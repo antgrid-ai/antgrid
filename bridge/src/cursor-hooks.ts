@@ -9,9 +9,12 @@ export function cursorHookCommand(
   command: HookCommand,
   event: "session-start" | "stop",
 ): string {
-  // No call operator: cursor embeds this string in its own PowerShell
-  // invocation, piping the hook payload in as `@'<json>'@ | & <command>`, so it
-  // supplies the `&` itself. A second one is a parse error.
+  // No call operator: cursor-agent parses this command string into an argv and
+  // spawns the first token as the executable (cross-spawn; the Windows shell is
+  // cmd.exe, never PowerShell) — it does NOT wrap it in a `& <command>`
+  // invocation. A leading `&` would be the program name — a bogus executable to
+  // the tokenizer and a syntax error to cmd.exe ("& was unexpected at this
+  // time") — so it must be omitted.
   return hookShellCommand(command, "cursor", event, { callOperator: false });
 }
 
