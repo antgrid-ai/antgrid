@@ -193,7 +193,11 @@ export function augmentAgentLaunch(
           hookCommand,
           cursorDir,
         );
-        return { args: [], env: {}, notificationsInjected };
+        // --trust: cursor-agent gates hooks (and project config) behind
+        // workspace trust — an untrusted dir prompts in the TUI and exits 1
+        // headless, before any hook runs. Opening a project in the bridge IS
+        // the user's trust decision, so pre-trust rather than re-asking.
+        return { args: ["--trust"], env: {}, notificationsInjected };
       }
       default:
         return NONE;
@@ -204,6 +208,15 @@ export function augmentAgentLaunch(
   }
 }
 
+// The user-tier file (~/.cursor/hooks.json) is cursor-agent's only workable
+// injection point: hook tiers MERGE (enterprise→team→project→user, nothing
+// overrides), and --plugin-dir cannot carry hooks — plugin hooks are
+// discovery-only in current builds (PluginHooksService has no callers; verified
+// against build 2026.07.16 — the flag delivers skills/commands/MCP only).
+// Machine-global is safe because unrelated cursor-agent runs fast-exit: the
+// hook posts nothing without ANTGRID_API_PORT in its environment, which only
+// bridge-spawned PTYs carry (see hook-runner.ts resolvePort), so a run outside
+// the bridge costs one short-lived process and no stdin wait.
 function ensureGlobalCursorHooks(
   command: HookCommand,
   cursorDir: string = join(homedir(), ".cursor"),

@@ -73,7 +73,7 @@ describe("augmentAgentLaunch", () => {
     const abDir = abdir();
     const cursorDir = abdir();
     const a = augmentAgentLaunch("cursor-agent", abDir, cursorDir, HOOK_COMMAND);
-    expect(a.args).toEqual([]);
+    expect(a.args).toEqual(["--trust"]);
     expect(a.env).toEqual({});
     expect(a.notificationsInjected).toBe(true);
 
@@ -111,7 +111,9 @@ describe("augmentAgentLaunch", () => {
     const cursorDirAsFile = join(abdir(), "not-a-dir");
     writeFileSync(cursorDirAsFile, "");
     const a = augmentAgentLaunch("cursor-agent", abDir, cursorDirAsFile, HOOK_COMMAND);
-    expect(a).toEqual({ args: [], env: {}, notificationsInjected: false });
+    // --trust survives the failed write: workspace trust is independent of the
+    // hooks channel, and the spawn must not regress to a trust prompt.
+    expect(a).toEqual({ args: ["--trust"], env: {}, notificationsInjected: false });
   });
 
   test("claude launches without plugin-dir and enables OSC fallback when materialization fails", () => {

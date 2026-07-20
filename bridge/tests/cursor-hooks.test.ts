@@ -65,6 +65,31 @@ test("recognizes a stale custom-named binary via its token despite a spaced inst
   expect(replaced!.hooks.stop).toEqual([{ command: current.stop, timeout: 5 }]);
 });
 
+test("replaces junk entries minted by pre-isolation test runs (Bun.main = test file)", () => {
+  const current = {
+    sessionStart: '"C:/Program Files/Antgrid/antgrid-bridge.exe" "hook" "cursor" "session-start"',
+    stop: '"C:/Program Files/Antgrid/antgrid-bridge.exe" "hook" "cursor" "stop"',
+  };
+  const data = {
+    hooks: {
+      sessionStart: [
+        {
+          command:
+            '"C:/Users/dev/.bun/bin/bun.exe" "C:/repo/bridge/tests/session-manager.test.ts" "hook" "cursor" "session-start"',
+        },
+        { command: "echo mine" },
+      ],
+    },
+  };
+
+  const replaced = replaceManagedCursorHookEntries(data, current);
+
+  expect(replaced!.hooks.sessionStart).toEqual([
+    { command: "echo mine" },
+    { command: current.sessionStart, timeout: 5 },
+  ]);
+});
+
 test("returns null when current managed hooks are already exact", () => {
   const commands = {
     sessionStart: '"/app/antgrid-bridge" "hook" "cursor" "session-start"',

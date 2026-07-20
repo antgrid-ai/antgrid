@@ -1142,16 +1142,26 @@ describe("SessionManager initial prompt", () => {
 
   it("cursor-agent: prompt is guarded by `--` (commander, verified)", () => {
     const term = makeFakeTerm();
-    const sm = new SessionManager({
-      projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
-      agentSpec: { command: "cursor-agent", name: "cursor-agent" },
-      sendMessage: () => {},
-    });
-    const s = sm.create(undefined, { tool: "cursor-agent" });
-    sm.start(s.id, "--fix the enum");
-    const args = term.spawns[0].args!;
-    expect(args[args.length - 2]).toBe("--");
-    expect(args[args.length - 1]).toBe("--fix the enum");
+    // cursorDir MUST be isolated: without it the spawn writes the developer's
+    // real ~/.cursor/hooks.json with a Bun.main test-file hook command.
+    const cursorDir = mkdtempSync(join(tmpdir(), "cursor-home-"));
+    try {
+      const sm = new SessionManager({
+        projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
+        agentSpec: { command: "cursor-agent", name: "cursor-agent" },
+        sendMessage: () => {},
+        cursorDir,
+      });
+      const s = sm.create(undefined, { tool: "cursor-agent" });
+      sm.start(s.id, "--fix the enum");
+      const args = term.spawns[0].args!;
+      expect(args).toContain("--trust");
+      expect(args[args.length - 2]).toBe("--");
+      expect(args[args.length - 1]).toBe("--fix the enum");
+      expect(existsSync(join(cursorDir, "hooks.json"))).toBe(true);
+    } finally {
+      rmSync(cursorDir, { recursive: true, force: true });
+    }
   });
 
   it("opencode gets --prompt <text>", () => {

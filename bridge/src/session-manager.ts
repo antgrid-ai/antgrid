@@ -55,6 +55,11 @@ interface SessionManagerOpts {
   codexHome?: string;
   /** Override for the Copilot session store dir (resume pre-flight). */
   copilotHome?: string;
+  /** Override for the cursor-agent hooks dir (~/.cursor). Unset in production;
+   *  tests MUST inject an isolated dir — the augmenter writes hooks.json there,
+   *  and under `bun test` the baked hook command is the test file (Bun.main),
+   *  which would land junk entries in the developer's real config. */
+  cursorDir?: string;
   /** Called by start()/stop() for a mode:'chat' session instead of the PTY path.
    *  Injected by agent-core to drive the StructuredAgentManager. */
   onStartChat?: (opts: { sessionId: string; tool: string; resumeId?: string; config?: Record<string, string>; initialPrompt?: string }) => void;
@@ -564,7 +569,7 @@ export class SessionManager {
       launchEnv = resolveAgentEnv(entry.tool, this.opts.storeDir);
       // Per-spawn integration that lets the agent report its conversation title
       // for auto-naming. Additive flags/env only; fail-open inside the augmenter.
-      const aug = augmentAgentLaunch(entry.tool, this.opts.storeDir);
+      const aug = augmentAgentLaunch(entry.tool, this.opts.storeDir, this.opts.cursorDir);
       baseArgs = [...baseArgs, ...aug.args];
       launchEnv = { ...launchEnv, ...aug.env };
       notificationsInjected = aug.notificationsInjected;
@@ -587,7 +592,7 @@ export class SessionManager {
       // The antgrid.yaml default spec gets per-spawn hooks + resume only for
       // agents whose augmenter needs it; other default agents launch bare.
       if (this.agentSpec.name === "github-copilot" || this.agentSpec.name === "cursor-agent") {
-        const aug = augmentAgentLaunch(this.agentSpec.name, this.opts.storeDir);
+        const aug = augmentAgentLaunch(this.agentSpec.name, this.opts.storeDir, this.opts.cursorDir);
         baseArgs = [...baseArgs, ...aug.args];
         launchEnv = { ...launchEnv, ...aug.env, ANTGRID_TERMINAL_ID: id };
         notificationsInjected = aug.notificationsInjected;

@@ -66,11 +66,13 @@ function buildHooks(stopEvent: string, notifMatcher: string) {
 
 // Cursor's hooks.json has a flatter shape than Claude/Codex's (no matcher/
 // hooks-array wrapper — see cursor.com/docs/hooks). agent-launch-augmenter.ts
-// (ensureCursorHook) already wires this same entry automatically on every
-// bridge-managed cursor-agent spawn; this installer covers cursor-agent runs
-// started outside the bridge (no --plugin-dir / -c injection channel exists
-// for cursor-agent, so the project's real hooks.json is the only place either
-// path can write this). The merge/dedupe logic itself is shared via
+// (ensureGlobalCursorHooks) wires these same entries into the USER tier
+// (~/.cursor/hooks.json) on every bridge-managed spawn; this installer writes
+// the PROJECT tier for runs started outside the bridge. hooks.json files are
+// the only channel: --plugin-dir cannot carry hooks (plugin hooks are
+// discovery-only in current cursor-agent builds — nothing feeds them to the
+// hook executor). Cursor MERGES tiers, so with both installed a bridge spawn
+// fires both entries. The merge/dedupe logic itself is shared via
 // cursor-hooks.ts so a fix only has to happen once.
 
 

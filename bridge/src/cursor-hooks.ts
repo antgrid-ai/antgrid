@@ -65,6 +65,10 @@ function isManagedCommand(
   return (
     (value.includes("antgrid-bridge") ||
       value.includes("/bridge/src/index.ts") ||
+      // Junk minted by pre-isolation bridge test runs: Bun.main under `bun
+      // test` is the TEST FILE, so the baked command was `<bun> <x.test.ts>
+      // hook cursor <event>`. Recognize so real spawns replace them.
+      value.includes(".test.ts") ||
       (token.length > 0 && value.includes(token))) &&
     value.includes("hook") &&
     value.includes("cursor") &&
