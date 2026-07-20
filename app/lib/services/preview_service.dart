@@ -9,7 +9,6 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import '../models/preview_models.dart';
 import '../models/ab_message.dart';
 import '../project/project_session.dart';
-import 'pending_reply.dart';
 import 'preview_proxy_server.dart';
 
 /// Outcome of [PreviewService.selectPort]. `portInUse` means the exact local
@@ -37,7 +36,8 @@ class PreviewService {
   final _stateController = StreamController<PreviewState>.broadcast();
   PreviewState _state = const PreviewState();
 
-  final Map<String, PendingReply<TunnelHttpResponse>> _pendingRequests = {};
+  final Map<String, Completer<TunnelHttpResponse>> _pendingRequests = {};
+  final Map<String, Timer> _pendingTimers = {};
   final Map<String, StreamSubscription> _activeWsTunnels = {};
 
   PreviewProxyServer? _proxyServer;
@@ -106,7 +106,11 @@ class PreviewService {
   }
 
   void _handleTunnelResponse(TunnelHttpResponse response) {
-    _pendingRequests.remove(response.requestId)?.complete(response);
+    final completer = _pendingRequests.remove(response.requestId);
+    _pendingTimers.remove(response.requestId)?.cancel();
+    if (completer != null && !completer.isCompleted) {
+      completer.complete(response);
+    }
   }
 
   // --- Public methods ---
@@ -115,16 +119,20 @@ class PreviewService {
     TunnelHttpRequest request, {
     Duration timeout = const Duration(seconds: 30),
   }) {
-    final pending = PendingReply<TunnelHttpResponse>(
-      timeout: timeout,
-      onTimeout: () => _pendingRequests.remove(request.requestId),
-      timeoutError: () => TimeoutException('Request timed out', timeout),
-    );
-    _pendingRequests[request.requestId] = pending;
+    final completer = Completer<TunnelHttpResponse>();
+    _pendingRequests[request.requestId] = completer;
 
-    unawaited(session.transport.send(request.toJson(), channel: 'preview'));
+    final timer = Timer(timeout, () {
+      if (!completer.isCompleted) {
+        _pendingRequests.remove(request.requestId);
+        completer.completeError(TimeoutException('Request timed out', timeout));
+      }
+    });
+    _pendingTimers[request.requestId] = timer;
 
-    return pending.future;
+    session.transport.send(request.toJson(), channel: 'preview');
+
+    return completer.future;
   }
 
   /// Opens [port] in the preview. In relay mode binds the local proxy to the
@@ -285,10 +293,17 @@ class PreviewService {
     await _proxyServer?.stop();
     _proxyServer = null;
 
-    for (final pending in _pendingRequests.values) {
-      pending.fail(TimeoutException('Service disposed'));
+    for (final entry in _pendingRequests.entries) {
+      if (!entry.value.isCompleted) {
+        entry.value.completeError(TimeoutException('Service disposed'));
+      }
     }
     _pendingRequests.clear();
+
+    for (final timer in _pendingTimers.values) {
+      timer.cancel();
+    }
+    _pendingTimers.clear();
 
     for (final sub in _activeWsTunnels.values) {
       await sub.cancel();

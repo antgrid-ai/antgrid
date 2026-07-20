@@ -51,11 +51,9 @@ test("one phone socket carries control + two project streams, isolated, on a sin
     const projA = env.projectId;
     const projB = computeProjectId(projBdir.dir);
 
-    // Open projB remote so it's in the host catalog, then STOP it so the later
-    // project:start exercises the genuine drill-in path (a fresh remote open +
-    // register), not the idempotent already-running branch. Both branches emit
-    // stream-ready — the idempotent one re-publishes it because the re-advert
-    // can be dedup-suppressed for a reconnecting phone.
+    // Open projB remote so it's in the host catalog, then STOP it so a later
+    // project:start genuinely drills in and emits stream-ready (an already-running
+    // project's project:start is idempotent and emits no stream-ready).
     expect((await loopbackControl(env.abDir, {
       id: "open-b", type: "project:open", projectId: projB, projectPath: projBdir.dir, mode: "remote",
     })).ok).toBe(true);

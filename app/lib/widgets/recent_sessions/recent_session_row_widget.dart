@@ -4,20 +4,19 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../constants/breakpoints.dart';
 import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
-import '../../design/ab_status_tone.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_confirm_dialog.dart';
 import '../../design/widgets/ab_focus_ring.dart';
-import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_snack_bar.dart';
-import '../../design/widgets/ab_status_dot.dart';
 import '../../models/recent_session_row.dart';
-import '../../models/session_entry.dart';
 import '../../providers/new_session_picker.dart';
 import '../../providers/now_ticker.dart';
+import '../../providers/project_work_status.dart';
 import '../../providers/recent_sessions.dart';
+import '../../services/control_plane_client.dart';
 import '../../util/relative_time.dart';
+import '../agent_work_status_dot.dart';
 
 /// Confirm dialog for removing a cached recent-session entry.
 ///
@@ -62,6 +61,16 @@ class _RecentSessionRowWidgetState
     final t = context.antgrid;
     final agentLabel = sessionAgentDisplayLabel(row.session);
     final relTime = relativeTime(when, now: now);
+    // Project-level attention/error (from the live advert) overlaid on this
+    // session's own running flag — so a blocked/errored agent is unmistakable
+    // in the list even on its idle sessions. Reads the advert map directly (not
+    // projectWorkStatusProvider) since the row already owns its running flag.
+    final status = recentRowStatus(
+      ref.watch(
+        remoteProjectStatusProvider.select((m) => m[row.origin.registrationId]),
+      ),
+      row.session.running,
+    );
     void onTap() => openRecentSession(context, ref, row);
 
     final content = Container(
@@ -80,12 +89,14 @@ class _RecentSessionRowWidgetState
           return compact
               ? _MobileLayout(
                   row: row,
+                  status: status,
                   agentLabel: agentLabel,
                   relTime: relTime,
                   onDelete: () => _confirmDelete(context, ref),
                 )
               : _DesktopLayout(
                   row: row,
+                  status: status,
                   agentLabel: agentLabel,
                   relTime: relTime,
                   showDelete: _hovered || _focused,
@@ -150,6 +161,7 @@ const double _mobileProjectIndent = AbTokens.dotSizeSm + AbTokens.space12;
 class _DesktopLayout extends StatelessWidget {
   const _DesktopLayout({
     required this.row,
+    required this.status,
     required this.agentLabel,
     required this.relTime,
     required this.showDelete,
@@ -157,6 +169,7 @@ class _DesktopLayout extends StatelessWidget {
   });
 
   final RecentSessionRow row;
+  final AgentWorkStatus status;
   final String agentLabel;
   final String relTime;
   final bool showDelete;
@@ -170,7 +183,7 @@ class _DesktopLayout extends StatelessWidget {
     // column without zig-zagging through mid-row chips.
     return Row(
       children: [
-        _SessionStatus(session: row.session),
+        _SessionStatus(status: status),
         const SizedBox(width: AbTokens.space12),
         // Name + slack share the row's ONLY flexible child. A loose Flexible
         // anywhere in the rail would dump its unused allotment at the row's
@@ -236,12 +249,14 @@ class _DesktopLayout extends StatelessWidget {
 class _MobileLayout extends StatelessWidget {
   const _MobileLayout({
     required this.row,
+    required this.status,
     required this.agentLabel,
     required this.relTime,
     required this.onDelete,
   });
 
   final RecentSessionRow row;
+  final AgentWorkStatus status;
   final String agentLabel;
   final String relTime;
 
@@ -257,7 +272,7 @@ class _MobileLayout extends StatelessWidget {
       children: [
         Row(
           children: [
-            _SessionStatus(session: row.session),
+            _SessionStatus(status: status),
             const SizedBox(width: AbTokens.space12),
             Expanded(child: _SessionName(name: row.session.name)),
             const SizedBox(width: AbTokens.space8),
@@ -349,37 +364,15 @@ class _TimeLabel extends StatelessWidget {
   }
 }
 
-/// Running sessions show a blue activity dot; stopped sessions show a green
-/// check — matching the Sessions list reference layout.
+/// The row's leading work-status indicator — working (blue), attention (amber),
+/// error (red), or done (green check). See [AgentWorkStatusDot].
 class _SessionStatus extends StatelessWidget {
-  const _SessionStatus({required this.session});
+  const _SessionStatus({required this.status});
 
-  final SessionEntry session;
+  final AgentWorkStatus status;
 
   @override
-  Widget build(BuildContext context) {
-    final t = context.antgrid;
-    if (session.running) {
-      return AbStatusDot(
-        tone: AbStatusTone.info,
-        size: AbDotSize.sm,
-        style: AbDotStyle.filled,
-        pulse: true,
-      );
-    }
-
-    return Stack(
-      alignment: Alignment.center,
-      children: [
-        AbStatusDot(
-          tone: AbStatusTone.success,
-          size: AbDotSize.sm,
-          style: AbDotStyle.hollow,
-        ),
-        AbIcon(AbIcons.check, size: 8, color: t.success),
-      ],
-    );
-  }
+  Widget build(BuildContext context) => AgentWorkStatusDot(status: status);
 }
 
 /// Agent label (Claude Code, Cursor, …) — a bare mono identifier, not a

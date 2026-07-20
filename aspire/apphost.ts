@@ -113,12 +113,6 @@ const builder = await createBuilder();
 // matches the accepted audience.
 const WEB_PORT = 8787;
 
-// Single source of truth for the relay's port under Aspire: the endpoint pin
-// below and web's RELAY_INTERNAL_URL both derive from it, so they can't drift.
-// Deliberately NOT relay/.env's PORT=8080 (which scripts/dev.ts still uses) —
-// the pin injects PORT, so the relay listens here under `aspire run`.
-const RELAY_PORT = 3000;
-
 // Computed up-front (before the web resource) so web can accept the LAN-IP
 // token audience — see pickLanIp() and the web EXTRA_TOKEN_AUDIENCES wiring.
 const lanHost = pickLanIp();
@@ -141,15 +135,6 @@ const licenseApi = await builder
   // false makes Aspire bind web directly to it (no proxy hop).
   .withHttpEndpoint({ port: WEB_PORT, targetPort: WEB_PORT, env: "PORT", isProxied: false })
   .withEnvironmentCallback(async (ctx: EnvironmentCallbackContext) => {
-    // web/.env's RELAY_INTERNAL_URL is generated for `npm run dev`, where the
-    // relay honours relay/.env's PORT=8080. Under `aspire run` the pin below
-    // injects RELAY_PORT instead, so that .env value points at nothing and
-    // /internal/{revoke,expire} silently degrades to TTL — the push is
-    // best-effort and only warns, so a device revoke appears to succeed while
-    // the relay never learns. Loopback, not lanHost: this hop is machine-local,
-    // and a LAN IP goes stale the moment the host changes network.
-    await setEnvRef(ctx, "RELAY_INTERNAL_URL", `http://127.0.0.1:${RELAY_PORT}`);
-
     // Mobile apps mint license tokens with `resource=${LICENSE_API_URL}/api/auth`,
     // and their LICENSE_API_URL is the LAN IP so they can reach web.
     // The oauth-provider validates that resource against its accepted audiences,
@@ -174,14 +159,13 @@ const relay = await builder
   .addBunApp("relay", "../relay", "src/index.ts")
   .withBun({ install: false })
   .withRunScript("dev")
-  // Pin to RELAY_PORT (the relay's conventional default) and bind directly, NOT
+  // Pin to 3000 (the relay's conventional default) and bind directly, NOT
   // behind Aspire's proxy. A proxied endpoint's DCP reverse-proxy listens on
   // loopback only, so the published port is unreachable on the LAN IP — the
   // app/host (and any phone) then can't open ws://<lanIp>:<port>/ws. With
-  // isProxied:false + targetPort, Bun binds 0.0.0.0:RELAY_PORT itself (same
-  // pattern as web on 8787), making it LAN-reachable. PORT is injected for
-  // loadConfig().
-  .withHttpEndpoint({ port: RELAY_PORT, targetPort: RELAY_PORT, env: "PORT", isProxied: false })
+  // isProxied:false + targetPort, Bun binds 0.0.0.0:3000 itself (same pattern
+  // as web on 8787), making it LAN-reachable. PORT is injected for loadConfig().
+  .withHttpEndpoint({ port: 3000, targetPort: 3000, env: "PORT", isProxied: false })
   .withReference(licenseApi)
   .waitFor(licenseApi)
   .withEnvironmentCallback((ctx: EnvironmentCallbackContext) =>

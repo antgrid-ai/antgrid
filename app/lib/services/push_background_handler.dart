@@ -2,8 +2,9 @@ import 'dart:convert';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show openPushBlob;
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
-import 'package:push/push.dart';
 
 import 'local_notification_service.dart';
 import 'push_identity.dart';
@@ -23,21 +24,20 @@ typedef DecodedPush = ({
   String? sourceMessageId,
 });
 
-/// Stable dedup key for a decoded push. The bridge always stamps
-/// `sourceMessageId` (`push-dispatcher.ts`), and it is stable across delivery
-/// surfaces — foreground onMessage vs background. When absent, returns null so
-/// the caller shows the push rather than silently deduping it away.
-///
-/// There is no envelope-level fallback: `push`'s RemoteMessage exposes only
-/// `notification` and `data`, so neither FCM's messageId nor an APNs equivalent
-/// is reachable from Dart.
-String? pushDedupKey(DecodedPush decoded) {
+/// Stable dedup key for a decoded push, given the FCM envelope's own id as a
+/// fallback. Prefers the bridge's `sourceMessageId` (stable across delivery
+/// surfaces — foreground onMessage vs background). When absent, falls back to
+/// the FCM messageId so two id-less pushes don't collide on a shared key; if
+/// even that is missing, returns null so the caller shows the push rather than
+/// silently deduping it away.
+String? pushDedupKey(DecodedPush decoded, {String? fcmMessageId}) {
   final src = decoded.sourceMessageId;
   if (src != null && src.isNotEmpty) return src;
+  if (fcmMessageId != null && fcmMessageId.isNotEmpty) return fcmMessageId;
   return null;
 }
 
-/// Pure decrypt+parse of a push data payload. Testable without the plugin.
+/// Pure decrypt+parse of an FCM data payload. Testable without Firebase.
 Future<DecodedPush?> decodePush(
   Map<String, String> data, {
   required PushIdentity pushIdentity,
@@ -68,28 +68,20 @@ Future<DecodedPush?> decodePush(
   }
 }
 
-/// Narrow `push`'s pigeon-typed data payload to the plain map [decodePush]
-/// takes. `push` types it `Map<String?, Object?>?` because that is pigeon's
-/// lowest common denominator; the sealed-blob fields are always non-null
-/// strings. Narrowing here keeps [decodePush] testable without the plugin.
-Map<String, String> pushDataOf(RemoteMessage message) => <String, String>{
-  for (final e in (message.data ?? const <String?, Object?>{}).entries)
-    if (e.key != null && e.value is String) e.key!: e.value! as String,
-};
-
-/// Background message handler, registered via [Push.addOnBackgroundMessage]
-/// from both `main` and `pushBackgroundMain`.
-///
-/// MUST NOT throw. `push` only invokes its `remoteMessageProcessingComplete`
-/// callback when this future completes successfully
-/// (PushHostHandlers.backgroundFlutterApplicationReady); on a rejection the
-/// headless engine is never destroyed and the receiver stays pending until its
-/// 30s goAsync budget expires.
+/// Background isolate entrypoint, registered via
+/// `FirebaseMessaging.onBackgroundMessage`. Runs in a separate Dart isolate
+/// when the app is backgrounded or killed (not force-stopped), so it must
+/// initialize Firebase itself — plugin state from the foreground isolate is
+/// not visible here.
 @pragma('vm:entry-point')
 Future<void> pushBackgroundHandler(RemoteMessage message) async {
+  // Runs in its own isolate: an uncaught throw (Firebase.initializeApp on an
+  // unconfigured build, secure-storage/decrypt failure) would crash it silently
+  // rather than degrade. Swallow so a bad push just goes unshown.
   try {
+    await Firebase.initializeApp();
     final decoded = await decodePush(
-      pushDataOf(message),
+      message.data.cast<String, String>(),
       pushIdentity: PushIdentity.secure(),
     );
     if (decoded == null) return;

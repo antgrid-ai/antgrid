@@ -98,16 +98,5 @@
 		-->
 		<key>ITSAppUsesNonExemptEncryption</key>
 		<false/>
-		<!-- iOS uses direct APNs (no FCM). Prevent the linked firebase_messaging pod
-		     from swizzling the APNs delegate methods our AppDelegate implements. -->
-		<key>FirebaseAppDelegateProxyEnabled</key>
-		<false/>
-		<!-- $(AppIdentifierPrefix) only expands in entitlements files, not Swift
-		     source. Info.plist keys DO get build-setting substitution, so this
-		     is how KeychainChannel.swift resolves the team prefix at runtime to
-		     build the shared keychain-access-group string. Keep in lockstep with
-		     the same key in NotificationService/Info.plist. -->
-		<key>AppIdentifierPrefix</key>
-		<string>$(AppIdentifierPrefix)</string>
 	</dict>
 </plist>

@@ -3,7 +3,6 @@ import 'dart:async';
 import '../models/ab_config.dart';
 import '../models/ab_message.dart';
 import '../project/project_session.dart';
-import 'pending_reply.dart';
 
 class DetectedTool {
   final String tool;
@@ -52,28 +51,21 @@ class ConfigState {
 class ConfigService {
   final ProjectSession session;
 
-  /// Hard ceiling on every request/reply pair. A reply can be lost (silent
-  /// transport drop pre-establish, agent gone mid-request), and without a
-  /// timer the returned future — and the UI awaiting it — hangs forever.
-  final Duration requestTimeout;
-
   StreamSubscription<Map<String, dynamic>>? _statusSub;
   final _stateController = StreamController<ConfigState>.broadcast();
   ConfigState _state = const ConfigState();
   bool _disposed = false;
 
-  PendingReply<AbConfig?>? _read;
-  PendingReply<List<String>?>? _write; // null on success, errors otherwise
-  PendingReply<List<DetectedTool>>? _detect;
+  Completer<AbConfig?>? _readCompleter;
+  Completer<List<String>?>?
+  _writeCompleter; // null on success, errors otherwise
+  Completer<List<DetectedTool>>? _detectCompleter;
 
   Stream<ConfigState> get stateStream => _stateController.stream;
   ConfigState get currentState => _state;
   String get projectId => session.projectId;
 
-  ConfigService.fromSession(
-    this.session, {
-    this.requestTimeout = const Duration(seconds: 15),
-  }) {
+  ConfigService.fromSession(this.session) {
     _statusSub = session.statusStream.listen(_onStatusJson);
   }
 
@@ -84,12 +76,18 @@ class ConfigService {
   }
 
   void _failPending(Object error) {
-    _read?.fail(error);
-    _write?.fail(error);
-    _detect?.fail(error);
-    _read = null;
-    _write = null;
-    _detect = null;
+    if (_readCompleter != null && !_readCompleter!.isCompleted) {
+      _readCompleter!.completeError(error);
+    }
+    if (_writeCompleter != null && !_writeCompleter!.isCompleted) {
+      _writeCompleter!.completeError(error);
+    }
+    if (_detectCompleter != null && !_detectCompleter!.isCompleted) {
+      _detectCompleter!.completeError(error);
+    }
+    _readCompleter = null;
+    _writeCompleter = null;
+    _detectCompleter = null;
   }
 
   Future<void> dispose() async {
@@ -106,40 +104,39 @@ class ConfigService {
     await session.send(msg);
   }
 
-  /// Generic request helper. Builds a [PendingReply] bounded by
-  /// [requestTimeout], hands it to [register] (which stores it on the
-  /// appropriate field, superseding any in-flight one), sends the message and
-  /// returns the bounded future. Superseding calls [PendingReply.fail], which
-  /// cancels the timer — so [onTimeout] only ever runs for the reply still
-  /// owning its field and can clear it unconditionally.
+  /// Generic request helper. Creates a [Completer<T>], passes it to
+  /// [register] (which should store it on the appropriate field, superseding
+  /// any in-flight completer), sends the message, and returns the future.
   Future<T> _request<T>(
     String type,
     Map<String, dynamic> payload,
-    void Function(PendingReply<T>) register, {
-    required void Function() onTimeout,
-  }) {
-    final pending = PendingReply<T>(
-      timeout: requestTimeout,
-      onTimeout: onTimeout,
-    );
-    register(pending);
-    unawaited(_send(createAbMessage(type, payload)));
-    return pending.future;
+    void Function(Completer<T>) register,
+  ) {
+    final completer = Completer<T>();
+    register(completer);
+    _send(createAbMessage(type, payload));
+    return completer.future;
   }
 
-  void _setRead(PendingReply<AbConfig?> next) {
-    _read?.fail(StateError('superseded by new read'));
-    _read = next;
+  void _setReadCompleter(Completer<AbConfig?> next) {
+    if (_readCompleter != null && !_readCompleter!.isCompleted) {
+      _readCompleter!.completeError(StateError('superseded by new read'));
+    }
+    _readCompleter = next;
   }
 
-  void _setWrite(PendingReply<List<String>?> next) {
-    _write?.fail(StateError('superseded by new write'));
-    _write = next;
+  void _setWriteCompleter(Completer<List<String>?> next) {
+    if (_writeCompleter != null && !_writeCompleter!.isCompleted) {
+      _writeCompleter!.completeError(StateError('superseded by new write'));
+    }
+    _writeCompleter = next;
   }
 
-  void _setDetect(PendingReply<List<DetectedTool>> next) {
-    _detect?.fail(StateError('superseded by new detect'));
-    _detect = next;
+  void _setDetectCompleter(Completer<List<DetectedTool>> next) {
+    if (_detectCompleter != null && !_detectCompleter!.isCompleted) {
+      _detectCompleter!.completeError(StateError('superseded by new detect'));
+    }
+    _detectCompleter = next;
   }
 
   void _onStatusJson(Map<String, dynamic> json) {
@@ -169,7 +166,7 @@ class ConfigService {
           ? const AbConfig()
           : AbConfig.fromJson(cfgJson);
       _setState(_state.copyWith(config: cfg, loading: false, clearError: true));
-      _read?.complete(cfg);
+      _readCompleter?.complete(cfg);
     } else {
       _setState(
         _state.copyWith(
@@ -178,22 +175,20 @@ class ConfigService {
           error: j['error'] as String?,
         ),
       );
-      // `null` means the agent answered and there is no usable config — never
-      // "we heard nothing". A timed-out read fails instead (see [read]).
-      _read?.complete(null);
+      _readCompleter?.complete(null);
     }
-    _read = null;
+    _readCompleter = null;
   }
 
   void _handleWriteResult(Map<String, dynamic> j) {
     final ok = j['ok'] as bool;
     if (ok) {
-      _write?.complete(null);
+      _writeCompleter?.complete(null);
     } else {
       final errors = (j['errors'] as List?)?.cast<String>() ?? const <String>[];
-      _write?.complete(errors);
+      _writeCompleter?.complete(errors);
     }
-    _write = null;
+    _writeCompleter = null;
   }
 
   void _handleDetectResult(Map<String, dynamic> j) {
@@ -201,8 +196,8 @@ class ConfigService {
         .map((e) => DetectedTool.fromJson(e as Map<String, dynamic>))
         .toList();
     _setState(_state.copyWith(detectedTools: tools));
-    _detect?.complete(tools);
-    _detect = null;
+    _detectCompleter?.complete(tools);
+    _detectCompleter = null;
   }
 
   void _handleChanged(Map<String, dynamic> j) {
@@ -216,42 +211,19 @@ class ConfigService {
     }
   }
 
-  /// Completes with the agent's config, or `null` when the agent answered but
-  /// has no usable one. A lost reply throws [TimeoutException] — it must NOT
-  /// resolve to `null`, or the settings screen would draft an empty config over
-  /// a project whose real `antgrid.yaml` we simply never heard back about.
   Future<AbConfig?> read() {
     _setState(_state.copyWith(loading: true, clearError: true));
-    return _request<AbConfig?>('config:read', {}, _setRead, onTimeout: () {
-      _read = null;
-      _setState(_state.copyWith(
-        loading: false,
-        error: 'No reply from the agent — config read timed out',
-      ));
-    });
+    return _request('config:read', {}, _setReadCompleter);
   }
 
-  /// Returns `null` on success, list of error strings on failure. A lost reply
-  /// throws [TimeoutException]: the write may or may not have landed, which is
-  /// not the same as "the agent rejected it".
+  /// Returns `null` on success, list of error strings on failure.
   Future<List<String>?> save(AbConfig cfg) {
-    return _request<List<String>?>(
-      'config:write',
-      {'config': cfg.toJson()},
-      _setWrite,
-      onTimeout: () => _write = null,
-    );
+    return _request('config:write', {
+      'config': cfg.toJson(),
+    }, _setWriteCompleter);
   }
 
-  /// A lost reply throws [TimeoutException] rather than resolving to an empty
-  /// list — "no tools installed" and "the agent never answered" drive different
-  /// UI, and only one of them should silently blank the agent picker.
   Future<List<DetectedTool>> detectTools() {
-    return _request<List<DetectedTool>>(
-      'config:detect-tools',
-      {},
-      _setDetect,
-      onTimeout: () => _detect = null,
-    );
+    return _request('config:detect-tools', {}, _setDetectCompleter);
   }
 }

@@ -39,11 +39,7 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      # Internal DNS — fast JWKS fetches, no public network hop. NOT the token
-      # issuer: Better-Auth stamps `iss` from BETTER_AUTH_URL (public), so the
-      # issuer check needs LICENSE_ISSUER_URL below instead — see deploy/README.md.
       LICENSE_API_URL: http://web-${COLOR}:8787
-      LICENSE_ISSUER_URL: ${BETTER_AUTH_URL}
       PORT: "8080"
     networks:
       - antgrid_edge

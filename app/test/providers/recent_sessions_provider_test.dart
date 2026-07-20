@@ -7,6 +7,8 @@ import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/providers/cached_sessions.dart';
 import 'package:antgrid/providers/projects.dart';
 import 'package:antgrid/providers/recent_agents.dart';
+import 'package:antgrid/providers/sessions.dart';
+import 'package:antgrid/services/sessions_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/storage/project_store.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
@@ -65,4 +67,76 @@ void main() {
     final rows = container.read(recentSessionsProvider);
     expect(rows.map((r) => r.session.id), ['r1', 'l1']);
   });
+
+  test(
+    'overlays the focused project live sessions so a just-created session '
+    'shows in Recent before the cache write-through lands',
+    () async {
+      useInMemoryPrefs();
+
+      final (projectStore, recentAgentsStore, cachedSessionsStore) = await (
+        ProjectStore.open(),
+        RecentAgentsStore.open(),
+        CachedSessionsStore.open(),
+      ).wait;
+      addTearDown(recentAgentsStore.close);
+      addTearDown(cachedSessionsStore.close);
+
+      // The cache for the focused remote project holds ONLY the old session —
+      // the freshly-created one hasn't been written through yet (or was
+      // clobbered by a stale control-plane peek).
+      await cachedSessionsStore.put('uuidA.projRemote', const [
+        SessionEntry(
+          id: 'old',
+          name: 'Old',
+          createdAt: 0,
+          lastUsedAt: 100,
+          archived: false,
+          running: false,
+        ),
+      ]);
+      await cachedSessionsStore.flushNow();
+
+      final container = ProviderContainer(
+        overrides: [
+          projectStoreProvider.overrideWithValue(projectStore),
+          recentAgentsStoreProvider.overrideWithValue(recentAgentsStore),
+          cachedSessionsStoreProvider.overrideWithValue(cachedSessionsStore),
+          accountAgentsProvider.overrideWith((_) async => const []),
+          localDeviceUuidProvider.overrideWith((_) async => null),
+          // Live SessionsService state for the focused project carries the new
+          // session (as the sidebar's sessionsForEntryProvider would render it).
+          freshSessionsStateProvider.overrideWithValue(
+            const SessionsState(
+              projectId: 'uuidA.projRemote',
+              sessions: [
+                SessionEntry(
+                  id: 'old',
+                  name: 'Old',
+                  createdAt: 0,
+                  lastUsedAt: 100,
+                  archived: false,
+                  running: false,
+                ),
+                SessionEntry(
+                  id: 'new',
+                  name: 'New',
+                  createdAt: 0,
+                  lastUsedAt: 300,
+                  archived: false,
+                  running: true,
+                ),
+              ],
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final rows = container.read(recentSessionsProvider);
+      // The live 'new' session appears (sorted first by recency) even though
+      // the cache only had 'old'.
+      expect(rows.map((r) => r.session.id), ['new', 'old']);
+    },
+  );
 }

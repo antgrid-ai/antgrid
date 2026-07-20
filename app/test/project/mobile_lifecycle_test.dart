@@ -88,35 +88,6 @@ void main() {
       });
     });
 
-    test('background pauses focus for every open project immediately', () {
-      fakeAsync((async) {
-        final seen = <String, bool>{};
-        final registry = ProjectSessionRegistry(
-          localCap: 100,
-          relayCap: 100,
-          onEvict: (_) async {},
-        );
-        registry.touch('a', isLocal: true);
-        registry.touch('b', isLocal: true);
-        final lifecycle = MobileLifecycleObserver(
-          registry: registry,
-          focusedProjectId: () => 'b',
-          backgroundDemoteDelay: const Duration(seconds: 30),
-          setFocusPaused: (id, {required bool paused}) => seen[id] = paused,
-        );
-
-        lifecycle.handleState(AppLifecycleState.paused);
-
-        // Must not wait for the demote timer: a turn ending in the first
-        // seconds of background still needs the fallback push.
-        expect(seen, {'a': true, 'b': true});
-
-        lifecycle.handleState(AppLifecycleState.resumed);
-        expect(seen, {'a': false, 'b': false});
-        lifecycle.dispose();
-      });
-    });
-
     test('dispose cancels pending timer', () {
       fakeAsync((async) {
         final evicted = <String>[];

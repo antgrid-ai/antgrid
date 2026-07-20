@@ -43,7 +43,6 @@ export interface RelayServerDeps {
   licenseGate?: LicenseGate;
   licenseCache?: LicenseCache;
   fcmSender?: { send(pushToken: string, data: Record<string, string>): Promise<"ok" | "unregistered" | "error"> };
-  apnsSender?: { send(pushToken: string, data: Record<string, string>): Promise<"ok" | "unregistered" | "error"> };
 }
 
 /**
@@ -73,15 +72,9 @@ function verifyHelloSig(publicKeyBase64: string, sigBody: Uint8Array, sigBase64:
 
 export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): RelayServer {
   setLogLevel(config.logLevel);
-  // licenseApiUrl may be an internal address (docker DNS) used only to fetch
-  // JWKS efficiently; the token issuer must match web's PUBLIC BETTER_AUTH_URL
-  // instead. licenseIssuerUrl carries that when the two differ, falling back
-  // to licenseApiUrl for single-host deployments where they're the same.
-  const issuerBaseUrl = config.licenseIssuerUrl || config.licenseApiUrl;
   logger.info("relay license config", {
     licenseApiUrl: config.licenseApiUrl,
-    issuerBaseUrl,
-    expectedIssuer: deviceTokenIssuer(issuerBaseUrl),
+    expectedIssuer: deviceTokenIssuer(config.licenseApiUrl),
   });
 
   const connections = new Connections();
@@ -92,7 +85,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
   const pairRateLimiter = new MessageRateLimiter(config.pairRateLimitPerIp);
   const licenseCache = deps.licenseCache ?? new LicenseCache({ maxEntries: config.licenseCacheMaxEntries });
   const licenseGate: LicenseGate = deps.licenseGate ?? createLicenseGate({
-    licenseIssuerUrl: issuerBaseUrl,
+    licenseApiUrl: config.licenseApiUrl,
     jwks: new JwksCache({ licenseApiUrl: config.licenseApiUrl, jwksPath: config.licenseApiJwksPath }),
     cache: licenseCache,
   });
@@ -556,16 +549,14 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
           sendError(ws, "MESSAGE_RATE_LIMITED", "Push delivery rate limit exceeded", true);
           return;
         }
-        const sender = msg.provider === "apns" ? deps.apnsSender : deps.fcmSender;
-        if (!sender) {
+        if (!deps.fcmSender) {
           sendJson(ws, { type: "push:result", pushToken: msg.pushToken, ok: false, reason: "unconfigured" });
           return;
         }
-        // The relay is a BLIND FORWARDER: forward ciphertext to the provider
-        // (FCM or APNs), never to the peer. Re-resolve the agent's CURRENT socket
-        // when the send settles (the provider round-trip can outlast a reconnect)
-        // so an "unregistered" reason still reaches the live agent and prunes the
-        // dead token.
+        // The relay is a BLIND FORWARDER: forward ciphertext to FCM, never to
+        // the peer. Re-resolve the agent's CURRENT socket when the send settles
+        // (the FCM round-trip can outlast a reconnect) so an "unregistered"
+        // reason still reaches the live agent and prunes the dead token.
         const agentDeviceId = conn.deviceId;
         const replyPushResult = (r: "ok" | "unregistered" | "error"): void => {
           const live = connections.getByDeviceId(agentDeviceId)?.ws;
@@ -574,11 +565,11 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
             ? { type: "push:result", pushToken: msg.pushToken, ok: true }
             : { type: "push:result", pushToken: msg.pushToken, ok: false, reason: r });
         };
-        sender
+        deps.fcmSender
           .send(msg.pushToken, { epk: msg.blob.epk, box: msg.blob.box })
           .then(replyPushResult)
           .catch((e) => {
-            logger.warn("push:deliver send failed", { provider: msg.provider, error: String(e) });
+            logger.warn("push:deliver FCM send failed", { error: String(e) });
             replyPushResult("error");
           });
         return;

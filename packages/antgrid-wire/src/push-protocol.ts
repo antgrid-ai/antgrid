@@ -3,8 +3,7 @@ import { z } from "zod/v4";
 /**
  * Agent → relay control message carrying a sealed push blob. The relay is a
  * BLIND FORWARDER: it reads `pushToken` (opaque) and forwards `blob` (ciphertext)
- * to FCM or APNs (per `provider`). It never sees notification content. `box` is
- * base64 of the AES-256-GCM
+ * to FCM. It never sees notification content. `box` is base64 of the AES-256-GCM
  * frame `nonce(12) ‖ ciphertext ‖ tag(16)`; `epk` is the base64 ephemeral X25519
  * public key used to derive the per-push key. Keep in lockstep with
  * bridge/src/push/seal.ts and packages/antgrid_relay_client/lib/src/e2e/push_open.dart.
@@ -12,7 +11,7 @@ import { z } from "zod/v4";
 export const PushDeliverMessage = z.object({
   type: z.literal("push:deliver"),
   pushToken: z.string().min(1).max(4096),
-  provider: z.enum(["fcm", "apns"]),
+  provider: z.literal("fcm"),
   blob: z.object({
     epk: z.string().min(1).max(256),
     box: z.string().min(1).max(8192),

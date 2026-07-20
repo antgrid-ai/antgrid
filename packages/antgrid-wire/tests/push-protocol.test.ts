@@ -16,14 +16,8 @@ describe("push:deliver", () => {
     expect(viaUnion.type).toBe("push:deliver");
   });
 
-  it("parses an apns push:deliver through the union", () => {
-    const msg = { type: "push:deliver", pushToken: "apns-hex-token", provider: "apns", blob: { epk: "ZXBr", box: "Ym94" } };
-    expect(PushDeliverMessage.parse(msg).provider).toBe("apns");
-    expect(ClientMessage.parse(msg).type).toBe("push:deliver");
-  });
-
-  it("rejects an unknown provider", () => {
-    const bad = { type: "push:deliver", pushToken: "t", provider: "gcm", blob: { epk: "a", box: "b" } };
+  it("rejects a non-fcm provider", () => {
+    const bad = { type: "push:deliver", pushToken: "t", provider: "apns", blob: { epk: "a", box: "b" } };
     expect(PushDeliverMessage.safeParse(bad).success).toBe(false);
   });
 

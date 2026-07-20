@@ -45,7 +45,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; Drops the runner folder verbatim (antgrid.exe, antgrid-bridge.exe,
 ; crashpad_handler.exe, runtime DLLs, native_assets.json, data\) minus the
 ; dev-only build artifacts the plain zip shipped by accident.
-Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion; Excludes: "*.pdb,*.lib,*.exp"
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion; Excludes: "*.pdb,*.lib,*.exp,firebase_core_plugin.lib"
 
 [Icons]
 Name: "{autoprograms}\Antgrid"; Filename: "{app}\antgrid.exe"

@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io' show Directory, Platform, Process;
 
-import 'package:push/push.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart'
     show defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/gestures.dart';
@@ -35,8 +35,7 @@ import '../providers/ui_attention_providers.dart';
 import '../providers/value_controller.dart';
 import '../services/attach_hydration.dart';
 import '../services/local_notification_service.dart';
-import '../services/push_background_handler.dart'
-    show decodePush, pushDataOf, pushDedupKey;
+import '../services/push_background_handler.dart' show decodePush, pushDedupKey;
 import '../services/push_identity.dart';
 import '../utils/notification_routing.dart';
 import '../widgets/agent_panel.dart';
@@ -119,8 +118,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     return true;
   }
 
-  /// `push` hands back an unsubscribe callback rather than a StreamSubscription.
-  VoidCallback? _unsubscribeForegroundPush;
+  StreamSubscription<RemoteMessage>? _fcmForegroundSub;
 
   @override
   void initState() {
@@ -128,28 +126,28 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     WidgetsBinding.instance.addObserver(this);
     // Fire-and-forget: async + self-degrading.
     _osNotifications.init();
-    if (defaultTargetPlatform == TargetPlatform.android ||
-        defaultTargetPlatform == TargetPlatform.iOS) {
-      _unsubscribeForegroundPush = Push.instance.addOnMessage((m) async {
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      _fcmForegroundSub = FirebaseMessaging.onMessage.listen((m) async {
         try {
           final decoded = await decodePush(
-            pushDataOf(m),
+            m.data.cast<String, String>(),
             pushIdentity: PushIdentity.secure(),
           );
           // The widget can be disposed while decodePush awaits; `context` (used
           // by _onAgentNotification's toast path) is dead after that.
           if (!mounted || decoded == null) return;
-          // Unified dedup: the key is shared with the live handler stream below,
-          // so a push and its live message surface once between them. A null key
-          // means show it — never dedup an unidentifiable push away.
-          final key = pushDedupKey(decoded);
+          // Unified dedup: a missing id must NOT collide — two id-less pushes
+          // would otherwise map to one key and the second be dropped — so fall
+          // back to the FCM messageId, or don't dedup at all if neither is
+          // present. The key is shared with the live handler stream below.
+          final key = pushDedupKey(decoded, fcmMessageId: m.messageId);
           if (key != null && !_markNotified(key)) {
             return; // already surfaced (this surface or the live stream)
           }
           _onAgentNotification(title: decoded.title, body: decoded.body);
         } catch (e) {
           // Async listener: an uncaught throw here is an unhandled rejection.
-          debugPrint('foreground push failed: $e');
+          debugPrint('foreground FCM push failed: $e');
         }
       });
     }
@@ -204,8 +202,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _unsubscribeForegroundPush?.call();
-    _unsubscribeForegroundPush = null;
+    _fcmForegroundSub?.cancel();
     _pageController.dispose();
     _drawerSearchFocus.dispose();
     super.dispose();

@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.5+6
+version: 1.0.4+5
 
 environment:
   sdk: ^3.11.0
@@ -76,16 +76,8 @@ dependencies:
   markdown_widget: ^2.3.2+8
   pdfrx: ^2.4.4
   sentry_flutter: ^9.22.0
-  # Fork of uxduck/push. Stock push runs the host app's main() headlessly on a
-  # terminated-state push (BackgroundFlutterAppLauncher); the fork adds an
-  # AndroidManifest-configurable background entrypoint so ours runs
-  # pushBackgroundMain instead. See docs/superpowers/specs/
-  # 2026-07-15-push-package-migration-design.md. Pinned to a SHA: upstream is
-  # dormant and we do not expect to move off the fork.
-  push:
-    git:
-      url: https://github.com/bharathm03/push.git
-      ref: bf4f22f0c2763416265a02268e3b071ab1767885
+  firebase_core: ^4.11.0
+  firebase_messaging: ^16.4.1
   markdown: ^7.3.1
   super_clipboard: ^0.9.0
   in_app_update: ^4.2.3
@@ -182,7 +174,7 @@ msix_config:
   publisher_display_name: Radha AI Product
   identity_name: RadhaAIProduct.antgrid
   publisher: CN=D6BFB7D7-5E99-4B9B-B4E0-29315D52C52B
-  msix_version: 1.0.5.0
+  msix_version: 1.0.4.0
   logo_path: assets/icon/antgrid-icon-1024.png
   architecture: x64
   capabilities: internetClient

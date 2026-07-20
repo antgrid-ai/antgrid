@@ -19,8 +19,15 @@ const HOOK_POST_TIMEOUT_MS = 4000;
 // runner acts on. Rust/serde agents serialize an absent field as JSON `null`,
 // so every optional field is `.nullish()`; `.optional()` alone rejects `null`,
 // which fails the whole parse and silently drops every post for that event.
+// "user-prompt" (→ /turn-start) is Claude-specific: Claude exposes a
+// UserPromptSubmit hook that fires before each new turn, which the bridge uses
+// to reset work status to "working" when a user re-prompts an existing session.
+// Codex/Gemini/Qwen/Cursor have no equivalent pre-turn hook — for those agents
+// only a new session (count increase) resets the status; re-prompting an
+// existing session leaves status at "done" or "attention" until the next
+// turn-end notification arrives (after-agent / stop).
 const HOOK_EVENTS: Record<string, readonly string[]> = {
-  claude: ["session-start", "stop", "notification"],
+  claude: ["session-start", "stop", "notification", "user-prompt"],
   codex: ["after-agent", "permission-request", "stop", "session-start"],
   gemini: ["session-start", "after-agent"],
   qwen: ["session-start", "after-agent"],
@@ -70,6 +77,7 @@ export type HookPath =
   | "/session-title"
   | "/notify"
   | "/handler-event"
+  | "/turn-start"
   | "/hook-alive";
 
 export interface HookPost {
@@ -159,6 +167,17 @@ async function buildPosts(
           transcriptPath: input.transcript_path ?? "",
         }),
       );
+    }
+    if (invocation.event === "user-prompt") {
+      // A fresh turn began — reset control-plane work status to "working" so a
+      // re-prompt of an existing session (or one resumed after a granted
+      // permission) stops showing the previous turn's done/attention. No
+      // notification: this is state, not a user-facing alert.
+      posts.push({
+        port,
+        path: "/turn-start",
+        body: { ...(terminalId ? { terminalId } : {}) },
+      });
     }
     if (invocation.event === "stop") {
       posts.push({

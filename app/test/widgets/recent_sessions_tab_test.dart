@@ -6,6 +6,7 @@ import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/models/recent_session_row.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
+import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/widgets/recent_sessions/recent_sessions_tab.dart';
 
 Widget _wrap(Widget child) {
@@ -117,6 +118,51 @@ void main() {
     await tester.pump();
     expect(find.textContaining('Sessions'), findsOneWidget);
     expect(find.text('Fix auth bug'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('summarizes a needs-attention project from the live advert', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    final row = RecentSessionRow(
+      session: const SessionEntry(
+        id: 's1',
+        name: 'Task',
+        createdAt: 0,
+        lastUsedAt: 1,
+        archived: false,
+        running: true,
+      ),
+      origin: const RecentOrigin(
+        isLocal: false,
+        registrationId: 'uuidA.projA',
+        projectId: 'projA',
+        machineUuid: 'uuidA',
+        projectName: 'proj',
+        deviceName: 'Mac',
+      ),
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          recentSessionsProvider.overrideWithValue([row]),
+        ],
+        child: _wrap(const RecentSessionsTab()),
+      ),
+    );
+    // Feed the live advert the way the app_shell reaper does.
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(RecentSessionsTab)),
+    );
+    container.read(remoteProjectStatusProvider.notifier).setMachineStatuses(
+      'uuidA',
+      {'uuidA.projA': AgentWorkStatus.attention},
+    );
+    await tester.pump();
+
+    // The header summarizes it as attention despite the session's running flag.
+    expect(find.textContaining('needs attention'), findsOneWidget);
     debugDefaultTargetPlatformOverride = null;
   });
 }

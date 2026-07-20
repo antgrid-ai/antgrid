@@ -3,7 +3,6 @@ import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/services/push_identity.dart';
 import 'package:antgrid/services/push_background_handler.dart';
-import 'package:push/push.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -85,7 +84,7 @@ void main() {
     expect(decoded!.sourceMessageId, isNull);
   });
 
-  test('pushDedupKey returns sourceMessageId, else null', () {
+  test('pushDedupKey prefers sourceMessageId, falls back, then null', () {
     const withSrc = (
       title: 't',
       body: 'b',
@@ -93,7 +92,7 @@ void main() {
       projectId: null,
       sourceMessageId: 'src1',
     );
-    expect(pushDedupKey(withSrc), 'src1');
+    expect(pushDedupKey(withSrc, fcmMessageId: 'fcm1'), 'src1');
 
     const noSrc = (
       title: 't',
@@ -102,26 +101,11 @@ void main() {
       projectId: null,
       sourceMessageId: null,
     );
-    // No id → null so the caller shows the push rather than deduping it away.
-    expect(pushDedupKey(noSrc), isNull);
-  });
-
-  group('pushDataOf', () {
-    test('keeps string entries', () {
-      final m = RemoteMessage(data: <String?, Object?>{'epk': 'A', 'box': 'B'});
-      expect(pushDataOf(m), <String, String>{'epk': 'A', 'box': 'B'});
-    });
-
-    test('drops null keys and non-string values rather than throwing', () {
-      final m = RemoteMessage(
-        data: <String?, Object?>{'epk': 'A', null: 'orphan', 'n': 3},
-      );
-      expect(pushDataOf(m), <String, String>{'epk': 'A'});
-    });
-
-    test('a null data payload is an empty map, not a crash', () {
-      expect(pushDataOf(RemoteMessage()), isEmpty);
-    });
+    // Two id-less pushes must NOT collide: fall back to the distinct FCM id.
+    expect(pushDedupKey(noSrc, fcmMessageId: 'fcm1'), 'fcm1');
+    expect(pushDedupKey(noSrc, fcmMessageId: 'fcm2'), 'fcm2');
+    // Neither present → null so the caller shows rather than dedups it away.
+    expect(pushDedupKey(noSrc, fcmMessageId: null), isNull);
   });
 
   test('decodePush returns null on garbage data', () async {

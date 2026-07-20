@@ -279,22 +279,9 @@ export class CodexDriver {
     this.turnOrder = turns.map((t) => String(t?.id ?? "")).filter(Boolean);
   }
 
-  // Every caller fire-and-forgets this, so a rejection would escape into the void
-  // and reach the host's process-level unhandledRejection hook, which tears down
-  // every project on the machine (see index.ts) — not just this session. The
-  // inner allSettled covers the RPCs; this covers the post-processing, and keeps
-  // each call site safe by construction.
-  private async discoverCapabilities(): Promise<void> {
-    try {
-      await this.discoverCapabilitiesInner();
-    } catch (err) {
-      logger.warn("codex capability discovery failed for session %s: %s", this.sessionId, err);
-    }
-  }
-
   // Fail-soft: each query settles independently, so a codex build lacking one
   // RPC omits that section instead of suppressing the whole advertisement.
-  private async discoverCapabilitiesInner(): Promise<void> {
+  private async discoverCapabilities(): Promise<void> {
     const [models, profiles, skills] = await Promise.allSettled([
       this.ep.request("model/list", {}),
       this.ep.request("permissionProfile/list", {}),

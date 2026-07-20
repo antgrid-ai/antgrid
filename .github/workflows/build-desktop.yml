@@ -487,11 +487,9 @@ jobs:
       # Secrets (repo Settings → Secrets and variables → Actions):
       #   MSSTORE_TENANT_ID / MSSTORE_CLIENT_ID / MSSTORE_CLIENT_SECRET /
       #   MSSTORE_SELLER_ID  (secrets)   +   MSSTORE_APP_ID (variable)
-      # Entra client secrets expire, and this step only runs on a tag — dispatch
-      # store-smoke.yml to check the credentials without cutting a release.
       - name: Configure Microsoft Store CLI
         if: ${{ startsWith(github.ref, 'refs/tags/') && env.MSSTORE_CLIENT_ID != '' && env.MSSTORE_APP_ID != '' && steps.build.outcome == 'success' }}
-        uses: microsoft/microsoft-store-apppublisher@v1.3
+        uses: microsoft/microsoft-store-apppublisher@v1.1
 
       - name: Publish to Microsoft Store
         if: ${{ startsWith(github.ref, 'refs/tags/') && env.MSSTORE_CLIENT_ID != '' && env.MSSTORE_APP_ID != '' && steps.build.outcome == 'success' }}

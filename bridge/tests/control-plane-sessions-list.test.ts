@@ -57,6 +57,50 @@ test("allowed phone gets the persisted list WITHOUT starting a core", async () =
   expect(h.get("projA")).toBeNull();
 });
 
+test("a WARM core is delegated to so the peek reports LIVE per-session running", async () => {
+  // The whole point of the peek fix: a warm core owns live PTY/chat state, so the
+  // handler must route to entry.core.listSessions (true `running`) instead of the
+  // disk peek, which always reports running:false. Inject a fake warm core into
+  // the private cores map — matching control-plane-sessions-delete's pattern — so
+  // we don't spawn a real one. Seed disk with running:false to prove the live core
+  // (not the disk file) is the source.
+  const h = host!;
+  seedSessions("projWarm", [{ id: "live", name: "Live", createdAt: 1, lastUsedAt: 10, archived: false, running: false }]);
+  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["projWarm"] });
+  const captured: { includeArchived: boolean | null } = { includeArchived: null };
+  (h as any).cores.set("projWarm", {
+    core: {
+      listSessions: (includeArchived: boolean) => {
+        captured.includeArchived = includeArchived;
+        return [{ id: "live", name: "Live", createdAt: 1, lastUsedAt: 10, archived: false, running: true }];
+      },
+      shutdown: async () => {},
+    },
+    path: "/p", mode: "local", lastFocusedMs: 0,
+  });
+
+  const res = (await h.handleSessionsListRpc(req("projWarm"), "pk1")) as any;
+  expect(res.ok).toBe(true);
+  expect(res.result.sessions.map((s: any) => s.id)).toEqual(["live"]);
+  expect(res.result.sessions[0].running).toBe(true); // LIVE state, not the disk's false
+  expect(captured.includeArchived).toBe(false); // routed to the live core
+});
+
+test("buildProjectsAdvertisement carries a warm core's work status", () => {
+  const h = host!;
+  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["projWarm"] });
+  // Inject a fake warm core exposing the reduced work status the advert folds in
+  // (mirrors the warm-core injection pattern above; no real core spawned).
+  (h as any).cores.set("projWarm", {
+    core: { workStatus: "attention", isRelayRegistered: () => true, shutdown: async () => {} },
+    path: "/p", mode: "local", lastFocusedMs: 0,
+  });
+
+  const entry = h.buildProjectsAdvertisement("pk1").find((p) => p.projectId === "projWarm");
+  expect(entry?.status).toBe("attention"); // folded from the core
+  expect(entry?.running).toBe(true); // dialable (isRelayRegistered)
+});
+
 test("non-allowed phone is rejected NOT_ALLOWED (no disk read leaked)", async () => {
   const h = host!;
   seedSessions("projA", [{ id: "a", name: "A", createdAt: 1, lastUsedAt: 10, archived: false }]);

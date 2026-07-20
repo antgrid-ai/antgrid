@@ -24,11 +24,14 @@ class ProjectSummary {
   final String path;
   final bool running;
   final String mode; // "local" | "remote"
+  /// Live work status for warm cores. Null until the first bus frame arrives.
+  final String? workStatus;
   const ProjectSummary({
     required this.projectId,
     required this.path,
     required this.running,
     required this.mode,
+    this.workStatus,
   });
 }
 
@@ -287,6 +290,7 @@ class HostControlClient {
         path: path,
         running: e['running'] == true,
         mode: mode,
+        workStatus: e['workStatus'] as String?,
       );
     }).toList(growable: false);
   }

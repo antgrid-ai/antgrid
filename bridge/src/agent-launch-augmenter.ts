@@ -62,6 +62,11 @@ function materializeClaudePlugin(
       SessionStart: [{ hooks: [claudeHook(command, "session-start")] }],
       Stop: [{ hooks: [claudeHook(command, "stop")] }],
       Notification: [{ hooks: [claudeHook(command, "notification")] }],
+      // A fresh turn: resets control-plane work status to "working" so a
+      // re-prompt of an existing session (the Stop hook already fired
+      // task_complete) no longer reads as done/attention. See hook-runner's
+      // "user-prompt" event → POST /turn-start.
+      UserPromptSubmit: [{ hooks: [claudeHook(command, "user-prompt")] }],
     },
   };
   try {

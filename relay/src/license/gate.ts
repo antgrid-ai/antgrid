@@ -28,16 +28,13 @@ export interface LicenseGate {
 }
 
 export interface LicenseGateDeps {
-  /** Base URL device tokens' `iss` claim must match — web's PUBLIC
-   *  BETTER_AUTH_URL, NOT necessarily wherever JWKS is fetched from (`jwks`
-   *  may be configured against an internal address instead). */
-  licenseIssuerUrl: string;
+  licenseApiUrl: string;
   jwks: JwksProvider;
   cache: LicenseCache;
 }
 
 export function createLicenseGate(deps: LicenseGateDeps): LicenseGate {
-  const expectedIssuer = deviceTokenIssuer(deps.licenseIssuerUrl);
+  const expectedIssuer = deviceTokenIssuer(deps.licenseApiUrl);
   return {
     async verify(token, deviceId, publicKeyBase64): Promise<LicenseGateResult> {
       // No early cache short-circuit: a stale `revoked`/`pk` entry would

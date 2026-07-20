@@ -41,18 +41,6 @@ class HandshakeException implements Exception {
   String toString() => 'HandshakeException: $message';
 }
 
-/// Thrown by [MachineSession.bindProject] when the agent rejects the
-/// `project:start` (`control:result {ok:false}` — e.g. `NOT_ALLOWED`,
-/// `OPEN_FAILED`) so the caller fails with the real reason instead of a
-/// blind timeout.
-class ProjectBindException implements Exception {
-  final String code;
-  final String message;
-  ProjectBindException(this.code, this.message);
-  @override
-  String toString() => 'ProjectBindException($code): $message';
-}
-
 /// One phone↔machine E2E session multiplexed over a single [RelayService]
 /// socket. Owns the single [SessionKeys] set, the handshake/rekey driver, the
 /// per-machine fragment reassembler, liveness, and the stream demux. Project
@@ -77,7 +65,6 @@ class MachineSession {
     // a swallowing listener so that never trips the unhandled-error zone hook;
     // every real `await ready` still receives the error.
     _readyCompleter.future.ignore();
-    _armKeysReady();
   }
 
   SessionKeys? _keys;
@@ -100,12 +87,6 @@ class MachineSession {
   DateTime _lastRecv = DateTime.now();
 
   final _readyCompleter = Completer<void>();
-
-  /// Completes each time [_keys] are installed and is re-armed on socket loss,
-  /// so a bind issued across a reconnect can wait for the next establishment
-  /// instead of failing on the transient keyless window.
-  late Completer<void> _keysReady;
-
   final _fragAborts = StreamController<FragHint>.broadcast();
   final _fragSendErrors = StreamController<FragSendError>.broadcast();
   final _streamReadyController =
@@ -194,37 +175,15 @@ class MachineSession {
   }) async {
     final known = _projectStreamIds[projectId];
     if (known != null) return known;
-    // One deadline spans both waits below, so a bind can never take 2×[timeout].
-    final deadline = DateTime.now().add(timeout);
-    // sendOnStream drops silently without keys, so the start message has to
-    // wait for them. Keys are per-connection and nulled on every socket blip
-    // while the reconnect re-establishes within seconds — treating that window
-    // as a hard failure turns a routine blip into a user-visible bind error.
-    if (_keys == null) {
-      try {
-        await _keysReady.future.timeout(_remainingUntil(deadline));
-      } on TimeoutException {
-        throw StateError('bindProject: E2E session not established');
-      }
-      // The post-establish `agent:projects` re-advert may have bound the
-      // project while we waited — no need to ask the agent to start it again.
-      final rebound = _projectStreamIds[projectId];
-      if (rebound != null) return rebound;
-    }
-    final waiter = _streamReadyWaiters.putIfAbsent(projectId, () {
-      final c = Completer<String>();
-      // A control:result rejection may completeError during the send await gap
-      // below, before this method's own await attaches — same pattern as
-      // [_readyCompleter] (real awaiters still receive the error).
-      c.future.ignore();
-      return c;
-    });
+    final waiter =
+        _streamReadyWaiters.putIfAbsent(projectId, () => Completer<String>());
     await sendOnStream(kControlStreamId, startMessage, 'control');
-    // The waiter is shared by every concurrent bind of this project, so one
-    // caller's deadline must not evict it: `.timeout()` leaves the completer
-    // itself pending, and dropping the map entry would strand the other callers
-    // where _recordProjectStream can no longer reach them. dispose() clears it.
-    return waiter.future.timeout(_remainingUntil(deadline));
+    try {
+      return await waiter.future.timeout(timeout);
+    } on TimeoutException {
+      _streamReadyWaiters.remove(projectId);
+      rethrow;
+    }
   }
 
   /// Wrap [message] as a sealed `{s, m}` envelope and send it (fragmenting past
@@ -316,13 +275,6 @@ class MachineSession {
     }
   }
 
-  void _armKeysReady() {
-    _keysReady = Completer<void>();
-    // dispose() can fail this before any [bindProject] awaits it — same
-    // unobserved-error guard as [_readyCompleter].
-    _keysReady.future.ignore();
-  }
-
   void _onSocketDown() {
     // Session keys are per-connection; a socket drop invalidates them. A fresh
     // paired transition on the reconnected socket re-establishes.
@@ -331,9 +283,6 @@ class MachineSession {
     _stopLiveness();
     _keys?.zeroize();
     _keys = null;
-    // Re-arm only from the completed state: a second blip before the first
-    // establishment would otherwise orphan whoever is already awaiting.
-    if (_keysReady.isCompleted) _armKeysReady();
   }
 
   // --- handshake / rekey ----------------------------------------------------
@@ -360,7 +309,6 @@ class MachineSession {
           final old = _keys;
           _keys = newKeys;
           old?.zeroize();
-          if (!_keysReady.isCompleted) _keysReady.complete();
           _established = true;
           _peerWasOffline = false;
           _lastRecv = DateTime.now();
@@ -488,11 +436,7 @@ class MachineSession {
   }
 
   /// Snoop control-plane adverts for project→stream bindings so [bindProject]
-  /// can resolve at 0 RTT and drill-in `stream-ready` waiters resolve. Called
-  /// for LIVE frames and for `state.snapshot`-replayed frames alike — the
-  /// bridge's replay-cache dedup can legally suppress a byte-identical live
-  /// re-advert after an app kill+reopen, so the snapshot pull is the reconnect
-  /// binding contract (design §7.4), not a cache warm-up.
+  /// can resolve at 0 RTT and drill-in `stream-ready` waiters resolve.
   void _snoopControl(String sid, Object? m) {
     if (sid != kControlStreamId || m is! Map<String, dynamic>) return;
     final type = m['type'];
@@ -503,34 +447,14 @@ class MachineSession {
     } else if (type == 'agent:projects') {
       final projects = m['projects'];
       if (projects is List) {
-        // The advert is the agent's COMPLETE dialable catalog: an entry without
-        // a streamId (or a project absent entirely) is not dialable. Drop stale
-        // bindings — after an agent restart the old ids point at dead streams
-        // and sends to them vanish with no feedback.
-        final next = <String, String>{};
         for (final p in projects) {
           if (p is Map<String, dynamic>) {
             final pid = p['projectId'];
             final streamId = p['streamId'];
-            if (pid is String && streamId is String) next[pid] = streamId;
+            if (pid is String && streamId is String) {
+              _recordProjectStream(pid, streamId);
+            }
           }
-        }
-        _projectStreamIds.removeWhere((pid, _) => !next.containsKey(pid));
-        next.forEach(_recordProjectStream);
-      }
-    } else if (type == 'control:result' && m['ok'] == false) {
-      // A rejected project:start (NOT_ALLOWED / OPEN_FAILED /
-      // SESSION_LIMIT_EXCEEDED) — fail the pending bind with the real reason
-      // instead of letting it run out its blind timeout.
-      final pid = m['projectId'];
-      if (pid is String) {
-        final waiter = _streamReadyWaiters.remove(pid);
-        if (waiter != null && !waiter.isCompleted) {
-          final err = m['error'];
-          waiter.completeError(ProjectBindException(
-            err is Map && err['code'] is String ? err['code'] as String : 'UNKNOWN',
-            err is Map && err['message'] is String ? err['message'] as String : '',
-          ));
         }
       }
     }
@@ -591,17 +515,7 @@ class MachineSession {
     if (!_readyCompleter.isCompleted) {
       _readyCompleter.completeError(StateError('session disposed'));
     }
-    if (!_keysReady.isCompleted) {
-      _keysReady.completeError(StateError('session disposed'));
-    }
   }
-}
-
-/// Time left before [deadline], floored at zero — a negative [Duration] passed
-/// to `Future.timeout` is not a meaningful budget.
-Duration _remainingUntil(DateTime deadline) {
-  final left = deadline.difference(DateTime.now());
-  return left.isNegative ? Duration.zero : left;
 }
 
 /// The per-project (or per-control-plane) [AgentTransport] view over a
@@ -621,11 +535,8 @@ class StreamTransport extends BufferedAgentTransport {
   @override
   Future<void> connect() async {
     setState(TransportState.connected);
-    // Seed durable state — but only when the session can carry the request:
-    // without keys sendOnStream drops it and the RPC would burn its full
-    // timeout to report what is already known. Nothing is lost, since every
-    // attached stream is refreshed on each (re)establish.
-    if (!session.isEstablished) return;
+    // Seed durable state; a no-op (times out) if the session isn't established
+    // yet — the session refreshes every stream on (re)establish.
     await _fetchSnapshot(timeout: const Duration(seconds: 10));
   }
 
@@ -674,14 +585,7 @@ class StreamTransport extends BufferedAgentTransport {
       final fresh = <InboundMessage>[];
       for (final raw in frames) {
         if (raw is Map) {
-          final m = raw.cast<String, dynamic>();
-          // Snapshot-replayed frames must feed the session's stream-binding
-          // map exactly like live frames: the bridge's replay-cache dedup can
-          // suppress the live re-advert after an app kill+reopen, making this
-          // pull the ONLY carrier of `agent:projects{streamId}` (design §7.4).
-          // No-op for non-control streams.
-          session._snoopControl(streamId, m);
-          fresh.add(InboundMessage('control', m));
+          fresh.add(InboundMessage('control', raw.cast<String, dynamic>()));
         }
       }
       snapshotCache

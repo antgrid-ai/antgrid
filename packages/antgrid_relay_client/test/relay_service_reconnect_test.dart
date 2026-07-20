@@ -22,27 +22,6 @@ DeviceIdentity _identity() => DeviceIdentity(
       x25519PublicKey: Uint8List(32),
     );
 
-/// Waits until [pred] holds for the service's connection state.
-///
-/// Checks [RelayService.currentState] BEFORE subscribing: `stateStream` is a
-/// broadcast stream with no replay, and the transition these tests trigger can
-/// land before the wait begins — the client processes a queued error frame
-/// while the test is still awaiting the server-side `close()`. Subscribing
-/// first and only then reading would miss it and hang for the full timeout.
-Future<void> _awaitState(
-  RelayService relay,
-  bool Function(AppState) pred, {
-  Duration timeout = const Duration(seconds: 5),
-}) async {
-  if (pred(relay.currentState)) return;
-  await relay.stateStream.firstWhere(pred).timeout(timeout);
-}
-
-bool _isDisconnected(AppState s) =>
-    s.connectionState == RelayConnectionState.disconnected;
-bool _isAuthenticated(AppState s) =>
-    s.connectionState == RelayConnectionState.authenticated;
-
 void main() {
   late FakeRelayWsServer server;
   late RelayService relay;
@@ -74,7 +53,9 @@ void main() {
       'serverTime': DateTime.now().toUtc().toIso8601String(),
     });
 
-    await _awaitState(relay, _isAuthenticated);
+    await relay.stateStream
+        .firstWhere((s) => s.connectionState == RelayConnectionState.authenticated)
+        .timeout(const Duration(seconds: 5));
   });
 
   test(
@@ -134,7 +115,10 @@ void main() {
         'epoch': 1,
         'serverTime': DateTime.now().toUtc().toIso8601String(),
       });
-      await _awaitState(relay, _isAuthenticated);
+      await relay.stateStream
+          .firstWhere(
+              (s) => s.connectionState == RelayConnectionState.authenticated)
+          .timeout(const Duration(seconds: 5));
     },
   );
 
@@ -154,7 +138,10 @@ void main() {
       });
       await conn1.close();
 
-      await _awaitState(relay, _isDisconnected);
+      await relay.stateStream
+          .firstWhere(
+              (s) => s.connectionState == RelayConnectionState.disconnected)
+          .timeout(const Duration(seconds: 5));
       expect(relay.currentState.errorCode, 'PROTOCOL_VIOLATION');
 
       final sawReconnect = await conns
@@ -230,7 +217,10 @@ void main() {
       });
       await conn1.close();
 
-      await _awaitState(relay, _isDisconnected);
+      await relay.stateStream
+          .firstWhere(
+              (s) => s.connectionState == RelayConnectionState.disconnected)
+          .timeout(const Duration(seconds: 5));
       expect(relay.currentState.errorCode, 'SUPERSEDED');
       expect(errorEvents.map((e) => e.code), contains('SUPERSEDED'));
 
@@ -268,7 +258,10 @@ void main() {
       });
       await conn1.close();
 
-      await _awaitState(relay, _isDisconnected);
+      await relay.stateStream
+          .firstWhere(
+              (s) => s.connectionState == RelayConnectionState.disconnected)
+          .timeout(const Duration(seconds: 5));
       // `licenseErrorStream` is populated a beat after the state transition
       // (see RelayService._handleError's ordering) — poll briefly rather than
       // race the exact microtask interleaving.

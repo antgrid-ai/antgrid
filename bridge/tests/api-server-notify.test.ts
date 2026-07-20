@@ -127,3 +127,35 @@ describe("POST /notify", () => {
     } finally { srv.stop(); }
   });
 });
+
+describe("POST /turn-start", () => {
+  test("fires onTurnStart and emits NO app-facing frame", async () => {
+    const sent: AbMessage[] = [];
+    let turns = 0;
+    const srv = startApiServer(ctx({
+      sendAb: (m) => sent.push(m),
+      onTurnStart: () => { turns++; },
+    }));
+    try {
+      const res = await fetch(`http://127.0.0.1:${srv.port}/turn-start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ terminalId: "t1" }),
+      });
+      expect(res.status).toBe(200);
+      expect(turns).toBe(1);
+      // A turn-start is state, not a notification — nothing goes on the bus.
+      expect(sent).toHaveLength(0);
+    } finally { srv.stop(); }
+  });
+
+  test("tolerates an empty body", async () => {
+    let turns = 0;
+    const srv = startApiServer(ctx({ onTurnStart: () => { turns++; } }));
+    try {
+      const res = await fetch(`http://127.0.0.1:${srv.port}/turn-start`, { method: "POST" });
+      expect(res.status).toBe(200);
+      expect(turns).toBe(1);
+    } finally { srv.stop(); }
+  });
+});

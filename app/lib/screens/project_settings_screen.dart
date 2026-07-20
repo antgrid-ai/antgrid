@@ -28,7 +28,6 @@ class _ProjectSettingsScreenState extends ConsumerState<ProjectSettingsScreen> {
   List<DetectedTool> _detected = const [];
   String? _saveError;
   bool _saving = false;
-  bool _loadFailed = false;
 
   @override
   void initState() {
@@ -45,19 +44,13 @@ class _ProjectSettingsScreenState extends ConsumerState<ProjectSettingsScreen> {
       final results = await Future.wait([svc.read(), svc.detectTools()]);
       if (!mounted) return;
       setState(() {
-        // A null read means the agent answered and has no usable config, so an
-        // empty draft is the right starting point. A lost reply throws instead.
         _draft = (results[0] as AbConfig?) ?? const AbConfig();
         _detected = results[1] as List<DetectedTool>;
       });
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        // Render the form so the error is visible instead of an endless
-        // spinner, but keep Save locked: this draft is a placeholder, not the
-        // project's config, and writing it would clobber the real antgrid.yaml.
         _draft ??= const AbConfig();
-        _loadFailed = true;
         _saveError = 'Failed to load settings: $e';
       });
     }
@@ -140,7 +133,7 @@ class _ProjectSettingsScreenState extends ConsumerState<ProjectSettingsScreen> {
                   children: [
                     AbButton(
                       label: _saving ? 'Saving…' : 'Save',
-                      onTap: _saving || _loadFailed ? null : _save,
+                      onTap: _saving ? null : _save,
                     ),
                   ],
                 ),

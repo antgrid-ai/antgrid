@@ -190,9 +190,6 @@ export class ClaudeDriver implements StructuredDriver {
   private selModel?: string;
   private resolvedModel?: string;
   private selMode?: string; // permission mode: default | acceptEdits | plan
-  // Newest in-flight pick per axis ("model" | "mode" | "effort"), so a slow
-  // rejection can tell whether it still owns the selection it wants to roll back.
-  private pickSeq = new Map<string, number>();
   private selEffort?: string;
   // The user (constructor opts.model / setConfig) pinned this axis — blocks the
   // eager default resolution and the system:init reconciliation from overriding it.
@@ -481,20 +478,7 @@ export class ClaudeDriver implements StructuredDriver {
   // the user's first real prompt still produces). Runs independently of (and
   // usually finishes well before) onInit's own discoverModels() call, which
   // stays as the fallback for whichever prompt arrives first.
-  // start() fire-and-forgets this, so a rejection would escape into the void and
-  // reach the host's process-level unhandledRejection hook, which tears down every
-  // project on the machine (see index.ts) — not just this session. The inner try
-  // only covers the RPC; the tail past it (the pendingConfig flush and the
-  // capabilities emit) writes to the transport and can throw too.
   private async discoverCapabilities(): Promise<void> {
-    try {
-      await this.discoverCapabilitiesInner();
-    } catch (err) {
-      logger.warn("claude capability discovery failed for session %s: %s", this.sessionId, err);
-    }
-  }
-
-  private async discoverCapabilitiesInner(): Promise<void> {
     if (!this.q) return;
     let gotCatalog = false;
     try {
@@ -571,8 +555,7 @@ export class ClaudeDriver implements StructuredDriver {
     const pick = this.capModels.find((m) => m.id === this.selModel)?.defaultEffort;
     if (!pick) return;
     this.selEffort = pick;
-    this.guardPick(this.q?.applyFlagSettings({ effortLevel: pick, ultracode: false }), "effort", pick,
-      () => { this.selEffort = undefined; });
+    void this.q?.applyFlagSettings({ effortLevel: pick, ultracode: false });
   }
 
   private emitCapabilities(): void {
@@ -596,31 +579,6 @@ export class ClaudeDriver implements StructuredDriver {
     if (this.applyConfig(key, value)) this.emitCapabilities();
   }
 
-  // A selection is written optimistically and pushed to the CLI fire-and-forget,
-  // but the control call is fallible: the CLI arbitrates picks it never
-  // advertised (permission mode "auto" is gated per-model, and no discovery API
-  // reports which models allow it) and answers an unsupported one with an error
-  // verdict, which the SDK surfaces as a rejection. Unguarded, that reaches the
-  // host's process-level unhandledRejection hook and takes down every project on
-  // the machine. Roll the optimistic write back and re-emit so the app's pills
-  // report the state the session is actually in.
-  private guardPick(call: Promise<unknown> | undefined, axis: string, id: string, revert: () => void): void {
-    const seq = (this.pickSeq.get(axis) ?? 0) + 1;
-    this.pickSeq.set(axis, seq);
-    // The trailing catch keeps the handler total: emitCapabilities() writes to the
-    // transport, and a throw there would reject this .catch()'s own promise —
-    // landing right back on the hook this guard exists to keep clear.
-    void call?.catch((err) => {
-      if (this.disposed) return;
-      logger.warn("claude %s pick \"%s\" rejected for session %s: %s", axis, id, this.sessionId, err);
-      // A newer pick on this axis already superseded ours and the CLI took it;
-      // rolling back now would clobber a selection that actually applied.
-      if (this.pickSeq.get(axis) !== seq) return;
-      revert();
-      this.emitCapabilities();
-    }).catch(() => {});
-  }
-
   private applyConfig(key: string, value: string): boolean {
     const pick = resolveConfigPick(key, value, {
       models: this.capModels, modes: this.capModes,
@@ -628,35 +586,20 @@ export class ClaudeDriver implements StructuredDriver {
     });
     if (!pick) return false;
     if (pick.key === "model") {
-      const prevModel = this.selModel, prevResolved = this.resolvedModel, prevExplicit = this.modelExplicit;
       this.selModel = pick.id;
       const raw = this.rawModelCatalog.find((m) => String(m?.value ?? "") === pick.id);
       this.resolvedModel = typeof raw?.resolvedModel === "string" ? raw.resolvedModel : pick.id;
-      this.modelExplicit = true;
-      this.guardPick(this.q?.setModel(pick.id), "model", pick.id, () => {
-        this.selModel = prevModel; this.resolvedModel = prevResolved; this.modelExplicit = prevExplicit;
-      });
+      this.modelExplicit = true; void this.q?.setModel(pick.id);
       // Clearing a carried-over effort also lifts ultracode — it's a sticky
       // session flag, so a bare effortLevel:null wouldn't turn it off.
-      if (pick.clearEffort) {
-        const prevEffort = this.selEffort;
-        this.selEffort = undefined;
-        this.guardPick(this.q?.applyFlagSettings({ effortLevel: null, ultracode: false }), "effort", "none",
-          () => { this.selEffort = prevEffort; });
-      }
-    } else if (pick.key === "mode") {
-      const prevMode = this.selMode;
-      this.selMode = pick.id;
-      this.guardPick(this.q?.setPermissionMode(pick.id), "mode", pick.id, () => { this.selMode = prevMode; });
-    } else if (pick.key === "effort") {
-      const prevEffort = this.selEffort, prevExplicit = this.effortExplicit;
+      if (pick.clearEffort) { this.selEffort = undefined; void this.q?.applyFlagSettings({ effortLevel: null, ultracode: false }); }
+    } else if (pick.key === "mode") { this.selMode = pick.id; void this.q?.setPermissionMode(pick.id); }
+    else if (pick.key === "effort") {
       this.selEffort = pick.id; this.effortExplicit = true;
       // ultracode isn't an effortLevel value — set its own flag; any concrete
       // level must also lift a previously-set ultracode (it's sticky).
-      this.guardPick(
-        this.q?.applyFlagSettings(pick.id === "ultracode" ? { ultracode: true } : { effortLevel: pick.id, ultracode: false }),
-        "effort", pick.id,
-        () => { this.selEffort = prevEffort; this.effortExplicit = prevExplicit; },
+      void this.q?.applyFlagSettings(
+        pick.id === "ultracode" ? { ultracode: true } : { effortLevel: pick.id, ultracode: false },
       );
     }
     return true;

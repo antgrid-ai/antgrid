@@ -10,8 +10,10 @@ import '../../design/widgets/ab_empty_state.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../../design/widgets/ab_status_dot.dart';
 import '../../models/recent_session_row.dart';
+import '../../providers/project_work_status.dart';
 import '../../providers/recent_sessions.dart';
 import '../../providers/relay_connection.dart';
+import '../../services/control_plane_client.dart';
 import '../ab_status_helpers.dart';
 import 'recent_session_row_widget.dart';
 
@@ -78,17 +80,28 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
       );
     }
 
-    final groups = _groupSessions(rows, _groupBy);
-    final working = rows.where((r) => r.session.running).length;
-    final done = rows.length - working;
+    // Effective per-row status (project-level attention/error overlaid on the
+    // session's own running flag), computed once here and reused for grouping
+    // and the header counts. Watches the live advert map ONCE (not per row) —
+    // keyed by row identity, distinct instances per build.
+    final advert = ref.watch(remoteProjectStatusProvider);
+    final statusFor = <RecentSessionRow, AgentWorkStatus>{
+      for (final r in rows)
+        r: recentRowStatus(advert[r.origin.registrationId], r.session.running),
+    };
+    final counts = <AgentWorkStatus, int>{};
+    for (final s in statusFor.values) {
+      counts[s] = (counts[s] ?? 0) + 1;
+    }
+
+    final groups = _groupSessions(rows, _groupBy, statusFor);
 
     return CustomScrollView(
       slivers: [
         SliverToBoxAdapter(
           child: _SessionsHeader(
             total: rows.length,
-            working: working,
-            done: done,
+            counts: counts,
             groupBy: _groupBy,
             onGroupBy: (g) => setState(() => _groupBy = g),
           ),
@@ -119,9 +132,27 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
   }
 }
 
+/// Status-group ordering: the two call-to-action states first (a blocked or
+/// errored agent is what the user opened Recent to find), then working, then
+/// done.
+const _statusOrder = [
+  AgentWorkStatus.attention,
+  AgentWorkStatus.error,
+  AgentWorkStatus.working,
+  AgentWorkStatus.done,
+];
+
+String workStatusLabel(AgentWorkStatus s) => switch (s) {
+  AgentWorkStatus.attention => 'Needs attention',
+  AgentWorkStatus.error => 'Error',
+  AgentWorkStatus.working => 'Working',
+  AgentWorkStatus.done => 'Done',
+};
+
 List<_SessionGroup> _groupSessions(
   List<RecentSessionRow> rows,
   _RecentGroupBy groupBy,
+  Map<RecentSessionRow, AgentWorkStatus> statusFor,
 ) {
   // Bucket by a STABLE identity (machineUuid / registrationId), never by a
   // user-facing display string — two different machines or projects can
@@ -140,15 +171,18 @@ List<_SessionGroup> _groupSessions(
         key = row.origin.registrationId;
         label = row.origin.projectName;
       case _RecentGroupBy.status:
-        key = row.session.running ? 'working' : 'done';
-        label = key == 'working' ? 'Working' : 'Done';
+        final s = statusFor[row] ?? AgentWorkStatus.done;
+        key = s.name;
+        label = workStatusLabel(s);
     }
     buckets.putIfAbsent(key, () => []).add(row);
     labels[key] = label;
   }
 
   final keys = groupBy == _RecentGroupBy.status
-      ? ['working', 'done'].where(buckets.containsKey).toList()
+      ? [
+          for (final s in _statusOrder) s.name,
+        ].where(buckets.containsKey).toList()
       : (buckets.keys.toList()..sort(
           (a, b) =>
               labels[a]!.toLowerCase().compareTo(labels[b]!.toLowerCase()),
@@ -173,17 +207,27 @@ List<_SessionGroup> _groupSessions(
 class _SessionsHeader extends StatelessWidget {
   const _SessionsHeader({
     required this.total,
-    required this.working,
-    required this.done,
+    required this.counts,
     required this.groupBy,
     required this.onGroupBy,
   });
 
   final int total;
-  final int working;
-  final int done;
+  final Map<AgentWorkStatus, int> counts;
   final _RecentGroupBy groupBy;
   final ValueChanged<_RecentGroupBy> onGroupBy;
+
+  /// Badge tone per state — attention/error stand out (amber/red), working is
+  /// live (accent + pulse), done recedes (muted).
+  Color _color(BuildContext context, AgentWorkStatus s) {
+    final t = context.antgrid;
+    return switch (s) {
+      AgentWorkStatus.attention => t.warning,
+      AgentWorkStatus.error => t.error,
+      AgentWorkStatus.working => t.accent,
+      AgentWorkStatus.done => t.textMuted,
+    };
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -238,17 +282,21 @@ class _SessionsHeader extends StatelessWidget {
                   alignment: Alignment.centerRight,
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
+                    spacing: AbTokens.space8,
                     children: [
-                      if (working > 0)
-                        _SummaryBadge(
-                          label: '$working working',
-                          color: t.accent,
-                          live: true,
-                        ),
-                      if (working > 0 && done > 0)
-                        const SizedBox(width: AbTokens.space8),
-                      if (done > 0)
-                        _SummaryBadge(label: '$done done', color: t.textMuted),
+                      for (final s in _statusOrder)
+                        if ((counts[s] ?? 0) > 0)
+                          _SummaryBadge(
+                            label:
+                                '${counts[s]} ${workStatusLabel(s).toLowerCase()}',
+                            color: _color(context, s),
+                            // Pulse the live states (working + attention) so
+                            // activity registers without reading the numbers.
+                            live:
+                                s == AgentWorkStatus.working ||
+                                s == AgentWorkStatus.attention,
+                            tone: s,
+                          ),
                     ],
                   ),
                 ),
@@ -267,14 +315,18 @@ class _SummaryBadge extends StatelessWidget {
   const _SummaryBadge({
     required this.label,
     required this.color,
+    required this.tone,
     this.live = false,
   });
 
   final String label;
   final Color color;
 
-  /// Prefix a pulsing activity dot — used for the "working" count so live
-  /// activity registers at a glance without reading the numbers.
+  /// The state this badge summarizes — drives the live dot's tone.
+  final AgentWorkStatus tone;
+
+  /// Prefix a pulsing activity dot — used for the live states (working /
+  /// attention) so activity registers at a glance without reading the numbers.
   final bool live;
 
   @override
@@ -284,7 +336,9 @@ class _SummaryBadge extends StatelessWidget {
       children: [
         if (live) ...[
           AbStatusDot(
-            tone: AbStatusTone.info,
+            tone: tone == AgentWorkStatus.attention
+                ? AbStatusTone.warning
+                : AbStatusTone.info,
             size: AbDotSize.sm,
             style: AbDotStyle.filled,
             pulse: true,

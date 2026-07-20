@@ -59,6 +59,18 @@ describe("Claude hooks", () => {
     ]);
   });
 
+  test("user-prompt posts a turn-start (fresh turn → working)", async () => {
+    const h = harness({
+      agent: "claude",
+      event: "user-prompt",
+      stdin: JSON.stringify({ session_id: "s1", transcript_path: "/tmp/t.jsonl", prompt: "hi" }),
+    });
+    await h.run();
+    expect(h.posts).toEqual([
+      { port: 43123, path: "/turn-start", body: { terminalId: "term-1" } },
+    ]);
+  });
+
   test("stop sends title, completion, and handler events", async () => {
     const h = harness({
       agent: "claude",

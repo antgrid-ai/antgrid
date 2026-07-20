@@ -16,7 +16,7 @@ export interface PairedPhone {
   // never stores these; the bridge supplies them per push:deliver.
   pushPubkey?: string;
   pushToken?: string;
-  pushProvider?: "fcm" | "apns";
+  pushProvider?: "fcm";
   pushUpdatedAt?: string;
 }
 

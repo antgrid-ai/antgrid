@@ -6,7 +6,6 @@ import '../models/session_entry.dart';
 import '../models/ab_message.dart';
 import '../project/project_session.dart';
 import '../storage/cached_sessions_store.dart';
-import 'pending_reply.dart';
 
 /// Reply timeout for any pending `session:*` request. The agent should answer
 /// within milliseconds locally and ≤1 RTT over the relay; 15s is comfortably
@@ -65,9 +64,9 @@ class SessionsService {
   SessionsState _state;
   bool _disposed = false;
 
-  final Map<String, PendingReply<List<SessionEntry>>> _pendingList = {};
-  final Map<String, PendingReply<SessionEntry?>> _pendingMutations = {};
-  final Map<String, PendingReply<bool>> _pendingDeletes = {};
+  final Map<String, _Pending<List<SessionEntry>>> _pendingList = {};
+  final Map<String, _Pending<SessionEntry?>> _pendingMutations = {};
+  final Map<String, _Pending<bool>> _pendingDeletes = {};
 
   Stream<SessionsState> get stateStream => _stateController.stream;
   SessionsState get currentState => _state;
@@ -173,12 +172,6 @@ class SessionsService {
 
   String _newRequestId() => const Uuid().v4();
 
-  PendingReply<T> _newPending<T>(void Function() onTimeout) => PendingReply<T>(
-    timeout: _kPendingReplyTimeout,
-    onTimeout: onTimeout,
-    timeoutError: () => TimeoutException('session reply timed out'),
-  );
-
   Future<void> _send(Map<String, dynamic> msg) async {
     await session.send(msg);
   }
@@ -187,18 +180,16 @@ class SessionsService {
 
   Future<List<SessionEntry>> requestList({bool includeArchived = false}) {
     final requestId = _newRequestId();
-    final pending = _newPending<List<SessionEntry>>(
-      () => _pendingList.remove(requestId),
+    final pending = _Pending<List<SessionEntry>>(
+      onTimeout: () => _pendingList.remove(requestId),
     );
     _pendingList[requestId] = pending;
     _setState(_state.copyWith(loading: true, clearError: true));
-    unawaited(
-      _send(
-        createAbMessage('session:list', {
-          'requestId': requestId,
-          if (includeArchived) 'includeArchived': true,
-        }),
-      ),
+    _send(
+      createAbMessage('session:list', {
+        'requestId': requestId,
+        if (includeArchived) 'includeArchived': true,
+      }),
     );
     return pending.future;
   }
@@ -244,15 +235,15 @@ class SessionsService {
 
   Future<bool> delete(String id) {
     final requestId = _newRequestId();
-    final pending = _newPending<bool>(() => _pendingDeletes.remove(requestId));
+    final pending = _Pending<bool>(
+      onTimeout: () => _pendingDeletes.remove(requestId),
+    );
     _pendingDeletes[requestId] = pending;
-    unawaited(
-      _send(
-        createAbMessage('session:delete', {
-          'requestId': requestId,
-          'sessionId': id,
-        }),
-      ),
+    _send(
+      createAbMessage('session:delete', {
+        'requestId': requestId,
+        'sessionId': id,
+      }),
     );
     return pending.future;
   }
@@ -264,13 +255,11 @@ class SessionsService {
 
   Future<SessionEntry?> _mutate(String type, Map<String, dynamic> fields) {
     final requestId = _newRequestId();
-    final pending = _newPending<SessionEntry?>(
-      () => _pendingMutations.remove(requestId),
+    final pending = _Pending<SessionEntry?>(
+      onTimeout: () => _pendingMutations.remove(requestId),
     );
     _pendingMutations[requestId] = pending;
-    unawaited(
-      _send(createAbMessage(type, {'requestId': requestId, ...fields})),
-    );
+    _send(createAbMessage(type, {'requestId': requestId, ...fields}));
     return pending.future;
   }
 
@@ -296,5 +285,35 @@ class SessionsService {
       p.fail(error);
     }
     _pendingDeletes.clear();
+  }
+}
+
+/// Pending wire-protocol reply with a hard timeout so a dropped frame can't
+/// hang the awaiting UI Future indefinitely. The owning map is cleaned up
+/// via [onTimeout] before the completer errors out.
+class _Pending<T> {
+  final Completer<T> _completer = Completer<T>();
+  late final Timer _timer;
+
+  _Pending({required void Function() onTimeout}) {
+    _timer = Timer(_kPendingReplyTimeout, () {
+      if (_completer.isCompleted) return;
+      onTimeout();
+      _completer.completeError(TimeoutException('session reply timed out'));
+    });
+  }
+
+  Future<T> get future => _completer.future;
+
+  void complete(T value) {
+    if (_completer.isCompleted) return;
+    _timer.cancel();
+    _completer.complete(value);
+  }
+
+  void fail(Object error) {
+    if (_completer.isCompleted) return;
+    _timer.cancel();
+    _completer.completeError(error);
   }
 }

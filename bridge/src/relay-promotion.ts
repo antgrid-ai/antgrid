@@ -20,7 +20,7 @@ type EnableMsg = Extract<AbMessage, { type: "agent:enableRelay" }>;
 export interface MachineRelaySession {
   attachStream(bus: MessageBus, opts: AttachStreamOpts): StreamHandle;
   currentPeerPubkey(): string | null;
-  sendPushDeliver(msg: { pushToken: string; provider: "fcm" | "apns"; blob: { epk: string; box: string } }): void;
+  sendPushDeliver(msg: { pushToken: string; provider: "fcm"; blob: { epk: string; box: string } }): void;
   /** The machine control-plane pairing window (opened for a wizard pair). */
   pairingWindow: PairingWindow;
   /** Bare machine deviceUuid — the QR `d=` payload (no `.projectId`; §7.4). */

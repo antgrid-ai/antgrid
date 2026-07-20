@@ -26,6 +26,11 @@ export interface AgentContext {
   onHandlerEvent?: (body: HandlerEventBody) => void;
   /** Called when an injected hook pings /hook-alive (codex drift probe). */
   onHookAlive?: (terminalId: string) => void;
+  /** Called when a turn-start hook pings /turn-start (a fresh turn began), so
+   *  the control-plane work status resets to "working". Bridge-internal: this
+   *  never emits an app-facing frame — unlike /notify, a turn-start is not a
+   *  user-facing notification. */
+  onTurnStart?: () => void;
   /**
    * Test-only accessor for the per-project pairing window. Wired in
    * `buildAgentCore` and only exposed via the `/test/open-pairing-window`
@@ -256,6 +261,15 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
           sessionTitle,
           projectId: project.id,
         }));
+        return json({ ok: true });
+      }
+
+      if (req.method === "POST" && path === "/turn-start") {
+        // Body is accepted but not required — the api-server is per-core, so the
+        // owning project is unambiguous without a terminalId. Drained so the
+        // hook's POST doesn't block on an unread body.
+        try { await req.json(); } catch { /* empty/invalid body is fine */ }
+        ctx.onTurnStart?.();
         return json({ ok: true });
       }
 

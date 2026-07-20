@@ -8,7 +8,7 @@ import type { JwksProvider } from "../../src/license/verify.js";
 
 type SignerKey = Awaited<ReturnType<typeof generateKeyPair>>["privateKey"];
 
-// `licenseIssuerUrl` is the bare origin; the gate derives the token issuer as
+// `licenseApiUrl` is the bare origin; the gate derives the token issuer as
 // `${origin}/api/auth` (Better-Auth's mount). Sign fixtures with that shape.
 //
 // Real Better-Auth `client_credentials` tokens carry device identity in the
@@ -95,7 +95,7 @@ function makeProvider(keys: JWK[]): CountingProvider {
 
 function makeGate(jwks: JwksProvider, cache?: LicenseCache) {
   return createLicenseGate({
-    licenseIssuerUrl: ISSUER,
+    licenseApiUrl: ISSUER,
     jwks,
     cache: cache ?? new LicenseCache({ maxEntries: 16 }),
   });

@@ -7,7 +7,6 @@ import 'package:uuid/uuid.dart';
 
 import '../models/ab_message.dart';
 import '../project/project_session.dart';
-import 'pending_reply.dart';
 
 /// Upload failure with a machine [code] (mirrors the bridge's
 /// file:upload-result error codes, plus app-side OFFLINE/TIMEOUT).
@@ -58,7 +57,7 @@ class UploadService {
 
   final ProjectSession session;
   StreamSubscription<Map<String, dynamic>>? _statusSub;
-  final Map<String, PendingReply<Map<String, dynamic>>> _pending = {};
+  final Map<String, Completer<Map<String, dynamic>>> _pending = {};
   // uploadId → the requestId its done-waiter is keyed by. Lets a failure result
   // that can only cite the uploadId (the bridge replies requestId:"" for a
   // swept/expired upload) still wake the pending `done:` wait instead of hanging.
@@ -97,18 +96,20 @@ class UploadService {
   }
 
   void _complete(String key, Map<String, dynamic> j) {
-    _pending.remove(key)?.complete(j);
+    final c = _pending.remove(key);
+    if (c != null && !c.isCompleted) c.complete(j);
   }
 
   Future<Map<String, dynamic>> _await(String key) {
-    final pending = PendingReply<Map<String, dynamic>>(
-      timeout: _kStepTimeout,
-      onTimeout: () => _pending.remove(key),
-      timeoutError: () =>
-          const UploadException('TIMEOUT', 'No reply from the agent'),
+    final completer = Completer<Map<String, dynamic>>();
+    _pending[key] = completer;
+    return completer.future.timeout(
+      _kStepTimeout,
+      onTimeout: () {
+        _pending.remove(key);
+        throw const UploadException('TIMEOUT', 'No reply from the agent');
+      },
     );
-    _pending[key] = pending;
-    return pending.future;
   }
 
   void _throwIfError(Map<String, dynamic> j) {
@@ -196,8 +197,10 @@ class UploadService {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
-    for (final p in _pending.values) {
-      p.fail(const UploadException('OFFLINE', 'Session closed'));
+    for (final c in _pending.values) {
+      if (!c.isCompleted) {
+        c.completeError(const UploadException('OFFLINE', 'Session closed'));
+      }
     }
     _pending.clear();
     _requestIdByUpload.clear();

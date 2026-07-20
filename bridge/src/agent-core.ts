@@ -18,7 +18,7 @@ import { loadConfig, findConfigFile, projectName, type AbConfig } from "./config
 import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from "./bootstrap";
 import { resolveAgent, listKnownTools } from "./known-agents";
 import { augmentAgentLaunch } from "./agent-launch-augmenter";
-import { createMessage, type AbMessage, type RpcRequest } from "./protocol";
+import { createMessage, type AbMessage, type RpcRequest, type SessionEntry } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
 import { MessageBus } from "./message-bus";
@@ -132,6 +132,12 @@ export interface AgentCore {
    *  initialized yet (pre-handshake). The control-plane delete RPC calls this
    *  for a warm core so the on-disk file and in-memory state stay consistent. */
   deleteSession(id: string): boolean;
+  /** Live session list with true per-session `running` (via SessionManager's
+   *  in-memory PTY/chat sets), for the control-plane `sessions.list` peek when a
+   *  warm core owns the project — the disk-only `readPersisted` reports every
+   *  session not-running. Returns null before sessions are initialized
+   *  (pre-handshake), signalling the caller to fall back to the on-disk list. */
+  listSessions(includeArchived: boolean): SessionEntry[] | null;
 }
 
 export interface BuildAgentCoreOptions {
@@ -151,6 +157,10 @@ export interface BuildAgentCoreOptions {
   /** Shared machine-level paired-phones store. When omitted, a machine-level
    *  store is loaded from abDir (single shared file, not per-project). */
   pairedPhones?: PairedPhonesStore;
+  /** Fired when a turn-start hook pings the api-server (`POST /turn-start`), so
+   *  the owning ProjectCore can reset its control-plane work status to "working"
+   *  on a fresh turn. Bridge-internal — never surfaces to the app. */
+  onTurnStart?: () => void;
 }
 
 export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<AgentCore> {
@@ -1593,6 +1603,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       }
     },
     onHookAlive: (terminalId) => { codexHookAlive.add(terminalId); },
+    onTurnStart: () => opts.onTurnStart?.(),
   });
 
   const TranscriptSnapshotParams = z.object({ sessionId: z.string() });
@@ -1695,6 +1706,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     deleteSession(id: string): boolean {
       if (!sessions) return false;
       return sessions.delete(id);
+    },
+    listSessions(includeArchived: boolean): SessionEntry[] | null {
+      return sessions ? sessions.list(includeArchived) : null;
     },
   };
 }
