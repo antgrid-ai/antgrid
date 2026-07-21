@@ -9,16 +9,15 @@ export interface GeminiHookDefinition {
 }
 export interface GeminiHooks {
   SessionStart: GeminiHookDefinition[];
-  // gemini/qwen's turn-end event is keyed `Stop` (its UI label is "After Agent
+  // gemini's turn-end event is keyed `Stop` (its UI label is "After Agent
   // Hooks"); there is no `AfterAgent` config key — writing one silently no-ops.
-  // Verified against qwen-code source (settingsSchema HookEventName). The bridge
-  // command token stays `after-agent` to match HOOK_EVENTS in hook-runner.ts.
+  // The bridge command token stays `after-agent` to match HOOK_EVENTS in hook-runner.ts.
   Stop: GeminiHookDefinition[];
 }
 
 export function buildGeminiHooks(
   command: HookCommand,
-  agent: "gemini" | "qwen",
+  agent: "gemini",
 ): GeminiHooks {
   const make = (event: "session-start" | "after-agent"): GeminiHookDefinition[] => [
     { hooks: [{ type: "command", command: hookShellCommand(command, agent, event) }] },
@@ -31,7 +30,10 @@ export function buildGeminiHooks(
 
 export function composeGeminiDefaults(opts: {
   general?: Record<string, unknown>;
-  hooks: GeminiHooks;
+  hooks?: GeminiHooks;
 }): Record<string, unknown> {
-  return { ...(opts.general ? { general: opts.general } : {}), hooks: opts.hooks };
+  return {
+    ...(opts.general ? { general: opts.general } : {}),
+    ...(opts.hooks ? { hooks: opts.hooks } : {}),
+  };
 }

@@ -22,15 +22,13 @@ const HOOK_POST_TIMEOUT_MS = 4000;
 // "user-prompt" (→ /turn-start) is Claude-specific: Claude exposes a
 // UserPromptSubmit hook that fires before each new turn, which the bridge uses
 // to reset work status to "working" when a user re-prompts an existing session.
-// Codex/Gemini/Qwen/Cursor have no equivalent pre-turn hook — for those agents
+// Codex/Cursor have no equivalent pre-turn hook — for those agents
 // only a new session (count increase) resets the status; re-prompting an
 // existing session leaves status at "done" or "attention" until the next
 // turn-end notification arrives (after-agent / stop).
 const HOOK_EVENTS: Record<string, readonly string[]> = {
   claude: ["session-start", "stop", "notification", "user-prompt"],
   codex: ["after-agent", "permission-request", "stop", "session-start"],
-  gemini: ["session-start", "after-agent"],
-  qwen: ["session-start", "after-agent"],
   cursor: ["session-start", "stop"],
   "github-copilot": ["session-start", "agent-stop"],
 };
@@ -262,14 +260,6 @@ async function buildPosts(
         posts.push({ port, path: "/hook-alive", body: { terminalId } });
       }
     }
-  } else if (invocation.agent === "gemini" || invocation.agent === "qwen") {
-    const input = parseOrEmpty(SessionPayloadSchema, await deps.readStdin());
-    if (!input) return [];
-    posts.push(
-      titlePost(port, terminalId, input.session_id, invocation.agent, {
-        ...(input.transcript_path ? { transcriptPath: input.transcript_path } : {}),
-      }),
-    );
   } else if (invocation.agent === "cursor") {
     const raw = await deps.readStdin();
     if (invocation.event === "session-start") {

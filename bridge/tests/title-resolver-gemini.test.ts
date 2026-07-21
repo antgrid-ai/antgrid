@@ -24,7 +24,7 @@ test("gemini transcript title comes from the first user message", async () => {
 test("gemini transcript title comes from array Part[] content (no type field)", async () => {
   const d = newDir();
   const p = join(d, "session-array.jsonl");
-  // Gemini/Qwen persist Part[] as {text} objects with no `type` field.
+  // Gemini persists Part[] as {text} objects with no `type` field.
   writeFileSync(p, [
     JSON.stringify({ sessionId: "s2", projectHash: "h" }),
     JSON.stringify({ type: "user", content: [{ text: "Refactor the auth module" }] }),
@@ -35,5 +35,5 @@ test("gemini transcript title comes from array Part[] content (no type field)", 
 });
 
 test("missing transcript path yields null", async () => {
-  expect(await resolveStructuredTitle("qwen", { sessionId: "s1" })).toBeNull();
+  expect(await resolveStructuredTitle("gemini", { sessionId: "s1" })).toBeNull();
 });

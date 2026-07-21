@@ -249,14 +249,10 @@ describe("Codex hooks", () => {
 });
 
 describe("session capture hooks", () => {
-  test("Gemini and Qwen omit absent transcript paths", async () => {
-    for (const agent of ["gemini", "qwen"]) {
-      const h = harness({ agent, event: "after-agent", stdin: JSON.stringify({ session_id: `${agent}-1` }) });
-      await h.run();
-      expect(h.posts).toEqual([
-        { port: 43123, path: "/session-title", body: { terminalId: "term-1", sessionId: `${agent}-1`, agent } },
-      ]);
-    }
+  test("gemini events are ignored (gemini removed from hook runner)", async () => {
+    const h = harness({ agent: "gemini", event: "after-agent", stdin: JSON.stringify({ session_id: "gemini-1" }) });
+    await h.run();
+    expect(h.posts).toEqual([]);
   });
 
   test("Cursor strips a BOM and only notifies for completed stops", async () => {

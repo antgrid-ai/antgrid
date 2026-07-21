@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { logger } from "./logger";
 
-export type StructuredAgent = "claude" | "codex" | "gemini" | "qwen" | "github-copilot";
+export type StructuredAgent = "claude" | "codex" | "gemini" | "github-copilot";
 
 /** Read a UTF-8 file, returning null on any error (missing / unreadable). Async
  *  so a large Claude transcript can't block the single-threaded bridge event
@@ -220,8 +220,8 @@ export async function resolveClaudeTranscriptTitle(transcriptPath: string): Prom
 }
 
 /**
- * Extract plain text from a Gemini/Qwen `content` field.
- * Gemini/Qwen persist content as `string | Part[]` where a Part is `{text}`
+ * Extract plain text from a Gemini `content` field.
+ * Gemini persists content as `string | Part[]` where a Part is `{text}`
  * with NO `type` field — distinct from Claude's `{type:'text', text}` parts,
  * so this can't reuse messageText.
  */
@@ -242,9 +242,9 @@ function geminiPartText(content: unknown): string | null {
 }
 
 /**
- * Gemini/Qwen session transcript title: first user message's text. Their chat
+ * Gemini session transcript title: first user message's text. Its chat
  * jsonl is a metadata line followed by message records {type, content}.
- * Gemini/Qwen persist `content` as `string | Part[]` where a Part is `{text}`
+ * Gemini persists `content` as `string | Part[]` where a Part is `{text}`
  * (no `type` field) — distinct from Claude's `{type:'text', text}` parts, so
  * this can't reuse messageText. Never throws.
  */
@@ -285,7 +285,7 @@ export async function resolveStructuredTitle(
     if (agent === "claude") {
       return args.transcriptPath ? await resolveClaudeTranscriptTitle(args.transcriptPath) : null;
     }
-    if (agent === "gemini" || agent === "qwen") {
+    if (agent === "gemini") {
       return args.transcriptPath ? await resolveGeminiTranscriptTitle(args.transcriptPath) : null;
     }
     if (agent === "github-copilot") {

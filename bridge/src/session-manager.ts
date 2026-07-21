@@ -82,7 +82,7 @@ interface PersistedEntry {
   // resumed on the next start(). See agent-resume.ts.
   agentSessionId?: string;
   // The agent's transcript/session file path when its hook supplied one
-  // (claude/gemini/qwen). Used for the pre-flight existence check. Codex/
+  // (claude/gemini). Used for the pre-flight existence check. Codex/
   // opencode don't post a path.
   agentTranscriptPath?: string;
   // Session-scoped structured-driver selections keyed by the wire config key the

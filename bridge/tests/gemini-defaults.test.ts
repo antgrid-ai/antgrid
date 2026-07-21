@@ -12,14 +12,9 @@ describe("gemini-defaults", () => {
       expect(cmd.command).toContain("antgrid-bridge");
       expect(cmd.command).toContain("gemini");
       expect(cmd.command).toContain(ev === "SessionStart" ? "session-start" : "after-agent");
-      // gemini/qwen turn-end hook is keyed `Stop`, not `AfterAgent` — see gemini-defaults.ts.
+      // gemini turn-end hook is keyed `Stop`, not `AfterAgent` — see gemini-defaults.ts.
       expect(cmd.command).not.toMatch(/\bnode(?:\.exe)?\b/i);
     }
-  });
-
-  test("qwen label is threaded into the command", () => {
-    const h = buildGeminiHooks(HOOK_COMMAND, "qwen");
-    expect(h.SessionStart[0].hooks[0].command).toContain("qwen");
   });
 
   test("composeGeminiDefaults merges general and hooks", () => {
@@ -32,7 +27,7 @@ describe("gemini-defaults", () => {
   });
 
   test("composeGeminiDefaults omits general when not supplied", () => {
-    const merged = composeGeminiDefaults({ hooks: buildGeminiHooks(HOOK_COMMAND, "qwen") });
+    const merged = composeGeminiDefaults({ hooks: buildGeminiHooks(HOOK_COMMAND, "gemini") });
     expect((merged as any).general).toBeUndefined();
     expect((merged as any).hooks).toBeDefined();
   });

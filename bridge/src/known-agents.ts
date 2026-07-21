@@ -50,10 +50,6 @@ export const KNOWN_AGENTS: Record<string, KnownAgent> = {
   // augmentAgentLaunch's notificationsInjected — stays "osc" until that gap
   // is closed, so a failed write can't silently kill auto-naming.
   "gemini":         { bin: "gemini",   hookDir: null,                notificationSource: "osc",    titleSource: "osc" },
-  // gemini fork but diverged: terminalBell defaults ON and fails CLOSED on
-  // focus, so the app's default-blur (DEC 1004) is all it needs — no injection.
-  // Same structured-title caveat as gemini above.
-  "qwen":           { bin: "qwen",     hookDir: null,                notificationSource: "osc",    titleSource: "osc" },
   // Signals only with a bare terminal bell (no OSC 9/777). Since the bell now
   // rings audibly instead of raising a desktop notification, kimi is heard, not
   // notified — no OSC notification source exists to coerce it into.
@@ -120,22 +116,13 @@ export function resolveAgentEnv(
         attention: { enabled: true },
       });
     case "gemini": {
-      // Single system-defaults file (GEMINI_CLI_SYSTEM_DEFAULTS_PATH names ONE
-      // file): compose the notification block AND the resume/title capture hooks
-      // together so neither clobbers the other. osc777 pinned for deterministic
-      // notifications under our fixed TERM_PROGRAM=ghostty.
+      // osc777 pinned for deterministic notifications under our fixed
+      // TERM_PROGRAM=ghostty. Hooks were removed (gemini is not in HOOK_EVENTS)
+      // so the defaults file carries only the notification block.
       return injectConfig("GEMINI_CLI_SYSTEM_DEFAULTS_PATH", abDir, "gemini-defaults.json",
         composeGeminiDefaults({
           general: { enableNotifications: true, notificationMethod: "osc777" },
-          hooks: buildGeminiHooks(hookCommand, "gemini"),
         }));
-    }
-    case "qwen": {
-      // Qwen needs no notification injection (terminalBell defaults on + fails
-      // closed on focus), but DOES need the capture hooks for resume. Hooks-only
-      // defaults file via QWEN_CODE_SYSTEM_DEFAULTS_PATH.
-      return injectConfig("QWEN_CODE_SYSTEM_DEFAULTS_PATH", abDir, "qwen-defaults.json",
-        composeGeminiDefaults({ hooks: buildGeminiHooks(hookCommand, "qwen") }));
     }
     default:
       return {};
