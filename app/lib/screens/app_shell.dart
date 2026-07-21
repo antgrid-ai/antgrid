@@ -209,7 +209,7 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
     // work status. Mobile has no local host; skip to avoid pointless reads.
     if (!isMobilePlatform) {
       _hostStatusTimer = Timer.periodic(
-        const Duration(milliseconds: 500),
+        const Duration(seconds: 2),
         (_) { if (mounted) _pollLocalProjectStatus(); },
       );
     }
@@ -231,10 +231,13 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
         _labelSubs.remove(uuid)?.close();
         // Socket closed → its advert can't refresh; drop the machine's live
         // status so rows fall back to session-running instead of showing stale
-        // work state. (Labels intentionally persist; status does not.)
+        // work state. Labels intentionally persist; status is cleared from both
+        // the live provider and the on-disk cache so a cold boot after a
+        // disconnect doesn't re-seed stale badges for an offline machine.
         ref
             .read(remoteProjectStatusProvider.notifier)
             .setMachineStatuses(uuid, const {});
+        ref.read(cachedSessionsStoreProvider).clearStatusesForMachine('$uuid.');
         // Clear stale advert-delta tracking so a reconnect triggers a fresh
         // re-peek regardless of whether the new advert matches the pre-disconnect
         // snapshot (the common case — agent didn't stop during the gap).
@@ -269,6 +272,14 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
     ref
         .read(remoteProjectStatusProvider.notifier)
         .setMachineStatuses(uuid, statuses);
+    // Persist the new statuses so a cold boot can seed the status map before
+    // the first advert arrives. Only projects in the current advert are written;
+    // projects dropped from the advert are cleared via clearStatusesForMachine
+    // before writing so the cache never grows with stale entries.
+    store.clearStatusesForMachine('$uuid.');
+    for (final e in statuses.entries) {
+      store.putStatus(e.key, e.value.name);
+    }
     // Peeked (never dialed) from the transport this advert already came from —
     // matches _syncLabelSubscriptions' peek-only contract; null when no live
     // socket. The eager auto-connect-everywhere design caused connection storms,

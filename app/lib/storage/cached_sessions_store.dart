@@ -21,6 +21,13 @@ class CachedSessionsStore {
   // control-plane advert, one project at a time via putLabel) — a separate
   // key lets a label-only flush skip re-encoding every cached session.
   static const _labelsKey = 'antgrid.session_cache.labels.v1';
+  // Last-seen per-project work status from live control-plane adverts. Persisted
+  // so a cold boot can seed remoteProjectStatusProvider with the last-known
+  // call-to-action (attention/error) before the first advert arrives; the seed
+  // deliberately ignores working/done, which are re-derived from cached
+  // session-running (see remoteProjectStatusProvider.build). Cleared per machine
+  // on socket close so an offline machine doesn't re-seed on the next boot.
+  static const _statusKey = 'antgrid.session_cache.status.v1';
   static const _flushDebounce = Duration(milliseconds: 200);
 
   final SharedPreferencesWithCache _prefs;
@@ -31,8 +38,10 @@ class CachedSessionsStore {
   // advert. Persisted alongside the sessions so an offline/cold-boot Recent
   // row can fall back to a real name instead of the raw projectId.
   final Map<String, String> _labels = {};
+  final Map<String, String> _statuses = {};
   bool _entriesDirty = false;
   bool _labelsDirty = false;
+  bool _statusesDirty = false;
   Timer? _flushTimer;
 
   CachedSessionsStore._(this._prefs) {
@@ -40,7 +49,7 @@ class CachedSessionsStore {
   }
 
   static Future<CachedSessionsStore> open() async =>
-      CachedSessionsStore._(await openScopedPrefs({_key, _labelsKey}));
+      CachedSessionsStore._(await openScopedPrefs({_key, _labelsKey, _statusKey}));
 
   /// Returns an unmodifiable view of the cached sessions for [entryId], or
   /// `const []` if nothing is cached.
@@ -94,6 +103,39 @@ class CachedSessionsStore {
     if (_labels[entryId] == label) return;
     _labels[entryId] = label;
     _labelsDirty = true;
+    _scheduleFlush();
+  }
+
+  /// Last-seen raw work-status string for [entryId] (`"working"` /
+  /// `"attention"` / `"done"` / `"error"`), or `null` if never observed.
+  /// Callers parse via `AgentWorkStatus.fromWire`.
+  String? statusOf(String entryId) => _statuses[entryId];
+
+  /// Unmodifiable snapshot of every persisted `entryId → raw status string`.
+  Map<String, String> allStatuses() => Map.unmodifiable(_statuses);
+
+  /// Record the last-seen live work status for [entryId]. Persisted so a cold
+  /// boot can seed the status map before the first advert arrives. No-ops if
+  /// unchanged; does not emit on [changes].
+  void putStatus(String entryId, String status) {
+    if (_statuses[entryId] == status) return;
+    _statuses[entryId] = status;
+    _statusesDirty = true;
+    _scheduleFlush();
+  }
+
+  /// Drop status entries for every key starting with [machinePrefix] (e.g.
+  /// `"$uuid."`) — called when a machine socket closes so stale statuses
+  /// don't seed the next cold boot with data from a disconnected machine.
+  void clearStatusesForMachine(String machinePrefix) {
+    final toRemove = _statuses.keys
+        .where((k) => k.startsWith(machinePrefix))
+        .toList(growable: false);
+    if (toRemove.isEmpty) return;
+    for (final k in toRemove) {
+      _statuses.remove(k);
+    }
+    _statusesDirty = true;
     _scheduleFlush();
   }
 
@@ -165,6 +207,19 @@ class CachedSessionsStore {
         // Corrupt blob — treat as empty. Next write replaces it.
       }
     }
+    final rawStatuses = _prefs.getString(_statusKey);
+    if (rawStatuses != null) {
+      try {
+        final decoded = jsonDecode(rawStatuses);
+        if (decoded is Map) {
+          decoded.forEach((k, v) {
+            if (k is String && v is String) _statuses[k] = v;
+          });
+        }
+      } catch (_) {
+        // Corrupt blob — treat as empty. Next write replaces it.
+      }
+    }
   }
 
   void _scheduleFlush() {
@@ -200,6 +255,13 @@ class CachedSessionsStore {
       final encoded = jsonEncode(_labels);
       if (_prefs.getString(_labelsKey) != encoded) {
         await _prefs.setString(_labelsKey, encoded);
+      }
+    }
+    if (_statusesDirty) {
+      _statusesDirty = false;
+      final encoded = jsonEncode(_statuses);
+      if (_prefs.getString(_statusKey) != encoded) {
+        await _prefs.setString(_statusKey, encoded);
       }
     }
   }

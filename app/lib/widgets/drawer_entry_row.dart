@@ -73,6 +73,7 @@ class MachineDrawerHeaderRow extends ConsumerWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             _MachineOnlineDot(machineUuid: machineUuid),
+            _MachineAggregateDot(machineUuid: machineUuid),
             Flexible(
               child: Text(
                 entry.displayName,
@@ -683,6 +684,33 @@ class _MachineOnlineDot extends ConsumerWidget {
         // Pulse while mid-handshake; a settled offline (disconnected) dot holds.
         pulse: !online && phase != RelayConnectionState.disconnected,
       ),
+    );
+  }
+}
+
+/// Aggregate work-status dot for a collapsed machine header: shows only the
+/// call-to-action states (attention/error) across ALL projects on [machineUuid].
+/// Hidden when expanded — individual project rows carry their own dots — and
+/// hidden when status is working/done, keeping idle machine headers clean.
+class _MachineAggregateDot extends ConsumerWidget {
+  const _MachineAggregateDot({required this.machineUuid});
+
+  final String machineUuid;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final expanded =
+        ref.watch(expandedDrawerIdsProvider).contains(machineUuid);
+    if (expanded) return const SizedBox.shrink();
+    final status = ref.watch(machineWorkStatusProvider(machineUuid));
+    if (status == null ||
+        status == AgentWorkStatus.done ||
+        status == AgentWorkStatus.working) {
+      return const SizedBox.shrink();
+    }
+    return Padding(
+      padding: const EdgeInsets.only(right: AbTokens.space6),
+      child: AgentWorkStatusDot(status: status),
     );
   }
 }

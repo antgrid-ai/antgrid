@@ -8,7 +8,6 @@ test("buildJudgeCommand maps the three supported tools", () => {
 });
 
 test("buildJudgeCommand returns null for unsupported tools", () => {
-  expect(buildJudgeCommand("gemini", "x", "P")).toBeNull();
   expect(buildJudgeCommand("cursor-agent", undefined, "P")).toBeNull();
 });
 

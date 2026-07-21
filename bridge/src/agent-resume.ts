@@ -17,9 +17,6 @@ export function resumeArgv(tool: string, agentSessionId: string): string[] {
   switch (tool) {
     case "claude-code":
       return ["--resume", agentSessionId];
-    case "gemini":
-      // resolveSession matches UUID-first (sessionUtils.ts:471-477) — verified.
-      return ["--resume", agentSessionId];
     case "opencode":
       return ["--session", agentSessionId];
     case "codex":
@@ -40,7 +37,7 @@ export function resumeArgv(tool: string, agentSessionId: string): string[] {
  * is gone — false negatives would silently break resume, so we only refuse when
  * sure. Keeps SessionManager.start() synchronous (existsSync / bun:sqlite are
  * sync).
- *   - transcript path present (claude/gemini) → exact existsSync check.
+ *   - transcript path present (claude) → exact existsSync check.
  *   - codex (no path posted) → query the threads table; optimistic if the DB is
  *     undeterminable.
  *   - opencode and everything else → optimistic (the agent's own bad-id handling

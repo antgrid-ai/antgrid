@@ -88,7 +88,7 @@ describe("POST /notify", () => {
     const sent: AbMessage[] = [];
     const srv = startApiServer(ctx({ sendAb: (m) => sent.push(m) }));
     try {
-      await post(srv.port, { type: "task_complete", agent: "gemini", transcriptPath: transcript("nope") });
+      await post(srv.port, { type: "task_complete", agent: "codex", transcriptPath: transcript("nope") });
       expect((sent[0] as any).message).toBeUndefined();
     } finally { srv.stop(); }
   });

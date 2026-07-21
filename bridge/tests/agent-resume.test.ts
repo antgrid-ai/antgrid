@@ -18,9 +18,8 @@ function seedCopilotSessions(home: string, ids: string[]) {
 }
 
 describe("resumeArgv", () => {
-  test("claude/gemini use --resume <id>", () => {
+  test("claude uses --resume <id>", () => {
     expect(resumeArgv("claude-code", "abc")).toEqual(["--resume", "abc"]);
-    expect(resumeArgv("gemini", "abc")).toEqual(["--resume", "abc"]);
   });
   test("opencode uses --session <id>", () => {
     expect(resumeArgv("opencode", "ses_1")).toEqual(["--session", "ses_1"]);

@@ -1591,7 +1591,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (
           body.agent === "claude" ||
           body.agent === "codex" ||
-          body.agent === "gemini" ||
           body.agent === "github-copilot"
         ) {
         const title = await resolveStructuredTitle(body.agent, {

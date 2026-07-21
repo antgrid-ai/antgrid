@@ -11,7 +11,6 @@ describe("known-agents registry", () => {
         "claude-code",
         "codex",
         "cursor-agent",
-        "gemini",
         "github-copilot",
         "kilo",
         "kimi",
@@ -23,7 +22,6 @@ describe("known-agents registry", () => {
 
   it("resolves the new agents to their CLI bins", () => {
     expect(resolveAgent("kilo").bin).toBe("kilo");
-    expect(resolveAgent("gemini").bin).toBe("gemini");
     expect(resolveAgent("kimi").bin).toBe("kimi");
     expect(resolveAgent("mistral-vibe").bin).toBe("vibe");
   });
@@ -78,7 +76,6 @@ describe("known-agents registry", () => {
 
   it("titleSourceFor is osc for agents without a fail-open injection signal, or no structured resolver at all", () => {
     expect(titleSourceFor("cursor-agent")).toBe("osc");
-    expect(titleSourceFor("gemini")).toBe("osc");
     expect(titleSourceFor("kilo")).toBe("osc");
     expect(titleSourceFor("kimi")).toBe("osc");
     expect(titleSourceFor("mistral-vibe")).toBe("osc");
@@ -118,20 +115,6 @@ test("kilo env points KILO_TUI_CONFIG at an attention-enabled config file", () =
 
   const cfg = JSON.parse(readFileSync(path!, "utf8"));
   expect(cfg.attention.enabled).toBe(true);
-});
-
-test("gemini env points GEMINI_CLI_SYSTEM_DEFAULTS_PATH at a notifications-enabled defaults file", () => {
-  const base = mkdtempSync(join(tmpdir(), "ab-known-agents-"));
-  const env = resolveAgentEnv("gemini", base, { binary: "/app/antgrid-bridge", preargs: ["hook"] });
-
-  const path = env.GEMINI_CLI_SYSTEM_DEFAULTS_PATH;
-  expect(path).toBeTruthy();
-  expect(existsSync(path!)).toBe(true);
-
-  const cfg = JSON.parse(readFileSync(path!, "utf8"));
-  expect(cfg.general.enableNotifications).toBe(true);
-  expect(cfg.general.notificationMethod).toBe("osc777");
-  expect(cfg.hooks).toBeUndefined();
 });
 
 test("entry-only agents get no extra launch env", () => {

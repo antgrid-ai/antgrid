@@ -62,9 +62,9 @@ class RemoteProjectLabelsController extends Notifier<Map<String, String>> {
 /// control-plane reaper — the SAME single-writer pattern as
 /// [remoteProjectLabelsProvider], and for the same reason (a per-machine
 /// `ref.watch` fan-in into one provider reproduced Riverpod's "rebuilt multiple
-/// times in the same frame" crash). NOT persisted: status is live-only, so a
-/// cold boot / closed socket falls back to session-running via
-/// [projectWorkStatusProvider].
+/// times in the same frame" crash). Seeded from [CachedSessionsStore] on cold
+/// boot (last-known state before the first advert arrives); cleared from the
+/// cache when a socket closes so offline machines don't seed stale badges.
 final remoteProjectStatusProvider =
     NotifierProvider<
       RemoteProjectStatusController,
@@ -74,7 +74,34 @@ final remoteProjectStatusProvider =
 class RemoteProjectStatusController
     extends Notifier<Map<String, AgentWorkStatus>> {
   @override
-  Map<String, AgentWorkStatus> build() => const {};
+  Map<String, AgentWorkStatus> build() {
+    // Seed from the persisted status cache so a cold-boot row can show the
+    // last-known CALL-TO-ACTION (attention/error) before the first advert
+    // arrives. Only those two are seeded: working/done are re-derived from
+    // cached session-running by projectWorkStatusProvider, so seeding a stale
+    // "working" here would paint a live-activity pulse on an offline machine
+    // whose cached sessions are idle — a visible contradiction. attention/error
+    // add real information the fallback can't express and self-heal the moment
+    // the socket dials (the advert overwrites the whole machine).
+    //
+    // Guarded: a widget/provider test that never touches cached sessions won't
+    // override cachedSessionsStoreProvider (which throws by contract when
+    // unset), and reading status must not force that store into existence —
+    // degrade to an empty map rather than throwing out of build().
+    try {
+      final raw = ref.read(cachedSessionsStoreProvider).allStatuses();
+      final result = <String, AgentWorkStatus>{};
+      for (final e in raw.entries) {
+        final s = AgentWorkStatus.fromWire(e.value);
+        if (s == AgentWorkStatus.attention || s == AgentWorkStatus.error) {
+          result[e.key] = s!;
+        }
+      }
+      return result;
+    } catch (_) {
+      return const {};
+    }
+  }
 
   /// Replace every entry for [machineUuid] with [statuses] in one write:
   /// handles additions, transitions, and removals (a project dropped from the

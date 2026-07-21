@@ -40,3 +40,40 @@ AgentWorkStatus recentRowStatus(AgentWorkStatus? advert, bool running) {
   }
   return running ? AgentWorkStatus.working : AgentWorkStatus.done;
 }
+
+/// Aggregate work status for a machine: the most severe status across ALL of
+/// its projects in the live advert map (attention > error > working > done).
+/// Returns null when no advert status is available for any project on this
+/// machine (older bridge, all sockets closed, no projects running).
+///
+/// Used by the drawer machine header to show a single indicator when the
+/// machine row is collapsed and individual project rows aren't visible.
+final machineWorkStatusProvider =
+    Provider.family<AgentWorkStatus?, String>((ref, machineUuid) {
+  final prefix = '$machineUuid.';
+  // Aggregation runs inside select so it returns AgentWorkStatus? (enum value
+  // equality), not a List. A new List is never == to another List in Dart, so
+  // returning one from select would defeat Riverpod's equality guard and cause
+  // every machineWorkStatusProvider to rebuild on every unrelated machine's
+  // status change.
+  return ref.watch(
+    remoteProjectStatusProvider.select((m) {
+      // Precedence: attention > error > working > done. Null = no matching keys.
+      AgentWorkStatus? best;
+      for (final e in m.entries) {
+        if (!e.key.startsWith(prefix)) continue;
+        final s = e.value;
+        if (s == AgentWorkStatus.attention) return AgentWorkStatus.attention;
+        if (s == AgentWorkStatus.error) {
+          best = AgentWorkStatus.error;
+        } else if (s == AgentWorkStatus.working &&
+            (best == null || best == AgentWorkStatus.done)) {
+          best = AgentWorkStatus.working;
+        } else {
+          best ??= AgentWorkStatus.done;
+        }
+      }
+      return best;
+    }),
+  );
+});

@@ -2,7 +2,6 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { logger } from "./logger";
-import { buildGeminiHooks, composeGeminiDefaults } from "./gemini-defaults";
 import { resolveHookCommand, type HookCommand } from "./hook-command";
 
 export interface KnownAgent {
@@ -43,13 +42,6 @@ export const KNOWN_AGENTS: Record<string, KnownAgent> = {
   // via KILO_TUI_CONFIG injection (see resolveAgentEnv); the app's default-blur
   // (DEC 1004) supplies the blur it waits on.
   "kilo":           { bin: "kilo",     hookDir: null,                notificationSource: "osc",    titleSource: "osc" },
-  // Notifications default off and fail OPEN on focus — only blocker is the
-  // default, enabled via the GEMINI_CLI_SYSTEM_DEFAULTS_PATH injection. Gets a
-  // hooks-based structured title too (buildGeminiHooks), but resolveAgentEnv's
-  // injectConfig() exposes no injection-success signal to fail open on, unlike
-  // augmentAgentLaunch's notificationsInjected — stays "osc" until that gap
-  // is closed, so a failed write can't silently kill auto-naming.
-  "gemini":         { bin: "gemini",   hookDir: null,                notificationSource: "osc",    titleSource: "osc" },
   // Signals only with a bare terminal bell (no OSC 9/777). Since the bell now
   // rings audibly instead of raising a desktop notification, kimi is heard, not
   // notified — no OSC notification source exists to coerce it into.
@@ -91,8 +83,8 @@ export function listKnownTools(): string[] {
  * Some agents won't emit terminal notifications until a config enables them.
  * We can't edit the user's own config, so we point a per-agent env var at a
  * bridge-owned file that flips the relevant default. Each injected file merges
- * BELOW the user's config (opencode/kilo: TUI_CONFIG precedence; gemini:
- * system-defaults is the lowest tier), so an explicit user opt-out still wins.
+ * BELOW the user's config (opencode/kilo: TUI_CONFIG precedence), so an
+ * explicit user opt-out still wins.
  * Driving the actual focus/blur state is the app+engine's job (DEC 1004) — see
  * the per-agent notes in KNOWN_AGENTS for which agents need injection vs. ride
  * the default-blur alone.
@@ -115,15 +107,6 @@ export function resolveAgentEnv(
       return injectConfig("KILO_TUI_CONFIG", abDir, "kilo-tui.json", {
         attention: { enabled: true },
       });
-    case "gemini": {
-      // osc777 pinned for deterministic notifications under our fixed
-      // TERM_PROGRAM=ghostty. Hooks were removed (gemini is not in HOOK_EVENTS)
-      // so the defaults file carries only the notification block.
-      return injectConfig("GEMINI_CLI_SYSTEM_DEFAULTS_PATH", abDir, "gemini-defaults.json",
-        composeGeminiDefaults({
-          general: { enableNotifications: true, notificationMethod: "osc777" },
-        }));
-    }
     default:
       return {};
   }

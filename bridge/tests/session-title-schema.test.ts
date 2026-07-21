@@ -3,7 +3,7 @@ import { SessionTitleSchema } from "../src/api-server";
 
 describe("SessionTitleSchema", () => {
   test("accepts all known agents and titleOnly", () => {
-    for (const agent of ["claude", "codex", "opencode", "gemini", "github-copilot", "cursor"] as const) {
+    for (const agent of ["claude", "codex", "opencode", "github-copilot", "cursor"] as const) {
       const r = SessionTitleSchema.safeParse({
         terminalId: "t1",
         sessionId: "s1",

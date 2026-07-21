@@ -249,12 +249,6 @@ describe("Codex hooks", () => {
 });
 
 describe("session capture hooks", () => {
-  test("gemini events are ignored (gemini removed from hook runner)", async () => {
-    const h = harness({ agent: "gemini", event: "after-agent", stdin: JSON.stringify({ session_id: "gemini-1" }) });
-    await h.run();
-    expect(h.posts).toEqual([]);
-  });
-
   test("Cursor strips a BOM and only notifies for completed stops", async () => {
     const start = harness({ agent: "cursor", event: "session-start", stdin: `\uFEFF${JSON.stringify({ session_id: "cursor-1" })}` });
     const complete = harness({ agent: "cursor", event: "stop", stdin: `\uFEFF${JSON.stringify({ status: "completed" })}` });

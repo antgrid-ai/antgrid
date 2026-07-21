@@ -150,7 +150,7 @@ describe("setAgentSession transcript-path retention", () => {
   test("a later path-less report keeps the captured path for the same session", () => {
     const store = newStore();
     const sm = mk(store);
-    const s = sm.create("Slot", { tool: "gemini" });
+    const s = sm.create("Slot", { tool: "claude-code" });
     sm.setAgentSession(s.id, "sess-1", "/t/real.jsonl");
     sm.setAgentSession(s.id, "sess-1"); // SessionStart-style, no path
     sm.flushNow();
@@ -163,7 +163,7 @@ describe("setAgentSession transcript-path retention", () => {
   test("a new session id resets the path", () => {
     const store = newStore();
     const sm = mk(store);
-    const s = sm.create("Slot", { tool: "gemini" });
+    const s = sm.create("Slot", { tool: "claude-code" });
     sm.setAgentSession(s.id, "sess-1", "/t/real.jsonl");
     sm.setAgentSession(s.id, "sess-2"); // switched conversations, no path yet
     sm.flushNow();

@@ -21,9 +21,12 @@ import '../providers/device_provisioning.dart';
 import '../providers/projects.dart';
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
+import '../providers/project_work_status.dart';
 import '../screens/terminal_screen.dart';
+import '../services/control_plane_client.dart';
 import '../utils/platform_utils.dart';
 import 'agent_transcript_view.dart';
+import 'agent_work_status_dot.dart';
 import 'auth_status_pill.dart';
 import 'command_bar.dart';
 import 'command_output_overlay.dart';
@@ -91,6 +94,10 @@ class _AgentStatusHeader extends ConsumerWidget {
     // Leaf slot must exist for the '/' separator + leafOverride to render; the
     // string is a fallback only — the editable leaf renders the live name.
     final segments = [agentName, if (active != null) active.name];
+    // Live work status for the focused project — shows working/attention/error
+    // next to the breadcrumb. Omitted when done to keep idle headers clean.
+    final workStatus =
+        activeId != null ? ref.watch(projectWorkStatusProvider(activeId)) : null;
 
     return AbToolbar.custom(
       children: [
@@ -103,6 +110,10 @@ class _AgentStatusHeader extends ConsumerWidget {
             ),
           ),
           const SizedBox(width: AbTokens.space6),
+        ],
+        if (workStatus != null && workStatus != AgentWorkStatus.done) ...[
+          AgentWorkStatusDot(status: workStatus),
+          const SizedBox(width: AbTokens.space8),
         ],
         Expanded(
           child: Row(

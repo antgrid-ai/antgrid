@@ -51,7 +51,7 @@ export const NotifyBodySchema = z.object({
   terminalId: z.string().optional(),
   // Hooks post pointers and the bridge reads.
   transcriptPath: z.string().optional(),
-  agent: z.enum(["claude", "codex", "opencode", "gemini", "github-copilot", "cursor"]).optional(),
+  agent: z.enum(["claude", "codex", "opencode", "github-copilot", "cursor"]).optional(),
 });
 
 export const SessionTitleSchema = z.object({
@@ -59,7 +59,7 @@ export const SessionTitleSchema = z.object({
   sessionId: z.string().min(1),
   title: z.string().optional(),
   transcriptPath: z.string().optional(),
-  agent: z.enum(["claude", "codex", "opencode", "gemini", "github-copilot", "cursor"]).optional(),
+  agent: z.enum(["claude", "codex", "opencode", "github-copilot", "cursor"]).optional(),
   titleOnly: z.boolean().optional(),
 });
 export type SessionTitleBody = z.infer<typeof SessionTitleSchema>;
