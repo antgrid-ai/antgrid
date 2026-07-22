@@ -518,10 +518,15 @@ class MachineSession {
         _projectStreamIds.removeWhere((pid, _) => !next.containsKey(pid));
         next.forEach(_recordProjectStream);
       }
-    } else if (type == 'control:result' && m['ok'] == false) {
+    } else if (type == 'control:result' &&
+        m['ok'] == false &&
+        m['verb'] == 'project:start') {
       // A rejected project:start (NOT_ALLOWED / OPEN_FAILED /
       // SESSION_LIMIT_EXCEEDED) — fail the pending bind with the real reason
-      // instead of letting it run out its blind timeout.
+      // instead of letting it run out its blind timeout. The `verb` match is
+      // load-bearing: the bridge echoes `projectId` on EVERY failed
+      // control-plane verb, so matching on `ok:false` alone would let an
+      // unrelated rejection kill a healthy bind with a bogus code.
       final pid = m['projectId'];
       if (pid is String) {
         final waiter = _streamReadyWaiters.remove(pid);

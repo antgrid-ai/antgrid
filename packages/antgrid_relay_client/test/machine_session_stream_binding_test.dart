@@ -155,6 +155,28 @@ void main() {
           reason: 'a binding the advert no longer vouches for is stale — '
               'sends to it would land on a dead stream with no feedback');
     });
+
+    test('an empty advert drops bindings but leaves attached streams routable',
+        () async {
+      await injectControl({
+        'type': 'agent:projects',
+        'projects': [
+          {'projectId': 'proj-p', 'running': true, 'streamId': 's-p'},
+        ],
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final attached = session.streamFor('s-p');
+
+      // buildProjectsAdvertisement returns [] for a phone it can't resolve —
+      // reachable transiently (handshake push before the phone is upserted).
+      await injectControl({'type': 'agent:projects', 'projects': const []});
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(session.streamIdForProject('proj-p'), isNull);
+      expect(identical(session.streamFor('s-p'), attached), isTrue,
+          reason: 'the wipe must cost at most a re-bind RTT; tearing the live '
+              'StreamTransport down would drop a working session');
+    });
   });
 
   group('bindProject keyless window', () {
@@ -294,6 +316,34 @@ void main() {
       expect(relay.sent.length, sentBefore,
           reason: 'a known mapping must not re-ask the agent to start the '
               'project');
+    });
+
+    test('a control:result{ok:false} for a DIFFERENT verb leaves the pending '
+        'bindProject alone', () async {
+      final bindF = session.bindProject(
+        'proj-f',
+        {'type': 'project:start', 'projectId': 'proj-f'},
+        timeout: const Duration(milliseconds: 400),
+      );
+
+      // The bridge echoes `projectId` on EVERY failed control-plane verb,
+      // including the UNKNOWN_VERB fallthrough (host-server.ts). Only the
+      // project:start rejection says anything about this bind.
+      await injectControl({
+        'type': 'control:result',
+        'ok': false,
+        'verb': 'sessions.delete',
+        'projectId': 'proj-f',
+        'error': {'code': 'UNKNOWN_VERB', 'message': 'unsupported verb'},
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      await injectControl({
+        'type': 'stream-ready',
+        'projectId': 'proj-f',
+        'streamId': 's-f',
+      });
+      expect(await bindF, 's-f');
     });
 
     test('a control:result{ok:false, projectId} fails the pending bindProject '
