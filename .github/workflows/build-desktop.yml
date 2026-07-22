@@ -270,58 +270,6 @@ jobs:
         working-directory: app
         run: flutter pub get
 
-      # firebase_core self-declares `windows` plugin support, so `flutter build
-      # windows` auto-registers it and its CMake downloads the 913 MB / 8.4 GB
-      # firebase-cpp-sdk. But every Firebase call in lib/ is guarded to
-      # TargetPlatform.android (see main.dart), so nothing uses it on Windows —
-      # firebase_messaging isn't even built here. Strip `windows` from the
-      # RESOLVED plugin pubspec so the `pub get` that `flutter build windows`
-      # runs next re-reads it and regenerates the plugin list
-      # (generated_plugins.cmake / .flutter-plugins-dependencies) without
-      # firebase_core. NOTE: this needs that implicit pub get — do NOT pass
-      # --no-pub to the Windows build. Only `pub get` regenerates the plugin
-      # list (the assemble phony target does not), so with --no-pub the pre-strip
-      # list is reused and the 8.4 GB firebase-cpp-sdk builds anyway (regression
-      # seen in Radha-AI-Products/antgrid run #37).
-      #
-      # Best-effort: this is a build-time optimization, so if the strip can't
-      # apply (upstream pubspec reformat, new keys in the windows block) we WARN
-      # and let firebase build rather than fail — a firebase-bearing installer
-      # still works, just larger, and blocking a `v*` release over a perf-only
-      # drift isn't worth it (the publish job needs this one). The self-check
-      # below surfaces the drift in seconds instead of after the 8.4 GB build.
-      - name: Exclude firebase_core from the Windows build (unused on Windows)
-        shell: bash
-        working-directory: app
-        run: |
-          set -euo pipefail
-          file=$(bun -e '
-            const fs = require("node:fs");
-            const path = require("node:path");
-            const { pathToFileURL, fileURLToPath } = require("node:url");
-            const cfg = require("./.dart_tool/package_config.json");
-            const pkg = cfg.packages.find(p => p.name === "firebase_core");
-            if (!pkg) process.exit(0);
-            const base = pathToFileURL(path.join(process.cwd(), ".dart_tool") + path.sep);
-            const root = new URL(pkg.rootUri.endsWith("/") ? pkg.rootUri : pkg.rootUri + "/", base);
-            const file = fileURLToPath(new URL("pubspec.yaml", root));
-            const before = fs.readFileSync(file, "utf8");
-            // Tolerate CRLF and indentation drift so the pattern is robust to
-            // however pub happens to have written the cache pubspec on this OS.
-            const after = before.replace(/^[ \t]+windows:\r?\n[ \t]+pluginClass: FirebaseCorePluginCApi\r?\n/m, "");
-            fs.writeFileSync(file, after);
-            process.stdout.write(file);
-          ')
-          if [ -z "$file" ]; then
-            echo "::warning::firebase_core not resolved; skipping Windows exclusion"
-            exit 0
-          fi
-          if grep -q "FirebaseCorePluginCApi" "$file"; then
-            echo "::warning::Could not strip firebase_core's windows entry ($file); the Windows build will include the 8.4 GB firebase-cpp-sdk — update the strip pattern."
-          else
-            echo "firebase_core windows platform stripped from $file"
-          fi
-
       - name: Install JS workspace deps
         # --ignore-scripts skips the root/web postinstall (Prisma client codegen
         # for the web service) — the desktop build never touches Postgres or web.
@@ -342,21 +290,6 @@ jobs:
         id: build
         working-directory: app
         run: flutter build windows --${{ env.BUILD_MODE }} --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }}
-
-      # Secondary check that the exclusion held end-to-end: a present SDK zip means
-      # firebase was built anyway (e.g. a future Flutter that ignores the pubspec
-      # edit). Warn, never fail — same best-effort stance as the strip step, and a
-      # warning also avoids a false red build if the build dir is ever cached and
-      # the zip is restored from a prior run.
-      - name: Check firebase-cpp-sdk was not downloaded
-        if: ${{ steps.build.outcome == 'success' }}
-        shell: bash
-        run: |
-          if ls app/build/windows/x64/firebase_cpp_sdk_windows_*.zip >/dev/null 2>&1; then
-            echo "::warning::firebase-cpp-sdk is present — the Windows firebase exclusion did not hold; the installer is larger than necessary."
-          else
-            echo "firebase-cpp-sdk not present — exclusion holds"
-          fi
 
       - name: Copy bridge into output folder
         if: ${{ steps.build.outcome == 'success' }}
@@ -449,9 +382,8 @@ jobs:
       # release). Identity values (identity_name/publisher/publisher_display_name)
       # live in app/pubspec.yaml's msix_config and MUST match Partner Center.
       #   --build-windows false: package the folder we already built above (with the
-      #     bridge copied in and firebase stripped). Letting msix re-run
-      #     `flutter build windows` would drop antgrid-bridge.exe and re-download the
-      #     8.4 GB firebase-cpp-sdk the strip step exists to avoid.
+      #     bridge copied in). Letting msix re-run `flutter build windows` would
+      #     drop antgrid-bridge.exe.
       # NOTE: this MSIX is intentionally NOT attached to the public GitHub Release —
       # the publish job only uploads the three named installer files; the Store is
       # the sole distribution channel for this package.
@@ -483,7 +415,7 @@ jobs:
       #   - GitHub-Actions Store updates currently work for FREE products only.
       #     Antgrid is listed Free (billed externally via Paddle), so it qualifies.
       # This only *uploads* the antgrid-store.msix already built above (with the
-      # bridge bundled + firebase stripped) — msstore does not rebuild it.
+      # bridge bundled) — msstore does not rebuild it.
       # Secrets (repo Settings → Secrets and variables → Actions):
       #   MSSTORE_TENANT_ID / MSSTORE_CLIENT_ID / MSSTORE_CLIENT_SECRET /
       #   MSSTORE_SELLER_ID  (secrets)   +   MSSTORE_APP_ID (variable)
@@ -545,8 +477,6 @@ jobs:
       #   - libcurl4-openssl-dev: sentry_flutter's bundled sentry-native crash
       #     backend find_package(CURL)s its HTTP transport on Linux.
       #   - libfuse2: lets the downloaded appimagetool run (it is itself an AppImage).
-      # firebase_core has no Linux platform, so — unlike the Windows job — there is
-      # nothing to strip; the plugin is simply never registered here.
       - name: Install Linux build dependencies
         run: |
           set -euo pipefail
