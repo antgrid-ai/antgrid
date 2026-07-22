@@ -1,0 +1,59 @@
+name: Store — credentials smoke test
+
+# Proves the MSSTORE_* credentials still authenticate against Partner Center
+# WITHOUT publishing anything. The only other consumer of these credentials is
+# the publish step in build-desktop.yml, which fires on a v* tag — so without
+# this workflow an expired Entra client secret is discovered mid-release. Entra
+# client secrets expire on a fixed schedule, so run this before cutting a tag.
+# Read-only: `apps list` never touches a submission.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    env:
+      MSSTORE_TENANT_ID: ${{ secrets.MSSTORE_TENANT_ID }}
+      MSSTORE_SELLER_ID: ${{ secrets.MSSTORE_SELLER_ID }}
+      MSSTORE_CLIENT_ID: ${{ secrets.MSSTORE_CLIENT_ID }}
+      MSSTORE_CLIENT_SECRET: ${{ secrets.MSSTORE_CLIENT_SECRET }}
+      # Public Store product id, so a variable rather than a secret — the same
+      # one build-desktop.yml passes to `msstore publish -id`.
+      MSSTORE_APP_ID: ${{ vars.MSSTORE_APP_ID }}
+    steps:
+      - name: Configure Microsoft Store CLI
+        uses: microsoft/microsoft-store-apppublisher@v1.3
+
+      - name: Verify credentials reach the configured app
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          foreach ($name in 'MSSTORE_TENANT_ID', 'MSSTORE_SELLER_ID', 'MSSTORE_CLIENT_ID', 'MSSTORE_CLIENT_SECRET', 'MSSTORE_APP_ID') {
+            if (-not (Get-Item "env:$name" -ErrorAction SilentlyContinue).Value) {
+              throw "$name is empty. Set it under Settings / Secrets and variables / Actions."
+            }
+          }
+
+          msstore reconfigure `
+            --tenantId $env:MSSTORE_TENANT_ID `
+            --sellerId $env:MSSTORE_SELLER_ID `
+            --clientId $env:MSSTORE_CLIENT_ID `
+            --clientSecret $env:MSSTORE_CLIENT_SECRET
+          # ErrorActionPreference doesn't apply to native exes, so gate on the
+          # exit code explicitly here and after every msstore call below.
+          if ($LASTEXITCODE -ne 0) { throw "msstore reconfigure failed ($LASTEXITCODE)" }
+
+          $apps = msstore apps list | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "msstore apps list failed ($LASTEXITCODE). Credentials rejected by Partner Center." }
+          Write-Host $apps
+
+          # `apps list` exits 0 on an empty account, and a wrong tenant/seller
+          # pair authenticates fine while listing somebody else's apps, so the
+          # only assertion that means anything is that our product id is there.
+          if ($apps -notmatch [regex]::Escape($env:MSSTORE_APP_ID)) {
+            throw "MSSTORE_APP_ID '$($env:MSSTORE_APP_ID)' is not in this account's app list"
+          }
+
+          Write-Host "OK: credentials valid and $($env:MSSTORE_APP_ID) is reachable."

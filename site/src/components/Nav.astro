@@ -1,0 +1,37 @@
+---
+import { Icon } from "astro-icon/components";
+import { links } from "../config";
+import Button from "./ui/Button.astro";
+---
+<header class="sticky top-0 z-50 border-b border-edge-inner bg-page/90 backdrop-blur">
+  <nav class="mx-auto flex max-w-5xl items-center justify-between px-6 py-3.5">
+    <a href="/" class="flex items-center">
+      <img src="/logo/antgrid-wordmark.svg" alt="antgrid" class="h-10 w-auto" />
+    </a>
+    <div class="hidden items-center gap-7 md:flex">
+      <a href={links.features} class="text-sm text-muted hover:text-ink">Features</a>
+      <a href={links.pricing} class="text-sm text-muted hover:text-ink">Pricing</a>
+      <a href={links.signIn} class="text-sm text-muted hover:text-ink">Sign in</a>
+      <Button href={links.startFree} variant="primary" class="px-4 py-2">Start free</Button>
+    </div>
+    <button id="navToggle" class="text-ink2 md:hidden" aria-label="Open menu" aria-expanded="false">
+      <Icon name="tabler:menu-2" width="22" height="22" />
+    </button>
+  </nav>
+  <div id="navMenu" class="hidden border-t border-edge-inner px-6 py-4 md:hidden">
+    <div class="flex flex-col gap-4">
+      <a href={links.features} class="text-sm text-muted">Features</a>
+      <a href={links.pricing} class="text-sm text-muted">Pricing</a>
+      <a href={links.signIn} class="text-sm text-muted">Sign in</a>
+      <Button href={links.startFree} variant="primary">Start free</Button>
+    </div>
+  </div>
+</header>
+<script>
+  const btn = document.getElementById("navToggle");
+  const menu = document.getElementById("navMenu");
+  btn?.addEventListener("click", () => {
+    const open = menu?.classList.toggle("hidden") === false;
+    btn.setAttribute("aria-expanded", String(open));
+  });
+</script>

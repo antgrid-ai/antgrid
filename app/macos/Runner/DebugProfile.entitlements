@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- App Sandbox is intentionally OFF on macOS: the app hosts a local bridge
+	     by spawning the user-installed `bun` to run bridge/src/index.ts, opens
+	     PTYs, and watches arbitrary project folders — all categorically blocked
+	     by App Sandbox (spawning a non-bundled binary returns EPERM). Shipped via
+	     notarized direct download, not the Mac App Store. -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+</dict>
+</plist>

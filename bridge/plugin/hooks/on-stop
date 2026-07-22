@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Hook: AI CLI finished responding → notify Antgrid app
+# Triggered by: Claude Code "Stop", Codex "Stop", Gemini "AfterAgent"
+set -euo pipefail
+
+# Resolves $PORT (env-first, file fallback, numeric-validated) or exits 0.
+source "${BASH_SOURCE[0]%/*}/_resolve-api-port.sh"
+
+curl -sf -X POST "http://127.0.0.1:${PORT}/notify" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"task_complete"}' \
+  > /dev/null 2>&1 || true

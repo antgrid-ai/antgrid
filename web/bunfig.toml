@@ -1,0 +1,4 @@
+# Tests clone a single migrated template DB instead of running
+# `prisma migrate deploy` per file — see tests/helpers/preload.ts.
+[test]
+preload = ["./tests/helpers/preload.ts"]

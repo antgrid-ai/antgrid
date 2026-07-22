@@ -1,0 +1,8 @@
+name: eval-agent-relay
+relayUrl: __RELAY_URL__
+
+services:
+  - name: echo-test
+    command: node
+    args: ["-e", "console.log('EVAL_READY'); setTimeout(() => {}, 60000)"]
+    autoStart: true

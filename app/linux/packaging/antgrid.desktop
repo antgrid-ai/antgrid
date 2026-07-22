@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=antgrid
+GenericName=Agent command centre
+Comment=Monitor and control AI coding agents from one screen
+Exec=antgrid
+Icon=antgrid
+Terminal=false
+Categories=Development;IDE;
+StartupWMClass=antgrid
+Keywords=agent;coding;terminal;claude;codex;

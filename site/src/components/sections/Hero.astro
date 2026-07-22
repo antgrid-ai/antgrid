@@ -1,0 +1,35 @@
+---
+import { Icon } from "astro-icon/components";
+import Eyebrow from "../ui/Eyebrow.astro";
+import Button from "../ui/Button.astro";
+import ProofCard from "./ProofCard.astro";
+import { links } from "../../config";
+---
+<section class="mx-auto max-w-5xl px-6 pb-20 pt-16">
+  <div class="grid items-center gap-12 md:grid-cols-2">
+    <div>
+      <Eyebrow class="mb-5 flex items-center gap-2 leading-4">
+        <img src="/logo/antgrid-wordmark.svg" alt="antgrid" class="h-4.75 w-auto -mt-1" />
+        <span>· mission control for your AI coding agents</span>
+      </Eyebrow>
+      <h1 class="mb-4 text-4xl font-medium leading-[1.1] tracking-tight text-ink md:text-5xl">
+        Stop babysitting your coding agents.
+      </h1>
+      <p class="mb-3 max-w-xl text-base leading-relaxed text-muted">
+        Run Claude Code, Codex and Cursor on your own machine — then watch, steer and approve them from your phone.
+        <span class="text-indigo">End-to-end encrypted.</span>
+      </p>
+      <p class="mb-7 max-w-xl text-base leading-relaxed text-muted">
+        Step away and antgrid keeps them moving — an AI supervisor answers the routine the way you would, and wakes you only for the calls that matter.
+      </p>
+      <div class="flex flex-wrap items-center gap-3">
+        <Button href={links.startFree} variant="primary">Start free<Icon name="tabler:arrow-right" width="16" height="16" /></Button>
+        <Button href={links.download} variant="outline">Download</Button>
+      </div>
+      <p class="mt-4 text-[12.5px] text-muted2">
+        Desktop + iOS + Android · coming to the App Store, Play &amp; Microsoft Store.
+      </p>
+    </div>
+    <ProofCard />
+  </div>
+</section>

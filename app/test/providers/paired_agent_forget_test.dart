@@ -1,0 +1,386 @@
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:antgrid/models/qr_payload.dart';
+import 'package:antgrid/models/session_target.dart';
+import 'package:antgrid/providers/agent_transport.dart';
+import 'package:antgrid/providers/auth.dart';
+import 'package:antgrid/providers/providers.dart';
+import 'package:antgrid/providers/recent_agents.dart';
+import 'package:antgrid/providers/relay_connection.dart';
+import 'package:antgrid/services/auth_service.dart';
+import 'package:antgrid/services/pairing_service.dart';
+import 'package:antgrid/services/phone_identity.dart';
+import 'package:antgrid/models/session_entry.dart';
+import 'package:antgrid/project/project_status.dart';
+import 'package:antgrid/project/project_status_cache.dart';
+import 'package:antgrid/providers/cached_sessions.dart';
+import 'package:antgrid/providers/recent_ports.dart';
+import 'package:antgrid/project/project_session_registry.dart'
+    show projectStatusCacheProvider;
+import 'package:antgrid/services/storage_service.dart';
+import 'package:antgrid/storage/cached_sessions_store.dart';
+import 'package:antgrid/storage/recent_agents_store.dart';
+import 'package:antgrid/storage/recent_ports_store.dart';
+import 'package:antgrid_relay_client/antgrid_relay_client.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import '../helpers/prefs_test_mock.dart';
+
+class _MemoryStorageService extends StorageService {
+  _MemoryStorageService(this.agents);
+
+  List<PairedAgent> agents;
+
+  @override
+  Future<List<PairedAgent>> loadPairedAgents() async => List.of(agents);
+
+  @override
+  Future<void> savePairedAgents(List<PairedAgent> agents) async {
+    this.agents = List.of(agents);
+  }
+}
+
+class _FailOncePairingService extends PairingService {
+  _FailOncePairingService(this._recentAgentsStore)
+    : super(
+        relay: RelayService(crypto: CryptoService()),
+        phoneIdentity: PhoneIdentity.inMemory(),
+        recentAgentsStore: _recentAgentsStore,
+        registrationId: 'M.project',
+      );
+
+  final RecentAgentsStore _recentAgentsStore;
+  var attempts = 0;
+
+  @override
+  Future<RecentAgent> pairWithAgent(
+    QrPayload qr,
+    DeviceIdentity identity, {
+    String? label,
+  }) async {
+    attempts++;
+    if (attempts == 1) {
+      throw PairException('first pair attempt failed');
+    }
+    final recent = _recent(qr.agentDeviceId);
+    await _recentAgentsStore.upsert(recent);
+    return recent;
+  }
+}
+
+class _StubDeviceIdentityNotifier extends DeviceIdentityNotifier {
+  @override
+  Future<DeviceIdentity> build() async {
+    return DeviceIdentity(
+      deviceId: 'phone-device',
+      name: 'Test Phone',
+      ed25519PrivateKey: Uint8List(64),
+      ed25519PublicKey: Uint8List(32),
+      x25519PrivateKey: Uint8List(32),
+      x25519PublicKey: Uint8List(32),
+    );
+  }
+}
+
+PairedAgent _paired(String id) =>
+    PairedAgent(relayUrl: 'ws://relay.test', agentDeviceId: id, agentName: id);
+
+RecentAgent _recent(String id) {
+  final now = DateTime.utc(2026, 1, 1);
+  return RecentAgent(
+    agentDeviceId: id,
+    agentLabel: id,
+    agentEd25519Pubkey: 'agent-pubkey',
+    relayUrl: 'ws://relay.test',
+    phoneDeviceId: 'phone',
+    phoneEd25519Pubkey: 'phone-pubkey',
+    pairedAt: now,
+    lastConnectedAt: now,
+  );
+}
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  Future<
+    ({
+      ProviderContainer container,
+      RecentAgentsStore recentStore,
+      _MemoryStorageService storage,
+      PhoneIdentity phoneIdentity,
+    })
+  >
+  buildContainer({
+    required List<PairedAgent> paired,
+    required List<RecentAgent> recent,
+  }) async {
+    useInMemoryPrefs();
+    final recentStore = await RecentAgentsStore.open();
+    for (final agent in recent) {
+      await recentStore.upsert(agent);
+    }
+    final storage = _MemoryStorageService(paired);
+    final phoneIdentity = PhoneIdentity.inMemory();
+    // forgetMachine purges each forgotten agent's per-entry footprint, so the
+    // container must provide the stores purgeEntryState reads.
+    final cachedSessions = await CachedSessionsStore.open();
+    final recentPorts = await RecentPortsStore.open();
+    final statusTmp = await Directory.systemTemp.createTemp(
+      'antgrid-forget-buildc-',
+    );
+    final statusCache = ProjectStatusCache.testInstance(root: statusTmp.path);
+    final container = ProviderContainer(
+      overrides: [
+        storageServiceProvider.overrideWithValue(storage),
+        recentAgentsStoreProvider.overrideWithValue(recentStore),
+        phoneIdentityProvider.overrideWithValue(phoneIdentity),
+        cachedSessionsStoreProvider.overrideWithValue(cachedSessions),
+        recentPortsStoreProvider.overrideWithValue(recentPorts),
+        projectStatusCacheProvider.overrideWithValue(statusCache),
+      ],
+    );
+    addTearDown(container.dispose);
+    addTearDown(recentStore.close);
+    addTearDown(cachedSessions.close);
+    addTearDown(recentPorts.close);
+    addTearDown(() async {
+      try {
+        await statusTmp.delete(recursive: true);
+      } on FileSystemException {
+        // Windows teardown handle race — harmless.
+      }
+    });
+    return (
+      container: container,
+      recentStore: recentStore,
+      storage: storage,
+      phoneIdentity: phoneIdentity,
+    );
+  }
+
+  test(
+    'forgetMachine removes inactive remote from paired and recent stores',
+    () async {
+      final h = await buildContainer(
+        paired: [_paired('M.project'), _paired('N.project')],
+        recent: [_recent('M.project'), _recent('N.project')],
+      );
+      await h.container.read(pairedAgentProvider.future);
+
+      await h.container.read(pairedAgentProvider.notifier).forgetMachine('M');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(h.storage.agents.map((a) => a.agentDeviceId), ['N.project']);
+      expect(h.recentStore.list().map((a) => a.agentDeviceId), ['N.project']);
+      expect(
+        h.container
+            .read(pairedAgentProvider)
+            .value
+            ?.map((a) => a.agentDeviceId),
+        ['N.project'],
+      );
+    },
+  );
+
+  test(
+    'forgetMachine preserves nonmatching paired agents before provider load',
+    () async {
+      final h = await buildContainer(
+        paired: [_paired('M.project'), _paired('N.project')],
+        recent: [_recent('M.project'), _recent('N.project')],
+      );
+
+      await h.container.read(pairedAgentProvider.notifier).forgetMachine('M');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(h.storage.agents.map((a) => a.agentDeviceId), ['N.project']);
+      expect(h.recentStore.list().map((a) => a.agentDeviceId), ['N.project']);
+    },
+  );
+
+  test(
+    'forgetMachine clears active target for the forgotten machine',
+    () async {
+      final h = await buildContainer(
+        paired: [_paired('M.project'), _paired('N.project')],
+        recent: [_recent('M.project'), _recent('N.project')],
+      );
+      h.container.read(selectedTargetProvider.notifier).set(
+        const RemoteTarget.legacy('M.project'),
+      );
+      await h.container.read(pairedAgentProvider.future);
+
+      await h.container
+          .read(pairedAgentProvider.notifier)
+          .forgetMachine('M.project');
+
+      expect(h.container.read(selectedTargetProvider), isNull);
+    },
+  );
+
+  test(
+    'forgetMachine removes all compound ids for the same bare machine',
+    () async {
+      final h = await buildContainer(
+        paired: [
+          _paired('M.projectA'),
+          _paired('M.projectB'),
+          _paired('N.project'),
+        ],
+        recent: [
+          _recent('M.projectA'),
+          _recent('M.projectB'),
+          _recent('N.project'),
+        ],
+      );
+      final mgr = h.container.read(relayConnectionManagerProvider);
+      mgr.connectionFor('M.projectA');
+      mgr.connectionFor('M.projectB');
+      mgr.connectionFor('N.project');
+      await h.container.read(pairedAgentProvider.future);
+
+      await h.container.read(pairedAgentProvider.notifier).forgetMachine('M');
+
+      expect(h.storage.agents.map((a) => a.agentDeviceId), ['N.project']);
+      expect(h.recentStore.list().map((a) => a.agentDeviceId), ['N.project']);
+      expect(mgr.peek('M.projectA'), isNull);
+      expect(mgr.peek('M.projectB'), isNull);
+      expect(mgr.peek('N.project'), isNotNull);
+    },
+  );
+
+  test('forgetMachine deletes only the forgotten machine keypair', () async {
+    final h = await buildContainer(
+      paired: [_paired('M.project'), _paired('N.project')],
+      recent: [_recent('M.project'), _recent('N.project')],
+    );
+    final mBefore = await h.phoneIdentity.ensureKeypair('M');
+    final nBefore = await h.phoneIdentity.ensureKeypair('N');
+    await h.container.read(pairedAgentProvider.future);
+
+    await h.container.read(pairedAgentProvider.notifier).forgetMachine('M');
+
+    final mAfter = await h.phoneIdentity.ensureKeypair('M');
+    final nAfter = await h.phoneIdentity.ensureKeypair('N');
+    expect(mAfter.pubkeyB64, isNot(mBefore.pubkeyB64));
+    expect(nAfter.pubkeyB64, nBefore.pubkeyB64);
+  });
+
+  test(
+    'forgetMachine purges cached sessions + status cache for its agents',
+    () async {
+      useInMemoryPrefs();
+      final tmp = await Directory.systemTemp.createTemp('antgrid-forget-test-');
+      addTearDown(() async {
+        try {
+          await tmp.delete(recursive: true);
+        } on FileSystemException {
+          // Windows teardown handle race — harmless for the assertion.
+        }
+      });
+      final statusCache = ProjectStatusCache.testInstance(root: tmp.path);
+
+      final recentStore = await RecentAgentsStore.open();
+      await recentStore.upsert(_recent('M.project'));
+      await recentStore.upsert(_recent('N.project'));
+      addTearDown(recentStore.close);
+
+      final cachedSessions = await CachedSessionsStore.open();
+      addTearDown(cachedSessions.close);
+      final recentPorts = await RecentPortsStore.open();
+      addTearDown(recentPorts.close);
+      await cachedSessions.put('M.project', [
+        SessionEntry(
+          id: 's1',
+          name: 's1',
+          createdAt: 1,
+          lastUsedAt: 2,
+          archived: false,
+          running: false,
+        ),
+      ]);
+      await cachedSessions.put('N.project', [
+        SessionEntry(
+          id: 's2',
+          name: 's2',
+          createdAt: 1,
+          lastUsedAt: 2,
+          archived: false,
+          running: false,
+        ),
+      ]);
+      await statusCache.write('M.project', const ProjectStatus.empty());
+
+      final storage = _MemoryStorageService([
+        _paired('M.project'),
+        _paired('N.project'),
+      ]);
+      final container = ProviderContainer(
+        overrides: [
+          storageServiceProvider.overrideWithValue(storage),
+          recentAgentsStoreProvider.overrideWithValue(recentStore),
+          phoneIdentityProvider.overrideWithValue(PhoneIdentity.inMemory()),
+          cachedSessionsStoreProvider.overrideWithValue(cachedSessions),
+          recentPortsStoreProvider.overrideWithValue(recentPorts),
+          projectStatusCacheProvider.overrideWithValue(statusCache),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(pairedAgentProvider.future);
+
+      await container.read(pairedAgentProvider.notifier).forgetMachine('M');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(cachedSessions.get('M.project'), isEmpty);
+      expect(await statusCache.read('M.project'), isNull);
+      // The other machine's cached sessions survive.
+      expect(cachedSessions.get('N.project').map((s) => s.id), ['s2']);
+    },
+  );
+
+  test('pair can retry after a failed pair attempt', () async {
+    useInMemoryPrefs();
+    final recentStore = await RecentAgentsStore.open();
+    final storage = _MemoryStorageService([]);
+    final phoneIdentity = PhoneIdentity.inMemory();
+    final pairing = _FailOncePairingService(recentStore);
+    final container = ProviderContainer(
+      overrides: [
+        storageServiceProvider.overrideWithValue(storage),
+        recentAgentsStoreProvider.overrideWithValue(recentStore),
+        phoneIdentityProvider.overrideWithValue(phoneIdentity),
+        currentUserProvider.overrideWith(
+          (_) async => CurrentUser(
+            userId: 'user-1',
+            email: 'user@example.test',
+            tier: 'pro',
+          ),
+        ),
+        deviceIdentityProvider.overrideWith(_StubDeviceIdentityNotifier.new),
+        pairingServiceForProvider('M.project').overrideWithValue(pairing),
+      ],
+    );
+    addTearDown(container.dispose);
+    addTearDown(recentStore.close);
+
+    final qr = QrPayload(
+      relayUrl: 'ws://relay.test',
+      agentDeviceId: 'M.project',
+      agentEd25519PublicKey: Uint8List(32),
+      pairCode: 'pair-code',
+      agentName: 'Machine M',
+    );
+
+    await expectLater(
+      container.read(pairedAgentProvider.notifier).pair(qr),
+      throwsA(isA<PairException>()),
+    );
+
+    await container.read(pairedAgentProvider.notifier).pair(qr);
+
+    expect(pairing.attempts, 2);
+    expect(storage.agents.map((a) => a.agentDeviceId), ['M.project']);
+  });
+}

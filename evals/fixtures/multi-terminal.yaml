@@ -1,0 +1,12 @@
+name: eval-agent-multi
+relayUrl: __RELAY_URL__
+
+services:
+  - name: terminal-a
+    command: node
+    args: ["-e", "console.log('TERMINAL_A'); setTimeout(() => {}, 60000)"]
+    autoStart: true
+  - name: terminal-b
+    command: node
+    args: ["-e", "console.log('TERMINAL_B'); setTimeout(() => {}, 60000)"]
+    autoStart: true

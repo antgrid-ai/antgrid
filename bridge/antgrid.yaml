@@ -1,0 +1,9 @@
+# Antgrid Agent Configuration
+name: antgrid-bridge-dev
+
+agent:
+  tool: claude-code
+
+commands:
+  - name: Test
+    command: bun test

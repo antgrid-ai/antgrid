@@ -1,0 +1,62 @@
+# Colored application stack: relay + web.
+#
+# Run TWO copies of this side by side (blue + green) for zero-downtime-ish
+# deploys. Each invocation is a separate compose *project* so the two colors
+# never collide:
+#
+#   COLOR=blue  IMAGE_TAG=<sha> docker compose -p ab-blue  -f compose.app.yml up -d
+#   COLOR=green IMAGE_TAG=<sha> docker compose -p ab-green -f compose.app.yml up -d
+#
+# Caddy (compose.edge.yml) reverse-proxies to whichever color is live; the flip
+# is driven by deploy.sh. Container names are color-suffixed so Caddy and the
+# intra-color wiring can address a specific color by DNS name on antgrid_edge.
+#
+# Postgres is EXTERNAL — PG_DATABASE_URL in .env points at a managed DB.
+
+services:
+  web:
+    image: ghcr.io/radha-ai-products/antgrid-web:${IMAGE_TAG:-latest}
+    container_name: web-${COLOR:?set COLOR=blue|green}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Intra-color service discovery (same color only — colors are isolated
+      # except for the shared antgrid_edge network, where names are unique).
+      RELAY_INTERNAL_URL: http://relay-${COLOR}:8080
+      PORT: "8787"
+    networks:
+      - antgrid_edge
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8787/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  relay:
+    image: ghcr.io/radha-ai-products/antgrid-relay:${IMAGE_TAG:-latest}
+    container_name: relay-${COLOR:?set COLOR=blue|green}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Internal DNS — fast JWKS fetches, no public network hop. NOT the token
+      # issuer: Better-Auth stamps `iss` from BETTER_AUTH_URL (public), so the
+      # issuer check needs LICENSE_ISSUER_URL below instead — see deploy/README.md.
+      LICENSE_API_URL: http://web-${COLOR}:8787
+      LICENSE_ISSUER_URL: ${BETTER_AUTH_URL}
+      PORT: "8080"
+    networks:
+      - antgrid_edge
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+
+networks:
+  # Shared, long-lived network created once at bootstrap:
+  #   docker network create antgrid_edge
+  # Caddy + both colors attach to it; container_name is the stable DNS name.
+  antgrid_edge:
+    external: true

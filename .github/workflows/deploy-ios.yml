@@ -1,0 +1,189 @@
+name: Deploy — iOS (TestFlight)
+
+# Publishes a signed release .ipa to TestFlight on push to development or main
+# (i.e. when a PR merges). The direct analogue of deploy-android.yml's Play Store
+# internal track: TestFlight builds go to internal testers; promotion to an App
+# Store review submission is a manual step in App Store Connect.
+#
+# development / main -> TestFlight (same app record). Unlike Play's internal vs
+# production tracks, iOS has one upload target; the App Store submission is manual.
+#
+# Required secrets (Settings -> Secrets and variables -> Actions):
+#   IOS_DIST_CERT_BASE64          base64 of an "Apple Distribution" .p12
+#   IOS_DIST_CERT_PASSWORD        password for that .p12
+#   IOS_PROVISIONING_PROFILE_BASE64  base64 of the App Store .mobileprovision for
+#                                    ai.radhaai.antgrid (Certificates, Identifiers
+#                                    & Profiles -> Profiles -> App Store)
+#   IOS_NSE_PROVISIONING_PROFILE_BASE64  same, for the extension's own bundle id
+#                                    ai.radhaai.antgrid.NotificationService. An app
+#                                    extension is a separately signed binary and
+#                                    needs its own profile; without it the archive
+#                                    fails before upload.
+#   APPSTORE_API_KEY_ID           App Store Connect API key id (Users and Access ->
+#   APPSTORE_API_ISSUER_ID          Integrations -> App Store Connect API; role
+#   APPSTORE_API_KEY_BASE64         App Manager). The .p8 is base64-encoded.
+#   SENTRY_DSN                    (already set; shared with the other builds)
+#
+# The team id is NOT a secret here — it lives in the committed project
+# (DEVELOPMENT_TEAM in Runner.xcodeproj), which is what lets the archive step
+# resolve signing, and it's echoed into ExportOptions.plist below.
+
+on:
+  push:
+    branches: [development, main]
+    paths:
+      - 'app/**'
+      - 'packages/**'
+      - '.github/workflows/deploy-ios.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-ios-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # macos-26 defaults to Xcode 26 / iOS 26 SDK. App Store Connect now hard-
+    # rejects anything built with an older SDK (ITMS-90725), and macos-15 still
+    # defaults to Xcode 16.4 (iOS 18.5 SDK) — so the runner label is load-bearing.
+    runs-on: macos-26
+    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Fail loudly if the runner's default Xcode ever regresses below the
+      # SDK App Store requires, instead of silently shipping a rejected build.
+      - name: Verify iOS 26 SDK
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          SDK=$(xcodebuild -showsdks \
+            | grep -oiE 'iphoneos[0-9]+' | grep -oE '[0-9]+' | sort -n | tail -1)
+          echo "Newest iOS SDK: $SDK"
+          if [ "${SDK:-0}" -lt 26 ]; then
+            echo "::error::iOS SDK $SDK < 26 — App Store requires the iOS 26 SDK (ITMS-90725)."
+            exit 1
+          fi
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.44.2'   # keep in lockstep with setup-android/build-desktop
+          cache: true
+
+      # portable_pty's native-assets hook links the PTY cdylib dynamically on iOS
+      # (see portablePtyLinkModeForBuild): the download gate skips the static-only
+      # upstream tarball for a dynamic build, so the hook compiles the cdylib from
+      # Rust source. The runner's preinstalled Rust lacks the device target, hence
+      # the explicit aarch64-apple-ios. Mirrors setup-android's Rust step (Android
+      # cross-compiles the PTY .so the same way).
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/portable_pty/rust
+          key: pty-ios
+
+      - name: Flutter pub get
+        working-directory: app
+        run: flutter pub get
+
+      # Import the distribution cert into a throwaway keychain, install the App
+      # Store provisioning profile, and write ExportOptions.plist — same
+      # throwaway-keychain pattern as the macOS signing job in build-desktop.yml.
+      # Manual export signing pins the profile explicitly: headless automatic
+      # signing would need xcodebuild's -allowProvisioningUpdates + API-key auth,
+      # which `flutter build ipa` does not expose. (The archive step signs from
+      # the committed DEVELOPMENT_TEAM in Runner.xcodeproj against this profile.)
+      # method `app-store` still works on Xcode 16 (deprecation notice in favor of
+      # `app-store-connect`); keep it for broad compatibility.
+      - name: Set up code signing
+        env:
+          CERT_B64: ${{ secrets.IOS_DIST_CERT_BASE64 }}
+          CERT_PW: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+          PROFILE_B64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+          NSE_PROFILE_B64: ${{ secrets.IOS_NSE_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KP="$(uuidgen)"
+          security create-keychain -p "$KP" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KP" "$KEYCHAIN"
+          echo "$CERT_B64" | base64 --decode > "$RUNNER_TEMP/dist.p12"
+          security import "$RUNNER_TEMP/dist.p12" -k "$KEYCHAIN" -P "$CERT_PW" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KP" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+
+          # A profile must live under ~/Library/MobileDevice/Provisioning Profiles
+          # (keyed by its UUID) for xcodebuild to find it. Its Name feeds ExportOptions.
+          # Two are required: the Notification Service Extension is a separately
+          # signed binary, so the app's profile alone fails the archive with
+          # "No profile ... matching 'Antgrid NSE iOS App Store CI'".
+          PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFILES_DIR"
+          install_profile() {
+            echo "$1" | base64 --decode > "$RUNNER_TEMP/$2.mobileprovision"
+            security cms -D -i "$RUNNER_TEMP/$2.mobileprovision" > "$RUNNER_TEMP/$2.plist"
+            local uuid name
+            uuid=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$RUNNER_TEMP/$2.plist")
+            name=$(/usr/libexec/PlistBuddy -c 'Print :Name' "$RUNNER_TEMP/$2.plist")
+            cp "$RUNNER_TEMP/$2.mobileprovision" "$PROFILES_DIR/$uuid.mobileprovision"
+            echo "$name"
+          }
+          if [ -z "${NSE_PROFILE_B64:-}" ]; then
+            echo "::error::IOS_NSE_PROVISIONING_PROFILE_BASE64 is unset. Create an App Store profile for ai.radhaai.antgrid.NotificationService and add it as a repo secret." >&2
+            exit 1
+          fi
+          PROFILE_NAME=$(install_profile "$PROFILE_B64" profile)
+          NSE_PROFILE_NAME=$(install_profile "$NSE_PROFILE_B64" nse-profile)
+
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store</string>
+            <key>teamID</key><string>VK5VFQQ4P6</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>signingCertificate</key><string>Apple Distribution</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>ai.radhaai.antgrid</key><string>$PROFILE_NAME</string>
+              <key>ai.radhaai.antgrid.NotificationService</key><string>$NSE_PROFILE_NAME</string>
+            </dict>
+            <key>uploadSymbols</key><true/>
+          </dict>
+          </plist>
+          EOF
+
+      # github.run_number is monotonic per workflow, so each upload gets a fresh,
+      # increasing CFBundleVersion — App Store Connect rejects a duplicate build
+      # number, exactly like Play rejects a reused versionCode. The marketing
+      # version (CFBundleShortVersionString) still comes from pubspec (version: x.y.z).
+      - name: Build signed release IPA
+        working-directory: app
+        run: |
+          flutter build ipa --release \
+            --build-number=${{ github.run_number }} \
+            --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }} \
+            --export-options-plist="$RUNNER_TEMP/ExportOptions.plist"
+
+      - name: Upload to TestFlight
+        env:
+          ASC_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+          ASC_KEY_B64: ${{ secrets.APPSTORE_API_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+          # altool discovers the API key by id under ./private_keys or
+          # ~/.appstoreconnect/private_keys, named AuthKey_<KEYID>.p8.
+          mkdir -p "$HOME/.appstoreconnect/private_keys"
+          echo "$ASC_KEY_B64" | base64 --decode \
+            > "$HOME/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8"
+          IPA=$(ls app/build/ios/ipa/*.ipa | head -1)
+          xcrun altool --upload-app -f "$IPA" -t ios \
+            --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"

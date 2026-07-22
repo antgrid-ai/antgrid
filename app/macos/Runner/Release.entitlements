@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- App Sandbox is intentionally OFF on macOS: the app spawns the user's
+	     `bun` to host the local bridge, opens PTYs, and watches arbitrary project
+	     folders — all blocked by App Sandbox. Shipped via notarized direct
+	     download, not the Mac App Store. Hardened Runtime (required for
+	     notarization) is enabled by the Release build settings, not here. -->
+</dict>
+</plist>

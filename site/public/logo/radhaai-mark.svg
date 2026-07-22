@@ -1,0 +1,30 @@
+<svg viewBox="0 0 425 426" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Radha AI Products">
+  <mask id="radhaai_mask" style="mask-type:alpha" maskUnits="userSpaceOnUse" x="0" y="0" width="425" height="426">
+    <rect x="424.295" y="0.985016" width="424.31" height="424.28" rx="20" transform="rotate(90 424.295 0.985016)" fill="#D9D9D9" />
+  </mask>
+  <g mask="url(#radhaai_mask)">
+    <path d="M424.295 0.985022L424.295 425.295L0.0149961 425.295L0.0150146 0.985004L424.295 0.985022Z" fill="white" />
+    <path d="M197.53 312.898L309.923 425.291L0.0114255 425.291L0.0113692 318.29C0.0113692 318.29 50.2869 272.546 100.962 273.11C151.637 273.675 197.53 312.898 197.53 312.898Z" fill="url(#radhaai_p0)" />
+    <path d="M311.903 227.76L424.295 115.367L424.295 425.278L317.295 425.278C317.295 425.278 271.55 375.003 272.115 324.328C272.679 273.652 311.903 227.76 311.903 227.76Z" fill="url(#radhaai_p1)" />
+    <path d="M112.413 198.544L0.0201281 310.936L0.0201416 1.02522L107.021 1.02516C107.021 1.02516 152.765 51.3007 152.2 101.976C151.636 152.651 112.413 198.544 112.413 198.544Z" fill="url(#radhaai_p2)" />
+    <path d="M226.774 113.377L114.381 0.985028L424.292 0.985016L424.292 107.986C424.292 107.986 374.017 153.73 323.342 153.165C272.666 152.601 226.774 113.377 226.774 113.377Z" fill="url(#radhaai_p3)" />
+  </g>
+  <defs>
+    <linearGradient id="radhaai_p0" x1="140.56" y1="409.699" x2="281.31" y2="53.1259" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2F3646" />
+      <stop offset="0.954986" stop-color="#221F29" />
+    </linearGradient>
+    <linearGradient id="radhaai_p1" x1="176.596" y1="425.567" x2="368.795" y2="303.424" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2F3646" />
+      <stop offset="1" stop-color="#221F29" />
+    </linearGradient>
+    <linearGradient id="radhaai_p2" x1="304.655" y1="-132.97" x2="-192.113" y2="87.9892" gradientUnits="userSpaceOnUse">
+      <stop offset="0.296291" stop-color="#382230" />
+      <stop offset="0.897863" stop-color="#6C404B" />
+    </linearGradient>
+    <linearGradient id="radhaai_p3" x1="434.528" y1="-7.83992" x2="212.888" y2="213.8" gradientUnits="userSpaceOnUse">
+      <stop offset="0.126478" stop-color="#A45354" />
+      <stop offset="0.683132" stop-color="#72353D" />
+    </linearGradient>
+  </defs>
+</svg>

@@ -1,0 +1,15 @@
+[package]
+name = "portable-pty-rs"
+version = "0.2.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+portable-pty = "0.9"
+libc = "0.2"
+
+[build-dependencies]
+cbindgen = "0.28"

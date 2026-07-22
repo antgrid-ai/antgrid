@@ -1,0 +1,14 @@
+{
+  "name": "@antgrid/plugin",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "mcp": "bun run mcp-server.ts",
+    "install-plugin": "bun run setup.ts install",
+    "uninstall-plugin": "bun run setup.ts uninstall"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "antgrid-evals",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test:mechanics": "bun test tests/",
+    "test:evals": "bun test scenarios/ tests/",
+    "test:evals:pairing": "bun test scenarios/pairing/",
+    "test:evals:terminal": "bun test scenarios/terminal/",
+    "test:evals:file-explorer": "bun test scenarios/file-explorer/",
+    "test:evals:browser-preview": "bun test scenarios/browser-preview/",
+    "test:evals:connection": "bun test scenarios/connection/",
+    "test:evals:relay-routing": "bun test scenarios/relay-routing/",
+    "test:evals:central-relay-e2e": "bun test scenarios/central-relay-e2e/",
+    "test:evals:dart-client-e2e": "bun test scenarios/dart-client-e2e/",
+    "test:evals:dart-terminal": "bun test scenarios/dart-client-e2e/dart-terminal.test.ts",
+    "test:evals:dart-file-explorer": "bun test scenarios/dart-client-e2e/dart-file-explorer.test.ts"
+  },
+  "dependencies": {
+    "antgrid-wire": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.4",
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "path": ["bridge", "relay", "web", "packages", "app"],
+  "minTokens": 50,
+  "threshold": 3,
+  "reporters": ["console", "html"],
+  "output": ".jscpd",
+  "absolute": true,
+  "gitignore": true,
+  "ignore": [
+    "**/node_modules/**",
+    "**/packages/ghostty_vte/**",
+    "**/packages/ghostty_vte_flutter/**",
+    "**/packages/portable_pty/**",
+    "**/generated/**",
+    "**/*.g.dart",
+    "**/*.freezed.dart",
+    "**/.dart_tool/**",
+    "**/build/**",
+    "**/dist/**",
+    "**/.worktrees/**",
+    "**/.claude/**",
+    "**/app/android/**",
+    "**/app/ios/**",
+    "**/app/macos/**",
+    "**/app/windows/**",
+    "**/app/linux/**",
+    "**/test/**",
+    "**/tests/**",
+    "**/*.test.ts",
+    "**/*_test.dart"
+  ]
+}

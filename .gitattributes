@@ -1,0 +1,9 @@
+# Files that are executed or consumed on Linux (the deploy VM, CI runners) must
+# keep LF line endings even when committed from Windows — a CRLF in a shell
+# script breaks the shebang, and CRLF in a Dockerfile/Caddyfile is fragile.
+*.sh        text eol=lf
+Dockerfile  text eol=lf
+Caddyfile   text eol=lf
+*.tftpl     text eol=lf
+*.tf        text eol=lf
+*.hcl       text eol=lf

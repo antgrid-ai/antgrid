@@ -1,0 +1,47 @@
+---
+import { Icon } from "astro-icon/components";
+import Eyebrow from "../ui/Eyebrow.astro";
+import Button from "../ui/Button.astro";
+import { links } from "../../config";
+
+const stores = [
+  { icon: "tabler:brand-apple", label: "App Store" },
+  { icon: "tabler:brand-google-play", label: "Google Play" },
+  { icon: "tabler:brand-windows", label: "Microsoft Store" },
+  { icon: "tabler:brand-apple", label: "Mac App Store" },
+];
+---
+<section id="download" class="mx-auto max-w-5xl px-6 py-16">
+  <div class="rounded-xl border border-indigodeep2 bg-[#131318] px-9 py-12 text-center">
+    <Eyebrow class="mb-4.5">Get started</Eyebrow>
+    <h2 class="mb-3.5 text-3xl font-medium leading-tight tracking-tight text-ink md:text-4xl">
+      Let your agents run.<br />Check in when it matters.
+    </h2>
+    <p class="mx-auto mb-7 max-w-md text-[15px] leading-relaxed text-muted">
+      Set up antgrid in a couple of minutes. <span class="text-ink2">Local sessions are free</span> — you pay only to control more agents remotely at once.
+    </p>
+    <div class="mb-3.5 flex flex-wrap items-center justify-center gap-3">
+      <Button href={links.startFree} variant="primary">Start free<Icon name="tabler:arrow-right" width="16" height="16" /></Button>
+      <Button href={links.pricing} variant="outline">See pricing</Button>
+    </div>
+    <p class="mb-7 text-[12.5px] text-muted2">No card required · local stays free</p>
+
+    <div class="mx-auto mb-5 h-px max-w-sm bg-edge"></div>
+    <p class="mb-4 font-mono text-[10.5px] uppercase tracking-[0.16em] text-faint">Download the desktop app</p>
+    <div class="mb-7 flex flex-wrap items-center justify-center gap-3">
+      <Button href={links.downloadMacos} variant="outline"><Icon name="tabler:brand-apple" width="16" height="16" />Download for macOS</Button>
+      <Button href={links.downloadWindows} variant="outline"><Icon name="tabler:brand-windows" width="16" height="16" />Download for Windows</Button>
+      <Button href={links.downloadLinux} variant="outline"><Icon name="tabler:brand-open-source" width="16" height="16" />Download for Linux</Button>
+    </div>
+
+    <p class="mb-4 font-mono text-[10.5px] uppercase tracking-[0.16em] text-faint">App stores coming soon</p>
+    <div class="mb-3.5 flex flex-wrap justify-center gap-2">
+      {stores.map((s) => (
+        <span class="inline-flex items-center gap-1.5 rounded-md border border-edge bg-panel px-3 py-2 text-xs text-muted">
+          <Icon name={s.icon} class="text-muted2" width="16" height="16" />{s.label}
+          <span class="rounded border border-edge px-1.5 py-px font-mono text-[9px] text-faint">soon</span>
+        </span>
+      ))}
+    </div>
+  </div>
+</section>

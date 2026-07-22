@@ -1,0 +1,288 @@
+import 'dart:async';
+
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:antgrid_relay_client/antgrid_relay_client.dart'
+    show RpcException;
+import 'package:antgrid/services/control_plane_client.dart';
+import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+
+void main() {
+  test('agent:projects populates the projects list', () async {
+    final t = FakeAgentTransport();
+    final client = ControlPlaneClient(transport: t);
+
+    t.emit('agent:projects', {
+      'projects': [
+        {
+          'projectId': 'projA',
+          'label': 'Project A',
+          'path': '/home/u/a',
+          'running': true,
+        },
+        {'projectId': 'projB', 'label': 'Project B', 'running': false},
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    final projects = client.currentState.projects;
+    expect(projects, hasLength(2));
+    expect(projects[0].projectId, 'projA');
+    expect(projects[0].label, 'Project A');
+    expect(projects[0].path, '/home/u/a');
+    expect(projects[0].running, isTrue);
+    expect(projects[1].projectId, 'projB');
+    expect(projects[1].label, 'Project B');
+    expect(projects[1].running, isFalse);
+    expect(projects[1].path, isNull);
+
+    await client.dispose();
+  });
+
+  test('startProject sends a project:start with the projectId', () async {
+    final t = FakeAgentTransport();
+    final client = ControlPlaneClient(transport: t);
+
+    await client.startProject('projA');
+
+    final sent = t.sent.firstWhere((m) => m['type'] == 'project:start');
+    expect(sent['projectId'], 'projA');
+
+    await client.dispose();
+  });
+
+  test('NOT_ALLOWED error response surfaces error state, no throw', () async {
+    final t = FakeAgentTransport();
+    final client = ControlPlaneClient(transport: t);
+
+    // Agent error shape: { ok:false, error:{ code, message } }.
+    t.emitJson({
+      'type': 'project:start',
+      'ok': false,
+      'error': {'code': 'NOT_ALLOWED', 'message': 'Phone not allowlisted'},
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(client.currentState.lastError, isNotNull);
+    expect(client.currentState.lastError!.code, 'NOT_ALLOWED');
+    expect(client.currentState.lastError!.message, 'Phone not allowlisted');
+
+    await client.dispose();
+  });
+
+  test('parses agent:tools into the tools set', () async {
+    final transport = FakeAgentTransport();
+    final client = ControlPlaneClient(transport: transport);
+    addTearDown(client.dispose);
+
+    // FakeAgentTransport.emit(type, [extra]) stamps `type` + id/timestamp and
+    // emits on the 'control' channel — do NOT pass 'control' as the first arg.
+    transport.emit('agent:tools', {
+      'tools': [
+        {'tool': 'claude-code', 'path': '/usr/bin/claude'},
+        {'tool': 'codex', 'path': '/usr/bin/codex'},
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(client.currentState.tools.map((t) => t.tool).toSet(), {
+      'claude-code',
+      'codex',
+    });
+  });
+
+  test('parses agent:tools chatCapable when present, null when absent',
+      () async {
+    final transport = FakeAgentTransport();
+    final client = ControlPlaneClient(transport: transport);
+    addTearDown(client.dispose);
+
+    transport.emit('agent:tools', {
+      'tools': [
+        {'tool': 'claude-code', 'path': '/usr/bin/claude', 'chatCapable': true},
+        {'tool': 'github-copilot', 'path': '/usr/bin/copilot', 'chatCapable': false},
+        {'tool': 'cursor-agent', 'path': '/usr/bin/cursor-agent'},
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    final byTool = {for (final t in client.currentState.tools) t.tool: t};
+    expect(byTool['claude-code']!.chatCapable, isTrue);
+    expect(byTool['github-copilot']!.chatCapable, isFalse);
+    expect(byTool['cursor-agent']!.chatCapable, isNull);
+  });
+
+  test(
+    'refresh() re-pulls state.snapshot and applies the response frames',
+    () async {
+      final t = FakeAgentTransport();
+      final client = ControlPlaneClient(transport: t);
+      addTearDown(client.dispose);
+
+      // Simulate the bridge recompute: the snapshot RESPONSE carries the fresh
+      // advert (a project that wasn't there at connect). The bus dedups an
+      // unchanged live push, so refresh must read these response frames directly.
+      t.requestHandler = (method, params) => {
+        'frames': [
+          {
+            'type': 'agent:projects',
+            'projects': [
+              {'projectId': 'late', 'label': 'Late Project', 'running': false},
+            ],
+          },
+        ],
+      };
+
+      await client.refresh();
+
+      expect(t.requests, hasLength(1));
+      expect(t.requests.single.method, 'state.snapshot');
+      expect(client.currentState.projects, hasLength(1));
+      expect(client.currentState.projects.single.projectId, 'late');
+    },
+  );
+
+  test('refresh() swallows an RpcException and keeps current state', () async {
+    final t = FakeAgentTransport();
+    final client = ControlPlaneClient(transport: t);
+    addTearDown(client.dispose);
+
+    t.emit('agent:projects', {
+      'projects': [
+        {'projectId': 'p1', 'running': true},
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    // Offline/pre-RPC agent: request throws. refresh must not rethrow, and the
+    // previously-advertised projects must remain.
+    t.requestHandler = (_, _) => throw RpcException('E_TIMEOUT', 'timed out');
+    await client.refresh();
+
+    expect(client.currentState.projects, hasLength(1));
+    expect(client.currentState.projects.single.projectId, 'p1');
+  });
+
+  test('peerPresence=false clears the cached advert (reactive offline)',
+      () async {
+    final t = FakeAgentTransport();
+    final presence = StreamController<bool>.broadcast();
+    addTearDown(presence.close);
+    final client =
+        ControlPlaneClient(transport: t, peerPresence: presence.stream);
+    addTearDown(client.dispose);
+
+    t.emit('agent:projects', {
+      'projects': [
+        {'projectId': 'p1', 'running': true},
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(client.currentState.projects, hasLength(1));
+
+    // The control-plane peer drops (desktop closed). The relay transport emits
+    // no disconnect, so the presence signal is what flips the client to offline.
+    presence.add(false);
+    await Future<void>.delayed(Duration.zero);
+    expect(client.currentState.projects, isEmpty,
+        reason: 'a peer disconnect must clear the stale advert reactively');
+
+    // A re-advert after the peer returns repopulates without a manual refresh.
+    presence.add(true);
+    t.emit('agent:projects', {
+      'projects': [
+        {'projectId': 'p2', 'running': true},
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(client.currentState.projects.single.projectId, 'p2');
+  });
+
+  test('state stream emits on agent:projects', () async {
+    final t = FakeAgentTransport();
+    final client = ControlPlaneClient(transport: t);
+
+    final future = client.stateStream.first;
+    t.emit('agent:projects', {
+      'projects': [
+        {'projectId': 'p1', 'running': true},
+      ],
+    });
+
+    final state = await future;
+    expect(state.projects, hasLength(1));
+    expect(state.projects.first.projectId, 'p1');
+
+    await client.dispose();
+  });
+
+  group('listSessions', () {
+    test('returns parsed sessions from the sessions.list response', () async {
+      final t = FakeAgentTransport();
+      final client = ControlPlaneClient(transport: t);
+      addTearDown(client.dispose);
+
+      t.requestHandler = (method, params) => {
+        'sessions': [
+          {
+            'id': 's1', 'name': 'Session 1',
+            'createdAt': 1, 'lastUsedAt': 2, 'archived': false, 'running': false,
+          },
+        ],
+      };
+
+      final sessions = await client.listSessions('p1');
+
+      expect(t.requests.single.method, 'sessions.list');
+      expect(t.requests.single.params, {'projectId': 'p1', 'includeArchived': false});
+      expect(sessions, hasLength(1));
+      expect(sessions.single.id, 's1');
+    });
+
+    test('propagates a NOT_ALLOWED RpcException', () async {
+      final t = FakeAgentTransport();
+      final client = ControlPlaneClient(transport: t);
+      addTearDown(client.dispose);
+
+      t.requestHandler = (_, _) => throw RpcException('NOT_ALLOWED', 'no');
+
+      await expectLater(
+        () => client.listSessions('p1'),
+        throwsA(isA<RpcException>().having((e) => e.code, 'code', 'NOT_ALLOWED')),
+      );
+    });
+  });
+
+  group('deleteSession', () {
+    test('deleteSession sends sessions.delete and returns result.deleted',
+        () async {
+      final t = FakeAgentTransport();
+      final client = ControlPlaneClient(transport: t);
+      addTearDown(client.dispose);
+
+      t.requestHandler = (method, params) => {'deleted': true};
+
+      final ok = await client.deleteSession('projA', 's1');
+
+      expect(ok, isTrue);
+      expect(t.requests.single.method, 'sessions.delete');
+      expect(t.requests.single.params, {
+        'projectId': 'projA',
+        'sessionId': 's1',
+      });
+    });
+
+    test('propagates a NOT_ALLOWED RpcException on delete', () async {
+      final t = FakeAgentTransport();
+      final client = ControlPlaneClient(transport: t);
+      addTearDown(client.dispose);
+
+      t.requestHandler = (_, _) => throw RpcException('NOT_ALLOWED', 'no');
+
+      await expectLater(
+        () => client.deleteSession('projA', 's1'),
+        throwsA(isA<RpcException>().having((e) => e.code, 'code', 'NOT_ALLOWED')),
+      );
+    });
+  });
+}

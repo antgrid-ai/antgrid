@@ -1,0 +1,22 @@
+# Dart / Flutter build output and tool state
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+pubspec.lock
+
+# Flutter tool crash reports
+flutter_*.log
+
+# Platform-generated native plugin registrants
+example/linux/flutter/generated_plugin_registrant.*
+example/linux/flutter/generated_plugins.cmake
+example/macos/Flutter/GeneratedPluginRegistrant.swift
+example/windows/flutter/generated_plugin_registrant.*
+example/windows/flutter/generated_plugins.cmake
+
+# IDE
+.idea/
+.vscode/
+*.iml

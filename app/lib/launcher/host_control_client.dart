@@ -1,0 +1,374 @@
+// app/lib/launcher/host_control_client.dart
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+
+/// Loopback data-plane connect info from a `project:open` response.
+/// Non-null for all modes — every core binds a loopback listener. Mirror of
+/// `control-protocol.ts` ConnectInfo.
+class ConnectInfo {
+  final int port;
+  final String token;
+  const ConnectInfo({required this.port, required this.token});
+}
+
+/// `project:open` / `project:start` response. Mirror of control-protocol.ts.
+class OpenResult {
+  final bool running;
+  final ConnectInfo? connect;
+  const OpenResult({required this.running, required this.connect});
+}
+
+/// One catalog entry. Mirror of `control-protocol.ts` ProjectSummary.
+class ProjectSummary {
+  final String projectId;
+  final String path;
+  final bool running;
+  final String mode; // "local" | "remote"
+  const ProjectSummary({
+    required this.projectId,
+    required this.path,
+    required this.running,
+    required this.mode,
+  });
+}
+
+/// One paired phone from `phones:list`. Mirror of control-protocol.ts PairedPhoneSummary.
+class PairedPhoneSummary {
+  final String phonePubkey;
+  final String phoneDeviceId;
+  final String? label;
+  final String pairedAt;
+  final String lastSeenAt;
+  final List<String> allowedProjects;
+  // How this phone was admitted: "same-account" (auto-paired via relay without
+  // a QR scan) or "pair-code" (explicit QR scan).
+  final String admission;
+  const PairedPhoneSummary({
+    required this.phonePubkey,
+    required this.phoneDeviceId,
+    this.label,
+    required this.pairedAt,
+    required this.lastSeenAt,
+    required this.allowedProjects,
+    required this.admission,
+  });
+
+  factory PairedPhoneSummary.fromJson(Map<String, dynamic> json) {
+    final phonePubkey = json['phonePubkey'];
+    final phoneDeviceId = json['phoneDeviceId'];
+    final pairedAt = json['pairedAt'];
+    final lastSeenAt = json['lastSeenAt'];
+    final admission = json['admission'];
+    if (phonePubkey is! String ||
+        phoneDeviceId is! String ||
+        pairedAt is! String ||
+        lastSeenAt is! String ||
+        admission is! String) {
+      throw HostControlException('BAD_RESPONSE', 'malformed phone fields: $json');
+    }
+    return PairedPhoneSummary(
+      phonePubkey: phonePubkey,
+      phoneDeviceId: phoneDeviceId,
+      label: json['label'] as String?,
+      pairedAt: pairedAt,
+      lastSeenAt: lastSeenAt,
+      allowedProjects: ((json['allowedProjects'] as List?) ?? const []).cast<String>(),
+      admission: admission,
+    );
+  }
+}
+
+/// One machine-known project from `phones:list`. Mirror of control-protocol.ts KnownProject.
+class KnownProject {
+  final String projectId;
+  final String? label;
+  final String? path;
+  final bool running;
+  const KnownProject({
+    required this.projectId,
+    this.label,
+    this.path,
+    required this.running,
+  });
+
+  factory KnownProject.fromJson(Map<String, dynamic> json) {
+    final projectId = json['projectId'];
+    if (projectId is! String) {
+      throw HostControlException('BAD_RESPONSE', 'malformed project fields: $json');
+    }
+    return KnownProject(
+      projectId: projectId,
+      label: json['label'] as String?,
+      path: json['path'] as String?,
+      running: json['running'] == true,
+    );
+  }
+}
+
+/// `phones:list` response: paired phones + the machine's known project set.
+class PhonesList {
+  final List<PairedPhoneSummary> phones;
+  final List<KnownProject> knownProjects;
+  const PhonesList({required this.phones, required this.knownProjects});
+
+  factory PhonesList.fromJson(Map<String, dynamic> json) {
+    final rawPhones = (json['phones'] as List?) ?? const [];
+    final rawProjects = (json['knownProjects'] as List?) ?? const [];
+    return PhonesList(
+      phones: rawPhones.map((e) {
+        if (e is! Map) throw HostControlException('BAD_RESPONSE', 'malformed phone: $e');
+        return PairedPhoneSummary.fromJson(e.cast<String, dynamic>());
+      }).toList(growable: false),
+      knownProjects: rawProjects.map((e) {
+        if (e is! Map) throw HostControlException('BAD_RESPONSE', 'malformed project: $e');
+        return KnownProject.fromJson(e.cast<String, dynamic>());
+      }).toList(growable: false),
+    );
+  }
+}
+
+/// One installed tool from the loopback `tools:list`. Mirror of control-protocol.ts
+/// ToolSummary. `chatCapable` is null against an older bridge that predates the
+/// field; callers fall back to the app's static capability list in that case.
+class ToolSummary {
+  final String tool;
+  final String path;
+  final bool? chatCapable;
+  const ToolSummary({required this.tool, required this.path, this.chatCapable});
+}
+
+/// The current machine-level mobile access policy: which projects are enabled
+/// for remote phone access. Mirror of control-protocol.ts MobileAccessPolicy.
+class MobileAccessPolicy {
+  final List<String> projectIds;
+  const MobileAccessPolicy({required this.projectIds});
+
+  factory MobileAccessPolicy.fromJson(Map<String, dynamic> json) {
+    final raw = (json['projectIds'] as List?) ?? const [];
+    return MobileAccessPolicy(projectIds: raw.cast<String>());
+  }
+}
+
+/// Thrown on a transport error, a non-200 status, or an `ok:false` body.
+class HostControlException implements Exception {
+  final String code;
+  final String message;
+  HostControlException(this.code, this.message);
+  @override
+  String toString() => 'HostControlException($code): $message';
+}
+
+/// Typed client for the bridge loopback control plane (unit 2/3a).
+/// `POST http://127.0.0.1:<port>/control` with `Authorization: Bearer <token>`.
+class HostControlClient {
+  HostControlClient({
+    required this.port,
+    required this.token,
+    http.Client? httpClient,
+  }) : _http = httpClient ?? http.Client();
+
+  final int port;
+  final String token;
+  final http.Client _http;
+
+  // Monotonic request-id counter. The bridge echoes `id` back; we don't match
+  // on it (one request per POST) but it must be present and non-empty.
+  int _seq = 0;
+
+  Uri get _uri => Uri.parse('http://127.0.0.1:$port/control');
+
+  /// [timeout] bounds the loopback round-trip; callers size it to the verb's
+  /// cost. A `TimeoutException` flows through the same `catch` as any transport
+  /// error → `HostControlException('TRANSPORT')`, the type the open-path
+  /// recovery invalidates + respawns on.
+  Future<Map<String, dynamic>> _post(
+    Map<String, dynamic> body, {
+    Duration timeout = const Duration(seconds: 5),
+  }) async {
+    final id = '${++_seq}';
+    http.Response res;
+    try {
+      res = await _http
+          .post(
+            _uri,
+            headers: {
+              'content-type': 'application/json',
+              'authorization': 'Bearer $token',
+            },
+            body: jsonEncode({'id': id, ...body}),
+          )
+          .timeout(timeout);
+    } catch (e) {
+      throw HostControlException('TRANSPORT', 'control POST failed: $e');
+    }
+    Map<String, dynamic> decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (_) {
+      decoded = const {};
+    }
+    if (res.statusCode != 200) {
+      throw HostControlException(
+        'HTTP_${res.statusCode}',
+        'control returned ${res.statusCode}',
+      );
+    }
+    if (decoded['ok'] != true) {
+      final err = decoded['error'];
+      if (err is Map) {
+        throw HostControlException(
+          (err['code'] as String?) ?? 'UNKNOWN',
+          (err['message'] as String?) ?? '',
+        );
+      }
+      throw HostControlException('UNKNOWN', 'control returned ok:false');
+    }
+    return decoded;
+  }
+
+  /// Opens a core for [projectId]. [mode] defaults to `local` — the desktop
+  /// driver's only mode today (see design §Data plane) — but is a parameter so
+  /// Phase B can request `remote` without a second near-duplicate method.
+  Future<OpenResult> projectOpen({
+    required String projectId,
+    required String projectPath,
+    String mode = 'local',
+    // Longer ceiling: project:open does real host work (spawn terminals, walk
+    // the file tree).
+    Duration timeout = const Duration(seconds: 20),
+  }) async {
+    final m = await _post({
+      'type': 'project:open',
+      'projectId': projectId,
+      'projectPath': projectPath,
+      'mode': mode,
+    }, timeout: timeout);
+    // Validate the connect block instead of casting blindly: a malformed/old
+    // host (the version-skew attach case this design enables) must surface a
+    // typed HostControlException, not a raw CastError the classifier can't read.
+    final c = m['connect'];
+    ConnectInfo? connect;
+    if (c is Map) {
+      final p = c['port'];
+      final t = c['token'];
+      if (p is int && t is String) {
+        connect = ConnectInfo(port: p, token: t);
+      } else {
+        throw HostControlException(
+          'BAD_RESPONSE',
+          'malformed connect info (port=$p token=$t)',
+        );
+      }
+    }
+    return OpenResult(running: m['running'] == true, connect: connect);
+  }
+
+  /// The [HostController] liveness ping. Short timeout so a wedged host is
+  /// detected fast instead of stalling the readiness poll / attach probe.
+  Future<List<ProjectSummary>> projectList({
+    Duration timeout = const Duration(seconds: 2),
+  }) async {
+    final m = await _post({'type': 'project:list'}, timeout: timeout);
+    final raw = (m['projects'] as List?) ?? const [];
+    return raw.map((e) {
+      if (e is! Map) {
+        throw HostControlException(
+            'BAD_RESPONSE', 'malformed project entry: $e');
+      }
+      final id = e['projectId'];
+      final path = e['path'];
+      final mode = e['mode'];
+      if (id is! String || path is! String || mode is! String) {
+        throw HostControlException(
+            'BAD_RESPONSE', 'malformed project fields: $e');
+      }
+      return ProjectSummary(
+        projectId: id,
+        path: path,
+        running: e['running'] == true,
+        mode: mode,
+      );
+    }).toList(growable: false);
+  }
+
+  Future<List<ToolSummary>> toolsList({
+    Duration timeout = const Duration(seconds: 3),
+  }) async {
+    final m = await _post({'type': 'tools:list'}, timeout: timeout);
+    final raw = (m['tools'] as List?) ?? const [];
+    return raw.map((e) {
+      if (e is! Map) {
+        throw HostControlException('BAD_RESPONSE', 'malformed tool entry: $e');
+      }
+      final tool = e['tool'];
+      final path = e['path'];
+      if (tool is! String || path is! String) {
+        throw HostControlException('BAD_RESPONSE', 'malformed tool fields: $e');
+      }
+      return ToolSummary(
+        tool: tool,
+        path: path,
+        chatCapable: e['chatCapable'] as bool?,
+      );
+    }).toList(growable: false);
+  }
+
+  Future<void> projectStop(String projectId) async {
+    await _post({'type': 'project:stop', 'projectId': projectId});
+  }
+
+  /// Erase every machine-side trace of [projectId] (its persisted session store,
+  /// the seen-catalog hint, and any phone allowlist grant). Called on project
+  /// delete so reopening the same folder doesn't reload the old sessions —
+  /// `sessions.json` on the bridge is authoritative; the app only caches it.
+  Future<void> projectForget(String projectId) async {
+    await _post({'type': 'project:forget', 'projectId': projectId});
+  }
+
+  /// Ask the host to shut itself down gracefully (flush state, kill all PTYs,
+  /// exit). Sent when the app window closes so the machine-level host daemon
+  /// doesn't outlive the app. The host defers teardown until after this
+  /// response, so the OK returns before the process exits.
+  Future<void> hostShutdown() async {
+    await _post({'type': 'host:shutdown'});
+  }
+
+  Future<PhonesList> phonesList({Duration timeout = const Duration(seconds: 3)}) async {
+    final m = await _post({'type': 'phones:list'}, timeout: timeout);
+    return PhonesList.fromJson(m);
+  }
+
+  Future<void> phonesAllow({required String phonePubkey, required String projectId}) =>
+      _post({'type': 'phones:allow', 'phonePubkey': phonePubkey, 'projectId': projectId});
+
+  Future<void> phonesDeny({required String phonePubkey, required String projectId}) =>
+      _post({'type': 'phones:deny', 'phonePubkey': phonePubkey, 'projectId': projectId});
+
+  Future<void> phonesUnpair({required String phonePubkey}) =>
+      _post({'type': 'phones:unpair', 'phonePubkey': phonePubkey});
+
+  Future<MobileAccessPolicy> mobileAccessGet({
+    Duration timeout = const Duration(seconds: 3),
+  }) async {
+    final m = await _post({'type': 'mobile-access:get'}, timeout: timeout);
+    return MobileAccessPolicy.fromJson(m);
+  }
+
+  Future<MobileAccessPolicy> mobileAccessEnableProject(String projectId) async {
+    final m = await _post({
+      'type': 'mobile-access:enable-project',
+      'projectId': projectId,
+    });
+    return MobileAccessPolicy.fromJson(m);
+  }
+
+  Future<MobileAccessPolicy> mobileAccessDisableProject(String projectId) async {
+    final m = await _post({
+      'type': 'mobile-access:disable-project',
+      'projectId': projectId,
+    });
+    return MobileAccessPolicy.fromJson(m);
+  }
+
+  void close() => _http.close();
+}

@@ -1,0 +1,51 @@
+{
+  "ids": {
+    "registrationId": "agent-deterministic.proj-deterministic",
+    "agentDeviceId": "agent-deterministic.proj-deterministic",
+    "phoneDeviceId": "phone-deterministic"
+  },
+  "ed25519": {
+    "agentSeedHex": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+    "agentPubB64": "tTPYrZ/Pvd4LSBwbM03cPFNBL9YUVk5+Wv0CA2jTgsM=",
+    "phoneSeedHex": "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+    "phonePubB64": "cF+6wB9VGYmfQ3vELkAlWumrVL/wDeNDOvfWh9nnGtU="
+  },
+  "x25519": {
+    "agentPrivHex": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+    "agentPubB64": "HHj8ce8BhV9nDFVcgiJjl/DnOwqvRDpJHUEQ3CLygjY=",
+    "phonePrivHex": "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+    "phonePubB64": "sl3FSFFjNp4XlDe7cv5L1KFCSCaCwwLWajotSGXD/Qs="
+  },
+  "nonceB64": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY=",
+  "transcripts": {
+    "phoneSigBodyHex": "616e74677269642e6532652d68616e647368616b652e76320002006167656e742d64657465726d696e69737469632e70726f6a2d64657465726d696e69737469630070686f6e65006167656e742d64657465726d696e69737469632e70726f6a2d64657465726d696e69737469630070686f6e652d64657465726d696e69737469630000b25dc5485163369e179437bb72fe4bd4a142482682c302d66a3a2d4865c3fd0b000606060606060606060606060606060606060606060606060606060606060606",
+    "agentSigBodyHex": "616e74677269642e6532652d68616e647368616b652e76320002006167656e742d64657465726d696e69737469632e70726f6a2d64657465726d696e6973746963006167656e74006167656e742d64657465726d696e69737469632e70726f6a2d64657465726d696e69737469630070686f6e652d64657465726d696e6973746963001c78fc71ef01855f670c555c82226397f0e73b0aaf443a491d4110dc22f2823600b25dc5485163369e179437bb72fe4bd4a142482682c302d66a3a2d4865c3fd0b000606060606060606060606060606060606060606060606060606060606060606"
+  },
+  "signatures": {
+    "phoneSigB64": "frJg5PWE1sHSwITlDqerNiiLA/ws5Mx6BXFspZ+VLaraSRaa/okg/fOFnEoHf/LKhyOr5oBl17foOxJSqxewDg==",
+    "agentSigB64": "Lu5pF/u5N8nKUAZ3N5UOeu4xTCTliewUxC+IxLDkcSJQRqQPJWV3B1kONyM1tnENZArx40bBZKd2gY2r/fD0DA=="
+  },
+  "keySchedule": {
+    "kA2pHex": "d2cbb6ceee96f449e009b165db0265c8d3eb88bf6a1b561a70722a5d032844c3",
+    "kP2aHex": "856b0053cc19d0373cbb1f0eed8237d43b545b635692a8a4cdb192876a601edc",
+    "kConfirmHex": "c5ba1b04987dbdc5e06a91267836d2c36def4cf583a7e0c35f1c2498806f2f44"
+  },
+  "confirm": {
+    "agentTagHex": "ce32b7ad275294022287e6d0d472a2df02ecf2925a8398de11680b0826f9cd70",
+    "phoneTagHex": "ac3e99b856fa72d0fa8ef6a80f6761429997fcaa97f3f7df22daf617832b74b3"
+  },
+  "transport": [
+    {
+      "dir": "a2p",
+      "plaintext": "hello from agent",
+      "nonceHex": "010101010101010101010101",
+      "sealedHex": "010101010101010101010101bf8888b37948848801da9e10348f553580f4a250e37cf047d46872f47abbcc5d"
+    },
+    {
+      "dir": "p2a",
+      "plaintext": "hello from phone",
+      "nonceHex": "020202020202020202020202",
+      "sealedHex": "0202020202020202020202026c55a531601c1f5c9afbc48c11e359c4f8c441bcd8472c4dd2b0f3d3f5c41f06"
+    }
+  ]
+}

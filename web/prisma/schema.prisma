@@ -1,0 +1,361 @@
+// Prisma schema for antgrid-web.
+// Generator + datasource follow the Bun-optimized configuration:
+// https://bun.com/docs/guides/ecosystem/prisma-postgres
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  engineType   = "client"
+  runtime      = "bun"
+  moduleFormat = "esm"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("PG_DATABASE_URL")
+}
+
+// ---------- Product billing (separate from Better-Auth account) ----------
+
+model ProductAccount {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String   @unique @map("user_id")
+  country         String?  @db.Char(2)
+  countrySource   String?  @map("country_source")
+  billingProvider String?  @map("billing_provider")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt       DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  user             User              @relation("UserOwnedAccount", fields: [userId], references: [id], onDelete: Cascade)
+  billingUser      User?             @relation("UserBillingAccount")
+  subscriptions    Subscription[]
+  billingCustomers BillingCustomer[]
+
+  @@map("product_accounts")
+}
+
+model Plan {
+  id           String  @id @db.Uuid
+  slug         String  @unique
+  label        String
+  tier         String
+  // Concurrent remote-running-agent cap (the paid axis). Local agents are free
+  // and uncounted; this gates simultaneous relay-promoted agents per account.
+  sessionLimit Int     @map("session_limit")
+  // Fair-use cap on how many devices an account may register. Not the paid
+  // axis — pricing is `sessionLimit`. Kept generous (10) for all tiers.
+  deviceLimit  Int     @map("device_limit")
+  recurring    Boolean
+  trial        Boolean
+  active       Boolean @default(true)
+  sortOrder    Int     @default(0) @map("sort_order")
+
+  subscriptions Subscription[]
+
+  @@map("plans")
+}
+
+model Subscription {
+  id                     String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId              String    @map("account_id") @db.Uuid
+  planId                 String    @map("plan_id") @db.Uuid
+  provider               String?
+  providerSubscriptionId String?   @unique @map("provider_subscription_id")
+  providerTransactionId  String?   @unique @map("provider_transaction_id")
+  tier                   String
+  status                 String
+  // Snapshotted from the plan at apply time (see applyPlanToAccountSubscription).
+  sessionLimit           Int       @map("session_limit")
+  deviceLimit            Int       @map("device_limit")
+  // Temporary pro-tier grant (no real purchase behind it) while in-app
+  // purchases aren't live yet. Always false for real purchases — see
+  // applyPlanToAccountSubscription / ensureDefaultSubscription.
+  promotional            Boolean   @default(false) @map("promotional")
+  trialStartedAt         DateTime? @map("trial_started_at") @db.Timestamptz(6)
+  trialEndsAt            DateTime? @map("trial_ends_at") @db.Timestamptz(6)
+  currentPeriodEnd       DateTime? @map("current_period_end") @db.Timestamptz(6)
+  cancelledAt            DateTime? @map("cancelled_at") @db.Timestamptz(6)
+  createdAt              DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt              DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  account ProductAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  plan    Plan           @relation(fields: [planId], references: [id])
+
+  @@index([accountId], map: "subscriptions_account_id_idx")
+  @@index([accountId, status], map: "subscriptions_account_status_idx")
+  @@map("subscriptions")
+}
+
+/// Gateway customer id per provider — required to list saved payment methods (Paddle ctm_*, Razorpay cust_*).
+model BillingCustomer {
+  accountId          String @map("account_id") @db.Uuid
+  provider           String
+  providerCustomerId String @map("provider_customer_id")
+
+  account ProductAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@id([accountId, provider])
+  @@unique([provider, providerCustomerId], map: "billing_customer_provider_cust_key")
+  @@map("billing_customers")
+}
+
+model WebhookEvent {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  provider        String
+  providerEventId String    @unique @map("provider_event_id")
+  type            String
+  payload         Json
+  receivedAt      DateTime  @default(now()) @map("received_at") @db.Timestamptz(6)
+  processedAt     DateTime? @map("processed_at") @db.Timestamptz(6)
+
+  @@map("webhook_events")
+}
+
+model Device {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId              String    @map("user_id")
+  deviceId            String    @map("device_id")
+  kind                String
+  platform            String
+  displayName         String    @map("display_name")
+  publicKey           Bytes     @map("public_key")
+  oauthClientId       String?   @unique @map("oauth_client_id")
+  activatedAt         DateTime  @default(now()) @map("activated_at") @db.Timestamptz(6)
+  lastSeenAt          DateTime? @map("last_seen_at") @db.Timestamptz(6)
+  revokedAt           DateTime? @map("revoked_at") @db.Timestamptz(6)
+  mobileAccessEnabled Boolean   @default(false) @map("mobile_access_enabled")
+  relayUrl            String?   @map("relay_url")
+  machineName         String?   @map("machine_name")
+
+  @@unique([userId, deviceId], map: "devices_user_id_device_id_key")
+  @@index([userId], map: "devices_user_active_idx")
+  @@index([userId, mobileAccessEnabled], map: "device_user_mobile_idx")
+  @@map("devices")
+}
+
+model User {
+  id            String    @id
+  name          String
+  email         String    @db.Citext
+  emailVerified Boolean   @default(false)
+  image         String?
+  /// Denormalized ProductAccount.id — set when billing account is provisioned.
+  accountId     String?   @unique @map("account_id") @db.Uuid
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  sessions      Session[]
+  accounts      Account[]
+  ownedProductAccount ProductAccount? @relation("UserOwnedAccount")
+  billingAccount      ProductAccount? @relation("UserBillingAccount", fields: [accountId], references: [id], onDelete: SetNull)
+
+  @@unique([email])
+  @@map("user")
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([token])
+  @@index([userId])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([userId])
+  @@map("account")
+}
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+  @@map("verification")
+}
+
+model PendingSignIn {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email            String
+  // HMAC of nonce that travels in the magic-link URL. Plain nonce is never stored.
+  nonceHash        Bytes     @map("nonce_hash")
+  // HMAC of the cookie token issued to Browser A at start. Validates that the
+  // poller is the same browser that initiated the flow.
+  browserTokenHash Bytes     @map("browser_token_hash")
+  // Context surfaced to the approver on Browser B.
+  requesterUa      String?   @map("requester_ua")
+  requesterIp      String?   @map("requester_ip")
+  // Once Browser B approves, we record the user that will be signed in.
+  approvedAt       DateTime? @map("approved_at") @db.Timestamptz(6)
+  // No FK to user.id by design: the sign-up-on-approve path may create the user
+  // row in the same flow, and the pending row is short-lived (10 min) — we don't
+  // want CASCADE behaviour coupling these tables.
+  approvedUserId   String?   @map("approved_user_id")
+  // Set when Browser A's poll picks the session up — prevents replay.
+  consumedAt       DateTime? @map("consumed_at") @db.Timestamptz(6)
+  // Delivery outcome reported by the ZeptoMail webhook (keyed by client_reference
+  // == this row's id). null until an event arrives; only hard bounce / delivered
+  // are recorded (soft bounce is transient and deliberately ignored).
+  deliveryStatus   String?   @map("delivery_status")
+  expiresAt        DateTime  @map("expires_at") @db.Timestamptz(6)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([expiresAt], map: "pending_sign_in_expires_idx")
+  @@map("pending_sign_in")
+}
+
+// ---------- Better-Auth JWT plugin ----------
+
+model Jwks {
+  id         String    @id
+  publicKey  String    @map("public_key")
+  privateKey String    @map("private_key")
+  createdAt  DateTime  @map("created_at") @db.Timestamptz(6)
+  expiresAt  DateTime? @map("expires_at") @db.Timestamptz(6)
+
+  @@map("jwks")
+}
+
+// ---------- First-party analytics ----------
+
+model AnalyticEvent {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  installId  String   @map("install_id")
+  name       String
+  ts         DateTime @db.Timestamptz(6)
+  platform   String
+  appVersion String   @map("app_version")
+  props      Json?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([name, ts], map: "analytic_event_name_ts_idx")
+  @@index([installId, ts], map: "analytic_event_install_ts_idx")
+  @@map("analytic_event")
+}
+
+// ---------- Better-Auth OAuth Provider plugin ----------
+
+model OauthClient {
+  id                      String    @id
+  clientId                String    @unique @map("client_id")
+  clientSecret            String?   @map("client_secret")
+  disabled                Boolean?  @default(false)
+  skipConsent             Boolean?  @map("skip_consent")
+  enableEndSession        Boolean?  @map("enable_end_session")
+  subjectType             String?   @map("subject_type")
+  scopes                  String[]
+  userId                  String?   @map("user_id")
+  createdAt               DateTime? @map("created_at") @db.Timestamptz(6)
+  updatedAt               DateTime? @map("updated_at") @db.Timestamptz(6)
+  name                    String?
+  uri                     String?
+  icon                    String?
+  contacts                String[]
+  tos                     String?
+  policy                  String?
+  softwareId              String?   @map("software_id")
+  softwareVersion         String?   @map("software_version")
+  softwareStatement       String?   @map("software_statement")
+  redirectUris            String[]  @map("redirect_uris")
+  postLogoutRedirectUris  String[]  @map("post_logout_redirect_uris")
+  tokenEndpointAuthMethod String?   @map("token_endpoint_auth_method")
+  grantTypes              String[]  @map("grant_types")
+  responseTypes           String[]  @map("response_types")
+  public                  Boolean?
+  type                    String?
+  requirePKCE             Boolean?  @map("require_pkce")
+  referenceId             String?   @map("reference_id")
+  metadata                Json?
+
+  accessTokens  OauthAccessToken[]
+  refreshTokens OauthRefreshToken[]
+  consents      OauthConsent[]
+
+  @@index([userId])
+  @@map("oauth_client")
+}
+
+model OauthAccessToken {
+  id          String   @id
+  token       String   @unique
+  clientId    String   @map("client_id")
+  sessionId   String?  @map("session_id")
+  userId      String?  @map("user_id")
+  referenceId String?  @map("reference_id")
+  refreshId   String?  @map("refresh_id")
+  expiresAt   DateTime @map("expires_at") @db.Timestamptz(6)
+  createdAt   DateTime @map("created_at") @db.Timestamptz(6)
+  scopes      String[]
+
+  client OauthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
+
+  @@index([clientId])
+  @@index([sessionId])
+  @@index([userId])
+  @@index([refreshId])
+  @@map("oauth_access_token")
+}
+
+model OauthRefreshToken {
+  id          String    @id
+  token       String    @unique
+  clientId    String    @map("client_id")
+  sessionId   String?   @map("session_id")
+  userId      String    @map("user_id")
+  referenceId String?   @map("reference_id")
+  expiresAt   DateTime  @map("expires_at") @db.Timestamptz(6)
+  createdAt   DateTime  @map("created_at") @db.Timestamptz(6)
+  revoked     DateTime? @db.Timestamptz(6)
+  authTime    DateTime? @map("auth_time") @db.Timestamptz(6)
+  scopes      String[]
+
+  client OauthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
+
+  @@index([clientId])
+  @@index([sessionId])
+  @@index([userId])
+  @@map("oauth_refresh_token")
+}
+
+model OauthConsent {
+  id          String   @id
+  clientId    String   @map("client_id")
+  userId      String?  @map("user_id")
+  referenceId String?  @map("reference_id")
+  scopes      String[]
+  createdAt   DateTime @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @map("updated_at") @db.Timestamptz(6)
+
+  client OauthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
+
+  @@index([clientId])
+  @@index([userId])
+  @@map("oauth_consent")
+}

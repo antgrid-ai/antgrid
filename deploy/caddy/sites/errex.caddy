@@ -1,0 +1,23 @@
+# Public crash dashboard + Sentry ingest for errex (container `errex:9090`).
+# Imported by ../Caddyfile (`import /etc/caddy/sites/*.caddy`); coexists with
+# the deploy.sh-generated active.caddy. errex's own multi-user login is the
+# auth boundary — see docs/superpowers/plans/2026-06-27-errex-deployment.md.
+#
+# PROD-ONLY: one errex instance serves staging too, via a separate errex
+# *project* (antgrid-app-staging) on this same host. deploy.sh removes this
+# file on non-prod VMs, so the hardcoded prod hostname is correct everywhere.
+errex.antgrid.ai {
+	# /metrics is UNAUTHENTICATED in errex — never expose it publicly.
+	handle /metrics* {
+		respond 404
+	}
+
+	handle {
+		reverse_proxy errex:9090 {
+			# errex trusts X-Forwarded-For hop #1 for its per-IP lockout, and
+			# Caddy *appends* to a client-supplied XFF — leaving a spoofable
+			# first hop. Overwrite it with the real peer so the lockout holds.
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+}

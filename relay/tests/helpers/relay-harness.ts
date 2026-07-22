@@ -1,0 +1,419 @@
+import { sign as edSign } from "node:crypto";
+import { startServer as startServerReal, type RelayServer, type RelayServerDeps } from "../../src/server.js";
+import { buildHelloSigBody, normalizeRelayHost, decodeRouteFrame } from "antgrid-wire";
+import type { RelayConfig } from "../../src/config.js";
+import type { LicenseGate } from "../../src/license/gate.js";
+
+// --- Inline pair-approval signer (mirrors bridge/src/pair-approval.ts) ---
+const PAIR_DOMAIN = "antgrid.pair-approval.v1";
+const PAIR_NUL = Buffer.from([0]);
+const ED25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
+
+export function rawSeedToPkcs8(seed: Uint8Array): Buffer {
+  return Buffer.concat([ED25519_PKCS8_PREFIX, Buffer.from(seed)]);
+}
+
+export function buildPairApprovalSigBody(args: {
+  agentDeviceId: string;
+  phonePubkey: string;
+  phoneDeviceId: string;
+  nonce: string;
+  expiresAt: string;
+}): Buffer {
+  return Buffer.concat([
+    Buffer.from(PAIR_DOMAIN, "utf8"),
+    PAIR_NUL,
+    Buffer.from(args.agentDeviceId, "utf8"),
+    PAIR_NUL,
+    Buffer.from(args.phonePubkey, "base64"),
+    PAIR_NUL,
+    Buffer.from(args.phoneDeviceId, "utf8"),
+    PAIR_NUL,
+    Buffer.from(args.nonce, "base64"),
+    PAIR_NUL,
+    Buffer.from(args.expiresAt, "utf8"),
+  ]);
+}
+
+export function signPairApproval(args: {
+  agentDeviceId: string;
+  phonePubkey: string;
+  phoneDeviceId: string;
+  nonce: string;
+  expiresAt: string;
+  agentEd25519Priv: Uint8Array;
+}): string {
+  const sigBody = buildPairApprovalSigBody(args);
+  const pkcs8 = rawSeedToPkcs8(args.agentEd25519Priv);
+  return edSign(null, sigBody, { key: pkcs8, format: "der", type: "pkcs8" }).toString("base64");
+}
+
+// Placeholder pair-request phoneSignature. The relay only validates message
+// shape — the agent verifies the actual phoneSignature. Any non-empty base64
+// passes relay-side Zod.
+export const RELAY_TEST_PLACEHOLDER_SIG = Buffer.alloc(64, 0).toString("base64");
+export function relayTestRequestedAt(): string {
+  return new Date().toISOString();
+}
+
+// Per-deviceId stable jti so reconnects look the same.
+const fakeJtiByDevice = new Map<string, string>();
+
+export interface FakeLicenseGateOptions {
+  /** Fixed sessionLimit, or derive it per agent deviceId (streams/sessionLimit tests). */
+  sessionLimit?: number | ((deviceId: string) => number);
+  /** Derive the account uid an agent's token carries — lets tests put two agent
+   *  connections under one account for cross-connection sessionLimit counting. */
+  agentUid?: (deviceId: string) => string;
+}
+
+/** Parameterized fake gate. `fakeLicenseGate` below is the opts-less default. */
+export function makeFakeLicenseGate(opts: FakeLicenseGateOptions = {}): LicenseGate {
+  const fixedSessionLimit = typeof opts.sessionLimit === "number" ? opts.sessionLimit : 10;
+  const sessionLimitFor: (deviceId: string) => number =
+    typeof opts.sessionLimit === "function" ? opts.sessionLimit : () => fixedSessionLimit;
+  const uidFor = opts.agentUid ?? ((deviceId: string) => `user-${deviceId}`);
+  return {
+    async verify(_token, deviceId, publicKeyBase64) {
+      let jti = fakeJtiByDevice.get(deviceId);
+      if (!jti) {
+        jti = `jti-${deviceId}-${Math.random().toString(36).slice(2, 10)}`;
+        fakeJtiByDevice.set(deviceId, jti);
+      }
+      return {
+        ok: true,
+        entry: {
+          jti,
+          deviceId,
+          userId: uidFor(deviceId),
+          tier: "pro",
+          sessionLimit: sessionLimitFor(deviceId),
+          pk: publicKeyBase64,
+          revoked: false,
+        },
+      };
+    },
+    // App path: token-only, no slot bind. Yields a stable userId per token so
+    // same-account tests are deterministic.
+    async verifyAppToken(token) {
+      return {
+        ok: true,
+        entry: {
+          jti: `jti-app-${token}`,
+          deviceId: `app-${token}`,
+          userId: `user-app-${token}`,
+          tier: "pro",
+          sessionLimit: 10,
+          pk: "",
+          revoked: false,
+        },
+      };
+    },
+  };
+}
+
+export const fakeLicenseGate: LicenseGate = makeFakeLicenseGate();
+
+export function startServer(cfg: RelayConfig, deps: RelayServerDeps = {}): RelayServer {
+  return startServerReal(cfg, { licenseGate: fakeLicenseGate, ...deps });
+}
+
+export const defaultConfig: RelayConfig = {
+  port: 0,
+  maxConnections: 100,
+  rateLimitConnPerIp: 10,
+  pairRequestTimeoutMs: 60000,
+  pairRateLimitPerIp: 50,
+  rateLimitMsgPerSec: 100,
+  jsonRateLimitPerSec: 10,
+  jsonRateLimitBurst: 30,
+  clockSkewMs: 120000,
+  replayTtlMs: 300000,
+  staleGrantDays: 30,
+  pingIntervalMs: 0, // disabled in tests
+  pongTimeoutMs: 10000,
+  logLevel: "error" as const,
+  licenseApiUrl: "http://localhost:8787",
+  relayInternalSecret: "x".repeat(16),
+  licenseCacheMaxEntries: 100000,
+};
+
+export function wsUrl(relay: RelayServer): string {
+  return `ws://localhost:${relay.server.port}/ws`;
+}
+
+/** The `relayHost` the client must sign — the relay compares its own Host header. */
+export function relayHostFor(relay: RelayServer): string {
+  return normalizeRelayHost(wsUrl(relay));
+}
+
+export async function connect(relay: RelayServer): Promise<WebSocket> {
+  const ws = new WebSocket(wsUrl(relay));
+  await new Promise<void>((resolve, reject) => {
+    ws.onopen = () => resolve();
+    ws.onerror = () => reject(new Error("WebSocket connection failed"));
+  });
+  return ws;
+}
+
+export function decodeMessage(data: unknown): Record<string, unknown> {
+  if (typeof data === "string") {
+    return JSON.parse(data);
+  }
+  const buf = data instanceof Buffer ? data : Buffer.from(data as ArrayBuffer);
+  const decoded = decodeRouteFrame(buf);
+  const header = decoded.header as Record<string, unknown>;
+  return {
+    ...header,
+    kind: decoded.kind,
+    payload: new TextDecoder().decode(decoded.payload),
+  };
+}
+
+export function waitForMessage(ws: WebSocket): Promise<Record<string, unknown>> {
+  return new Promise((resolve) => {
+    ws.onmessage = (e) => resolve(decodeMessage(e.data));
+  });
+}
+
+export function waitForMessages(ws: WebSocket, n: number): Promise<Record<string, unknown>[]> {
+  return new Promise((resolve) => {
+    const messages: Record<string, unknown>[] = [];
+    ws.onmessage = (e) => {
+      messages.push(decodeMessage(e.data));
+      if (messages.length >= n) resolve(messages);
+    };
+  });
+}
+
+/**
+ * Wait for the next message of a specific `type`, ignoring anything else that
+ * arrives first (e.g. a `peer-online` fan-out interleaved with the reply a
+ * test actually cares about). Uses `addEventListener` so it composes with
+ * other concurrent waiters instead of clobbering `ws.onmessage`.
+ */
+export function waitForType(ws: WebSocket, type: string): Promise<Record<string, unknown>> {
+  return new Promise((resolve) => {
+    const handler = (e: MessageEvent) => {
+      const m = decodeMessage(e.data);
+      if (m.type === type) {
+        ws.removeEventListener("message", handler as never);
+        resolve(m);
+      }
+    };
+    ws.addEventListener("message", handler as never);
+  });
+}
+
+/** Wait for the socket's close event; resolves with the close code. */
+export function waitForClose(ws: WebSocket): Promise<number> {
+  return new Promise((resolve) => {
+    ws.onclose = (e) => resolve(e.code);
+  });
+}
+
+export async function generateKeyPair(): Promise<{
+  keyPair: CryptoKeyPair;
+  publicKeyBase64: string;
+  privateSeed: Uint8Array;
+}> {
+  const keyPair = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
+  const publicKeyRaw = await crypto.subtle.exportKey("raw", keyPair.publicKey);
+  const jwk = (await crypto.subtle.exportKey("jwk", keyPair.privateKey)) as { d?: string };
+  const dB64Url = jwk.d ?? "";
+  const dB64 = dB64Url.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(dB64Url.length / 4) * 4, "=");
+  const privateSeed = new Uint8Array(Buffer.from(dB64, "base64"));
+  return {
+    keyPair,
+    publicKeyBase64: Buffer.from(publicKeyRaw).toString("base64"),
+    privateSeed,
+  };
+}
+
+export interface HelloOptions {
+  deviceId: string;
+  deviceType?: "agent" | "app";
+  name?: string;
+  epoch?: number;
+  licenseToken?: string;
+  ts?: string;
+  nonce?: string;
+  /** Override the signed host — for host-mismatch tests. */
+  relayHost?: string;
+  /** Reuse an identity (e.g. a reconnect / epoch test) instead of a fresh key. */
+  publicKeyBase64?: string;
+  privateSeed?: Uint8Array;
+}
+
+/**
+ * Build a fully-signed v3 `hello` (defaults fill in a valid keypair, current
+ * `ts`, random nonce, and the relay's own host). Return the keypair so callers
+ * can reuse it across a reconnect or sign further agent-side messages.
+ */
+export async function makeHello(
+  relay: RelayServer,
+  opts: HelloOptions,
+): Promise<{ hello: Record<string, unknown>; publicKeyBase64: string; privateSeed: Uint8Array }> {
+  const deviceType = opts.deviceType ?? "agent";
+  let publicKeyBase64: string;
+  let privateSeed: Uint8Array;
+  if (opts.publicKeyBase64 && opts.privateSeed) {
+    publicKeyBase64 = opts.publicKeyBase64;
+    privateSeed = opts.privateSeed;
+  } else {
+    const kp = await generateKeyPair();
+    publicKeyBase64 = kp.publicKeyBase64;
+    privateSeed = kp.privateSeed;
+  }
+  const epoch = opts.epoch ?? Math.floor(Date.now() / 1000);
+  const ts = opts.ts ?? new Date().toISOString();
+  const nonce = opts.nonce ?? Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64");
+  const licenseToken = opts.licenseToken ?? "test-token";
+  const relayHost = opts.relayHost ?? relayHostFor(relay);
+
+  const sigBody = buildHelloSigBody({
+    relayHost,
+    deviceType,
+    deviceId: opts.deviceId,
+    publicKey: publicKeyBase64,
+    epoch,
+    licenseToken,
+    ts,
+    nonce,
+  });
+  const sig = edSign(null, Buffer.from(sigBody), { key: rawSeedToPkcs8(privateSeed), format: "der", type: "pkcs8" }).toString("base64");
+
+  const hello: Record<string, unknown> = {
+    type: "hello",
+    protocolVersion: 3,
+    deviceType,
+    deviceId: opts.deviceId,
+    name: opts.name ?? opts.deviceId,
+    publicKey: publicKeyBase64,
+    epoch,
+    licenseToken,
+    ts,
+    nonce,
+    sig,
+  };
+  return { hello, publicKeyBase64, privateSeed };
+}
+
+/** Connect, send a valid `hello`, and await the first relay reply (welcome or error). */
+export async function connectHello(
+  relay: RelayServer,
+  opts: HelloOptions,
+): Promise<{ ws: WebSocket; publicKeyBase64: string; privateSeed: Uint8Array; welcome: Record<string, unknown> }> {
+  const { hello, publicKeyBase64, privateSeed } = await makeHello(relay, opts);
+  const ws = await connect(relay);
+  const first = waitForMessage(ws);
+  ws.send(JSON.stringify(hello));
+  const welcome = await first;
+  return { ws, publicKeyBase64, privateSeed, welcome };
+}
+
+/**
+ * Drive the v3 pair flow: an app sends pair-request (with deadline), the agent
+ * receives the relay-stamped forward, signs an approval echoing `pairId`, and
+ * both sides observe `pair-connected`. Both sockets must already be past hello.
+ *
+ * The phone's PAIRING key defaults to a fresh keypair, distinct from the
+ * connection key it authenticated with at hello. That mirrors the real app
+ * (PhoneIdentity vs DeviceIdentity are independently generated) — reusing one
+ * key for both roles hides bugs in which anchor the relay uses.
+ */
+export async function completePairFlow(opts: {
+  agentWs: WebSocket;
+  appWs: WebSocket;
+  agentId: string;
+  appId: string;
+  agentPrivSeed: Uint8Array;
+  /** Override the phone's pairing key; defaults to a fresh, distinct keypair. */
+  pairingPubkey?: string;
+}): Promise<{ pairingPubkey: string }> {
+  const { agentWs, appWs, agentId, appId, agentPrivSeed } = opts;
+  const pairingPubkey = opts.pairingPubkey ?? (await generateKeyPair()).publicKeyBase64;
+  const nonce = Buffer.from(crypto.getRandomValues(new Uint8Array(24))).toString("base64");
+
+  const agentForwarded = new Promise<Record<string, unknown>>((resolve) => {
+    const h = (e: MessageEvent) => {
+      if (typeof e.data !== "string") return;
+      const m = JSON.parse(e.data);
+      if (m.type === "pair-request") {
+        agentWs.removeEventListener("message", h as never);
+        resolve(m);
+      }
+    };
+    agentWs.addEventListener("message", h as never);
+  });
+
+  appWs.send(JSON.stringify({
+    type: "pair-request",
+    agentDeviceId: agentId,
+    phonePubkey: pairingPubkey,
+    phoneDeviceId: appId,
+    nonce,
+    requestedAt: relayTestRequestedAt(),
+    deadline: Date.now() + 60_000,
+    phoneSignature: RELAY_TEST_PLACEHOLDER_SIG,
+  }));
+  const forwarded = await agentForwarded;
+  const pairId = forwarded.pairId as string;
+
+  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  const signature = signPairApproval({
+    agentDeviceId: agentId,
+    phonePubkey: pairingPubkey,
+    phoneDeviceId: appId,
+    nonce,
+    expiresAt,
+    agentEd25519Priv: agentPrivSeed,
+  });
+
+  const waitConnected = (ws: WebSocket) => new Promise<void>((resolve) => {
+    const h = (e: MessageEvent) => {
+      if (typeof e.data !== "string") return;
+      const m = JSON.parse(e.data);
+      if (m.type === "pair-connected") {
+        ws.removeEventListener("message", h as never);
+        resolve();
+      }
+    };
+    ws.addEventListener("message", h as never);
+  });
+  const agentConnected = waitConnected(agentWs);
+  const appConnected = waitConnected(appWs);
+
+  agentWs.send(JSON.stringify({
+    type: "pair-approval",
+    pairId,
+    phonePubkey: pairingPubkey,
+    phoneDeviceId: appId,
+    nonce,
+    expiresAt,
+    signature,
+  }));
+
+  await Promise.all([agentConnected, appConnected]);
+  return { pairingPubkey };
+}
+
+/** Connect an agent + app via hello and pair them, returning both sockets and keys. */
+export async function setupPairedDevices(relay: RelayServer, prefix: string) {
+  const agentId = `${prefix}-agent`;
+  const appId = `${prefix}-app`;
+  const agent = await connectHello(relay, { deviceId: agentId, deviceType: "agent" });
+  const app = await connectHello(relay, { deviceId: appId, deviceType: "app" });
+
+  await completePairFlow({
+    agentWs: agent.ws,
+    appWs: app.ws,
+    agentId,
+    appId,
+    agentPrivSeed: agent.privateSeed,
+  });
+
+  return { agentWs: agent.ws, appWs: app.ws, agent, app, agentId, appId };
+}
+
+export type { RelayServer, RelayServerDeps };

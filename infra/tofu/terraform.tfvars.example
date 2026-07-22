@@ -1,0 +1,25 @@
+# Copy to terraform.tfvars and fill in. (terraform.tfvars is gitignored.)
+# In CI these come from TF_VAR_* env vars instead.
+#
+# This same file is used for BOTH environments — region, vm_size, pg_sku and
+# domain are derived from the selected workspace (see locals.tf), so you don't
+# set them per-env:
+#   tofu workspace select -or-create prod      # -> westus2, Standard_D2as_v7, antgrid.ai
+#   tofu apply
+#   tofu workspace select -or-create staging   # -> southeastasia, Standard_B2als_v2, staging.antgrid.ai
+#   tofu apply
+
+# NOTE: ssh_public_keys is NOT set here. The authorized SSH public keys live in
+# the committed infra/tofu/ssh_keys.auto.tfvars (public keys aren't secret, so
+# they're version-controlled and shared by local + CI). Edit that file to add or
+# remove keys. This file is only for secret/per-machine overrides below.
+
+# Optional overrides. location/vm_size/pg_sku/domain default per-environment
+# (locals.tf); set them here only to override for the selected workspace.
+# NB: this subscription REJECTS vm creation in eastus / eastus2 / westeurope.
+# location       = "westus2"
+# vm_size        = "Standard_D2as_v7"
+# pg_sku         = "B_Standard_B1ms"
+# admin_username = "azureuser"
+# domain         = "antgrid.ai"
+# manage_dns     = false

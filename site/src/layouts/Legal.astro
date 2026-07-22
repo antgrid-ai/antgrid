@@ -1,0 +1,106 @@
+---
+import Base from "./Base.astro";
+
+interface Props {
+  frontmatter: { title: string; description: string; path: string };
+}
+const { frontmatter } = Astro.props;
+---
+<Base title={frontmatter.title} description={frontmatter.description} path={frontmatter.path}>
+  <main class="mx-auto max-w-3xl px-6 py-16">
+    <article class="legal-prose">
+      <slot />
+    </article>
+  </main>
+</Base>
+
+<style is:global>
+  .legal-prose {
+    font-size: 14px;
+    line-height: 1.7;
+    color: var(--color-muted);
+  }
+  .legal-prose h1 {
+    font-size: 30px;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    color: var(--color-ink);
+    margin-bottom: 0.75rem;
+  }
+  .legal-prose h2 {
+    font-size: 18px;
+    font-weight: 500;
+    color: var(--color-ink);
+    margin-top: 2.5rem;
+    margin-bottom: 0.85rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--color-edge-inner);
+  }
+  .legal-prose h3 {
+    font-size: 14.5px;
+    font-weight: 500;
+    color: var(--color-ink2);
+    margin-top: 1.5rem;
+    margin-bottom: 0.5rem;
+  }
+  .legal-prose p {
+    margin-bottom: 1rem;
+  }
+  .legal-prose strong {
+    color: var(--color-ink);
+    font-weight: 600;
+  }
+  .legal-prose a {
+    color: var(--color-indigo);
+    text-decoration: none;
+  }
+  .legal-prose a:hover {
+    color: var(--color-indigo2);
+    text-decoration: underline;
+  }
+  .legal-prose ul {
+    list-style: disc;
+    padding-left: 1.35rem;
+    margin-bottom: 1rem;
+  }
+  .legal-prose li {
+    margin-bottom: 0.4rem;
+  }
+  .legal-prose li::marker {
+    color: var(--color-faint);
+  }
+  .legal-prose code {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--color-ink2);
+    background: var(--color-group);
+    border: 1px solid var(--color-edge-inner);
+    border-radius: 3px;
+    padding: 0.1em 0.35em;
+  }
+  .legal-prose table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1.25rem 0;
+    font-size: 13px;
+  }
+  .legal-prose th,
+  .legal-prose td {
+    border: 1px solid var(--color-edge);
+    padding: 0.55rem 0.7rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  .legal-prose th {
+    background: var(--color-chrome);
+    color: var(--color-ink2);
+    font-weight: 500;
+  }
+  /* "Last updated" line — the first paragraph after the H1 */
+  .legal-prose h1 + p {
+    color: var(--color-faint);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    margin-bottom: 2rem;
+  }
+</style>

@@ -1,0 +1,80 @@
+name: Setup Android toolchain
+description: >-
+  Java + Flutter + Bun + Rust + NDK r28, with the aligned PTY override built into
+  app/.prebuilt/. Shared by ci-android.yml and deploy-android.yml so the toolchain
+  (and its version pins) live in ONE place. Caches the Flutter SDK, cargo build,
+  Gradle home, and the Bun install cache.
+
+inputs:
+  pty-targets:
+    description: portable_pty targets passed to build-pty-android.ts.
+    default: arm64,x64
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-java@v5
+      with:
+        distribution: temurin
+        java-version: '17'
+
+    - uses: subosito/flutter-action@v2
+      with:
+        channel: stable
+        flutter-version: '3.44.2'
+        cache: true                      # cache the Flutter SDK between runs
+
+    - uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: '1.3'
+
+    - name: Cache Bun install cache
+      uses: actions/cache@v6
+      with:
+        path: ~/.bun/install/cache
+        key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+        restore-keys: bun-${{ runner.os }}-
+
+    # Rust + the Android cross-compile targets build-pty-android.ts needs.
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: aarch64-linux-android,x86_64-linux-android
+
+    # Cache the cargo registry + target/ so the portable_pty cross-compile isn't
+    # rebuilt from scratch every run (the slowest part of a cold Android job).
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: pty-android
+
+    # Caches ~/.gradle (wrapper dists + resolved deps) so Flutter's Gradle build
+    # doesn't re-download the Android dependency graph each run.
+    - uses: gradle/actions/setup-gradle@v5
+
+    # NDK r28+ — its lld defaults LOAD p_align to 16 KB. Not cached: the extracted
+    # NDK is multi-GB and would evict the higher-value Gradle/Rust/Flutter caches
+    # under the 10 GB repo budget.
+    - name: Install NDK r28
+      shell: bash
+      run: |
+        # Often already in the runner image — install only if absent. `yes` keeps
+        # writing after sdkmanager is satisfied and exits 0, so the pipe breaks and
+        # `yes` returns non-zero; under the step's default `pipefail` that would
+        # fail the step despite a clean install. Drop pipefail for the pipe so only
+        # sdkmanager's own exit status counts.
+        if [ ! -d "$ANDROID_SDK_ROOT/ndk/28.2.13676358" ]; then
+          set +o pipefail
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install "ndk;28.2.13676358"
+          set -o pipefail
+        fi
+        ln -sf "$ANDROID_SDK_ROOT/ndk/28.2.13676358" "$ANDROID_NDK_HOME"
+
+    - name: Flutter pub get
+      working-directory: app
+      shell: bash
+      run: flutter pub get          # populates the pub cache the script reads
+
+    # Must run AFTER pub get (portable_pty crate in the cache) and BEFORE the
+    # build (so the aligned .so is in app/.prebuilt/ when the hook looks).
+    - name: Build 16 KB-aligned PTY override
+      shell: bash
+      run: bun run scripts/build-pty-android.ts --targets ${{ inputs.pty-targets }}

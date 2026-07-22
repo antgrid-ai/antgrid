@@ -1,0 +1,224 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../config/environment.dart';
+import '../design/theme_presets.dart';
+import '../storage/scoped_prefs.dart';
+
+const _kDefaultRelayUrl = 'app.defaultRelayUrl';
+const _kThemePreset = 'app.theme.preset';
+const _kCustomBg = 'app.theme.custom.bg';
+const _kCustomPrimary = 'app.theme.custom.primary';
+const _kCustomAccent = 'app.theme.custom.accent';
+const _kUiScale = 'antgrid.ui_scale.v1';
+const _kTelemetryEnabled = 'app.telemetry.enabled';
+
+/// Every key AppSettings persists. The WithCache instance backing app settings
+/// must allow exactly these — reads/writes of any other key throw.
+const appSettingsPrefsKeys = <String>{
+  _kDefaultRelayUrl,
+  _kThemePreset,
+  _kCustomBg,
+  _kCustomPrimary,
+  _kCustomAccent,
+  _kUiScale,
+  _kTelemetryEnabled,
+};
+
+@immutable
+class AppSettings {
+  const AppSettings({
+    this.defaultRelayUrl,
+    this.preset = AbThemePreset.zinc,
+    this.customBg,
+    this.customPrimary,
+    this.customAccent,
+    this.uiScale = 1.0,
+    this.telemetryEnabled = true,
+  });
+
+  final String? defaultRelayUrl;
+  final AbThemePreset preset;
+  final Color? customBg;
+  final Color? customPrimary;
+  final Color? customAccent;
+  final double uiScale;
+  final bool telemetryEnabled;
+
+  static const defaults = AppSettings();
+
+  AppSettings copyWith({
+    String? defaultRelayUrl,
+    bool clearDefaultRelayUrl = false,
+    AbThemePreset? preset,
+    Color? customBg,
+    Color? customPrimary,
+    Color? customAccent,
+    double? uiScale,
+    bool? telemetryEnabled,
+  }) {
+    return AppSettings(
+      defaultRelayUrl: clearDefaultRelayUrl
+          ? null
+          : (defaultRelayUrl ?? this.defaultRelayUrl),
+      preset: preset ?? this.preset,
+      customBg: customBg ?? this.customBg,
+      customPrimary: customPrimary ?? this.customPrimary,
+      customAccent: customAccent ?? this.customAccent,
+      uiScale: uiScale ?? this.uiScale,
+      telemetryEnabled: telemetryEnabled ?? this.telemetryEnabled,
+    );
+  }
+
+  static AppSettings fromPrefs(SharedPreferencesWithCache prefs) {
+    final presetName = prefs.getString(_kThemePreset);
+    final preset = AbThemePreset.values.firstWhere(
+      (p) => p.name == presetName,
+      orElse: () => AbThemePreset.zinc,
+    );
+    Color? readColor(String key) {
+      final v = prefs.getInt(key);
+      return v == null ? null : Color(v);
+    }
+
+    return AppSettings(
+      defaultRelayUrl: prefs.getString(_kDefaultRelayUrl),
+      preset: preset,
+      customBg: readColor(_kCustomBg),
+      customPrimary: readColor(_kCustomPrimary),
+      customAccent: readColor(_kCustomAccent),
+      uiScale: prefs.getDouble(_kUiScale) ?? 1.0,
+      telemetryEnabled: prefs.getBool(_kTelemetryEnabled) ?? true,
+    );
+  }
+}
+
+class AppSettingsService extends Notifier<AppSettings> {
+  AppSettingsService(this._prefs, this._seed);
+
+  final SharedPreferencesWithCache _prefs;
+  final AppSettings _seed;
+
+  @override
+  AppSettings build() => _seed;
+
+  /// Persists the relay URL. Returns `null` on success, or a human-readable
+  /// error message if the URL is malformed — caught at input rather than
+  /// surfacing later as a stuck "Enabling…" button.
+  Future<String?> setDefaultRelayUrl(String? url) async {
+    final trimmed = url?.trim();
+    final empty = trimmed == null || trimmed.isEmpty;
+    if (!empty) {
+      final error = _validateRelayUrl(trimmed);
+      if (error != null) return error;
+    }
+    state = state.copyWith(
+      defaultRelayUrl: empty ? null : trimmed,
+      clearDefaultRelayUrl: empty,
+    );
+    if (empty) {
+      await _prefs.remove(_kDefaultRelayUrl);
+    } else {
+      await _prefs.setString(_kDefaultRelayUrl, trimmed);
+    }
+    return null;
+  }
+
+  /// Mirrors the agent-side check in `startRelay`. `http(s)` is allowed
+  /// alongside `ws(s)` because some dev setups upgrade at connect time.
+  static String? _validateRelayUrl(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+      return 'Relay URL must include a scheme and host, e.g. wss://relay.example.com';
+    }
+    const allowed = {'ws', 'wss', 'http', 'https'};
+    if (!allowed.contains(uri.scheme.toLowerCase())) {
+      return 'Relay URL scheme "${uri.scheme}" is not supported. Use wss:// or ws://.';
+    }
+    return null;
+  }
+
+  Future<void> setPreset(AbThemePreset preset) async {
+    state = state.copyWith(preset: preset);
+    await _prefs.setString(_kThemePreset, preset.name);
+  }
+
+  Future<void> setCustomColors({
+    Color? bg,
+    Color? primary,
+    Color? accent,
+  }) async {
+    state = state.copyWith(
+      preset: AbThemePreset.custom,
+      customBg: bg ?? state.customBg,
+      customPrimary: primary ?? state.customPrimary,
+      customAccent: accent ?? state.customAccent,
+    );
+    await _prefs.setString(_kThemePreset, AbThemePreset.custom.name);
+    if (bg != null) await _prefs.setInt(_kCustomBg, _argb(bg));
+    if (primary != null) await _prefs.setInt(_kCustomPrimary, _argb(primary));
+    if (accent != null) await _prefs.setInt(_kCustomAccent, _argb(accent));
+  }
+
+  Future<void> setUiScale(double scale) async {
+    state = state.copyWith(uiScale: scale);
+    await _prefs.setDouble(_kUiScale, scale);
+  }
+
+  Future<void> setTelemetryEnabled(bool enabled) async {
+    state = state.copyWith(telemetryEnabled: enabled);
+    await _prefs.setBool(_kTelemetryEnabled, enabled);
+  }
+
+  Future<void> reset() async {
+    state = AppSettings.defaults;
+    await Future.wait([
+      _prefs.remove(_kDefaultRelayUrl),
+      _prefs.remove(_kThemePreset),
+      _prefs.remove(_kCustomBg),
+      _prefs.remove(_kCustomPrimary),
+      _prefs.remove(_kCustomAccent),
+      _prefs.remove(_kUiScale),
+      _prefs.remove(_kTelemetryEnabled),
+    ]);
+  }
+}
+
+int _argb(Color c) =>
+    ((c.a * 255).round() << 24) |
+    ((c.r * 255).round() << 16) |
+    ((c.g * 255).round() << 8) |
+    (c.b * 255).round();
+
+/// Opens the WithCache instance scoped to the app-settings keys. Shared by
+/// `main.dart` and test setup so the allowList lives in one place.
+Future<SharedPreferencesWithCache> openAppSettingsPrefs() =>
+    openScopedPrefs(appSettingsPrefsKeys);
+
+/// Overridden in `main.dart` with a prefs-seeded instance — calling the
+/// default impl is a programmer error.
+final appSettingsServiceProvider =
+    NotifierProvider<AppSettingsService, AppSettings>(
+      () => throw UnimplementedError(
+        'appSettingsServiceProvider must be overridden in ProviderScope with a '
+        'prefs-seeded AppSettingsService instance.',
+      ),
+    );
+
+/// Compile-time relay URL baked in via `--dart-define=RELAY_URL=...`. Lets a
+/// build point at a specific relay (e.g. staging) without anyone touching App
+/// Settings. Empty (the default) means "no compile-time default".
+const String relayUrlFromEnv = String.fromEnvironment('RELAY_URL');
+
+/// Canonical relay URL source. Precedence: an explicit App Settings value the
+/// user saved wins; otherwise the `RELAY_URL` dart-define; otherwise the
+/// build-mode default (release → prod, debug/profile → staging). Always returns
+/// a non-empty URL, so callers don't need their own fallback. For the local
+/// full-stack loop pass `--dart-define=RELAY_URL=ws://localhost:3000`.
+final defaultRelayUrlProvider = Provider<String>((ref) {
+  final fromSettings = ref.watch(appSettingsServiceProvider).defaultRelayUrl;
+  if (fromSettings != null && fromSettings.isNotEmpty) return fromSettings;
+  if (relayUrlFromEnv.isNotEmpty) return relayUrlFromEnv;
+  return AppEnvironment.relayUrl;
+});

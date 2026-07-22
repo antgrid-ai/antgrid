@@ -1,0 +1,664 @@
+name: Build — desktop (macOS / Windows / Linux)
+
+# Desktop builds for macOS + Windows + Linux. Two entry points:
+#   - Push a v* tag        -> builds all platforms (release) AND publishes the
+#                             installers as a GitHub Release on the PUBLIC repo
+#                             Radha-AI-Products/antgrid-releases. The site links
+#                             releases/latest/download/<asset> — asset filenames
+#                             (antgrid-macos.dmg / antgrid-windows-setup.exe /
+#                             antgrid-linux.AppImage) are load-bearing, never
+#                             rename them.
+#   - Manual dispatch      -> builds selected platform/mode, artifacts only
+#                             (no publish). Run from the Actions tab or
+#                             `gh workflow run build-desktop.yml`.
+#
+# Signing is OPTIONAL and auto-detected: with no signing secrets set the builds
+# are UNSIGNED (fine for sharing with people who can bypass Gatekeeper / SmartScreen).
+# Add the secrets listed under each "Code sign" step later to get signed +
+# (macOS) notarized output with no workflow changes.
+
+on:
+  # A v* tag builds ALL platforms in RELEASE mode and publishes the zips as a
+  # GitHub Release on the public antgrid-releases repo (inputs are empty on
+  # push events; every `inputs.*` consumer below defaults accordingly).
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Which platform(s) to build
+        type: choice
+        default: all
+        # `both` is a legacy alias kept for muscle memory — it means macOS +
+        # Windows only (the pre-Linux set). `all` is the everything build.
+        options: [all, both, macos, windows, linux]
+      build_mode:
+        description: Flutter build mode
+        type: choice
+        default: release
+        options: [release, profile, debug]
+
+concurrency:
+  # Distinct (platform, mode) dispatches on the same branch must not cancel each
+  # other — only a newer dispatch of the SAME config supersedes an in-flight one.
+  group: build-desktop-${{ github.ref }}-${{ inputs.platform }}-${{ inputs.build_mode }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: '3.44.2'   # keep in lockstep with .github/actions/setup-android
+  LICENSE_API_URL: 'https://app.antgrid.ai'
+
+jobs:
+  macos:
+    # Empty inputs = tag push = build everything.
+    if: ${{ github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'both' || inputs.platform == 'macos' }}
+    runs-on: macos-15
+    env:
+      # Tag pushes carry no inputs — default to a release build.
+      BUILD_MODE: ${{ inputs.build_mode || 'release' }}
+      # Flutter's product subfolder for the selected mode, computed once so the
+      # sign and package steps can never disagree on which bundle they handle.
+      DEST: ${{ (inputs.build_mode == '' || inputs.build_mode == 'release') && 'Release' || inputs.build_mode == 'profile' && 'Profile' || 'Debug' }}
+      # Lifted to a job env so the signing step can gate on it: the `secrets`
+      # context is not reliably readable inside a step-level `if`, but `env` is.
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3'
+
+      - uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+
+      - name: Flutter pub get
+        working-directory: app
+        run: flutter pub get
+
+      - name: Install JS workspace deps
+        # --ignore-scripts skips the root/web postinstall (Prisma client codegen
+        # for the web service) — the desktop build never touches Postgres or web.
+        run: bun install --ignore-scripts
+
+      - name: Build bridge (universal macOS binary)
+        run: |
+          set -euo pipefail
+          mkdir -p bridge/dist
+          bun build bridge/src/index.ts --compile \
+            --target bun-darwin-arm64 \
+            --outfile bridge/dist/antgrid-bridge-arm64 \
+            --define 'process.env.LICENSE_API_URL="${{ env.LICENSE_API_URL }}"' \
+            --define 'process.env.ANTGRID_BRIDGE_COMPILED="1"'
+          bun build bridge/src/index.ts --compile \
+            --target bun-darwin-x64 \
+            --outfile bridge/dist/antgrid-bridge-x64 \
+            --define 'process.env.LICENSE_API_URL="${{ env.LICENSE_API_URL }}"' \
+            --define 'process.env.ANTGRID_BRIDGE_COMPILED="1"'
+          lipo -create -output bridge/dist/antgrid-bridge \
+            bridge/dist/antgrid-bridge-arm64 \
+            bridge/dist/antgrid-bridge-x64
+
+      - name: Smoke test compiled bridge hook
+        run: bun run bridge/scripts/smoke-hook-binary.ts bridge/dist/antgrid-bridge
+
+      - name: Build macOS app
+        id: build
+        working-directory: app
+        run: flutter build macos --${{ env.BUILD_MODE }} --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }}
+
+      - name: Copy bridge into .app bundle
+        if: ${{ steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          MACOS_BIN="app/build/macos/Build/Products/$DEST/antgrid.app/Contents/MacOS"
+          cp bridge/dist/antgrid-bridge "$MACOS_BIN/antgrid-bridge"
+          chmod +x "$MACOS_BIN/antgrid-bridge"
+
+      # Signing — runs only when the Apple secrets are present AND the build is
+      # `release`. debug/profile bundles carry `get-task-allow` (which notarization
+      # later rejects) and need the JIT entitlement (DebugProfile.entitlements) that a
+      # hardened-runtime re-sign would have to special-case; release uses the empty
+      # Release.entitlements + AOT, so it is the only signable/notarizable mode.
+      # Notarization is a SEPARATE step below, targeting the packaged .dmg (sign the
+      # app here → package the dmg → notarize+staple the dmg).
+      # Required secrets (this step):
+      #   APPLE_CERTIFICATE_BASE64   base64 of a "Developer ID Application" .p12
+      #   APPLE_CERTIFICATE_PASSWORD password for that .p12
+      #   APPLE_SIGNING_IDENTITY     e.g. "Developer ID Application: Name (TEAMID)"
+      # (the notarize step below additionally needs APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID)
+      - name: Code sign (optional)
+        if: ${{ env.APPLE_SIGNING_IDENTITY != '' && env.BUILD_MODE == 'release' }}
+        env:
+          APP: app/build/macos/Build/Products/Release/antgrid.app
+          CERT_B64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          CERT_PW: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          # Import the signing cert into a throwaway keychain.
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KP="$(uuidgen)"
+          security create-keychain -p "$KP" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KP" "$KEYCHAIN"
+          echo "$CERT_B64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PW" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KP" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+
+          # Sign nested Mach-O inside-out, THEN the outer bundle. `--deep` is
+          # unreliable for Flutter .app bundles (Apple discourages it and it can
+          # leave embedded frameworks invalidly signed), so sign each explicitly.
+          while IFS= read -r -d '' dylib; do
+            codesign --force --options runtime --timestamp --sign "$IDENTITY" "$dylib"
+          done < <(find "$APP/Contents/Frameworks" -name '*.dylib' -print0)
+          for fw in "$APP"/Contents/Frameworks/*.framework; do
+            [ -e "$fw" ] && codesign --force --options runtime --timestamp --sign "$IDENTITY" "$fw"
+          done
+          # Sign the bundled bridge binary before the outer bundle seal, with its own
+          # entitlements (the outer-app entitlement does not propagate to this separate
+          # Mach-O). The bridge is a Bun `--compile` single-file executable, and needs:
+          #   - JIT entitlements (allow-jit, allow-unsigned-executable-memory,
+          #     disable-executable-page-protection, allow-dyld-environment-variables):
+          #     Bun embeds JavaScriptCore, which needs writable-executable memory. Under
+          #     Hardened Runtime the OS blocks that without these, and JSC then fails to
+          #     install SharedArrayBuffer (which @anthropic-ai/claude-agent-sdk uses
+          #     unguarded at module top level) -> bridge dies "SharedArrayBuffer is not
+          #     defined". Bun's documented set: bun.sh/docs/bundler/executables
+          #   - disable-library-validation: the binary embeds bun-pty's PTY dylib
+          #     (ad-hoc/linker-signed, no Team ID) and dlopens it from a temp dir; Team-ID
+          #     library validation would reject it as a foreign team and the PTY dies.
+          # Keep Bridge.entitlements comment-free ASCII: codesign's AMFI plist parser is
+          # strict (rejects `--` in XML comments, unlike plutil) and fails the whole sign.
+          codesign --force --options runtime --timestamp \
+            --entitlements app/macos/Runner/Bridge.entitlements \
+            --sign "$IDENTITY" "$APP/Contents/MacOS/antgrid-bridge"
+          codesign --force --options runtime --timestamp \
+            --entitlements app/macos/Runner/Release.entitlements \
+            --sign "$IDENTITY" "$APP"
+          codesign --verify --strict --verbose=2 "$APP"
+
+      # Always package the DMG when the BUILD succeeded, even if the optional sign
+      # step didn't run (unsigned/dispatch builds) — a good build is never discarded.
+      # create-dmg lays out a drag-to-Applications window (app icon + Applications
+      # alias). Signing/notarization of the dmg happens in the next step.
+      - name: Package DMG
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          brew install create-dmg
+          APP="app/build/macos/Build/Products/$DEST/antgrid.app"
+          create-dmg \
+            --volname "Antgrid" \
+            --window-size 600 400 \
+            --icon-size 120 \
+            --icon "antgrid.app" 150 190 \
+            --app-drop-link 450 190 \
+            --no-internet-enable \
+            "antgrid-macos.dmg" \
+            "$APP"
+
+      # Notarize + staple the DMG. Same gate as the sign step; stapling the dmg is
+      # Apple's supported flow (mounting + drag-out passes Gatekeeper offline). No
+      # continue-on-error: a notary/staple failure fails the job so an unstapled dmg
+      # is never published as a release. Required secrets: APPLE_ID / APPLE_PASSWORD
+      # (app-specific) / APPLE_TEAM_ID, plus APPLE_SIGNING_IDENTITY to sign the dmg.
+      - name: Notarize + staple DMG (optional)
+        if: ${{ env.APPLE_SIGNING_IDENTITY != '' && env.BUILD_MODE == 'release' }}
+        env:
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PW: ${{ secrets.APPLE_PASSWORD }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          codesign --force --timestamp --sign "$IDENTITY" "antgrid-macos.dmg"
+          xcrun notarytool submit "antgrid-macos.dmg" \
+            --apple-id "$APPLE_ID" --password "$APPLE_PW" --team-id "$TEAM_ID" --wait
+          xcrun stapler staple "antgrid-macos.dmg"
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        with:
+          name: antgrid-macos-${{ env.BUILD_MODE }}
+          path: antgrid-macos.dmg
+          if-no-files-found: error
+
+  windows:
+    if: ${{ github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'both' || inputs.platform == 'windows' }}
+    runs-on: windows-latest
+    env:
+      BUILD_MODE: ${{ inputs.build_mode || 'release' }}
+      DEST: ${{ (inputs.build_mode == '' || inputs.build_mode == 'release') && 'Release' || inputs.build_mode == 'profile' && 'Profile' || 'Debug' }}
+      # See the macOS job: gate the signing step on env, not the secrets context.
+      WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
+      # Microsoft Store publish gate — lifted to env so the publish steps' `if`
+      # can read them (secrets aren't readable in a step-level `if`). MSSTORE_APP_ID
+      # is a repo *variable* (vars), not a secret — it's the public Store product
+      # id, e.g. get it from `msstore apps list`. Leave any unset to keep the Store
+      # publish inert; the direct-download Inno installer is unaffected either way.
+      MSSTORE_CLIENT_ID: ${{ secrets.MSSTORE_CLIENT_ID }}
+      MSSTORE_APP_ID: ${{ vars.MSSTORE_APP_ID }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3'
+
+      - uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+
+      - name: Flutter pub get
+        working-directory: app
+        run: flutter pub get
+
+      # firebase_core self-declares `windows` plugin support, so `flutter build
+      # windows` auto-registers it and its CMake downloads the 913 MB / 8.4 GB
+      # firebase-cpp-sdk. But every Firebase call in lib/ is guarded to
+      # TargetPlatform.android (see main.dart), so nothing uses it on Windows —
+      # firebase_messaging isn't even built here. Strip `windows` from the
+      # RESOLVED plugin pubspec so the `pub get` that `flutter build windows`
+      # runs next re-reads it and regenerates the plugin list
+      # (generated_plugins.cmake / .flutter-plugins-dependencies) without
+      # firebase_core. NOTE: this needs that implicit pub get — do NOT pass
+      # --no-pub to the Windows build. Only `pub get` regenerates the plugin
+      # list (the assemble phony target does not), so with --no-pub the pre-strip
+      # list is reused and the 8.4 GB firebase-cpp-sdk builds anyway (regression
+      # seen in Radha-AI-Products/antgrid run #37).
+      #
+      # Best-effort: this is a build-time optimization, so if the strip can't
+      # apply (upstream pubspec reformat, new keys in the windows block) we WARN
+      # and let firebase build rather than fail — a firebase-bearing installer
+      # still works, just larger, and blocking a `v*` release over a perf-only
+      # drift isn't worth it (the publish job needs this one). The self-check
+      # below surfaces the drift in seconds instead of after the 8.4 GB build.
+      - name: Exclude firebase_core from the Windows build (unused on Windows)
+        shell: bash
+        working-directory: app
+        run: |
+          set -euo pipefail
+          file=$(bun -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const { pathToFileURL, fileURLToPath } = require("node:url");
+            const cfg = require("./.dart_tool/package_config.json");
+            const pkg = cfg.packages.find(p => p.name === "firebase_core");
+            if (!pkg) process.exit(0);
+            const base = pathToFileURL(path.join(process.cwd(), ".dart_tool") + path.sep);
+            const root = new URL(pkg.rootUri.endsWith("/") ? pkg.rootUri : pkg.rootUri + "/", base);
+            const file = fileURLToPath(new URL("pubspec.yaml", root));
+            const before = fs.readFileSync(file, "utf8");
+            // Tolerate CRLF and indentation drift so the pattern is robust to
+            // however pub happens to have written the cache pubspec on this OS.
+            const after = before.replace(/^[ \t]+windows:\r?\n[ \t]+pluginClass: FirebaseCorePluginCApi\r?\n/m, "");
+            fs.writeFileSync(file, after);
+            process.stdout.write(file);
+          ')
+          if [ -z "$file" ]; then
+            echo "::warning::firebase_core not resolved; skipping Windows exclusion"
+            exit 0
+          fi
+          if grep -q "FirebaseCorePluginCApi" "$file"; then
+            echo "::warning::Could not strip firebase_core's windows entry ($file); the Windows build will include the 8.4 GB firebase-cpp-sdk — update the strip pattern."
+          else
+            echo "firebase_core windows platform stripped from $file"
+          fi
+
+      - name: Install JS workspace deps
+        # --ignore-scripts skips the root/web postinstall (Prisma client codegen
+        # for the web service) — the desktop build never touches Postgres or web.
+        run: bun install --ignore-scripts
+
+      - name: Build bridge (Windows x64 binary)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force bridge/dist | Out-Null
+          bun build bridge/src/index.ts --compile --target bun-windows-x64 --outfile bridge/dist/antgrid-bridge.exe --define 'process.env.LICENSE_API_URL="${{ env.LICENSE_API_URL }}"' --define 'process.env.ANTGRID_BRIDGE_COMPILED="1"'
+
+      - name: Smoke test compiled bridge hook
+        shell: pwsh
+        run: bun run bridge/scripts/smoke-hook-binary.ts bridge/dist/antgrid-bridge.exe
+
+      - name: Build Windows app
+        id: build
+        working-directory: app
+        run: flutter build windows --${{ env.BUILD_MODE }} --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }}
+
+      # Secondary check that the exclusion held end-to-end: a present SDK zip means
+      # firebase was built anyway (e.g. a future Flutter that ignores the pubspec
+      # edit). Warn, never fail — same best-effort stance as the strip step, and a
+      # warning also avoids a false red build if the build dir is ever cached and
+      # the zip is restored from a prior run.
+      - name: Check firebase-cpp-sdk was not downloaded
+        if: ${{ steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          if ls app/build/windows/x64/firebase_cpp_sdk_windows_*.zip >/dev/null 2>&1; then
+            echo "::warning::firebase-cpp-sdk is present — the Windows firebase exclusion did not hold; the installer is larger than necessary."
+          else
+            echo "firebase-cpp-sdk not present — exclusion holds"
+          fi
+
+      - name: Copy bridge into output folder
+        if: ${{ steps.build.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          Copy-Item bridge/dist/antgrid-bridge.exe `
+            "app/build/windows/x64/runner/$env:DEST/antgrid-bridge.exe"
+
+      # Authenticode signing — runs only when the Windows code-signing secrets are
+      # present. Signs the exe AND the bundled DLLs (flutter_windows.dll, plugins)
+      # so the whole distributed payload is signed, not just the launcher.
+      # Required secrets:
+      #   WINDOWS_CERT_BASE64    base64 of an Authenticode code-signing .pfx
+      #   WINDOWS_CERT_PASSWORD  password for that .pfx
+      - name: Code sign (optional)
+        if: ${{ env.WINDOWS_CERT_BASE64 != '' && steps.build.outcome == 'success' }}
+        shell: pwsh
+        env:
+          CERT_B64: ${{ env.WINDOWS_CERT_BASE64 }}
+          CERT_PW: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = "app/build/windows/x64/runner/$env:DEST"
+          $pfx = Join-Path $env:RUNNER_TEMP 'cert.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT_B64))
+          # signtool ships with the Windows SDK; pick the newest by version path.
+          $signtool = Get-ChildItem 'C:/Program Files (x86)/Windows Kits/10/bin' -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match '\\x64\\' } |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw 'signtool.exe (x64) not found in the Windows SDK' }
+          $targets = Get-ChildItem $dir -Recurse -Include *.exe,*.dll | ForEach-Object { $_.FullName }
+          & $signtool.FullName sign /f $pfx /p $env:CERT_PW /fd SHA256 `
+            /tr http://timestamp.digicert.com /td SHA256 $targets
+
+      # Wrap the signed runner folder in a per-user Inno Setup installer
+      # (app/windows/installer/antgrid.iss). Unconditional (like the old zip) so
+      # unsigned dispatch builds still produce an installer. ISCC resolves
+      # relative paths from the .iss folder, so pass ABSOLUTE paths: /DSourceDir
+      # = the built runner folder, /O = the workspace root (where upload-artifact
+      # looks). AppVersion comes from the tag (v1.2.3 -> 1.2.3), else pubspec.
+      - name: Package installer (Inno Setup)
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install innosetup --no-progress -y
+          $iscc = 'C:/Program Files (x86)/Inno Setup 6/ISCC.exe'
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
+          $src = (Resolve-Path "app/build/windows/x64/runner/$env:DEST").Path
+          $tag = "${{ github.ref_name }}"
+          if ($tag -match '^v(\d+\.\d+\.\d+)') {
+            $ver = $Matches[1]
+          } else {
+            $m = Select-String -Path app/pubspec.yaml -Pattern '^version:\s*(\d+\.\d+\.\d+)' | Select-Object -First 1
+            $ver = if ($m) { $m.Matches[0].Groups[1].Value } else { '0.0.0' }
+          }
+          & $iscc /DAppVersion=$ver /DSourceDir=$src "/O$env:GITHUB_WORKSPACE" app/windows/installer/antgrid.iss
+
+      # Authenticode-sign the installer itself (so SmartScreen trusts what the
+      # user runs), gated on the same cert secret as the inner-binary signing.
+      - name: Sign installer (optional)
+        if: ${{ env.WINDOWS_CERT_BASE64 != '' && steps.build.outcome == 'success' }}
+        shell: pwsh
+        env:
+          CERT_B64: ${{ env.WINDOWS_CERT_BASE64 }}
+          CERT_PW: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pfx = Join-Path $env:RUNNER_TEMP 'cert.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT_B64))
+          $signtool = Get-ChildItem 'C:/Program Files (x86)/Windows Kits/10/bin' -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match '\\x64\\' } |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw 'signtool.exe (x64) not found in the Windows SDK' }
+          & $signtool.FullName sign /f $pfx /p $env:CERT_PW /fd SHA256 `
+            /tr http://timestamp.digicert.com /td SHA256 antgrid-windows-setup.exe
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        with:
+          name: antgrid-windows-${{ env.BUILD_MODE }}
+          path: antgrid-windows-setup.exe
+          if-no-files-found: error
+
+      # Microsoft Store package (MSIX) — a SEPARATE output from the Inno .exe above,
+      # for manual upload to Partner Center. The Store signs the package itself, so
+      # this path uses NO code-signing cert (independent of the WINDOWS_CERT_*
+      # secrets). Release-only: the Store rejects debug/profile packages, so this is
+      # skipped for those dispatch modes (and always runs on a v* tag, which is
+      # release). Identity values (identity_name/publisher/publisher_display_name)
+      # live in app/pubspec.yaml's msix_config and MUST match Partner Center.
+      #   --build-windows false: package the folder we already built above (with the
+      #     bridge copied in and firebase stripped). Letting msix re-run
+      #     `flutter build windows` would drop antgrid-bridge.exe and re-download the
+      #     8.4 GB firebase-cpp-sdk the strip step exists to avoid.
+      # NOTE: this MSIX is intentionally NOT attached to the public GitHub Release —
+      # the publish job only uploads the three named installer files; the Store is
+      # the sole distribution channel for this package.
+      - name: Package MSIX (Microsoft Store)
+        if: ${{ env.BUILD_MODE == 'release' && steps.build.outcome == 'success' }}
+        shell: pwsh
+        working-directory: app
+        run: dart run msix:create --store --build-windows false --output-path "$env:GITHUB_WORKSPACE" --output-name antgrid-store
+
+      - name: Verify MSIX protocol activation
+        if: ${{ env.BUILD_MODE == 'release' && steps.build.outcome == 'success' }}
+        shell: pwsh
+        run: ./scripts/verify-msix-protocol.ps1 -Path antgrid-store.msix -Protocol antgrid
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ env.BUILD_MODE == 'release' && steps.build.outcome == 'success' }}
+        with:
+          name: antgrid-windows-store
+          path: antgrid-store.msix
+          if-no-files-found: error
+
+      # Publish the Store MSIX to Microsoft Store via the Store Developer CLI.
+      # Fires ONLY on a v* tag (a deliberate release) AND only once the Store API
+      # secrets + app id are configured — otherwise skipped, so normal tag builds
+      # keep working before Store automation is set up. Requirements Microsoft
+      # imposes on this path:
+      #   - The app must already have ONE manual submission LIVE in the Store; the
+      #     API can only *update* an existing live app, not create the first one.
+      #   - GitHub-Actions Store updates currently work for FREE products only.
+      #     Antgrid is listed Free (billed externally via Paddle), so it qualifies.
+      # This only *uploads* the antgrid-store.msix already built above (with the
+      # bridge bundled + firebase stripped) — msstore does not rebuild it.
+      # Secrets (repo Settings → Secrets and variables → Actions):
+      #   MSSTORE_TENANT_ID / MSSTORE_CLIENT_ID / MSSTORE_CLIENT_SECRET /
+      #   MSSTORE_SELLER_ID  (secrets)   +   MSSTORE_APP_ID (variable)
+      # Entra client secrets expire, and this step only runs on a tag — dispatch
+      # store-smoke.yml to check the credentials without cutting a release.
+      - name: Configure Microsoft Store CLI
+        if: ${{ startsWith(github.ref, 'refs/tags/') && env.MSSTORE_CLIENT_ID != '' && env.MSSTORE_APP_ID != '' && steps.build.outcome == 'success' }}
+        uses: microsoft/microsoft-store-apppublisher@v1.3
+
+      - name: Publish to Microsoft Store
+        if: ${{ startsWith(github.ref, 'refs/tags/') && env.MSSTORE_CLIENT_ID != '' && env.MSSTORE_APP_ID != '' && steps.build.outcome == 'success' }}
+        shell: pwsh
+        env:
+          MSSTORE_TENANT_ID: ${{ secrets.MSSTORE_TENANT_ID }}
+          MSSTORE_SELLER_ID: ${{ secrets.MSSTORE_SELLER_ID }}
+          MSSTORE_CLIENT_SECRET: ${{ secrets.MSSTORE_CLIENT_SECRET }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          msstore reconfigure `
+            --tenantId $env:MSSTORE_TENANT_ID `
+            --sellerId $env:MSSTORE_SELLER_ID `
+            --clientId $env:MSSTORE_CLIENT_ID `
+            --clientSecret $env:MSSTORE_CLIENT_SECRET
+          msstore publish "$env:GITHUB_WORKSPACE/antgrid-store.msix" -id $env:MSSTORE_APP_ID
+
+  linux:
+    if: ${{ github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'linux' }}
+    runs-on: ubuntu-latest
+    env:
+      BUILD_MODE: ${{ inputs.build_mode || 'release' }}
+      # Flutter's Linux product folder is the LOWERCASE mode (release/profile/
+      # debug), unlike the capitalized macOS/Windows DEST — so BUILD_MODE names
+      # the bundle path directly and no DEST computation is needed here.
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3'
+
+      - uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+
+      # Flutter's Linux desktop toolchain + this app's plugin deps:
+      #   - ninja/gtk/pkg-config/clang: the base `flutter build linux` toolchain.
+      #   - libwebkit2gtk-4.1: the WebKitGTK engine webview_all_linux embeds for
+      #     the preview webview (via GtkOverlay; see linux/runner/my_application.cc).
+      #     This IS in the noble repos, unlike the WPE stack inappwebview needed.
+      #   - libsecret-1: flutter_secure_storage_linux backing store.
+      #   - libayatana-appindicator3: tray/indicator support pulled by the GTK shell.
+      #   - libcurl4-openssl-dev: sentry_flutter's bundled sentry-native crash
+      #     backend find_package(CURL)s its HTTP transport on Linux.
+      #   - libfuse2: lets the downloaded appimagetool run (it is itself an AppImage).
+      # firebase_core has no Linux platform, so — unlike the Windows job — there is
+      # nothing to strip; the plugin is simply never registered here.
+      - name: Install Linux build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build libgtk-3-dev pkg-config clang cmake \
+            libwebkit2gtk-4.1-dev \
+            libsecret-1-dev libayatana-appindicator3-dev \
+            libcurl4-openssl-dev libfuse2
+
+      - name: Flutter pub get
+        working-directory: app
+        run: flutter pub get
+
+      - name: Install JS workspace deps
+        # --ignore-scripts skips the root/web postinstall (Prisma client codegen
+        # for the web service) — the desktop build never touches Postgres or web.
+        run: bun install --ignore-scripts
+
+      - name: Build bridge (Linux x64 binary)
+        run: |
+          set -euo pipefail
+          mkdir -p bridge/dist
+          bun build bridge/src/index.ts --compile \
+            --target bun-linux-x64 \
+            --outfile bridge/dist/antgrid-bridge \
+            --define 'process.env.LICENSE_API_URL="${{ env.LICENSE_API_URL }}"' \
+            --define 'process.env.ANTGRID_BRIDGE_COMPILED="1"'
+
+      - name: Smoke test compiled bridge hook
+        run: bun run bridge/scripts/smoke-hook-binary.ts bridge/dist/antgrid-bridge
+
+      - name: Build Linux app
+        id: build
+        working-directory: app
+        run: flutter build linux --${{ env.BUILD_MODE }} --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }}
+
+      - name: Copy bridge into the app bundle
+        if: ${{ steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          BUNDLE="app/build/linux/x64/$BUILD_MODE/bundle"
+          cp bridge/dist/antgrid-bridge "$BUNDLE/antgrid-bridge"
+          chmod +x "$BUNDLE/antgrid-bridge"
+
+      # Wrap the bundle in a portable AppImage (double-click to run, no install).
+      # The AppImage carries the whole Flutter bundle under usr/bin so the exe,
+      # its data/ folder, bundled lib/ (rpath $ORIGIN/lib), and antgrid-bridge
+      # sibling all resolve exactly as they do in a plain `flutter run`. GTK and
+      # webkit2gtk are NOT bundled — they are expected on the host (documented on
+      # the download page), matching how distro apps rely on the system GTK.
+      - name: Package AppImage
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          BUNDLE="app/build/linux/x64/$BUILD_MODE/bundle"
+          APPDIR="$RUNNER_TEMP/AppDir"
+          mkdir -p "$APPDIR/usr/bin"
+          cp -r "$BUNDLE"/. "$APPDIR/usr/bin/"
+          cp app/linux/packaging/antgrid.desktop "$APPDIR/antgrid.desktop"
+          cp app/linux/packaging/antgrid.png "$APPDIR/antgrid.png"
+          cat > "$APPDIR/AppRun" <<'SH'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "$HERE/usr/bin/antgrid" "$@"
+          SH
+          chmod +x "$APPDIR/AppRun"
+
+          TOOL="$RUNNER_TEMP/appimagetool.AppImage"
+          curl -fsSL -o "$TOOL" \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$TOOL"
+          # --appimage-extract-and-run avoids needing FUSE mounted for the tool.
+          ARCH=x86_64 "$TOOL" --appimage-extract-and-run "$APPDIR" antgrid-linux.AppImage
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        with:
+          name: antgrid-linux-${{ env.BUILD_MODE }}
+          path: antgrid-linux.AppImage
+          if-no-files-found: error
+
+  # Tag pushes only: attach both installers to a GitHub Release on the PUBLIC
+  # antgrid-releases repo. RELEASES_TOKEN is a fine-grained PAT scoped to that
+  # repo (contents: read/write) — GITHUB_TOKEN cannot write cross-repo.
+  publish:
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
+    needs: [macos, windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: antgrid-*
+          merge-multiple: true
+
+      - name: Create release on antgrid-releases
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # A pre-release tag (v1.1.0-beta.1) must never move releases/latest —
+          # the site's stable download URLs point there.
+          prerelease=""
+          case "$TAG" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$TAG" \
+            --repo Radha-AI-Products/antgrid-releases \
+            --title "Antgrid $TAG" \
+            --notes "Desktop builds for Antgrid $TAG.
+
+          - **macOS** (antgrid-macos.dmg): signed and notarized. Open the .dmg and drag Antgrid to Applications.
+          - **Windows** (antgrid-windows-setup.exe): run the installer (per-user, no admin needed). Currently unsigned — SmartScreen may warn; choose \"More info\" -> \"Run anyway\".
+          - **Linux** (antgrid-linux.AppImage): \`chmod +x antgrid-linux.AppImage\` then run it. Needs GTK 3 and WebKit2GTK on the host (\`libgtk-3-0\`, \`libwebkit2gtk-4.1-0\`, \`libsecret-1-0\`)." \
+            $prerelease \
+            antgrid-macos.dmg antgrid-windows-setup.exe antgrid-linux.AppImage

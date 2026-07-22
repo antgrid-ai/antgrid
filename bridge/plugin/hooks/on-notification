@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Hook: AI CLI needs user input → notify Antgrid app
+# Triggered by: Claude Code "Notification", Codex "Notification"
+# Reads hook event JSON from stdin to determine notification type.
+set -euo pipefail
+
+# Resolves $PORT (env-first, file fallback, numeric-validated) or exits 0.
+source "${BASH_SOURCE[0]%/*}/_resolve-api-port.sh"
+
+# Try to parse notification type from stdin JSON
+NOTIFY_TYPE="permission_request"
+if INPUT=$(cat 2>/dev/null); then
+  if [ -n "$INPUT" ]; then
+    PARSED=$(echo "$INPUT" | grep -o '"notification_type"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | grep -o '"[^"]*"$' | tr -d '"') || true
+    if [ "$PARSED" = "idle_prompt" ]; then
+      NOTIFY_TYPE="idle"
+    fi
+  fi
+fi
+
+curl -sf -X POST "http://127.0.0.1:${PORT}/notify" \
+  -H "Content-Type: application/json" \
+  -d "{\"type\":\"${NOTIFY_TYPE}\"}" \
+  > /dev/null 2>&1 || true

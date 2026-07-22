@@ -1,0 +1,23 @@
+---
+import Base from "../layouts/Base.astro";
+import PricingHeader from "../components/pricing/PricingHeader.astro";
+import FreeBar from "../components/pricing/FreeBar.astro";
+import PlanCard from "../components/pricing/PlanCard.astro";
+import { proYearly, proLifetime, TRIAL_DAYS, YEARLY_OFFER_USD, LIFETIME_USD } from "../data/pricing";
+---
+<Base
+  title="Pricing — antgrid"
+  description={`Local is free, forever. Pay only to control your agents remotely — Pro Yearly $${YEARLY_OFFER_USD}/year or Pro Lifetime $${LIFETIME_USD} one-time, with a ${TRIAL_DAYS}-day free trial.`}
+  path="/pricing"
+>
+  <main class="mx-auto max-w-3xl px-6 py-16">
+    <PricingHeader />
+    <FreeBar />
+    <p class="my-5 text-center font-mono text-[10.5px] uppercase tracking-[0.16em] text-faint">Go remote — {TRIAL_DAYS}-day free trial</p>
+    <div class="grid gap-3.5 md:grid-cols-2">
+      <PlanCard plan={proYearly} />
+      <PlanCard plan={proLifetime} />
+    </div>
+    <p class="mt-5.5 text-center text-xs text-faint">All plans include end-to-end encryption. The relay never sees your code.</p>
+  </main>
+</Base>

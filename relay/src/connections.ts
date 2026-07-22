@@ -1,0 +1,175 @@
+import type { ServerWebSocket } from "bun";
+import { logger } from "./logger.js";
+
+/**
+ * Per-socket state stamped at HTTP upgrade and mutated once, when the socket
+ * clears `hello`. `phase` gates the message dispatcher: only `ready` sockets may
+ * send route frames or control verbs.
+ */
+export interface WsData {
+  connectionId: string;
+  ip: string;
+  /**
+   * Normalized `Host` header of the upgrade request (lowercased, scheme-default
+   * port dropped). Rebuilt into the hello signature body server-side so a
+   * cross-relay-replayed hello fails the signature (design §4.1 step 4).
+   */
+  relayHost: string;
+  deviceId?: string;
+  phase: "awaiting-hello" | "ready";
+  /** License credential id (`azp`) — lets /internal/revoke find the socket. */
+  jti?: string;
+}
+
+/** Verified identity carried by a live connection past hello. */
+export interface ConnectionClaims {
+  /** Account id (`claims.uid`) — the sessionLimit + grant.userId key. */
+  uid: string;
+  tier?: string;
+  /** Agents only: the account's concurrent-remote-agent cap (paid axis). */
+  sessionLimit?: number;
+  /** License credential id (`azp`) for revocation lookup. */
+  jti?: string;
+}
+
+/** A live connection — an entry exists iff a socket is open and past hello. */
+export interface Connection {
+  connectionId: string;
+  deviceId: string;
+  deviceType: "agent" | "app";
+  name: string;
+  publicKey: string;
+  epoch: number;
+  ws: ServerWebSocket<WsData>;
+  ip: string;
+  connectedAt: number;
+  /** Transport diagnostics only — NEVER consulted for arbitration (design §6.3). */
+  lastSeen: number;
+  claims?: ConnectionClaims;
+  /** Agents only: opaque stream ids for sessionLimit accounting (design §7.3). */
+  openStreams: Set<string>;
+}
+
+/** Identity-free row for the internal connections view (web enriches the rest). */
+export interface ConnectionSummary {
+  deviceId: string;
+  deviceType: "agent" | "app";
+  connectedAt: number;
+  lastSeen: number;
+}
+
+/**
+ * The live-connection table. Replaces the v2 `DeviceRegistry`: no retained
+ * disconnected tombstones, no symmetric pairing pointers, no state machine — an
+ * entry exists exactly while its socket is open and past hello. Keyed twice: by
+ * `connectionId` (the stable per-socket id, so a superseded socket's close
+ * handler can tell it is no longer the live holder) and by `deviceId` (the one
+ * live connection currently owning that identity).
+ */
+export class Connections {
+  private readonly byConnectionId = new Map<string, Connection>();
+  private readonly byDeviceId = new Map<string, Connection>();
+  private readonly ipCounts = new Map<string, number>();
+
+  insert(conn: Connection): void {
+    this.byConnectionId.set(conn.connectionId, conn);
+    this.byDeviceId.set(conn.deviceId, conn);
+  }
+
+  /**
+   * Remove a connection from both indexes (used both on socket close and on
+   * epoch supersession). Removing the entry drops its `openStreams` set, which
+   * is how a superseded agent's streams are released before the successor is
+   * inserted (design §6.3 / §7.3).
+   */
+  remove(conn: Connection): void {
+    this.byConnectionId.delete(conn.connectionId);
+    if (this.byDeviceId.get(conn.deviceId) === conn) {
+      this.byDeviceId.delete(conn.deviceId);
+    }
+  }
+
+  getByConnectionId(connectionId: string): Connection | undefined {
+    return this.byConnectionId.get(connectionId);
+  }
+
+  getByDeviceId(deviceId: string): Connection | undefined {
+    return this.byDeviceId.get(deviceId);
+  }
+
+  getConnectionsForUser(userId: string): Connection[] {
+    const out: Connection[] = [];
+    for (const c of this.byDeviceId.values()) {
+      if (c.claims?.uid === userId) out.push(c);
+    }
+    return out;
+  }
+
+  /**
+   * Count open streams across ALL live agent connections owned by [userId] —
+   * the sessionLimit denominator. Callers MUST invoke this in the same
+   * synchronous, await-free window as the admit that follows (design §7.3).
+   */
+  countOpenStreamsForUser(userId: string): number {
+    let count = 0;
+    for (const c of this.byDeviceId.values()) {
+      if (c.deviceType !== "agent") continue;
+      if (c.claims?.uid !== userId) continue;
+      count += c.openStreams.size;
+    }
+    return count;
+  }
+
+  updateLastSeen(deviceId: string): void {
+    const c = this.byDeviceId.get(deviceId);
+    if (c) c.lastSeen = Date.now();
+  }
+
+  incrementIpCount(ip: string): number {
+    const count = (this.ipCounts.get(ip) ?? 0) + 1;
+    this.ipCounts.set(ip, count);
+    return count;
+  }
+
+  decrementIpCount(ip: string): void {
+    const count = this.ipCounts.get(ip) ?? 0;
+    if (count <= 1) this.ipCounts.delete(ip);
+    else this.ipCounts.set(ip, count - 1);
+  }
+
+  getConnectionCountByIp(ip: string): number {
+    return this.ipCounts.get(ip) ?? 0;
+  }
+
+  getConnectionCount(): number {
+    return this.byDeviceId.size;
+  }
+
+  private toSummary(c: Connection): ConnectionSummary {
+    return {
+      deviceId: c.deviceId,
+      deviceType: c.deviceType,
+      connectedAt: c.connectedAt,
+      lastSeen: c.lastSeen,
+    };
+  }
+
+  listConnections(): ConnectionSummary[] {
+    return [...this.byDeviceId.values()].map((c) => this.toSummary(c));
+  }
+
+  listConnectionsForUser(userId: string): ConnectionSummary[] {
+    const out: ConnectionSummary[] = [];
+    for (const c of this.byDeviceId.values()) {
+      if (c.claims?.uid === userId) out.push(this.toSummary(c));
+    }
+    return out;
+  }
+
+  clear(): void {
+    this.byConnectionId.clear();
+    this.byDeviceId.clear();
+    this.ipCounts.clear();
+    logger.debug("connections cleared");
+  }
+}

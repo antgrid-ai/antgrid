@@ -1,0 +1,12 @@
+---
+interface Props { variant?: "default" | "amber" | "dashed"; class?: string }
+const { variant = "default", class: cls = "" } = Astro.props;
+const map = {
+  default: "bg-chrome border border-edge text-muted",
+  amber: "bg-amberbg border border-amberbg2 text-amber2",
+  dashed: "bg-group border border-dashed border-edge-emph text-muted2",
+};
+---
+<span class={`inline-flex items-center gap-1.5 rounded px-2.5 py-1 font-mono text-[11px] ${map[variant]} ${cls}`}>
+  <slot />
+</span>

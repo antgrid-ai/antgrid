@@ -1,0 +1,8 @@
+name: eval-agent
+relayUrl: __RELAY_URL__
+
+# Chat-mode sessions are created explicitly by the eval (session:create with
+# mode:'chat'); this agent.tool only marks the project's default coding agent.
+# No `services` block — nothing should auto-spawn a PTY on connect.
+agent:
+  tool: claude-code

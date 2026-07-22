@@ -1,0 +1,42 @@
+---
+import { Icon } from "astro-icon/components";
+import Eyebrow from "../ui/Eyebrow.astro";
+import Chip from "../ui/Chip.astro";
+
+const agents = ["Claude Code", "Codex", "Cursor", "opencode", "Aider"];
+const steps = [
+  { n: 1, icon: "tabler:download", title: "Install on your machine", body: "The desktop app runs your agents in real terminals and links them to your phone — Windows, macOS, Linux.", accent: false },
+  { n: 2, icon: "tabler:terminal-2", title: "Run any agent", body: "Start Claude Code, Codex or Cursor exactly how you do now. antgrid wraps them — no workflow change.", accent: false },
+  { n: 3, icon: "tabler:device-mobile", title: "Take it with you", body: "Watch, steer and approve from your phone. Step away — an AI supervisor keeps them moving and wakes you only when it matters.", accent: true },
+];
+---
+<section class="mx-auto max-w-5xl px-6 py-20">
+  <Eyebrow class="mb-4">Works with your stack</Eyebrow>
+  <h2 class="mb-3.5 text-3xl font-medium tracking-tight text-ink">Bring the agent you already use.</h2>
+  <p class="mb-6 max-w-xl text-base leading-relaxed text-muted">
+    antgrid doesn't replace your coding agent — it's the command centre over the ones you already run. No new model, no new CLI to learn.
+  </p>
+
+  <div class="mb-9 flex flex-wrap gap-2">
+    {agents.map((a) => (
+      <Chip class="px-3 py-1.5 text-xs text-ink2"><Icon name="tabler:terminal-2" class="text-indigo" width="14" height="14" />{a}</Chip>
+    ))}
+    <Chip variant="dashed" class="px-3 py-1.5 text-xs"><Icon name="tabler:plus" width="13" height="13" />any terminal agent</Chip>
+  </div>
+
+  <div class="h-px bg-edge-inner"></div>
+  <p class="mb-5 mt-7 font-mono text-[11px] uppercase tracking-[0.18em] text-muted2">How it works</p>
+
+  <div class="grid gap-3.5 md:grid-cols-3">
+    {steps.map((s) => (
+      <div class="rounded-lg border border-edge bg-panel p-4.5">
+        <div class="mb-3.5 flex items-center justify-between">
+          <span class={`flex size-6.5 items-center justify-center rounded-md border font-mono text-xs ${s.accent ? "border-indigobtn bg-indigodeep2 text-indigo3" : "border-indigodeep2 bg-indigodeep text-indigo2"}`}>{s.n}</span>
+          <Icon name={s.icon} class={s.accent ? "text-indigo" : "text-faint"} width="19" height="19" />
+        </div>
+        <div class="mb-1.5 text-sm font-medium text-ink">{s.title}</div>
+        <div class="text-[12.5px] leading-relaxed text-muted">{s.body}</div>
+      </div>
+    ))}
+  </div>
+</section>

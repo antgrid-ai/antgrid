@@ -1,0 +1,100 @@
+# On-demand maintenance tooling — NOT part of blue-green deploys, NOT started by
+# deploy.sh. pgweb is a read-only Postgres browser pinned to this host's database.
+#
+# It has NO public endpoint: the port is published to the VM LOOPBACK only, and
+# the NSG opens just 22/80/443 anyway. Reach it through an SSH tunnel — your SSH
+# key is the authentication:
+#
+#   # on the VM, start it:
+#   cd /srv/antgrid && docker compose -f compose.tools.yml -p ab-tools up -d
+#   # from your laptop, tunnel + browse:
+#   ssh -L 8081:127.0.0.1:8081 <user>@<vm-ip>
+#   open http://localhost:8081
+#   # when done:
+#   docker compose -f compose.tools.yml -p ab-tools down
+#
+# Read-only by design (--readonly): browse + SELECT, never write. To run a real
+# mutation/maintenance change, drop --readonly for that session (see deploy/README).
+
+services:
+  pgweb:
+    image: sosedoff/pgweb:0.17.0
+    container_name: pgweb
+    # Maintenance tool — don't auto-restart or linger across reboots; start it
+    # when you need it, `down` when finished.
+    restart: "no"
+    # PGWEB_DATABASE_URL is substituted from PG_DATABASE_URL in ./.env (same
+    # managed DB the app uses). Fail loudly if it's unset rather than starting
+    # unconnected. (pgweb 0.17 deprecated the older DATABASE_URL name.)
+    environment:
+      PGWEB_DATABASE_URL: ${PG_DATABASE_URL:?PG_DATABASE_URL must be set in /srv/antgrid/.env}
+    # Bind 0.0.0.0 INSIDE the container; the host mapping below restricts the
+    # actual exposure to 127.0.0.1. --lock-session pins pgweb to this one DB and
+    # hides the connection form; --readonly blocks all writes; --no-ssh disables
+    # pgweb's own SSH-tunnel feature (we tunnel at the OS layer instead).
+    command:
+      - "--bind=0.0.0.0"
+      - "--listen=8081"
+      - "--lock-session"
+      - "--readonly"
+      - "--no-ssh"
+      - "--skip-open"
+    ports:
+      - "127.0.0.1:8081:8081"
+
+  # Live container-log viewer (web UI: tail, search, multi-container). Same
+  # on-demand, tunnel-only model as pgweb — start it when you need it, `down`
+  # when finished. Reads the host Docker socket READ-ONLY to discover and stream
+  # logs; that grants visibility into ALL containers on this host (broader than
+  # pgweb's single-DB scope), which is fine for an operator tool gated behind SSH.
+  # Works fine with our journald log driver: Dozzle streams via the Docker logs
+  # API, and journald supports native log read-back through that API (no
+  # dual-logging cache needed). The live UI respects the journal's retention; for
+  # older history, query `journalctl CONTAINER_NAME=<container>` directly.
+  dozzle:
+    image: amir20/dozzle:v8.13.11
+    container_name: dozzle
+    restart: "no"
+    volumes:
+      # Read-only socket: Dozzle lists containers and streams their logs; it
+      # cannot start/stop/exec anything with :ro.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      DOZZLE_NO_ANALYTICS: "true"
+      # Bind inside the container; the host mapping below restricts real exposure
+      # to 127.0.0.1 (reach it via SSH tunnel, like pgweb).
+      DOZZLE_ADDR: ":8082"
+    ports:
+      - "127.0.0.1:8082:8082"
+
+  # Web file browser + text editor over /srv/antgrid (.env, compose files,
+  # Caddyfile). Same on-demand, loopback-only, SSH-tunnel model as the others.
+  # SECURITY: this mount includes .env, which holds DB/auth/OAuth SECRETS — the
+  # SSH tunnel is the ONLY auth boundary (run with --noauth: filebrowser's own
+  # login is redundant behind a key-gated loopback port, like pgweb). Treat it as
+  # a privileged operator tool: start it, edit, then `down` — don't leave it up.
+  filebrowser:
+    image: filebrowser/filebrowser:v2.32.0
+    container_name: filebrowser
+    restart: "no"
+    # Run as the host's azureuser (uid/gid 1000 on Ubuntu cloud images) so files
+    # saved through the browser stay azureuser-owned. As root (filebrowser's
+    # default) a saved .env could end up root:root 600, after which the next
+    # azureuser-run ./deploy.sh can't read env_file. Adjust if the VM's admin
+    # user isn't uid 1000.
+    user: "1000:1000"
+    volumes:
+      # Expose the deploy dir as /srv (root of the browser). /srv/antgrid is
+      # azureuser-owned, so uid 1000 can both read and write it.
+      - ./:/srv
+    command:
+      - "--noauth"
+      - "--address=0.0.0.0"
+      - "--port=8083"
+      - "--root=/srv"
+      # State db lives on the azureuser-owned bind mount — a NAMED volume would
+      # init as root and uid 1000 couldn't write it, so filebrowser wouldn't
+      # start. Hidden dotfile; ephemeral (no users under --noauth), safe to rm.
+      - "--database=/srv/.filebrowser.db"
+    ports:
+      - "127.0.0.1:8083:8083"

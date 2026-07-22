@@ -1,0 +1,215 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'scoped_prefs.dart';
+
+import '../models/session_entry.dart';
+
+/// SharedPreferences-backed cache of `List<SessionEntry>` keyed by drawer entry
+/// id (`projectId` for local projects, `agentDeviceId` for paired remotes).
+/// Written-through by `SessionsService` so an expanded but inactive drawer
+/// panel still shows its sessions.
+///
+/// Writes are debounced to coalesce rapid `session:updated` bursts (the agent
+/// emits two frames per mutation — sync `changed()` + async PTY `noteExited`).
+/// Tests can force a flush via [flushNow].
+class CachedSessionsStore {
+  static const _key = 'antgrid.session_cache.v1';
+  // Labels churn far more often than the session list itself (every live
+  // control-plane advert, one project at a time via putLabel) — a separate
+  // key lets a label-only flush skip re-encoding every cached session.
+  static const _labelsKey = 'antgrid.session_cache.labels.v1';
+  static const _flushDebounce = Duration(milliseconds: 200);
+
+  final SharedPreferencesWithCache _prefs;
+  final StreamController<String> _changes =
+      StreamController<String>.broadcast();
+  final Map<String, List<SessionEntry>> _mem = {};
+  // Last-seen human project label per entryId, from a live control-plane
+  // advert. Persisted alongside the sessions so an offline/cold-boot Recent
+  // row can fall back to a real name instead of the raw projectId.
+  final Map<String, String> _labels = {};
+  bool _entriesDirty = false;
+  bool _labelsDirty = false;
+  Timer? _flushTimer;
+
+  CachedSessionsStore._(this._prefs) {
+    _loadFromDisk();
+  }
+
+  static Future<CachedSessionsStore> open() async =>
+      CachedSessionsStore._(await openScopedPrefs({_key, _labelsKey}));
+
+  /// Returns an unmodifiable view of the cached sessions for [entryId], or
+  /// `const []` if nothing is cached.
+  List<SessionEntry> get(String entryId) =>
+      List.unmodifiable(_mem[entryId] ?? const <SessionEntry>[]);
+
+  /// Whether [entryId] has ever been seeded — true even for a project cached
+  /// with zero sessions. Distinct from `get(entryId).isEmpty`, which can't
+  /// tell "never synced" from "synced, genuinely no sessions".
+  bool has(String entryId) => _mem.containsKey(entryId);
+
+  /// Unmodifiable snapshot of every cached `entryId → sessions`. The Recent tab
+  /// aggregates over this to build a cross-project flat list. Lists are already
+  /// unmodifiable (stored that way by [put]); the outer map is copied so callers
+  /// can't mutate `_mem`.
+  Map<String, List<SessionEntry>> entries() => Map.unmodifiable(_mem);
+
+  /// Replace the cached list for [entryId]. No-ops if the encoded list is
+  /// identical to the in-memory one. Writes are debounced; [changes] still
+  /// emits on the next microtask so listeners can react synchronously.
+  Future<void> put(String entryId, List<SessionEntry> sessions) async {
+    final prev = _mem[entryId];
+    if (prev != null && _listsEqual(prev, sessions)) return;
+    _mem[entryId] = List.unmodifiable(sessions);
+    _entriesDirty = true;
+    if (!_changes.isClosed) _changes.add(entryId);
+    _scheduleFlush();
+  }
+
+  /// Drop [entryId] from the cache. Emits on [changes] and flushes per the
+  /// usual debounce so the SharedPreferences blob actually shrinks.
+  Future<void> removeKey(String entryId) async {
+    if (!_mem.containsKey(entryId)) return;
+    _mem.remove(entryId);
+    _entriesDirty = true;
+    if (!_changes.isClosed) _changes.add(entryId);
+    _scheduleFlush();
+  }
+
+  /// Last-seen human project label for [entryId], or `null` if never observed.
+  String? label(String entryId) => _labels[entryId];
+
+  /// Unmodifiable snapshot of every persisted `entryId → project label`.
+  Map<String, String> labels() => Map.unmodifiable(_labels);
+
+  /// Record the last-seen live project label for [entryId]. No-ops if
+  /// unchanged. Debounced flush like [put]; does not emit on [changes] — a
+  /// label update alone shouldn't force every listener to re-derive its
+  /// session list.
+  void putLabel(String entryId, String label) {
+    if (_labels[entryId] == label) return;
+    _labels[entryId] = label;
+    _labelsDirty = true;
+    _scheduleFlush();
+  }
+
+  /// Broadcast stream of `entryId`s that just changed. Does NOT replay; callers
+  /// should seed from [get] and then listen.
+  Stream<String> get changes => _changes.stream;
+
+  /// Force pending writes through immediately. Production code doesn't need
+  /// this; tests use it to make round-trips deterministic.
+  Future<void> flushNow() async {
+    _flushTimer?.cancel();
+    _flushTimer = null;
+    await _flush();
+  }
+
+  Future<void> close() async {
+    await flushNow();
+    await _changes.close();
+  }
+
+  void _loadFromDisk() {
+    final raw = _prefs.getString(_key);
+    if (raw != null) {
+      try {
+        final decoded = jsonDecode(raw);
+        final entries = decoded is Map ? decoded['entries'] : null;
+        if (entries is Map) {
+          entries.forEach((k, v) {
+            if (k is! String || v is! List) return;
+            final list = <SessionEntry>[];
+            for (final item in v) {
+              if (item is Map<String, dynamic>) {
+                try {
+                  // `running` is in-memory state only — even if an older build
+                  // persisted it, force false on load so a fresh launch never
+                  // resurrects a stale green status dot.
+                  list.add(SessionEntry.fromJson({...item, 'running': false}));
+                } catch (_) {
+                  /* skip malformed */
+                }
+              }
+            }
+            _mem[k] = List.unmodifiable(list);
+          });
+        }
+        // Pre-split-key installs persisted labels embedded in this same blob
+        // (see _labelsKey) — load them so upgrading doesn't drop every
+        // already-observed project label back to showing the raw id.
+        final legacyLabels = decoded is Map ? decoded['labels'] : null;
+        if (legacyLabels is Map) {
+          legacyLabels.forEach((k, v) {
+            if (k is String && v is String) _labels[k] = v;
+          });
+        }
+      } catch (_) {
+        // Corrupt blob — treat as empty. Next write replaces it.
+      }
+    }
+    final rawLabels = _prefs.getString(_labelsKey);
+    if (rawLabels != null) {
+      try {
+        final decoded = jsonDecode(rawLabels);
+        if (decoded is Map) {
+          decoded.forEach((k, v) {
+            if (k is String && v is String) _labels[k] = v;
+          });
+        }
+      } catch (_) {
+        // Corrupt blob — treat as empty. Next write replaces it.
+      }
+    }
+  }
+
+  void _scheduleFlush() {
+    if (_flushTimer != null) return;
+    _flushTimer = Timer(_flushDebounce, () {
+      _flushTimer = null;
+      _flush();
+    });
+  }
+
+  Future<void> _flush() async {
+    if (_entriesDirty) {
+      _entriesDirty = false;
+      // Strip `running` before persisting: it's process-lifetime state owned
+      // by SessionsService, not durable metadata. Persisting it means an app
+      // restart can render sessions as "running" before the agent reports.
+      final encoded = jsonEncode({
+        'version': 1,
+        'entries': _mem.map(
+          (k, v) => MapEntry(
+            k,
+            // Non-mutating spread: don't assume `toJson()` returns a fresh map.
+            v.map((s) => {...s.toJson(), 'running': false}).toList(),
+          ),
+        ),
+      });
+      if (_prefs.getString(_key) != encoded) {
+        await _prefs.setString(_key, encoded);
+      }
+    }
+    if (_labelsDirty) {
+      _labelsDirty = false;
+      final encoded = jsonEncode(_labels);
+      if (_prefs.getString(_labelsKey) != encoded) {
+        await _prefs.setString(_labelsKey, encoded);
+      }
+    }
+  }
+
+  bool _listsEqual(List<SessionEntry> a, List<SessionEntry> b) {
+    if (identical(a, b)) return true;
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+}

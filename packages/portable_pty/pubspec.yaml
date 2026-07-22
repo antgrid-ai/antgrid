@@ -1,0 +1,38 @@
+name: portable_pty
+description: >-
+  Cross-platform pseudo-terminal (PTY) for Dart.
+  Spawns shell subprocesses on Linux, macOS, Windows, and Android, links native
+  assets into supported iOS builds, and connects through WebSocket or
+  WebTransport to a remote PTY server on web.
+version: 0.0.5
+
+repository: https://github.com/kingwill101/dart_terminal/tree/master/pkgs/pty/portable_pty
+homepage: https://github.com/kingwill101/dart_terminal
+issue_tracker: https://github.com/kingwill101/dart_terminal/issues
+
+topics:
+  - terminal
+  - pty
+  - ffi
+  - shell
+  - process
+
+environment:
+  sdk: ^3.10.4
+
+executables:
+  setup: setup
+
+dependencies:
+  code_assets: ^1.0.0
+  crypto: ^3.0.6
+  ffi: ^2.2.0
+  hooks: ^1.0.1
+  native_toolchain_rust: ^1.0.3
+  path: ^1.9.1
+  web: ^1.1.1
+
+dev_dependencies:
+  ffigen: ^20.1.1
+  flutter_lints: ^6.0.0
+  test: ^1.25.8

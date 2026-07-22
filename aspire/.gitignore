@@ -1,0 +1,15 @@
+.modules/
+.aspire/
+.agents/
+.aspire/
+.flutter-control*
+node_modules/
+dist/
+package-lock.json
+bun.lock
+bun.lockb
+*.log
+
+# Runtime control-server port published by scripts/flutter-launcher.mjs
+# (one per app target: .flutter-control-windows, .flutter-control-android)
+.flutter-control*

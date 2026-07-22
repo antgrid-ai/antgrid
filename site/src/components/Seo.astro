@@ -1,0 +1,36 @@
+---
+import { SITE_URL } from "../config";
+interface Props {
+  title: string;
+  description: string;
+  ogImage?: string;
+  path?: string;
+}
+const {
+  title,
+  description,
+  ogImage = "/og/while-you-slept.png",
+  path = "/",
+} = Astro.props;
+const canonical = new URL(path, SITE_URL).href;
+const ogUrl = new URL(ogImage, SITE_URL).href;
+---
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{title}</title>
+<meta name="description" content={description} />
+<link rel="canonical" href={canonical} />
+<meta name="theme-color" content="#0a0a0b" />
+<link rel="icon" href="/logo/antgrid-favicon.svg" type="image/svg+xml" />
+<link rel="icon" href="/favicon.ico" sizes="any" />
+<link rel="apple-touch-icon" href="/logo/apple-touch-icon-180.png" />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="antgrid" />
+<meta property="og:title" content={title} />
+<meta property="og:description" content={description} />
+<meta property="og:url" content={canonical} />
+<meta property="og:image" content={ogUrl} />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content={title} />
+<meta name="twitter:description" content={description} />
+<meta name="twitter:image" content={ogUrl} />

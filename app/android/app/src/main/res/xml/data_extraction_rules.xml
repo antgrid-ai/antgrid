@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Auto Backup + device-transfer rules for API 31+. Mirror of backup_rules.xml
+  (API 24-30) — keep the two in lockstep; see that file for why this is an
+  allowlist rather than an <exclude> list.
+
+  Both destinations get the same single file. Cloud-backup covers the reinstall
+  case, device-transfer the new-phone case, and reusing the uuid is the desired
+  outcome in each.
+
+  disableIfNoEncryptionCapabilities is deliberately NOT set: it would skip
+  backup entirely on devices without a screen lock, which is exactly where the
+  reinstall/device_limit problem still bites. The uuid is an opaque identifier,
+  not a secret — it grants nothing without the device keypair, which is in
+  secure storage and is not backed up.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <include domain="file" path="datastore/FlutterSharedPreferences.preferences_pb"/>
+    </cloud-backup>
+    <device-transfer>
+        <include domain="file" path="datastore/FlutterSharedPreferences.preferences_pb"/>
+    </device-transfer>
+</data-extraction-rules>

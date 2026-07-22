@@ -1,0 +1,36 @@
+#cloud-config
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+# Written BEFORE runcmd, so Docker picks up the journald log driver the first
+# time it starts. Container logs go to the systemd journal (NOT per-container
+# json files) so they survive blue-green container recreation — that's what
+# makes time-based retention possible. `docker logs` and Dozzle still work via
+# Docker's dual-logging. Retention/limits are set on the journal below.
+write_files:
+  - path: /etc/docker/daemon.json
+    content: |
+      {
+        "log-driver": "journald",
+        "log-opts": { "tag": "{{.Name}}" }
+      }
+  # Persistent, compressed journal with a 1-month time cap and a 4 GiB size
+  # ceiling (whichever limit is hit first wins — the size cap is the disk-safety
+  # backstop). Bump MaxRetentionSec / SystemMaxUse if you need a longer window.
+  - path: /etc/systemd/journald.conf.d/antgrid.conf
+    content: |
+      [Journal]
+      Storage=persistent
+      Compress=yes
+      MaxRetentionSec=1month
+      SystemMaxUse=4G
+runcmd:
+  - mkdir -p /var/log/journal
+  - systemctl restart systemd-journald
+  - curl -fsSL https://get.docker.com | sh
+  - usermod -aG docker ${admin_username}
+  - systemctl enable --now docker
+  - mkdir -p /srv/antgrid/caddy/sites
+  - chown -R ${admin_username}:${admin_username} /srv/antgrid
+  - docker network create antgrid_edge || true

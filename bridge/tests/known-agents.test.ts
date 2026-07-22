@@ -1,0 +1,189 @@
+import { describe, it, test, expect } from "bun:test";
+import { mkdtempSync, readFileSync, existsSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { KNOWN_AGENTS, resolveAgent, resolveAgentEnv, listKnownTools, titleSourceFor } from "../src/known-agents";
+
+describe("known-agents registry", () => {
+  it("exposes entries for the known coding agents", () => {
+    expect(Object.keys(KNOWN_AGENTS).sort()).toEqual(
+      [
+        "claude-code",
+        "codex",
+        "cursor-agent",
+        "gemini",
+        "github-copilot",
+        "kilo",
+        "kimi",
+        "mistral-vibe",
+        "opencode",
+        "qwen",
+      ],
+    );
+  });
+
+  it("resolves the new agents to their CLI bins", () => {
+    expect(resolveAgent("kilo").bin).toBe("kilo");
+    expect(resolveAgent("gemini").bin).toBe("gemini");
+    expect(resolveAgent("qwen").bin).toBe("qwen");
+    expect(resolveAgent("kimi").bin).toBe("kimi");
+    expect(resolveAgent("mistral-vibe").bin).toBe("vibe");
+  });
+
+  it("resolveAgent returns bin + hookDir for a known tool", () => {
+    const r = resolveAgent("claude-code");
+    expect(r.bin).toBe("claude");
+    expect(r.hookDir).toMatch(/\.claude[/\\]hooks$/);
+  });
+
+  it("resolveAgent expands ~ in hookDir", () => {
+    const r = resolveAgent("codex");
+    expect(r.hookDir?.startsWith("~")).toBe(false);
+  });
+
+  it("resolveAgent throws on unknown tool", () => {
+    expect(() => resolveAgent("nope")).toThrow(/unknown agent/i);
+  });
+
+  it("resolves github-copilot to the copilot bin", () => {
+    expect(resolveAgent("github-copilot").bin).toBe("copilot");
+  });
+
+  it("lists github-copilot among known tools", () => {
+    expect(listKnownTools()).toContain("github-copilot");
+  });
+
+  it("codex uses plugin hooks for notifications, not OSC9 terminal overrides", () => {
+    // Notifications now arrive via injected codex hooks (buildCodexNotifyInjection),
+    // so no OSC9-forcing -c flags are baked into the registry entry. The hook
+    // injection happens at per-spawn time in agent-launch-augmenter.ts.
+    const r = resolveAgent("codex");
+    expect(r.args).toEqual([]);
+    expect(r.args).not.toContain("tui.notification_method=osc9");
+    expect(KNOWN_AGENTS["codex"].notificationSource).toBe("plugin");
+  });
+
+  it("agents without default flags resolve to empty args", () => {
+    expect(resolveAgent("claude-code").args).toEqual([]);
+    expect(resolveAgent("cursor-agent").args).toEqual([]);
+  });
+
+  it("titleSourceFor is structured for agents with a hook-derived title path", () => {
+    // Deliberately NOT the same set as notificationSource "plugin": cursor-agent
+    // has plugin notifications but no structured title resolver, and
+    // github-copilot has a structured title resolver despite osc notifications.
+    expect(titleSourceFor("claude-code")).toBe("structured");
+    expect(titleSourceFor("codex")).toBe("structured");
+    expect(titleSourceFor("opencode")).toBe("structured");
+    expect(titleSourceFor("github-copilot")).toBe("structured");
+  });
+
+  it("titleSourceFor is osc for agents without a fail-open injection signal, or no structured resolver at all", () => {
+    expect(titleSourceFor("cursor-agent")).toBe("osc");
+    expect(titleSourceFor("gemini")).toBe("osc");
+    expect(titleSourceFor("qwen")).toBe("osc");
+    expect(titleSourceFor("kilo")).toBe("osc");
+    expect(titleSourceFor("kimi")).toBe("osc");
+    expect(titleSourceFor("mistral-vibe")).toBe("osc");
+  });
+
+  it("titleSourceFor defaults to osc for an unregistered tool", () => {
+    expect(titleSourceFor("some-future-agent")).toBe("osc");
+  });
+});
+
+test("opencode env points OPENCODE_TUI_CONFIG at an attention-enabled config file", () => {
+  const base = mkdtempSync(join(tmpdir(), "ab-known-agents-"));
+  const env = resolveAgentEnv("opencode", base);
+
+  const path = env.OPENCODE_TUI_CONFIG;
+  expect(path).toBeTruthy();
+  expect(existsSync(path!)).toBe(true);
+
+  const cfg = JSON.parse(readFileSync(path!, "utf8"));
+  expect(cfg.attention.enabled).toBe(true);
+});
+
+test("opencode env writer is idempotent", () => {
+  const base = mkdtempSync(join(tmpdir(), "ab-known-agents-"));
+  const a = resolveAgentEnv("opencode", base);
+  const b = resolveAgentEnv("opencode", base);
+  expect(a.OPENCODE_TUI_CONFIG).toBe(b.OPENCODE_TUI_CONFIG);
+});
+
+test("kilo env points KILO_TUI_CONFIG at an attention-enabled config file", () => {
+  const base = mkdtempSync(join(tmpdir(), "ab-known-agents-"));
+  const env = resolveAgentEnv("kilo", base);
+
+  const path = env.KILO_TUI_CONFIG;
+  expect(path).toBeTruthy();
+  expect(existsSync(path!)).toBe(true);
+
+  const cfg = JSON.parse(readFileSync(path!, "utf8"));
+  expect(cfg.attention.enabled).toBe(true);
+});
+
+test("gemini env points GEMINI_CLI_SYSTEM_DEFAULTS_PATH at a notifications-enabled defaults file", () => {
+  const base = mkdtempSync(join(tmpdir(), "ab-known-agents-"));
+  const env = resolveAgentEnv("gemini", base, { binary: "/app/antgrid-bridge", preargs: ["hook"] });
+
+  const path = env.GEMINI_CLI_SYSTEM_DEFAULTS_PATH;
+  expect(path).toBeTruthy();
+  expect(existsSync(path!)).toBe(true);
+
+  const cfg = JSON.parse(readFileSync(path!, "utf8"));
+  expect(cfg.general.enableNotifications).toBe(true);
+  expect(cfg.general.notificationMethod).toBe("osc777");
+  expect(cfg.hooks.SessionStart[0].hooks[0].command).toContain("antgrid-bridge");
+  expect(cfg.hooks.SessionStart[0].hooks[0].command).not.toMatch(/\bnode(?:\.exe)?\b/i);
+  expect(cfg.hooks.Stop[0].hooks[0].command).toContain("gemini");
+});
+
+test("qwen env points QWEN_CODE_SYSTEM_DEFAULTS_PATH at a hooks-only defaults file", () => {
+  const base = mkdtempSync(join(tmpdir(), "ab-known-agents-"));
+  const env = resolveAgentEnv("qwen", base, { binary: "/app/antgrid-bridge", preargs: ["hook"] });
+  const path = env.QWEN_CODE_SYSTEM_DEFAULTS_PATH;
+  expect(path).toBeTruthy();
+  expect(existsSync(path!)).toBe(true);
+  const cfg = JSON.parse(readFileSync(path!, "utf8"));
+  expect(cfg.general).toBeUndefined();
+  expect(cfg.hooks.Stop[0].hooks[0].command).toContain("qwen");
+});
+
+test("entry-only agents get no extra launch env", () => {
+  const base = mkdtempSync(join(tmpdir(), "ab-known-agents-"));
+  // These notify by default (or via the focus-routing default-blur) so they
+  // need no injected config — only a registry entry.
+  // qwen is excluded here — it uses a hooks-only defaults file (own test above)
+  expect(resolveAgentEnv("kimi", base)).toEqual({});
+  expect(resolveAgentEnv("mistral-vibe", base)).toEqual({});
+  expect(resolveAgentEnv("codex", base)).toEqual({});
+  expect(resolveAgentEnv("claude-code", base)).toEqual({});
+});
+
+test("honors a user-set config env var instead of clobbering it", () => {
+  const base = mkdtempSync(join(tmpdir(), "ab-known-agents-"));
+  const prev = process.env.OPENCODE_TUI_CONFIG;
+  process.env.OPENCODE_TUI_CONFIG = "/home/me/my-tui.json";
+  try {
+    // User already pointed the var at their own file — we must not override it.
+    expect(resolveAgentEnv("opencode", base)).toEqual({});
+  } finally {
+    if (prev === undefined) delete process.env.OPENCODE_TUI_CONFIG;
+    else process.env.OPENCODE_TUI_CONFIG = prev;
+  }
+});
+
+test("degrades to no env when the config file can't be written", () => {
+  // Use a regular file as the abDir so mkdir/write of <file>/agents fails.
+  const fileAsDir = join(mkdtempSync(join(tmpdir(), "ab-known-agents-")), "not-a-dir");
+  writeFileSync(fileAsDir, "x");
+  const prev = process.env.OPENCODE_TUI_CONFIG;
+  delete process.env.OPENCODE_TUI_CONFIG;
+  try {
+    // Spawn must still proceed (empty env), not throw.
+    expect(resolveAgentEnv("opencode", fileAsDir)).toEqual({});
+  } finally {
+    if (prev !== undefined) process.env.OPENCODE_TUI_CONFIG = prev;
+  }
+});

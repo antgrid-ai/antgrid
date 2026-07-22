@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+	<dict>
+		<!-- Driven by the per-configuration APS_ENVIRONMENT build setting:
+		     development for Debug/Profile, production for Release. Release signs
+		     manually against an App Store profile, which only grants production —
+		     a hardcoded value here would break one side or the other. -->
+		<key>aps-environment</key>
+		<string>$(APS_ENVIRONMENT)</string>
+		<key>keychain-access-groups</key>
+		<!-- The app's own bundle group MUST stay first: the first entry is the
+		     default access group for un-grouped flutter_secure_storage items
+		     (auth cookie, device creds, phone keypairs). Listing the .push group
+		     first would orphan every existing item and silently sign users out.
+		     The .push group is shared with the Notification Service Extension. -->
+		<array>
+			<string>$(AppIdentifierPrefix)ai.radhaai.antgrid</string>
+			<string>$(AppIdentifierPrefix)ai.radhaai.antgrid.push</string>
+		</array>
+	</dict>
+</plist>

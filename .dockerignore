@@ -1,0 +1,46 @@
+**/node_modules
+**/.git
+**/.worktrees
+**/.dart_tool
+**/build
+**/dist
+**/.next
+**/.turbo
+**/.vite
+
+# Flutter / .NET — not used by Docker builds
+app/
+aspire/
+# Dart-only packages. The TS `antgrid-wire` package also lives under packages/ and
+# IS needed by the relay/web image builds (workspace dep), so exclude per-package
+# rather than the whole dir — keep this list in sync when adding Dart packages.
+packages/antgrid_eval_client/
+packages/antgrid_relay_client/
+packages/ghostty_vte_flutter/
+
+# Repo-only — never needed at runtime
+.claude/
+.superpowers/
+docs/
+scripts/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Secrets and env (in case any slip through)
+**/.env
+**/.env.*
+!**/.env.example
+**/*.pem
+**/*.key
+
+# Logs
+**/*.log
+
+# Test caches / coverage
+**/coverage
+**/.bun-cache

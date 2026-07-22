@@ -1,0 +1,132 @@
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:antgrid/project/project_session.dart';
+import 'package:antgrid/services/sessions_service.dart';
+import 'package:antgrid/storage/cached_sessions_store.dart';
+import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import '../helpers/prefs_test_mock.dart';
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  setUp(() {
+    useInMemoryPrefs();
+  });
+
+  Future<ProjectSession> makeSession(
+    FakeAgentTransport t, {
+    String projectId = 'p',
+  }) async {
+    final cache = await CachedSessionsStore.open();
+    return ProjectSession(
+      projectId: projectId,
+      transport: t,
+      mode: ProjectSessionMode.local,
+      cachedSessionsStore: cache,
+      onClose: () async => await t.dispose(),
+    );
+  }
+
+  test(
+    'fromSession ctor subscribes to status (subscribed before message arrives)',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final cache = await CachedSessionsStore.open();
+      final svc = SessionsService.fromSession(session, cache: cache);
+
+      t.emit('session:list:result', {
+        'projectId': 'p',
+        'sessions': const <Map<String, dynamic>>[],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.projectId, 'p');
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
+  test(
+    'session:result routes through MessageRouter and completes mutation future',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final cache = await CachedSessionsStore.open();
+      final svc = SessionsService.fromSession(session, cache: cache);
+
+      // Kick off a mutation; capture the requestId off the wire.
+      final future = svc.create(name: 'new-session');
+      await Future<void>.delayed(Duration.zero);
+
+      final createMsg = t.sent.firstWhere((m) => m['type'] == 'session:create');
+      final requestId = createMsg['requestId'] as String;
+
+      // Agent reply: success, no `error` field. This must classify as
+      // status-tier so MessageRouter forwards it to SessionsService.
+      t.emit('session:result', {
+        'requestId': requestId,
+        'ok': true,
+        'session': {
+          'id': 'sess-1',
+          'name': 'new-session',
+          'createdAt': DateTime.now().millisecondsSinceEpoch,
+          'lastUsedAt': DateTime.now().millisecondsSinceEpoch,
+          'archived': false,
+          'running': false,
+        },
+      });
+
+      final entry = await future;
+      expect(entry, isNotNull);
+      expect(entry!.id, 'sess-1');
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
+  test('public methods include projectId from session', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t, projectId: 'proj-y');
+    final cache = await CachedSessionsStore.open();
+    final svc = SessionsService.fromSession(session, cache: cache);
+
+    // Fire-and-forget; we only care that the message was sent.
+    // ignore: unawaited_futures
+    svc.requestList().ignore();
+    await Future<void>.delayed(Duration.zero);
+
+    // Verify SOME sent message exists and includes projectId.
+    expect(t.sent, isNotEmpty);
+    final listMsg = t.sent.firstWhere(
+      (m) => m['type'] == 'session:list',
+      orElse: () => {},
+    );
+    expect(listMsg, isNotEmpty);
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('start includes initialPrompt when provided, omits when null', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final cache = await CachedSessionsStore.open();
+    final svc = SessionsService.fromSession(session, cache: cache);
+
+    // Fire-and-forget: dispose() below fails these pending futures, so ignore
+    // to avoid an unhandled-error report unrelated to what this test checks.
+    svc.start('sess-1', initialPrompt: 'fix the bug').ignore();
+    svc.start('sess-2').ignore();
+    await Future<void>.delayed(Duration.zero);
+
+    final starts = t.sent.where((m) => m['type'] == 'session:start').toList();
+    expect(starts[0]['initialPrompt'], 'fix the bug');
+    expect(starts[1].containsKey('initialPrompt'), isFalse);
+
+    await svc.dispose();
+    await session.close();
+  });
+}

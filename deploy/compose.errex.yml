@@ -1,0 +1,67 @@
+# Self-hosted crash backend (errex — Sentry-compatible, Rust + SQLite).
+#
+# Long-lived and NOT colored — its own compose project so the blue-green
+# `down --remove-orphans` in deploy.sh never touches it, and its SQLite
+# survives every flip:
+#   docker compose -p ab-errex -f compose.errex.yml up -d
+#
+# Caddy (compose.edge.yml + caddy/sites/errex.caddy) terminates TLS for
+# errex.$DOMAIN and reverse-proxies here. Dashboard + ingest are public;
+# errex's own multi-user auth is the boundary (see caddy/sites/errex.caddy).
+#
+# The container_name `errex` is the stable DNS name Caddy dials on antgrid_edge.
+
+services:
+  errex:
+    # Pinned by digest, not the floating :latest — errex sits OUTSIDE the
+    # blue-green flip and owns an in-place SQLite volume, so an unreviewed
+    # upstream image (e.g. a one-way schema migration) would have no rollback
+    # path. The :latest tag is kept as a human hint; the digest is what pulls.
+    # Re-pin deliberately: docker buildx imagetools inspect ghcr.io/theholtz/errex:latest
+    image: ghcr.io/theholtz/errex:latest@sha256:adc34f22e89a811c76b5379ebf701bd003a380a8477af70e1175a37a28b79d28
+    container_name: errex
+    restart: unless-stopped
+    environment:
+      # errex defaults to binding 127.0.0.1; inside the container that hides it
+      # from Caddy. Bind all interfaces so `errex:9090` resolves on the network.
+      ERREX_HOST: "0.0.0.0"
+      # Public origin — baked into DSNs, webhook links, and the dashboard's
+      # curl example. errex is prod-only (deploy.sh's DOMAIN gate) and always
+      # served at the host hardcoded in caddy/sites/errex.caddy, so this never
+      # varies — default it to that same host. Overridable via .env only for a
+      # forked domain.
+      ERREX_PUBLIC_URL: ${ERREX_PUBLIC_URL:-https://errex.antgrid.ai}
+      # One-shot setup-wizard secret. Consumed once at /setup, then ignored.
+      ERREX_ADMIN_TOKEN: ${ERREX_ADMIN_TOKEN:-}
+      # Validate sentry_key on ingest (also the daemon's code default).
+      ERREX_REQUIRE_AUTH: "true"
+      # We sit behind Caddy: trust the (Caddy-overwritten) X-Forwarded-For so
+      # per-IP lockout keys on the real client. Safe ONLY because errex.caddy
+      # overwrites XFF with {remote_host} (see that file).
+      ERREX_TRUST_PROXY_HEADERS: "true"
+      # Events auto-expire at 30 days (self-bounding SQLite). Tune in the
+      # dashboard later; this is just the boot default.
+      ERREX_RETENTION_DAYS: "30"
+    expose:
+      - "9090"          # in-network only; Caddy fronts it. No host port bind.
+    volumes:
+      - errex_data:/data
+    networks:
+      - antgrid_edge
+    # The image is distroless (gcr.io/distroless/cc-debian12) — no shell, no
+    # wget. Use the binary's own `healthcheck` subcommand (the same one the
+    # image's built-in HEALTHCHECK uses). A wget/curl probe would never resolve
+    # and the container would sit `unhealthy` forever.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/errexd", "healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  errex_data:           # SQLite lives here — DO NOT lose this volume.
+
+networks:
+  antgrid_edge:
+    external: true

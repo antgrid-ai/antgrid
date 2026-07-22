@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["bun"],
+    "strict": true,
+    "skipLibCheck": true,
+    "jsx": "react-jsx",
+    "jsxImportSource": "hono/jsx",
+    "paths": {
+      "@bridge/*": ["../bridge/src/*"],
+      "@relay/*": ["../relay/src/*"]
+    }
+  },
+  "include": ["helpers/**/*.ts", "scenarios/**/*.ts", "tests/**/*.ts", "support/**/*.ts"]
+}

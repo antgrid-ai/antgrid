@@ -1,0 +1,26 @@
+{
+  "name": "antgrid-site",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "check": "astro check",
+    "test": "playwright test",
+    "build:og": "bun run scripts/shoot-og.ts"
+  },
+  "dependencies": {
+    "@astrojs/sitemap": "^3.7.3",
+    "@iconify-json/tabler": "^1.2.0",
+    "astro": "^5.0.0",
+    "astro-icon": "^1.1.5"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.4",
+    "@tailwindcss/vite": "^4.2.4",
+    "tailwindcss": "^4.2.4",
+    "@playwright/test": "^1.48.0",
+    "typescript": "^5.7.3"
+  }
+}

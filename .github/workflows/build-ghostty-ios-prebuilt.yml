@@ -1,0 +1,41 @@
+name: Build — ghostty-vt iOS prebuilt
+
+# Regenerates the App-Store-compliant libghostty-vt.dylib for iOS device and
+# uploads it as an artifact. Run this manually, download the artifact, and commit
+# it to app/.prebuilt/ios-arm64/ (see scripts/build-ghostty-ios.sh for the why).
+#
+# MUST run on macos-15 (Xcode <= 16): Zig 0.15.2's linker — required to build
+# ghostty debcffba — cannot link against the macOS 26 / Xcode 26 SDK, so the
+# deploy-ios runner (which may move to macos-26 for ITMS-90725) cannot build this.
+# Committing the prebuilt decouples the deploy runner's SDK from Zig entirely.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ghostty_ref:
+        description: ghostty-org/ghostty commit to build (must match the vendored ghostty_vte bindings' ABI)
+        required: false
+        default: debcffbadb75221a030319c075fae12cfe114176
+      ios_min:
+        description: Minimum iOS version stamped into the dylib (must match Flutter's native-asset framework MinimumOSVersion — see script; ITMS-90208)
+        required: false
+        default: '13.0'
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build compliant libghostty-vt.dylib
+        env:
+          GHOSTTY_REF: ${{ inputs.ghostty_ref }}
+          IOS_MIN: ${{ inputs.ios_min }}
+        run: bash scripts/build-ghostty-ios.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: libghostty-vt-ios-arm64
+          path: app/.prebuilt/ios-arm64/libghostty-vt.dylib
+          if-no-files-found: error
+          retention-days: 7

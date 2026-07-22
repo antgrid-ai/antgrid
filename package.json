@@ -1,0 +1,37 @@
+{
+  "name": "antgrid",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["packages/antgrid-wire", "bridge", "bridge/plugin", "relay", "web", "evals"],
+  "scripts": {
+    "postinstall": "bun run --filter antgrid-web prisma:generate",
+    "setup": "bun run scripts/dev-setup.ts",
+    "worktree": "bun run scripts/worktree.ts",
+    "wt": "bun run scripts/wt-where.ts",
+    "sym": "bun run scripts/sym.ts",
+    "pty:android": "bun run scripts/build-pty-android.ts",
+    "dev": "bun run scripts/dev.ts",
+    "dev:web": "bun run --filter antgrid-web dev",
+    "dev:relay": "bun run --filter antgrid-relay dev",
+    "dev:agent": "bun run --filter antgrid-bridge dev",
+    "dev:app": "cd app && flutter run -d windows",
+    "dev:protocol:add": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/windows-dev-protocol.ps1 -Action Add",
+    "dev:protocol:remove": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/windows-dev-protocol.ps1 -Action Remove",
+    "preaspire": "bun install",
+    "aspire": "cd aspire && aspire run",
+    "aspire:android": "bun run scripts/aspire-targets.ts android",
+    "aspire:ios": "bun run scripts/aspire-targets.ts ios",
+    "aspire:macos": "bun run scripts/aspire-targets.ts macos",
+    "aspire:all": "bun run scripts/aspire-targets.ts windows,android",
+    "aspire:mac:all": "bun run scripts/aspire-targets.ts macos,ios",
+    "typecheck": "bun run --filter='*' typecheck",
+    "check:font-tokens": "bash app/scripts/check_font_tokens.sh",
+    "dup-check": "jscpd",
+    "test": "bun run --filter='*' test",
+    "test:dev-protocol": "cd scripts && bun test windows-dev-protocol.test.ts",
+    "test:evals": "bun run --filter antgrid-evals test:evals"
+  },
+  "devDependencies": {
+    "jscpd": "5.0.9"
+  }
+}

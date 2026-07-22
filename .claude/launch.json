@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "web",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["run", "dev:web"],
+      "port": 8787
+    },
+    {
+      "name": "relay",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["run", "dev:relay"],
+      "port": 8080
+    }
+  ]
+}

@@ -1,0 +1,64 @@
+---
+import { Icon } from "astro-icon/components";
+import Eyebrow from "../ui/Eyebrow.astro";
+
+type Row = { name: string; agent: string; task: string; time: string; state: "working" | "needs" | "done" };
+type Machine = { host: string; tag?: string; rows: Row[] };
+const machines: Machine[] = [
+  { host: "macbook-pro", rows: [
+    { name: "api", agent: "Claude Code", task: "Refactoring auth middleware…", time: "2m", state: "working" },
+    { name: "web", agent: "Codex", task: "Writing checkout tests…", time: "5m", state: "working" },
+  ]},
+  { host: "studio-workstation", rows: [
+    { name: "relay", agent: "Claude Code", task: "Needs you — which migration strategy?", time: "just now", state: "needs" },
+    { name: "app", agent: "Cursor", task: "Built release bundle", time: "12m", state: "done" },
+  ]},
+  { host: "prod-box", tag: "cloud", rows: [
+    { name: "evals", agent: "Codex", task: "Running E2E suite…", time: "1m", state: "working" },
+    { name: "infra", agent: "Claude Code", task: "Tailing deploy logs…", time: "3m", state: "working" },
+  ]},
+];
+
+const allRows = machines.flatMap((m) => m.rows);
+const totalCount = allRows.length;
+const needsCount = allRows.filter((r) => r.state === "needs").length;
+const workingCount = allRows.filter((r) => r.state === "working").length;
+const doneCount = allRows.filter((r) => r.state === "done").length;
+---
+<section id="fleet" class="mx-auto max-w-5xl px-6 py-20">
+  <Eyebrow class="mb-4">Fleet view</Eyebrow>
+  <h2 class="mb-3 text-3xl font-medium tracking-tight text-ink">Every agent. Every machine. One screen.</h2>
+  <p class="mb-8 max-w-2xl text-base leading-relaxed text-muted">
+    Your laptop, your workstation, a cloud box — every agent you're running, grouped by the machine it's on, with the ones that need you floated to the top.
+  </p>
+
+  <div class="overflow-hidden rounded-lg border border-edge bg-panel">
+    <div class="flex items-center justify-between border-b border-edge-inner bg-chrome px-4 py-2.5">
+      <span class="font-mono text-xs text-muted">Agents · {totalCount} total</span>
+      <div class="flex gap-2 font-mono text-[10.5px]">
+        <span class="rounded border border-amberbg2 bg-amberbg px-2 py-0.5 text-amber2">{needsCount} needs you</span>
+        <span class="rounded border border-edge px-2 py-0.5 text-indigo">{workingCount} working</span>
+        <span class="rounded border border-edge px-2 py-0.5 text-muted2">{doneCount} done</span>
+      </div>
+    </div>
+
+    {machines.map((m) => (
+      <div class="border-b border-edge-inner last:border-b-0">
+        <div class="bg-group px-4 py-1.5 font-mono text-[11px] text-muted2">
+          {m.host}{m.tag && <span class="text-faint"> · {m.tag}</span>}
+        </div>
+        {m.rows.map((r) => (
+          <div class={`flex items-center gap-3 px-4 py-2.5 ${r.state === "needs" ? "border-l-2 border-amber bg-amberbg/40" : ""}`}>
+            {r.state === "done"
+              ? <Icon name="tabler:circle-check" class="shrink-0 text-ok" width="14" height="14" />
+              : <span class={`size-2 shrink-0 rounded-full ${r.state === "needs" ? "bg-amber" : "bg-indigo"}`} />}
+            <span class="font-mono text-[13px] text-ink">{r.name}</span>
+            <span class="rounded border border-edge px-1.5 py-0.5 text-[10.5px] text-muted2">{r.agent}</span>
+            <span class={`flex-1 truncate text-[12.5px] ${r.state === "needs" ? "text-amber2" : "text-muted"}`}>{r.task}</span>
+            <span class="shrink-0 font-mono text-[11px] text-faint">{r.time}</span>
+          </div>
+        ))}
+      </div>
+    ))}
+  </div>
+</section>

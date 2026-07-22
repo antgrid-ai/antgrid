@@ -1,0 +1,7 @@
+{
+  "recipientPrivSeed": "ty/HZVPUS9ThPfpkuDaNnSzIl+8HxroHz0SCG6T0840=",
+  "recipientPub": "wwdnuS3kpIha8c6tAfnuBj8JLoktCM7W7gvBZYBcySE=",
+  "epk": "F7O0plrBZn09ZP2cUmsqoaMkIr3XYr7uRngEjW7KyUA=",
+  "box": "XWO91C+LsnWkiKdDztjGFMnLEmepkx116UC4fO+BLeeR+W7yleX4wOqH3pR5wL2dYQGJCh5WPSZ6C4dac7/s/PLIJSuuTg4xPRtrEm31IPKQD/oPhHi0NWdG1f6/RtLfF/2H0k1HMorG7PzUoyMw",
+  "plaintext": "{\"title\":\"Task complete\",\"body\":\"done\",\"kind\":\"agent\",\"sourceMessageId\":\"vector-1\"}"
+}

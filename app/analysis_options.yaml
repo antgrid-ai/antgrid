@@ -1,0 +1,59 @@
+# This file configures the analyzer, which statically analyzes Dart code to
+# check for errors, warnings, and lints.
+#
+# The issues identified by the analyzer are surfaced in the UI of Dart-enabled
+# IDEs (https://dart.dev/tools#ides-and-editors). The analyzer can also be
+# invoked from the command line by running `flutter analyze`.
+
+# The following line activates a set of recommended lints for Flutter apps,
+# packages, and plugins designed to encourage good coding practices.
+include: package:flutter_lints/flutter.yaml
+
+# riverpod_lint (analysis_server_plugin, not custom_lint) only loads under
+# `dart analyze` / the IDE — `flutter analyze` silently skips it (CI runs
+# `flutter analyze`, so this plugin does not gate CI). Its diagnostics also
+# cannot be suppressed with `// ignore:` / `// ignore_for_file:` — the
+# analyzer emits `duplicate_ignore` but the plugin fires anyway. Both
+# verified against riverpod_lint 3.1.4 / analyzer 12.1.0 / Dart 3.12.2.
+# Every finding below is fixed at the source, not ignored, because of this.
+plugins:
+  riverpod_lint: ^3.1.4
+
+analyzer:
+  errors:
+    # The 18 color constants on `AbTokens` are @Deprecated — they bake
+    # in dark-Zinc defaults at compile time and silently bypass the
+    # active theme palette. Promote any in-package use to a warning so
+    # `flutter analyze` fails CI on regressions; widget code must read
+    # colors via `context.antgrid.<name>`.
+    deprecated_member_use_from_same_package: warning
+
+linter:
+  # The lint rules applied to this project can be customized in the
+  # section below to disable rules from the `package:flutter_lints/flutter.yaml`
+  # included above or to enable additional rules. A list of all available lints
+  # and their documentation is published at https://dart.dev/lints.
+  #
+  # Instead of disabling a lint rule for the entire project in the
+  # section below, it can also be suppressed for a single line of code
+  # or a specific dart file by using the `// ignore: name_of_lint` and
+  # `// ignore_for_file: name_of_lint` syntax on the line or in the file
+  # producing the lint.
+  rules:
+    # avoid_print: false  # Uncomment to disable the `avoid_print` rule
+    # prefer_single_quotes: true  # Uncomment to enable the `prefer_single_quotes` rule
+
+    # Async-correctness backstop. flutter_lints does NOT enable these, so a
+    # missing await in an async body (the most common async bug) goes
+    # unflagged by default. Pairs with the dart-async-correctness skill: the
+    # skill guides how code is written, these fail CI when it isn't. Mark
+    # deliberate fire-and-forget with `unawaited(...)` to satisfy them.
+    # `discarded_futures` is deliberately NOT enabled — it flags every
+    # Future-returning call in a sync context (event handlers, dispose), which
+    # is mostly legitimate fire-and-forget here; the noise would train the team
+    # to ignore the analyzer.
+    unawaited_futures: true
+    avoid_void_async: true
+
+# Additional information about this file can be found at
+# https://dart.dev/guides/language/analysis-options

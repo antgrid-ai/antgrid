@@ -1,0 +1,18 @@
+# OpenTofu local state, plans, vars, and backend config — never commit.
+# NOTE: .terraform.lock.hcl is intentionally NOT ignored — it's committed so
+# local and CI runs resolve the same provider versions (see README).
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+terraform.tfvars
+backend.hcl
+crash.log
+
+# State-encryption passphrase (TF_ENCRYPTION). Never commit — mirror its value
+# into the TF_STATE_PASSPHRASE CI secret.
+.tf-passphrase
+
+# direnv local env loader (exports ARM_SUBSCRIPTION_ID + reads .tf-passphrase
+# into TF_ENCRYPTION). Local convenience only — never commit.
+.envrc
