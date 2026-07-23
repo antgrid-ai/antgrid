@@ -96,6 +96,23 @@ test("advertised projects carry lastActiveAt when known", async () => {
   expect(a!.lastActiveAt! >= before).toBe(true);
 });
 
+test("warm core advertises runningSessions; a stopped project omits it (like status)", async () => {
+  host = new HostServer({});
+  await host.open("projA", tempFolder(), "local");
+  await host.open("projB", tempFolder(), "local");
+  await host.stop("projB");
+
+  host.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1",
+    pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["projA", "projB"] });
+
+  const adv = host.buildProjectsAdvertisement("pk1");
+  // Warm, no sessions started yet → an explicit 0 (the app's re-peek trigger
+  // needs the baseline to detect the first session starting on the desktop).
+  expect(adv.find((p) => p.projectId === "projA")?.runningSessions).toBe(0);
+  // Cold → omitted, matching the status field's warm-only contract.
+  expect(adv.find((p) => p.projectId === "projB")?.runningSessions).toBeUndefined();
+});
+
 test("phone with empty allowlist gets an empty advertisement", async () => {
   host = new HostServer({});
   await host.open("projA", tempFolder(), "local");

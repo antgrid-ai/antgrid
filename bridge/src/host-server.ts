@@ -413,10 +413,10 @@ export class HostServer {
         // A reconnecting phone binds its ProjectSession to this streamId without a
         // fresh project:start (design §7.4). Only surfaced for a dialable stream.
         const streamId = dialable ? this.streamIds.get(id) : undefined;
-        // Live work status for warm cores only. Cold projects omit it (their
-        // agent PTY isn't alive → nothing "working"); the app falls back to
-        // `running` for those, reading them as done/offline.
-        return { projectId: id, label: seen?.label, path: seen?.path, running: dialable, status: entry?.core.workStatus, lastActiveAt: seen?.lastActiveAt, streamId };
+        // Live work status + running-session count for warm cores only. Cold
+        // projects omit both (their agent PTY isn't alive → nothing "working");
+        // the app falls back to `running` for those, reading them as done/offline.
+        return { projectId: id, label: seen?.label, path: seen?.path, running: dialable, status: entry?.core.workStatus, runningSessions: entry?.core.workRunningCount, lastActiveAt: seen?.lastActiveAt, streamId };
       });
   }
 
@@ -992,6 +992,10 @@ export class HostServer {
     // read path already "never throws into the caller" — extend that to writes).
     this.seenProjects.set(projectId, { path: projectPath, label: basename(projectPath), lastActiveAt: new Date().toISOString() });
     this.flushSeen();
+    // Push the newly-warm project to the connected phone NOW — without this,
+    // a project opened from the desktop reaches the phone only when its first
+    // work-status transition happens to re-advertise (i.e. late or never).
+    this.readvertiseToControlPlane();
     logger.info(`host: opened project ${projectId} (mode=${mode}, ${this.cores.size} core(s) warm)`);
     await this.evictIfNeeded(projectId);
     return this.resultFor(entry);

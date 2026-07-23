@@ -72,6 +72,32 @@ void main() {
     },
   );
 
+  test(
+    'agent:projects parses runningSessions, null when absent (older bridge)',
+    () async {
+      final t = FakeAgentTransport();
+      final client = ControlPlaneClient(transport: t);
+      addTearDown(client.dispose);
+
+      t.emit('agent:projects', {
+        'projects': [
+          {'projectId': 'a', 'running': true, 'runningSessions': 2},
+          {'projectId': 'b', 'running': true, 'runningSessions': 0},
+          {'projectId': 'c', 'running': false},
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      final byId = {
+        for (final p in client.currentState.projects)
+          p.projectId: p.runningSessions,
+      };
+      expect(byId['a'], 2);
+      expect(byId['b'], 0);
+      expect(byId['c'], isNull);
+    },
+  );
+
   test('startProject sends a project:start with the projectId', () async {
     final t = FakeAgentTransport();
     final client = ControlPlaneClient(transport: t);

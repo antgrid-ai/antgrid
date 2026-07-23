@@ -93,17 +93,27 @@ export class ProjectCore {
    *  control-plane advert. Defaults to "done" before any signal. */
   get workStatus(): WorkStatus { return this._work.status; }
 
-  /** Register a callback fired whenever {@link workStatus} CHANGES (deduped), so
-   *  the host can re-advertise the control plane on a real transition rather than
-   *  polling. Pass null to clear. */
+  /** Live non-archived running-session count from the same reduction, carried
+   *  in the control-plane advert (`runningSessions`) so the app re-peeks the
+   *  session list exactly when it actually changed — see protocol.ts. */
+  get workRunningCount(): number { return this._work.runningCount; }
+
+  /** Register a callback fired whenever {@link workStatus} or
+   *  {@link workRunningCount} CHANGES (deduped), so the host can re-advertise
+   *  the control plane on a real transition rather than polling. Pass null to
+   *  clear. */
   onWorkStatusChange(cb: (() => void) | null): void { this._onWorkStatusChange = cb; }
 
   /** Commit a new work-status reduction, firing {@link onWorkStatusChange} only
-   *  on a real status transition (a fresh object with the same status — e.g. a
-   *  turn-start while already working — re-advertises nothing). */
+   *  on a real transition of status OR running-session count (a fresh object
+   *  with both unchanged — e.g. a turn-start while already working —
+   *  re-advertises nothing). Count changes with an unchanged status (a 2nd
+   *  session starting while one is working) must still re-advertise, or the
+   *  phone's Recent list misses the new session until an unrelated flip. */
   private commitWork(next: WorkStatusState): void {
     if (next === this._work) return;
-    const changed = next.status !== this._work.status;
+    const changed = next.status !== this._work.status
+      || next.runningCount !== this._work.runningCount;
     this._work = next;
     if (changed) this._onWorkStatusChange?.();
   }

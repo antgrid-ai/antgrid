@@ -167,6 +167,14 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
   // recentSessionsProvider). Absent key = never observed (first advert).
   final Map<String, AgentWorkStatus?> _lastAdvertStatus = {};
 
+  // Last-seen per-project advert running-session count, keyed by entryId. A
+  // count change is the bridge's "the session list actually changed" signal —
+  // it fires when a session starts/exits on the DESKTOP (done→working there is
+  // filtered out of _lastAdvertStatus's trigger, and `running` never moves), so
+  // without this the Recent row for a desktop-started session stays stale until
+  // attention/error or a manual pull-to-refresh. Null value = older bridge.
+  final Map<String, int?> _lastAdvertRunningCount = {};
+
   @override
   void initState() {
     super.initState();
@@ -244,6 +252,7 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
         final prefix = '$uuid.';
         _lastAdvertRunning.removeWhere((k, _) => k.startsWith(prefix));
         _lastAdvertStatus.removeWhere((k, _) => k.startsWith(prefix));
+        _lastAdvertRunningCount.removeWhere((k, _) => k.startsWith(prefix));
       }
     }
     for (final uuid in openIds) {
@@ -299,6 +308,9 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
       final hadStatus = _lastAdvertStatus.containsKey(entryId);
       final prevStatus = _lastAdvertStatus[entryId];
       _lastAdvertStatus[entryId] = ap.status;
+      final hadCount = _lastAdvertRunningCount.containsKey(entryId);
+      final prevCount = _lastAdvertRunningCount[entryId];
+      _lastAdvertRunningCount[entryId] = ap.runningSessions;
       if (cp == null) continue;
       // Seed a never-synced project's sessions, OR re-peek when its advertised
       // run-state or work status flips — the bridge peek reports true per-session
@@ -318,7 +330,15 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
       final statusFlipped = hadStatus && prevStatus != ap.status &&
           (ap.status == AgentWorkStatus.attention ||
               ap.status == AgentWorkStatus.error);
-      if (neverSynced || runStateFlipped || statusFlipped) {
+      // Running-session count moved → the session list itself changed (a
+      // session started/exited, e.g. from the desktop app). Precise where the
+      // status filter above is deliberately coarse: a re-prompt cycles
+      // working↔done without moving the count, so this never peeks on mere
+      // turn boundaries.
+      final sessionCountChanged =
+          hadCount && prevCount != ap.runningSessions;
+      if (neverSynced || runStateFlipped || statusFlipped ||
+          sessionCountChanged) {
         _peekProjectSessions(cp, ap.projectId, entryId, store);
       }
     }

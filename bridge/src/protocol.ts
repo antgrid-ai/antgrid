@@ -321,6 +321,13 @@ const AgentProjectsMessage = BaseMessage.extend({
       path: z.string().optional(),
       running: z.boolean(),
       status: WorkStatusSchema.optional(),
+      // Live non-archived running-session count for warm cores (absent when
+      // cold, like `status`). The app re-peeks a project's session list when
+      // this changes — `status` alone can't signal it: a 2nd session starting
+      // while one is already working stays "working", and done→working is
+      // ambiguous between new-session and re-prompt (see app_shell's
+      // _onControlPlaneState).
+      runningSessions: z.number().int().nonnegative().optional(),
       lastActiveAt: z.string().optional(),
       // Present when the project has an admitted relay data-plane stream: the
       // phone binds its ProjectSession services to this streamId without a fresh

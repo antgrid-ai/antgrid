@@ -117,6 +117,17 @@ test("turn-start with no running session stays done (no phantom working)", () =>
   expect(turnStart(initialWorkStatus)).toBe(initialWorkStatus);
 });
 
+test("a count change with an unchanged status yields a NEW state (advert re-push trigger)", () => {
+  // 1 → 2 running sessions: status stays "working", but the count moved — the
+  // control-plane advert must re-push (commitWork keys off status OR count) so
+  // the phone re-peeks the session list and shows the new desktop-started row.
+  const one = fold([sessions(1)]);
+  const two = reduceWorkStatus(one, sessions(2));
+  expect(two).not.toBe(one);
+  expect(two.status).toBe("working");
+  expect(two.runningCount).toBe(2);
+});
+
 test("an irrelevant frame and a no-op change return the SAME object (identity)", () => {
   const s = fold([sessions(1)]);
   const irrelevant = { id: "m", timestamp: 0, type: "terminal:output", data: "x" } as any;

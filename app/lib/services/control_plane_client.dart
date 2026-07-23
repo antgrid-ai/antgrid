@@ -27,8 +27,8 @@ enum AgentWorkStatus {
 /// A project advertised by the agent over the control-plane connection.
 ///
 /// Hand-mirrors the bridge `agent:projects` entry schema
-/// (`{ projectId, label?, path?, running, status? }`) per the package
-/// convention that the Dart side mirrors the TS Zod schemas by hand.
+/// (`{ projectId, label?, path?, running, status?, runningSessions? }`) per the
+/// package convention that the Dart side mirrors the TS Zod schemas by hand.
 class AdvertisedProject {
   final String projectId;
   final String? label;
@@ -38,6 +38,12 @@ class AdvertisedProject {
   /// Live work status, present only for warm cores. Null when talking to an
   /// older bridge, or for a cold project — callers fall back to [running].
   final AgentWorkStatus? status;
+
+  /// Live non-archived running-session count, present only for warm cores.
+  /// Null on an older bridge or a cold project. A change here means the
+  /// project's session list actually changed — the trigger for re-peeking it
+  /// (see app_shell's _onControlPlaneState), which `status` alone can't signal.
+  final int? runningSessions;
   final String? lastActiveAt;
 
   const AdvertisedProject({
@@ -46,6 +52,7 @@ class AdvertisedProject {
     this.path,
     required this.running,
     this.status,
+    this.runningSessions,
     this.lastActiveAt,
   });
 
@@ -59,6 +66,7 @@ class AdvertisedProject {
       path: json['path'] as String?,
       running: running,
       status: AgentWorkStatus.fromWire(json['status']),
+      runningSessions: (json['runningSessions'] as num?)?.toInt(),
       lastActiveAt: json['lastActiveAt'] as String?,
     );
   }
