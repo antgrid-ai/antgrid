@@ -3,20 +3,21 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../config/environment.dart';
+import '../config/storage_scope.dart';
 import '../design/theme_presets.dart';
 import '../storage/scoped_prefs.dart';
 
-const _kDefaultRelayUrl = 'app.defaultRelayUrl';
-const _kThemePreset = 'app.theme.preset';
-const _kCustomBg = 'app.theme.custom.bg';
-const _kCustomPrimary = 'app.theme.custom.primary';
-const _kCustomAccent = 'app.theme.custom.accent';
-const _kUiScale = 'antgrid.ui_scale.v1';
-const _kTelemetryEnabled = 'app.telemetry.enabled';
+final _kDefaultRelayUrl = scopedStorageKey('app.defaultRelayUrl');
+final _kThemePreset = scopedStorageKey('app.theme.preset');
+final _kCustomBg = scopedStorageKey('app.theme.custom.bg');
+final _kCustomPrimary = scopedStorageKey('app.theme.custom.primary');
+final _kCustomAccent = scopedStorageKey('app.theme.custom.accent');
+final _kUiScale = scopedStorageKey('antgrid.ui_scale.v1');
+final _kTelemetryEnabled = scopedStorageKey('app.telemetry.enabled');
 
 /// Every key AppSettings persists. The WithCache instance backing app settings
 /// must allow exactly these — reads/writes of any other key throw.
-const appSettingsPrefsKeys = <String>{
+final appSettingsPrefsKeys = <String>{
   _kDefaultRelayUrl,
   _kThemePreset,
   _kCustomBg,

@@ -1,13 +1,13 @@
 // Lightweight perf instrumentation for the agent process. Enabled via
 // `--debug-perf` on the CLI. Samples `process.memoryUsage()` at 1Hz and
-// appends a single line per sample to `~/.antgrid/perf.log`.
+// appends a single line per sample to `<abDir>/perf.log` (ANTGRID_DIR-aware).
 //
 // Target: an idle warm agent (no active session) should stay well under
 // the 80MB RSS budget called out in the spec.
 
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { mkdirSync, appendFileSync, existsSync } from "node:fs";
+import { resolveAbDir } from "./antgrid-dir";
 
 export interface PerfLogHandle {
   /** Stop the sampler and flush a final marker line. Idempotent. */
@@ -17,7 +17,7 @@ export interface PerfLogHandle {
 }
 
 export function startPerfLog(projectId: string): PerfLogHandle {
-  const dir = join(homedir(), ".antgrid");
+  const dir = resolveAbDir();
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const path = join(dir, "perf.log");
 

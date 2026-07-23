@@ -587,8 +587,27 @@ Future<Process> spawnHostProcess(BootstrapPayload payload) async {
             .toList(growable: false);
   // No subcommand args — the host reads stdin to learn its mode.
   final args = <String>[...(envPreargs.isNotEmpty ? envPreargs : cmd.preargs)];
+
+  // Pin the host to the SAME data dir the app resolved. The app is the
+  // authority on ANTGRID_DIR because only it knows the build mode: a debug
+  // build resolves `~/.antgrid-dev` so it never shares pairing/relay-epoch/
+  // device state with an installed release app on `~/.antgrid`. The bridge's
+  // resolveAbDir() has no build-mode notion, so we must hand it the value here
+  // rather than letting the child fall back to its own default.
+  final abDir = hostDir();
+
+  // Only export in non-release: a release build's abDir already equals what
+  // the host's own resolveAbDir() resolves unprompted, and the host's PTY
+  // sessions spread their environment into every user shell — exporting it
+  // unconditionally would let a dev stack later launched from an Antgrid
+  // terminal inherit ~/.antgrid as an "explicit override" and silently
+  // collide with the release install.
+  final hostEnv = kReleaseMode
+      ? const <String, String>{}
+      : {'ANTGRID_DIR': abDir};
+
   debugPrint(
-    '[HostController] spawning host: binary="$binary" args=$args',
+    '[HostController] spawning host: binary="$binary" args=$args abDir="$abDir"',
   );
 
   // .cmd/.bat on Windows requires runInShell. Direct .exe invocation does
@@ -604,6 +623,8 @@ Future<Process> spawnHostProcess(BootstrapPayload payload) async {
     proc = await Process.start(
       binary,
       args,
+      // Merged onto the inherited env (includeParentEnvironment defaults true).
+      environment: hostEnv,
       // `normal` mode lets us watch exitCode and stream stdio.
       mode: ProcessStartMode.normal,
       runInShell: isWindowsScript,

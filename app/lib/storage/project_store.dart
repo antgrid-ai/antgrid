@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'scoped_prefs.dart';
 
+import '../config/storage_scope.dart';
 import '../models/ab_project.dart';
 
 /// SharedPreferences-backed persistence for the user's opened-project list.
@@ -12,14 +13,13 @@ import '../models/ab_project.dart';
 /// Suitable for the small lists this App produces (tens of projects). Move to
 /// a real DB if it grows.
 class ProjectStore {
-  static const _key = 'antgrid.projects.v1';
+  static final _key = scopedStorageKey('antgrid.projects.v1');
   final SharedPreferencesWithCache _prefs;
 
   ProjectStore(this._prefs);
 
-  static Future<ProjectStore> open() async => ProjectStore(
-    await openScopedPrefs({_key}),
-  );
+  static Future<ProjectStore> open() async =>
+      ProjectStore(await openScopedPrefs({_key}));
 
   List<AbProject> list() {
     final raw = _prefs.getString(_key);

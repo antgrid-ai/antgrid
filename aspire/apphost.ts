@@ -25,8 +25,8 @@
 
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { networkInterfaces } from "node:os";
-import { dirname, resolve } from "node:path";
+import { homedir, networkInterfaces } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   createBuilder,
@@ -325,6 +325,16 @@ for (const target of appTargets) {
     app = app
       .withEnvironment("ANTGRID_AGENT_BIN", bunBin)
       .withEnvironment("ANTGRID_AGENT_PREARGS", agentScript)
+      // Isolate the dev stack's Antgrid home (pairing, relay-epoch, sessions,
+      // auth) from an installed release app on ~/.antgrid. The app inherits
+      // this, resolves it via hostDir(), and hands it to the spawned host — so
+      // both agree. Home-relative (matches hostDir()'s own bare-debug-build
+      // default and scripts/dev.ts) so every launch path lands on the same
+      // directory. `??` honors a developer's own explicit override.
+      .withEnvironment(
+        "ANTGRID_DIR",
+        process.env.ANTGRID_DIR ?? join(homedir(), ".antgrid-dev"),
+      )
       // Diagnostic: tee the app-spawned bridge/host logs to a file (the host's
       // stdout is otherwise buried under flutter+aspire). Inherited by the host
       // child via LocalAgentLauncher. Remove once same-account pairing is sorted.

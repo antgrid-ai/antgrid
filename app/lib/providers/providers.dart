@@ -9,6 +9,7 @@ import 'package:uuid/uuid.dart';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
+import '../config/storage_scope.dart';
 import '../models/ab_message.dart'
     show CommandInfo, NotificationPushMessage, TerminalNotificationMessage;
 import '../models/qr_payload.dart';
@@ -91,7 +92,7 @@ final licenseTokenMinterProvider = FutureProvider<LicenseTokenMinter?>((
 /// floor makes a storage wipe / reinstall a non-event: a fresh install still
 /// out-epochs any zombie connection whose counter came from a sane past.
 final relayEpochProvider = FutureProvider<int>((ref) async {
-  const key = 'antgrid.relay_epoch';
+  final key = scopedStorageKey('antgrid.relay_epoch');
   // SharedPreferencesAsync, not the legacy getInstance() — this repo's prefs
   // convention (see device_provisioning.dart) and the only API the in-memory
   // test platform backs.

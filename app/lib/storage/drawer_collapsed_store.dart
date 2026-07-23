@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../config/storage_scope.dart';
 import 'scoped_prefs.dart';
 
 /// SharedPreferences-backed persistence for the set of drawer entries the user
@@ -11,14 +12,13 @@ import 'scoped_prefs.dart';
 /// know the full id list. Ids share one namespace (local project ids + remote
 /// agent device ids); stale ids never match a live entry and are harmless.
 class DrawerCollapsedStore {
-  static const _key = 'antgrid.drawer_collapsed.v1';
+  static final _key = scopedStorageKey('antgrid.drawer_collapsed.v1');
   final SharedPreferencesWithCache _prefs;
 
   DrawerCollapsedStore._(this._prefs);
 
-  static Future<DrawerCollapsedStore> open() async => DrawerCollapsedStore._(
-    await openScopedPrefs({_key}),
-  );
+  static Future<DrawerCollapsedStore> open() async =>
+      DrawerCollapsedStore._(await openScopedPrefs({_key}));
 
   Set<String> read() {
     final raw = _prefs.getString(_key);

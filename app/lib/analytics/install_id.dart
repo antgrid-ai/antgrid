@@ -1,6 +1,8 @@
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:uuid/uuid.dart';
 
+import '../config/storage_scope.dart';
+
 /// A stable, anonymous per-install identifier. NOT the account id or device uuid;
 /// used only to compute retention over first-party events. The id persists in
 /// secure storage across sessions; when telemetry is disabled it is simply never
@@ -13,9 +15,9 @@ abstract class InstallIdStore {
 
 class SecureInstallIdStore implements InstallIdStore {
   SecureInstallIdStore([FlutterSecureStorage? storage])
-      : _storage = storage ?? const FlutterSecureStorage();
+    : _storage = storage ?? const FlutterSecureStorage();
 
-  static const _key = 'antgrid.analytics.install_id.v1';
+  static final _key = scopedStorageKey('antgrid.analytics.install_id.v1');
   final FlutterSecureStorage _storage;
 
   @override

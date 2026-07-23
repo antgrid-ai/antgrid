@@ -4,6 +4,8 @@ import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../config/storage_scope.dart';
+
 /// Per-agent Ed25519 keypair held by the phone. The pubkey is what the agent
 /// signs over in `pair-approval`; the privSeed is used to sign phone-side
 /// challenges. The privSeed is the raw 32-byte Ed25519 seed; pubkeyB64 is
@@ -36,11 +38,13 @@ abstract class PhoneIdentity {
   /// deviceUuid — there is no `.projectId` suffix; the trust anchor is the
   /// bare uuid.
   @visibleForTesting
-  static String privStorageKey(String id) => 'antgrid.phone_priv.$id';
+  static String privStorageKey(String id) =>
+      scopedStorageKey('antgrid.phone_priv.$id');
 
   /// Secure-storage key for the public key. Keyed by the BARE agent deviceUuid.
   @visibleForTesting
-  static String pubStorageKey(String id) => 'antgrid.phone_pub.$id';
+  static String pubStorageKey(String id) =>
+      scopedStorageKey('antgrid.phone_pub.$id');
 }
 
 class _SecurePhoneIdentity implements PhoneIdentity {
@@ -85,13 +89,17 @@ class _SecurePhoneIdentity implements PhoneIdentity {
 
   @override
   Future<void> clearAll() async {
-    // Per-agent keys are stored under `antgrid.phone_priv.*`/`antgrid.phone_pub.*`.
-    // Enumerate and delete only those — `deleteAll()` would also nuke unrelated
-    // secure-storage entries (session cookie, device record handled elsewhere).
+    // Per-agent keys are stored under `antgrid.phone_priv.*`/`antgrid.phone_pub.*`
+    // (scope-prefixed, so a dev build only sweeps its own). Enumerate and delete
+    // only those — `deleteAll()` would also nuke unrelated secure-storage entries
+    // (session cookie, device record handled elsewhere). Prefixes come from the
+    // same builders that write the keys (empty id = the bare prefix) so a
+    // future key-shape change can't silently desync the sweep from the write.
+    final privPrefix = PhoneIdentity.privStorageKey('');
+    final pubPrefix = PhoneIdentity.pubStorageKey('');
     final all = await _storage.readAll();
     for (final key in all.keys) {
-      if (key.startsWith('antgrid.phone_priv.') ||
-          key.startsWith('antgrid.phone_pub.')) {
+      if (key.startsWith(privPrefix) || key.startsWith(pubPrefix)) {
         await _storage.delete(key: key);
       }
     }

@@ -4,6 +4,7 @@ import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../config/storage_scope.dart';
 import 'shared_keychain.dart';
 
 /// Shared Keychain account under which the raw X25519 seed is mirrored on iOS
@@ -36,11 +37,11 @@ abstract class PushIdentity {
 
   /// Secure-storage key for the private seed.
   @visibleForTesting
-  static const privStorageKey = 'antgrid.push_priv.x25519.v1';
+  static final privStorageKey = scopedStorageKey('antgrid.push_priv.x25519.v1');
 
   /// Secure-storage key for the public key.
   @visibleForTesting
-  static const pubStorageKey = 'antgrid.push_pub.x25519.v1';
+  static final pubStorageKey = scopedStorageKey('antgrid.push_pub.x25519.v1');
 }
 
 Future<PushKeypair> _generate() async {
@@ -88,8 +89,14 @@ class _SecurePushIdentity implements PushIdentity {
   /// iOS: mirror the base64 seed into the shared Keychain Access Group so the
   /// NSE can decrypt push blobs. No-op off iOS. Guarded — the channel is absent
   /// in unit tests / on unsupported platforms and must never throw here.
+  ///
+  /// The shared account is unscoped — native NSE code can't read the Dart-side
+  /// storage-scope prefix — so a scoped (dev/test-instance) build must never
+  /// write it: doing so would overwrite the release app's seed and break its
+  /// push decryption until it next foregrounds and re-mirrors.
   Future<void> _mirrorSeedToSharedKeychain(String seedB64) async {
     if (defaultTargetPlatform != TargetPlatform.iOS) return;
+    if (storageScopePrefix.isNotEmpty) return;
     try {
       await SharedKeychain().write(_kSharedSeedAccount, seedB64);
     } catch (e) {
@@ -101,7 +108,10 @@ class _SecurePushIdentity implements PushIdentity {
   Future<void> clear() async {
     await _storage.delete(key: PushIdentity.privStorageKey);
     await _storage.delete(key: PushIdentity.pubStorageKey);
-    if (defaultTargetPlatform == TargetPlatform.iOS) {
+    // Same scoping rule as the mirror above: only the release identity may
+    // touch the shared (unscoped) keychain account.
+    if (defaultTargetPlatform == TargetPlatform.iOS &&
+        storageScopePrefix.isEmpty) {
       try {
         await SharedKeychain().delete(_kSharedSeedAccount);
       } catch (e) {

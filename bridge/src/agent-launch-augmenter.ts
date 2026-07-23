@@ -5,6 +5,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { atomicWriteFile } from "./discovery";
 import { logger } from "./logger";
 import { computeCommandHookHash, hookStateKey, EVENT_LABELS } from "./codex-hook-fingerprint";
+import { resolveAbDir } from "./antgrid-dir";
 import {
   hookArgv,
   hookShellCommand,
@@ -154,7 +155,7 @@ export function buildCodexNotifyInjection(
 
 export function augmentAgentLaunch(
   tool: string,
-  abDir: string = join(homedir(), ".antgrid"),
+  abDir: string = resolveAbDir(),
   cursorDir?: string,
   hookCommand: HookCommand = resolveHookCommand(),
 ): LaunchAugmentation {

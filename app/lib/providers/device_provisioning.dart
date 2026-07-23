@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
+import '../config/storage_scope.dart';
 import '../services/device_provisioning.dart';
 import '../services/devices_api.dart';
 import '../services/keychain_device_store.dart';
@@ -138,7 +139,7 @@ final localDeviceUuidProvider = FutureProvider<String?>((ref) async {
 /// literal would silently re-mint the host identity. Read via cacheless
 /// [SharedPreferencesAsync] (never WithCache) precisely because it's shared:
 /// per-instance sync caches would drift.
-const kLocalHostUuidKey = 'antgrid.local_host_uuid';
+final kLocalHostUuidKey = scopedStorageKey('antgrid.local_host_uuid');
 
 /// `Platform.localHostname` is the kernel network hostname, not a human
 /// device label — on Android it's commonly the literal string "localhost",
