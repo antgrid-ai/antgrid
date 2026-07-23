@@ -16,6 +16,7 @@ import '../providers/analytics.dart';
 import '../services/preview_service.dart';
 import '../providers/agent_transport.dart';
 import '../providers/providers.dart';
+import '../util/ab_log.dart';
 import '../widgets/port_entry.dart';
 import '../widgets/port_list_widget.dart';
 import '../widgets/preview_empty_state.dart';
@@ -79,7 +80,11 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
             _refreshHistoryFlags();
           },
           onWebResourceError: (error) {
-            debugPrint('WebView error: ${error.description}');
+            AbLog.error(
+              'PreviewScreen',
+              'WebView error',
+              fields: {'description': error.description},
+            );
           },
         ),
       )

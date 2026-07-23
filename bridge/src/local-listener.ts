@@ -3,6 +3,7 @@ import type { ServerWebSocket } from "bun";
 import { MessageBus, type Channel, type TransportSubscriber } from "./message-bus";
 import { parseMessageFast, type AbMessage } from "./protocol";
 import { logger } from "./logger";
+const log = logger.child({ component: "local-listener" });
 
 interface ConnState {
   state: "awaiting-hello" | "connected" | "rejected";
@@ -78,7 +79,7 @@ export class LocalListener implements TransportSubscriber {
         close: (ws) => {
           this.connections.delete(ws);
           if (this.ownerSocket === ws) {
-            logger.info("local listener: owner disconnected (app pid=%s)", ws.data.appPid ?? "?");
+            log.info("local listener: owner disconnected (app pid=%s)", ws.data.appPid ?? "?");
             this.ownerSocket = null;
             this.busUnsubscribe?.();
             this.busUnsubscribe = null;
@@ -87,7 +88,7 @@ export class LocalListener implements TransportSubscriber {
       },
     });
 
-    logger.info(`local listener bound on 127.0.0.1:${this.server.port}`);
+    log.info(`local listener bound on 127.0.0.1:${this.server.port}`);
   }
 
   async stop(): Promise<void> {
@@ -108,17 +109,17 @@ export class LocalListener implements TransportSubscriber {
   private handleHello(ws: ServerWebSocket<ConnState>, text: string, tokenBuf: Buffer): void {
     let envelope: any;
     try { envelope = JSON.parse(text); } catch {
-      logger.warn("local listener: rejecting hello (bad envelope), closing 4401");
+      log.warn("local listener: rejecting hello (bad envelope), closing 4401");
       ws.close(CLOSE_UNAUTHORIZED, "bad envelope"); return;
     }
     if (envelope?.type !== "hello" || typeof envelope.token !== "string") {
-      logger.warn("local listener: rejecting hello (malformed), closing 4401");
+      log.warn("local listener: rejecting hello (malformed), closing 4401");
       ws.close(CLOSE_UNAUTHORIZED, "bad hello"); return;
     }
     const presented = Buffer.from(envelope.token);
     const ok = presented.length === tokenBuf.length && timingSafeEqual(presented, tokenBuf);
     if (!ok) {
-      logger.warn("local listener: rejecting hello (bad token), closing 4401");
+      log.warn("local listener: rejecting hello (bad token), closing 4401");
       ws.close(CLOSE_UNAUTHORIZED, "bad token"); return;
     }
 
@@ -136,7 +137,7 @@ export class LocalListener implements TransportSubscriber {
     // the new owner we install here.
     if (this.ownerSocket && this.ownerSocket !== ws) {
       const stale = this.ownerSocket;
-      logger.warn(
+      log.warn(
         "local listener: owner superseded — new app (pid=%s) took over from existing owner (pid=%s); closing stale socket 4409",
         newPid ?? "?",
         stale.data.appPid ?? "?",
@@ -146,7 +147,7 @@ export class LocalListener implements TransportSubscriber {
       this.ownerSocket = null;
       try { stale.close(CLOSE_CONFLICT, "owner superseded"); } catch {}
     } else {
-      logger.info("local listener: owner connected (app pid=%s)", newPid ?? "?");
+      log.info("local listener: owner connected (app pid=%s)", newPid ?? "?");
     }
 
     ws.data.state = "connected";

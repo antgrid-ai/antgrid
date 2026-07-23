@@ -1,7 +1,8 @@
-import { test, expect } from "bun:test";
+import { afterAll, test, expect } from "bun:test";
 import { TerminalManager } from "../src/terminal-manager";
 import type { AbMessage } from "../src/protocol";
 import { createConnState } from "../src/conn-state";
+import { __setRootForTest } from "../src/logger";
 
 function makeManager() {
   const sent: AbMessage[] = [];
@@ -12,6 +13,8 @@ function makeManager() {
   );
   return { mgr, sent };
 }
+
+afterAll(() => __setRootForTest(process.stdout));
 
 test("resize sets driver to last resizer and broadcasts terminal:size", () => {
   const { mgr, sent } = makeManager();
@@ -31,11 +34,15 @@ test("resize sets driver to last resizer and broadcasts terminal:size", () => {
 
 test("same-client same-size resize is ignored before touching the PTY", () => {
   const { mgr } = makeManager();
-  const logs: string[] = [];
-  const originalLog = console.log;
-  console.log = (...args: unknown[]) => {
-    logs.push(args.map(String).join(" "));
-  };
+  // pino writes JSONL straight to its destination stream, bypassing
+  // console.log, so capture via the test root instead.
+  const lines: string[] = [];
+  __setRootForTest({
+    write(s: string): boolean {
+      lines.push(s);
+      return true;
+    },
+  }, "debug");
 
   try {
     mgr.spawn({ terminalId: "t1", cols: 80, rows: 24 });
@@ -43,12 +50,11 @@ test("same-client same-size resize is ignored before touching the PTY", () => {
     mgr.resize("t1", "deviceA", 120, 30);
     mgr.resize("t1", "deviceA", 120, 30);
 
-    const resizeLogs = logs.filter((line) =>
-      line.includes('Terminal "t1" resized to 120x30 by deviceA'),
-    );
+    const resizeLogs = lines
+      .map((l) => (JSON.parse(l) as { msg: string }).msg)
+      .filter((msg) => msg.includes('Terminal "t1" resized to 120x30 by deviceA'));
     expect(resizeLogs).toHaveLength(1);
   } finally {
-    console.log = originalLog;
     mgr.killAll();
   }
 });

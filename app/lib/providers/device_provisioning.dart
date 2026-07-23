@@ -10,6 +10,7 @@ import '../config/storage_scope.dart';
 import '../services/device_provisioning.dart';
 import '../services/devices_api.dart';
 import '../services/keychain_device_store.dart';
+import '../util/ab_log.dart';
 import 'auth.dart';
 import 'provider_retry.dart';
 
@@ -92,9 +93,13 @@ Future<DeviceRecord?> resolveDeviceRecord(
         device = await ensureCurrentUserDeviceRecord(ref);
       }
     } on ProvisioningException catch (e) {
-      debugPrint('[$logTag] provisioning failed (${e.code}): ${e.message}');
+      AbLog.error(
+        logTag,
+        'provisioning failed',
+        fields: {'code': e.code, 'message': e.message},
+      );
     } catch (e) {
-      debugPrint('[$logTag] skipped machine provisioning: $e');
+      AbLog.warn(logTag, 'skipped machine provisioning', fields: {'error': '$e'});
     }
   }
   return device;

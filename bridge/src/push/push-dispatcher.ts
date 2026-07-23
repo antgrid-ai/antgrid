@@ -1,5 +1,6 @@
 import type { AbMessage } from "../protocol";
 import { logger } from "../logger";
+const log = logger.child({ component: "push-dispatcher" });
 import { composePush } from "./compose";
 
 const MAX_BODY_LEN = 480; // keep the sealed payload well under FCM's ~4 KB data cap
@@ -45,14 +46,14 @@ export function createPushDispatcher(deps: PushDispatcherDeps) {
         // at all. At debug it's indistinguishable from the agent never notifying,
         // which sends anyone debugging push off hunting a message that was in
         // fact delivered in-band. One line per turn on a relay-paired project.
-        logger.info("push: %s not sent — phone can receive in-band", composed.kind);
+        log.info("push: %s not sent — phone can receive in-band", composed.kind);
         return;
       }
       const targets = deps.resolveTargets();
       if (targets.length === 0) {
         // warn: the phone can't receive in-band AND has nowhere to push, so this
         // notification is lost outright. resolveTargets logs the specific cause.
-        logger.warn("push: %s DROPPED — no push target for project %s", composed.kind, deps.projectId);
+        log.warn("push: %s DROPPED — no push target for project %s", composed.kind, deps.projectId);
         return;
       }
       const sourceMessageId = msg.type === "handler:escalation" ? msg.escalationId : msg.id;
@@ -69,7 +70,7 @@ export function createPushDispatcher(deps: PushDispatcherDeps) {
         const blob = deps.seal(payload, target.pushPubkey);
         deps.deliver(target.pushToken, target.provider, blob);
       }
-      logger.info(
+      log.info(
         "push: %s sealed and handed to relay (providers=%s)",
         composed.kind,
         targets.map((t) => t.provider).join(","),

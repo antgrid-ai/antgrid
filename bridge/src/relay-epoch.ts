@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { logger } from "./logger";
+const log = logger.child({ component: "relay-epoch" });
 
 /**
  * Connection-instance epoch for v3 hello arbitration (design §6.3/§13.2).
@@ -24,7 +25,7 @@ export function nextEpoch(abDir: string): number {
   } catch (err) {
     // A corrupt/unreadable counter falls back to the wall-clock floor below —
     // never fail closed, an epoch is only a monotonic tiebreaker.
-    logger.warn("relay-epoch: failed to read %s: %s", path, err instanceof Error ? err.message : String(err));
+    log.warn("relay-epoch: failed to read %s: %s", path, err instanceof Error ? err.message : String(err));
   }
   const epoch = Math.max(stored + 1, Math.floor(Date.now() / 1000));
   try {
@@ -34,7 +35,7 @@ export function nextEpoch(abDir: string): number {
     // Persist failure only risks a non-monotonic epoch after a same-second
     // restart; the relay rejects an equal/lower epoch, so worst case is one
     // reconnect retry — not a correctness hazard.
-    logger.warn("relay-epoch: failed to persist %s: %s", path, err instanceof Error ? err.message : String(err));
+    log.warn("relay-epoch: failed to persist %s: %s", path, err instanceof Error ? err.message : String(err));
   }
   return epoch;
 }

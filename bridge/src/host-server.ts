@@ -16,6 +16,7 @@ import { VERSION } from "./version";
 import type { DeviceIdentity } from "./device";
 import type { ProjectSummary, ConnectInfo, PairedPhoneSummary, KnownProject } from "./control-protocol";
 import { logger } from "./logger";
+const log = logger.child({ component: "host-server" });
 import { RelayClient, type RelayClientOptions } from "./relay-client";
 import type { MachineRelaySession } from "./relay-promotion";
 import type { AgentEnableRelay } from "./protocol";
@@ -244,7 +245,7 @@ export class HostServer {
       startedAt: new Date().toISOString(),
       agentVersion: VERSION,
     });
-    logger.info(`host control plane ready on 127.0.0.1:${listener.port}; host.json written`);
+    log.info(`host control plane ready on 127.0.0.1:${listener.port}; host.json written`);
     // Open the always-on remote control plane only when the machine has remote
     // config (device auth + relay endpoints). Local-only hosts have no relay.
     // Best-effort: a control-plane open failure (e.g. the OAuth mint throwing in
@@ -256,7 +257,7 @@ export class HostServer {
     // retry the mint — we don't double-consume the failure here.
     if (this.opts.remote) {
       await this.startRemoteControlPlane().catch((err) =>
-        logger.warn("host: remote control plane failed to start (will not retry): %s", err?.message ?? err),
+        log.warn("host: remote control plane failed to start (will not retry): %s", err?.message ?? err),
       );
     }
     return { port: listener.port, token };
@@ -303,7 +304,7 @@ export class HostServer {
         this.sendToolsAdvertisement(bus); // machine-level; no phone-pubkey needed
       },
       onPaired: (_id, name) => {
-        logger.info("Phone '%s' paired to control plane", name);
+        log.info("Phone '%s' paired to control plane", name);
         this.readvertiseToControlPlane();
       },
       // A bridge-side reconnect to the RELAY (heartbeat lapse, network blip on
@@ -326,7 +327,7 @@ export class HostServer {
       // (phones:deny / phones:unpair → demoteIfOrphaned) and core lifecycle
       // (stop / evict / shutdown). The promoted slot is a bounded idle outbound
       // socket meanwhile; it reconnects with the core.
-      onUnpaired: (id) => logger.info("Control-plane phone %s disconnected — promotions left intact", id),
+      onUnpaired: (id) => log.info("Control-plane phone %s disconnected — promotions left intact", id),
     });
 
     bus.setInboundHandler((msg, channel) => {
@@ -339,7 +340,7 @@ export class HostServer {
     this.controlPlaneRelay = client;
     this.controlPlaneBus = bus;
     client.connect();
-    logger.info("host: remote control plane relay opened (device=%s)", client.deviceId);
+    log.info("host: remote control plane relay opened (device=%s)", client.deviceId);
   }
 
   /** Bring the machine relay socket up (from the desktop wizard's credentials if
@@ -500,13 +501,13 @@ export class HostServer {
         // SessionManager.readPersisted), so publish on resolve.
         void this.handleSessionsListRpc(msg, phonePubkey)
           .then((res) => bus.publish(res, channel))
-          .catch((err) => logger.warn("sessions.list handler threw: %s", err));
+          .catch((err) => log.warn("sessions.list handler threw: %s", err));
         return;
       }
       if (msg.method === "sessions.delete") {
         void this.handleSessionsDeleteRpc(msg, phonePubkey)
           .then((res) => bus.publish(res, channel))
-          .catch((err) => logger.warn("sessions.delete handler threw: %s", err));
+          .catch((err) => log.warn("sessions.delete handler threw: %s", err));
         return;
       }
       void dispatchRpc(bus, msg).then((res) => bus.publish(res, channel));
@@ -528,7 +529,7 @@ export class HostServer {
           );
         }
       })
-      .catch((err) => logger.warn("control-plane verb handler threw: %s", err));
+      .catch((err) => log.warn("control-plane verb handler threw: %s", err));
   }
 
   /** Handle a desktop allowlist-hub verb over the loopback control plane. The
@@ -833,7 +834,7 @@ export class HostServer {
           "control",
         );
       })
-      .catch((e) => logger.warn("reportFirstRegister threw for %s: %s", projectId, e));
+      .catch((e) => log.warn("reportFirstRegister threw for %s: %s", projectId, e));
   }
 
   /** True once an already-open core has been promoted onto the relay (additive
@@ -854,7 +855,7 @@ export class HostServer {
     try {
       entry.promotion.stop();
     } catch (e) {
-      logger.warn("Failed to demote orphaned core %s: %s", projectId, e instanceof Error ? e.message : String(e));
+      log.warn("Failed to demote orphaned core %s: %s", projectId, e instanceof Error ? e.message : String(e));
     }
     entry.promotion = undefined;
   }
@@ -876,7 +877,7 @@ export class HostServer {
         // PromotionHandle.stop() isolates each teardown sub-step internally; an
         // unexpected throw escaping those inner catches must be reported, never
         // dropped silently. The slot is still cleared below.
-        logger.warn("Failed to demote promoted core %s: %s", projectId, e instanceof Error ? e.message : String(e));
+        log.warn("Failed to demote promoted core %s: %s", projectId, e instanceof Error ? e.message : String(e));
       }
       entry.promotion = undefined;
     }
@@ -992,7 +993,7 @@ export class HostServer {
     // read path already "never throws into the caller" — extend that to writes).
     this.seenProjects.set(projectId, { path: projectPath, label: basename(projectPath), lastActiveAt: new Date().toISOString() });
     this.flushSeen();
-    logger.info(`host: opened project ${projectId} (mode=${mode}, ${this.cores.size} core(s) warm)`);
+    log.info(`host: opened project ${projectId} (mode=${mode}, ${this.cores.size} core(s) warm)`);
     await this.evictIfNeeded(projectId);
     return this.resultFor(entry);
   }
@@ -1045,7 +1046,7 @@ export class HostServer {
       relayUrl: r.relayUrl,
       machineName: process.env.ANTGRID_HOST_NAME ?? hostname(),
     }).then((ok) => {
-      if (!ok) logger.warn("heartbeat POST failed (non-2xx or network error)", { deviceUuid: r.auth.deviceUuid });
+      if (!ok) log.warn("heartbeat POST failed (non-2xx or network error)", { deviceUuid: r.auth.deviceUuid });
     });
   }
 
@@ -1065,7 +1066,7 @@ export class HostServer {
     // A promoted local core holds a relay slot separate from its loopback session
     // (core.shutdown only closes the core's own `this.relay`, which a local core
     // never set). Stop the slot explicitly so it doesn't leak past teardown.
-    try { entry.promotion?.stop(); } catch (e) { logger.warn("Failed to stop promotion for %s: %s", projectId, e instanceof Error ? e.message : String(e)); }
+    try { entry.promotion?.stop(); } catch (e) { log.warn("Failed to stop promotion for %s: %s", projectId, e instanceof Error ? e.message : String(e)); }
     await entry.core.shutdown();
   }
 
@@ -1108,7 +1109,7 @@ export class HostServer {
       try {
         rmSync(dir, { recursive: true, force: true });
       } catch (e) {
-        logger.warn("host: failed to delete %s: %s", dir, e instanceof Error ? e.message : String(e));
+        log.warn("host: failed to delete %s: %s", dir, e instanceof Error ? e.message : String(e));
       }
     }
   }
@@ -1131,7 +1132,7 @@ export class HostServer {
     this.control = null;
     const entries = [...this.cores.values()];
     this.cores.clear();
-    for (const e of entries) { try { e.promotion?.stop(); } catch (err) { logger.warn("Failed to stop promotion for %s during shutdown: %s", e.core.projectId, err instanceof Error ? err.message : String(err)); } }
+    for (const e of entries) { try { e.promotion?.stop(); } catch (err) { log.warn("Failed to stop promotion for %s during shutdown: %s", e.core.projectId, err instanceof Error ? err.message : String(err)); } }
     await Promise.all(entries.map((e) => e.core.shutdown(reason).catch(() => {})));
   }
 
@@ -1181,8 +1182,8 @@ export class HostServer {
       if (!victim) break;
       const entry = this.cores.get(victim);
       this.cores.delete(victim);
-      try { entry?.promotion?.stop(); } catch (e) { logger.warn("Failed to stop promotion for evicted core %s: %s", victim, e instanceof Error ? e.message : String(e)); }
-      logger.info(`host: evicting LRU core ${victim} (cap ${cap})`);
+      try { entry?.promotion?.stop(); } catch (e) { log.warn("Failed to stop promotion for evicted core %s: %s", victim, e instanceof Error ? e.message : String(e)); }
+      log.info(`host: evicting LRU core ${victim} (cap ${cap})`);
       // Await teardown so eviction is observable (discovery file removed) before
       // open() returns. open() already awaits core.start(), so this is consistent.
       await entry?.core.shutdown("evicted").catch(() => {});
@@ -1226,7 +1227,7 @@ export class HostServer {
    *  cache the read path already tolerates losing. */
   private flushSeen(): void {
     try { flushSeenProjects(seenProjectsPath(), this.seenProjects); }
-    catch (e) { logger.warn("host: failed to persist projects.json (hint only): %s", e); }
+    catch (e) { log.warn("host: failed to persist projects.json (hint only): %s", e); }
   }
 }
 

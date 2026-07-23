@@ -8,6 +8,7 @@ import {
   type FileUploadStart, type FileUploadChunk, type FileUploadDone,
 } from "./protocol";
 import { logger } from "./logger";
+const log = logger.child({ component: "file-upload" });
 
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 const MAX_CONCURRENT_UPLOADS = 4;
@@ -93,7 +94,7 @@ export class FileUploadManager {
   private touch(u: UploadSession): void {
     clearTimeout(u.timer);
     u.timer = setTimeout(() => {
-      logger.warn("Upload %s timed out after %dms of inactivity", u.uploadId, INACTIVITY_MS);
+      log.warn("Upload %s timed out after %dms of inactivity", u.uploadId, INACTIVITY_MS);
       this.abort(u, "TIMEOUT", "Upload timed out");
     }, INACTIVITY_MS);
   }
@@ -126,7 +127,7 @@ export class FileUploadManager {
       this.touch(session);
       this.opts.send(createMessage("file:upload-ready", { requestId: msg.requestId, uploadId }));
     } catch (err) {
-      logger.error("upload start failed: %s", err);
+      log.error("upload start failed: %s", err);
       this.sendResult(msg.requestId, { ok: false, error: "WRITE_FAILED", message: "Could not create staging file" });
     }
   }
@@ -172,7 +173,7 @@ export class FileUploadManager {
     try {
       writeSync(u.fd, buf);
     } catch (err) {
-      logger.error("upload chunk write failed: %s", err);
+      log.error("upload chunk write failed: %s", err);
       this.abort(u, "WRITE_FAILED", "Could not write to staging file");
       return;
     }
@@ -203,7 +204,7 @@ export class FileUploadManager {
     try {
       renameSync(u.partPath, finalPath);
     } catch (err) {
-      logger.error("upload finalize failed: %s", err);
+      log.error("upload finalize failed: %s", err);
       rmSync(u.partPath, { force: true });
       this.sendResult(u.requestId, { uploadId: u.uploadId, ok: false, error: "WRITE_FAILED", message: "Could not finalize upload" });
       return;

@@ -6,6 +6,7 @@ import { createRelayPromotion, type RelayPromotionController, type RelayPromotio
 import type { AttachStreamOpts, StreamHandle } from "./stream-mux";
 import { createMessage } from "./protocol";
 import { logger } from "./logger";
+const log = logger.child({ component: "project-core" });
 import { createPushDispatcher } from "./push/push-dispatcher";
 import { sealPush } from "./push/seal";
 
@@ -158,7 +159,7 @@ export class ProjectCore {
     // Connect info is published via the control-plane `project:open` response
     // (no per-project discovery file). Surface it for the host to hand out.
     this._localConnectInfo = { port: listener.port, token };
-    logger.info(`local listener ready on port ${listener.port}`);
+    log.info(`local listener ready on port ${listener.port}`);
 
     core.onHandshakeComplete();
   }
@@ -166,7 +167,7 @@ export class ProjectCore {
   private async startLocal(core: AgentCore, bus: MessageBus): Promise<void> {
     const projectId = core.projectId;
     const folder = this.deps.folder;
-    logger.info(`local: folder=${folder} projectId=${projectId} pid=${process.pid}`);
+    log.info(`local: folder=${folder} projectId=${projectId} pid=${process.pid}`);
 
     await this.bindLoopback(core, bus);
 
@@ -206,7 +207,7 @@ export class ProjectCore {
     const slot = this.attachRelayStream(core, bus, remote, {
       onUnpaired: () => {
         if (this.listener?.hasOwner) {
-          logger.info("relay peer unpaired; loopback owner attached — leaving core services up");
+          log.info("relay peer unpaired; loopback owner attached — leaving core services up");
           return;
         }
         core.onUnpaired();
@@ -310,7 +311,7 @@ export class ProjectCore {
           // The dispatcher can only report THAT it dropped the notification. A
           // pruned token, a never-allowlisted phone and no phone at all are
           // indistinguishable in host.log without this.
-          logger.warn(
+          log.warn(
             "push: no eligible phone for project %s (live peer: %s, paired: %d) — need pairing + allowlist + a push token",
             core.projectId,
             peerPubkey ? "yes" : "none since agent start",
@@ -330,7 +331,7 @@ export class ProjectCore {
         try {
           dispatcher.onOutbound(msg);
         } catch (err) {
-          logger.error("push dispatcher threw during deliver (type=%s): %s", msg.type, String(err));
+          log.error("push dispatcher threw during deliver (type=%s): %s", msg.type, String(err));
         }
       },
     });
@@ -348,7 +349,7 @@ export class ProjectCore {
     remote: ProjectCoreRemoteDeps,
   ): { handle: StreamHandle; detach: () => void } {
     const { handle, unsubscribePush } = this.attachRelayStream(core, bus, remote, {
-      onUnpaired: () => logger.info("wizard-promoted core peer unpaired (phone); leaving local session attached"),
+      onUnpaired: () => log.info("wizard-promoted core peer unpaired (phone); leaving local session attached"),
     });
     return {
       handle,
@@ -383,7 +384,7 @@ export class ProjectCore {
     if (!core || !bus) throw new Error("ProjectCore.promote: core not started (call start() first)");
 
     const { handle, firstRegister, unsubscribePush } = this.attachRelayStream(core, bus, remoteDeps, {
-      onUnpaired: () => logger.info("promoted core peer unpaired (phone); leaving local session attached"),
+      onUnpaired: () => log.info("promoted core peer unpaired (phone); leaving local session attached"),
     });
 
     let stopped = false;

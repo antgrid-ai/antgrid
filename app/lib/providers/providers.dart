@@ -49,6 +49,7 @@ import '../services/agent_session_service.dart';
 import '../services/handler_service.dart';
 import '../services/sessions_service.dart';
 import '../services/upload_service.dart';
+import '../util/ab_log.dart';
 import 'client_id.dart';
 import 'value_controller.dart';
 
@@ -876,7 +877,7 @@ class PairedAgentNotifier extends AsyncNotifier<List<PairedAgent>> {
     if (agent == null) return;
     final ra = _findRecentAgent(agent.agentDeviceId);
     if (ra == null) return;
-    debugPrint('[relay] retry → reconnect(target=${agent.agentDeviceId})');
+    AbLog.info('relay', 'retry → reconnect', fields: {'target': agent.agentDeviceId});
     final identity = await _identityForRelay();
     final pairing = ref.read(pairingServiceForProvider(agent.agentDeviceId));
     await pairing.reconnect(ra, identity);

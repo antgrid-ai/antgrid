@@ -33,6 +33,7 @@ import '../providers/providers.dart';
 import '../providers/sessions.dart';
 import '../services/agent_session_service.dart';
 import '../services/upload_service.dart';
+import '../util/ab_log.dart';
 import '../utils/platform_utils.dart';
 import 'transcript/composer/composer_attachments.dart';
 import 'transcript/composer/composer_controller.dart';
@@ -556,8 +557,11 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
                           _selection
                               .copy(CopyKind.rich)
                               .catchError(
-                                (Object e) =>
-                                    debugPrint('transcript copy failed: $e'),
+                                (Object e) => AbLog.error(
+                                  'AgentTranscript',
+                                  'copy failed',
+                                  fields: {'error': '$e'},
+                                ),
                               );
                           return null;
                         },
@@ -923,9 +927,9 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
     void run(CopyKind kind) {
       // Fire-and-forget, but never let a clipboard write reject unobserved: an
       // unhandled async error crashes the debug zone and tells the user nothing.
-      _selection
-          .copy(kind)
-          .catchError((Object e) => debugPrint('transcript copy failed: $e'));
+      _selection.copy(kind).catchError(
+        (Object e) => AbLog.error('AgentTranscript', 'copy failed', fields: {'error': '$e'}),
+      );
       state.hideToolbar();
     }
 

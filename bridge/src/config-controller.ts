@@ -4,6 +4,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { AbConfigSchema, type AbConfig, formatZodIssues } from "./config";
 import { atomicWriteFile } from "./discovery";
 import { logger } from "./logger";
+const log = logger.child({ component: "config-controller" });
 
 export type ReadResult =
   | { ok: true; config: AbConfig }
@@ -77,7 +78,7 @@ export class ConfigController {
     // watched path is locked or removed at runtime); with no handler Node
     // rethrows them as an uncaught exception. Swallow-and-log, mirroring the
     // chokidar FileWatcher's error handling.
-    this.watcher.on("error", (err) => logger.error("Config watcher error: %s", err));
+    this.watcher.on("error", (err) => log.error("Config watcher error: %s", err));
     // seed lastConfig from current file
     const r0 = this.read();
     if (r0.ok) this.lastConfig = r0.config;

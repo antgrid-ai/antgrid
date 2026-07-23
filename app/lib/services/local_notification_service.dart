@@ -1,5 +1,6 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+
+import '../util/ab_log.dart';
 
 /// Thin wrapper over flutter_local_notifications. Used only for FOREGROUND
 /// OS notifications when the app is backgrounded; the caller decides when to
@@ -39,13 +40,18 @@ class LocalNotificationService {
       final ok = await _plugin.initialize(settings: settings);
       _ready = ok ?? true;
       if (!_ready) {
-        debugPrint(
-          'LocalNotificationService: plugin.initialize returned false — '
-          'OS notifications unavailable on this platform/build.',
+        AbLog.warn(
+          'LocalNotificationService',
+          'plugin.initialize returned false — OS notifications unavailable '
+              'on this platform/build.',
         );
       }
     } catch (e) {
-      debugPrint('LocalNotificationService init failed: $e');
+      AbLog.error(
+        'LocalNotificationService',
+        'init failed',
+        fields: {'error': '$e'},
+      );
     }
   }
 
@@ -81,7 +87,11 @@ class LocalNotificationService {
         ),
       );
     } catch (e) {
-      debugPrint('LocalNotificationService show failed: $e');
+      AbLog.error(
+        'LocalNotificationService',
+        'show failed',
+        fields: {'error': '$e'},
+      );
     }
   }
 }

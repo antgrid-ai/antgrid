@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { hostname } from "node:os";
 import { spawn, type ChildProcess } from "node:child_process";
 import { logger } from "./logger";
+const log = logger.child({ component: "agent-core" });
 import { TerminalManager } from "./terminal-manager";
 import { createConnState, type ConnState } from "./conn-state";
 import { FileWatcher } from "./file-watcher";
@@ -168,7 +169,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   if (opts.configPath || findConfigFile(opts.folder)) {
     config = loadConfig(opts.configPath, opts.folder);
   } else if (opts.mode === "local" || !interactive) {
-    logger.info(`No antgrid.yaml found; using defaults (${opts.mode} mode, headless)`);
+    log.info(`No antgrid.yaml found; using defaults (${opts.mode} mode, headless)`);
     config = loadConfig(undefined, opts.folder); // returns DEFAULT_CONFIG
   } else {
     console.log("No antgrid.yaml found. Let's set up this workspace.");
@@ -290,7 +291,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       projectId: project.id,
       ed25519PublicKey: identity.ed25519PublicKey,
       pairCode: bannerPairCode,
-    }).catch((err) => logger.warn("Banner display failed: %s", err));
+    }).catch((err) => log.warn("Banner display failed: %s", err));
   }
 
   let manager: TerminalManager | null = null;
@@ -337,17 +338,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   function handleTunnelMessage(raw: unknown) {
     const msg = parseTunnelMessage(raw as string | object);
-    if (!msg) { logger.warn("Invalid tunnel message, dropping"); return; }
+    if (!msg) { log.warn("Invalid tunnel message, dropping"); return; }
     // Tunnel verbs proxy arbitrary HTTP to localhost:<port> and return the body,
     // so a not-allowed phone could otherwise read a project's dev-server/preview
     // data without ever touching the bus dispatch gate. Gate here too.
     if (!currentPhoneAllowed()) {
-      logger.warn("Dropping tunnel %s from not-allowed phone for project %s", msg.type, project.id);
+      log.warn("Dropping tunnel %s from not-allowed phone for project %s", msg.type, project.id);
       return;
     }
     if (msg.type === "tunnel:http-request" && tunnelManager) {
       tunnelManager.onHttpRequest(msg).catch((err) =>
-        logger.error("tunnel:http-request handler failed: %s", err)
+        log.error("tunnel:http-request handler failed: %s", err)
       );
     }
   }
@@ -419,7 +420,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (fw) {
           fw.handleFileReadRequest(msg.path);
         } else {
-          logger.warn("file:read for unknown projectId: %s", msg.projectId);
+          log.warn("file:read for unknown projectId: %s", msg.projectId);
         }
         break;
       }
@@ -442,9 +443,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
             regex: msg.regex,
             wholeWord: msg.wholeWord,
             requestId: msg.requestId,
-          }).catch((err) => logger.error("file:search handler failed: %s", err));
+          }).catch((err) => log.error("file:search handler failed: %s", err));
         } else {
-          logger.warn("file:search for unknown projectId: %s", msg.projectId);
+          log.warn("file:search for unknown projectId: %s", msg.projectId);
         }
         break;
       }
@@ -457,38 +458,38 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       }
       case "git:diff": {
         handleGitDiffRequest(msg.projectId, msg.path).catch((err) =>
-          logger.error("git:diff handler failed: %s", err)
+          log.error("git:diff handler failed: %s", err)
         );
         break;
       }
       case "git:list-branches": {
         handleGitListBranches(msg.projectId).catch((err) =>
-          logger.error("git:list-branches handler failed: %s", err)
+          log.error("git:list-branches handler failed: %s", err)
         );
         break;
       }
       case "git:checkout": {
         handleGitCheckout(msg.projectId, msg.branch).catch((err) =>
-          logger.error("git:checkout handler failed: %s", err)
+          log.error("git:checkout handler failed: %s", err)
         );
         break;
       }
       case "git:commit": {
         handleGitCommit(msg.projectId, msg.message, msg.files).catch((err) =>
-          logger.error("git:commit handler failed: %s", err)
+          log.error("git:commit handler failed: %s", err)
         );
         break;
       }
       case "git:discard": {
         handleGitDiscard(msg.projectId, msg.files).catch((err) =>
-          logger.error("git:discard handler failed: %s", err)
+          log.error("git:discard handler failed: %s", err)
         );
         break;
       }
       case "command:run": {
         const cmdConfig = config.commands?.find((c) => c.name === msg.commandName);
         if (!cmdConfig) {
-          logger.warn("command:run for unknown command: %s", msg.commandName);
+          log.warn("command:run for unknown command: %s", msg.commandName);
           sendAb(createMessage("command:done", {
             projectId: msg.projectId,
             commandName: msg.commandName,
@@ -499,7 +500,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
         // Reject unconfirmed runs of commands marked confirm: true
         if (cmdConfig.confirm && !msg.confirmed) {
-          logger.warn("command:run rejected — '%s' requires confirmation", msg.commandName);
+          log.warn("command:run rejected — '%s' requires confirmation", msg.commandName);
           sendAb(createMessage("command:output", {
             projectId: msg.projectId,
             commandName: msg.commandName,
@@ -565,7 +566,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           }));
         });
 
-        logger.info("Command '%s' started for project '%s'", msg.commandName, msg.projectId);
+        log.info("Command '%s' started for project '%s'", msg.commandName, msg.projectId);
         break;
       }
       case "agent:update": {
@@ -587,7 +588,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         const chatIds = (sessions?.list(true) ?? [])
           .filter((s) => s.mode === "chat" && (s.tool ?? "codex") === spec.tool && s.running)
           .map((s) => s.id);
-        logger.info("agent:update — quiescing %d %s session(s) to update", chatIds.length, spec.tool);
+        log.info("agent:update — quiescing %d %s session(s) to update", chatIds.length, spec.tool);
         void runToolUpdate({
           sessionIds: chatIds,
           // stopChat resolves only once the process has exited (its dispose awaits
@@ -704,13 +705,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       }
       case "client:focus-state": {
         connState.appFocusPaused = msg.paused;
-        logger.info("focus-state: paused=%s", msg.paused);
+        log.info("focus-state: paused=%s", msg.paused);
         break;
       }
       case "terminal:snapshot:request": {
         const snap = manager.getScrollback(msg.terminalId);
         if (!snap) {
-          logger.warn("snapshot requested for unknown terminal %s", msg.terminalId);
+          log.warn("snapshot requested for unknown terminal %s", msg.terminalId);
           break;
         }
         sendAb(createMessage("terminal:snapshot", {
@@ -737,9 +738,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       }
       case "push:register": {
         const peerPubkey = peerPubkeyProvider?.() ?? null;
-        if (!peerPubkey) { logger.warn("push:register with no peer pubkey; ignoring"); break; }
+        if (!peerPubkey) { log.warn("push:register with no peer pubkey; ignoring"); break; }
         const phone = pairedPhones.get(peerPubkey);
-        if (!phone) { logger.warn("push:register from unknown phone; ignoring"); break; }
+        if (!phone) { log.warn("push:register from unknown phone; ignoring"); break; }
         if (msg.pushToken === "") {
           // Clear signal (sign-out): stop pushing to this phone.
           pairedPhones.upsert({
@@ -749,7 +750,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
             pushPubkey: undefined,
             pushUpdatedAt: new Date().toISOString(),
           });
-          logger.info("Cleared push token for phone %s", phone.phoneDeviceId);
+          log.info("Cleared push token for phone %s", phone.phoneDeviceId);
           break;
         }
         pairedPhones.upsert({
@@ -759,7 +760,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           pushPubkey: msg.pushPubkey,
           pushUpdatedAt: new Date().toISOString(),
         });
-        logger.info("Registered push token for phone %s", phone.phoneDeviceId);
+        log.info("Registered push token for phone %s", phone.phoneDeviceId);
         break;
       }
     }
@@ -1079,7 +1080,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   let gitBranchInterval: ReturnType<typeof setInterval> | null = null;
 
   async function resyncState() {
-    logger.info("App reconnected, re-syncing existing state");
+    log.info("App reconnected, re-syncing existing state");
     // Use cached git state for the immediate resync; refresh in background.
     sendStatus();
     sendGitStatus();
@@ -1354,7 +1355,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (!codexHookAlive.has(id)) {
           session.enableOscNotifications();
           session.enableOscTitle();
-          logger.warn(
+          log.warn(
             "codex hooks did not ping /hook-alive for %s — trust fingerprint " +
             "may have drifted; re-enabled OSC scanner (notifications + title) as fallback",
             id,
@@ -1531,7 +1532,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   }
 
   function onHandshakeComplete() {
-    logger.info("app:ready / owner-connect — emitting hello and (re)syncing state");
+    log.info("app:ready / owner-connect — emitting hello and (re)syncing state");
     // Re-emit hello on every handshake; app-side notifiers are
     // latest-wins, so this is a no-op when unchanged and self-healing
     // otherwise. (Local mode has no onUnpaired to reset a guard.)
@@ -1541,11 +1542,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Sessions are no longer auto-created on connect; the app routes the user
     // to the New Session page when the list is empty so they pick an agent.
     // Existing sessions are still restored + listed by session:list.
-    void setupServices().catch((err) => logger.error("setupServices failed: %s", err));
+    void setupServices().catch((err) => log.error("setupServices failed: %s", err));
   }
 
   function onUnpaired() {
-    logger.info("App unpaired, tearing down services");
+    log.info("App unpaired, tearing down services");
     teardownServices();
   }
 
@@ -1561,7 +1562,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       handlerEngine.handleEvent({
         terminalId: body.terminalId, event: body.event,
         transcriptPath: body.transcriptPath, sessionId: body.sessionId,
-      }).catch((err) => logger.error("Handler event failed: %s", err));
+      }).catch((err) => log.error("Handler event failed: %s", err));
     },
     onSessionTitle: async (body) => {
       // Persist the agent's native resume id for this slot every turn
@@ -1641,7 +1642,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // the source check a promoted core would gate the desktop's own input by
       // the phone's allowlist and silently drop the user's local typing.
       if (source !== "loopback" && !currentPhoneAllowed()) {
-        logger.warn(
+        log.warn(
           "Dropping inbound %s from not-allowed phone for project %s",
           msg.type,
           project.id,
@@ -1676,7 +1677,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       teardownServices();
       const closed = manager ? await manager.killAllGracefully(5000) : 0;
 
-      logger.info("Antgrid Agent stopped. %d terminal(s) closed.", closed);
+      log.info("Antgrid Agent stopped. %d terminal(s) closed.", closed);
       return closed;
     },
     relayUrl: relayBase,

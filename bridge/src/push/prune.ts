@@ -1,5 +1,6 @@
 import type { PairedPhonesStore } from "../paired-phones";
 import { logger } from "../logger";
+const log = logger.child({ component: "push-prune" });
 
 /**
  * Clear a phone's FCM token after the relay reports it UNREGISTERED (FCM
@@ -13,7 +14,7 @@ export function prunePushToken(pairedPhones: PairedPhonesStore, pushToken: strin
   if (!phone) return;
   // warn: this disarms push for the phone until the app re-registers a token.
   // Unlogged, the dispatcher just goes quiet and host.log offers no reason.
-  logger.warn(
+  log.warn(
     "push: token for phone %s reported dead — cleared; push stays off until the app re-registers",
     phone.label ?? phone.phoneDeviceId,
   );

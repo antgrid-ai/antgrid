@@ -7,6 +7,7 @@ import { mapAssistantContent, mapToolKind, mapUsage, addUsage, mapResultError, t
 import { claudeResumeReplay } from "./claude-resume-replay";
 import { readClaudeTranscript } from "./claude-transcript-read";
 import { logger } from "../logger";
+const log = logger.child({ component: "claude-driver" });
 
 // The SDK's `displayName` is a bare family name ("Sonnet"); the version lives
 // in `resolvedModel`, the canonical wire id ("claude-sonnet-5", "claude-opus-4-8").
@@ -290,7 +291,7 @@ export class ClaudeDriver implements StructuredDriver {
       const replay = createTranscriptReplay(this.sessionId, claudeResumeReplay(this.sessionId, disk));
       if (replay) this.send(replay);
     } catch (err) {
-      logger.warn("claude resume-replay failed for session %s (%s): %s", this.sessionId, resumeId, err);
+      log.warn("claude resume-replay failed for session %s (%s): %s", this.sessionId, resumeId, err);
     }
   }
 
@@ -302,13 +303,13 @@ export class ClaudeDriver implements StructuredDriver {
       for await (const chunk of this.q) {
         if (this.disposed) break;
         try { await this.handleChunk(chunk as any); }
-        catch (err) { logger.error("claude chunk handler threw for %s: %s", (chunk as any)?.type, err); }
+        catch (err) { log.error("claude chunk handler threw for %s: %s", (chunk as any)?.type, err); }
       }
     } catch (err) {
       // dispose() closes the query/aborts the controller, which the SDK
       // surfaces as an iterator error — not a real failure, so stay silent.
       if (this.disposed) return;
-      logger.warn("claude consume loop ended for session %s: %s", this.sessionId, err);
+      log.warn("claude consume loop ended for session %s: %s", this.sessionId, err);
       const tail = this.stderrTail?.() ?? "";
       const message = tail
         ? `claude session ended unexpectedly: ${err instanceof Error ? err.message : String(err)}\nstderr: ${tail.slice(-STDERR_TAIL_MAX_CHARS)}`
@@ -392,7 +393,7 @@ export class ClaudeDriver implements StructuredDriver {
       // later init back to the original resume request would log a spurious
       // mismatch every time.
       if (this.resumeRequested && c.session_id !== this.resumeRequested) {
-        logger.warn("claude resume mismatch: asked %s, got %s; continuing on fresh session", this.resumeRequested, c.session_id);
+        log.warn("claude resume mismatch: asked %s, got %s; continuing on fresh session", this.resumeRequested, c.session_id);
       }
       this.resumeRequested = undefined;
       // Capture the on-disk transcript anchor for a FRESH session (no resume).
@@ -490,7 +491,7 @@ export class ClaudeDriver implements StructuredDriver {
     try {
       await this.discoverCapabilitiesInner();
     } catch (err) {
-      logger.warn("claude capability discovery failed for session %s: %s", this.sessionId, err);
+      log.warn("claude capability discovery failed for session %s: %s", this.sessionId, err);
     }
   }
 
@@ -612,7 +613,7 @@ export class ClaudeDriver implements StructuredDriver {
     // landing right back on the hook this guard exists to keep clear.
     void call?.catch((err) => {
       if (this.disposed) return;
-      logger.warn("claude %s pick \"%s\" rejected for session %s: %s", axis, id, this.sessionId, err);
+      log.warn("claude %s pick \"%s\" rejected for session %s: %s", axis, id, this.sessionId, err);
       // A newer pick on this axis already superseded ours and the CLI took it;
       // rolling back now would clobber a selection that actually applied.
       if (this.pickSeq.get(axis) !== seq) return;
@@ -831,7 +832,7 @@ export class ClaudeDriver implements StructuredDriver {
         const disk = await this.readTranscript(this.cwd, this.agentSessionId);
         if (disk.length) return claudeResumeReplay(this.sessionId, disk);
       } catch (err) {
-        logger.warn("claude transcript read failed for session %s (%s); falling back to in-memory: %s",
+        log.warn("claude transcript read failed for session %s (%s); falling back to in-memory: %s",
           this.sessionId, this.agentSessionId, err);
       }
     }

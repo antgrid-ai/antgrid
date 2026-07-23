@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { atomicWriteFile } from "./discovery";
 import { logger } from "./logger";
+const log = logger.child({ component: "agent-launch" });
 import { computeCommandHookHash, hookStateKey, EVENT_LABELS } from "./codex-hook-fingerprint";
 import { resolveAbDir } from "./antgrid-dir";
 import {
@@ -69,7 +70,7 @@ function materializeClaudePlugin(
     atomicWriteFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
     atomicWriteFile(hooksPath, `${JSON.stringify(hooks, null, 2)}\n`);
   } catch (err) {
-    logger.warn("failed to materialize Claude plugin: %s", err);
+    log.warn("failed to materialize Claude plugin: %s", err);
   }
   return hasFiles([manifestPath, hooksPath]) ? targetDir : null;
 }
@@ -104,7 +105,7 @@ function materializeCopilotPlugin(
   try {
     atomicWriteFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   } catch (err) {
-    logger.warn("failed to materialize bundled Copilot plugin: %s", err);
+    log.warn("failed to materialize bundled Copilot plugin: %s", err);
   }
   return hasFiles([manifestPath]) ? targetDir : null;
 }
@@ -198,7 +199,7 @@ export function augmentAgentLaunch(
         return NONE;
     }
   } catch (err) {
-    logger.warn("agent launch augmentation failed for %s: %s", tool, err);
+    log.warn("agent launch augmentation failed for %s: %s", tool, err);
     return NONE;
   }
 }
@@ -225,7 +226,7 @@ function ensureGlobalCursorHooks(
     atomicWriteFile(hooksPath, `${JSON.stringify(replaced, null, 2)}\n`);
     return true;
   } catch (err) {
-    logger.warn("failed to write global cursor hooks.json (%s): %s", hooksPath, err);
+    log.warn("failed to write global cursor hooks.json (%s): %s", hooksPath, err);
     return false;
   }
 }
@@ -237,7 +238,7 @@ function writeOpencodeConfig(abDir: string): string | null {
     atomicWriteFile(path, JSON.stringify({ plugin: [pluginUrl] }, null, 2));
     return path;
   } catch (err) {
-    logger.warn("failed to write opencode session-namer config: %s", err);
+    log.warn("failed to write opencode session-namer config: %s", err);
     return null;
   }
 }

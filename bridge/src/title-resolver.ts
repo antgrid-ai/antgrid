@@ -4,6 +4,7 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { logger } from "./logger";
+const log = logger.child({ component: "title-resolver" });
 
 export type StructuredAgent = "claude" | "codex" | "gemini" | "qwen" | "github-copilot";
 
@@ -294,7 +295,7 @@ export async function resolveStructuredTitle(
     }
     return null;
   } catch (err) {
-    logger.warn("title resolution failed: %s", err);
+    log.warn("title resolution failed: %s", err);
     return null;
   }
 }

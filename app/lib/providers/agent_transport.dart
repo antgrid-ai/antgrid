@@ -11,6 +11,7 @@ import '../models/ab_project.dart';
 import '../models/session_target.dart';
 import '../navigation/nav_controller.dart';
 import '../services/app_settings_service.dart';
+import '../util/ab_log.dart';
 import '../util/device_id.dart';
 import 'account_agents.dart';
 import 'auth.dart';
@@ -277,9 +278,11 @@ Future<AgentTransport?> _buildLocalTransportFor(
     // ("No transport available") if it read-once — it now `watch`es this family,
     // so the folder-watch rebuild above re-runs the build once the project is
     // registered. Logged so a stray null build is visible in a repro.
-    debugPrint(
-      '[agentTransport] no folder registered yet for "$projectId" — '
-      'returning null transport (will rebuild when the project is upserted)',
+    AbLog.info(
+      'AgentTransport',
+      'no folder registered yet — returning null transport (will rebuild '
+          'when the project is upserted)',
+      fields: {'projectId': projectId},
     );
     return null;
   }
@@ -316,8 +319,9 @@ Future<AgentTransport?> _buildLocalTransportFor(
   // For orphan-attached agents result.events is an empty stream (no-op).
   final eventSub = result.events.listen((event) async {
     if (event.kind == 'auth_revoked') {
-      debugPrint(
-        '[agentTransport] auth_revoked event received — clearing keychain device record',
+      AbLog.info(
+        'AgentTransport',
+        'auth_revoked event received — clearing keychain device record',
       );
       await ref.read(keychainDeviceStoreProvider).clear();
       ref.read(authRevokedBannerProvider.notifier).set(true);

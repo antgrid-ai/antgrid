@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../config/storage_scope.dart';
+import '../util/ab_log.dart';
 import 'shared_keychain.dart';
 
 /// Shared Keychain account under which the raw X25519 seed is mirrored on iOS
@@ -100,7 +101,11 @@ class _SecurePushIdentity implements PushIdentity {
     try {
       await SharedKeychain().write(_kSharedSeedAccount, seedB64);
     } catch (e) {
-      debugPrint('push seed shared-keychain mirror failed: $e');
+      AbLog.warn(
+        'PushIdentity',
+        'push seed shared-keychain mirror failed',
+        fields: {'error': '$e'},
+      );
     }
   }
 
@@ -115,7 +120,11 @@ class _SecurePushIdentity implements PushIdentity {
       try {
         await SharedKeychain().delete(_kSharedSeedAccount);
       } catch (e) {
-        debugPrint('push seed shared-keychain delete failed: $e');
+        AbLog.warn(
+          'PushIdentity',
+          'push seed shared-keychain delete failed',
+          fields: {'error': '$e'},
+        );
       }
     }
   }

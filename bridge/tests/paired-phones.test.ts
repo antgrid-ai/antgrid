@@ -1,9 +1,27 @@
-import { describe, it, expect, spyOn } from "bun:test";
+import { describe, it, expect } from "bun:test";
 import { mkdtempSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPairedPhones } from "../src/paired-phones";
-import { logger } from "../src/logger";
+import { __setRootForTest } from "../src/logger";
+
+/** Capture pino JSONL lines written during `fn`, bypassing the "warn" spy
+ *  approach that can't observe calls made through a component child logger. */
+function captureLogLines(fn: () => void): string[] {
+  const lines: string[] = [];
+  __setRootForTest({
+    write(s: string): boolean {
+      lines.push(s);
+      return true;
+    },
+  }, "debug");
+  try {
+    fn();
+  } finally {
+    __setRootForTest(process.stdout);
+  }
+  return lines;
+}
 
 /** Write a paired-phones.json with the given raw phone rows and return the abDir. */
 function seedFile(phones: unknown[]): string {
@@ -188,11 +206,13 @@ describe("paired-phones legacy-row migration", () => {
       { phonePubkey: "legacy", phoneDeviceId: "d-old", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projA"] },
       { phonePubkey: "modern", phoneDeviceId: "d-new", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: [] },
     ]);
-    const warn = spyOn(logger, "warn");
-    const store = loadPairedPhones(dir);
+    let store!: ReturnType<typeof loadPairedPhones>;
+    const lines = captureLogLines(() => {
+      store = loadPairedPhones(dir);
+    });
     expect(store.list().map((p) => p.phonePubkey)).toEqual(["modern"]);
-    expect(warn).toHaveBeenCalledTimes(1);
-    warn.mockRestore();
+    const warnLines = lines.filter((l) => (JSON.parse(l) as { level: number }).level === 40);
+    expect(warnLines).toHaveLength(1);
     rmSync(dir, { recursive: true });
   });
 
@@ -200,10 +220,11 @@ describe("paired-phones legacy-row migration", () => {
     const dir = seedFile([
       { phonePubkey: "modern", phoneDeviceId: "d-new", pairedAt: "x", lastSeenAt: "x", admission: "same-account", allowedProjects: [] },
     ]);
-    const warn = spyOn(logger, "warn");
-    loadPairedPhones(dir);
-    expect(warn).not.toHaveBeenCalled();
-    warn.mockRestore();
+    const lines = captureLogLines(() => {
+      loadPairedPhones(dir);
+    });
+    const warnLines = lines.filter((l) => (JSON.parse(l) as { level: number }).level === 40);
+    expect(warnLines).toHaveLength(0);
     rmSync(dir, { recursive: true });
   });
 });

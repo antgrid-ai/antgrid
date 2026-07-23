@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:in_app_update/in_app_update.dart';
 
+import '../util/ab_log.dart';
+
 /// Immediate (blocking) update kicks in only for important or very-stale
 /// releases; everything else takes the flexible (background-download) path.
 /// `updatePriority` is 0..5, set per-release in the Play Console / Developer API.
@@ -118,7 +120,11 @@ class InAppUpdateService {
           return UpdateDecision.flexibleReady;
       }
     } catch (e) {
-      debugPrint('InAppUpdateService.checkAndStart failed (ignored): $e');
+      AbLog.warn(
+        'InAppUpdate',
+        'InAppUpdateService.checkAndStart failed (ignored)',
+        fields: {'error': '$e'},
+      );
       return UpdateDecision.none;
     }
   }
@@ -129,7 +135,11 @@ class InAppUpdateService {
     try {
       await InAppUpdate.completeFlexibleUpdate();
     } catch (e) {
-      debugPrint('InAppUpdateService.completeFlexibleUpdate failed: $e');
+      AbLog.warn(
+        'InAppUpdate',
+        'InAppUpdateService.completeFlexibleUpdate failed (ignored)',
+        fields: {'error': '$e'},
+      );
     }
   }
 }
