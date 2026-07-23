@@ -241,8 +241,6 @@ jobs:
     env:
       BUILD_MODE: ${{ inputs.build_mode || 'release' }}
       DEST: ${{ (inputs.build_mode == '' || inputs.build_mode == 'release') && 'Release' || inputs.build_mode == 'profile' && 'Profile' || 'Debug' }}
-      # See the macOS job: gate the signing step on env, not the secrets context.
-      WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
       # Microsoft Store publish gate — lifted to env so the publish steps' `if`
       # can read them (secrets aren't readable in a step-level `if`). MSSTORE_APP_ID
       # is a repo *variable* (vars), not a secret — it's the public Store product
@@ -300,38 +298,12 @@ jobs:
           Copy-Item bridge/dist/antgrid-bridge.exe `
             "app/build/windows/x64/runner/$env:DEST/antgrid-bridge.exe"
 
-      # Authenticode signing — runs only when the Windows code-signing secrets are
-      # present. Signs the exe AND the bundled DLLs (flutter_windows.dll, plugins)
-      # so the whole distributed payload is signed, not just the launcher.
-      # Required secrets:
-      #   WINDOWS_CERT_BASE64    base64 of an Authenticode code-signing .pfx
-      #   WINDOWS_CERT_PASSWORD  password for that .pfx
-      - name: Code sign (optional)
-        if: ${{ env.WINDOWS_CERT_BASE64 != '' && steps.build.outcome == 'success' }}
-        shell: pwsh
-        env:
-          CERT_B64: ${{ env.WINDOWS_CERT_BASE64 }}
-          CERT_PW: ${{ secrets.WINDOWS_CERT_PASSWORD }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $dir = "app/build/windows/x64/runner/$env:DEST"
-          $pfx = Join-Path $env:RUNNER_TEMP 'cert.pfx'
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT_B64))
-          # signtool ships with the Windows SDK; pick the newest by version path.
-          $signtool = Get-ChildItem 'C:/Program Files (x86)/Windows Kits/10/bin' -Recurse -Filter signtool.exe |
-            Where-Object { $_.FullName -match '\\x64\\' } |
-            Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $signtool) { throw 'signtool.exe (x64) not found in the Windows SDK' }
-          $targets = Get-ChildItem $dir -Recurse -Include *.exe,*.dll | ForEach-Object { $_.FullName }
-          & $signtool.FullName sign /f $pfx /p $env:CERT_PW /fd SHA256 `
-            /tr http://timestamp.digicert.com /td SHA256 $targets
-
       # Microsoft Store package (MSIX) — the Windows distribution package, for
       # manual upload to Partner Center (and auto-publish below on a v* tag). The
-      # Store signs the package itself, so this path uses NO code-signing cert
-      # (independent of the WINDOWS_CERT_* secrets). Release-only: the Store rejects
-      # debug/profile packages, so this is skipped for those dispatch modes (and
-      # always runs on a v* tag, which is release). Identity values
+      # Store signs the package itself, so this path needs no code-signing cert.
+      # Release-only: the Store rejects debug/profile packages, so this is skipped
+      # for those dispatch modes (and always runs on a v* tag, which is release).
+      # Identity values
       # (identity_name/publisher/publisher_display_name) live in app/pubspec.yaml's
       # msix_config and MUST match Partner Center.
       #   --build-windows false: package the folder we already built above (with the
