@@ -1,13 +1,14 @@
 name: Build — desktop (macOS / Windows / Linux)
 
 # Desktop builds for macOS + Windows + Linux. Two entry points:
-#   - Push a v* tag        -> builds all platforms (release) AND publishes the
-#                             installers as a GitHub Release on the PUBLIC repo
-#                             Radha-AI-Products/antgrid-releases. The site links
-#                             releases/latest/download/<asset> — asset filenames
-#                             (antgrid-macos.dmg / antgrid-windows-setup.exe /
-#                             antgrid-linux.AppImage) are load-bearing, never
-#                             rename them.
+#   - Push a v* tag        -> builds all platforms (release). macOS + Linux are
+#                             published as a GitHub Release on the PUBLIC repo
+#                             Radha-AI-Products/antgrid-releases; Windows ships to
+#                             the Microsoft Store (MSIX) instead of a direct
+#                             download. The site links releases/latest/download/
+#                             <asset> — the mac/linux asset filenames
+#                             (antgrid-macos.dmg / antgrid-linux.AppImage) are
+#                             load-bearing, never rename them.
 #   - Manual dispatch      -> builds selected platform/mode, artifacts only
 #                             (no publish). Run from the Actions tab or
 #                             `gh workflow run build-desktop.yml`.
@@ -18,9 +19,10 @@ name: Build — desktop (macOS / Windows / Linux)
 # (macOS) notarized output with no workflow changes.
 
 on:
-  # A v* tag builds ALL platforms in RELEASE mode and publishes the zips as a
-  # GitHub Release on the public antgrid-releases repo (inputs are empty on
-  # push events; every `inputs.*` consumer below defaults accordingly).
+  # A v* tag builds ALL platforms in RELEASE mode, publishes macOS + Linux as a
+  # GitHub Release on the public antgrid-releases repo, and ships Windows to the
+  # Microsoft Store (inputs are empty on push events; every `inputs.*` consumer
+  # below defaults accordingly).
   push:
     tags: ['v*']
   workflow_dispatch:
@@ -245,7 +247,7 @@ jobs:
       # can read them (secrets aren't readable in a step-level `if`). MSSTORE_APP_ID
       # is a repo *variable* (vars), not a secret — it's the public Store product
       # id, e.g. get it from `msstore apps list`. Leave any unset to keep the Store
-      # publish inert; the direct-download Inno installer is unaffected either way.
+      # publish inert; the MSIX artifact is still built for manual upload.
       MSSTORE_CLIENT_ID: ${{ secrets.MSSTORE_CLIENT_ID }}
       MSSTORE_APP_ID: ${{ vars.MSSTORE_APP_ID }}
     steps:
@@ -324,69 +326,19 @@ jobs:
           & $signtool.FullName sign /f $pfx /p $env:CERT_PW /fd SHA256 `
             /tr http://timestamp.digicert.com /td SHA256 $targets
 
-      # Wrap the signed runner folder in a per-user Inno Setup installer
-      # (app/windows/installer/antgrid.iss). Unconditional (like the old zip) so
-      # unsigned dispatch builds still produce an installer. ISCC resolves
-      # relative paths from the .iss folder, so pass ABSOLUTE paths: /DSourceDir
-      # = the built runner folder, /O = the workspace root (where upload-artifact
-      # looks). AppVersion comes from the tag (v1.2.3 -> 1.2.3), else pubspec.
-      - name: Package installer (Inno Setup)
-        if: ${{ always() && steps.build.outcome == 'success' }}
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          choco install innosetup --no-progress -y
-          $iscc = 'C:/Program Files (x86)/Inno Setup 6/ISCC.exe'
-          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
-          $src = (Resolve-Path "app/build/windows/x64/runner/$env:DEST").Path
-          $tag = "${{ github.ref_name }}"
-          if ($tag -match '^v(\d+\.\d+\.\d+)') {
-            $ver = $Matches[1]
-          } else {
-            $m = Select-String -Path app/pubspec.yaml -Pattern '^version:\s*(\d+\.\d+\.\d+)' | Select-Object -First 1
-            $ver = if ($m) { $m.Matches[0].Groups[1].Value } else { '0.0.0' }
-          }
-          & $iscc /DAppVersion=$ver /DSourceDir=$src "/O$env:GITHUB_WORKSPACE" app/windows/installer/antgrid.iss
-
-      # Authenticode-sign the installer itself (so SmartScreen trusts what the
-      # user runs), gated on the same cert secret as the inner-binary signing.
-      - name: Sign installer (optional)
-        if: ${{ env.WINDOWS_CERT_BASE64 != '' && steps.build.outcome == 'success' }}
-        shell: pwsh
-        env:
-          CERT_B64: ${{ env.WINDOWS_CERT_BASE64 }}
-          CERT_PW: ${{ secrets.WINDOWS_CERT_PASSWORD }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $pfx = Join-Path $env:RUNNER_TEMP 'cert.pfx'
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT_B64))
-          $signtool = Get-ChildItem 'C:/Program Files (x86)/Windows Kits/10/bin' -Recurse -Filter signtool.exe |
-            Where-Object { $_.FullName -match '\\x64\\' } |
-            Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $signtool) { throw 'signtool.exe (x64) not found in the Windows SDK' }
-          & $signtool.FullName sign /f $pfx /p $env:CERT_PW /fd SHA256 `
-            /tr http://timestamp.digicert.com /td SHA256 antgrid-windows-setup.exe
-
-      - uses: actions/upload-artifact@v7
-        if: ${{ always() && steps.build.outcome == 'success' }}
-        with:
-          name: antgrid-windows-${{ env.BUILD_MODE }}
-          path: antgrid-windows-setup.exe
-          if-no-files-found: error
-
-      # Microsoft Store package (MSIX) — a SEPARATE output from the Inno .exe above,
-      # for manual upload to Partner Center. The Store signs the package itself, so
-      # this path uses NO code-signing cert (independent of the WINDOWS_CERT_*
-      # secrets). Release-only: the Store rejects debug/profile packages, so this is
-      # skipped for those dispatch modes (and always runs on a v* tag, which is
-      # release). Identity values (identity_name/publisher/publisher_display_name)
-      # live in app/pubspec.yaml's msix_config and MUST match Partner Center.
+      # Microsoft Store package (MSIX) — the Windows distribution package, for
+      # manual upload to Partner Center (and auto-publish below on a v* tag). The
+      # Store signs the package itself, so this path uses NO code-signing cert
+      # (independent of the WINDOWS_CERT_* secrets). Release-only: the Store rejects
+      # debug/profile packages, so this is skipped for those dispatch modes (and
+      # always runs on a v* tag, which is release). Identity values
+      # (identity_name/publisher/publisher_display_name) live in app/pubspec.yaml's
+      # msix_config and MUST match Partner Center.
       #   --build-windows false: package the folder we already built above (with the
       #     bridge copied in). Letting msix re-run `flutter build windows` would
       #     drop antgrid-bridge.exe.
-      # NOTE: this MSIX is intentionally NOT attached to the public GitHub Release —
-      # the publish job only uploads the three named installer files; the Store is
-      # the sole distribution channel for this package.
+      # NOTE: this MSIX is NOT attached to the public GitHub Release — Windows ships
+      # through the Microsoft Store only; the publish job carries just macOS + Linux.
       - name: Package MSIX (Microsoft Store)
         if: ${{ env.BUILD_MODE == 'release' && steps.build.outcome == 'success' }}
         shell: pwsh
@@ -559,12 +511,15 @@ jobs:
           path: antgrid-linux.AppImage
           if-no-files-found: error
 
-  # Tag pushes only: attach both installers to a GitHub Release on the PUBLIC
-  # antgrid-releases repo. RELEASES_TOKEN is a fine-grained PAT scoped to that
-  # repo (contents: read/write) — GITHUB_TOKEN cannot write cross-repo.
+  # Tag pushes only: attach the macOS + Linux installers to a GitHub Release on
+  # the PUBLIC antgrid-releases repo (Windows ships via the Microsoft Store, not a
+  # direct download, so it is intentionally absent here and not a dependency —
+  # a Store-publish hiccup must not block the mac/linux release). RELEASES_TOKEN is
+  # a fine-grained PAT scoped to that repo (contents: read/write) — GITHUB_TOKEN
+  # cannot write cross-repo.
   publish:
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-    needs: [macos, windows, linux]
+    needs: [macos, linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v7
@@ -588,7 +543,7 @@ jobs:
             --notes "Desktop builds for Antgrid $TAG.
 
           - **macOS** (antgrid-macos.dmg): signed and notarized. Open the .dmg and drag Antgrid to Applications.
-          - **Windows** (antgrid-windows-setup.exe): run the installer (per-user, no admin needed). Currently unsigned — SmartScreen may warn; choose \"More info\" -> \"Run anyway\".
+          - **Windows**: install from the [Microsoft Store](https://apps.microsoft.com/detail/9N0P7ZRL4D9W).
           - **Linux** (antgrid-linux.AppImage): \`chmod +x antgrid-linux.AppImage\` then run it. Needs GTK 3 and WebKit2GTK on the host (\`libgtk-3-0\`, \`libwebkit2gtk-4.1-0\`, \`libsecret-1-0\`)." \
             $prerelease \
-            antgrid-macos.dmg antgrid-windows-setup.exe antgrid-linux.AppImage
+            antgrid-macos.dmg antgrid-linux.AppImage
