@@ -759,3 +759,34 @@ describe("opencode early context capacity", () => {
     expect(sent.filter((m: any) => m.type === "agent:usage").length).toBe(0);
   });
 });
+
+describe("OpencodeDriver capability discovery", () => {
+  it("contains a discovery failure instead of taking the whole host down", async () => {
+    // start() fire-and-forgets discoverCapabilities(). allSettled covers its
+    // RPCs, but the post-processing tail can still throw — a failing transport
+    // write is the realistic way. Unguarded, that rejection reaches the host's
+    // unhandledRejection hook and shuts down every project on the machine.
+    const fake = makeFakeClient();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown) => unhandled.push(e);
+    process.on("unhandledRejection", onUnhandled);
+    // start() emits its own early "loading" frame first and is awaited by the
+    // manager (so it surfaces as agent:error); only fail the later frame, which
+    // is the one discovery emits.
+    let caps = 0;
+    try {
+      const driver = new OpencodeDriver({
+        sessionId: "s1",
+        client: fake.client,
+        sendMessage: (m) => { if (m.type === "agent:capabilities" && ++caps > 1) throw new Error("transport closed"); },
+      });
+      await driver.start();
+      await tick();
+      await tick();
+      driver.dispose();
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    expect(unhandled).toEqual([]);
+  });
+});

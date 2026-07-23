@@ -372,9 +372,22 @@ export class OpencodeDriver {
     }
   }
 
+  // start() fire-and-forgets this, so a rejection would escape into the void and
+  // reach the host's process-level unhandledRejection hook, which tears down every
+  // project on the machine (see index.ts) — not just this session. The inner
+  // allSettled covers the RPCs; this covers the post-processing (same containment
+  // runEventLoop does for the event stream).
+  private async discoverCapabilities(): Promise<void> {
+    try {
+      await this.discoverCapabilitiesInner();
+    } catch (err) {
+      logger.warn("opencode capability discovery failed for session %s: %s", this.sessionId, err);
+    }
+  }
+
   // Fail-soft: each list settles independently; a route the running binary
   // doesn't serve (version skew) only omits its section.
-  private async discoverCapabilities(): Promise<void> {
+  private async discoverCapabilitiesInner(): Promise<void> {
     const [commands, agents, providers] = await Promise.allSettled([
       this.client.listCommands(),
       this.client.listAgents(),

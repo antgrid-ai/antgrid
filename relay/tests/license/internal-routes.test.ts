@@ -16,13 +16,13 @@ import {
   waitForType,
 } from "../helpers/relay-harness.js";
 
-// `licenseApiUrl` is the bare origin; the gate derives the token issuer as
+// `licenseIssuerUrl` is the bare origin; the gate derives the token issuer as
 // `${origin}/api/auth` (Better-Auth's mount). Sign fixtures with that shape.
 const ISSUER = "http://license-api.test";
 const TOKEN_ISS = `${ISSUER}/api/auth`;
 const SECRET = defaultConfig.relayInternalSecret;
 
-const baseConfig = { ...defaultConfig, licenseApiUrl: ISSUER, relayInternalSecret: SECRET };
+const baseConfig = { ...defaultConfig, licenseIssuerUrl: ISSUER, relayInternalSecret: SECRET };
 
 interface SignerCtx {
   signer: { privateKey: CryptoKey; publicJwk: JWK; kid: string };
@@ -183,7 +183,7 @@ async function postInternal(port: number, path: string, body: unknown, signature
 test("revoke: bad signature -> 401, no side effects", async () => {
   const { signer, jwks } = await makeSigner();
   const cache = new LicenseCache({ maxEntries: 100 });
-  const gate = createLicenseGate({ licenseApiUrl: ISSUER, jwks, cache });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
   const r = startWith({ licenseGate: gate, licenseCache: cache });
 
   await helloAgent({ relay: r, signer, deviceId: "dev-1", azp: "client-1" });
@@ -198,7 +198,7 @@ test("revoke: bad signature -> 401, no side effects", async () => {
 test("revoke: closes the agent ws 4002 with a typed LICENSE_REVOKED error first, revokes its grants, and phones stay alive with grant-revoked + peer-offline", async () => {
   const { signer, jwks } = await makeSigner();
   const cache = new LicenseCache({ maxEntries: 100 });
-  const gate = createLicenseGate({ licenseApiUrl: ISSUER, jwks, cache });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
   const r = startWith({ licenseGate: gate, licenseCache: cache });
 
   const agent = await helloAgent({ relay: r, signer, deviceId: "dev-2", azp: "client-2" });
@@ -243,7 +243,7 @@ test("revoke: device not connected -> still 200, cache marked", async () => {
 test("revoke: subsequent hello with the same revoked token -> LICENSE_REVOKED", async () => {
   const { signer, jwks } = await makeSigner();
   const cache = new LicenseCache({ maxEntries: 100 });
-  const gate = createLicenseGate({ licenseApiUrl: ISSUER, jwks, cache });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
   const r = startWith({ licenseGate: gate, licenseCache: cache });
 
   const identity = await genRelayKeyPair();
@@ -288,7 +288,7 @@ test("revoke: subsequent hello with the same revoked token -> LICENSE_REVOKED", 
 test("expire: multi-device user -> all closed and revoked", async () => {
   const { signer, jwks } = await makeSigner();
   const cache = new LicenseCache({ maxEntries: 100 });
-  const gate = createLicenseGate({ licenseApiUrl: ISSUER, jwks, cache });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
   const r = startWith({ licenseGate: gate, licenseCache: cache });
 
   const a = await helloAgent({ relay: r, signer, deviceId: "dev-A", uid: "shared-user", azp: "client-A" });
@@ -314,7 +314,7 @@ test("expire: multi-device user -> all closed and revoked", async () => {
 test("expire: an agent's grants are severed too — its phone gets grant-revoked + peer-offline and stays alive", async () => {
   const { signer, jwks } = await makeSigner();
   const cache = new LicenseCache({ maxEntries: 100 });
-  const gate = createLicenseGate({ licenseApiUrl: ISSUER, jwks, cache });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
   const r = startWith({ licenseGate: gate, licenseCache: cache });
 
   const agent = await helloAgent({ relay: r, signer, deviceId: "dev-expire-agent", uid: "expire-user", azp: "client-ea" });
@@ -373,7 +373,7 @@ test("non-POST -> 405", async () => {
 test("connections: returns identity-free liveness rows for live devices", async () => {
   const { signer, jwks } = await makeSigner();
   const cache = new LicenseCache({ maxEntries: 100 });
-  const gate = createLicenseGate({ licenseApiUrl: ISSUER, jwks, cache });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
   const r = startWith({ licenseGate: gate, licenseCache: cache });
 
   await helloAgent({ relay: r, signer, deviceId: "conn-1", azp: "client-1" });
@@ -425,7 +425,7 @@ test("connections: GET -> 405", async () => {
 test("connections: userId scopes to that user's connections (identity-free)", async () => {
   const { signer, jwks } = await makeSigner();
   const cache = new LicenseCache({ maxEntries: 100 });
-  const gate = createLicenseGate({ licenseApiUrl: ISSUER, jwks, cache });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
   const r = startWith({ licenseGate: gate, licenseCache: cache });
 
   await helloAgent({ relay: r, signer, deviceId: "scope-A", uid: "user-A", azp: "client-A" });

@@ -76,6 +76,13 @@ app.*.map.json
 .env
 .env.local
 
+# Dev-stack Antgrid home (ANTGRID_DIR): pairing/relay-epoch/session/auth state,
+# isolated from an installed release app's ~/.antgrid. Lives at ~/.antgrid-dev
+# by default (see hostDir() / scripts/dev.ts / aspire/apphost.ts) — outside the
+# repo, so nothing to ignore here unless a developer points ANTGRID_DIR at a
+# repo-local scratch dir.
+.antgrid-dev/
+
 # Worktrees and superpowers
 .worktrees/
 .superpowers/

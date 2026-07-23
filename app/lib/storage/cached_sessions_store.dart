@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'scoped_prefs.dart';
 
+import '../config/storage_scope.dart';
 import '../models/session_entry.dart';
 
 /// SharedPreferences-backed cache of `List<SessionEntry>` keyed by drawer entry
@@ -16,18 +17,19 @@ import '../models/session_entry.dart';
 /// emits two frames per mutation — sync `changed()` + async PTY `noteExited`).
 /// Tests can force a flush via [flushNow].
 class CachedSessionsStore {
-  static const _key = 'antgrid.session_cache.v1';
+  static final _key = scopedStorageKey('antgrid.session_cache.v1');
   // Labels churn far more often than the session list itself (every live
   // control-plane advert, one project at a time via putLabel) — a separate
   // key lets a label-only flush skip re-encoding every cached session.
-  static const _labelsKey = 'antgrid.session_cache.labels.v1';
+  static final _labelsKey = scopedStorageKey('antgrid.session_cache.labels.v1');
   // Last-seen per-project work status from live control-plane adverts. Persisted
   // so a cold boot can seed remoteProjectStatusProvider with the last-known
   // call-to-action (attention/error) before the first advert arrives; the seed
   // deliberately ignores working/done, which are re-derived from cached
   // session-running (see remoteProjectStatusProvider.build). Cleared per machine
   // on socket close so an offline machine doesn't re-seed on the next boot.
-  static const _statusKey = 'antgrid.session_cache.status.v1';
+  static final _statusKey =
+      scopedStorageKey('antgrid.session_cache.status.v1');
   static const _flushDebounce = Duration(milliseconds: 200);
 
   final SharedPreferencesWithCache _prefs;

@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../config/storage_scope.dart';
+
 /// Pluggable seam for tests.
 abstract class DeviceSecretStorage {
   Future<String?> read();
@@ -9,13 +11,16 @@ abstract class DeviceSecretStorage {
 }
 
 class SecureDeviceSecretStorage implements DeviceSecretStorage {
-  static const _key = 'antgrid.device.v1';
+  static final _key = scopedStorageKey('antgrid.device.v1');
   final FlutterSecureStorage _s;
   SecureDeviceSecretStorage({FlutterSecureStorage? storage})
-      : _s = storage ?? const FlutterSecureStorage();
-  @override Future<String?> read() => _s.read(key: _key);
-  @override Future<void> write(String v) => _s.write(key: _key, value: v);
-  @override Future<void> delete() => _s.delete(key: _key);
+    : _s = storage ?? const FlutterSecureStorage();
+  @override
+  Future<String?> read() => _s.read(key: _key);
+  @override
+  Future<void> write(String v) => _s.write(key: _key, value: v);
+  @override
+  Future<void> delete() => _s.delete(key: _key);
 }
 
 class DeviceRecord {
@@ -64,7 +69,7 @@ class DeviceRecord {
 
 class KeychainDeviceStore {
   KeychainDeviceStore({DeviceSecretStorage? storage})
-      : _storage = storage ?? SecureDeviceSecretStorage();
+    : _storage = storage ?? SecureDeviceSecretStorage();
   final DeviceSecretStorage _storage;
 
   Future<DeviceRecord?> read() async {

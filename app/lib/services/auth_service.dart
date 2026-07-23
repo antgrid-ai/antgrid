@@ -5,6 +5,8 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
+import '../config/storage_scope.dart';
+
 /// Abstract over secure storage so tests can substitute an in-memory impl.
 ///
 /// The stored value is the FULL session cookie `name=value` pair (e.g.
@@ -30,8 +32,8 @@ class SecureAuthStorage implements AuthStorage {
   // v2 stores the full `name=value` pair (v1 stored the bare value). The bump
   // invalidates any v1 entry so a stale value-only cookie is never replayed as
   // a malformed nameless header — affected users simply re-authenticate once.
-  static const _key = 'antgrid.session_cookie.v2';
-  static const _pendingKey = 'antgrid.pending_signin.v1';
+  static final _key = scopedStorageKey('antgrid.session_cookie.v2');
+  static final _pendingKey = scopedStorageKey('antgrid.pending_signin.v1');
   final FlutterSecureStorage _storage;
   SecureAuthStorage({FlutterSecureStorage? storage})
     : _storage = storage ?? const FlutterSecureStorage();
@@ -348,8 +350,9 @@ class AuthService {
   /// `pickLanIp`). Baked in at build/launch time by the developer's own
   /// tooling — never attacker- or runtime-reachable — so it's a safe trust
   /// anchor for [_transportIsSecure] independent of the host's address range.
-  static const String _licenseApiUrlDartDefine =
-      String.fromEnvironment('LICENSE_API_URL');
+  static const String _licenseApiUrlDartDefine = String.fromEnvironment(
+    'LICENSE_API_URL',
+  );
 
   /// Whether [licenseApiUrl] is a transport safe to send credentials over:
   /// `https` to any host, or plain `http` to loopback (covers IPv4
@@ -371,7 +374,8 @@ class AuthService {
         uri.host == '127.0.0.1' ||
         uri.host == '::1' ||
         uri.host == '10.0.2.2';
-    final trustedDevOrigin = kDebugMode &&
+    final trustedDevOrigin =
+        kDebugMode &&
         _licenseApiUrlDartDefine.isNotEmpty &&
         licenseApiUrl == _licenseApiUrlDartDefine;
     return uri.scheme == 'https' || isLoopback || trustedDevOrigin;

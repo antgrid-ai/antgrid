@@ -1,8 +1,8 @@
 import 'dart:async';
 
-import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:push/push.dart';
 
 import '../models/ab_message.dart';
 import '../project/project_session.dart';
@@ -23,10 +23,24 @@ class PushMessagingService {
   /// getToken round-trip.
   String? _token;
 
+  /// The push provider for [_token]: 'apns' on iOS, 'fcm' on Android. Derived
+  /// from the platform rather than assigned when a token arrives, because the
+  /// token read can time out (see [init]) — leaving a default of 'fcm' to be
+  /// reported by a later clearToken on an iOS device.
+  String _provider = defaultTargetPlatform == TargetPlatform.iOS
+      ? 'apns'
+      : 'fcm';
+
   /// projectIds already registered with the current [_token]. Reset whenever
   /// the token changes so a token refresh re-registers every session. Lets
   /// [registerNewSessions] skip sessions already told about this token.
   final Set<String> _registered = <String>{};
+
+  /// pubkey of the identity [_registered] was populated under. Sign-out
+  /// regenerates the push keypair but reuses the same long-lived service and
+  /// device token, so a token-only reset would miss it — reset on pubkey change
+  /// too, or a re-signed-in user's agents keep the stale pubkey and can't push.
+  String? _registeredPubkey;
 
   /// projectIds with a pending "register once connected" status listener. A
   /// session can enter the warm set before its transport finishes handshaking;
@@ -35,12 +49,13 @@ class PushMessagingService {
   /// so repeated passes over a still-connecting session don't stack listeners.
   final Set<String> _awaitingReady = <String>{};
 
-  StreamSubscription<String>? _tokenRefreshSub;
+  /// `push` hands back an unsubscribe callback rather than a StreamSubscription.
+  VoidCallback? _unsubscribeToken;
 
-  /// Request the Android runtime notification permission (POST_NOTIFICATIONS,
-  /// required on API 33+), obtain the FCM token, register it on all current
-  /// relay-paired sessions, and re-register on refresh. Called once at startup
-  /// after Firebase.initializeApp. On-device only; no-ops cleanly under test.
+  /// Request the notification permission, obtain the push token, register it on
+  /// all current relay-paired sessions, and re-register on refresh. Called once
+  /// at startup on Android and iOS — `push` unifies both, so there is no
+  /// separate APNs path any more. On-device only; no-ops cleanly under test.
   ///
   /// [sessions] is a live view of the currently warm sessions, re-read on each
   /// registration pass so a session that becomes warm after startup is caught
@@ -49,25 +64,54 @@ class PushMessagingService {
     required Iterable<ProjectSession> Function() sessions,
   }) async {
     await _requestAndroidNotificationPermission();
-    // FirebaseMessaging.requestPermission is a no-op on Android for the runtime
-    // POST_NOTIFICATIONS grant (it drives APNs on iOS); the real Android ask is
-    // done above. Still call it so iOS/other providers keep working if this
-    // service is ever reused there.
-    await FirebaseMessaging.instance.requestPermission();
-    final token = await FirebaseMessaging.instance.getToken();
-    if (token != null) {
-      await _setTokenAndRegister(token, sessions());
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      // Drives the APNs authorization prompt. Deliberately NOT called on
+      // Android: PushPlugin.onRequestPushNotificationsPermission only resolves
+      // its callback via onRequestPermissionsResult, so when notifications are
+      // already disabled AND (the SDK is < 33 or no activity is attached) it
+      // never fires and this await never returns, stranding init(). The real
+      // Android grant is the flutter_local_notifications call above.
+      await Push.instance.requestPermission();
     }
-    _tokenRefreshSub = FirebaseMessaging.instance.onTokenRefresh.listen((t) {
-      // The listener callback is sync and can't propagate a rejection; the
-      // registration is async, so an uncaught throw here would be an unhandled
-      // rejection. Swallow (log) — a failed re-register must never crash.
+    // Subscribe BEFORE reading the token: on iOS the token usually arrives
+    // after startup (push registers for remote notifications itself in
+    // didFinishLaunchingWithOptions), and a token landing between the read and
+    // the subscribe would otherwise be missed. _setTokenAndRegister dedups, so
+    // both paths firing is harmless.
+    _unsubscribeToken = Push.instance.addOnNewToken((t) {
+      // The callback is sync and can't propagate a rejection; the registration
+      // is async, so an uncaught throw here would be an unhandled rejection.
+      // Swallow (log) — a failed re-register must never crash.
       unawaited(
-        _setTokenAndRegister(t, sessions()).catchError((Object e) {
+        _setTokenAndRegister(t, sessions(), provider: _provider).catchError((
+          Object e,
+        ) {
           debugPrint('PushMessagingService token-refresh register failed: $e');
         }),
       );
     });
+    // Bounded: on iOS `push`'s getToken waits on a DispatchGroup that
+    // didFailToRegisterForRemoteNotificationsWithError never leaves
+    // (PushHostHandlers.swift), so a registration failure hangs here forever.
+    // The addOnNewToken subscription above still catches a late token.
+    //
+    // Deliberately no onTimeout callback: `Push.instance.token` is declared
+    // Future<String?> but hands back the pigeon Future<String>, so at runtime
+    // T is String and a `() => null` callback fails its subtype check —
+    // init() throws and no token is ever registered. The analyzer only sees
+    // the nullable static type, so this is invisible to `flutter analyze`.
+    String? token;
+    try {
+      token = await Push.instance.token.timeout(const Duration(seconds: 30));
+    } on TimeoutException {
+      // Worth logging: with no token every later registerNewSessions returns
+      // early, so the whole push path goes quiet with nothing to show for it.
+      debugPrint('PushMessagingService: token read timed out after 30s');
+      token = null;
+    }
+    if (token != null) {
+      await _setTokenAndRegister(token, sessions(), provider: _provider);
+    }
   }
 
   /// Request the Android POST_NOTIFICATIONS runtime permission. No-op / safe on
@@ -87,14 +131,17 @@ class PushMessagingService {
 
   Future<void> _setTokenAndRegister(
     String token,
-    Iterable<ProjectSession> sessions,
-  ) async {
-    if (token != _token) {
+    Iterable<ProjectSession> sessions, {
+    String provider = 'fcm',
+  }) async {
+    if (token != _token || provider != _provider) {
       _token = token;
+      _provider = provider;
       _registered.clear();
     }
     await registerToken(
       token: token,
+      provider: provider,
       pushIdentity: _pushIdentity,
       sessions: sessions,
     );
@@ -108,6 +155,7 @@ class PushMessagingService {
     if (token == null) return;
     await registerToken(
       token: token,
+      provider: _provider,
       pushIdentity: _pushIdentity,
       sessions: sessions,
     );
@@ -115,20 +163,27 @@ class PushMessagingService {
 
   Future<void> registerToken({
     required String token,
+    String provider = 'fcm',
     required PushIdentity pushIdentity,
     required Iterable<ProjectSession> sessions,
   }) async {
-    // Record the token so a deferred (register-when-ready) send reads the
-    // CURRENT token at fire time — a refresh mid-handshake then registers the
+    // Record the token/provider so a deferred (register-when-ready) send reads
+    // the CURRENT pair at fire time — a refresh mid-handshake then registers the
     // new token, not the one captured when the listener was attached. Callers
     // (_setTokenAndRegister / registerNewSessions) already keep this in lockstep.
     _token = token;
+    _provider = provider;
     final kp = await pushIdentity.ensureKeypair();
+    if (kp.pubkeyB64 != _registeredPubkey) {
+      _registered.clear();
+      _registeredPubkey = kp.pubkeyB64;
+    }
     for (final s in sessions) {
       // Push is a relay-only concern: a local agent shares the machine, so
       // there is nothing to relay a blob through. Only register relay sessions.
       if (s.mode != ProjectSessionMode.relay) continue;
-      if (_registered.contains(s.projectId)) continue; // already told this token
+      // Already told this token about the project.
+      if (_registered.contains(s.projectId)) continue;
       // A send() on a transport that hasn't finished its E2E handshake is
       // silently dropped, and the registry-membership trigger never re-fires
       // for a session that merely transitions from handshaking to connected —
@@ -152,7 +207,7 @@ class PushMessagingService {
       await s.send(
         createAbMessage('push:register', {
           'pushToken': token,
-          'provider': 'fcm',
+          'provider': _provider,
           'pushPubkey': pushPubkeyB64,
         }),
       );
@@ -190,6 +245,7 @@ class PushMessagingService {
   /// it). Clears the local registered-set so a later re-register re-sends.
   Future<void> clearToken({required Iterable<ProjectSession> sessions}) async {
     _registered.clear();
+    _registeredPubkey = null;
     // Drop pending "register when ready" listeners too: their sessions are torn
     // down on sign-out, but clearing the guard lets a re-sign-in re-schedule.
     _awaitingReady.clear();
@@ -199,7 +255,7 @@ class PushMessagingService {
         await s.send(
           createAbMessage('push:register', {
             'pushToken': '',
-            'provider': 'fcm',
+            'provider': _provider,
             'pushPubkey': '',
           }),
         );
@@ -210,8 +266,8 @@ class PushMessagingService {
     }
   }
 
-  Future<void> dispose() async {
-    await _tokenRefreshSub?.cancel();
-    _tokenRefreshSub = null;
+  void dispose() {
+    _unsubscribeToken?.call();
+    _unsubscribeToken = null;
   }
 }

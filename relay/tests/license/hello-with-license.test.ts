@@ -13,12 +13,12 @@ import {
   waitForMessage,
 } from "../helpers/relay-harness.js";
 
-// `licenseApiUrl` is the bare origin; the gate derives the token issuer as
+// `licenseIssuerUrl` is the bare origin; the gate derives the token issuer as
 // `${origin}/api/auth` (Better-Auth's mount). Sign fixtures with that shape.
 const ISSUER = "http://license-api.test";
 const TOKEN_ISS = `${ISSUER}/api/auth`;
 
-const baseConfig = { ...defaultConfig, licenseApiUrl: ISSUER };
+const baseConfig = { ...defaultConfig, licenseIssuerUrl: ISSUER };
 
 interface SignerCtx {
   signer: { privateKey: CryptoKey; publicJwk: JWK; kid: string };
@@ -94,7 +94,7 @@ async function sendHello(
 test("app hello: license token's deviceUuid/pk need not match the phone's relay slot identity", async () => {
   const { signer, jwks } = await makeSigner();
   const cache = new LicenseCache({ maxEntries: 100 });
-  const gate = createLicenseGate({ licenseApiUrl: ISSUER, jwks, cache });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
   const r = startWith({ licenseGate: gate, licenseCache: cache });
 
   const identity = await genRelayKeyPair();
@@ -111,7 +111,7 @@ test("app hello: license token's deviceUuid/pk need not match the phone's relay 
 test("app hello: expired token -> LICENSE_EXPIRED (crypto still enforced)", async () => {
   const { signer, jwks } = await makeSigner();
   const cache = new LicenseCache({ maxEntries: 100 });
-  const gate = createLicenseGate({ licenseApiUrl: ISSUER, jwks, cache });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
   const r = startWith({ licenseGate: gate, licenseCache: cache });
 
   const identity = await genRelayKeyPair();
@@ -129,7 +129,7 @@ test("app hello: expired token -> LICENSE_EXPIRED (crypto still enforced)", asyn
 test("agent hello: valid token -> welcome", async () => {
   const { signer, jwks } = await makeSigner();
   const cache = new LicenseCache({ maxEntries: 100 });
-  const gate = createLicenseGate({ licenseApiUrl: ISSUER, jwks, cache });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
   const r = startWith({ licenseGate: gate, licenseCache: cache });
 
   const identity = await genRelayKeyPair();
@@ -146,7 +146,7 @@ test("agent hello: valid token -> welcome", async () => {
 test("agent hello: malformed token -> LICENSE_INVALID and ws closed 1008", async () => {
   const { jwks } = await makeSigner();
   const cache = new LicenseCache({ maxEntries: 100 });
-  const gate = createLicenseGate({ licenseApiUrl: ISSUER, jwks, cache });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
   const r = startWith({ licenseGate: gate, licenseCache: cache });
 
   const identity = await genRelayKeyPair();
@@ -163,7 +163,7 @@ test("agent hello: malformed token -> LICENSE_INVALID and ws closed 1008", async
 test("agent hello: expired token -> LICENSE_EXPIRED", async () => {
   const { signer, jwks } = await makeSigner();
   const cache = new LicenseCache({ maxEntries: 100 });
-  const gate = createLicenseGate({ licenseApiUrl: ISSUER, jwks, cache });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
   const r = startWith({ licenseGate: gate, licenseCache: cache });
 
   const identity = await genRelayKeyPair();
@@ -180,7 +180,7 @@ test("agent hello: expired token -> LICENSE_EXPIRED", async () => {
 test("agent hello: deviceUuid mismatch -> LICENSE_INVALID", async () => {
   const { signer, jwks } = await makeSigner();
   const cache = new LicenseCache({ maxEntries: 100 });
-  const gate = createLicenseGate({ licenseApiUrl: ISSUER, jwks, cache });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
   const r = startWith({ licenseGate: gate, licenseCache: cache });
 
   const identity = await genRelayKeyPair();
@@ -197,7 +197,7 @@ test("agent hello: deviceUuid mismatch -> LICENSE_INVALID", async () => {
 test("agent hello: pk claim mismatch -> LICENSE_INVALID", async () => {
   const { signer, jwks } = await makeSigner();
   const cache = new LicenseCache({ maxEntries: 100 });
-  const gate = createLicenseGate({ licenseApiUrl: ISSUER, jwks, cache });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
   const r = startWith({ licenseGate: gate, licenseCache: cache });
 
   const identity = await genRelayKeyPair();
@@ -216,7 +216,7 @@ test("agent hello: pk claim mismatch -> LICENSE_INVALID", async () => {
 test("free tier agent hello still succeeds — tier no longer gates hello (only sessionLimit gates stream-open)", async () => {
   const { signer, jwks } = await makeSigner();
   const cache = new LicenseCache({ maxEntries: 100 });
-  const gate = createLicenseGate({ licenseApiUrl: ISSUER, jwks, cache });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
   const r = startWith({ licenseGate: gate, licenseCache: cache });
 
   const identity = await genRelayKeyPair();
@@ -233,7 +233,7 @@ test("free tier agent hello still succeeds — tier no longer gates hello (only 
 test("revoked entry in cache -> LICENSE_REVOKED", async () => {
   const { signer, jwks } = await makeSigner();
   const cache = new LicenseCache({ maxEntries: 100 });
-  const gate = createLicenseGate({ licenseApiUrl: ISSUER, jwks, cache });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
   const r = startWith({ licenseGate: gate, licenseCache: cache });
 
   const identity = await genRelayKeyPair();
@@ -271,7 +271,7 @@ test("second hello with the same token reuses the license cache (JWKS fetched on
     },
   };
   const cache = new LicenseCache({ maxEntries: 100 });
-  const gate = createLicenseGate({ licenseApiUrl: ISSUER, jwks: countingJwks, cache });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks: countingJwks, cache });
   const r = startWith({ licenseGate: gate, licenseCache: cache });
 
   const identity = await genRelayKeyPair();

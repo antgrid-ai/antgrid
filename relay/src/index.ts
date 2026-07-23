@@ -2,6 +2,7 @@ import { loadConfig } from "./config.js";
 import { setLogLevel, logger } from "./logger.js";
 import { startServer } from "./server.js";
 import { FcmSender, GoogleTokenSource } from "./push/fcm.js";
+import { ApnsSender, ApnsProviderToken, Http2ApnsTransport } from "./push/apns.js";
 
 const config = loadConfig();
 setLogLevel(config.logLevel);
@@ -20,7 +21,22 @@ const fcmSender =
       })
     : undefined;
 
-const relay = startServer(config, { fcmSender });
+// All four APNs fields must be set together to enable direct-APNs push.
+const apnsSender =
+  config.apnsKeyId && config.apnsTeamId && config.apnsPrivateKey && config.apnsBundleId
+    ? new ApnsSender({
+        bundleId: config.apnsBundleId,
+        providerToken: new ApnsProviderToken({
+          keyId: config.apnsKeyId,
+          teamId: config.apnsTeamId,
+          // Env stores the .p8 PEM with literal \n; restore real newlines.
+          privateKeyPem: config.apnsPrivateKey.replace(/\\n/g, "\n"),
+        }),
+        transport: new Http2ApnsTransport({ production: config.apnsProduction ?? false }),
+      })
+    : undefined;
+
+const relay = startServer(config, { fcmSender, apnsSender });
 
 logger.info("Antgrid Relay started", {
   port: config.port,

@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../config/storage_scope.dart';
 import 'scoped_prefs.dart';
 
 /// One agent the phone has previously paired with. The phone is the system of
@@ -81,16 +82,15 @@ class RecentAgentsStore {
   // Bumped to v3 so stale compound-`agentDeviceId` rows from the v2
   // socket-per-project era are dropped rather than migrated (pre-release):
   // `agentDeviceId` now always carries the bare machine deviceUuid.
-  static const _key = 'antgrid.recent_agents.v3';
+  static final _key = scopedStorageKey('antgrid.recent_agents.v3');
   final SharedPreferencesWithCache _prefs;
   final StreamController<List<RecentAgent>> _changes =
       StreamController<List<RecentAgent>>.broadcast();
 
   RecentAgentsStore._(this._prefs);
 
-  static Future<RecentAgentsStore> open() async => RecentAgentsStore._(
-    await openScopedPrefs({_key}),
-  );
+  static Future<RecentAgentsStore> open() async =>
+      RecentAgentsStore._(await openScopedPrefs({_key}));
 
   List<RecentAgent> list() {
     final raw = _prefs.getString(_key);

@@ -552,7 +552,7 @@ const PushRegisterMessage = BaseMessage.extend({
   // Empty string is the CLEAR signal (sign-out) — do not use .min(1). See the
   // clear branch in the agent-core handler and Task 10's clearToken().
   pushToken: z.string(),
-  provider: z.literal("fcm"),
+  provider: z.enum(["fcm", "apns"]),
   pushPubkey: PushPubkeyB64,
 });
 

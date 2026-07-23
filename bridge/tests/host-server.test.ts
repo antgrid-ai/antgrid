@@ -271,7 +271,12 @@ test("startControlPlane writes host.json with the control port + token", async (
 
 test("host:shutdown returns ok and fires onShutdownRequested (after the response)", async () => {
   let shutdownCalls = 0;
-  host = new HostServer({ onShutdownRequested: () => { shutdownCalls++; } });
+  // Mirror real usage: the entrypoint's callback tears the host down. The OK
+  // still reaching the client is the deferral contract — the response flushed
+  // before teardown killed the control listener. Whether the deferred callback
+  // fires before or after fetch() resolves is event-loop scheduling, not
+  // contract, so don't assert on that ordering.
+  host = new HostServer({ onShutdownRequested: () => { shutdownCalls++; void host?.shutdown(); } });
   const cp = await host.startControlPlane();
 
   const res = await fetch(`http://127.0.0.1:${cp.port}/control`, {
@@ -287,7 +292,7 @@ test("host:shutdown returns ok and fires onShutdownRequested (after the response
   // here: the server's 0ms defer timer can legitimately fire before the
   // client finishes parsing, so that assertion is a scheduling race (flaked
   // under full-suite load).
-  await new Promise((r) => setTimeout(r, 20));
+  for (let i = 0; i < 100 && shutdownCalls === 0; i++) await new Promise((r) => setTimeout(r, 5));
   expect(shutdownCalls).toBe(1);
 });
 

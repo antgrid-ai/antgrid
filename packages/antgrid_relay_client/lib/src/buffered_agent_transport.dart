@@ -67,6 +67,8 @@ abstract class BufferedAgentTransport implements AgentTransport {
     final requestId = 'r${_nextRequestId++}';
     final completer = Completer<Map<String, dynamic>>();
     pending[requestId] = completer;
+    // A send that fails (closed socket, oversized frame) means the reply can
+    // never come — fail the RPC now rather than burning the full timeout.
     send({
       'type': 'request',
       'id': requestId,
@@ -74,6 +76,11 @@ abstract class BufferedAgentTransport implements AgentTransport {
       'requestId': requestId,
       'method': method,
       if (params != null) 'params': params,
+    }).catchError((Object e) {
+      final c = pending.remove(requestId);
+      if (c != null && !c.isCompleted) {
+        c.completeError(RpcException('E_SEND_FAILED', 'request $method: $e'));
+      }
     });
     return completer.future.timeout(timeout, onTimeout: () {
       pending.remove(requestId);

@@ -61,6 +61,87 @@ void main() {
     },
   );
 
+  test(
+    'backgrounding pauses focus even while heavy stays subscribed',
+    () async {
+      final sub = router.heavy.listen((_) {});
+      await Future<void>.delayed(Duration.zero);
+      expect(transport.sent.last['paused'], false);
+
+      router.setLifecyclePaused(true);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(transport.sent.last['type'], 'client:focus-state');
+      expect(transport.sent.last['paused'], true);
+
+      await sub.cancel();
+    },
+  );
+
+  test('heavy re-subscribe while backgrounded does not unpause', () async {
+    final first = router.heavy.listen((_) {});
+    await Future<void>.delayed(Duration.zero);
+    router.setLifecyclePaused(true);
+    await Future<void>.delayed(Duration.zero);
+    final sentAfterPause = transport.sent.length;
+
+    await first.cancel();
+    final second = router.heavy.listen((_) {});
+    await Future<void>.delayed(Duration.zero);
+
+    expect(transport.sent.length, sentAfterPause);
+    expect(transport.sent.last['paused'], true);
+
+    await second.cancel();
+  });
+
+  test('resuming unpauses once the app returns to the foreground', () async {
+    final sub = router.heavy.listen((_) {});
+    await Future<void>.delayed(Duration.zero);
+    router.setLifecyclePaused(true);
+    await Future<void>.delayed(Duration.zero);
+
+    router.setLifecyclePaused(false);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(transport.sent.last['paused'], false);
+
+    await sub.cancel();
+  });
+
+  test('resyncFocusState re-asserts the union after a handshake', () async {
+    // Regression: `transport.send` is a silent no-op until session keys are
+    // installed, but _syncFocusState records the value as sent regardless. A
+    // phone backgrounding across a reconnect (the common case — the OS suspends
+    // the socket exactly then) loses `{paused: true}` and the dedup blocks every
+    // retry, so the agent keeps believing the app is foregrounded and skips the
+    // fallback push forever. The post-handshake resync must re-send the union
+    // even though the value hasn't changed.
+    final sub = router.heavy.listen((_) {});
+    await Future<void>.delayed(Duration.zero);
+    router.setLifecyclePaused(true);
+    await Future<void>.delayed(Duration.zero);
+    transport.sent.clear(); // pretend everything so far was dropped pre-handshake
+
+    router.resyncFocusState();
+    await Future<void>.delayed(Duration.zero);
+
+    expect(transport.sent.length, 1);
+    expect(transport.sent.single['type'], 'client:focus-state');
+    expect(transport.sent.single['paused'], true);
+
+    await sub.cancel();
+  });
+
+  test('resyncFocusState is a no-op before any focus state is established', () async {
+    // Nothing has been declared yet (no heavy subscriber, no lifecycle call), so
+    // a handshake must not invent a focus claim the app never made.
+    router.resyncFocusState();
+    await Future<void>.delayed(Duration.zero);
+
+    expect(transport.sent, isEmpty);
+  });
+
   test('ignore-tier messages do not reach either stream', () async {
     final statusRx = <Map<String, dynamic>>[];
     final heavyRx = <Map<String, dynamic>>[];

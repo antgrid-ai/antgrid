@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { loadConfig } from "../src/config";
 
 const VALID_SECRET = "x".repeat(16);
-const TOUCHED_KEYS = ["LICENSE_API_URL", "RELAY_INTERNAL_SECRET", "LICENSE_CACHE_MAX_ENTRIES"] as const;
+const TOUCHED_KEYS = [
+  "LICENSE_API_URL",
+  "LICENSE_ISSUER_URL",
+  "RELAY_INTERNAL_SECRET",
+  "LICENSE_CACHE_MAX_ENTRIES",
+] as const;
 
 describe("loadConfig", () => {
   let saved: Record<string, string | undefined> = {};
@@ -52,6 +57,26 @@ describe("loadConfig", () => {
     expect(cfg.licenseApiUrl).toBe("http://localhost:8787");
     expect(cfg.relayInternalSecret).toBe(VALID_SECRET);
     expect(cfg.licenseCacheMaxEntries).toBe(100000);
+  });
+
+  // licenseApiUrl may point at an internal address (docker DNS) for fast JWKS
+  // fetches, which is NOT necessarily the public BETTER_AUTH_URL that Better-Auth
+  // stamps into every token's `iss`. licenseIssuerUrl is undefined unless a
+  // deployment opts in, so a single-host setup (local dev) needs no new config.
+  test("licenseIssuerUrl is undefined when LICENSE_ISSUER_URL is unset", () => {
+    process.env.LICENSE_API_URL = "http://web-blue:8787";
+    process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;
+    const cfg = loadConfig();
+    expect(cfg.licenseIssuerUrl).toBeUndefined();
+  });
+
+  test("licenseIssuerUrl is read from LICENSE_ISSUER_URL when set, independent of licenseApiUrl", () => {
+    process.env.LICENSE_API_URL = "http://web-blue:8787";
+    process.env.LICENSE_ISSUER_URL = "https://app.staging.antgrid.ai";
+    process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;
+    const cfg = loadConfig();
+    expect(cfg.licenseApiUrl).toBe("http://web-blue:8787");
+    expect(cfg.licenseIssuerUrl).toBe("https://app.staging.antgrid.ai");
   });
 
   test("respects LICENSE_CACHE_MAX_ENTRIES override", () => {

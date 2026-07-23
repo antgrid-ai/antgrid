@@ -523,8 +523,11 @@ export class HostServer {
     void this.handleControlPlaneVerb(msg, phonePubkey, bus)
       .then((res) => {
         if (!res.ok) {
+          // projectId lets the phone fail the exact pending bind (MachineSession
+          // keys its stream-ready waiters by projectId) instead of guessing.
+          const projectId = "projectId" in msg && typeof msg.projectId === "string" ? msg.projectId : undefined;
           bus.publish(
-            createMessage("control:result", { ok: false, verb: msg.type, error: res.error }),
+            createMessage("control:result", { ok: false, verb: msg.type, projectId, error: res.error }),
             "control",
           );
         }
@@ -783,10 +786,22 @@ export class HostServer {
           return { ok: true };
         }
       }
-      // else: already remote OR already promoted → idempotent. Re-advertise so the
-      // phone re-reads the current dialable state (running:true only if the slot
-      // is actually relay-admitted — buildProjectsAdvertisement gates on that, so
-      // a promoted-but-not-yet-registered core still reads not-running here).
+      // else: already remote OR already promoted → idempotent. The phone's
+      // project:start IS the "what stream do I bind?" question, and the re-advert
+      // alone can't answer it — the bus's payload dedup legally suppresses a
+      // byte-identical re-advert to a reconnecting phone. stream-ready is
+      // dedup-immune (not in REPLAY_TYPES), so publish the binding whenever the
+      // slot is actually relay-admitted (same dialable gate as the advert).
+      if (this.cores.get(projectId)?.core.isRelayRegistered()) {
+        const streamId = this.streamIds.get(projectId);
+        if (streamId) {
+          bus.publish(createMessage("stream-ready", { projectId, streamId }), "control");
+        }
+      }
+      // Re-advertise so the phone re-reads the current dialable state
+      // (running:true only if the slot is actually relay-admitted —
+      // buildProjectsAdvertisement gates on that, so a promoted-but-not-yet-
+      // registered core still reads not-running here).
       this.sendProjectsAdvertisement(phonePubkey, bus);
       return { ok: true };
     }
@@ -824,6 +839,7 @@ export class HostServer {
           createMessage("control:result", {
             ok: false,
             verb: "project:start",
+            projectId,
             error: { code: outcome.code, message: outcome.message },
           }),
           "control",

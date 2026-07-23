@@ -19,8 +19,19 @@ export interface RelayConfig {
   pingIntervalMs: number;
   pongTimeoutMs: number;
   logLevel: "debug" | "info" | "warn" | "error";
+  /** Base URL the relay fetches JWKS from — may be an internal address (e.g.
+   *  docker-internal DNS) for network efficiency; NOT necessarily the token
+   *  issuer. See `licenseIssuerUrl`. */
   licenseApiUrl: string;
   licenseApiJwksPath?: string;
+  /**
+   * Base URL the relay expects device tokens' `iss` claim to match — Better-Auth
+   * stamps `iss` from `BETTER_AUTH_URL` (web's PUBLIC origin), which can differ
+   * from `licenseApiUrl` when the latter points at an internal address. Falls
+   * back to `licenseApiUrl` when unset, so single-host deployments (local dev)
+   * need no extra config.
+   */
+  licenseIssuerUrl?: string;
   relayInternalSecret: string;
   licenseCacheMaxEntries: number;
   // Push (FCM) is optional — all three set together enables push:deliver
@@ -29,6 +40,14 @@ export interface RelayConfig {
   fcmProjectId?: string;
   fcmClientEmail?: string;
   fcmPrivateKey?: string;
+  // Push (APNs, iOS direct) is optional — all four (key id, team id, private key,
+  // bundle id) must be set together to enable direct-APNs forwarding; if any is
+  // missing the relay replies "unconfigured" for provider:"apns".
+  apnsKeyId?: string;
+  apnsTeamId?: string;
+  apnsPrivateKey?: string;
+  apnsBundleId?: string;
+  apnsProduction?: boolean;
 }
 
 function requireEnv(name: string): string {
@@ -108,8 +127,14 @@ export function loadConfig(): RelayConfig {
     logLevel: (process.env.LOG_LEVEL as RelayConfig["logLevel"]) || "info",
     licenseApiUrl: requireEnv("LICENSE_API_URL"),
     licenseApiJwksPath: process.env.LICENSE_API_JWKS_PATH || undefined,
+    licenseIssuerUrl: process.env.LICENSE_ISSUER_URL || undefined,
     relayInternalSecret: requireEnvMinLength("RELAY_INTERNAL_SECRET", 16),
     licenseCacheMaxEntries: parseInt(process.env.LICENSE_CACHE_MAX_ENTRIES || "100000", 10),
     ...loadFcmConfig(),
+    apnsKeyId: process.env.APNS_KEY_ID || undefined,
+    apnsTeamId: process.env.APNS_TEAM_ID || undefined,
+    apnsPrivateKey: process.env.APNS_PRIVATE_KEY || undefined,
+    apnsBundleId: process.env.APNS_BUNDLE_ID || undefined,
+    apnsProduction: process.env.APNS_PRODUCTION === "true",
   };
 }

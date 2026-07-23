@@ -1,4 +1,5 @@
 import type { PairedPhonesStore } from "../paired-phones";
+import { logger } from "../logger";
 
 /**
  * Clear a phone's FCM token after the relay reports it UNREGISTERED (FCM
@@ -10,6 +11,12 @@ import type { PairedPhonesStore } from "../paired-phones";
 export function prunePushToken(pairedPhones: PairedPhonesStore, pushToken: string): void {
   const phone = pairedPhones.list().find((p) => p.pushToken === pushToken);
   if (!phone) return;
+  // warn: this disarms push for the phone until the app re-registers a token.
+  // Unlogged, the dispatcher just goes quiet and host.log offers no reason.
+  logger.warn(
+    "push: token for phone %s reported dead — cleared; push stays off until the app re-registers",
+    phone.label ?? phone.phoneDeviceId,
+  );
   pairedPhones.upsert({
     ...phone,
     pushToken: undefined,

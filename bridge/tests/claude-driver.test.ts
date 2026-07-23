@@ -42,6 +42,9 @@ function makeFakeQuery(opts?: {
   supportedModels?: () => Promise<any[]>;
   initializationResult?: () => Promise<any>;
   getContextUsage?: () => Promise<any>;
+  setPermissionMode?: (mode: string) => Promise<void>;
+  setModel?: (model?: string) => Promise<void>;
+  applyFlagSettings?: (settings: any) => Promise<void>;
 }) {
   const chunks: any[] = [];
   let push!: (c: any) => void;
@@ -61,9 +64,9 @@ function makeFakeQuery(opts?: {
   }
   const q: ClaudeQueryLike = Object.assign(gen(), {
     interrupt: async () => { control.interrupt++; },
-    setModel: async (m?: string) => { control.setModel.push(m); },
-    setPermissionMode: async (m: string) => { control.setPermissionMode.push(m); },
-    applyFlagSettings: async (s: any) => { control.applyFlagSettings.push(s); },
+    setModel: async (m?: string) => { control.setModel.push(m); await opts?.setModel?.(m); },
+    setPermissionMode: async (m: string) => { control.setPermissionMode.push(m); await opts?.setPermissionMode?.(m); },
+    applyFlagSettings: async (s: any) => { control.applyFlagSettings.push(s); await opts?.applyFlagSettings?.(s); },
     supportedCommands: async () => [],
     supportedModels: opts?.supportedModels ?? (async () => []),
     initializationResult: opts?.initializationResult ?? (async () => ({})),
@@ -843,6 +846,70 @@ describe("ClaudeDriver permission modes", () => {
     const after = sent.filter((m) => m.type === "agent:capabilities").at(-1);
     if (after?.type === "agent:capabilities") expect(after.currentModeId).toBe("auto");
   });
+
+  it("survives a CLI control call that rejects the mode as unavailable", async () => {
+    // The CLI gates "auto" per-model and answers an unsupported pick with an
+    // error verdict, which the SDK surfaces as a rejected setPermissionMode.
+    // Unhandled, it reaches the host's process-level unhandledRejection hook
+    // and takes down every project on the machine.
+    const fake = makeFakeQuery({
+      initializationResult: async () => ({ models: [{ value: "opus", displayName: "Opus" }] }),
+      setPermissionMode: async (m) => {
+        throw new Error(`Cannot set permission mode to ${m}: auto mode unavailable for this model`);
+      },
+    });
+    const { driver } = makeDriver({ fake });
+    await driver.start();
+    fake.emit({ type: "system", subtype: "init", session_id: "sess-1", model: "m", permissionMode: "default", slash_commands: [], skills: [] });
+    await flush();
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown) => unhandled.push(e);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      driver.setConfig("mode", "auto");
+      await flush();
+      await flush();
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    expect(unhandled).toEqual([]);
+  });
+
+  it("rolls the mode selection back to the live one when the CLI rejects it", async () => {
+    const fake = makeFakeQuery({
+      initializationResult: async () => ({ models: [{ value: "opus", displayName: "Opus" }] }),
+      setPermissionMode: async (m) => {
+        if (m === "auto") throw new Error("auto mode unavailable for this model");
+      },
+    });
+    const { driver, sent } = makeDriver({ fake });
+    await driver.start();
+    fake.emit({ type: "system", subtype: "init", session_id: "sess-1", model: "m", permissionMode: "default", slash_commands: [], skills: [] });
+    await flush();
+
+    driver.setConfig("mode", "auto");
+    await flush();
+    await flush();
+    // The optimistic write must not outlive the rejection — otherwise the app's
+    // pill reads "Auto" while the session is still on default.
+    const caps = sent.filter((m) => m.type === "agent:capabilities").at(-1);
+    expect(caps?.type === "agent:capabilities" && caps.currentModeId).toBe("default");
+  });
+
+  it("keeps an accepted mode selection applied", async () => {
+    const fake = makeFakeQuery({ initializationResult: async () => ({ models: [{ value: "opus", displayName: "Opus" }] }) });
+    const { driver, sent } = makeDriver({ fake });
+    await driver.start();
+    fake.emit({ type: "system", subtype: "init", session_id: "sess-1", model: "m", permissionMode: "default", slash_commands: [], skills: [] });
+    await flush();
+
+    driver.setConfig("mode", "plan");
+    await flush();
+    await flush();
+    const caps = sent.filter((m) => m.type === "agent:capabilities").at(-1);
+    expect(caps?.type === "agent:capabilities" && caps.currentModeId).toBe("plan");
+  });
 });
 
 describe("ClaudeDriver permissionMode seeding", () => {
@@ -1179,5 +1246,83 @@ describe("ClaudeDriver compaction", () => {
     h.fake.emit({ type: "system", subtype: "init", session_id: "yet-another-sess", model: "m", slash_commands: [], skills: [] });
     await flush();
     expect(h.sessionIds).toEqual(["new-sess", "yet-another-sess"]);
+  });
+});
+
+// The driver applies picks fire-and-forget and the host turns any unhandled
+// rejection into a full shutdown (index.ts), so the rollback path itself must be
+// total — including when the transport write inside it fails.
+describe("ClaudeDriver pick rollback", () => {
+  // `failWrite` decides, per agent:capabilities frame (n = 1-based), whether the
+  // transport write throws — letting each test fail only the frame it cares about.
+  function makeDriverWithWrites(
+    fake: ReturnType<typeof makeFakeQuery>,
+    failWrite: (n: number) => boolean,
+  ) {
+    const controller: PromptStreamController = { push: () => {}, end: () => {}, isEnded: () => false };
+    let n = 0;
+    return new ClaudeDriver({
+      sessionId: "s1",
+      sendMessage: (m) => { if (m.type === "agent:capabilities" && failWrite(++n)) throw new Error("transport closed"); },
+      spawn: (_args) => ({ query: fake.q, controller }),
+    });
+  }
+
+  async function withUnhandledWatch(fn: () => Promise<void>): Promise<unknown[]> {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown) => unhandled.push(e);
+    process.on("unhandledRejection", onUnhandled);
+    try { await fn(); } finally { process.off("unhandledRejection", onUnhandled); }
+    return unhandled;
+  }
+
+  it("survives a transport write that fails while rolling a rejected pick back", async () => {
+    const fake = makeFakeQuery({
+      initializationResult: async () => ({ models: [{ value: "opus", displayName: "Opus" }] }),
+      setPermissionMode: async () => { throw new Error("auto mode unavailable for this model"); },
+    });
+    // Only the rollback's re-emit fails. setConfig's own optimistic emit is
+    // synchronous and surfaces through the manager as agent:error, not a crash.
+    let failNow = false;
+    const driver = makeDriverWithWrites(fake, () => failNow);
+    await driver.start();
+    await flush();
+    const unhandled = await withUnhandledWatch(async () => {
+      driver.setConfig("mode", "auto");
+      failNow = true;
+      await flush(); await flush();
+    });
+    expect(unhandled).toEqual([]);
+  });
+
+  it("survives a transport write that fails in the discovery tail", async () => {
+    const fake = makeFakeQuery({ initializationResult: async () => ({ models: [{ value: "opus", displayName: "Opus" }] }) });
+    // start()'s early "loading" frame must still land; the later one is the tail's.
+    const driver = makeDriverWithWrites(fake, (n) => n > 1);
+    const unhandled = await withUnhandledWatch(async () => {
+      await driver.start();
+      await flush(); await flush();
+    });
+    expect(unhandled).toEqual([]);
+  });
+
+  it("does not let a stale rejection clobber a newer pick the CLI accepted", async () => {
+    let rejectAuto!: (e: unknown) => void;
+    const fake = makeFakeQuery({
+      initializationResult: async () => ({ models: [{ value: "opus", displayName: "Opus" }] }),
+      setPermissionMode: (m) =>
+        m === "auto" ? new Promise<void>((_res, rej) => { rejectAuto = rej; }) : Promise.resolve(),
+    });
+    const { driver, sent } = makeDriver({ fake });
+    await driver.start();
+    fake.emit({ type: "system", subtype: "init", session_id: "sess-1", model: "m", permissionMode: "default", slash_commands: [], skills: [] });
+    await flush();
+    driver.setConfig("mode", "auto");  // in flight, will be rejected
+    driver.setConfig("mode", "plan");  // accepted while auto is still pending
+    await flush();
+    rejectAuto(new Error("auto mode unavailable for this model"));
+    await flush(); await flush();
+    const last = sent.filter((m) => m.type === "agent:capabilities").at(-1);
+    expect(last?.type === "agent:capabilities" && last.currentModeId).toBe("plan");
   });
 });

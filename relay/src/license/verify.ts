@@ -65,16 +65,20 @@ export interface JwksProvider {
 /**
  * Better-Auth mounts its handler (and the OAuth provider / JWKS) under
  * `/api/auth`, and stamps that same base onto every token's `iss` claim
- * (`ctx.context.baseURL` = `${BETTER_AUTH_URL}/api/auth`). So the issuer the
- * relay must verify against is NOT the bare `LICENSE_API_URL` origin but that
- * origin + `/api/auth`. This mirrors web's own `jwt-bearer.ts`, which verifies
- * the very same OAuth `client_credentials` access tokens for the agent
- * heartbeat endpoint. Keep the two in lockstep.
+ * (`ctx.context.baseURL` = `${BETTER_AUTH_URL}/api/auth`). So the expected
+ * issuer is web's PUBLIC origin + `/api/auth` — callers must pass
+ * `licenseIssuerUrl` (which defaults to `BETTER_AUTH_URL`), NOT the relay's
+ * `licenseApiUrl`, which may instead be an internal address used purely to
+ * fetch JWKS efficiently (docker-internal DNS on the VM deploy). Conflating
+ * the two made every hello fail issuer verification on any deployment where
+ * they differ — see gate.ts's `licenseIssuerUrl` wiring. This mirrors web's
+ * own `jwt-bearer.ts`, which verifies the very same OAuth `client_credentials`
+ * access tokens for the agent heartbeat endpoint. Keep the two in lockstep.
  */
 const AUTH_BASE_PATH = "/api/auth";
 
-export function deviceTokenIssuer(licenseApiUrl: string): string {
-  return `${licenseApiUrl.replace(/\/+$/, "")}${AUTH_BASE_PATH}`;
+export function deviceTokenIssuer(issuerBaseUrl: string): string {
+  return `${issuerBaseUrl.replace(/\/+$/, "")}${AUTH_BASE_PATH}`;
 }
 
 function isNonEmptyString(v: unknown): v is string {

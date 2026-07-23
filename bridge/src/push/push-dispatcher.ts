@@ -1,11 +1,12 @@
 import type { AbMessage } from "../protocol";
+import { logger } from "../logger";
 import { composePush } from "./compose";
 
 const MAX_BODY_LEN = 480; // keep the sealed payload well under FCM's ~4 KB data cap
 
 export interface PushTarget {
   pushToken: string;
-  provider: "fcm";
+  provider: "fcm" | "apns";
   pushPubkey: string;
 }
 
@@ -15,9 +16,12 @@ export interface PushDispatcherDeps {
    *  This is the SUPPRESSION union (peer offline OR app backgrounded), not bare
    *  peer-offline — a connected-but-backgrounded phone (Phase 1) must still push. */
   shouldFallback: () => boolean;
-  resolveTarget: () => PushTarget | null;
+  /** The phones eligible to receive this notification; empty means nowhere to
+   *  send. Plural because with no live peer the agent can't know which allowed
+   *  device the user holds — see resolveTargets in project-core.ts. */
+  resolveTargets: () => PushTarget[];
   seal: (json: string, recipientPushPubkeyB64: string) => { epk: string; box: string };
-  deliver: (token: string, provider: "fcm", blob: { epk: string; box: string }) => void;
+  deliver: (token: string, provider: "fcm" | "apns", blob: { epk: string; box: string }) => void;
 }
 
 /**
@@ -32,9 +36,25 @@ export function createPushDispatcher(deps: PushDispatcherDeps) {
     onOutbound(msg: AbMessage): void {
       const composed = composePush(msg);
       if (!composed) return;
-      if (!deps.shouldFallback()) return;
-      const target = deps.resolveTarget();
-      if (!target) return;
+      // Past this point every return path drops a user-facing notification, and
+      // each one is otherwise indistinguishable from "the agent never notified".
+      // Log at most one line per notification (composePush already filtered the
+      // firehose down to notification:push / handler:escalation).
+      if (!deps.shouldFallback()) {
+        // info, not debug: this is the ONLY signal that a notification existed
+        // at all. At debug it's indistinguishable from the agent never notifying,
+        // which sends anyone debugging push off hunting a message that was in
+        // fact delivered in-band. One line per turn on a relay-paired project.
+        logger.info("push: %s not sent — phone can receive in-band", composed.kind);
+        return;
+      }
+      const targets = deps.resolveTargets();
+      if (targets.length === 0) {
+        // warn: the phone can't receive in-band AND has nowhere to push, so this
+        // notification is lost outright. resolveTargets logs the specific cause.
+        logger.warn("push: %s DROPPED — no push target for project %s", composed.kind, deps.projectId);
+        return;
+      }
       const sourceMessageId = msg.type === "handler:escalation" ? msg.escalationId : msg.id;
       const payload = JSON.stringify({
         title: composed.title,
@@ -43,8 +63,17 @@ export function createPushDispatcher(deps: PushDispatcherDeps) {
         projectId: deps.projectId,
         sourceMessageId,
       });
-      const blob = deps.seal(payload, target.pushPubkey);
-      deps.deliver(target.pushToken, target.provider, blob);
+      // Seal per target: each phone has its own push key, so the ciphertext can't
+      // be shared even though the plaintext is identical.
+      for (const target of targets) {
+        const blob = deps.seal(payload, target.pushPubkey);
+        deps.deliver(target.pushToken, target.provider, blob);
+      }
+      logger.info(
+        "push: %s sealed and handed to relay (providers=%s)",
+        composed.kind,
+        targets.map((t) => t.provider).join(","),
+      );
     },
   };
 }

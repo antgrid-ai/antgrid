@@ -53,13 +53,13 @@ test("closing CTA: Start free, direct downloads, store chips, correct pricing co
   );
   await expect(band.getByRole("link", { name: /download for windows/i })).toHaveAttribute(
     "href",
-    "https://github.com/Radha-AI-Products/antgrid-releases/releases/latest/download/antgrid-windows-setup.exe"
+    "https://get.microsoft.com/installer/download/9N0P7ZRL4D9W?referrer=appbadge&cid=site"
   );
   await expect(band.getByRole("link", { name: /download for linux/i })).toHaveAttribute(
     "href",
     "https://github.com/Radha-AI-Products/antgrid-releases/releases/latest/download/antgrid-linux.AppImage"
   );
-  await expect(band.getByText("Microsoft Store")).toBeVisible();
+  await expect(band.getByText("Microsoft Store")).toHaveCount(0);
   await expect(band.getByText("soon").first()).toBeVisible();
 });
 

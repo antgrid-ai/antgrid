@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../config/storage_scope.dart';
 import 'scoped_prefs.dart';
 
 /// SharedPreferences-backed persistence for the user's drawer ordering. The
@@ -11,14 +12,13 @@ import 'scoped_prefs.dart';
 /// new ids (newly opened projects, newly paired agents) are appended at the
 /// end of the displayed list and only persisted when the user actually drags.
 class DrawerOrderStore {
-  static const _key = 'antgrid.drawer_order.v1';
+  static final _key = scopedStorageKey('antgrid.drawer_order.v1');
   final SharedPreferencesWithCache _prefs;
 
   DrawerOrderStore._(this._prefs);
 
-  static Future<DrawerOrderStore> open() async => DrawerOrderStore._(
-    await openScopedPrefs({_key}),
-  );
+  static Future<DrawerOrderStore> open() async =>
+      DrawerOrderStore._(await openScopedPrefs({_key}));
 
   List<String> list() {
     final raw = _prefs.getString(_key);

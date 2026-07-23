@@ -191,6 +191,12 @@ program
     const { readHostFile, hostFilePath } = await import("./host-discovery");
 
     const abDir = resolveAbDir();
+    // This CLI resolves ANTGRID_DIR from its own shell env, which is only
+    // correct when it matches whatever env the target host was started with
+    // (e.g. a dev host launched via `npm run dev`/`npm run aspire` runs on
+    // ~/.antgrid-dev, not this default) — printed so a mismatch is visible
+    // instead of a silent "allowed" that the running host never sees.
+    console.error(`[antgrid phones] using ${join(abDir, "agents", "paired-phones.json")}`);
     const store = loadPairedPhones(abDir);
 
     // M3 catalog resolver: try the loopback control plane (host.json) if running;

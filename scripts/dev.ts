@@ -9,8 +9,22 @@
  * Usage: bun run scripts/dev.ts
  */
 
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 const LICENSE_API_URL = process.env.LICENSE_API_URL ?? "http://localhost:8787";
 const HEALTH_TIMEOUT_MS = 30_000;
+
+// Isolate the dev stack's Antgrid home (pairing, relay-epoch, sessions, auth)
+// from an installed release app on ~/.antgrid so the two never collide. Set
+// here so it flows through `start()`'s `...process.env` to the debug app, which
+// resolves it via hostDir() and hands it to the spawned host — both agree.
+// Home-relative (NOT repo-local) so it matches hostDir()'s own bare-debug-build
+// default (app/lib/launcher/host_discovery.dart) — a plain `flutter run` with no
+// launcher lands on the same directory as this script. Honors an explicit
+// override (e.g. a developer pointing at a scratch dir).
+process.env.ANTGRID_DIR ??= join(homedir(), ".antgrid-dev");
+console.log(`[antgrid] ANTGRID_DIR=${process.env.ANTGRID_DIR}`);
 
 // Spawn bun directly (not via a .cmd wrapper) so the App's
 // LocalAgentLauncher avoids the visible cmd.exe popup on Windows.

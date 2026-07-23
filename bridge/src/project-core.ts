@@ -21,7 +21,7 @@ export interface ProjectCoreRemoteDeps {
   /** The machine's currently-paired phone pubkey (for the allowlist gate). */
   currentPeerPubkey(): string | null;
   /** Blind FCM push forward over the machine socket (fallback delivery). */
-  sendPushDeliver(msg: { pushToken: string; provider: "fcm"; blob: { epk: string; box: string } }): void;
+  sendPushDeliver(msg: { pushToken: string; provider: "fcm" | "apns"; blob: { epk: string; box: string } }): void;
 }
 
 export interface ProjectCoreDeps extends BuildAgentCoreOptions {
@@ -302,6 +302,14 @@ export class ProjectCore {
     let settled = false;
     const settleOnce = (o: RegisterOutcome) => { if (!settled) { settled = true; settle(o); } };
 
+    // Whether a phone is live on THIS stream. Starts false: a fresh stream has
+    // no peer until one connects. `connState.peerOnline` cannot express that —
+    // it defaults true (a local core must stream to its loopback owner
+    // un-suppressed) and its peer-offline transition is deliberately skipped
+    // while a desktop owner is attached, so it reads "online" for a phone that
+    // has never dialled in.
+    let peerConnected = false;
+
     const handle = remote.attachStream(bus, {
       onAdmitted: () => { this.relayRegistered = true; settleOnce({ ok: true }); },
       onRejected: (code, message) => { this.relayRegistered = false; settleOnce({ ok: false, code, message }); },
@@ -309,12 +317,16 @@ export class ProjectCore {
       // snapshots on reconnect. connState gates ALL bus subscribers at the source,
       // so don't suppress while a desktop owner shares it over loopback — that
       // would freeze the live local session (mirrors onUnpaired's hasOwner guard).
-      onPeerOnline: () => { core.connState.peerOnline = true; },
+      onPeerOnline: () => { peerConnected = true; core.connState.peerOnline = true; },
       onPeerOffline: () => {
+        // Unconditional, unlike the stream gate below: the loopback carve-out
+        // keeps the DESKTOP's stream live, it doesn't make the phone reachable
+        // in-band. Leaving this set would mute push on every promoted core.
+        peerConnected = false;
         if (this.listener?.hasOwner) return;
         core.connState.peerOnline = false;
       },
-      onUnpaired,
+      onUnpaired: () => { peerConnected = false; onUnpaired(); },
       onTunnel: (raw) => core.handleTunnelMessage(raw),
     });
 
@@ -323,22 +335,52 @@ export class ProjectCore {
     // Local mode never wires this, so loopback control stays ungated.
     core.setPeerPubkeyProvider(() => remote.currentPeerPubkey());
 
-    // Fallback push path: while the paired phone can't receive in-band (its relay
-    // socket is offline OR the app is backgrounded — connState.suppressed), seal a
-    // notification to its persistent push key and hand the ciphertext to the relay
-    // as a blind FCM forward (push:deliver). This is an ADDITIVE bus subscriber.
+    // Fallback push path: while the paired phone can't receive in-band (no live
+    // peer on this stream OR the app is backgrounded), seal a notification to its
+    // persistent push key and hand the ciphertext to the relay as a blind
+    // FCM/APNs forward (push:deliver). This is an ADDITIVE bus subscriber — it
+    // does NOT replace the stream's own live subscription (attachStream above);
+    // the live path handles the online case and the dispatcher no-ops then.
     const dispatcher = createPushDispatcher({
       projectId: core.projectId,
-      shouldFallback: () => core.connState.suppressed,
-      resolveTarget: () => {
+      // Fire when the phone can't receive in-band: no live peer OR backgrounded
+      // (`client:focus-state`). NOT connState.suppressed — that's the heavy-stream
+      // gate, whose `peerOnline` defaults true, so it reads "can receive in-band"
+      // for a phone that has never connected and mutes push after a host restart.
+      shouldFallback: () => !peerConnected || core.connState.appFocusPaused,
+      // A live peer names the exact device in session, so target only it. With no
+      // live peer, fall back to the persisted trust store: delivery never needs the
+      // socket (the relay forwards to FCM/APNs blindly), and `currentPeerPubkey()`
+      // stays null after a host restart until the phone dials in — which it may
+      // never do while the user is away. Every allowed phone is targeted then;
+      // picking one by `lastSeenAt` would guess which device the user holds and
+      // drop the notification when wrong, and `lastSeenAt` is stale in exactly
+      // this window.
+      resolveTargets: () => {
         const peerPubkey = remote.currentPeerPubkey();
-        if (!peerPubkey) return null;
-        const phone = core.pairedPhones.get(peerPubkey);
-        if (!phone || !phone.pushToken || !phone.pushPubkey) return null;
-        // Never push to a project the phone isn't allowed — the allowlist gate
-        // is the trust boundary; a token+pubkey alone must not leak notifications.
-        if (!core.pairedPhones.isAllowed(peerPubkey, core.projectId)) return null;
-        return { pushToken: phone.pushToken, provider: "fcm", pushPubkey: phone.pushPubkey };
+        const paired = core.pairedPhones.list();
+        const candidates = peerPubkey ? paired.filter((p) => p.phonePubkey === peerPubkey) : paired;
+        // Never push to a project the phone isn't allowed — the allowlist gate is
+        // the trust boundary; a token+pubkey alone must not leak notifications.
+        // The store fallback widens WHICH phones are eligible, never what they're
+        // entitled to.
+        const targets = candidates.flatMap((p) =>
+          core.pairedPhones.isAllowed(p.phonePubkey, core.projectId) && p.pushToken && p.pushPubkey
+            ? [{ pushToken: p.pushToken, provider: p.pushProvider ?? "fcm", pushPubkey: p.pushPubkey }]
+            : [],
+        );
+        if (targets.length === 0) {
+          // The dispatcher can only report THAT it dropped the notification. A
+          // pruned token, a never-allowlisted phone and no phone at all are
+          // indistinguishable in host.log without this.
+          logger.warn(
+            "push: no eligible phone for project %s (live peer: %s, paired: %d) — need pairing + allowlist + a push token",
+            core.projectId,
+            peerPubkey ? "yes" : "none since agent start",
+            paired.length,
+          );
+        }
+        return targets;
       },
       seal: (json, pubkey) => sealPush(json, pubkey),
       deliver: (token, provider, blob) => remote.sendPushDeliver({ pushToken: token, provider, blob }),

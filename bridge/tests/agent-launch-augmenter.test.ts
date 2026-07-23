@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { augmentAgentLaunch } from "../src/agent-launch-augmenter";
-import { hookShellCommand, type HookCommand } from "../src/hook-command";
+import { type HookCommand } from "../src/hook-command";
 
 const dirs: string[] = [];
 function abdir() { const d = mkdtempSync(join(tmpdir(), "ab-aug-")); dirs.push(d); return d; }
@@ -77,13 +77,29 @@ describe("augmentAgentLaunch", () => {
     expect(a.notificationsInjected).toBe(true);
 
     const hooks = JSON.parse(readFileSync(join(cursorDir, "hooks.json"), "utf8"));
-    expect(hooks.hooks.sessionStart[0].command).toContain("antgrid-bridge.exe");
-    // hookShellCommand quotes per host platform, so assert against its output
-    // rather than a literal quoting style.
-    expect(hooks.hooks.sessionStart[0].command).toBe(
-      hookShellCommand(HOOK_COMMAND, "cursor", "session-start"),
-    );
-    expect(hooks.hooks.stop[0].command).toBe(hookShellCommand(HOOK_COMMAND, "cursor", "stop"));
+    // Quoting is per host platform, so the literals branch; the absence of a
+    // leading `&` is not platform-dependent. Cursor embeds the command in its
+    // own PowerShell invocation (`@'<json>'@ | & <command>`) and supplies the
+    // call operator itself — a second one is a parse error that breaks every
+    // cursor hook on Windows.
+    const expected =
+      process.platform === "win32"
+        ? {
+            sessionStart:
+              '"C:/Program Files/Antgrid/antgrid-bridge.exe" "hook" "cursor" "session-start"',
+            stop: '"C:/Program Files/Antgrid/antgrid-bridge.exe" "hook" "cursor" "stop"',
+          }
+        : {
+            sessionStart:
+              "'C:\\Program Files\\Antgrid\\antgrid-bridge.exe' 'hook' 'cursor' 'session-start'",
+            stop: "'C:\\Program Files\\Antgrid\\antgrid-bridge.exe' 'hook' 'cursor' 'stop'",
+          };
+    for (const event of ["sessionStart", "stop"] as const) {
+      const command = hooks.hooks[event][0].command;
+      expect(command).toContain("antgrid-bridge.exe");
+      expect(command.startsWith("&")).toBe(false);
+      expect(command).toBe(expected[event]);
+    }
     expect(JSON.stringify(hooks)).not.toMatch(/\bnode(?:\.exe)?\b/i);
   });
 

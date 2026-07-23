@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { logger } from "./logger";
 import { resolveHookCommand, type HookCommand } from "./hook-command";
+import { resolveAbDir } from "./antgrid-dir";
 
 export interface KnownAgent {
   bin: string;
@@ -95,7 +96,7 @@ export function listKnownTools(): string[] {
  */
 export function resolveAgentEnv(
   tool: string,
-  abDir: string = join(homedir(), ".antgrid"),
+  abDir: string = resolveAbDir(),
   hookCommand: HookCommand = resolveHookCommand(),
 ): Record<string, string> {
   switch (tool) {

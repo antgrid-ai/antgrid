@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Auto Backup rules for API 24-30. API 31+ uses data_extraction_rules.xml
+  instead; keep the two in lockstep.
+
+  Allowlist, not denylist: naming a single <include> switches Android from
+  "back up everything" to "back up only this". That is the point of the file.
+  The default (no rules) backs up shared_prefs/FlutterSecureStorage.xml and
+  FlutterSecureKeyStorage.xml, whose values are encrypted under an
+  AndroidKeyStore key that is NEVER backed up — restoring them yields
+  undecryptable blobs, and flutter_secure_storage's resetOnError defaults to
+  false, so the read throws instead of self-healing. An allowlist also keeps
+  out Firebase's PersistedInstallation.<key>.json, which embeds a per-app
+  persistence key and so cannot be named in an <exclude> (no wildcards).
+
+  The one included file is the shared_preferences DataStore backing store
+  (SharedPreferencesAsync/WithCache; the legacy XML API is a separate file and
+  deliberately not backed up). It carries antgrid.local_host_uuid, so a
+  reinstall re-provisions onto the SAME account device row instead of minting a
+  fresh one — an uninstall runs no code and can never revoke the old row, so
+  without this every reinstall permanently burns a fair-use device_limit slot.
+  The device keypair intentionally does NOT survive: re-provisioning mints a
+  new one and the server rebinds it to the reused uuid.
+-->
+<full-backup-content>
+    <include domain="file" path="datastore/FlutterSharedPreferences.preferences_pb"/>
+</full-backup-content>

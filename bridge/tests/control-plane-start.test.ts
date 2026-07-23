@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
 import { MessageBus } from "../src/message-bus";
 import { ProjectStartMessage, parseMessage } from "../src/protocol";
+import type { RelayClient, RelayClientOptions } from "../src/relay-client";
+import type { AttachStreamOpts } from "../src/stream-mux";
 
 // --- shared fakes (mirror host-control-plane.test.ts) ----------------------
 
@@ -20,6 +22,25 @@ function fakeRemoteConfig(): HostRemoteConfig {
 
 function fakeRuntime(): RemoteRuntime {
   return { maint: { getToken: () => "tok", stop: () => {} }, getAccountPeerKeys: async () => new Set<string>() };
+}
+
+// A machine-relay-client stub whose promoted stream is admitted the instant it
+// attaches (mirrors host-promotion.test.ts) — flips isRelayRegistered() true
+// and records the streamId in host.streamIds via remoteDepsFor's wrapper.
+function makeAuthenticatingRelayFactory() {
+  return (_opts: RelayClientOptions): RelayClient =>
+    ({
+      deviceId: "control-plane-dev",
+      currentPeerPubkey: () => null,
+      setBus: () => {},
+      connect: () => {},
+      close: () => {},
+      attachStream: (_bus: MessageBus, streamOpts: AttachStreamOpts) => {
+        streamOpts.onAdmitted?.("s1");
+        return { streamId: "s1", detach: () => {}, sendTunnel: () => {} };
+      },
+      sendPushDeliver: () => {},
+    }) as unknown as RelayClient;
 }
 
 let host: HostServer | null = null;
@@ -131,6 +152,77 @@ test("open() throwing resolves to OPEN_FAILED (never rejects into the void calle
   expect(res.ok).toBe(false);
   if (!res.ok) expect(res.error.code).toBe("OPEN_FAILED");
   expect(h.get("boom")).toBeNull(); // no warm core left behind
+});
+
+test("idempotent project:start on an already-promoted, relay-registered core re-publishes stream-ready", async () => {
+  // The reconnect repro: the app killed+reopened sends project:start as its
+  // stream-binding question. The core is already promoted, so the idempotent
+  // branch runs — and its re-advert can be legally suppressed by the bus's
+  // payload dedup (byte-identical catalog). stream-ready is dedup-immune (not
+  // in REPLAY_TYPES), so the idempotent branch MUST publish it: a verb that
+  // returns ok must emit the frame its caller awaits.
+  await host?.shutdown();
+  host = new HostServer({
+    remote: fakeRemoteConfig(),
+    remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
+    relayClientFactory: makeAuthenticatingRelayFactory(),
+  });
+  const h = host;
+
+  await h.open("projX", tempFolder(), "local");
+  h.pairedPhones.upsert({
+    phonePubkey: "pk1",
+    phoneDeviceId: "d1",
+    pairedAt: "x",
+    lastSeenAt: "x",
+    admission: "pair-code",
+    allowedProjects: ["projX"],
+  });
+
+  const bus = new MessageBus();
+  bus.setInboundHandler(() => {});
+  const out: any[] = [];
+  bus.subscribe({ deliver: (m) => out.push(m) });
+
+  // First start: promote + register (instant-admit stub).
+  const first = await h.handleControlPlaneVerb({ type: "project:start", projectId: "projX" } as any, "pk1", bus);
+  expect(first.ok).toBe(true);
+  await new Promise((r) => setTimeout(r, 20));
+  expect(out.some((m) => m.type === "stream-ready" && m.projectId === "projX" && m.streamId === "s1")).toBe(true);
+
+  // Reconnect scenario: a SECOND project:start hits the idempotent branch.
+  out.length = 0;
+  const again = await h.handleControlPlaneVerb({ type: "project:start", projectId: "projX" } as any, "pk1", bus);
+  expect(again.ok).toBe(true);
+  const ready = out.find((m) => m.type === "stream-ready");
+  expect(ready).toBeDefined();
+  expect(ready.projectId).toBe("projX");
+  expect(ready.streamId).toBe("s1");
+});
+
+test("a rejected verb's control:result carries projectId so the phone can correlate it", async () => {
+  const h = host!;
+  const bus = new MessageBus();
+  bus.setInboundHandler(() => {});
+  const out: any[] = [];
+  bus.subscribe({ deliver: (m) => out.push(m) });
+
+  // pk1 has NO allowlist entry → NOT_ALLOWED via the async dispatch path (the
+  // one the phone actually exercises).
+  h.dispatchControlPlaneInbound(
+    { type: "project:start", projectId: "projB" } as any,
+    "control",
+    "pk1",
+    bus,
+  );
+  await new Promise((r) => setTimeout(r, 20));
+
+  const res = out.find((m) => m.type === "control:result" && m.ok === false);
+  expect(res).toBeDefined();
+  expect(res.verb).toBe("project:start");
+  expect(res.error.code).toBe("NOT_ALLOWED");
+  // Without projectId the phone can only guess which pending bind failed.
+  expect(res.projectId).toBe("projB");
 });
 
 test("an unknown verb type is rejected without effect", async () => {

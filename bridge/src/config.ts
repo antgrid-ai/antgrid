@@ -1,9 +1,9 @@
 import { z, type ZodIssue } from "zod";
 import { readFileSync, existsSync } from "node:fs";
 import { join, basename } from "node:path";
-import { homedir } from "node:os";
 import { parse as parseYaml } from "yaml";
 import { logger } from "./logger";
+import { resolveAbDir } from "./antgrid-dir";
 
 export const AgentBlockSchema = z.object({
   tool: z.string().optional(),
@@ -134,7 +134,7 @@ export function loadConfig(configPath?: string, folder?: string): AbConfig {
 export function findConfigFile(folder?: string): string | null {
   const local = join(folder ?? process.cwd(), "antgrid.yaml");
   if (existsSync(local)) return local;
-  const global = join(homedir(), ".antgrid", "antgrid.yaml");
+  const global = join(resolveAbDir(), "antgrid.yaml");
   if (existsSync(global)) return global;
   return null;
 }

@@ -39,6 +39,7 @@ class _AppShellState extends ConsumerState<AppShell> {
         registry: ref.read(projectSessionRegistryProvider.notifier).registry,
         focusedProjectId: () => ref.read(selectedRegistrationIdProvider),
         backgroundDemoteDelay: kMobileBackgroundDemoteDelay,
+        setFocusPaused: _setFocusPaused,
       );
     }
     _lifecycleListener = AppLifecycleListener(
@@ -59,6 +60,16 @@ class _AppShellState extends ConsumerState<AppShell> {
     _mobileLifecycle?.dispose();
     _lifecycleListener.dispose();
     super.dispose();
+  }
+
+  /// Only called for ids the registry lists as open, which the session provider
+  /// populates itself — so this read is a cache hit and never builds a session
+  /// as a side effect of a lifecycle transition.
+  void _setFocusPaused(String projectId, {required bool paused}) {
+    ref
+        .read(projectSessionProvider(projectId))
+        .value
+        ?.setLifecyclePaused(paused);
   }
 
   void _reconnectRelay() {

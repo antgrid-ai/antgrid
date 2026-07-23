@@ -1,4 +1,8 @@
-FROM oven/bun:1.3-alpine
+# Pinned, not floating 1.3: direct-APNs push needs Bun >= 1.3.14. Earlier 1.3.x
+# negotiates no h2 against the APNs endpoint (ERR_HTTP2_ERROR "h2 is not
+# supported"), and ApnsSender.send reports only "error", so a regression here is
+# invisible at runtime.
+FROM oven/bun:1.3.14-alpine
 
 WORKDIR /app
 

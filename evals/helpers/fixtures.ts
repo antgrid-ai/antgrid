@@ -4,6 +4,11 @@ import { tmpdir } from "node:os";
 
 const FIXTURES_DIR = resolve(import.meta.dir, "../fixtures");
 
+/** cleanup() is sync by contract, so back off without an event-loop turn. */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 export interface TestProject {
   dir: string;
   configPath: string;
@@ -40,7 +45,18 @@ export function createTestProject(fixtureName: string, replacements?: Record<str
     dir,
     configPath,
     cleanup() {
-      rmSync(dir, { recursive: true, force: true });
+      // On Windows the agent we just killed can still hold handles into the
+      // project dir for a few ms, so rmSync throws EBUSY/EPERM and fails a test
+      // whose assertions all passed. Retry, then give up: a leftover directory
+      // under tmpdir is the OS's to reclaim, and never a reason to fail a test.
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+          return;
+        } catch {
+          sleepSync(100);
+        }
+      }
     },
   };
 }

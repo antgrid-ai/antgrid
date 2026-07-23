@@ -63,6 +63,7 @@ class ProjectSession {
   late final UploadService uploadService;
   StreamSubscription? _fragAbortSub;
   StreamSubscription? _fragSendErrSub;
+  StreamSubscription? _streamReadySub;
   bool _closed = false;
 
   ProjectSession({
@@ -106,6 +107,15 @@ class ProjectSession {
       fileService.onFragmentSuccess = coordinator.onSuccess;
       _fragSendErrSub =
           session.fragmentSendErrors.listen(_onFragmentSendError);
+      // Relay only: the agent resets `appFocusPaused` for each connection, and
+      // sends before the handshake are dropped silently — so re-declare focus
+      // once this project's stream is ready. Local mode has no handshake and no
+      // such window.
+      // Matched on wireProjectId: streamReadyEvents carries the BARE id the
+      // bridge advertises in `agent:projects`, not the compound registrationId.
+      _streamReadySub = session.streamReadyEvents
+          .where((e) => e.projectId == wireProjectId)
+          .listen((_) => _router.resyncFocusState());
     }
   }
 
@@ -119,9 +129,13 @@ class ProjectSession {
     );
   }
 
-  /// Heavy-tier inbound stream. Subscribing triggers `client:focus-state
-  /// {paused: false}` to the agent; the last cancel triggers `{paused: true}`.
+  /// Heavy-tier inbound stream. Subscription presence is one of the two inputs
+  /// to the agent's `client:focus-state`; see [setLifecyclePaused].
   Stream<Map<String, dynamic>> get heavyStream => _router.heavy;
+
+  /// Declares app-level background state to the agent, gating both the heavy
+  /// stream and the fallback push. See [MessageRouter.setLifecyclePaused].
+  void setLifecyclePaused(bool paused) => _router.setLifecyclePaused(paused);
 
   /// Status-tier inbound stream. Always-on (no focus gating), used by sessions
   /// and config services which need to react to small state-tier messages
@@ -151,6 +165,7 @@ class ProjectSession {
     await Future.wait([
       if (_fragAbortSub != null) _fragAbortSub!.cancel(),
       if (_fragSendErrSub != null) _fragSendErrSub!.cancel(),
+      if (_streamReadySub != null) _streamReadySub!.cancel(),
       terminalService.dispose(),
       sessionsService.dispose(),
       fileService.dispose(),

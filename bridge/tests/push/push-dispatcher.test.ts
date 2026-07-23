@@ -8,15 +8,16 @@ const target: PushTarget = { pushToken: "tok", provider: "fcm", pushPubkey: "pk"
 function harness(overrides: Partial<Parameters<typeof createPushDispatcher>[0]> = {}) {
   const delivered: any[] = [];
   const sealed: string[] = [];
+  const sealKeys: string[] = [];
   const d = createPushDispatcher({
     projectId: "p1",
     shouldFallback: () => true,
-    resolveTarget: () => target,
-    seal: (json) => { sealed.push(json); return { epk: "E", box: "B" }; },
+    resolveTargets: () => [target],
+    seal: (json, pubkey) => { sealed.push(json); sealKeys.push(pubkey); return { epk: "E", box: "B" }; },
     deliver: (t, prov, blob) => delivered.push({ t, prov, blob }),
     ...overrides,
   });
-  return { d, delivered, sealed };
+  return { d, delivered, sealed, sealKeys };
 }
 
 test("composePush mirrors the app strings", () => {
@@ -83,9 +84,20 @@ test("not suppressed (in-band available) → no delivery", () => {
 });
 
 test("no target → no delivery", () => {
-  const { d, delivered } = harness({ resolveTarget: () => null });
+  const { d, delivered } = harness({ resolveTargets: () => [] });
   d.onOutbound(createMessage("notification:push", { notificationType: "error", projectId: "p1" }));
   expect(delivered).toHaveLength(0);
+});
+
+test("multiple targets → one sealed delivery each, keyed to that phone's push key", () => {
+  const second: PushTarget = { pushToken: "tok2", provider: "apns", pushPubkey: "pk2" };
+  const { d, delivered, sealed, sealKeys } = harness({ resolveTargets: () => [target, second] });
+  d.onOutbound(createMessage("notification:push", { notificationType: "task_complete", message: "built", projectId: "p1" }));
+  expect(delivered.map((x) => x.t)).toEqual(["tok", "tok2"]);
+  expect(delivered.map((x) => x.prov)).toEqual(["fcm", "apns"]);
+  // Same plaintext, but sealed to each recipient's own key — never a shared ciphertext.
+  expect(sealKeys).toEqual(["pk", "pk2"]);
+  expect(JSON.parse(sealed[0])).toEqual(JSON.parse(sealed[1]));
 });
 
 test("non-user-facing message → ignored", () => {

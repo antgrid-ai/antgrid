@@ -15,7 +15,13 @@ const int kImmediateStalenessDays = 14;
 /// installed. Both surface on subsequent `checkForUpdate` calls as
 /// `developerTriggeredUpdateInProgress` / `installStatus == downloaded`, and
 /// must be re-driven rather than treated as "no update".
-enum UpdateAction { none, immediate, flexible, resumeImmediate, completeFlexible }
+enum UpdateAction {
+  none,
+  immediate,
+  flexible,
+  resumeImmediate,
+  completeFlexible,
+}
 
 /// Outcome of [InAppUpdateService.checkAndStart], for the caller's UI decision.
 /// [flexibleReady] means a flexible update finished downloading and the app
@@ -49,7 +55,8 @@ UpdateAction decideUpdateAction({
   }
 
   if (!available) return UpdateAction.none;
-  final wantImmediate = updatePriority >= kImmediatePriorityThreshold ||
+  final wantImmediate =
+      updatePriority >= kImmediatePriorityThreshold ||
       stalenessDays >= kImmediateStalenessDays;
   if (wantImmediate && immediateAllowed) return UpdateAction.immediate;
   if (flexibleAllowed) return UpdateAction.flexible;
@@ -61,8 +68,7 @@ UpdateAction decideUpdateAction({
 /// Every method is a safe no-op off Android and swallows plugin errors —
 /// `InAppUpdate.checkForUpdate()` throws for builds not installed from Google
 /// Play (sideloaded, `flutter run`, other stores), so the whole feature must
-/// degrade silently rather than surface an error or block startup. Mirrors the
-/// Firebase-init guard posture in `main.dart`.
+/// degrade silently rather than surface an error or block startup.
 class InAppUpdateService {
   const InAppUpdateService();
 
@@ -81,7 +87,8 @@ class InAppUpdateService {
       final action = decideUpdateAction(
         available:
             info.updateAvailability == UpdateAvailability.updateAvailable,
-        updateInProgress: info.updateAvailability ==
+        updateInProgress:
+            info.updateAvailability ==
             UpdateAvailability.developerTriggeredUpdateInProgress,
         downloaded: info.installStatus == InstallStatus.downloaded,
         updatePriority: info.updatePriority,

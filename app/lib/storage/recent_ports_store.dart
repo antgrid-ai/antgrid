@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../config/storage_scope.dart';
 import 'scoped_prefs.dart';
 
 /// A remembered preview target: a port plus the scheme it was last opened with.
@@ -40,7 +41,7 @@ class RecentPortsChange {
 /// Mirrors [RecentAgentsStore]'s snapshot-on-write model: every mutation emits
 /// a fresh immutable list on [changes].
 class RecentPortsStore {
-  static const _key = 'antgrid.recent_ports.v1';
+  static final _key = scopedStorageKey('antgrid.recent_ports.v1');
   static const _capPerProject = 8;
 
   final SharedPreferencesWithCache _prefs;

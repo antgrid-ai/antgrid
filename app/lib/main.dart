@@ -1,13 +1,12 @@
 import 'dart:async';
 
 import 'package:app_links/app_links.dart';
-import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:http/http.dart' as http;
+import 'package:push/push.dart';
 
 import 'analytics/crash_reporting.dart';
 import 'analytics/events.dart';
@@ -49,6 +48,27 @@ import 'storage/recent_agents_store.dart';
 import 'storage/recent_ports_store.dart';
 import 'update/update_gate.dart';
 
+/// Push is Android (FCM) and iOS (APNs) only — desktop has no transport.
+bool get _pushSupported =>
+    defaultTargetPlatform == TargetPlatform.android ||
+    defaultTargetPlatform == TargetPlatform.iOS;
+
+/// Dedicated entrypoint for a push that arrives while the app is terminated.
+///
+/// `push` spawns a headless engine and runs the entrypoint named by the
+/// `uk.orth.push.background_entrypoint` meta-data in AndroidManifest.xml (a
+/// patch carried by our fork — stock push runs `main`, which would drag the
+/// whole app bootstrap into a background receiver). Keep this cheap: it runs
+/// on every terminated-state push, inside that receiver's 30s budget.
+///
+/// Registering the handler is also what releases the queued message — it
+/// triggers push's readiness handshake. Nothing else belongs here.
+@pragma('vm:entry-point')
+void pushBackgroundMain() {
+  WidgetsFlutterBinding.ensureInitialized();
+  Push.instance.addOnBackgroundMessage(pushBackgroundHandler);
+}
+
 Future<void> main() async {
   // markdown_widget's CodeBlockNode.build() uses a try/catch as control flow
   // for language-less fenced code blocks (no `class` attr -> null-check throw)
@@ -60,30 +80,12 @@ Future<void> main() async {
     defaultDebugPrint(message, wrapWidth: wrapWidth);
   };
   WidgetsFlutterBinding.ensureInitialized();
-  // Push notifications are Android-only for Phase 1; skip Firebase entirely on
-  // desktop/other platforms rather than risk a bad google-services config
-  // stalling launch there.
-  //
-  // Firebase init is kicked off here but NOT awaited before the first frame —
-  // awaiting it serially added launch latency to every Android start. The
-  // future is joined later (by PushMessagingService.init, which is already
-  // fire-and-forget). The background-message handler, however, MUST be
-  // registered before runApp for background/terminated delivery to reach our
-  // isolate entrypoint; onBackgroundMessage only records the callback and does
-  // not require Firebase to be initialized in this isolate first (the bg
-  // isolate calls Firebase.initializeApp itself — see pushBackgroundHandler),
-  // so registering it synchronously here is correct.
-  Future<bool> firebaseReady = Future.value(false);
-  if (defaultTargetPlatform == TargetPlatform.android) {
-    firebaseReady = Firebase.initializeApp().then((_) => true).catchError((
-      Object e,
-    ) {
-      // No Google Play Services, missing google-services.json, etc. — push
-      // notifications degrade to a no-op rather than blocking startup.
-      debugPrint('Firebase init failed, push notifications disabled: $e');
-      return false;
-    });
-    FirebaseMessaging.onBackgroundMessage(pushBackgroundHandler);
+  // Register the background-message handler before runApp so background and
+  // terminated deliveries reach our isolate. This registration covers the
+  // backgrounded-but-alive case, where push routes to this existing engine;
+  // pushBackgroundMain covers the terminated case, where it spawns a new one.
+  if (_pushSupported) {
+    Push.instance.addOnBackgroundMessage(pushBackgroundHandler);
   }
   // Reap the app-spawned bridge host on window close so the machine-level host
   // daemon doesn't outlive the app (desktop-only in effect).
@@ -168,20 +170,19 @@ Future<void> main() async {
   // non-blocking). Same "must stay listened" reasoning as above.
   container.listen(localHostWarmupProvider, (_, _) {});
 
-  // Register the FCM token on every warm RELAY session (Android only — see the
-  // Firebase.initializeApp guard above). requestPermission/getToken can throw
-  // on a device without Google Play Services; never let that take down
-  // startup. Fire-and-forget: registration completing after first paint is
-  // fine, unlike the deep-link/provisioning hooks above.
+  // Register the push token on every warm RELAY session (Android + iOS).
+  // requestPermission/token can throw on a device without Google Play Services;
+  // never let that take down startup. Fire-and-forget: registration completing
+  // after first paint is fine, unlike the deep-link/provisioning hooks above.
   //
   // Two triggers are needed because at cold start the registry is EMPTY (no
   // warm projects yet), so init()'s one-shot pass would register with nothing:
-  //   (a) init() runs once Firebase is ready and registers whatever is warm;
+  //   (a) init() registers whatever is warm;
   //   (b) a registry listener re-runs registration whenever the warm-project
   //       set grows, so a relay session that pairs AFTER startup still gets the
   //       token. PushMessagingService dedups per-projectId so this is idempotent.
   // Token refresh (c) is handled inside init().
-  if (defaultTargetPlatform == TargetPlatform.android) {
+  if (_pushSupported) {
     Iterable<ProjectSession> warmSessions() => container
         .read(projectSessionRegistryProvider)
         .map((id) => container.read(projectSessionProvider(id)).value)
@@ -200,10 +201,7 @@ Future<void> main() async {
       );
     });
     unawaited(
-      firebaseReady.then((ready) async {
-        if (!ready) return;
-        await pushService.init(sessions: warmSessions);
-      }).catchError((Object e) {
+      pushService.init(sessions: warmSessions).catchError((Object e) {
         debugPrint('PushMessagingService.init failed: $e');
       }),
     );

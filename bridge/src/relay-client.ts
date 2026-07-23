@@ -717,7 +717,11 @@ export class RelayClient {
         if (!msg.ok && msg.reason === "unregistered" && this.opts.pairedPhones) {
           prunePushToken(this.opts.pairedPhones, msg.pushToken);
         } else if (!msg.ok) {
-          logger.debug("push:result not ok (reason=%s)", msg.reason);
+          // warn, not debug: a push that never lands has no other observable on
+          // this side. At debug, a misconfigured relay (bad FCM key -> reason
+          // "error", absent creds -> "unconfigured") is indistinguishable from
+          // no push being attempted at all, which reads as an app bug.
+          logger.warn("push:result not ok (reason=%s)", msg.reason);
         }
         break;
       case "error":
@@ -1076,9 +1080,9 @@ export class RelayClient {
     this.sendAppEnvelope(CONTROL_STREAM_ID, data, "preview");
   }
 
-  /** Send a push:deliver control frame to the relay (blind FCM forward). A
+  /** Send a push:deliver control frame to the relay (blind FCM/APNs forward). A
    *  top-level control message on OUR socket — the relay itself consumes it. */
-  sendPushDeliver(msg: { pushToken: string; provider: "fcm"; blob: { epk: string; box: string } }): void {
+  sendPushDeliver(msg: { pushToken: string; provider: "fcm" | "apns"; blob: { epk: string; box: string } }): void {
     this.sendJson({ type: "push:deliver", ...msg });
   }
 
