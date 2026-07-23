@@ -136,6 +136,45 @@ void main() {
     expect(raw, isNot(contains('localhost:$targetPort')));
   });
 
+  test('downgrades an https absolute redirect to the plain-http proxy origin '
+      'even on an exact-port bind', () async {
+    final port = await freePort();
+    final proxy = PreviewProxyServer(
+      targetPort: port,
+      targetScheme: 'https',
+      // An https dev server redirects absolutely with its own scheme; the
+      // proxy serves plain HTTP even on the exact port, so `https://` must
+      // not survive — the WebView would attempt TLS against the proxy.
+      onRequest: (_) async => TunnelHttpResponse(
+        requestId: 'x',
+        status: 302,
+        headers: {'location': 'https://localhost:$port/login'},
+        body: '',
+        bodyEncoding: 'utf8',
+      ),
+    );
+    final bound = await proxy.start();
+    addTearDown(() async => proxy.stop());
+    expect(bound, port);
+
+    final socket = await Socket.connect('localhost', bound);
+    socket.write(
+      'GET / HTTP/1.1\r\n'
+      'Host: localhost:$bound\r\n'
+      'Connection: close\r\n'
+      '\r\n',
+    );
+    await socket.flush();
+    final raw = await socket
+        .cast<List<int>>()
+        .transform(const Utf8Decoder(allowMalformed: true))
+        .join();
+    await socket.close();
+
+    expect(raw, contains('location: http://localhost:$port/login'));
+    expect(raw, isNot(contains('https://localhost')));
+  });
+
   test('emits each Set-Cookie value as its own response header', () async {
     final port = await freePort();
     final proxy = PreviewProxyServer(

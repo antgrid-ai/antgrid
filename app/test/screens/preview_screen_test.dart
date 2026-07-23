@@ -56,6 +56,26 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     });
 
+    testWidgets('marks https ports in the port list', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+
+      final state = PreviewState(
+        ports: [
+          const PortInfo(port: 3000, processName: 'node'),
+          const PortInfo(port: 8443, label: 'vite', scheme: 'https'),
+        ],
+      );
+
+      await tester.pumpWidget(buildTestWidget(previewState: AsyncData(state)));
+      await tester.pump();
+
+      // http is the norm and stays unmarked; https is called out.
+      expect(find.text('node'), findsOneWidget);
+      expect(find.text('vite · https'), findsOneWidget);
+
+      debugDefaultTargetPlatformOverride = null;
+    });
+
     testWidgets('shows loading when preview state is loading', (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
 

@@ -275,6 +275,9 @@ const PortInfoSchema = z.object({
   pid: z.number().optional(),
   processName: z.string().optional(),
   label: z.string().optional(),
+  // Detected dev-server scheme (from terminal-output URL sightings). Absent
+  // means unknown; consumers should fall back to http.
+  scheme: z.enum(["http", "https"]).optional(),
 });
 
 const PortsUpdateMessage = BaseMessage.extend({
@@ -877,6 +880,9 @@ const PreviewUrlEntrySchema = z.object({
   port: z.number().int().positive(),
   url: z.string(),
   label: z.string().optional(),
+  // Detected dev-server scheme — mirrors PortInfoSchema.scheme so a
+  // welcome-replayed snapshot doesn't lose it (absent = unknown → http).
+  scheme: z.enum(["http", "https"]).optional(),
 });
 
 const PreviewSnapshotMessage = BaseMessage.extend({

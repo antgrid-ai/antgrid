@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The preview WebView loads the on-device proxy at http://localhost:<port>
+     (PreviewProxyServer fronts the E2E tunnel over plain HTTP; TLS to the dev
+     server is applied bridge-side). Android 9+ blocks cleartext by default
+     (net::ERR_CLEARTEXT_NOT_PERMITTED), so permit it for loopback ONLY —
+     everything else stays HTTPS-enforced. -->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>

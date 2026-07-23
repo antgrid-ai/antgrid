@@ -620,7 +620,16 @@ class PreviewUrlEntry {
   final String url;
   final String? label;
 
-  const PreviewUrlEntry({required this.port, required this.url, this.label});
+  /// Detected dev-server scheme — mirrors the bridge's PreviewUrlEntrySchema
+  /// (absent = unknown → http).
+  final String? scheme;
+
+  const PreviewUrlEntry({
+    required this.port,
+    required this.url,
+    this.label,
+    this.scheme,
+  });
 
   static PreviewUrlEntry? fromJson(Map<String, dynamic> json) {
     final port = json['port'];
@@ -630,6 +639,7 @@ class PreviewUrlEntry {
       port: port,
       url: url,
       label: json['label'] as String?,
+      scheme: json['scheme'] as String?,
     );
   }
 
@@ -637,6 +647,7 @@ class PreviewUrlEntry {
     'port': port,
     'url': url,
     if (label != null) 'label': label,
+    if (scheme != null) 'scheme': scheme,
   };
 }
 

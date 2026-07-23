@@ -84,6 +84,54 @@ describe("PortDetector", () => {
     expect(detected[0][0].port).toBe(3000);
   });
 
+  it("ignores file:line references (ghost ports)", () => {
+    const detected: PortInfo[][] = [];
+    const pd = new PortDetector(makeProject());
+    pd.onPortsChange = (ports) => detected.push(ports);
+
+    pd.feed("t1", "  at doWork (agent-core.ts:1091)\n");
+    pd.feed("t1", "webpack compiled bundle.js:10234 in 3s\n");
+    pd.feed("t1", "error in preview_screen.dart:2648\n");
+
+    expect(detected.length).toBe(0);
+  });
+
+  it("ignores file:line references even when the path contains a hint word", () => {
+    const detected: PortInfo[][] = [];
+    const pd = new PortDetector(makeProject());
+    pd.onPortsChange = (ports) => detected.push(ports);
+
+    // "host", "local", "serv" all pass SERVING_HINT — the `<name>.<ext>:<line>`
+    // shape itself must be rejected.
+    pd.feed("t1", "  at handleHello (host-server.ts:1091)\n");
+    pd.feed("t1", "  at fetchLocalhost (localhost-fetch.ts:2345)\n");
+    pd.feed("t1", "error in http-client.js:4242\n");
+
+    expect(detected.length).toBe(0);
+  });
+
+  it("still detects a bare IP:port serving announcement (digit after dot is not an extension)", () => {
+    const detected: PortInfo[][] = [];
+    const pd = new PortDetector(makeProject());
+    pd.onPortsChange = (ports) => detected.push(ports);
+
+    pd.feed("t1", "Listening on 127.0.0.1:8080\n");
+
+    expect(detected.length).toBe(1);
+    expect(detected[0][0].port).toBe(8080);
+  });
+
+  it("still detects schemeless host:port serving announcements", () => {
+    const detected: PortInfo[][] = [];
+    const pd = new PortDetector(makeProject());
+    pd.onPortsChange = (ports) => detected.push(ports);
+
+    pd.feed("t1", "Listening on localhost:3000\n");
+
+    expect(detected.length).toBe(1);
+    expect(detected[0][0].port).toBe(3000);
+  });
+
   it("ignores ports outside 1024-65535", () => {
     const detected: PortInfo[][] = [];
     const pd = new PortDetector(makeProject());
@@ -211,5 +259,58 @@ describe("PortDetector output source", () => {
     detector.observeOutput("t", "http://localhost:3000/a");
     detector.observeOutput("t", "http://localhost:3000/b");
     expect(events.length).toBe(2);
+  });
+
+  it("attaches detected scheme to ports:update entries", () => {
+    const detected: PortInfo[][] = [];
+    const pd = new PortDetector(makeProject());
+    pd.onPortsChange = (ports) => detected.push(ports);
+
+    // Line-based feed advertises the port first, scheme unknown.
+    pd.feed("t1", "Server started on :3000\n");
+    expect(detected[0]).toEqual([{ port: 3000 }]);
+
+    // URL sighting reveals https — the port list must be re-emitted with it.
+    pd.observeOutput("t1", "Local: https://localhost:3000/\n");
+    expect(detected.length).toBe(2);
+    expect(detected[1]).toEqual([{ port: 3000, scheme: "https" }]);
+  });
+
+  it("emitCurrent re-emits the current list unconditionally (reconnect resync)", () => {
+    const detected: PortInfo[][] = [];
+    const pd = new PortDetector(makeProject());
+    pd.onPortsChange = (ports) => detected.push(ports);
+
+    pd.feed("t1", "https://localhost:3000\n");
+    pd.observeOutput("t1", "https://localhost:3000/\n");
+    const before = detected.length;
+
+    pd.emitCurrent();
+    expect(detected.length).toBe(before + 1);
+    expect(detected[detected.length - 1]).toEqual([{ port: 3000, scheme: "https" }]);
+  });
+
+  it("does not re-emit ports for a sighting of an unadvertised port", () => {
+    const detected: PortInfo[][] = [];
+    const pd = new PortDetector(makeProject());
+    pd.onPortsChange = (ports) => detected.push(ports);
+
+    // Port 9999 was never fed nor configured — it isn't in the advertised
+    // list, so the sighting must not push an identical ports:update.
+    pd.observeOutput("t1", "see https://localhost:9999/docs");
+
+    expect(detected.length).toBe(0);
+  });
+
+  it("does not re-emit ports when a sighting only changes the path", () => {
+    const detected: PortInfo[][] = [];
+    const pd = new PortDetector(makeProject());
+    pd.onPortsChange = (ports) => detected.push(ports);
+
+    pd.feed("t1", "http://localhost:3000\n");
+    pd.observeOutput("t1", "http://localhost:3000/a");
+    const after = detected.length;
+    pd.observeOutput("t1", "http://localhost:3000/b");
+    expect(detected.length).toBe(after);
   });
 });

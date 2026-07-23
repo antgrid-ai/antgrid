@@ -1105,6 +1105,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Re-send file tree
     for (const fw of fileWatchers.values()) fw.sendFullTree();
 
+    // Re-emit the detected-port list. ports:update is only pushed on change,
+    // so a phone that binds after detection would otherwise never see ports
+    // found before it connected (preview:snapshot only covers config-declared
+    // preview ports, not ad-hoc detections).
+    portDetector?.emitCurrent();
+
     // Re-send terminal scrollback so the app has current output
     if (manager) {
       for (const t of manager.getStatus()) {

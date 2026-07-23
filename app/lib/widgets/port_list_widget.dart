@@ -12,7 +12,10 @@ import '../models/preview_models.dart';
 class PortListWidget extends StatelessWidget {
   final List<PortInfo> ports;
   final int? selectedPort;
-  final void Function(int) onPortSelected;
+
+  /// Called with the tapped port and its target scheme ('http'/'https' as
+  /// detected by the bridge; http when unknown).
+  final void Function(int port, String scheme) onPortSelected;
 
   const PortListWidget({
     super.key,
@@ -29,7 +32,12 @@ class PortListWidget extends StatelessWidget {
       itemBuilder: (context, index) {
         final port = ports[index];
         final isSelected = port.port == selectedPort;
-        final subtitle = port.label ?? port.processName;
+        final scheme = port.scheme ?? 'http';
+        final label = port.label ?? port.processName;
+        // Only call out https — http is the norm and would just be noise.
+        final subtitle = scheme == 'https'
+            ? (label != null ? '$label · https' : 'https')
+            : label;
 
         return MouseRegion(
           cursor: SystemMouseCursors.click,
@@ -42,14 +50,16 @@ class PortListWidget extends StatelessWidget {
               'Port ${port.port}',
               style: AbTokens.monoStyle(
                 fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
-                color: isSelected ? context.antgrid.accent : context.antgrid.textPrimary,
+                color: isSelected
+                    ? context.antgrid.accent
+                    : context.antgrid.textPrimary,
               ),
             ),
             subtitle: subtitle != null ? Text(subtitle) : null,
             selected: isSelected,
             selectionStyle: AbRowSelection.surface,
             density: AbRowDensity.md,
-            onTap: () => onPortSelected(port.port),
+            onTap: () => onPortSelected(port.port, scheme),
           ),
         );
       },

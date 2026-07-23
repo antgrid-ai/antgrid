@@ -47,10 +47,21 @@ export class TunnelManager {
     // and the message has no consumer in that path.
     if (!this.relayHost) return;
     for (const p of ports) {
+      // A port can gain a scheme after its entry was first sent (URL sighting
+      // lands later than the line-based detection) — keep the snapshot fresh.
+      const existing = this.sentUrlDetails.get(p.port);
+      if (existing && p.scheme && existing.scheme !== p.scheme) {
+        this.sentUrlDetails.set(p.port, { ...existing, scheme: p.scheme });
+      }
       if (!this.sentUrlDetails.has(p.port) && this.previewPorts.has(p.port)) {
         const url = `http://${this.relayHost}/preview/${p.port}/`;
         const label = this.portLabels.get(p.port) ?? p.label;
-        const entry: PreviewUrlEntry = { port: p.port, url, ...(label ? { label } : {}) };
+        const entry: PreviewUrlEntry = {
+          port: p.port,
+          url,
+          ...(label ? { label } : {}),
+          ...(p.scheme ? { scheme: p.scheme } : {}),
+        };
         this.sentUrlDetails.set(p.port, entry);
         if (this.connState.suppressed) continue;
         this.sendEncrypted(
