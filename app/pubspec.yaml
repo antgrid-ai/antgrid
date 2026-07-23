@@ -182,8 +182,14 @@ msix_config:
   publisher_display_name: Radha AI Product
   identity_name: RadhaAIProduct.antgrid
   publisher: CN=D6BFB7D7-5E99-4B9B-B4E0-29315D52C52B
-  msix_version: 1.0.5.0
-  logo_path: assets/icon/antgrid-icon-1024.png
+  msix_version: 1.0.6.0
+  # Same tileless monogram the old Inno installer + the exe/taskbar use
+  # (windows/runner/resources/app_icon.ico), rendered transparent and square from
+  # antgrid-icon-square.svg. trim_logo MUST stay false: the monogram's artwork is
+  # portrait (tall antennae), so the msix package's default trim-then-fit-to-square
+  # would crop the antenna dots and the base of the "a" on every square tile.
+  logo_path: assets/icon/antgrid-store-logo.png
+  trim_logo: false
   architecture: x64
   capabilities: internetClient
   protocol_activation: antgrid
