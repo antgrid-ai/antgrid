@@ -13,7 +13,9 @@ export const links = {
   features: "/#fleet",
   download: "/#download",
   downloadMacos: `${RELEASES_URL}/releases/latest/download/antgrid-macos.dmg`,
-  downloadWindows: `${RELEASES_URL}/releases/latest/download/antgrid-windows-setup.exe`,
+  // Microsoft Store deep link (product 9N0P7ZRL4D9W); version-stable like the
+  // GitHub release URLs above, so a new build never needs a site deploy.
+  downloadWindows: "https://get.microsoft.com/installer/download/9N0P7ZRL4D9W?referrer=appbadge&cid=site",
   downloadLinux: `${RELEASES_URL}/releases/latest/download/antgrid-linux.AppImage`,
   support: "/support",
   privacy: "/privacy",
