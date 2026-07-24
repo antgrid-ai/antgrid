@@ -17,10 +17,11 @@ final bool _hasNativeTerminal = hasNativeTerminal;
 // run outside `binding.runTest`, so the framework's end-of-body invariant check
 // would see the override still set and fail every test.
 //
-// Any test driving plain text, Enter, or Backspace must pin one of these:
-// `flutter_test` defaults to Android, where the view attaches an IME that owns
-// those keys (see `_GhosttyTerminalSoftKeyboard`) and they never reach the
-// raw-key path.
+// Any test driving plain text or Enter must pin one of these: `flutter_test`
+// defaults to Android, where the view attaches an IME that owns those keys
+// (see `_GhosttyTerminalSoftKeyboard`) and they never reach the raw-key path.
+// (Backspace is exempt — it is always handled by the raw path, since the
+// engine has no editable fallback for KEYCODE_DEL.)
 final _android = TargetPlatformVariant.only(TargetPlatform.android);
 final _desktop = TargetPlatformVariant.only(TargetPlatform.linux);
 
@@ -4730,8 +4731,10 @@ void main() {
     }, variant: _android);
 
     // Hardware-keyboard coexistence: when the IME bridge owns input, the raw
-    // KeyEvent path must not also apply text/Enter/Backspace (a Bluetooth
-    // keyboard surfaces both), or every key would land twice.
+    // KeyEvent path must not also apply text/Enter (a Bluetooth keyboard
+    // surfaces both), or every key would land twice. Backspace is the
+    // exception — the engine has no editable fallback for KEYCODE_DEL, so the
+    // raw path is its only delivery channel (see the guard in _handleKey).
 
     testWidgets('IME active: hardware Enter is not double-sent', (
       tester,
@@ -4751,7 +4754,7 @@ void main() {
       expect(captured, isEmpty);
     }, variant: _android);
 
-    testWidgets('IME active: hardware Backspace is not double-sent', (
+    testWidgets('IME active: hardware Backspace IS sent by the raw path', (
       tester,
     ) async {
       if (!_hasNativeTerminal) {
@@ -4763,10 +4766,14 @@ void main() {
       await tester.pump();
 
       captured.clear();
+      // Gboard/LatinIME send backspace as a bare KEYCODE_DEL key event; the
+      // engine's editable fallback drops KEYCODE_DEL, so deferring to the IME
+      // would lose the key. Exactly one backspace must come from the raw path.
       await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
       await tester.pump();
 
-      expect(captured, isEmpty);
+      final backspaces = captured.where((b) => b == 0x7f || b == 0x08).length;
+      expect(backspaces, 1);
     }, variant: _android);
 
     testWidgets('IME active: Ctrl+C still reaches the raw-key path', (

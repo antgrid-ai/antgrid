@@ -858,7 +858,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
               child: Row(
                 children: [
                   AbIconButton(
-                    icon: AbIcons.upload,
+                    icon: AbIcons.attach,
                     tooltip: 'Attach file',
                     onTap: _pickAndAttach,
                   ),

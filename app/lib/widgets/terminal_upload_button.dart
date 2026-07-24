@@ -3,7 +3,9 @@ import 'dart:typed_data';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
+import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
+import '../design/widgets/ab_icon_button.dart';
 import '../services/upload_service.dart';
 
 class PickedUpload {
@@ -94,22 +96,20 @@ class _TerminalUploadButtonState extends State<TerminalUploadButton> {
 
   @override
   Widget build(BuildContext context) {
-    // Mirrors _actionButton in terminal_view_wrapper.dart so the bar reads
-    // as one row of uniform controls.
+    // Mirrors the keyboard icon button in terminal_view_wrapper.dart so the
+    // bar reads as one row of uniform controls. AbIconButton renders its
+    // disabled state itself (onTap null → 0.4 opacity) while busy.
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: AbTokens.space2),
       child: SizedBox(
-        height: AbTokens.rowHeightSm,
-        child: TextButton(
-          style: TextButton.styleFrom(
-            padding: const EdgeInsets.symmetric(horizontal: AbTokens.space10),
-            minimumSize: Size.zero,
-            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          ),
-          onPressed: _busy ? null : _run,
-          child: Text(
-            _busy ? 'Uploading…' : 'Upload',
-            style: const TextStyle(fontSize: AbTokens.fontSm),
+        height: AbTokens.rowHeightXl,
+        child: Center(
+          child: AbIconButton(
+            icon: AbIcons.attach,
+            tooltip: _busy ? 'Uploading…' : 'Attach file',
+            onTap: _busy ? null : _run,
+            boxSize: AbTokens.rowHeightXl,
+            glyphSize: AbTokens.iconButtonGlyphXl,
           ),
         ),
       ),

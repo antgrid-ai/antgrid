@@ -154,8 +154,11 @@ flutter_native_splash:
   web: false
 
 # Vendored fork of ghostty_vte_flutter with a `showFocusRing` constructor
-# param gating upstream's hardcoded #2A83FF focus border. Drop this override
-# (and the vendored copy under packages/) once the param ships upstream.
+# param gating upstream's hardcoded #2A83FF focus border, plus
+# `showKeyboardOnInteraction`/`GhosttyTerminalSoftKeyboardController` so hosts
+# can reserve taps for scroll/select and summon the mobile IME explicitly.
+# Drop this override (and the vendored copy under packages/) once both ship
+# upstream.
 dependency_overrides:
   ghostty_vte_flutter:
     path: ../packages/ghostty_vte_flutter

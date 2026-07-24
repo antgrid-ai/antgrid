@@ -11,8 +11,11 @@ enum AbIconButtonTone { normal, muted, accent, danger, success }
 
 /// Minimal icon button using Iconify (SVG-rendered).
 ///
-/// Visual box is always [AbTokens.iconButtonBox] (24px). Glyph is always
-/// [AbTokens.iconButtonGlyph] (14px). Use [tone] for color variation.
+/// Visual box defaults to [AbTokens.iconButtonBox] (24px) and glyph to
+/// [AbTokens.iconButtonGlyph] (14px) — the canonical chrome sizing. Use
+/// [tone] for color variation. [boxSize]/[glyphSize] override the defaults
+/// ONLY for touch affordances that need a larger hit target and glyph (e.g.
+/// the mobile terminal quick-actions bar); keep chrome on the defaults.
 ///
 /// Pass `onTap: null` to render the button in a disabled state
 /// (opacity 0.4, no hover, no focus, basic cursor). See the
@@ -25,6 +28,8 @@ class AbIconButton extends StatefulWidget {
     this.tone = AbIconButtonTone.normal,
     this.color,
     this.tooltip,
+    this.boxSize,
+    this.glyphSize,
   });
 
   final String icon;
@@ -34,6 +39,12 @@ class AbIconButton extends StatefulWidget {
   /// Overrides [tone] when provided. Prefer [tone] for consistency.
   final Color? color;
   final String? tooltip;
+
+  /// Visual box / hit-target size. Defaults to [AbTokens.iconButtonBox].
+  final double? boxSize;
+
+  /// Glyph size. Defaults to [AbTokens.iconButtonGlyph].
+  final double? glyphSize;
 
   @override
   State<AbIconButton> createState() => _AbIconButtonState();
@@ -64,7 +75,7 @@ class _AbIconButtonState extends State<AbIconButton> {
     final glyphColor = widget.color ?? _toneColor();
 
     final Widget visual = SizedBox.square(
-      dimension: AbTokens.iconButtonBox,
+      dimension: widget.boxSize ?? AbTokens.iconButtonBox,
       child: DecoratedBox(
         decoration: BoxDecoration(
           color: _hovered && !disabled
@@ -75,7 +86,7 @@ class _AbIconButtonState extends State<AbIconButton> {
         child: Center(
           child: AbIcon(
             widget.icon,
-            size: AbTokens.iconButtonGlyph,
+            size: widget.glyphSize ?? AbTokens.iconButtonGlyph,
             color: glyphColor,
           ),
         ),

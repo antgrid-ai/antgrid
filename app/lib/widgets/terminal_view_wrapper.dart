@@ -21,6 +21,7 @@ import '../services/terminal_service.dart';
 import '../services/upload_service.dart';
 import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
+import 'terminal_quick_actions_bar.dart';
 import 'terminal_upload_button.dart';
 
 /// True on desktop platforms (not web) where a physical keyboard is guaranteed.
@@ -62,6 +63,12 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// must scope its effect to the focused terminal — `HardwareKeyboard`
   /// handlers fire app-wide otherwise.
   final FocusScopeNode _focusScope = FocusScopeNode();
+
+  /// Explicit soft-keyboard handle for mobile. Terminal taps scroll/select
+  /// only (`showKeyboardOnInteraction: false`); the IME is summoned solely by
+  /// the Keyboard quick-action, so reading output never pops the keyboard.
+  final GhosttyTerminalSoftKeyboardController _softKeyboardController =
+      GhosttyTerminalSoftKeyboardController();
 
   /// Exact float cell metrics reported post-frame by Ghostty
   /// (`onCellMetricsChanged`). Null until the first frame settles; the
@@ -298,6 +305,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     final terminalView = GhosttyTerminalView(
       controller: tab.ghostty,
       autofocus: true,
+      // Mobile: taps scroll/read; the IME comes only from the Keyboard
+      // quick-action. Desktop has no IME bridge, so `true` is a no-op there.
+      showKeyboardOnInteraction: _hasPhysicalKeyboard,
+      softKeyboardController: _softKeyboardController,
       fontSize: AbTokens.fontBody,
       // Use the design-system mono face per platform (Cascadia Mono on
       // Windows, Menlo on Apple). Hardcoding 'Cascadia Mono' silently fell
@@ -577,66 +588,23 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   }
 
   Widget _buildQuickActions() {
-    return Container(
-      color: Theme.of(context).colorScheme.surfaceContainerHighest,
-      padding: const EdgeInsets.symmetric(
-        vertical: AbTokens.space4,
-        horizontal: AbTokens.space4,
-      ),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          children: [
-            TerminalUploadButton(
-              pick: pickUploadFile,
-              upload: (name, bytes) {
-                final svc = serviceWhenReady(ref, uploadServiceProvider);
-                if (svc == null) {
-                  throw const UploadException('OFFLINE', 'Not connected');
-                }
-                return svc.upload(fileName: name, bytes: bytes);
-              },
-              // Double-quoted + trailing space: paste-a-path semantics identical to
-              // desktop drag-drop; quotes survive spaces in both PowerShell and POSIX shells.
-              onInsertPath: (path) => widget.terminalService.sendInput(
-                widget.tab.terminalId,
-                '"$path" ',
-              ),
-              onError: (m) {
-                if (mounted) showAbSnackBar(context, m);
-              },
-            ),
-            _actionButton('Tab', '\t'),
-            _actionButton('Esc', '\x1b'),
-            _actionButton('Ctrl+C', '\x03'),
-            _actionButton('Ctrl+D', '\x04'),
-            _actionButton('↑', '\x1b[A'),
-            _actionButton('↓', '\x1b[B'),
-            _actionButton('→', '\x1b[C'),
-            _actionButton('←', '\x1b[D'),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _actionButton(String label, String data) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: AbTokens.space2),
-      child: SizedBox(
-        height: AbTokens.rowHeightSm,
-        child: TextButton(
-          style: TextButton.styleFrom(
-            padding: const EdgeInsets.symmetric(horizontal: AbTokens.space10),
-            minimumSize: Size.zero,
-            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          ),
-          onPressed: () {
-            widget.terminalService.sendInput(widget.tab.terminalId, data);
-          },
-          child: Text(label, style: const TextStyle(fontSize: AbTokens.fontSm)),
-        ),
-      ),
+    return TerminalQuickActionsBar(
+      softKeyboardController: _softKeyboardController,
+      onPick: pickUploadFile,
+      onUpload: (name, bytes) {
+        final svc = serviceWhenReady(ref, uploadServiceProvider);
+        if (svc == null) {
+          throw const UploadException('OFFLINE', 'Not connected');
+        }
+        return svc.upload(fileName: name, bytes: bytes);
+      },
+      onInsertPath: (path) =>
+          widget.terminalService.sendInput(widget.tab.terminalId, '"$path" '),
+      onUploadError: (m) {
+        if (mounted) showAbSnackBar(context, m);
+      },
+      onSendInput: (data) =>
+          widget.terminalService.sendInput(widget.tab.terminalId, data),
     );
   }
 }
