@@ -3,6 +3,7 @@ import { mapPart, mapPlanEntries, mapTokens, mapOpencodeError } from "./opencode
 import { opencodeResumeReplay } from "./opencode-resume-replay";
 import { resolveConfigPick } from "../structured/set-config";
 import { logger } from "../logger";
+const log = logger.child({ component: "opencode-driver" });
 
 // `type` is a bare string, not the @opencode-ai/sdk Event union. The binary
 // streams every event on one unfiltered /event bus, so the set of names is not
@@ -165,7 +166,7 @@ export class OpencodeDriver {
         (p, m) => this.modelContextWindows.get(`${p}/${m}`),
       );
     } catch (err) {
-      logger.warn(
+      log.warn(
         "opencode messages() failed for session %s (session %s); returning empty transcript snapshot: %s",
         this.sessionId,
         this.rootSessionId,
@@ -240,7 +241,7 @@ export class OpencodeDriver {
     // Unknown commandId prefixes degrade to a plain prompt of the args text.
     // Reachable when the app holds capabilities from another driver/session
     // (stale replay); log it so the dropped routing is diagnosable.
-    if (commandId) logger.warn("opencode: unrecognized commandId %s; sending as plain prompt", commandId);
+    if (commandId) log.warn("opencode: unrecognized commandId %s; sending as plain prompt", commandId);
     await this.client.prompt(this.rootSessionId, text, {
       ...(this.selModel ? { model: this.selModel } : {}),
       ...(this.selAgent ? { agent: this.selAgent } : {}),
@@ -340,7 +341,7 @@ export class OpencodeDriver {
         try {
           this.handleEvent(evt);
         } catch (err) {
-          logger.error("opencode event handler threw for %s: %s", evt?.type, err);
+          log.error("opencode event handler threw for %s: %s", evt?.type, err);
         }
       }
     } catch {
@@ -381,7 +382,7 @@ export class OpencodeDriver {
     try {
       await this.discoverCapabilitiesInner();
     } catch (err) {
-      logger.warn("opencode capability discovery failed for session %s: %s", this.sessionId, err);
+      log.warn("opencode capability discovery failed for session %s: %s", this.sessionId, err);
     }
   }
 

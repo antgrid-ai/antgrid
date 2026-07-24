@@ -1,4 +1,5 @@
 import { logger } from "./logger";
+const log = logger.child({ component: "tunnel-manager" });
 import { fetchLocalhost } from "./localhost-fetch";
 import { createMessage, type AbMessage, type PortInfo, type PreviewUrlEntry } from "./protocol";
 import type { TunnelHttpRequest } from "./tunnel-protocol";
@@ -72,7 +73,7 @@ export class TunnelManager {
             ...(label ? { label } : {}),
           }),
         );
-        logger.info("Sent preview:url for port %d → %s", p.port, url);
+        log.info("Sent preview:url for port %d → %s", p.port, url);
       }
     }
   }

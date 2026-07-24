@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { join } from "node:path";
-import { logger, setLogLevel, setJsonMode } from "./logger";
+import type { Level } from "pino";
+import { logger, setLogLevel } from "./logger";
 import { consoleBootstrapIO, writeConfigYaml, buildConfigFromBootstrap } from "./bootstrap";
 import { startPerfLog } from "./perf-log";
 import { readBootstrapPayload } from "./auth/credentials";
@@ -10,6 +11,11 @@ import { resolveAbDir } from "./antgrid-dir";
 import { startOwnerWatchdog } from "./owner-watchdog";
 import { augmentHostPath } from "./host-path";
 import { runHookInvocation } from "./hook-runner";
+
+// Component-tagged child for this module's own lifecycle logs.
+const log = logger.child({ component: "bridge" });
+
+const VALID_LEVELS = new Set<string>(["trace", "debug", "info", "warn", "error", "fatal"]);
 
 // Re-exported for tests/protocol.test.ts, which imports it from `./index`.
 export { buildAgentHello } from "./agent-core";
@@ -58,12 +64,16 @@ program
 
 // Single default action — reads bootstrap payload from stdin, branches on mode.
 program
-  .option("--verbose", "Enable debug logging")
-  .option("--json-logs", "Emit structured JSON log lines")
+  .option("--verbose", "Alias for --log-level debug")
+  .option("--log-level <level>", "trace|debug|info|warn|error|fatal (env: ANTGRID_LOG_LEVEL)")
   .option("--debug-perf", "Sample RSS at 1Hz to ~/.antgrid/perf.log")
-  .action(async (opts: { verbose?: boolean; jsonLogs?: boolean; debugPerf?: boolean }) => {
-    if (opts.verbose) setLogLevel("debug");
-    if (opts.jsonLogs) setJsonMode(true);
+  .action(async (opts: { verbose?: boolean; logLevel?: string; debugPerf?: boolean }) => {
+    // Precedence: explicit --log-level, then ANTGRID_LOG_LEVEL, then --verbose alias.
+    const level = opts.logLevel ?? process.env.ANTGRID_LOG_LEVEL ?? (opts.verbose ? "debug" : undefined);
+    if (level) {
+      if (VALID_LEVELS.has(level)) setLogLevel(level as Level);
+      else log.warn(`ignoring invalid log level "${level}"`);
+    }
 
     let payload;
     try {
@@ -118,7 +128,7 @@ program
     const shutdown = async (reason?: string) => {
       if (isShuttingDown) return;
       isShuttingDown = true;
-      logger.info("Shutting down%s...", reason ? ` (${reason})` : "");
+      log.info("Shutting down%s...", reason ? ` (${reason})` : "");
       perfLog?.stop();
       await host.shutdown(reason);
       process.exit(0);
@@ -140,8 +150,8 @@ program
     process.on("SIGINT", () => shutdown("SIGINT"));
     process.on("SIGTERM", () => shutdown("SIGTERM"));
     process.on("SIGHUP", () => shutdown("SIGHUP"));
-    process.on("uncaughtException", (err) => { logger.error("Uncaught exception: %s", err); shutdown("uncaughtException"); });
-    process.on("unhandledRejection", (err) => { logger.error("Unhandled rejection: %s", err); shutdown("unhandledRejection"); });
+    process.on("uncaughtException", (err) => { log.error("Uncaught exception: %s", err); shutdown("uncaughtException"); });
+    process.on("unhandledRejection", (err) => { log.error("Unhandled rejection: %s", err); shutdown("unhandledRejection"); });
 
     // Inline the first project when one was provided. An eager warm-up spawn
     // (app launch) sends no firstProject — the control plane is already up from

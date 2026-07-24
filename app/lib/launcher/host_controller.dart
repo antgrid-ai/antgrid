@@ -9,8 +9,10 @@ import 'discovery.dart' show isPidAlive, terminatePid, terminateTree;
 import 'host_control_client.dart';
 import 'host_discovery.dart';
 import 'local_agent_launcher.dart' show BootstrapPayload, AgentEvent;
+import '../util/ab_log.dart';
+import '../util/log_rotation.dart';
 
-void _log(String msg) => debugPrint('[HostController] $msg');
+void _log(String msg) => AbLog.info('HostController', msg);
 
 /// Owns the singleton host process for this machine: discovery, liveness
 /// verification, and single-flighted respawn. One per app process.
@@ -332,6 +334,9 @@ class HostController {
     final dir = Directory(hostDir());
     dir.createSync(recursive: true);
     final logPath = '${hostDir()}/host.log';
+    // Cap host.log at spawn time (single .old generation). Checked on open —
+    // simplest bound now that the log writes in every build mode.
+    rotateLogIfNeeded(logPath);
     final logSink = File(logPath).openWrite(mode: FileMode.append);
     logSink.writeln(
       '--- ${DateTime.now().toIso8601String()} host spawned pid=${proc.pid} ---',
@@ -528,8 +533,10 @@ HostCommand _resolveHostCommand() {
     isWindows: Platform.isWindows,
     isRelease: kReleaseMode,
   );
-  debugPrint(
-    '[HostController] host command: ${cmd.binary} ${cmd.preargs.join(" ")}',
+  AbLog.info(
+    'HostController',
+    'host command',
+    fields: {'binary': cmd.binary, 'preargs': cmd.preargs.join(' ')},
   );
   return cmd;
 }
@@ -606,8 +613,10 @@ Future<Process> spawnHostProcess(BootstrapPayload payload) async {
       ? const <String, String>{}
       : {'ANTGRID_DIR': abDir};
 
-  debugPrint(
-    '[HostController] spawning host: binary="$binary" args=$args abDir="$abDir"',
+  AbLog.info(
+    'HostController',
+    'spawning host',
+    fields: {'binary': binary, 'args': args, 'abDir': abDir},
   );
 
   // .cmd/.bat on Windows requires runInShell. Direct .exe invocation does
@@ -631,12 +640,10 @@ Future<Process> spawnHostProcess(BootstrapPayload payload) async {
       // No workingDirectory — the host is machine-level, not per-project.
     );
   } catch (e, st) {
-    debugPrint('[HostController] Process.start threw: $e\n$st');
+    AbLog.error('HostController', 'Process.start threw', fields: {'error': '$e', 'stack': '$st'});
     rethrow;
   }
-  debugPrint(
-    '[HostController] spawned host pid=${proc.pid}',
-  );
+  AbLog.info('HostController', 'spawned host', fields: {'pid': proc.pid});
 
   // Write the bootstrap line, then close stdin. The host reads exactly one
   // line and never expects more input.
@@ -645,7 +652,7 @@ Future<Process> spawnHostProcess(BootstrapPayload payload) async {
     await proc.stdin.flush();
     await proc.stdin.close();
   } catch (e) {
-    debugPrint('[HostController] stdin write failed: $e');
+    AbLog.error('HostController', 'stdin write failed', fields: {'error': '$e'});
     proc.kill();
     rethrow;
   }

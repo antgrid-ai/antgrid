@@ -1,5 +1,6 @@
 import { sign, createPrivateKey, randomBytes } from "node:crypto";
 import { logger } from "./logger";
+const log = logger.child({ component: "relay-client" });
 import type { DeviceIdentity } from "./device";
 import {
   buildTranscript, deriveSessionKeys, agentConfirmTag, phoneConfirmTag,
@@ -113,7 +114,7 @@ export async function handleInboundPairRequest(args: HandlePairRequestArgs): Pro
   if (!pairId) {
     // The relay always stamps pairId before forwarding; without it the response
     // is unroutable, so there is nothing to answer.
-    logger.warn("pair-request missing relay-stamped pairId — dropping");
+    log.warn("pair-request missing relay-stamped pairId — dropping");
     return;
   }
 
@@ -166,7 +167,7 @@ export async function handleInboundPairRequest(args: HandlePairRequestArgs): Pro
         const keys = await args.getAccountPeerKeys();
         accountMember = keys.has(msg.accountDevicePubkey);
       } catch (err) {
-        logger.warn("account peer-key fetch failed during pair admission: %o", err);
+        log.warn("account peer-key fetch failed during pair admission: %o", err);
       }
     }
   }
@@ -192,7 +193,7 @@ export async function handleInboundPairRequest(args: HandlePairRequestArgs): Pro
         : pairingWindow.isOpen()
           ? "pairCode did not match the open window (stale/wrong URL)"
           : "no open pairing window (expired >60s, or wizard not on the pairing step)";
-    logger.warn(
+    log.warn(
       "pair-request rejected: %s — %s (phone=%s, accountSig=%s)",
       reason,
       detail,
@@ -492,7 +493,7 @@ export class RelayClient {
       onComplete: (json) => this.routeReassembledEnvelope(json),
       onAbort: (hint) => {
         if (hint?.type === "file:content") {
-          logger.warn("Fragmented file content transfer interrupted for %s", hint.key);
+          log.warn("Fragmented file content transfer interrupted for %s", hint.key);
           this.opts.onError?.("TRANSFER_INTERRUPTED", `Transfer interrupted for ${hint.key}`);
         }
       },
@@ -522,11 +523,11 @@ export class RelayClient {
     this.lastError = null;
     this.resetE2eState();
 
-    logger.debug(`Connecting to ${this.opts.url}`);
+    log.debug(`Connecting to ${this.opts.url}`);
     const ws = new WebSocket(this.opts.url);
 
     ws.addEventListener("open", () => {
-      logger.info(`Connected to relay at ${this.opts.url}`);
+      log.info(`Connected to relay at ${this.opts.url}`);
       this.ws = ws;
       // Backoff is reset ONLY on `welcome`, never on socket open (a socket that
       // opens then fails auth must keep backing off — PR#49 carry-over).
@@ -562,7 +563,9 @@ export class RelayClient {
     });
 
     ws.addEventListener("error", (err) => {
-      logger.error("WebSocket error", err);
+      // Object-first: a bare trailing arg is dropped when the message has no
+      // printf placeholder, so the actual error detail would be lost.
+      log.error({ err }, "WebSocket error");
     });
   }
 
@@ -572,7 +575,7 @@ export class RelayClient {
     try {
       licenseToken = await this.opts.getLicenseToken();
     } catch (err) {
-      logger.error("Failed to get license token", err);
+      log.error({ err }, "Failed to get license token");
       this.opts.onError?.("LICENSE_INVALID", String(err));
       this.ws?.close();
       return;
@@ -590,7 +593,7 @@ export class RelayClient {
     if (!identity.ed25519PublicKey || !identity.ed25519PrivateKey) {
       // A missing device keypair is PERMANENT (never gained at runtime) — fail
       // closed so we don't dial → fail hello → reconnect every second forever.
-      logger.error("No Ed25519 keypair available for hello");
+      log.error("No Ed25519 keypair available for hello");
       this.intentionalClose = true;
       this.opts.onError?.("AUTH_FAILED", "Missing device keypair");
       this.ws?.close();
@@ -632,13 +635,13 @@ export class RelayClient {
     try {
       parsed = JSON.parse(raw);
     } catch {
-      logger.warn("Received non-JSON message from relay, dropping");
+      log.warn("Received non-JSON message from relay, dropping");
       return;
     }
 
     const result = ServerMessage.safeParse(parsed);
     if (!result.success) {
-      logger.warn("Received invalid relay message, dropping: %s", result.error.message);
+      log.warn("Received invalid relay message, dropping: %s", result.error.message);
       return;
     }
     const msg = result.data;
@@ -652,7 +655,7 @@ export class RelayClient {
         // Re-admit every attached stream: the relay lost its openStreams on the
         // disconnect, so re-count them (sessionLimit) before app traffic resumes.
         this.mux.reopenAll();
-        logger.info("Authenticated with relay as %s (epoch %d)", msg.deviceId, msg.epoch);
+        log.info("Authenticated with relay as %s (epoch %d)", msg.deviceId, msg.epoch);
         this.opts.onAuthenticated?.();
         break;
       case "stream-opened":
@@ -663,19 +666,19 @@ export class RelayClient {
         break;
       case "pair-connected":
         this._peerId = msg.peerId;
-        logger.info("Paired with %s (%s)", msg.peerName, msg.peerId);
+        log.info("Paired with %s (%s)", msg.peerName, msg.peerId);
         // Reactive: the phone drives the handshake — wait for its client-hello.
         this.opts.onPaired?.(msg.peerId, msg.peerName);
         break;
       case "grant-revoked":
-        logger.info("Grant revoked by peer %s (%s)", msg.peerDeviceId, msg.reason);
+        log.info("Grant revoked by peer %s (%s)", msg.peerDeviceId, msg.reason);
         this._peerId = null;
         this.resetE2eState();
         this.mux.notifyUnpaired();
         this.opts.onUnpaired?.(msg.peerDeviceId);
         break;
       case "peer-online":
-        logger.info("Peer online: %s", msg.peerId);
+        log.info("Peer online: %s", msg.peerId);
         this._peerId = msg.peerId;
         this.backfillPeerPubkey(msg.peerId);
         // Reactive: wait for the phone's fresh client-hello (its rekey). Stream
@@ -683,7 +686,7 @@ export class RelayClient {
         this.opts.onPeerOnline?.(msg.peerId);
         break;
       case "peer-offline":
-        logger.info("Peer offline: %s", msg.peerId);
+        log.info("Peer offline: %s", msg.peerId);
         // Keep _peerId + the established session for push fallback and a quick
         // reconnect; suppress the heavy stream until the phone returns.
         this.mux.notifyPeerOffline();
@@ -694,7 +697,7 @@ export class RelayClient {
         const window = this.opts.pairingWindow;
         const ed25519PrivB64 = this.opts.identity.ed25519PrivateKey;
         if (!phones || !window || !ed25519PrivB64) {
-          logger.warn("pair-request received but agent is not configured for inbound pairing");
+          log.warn("pair-request received but agent is not configured for inbound pairing");
           break;
         }
         const ed25519Priv = Buffer.from(ed25519PrivB64, "base64");
@@ -721,7 +724,7 @@ export class RelayClient {
           // this side. At debug, a misconfigured relay (bad FCM key -> reason
           // "error", absent creds -> "unconfigured") is indistinguishable from
           // no push being attempted at all, which reads as an app bug.
-          logger.warn("push:result not ok (reason=%s)", msg.reason);
+          log.warn("push:result not ok (reason=%s)", msg.reason);
         }
         break;
       case "error":
@@ -753,7 +756,7 @@ export class RelayClient {
     // re-hello with a corrected `ts` (design §13.1).
     if (msg.code === "AUTH_FAILED" && msg.serverTime) this.applyClockOffset(msg.serverTime);
 
-    logger.error(
+    log.error(
       `Relay error: device=${this.opts.identity.deviceId} peer=${this._peerId ?? "unpaired"} ` +
       `code=${msg.code} retryable=${msg.retryable} message="${msg.message}"`,
     );
@@ -765,7 +768,7 @@ export class RelayClient {
     // `retryable:false` stops reconnecting in the close handler.
     if (LICENSE_TERMINAL.has(msg.code)) this.opts.onAuthRevoked?.();
     if (msg.code === "SUPERSEDED") {
-      logger.info("Superseded by a newer connection of this device — stopping reconnect");
+      log.info("Superseded by a newer connection of this device — stopping reconnect");
     }
   }
 
@@ -778,7 +781,7 @@ export class RelayClient {
     if (this.clockOffsetApplied && Math.abs(offset - this.clockOffsetMs) < 1000) return;
     this.clockOffsetMs = offset;
     this.clockOffsetApplied = true;
-    logger.warn("Relay clock skew detected; applying %dms offset to the next hello", offset);
+    log.warn("Relay clock skew detected; applying %dms offset to the next hello", offset);
   }
 
   // --- Binary frame receive path (kind-byte dispatch, design §3.1) ---
@@ -789,14 +792,14 @@ export class RelayClient {
       decoded = decodeRouteFrame(buf);
     } catch (e) {
       if (e instanceof FrameError) {
-        logger.warn("Received malformed frame: %s", e.reason);
+        log.warn("Received malformed frame: %s", e.reason);
         return;
       }
       throw e;
     }
     const header = decoded.header as { type?: string; from?: string; channel?: string };
     if (header.type !== "message" || !header.from || !header.channel) {
-      logger.warn("Invalid route header on binary frame");
+      log.warn("Invalid route header on binary frame");
       return;
     }
     const channel: Channel = header.channel === "preview" ? "preview" : "control";
@@ -817,14 +820,14 @@ export class RelayClient {
     try {
       obj = JSON.parse(Buffer.from(payload).toString("utf8"));
     } catch {
-      logger.warn("Dropping non-JSON kind-1 handshake frame");
+      log.warn("Dropping non-JSON kind-1 handshake frame");
       return;
     }
     if (obj?.type === "handshake:client-hello") {
       this.handleClientHello(obj as { attemptId?: string; pubkey?: string; nonce?: string; sig?: string });
       return;
     }
-    logger.warn("Dropping unexpected kind-1 handshake frame (type=%s)", obj?.type);
+    log.warn("Dropping unexpected kind-1 handshake frame (type=%s)", obj?.type);
   }
 
   private handleSealedFrame(payload: Buffer, channel: Channel): void {
@@ -846,7 +849,7 @@ export class RelayClient {
         return;
       }
     }
-    logger.warn("Failed to open sealed frame (len=%d), dropping", payload.length);
+    log.warn("Failed to open sealed frame (len=%d), dropping", payload.length);
   }
 
   private onSealedPlaintext(plaintext: string, channel: Channel): void {
@@ -857,7 +860,7 @@ export class RelayClient {
     try {
       obj = JSON.parse(plaintext);
     } catch {
-      logger.warn("Dropping non-JSON sealed plaintext");
+      log.warn("Dropping non-JSON sealed plaintext");
       return;
     }
     if (obj && typeof obj === "object") {
@@ -873,7 +876,7 @@ export class RelayClient {
         return;
       }
     }
-    logger.warn("Dropping unrecognized sealed plaintext");
+    log.warn("Dropping unrecognized sealed plaintext");
   }
 
   private routeReassembledEnvelope(json: string): void {
@@ -881,11 +884,11 @@ export class RelayClient {
     try {
       env = JSON.parse(json);
     } catch {
-      logger.warn("Dropping non-JSON reassembled envelope");
+      log.warn("Dropping non-JSON reassembled envelope");
       return;
     }
     if (!env || typeof env !== "object" || !("m" in env)) {
-      logger.warn("Dropping malformed reassembled envelope");
+      log.warn("Dropping malformed reassembled envelope");
       return;
     }
     // Reassembled transfers are control-tier (file:content, diffs); the channel
@@ -902,7 +905,7 @@ export class RelayClient {
       return;
     }
     if (!this.mux.dispatchInbound(streamId, mJson, channel)) {
-      logger.warn("Dropping inbound frame for unknown streamId %s", streamId);
+      log.warn("Dropping inbound frame for unknown streamId %s", streamId);
     }
   }
 
@@ -932,31 +935,31 @@ export class RelayClient {
         // Liveness reset done in handleSealedFrame's recordSealedRecv.
         return;
       default:
-        logger.warn("Dropping unexpected sealed session frame (type=%s)", obj.type);
+        log.warn("Dropping unexpected sealed session frame (type=%s)", obj.type);
     }
   }
 
   private handleClientHello(obj: { attemptId?: string; pubkey?: string; nonce?: string; sig?: string }): void {
     const { attemptId, pubkey, nonce, sig } = obj;
     if (!attemptId || !pubkey || !nonce || !sig) {
-      logger.warn("client-hello missing fields — dropping");
+      log.warn("client-hello missing fields — dropping");
       return;
     }
     const peerId = this._peerId;
     if (!peerId) return;
     const phoneEd25519PubB64 = this.resolvePhoneEd25519PubB64(peerId);
     if (!phoneEd25519PubB64) {
-      logger.warn("No pinned Ed25519 identity for peer %s; cannot verify handshake", peerId);
+      log.warn("No pinned Ed25519 identity for peer %s; cannot verify handshake", peerId);
       return;
     }
     const seedB64 = this.opts.identity.ed25519PrivateKey;
     if (!seedB64) {
-      logger.warn("No Ed25519 seed to sign agent-hello — dropping client-hello");
+      log.warn("No Ed25519 seed to sign agent-hello — dropping client-hello");
       return;
     }
     const clientPubkey = Buffer.from(pubkey, "base64");
     if (clientPubkey.length !== 32) {
-      logger.warn("Invalid client pubkey length: %d", clientPubkey.length);
+      log.warn("Invalid client pubkey length: %d", clientPubkey.length);
       return;
     }
     const nonceBuf = Buffer.from(nonce, "base64");
@@ -974,7 +977,7 @@ export class RelayClient {
       nonce: nonceBuf,
     });
     if (!verifyTranscriptSig(phoneTranscript, phoneEd25519PubB64, sig)) {
-      logger.warn("Rejecting client-hello: transcript signature invalid");
+      log.warn("Rejecting client-hello: transcript signature invalid");
       return;
     }
 
@@ -1012,7 +1015,7 @@ export class RelayClient {
       { type: "handshake:agent-ready", attemptId, confirm: agentConfirmTag(sessionKeys.confirm).toString("base64") },
       transport,
     );
-    logger.info("E2E handshake keys derived (attempt %s), waiting for app:ready", attemptId);
+    log.info("E2E handshake keys derived (attempt %s), waiting for app:ready", attemptId);
   }
 
   private handleAppReady(obj: { attemptId?: string; confirm?: string }): void {
@@ -1031,7 +1034,7 @@ export class RelayClient {
     if (this.pending && this.pending.attemptId === attemptId) {
       const expected = phoneConfirmTag(this.pending.sessionKeys.confirm);
       if (!verifyConfirmTag(expected, tag)) {
-        logger.warn("app:ready confirm tag invalid (attempt %s) — dropping", attemptId);
+        log.warn("app:ready confirm tag invalid (attempt %s) — dropping", attemptId);
         return;
       }
       // Make-before-break swap: promote the candidate, then zeroize the old set.
@@ -1045,13 +1048,13 @@ export class RelayClient {
       }
       this.startLiveness();
       this.sendSessionFrame({ type: "established", attemptId }, this.established.transport);
-      logger.info("E2E session established (attempt %s)", attemptId);
+      log.info("E2E session established (attempt %s)", attemptId);
       this.opts.onHandshakeComplete?.();
       this.mux.notifyPeerOnline();
       return;
     }
 
-    logger.warn("app:ready for unknown attempt %s — dropping", attemptId);
+    log.warn("app:ready for unknown attempt %s — dropping", attemptId);
   }
 
   private resolvePhoneEd25519PubB64(phoneDeviceId: string): string | undefined {
@@ -1100,7 +1103,7 @@ export class RelayClient {
       // NEVER send app traffic in cleartext (the relay is zero-knowledge). During
       // a rekey window services may still emit; dropping is correct — the phone
       // re-syncs control state after the next establishment.
-      logger.debug("Dropping outbound %s — E2E session not established", type ?? "message");
+      log.debug("Dropping outbound %s — E2E session not established", type ?? "message");
       this.handleUndeliverableTunnel("dropped", channel, msg);
       return "dropped";
     }
@@ -1111,7 +1114,7 @@ export class RelayClient {
     const key = this.messageFragKey(msg);
     const fragmented = fragmentForSend(json, type, key);
     if (!fragmented.ok) {
-      logger.warn("%s", fragmented.error.message);
+      log.warn("%s", fragmented.error.message);
       this.opts.onError?.(fragmented.error.code, fragmented.error.message);
       const outcome = fragmented.error.code === "MESSAGE_TOO_LARGE" ? "too-large" : "dropped";
       this.handleUndeliverableTunnel(outcome, channel, msg);
@@ -1151,7 +1154,7 @@ export class RelayClient {
         "preview",
       );
     } else {
-      logger.warn(
+      log.warn(
         "Tunnel response %s dropped (E2E session not established) — preview request will time out",
         requestId,
       );
@@ -1195,7 +1198,7 @@ export class RelayClient {
     diagnosticType = "transport",
   ): void {
     if (!this._peerId) {
-      logger.warn("Cannot send payload — not paired");
+      log.warn("Cannot send payload — not paired");
       return;
     }
     if (this.ws?.readyState !== WebSocket.OPEN) return;
@@ -1285,7 +1288,7 @@ export class RelayClient {
     if (this.rateLimitBurst) this.finishRateLimitBurst();
 
     const outboundAtOnset = this.formatOutboundRateDiagnostic(now);
-    logger.error(
+    log.error(
       `Relay rate limit: device=${this.opts.identity.deviceId} peer=${this._peerId ?? "unpaired"} ` +
       `message="${message}" recentOutbound(${RATE_DIAGNOSTIC_WINDOW_MS}ms)={${outboundAtOnset}}`,
     );
@@ -1304,7 +1307,7 @@ export class RelayClient {
     this.rateLimitBurst = null;
     if (burst.errors <= 1) return;
 
-    logger.error(
+    log.error(
       `Relay rate-limit burst summary: device=${this.opts.identity.deviceId} ` +
       `rejectedFrames=${burst.errors} duplicateCallbacksSuppressed=${burst.errors - 1} ` +
       `durationMs=${Date.now() - burst.startedAt} ` +
@@ -1355,7 +1358,7 @@ export class RelayClient {
     this.stopHalfOpenTimer();
     this.halfOpenTimer = setTimeout(() => {
       if (this.pending) {
-        logger.warn("Half-open handshake attempt %s expired — discarding candidate keys", this.pending.attemptId);
+        log.warn("Half-open handshake attempt %s expired — discarding candidate keys", this.pending.attemptId);
         this.tearDownPending();
       }
     }, this.opts.halfOpenMs ?? HALF_OPEN_MS);
@@ -1404,7 +1407,7 @@ export class RelayClient {
   /** The E2E session is unresponsive: drop keys and wait for the phone's rekey
    *  (it owns retry pacing — design §6.2). The socket is left intact. */
   private declareSessionDead(): void {
-    logger.warn("E2E session declared dead (2 missed pongs) — dropping keys, awaiting rekey");
+    log.warn("E2E session declared dead (2 missed pongs) — dropping keys, awaiting rekey");
     this.tearDownEstablished();
     this.stopLiveness();
     this.mux.notifyPeerOffline();
@@ -1433,7 +1436,7 @@ export class RelayClient {
     // Equal jitter (PR#49): the SCHEDULED DELAY is uniform in [backoff/2, backoff];
     // the stored `backoff` stays deterministic and doubles for the next attempt.
     const delay = this.backoff / 2 + Math.random() * (this.backoff / 2);
-    logger.info(`Reconnecting in ${Math.round(delay)}ms...`);
+    log.info(`Reconnecting in ${Math.round(delay)}ms...`);
     this.reconnectTimer = setTimeout(() => {
       this.backoff = Math.min(this.backoff * 2, MAX_BACKOFF);
       this.doConnect();

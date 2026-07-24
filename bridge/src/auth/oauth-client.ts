@@ -1,4 +1,5 @@
 import { logger } from "../logger.js";
+const log = logger.child({ component: "oauth-client" });
 
 export interface MintedToken {
   accessToken: string;
@@ -99,12 +100,12 @@ export function startTokenMaintenance(
       if (stopped) return;
       try {
         current = await client.mint();
-        logger.info(
+        log.info(
           "Refreshed OAuth access token; expires_in=%ds",
           Math.round((current.expiresAt - Date.now()) / 1000),
         );
       } catch (err) {
-        logger.warn("OAuth re-mint failed: %s — will retry in 30s", err);
+        log.warn("OAuth re-mint failed: %s — will retry in 30s", err);
         timer = setTimeout(() => {
           if (!stopped) schedule();
         }, 30_000);

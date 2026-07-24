@@ -4,6 +4,7 @@ import { writeFileSync, unlinkSync, readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { z } from "zod";
 import { logger } from "./logger";
+const log = logger.child({ component: "api-server" });
 import { createMessage, type AbMessage } from "./protocol";
 import type { TerminalManager } from "./terminal-manager";
 import type { AbConfig } from "./config";
@@ -320,10 +321,10 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
   try {
     writeFileSync(PORT_FILE, String(port), { mode: 0o600 });
   } catch (err) {
-    logger.warn("Failed to write API port file: %s", err);
+    log.warn("Failed to write API port file: %s", err);
   }
 
-  logger.info("API server listening on http://127.0.0.1:%d", port);
+  log.info("API server listening on http://127.0.0.1:%d", port);
 
   let stopped = false;
   return {

@@ -2,13 +2,13 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
 import 'package:antgrid/services/keychain_device_store.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
 import 'host_control_client.dart';
 import 'host_controller.dart';
 import 'project_id.dart';
+import '../util/ab_log.dart';
 
 // ---------------------------------------------------------------------------
 // BootstrapPayload
@@ -123,8 +123,7 @@ class LaunchResult {
 }
 
 void _log(String msg) {
-  // Always print so users can grep `flutter run` output.
-  debugPrint('[LocalAgentLauncher] $msg');
+  AbLog.info('LocalAgentLauncher', msg);
 }
 
 class LocalAgentLauncher {

@@ -47,6 +47,7 @@ import 'storage/project_store.dart';
 import 'storage/recent_agents_store.dart';
 import 'storage/recent_ports_store.dart';
 import 'update/update_gate.dart';
+import 'util/ab_log.dart';
 
 /// Push is Android (FCM) and iOS (APNs) only — desktop has no transport.
 bool get _pushSupported =>
@@ -196,13 +197,17 @@ Future<void> main() async {
     container.listen(projectSessionRegistryProvider, (_, _) {
       unawaited(
         pushService.registerNewSessions(warmSessions()).catchError((Object e) {
-          debugPrint('PushMessagingService.registerNewSessions failed: $e');
+          AbLog.error(
+            'Main',
+            'PushMessagingService.registerNewSessions failed',
+            fields: {'error': '$e'},
+          );
         }),
       );
     });
     unawaited(
       pushService.init(sessions: warmSessions).catchError((Object e) {
-        debugPrint('PushMessagingService.init failed: $e');
+        AbLog.error('Main', 'PushMessagingService.init failed', fields: {'error': '$e'});
       }),
     );
   }

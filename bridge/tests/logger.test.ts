@@ -1,90 +1,93 @@
-import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
-import { logger, setLogLevel, setJsonMode } from "../src/logger";
+import { describe, it, expect, beforeEach, afterAll } from "bun:test";
+import { logger, setLogLevel, __setRootForTest } from "../src/logger";
+
+// Collect each pino line (pino writes one JSON string per call, newline-terminated).
+const lines: string[] = [];
+const capture = {
+  write(s: string): boolean {
+    lines.push(s);
+    return true;
+  },
+};
+
+function last(): Record<string, unknown> {
+  return JSON.parse(lines[lines.length - 1]!);
+}
 
 describe("logger", () => {
-  let logSpy: ReturnType<typeof spyOn>;
-  let errorSpy: ReturnType<typeof spyOn>;
-  let warnSpy: ReturnType<typeof spyOn>;
-
   beforeEach(() => {
-    logSpy = spyOn(console, "log").mockImplementation(() => {});
-    errorSpy = spyOn(console, "error").mockImplementation(() => {});
-    warnSpy = spyOn(console, "warn").mockImplementation(() => {});
-    setLogLevel("debug");
-    setJsonMode(false);
+    lines.length = 0;
+    __setRootForTest(capture, "debug");
   });
 
-  afterEach(() => {
-    logSpy.mockRestore();
-    errorSpy.mockRestore();
-    warnSpy.mockRestore();
-    setLogLevel("info");
-    setJsonMode(false);
+  // Bun shares the module cache across the whole suite; without this the hub
+  // stays pointed at our dead in-memory buffer and a later stdout-asserting
+  // test in another file would silently capture nothing. Restore the real sink.
+  afterAll(() => __setRootForTest(process.stdout));
+
+  it("emits one pino-shaped JSON line per call", () => {
+    logger.info("hello %s", "world");
+    expect(lines.length).toBe(1);
+    const o = last();
+    expect(typeof o.level).toBe("number");
+    expect(o.level).toBe(30);
+    expect(typeof o.time).toBe("number");
+    expect(o.pid).toBe(process.pid);
+    expect(o.msg).toBe("hello world");
+    expect("hostname" in o).toBe(false); // dropped via base:{pid}
   });
 
-  it("logs at all levels when level is debug", () => {
+  it("maps each method to its numeric level", () => {
     logger.debug("d");
     logger.info("i");
     logger.warn("w");
     logger.error("e");
-    expect(logSpy).toHaveBeenCalledTimes(2); // debug + info
-    expect(warnSpy).toHaveBeenCalledTimes(1);
-    expect(errorSpy).toHaveBeenCalledTimes(1);
+    const levels = lines.map((l) => (JSON.parse(l) as { level: number }).level);
+    expect(levels).toEqual([20, 30, 40, 50]);
   });
 
-  it("filters debug when level is info", () => {
-    setLogLevel("info");
-    logger.debug("hidden");
-    logger.info("visible");
-    expect(logSpy).toHaveBeenCalledTimes(1);
-  });
-
-  it("filters debug and info when level is warn", () => {
-    setLogLevel("warn");
+  it("filters below the active level", () => {
+    __setRootForTest(capture, "warn");
     logger.debug("hidden");
     logger.info("hidden");
-    logger.warn("visible");
-    expect(logSpy).toHaveBeenCalledTimes(0);
-    expect(warnSpy).toHaveBeenCalledTimes(1);
+    logger.warn("shown");
+    expect(lines.length).toBe(1);
+    expect(last().level).toBe(40);
   });
 
-  it("only shows error when level is error", () => {
-    setLogLevel("error");
+  it("respects setLogLevel at runtime", () => {
+    __setRootForTest(capture, "info");
     logger.debug("hidden");
-    logger.info("hidden");
-    logger.warn("hidden");
-    logger.error("visible");
-    expect(logSpy).toHaveBeenCalledTimes(0);
-    expect(warnSpy).toHaveBeenCalledTimes(0);
-    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(lines.length).toBe(0);
+    setLogLevel("debug");
+    logger.debug("now shown");
+    expect(lines.length).toBe(1);
   });
 
-  it("emits JSON when json mode is enabled", () => {
-    setJsonMode(true);
-    logger.info("hello %s", "world");
-    expect(logSpy).toHaveBeenCalledTimes(1);
-    const output = logSpy.mock.calls[0][0] as string;
-    const parsed = JSON.parse(output);
-    expect(parsed.level).toBe("info");
-    expect(parsed.msg).toBe("hello world");
-    expect(parsed.time).toBeDefined();
+  it("adds a component binding via child()", () => {
+    const log = logger.child({ component: "relay-client" });
+    log.warn("connected");
+    const o = last();
+    expect(o.component).toBe("relay-client");
+    expect(o.level).toBe(40);
+    expect(o.msg).toBe("connected");
   });
 
-  it("emits JSON errors to console.error", () => {
-    setJsonMode(true);
-    logger.error("fail");
-    expect(errorSpy).toHaveBeenCalledTimes(1);
-    const output = errorSpy.mock.calls[0][0] as string;
-    const parsed = JSON.parse(output);
-    expect(parsed.level).toBe("error");
-    expect(parsed.msg).toBe("fail");
+  it("merges a fields object passed as the first arg", () => {
+    logger.info({ projectId: "abc" }, "opened");
+    const o = last();
+    expect(o.projectId).toBe("abc");
+    expect(o.msg).toBe("opened");
   });
 
-  it("includes timestamp in human mode", () => {
-    logger.info("test");
-    const call = logSpy.mock.calls[0];
-    const prefix = call[0] as string;
-    // Format: HH:MM:SS.mmm [INFO ]
-    expect(prefix).toMatch(/^\d{2}:\d{2}:\d{2}\.\d{3} \[INFO \]$/);
+  it("propagates setLogLevel to an already-created child", () => {
+    __setRootForTest(capture, "info");
+    const child = logger.child({ component: "late" });
+    child.debug("hidden");
+    expect(lines.length).toBe(0);
+    setLogLevel("debug");
+    child.debug("now shown");
+    expect(lines.length).toBe(1);
+    expect(last().component).toBe("late");
   });
 });

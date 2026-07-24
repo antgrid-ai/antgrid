@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { ControlRequestSchema, type ControlRequest, type ControlResponse } from "./control-protocol";
 import { logger } from "./logger";
+const log = logger.child({ component: "control-listener" });
 
 export interface ControlListenerOptions {
   /** Bearer token a client must present (the one published in host.json). */
@@ -61,12 +62,12 @@ export class ControlListener {
           const res = await this.opts.handler(parsed.data);
           return json(res, res.ok ? 200 : 400);
         } catch (err) {
-          logger.error("control handler threw: %s", (err as Error).message);
+          log.error("control handler threw: %s", (err as Error).message);
           return json({ id: parsed.data.id, ok: false, error: { code: "INTERNAL", message: (err as Error).message } }, 500);
         }
       },
     });
-    logger.info(`control listener bound on 127.0.0.1:${this.server.port}`);
+    log.info(`control listener bound on 127.0.0.1:${this.server.port}`);
   }
 
   async stop(): Promise<void> {

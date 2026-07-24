@@ -2,6 +2,7 @@ import chokidar, { type FSWatcher } from "chokidar";
 import { relative, extname, basename, join } from "node:path";
 import { statSync, watch as fsWatch, type FSWatcher as NodeFSWatcher } from "node:fs";
 import { logger } from "./logger";
+const log = logger.child({ component: "file-watcher" });
 import { createMessage, type AbMessage } from "./protocol";
 import {
   loadIgnoreRules,
@@ -65,7 +66,7 @@ export class FileWatcher {
   sendFullTree(): void {
     const root = buildTree(this.projectRoot, this.projectRoot, this.ig);
     if (!root) {
-      logger.error("Failed to build file tree for %s", this.projectRoot);
+      log.error("Failed to build file tree for %s", this.projectRoot);
       return;
     }
 
@@ -75,7 +76,7 @@ export class FileWatcher {
         root,
       }),
     );
-    logger.info("Sent full file tree for project %s", this.projectId);
+    log.info("Sent full file tree for project %s", this.projectId);
   }
 
   startWatching(): void {
@@ -117,9 +118,9 @@ export class FileWatcher {
       .on("unlink", (filePath) => this.onFileRemoved(filePath))
       .on("addDir", (dirPath) => this.onDirAdded(dirPath))
       .on("unlinkDir", (dirPath) => this.onFileRemoved(dirPath))
-      .on("error", (err) => logger.error("File watcher error: %s", err));
+      .on("error", (err) => log.error("File watcher error: %s", err));
 
-    logger.info("File watcher started for %s", this.projectRoot);
+    log.info("File watcher started for %s", this.projectRoot);
   }
 
   private startNativeRecursiveWatch(): void {
@@ -141,14 +142,14 @@ export class FileWatcher {
         },
       );
       this.nativeWatcher.on("error", (err) =>
-        logger.error("File watcher error: %s", err),
+        log.error("File watcher error: %s", err),
       );
-      logger.info(
+      log.info(
         "File watcher started (native recursive) for %s",
         this.projectRoot,
       );
     } catch (err) {
-      logger.error(
+      log.error(
         "native recursive watch failed (%s); falling back to chokidar",
         err,
       );
@@ -202,7 +203,7 @@ export class FileWatcher {
     this.watcher = null;
     this.nativeWatcher?.close();
     this.nativeWatcher = null;
-    logger.info("File watcher stopped for %s", this.projectId);
+    log.info("File watcher stopped for %s", this.projectId);
   }
 
   private onFileAdded(filePath: string): void {
@@ -289,7 +290,7 @@ export class FileWatcher {
       }),
     );
 
-    logger.debug(
+    log.debug(
       "tree:update — added: %d, modified: %d, removed: %d",
       added.length,
       modified.length,

@@ -1,10 +1,10 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../analytics/events.dart';
 import '../services/auth_service.dart';
 import '../services/devices_api.dart' show ProvisioningException;
+import '../util/ab_log.dart';
 import 'analytics.dart';
 import 'auth.dart';
 import 'device_provisioning.dart';
@@ -75,12 +75,18 @@ final postSignInProvisioningProvider = Provider<void>((ref) {
           // upgrade prompt (upgrading can't raise deviceLimit; it's flat).
           ref.read(deviceCapProvider.notifier).set(e.cap);
         } else {
-          debugPrint(
-            '[postSignInProvisioning] provisioning failed (${e.code}): ${e.message}',
+          AbLog.error(
+            'postSignInProvisioning',
+            'provisioning failed',
+            fields: {'code': e.code, 'message': e.message},
           );
         }
       } catch (e) {
-        debugPrint('[postSignInProvisioning] device provisioning failed: $e');
+        AbLog.error(
+          'postSignInProvisioning',
+          'device provisioning failed',
+          fields: {'error': '$e'},
+        );
       }
     }();
   }, fireImmediately: true);

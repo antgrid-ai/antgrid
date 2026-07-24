@@ -1,10 +1,10 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../services/app_settings_service.dart' show defaultRelayUrlProvider;
 import '../services/auth_service.dart' show CurrentUser;
+import '../util/ab_log.dart';
 import '../utils/platform_utils.dart';
 import 'agent_transport.dart' show localAgentLauncherProvider;
 import 'auth.dart' show currentUserProvider, licenseApiUrlProvider;
@@ -41,7 +41,7 @@ final localHostWarmupProvider = Provider<void>((ref) {
       spawnedWithDevice = device != null;
       warmedOnce = true;
     } catch (e) {
-      debugPrint('[localHostWarmup] warm-up failed (non-fatal): $e');
+      AbLog.warn('localHostWarmup', 'warm-up failed (non-fatal)', fields: {'error': '$e'});
     }
   }
 

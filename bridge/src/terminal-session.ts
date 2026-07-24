@@ -3,6 +3,7 @@ import type { IPty, IDisposable } from "bun-pty";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { delimiter, dirname, extname } from "node:path";
 import { logger } from "./logger";
+const log = logger.child({ component: "terminal-session" });
 import { createMessage, type AbMessage } from "./protocol";
 import { findOnPath } from "./tool-detector";
 import { TerminalNotificationScanner, type NotificationEvent } from "./notification-scanner";
@@ -38,7 +39,7 @@ function logPtyChunk(terminalId: string, data: string): void {
     appendFileSync(PTY_LOG_PATH, marker + data, "binary");
   } catch (e) {
     // Don't let logging failures break the agent.
-    logger.warn(`PTY log write failed: ${(e as Error).message}`);
+    log.warn(`PTY log write failed: ${(e as Error).message}`);
   }
 }
 
@@ -331,7 +332,7 @@ export class TerminalSession {
       cmd = this.shell;
       args = [];
     }
-    logger.info(`Spawning terminal "${this.terminalId}": ${cmd} ${args.join(" ")} (${this._cols}x${this._rows})`);
+    log.info(`Spawning terminal "${this.terminalId}": ${cmd} ${args.join(" ")} (${this._cols}x${this._rows})`);
 
     // Announce a terminal identity that agents recognize as OSC-9-capable so
     // they emit rich desktop notifications (with a message) instead of bare
@@ -398,7 +399,7 @@ export class TerminalSession {
         this._running = false;
         this.flushBatch();
         this.dispose();
-        logger.info(`Terminal "${this.terminalId}" exited with code ${exitCode}`);
+        log.info(`Terminal "${this.terminalId}" exited with code ${exitCode}`);
         this.onMessage(
           createMessage("terminal:exited", {
             terminalId: this.terminalId,
@@ -453,7 +454,7 @@ export class TerminalSession {
     this._driverClientId = clientId;
     this._cols = cols;
     this._rows = rows;
-    logger.info(`Terminal "${this.terminalId}" resized to ${cols}x${rows} by ${clientId}`);
+    log.info(`Terminal "${this.terminalId}" resized to ${cols}x${rows} by ${clientId}`);
     try {
       this.pty?.resize(cols, rows);
     } catch {

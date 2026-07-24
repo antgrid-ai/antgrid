@@ -10,6 +10,7 @@ import { codexResumeReplay } from "./codex-resume-replay";
 import { planElicitation, type FlatQuestion } from "./codex-elicitation";
 import { resolveConfigPick } from "../structured/set-config";
 import { logger } from "../logger";
+const log = logger.child({ component: "codex-driver" });
 
 // The slice of JsonRpcEndpoint the driver needs (injectable for tests).
 export interface CodexEndpoint {
@@ -151,7 +152,7 @@ export class CodexDriver {
         // Resume failed (thread deleted via codex's own tools, or a store
         // migration). Fall through to a fresh thread rather than a dead session;
         // the app clears the stale agentSessionId (see manager onAgentSession).
-        logger.warn(
+        log.warn(
           "codex thread/resume failed for session %s (thread %s); starting a fresh thread: %s",
           this.sessionId,
           resumeId,
@@ -184,7 +185,7 @@ export class CodexDriver {
       const completed = turns.filter((t) => t?.status === "completed");
       return codexResumeReplay(this.sessionId, { ...res?.thread, turns: completed });
     } catch (err) {
-      logger.warn(
+      log.warn(
         "codex thread/read failed for session %s (thread %s); returning empty transcript snapshot: %s",
         this.sessionId,
         this.threadId,
@@ -220,7 +221,7 @@ export class CodexDriver {
     } else {
       // Reachable when the app holds capabilities from another driver/session
       // (stale replay); the prompt still goes out, just without command routing.
-      if (commandId) logger.warn("codex: unrecognized commandId %s; sending as plain prompt", commandId);
+      if (commandId) log.warn("codex: unrecognized commandId %s; sending as plain prompt", commandId);
       input.push({ type: "text", text });
     }
     await this.ep.request("turn/start", {
@@ -288,7 +289,7 @@ export class CodexDriver {
     try {
       await this.discoverCapabilitiesInner();
     } catch (err) {
-      logger.warn("codex capability discovery failed for session %s: %s", this.sessionId, err);
+      log.warn("codex capability discovery failed for session %s: %s", this.sessionId, err);
     }
   }
 

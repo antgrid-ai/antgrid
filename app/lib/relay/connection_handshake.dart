@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter/foundation.dart';
 
+import '../util/ab_log.dart';
 import '../util/secure_nonce.dart';
 
 /// Runs ONE app-initiated v2-crypto handshake to `established` over a single
@@ -116,9 +117,9 @@ class ConnectionHandshake {
             sigB64: sig,
           );
           if (!ok) {
-            debugPrint(
-              'ConnectionHandshake.run: agent-hello v2 sig invalid '
-              '(possible MITM)',
+            AbLog.debug(
+              'ConnectionHandshake',
+              'agent-hello v2 sig invalid (possible MITM)',
             );
             keysFuture = null;
             return null;
@@ -167,9 +168,9 @@ class ConnectionHandshake {
           return;
         }
         if (!verifyConfirmTagV2(expectedAgentTag, presented)) {
-          debugPrint(
-            'ConnectionHandshake.run: agent-ready confirm tag invalid, '
-            'rejecting',
+          AbLog.debug(
+            'ConnectionHandshake',
+            'agent-ready confirm tag invalid, rejecting',
           );
           return;
         }
@@ -219,7 +220,7 @@ class ConnectionHandshake {
     } on TimeoutException {
       return null;
     } catch (e, st) {
-      debugPrint('ConnectionHandshake.run error: $e\n$st');
+      AbLog.error('ConnectionHandshake', 'run error', fields: {'error': '$e', 'stack': '$st'});
       return null;
     } finally {
       _appReadyTimer?.cancel();
@@ -258,7 +259,7 @@ class ConnectionHandshake {
         if (_cancelled) return;
         _relay.sendMessage(_machineDeviceId, 'control', sealed);
       } catch (e) {
-        debugPrint('ConnectionHandshake: app:ready seal/send failed: $e');
+        AbLog.error('ConnectionHandshake', 'app:ready seal/send failed', fields: {'error': '$e'});
       }
     }
 

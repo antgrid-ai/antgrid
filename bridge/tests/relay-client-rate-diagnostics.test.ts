@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { RelayClient } from "../src/relay-client";
 import { createMessage } from "../src/protocol";
+import { __setRootForTest } from "../src/logger";
 
 const RELAY_RATE_ERROR = JSON.stringify({
   type: "error",
@@ -11,7 +12,9 @@ const RELAY_RATE_ERROR = JSON.stringify({
 
 describe("RelayClient rate-limit diagnostics", () => {
   let client: RelayClient | null = null;
-  let errorSpy: ReturnType<typeof spyOn>;
+  // pino writes JSONL straight to its destination stream, bypassing console.*,
+  // so capture via the test root rather than spying on console.error.
+  let capturedLines: string[];
   let surfaced: Array<{ code: string; message: string }>;
 
   /** A paired, handshake-complete client whose socket and seal are inert, so a
@@ -61,18 +64,25 @@ describe("RelayClient rate-limit diagnostics", () => {
   }
 
   const logLines = (): string[] =>
-    errorSpy.mock.calls.map((args: unknown[]) => args.map(String).join(" "));
+    capturedLines.map((l) => (JSON.parse(l) as { msg: string }).msg);
 
   beforeEach(() => {
     surfaced = [];
-    errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    capturedLines = [];
+    __setRootForTest({
+      write(s: string): boolean {
+        capturedLines.push(s);
+        return true;
+      },
+    }, "debug");
   });
 
   afterEach(() => {
     client?.close();
     client = null;
-    errorSpy.mockRestore();
   });
+
+  afterAll(() => __setRootForTest(process.stdout));
 
   it("logs the project and recent outbound message types without flooding callbacks", () => {
     client = makeClient();
@@ -90,7 +100,7 @@ describe("RelayClient rate-limit diagnostics", () => {
       code: "MESSAGE_RATE_LIMITED",
       message: "Message rate limit exceeded",
     }]);
-    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(capturedLines.length).toBe(1);
 
     const log = logLines()[0];
     expect(log).toContain("device=dev-1");
@@ -100,7 +110,7 @@ describe("RelayClient rate-limit diagnostics", () => {
     expect(log).toContain("agent:turn-start/control=1 frame(s)");
 
     (client as any).finishRateLimitBurst();
-    expect(errorSpy).toHaveBeenCalledTimes(2);
+    expect(capturedLines.length).toBe(2);
     const summary = logLines()[1];
     expect(summary).toContain("rejectedFrames=2");
     expect(summary).toContain("duplicateCallbacksSuppressed=1");

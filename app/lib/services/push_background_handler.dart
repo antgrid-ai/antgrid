@@ -2,9 +2,9 @@ import 'dart:convert';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show openPushBlob;
-import 'package:flutter/foundation.dart';
 import 'package:push/push.dart';
 
+import '../util/ab_log.dart';
 import 'local_notification_service.dart';
 import 'push_identity.dart';
 
@@ -97,6 +97,10 @@ Future<void> pushBackgroundHandler(RemoteMessage message) async {
     await notifications.init();
     await notifications.show(title: decoded.title, body: decoded.body);
   } catch (e) {
-    debugPrint('pushBackgroundHandler failed: $e');
+    AbLog.error(
+      'PushBackgroundHandler',
+      'pushBackgroundHandler failed',
+      fields: {'error': '$e'},
+    );
   }
 }

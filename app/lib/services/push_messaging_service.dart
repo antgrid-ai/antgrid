@@ -6,6 +6,7 @@ import 'package:push/push.dart';
 
 import '../models/ab_message.dart';
 import '../project/project_session.dart';
+import '../util/ab_log.dart';
 import 'push_identity.dart';
 
 class PushMessagingService {
@@ -86,7 +87,11 @@ class PushMessagingService {
         _setTokenAndRegister(t, sessions(), provider: _provider).catchError((
           Object e,
         ) {
-          debugPrint('PushMessagingService token-refresh register failed: $e');
+          AbLog.error(
+            'PushMessagingService',
+            'token-refresh register failed',
+            fields: {'error': '$e'},
+          );
         }),
       );
     });
@@ -106,7 +111,7 @@ class PushMessagingService {
     } on TimeoutException {
       // Worth logging: with no token every later registerNewSessions returns
       // early, so the whole push path goes quiet with nothing to show for it.
-      debugPrint('PushMessagingService: token read timed out after 30s');
+      AbLog.warn('PushMessagingService', 'token read timed out after 30s');
       token = null;
     }
     if (token != null) {
@@ -125,7 +130,11 @@ class PushMessagingService {
           >();
       await android?.requestNotificationsPermission();
     } catch (e) {
-      debugPrint('POST_NOTIFICATIONS request failed: $e');
+      AbLog.error(
+        'PushMessagingService',
+        'POST_NOTIFICATIONS request failed',
+        fields: {'error': '$e'},
+      );
     }
   }
 
@@ -215,7 +224,11 @@ class PushMessagingService {
       // One closed/failing transport must not abort the rest of the sessions.
       // Un-mark so a later registerNewSessions pass retries this one.
       _registered.remove(s.projectId);
-      debugPrint('push:register failed for ${s.projectId}: $e');
+      AbLog.error(
+        'PushMessagingService',
+        'push:register failed',
+        fields: {'projectId': s.projectId, 'error': '$e'},
+      );
     }
   }
 
@@ -261,7 +274,11 @@ class PushMessagingService {
         );
       } catch (e) {
         // One failing transport must not block clearing the rest.
-        debugPrint('push:register clear failed for ${s.projectId}: $e');
+        AbLog.error(
+          'PushMessagingService',
+          'push:register clear failed',
+          fields: {'projectId': s.projectId, 'error': '$e'},
+        );
       }
     }
   }

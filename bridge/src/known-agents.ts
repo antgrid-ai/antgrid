@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { logger } from "./logger";
+const log = logger.child({ component: "known-agents" });
 import { resolveHookCommand, type HookCommand } from "./hook-command";
 import { resolveAbDir } from "./antgrid-dir";
 
@@ -152,7 +153,7 @@ function ensureJsonConfig(abDir: string, filename: string, content: unknown): st
     writeFileSync(path, JSON.stringify(content, null, 2));
     return path;
   } catch (err) {
-    logger.warn(`failed to write agent config ${path}: ${err}`);
+    log.warn(`failed to write agent config ${path}: ${err}`);
     return null;
   }
 }

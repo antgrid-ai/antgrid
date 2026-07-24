@@ -3,6 +3,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join, basename } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { logger } from "./logger";
+const log = logger.child({ component: "config" });
 import { resolveAbDir } from "./antgrid-dir";
 
 export const AgentBlockSchema = z.object({
@@ -113,7 +114,7 @@ function resolveAll(cfg: AbConfig): AbConfig {
 export function loadConfig(configPath?: string, folder?: string): AbConfig {
   const filePath = configPath ?? findConfigFile(folder);
   if (!filePath || !existsSync(filePath)) {
-    logger.debug("No antgrid.yaml found, using defaults");
+    log.debug("No antgrid.yaml found, using defaults");
     return DEFAULT_CONFIG;
   }
   const raw = readFileSync(filePath, "utf8");

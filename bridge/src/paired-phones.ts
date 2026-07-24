@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, watch as fsWatch } from "node:fs";
 import { join } from "node:path";
 import { logger } from "./logger";
+const log = logger.child({ component: "paired-phones" });
 
 export type PhoneAdmission = "same-account" | "pair-code";
 
@@ -151,7 +152,7 @@ export function loadPairedPhones(abDir: string): PairedPhonesStore {
       });
       // FSWatcher emits async 'error' events (EPERM/ENOENT on Windows when the
       // dir is locked or removed); unhandled, Node rethrows them as uncaught.
-      w.on("error", (err) => logger.error("paired-phones watcher error: %s", err));
+      w.on("error", (err) => log.error("paired-phones watcher error: %s", err));
       return () => { if (timer) clearTimeout(timer); w.close(); };
     },
   };
@@ -173,7 +174,7 @@ function readFile(path: string): PairedPhone[] {
     // why. One line turns an undiagnosable support ticket into a self-evident one.
     const dropped = parsed.phones.length - kept.length;
     if (dropped > 0) {
-      logger.warn(
+      log.warn(
         "paired-phones: dropped %d phone(s) with no admission field (paired before the admission migration); re-pair required",
         dropped,
       );

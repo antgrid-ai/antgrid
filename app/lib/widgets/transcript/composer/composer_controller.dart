@@ -2,6 +2,8 @@ import 'package:fleather/fleather.dart';
 import 'package:flutter/widgets.dart';
 import 'package:parchment/codecs.dart';
 
+import '../../../util/ab_log.dart';
+
 /// Adapter around [FleatherController] exposing exactly what the transcript
 /// composer needs. Fleather stays an implementation detail of the composer
 /// module — the transcript view never imports fleather directly.
@@ -58,7 +60,11 @@ class ComposerController extends ChangeNotifier {
       // Degrade to plain text so a codec bug never blocks send, but surface it
       // in debug so the underlying document-state defect stays diagnosable
       // instead of silently recurring.
-      debugPrint('composer: markdown encode failed, sending plain text: $e');
+      AbLog.warn(
+        'Composer',
+        'markdown encode failed, sending plain text',
+        fields: {'error': '$e'},
+      );
       return fleather.document.toPlainText().trim();
     }
   }

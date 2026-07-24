@@ -1,6 +1,7 @@
 import { TerminalSession, buildSpawnEnv } from "./terminal-session";
 import { ScrollbackBuffer } from "./scrollback";
 import { logger } from "./logger";
+const log = logger.child({ component: "terminal-manager" });
 import { createMessage, type AbMessage } from "./protocol";
 import type { ConnState } from "./conn-state";
 
@@ -72,7 +73,7 @@ export class TerminalManager {
     const terminalId = config.terminalId ?? crypto.randomUUID();
 
     if (this.sessions.has(terminalId)) {
-      logger.warn(`Terminal "${terminalId}" already exists, killing first`);
+      log.warn(`Terminal "${terminalId}" already exists, killing first`);
       this.kill(terminalId);
     }
 
@@ -145,14 +146,14 @@ export class TerminalManager {
       try { fn(session); } catch { /* ignore */ }
     }
     session.spawn();
-    logger.info(`Terminal "${terminalId}" spawned (${config.name ?? "shell"})`);
+    log.info(`Terminal "${terminalId}" spawned (${config.name ?? "shell"})`);
     return terminalId;
   }
 
   kill(terminalId: string): void {
     const session = this.sessions.get(terminalId);
     if (!session) {
-      logger.warn(`Terminal "${terminalId}" not found`);
+      log.warn(`Terminal "${terminalId}" not found`);
       return;
     }
     session.kill();
@@ -186,7 +187,7 @@ export class TerminalManager {
 
     // Force-kill survivors
     if (this.sessions.size > 0) {
-      logger.warn("Force-killing %d surviving terminal(s)", this.sessions.size);
+      log.warn("Force-killing %d surviving terminal(s)", this.sessions.size);
       this.killAll();
     }
 
@@ -202,7 +203,7 @@ export class TerminalManager {
   ): void {
     const session = this.sessions.get(terminalId);
     if (!session) {
-      logger.warn(`Terminal "${terminalId}" not found for resize`);
+      log.warn(`Terminal "${terminalId}" not found for resize`);
       return;
     }
     const prevCols = session.cols;
@@ -214,7 +215,7 @@ export class TerminalManager {
       clientId !== prevDriver &&
       baseDriverClientId !== prevDriver
     ) {
-      logger.info(
+      log.info(
         `Ignoring stale resize for terminal "${terminalId}" from ${clientId}; ` +
           `based on ${baseDriverClientId}, current driver is ${prevDriver}`,
       );
@@ -244,7 +245,7 @@ export class TerminalManager {
   write(terminalId: string, data: string): void {
     const session = this.sessions.get(terminalId);
     if (!session) {
-      logger.warn(`Terminal "${terminalId}" not found for write`);
+      log.warn(`Terminal "${terminalId}" not found for write`);
       return;
     }
     session.write(data);

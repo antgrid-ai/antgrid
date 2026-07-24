@@ -38,6 +38,7 @@ import '../services/local_notification_service.dart';
 import '../services/push_background_handler.dart'
     show decodePush, pushDataOf, pushDedupKey;
 import '../services/push_identity.dart';
+import '../util/ab_log.dart';
 import '../utils/notification_routing.dart';
 import '../widgets/agent_panel.dart';
 import '../widgets/mobile_bottom_nav.dart';
@@ -149,7 +150,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           _onAgentNotification(title: decoded.title, body: decoded.body);
         } catch (e) {
           // Async listener: an uncaught throw here is an unhandled rejection.
-          debugPrint('foreground push failed: $e');
+          AbLog.error('WorkspaceShell', 'foreground push failed', fields: {'error': '$e'});
         }
       });
     }

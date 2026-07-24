@@ -1,5 +1,6 @@
 import { createMessage, type AbMessage } from "./protocol";
 import { logger } from "./logger";
+const log = logger.child({ component: "file-search" });
 
 type SearchEngine = "ripgrep" | "git-grep";
 
@@ -12,7 +13,7 @@ async function detectEngine(): Promise<SearchEngine> {
     await proc.exited;
     if (proc.exitCode === 0) {
       cachedEngine = "ripgrep";
-      logger.info("Search engine: ripgrep");
+      log.info("Search engine: ripgrep");
       return "ripgrep";
     }
   } catch {}
@@ -21,7 +22,7 @@ async function detectEngine(): Promise<SearchEngine> {
     await proc.exited;
     if (proc.exitCode === 0) {
       cachedEngine = "git-grep";
-      logger.info("Search engine: git-grep");
+      log.info("Search engine: git-grep");
       return "git-grep";
     }
   } catch {}

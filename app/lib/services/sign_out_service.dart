@@ -1,5 +1,4 @@
 import 'package:collection/collection.dart';
-import 'package:flutter/foundation.dart';
 
 import 'auth_service.dart';
 import 'devices_api.dart';
@@ -7,6 +6,7 @@ import 'keychain_device_store.dart';
 import 'phone_identity.dart';
 import 'push_identity.dart';
 import '../storage/recent_agents_store.dart';
+import '../util/ab_log.dart';
 
 /// Orchestrates a **hard** sign-out: revoke this device on the account, then
 /// wipe every piece of local identity and connection state so the app lands in
@@ -116,6 +116,6 @@ class SignOutService {
   }
 
   static void _debugReport(Object error, StackTrace stack) {
-    if (kDebugMode) debugPrint('SignOutService: $error');
+    AbLog.error('SignOutService', '$error');
   }
 }

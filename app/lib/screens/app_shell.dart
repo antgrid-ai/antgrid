@@ -17,6 +17,7 @@ import '../providers/ui_attention_providers.dart';
 import '../services/control_plane_client.dart';
 import '../storage/cached_sessions_store.dart';
 import '../launcher/host_control_client.dart';
+import '../util/ab_log.dart';
 import 'new_session_screen.dart';
 import 'workspace_shell.dart';
 
@@ -77,7 +78,7 @@ class _AppShellState extends ConsumerState<AppShell> {
     final notifier = ref.read(pairedAgentProvider.notifier);
     final agent = ref.read(activeAgentProvider);
     if (agent != null) {
-      debugPrint('App resumed, reconnecting to relay...');
+      AbLog.info('AppShell', 'app resumed, reconnecting to relay');
       notifier.ensureListenersRunning(agent).ignore();
     }
   }

@@ -3,6 +3,7 @@ import { readFile, writeFile, rename, chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { logger } from "./logger";
+const log = logger.child({ component: "session-manager" });
 import { resolveAgent, resolveAgentEnv, notificationSourceFor, titleSourceFor } from "./known-agents";
 import { augmentAgentLaunch, injectsHookAliveProbe } from "./agent-launch-augmenter";
 import { resumeArgv, sessionResumable } from "./agent-resume";
@@ -165,7 +166,7 @@ function parsePersistedContent(raw: string | null): PersistedEntry[] {
     }
     return out;
   } catch (err) {
-    logger.warn("sessions.json unreadable, treating as empty: %s", err);
+    log.warn("sessions.json unreadable, treating as empty: %s", err);
     return [];
   }
 }
@@ -525,7 +526,7 @@ export class SessionManager {
       return;
     }
     if (this.tm.has(id)) {
-      logger.warn(`session ${id} already running`);
+      log.warn(`session ${id} already running`);
       return;
     }
 
@@ -787,7 +788,7 @@ export class SessionManager {
     try {
       if (existsSync(this.path)) raw = readFileSync(this.path, "utf8");
     } catch (err) {
-      logger.warn("sessions.json unreadable, treating as empty: %s", err);
+      log.warn("sessions.json unreadable, treating as empty: %s", err);
     }
     for (const e of parsePersistedContent(raw)) this.entries.set(e.id, e);
   }
@@ -814,7 +815,7 @@ export class SessionManager {
         try { chmodSync(this.path, 0o600); } catch { /* ignore */ }
       }
     } catch (err) {
-      logger.error("failed to persist sessions.json: %s", err);
+      log.error("failed to persist sessions.json: %s", err);
     }
   }
 }
