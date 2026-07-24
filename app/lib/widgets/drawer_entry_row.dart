@@ -291,7 +291,10 @@ class _DrawerEntryTrailing extends ConsumerWidget {
             mainAxisSize: MainAxisSize.min,
             spacing: AbTokens.space4,
             children: [
-              _NewSessionButton(entry: entry),
+              // No per-machine "New session" +: a machine is a container, not a
+              // project, so a session must name a project. The + lives on each
+              // advertised project row instead (see `_AdvertisedProjectRow`).
+              if (entry.machineUuid == null) _NewSessionButton(entry: entry),
               _RemoveButton(entry: entry),
             ],
           ),

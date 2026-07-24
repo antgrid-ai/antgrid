@@ -546,7 +546,21 @@ class _AdvertisedProjectRow extends ConsumerWidget {
                 color: t.textSecondary,
               ),
             ),
-            trailing: _ProjectRunStateIcon(running: project.running),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              spacing: AbTokens.space4,
+              children: [
+                // Create a session in THIS project (not the machine): lands on
+                // New Session already targeting it — the user only picks the
+                // agent and hits Start.
+                AbIconButton(
+                  icon: AbIcons.add,
+                  tooltip: 'New session',
+                  onTap: () => _newSessionForProject(context, ref),
+                ),
+                _ProjectRunStateIcon(running: project.running),
+              ],
+            ),
             margin: const EdgeInsets.symmetric(vertical: AbTokens.space2),
             onTap: () =>
                 ref.read(expandedDrawerIdsProvider.notifier).toggle(regId),
@@ -555,6 +569,20 @@ class _AdvertisedProjectRow extends ConsumerWidget {
         if (expanded) _ProjectSessions(regId: regId),
       ],
     );
+  }
+
+  void _newSessionForProject(BuildContext context, WidgetRef ref) {
+    enterNewSessionForRemoteProject(
+      ref,
+      machineUuid: machineUuid,
+      project: project,
+    );
+    // Mobile: the drawer is a slide-in overlay — close it so the New Session
+    // page is visible. No-op on desktop (drawer is always-on, not a route).
+    final scaffold = Scaffold.maybeOf(context);
+    if (scaffold?.hasDrawer == true && scaffold!.isDrawerOpen) {
+      Navigator.of(context).pop();
+    }
   }
 }
 
