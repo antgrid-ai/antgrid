@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -5,12 +6,12 @@ import 'package:antgrid/models/qr_payload.dart';
 import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/auth.dart';
+import 'package:antgrid/providers/connection_identity.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/recent_agents.dart';
 import 'package:antgrid/providers/relay_connection.dart';
 import 'package:antgrid/services/auth_service.dart';
-import 'package:antgrid/services/pairing_service.dart';
-import 'package:antgrid/services/phone_identity.dart';
+import 'package:antgrid/services/keychain_device_store.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_status.dart';
 import 'package:antgrid/project/project_status_cache.dart';
@@ -42,45 +43,20 @@ class _MemoryStorageService extends StorageService {
   }
 }
 
-class _FailOncePairingService extends PairingService {
-  _FailOncePairingService(this._recentAgentsStore)
-    : super(
-        relay: RelayService(crypto: CryptoService()),
-        phoneIdentity: PhoneIdentity.inMemory(),
-        recentAgentsStore: _recentAgentsStore,
-        registrationId: 'M.project',
-      );
-
-  final RecentAgentsStore _recentAgentsStore;
-  var attempts = 0;
+/// Fails the FIRST persist, then succeeds — models a QR import that dies
+/// half-way so the retry path can be exercised.
+class _FailOnceStorageService extends StorageService {
+  List<PairedAgent> agents = <PairedAgent>[];
+  var saves = 0;
 
   @override
-  Future<RecentAgent> pairWithAgent(
-    QrPayload qr,
-    DeviceIdentity identity, {
-    String? label,
-  }) async {
-    attempts++;
-    if (attempts == 1) {
-      throw PairException('first pair attempt failed');
-    }
-    final recent = _recent(qr.agentDeviceId);
-    await _recentAgentsStore.upsert(recent);
-    return recent;
-  }
-}
+  Future<List<PairedAgent>> loadPairedAgents() async => List.of(agents);
 
-class _StubDeviceIdentityNotifier extends DeviceIdentityNotifier {
   @override
-  Future<DeviceIdentity> build() async {
-    return DeviceIdentity(
-      deviceId: 'phone-device',
-      name: 'Test Phone',
-      ed25519PrivateKey: Uint8List(64),
-      ed25519PublicKey: Uint8List(32),
-      x25519PrivateKey: Uint8List(32),
-      x25519PublicKey: Uint8List(32),
-    );
+  Future<void> savePairedAgents(List<PairedAgent> next) async {
+    saves++;
+    if (saves == 1) throw PairException('first import attempt failed');
+    agents = List.of(next);
   }
 }
 
@@ -94,8 +70,6 @@ RecentAgent _recent(String id) {
     agentLabel: id,
     agentEd25519Pubkey: 'agent-pubkey',
     relayUrl: 'ws://relay.test',
-    phoneDeviceId: 'phone',
-    phoneEd25519Pubkey: 'phone-pubkey',
     pairedAt: now,
     lastConnectedAt: now,
   );
@@ -109,7 +83,6 @@ void main() {
       ProviderContainer container,
       RecentAgentsStore recentStore,
       _MemoryStorageService storage,
-      PhoneIdentity phoneIdentity,
     })
   >
   buildContainer({
@@ -122,7 +95,6 @@ void main() {
       await recentStore.upsert(agent);
     }
     final storage = _MemoryStorageService(paired);
-    final phoneIdentity = PhoneIdentity.inMemory();
     // forgetMachine purges each forgotten agent's per-entry footprint, so the
     // container must provide the stores purgeEntryState reads.
     final cachedSessions = await CachedSessionsStore.open();
@@ -135,7 +107,6 @@ void main() {
       overrides: [
         storageServiceProvider.overrideWithValue(storage),
         recentAgentsStoreProvider.overrideWithValue(recentStore),
-        phoneIdentityProvider.overrideWithValue(phoneIdentity),
         cachedSessionsStoreProvider.overrideWithValue(cachedSessions),
         recentPortsStoreProvider.overrideWithValue(recentPorts),
         projectStatusCacheProvider.overrideWithValue(statusCache),
@@ -152,12 +123,7 @@ void main() {
         // Windows teardown handle race — harmless.
       }
     });
-    return (
-      container: container,
-      recentStore: recentStore,
-      storage: storage,
-      phoneIdentity: phoneIdentity,
-    );
+    return (container: container, recentStore: recentStore, storage: storage);
   }
 
   test(
@@ -207,9 +173,9 @@ void main() {
         paired: [_paired('M.project'), _paired('N.project')],
         recent: [_recent('M.project'), _recent('N.project')],
       );
-      h.container.read(selectedTargetProvider.notifier).set(
-        const RemoteTarget.legacy('M.project'),
-      );
+      h.container
+          .read(selectedTargetProvider.notifier)
+          .set(const RemoteTarget.legacy('M.project'));
       await h.container.read(pairedAgentProvider.future);
 
       await h.container
@@ -250,23 +216,6 @@ void main() {
       expect(mgr.peek('N.project'), isNotNull);
     },
   );
-
-  test('forgetMachine deletes only the forgotten machine keypair', () async {
-    final h = await buildContainer(
-      paired: [_paired('M.project'), _paired('N.project')],
-      recent: [_recent('M.project'), _recent('N.project')],
-    );
-    final mBefore = await h.phoneIdentity.ensureKeypair('M');
-    final nBefore = await h.phoneIdentity.ensureKeypair('N');
-    await h.container.read(pairedAgentProvider.future);
-
-    await h.container.read(pairedAgentProvider.notifier).forgetMachine('M');
-
-    final mAfter = await h.phoneIdentity.ensureKeypair('M');
-    final nAfter = await h.phoneIdentity.ensureKeypair('N');
-    expect(mAfter.pubkeyB64, isNot(mBefore.pubkeyB64));
-    expect(nAfter.pubkeyB64, nBefore.pubkeyB64);
-  });
 
   test(
     'forgetMachine purges cached sessions + status cache for its agents',
@@ -321,7 +270,6 @@ void main() {
         overrides: [
           storageServiceProvider.overrideWithValue(storage),
           recentAgentsStoreProvider.overrideWithValue(recentStore),
-          phoneIdentityProvider.overrideWithValue(PhoneIdentity.inMemory()),
           cachedSessionsStoreProvider.overrideWithValue(cachedSessions),
           recentPortsStoreProvider.overrideWithValue(recentPorts),
           projectStatusCacheProvider.overrideWithValue(statusCache),
@@ -340,17 +288,14 @@ void main() {
     },
   );
 
-  test('pair can retry after a failed pair attempt', () async {
+  test('a QR import can retry after a failed attempt', () async {
     useInMemoryPrefs();
     final recentStore = await RecentAgentsStore.open();
-    final storage = _MemoryStorageService([]);
-    final phoneIdentity = PhoneIdentity.inMemory();
-    final pairing = _FailOncePairingService(recentStore);
+    final storage = _FailOnceStorageService();
     final container = ProviderContainer(
       overrides: [
         storageServiceProvider.overrideWithValue(storage),
         recentAgentsStoreProvider.overrideWithValue(recentStore),
-        phoneIdentityProvider.overrideWithValue(phoneIdentity),
         currentUserProvider.overrideWith(
           (_) async => CurrentUser(
             userId: 'user-1',
@@ -358,8 +303,18 @@ void main() {
             tier: 'pro',
           ),
         ),
-        deviceIdentityProvider.overrideWith(_StubDeviceIdentityNotifier.new),
-        pairingServiceForProvider('M.project').overrideWithValue(pairing),
+        connectionDeviceRecordProvider.overrideWith(
+          (_) async => DeviceRecord(
+            userId: 'user-1',
+            deviceUuid: 'controller-uuid',
+            clientId: 'cid',
+            clientSecret: 'csec',
+            ed25519Pub: base64Encode(List<int>.filled(32, 1)),
+            ed25519Priv: base64Encode(List<int>.filled(32, 2)),
+            x25519Pub: base64Encode(List<int>.filled(32, 3)),
+            x25519Priv: base64Encode(List<int>.filled(32, 4)),
+          ),
+        ),
       ],
     );
     addTearDown(container.dispose);
@@ -369,18 +324,25 @@ void main() {
       relayUrl: 'ws://relay.test',
       agentDeviceId: 'M.project',
       agentEd25519PublicKey: Uint8List(32),
-      pairCode: 'pair-code',
       agentName: 'Machine M',
     );
 
     await expectLater(
-      container.read(pairedAgentProvider.notifier).pair(qr),
+      container.read(pairedAgentProvider.notifier).importCoordinates(qr),
       throwsA(isA<PairException>()),
     );
 
-    await container.read(pairedAgentProvider.notifier).pair(qr);
+    await container.read(pairedAgentProvider.notifier).importCoordinates(qr);
 
-    expect(pairing.attempts, 2);
+    expect(
+      storage.saves,
+      2,
+      reason: 'the AsyncError must not wedge the import',
+    );
     expect(storage.agents.map((a) => a.agentDeviceId), ['M.project']);
+    // The QR is now a pure coordinate import: it persists a dialable
+    // RecentAgent row and nothing else.
+    expect(recentStore.list().map((r) => r.agentDeviceId), ['M.project']);
+    expect(recentStore.list().single.relayUrl, 'ws://relay.test');
   });
 }

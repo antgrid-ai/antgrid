@@ -1,11 +1,12 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   allocatePort,
+  generateAppIdentity,
   generateEvalAuth,
+  handshakeWithoutPairing,
   spawnAgent,
   startFakeLicenseApi,
   startRelay,
@@ -13,17 +14,12 @@ import {
   type FakeLicenseApi,
   type RelayHandle,
 } from "../helpers/harness";
-import { RelayClient, PairAgentOfflineError } from "../helpers/relay-client";
+import { RelayClient } from "../helpers/relay-client";
 import { createTestProject } from "../helpers/fixtures";
 import { createMessage } from "../../bridge/src/protocol";
 import { loadPairedPhones } from "../../bridge/src/paired-phones";
 import { readHostFile } from "../../bridge/src/host-discovery";
 import { computeProjectId } from "../../bridge/src/project-id";
-
-function rawEdPubB64(pub: import("node:crypto").KeyObject): string {
-  const der = pub.export({ format: "der", type: "spki" });
-  return Buffer.from(der.subarray(der.length - 32)).toString("base64");
-}
 
 /**
  * `store.allowProject` no-ops (skips its internal `flush()`, so no NEW
@@ -99,10 +95,10 @@ async function drillIntoProject(app: RelayClient, projectId: string, timeoutMs =
  *     `control:result{ok:false, error:{code:SESSION_LIMIT_EXCEEDED}}}` to the
  *     requesting phone (host-server.ts's `reportFirstRegister`), while the
  *     already-open project stream and the socket stay fully functional.
- *     `setupPairFlowTestEnv`/`setupTestEnv` don't forward a `sessionLimit`
- *     override (test-env.ts's `startRelay` call is hardcoded), so this test
- *     bootstraps directly (spawnAgent + startRelay({sessionLimit:1})) —
- *     mirroring harness.ts's setupTestEnv internals, which aren't exported.
+ *     `setupTestEnv` doesn't forward a `sessionLimit` override (its own
+ *     `startRelay` call is hardcoded), so this test bootstraps directly
+ *     (spawnAgent + startRelay({sessionLimit:1})) — mirroring harness.ts's
+ *     setupTestEnv internals, which aren't exported.
  */
 describe("gate: sessionLimit — relay admission (ref field)", () => {
   let relay: RelayHandle;
@@ -157,19 +153,18 @@ describe("gate: sessionLimit — end-to-end phone-visible failure", () => {
   let projectDir: string;
   let projectId: string;
   let deviceUuid: string;
-  let accountKp: { publicKey: import("node:crypto").KeyObject; privateKey: import("node:crypto").KeyObject };
-  let accountPubB64: string;
 
   beforeAll(async () => {
     const port = allocatePort();
     abDir = mkdtempSync(join(tmpdir(), "antgrid-gate-session-limit-"));
-    accountKp = generateKeyPairSync("ed25519");
-    accountPubB64 = rawEdPubB64(accountKp.publicKey);
+    const appIdentity = await generateAppIdentity();
 
     // sessionLimit:1 — firstProject's own boot-time remote attach exhausts it,
     // so the very next project:start is guaranteed to push the agent over cap.
-    relay = await startRelay({ port, pairRequestTimeoutMs: 15_000, sessionLimit: 1 });
-    licenseApi = startFakeLicenseApi({ accountPeerKeys: [accountPubB64] });
+    relay = await startRelay({ port, sessionLimit: 1 });
+    licenseApi = startFakeLicenseApi({
+      accountDevices: [{ deviceId: appIdentity.deviceId, ed25519Pub: appIdentity.publicKeyBase64 }],
+    });
     const auth = generateEvalAuth();
     deviceUuid = auth.deviceUuid;
     const project = createTestProject("basic", { "__RELAY_URL__": `ws://localhost:${port}` });
@@ -181,25 +176,15 @@ describe("gate: sessionLimit — end-to-end phone-visible failure", () => {
       env: { ANTGRID_EVAL_TEST: "1" },
     });
 
-    app = await RelayClient.connectAndAuth(relay.url, { deviceType: "app", name: "gate-session-limit-app" });
-    for (let i = 0; i < 30; i++) {
-      try {
-        const r = await app.pairWith(deviceUuid, {
-          timeoutMs: 8_000,
-          accountKey: { pubB64: accountPubB64, privateKey: accountKp.privateKey },
-        });
-        app.setPeerId(r.peerId);
-        break;
-      } catch (err) {
-        if (err instanceof PairAgentOfflineError) {
-          if (app.isClosed) await app.reconnectAndAuth(relay.url);
-          await Bun.sleep(200);
-          continue;
-        }
-        throw err;
-      }
-    }
-    await app.performE2EHandshake(deviceUuid, 10_000, { agentEd25519Pub: auth.ed25519Pub });
+    app = await RelayClient.connectAndAuth(relay.url, {
+      deviceType: "app",
+      name: "gate-session-limit-app",
+      identity: appIdentity,
+      deviceId: appIdentity.deviceId,
+    });
+    // Never a pair-request: admission is relay same-account routing + bridge
+    // inventory trust.
+    await handshakeWithoutPairing(app, deviceUuid, auth.ed25519Pub);
     await allowProjectForPairedPhones(abDir, projectId);
   });
 
@@ -238,8 +223,8 @@ describe("gate: sessionLimit — end-to-end phone-visible failure", () => {
       // write vs. the agent's own occasional writes to the same
       // paired-phones.json); a single project:start can land on a not-yet-
       // reloaded view and get a stale NOT_ALLOWED. Retry a few times rather
-      // than chase the exact race — same spirit as this file's pairWith
-      // retries and harness.ts's documented fs.watch-debounce wait.
+      // than chase the exact race — same spirit as harness.ts's documented
+      // fs.watch-debounce wait.
       let rejection: any;
       for (let attempt = 0; attempt < 5; attempt++) {
         const controlResultP = app.waitFor((m: any) => m.type === "control:result" && m.verb === "project:start", 5_000);

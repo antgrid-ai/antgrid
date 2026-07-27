@@ -21,7 +21,7 @@ function fakeRemoteConfig(): HostRemoteConfig {
 }
 
 function fakeRuntime(): RemoteRuntime {
-  return { maint: { getToken: () => "tok", stop: () => {} }, getAccountPeerKeys: async () => new Set<string>() };
+  return { maint: { getToken: () => "tok", stop: () => {} } };
 }
 
 // A machine-relay-client stub whose promoted stream is admitted the instant it
@@ -84,7 +84,6 @@ test("starts an allowed stopped project; rejects a non-allowed one", async () =>
     phoneDeviceId: "d1",
     pairedAt: "x",
     lastSeenAt: "x",
-    admission: "pair-code",
     allowedProjects: ["projA"],
   });
   const bus = new MessageBus();
@@ -107,7 +106,6 @@ test("rejects an allowed projectId with no path on record (UNKNOWN_PROJECT, no c
     phoneDeviceId: "d1",
     pairedAt: "x",
     lastSeenAt: "x",
-    admission: "pair-code",
     allowedProjects: ["ghost"],
   });
   const bus = new MessageBus();
@@ -142,7 +140,6 @@ test("open() throwing resolves to OPEN_FAILED (never rejects into the void calle
     phoneDeviceId: "d1",
     pairedAt: "x",
     lastSeenAt: "x",
-    admission: "pair-code",
     allowedProjects: ["boom"],
   });
   const bus = new MessageBus();
@@ -175,7 +172,6 @@ test("idempotent project:start on an already-promoted, relay-registered core re-
     phoneDeviceId: "d1",
     pairedAt: "x",
     lastSeenAt: "x",
-    admission: "pair-code",
     allowedProjects: ["projX"],
   });
 

@@ -12,6 +12,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
     show LocalTransportHandshakeException, RelayConnectionState;
 
+import '../connection/relay_mechanisms.dart' show ConnectionBlockedException;
+import '../connection/supervisor_state.dart'
+    show BlockReason, Blocked, SupervisorStatus;
 import '../constants/breakpoints.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
@@ -31,9 +34,9 @@ import '../providers/new_session_picker.dart'
 import '../providers/providers.dart';
 import '../providers/relay_error_banner.dart';
 import '../providers/sessions.dart';
+import '../providers/supervisor_status.dart';
 import '../providers/ui_attention_providers.dart';
 import '../providers/value_controller.dart';
-import '../services/attach_hydration.dart';
 import '../services/local_notification_service.dart';
 import '../services/push_background_handler.dart'
     show decodePush, pushDataOf, pushDedupKey;
@@ -48,6 +51,7 @@ import '../design/widgets/pulsing_opacity.dart';
 import '../widgets/resizable_pane.dart';
 import '../widgets/workspace_tab_bar.dart';
 import '../widgets/ab_banner.dart';
+import '../widgets/ab_host_banner.dart';
 import '../widgets/workspace_panel.dart';
 import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
@@ -414,13 +418,13 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       if (ref.read(selectedRegistrationIdProvider) != triggeredFor) return;
       ref.read(activeSessionIdProvider.notifier).set(active.first.id);
       final session = active.first;
-      var entry = session;
       if (!session.running) {
-        entry = await svc.start(session.id) ?? session;
+        await svc.start(session.id);
         if (!mounted) return;
         if (ref.read(selectedRegistrationIdProvider) != triggeredFor) return;
       }
-      hydrateAttachedChatIfNeeded(ref, entry);
+      // Transcript hydration is driven by AgentTranscriptView.initState (the
+      // single per-session chokepoint), not here — see hydrateAttachedChatIfNeeded.
       // Bump server-side lastUsedAt so a second app connecting later sees
       // the actual recency (parity with manual tap in session_row.dart).
       svc.focus(session.id);
@@ -547,27 +551,32 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     final sessionError = (sessionAsync == null || sessionAsync.isLoading)
         ? null
         : sessionAsync.error;
-    if (transportError != null || sessionError != null) {
-      return _LocalLaunchErrorScreen(
-        error: (transportError ?? sessionError)!,
-        projectId: activeProjectId,
-        onRetry: activeProjectId == null
-            ? null
-            : () {
-                // Drop the static dedupe entry too: if the prior failure
-                // settled (which it did, by definition — we have an error),
-                // it's already gone, but invalidating the providers also
-                // guarantees fresh family-entry builds rather than re-using
-                // a cached error.
-                // `agentTransportProvider` is a pure forwarder over the
-                // family; invalidating the family entry is enough.
-                ref.invalidate(projectSessionProvider(activeProjectId));
-                ref.invalidate(agentTransportForProvider(activeProjectId));
-              },
-        onBack: () => ref.read(selectedTargetProvider.notifier).set(null),
+    // Remote targets only: a local project has no machine socket, so no
+    // supervisor — and its id is not a machine uuid to look one up by.
+    final isRemoteTarget = ref.watch(selectedTargetProvider)?.isLocal == false;
+    final liveStatus = (isRemoteTarget && activeProjectId != null)
+        ? ref.watch(supervisorStatusProvider(activeProjectId)).value
+        : null;
+    final blockingError = workspaceBlockingError(
+      transportError: transportError,
+      sessionError: sessionError,
+      liveStatus: liveStatus,
+    );
+    if (blockingError != null) {
+      // The host banner must survive this early return: a dead LOCAL bridge is
+      // often what CAUSED the blocking error (ensureHost threw), and the
+      // banner's "Restart bridge" (retryNow) is the only affordance that
+      // clears the supervision crash-loop budget — the generic Retry below
+      // only invalidates providers.
+      return Column(
+        children: [
+          const AbHostBanner(),
+          Expanded(
+            child: _buildBlockingErrorScreen(blockingError, activeProjectId),
+          ),
+        ],
       );
     }
-
     final isLocalMode = ref.watch(selectedRegistrationIdProvider) != null;
 
     // Only listen while prefs haven't been applied yet.
@@ -641,6 +650,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
             children: [
               const OperationalErrorToaster(),
               const AbBanner(),
+              const AbHostBanner(),
               Expanded(child: isMobile ? _buildMobile() : _buildDesktop()),
             ],
           ),
@@ -665,6 +675,39 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   }
 
   // ── Mobile ───────────────────────────────────────────────────────────
+
+  Widget _buildBlockingErrorScreen(Object error, String? activeProjectId) {
+    return _LocalLaunchErrorScreen(
+      error: error,
+      projectId: activeProjectId,
+      onRetry: activeProjectId == null
+          ? null
+          : () {
+              // Drop the static dedupe entry too: any prior failure has
+              // settled by the time this screen renders, so it's already
+              // gone, but invalidating the providers also guarantees fresh
+              // family-entry builds rather than re-using a cached error —
+              // and, for a block that landed on ALREADY-resolved providers,
+              // it is what rebuilds the transport off the dead session.
+              // `agentTransportProvider` is a pure forwarder over the
+              // family; invalidating the family entry is enough.
+              ref.invalidate(projectSessionProvider(activeProjectId));
+              if (ref.read(selectedTargetProvider)?.isLocal == false) {
+                // A remote transport error is usually the supervisor's
+                // Blocked verdict, which is sticky and replayed to every new
+                // listener: invalidating alone rebuilds straight back into
+                // the same error. `retry()` is the only input that clears it,
+                // and retryAgentConnection does the invalidate itself.
+                unawaited(
+                  ref.read(pairedAgentProvider.notifier).retryAgentConnection(),
+                );
+                return;
+              }
+              ref.invalidate(agentTransportForProvider(activeProjectId));
+            },
+      onBack: () => ref.read(selectedTargetProvider.notifier).set(null),
+    );
+  }
 
   Widget _buildMobile() {
     final surface = ref.watch(workbenchSurfaceProvider);
@@ -1008,19 +1051,16 @@ class _WorkspaceBootStatusState extends ConsumerState<_WorkspaceBootStatus> {
     notifier.cancelActiveAgent();
   }
 
-  /// Ordered relay states from cold (-1) to fully paired. The ordinal of
-  /// the current state drives every phase's status via a threshold compare,
-  /// instead of one bespoke if/else cascade per row.
+  /// Ordered relay states from cold (-1) to live. The ordinal of the current
+  /// state drives every phase's status via a threshold compare, instead of one
+  /// bespoke if/else cascade per row.
   static const _stateOrder = [
     RelayConnectionState.connecting, // 0
     RelayConnectionState.authenticating, // 1
     RelayConnectionState.authenticated, // 2
-    RelayConnectionState.pairing, // 3
-    RelayConnectionState.paired, // 4
   ];
   static const _kReachedAuthenticating = 1;
   static const _kReachedAuthenticated = 2;
-  static const _kReachedPaired = 4;
 
   /// Returns `running`/`done`/`pending` for a phase that is "running while
   /// at exactly [runningAt], done once past it, pending otherwise".
@@ -1047,12 +1087,15 @@ class _WorkspaceBootStatusState extends ConsumerState<_WorkspaceBootStatus> {
     if (pairFailed) {
       pairStatus = _PhaseStatus.failed;
       pairDetail = 'not reachable';
-    } else if (reached >= _kReachedPaired) {
+    } else if (reach == AgentReachability.online) {
+      // Only the supervisor's Connected — not mere socket auth — proves the
+      // agent actually answered (see agentReachabilityProvider).
       pairStatus = _PhaseStatus.done;
       pairDetail = agentLabel;
     } else if (reached >= _kReachedAuthenticated) {
+      // Socket is up but the ladder hasn't confirmed the agent yet.
       pairStatus = _PhaseStatus.running;
-      pairDetail = 'looking for $agentLabel';
+      pairDetail = '';
     } else {
       pairStatus = _PhaseStatus.pending;
       pairDetail = '';
@@ -1078,7 +1121,7 @@ class _WorkspaceBootStatusState extends ConsumerState<_WorkspaceBootStatus> {
         'workspace',
         'workspace',
         'awaiting hello',
-        reached >= _kReachedPaired
+        reached >= _kReachedAuthenticated
             ? _PhaseStatus.running
             : _PhaseStatus.pending,
       ),
@@ -1439,10 +1482,70 @@ class _AgentLinkFailureFooter extends StatelessWidget {
   }
 }
 
-/// Shown when [agentTransportProvider] or the active [projectSessionProvider]
-/// throws — typically a local-agent spawn failure (missing antgrid.yaml, bun
-/// unavailable, crash before publishing discovery) or a single-owner socket
-/// collision (4409) with another running antgrid app.
+/// The error [_LocalLaunchErrorScreen] should take the workspace over with, or
+/// null to render the workspace normally.
+///
+/// The live [SupervisorStatus] is a source in its own right, not a duplicate of
+/// the two provider errors. Those can only report a block the ladder reached
+/// while `agentTransportProvider` was still RESOLVING — a block that lands
+/// afterwards (another device taking the session over mid-use being the one
+/// that has to work) leaves both providers holding their last good value while
+/// every send is silently dropped, i.e. a dead workspace stating no reason at
+/// all. Feeding the supervisor's own verdict in is what makes a block reach the
+/// user whenever it arrives rather than only when it arrives during connect.
+///
+/// Pulled out of the build so the derivation is pinned against literal
+/// [SupervisorStatus] values without pumping the whole provider graph — same
+/// reasoning as `reachabilityForStatus` in `providers.dart`.
+@visibleForTesting
+Object? workspaceBlockingError({
+  required Object? transportError,
+  required Object? sessionError,
+  required SupervisorStatus? liveStatus,
+}) {
+  if (transportError != null) return transportError;
+  if (sessionError != null) return sessionError;
+  // Ranked last: while a provider is settling into its own error the two agree,
+  // and the thrown exception carries the more specific cause (a local spawn
+  // failure, a 4409) than the reason the ladder reduced it to.
+  if (liveStatus is Blocked && _takesOverMidSession(liveStatus.reason)) {
+    return ConnectionBlockedException(liveStatus.reason);
+  }
+  return null;
+}
+
+/// Whether [reason], reached on an ALREADY-established workspace, is worth
+/// unmounting that workspace for.
+///
+/// Only the reasons that stay blocked until the user acts. `agentOffline` and
+/// `handshakeFailing` clear themselves on `notePresence(true)`, and the routable
+/// rung reaches `agentOffline` about 6s after a peer-offline (3 ×
+/// `routableStallMs`) — so taking the screen over for them would blow the
+/// terminal, file tree and panes away on every host restart and rebuild them
+/// from scratch seconds later. Those two already have their own non-destructive
+/// surface in `agentReachabilityProvider`.
+///
+/// A block reached while the providers were still resolving is unaffected: it
+/// arrives as a thrown [ConnectionBlockedException] above, where there is no
+/// established workspace to preserve and every reason must be stated.
+bool _takesOverMidSession(BlockReason reason) => switch (reason) {
+  BlockReason.sessionTakenOver ||
+  BlockReason.superseded ||
+  BlockReason.deviceRevoked ||
+  BlockReason.licenseExpired => true,
+  BlockReason.agentOffline || BlockReason.handshakeFailing => false,
+};
+
+/// Shown for whatever [workspaceBlockingError] returns, which is EITHER of two
+/// sources — a reader who checks only the first will conclude this screen
+/// cannot be the one on the user's display:
+///  - [agentTransportProvider] or the active [projectSessionProvider] throwing
+///    — typically a local-agent spawn failure (missing antgrid.yaml, bun
+///    unavailable, crash before publishing discovery) or a single-owner socket
+///    collision (4409) with another running antgrid app;
+///  - a live `Blocked(reason)` from the machine's supervisor while BOTH of
+///    those providers are healthy `AsyncData` — a session another device took
+///    over mid-use, a license verdict, a revoked device.
 ///
 /// Every path leaves the user with at least one button that changes the
 /// state: Retry re-runs the launch; Open log opens the host log directory;
@@ -1461,9 +1564,75 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
 
   /// Map specific exception shapes to a user-actionable headline + tip. The
   /// fallback covers everything else without leaving the user staring at a
-  /// raw stack-trace-style message.
-  ({String headline, String tip}) _diagnose() {
+  /// raw stack-trace-style message. `retryLabel` defaults to 'retry' — only
+  /// `sessionTakenOver` needs a different verb ("take back"), since retrying
+  /// there specifically reclaims a session another device is holding, rather
+  /// than merely reattempting a failed connection.
+  ({String headline, String tip, String retryLabel}) _diagnose() {
     final e = error;
+    // The supervisor stopped climbing on purpose and named the reason. Each
+    // one has a different user action, so none of them may collapse into the
+    // generic "agent failed to start" bucket below.
+    if (e is ConnectionBlockedException) {
+      return switch (e.reason) {
+        BlockReason.deviceRevoked => (
+          headline: 'the relay would not accept this device',
+          // LICENSE_INVALID covers far more than a revoked device: a token the
+          // relay cannot verify (wrong issuer — a build pointed at the wrong
+          // LICENSE_API_URL), a malformed one, and a missing/invalid
+          // sessionLimit claim all land here alongside LICENSE_REVOKED. So the
+          // copy has to be true for every cause while still naming the one
+          // action that fixes the common ones.
+          tip:
+              'The relay rejected this device\'s access token — it was '
+              'revoked, it no longer matches your plan, or this build is '
+              'pointed at a different server. Check you are signed in on the '
+              'right account, then sign out and back in to re-provision this '
+              'device and Retry.',
+          retryLabel: 'retry',
+        ),
+        BlockReason.licenseExpired => (
+          headline: 'subscription expired',
+          tip:
+              'The relay rejected this connection\'s license. Renew the '
+              'subscription, then Retry.',
+          retryLabel: 'retry',
+        ),
+        BlockReason.agentOffline => (
+          headline: 'agent is not running',
+          tip:
+              'The relay could not route to this machine — its antgrid host '
+              'is not connected. Start it on the host, then Retry.',
+          retryLabel: 'retry',
+        ),
+        BlockReason.superseded => (
+          headline: 'the relay is holding this connection for another session',
+          // Reached only after the ladder has already retried long enough for
+          // the relay to drop a stale entry of our own, so by this point it is
+          // genuinely someone else's — and Retry cannot evict them: this app
+          // dials with one epoch per launch, which the relay refuses against
+          // an equal-or-higher live holder.
+          tip:
+              'Another session of this app is connected as the same device. '
+              'Close it, or restart this app to connect with a fresh session, '
+              'then Retry.',
+          retryLabel: 'retry',
+        ),
+        BlockReason.sessionTakenOver => (
+          headline: 'another device took over this agent',
+          tip: 'Another of your devices took over this agent.',
+          retryLabel: 'take back',
+        ),
+        BlockReason.handshakeFailing => (
+          headline: 'the encrypted session could not be established',
+          tip:
+              'The agent answered but the E2E handshake kept failing — usually '
+              'a host that re-provisioned its identity. Retry; if it persists, '
+              'forget the machine and pair it again.',
+          retryLabel: 'retry',
+        ),
+      };
+    }
     if (e is LocalTransportHandshakeException && e.closeCode == 4409) {
       return (
         headline: 'another antgrid app is connected to this project',
@@ -1473,6 +1642,7 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
             'socket). Close the other app and Retry — or wait a few seconds '
             'and Retry; the agent releases the lock automatically when its '
             'owner disconnects.',
+        retryLabel: 'retry',
       );
     }
     if (e is LocalTransportHandshakeException) {
@@ -1482,6 +1652,7 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
             'The agent is running but refused this app\'s handshake '
             '(close ${e.closeCode}). Retry; if it persists, open the log '
             'and look for an [ERROR] line near the handshake.',
+        retryLabel: 'retry',
       );
     }
     if (e is HostControlException) {
@@ -1494,6 +1665,7 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
             tip:
                 'The host could not open this folder. Confirm the path still '
                 'exists and contains an antgrid.yaml, then Retry.',
+            retryLabel: 'retry',
           );
         case 'TRANSPORT':
           return (
@@ -1502,6 +1674,7 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
                 'The host control socket did not answer — it may have just '
                 'exited. Retry to re-discover/respawn the host, or open '
                 'host.log for the stderr trace.',
+            retryLabel: 'retry',
           );
         case 'HTTP_401':
         case 'HTTP_403':
@@ -1511,6 +1684,7 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
                 'The loopback control token is stale (the host was replaced). '
                 'Retry to re-discover the current host; if it persists, '
                 'restart the app.',
+            retryLabel: 'retry',
           );
         case 'BAD_RESPONSE':
           return (
@@ -1518,6 +1692,7 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
             tip:
                 'The running host may be a different version than this app. '
                 'Retry; if it persists, restart the host (see host.log).',
+            retryLabel: 'retry',
           );
         default:
           return (
@@ -1525,6 +1700,7 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
             tip: e.message.isNotEmpty
                 ? e.message
                 : 'See host.log in the log directory for details, then Retry.',
+            retryLabel: 'retry',
           );
       }
     }
@@ -1536,6 +1712,7 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
             'The host process started but its control plane was not reachable '
             'within 30s. Check host.log in the log directory for the '
             'startup error, then Retry.',
+        retryLabel: 'retry',
       );
     }
     if (msg.contains('no connect info')) {
@@ -1545,6 +1722,7 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
             'The host control plane answered but returned no socket address for '
             'this project. Retry; if it persists, check host.log for an error '
             'near the project:open call.',
+        retryLabel: 'retry',
       );
     }
     return (
@@ -1552,6 +1730,7 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
       tip:
           'Retry runs the launcher again. If it keeps failing, open the log '
           'directory and check host.log for the underlying stderr trace.',
+      retryLabel: 'retry',
     );
   }
 
@@ -1632,7 +1811,7 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
                 children: [
                   if (onRetry != null)
                     AbButton(
-                      label: 'retry',
+                      label: d.retryLabel,
                       color: context.antgrid.accent,
                       onTap: onRetry,
                       compact: true,

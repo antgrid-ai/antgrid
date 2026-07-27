@@ -371,13 +371,14 @@ Future<bool> selectRemoteAgent(
     final ra = ref
         .read(recentAgentsProvider)
         .firstWhere((r) => r.agentDeviceId == agentDeviceId);
-    final identity = await ref.read(deviceIdentityProvider.future);
-    final updated = await ref
-        .read(pairingServiceForProvider(agentDeviceId))
-        .reconnect(ra, identity);
-    ref.read(selectedTargetProvider.notifier).set(RemoteTarget.legacy(
-      updated.agentDeviceId,
-    ));
+    // No rendezvous: reading the machine's transport declares the connection
+    // wanted and hands the supervisor the ladder (dial → presence → E2E
+    // handshake as this app's own DeviceRecord). It throws with the block
+    // reason when the supervisor gives up, which is what the snackbar reports.
+    await ref.read(agentTransportForProvider(ra.agentDeviceId).future);
+    ref
+        .read(selectedTargetProvider.notifier)
+        .set(RemoteTarget.legacy(ra.agentDeviceId));
     return true;
   } catch (e) {
     if (context.mounted) {
@@ -432,10 +433,14 @@ Future<bool> activateDrawerEntryById(
   // overlapping selectAgent() calls. Gated on `focusedIsRelayProvider`
   // because `agentReachabilityProvider` returns `connecting` by default
   // whenever no agent is active (including pure local mode), which would
-  // otherwise block every tap.
+  // otherwise block every tap. Gated on `focusedAgentBlockedProvider` because
+  // a blocked ladder also reads `connecting` and never leaves it on its own:
+  // without this the tap is a silent no-op forever and the user can never
+  // reach the error surface that holds Retry.
   if (entry is RemoteAgentEntry || entry is InventoryAgentEntry) {
     final hasActiveRemote = ref.read(focusedIsRelayProvider);
     if (hasActiveRemote &&
+        !ref.read(focusedAgentBlockedProvider) &&
         ref.read(agentReachabilityProvider) == AgentReachability.connecting) {
       return false;
     }
@@ -458,18 +463,16 @@ Future<bool> activateDrawerEntryById(
       }
       break;
     case InventoryAgentEntry e:
-      // Same-account auto-pair: no QR code needed. The relay auto-approves
-      // when both sides share the same account JWT.
+      // Same-account machine straight from the peers inventory — no QR, no
+      // pairing. Reading its transport brings the supervisor up; the agent
+      // admits us from the inventory when the E2E handshake lands.
       final priorTarget = ref.read(selectedTargetProvider);
       ref.read(selectedTargetProvider.notifier).set(null);
       try {
-        final identity = await ref.read(deviceIdentityProvider.future);
-        final ra = await ref
-            .read(pairingServiceForProvider(e.agent.deviceUuid))
-            .autoOpen(e.agent, identity);
-        ref.read(selectedTargetProvider.notifier).set(RemoteTarget.legacy(
-          ra.agentDeviceId,
-        ));
+        await ref.read(agentTransportForProvider(e.agent.deviceUuid).future);
+        ref
+            .read(selectedTargetProvider.notifier)
+            .set(RemoteTarget.legacy(e.agent.deviceUuid));
         ok = true;
       } catch (ex) {
         ref.read(selectedTargetProvider.notifier).set(priorTarget);
@@ -509,10 +512,9 @@ bool _focusOpenRemoteProject(WidgetRef ref, String regId) {
   if (!isOpen) return false;
   final machineUuid = baseDeviceUuid(regId);
   final projectId = regId.substring(machineUuid.length + 1);
-  ref.read(selectedTargetProvider.notifier).set(RemoteProject(
-    machineUuid: machineUuid,
-    projectId: projectId,
-  ));
+  ref
+      .read(selectedTargetProvider.notifier)
+      .set(RemoteProject(machineUuid: machineUuid, projectId: projectId));
   recordProjectFocus(ref);
   return true;
 }

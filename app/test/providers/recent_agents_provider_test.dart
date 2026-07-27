@@ -9,8 +9,6 @@ RecentAgent _agent(String id) => RecentAgent(
   agentLabel: id,
   agentEd25519Pubkey: '',
   relayUrl: '',
-  phoneDeviceId: '',
-  phoneEd25519Pubkey: '',
   pairedAt: DateTime.utc(2026, 1, 1),
   lastConnectedAt: DateTime.utc(2026, 1, 1),
 );

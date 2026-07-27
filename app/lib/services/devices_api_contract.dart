@@ -9,5 +9,10 @@ abstract class DevicesApiCreator {
     required String x25519Pub,
     required String platform,
     required String displayName,
+
+    /// Overrides the server's platform-derived kind. Only the desktop
+    /// controller record passes one (`'app'`); every other caller leaves it
+    /// null so a desktop stays `kind:"agent"` and a phone stays `kind:"app"`.
+    String? kind,
   });
 }

@@ -87,6 +87,12 @@ export class OAuthClient {
 export function startTokenMaintenance(
   client: OAuthClient,
   initial: MintedToken,
+  opts?: {
+    /** Fired after every successful RE-mint (never the caller-supplied initial
+     *  token). Lets the machine RelayClient redial after a LICENSE_EXPIRED stop
+     *  the instant a renewed subscription's token lands. */
+    onMinted?: () => void;
+  },
 ): { getToken: () => string; stop: () => void } {
   let current = initial;
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -100,6 +106,7 @@ export function startTokenMaintenance(
       if (stopped) return;
       try {
         current = await client.mint();
+        opts?.onMinted?.();
         log.info(
           "Refreshed OAuth access token; expires_in=%ds",
           Math.round((current.expiresAt - Date.now()) / 1000),

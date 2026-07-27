@@ -17,7 +17,7 @@ function fakeRemoteConfig(): HostRemoteConfig {
 }
 
 function fakeRuntime(): RemoteRuntime {
-  return { maint: { getToken: () => "tok", stop: () => {} }, getAccountPeerKeys: async () => new Set<string>() };
+  return { maint: { getToken: () => "tok", stop: () => {} } };
 }
 
 let host: HostServer | null = null;
@@ -98,7 +98,6 @@ test("forget() revokes the project from every paired phone's allowlist", async (
     phoneDeviceId: "d1",
     pairedAt: "x",
     lastSeenAt: "x",
-    admission: "pair-code",
     allowedProjects: ["projA", "projB"],
   });
 

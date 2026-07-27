@@ -1,20 +1,36 @@
+import 'package:flutter_secure_storage/test/test_flutter_secure_storage_platform.dart';
+import 'package:flutter_secure_storage_platform_interface/flutter_secure_storage_platform_interface.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/services/keychain_device_store.dart';
 
 class FakeSecureStorage implements DeviceSecretStorage {
   String? _value;
-  @override Future<String?> read() async => _value;
-  @override Future<void> write(String v) async { _value = v; }
-  @override Future<void> delete() async { _value = null; }
+  @override
+  Future<String?> read() async => _value;
+  @override
+  Future<void> write(String v) async {
+    _value = v;
+  }
+
+  @override
+  Future<void> delete() async {
+    _value = null;
+  }
 }
 
-DeviceRecord _sample({String userId = 'user-1', String uuid = '00000000-0000-0000-0000-000000000001'}) =>
-    DeviceRecord(
-      userId: userId, deviceUuid: uuid,
-      clientId: 'cid', clientSecret: 'csec',
-      ed25519Pub: 'a', ed25519Priv: 'b',
-      x25519Pub: 'c', x25519Priv: 'd',
-    );
+DeviceRecord _sample({
+  String userId = 'user-1',
+  String uuid = '00000000-0000-0000-0000-000000000001',
+}) => DeviceRecord(
+  userId: userId,
+  deviceUuid: uuid,
+  clientId: 'cid',
+  clientSecret: 'csec',
+  ed25519Pub: 'a',
+  ed25519Priv: 'b',
+  x25519Pub: 'c',
+  x25519Priv: 'd',
+);
 
 void main() {
   test('round-trips a device record', () async {
@@ -50,5 +66,43 @@ void main() {
     final store = KeychainDeviceStore(storage: fake);
     await fake.write('not-json');
     expect(await store.read(), isNull);
+  });
+
+  test('the main and controller storage keys are distinct constants', () {
+    expect(
+      kControllerDeviceRecordStorageKey,
+      isNot(equals(kDeviceRecordStorageKey)),
+    );
+  });
+
+  test('default constructor writes the main and controller records to '
+      'genuinely separate underlying storage', () async {
+    // Regression guard: if SecureDeviceSecretStorage's default `key` ever
+    // collapsed back to kDeviceRecordStorageKey for the controller slot,
+    // this would silently overwrite the local bridge's relay identity with
+    // the desktop controller record — the worst failure mode in this
+    // feature. Route the REAL default-constructed FlutterSecureStorage
+    // through the plugin's own bundled fake platform (an in-memory map) so
+    // we observe the actual keys it writes, rather than a test double that
+    // never shared state to begin with.
+    final backing = <String, String>{};
+    FlutterSecureStoragePlatform.instance = TestFlutterSecureStoragePlatform(
+      backing,
+    );
+
+    final store = KeychainDeviceStore();
+    await store.write(_sample(uuid: 'main-uuid'));
+    await store.writeController(_sample(uuid: 'controller-uuid'));
+
+    expect(backing.keys, hasLength(2));
+    expect((await store.read())!.deviceUuid, 'main-uuid');
+    expect((await store.readController())!.deviceUuid, 'controller-uuid');
+
+    await store.clearController();
+    expect(
+      (await store.read())!.deviceUuid,
+      'main-uuid',
+      reason: 'clearing the controller slot must not touch the main record',
+    );
   });
 }

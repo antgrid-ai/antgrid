@@ -9,7 +9,6 @@
 // but the provider body has multiple awaits; we don't await the full future).
 
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
@@ -105,20 +104,6 @@ class _EmptyPairedAgentNotifier extends PairedAgentNotifier {
   Future<List<PairedAgent>> build() async => const [];
 }
 
-class _StubDeviceIdentityNotifier extends DeviceIdentityNotifier {
-  @override
-  Future<DeviceIdentity> build() async {
-    return DeviceIdentity(
-      deviceId: 'phone-device-id',
-      name: 'Test Phone',
-      ed25519PrivateKey: Uint8List(64),
-      ed25519PublicKey: Uint8List(32),
-      x25519PrivateKey: Uint8List(32),
-      x25519PublicKey: Uint8List(32),
-    );
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -181,7 +166,6 @@ void main() {
       pairedAgentProvider.overrideWith(() => _EmptyPairedAgentNotifier()),
       accountAgentsProvider.overrideWith((_) async => const <InventoryAgent>[]),
       localDeviceUuidProvider.overrideWith((_) async => 'local-uuid'),
-      deviceIdentityProvider.overrideWith(() => _StubDeviceIdentityNotifier()),
       // Test seam introduced in Task 5.
       localAgentLauncherProvider.overrideWithValue(fakeLauncher),
       // Inject pre-configured keychain (avoids real secure storage).
@@ -255,7 +239,8 @@ void main() {
         // propagated: the local project still opens (with a null device).
         final container = ProviderContainer(
           overrides: baseOverrides(
-            keychainRecord: null, // empty keychain → provisioning branch entered
+            keychainRecord:
+                null, // empty keychain → provisioning branch entered
             userError: Exception('account/me unreachable'),
           ),
         );

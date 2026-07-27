@@ -73,8 +73,6 @@ void main() {
           agentLabel: 'my-project',
           agentEd25519Pubkey: 'k',
           relayUrl: 'wss://relay',
-          phoneDeviceId: 'p',
-          phoneEd25519Pubkey: 'pk',
           pairedAt: DateTime(2026),
           lastConnectedAt: DateTime(2026),
           hostMachineName: 'devbox',

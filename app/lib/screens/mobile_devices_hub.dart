@@ -13,7 +13,7 @@ import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_panel_header.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../launcher/host_control_client.dart';
-import '../pairing/remote_pair_actions.dart';
+import '../connect/remote_connect_actions.dart';
 import '../providers/mobile_devices_hub.dart';
 
 /// Desktop hub: one card per paired phone, each with a per-project allowlist
@@ -209,8 +209,8 @@ class _ProjectToggleRow extends ConsumerWidget {
 
 /// Machine-level pair entry for the hub. Same-account phones (signed in as the
 /// same user) pair automatically on first connect — no QR needed. QR is the
-/// secondary path for phones not on your account. Reuses [RemotePairActions]
-/// so the CTA cannot drift from the other pairing entry points.
+/// secondary path for phones not on your account. Reuses [RemoteConnectActions]
+/// so the CTA cannot drift from the other connect entry points.
 class _EmptyState extends ConsumerStatefulWidget {
   const _EmptyState();
 
@@ -219,7 +219,7 @@ class _EmptyState extends ConsumerStatefulWidget {
 }
 
 class _EmptyStateState extends ConsumerState<_EmptyState>
-    with RemotePairActions {
+    with RemoteConnectActions {
   @override
   Widget build(BuildContext context) {
     return AbEmptyState(
@@ -239,7 +239,7 @@ class _EmptyStateState extends ConsumerState<_EmptyState>
           size: 12,
           color: context.antgrid.accentForeground,
         ),
-        onTap: scanAndPair,
+        onTap: scanAndConnect,
       ),
     );
   }

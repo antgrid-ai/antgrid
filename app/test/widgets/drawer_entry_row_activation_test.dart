@@ -1,5 +1,3 @@
-import 'dart:typed_data';
-
 import 'package:antgrid/models/drawer_entry.dart';
 import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/providers/agent_transport.dart';
@@ -9,8 +7,6 @@ import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/recent_agents.dart';
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/services/control_plane_client.dart';
-import 'package:antgrid/services/pairing_service.dart';
-import 'package:antgrid/services/phone_identity.dart';
 import 'package:antgrid/services/storage_service.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
@@ -34,8 +30,6 @@ RecentAgent _recentAgent() {
     agentLabel: 'Remote Agent',
     agentEd25519Pubkey: '',
     relayUrl: 'wss://relay.example.test/ws',
-    phoneDeviceId: 'phone-device',
-    phoneEd25519Pubkey: '',
     pairedAt: now,
     lastConnectedAt: now,
   );
@@ -68,44 +62,6 @@ class _MemoryStorageService extends StorageService {
   }
 }
 
-class _StubDeviceIdentityNotifier extends DeviceIdentityNotifier {
-  @override
-  Future<DeviceIdentity> build() async {
-    return DeviceIdentity(
-      deviceId: 'phone-device',
-      name: 'Test Phone',
-      ed25519PrivateKey: Uint8List(64),
-      ed25519PublicKey: Uint8List(32),
-      x25519PrivateKey: Uint8List(32),
-      x25519PublicKey: Uint8List(32),
-    );
-  }
-}
-
-/// Passthrough pairing service that records which family id it was resolved for
-/// (must be the bare MACHINE id) and succeeds without touching a real relay.
-class _RecordingPairingService extends PairingService {
-  _RecordingPairingService(
-    RecentAgentsStore recentAgentsStore, {
-    required this.resolvedId,
-    required this.onReconnect,
-  }) : super(
-         relay: RelayService(crypto: CryptoService()),
-         phoneIdentity: PhoneIdentity.inMemory(),
-         recentAgentsStore: recentAgentsStore,
-         registrationId: resolvedId,
-       );
-
-  final String resolvedId;
-  final void Function(String resolvedId) onReconnect;
-
-  @override
-  Future<RecentAgent> reconnect(RecentAgent ra, DeviceIdentity identity) async {
-    onReconnect(resolvedId);
-    return ra;
-  }
-}
-
 class _SeededRecentAgentsNotifier extends RecentAgentsNotifier {
   _SeededRecentAgentsNotifier(this._seed);
   final List<RecentAgent> _seed;
@@ -113,26 +69,6 @@ class _SeededRecentAgentsNotifier extends RecentAgentsNotifier {
   List<RecentAgent> build() {
     super.build(); // wire the store-change subscription
     return _seed;
-  }
-}
-
-class _ThrowingPairingService extends PairingService {
-  _ThrowingPairingService(RecentAgentsStore recentAgentsStore)
-    : super(
-        relay: RelayService(crypto: CryptoService()),
-        phoneIdentity: PhoneIdentity.inMemory(),
-        recentAgentsStore: recentAgentsStore,
-        registrationId: 'test-registration',
-      );
-
-  @override
-  Future<RecentAgent> autoOpen(InventoryAgent agent, DeviceIdentity identity) {
-    throw PairException('forced autoOpen failure');
-  }
-
-  @override
-  Future<RecentAgent> reconnect(RecentAgent ra, DeviceIdentity identity) {
-    throw PairException('forced reconnect failure');
   }
 }
 
@@ -148,18 +84,13 @@ Future<void> _pumpActivationHarness(
         ...stores.overrides,
         drawerEntriesProvider.overrideWithValue([entry]),
         pairedAgentProvider.overrideWith(() => _EmptyPairedAgentNotifier()),
-        deviceIdentityProvider.overrideWith(
-          () => _StubDeviceIdentityNotifier(),
+        // Activation now brings the machine up by reading its transport (the
+        // supervisor owns the dial). A machine that cannot be reached surfaces
+        // as this provider rejecting, which is what the restore-prior-target
+        // behaviour under test hangs off.
+        agentTransportForProvider.overrideWith(
+          (ref, id) async => throw StateError('forced connect failure for $id'),
         ),
-        // Pairing is per-connection now: override the family entry for each id
-        // the activation path resolves (remote entry → its agentDeviceId,
-        // inventory entry → its deviceUuid).
-        pairingServiceForProvider(
-          _remoteEntryId,
-        ).overrideWithValue(_ThrowingPairingService(stores.recentAgentsStore)),
-        pairingServiceForProvider(
-          _inventoryEntryId,
-        ).overrideWithValue(_ThrowingPairingService(stores.recentAgentsStore)),
       ],
       child: MaterialApp(
         home: Scaffold(
@@ -246,30 +177,28 @@ void main() {
   });
 
   testWidgets(
-    'cold remote session-row activation pairs machine + focuses the project',
+    'cold remote session-row activation brings the machine up + focuses the '
+    'project',
     (tester) async {
       // Regression: tapping a session row under an advertised-but-not-warm remote
       // project used to silently no-op (the entry==null branch only refocused
-      // already-open projects). It must now pair the machine and set the typed
-      // RemoteProject target so the project actually opens.
+      // already-open projects). It must now bring the machine up and set the
+      // typed RemoteProject target so the project actually opens.
       useInMemoryPrefs();
       final stores = await buildTestStoreOverrides();
       addTearDown(stores.close);
 
       const machineUuid = 'M';
       // A recent carrying a compound id whose bare machine prefix is 'M' — the
-      // open path resolves pairing by the machine, not the compound target.
+      // open path resolves the machine, not the compound target.
       final recent = RecentAgent(
         agentDeviceId: '$machineUuid.someproj',
         agentLabel: 'Remote Agent',
         agentEd25519Pubkey: '',
         relayUrl: 'wss://relay.example.test/ws',
-        phoneDeviceId: 'phone-device',
-        phoneEd25519Pubkey: '',
         pairedAt: DateTime(2026, 1, 1),
         lastConnectedAt: DateTime(2026, 1, 1),
       );
-      String? pairedFor;
       // Activation ALWAYS promotes via project:start (warm ≠ relay-promoted), so
       // the cold path needs a control-plane client. It records the project:start
       // and is seeded running:true below so awaitProjectRunning resolves.
@@ -282,19 +211,12 @@ void main() {
             ...stores.overrides,
             // 'M.p1' is NOT a drawer entry — forces the entry==null cold path.
             drawerEntriesProvider.overrideWithValue(const []),
-            deviceIdentityProvider.overrideWith(
-              () => _StubDeviceIdentityNotifier(),
-            ),
             recentAgentsProvider.overrideWith(
               () => _SeededRecentAgentsNotifier([recent]),
             ),
-            pairingServiceForProvider(recent.agentDeviceId).overrideWithValue(
-              _RecordingPairingService(
-                stores.recentAgentsStore,
-                resolvedId: recent.agentDeviceId,
-                onReconnect: (id) => pairedFor = id,
-              ),
-            ),
+            // Keyed by the MACHINE uuid, never the compound target id: a
+            // compound-keyed resolution would build the REAL provider (and a
+            // real relay transport with it) and fail.
             controlPlaneClientForProvider(machineUuid).overrideWith((
               ref,
             ) async {
@@ -341,8 +263,6 @@ void main() {
         container.read(selectedTargetProvider),
         const RemoteProject(machineUuid: machineUuid, projectId: 'p1'),
       );
-      // Pairing resolved for the MACHINE, not the compound target id.
-      expect(pairedFor, recent.agentDeviceId);
       // Always promotes: project:start was sent despite running:true.
       expect(
         cpTransport.sent.where((m) => m['type'] == 'project:start'),
@@ -370,7 +290,6 @@ void main() {
         overrides: [
           ...stores.overrides,
           storageServiceProvider.overrideWithValue(storage),
-          phoneIdentityProvider.overrideWithValue(PhoneIdentity.inMemory()),
         ],
         child: MaterialApp(
           home: Scaffold(body: DrawerEntryRow(RemoteAgentEntry(recent))),

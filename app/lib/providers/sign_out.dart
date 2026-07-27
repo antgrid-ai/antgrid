@@ -6,10 +6,12 @@ import '../services/devices_api.dart';
 import '../services/push_identity.dart';
 import '../services/sign_out_service.dart';
 import 'auth.dart';
+import 'connection_identity.dart';
 import 'device_provisioning.dart';
 import 'providers.dart';
 import 'push.dart';
 import 'recent_agents.dart';
+import 'relay_connection.dart';
 import 'subscription.dart';
 
 /// Assembles a [SignOutService] from the live providers, wiring the two
@@ -23,7 +25,6 @@ final signOutServiceProvider = Provider<SignOutService>((ref) {
       licenseApiUrl: ref.read(licenseApiUrlProvider),
       cookieProvider: () => auth.storage.readCookie(),
     ),
-    phoneIdentity: ref.read(phoneIdentityProvider),
     pushIdentity: PushIdentity.secure(),
     recentAgentsStore: ref.read(recentAgentsStoreProvider),
     clearPushToken: () async {
@@ -33,7 +34,9 @@ final signOutServiceProvider = Provider<SignOutService>((ref) {
           .whereType<ProjectSession>();
       // The SAME instance startup registered on — clearToken resets its cached
       // token/registered-set so a re-sign-in re-registers (see push.dart).
-      await ref.read(pushMessagingServiceProvider).clearToken(sessions: sessions);
+      await ref
+          .read(pushMessagingServiceProvider)
+          .clearToken(sessions: sessions);
     },
     stopMinter: () async {
       final minter = await ref.read(licenseTokenMinterProvider.future);
@@ -46,6 +49,14 @@ final signOutServiceProvider = Provider<SignOutService>((ref) {
         controller.forceEvict(id);
       }
     },
+    releaseControlPlanes: () async {
+      // Per-id release, not disposeAll: disposeAll closes the manager's change
+      // stream for good, and the same manager must serve a later re-sign-in.
+      final mgr = ref.read(relayConnectionManagerProvider);
+      for (final id in mgr.openControlPlaneIds()) {
+        mgr.release(id);
+      }
+    },
   );
 });
 
@@ -55,6 +66,7 @@ final signOutServiceProvider = Provider<SignOutService>((ref) {
 Future<void> performHardSignOut(WidgetRef ref) async {
   await ref.read(signOutServiceProvider).hardSignOut();
   ref.invalidate(licenseTokenMinterProvider);
+  ref.invalidate(connectionTokenMinterProvider);
   ref.invalidate(currentUserProvider);
   ref.invalidate(hasStoredSessionProvider);
   ref.invalidate(subscriptionProvider);

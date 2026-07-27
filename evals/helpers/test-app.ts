@@ -1,417 +1,194 @@
-import {
-  generateKeyPairSync,
-  randomUUID,
-  randomBytes,
-  sign,
-  type KeyObject,
-} from "node:crypto";
-import { verifyPairApproval } from "../../relay/src/pair-verify";
-import { buildPairApprovalSigBody } from "../../bridge/src/pair-approval";
-import { buildPairRequestSigBody } from "../../bridge/src/pair-request-verify";
-import { buildHelloSigBody, normalizeRelayHost } from "antgrid-wire";
-import type { TestEnv } from "./test-env";
-
-const TEST_LICENSE_TOKEN = "eval-license-token";
-
-let testAppEpoch = 0;
-function nextTestAppEpoch(): number {
-  testAppEpoch = Math.max(testAppEpoch + 1, Math.floor(Date.now() / 1000));
-  return testAppEpoch;
-}
-
-export class PairException extends Error {
-  constructor(
-    message: string,
-    public readonly reason: string,
-  ) {
-    super(message);
-    this.name = "PairException";
-  }
-}
-
-interface CloseEvent {
-  code: number;
-  reason: string;
-}
+import { relaySlotId } from "antgrid-wire";
+import { RelayClient } from "./relay-client";
+import { createMessage } from "../../bridge/src/protocol";
+import type { TestEnv } from "./harness";
 
 /**
- * E2E test driver that mimics the phone-side pair flow. Connects to the
- * relay over WS, registers as `app` (no licenseToken), authenticates via
- * Ed25519 challenge-response, then drives `pair-request` / `pair-approval`
- * exactly like the real Dart client.
- *
- * Reuses the same Ed25519 keypair across `disconnect()` + `reconnect()` so
- * the agent's paired-phones trust list recognises us on reconnect.
+ * Thin wrapper around `RelayClient` that drives a full account-trusted
+ * session (hello with an account token → E2E handshake admitted from the
+ * account inventory) with no pairing ceremony — the production path since
+ * Phase B. `TestApp.connect` is single-shot; a caller that needs to absorb
+ * the agent-just-spawned startup race uses `waitAgentReachable`
+ * (`evals/support/reachable.ts`), which retries it.
  */
 export class TestApp {
-  private ws: WebSocket | null = null;
-  private waiters: Array<{
-    match: (msg: any) => boolean;
-    resolve: (msg: any) => void;
-    reject: (err: Error) => void;
-    timer: ReturnType<typeof setTimeout> | null;
-  }> = [];
-  private queue: any[] = [];
-  private closeWaiters: Array<(c: CloseEvent) => void> = [];
-  private closeEvent: CloseEvent | null = null;
-  private authenticated = false;
-  private agentRegistrationId: string | null = null;
-  private peerId: string | null = null;
-  private agentEd25519PubkeyB64: string | null = null;
-
-  readonly phoneDeviceId: string;
-  readonly phonePubkeyB64: string;
-  private readonly phoneEd25519: { publicKey: KeyObject; privateKey: KeyObject };
-  private readonly relayUrl: string;
-  private readonly env: TestEnv;
-
-  private constructor(env: TestEnv) {
-    this.env = env;
-    this.relayUrl = env.relay.url;
-    // Stable per-TestApp identity. uuid format matches the device-id regex on
-    // the relay (`[a-zA-Z0-9_.-]+`).
-    this.phoneDeviceId = randomUUID();
-    this.phoneEd25519 = generateKeyPairSync("ed25519");
-    const spki = this.phoneEd25519.publicKey.export({ type: "spki", format: "der" });
-    // Strip 12-byte SPKI header → 32-byte raw pubkey
-    this.phonePubkeyB64 = Buffer.from(spki.subarray(spki.length - 32)).toString("base64");
-  }
+  private constructor(
+    private readonly client: RelayClient,
+    private readonly env: TestEnv,
+  ) {}
 
   /**
-   * Connect, register as an `app` (no licenseToken), complete Ed25519
-   * challenge-response. Does NOT pair — call `pairWithAgent` next.
+   * Connect, authenticate, and complete the E2E handshake against
+   * `env.agentDeviceId`. Reuses `env.appIdentity` (the SAME Ed25519 identity
+   * `setupTestEnv` registered with the fake account inventory) so admission
+   * resolves without a pair-request — a fresh, never-registered identity
+   * cannot be admitted (the bridge's `TrustedPeersProvider` is deviceId-keyed).
+   *
+   * `machineDeviceId` addresses this connection on a per-machine relay SLOT
+   * (`relaySlotId`) while the E2E transcript still binds the bare
+   * `accountDeviceId` — see `RelayClient`'s `deviceId`/`transcriptDeviceId`
+   * split. With the DEFAULT `accountDeviceId` (`env.appIdentity.deviceId`),
+   * `env.app` already holds a live socket under that exact bare deviceId, so
+   * an unslotted second hello would supersede it (the relay closes the older
+   * of two same-deviceId connections — strictly monotonic epochs). An omitted
+   * `machineDeviceId` defaults to a fresh random one whenever the RESOLVED
+   * `accountDeviceId` equals `env.appIdentity.deviceId` (the default) — this
+   * is a value comparison, not an `opts.accountDeviceId` presence check, so
+   * passing `accountDeviceId: env.appIdentity.deviceId` explicitly is NOT a
+   * no-op: it's treated identically to omitting the option. Only an
+   * `accountDeviceId` that actually DIFFERS from the default opts back in to
+   * the old bare-id (displacing) behaviour, leaving `machineDeviceId` unset
+   * unless the caller also supplies one.
+   *
+   * NOT a safe, additive probe, even with the default slot. Two layers are
+   * involved: the relay routes the slotted hello to a distinct connection, so
+   * it no longer sends a SUPERSEDED close to `env.app`'s socket — but the
+   * bridge (`bridge/src/relay-client.ts`, single-active-phone takeover, spec
+   * 2026-07-24 §4.3) still sees a second same-account slot as a competing
+   * phone. It sends a sealed `session-takeover` to the previously-established
+   * session, zeroizes those keys, and stops liveness — deliberately, that's
+   * production behaviour, not a bug. So after a second `TestApp.connect(env)`,
+   * `env.app`'s WebSocket stays open but its E2E session is dead: further
+   * sealed round trips on `env.app` (e.g. `pullStateSnapshot`) are silently
+   * dropped by the bridge and never answered. A caller that still needs
+   * `env.app` afterwards must re-handshake it (`RelayClient.reconnect`/
+   * `performE2EHandshake`) — `TestApp.connect(env)` does not do this for you.
    */
   static async connect(
     env: TestEnv,
-    _opts?: { licenseToken?: string | null },
+    opts: {
+      onOutbound?: (raw: string) => void;
+      accountDeviceId?: string;
+      machineDeviceId?: string;
+    } = {},
   ): Promise<TestApp> {
-    const app = new TestApp(env);
-    await app.openSocket();
-    return app;
+    // Always env.appIdentity: a caller needing a different signing key for a
+    // different accountDeviceId (a late-added or cross-env device) drives
+    // RelayClient directly, e.g. `handshakeWithoutPairing` in
+    // gate-inventory-miss / gate-multi-machine-slots — connect+claim staying
+    // coupled here rules out signing with one key while claiming another.
+    const identity = env.appIdentity;
+    const accountDeviceId = opts.accountDeviceId ?? env.appIdentity.deviceId;
+    // Value comparison, not `opts.accountDeviceId` presence: a caller passing
+    // `accountDeviceId: env.appIdentity.deviceId` explicitly is visually a
+    // no-op and must slot exactly like an omitted option, not silently fall
+    // back to the displacing unslotted path.
+    const machineDeviceId =
+      opts.machineDeviceId ?? (accountDeviceId === env.appIdentity.deviceId ? crypto.randomUUID() : undefined);
+    const helloDeviceId = machineDeviceId
+      ? relaySlotId(accountDeviceId, machineDeviceId)
+      : accountDeviceId;
+    const client = await RelayClient.connectAndAuth(env.relay.url, {
+      deviceType: "app",
+      name: "test-app",
+      identity,
+      deviceId: helloDeviceId,
+      transcriptDeviceId: accountDeviceId,
+      onOutbound: opts.onOutbound,
+    });
+    client.setPeerId(env.agentDeviceId);
+    await client.performE2EHandshake(env.agentDeviceId, 10_000, {
+      agentEd25519Pub: env.agent.ed25519Pubkey,
+    });
+    return new TestApp(client, env);
   }
 
-  private openSocket(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const ws = new WebSocket(this.relayUrl);
-      const timeout = setTimeout(() => reject(new Error("Auth timed out")), 10_000);
+  /** Wrap an ALREADY connected + already E2E-handshaked `RelayClient` as a
+   *  `TestApp` — for callers that need `handshakeWithoutPairing`'s retry
+   *  (SAME socket, resent client-hello) instead of `connect`'s single-shot
+   *  attempt, e.g. a slotted identity added to the account inventory AFTER
+   *  the agent's own startup fetch (gate-multi-machine-slots). */
+  static wrap(client: RelayClient, env: TestEnv): TestApp {
+    return new TestApp(client, env);
+  }
 
-      ws.addEventListener("open", () => {
-        this.ws = ws;
-        // v3: authenticate with a single signed `hello`. Apps now present a
-        // license token too (design §4.2 — the fake gate accepts the eval token).
-        const epoch = nextTestAppEpoch();
-        const ts = new Date().toISOString();
-        const nonce = randomBytes(16).toString("base64");
-        const sigBody = buildHelloSigBody({
-          relayHost: normalizeRelayHost(this.relayUrl),
-          deviceType: "app",
-          deviceId: this.phoneDeviceId,
-          publicKey: this.phonePubkeyB64,
-          epoch,
-          licenseToken: TEST_LICENSE_TOKEN,
-          ts,
-          nonce,
+  /** Pull-then-replay welcome state (see `RelayClient.pullStateSnapshot`). Note:
+   *  it silently swallows a dead/unresponsive session (resolves anyway) — a
+   *  suite asserting recovery should use `waitForStateSnapshot` instead, which
+   *  actually throws on failure. */
+  pullStateSnapshot(): Promise<void> {
+    return this.client.pullStateSnapshot();
+  }
+
+  /** Hard-close the underlying socket without touching E2E bookkeeping —
+   *  simulates an unintentional network drop (see `RelayClient.dropSocket`). */
+  dropSocket(): void {
+    this.client.dropSocket();
+  }
+
+  /** Resolve once the underlying socket closes, with the WS close code (e.g.
+   *  4002 for `/internal/revoke` — see relay's `internal-routes.ts`). `code`
+   *  is `null` if the timeout elapsed with no close observed. */
+  async waitClose(timeoutMs = 5_000): Promise<{ closed: boolean; code: number | null }> {
+    const closed = await this.client.waitForClose(timeoutMs);
+    return { closed, code: closed ? this.client.lastCloseCode : null };
+  }
+
+  /**
+   * Re-establish a fresh authenticated socket + E2E handshake under the SAME
+   * identity. Trusted phones reconnect this way — no re-pair. Mints a fresh
+   * app token before each redial (`env.license.mintAppToken()`), mirroring
+   * the real app re-presenting its account token on every connect — this is
+   * what lets `env.license.expireNextToken()` actually reach the wire.
+   */
+  async reconnect(): Promise<{ connected: true } | { connected: false; reason: string }> {
+    try {
+      this.client.setLicenseToken(this.env.license.mintAppToken());
+      await this.client.reconnectAndAuth(this.env.relay.url);
+      this.client.setPeerId(this.env.agentDeviceId);
+      await this.client.performE2EHandshake(this.env.agentDeviceId, 10_000, {
+        agentEd25519Pub: this.env.agent.ed25519Pubkey,
+      });
+      return { connected: true };
+    } catch (err) {
+      return { connected: false, reason: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
+   * Strong session-liveness proof for the failure-matrix suites: sends a
+   * direct `state.snapshot` RPC and THROWS if it never answers ok:true —
+   * unlike `pullStateSnapshot` (which silently returns on a dead session, see
+   * its doc comment), a caller asserting "the session recovered" actually
+   * fails when it hasn't. Tries the RPC on the CURRENT E2E context first; on
+   * failure, re-runs the E2E handshake on the SAME live socket (no reconnect,
+   * no re-pair — mirrors a bridge restart handing the phone fresh keys) and
+   * retries, until `timeoutMs` elapses.
+   */
+  async waitForStateSnapshot(opts: { timeoutMs?: number } = {}): Promise<{ ok: true }> {
+    const timeoutMs = opts.timeoutMs ?? 10_000;
+    const deadline = Date.now() + timeoutMs;
+    let lastErr: unknown = new Error("waitForStateSnapshot: no attempt completed");
+    while (Date.now() < deadline) {
+      const remaining = Math.max(500, deadline - Date.now());
+      try {
+        return await this.snapshotRoundTrip(Math.min(2_000, remaining));
+      } catch (err) {
+        lastErr = err;
+      }
+      try {
+        this.client.setPeerId(this.env.agentDeviceId);
+        await this.client.performE2EHandshake(this.env.agentDeviceId, Math.min(2_000, Math.max(500, deadline - Date.now())), {
+          agentEd25519Pub: this.env.agent.ed25519Pubkey,
         });
-        const sig = sign(null, sigBody, this.phoneEd25519.privateKey).toString("base64");
-        ws.send(
-          JSON.stringify({
-            type: "hello",
-            protocolVersion: 3,
-            deviceType: "app",
-            deviceId: this.phoneDeviceId,
-            name: "test-app",
-            publicKey: this.phonePubkeyB64,
-            epoch,
-            licenseToken: TEST_LICENSE_TOKEN,
-            ts,
-            nonce,
-            sig,
-          }),
-        );
-      });
-
-      ws.addEventListener("message", (evt) => {
-        // All pair-flow handshake traffic is text JSON.
-        if (typeof evt.data !== "string") return;
-        let data: any;
-        try { data = JSON.parse(evt.data); } catch { return; }
-
-        if (!this.authenticated) {
-          if (data.type === "welcome") {
-            this.authenticated = true;
-            clearTimeout(timeout);
-            resolve();
-            return;
-          }
-          if (data.type === "error") {
-            clearTimeout(timeout);
-            reject(new Error(`Auth error: ${data.code} ${data.message}`));
-            return;
-          }
-          return;
-        }
-
-        // Post-auth: dispatch to waiters, else queue.
-        for (let i = 0; i < this.waiters.length; i++) {
-          if (this.waiters[i].match(data)) {
-            const w = this.waiters.splice(i, 1)[0];
-            if (w.timer) clearTimeout(w.timer);
-            w.resolve(data);
-            return;
-          }
-        }
-        this.queue.push(data);
-      });
-
-      ws.addEventListener("error", () => {
-        if (!this.authenticated) {
-          clearTimeout(timeout);
-          reject(new Error("WebSocket error"));
-        }
-      });
-
-      ws.addEventListener("close", (evt: any) => {
-        const ev: CloseEvent = {
-          code: typeof evt?.code === "number" ? evt.code : 0,
-          reason: typeof evt?.reason === "string" ? evt.reason : "",
-        };
-        this.closeEvent = ev;
-        for (const fn of this.closeWaiters.splice(0)) fn(ev);
-        for (const w of this.waiters.splice(0)) {
-          if (w.timer) clearTimeout(w.timer);
-          w.reject(new Error("WebSocket closed during wait"));
-        }
-        if (!this.authenticated) {
-          clearTimeout(timeout);
-          reject(new Error("Closed during auth"));
-        }
-      });
-    });
+      } catch (err) {
+        lastErr = err;
+        await Bun.sleep(300);
+      }
+    }
+    throw new Error(`waitForStateSnapshot timed out after ${timeoutMs}ms: ${String(lastErr)}`);
   }
 
-  private waitFor(match: (msg: any) => boolean, timeoutMs = 8_000): Promise<any> {
-    for (let i = 0; i < this.queue.length; i++) {
-      if (match(this.queue[i])) return Promise.resolve(this.queue.splice(i, 1)[0]);
-    }
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const idx = this.waiters.findIndex((w) => w.timer === timer);
-        if (idx !== -1) this.waiters.splice(idx, 1);
-        reject(new Error(`Timed out waiting for message (${timeoutMs}ms)`));
-      }, timeoutMs);
-      this.waiters.push({ match, resolve, reject, timer });
-    });
+  private async snapshotRoundTrip(timeoutMs: number): Promise<{ ok: true }> {
+    const requestId = `snap-${Math.random().toString(36).slice(2)}`;
+    const responseP = this.client.waitFor((m: any) => m.type === "response" && m.requestId === requestId, timeoutMs);
+    this.client.sendEncrypted(createMessage("request", { requestId, method: "state.snapshot", params: { types: ["*"] } }));
+    const res = (await responseP) as { ok?: boolean };
+    if (!res?.ok) throw new Error(`state.snapshot returned ok:false (${JSON.stringify(res)})`);
+    return { ok: true };
   }
 
-  /**
-   * Drive a full first-pair: send `pair-request` and await the next matching
-   * `pair-approval` (success) or `pair-rejected` (rejection). Verifies the
-   * approval signature via the same code path the relay/phone uses; throws
-   * `PairException` on rejection or signature failure.
-   */
-  async pairWithAgent(
-    agentRegistrationId: string,
-    agentEd25519PubkeyB64: string,
-    opts?: { pairCode?: string },
-  ): Promise<{ paired: true; agentDeviceId: string }> {
-    const result = await this.tryPairRequest(agentRegistrationId, opts);
-    if (result.paired) {
-      this.agentRegistrationId = agentRegistrationId;
-      this.agentEd25519PubkeyB64 = agentEd25519PubkeyB64;
-      return { paired: true, agentDeviceId: agentRegistrationId };
-    }
-    throw new PairException(`pair rejected: ${result.reason}`, result.reason);
-  }
-
-  /**
-   * Send a pair-request and resolve with the outcome instead of throwing.
-   * Used by tests that intentionally trigger rejections.
-   */
-  async tryPairRequest(
-    agentRegistrationId: string,
-    opts?: { pairCode?: string },
-  ): Promise<{ paired: true } | { paired: false; reason: string }> {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new Error("TestApp not connected");
-    }
-    const nonce = randomBytes(24).toString("base64");
-    const requestedAt = new Date().toISOString();
-    const sigBody = buildPairRequestSigBody({
-      agentDeviceId: agentRegistrationId,
-      phonePubkey: this.phonePubkeyB64,
-      phoneDeviceId: this.phoneDeviceId,
-      nonce,
-      requestedAt,
-    });
-    const phoneSignature = sign(null, sigBody, this.phoneEd25519.privateKey).toString("base64");
-
-    // Arm waiters BEFORE send to avoid races on fast approval/rejection.
-    const approvalP = this.waitFor(
-      (m) =>
-        m.type === "pair-approval" &&
-        m.phonePubkey === this.phonePubkeyB64 &&
-        m.nonce === nonce,
-      10_000,
-    ).catch(() => null);
-    const rejectionP = this.waitFor(
-      (m) => m.type === "pair-rejected" && m.phonePubkey === this.phonePubkeyB64,
-      10_000,
-    ).catch(() => null);
-    const errorP = this.waitFor(
-      (m) => m.type === "error",
-      10_000,
-    ).catch(() => null);
-    const closeP = new Promise<{ kind: "close"; ev: CloseEvent }>((resolve) => {
-      if (this.closeEvent) resolve({ kind: "close", ev: this.closeEvent });
-      else this.closeWaiters.push((ev) => resolve({ kind: "close", ev }));
-    });
-
-    this.ws.send(
-      JSON.stringify({
-        type: "pair-request",
-        agentDeviceId: agentRegistrationId,
-        phonePubkey: this.phonePubkeyB64,
-        phoneDeviceId: this.phoneDeviceId,
-        nonce,
-        requestedAt,
-        // v3 requires a deadline; the relay expires the pending pair past it.
-        deadline: Date.now() + 10_000,
-        phoneSignature,
-        ...(opts?.pairCode ? { pairCode: opts.pairCode } : {}),
-      }),
-    );
-
-    const winner: any = await Promise.race([
-      approvalP.then((m) => (m ? { kind: "approval", m } : null)),
-      rejectionP.then((m) => (m ? { kind: "rejection", m } : null)),
-      errorP.then((m) => (m ? { kind: "error", m } : null)),
-      closeP,
-    ]);
-
-    if (!winner) {
-      return { paired: false, reason: "TIMEOUT" };
-    }
-    if (winner.kind === "approval") {
-      this.agentRegistrationId = agentRegistrationId;
-      // No agent pubkey provided here — caller (pairWithAgent) sets it.
-      this.peerId = agentRegistrationId;
-      return { paired: true };
-    }
-    if (winner.kind === "rejection") {
-      return { paired: false, reason: winner.m.reason };
-    }
-    if (winner.kind === "error") {
-      return { paired: false, reason: `ERROR:${winner.m.code}` };
-    }
-    // closed
-    return { paired: false, reason: `CLOSED:${winner.ev.code}:${winner.ev.reason}` };
-  }
-
-  /**
-   * Synthesize a pair-approval signed with a NON-trusted Ed25519 keypair
-   * and run it through the same client-side `verifyPairApproval` path.
-   * Throws an Error containing "signature" when verification fails.
-   */
-  async injectForgedApproval(
-    agentRegistrationId: string,
-    evilKp: { publicKey: KeyObject; privateKey: KeyObject },
-  ): Promise<void> {
-    if (!this.agentEd25519PubkeyB64) {
-      // For forged-approval testing the caller passes the *real* agent
-      // pubkey via env.agent.ed25519Pubkey before calling pairWithAgent —
-      // but injectForgedApproval can be invoked standalone. Read from env.
-      this.agentEd25519PubkeyB64 = this.env.agent.ed25519Pubkey;
-    }
-    const nonce = randomBytes(24).toString("base64");
-    const expiresAt = new Date(Date.now() + 30_000).toISOString();
-    const sigBody = buildPairApprovalSigBody({
-      agentDeviceId: agentRegistrationId,
-      phonePubkey: this.phonePubkeyB64,
-      phoneDeviceId: this.phoneDeviceId,
-      nonce,
-      expiresAt,
-    });
-    const signature = sign(null, sigBody, evilKp.privateKey).toString("base64");
-
-    const result = verifyPairApproval({
-      agentEd25519Pubkey: this.agentEd25519PubkeyB64,
-      agentDeviceId: agentRegistrationId,
-      approval: {
-        type: "pair-approval",
-        // pairId is relay-stamped; the forged approval fabricates one so the
-        // shape validates (verification fails on the SIGNATURE, which is the point).
-        pairId: randomUUID(),
-        phonePubkey: this.phonePubkeyB64,
-        phoneDeviceId: this.phoneDeviceId,
-        nonce,
-        expiresAt,
-        signature,
-      },
-      expectedNonce: nonce,
-    });
-    if (result.ok) {
-      throw new Error("forged approval unexpectedly verified");
-    }
-    if (result.reason !== "BAD_SIGNATURE") {
-      throw new Error(`forged approval rejected for ${result.reason}, expected BAD_SIGNATURE`);
-    }
-    throw new Error(`pair-approval signature verification failed: ${result.reason}`);
-  }
-
-  /**
-   * Re-register with the SAME Ed25519 keypair + phoneDeviceId, then issue
-   * a pair-request WITHOUT a pairCode. Trusted phones reconnect this way.
-   */
-  async reconnect(): Promise<{ paired: true } | { paired: false; reason: string }> {
-    if (!this.agentRegistrationId) {
-      throw new Error("reconnect requires a prior successful pair");
-    }
-    if (this.ws) {
-      try { this.ws.close(); } catch { /* ignore */ }
-      this.ws = null;
-    }
-    this.authenticated = false;
-    this.queue = [];
-    this.closeEvent = null;
-    await this.openSocket();
-    return this.tryPairRequest(this.agentRegistrationId);
-  }
-
-  /** Await the next WS close event (resolves immediately if already closed). */
-  async waitClose(): Promise<{ code: number; reason: string }> {
-    if (this.closeEvent) return this.closeEvent;
-    return new Promise((resolve) => this.closeWaiters.push(resolve));
-  }
-
-  /**
-   * Send a smoke message after pairing. The TestApp does not perform an
-   * E2E handshake; this is a plaintext payload in a route frame so the
-   * test can confirm the agent receives traffic from a non-licensed app.
-   */
-  async send(payload: string): Promise<void> {
-    if (!this.ws || !this.peerId) throw new Error("Not paired");
-    // Minimal route-frame send — tests that need real E2E should use the
-    // existing helpers/relay-client.ts. This is intentionally simple: a
-    // text-JSON frame the agent will drop with a parse warning, which is
-    // sufficient to assert "no license-side rejection of a paired phone".
-    this.ws.send(
-      JSON.stringify({
-        type: "message",
-        to: this.peerId,
-        channel: "control",
-        payload,
-      }),
-    );
-  }
-
-  async disconnect(): Promise<void> {
-    for (const w of this.waiters.splice(0)) {
-      if (w.timer) clearTimeout(w.timer);
-      w.reject(new Error("Disconnected"));
-    }
-    if (this.ws) {
-      try { this.ws.close(); } catch { /* ignore */ }
-      this.ws = null;
-    }
+  disconnect(): Promise<void> {
+    return this.client.disconnect();
   }
 }

@@ -7,6 +7,7 @@ import '../services/devices_api.dart' show ProvisioningException;
 import '../util/ab_log.dart';
 import 'analytics.dart';
 import 'auth.dart';
+import 'connection_identity.dart';
 import 'device_provisioning.dart';
 import 'providers.dart';
 import 'subscription.dart';
@@ -54,9 +55,12 @@ final postSignInProvisioningProvider = Provider<void>((ref) {
         // teardown); a bare ref.read/invalidate past that point throws
         // UnmountedRefException.
         if (!ref.mounted) return;
-        ref.read(analyticsServiceProvider)?.track(AnalyticsEvents.deviceProvisioned);
+        ref
+            .read(analyticsServiceProvider)
+            ?.track(AnalyticsEvents.deviceProvisioned);
         ref.read(deviceCapProvider.notifier).set(null);
         ref.invalidate(licenseTokenMinterProvider);
+        ref.invalidate(connectionTokenMinterProvider);
         ref.invalidate(localDeviceUuidProvider);
         prefetchSubscriptionCache(ref);
       } on ProvisioningException catch (e) {
@@ -100,6 +104,7 @@ Future<void> retryDeviceProvisioning(WidgetRef ref) async {
   await ensureCurrentUserDeviceRecord(ref);
   ref.read(deviceCapProvider.notifier).set(null);
   ref.invalidate(licenseTokenMinterProvider);
+  ref.invalidate(connectionTokenMinterProvider);
   ref.invalidate(localDeviceUuidProvider);
   prefetchSubscriptionCache(ref);
 }

@@ -1,8 +1,11 @@
 import { describe, it, expect } from "bun:test";
 import { HelloMessage, RouteHeader } from "../src/index";
 
-// v3 device ids are bare machine/phone ids — no '#' fan-out sub-ids and no
-// compound `deviceUuid.projectId` registrations, though '.' remains legal.
+// An agent's device id is its bare machine `deviceUuid`; an app's is a
+// per-machine relay slot, `<accountDeviceUuid>#<machineDeviceUuid>` (see
+// relay-slot.ts). Both shapes must parse — and so must a route header's `to`,
+// since that is how an agent addresses the slot back. The compound
+// `deviceUuid.projectId` registration is gone, but '.' remains legal.
 const fakePubKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 const b64 = (n: number) => Buffer.from(new Uint8Array(n)).toString("base64");
 
@@ -20,9 +23,16 @@ const baseHello = {
 };
 
 describe("v3 device id validation", () => {
-  it("HelloMessage rejects deviceId with '#' (sub-deviceId fan-out is gone)", () => {
-    const result = HelloMessage.safeParse({ ...baseHello, deviceId: "M#M.p1" });
-    expect(result.success).toBe(false);
+  // The app cannot dial at all if this rejects: every one of its sockets
+  // presents a slot, and a schema failure is PROTOCOL_VIOLATION before the
+  // signature is even looked at.
+  it("HelloMessage accepts an app's per-machine relay slot", () => {
+    const slot = "11111111-2222-3333-4444-555555555555#66666666-7777-8888-9999-000000000000";
+    const result = HelloMessage.safeParse({ ...baseHello, deviceType: "app", deviceId: slot });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.deviceId).toBe(slot);
+    }
   });
 
   it("HelloMessage accepts a bare deviceId with '.'", () => {
@@ -38,13 +48,20 @@ describe("v3 device id validation", () => {
     expect(result.success).toBe(false);
   });
 
-  it("RouteHeader rejects 'to' with '#'", () => {
+  // Two UUIDs plus the separator is 73 chars; the cap is what keeps an
+  // unbounded id out of the connection table's keys.
+  it("HelloMessage rejects a deviceId past the 128-char cap", () => {
+    const result = HelloMessage.safeParse({ ...baseHello, deviceId: "a".repeat(129) });
+    expect(result.success).toBe(false);
+  });
+
+  it("RouteHeader accepts a slot as 'to' — it is how the agent replies", () => {
     const result = RouteHeader.safeParse({
       type: "message",
-      to: "phone#M.p1",
+      to: "phone-1#machine-1",
       channel: "control",
     });
-    expect(result.success).toBe(false);
+    expect(result.success).toBe(true);
   });
 
   it("RouteHeader accepts a bare 'to' device id", () => {

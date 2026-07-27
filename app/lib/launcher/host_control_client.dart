@@ -40,9 +40,6 @@ class PairedPhoneSummary {
   final String pairedAt;
   final String lastSeenAt;
   final List<String> allowedProjects;
-  // How this phone was admitted: "same-account" (auto-paired via relay without
-  // a QR scan) or "pair-code" (explicit QR scan).
-  final String admission;
   const PairedPhoneSummary({
     required this.phonePubkey,
     required this.phoneDeviceId,
@@ -50,7 +47,6 @@ class PairedPhoneSummary {
     required this.pairedAt,
     required this.lastSeenAt,
     required this.allowedProjects,
-    required this.admission,
   });
 
   factory PairedPhoneSummary.fromJson(Map<String, dynamic> json) {
@@ -58,12 +54,10 @@ class PairedPhoneSummary {
     final phoneDeviceId = json['phoneDeviceId'];
     final pairedAt = json['pairedAt'];
     final lastSeenAt = json['lastSeenAt'];
-    final admission = json['admission'];
     if (phonePubkey is! String ||
         phoneDeviceId is! String ||
         pairedAt is! String ||
-        lastSeenAt is! String ||
-        admission is! String) {
+        lastSeenAt is! String) {
       throw HostControlException('BAD_RESPONSE', 'malformed phone fields: $json');
     }
     return PairedPhoneSummary(
@@ -73,7 +67,6 @@ class PairedPhoneSummary {
       pairedAt: pairedAt,
       lastSeenAt: lastSeenAt,
       allowedProjects: ((json['allowedProjects'] as List?) ?? const []).cast<String>(),
-      admission: admission,
     );
   }
 }

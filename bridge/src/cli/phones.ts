@@ -19,7 +19,10 @@ function findPhone(store: PairedPhonesStore, ref: string): PairedPhone | null {
 export function phonesList(store: PairedPhonesStore): number {
   for (const p of store.list()) {
     const allowed = p.allowedProjects.length ? p.allowedProjects.join(", ") : "(none)";
-    console.log(`${p.label ?? p.phoneDeviceId}  [${p.phoneDeviceId}]  allowed: ${allowed}`);
+    // Rows are read back without field validation, so a hand-edited file can
+    // omit lastSeenAt — print "unknown", never the string "undefined".
+    const lastSeen = p.lastSeenAt || "unknown";
+    console.log(`${p.label ?? p.phoneDeviceId}  [${p.phoneDeviceId}]  last seen: ${lastSeen}  allowed: ${allowed}`);
   }
   return 0;
 }

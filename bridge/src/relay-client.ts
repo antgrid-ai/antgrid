@@ -5,10 +5,11 @@ import type { DeviceIdentity } from "./device";
 import {
   buildTranscript, deriveSessionKeys, agentConfirmTag, phoneConfirmTag,
   verifyConfirmTag, E2eTransport, signTranscript, verifyTranscriptSig,
-  zeroizeSessionKeys, type SessionKeys,
+  zeroizeSessionKeys, rawSeedToPkcs8, type SessionKeys,
 } from "./e2e";
 import { deriveSharedSecret, type EphemeralKeypair } from "./key-exchange";
 import { parseMessageFast, type AbMessage } from "./protocol";
+import { baseSlotDeviceId, slotMachineDeviceId } from "./relay-slot";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import {
   encodeRouteFrame,
@@ -25,245 +26,15 @@ import {
   normalizeRelayHost,
   CONTROL_STREAM_ID,
   type HelloMessage,
-  type PairApprovalMessage,
-  type PairRejectedMessage,
   type RouteHeader,
 } from "antgrid-wire";
 import type { MessageBus, Channel, TransportSubscriber } from "./message-bus";
-import { rawSeedToPkcs8, signPairApproval } from "./pair-approval";
 import type { PairedPhonesStore } from "./paired-phones";
-import type { PairingWindow } from "./pairing-window";
-import { verifyPairRequest } from "./pair-request-verify";
-import { verifyAccountMembershipSig } from "./account-membership-verify";
+import type { TrustedPeersProvider } from "./trusted-peers";
 import { FragReassembler } from "./frag-reassembler";
 import { prunePushToken } from "./push/prune";
 import { nextEpoch } from "./relay-epoch";
 import { StreamMux, type AttachStreamOpts, type StreamHandle } from "./stream-mux";
-
-export interface HandlePairRequestArgs {
-  msg: {
-    type: "pair-request";
-    agentDeviceId: string;
-    phonePubkey: string;
-    phoneDeviceId: string;
-    nonce: string;
-    requestedAt: string;
-    phoneSignature: string;
-    /** Relay-stamped rendezvous id; echoed in pair-approval / pair-rejected so
-     *  the relay routes the response to the requesting phone (design §5.2). */
-    pairId?: string;
-    pairCode?: string;
-    label?: string;
-    /** Account-enrolled device Ed25519 pubkey (base64) the phone uses to prove
-     *  account membership. Verified against the account's live peer-key set. */
-    accountDevicePubkey?: string;
-    /** Signature over the pair-request transcript by `accountDevicePubkey`,
-     *  proving possession of an account-enrolled device key. */
-    accountMembershipSig?: string;
-  };
-  pairedPhones: PairedPhonesStore;
-  pairingWindow: PairingWindow;
-  agentDeviceId: string;
-  agentEd25519Priv: Uint8Array;
-  /** Returns the caller account's live enrolled app-device Ed25519 key set.
-   *  Fetched over the agent's own Bearer/TLS channel, so a malicious relay
-   *  cannot forge membership. Absent when account-membership routing is off. */
-  getAccountPeerKeys?: () => Promise<Set<string>>;
-  sameAccountDefaultProjects?: () => string[];
-  send: (msg: unknown) => void;
-  /** Injectable clock for tests. */
-  now?: () => number;
-  /**
-   * Called after a pair-request passes verification AND is admitted (trusted,
-   * sameAccount, or window-matched), just before the approval is sent. Lets the
-   * caller record the phone's Ed25519 pubkey + deviceId so the subsequent E2E
-   * handshake can verify the phone's transcript signature.
-   */
-  onApproved?: (phone: { phonePubkey: string; phoneDeviceId: string }) => void;
-}
-
-/**
- * Handle a phone-side `pair-request` arriving over the relay.
- *
- * Trust admission rules:
- *  - If the phone's pubkey is already on the trust list (`pairedPhones`), the
- *    request is approved without needing a pair-window match. This handles
- *    silent reconnects.
- *  - If the request carries a valid account-membership proof — an Ed25519
- *    signature over the pair-request transcript by an `accountDevicePubkey`
- *    that is present in the account's live enrolled-device key set (fetched
- *    over the agent's own Bearer/TLS channel) — the request is approved without
- *    consuming a pair code. This REPLACES trust in the relay's `sameAccount`
- *    stamp: a malicious relay cannot forge the proof. The Ed25519
- *    phone-signature check still runs unconditionally.
- *  - Otherwise, the request must include a `pairCode` that consumes the
- *    currently-open pairing window. Window consumption is single-use.
- *  - Otherwise, the request is rejected with one of `UNKNOWN_PHONE` (no code
- *    presented at all) or `PAIRING_WINDOW_CLOSED` (a code was presented but
- *    the window was closed, expired, or did not match).
- *
- * On approval the trust list is upserted (fresh entry for window matches,
- * `lastSeenAt` bump for trusted reconnects) and a `pair-approval` message is
- * sent containing an Ed25519 signature over the canonical sigBody so the
- * phone can verify the agent's identity. Both the approval and rejection echo
- * the relay-stamped `pairId` so the relay can route the response.
- */
-export async function handleInboundPairRequest(args: HandlePairRequestArgs): Promise<void> {
-  const { msg, pairedPhones, pairingWindow } = args;
-  const pairId = msg.pairId;
-  if (!pairId) {
-    // The relay always stamps pairId before forwarding; without it the response
-    // is unroutable, so there is nothing to answer.
-    log.warn("pair-request missing relay-stamped pairId — dropping");
-    return;
-  }
-
-  // Phone-side possession proof MUST be verified before any trust
-  // decision. Without this check, a malicious client that knows a
-  // trusted phone's pubkey could replay it and bypass pairing.
-  const verifyResult = verifyPairRequest({
-    phonePubkey: msg.phonePubkey,
-    agentDeviceId: msg.agentDeviceId,
-    phoneDeviceId: msg.phoneDeviceId,
-    nonce: msg.nonce,
-    requestedAt: msg.requestedAt,
-    phoneSignature: msg.phoneSignature,
-    now: args.now?.(),
-  });
-  if (!verifyResult.ok) {
-    const rejected: PairRejectedMessage = {
-      type: "pair-rejected",
-      pairId,
-      phonePubkey: msg.phonePubkey,
-      reason: verifyResult.reason,
-    };
-    args.send(rejected);
-    return;
-  }
-
-  const trusted = pairedPhones.has(msg.phonePubkey);
-
-  // Account-membership proof replaces trust in the relay's sameAccount stamp.
-  // The phone signs the pair-request transcript with its account-enrolled device
-  // key (proof of possession) and presents that key; we admit only if the sig
-  // verifies AND the key is in the account's live enrolled-app-device set fetched
-  // over our own Bearer/TLS channel. A malicious relay cannot forge this.
-  //
-  // Skip entirely when the phone is already `trusted` (silent reconnect): trust
-  // already admits it, so there is no reason to spend an Ed25519 verify + a
-  // network fetch of the account peer-key set on every reconnect.
-  let accountMember = false;
-  if (!trusted && msg.accountDevicePubkey && msg.accountMembershipSig && args.getAccountPeerKeys) {
-    const sigOk = verifyAccountMembershipSig({
-      agentDeviceId: msg.agentDeviceId,
-      phoneDeviceId: msg.phoneDeviceId,
-      phonePubkey: msg.phonePubkey,
-      accountDevicePubkey: msg.accountDevicePubkey,
-      nonce: msg.nonce,
-      sigB64: msg.accountMembershipSig,
-    });
-    if (sigOk) {
-      try {
-        const keys = await args.getAccountPeerKeys();
-        accountMember = keys.has(msg.accountDevicePubkey);
-      } catch (err) {
-        log.warn("account peer-key fetch failed during pair admission: %o", err);
-      }
-    }
-  }
-
-  // Gate consume() on !trusted && !accountMember so an already-admitted phone
-  // that happens to carry a pairCode does NOT burn the single-use pairing window
-  // as a side effect. (This tightens the previous behavior, which only excluded
-  // sameAccount.)
-  const windowMatches =
-    !trusted && !accountMember && msg.pairCode != null && pairingWindow.consume(msg.pairCode);
-
-  if (!trusted && !accountMember && !windowMatches) {
-    const reason = msg.pairCode != null ? "PAIRING_WINDOW_CLOSED" : "UNKNOWN_PHONE";
-    // The reject path is otherwise silent, which makes PAIRING_WINDOW_CLOSED
-    // undiagnosable: a presented pairCode that doesn't admit means either the
-    // window already expired/closed (no open window) or the code didn't match
-    // the open one (stale/wrong URL). consume() already ran above and is
-    // destructive, but isOpen() is not — so a still-open window here means the
-    // code mismatched, while a closed one means it expired or was never opened.
-    const detail =
-      reason === "UNKNOWN_PHONE"
-        ? "no pairCode presented"
-        : pairingWindow.isOpen()
-          ? "pairCode did not match the open window (stale/wrong URL)"
-          : "no open pairing window (expired >60s, or wizard not on the pairing step)";
-    log.warn(
-      "pair-request rejected: %s — %s (phone=%s, accountSig=%s)",
-      reason,
-      detail,
-      msg.phoneDeviceId,
-      msg.accountMembershipSig != null ? "present" : "absent",
-    );
-    const rejected: PairRejectedMessage = {
-      type: "pair-rejected",
-      pairId,
-      phonePubkey: msg.phonePubkey,
-      reason,
-    };
-    args.send(rejected);
-    return;
-  }
-
-  const now = new Date().toISOString();
-  if (accountMember) {
-    pairedPhones.upsert({
-      phonePubkey: msg.phonePubkey,
-      phoneDeviceId: msg.phoneDeviceId,
-      label: msg.label,
-      pairedAt: now,
-      lastSeenAt: now,
-      admission: "same-account",
-      allowedProjects: args.sameAccountDefaultProjects?.() ?? [],
-    });
-  } else if (windowMatches) {
-    // Explicit pair-code admits fail-closed; allowlist changes happen separately.
-    pairedPhones.upsert({
-      phonePubkey: msg.phonePubkey,
-      phoneDeviceId: msg.phoneDeviceId,
-      label: msg.label,
-      pairedAt: now,
-      lastSeenAt: now,
-      admission: "pair-code",
-    });
-  } else if (trusted) {
-    // Trusted reconnect: spread preserves the existing allowedProjects allowlist.
-    const existing = pairedPhones.get(msg.phonePubkey)!;
-    pairedPhones.upsert({ ...existing, lastSeenAt: now });
-  }
-
-  // Admitted: record the phone's signing identity for the E2E handshake.
-  args.onApproved?.({
-    phonePubkey: msg.phonePubkey,
-    phoneDeviceId: msg.phoneDeviceId,
-  });
-
-  const expiresAt = new Date(Date.now() + 30_000).toISOString();
-  const { signature } = signPairApproval({
-    agentEd25519Priv: args.agentEd25519Priv,
-    agentDeviceId: args.agentDeviceId,
-    phonePubkey: msg.phonePubkey,
-    phoneDeviceId: msg.phoneDeviceId,
-    nonce: msg.nonce,
-    expiresAt,
-  });
-
-  const approval: PairApprovalMessage = {
-    type: "pair-approval",
-    pairId,
-    phonePubkey: msg.phonePubkey,
-    phoneDeviceId: msg.phoneDeviceId,
-    nonce: msg.nonce,
-    expiresAt,
-    signature,
-  };
-  args.send(approval);
-}
 
 export interface RelayClientOptions {
   url: string;
@@ -274,12 +45,12 @@ export interface RelayClientOptions {
   generateKeypair: () => EphemeralKeypair;
   /** Fired on `welcome` — the single 1-RTT authentication event. */
   onAuthenticated?: () => void;
-  /** Kept exception (design §B2): the relay rejected our license with a terminal
-   *  verdict (LICENSE_INVALID | LICENSE_EXPIRED | LICENSE_REVOKED). SUPERSEDED /
-   *  PAIR_REJECTED must NEVER call this — re-enrolling would be wrong advice. */
+  /** Kept exception (design §B2): the relay rejected our license with an
+   *  identity-dead verdict (LICENSE_INVALID | LICENSE_REVOKED). LICENSE_EXPIRED
+   *  is recoverable by time (see {@link redialWithFreshToken}) and does NOT fire
+   *  this; SUPERSEDED must NEVER call it — re-enrolling would be
+   *  wrong advice. */
   onAuthRevoked?: () => void;
-  onPaired?: (peerId: string, peerName: string) => void;
-  onUnpaired?: (peerId: string) => void;
   onPeerOnline?: (peerId: string) => void;
   onPeerOffline?: (peerId: string) => void;
   /** The E2E session established (phone's app:ready confirm verified). */
@@ -297,11 +68,9 @@ export interface RelayClientOptions {
   getLicenseToken: () => Promise<string> | string;
   /** Trust list for paired phones; required to admit reconnects of known phones. */
   pairedPhones?: PairedPhonesStore;
-  /** Single-use pairing window (opened on `agent:enableRelay`). */
-  pairingWindow?: PairingWindow;
-  /** Returns the caller account's live enrolled app-device Ed25519 key set,
-   *  used to verify QR-less auto-pair account-membership proofs. */
-  getAccountPeerKeys?: () => Promise<Set<string>>;
+  /** Account device inventory (spec 2026-07-24 §3.3); consulted before the
+   *  paired-phones store when resolving a phone's Ed25519 pubkey. */
+  trustedPeers?: TrustedPeersProvider;
   sameAccountDefaultProjects?: () => string[];
   /** Test seam: overrides the half-open handshake-attempt expiry (design §6.2's
    *  30s default). Production never sets this. */
@@ -328,8 +97,11 @@ const MAX_DIAGNOSTIC_TYPES = 8;
 const FRAG_ID_SEED = randomBytes(8).toString("hex");
 let fragIdCounter = 0;
 
-/** Terminal license verdicts that trigger the kept `auth_revoked` exception. */
-const LICENSE_TERMINAL = new Set<string>(["LICENSE_INVALID", "LICENSE_EXPIRED", "LICENSE_REVOKED"]);
+/** Identity-dead license verdicts that trigger the kept `auth_revoked`
+ *  exception. LICENSE_EXPIRED is deliberately NOT here: it is recoverable by
+ *  time (a lapsed-then-renewed subscription), so it stops reconnecting but keeps
+ *  token maintenance re-minting; a fresh mint redials (redialWithFreshToken). */
+const LICENSE_AUTH_DEAD = new Set<string>(["LICENSE_INVALID", "LICENSE_REVOKED"]);
 
 export type FragmentForSendResult =
   | { ok: true; frames: string[] }
@@ -354,6 +126,10 @@ interface E2eAttempt {
   attemptId: string;
   transport: E2eTransport;
   sessionKeys: SessionKeys;
+  // The phone deviceId this session's keys belong to. Anchors outgoing
+  // addressing to the session (spec 2026-07-24 single-active-phone §4.1), so a
+  // sibling's bare presence can't repoint frames away from the live peer.
+  peerId: string;
 }
 
 function formatDiagnosticBytes(bytes: number): string {
@@ -406,6 +182,9 @@ export class RelayClient {
   private intentionalClose = false;
   private backoff = INITIAL_BACKOFF;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  /** True from the moment a heartbeat `ping` is sent until a reply (or any
+   *  other inbound frame) proves the socket is still alive. */
+  private awaitingPong = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private authenticated = false;
   private _peerId: string | null = null;
@@ -427,8 +206,9 @@ export class RelayClient {
   private missedPongs = 0;
   private livenessTimer: ReturnType<typeof setInterval> | null = null;
 
-  // Phone Ed25519 pubkeys (standard base64, raw 32 bytes) learned from verified
-  // pair-requests, keyed by the phone's deviceId (== relay peer id).
+  // Phone Ed25519 pubkeys (standard base64, raw 32 bytes) resolved from the
+  // account peers inventory at handshake, keyed by the phone's deviceId (==
+  // relay peer id).
   private phoneEd25519ByDeviceId = new Map<string, string>();
 
   private bus: MessageBus | null = null;
@@ -452,7 +232,9 @@ export class RelayClient {
 
   /** The Ed25519 pubkey (standard base64) of the phone currently paired on this
    *  connection, or null. Resolves `_peerId` → pubkey via `phoneEd25519ByDeviceId`
-   *  (populated at pair-approval). Used by the per-project allowlist gate. */
+   *  (populated at a client-hello's verified identity, or backfilled from the
+   *  paired-phones store on a trusted reconnect). Used by the per-project
+   *  allowlist gate. */
   currentPeerPubkey(): string | null {
     if (!this._peerId) return null;
     return this.phoneEd25519ByDeviceId.get(this._peerId) ?? null;
@@ -460,12 +242,31 @@ export class RelayClient {
 
   /** Ensure `phoneEd25519ByDeviceId` has an entry for `peerId` by recovering it
    *  from the persistent trust list. Used on a trusted reconnect (peer-online
-   *  with no fresh pair-request) so the allowlist gate can still identify the
+   *  with no fresh handshake) so the allowlist gate can still identify the
    *  phone after an agent restart. No-op when already known or not trusted. */
   private backfillPeerPubkey(peerId: string): void {
     if (this.phoneEd25519ByDeviceId.has(peerId)) return;
-    const phone = this.opts.pairedPhones?.list().find((p) => p.phoneDeviceId === peerId);
+    // Cache under the route id we were given, look up under the account device
+    // the store is keyed by — see `relay-slot.ts`.
+    const baseId = baseSlotDeviceId(peerId);
+    const phone = this.opts.pairedPhones?.list().find((p) => p.phoneDeviceId === baseId);
     if (phone) this.phoneEd25519ByDeviceId.set(peerId, phone.phonePubkey);
+  }
+
+  /** True when `peerId` is an app relay slot scoped at a DIFFERENT machine.
+   *
+   *  The relay fans presence to every same-account peer of the opposite type,
+   *  so one phone holding N machines open reaches us once per SLOT — and all
+   *  but one of those name a machine that isn't us. Acting on a sibling's would
+   *  point our reply address at a socket whose E2E session cannot open our
+   *  frames (peer-online), or suppress our heavy stream because a DIFFERENT
+   *  machine's socket closed (peer-offline).
+   *
+   *  Unscoped ids are never foreign — they carry no claim about who they are
+   *  for, and every pre-slot client sends one. */
+  private isForeignSlot(peerId: string): boolean {
+    const machine = slotMachineDeviceId(peerId);
+    return machine !== null && machine !== this.opts.identity.deviceId;
   }
 
   constructor(private opts: RelayClientOptions) {
@@ -514,6 +315,24 @@ export class RelayClient {
 
   connect(): void {
     this.intentionalClose = false;
+    this.doConnect();
+  }
+
+  /**
+   * Redial after a LICENSE_EXPIRED stop, once a fresh token has minted. Expired
+   * is recoverable by time (a lapsed-then-renewed subscription): unlike the
+   * identity-dead verdicts it stops reconnecting but leaves token maintenance
+   * running, so when maintenance reports a fresh mint the machine socket redials
+   * WITHOUT a process restart. No-op unless we actually stopped on an expired
+   * verdict — never broadens to other terminal stops (SUPERSEDED)
+   * or a live/intentionally-closed socket.
+   */
+  redialWithFreshToken(): void {
+    if (this.intentionalClose) return;
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
+    if (this.lastError?.code !== "LICENSE_EXPIRED") return;
+    this.lastError = null;
+    this.backoff = INITIAL_BACKOFF;
     this.doConnect();
   }
 
@@ -645,6 +464,9 @@ export class RelayClient {
       return;
     }
     const msg = result.data;
+    // Any successfully parsed inbound frame proves the socket is alive, not
+    // just an explicit `pong` — a chatty relay is as good a liveness signal.
+    this.awaitingPong = false;
 
     switch (msg.type) {
       case "welcome":
@@ -664,22 +486,17 @@ export class RelayClient {
       case "stream-closed":
         // Idempotent accounting ack — nothing to do; the mux already forgot it.
         break;
-      case "pair-connected":
-        this._peerId = msg.peerId;
-        log.info("Paired with %s (%s)", msg.peerName, msg.peerId);
-        // Reactive: the phone drives the handshake — wait for its client-hello.
-        this.opts.onPaired?.(msg.peerId, msg.peerName);
-        break;
-      case "grant-revoked":
-        log.info("Grant revoked by peer %s (%s)", msg.peerDeviceId, msg.reason);
-        this._peerId = null;
-        this.resetE2eState();
-        this.mux.notifyUnpaired();
-        this.opts.onUnpaired?.(msg.peerDeviceId);
-        break;
       case "peer-online":
         log.info("Peer online: %s", msg.peerId);
-        this._peerId = msg.peerId;
+        if (this.isForeignSlot(msg.peerId)) {
+          log.debug("Ignoring peer-online for %s — scoped at another machine", msg.peerId);
+          break;
+        }
+        // Bare presence is not a handshake: a same-account sibling coming online
+        // must never repoint the address of a live session (spec 2026-07-24
+        // single-active-phone §4.4). Only a verified handshake moves it; adopt a
+        // presence peer as the default address solely when nothing is established.
+        if (!this.established) this._peerId = msg.peerId;
         this.backfillPeerPubkey(msg.peerId);
         // Reactive: wait for the phone's fresh client-hello (its rekey). Stream
         // resume happens on handshake-complete, not here.
@@ -687,35 +504,15 @@ export class RelayClient {
         break;
       case "peer-offline":
         log.info("Peer offline: %s", msg.peerId);
+        if (this.isForeignSlot(msg.peerId)) {
+          log.debug("Ignoring peer-offline for %s — scoped at another machine", msg.peerId);
+          break;
+        }
         // Keep _peerId + the established session for push fallback and a quick
         // reconnect; suppress the heavy stream until the phone returns.
         this.mux.notifyPeerOffline();
         this.opts.onPeerOffline?.(msg.peerId);
         break;
-      case "pair-request": {
-        const phones = this.opts.pairedPhones;
-        const window = this.opts.pairingWindow;
-        const ed25519PrivB64 = this.opts.identity.ed25519PrivateKey;
-        if (!phones || !window || !ed25519PrivB64) {
-          log.warn("pair-request received but agent is not configured for inbound pairing");
-          break;
-        }
-        const ed25519Priv = Buffer.from(ed25519PrivB64, "base64");
-        void handleInboundPairRequest({
-          msg,
-          pairedPhones: phones,
-          pairingWindow: window,
-          agentDeviceId: this.opts.identity.deviceId,
-          agentEd25519Priv: ed25519Priv,
-          getAccountPeerKeys: this.opts.getAccountPeerKeys,
-          sameAccountDefaultProjects: this.opts.sameAccountDefaultProjects,
-          send: (m) => this.sendJson(m as object),
-          onApproved: ({ phonePubkey, phoneDeviceId }) => {
-            this.phoneEd25519ByDeviceId.set(phoneDeviceId, phonePubkey);
-          },
-        });
-        break;
-      }
       case "push:result":
         if (!msg.ok && msg.reason === "unregistered" && this.opts.pairedPhones) {
           prunePushToken(this.opts.pairedPhones, msg.pushToken);
@@ -729,6 +526,11 @@ export class RelayClient {
         break;
       case "error":
         this.handleErrorFrame(msg);
+        break;
+      case "pong":
+        // App-layer liveness reply to our heartbeat probe (already cleared
+        // above; explicit for readability at the call site).
+        this.awaitingPong = false;
         break;
       default: {
         const _exhaustive: never = msg;
@@ -762,11 +564,12 @@ export class RelayClient {
     );
     this.opts.onError?.(msg.code, msg.message);
 
-    // Kept exception (B2): only a terminal LICENSE verdict tells the user to
-    // re-enroll. SUPERSEDED (a newer instance of OURSELVES) and PAIR_REJECTED
-    // must never trigger this — the relay closes the socket and the terminal
-    // `retryable:false` stops reconnecting in the close handler.
-    if (LICENSE_TERMINAL.has(msg.code)) this.opts.onAuthRevoked?.();
+    // Kept exception (B2): only an identity-dead LICENSE verdict tells the user
+    // to re-enroll. LICENSE_EXPIRED is recoverable by time — it takes the plain
+    // terminal path (retryable:false stops reconnect at the close handler) while
+    // token maintenance keeps re-minting and redials on a fresh mint. SUPERSEDED
+    // (a newer instance of OURSELVES) must never trigger this.
+    if (LICENSE_AUTH_DEAD.has(msg.code)) this.opts.onAuthRevoked?.();
     if (msg.code === "SUPERSEDED") {
       log.info("Superseded by a newer connection of this device — stopping reconnect");
     }
@@ -803,9 +606,14 @@ export class RelayClient {
       return;
     }
     const channel: Channel = header.channel === "preview" ? "preview" : "control";
+    // A structurally valid route frame proves the socket delivered real bytes —
+    // sealed/binary E2E traffic (terminal, file data) must count as liveness
+    // the same as a JSON pong, even if the sealed payload itself later fails to
+    // decrypt (decrypt-or-drop). Mirrors handleTextMessage's clear-before-dispatch.
+    this.awaitingPong = false;
 
     if (decoded.kind === FrameKind.handshake) {
-      this.handleHandshakeFrame(decoded.payload);
+      this.handleHandshakeFrame(decoded.payload, header.from);
       return;
     }
     // kind === sealed: decrypt-or-drop.
@@ -815,7 +623,7 @@ export class RelayClient {
   /** Kind-1 plaintext admits exactly the two handshake types; the agent only
    *  ever consumes client-hello. A frame that is not a signature-valid
    *  client-hello is dropped with a log (design §3.1). */
-  private handleHandshakeFrame(payload: Uint8Array): void {
+  private handleHandshakeFrame(payload: Uint8Array, from: string): void {
     let obj: { type?: string } | null = null;
     try {
       obj = JSON.parse(Buffer.from(payload).toString("utf8"));
@@ -824,7 +632,7 @@ export class RelayClient {
       return;
     }
     if (obj?.type === "handshake:client-hello") {
-      this.handleClientHello(obj as { attemptId?: string; pubkey?: string; nonce?: string; sig?: string });
+      this.handleClientHello(obj as { attemptId?: string; pubkey?: string; nonce?: string; sig?: string }, from);
       return;
     }
     log.warn("Dropping unexpected kind-1 handshake frame (type=%s)", obj?.type);
@@ -939,19 +747,14 @@ export class RelayClient {
     }
   }
 
-  private handleClientHello(obj: { attemptId?: string; pubkey?: string; nonce?: string; sig?: string }): void {
+  private handleClientHello(obj: { attemptId?: string; pubkey?: string; nonce?: string; sig?: string }, from: string): void {
     const { attemptId, pubkey, nonce, sig } = obj;
     if (!attemptId || !pubkey || !nonce || !sig) {
       log.warn("client-hello missing fields — dropping");
       return;
     }
-    const peerId = this._peerId;
+    const peerId = from;
     if (!peerId) return;
-    const phoneEd25519PubB64 = this.resolvePhoneEd25519PubB64(peerId);
-    if (!phoneEd25519PubB64) {
-      log.warn("No pinned Ed25519 identity for peer %s; cannot verify handshake", peerId);
-      return;
-    }
     const seedB64 = this.opts.identity.ed25519PrivateKey;
     if (!seedB64) {
       log.warn("No Ed25519 seed to sign agent-hello — dropping client-hello");
@@ -964,22 +767,117 @@ export class RelayClient {
     }
     const nonceBuf = Buffer.from(nonce, "base64");
     const deviceId = this.opts.identity.deviceId;
+    // `peerId` is the phone's per-machine relay SLOT — a transport address. The
+    // transcript and every identity lookup below are keyed by the ACCOUNT
+    // device, which is what the phone signs as and what the inventory holds.
+    const peerBaseId = baseSlotDeviceId(peerId);
 
     // SECURITY: verify the phone's transcript signature (empty agent-pub slot —
-    // pull-model ordering) against the pinned key before deriving anything.
+    // pull-model ordering) against a pinned key before deriving anything.
     const phoneTranscript = buildTranscript({
       registrationId: deviceId,
       role: "phone",
       agentDeviceId: deviceId,
-      phoneDeviceId: peerId,
+      phoneDeviceId: peerBaseId,
       agentX25519Pub: Buffer.alloc(0),
       phoneX25519Pub: clientPubkey,
       nonce: nonceBuf,
     });
-    if (!verifyTranscriptSig(phoneTranscript, phoneEd25519PubB64, sig)) {
-      log.warn("Rejecting client-hello: transcript signature invalid");
+    // Tries every known identity source, not just the first hit: a cached key
+    // that no longer verifies (device re-registered under a new Ed25519 key —
+    // web updates `publicKey` in place) must fall through to the inventory
+    // instead of dead-ending admission until process restart.
+    const resolved = this.resolvePhoneEd25519PubB64(peerId, (candidate) =>
+      verifyTranscriptSig(phoneTranscript, candidate, sig),
+    );
+    if (!resolved.pub) {
+      // Two very different admission failures, and the operator needs to tell
+      // them apart: nobody has ever heard of this device (enrolment/inventory
+      // lag) versus a device we DO know presenting a signature that doesn't
+      // verify (stale pin after a re-key — or a forgery).
+      if (resolved.known === 0) {
+        log.warn("Rejecting client-hello: peer %s is unknown to every identity source (cache, account inventory, paired phones)", peerId);
+      } else {
+        log.warn("Rejecting client-hello: none of the %d known identities for peer %s verifies the transcript signature", resolved.known, peerId);
+      }
       return;
     }
+    const phoneEd25519PubB64 = resolved.pub;
+
+    // Cache the verified identity for POST-handshake authorization
+    // (currentPeerPubkey/backfillPeerPubkey): a trust-only phone (account
+    // inventory, no pair-request ever sent) has no paired-phones row for
+    // backfillPeerPubkey to recover from, so without this the control-plane
+    // dispatch gate (`if (!pk) return`) drops every frame from it forever.
+    this.phoneEd25519ByDeviceId.set(peerId, phoneEd25519PubB64);
+
+    // Account trust admits without a pair-request, so nothing else ever creates
+    // this phone's allowlist row — and `buildProjectsAdvertisement` returns []
+    // for a phone the store doesn't know. Without this a fully connected phone
+    // reads "offline" forever and can't be granted out of it, because
+    // `antgrid phones list` wouldn't show it either. The row is the ALLOWLIST
+    // half of paired-phones.json, never a trust claim: it is written only after
+    // the transcript signature verified against an account identity, and it
+    // grants exactly what the desktop's mobile-access policy already shares.
+    //
+    // Creation only. A rekey re-runs this hello, and rewriting the row would
+    // flush the file — tripping its watcher's re-advertise — on every one.
+    // An existing row instead takes `touchLastSeen`, which updates memory and
+    // coalesces the write, so `last seen` tracks admissions without that cost.
+    if (this.opts.pairedPhones && !this.opts.pairedPhones.has(phoneEd25519PubB64)) {
+      const now = new Date().toISOString();
+      const allowedProjects = this.opts.sameAccountDefaultProjects?.() ?? [];
+      this.opts.pairedPhones.upsert({
+        phonePubkey: phoneEd25519PubB64,
+        // The ACCOUNT device, not the slot it happened to reach us on: trust is
+        // machine-level and one row serves every socket this phone opens. A
+        // slot here would also be invisible to the base-keyed lookups in
+        // `resolvePhoneEd25519PubB64`/`backfillPeerPubkey`.
+        phoneDeviceId: peerBaseId,
+        pairedAt: now,
+        lastSeenAt: now,
+        allowedProjects,
+      });
+      log.info(
+        "Registered account-trusted phone %s with %d default project(s)",
+        peerBaseId,
+        allowedProjects.length,
+      );
+    } else {
+      this.opts.pairedPhones?.touchLastSeen(phoneEd25519PubB64);
+    }
+
+    // A different device's signature-verified client-hello supersedes the live
+    // session explicitly (spec 2026-07-24 single-active-phone §4.3) — the sig is
+    // proof of the new phone's identity, so don't wait for liveness to discover
+    // the old session is obsolete. Same-device rekey keeps make-before-break
+    // (the established session survives below until the new app:ready confirms).
+    if (this.established && this.established.peerId !== peerId) {
+      // Notify the displaced phone with its own (still-live) keys before
+      // zeroizing; without this it only learns via liveness timeout and would
+      // rekey right back (two-device ping-pong). Best-effort: it may already
+      // be gone.
+      // Both ids AND the address: the frame is sealed with the displaced
+      // phone's keys but routed by `_peerId`, and a mismatch there is the
+      // failure mode that has bitten this file before (a live session's
+      // address getting re-pointed). Silent otherwise — the notice leaves no
+      // other trace, so a displaced device that never banners is
+      // indistinguishable from one that was never notified.
+      log.info(
+        "Displacing phone %s in favour of %s — sending session-takeover (addressed to %s)",
+        this.established.peerId,
+        peerId,
+        this._peerId,
+      );
+      try {
+        this.sendSessionFrame({ type: "session-takeover" }, this.established.transport);
+      } catch {
+        // displaced peer unreachable — teardown proceeds regardless
+      }
+      this.tearDownEstablished();
+      this.stopLiveness();
+    }
+    this._peerId = peerId;
 
     // Fresh attempt: any prior half-open candidate is superseded.
     this.tearDownPending();
@@ -990,7 +888,9 @@ export class RelayClient {
       registrationId: deviceId,
       role: "agent",
       agentDeviceId: deviceId,
-      phoneDeviceId: peerId,
+      // Base id, matching the phone transcript above: this transcript is the
+      // HKDF salt, so a slot id here would derive keys the app cannot open.
+      phoneDeviceId: peerBaseId,
       agentX25519Pub: agentPubkey,
       phoneX25519Pub: clientPubkey,
       nonce: nonceBuf,
@@ -999,7 +899,7 @@ export class RelayClient {
     kp.privateKey.fill(0);
     const sessionKeys = deriveSessionKeys(sharedSecret, agentTranscript);
     const transport = new E2eTransport({ sendKey: sessionKeys.a2p, recvKey: sessionKeys.p2a });
-    this.pending = { attemptId, transport, sessionKeys };
+    this.pending = { attemptId, transport, sessionKeys, peerId };
     this.startHalfOpenTimer();
 
     const agentSig = signTranscript(agentTranscript, Buffer.from(seedB64, "base64"));
@@ -1040,6 +940,10 @@ export class RelayClient {
       // Make-before-break swap: promote the candidate, then zeroize the old set.
       const old = this.established;
       this.established = this.pending;
+      // Self-correct the address to the promoted session's peer (already equal
+      // to it for same-device rekey; makes a presence flap during the pending
+      // window harmless — spec 2026-07-24 §4.3).
+      this._peerId = this.established.peerId;
       this.pending = null;
       this.stopHalfOpenTimer();
       if (old) {
@@ -1057,12 +961,35 @@ export class RelayClient {
     log.warn("app:ready for unknown attempt %s — dropping", attemptId);
   }
 
-  private resolvePhoneEd25519PubB64(phoneDeviceId: string): string | undefined {
-    const fromMap = this.phoneEd25519ByDeviceId.get(phoneDeviceId);
-    if (fromMap) return fromMap;
-    const store = this.opts.pairedPhones;
-    if (!store) return undefined;
-    return store.list().find((p) => p.phoneDeviceId === phoneDeviceId)?.phonePubkey;
+  /** Try each known identity source in priority order — verified cache →
+   *  account inventory (spec 2026-07-24 §3.3) → paired-phones store (parallel
+   *  path until Phase C) — returning the first one `verify` accepts. A cache
+   *  hit is preferred for the hot path but does NOT short-circuit: if it fails
+   *  verification the loop falls through to the inventory rather than
+   *  dead-ending on a stale key. Warms a throttled inventory refresh when
+   *  nothing verifies, covering both "never seen" and "cache went stale".
+   *
+   *  A rejection carries how many identities were actually tried, because those
+   *  two cases are diagnostically distinct on the admission path. */
+  private resolvePhoneEd25519PubB64(
+    phoneDeviceId: string,
+    verify: (candidate: string) => boolean,
+  ): { pub: string | undefined; known: number } {
+    // Route id for the local cache (it is keyed by reply address), account
+    // device id for the two persistent stores — neither has ever heard of a
+    // per-machine slot. Widening the candidate list is not widening admission:
+    // `verify` still has to pass on whatever comes back.
+    const baseId = baseSlotDeviceId(phoneDeviceId);
+    const candidates = [
+      this.phoneEd25519ByDeviceId.get(phoneDeviceId),
+      this.opts.trustedPeers?.lookup(baseId),
+      this.opts.pairedPhones?.list().find((p) => p.phoneDeviceId === baseId)?.phonePubkey,
+    ].filter((c): c is string => !!c);
+    for (const candidate of candidates) {
+      if (verify(candidate)) return { pub: candidate, known: candidates.length };
+    }
+    this.opts.trustedPeers?.noteMiss();
+    return { pub: undefined, known: candidates.length };
   }
 
   // --- Sending ---
@@ -1413,15 +1340,24 @@ export class RelayClient {
     this.mux.notifyPeerOffline();
   }
 
+  private heartbeatTick(): void {
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    if (this.awaitingPong) {
+      // Half-open socket (e.g. after machine sleep): our previous probe went
+      // unanswered for a full interval. Force-close rather than leaving it to
+      // linger until OS TCP timeout; the close handler owns reconnection.
+      log.warn("relay socket unresponsive — closing to trigger reconnect");
+      this.ws.close();
+      return;
+    }
+    this.awaitingPong = true;
+    this.sendJson({ type: "ping" });
+  }
+
   private startHeartbeat(): void {
     this.stopHeartbeat();
-    this.heartbeatTimer = setInterval(() => {
-      if (this.ws?.readyState === WebSocket.OPEN) {
-        const ws = this.ws as unknown as { ping?: () => void };
-        if (typeof ws.ping === "function") ws.ping();
-        else this.sendJson({ type: "ping" });
-      }
-    }, HEARTBEAT_INTERVAL);
+    this.awaitingPong = false;
+    this.heartbeatTimer = setInterval(() => this.heartbeatTick(), HEARTBEAT_INTERVAL);
     this.heartbeatTimer?.unref?.();
   }
 
@@ -1445,6 +1381,7 @@ export class RelayClient {
 
   private cleanup(): void {
     this.stopHeartbeat();
+    this.awaitingPong = false;
     this.stopHalfOpenTimer();
     this.stopLiveness();
     if (this.reconnectTimer) {

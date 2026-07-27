@@ -127,7 +127,6 @@ test("drops project verbs from a trusted-but-not-allowed phone, honors them afte
     phoneDeviceId: "phone-dev-1",
     pairedAt: new Date().toISOString(),
     lastSeenAt: new Date().toISOString(),
-    admission: "pair-code",
     allowedProjects: [],
   });
 
@@ -229,7 +228,6 @@ test("loopback frames bypass the allowlist gate even when the relay peer is not 
     phoneDeviceId: "phone-dev-loopback",
     pairedAt: new Date().toISOString(),
     lastSeenAt: new Date().toISOString(),
-    admission: "pair-code",
     allowedProjects: [],
   });
 
@@ -288,7 +286,6 @@ test("drops tunnel:http-request from a trusted-but-not-allowed phone, honors it 
     phoneDeviceId: "phone-dev-tunnel",
     pairedAt: new Date().toISOString(),
     lastSeenAt: new Date().toISOString(),
-    admission: "pair-code",
     allowedProjects: [],
   });
 
@@ -362,7 +359,6 @@ test("currentPeerPubkey backfills from the trust list on trusted reconnect (empt
     phoneDeviceId,
     pairedAt: new Date().toISOString(),
     lastSeenAt: new Date().toISOString(),
-    admission: "pair-code",
     allowedProjects: ["projX"],
   });
 
@@ -421,7 +417,6 @@ test("promotion wires (and clears) the allowlist-gate peer provider", async () =
     pairedPhones: { has: () => false } as never,
     handleTunnelMessage: () => {},
     onHandshakeComplete: () => {},
-    onUnpaired: () => {},
     setPlainHook: () => {},
     setPeerPubkeyProvider,
     attachTransport: () => {},
@@ -434,12 +429,6 @@ test("promotion wires (and clears) the allowlist-gate peer provider", async () =
     attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: () => {} }),
     currentPeerPubkey: () => "promoted-phone-pk",
     sendPushDeliver: () => {},
-    pairingWindow: {
-      open: () => ({ code: "CODE", expiresAt: "2030-01-01T00:00:00.000Z" }),
-      consume: () => false,
-      isOpen: () => false,
-      close: () => {},
-    },
     agentDeviceId: "0bbd1111-2222-3333-4444-555566667777",
     ed25519Pub: Buffer.from("edpub").toString("base64"),
     relayBase: "https://relay.example.com",

@@ -66,6 +66,7 @@ class DevicesApi extends CookieApiClient implements DevicesApiCreator {
     required String x25519Pub,
     required String platform,
     required String displayName,
+    String? kind,
   }) async {
     final cookie = await cookieProvider();
     if (cookie == null) {
@@ -82,6 +83,9 @@ class DevicesApi extends CookieApiClient implements DevicesApiCreator {
           'x25519Pub': x25519Pub,
           'platform': platform,
           'displayName': displayName,
+          // Omitted (not null) when unset so the server keeps deriving the kind
+          // from the platform.
+          'kind': ?kind,
         }),
       );
     } catch (e) {

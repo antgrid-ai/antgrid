@@ -20,6 +20,7 @@ class FakeDevicesApi implements DevicesApiCreator {
     required String x25519Pub,
     required String platform,
     required String displayName,
+    String? kind,
   }) async {
     callCount++;
     if (fail != null) throw fail!;

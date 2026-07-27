@@ -25,6 +25,7 @@ import 'providers/auth.dart';
 import 'providers/cached_sessions.dart';
 import 'providers/collapsed_drawer.dart';
 import 'providers/drawer_order.dart';
+import 'providers/host_status.dart';
 import 'providers/local_host_warmup.dart';
 import 'providers/post_signin_provisioning.dart';
 import 'providers/projects.dart';
@@ -170,6 +171,10 @@ Future<void> main() async {
   // Eagerly warm the local bridge host + control plane on launch (desktop-only,
   // non-blocking). Same "must stay listened" reasoning as above.
   container.listen(localHostWarmupProvider, (_, _) {});
+
+  // Supervision of that host: re-bind open local projects after a respawn.
+  // Must stay listened for the whole app lifetime, like the warm-up above.
+  container.listen(hostRestartRebindProvider, (_, _) {});
 
   // Register the push token on every warm RELAY session (Android + iOS).
   // requestPermission/token can throw on a device without Google Play Services;

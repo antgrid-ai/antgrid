@@ -15,7 +15,11 @@ class LocalTransportHandshakeException implements Exception {
   final int? closeCode;
   final String? closeReason;
   final String message;
-  LocalTransportHandshakeException(this.message, {this.closeCode, this.closeReason});
+  LocalTransportHandshakeException(
+    this.message, {
+    this.closeCode,
+    this.closeReason,
+  });
   @override
   String toString() =>
       'LocalTransportHandshakeException($closeCode, $closeReason): $message';
@@ -102,8 +106,9 @@ class LocalTransport extends BufferedAgentTransport {
         unawaited(pendingWs.then((ws) => ws.close(), onError: (_) {}));
         if (attempt == maxAttempts) {
           throw LocalTransportHandshakeException(
-              'WS connect timed out after ${connectTimeout.inMilliseconds}ms'
-              ' ($maxAttempts attempts)');
+            'WS connect timed out after ${connectTimeout.inMilliseconds}ms'
+            ' ($maxAttempts attempts)',
+          );
         }
       }
     }
@@ -155,23 +160,27 @@ class LocalTransport extends BufferedAgentTransport {
       },
       onDone: () {
         if (!ready.isCompleted) {
-          ready.completeError(LocalTransportHandshakeException(
-            'socket closed before ready',
-            closeCode: _ch?.closeCode,
-            closeReason: _ch?.closeReason,
-          ));
+          ready.completeError(
+            LocalTransportHandshakeException(
+              'socket closed before ready',
+              closeCode: _ch?.closeCode,
+              closeReason: _ch?.closeReason,
+            ),
+          );
         } else {
           setState(TransportState.disconnected);
         }
       },
     );
 
-    _ch!.sink.add(jsonEncode({
-      'type': 'hello',
-      'token': token,
-      'appPid': appPid,
-      'appVersion': appVersion,
-    }));
+    _ch!.sink.add(
+      jsonEncode({
+        'type': 'hello',
+        'token': token,
+        'appPid': appPid,
+        'appVersion': appVersion,
+      }),
+    );
 
     try {
       await ready.future.timeout(const Duration(seconds: 3));
@@ -189,18 +198,26 @@ class LocalTransport extends BufferedAgentTransport {
     try {
       final snap = await request(
         'state.snapshot',
-        params: {'types': ['*']},
+        params: {
+          'types': ['*'],
+        },
         timeout: const Duration(seconds: 5),
       );
       final frames = (snap['frames'] as List?) ?? const [];
       for (final raw in frames) {
         if (raw is Map) {
-          snapshotCache.add(InboundMessage('control', raw.cast<String, dynamic>()));
+          snapshotCache.add(
+            InboundMessage('control', raw.cast<String, dynamic>()),
+          );
         }
       }
     } on RpcException {
       // Pre-RPC agent — fall through, subscribers get live frames only.
     }
+    // Born established: fire the tier-3 hydrators once. A local session never
+    // re-establishes (no handshake), so this is the only replay — no reconnect
+    // staleness to reconcile, unlike a StreamTransport.
+    redriveHydrators();
   }
 
   @override
@@ -218,6 +235,7 @@ class LocalTransport extends BufferedAgentTransport {
   @override
   Future<void> dispose() async {
     failAllPending();
+    clearHydrators();
     snapshotCache.clear();
     await _sub?.cancel();
     await _ch?.sink.close();

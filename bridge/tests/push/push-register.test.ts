@@ -44,7 +44,7 @@ test("paired-phones persists push fields through upsert", () => {
   const store = loadPairedPhones(dir);
   store.upsert({
     phonePubkey: "PK", phoneDeviceId: "d1", pairedAt: "2026-07-01T00:00:00.000Z",
-    lastSeenAt: "2026-07-01T00:00:00.000Z", admission: "same-account",
+    lastSeenAt: "2026-07-01T00:00:00.000Z",
     pushToken: "tok", pushProvider: "fcm", pushPubkey: "xpk", pushUpdatedAt: "2026-07-01T00:00:00.000Z",
   });
   // Re-open from disk to prove persistence:
@@ -62,7 +62,7 @@ test("paired-phones round-trips a clear (undefined) push fields state", () => {
   const store = loadPairedPhones(dir);
   store.upsert({
     phonePubkey: "PK2", phoneDeviceId: "d2", pairedAt: "2026-07-01T00:00:00.000Z",
-    lastSeenAt: "2026-07-01T00:00:00.000Z", admission: "same-account",
+    lastSeenAt: "2026-07-01T00:00:00.000Z",
     pushToken: "tok", pushProvider: "fcm", pushPubkey: "xpk", pushUpdatedAt: "2026-07-01T00:00:00.000Z",
   });
   const phone = store.get("PK2")!;

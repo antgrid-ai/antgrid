@@ -52,12 +52,14 @@ void main() {
         final second = const ProjectStatus.empty().copyWith(
           configErrorMessage: 'second',
         );
-        // ignore: unawaited_futures
-        cache.write('p3', second);
+        final pending = cache.write('p3', second);
 
         final mid = await cache.read('p3');
         expect(mid, isNotNull);
         expect(['first', 'second'], contains(mid!.configErrorMessage));
+        // Quiesce before tearDown: an in-flight temp-file rename racing the
+        // recursive delete intermittently throws PathNotFound on Windows.
+        await pending;
       },
     );
 

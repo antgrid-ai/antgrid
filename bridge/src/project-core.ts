@@ -119,6 +119,7 @@ export class ProjectCore {
       mode: this.deps.mode,
       identity: this.deps.identity,
       pairedPhones: this.deps.pairedPhones,
+      relayUrl: this.deps.relayUrl,
     });
     this.core = core;
     const bus = new MessageBus();
@@ -199,20 +200,7 @@ export class ProjectCore {
 
     await this.bindLoopback(core, bus);
 
-    // A remote core now ALSO binds a loopback listener (bindLoopback), so a phone
-    // unpairing must not blindly tear down core services: if a desktop owner is
-    // attached over loopback, onUnpaired() would kill its live session (PTYs,
-    // watchers). Tear down only when no loopback owner is present — mirroring the
-    // log-only stance promote() takes for the same hazard.
-    const slot = this.attachRelayStream(core, bus, remote, {
-      onUnpaired: () => {
-        if (this.listener?.hasOwner) {
-          log.info("relay peer unpaired; loopback owner attached — leaving core services up");
-          return;
-        }
-        core.onUnpaired();
-      },
-    });
+    const slot = this.attachRelayStream(core, bus, remote);
     this.streamHandle = slot.handle;
     this.relayPushUnsub = slot.unsubscribePush;
     this.relayFirstRegister = slot.firstRegister;
@@ -229,7 +217,6 @@ export class ProjectCore {
     core: AgentCore,
     bus: MessageBus,
     remote: ProjectCoreRemoteDeps,
-    { onUnpaired }: { onUnpaired: () => void },
   ): { handle: StreamHandle; firstRegister: Promise<RegisterOutcome>; unsubscribePush: () => void } {
     // Settle on the FIRST admission outcome only (onPeerOnline re-fires on every
     // rekey; a recoverable state must not pre-empt a later success), so the host
@@ -254,7 +241,7 @@ export class ProjectCore {
       // Suppress the heavy stream while the phone is gone; it rebuilds from
       // snapshots on reconnect. connState gates ALL bus subscribers at the source,
       // so don't suppress while a desktop owner shares it over loopback — that
-      // would freeze the live local session (mirrors onUnpaired's hasOwner guard).
+      // would freeze the live local session.
       onPeerOnline: () => { peerConnected = true; core.connState.peerOnline = true; },
       onPeerOffline: () => {
         // Unconditional, unlike the stream gate below: the loopback carve-out
@@ -264,7 +251,6 @@ export class ProjectCore {
         if (this.listener?.hasOwner) return;
         core.connState.peerOnline = false;
       },
-      onUnpaired: () => { peerConnected = false; onUnpaired(); },
       onTunnel: (raw) => core.handleTunnelMessage(raw),
     });
 
@@ -348,9 +334,7 @@ export class ProjectCore {
     bus: MessageBus,
     remote: ProjectCoreRemoteDeps,
   ): { handle: StreamHandle; detach: () => void } {
-    const { handle, unsubscribePush } = this.attachRelayStream(core, bus, remote, {
-      onUnpaired: () => log.info("wizard-promoted core peer unpaired (phone); leaving local session attached"),
-    });
+    const { handle, unsubscribePush } = this.attachRelayStream(core, bus, remote);
     return {
       handle,
       detach: () => {
@@ -367,10 +351,7 @@ export class ProjectCore {
    *  untouched. The phone here is machine-trusted (admitted via the host control
    *  plane + per-phone allowlist), NOT QR-paired per project, so this does NOT
    *  open a pairing window. `remoteDeps` MUST come from the host's ONE shared
-   *  runtime (remoteDepsFor) — promote constructs no OAuthClient / token timer.
-   *
-   *  `onUnpaired` is LOG-ONLY: the peer is the PHONE, and calling core.onUnpaired()
-   *  would tear down services and kill the live desktop PTYs over loopback. */
+   *  runtime (remoteDepsFor) — promote constructs no OAuthClient / token timer. */
   promote(remoteDeps: ProjectCoreRemoteDeps): PromotionHandle {
     // A remote-mode core's relay slot IS its primary session; promoting it would
     // wire a SECOND client whose PromotionHandle.stop() nulls setPlainHook/
@@ -383,9 +364,7 @@ export class ProjectCore {
     const bus = this.bus;
     if (!core || !bus) throw new Error("ProjectCore.promote: core not started (call start() first)");
 
-    const { handle, firstRegister, unsubscribePush } = this.attachRelayStream(core, bus, remoteDeps, {
-      onUnpaired: () => log.info("promoted core peer unpaired (phone); leaving local session attached"),
-    });
+    const { handle, firstRegister, unsubscribePush } = this.attachRelayStream(core, bus, remoteDeps);
 
     let stopped = false;
     return {

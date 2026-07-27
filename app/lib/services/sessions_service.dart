@@ -80,6 +80,21 @@ class SessionsService {
     if (cached.isNotEmpty) {
       _setState(_state.copyWith(sessions: cached));
     }
+    // Tier-3: the session list is idempotent view-state — fetch it on the first
+    // establishment and re-fetch on every reconnect (the reconciliation
+    // checkpoint) so a re-established stream shows the live list, not the stale
+    // cache. Deliberately a plain send, NOT requestList(): the result updates
+    // state via _handleListResult regardless of a tracked pending reply, so the
+    // re-drive avoids arming (and, on a slow reply, leaking) a caller-timeout
+    // timer on every reconnect. The requestId is present only to satisfy the
+    // wire schema — no _pendingList entry is registered for it.
+    session.hydrate('sessions:list', _hydrateList);
+  }
+
+  Future<void> _hydrateList() async {
+    await _send(
+      createAbMessage('session:list', {'requestId': _newRequestId()}),
+    );
   }
 
   void _writeThrough(List<SessionEntry> sessions) {
@@ -277,6 +292,7 @@ class SessionsService {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    session.unhydrate('sessions:list');
     _failPending(StateError('SessionsService disposed'));
     await _statusSub?.cancel();
     _statusSub = null;

@@ -31,10 +31,6 @@ class _RecordingRelay extends RelayService {
   Stream<AppState> get stateStream => const Stream.empty();
   @override
   AppState get currentState => const AppState();
-  @override
-  Stream<PairApprovalMessage> get pairApprovalStream => const Stream.empty();
-  @override
-  Stream<PairRejectedMessage> get pairRejectedStream => const Stream.empty();
 
   @override
   void sendMessage(

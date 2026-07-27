@@ -51,6 +51,26 @@ void main() {
     await client.dispose();
   });
 
+  test('startProject fails fast (no silent drop) when the session is not '
+      'established', () async {
+    final t = FakeAgentTransport();
+    final client = ControlPlaneClient(transport: t);
+
+    // Keyless window: the stream reads connected but a send would silently drop
+    // (sendOnStream no-ops without keys). Tier-2 fail-fast so awaitProjectRunning
+    // never burns the full 30s on an undeliverable start.
+    t.setEstablished(false);
+
+    await expectLater(
+      client.startProject('projA'),
+      throwsA(isA<RpcException>()),
+    );
+    // Nothing was pushed onto the wire — the caller gets to retry, not strand.
+    expect(t.sent.any((m) => m['type'] == 'project:start'), isFalse);
+
+    await client.dispose();
+  });
+
   test('NOT_ALLOWED error response surfaces error state, no throw', () async {
     final t = FakeAgentTransport();
     final client = ControlPlaneClient(transport: t);
@@ -91,26 +111,36 @@ void main() {
     });
   });
 
-  test('parses agent:tools chatCapable when present, null when absent',
-      () async {
-    final transport = FakeAgentTransport();
-    final client = ControlPlaneClient(transport: transport);
-    addTearDown(client.dispose);
+  test(
+    'parses agent:tools chatCapable when present, null when absent',
+    () async {
+      final transport = FakeAgentTransport();
+      final client = ControlPlaneClient(transport: transport);
+      addTearDown(client.dispose);
 
-    transport.emit('agent:tools', {
-      'tools': [
-        {'tool': 'claude-code', 'path': '/usr/bin/claude', 'chatCapable': true},
-        {'tool': 'github-copilot', 'path': '/usr/bin/copilot', 'chatCapable': false},
-        {'tool': 'cursor-agent', 'path': '/usr/bin/cursor-agent'},
-      ],
-    });
-    await Future<void>.delayed(Duration.zero);
+      transport.emit('agent:tools', {
+        'tools': [
+          {
+            'tool': 'claude-code',
+            'path': '/usr/bin/claude',
+            'chatCapable': true,
+          },
+          {
+            'tool': 'github-copilot',
+            'path': '/usr/bin/copilot',
+            'chatCapable': false,
+          },
+          {'tool': 'cursor-agent', 'path': '/usr/bin/cursor-agent'},
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
 
-    final byTool = {for (final t in client.currentState.tools) t.tool: t};
-    expect(byTool['claude-code']!.chatCapable, isTrue);
-    expect(byTool['github-copilot']!.chatCapable, isFalse);
-    expect(byTool['cursor-agent']!.chatCapable, isNull);
-  });
+      final byTool = {for (final t in client.currentState.tools) t.tool: t};
+      expect(byTool['claude-code']!.chatCapable, isTrue);
+      expect(byTool['github-copilot']!.chatCapable, isFalse);
+      expect(byTool['cursor-agent']!.chatCapable, isNull);
+    },
+  );
 
   test(
     'refresh() re-pulls state.snapshot and applies the response frames',
@@ -163,13 +193,14 @@ void main() {
     expect(client.currentState.projects.single.projectId, 'p1');
   });
 
-  test('peerPresence=false clears the cached advert (reactive offline)',
-      () async {
+  test('peerPresence=false clears the cached advert (reactive offline)', () async {
     final t = FakeAgentTransport();
     final presence = StreamController<bool>.broadcast();
     addTearDown(presence.close);
-    final client =
-        ControlPlaneClient(transport: t, peerPresence: presence.stream);
+    final client = ControlPlaneClient(
+      transport: t,
+      peerPresence: presence.stream,
+    );
     addTearDown(client.dispose);
 
     t.emit('agent:projects', {
@@ -184,8 +215,11 @@ void main() {
     // no disconnect, so the presence signal is what flips the client to offline.
     presence.add(false);
     await Future<void>.delayed(Duration.zero);
-    expect(client.currentState.projects, isEmpty,
-        reason: 'a peer disconnect must clear the stale advert reactively');
+    expect(
+      client.currentState.projects,
+      isEmpty,
+      reason: 'a peer disconnect must clear the stale advert reactively',
+    );
 
     // A re-advert after the peer returns repopulates without a manual refresh.
     presence.add(true);
@@ -225,8 +259,12 @@ void main() {
       t.requestHandler = (method, params) => {
         'sessions': [
           {
-            'id': 's1', 'name': 'Session 1',
-            'createdAt': 1, 'lastUsedAt': 2, 'archived': false, 'running': false,
+            'id': 's1',
+            'name': 'Session 1',
+            'createdAt': 1,
+            'lastUsedAt': 2,
+            'archived': false,
+            'running': false,
           },
         ],
       };
@@ -234,7 +272,10 @@ void main() {
       final sessions = await client.listSessions('p1');
 
       expect(t.requests.single.method, 'sessions.list');
-      expect(t.requests.single.params, {'projectId': 'p1', 'includeArchived': false});
+      expect(t.requests.single.params, {
+        'projectId': 'p1',
+        'includeArchived': false,
+      });
       expect(sessions, hasLength(1));
       expect(sessions.single.id, 's1');
     });
@@ -248,29 +289,33 @@ void main() {
 
       await expectLater(
         () => client.listSessions('p1'),
-        throwsA(isA<RpcException>().having((e) => e.code, 'code', 'NOT_ALLOWED')),
+        throwsA(
+          isA<RpcException>().having((e) => e.code, 'code', 'NOT_ALLOWED'),
+        ),
       );
     });
   });
 
   group('deleteSession', () {
-    test('deleteSession sends sessions.delete and returns result.deleted',
-        () async {
-      final t = FakeAgentTransport();
-      final client = ControlPlaneClient(transport: t);
-      addTearDown(client.dispose);
+    test(
+      'deleteSession sends sessions.delete and returns result.deleted',
+      () async {
+        final t = FakeAgentTransport();
+        final client = ControlPlaneClient(transport: t);
+        addTearDown(client.dispose);
 
-      t.requestHandler = (method, params) => {'deleted': true};
+        t.requestHandler = (method, params) => {'deleted': true};
 
-      final ok = await client.deleteSession('projA', 's1');
+        final ok = await client.deleteSession('projA', 's1');
 
-      expect(ok, isTrue);
-      expect(t.requests.single.method, 'sessions.delete');
-      expect(t.requests.single.params, {
-        'projectId': 'projA',
-        'sessionId': 's1',
-      });
-    });
+        expect(ok, isTrue);
+        expect(t.requests.single.method, 'sessions.delete');
+        expect(t.requests.single.params, {
+          'projectId': 'projA',
+          'sessionId': 's1',
+        });
+      },
+    );
 
     test('propagates a NOT_ALLOWED RpcException on delete', () async {
       final t = FakeAgentTransport();
@@ -281,7 +326,9 @@ void main() {
 
       await expectLater(
         () => client.deleteSession('projA', 's1'),
-        throwsA(isA<RpcException>().having((e) => e.code, 'code', 'NOT_ALLOWED')),
+        throwsA(
+          isA<RpcException>().having((e) => e.code, 'code', 'NOT_ALLOWED'),
+        ),
       );
     });
   });

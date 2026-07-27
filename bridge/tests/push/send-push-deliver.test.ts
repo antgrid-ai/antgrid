@@ -56,7 +56,7 @@ function seedPhone(pushToken: string) {
   const store = loadPairedPhones(dir);
   store.upsert({
     phonePubkey: "PK", phoneDeviceId: "d1", pairedAt: "2026-07-01T00:00:00.000Z",
-    lastSeenAt: "2026-07-01T00:00:00.000Z", admission: "same-account",
+    lastSeenAt: "2026-07-01T00:00:00.000Z",
     pushToken, pushProvider: "fcm", pushPubkey: "xpk",
   });
   return store;

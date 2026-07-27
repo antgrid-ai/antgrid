@@ -326,35 +326,47 @@ final newSessionDetectedToolsProvider = FutureProvider<Set<String>>((
 /// "advertised, capable of nothing" must stay distinguishable so callers know
 /// to fall back to [newSessionAgentSupportsChat] rather than disabling Chat
 /// for every agent.
-final newSessionChatCapableToolsProvider = FutureProvider<Set<String>?>((
-  ref,
-) async {
-  final target = ref.watch(selectedTargetProjectProvider);
-  if (target == null) return null;
+/// `autoDispose` is load-bearing, not an optimization: a plain provider would
+/// outlive the composer, staying subscribed to [controlPlaneStateProvider]
+/// (which re-emits a non-`==` state on every control-plane push, so this stays
+/// perpetually dirty). On the composer's next mount, `ref.listen` of this
+/// provider flushes it mid-build and synchronously notifies its still-live
+/// dependent [newSessionSupportsChatProvider], whose refresh is scheduled via
+/// `setState` on the enclosing ProviderScope — illegal during build. Disposing
+/// with the composer means each mount starts fresh, with no stale dependent to
+/// notify. Keep this and [newSessionSupportsChatProvider] both autoDispose.
+final newSessionChatCapableToolsProvider =
+    FutureProvider.autoDispose<Set<String>?>((ref) async {
+      final target = ref.watch(selectedTargetProjectProvider);
+      if (target == null) return null;
 
-  if (target.isLocal) {
-    try {
-      final host = await ref.watch(hostControllerProvider).ensureHost();
-      final client = HostControlClient(
-        port: host.controlPort,
-        token: host.token,
-      );
-      try {
-        final tools = await client.toolsList();
-        return _chatCapableSetOrNull(tools.map((t) => (t.tool, t.chatCapable)));
-      } finally {
-        client.close();
+      if (target.isLocal) {
+        try {
+          final host = await ref.watch(hostControllerProvider).ensureHost();
+          final client = HostControlClient(
+            port: host.controlPort,
+            token: host.token,
+          );
+          try {
+            final tools = await client.toolsList();
+            return _chatCapableSetOrNull(
+              tools.map((t) => (t.tool, t.chatCapable)),
+            );
+          } finally {
+            client.close();
+          }
+        } catch (_) {
+          return null;
+        }
       }
-    } catch (_) {
-      return null;
-    }
-  }
 
-  final machineUuid = target.machineUuid ?? baseDeviceUuid(target.id);
-  final state = ref.watch(controlPlaneStateProvider(machineUuid)).value;
-  if (state == null) return null;
-  return _chatCapableSetOrNull(state.tools.map((t) => (t.tool, t.chatCapable)));
-});
+      final machineUuid = target.machineUuid ?? baseDeviceUuid(target.id);
+      final state = ref.watch(controlPlaneStateProvider(machineUuid)).value;
+      if (state == null) return null;
+      return _chatCapableSetOrNull(
+        state.tools.map((t) => (t.tool, t.chatCapable)),
+      );
+    });
 
 /// Reduce (tool, chatCapable?) pairs to the set of chat-capable tool keys, or
 /// `null` when every entry's `chatCapable` was absent (no wire signal at all —
@@ -520,7 +532,9 @@ bool agentSupportsChatResolved(
 /// a fresh `Set` and re-emits on EVERY control-plane push (heartbeat), which
 /// would rebuild the whole composer subtree while idle. A `Provider<bool>`
 /// notifies only when the resolved value actually flips.
-final newSessionSupportsChatProvider = Provider<bool>((ref) {
+/// autoDispose so it never outlives the composer as a stale, still-subscribed
+/// dependent of [newSessionChatCapableToolsProvider] — see that provider's note.
+final newSessionSupportsChatProvider = Provider.autoDispose<bool>((ref) {
   final agent = ref.watch(newSessionAgentProvider);
   final wire = ref.watch(newSessionChatCapableToolsProvider).value;
   return agentSupportsChatResolved(agent, wire);

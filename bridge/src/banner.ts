@@ -1,5 +1,5 @@
 import { hostname } from "node:os";
-import { buildPairingUri, generateShortCode } from "./pairing";
+import { buildConnectUri } from "./connect-uri";
 import { type DeviceIdentity } from "./device";
 
 function emulatorRelayUrl(relayUrl: string): string | null {
@@ -13,9 +13,12 @@ function emulatorRelayUrl(relayUrl: string): string | null {
 
 export interface BannerOptions {
   version: string;
-  relayUrl: string;
+  /** Null when the caller has no relay coordinate. The banner then prints no
+   *  connect URI at all — a URI whose `r=` is not a URL is worse than none:
+   *  the app takes `r=` verbatim whenever it is present, so a placeholder is
+   *  adopted as the relay URL instead of falling back to the default. */
+  relayUrl: string | null;
   identity: DeviceIdentity;
-  pubkey: Buffer;
   mode: "agent" | "pair";
   terminalCount?: number;
   commandCount?: number;
@@ -24,27 +27,21 @@ export interface BannerOptions {
   projectId?: string;
   /** Base64-encoded Ed25519 public key (from device identity). */
   ed25519PublicKey?: string;
-  /** Single-use pair code from the agent's pairing window. */
-  pairCode?: string;
 }
 
 export async function displayStartupBanner(opts: BannerOptions): Promise<void> {
-  const { version, relayUrl, identity, pubkey, mode, terminalCount, commandCount, proxyCount, projectPath, ed25519PublicKey, pairCode } = opts;
+  const { version, relayUrl, identity, mode, terminalCount, commandCount, proxyCount, projectPath, ed25519PublicKey } = opts;
 
-  // The v1 pairing URI carries an Ed25519 pubkey (`e=`) and a pair-code (`p=`).
-  // Fall back to an empty pair code if the caller hasn't opened a window yet —
-  // the App treats a missing `p=` as a request that won't pass the agent's
-  // pair-window check.
   const ed25519Buf = Buffer.from(ed25519PublicKey ?? "", "base64");
-  const url = buildPairingUri({
-    relayUrl,
-    agentDeviceId: identity.deviceId,
-    agentEd25519PublicKey: ed25519Buf,
-    pairCode: pairCode ?? "",
-    agentName: identity.deviceName,
-    hostMachineName: process.env.ANTGRID_HOST_NAME ?? hostname(),
-  });
-  const shortCode = generateShortCode(pubkey);
+  const url = relayUrl
+    ? buildConnectUri({
+        relayUrl,
+        agentDeviceId: identity.deviceId,
+        agentEd25519PublicKey: ed25519Buf,
+        agentName: identity.deviceName,
+        hostMachineName: process.env.ANTGRID_HOST_NAME ?? hostname(),
+      })
+    : null;
 
   const lines: string[] = [];
   lines.push("┌──────────────────────────────────────────┐");
@@ -57,7 +54,7 @@ export async function displayStartupBanner(opts: BannerOptions): Promise<void> {
     lines.push(`│  Project: ${display.padEnd(30)}│`);
   }
 
-  lines.push(`│  Relay:   ${relayUrl.slice(0, 30).padEnd(30)}│`);
+  lines.push(`│  Relay:   ${(relayUrl ?? "(not configured)").slice(0, 30).padEnd(30)}│`);
   lines.push(`│  Device:  ${identity.deviceName.slice(0, 30).padEnd(30)}│`);
 
   if (mode === "agent" && terminalCount !== undefined) {
@@ -70,31 +67,29 @@ export async function displayStartupBanner(opts: BannerOptions): Promise<void> {
     lines.push(`│  Proxies:   ${String(proxyCount).padEnd(28)}│`);
   }
 
-  lines.push("├──────────────────────────────────────────┤");
-  lines.push(`│  Code: ${shortCode.padEnd(33)}│`);
   lines.push("└──────────────────────────────────────────┘");
 
   console.log("\n" + lines.join("\n"));
 
-  console.log(`\nPair URI: ${url}`);
+  if (url && relayUrl) {
+    console.log(`\nConnect URI: ${url}`);
 
-  const emulatorRelay = emulatorRelayUrl(relayUrl);
-  if (emulatorRelay) {
-    const emulatorUrl = buildPairingUri({
-      relayUrl: emulatorRelay,
-      agentDeviceId: identity.deviceId,
-      agentEd25519PublicKey: ed25519Buf,
-      pairCode: pairCode ?? "",
-      agentName: identity.deviceName,
-      hostMachineName: process.env.ANTGRID_HOST_NAME ?? hostname(),
-    });
-    console.log(`Pair URI (Android emulator): ${emulatorUrl}`);
-  }
-  console.log("");
-  if (mode === "pair") {
-    console.log("Open the Pair URI above in the Antgrid app to pair this device.");
+    const emulatorRelay = emulatorRelayUrl(relayUrl);
+    if (emulatorRelay) {
+      const emulatorUrl = buildConnectUri({
+        relayUrl: emulatorRelay,
+        agentDeviceId: identity.deviceId,
+        agentEd25519PublicKey: ed25519Buf,
+        agentName: identity.deviceName,
+        hostMachineName: process.env.ANTGRID_HOST_NAME ?? hostname(),
+      });
+      console.log(`Connect URI (Android emulator): ${emulatorUrl}`);
+    }
+    console.log("");
+    console.log("Open the URI above in the Antgrid app to connect this machine.");
   } else {
-    console.log("Open the Pair URI above in the Antgrid app to connect.");
+    console.log("");
+    console.log("No relay URL configured — connect this machine from the app's machine list.");
   }
   console.log("Waiting for Antgrid app...");
   console.log("");

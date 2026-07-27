@@ -20,6 +20,21 @@ void main() {
     );
   }
 
+  // A relay session starts NOT established: its E2E stream must establish before
+  // an RPC can be carried (a send before then is silently dropped). Drive the
+  // fake with `t.setEstablished(false)` before use and `t.setEstablished(true)`
+  // to simulate the handshake completing (which re-drives hydrators).
+  Future<ProjectSession> newRelaySession(FakeAgentTransport t) async {
+    final cache = await CachedSessionsStore.open();
+    return ProjectSession(
+      projectId: 'p',
+      transport: t,
+      mode: ProjectSessionMode.relay,
+      cachedSessionsStore: cache,
+      onClose: () async => await t.dispose(),
+    );
+  }
+
   test(
     'stateFor starts loading until the first session-scoped agent frame',
     () async {
@@ -607,6 +622,78 @@ void main() {
     },
   );
 
+  test(
+    'relay hydration defers until the transport is ready, then drives the pull',
+    () async {
+      final t = FakeAgentTransport()..setEstablished(false);
+      final session = await newRelaySession(t);
+      final svc = AgentSessionService.fromSession(session);
+
+      t.requestHandler = (method, params) => {
+        'frames': [
+          {
+            'id': '0',
+            'timestamp': 1,
+            'type': 'agent:turn-start',
+            'sessionId': 'p',
+            'turnId': 'resumed',
+          },
+          {
+            'id': '1',
+            'timestamp': 1,
+            'type': 'agent:turn-end',
+            'sessionId': 'p',
+            'turnId': 'resumed',
+            'stopReason': 'end_turn',
+          },
+        ],
+      };
+
+      // Not yet established: firing the transcript RPC now would be silently
+      // dropped by the relay stream and burn its full timeout, so the pull must
+      // be DEFERRED, not sent. The view meanwhile shows the loading spinner.
+      await svc.hydrateIfNeeded('p');
+      expect(t.requests, isEmpty);
+      expect(svc.stateFor('p').loading, isTrue);
+
+      // Establishment re-drives the registered hydrator (as refreshSnapshot does
+      // on each handshake) — the fix that makes the transcript ride the
+      // establishment wave like the durable snapshot does.
+      t.setEstablished(true);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(t.requests.single.method, 'session.transcriptSnapshot');
+      expect(svc.stateFor('p').turns.single.turnId, 'resumed');
+      expect(svc.stateFor('p').loading, isFalse);
+    },
+  );
+
+  test(
+    'stopHydrating deregisters the transcript hydrator so a reconnect no '
+    'longer re-pulls that session',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await newRelaySession(t);
+      final svc = AgentSessionService.fromSession(session);
+
+      t.requestHandler = (method, params) => {'frames': <dynamic>[]};
+
+      // Established: one snapshot pull on the initial hydrate.
+      await svc.hydrateIfNeeded('p');
+      expect(t.requests.length, 1);
+
+      // The view is gone. A subsequent (re)establishment must NOT re-pull the
+      // now-unviewed session — otherwise every session ever opened would
+      // re-fetch its transcript on each reconnect.
+      svc.stopHydrating('p');
+      t.setEstablished(false);
+      t.setEstablished(true); // re-drives every STILL-registered hydrator
+      await Future<void>.delayed(Duration.zero);
+
+      expect(t.requests.length, 1);
+    },
+  );
+
   test('hydrateIfNeeded sets hydrationFailed on RPC failure', () async {
     final t = FakeAgentTransport();
     final session = await newSession(t);
@@ -797,18 +884,21 @@ void main() {
     },
   );
 
-  test('cancel names the turn the UI shows as running, so the bridge can close it', () async {
-    final t = FakeAgentTransport();
-    final session = await newSession(t);
-    final svc = AgentSessionService.fromSession(session);
+  test(
+    'cancel names the turn the UI shows as running, so the bridge can close it',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = AgentSessionService.fromSession(session);
 
-    t.emit('agent:turn-start', {'sessionId': 'p', 'turnId': 't1'});
-    await Future<void>.delayed(Duration.zero);
-    t.clearSent();
+      t.emit('agent:turn-start', {'sessionId': 'p', 'turnId': 't1'});
+      await Future<void>.delayed(Duration.zero);
+      t.clearSent();
 
-    svc.cancel('p');
-    final cancels = t.sent.where((m) => m['type'] == 'agent:cancel').toList();
-    expect(cancels.length, 1);
-    expect(cancels.single['turnId'], 't1');
-  });
+      svc.cancel('p');
+      final cancels = t.sent.where((m) => m['type'] == 'agent:cancel').toList();
+      expect(cancels.length, 1);
+      expect(cancels.single['turnId'], 't1');
+    },
+  );
 }

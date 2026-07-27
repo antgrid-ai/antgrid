@@ -105,12 +105,13 @@ class ProjectSession {
       );
       _fragAbortSub = session.fragmentAborts.listen(coordinator.onAbort);
       fileService.onFragmentSuccess = coordinator.onSuccess;
-      _fragSendErrSub =
-          session.fragmentSendErrors.listen(_onFragmentSendError);
+      _fragSendErrSub = session.fragmentSendErrors.listen(_onFragmentSendError);
       // Relay only: the agent resets `appFocusPaused` for each connection, and
       // sends before the handshake are dropped silently — so re-declare focus
       // once this project's stream is ready. Local mode has no handshake and no
-      // such window.
+      // such window. Deferred transcript hydration is NOT wired here anymore: it
+      // rides the transport's hydrator registry, which refreshSnapshot re-drives
+      // on every (re)establish (see AgentSessionService.hydrateIfNeeded).
       // Matched on wireProjectId: streamReadyEvents carries the BARE id the
       // bridge advertises in `agent:projects`, not the compound registrationId.
       _streamReadySub = session.streamReadyEvents
@@ -156,6 +157,26 @@ class ProjectSession {
     }
     return transport.send(message);
   }
+
+  /// Tier-3 re-drive registration. Registers [run] as the hydrator for [key] on
+  /// the transport: it fires now when the session is already established and
+  /// re-fires on every future (re)establishment — the receive-side counterpart
+  /// of the durable snapshot, so a reconnect re-pulls idempotent view-state
+  /// (session list, config, the open file) instead of stranding it stale. A
+  /// re-register under [key] supersedes. See [AgentTransport.hydrate].
+  Future<void> hydrate(String key, Future<void> Function() run) =>
+      transport.hydrate(key, run);
+
+  /// Deregister a hydrator registered via [hydrate]. No-op if absent.
+  void unhydrate(String key) => transport.unhydrate(key);
+
+  /// Tier-2 bounded fail-fast send: runs [run] under [timeout] so the caller's
+  /// flag lifecycle always settles even if the reply never arrives. NOT
+  /// re-driven on reconnect. See [AgentTransport.action].
+  Future<T> action<T>(
+    Future<T> Function() run, {
+    Duration? timeout = const Duration(seconds: 15),
+  }) => transport.action(run, timeout: timeout);
 
   Future<void> close() async {
     if (_closed) return;

@@ -23,6 +23,9 @@ const CreateDeviceBody = z.object({
   x25519Pub: z.string().min(1),
   platform: z.enum(["macos", "windows", "linux", "ios", "android"]),
   displayName: z.string().min(1).max(120),
+  // Desktop controllers register as kind:"app" despite a desktop platform —
+  // the peers inventory (bridge E2E admission) serves kind:"app" rows only.
+  kind: z.enum(["app", "agent"]).optional(),
 });
 
 export function deviceRoutes(deps: { db: DB; auth: Auth; relay: RelayPushConfig }) {
@@ -55,7 +58,7 @@ export function deviceRoutes(deps: { db: DB; auth: Auth; relay: RelayPushConfig 
     // reads `agent`, while `listAppDeviceKeys` (same-account pair-membership
     // proof) reads `app`.
     const kind: DeviceKind =
-      body.platform === "ios" || body.platform === "android" ? "app" : "agent";
+      body.kind ?? (body.platform === "ios" || body.platform === "android" ? "app" : "agent");
 
     // If this device UUID already exists, the desktop app may have lost its
     // keychain copy of the OAuth client secret. Create a fresh OAuth client and

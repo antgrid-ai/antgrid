@@ -1,4 +1,6 @@
 // app/test/launcher/host_controller_test.dart
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/launcher/host_controller.dart';
 import 'package:antgrid/launcher/host_discovery.dart';
@@ -199,6 +201,212 @@ void main() {
     expect(h.controlPort, 8600);
     expect(spawns, 1);
     expect(terminated, [100]);
+  });
+
+  group('supervision', () {
+    /// Drain the restart chain (delay → ensureHost → spawn), which spans
+    /// several microtask hops.
+    Future<void> settle() async {
+      for (var i = 0; i < 10; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+    }
+
+    /// A controller whose host is already "spawned" (generation 1) so
+    /// [HostController.handleHostExit] can simulate the process dying.
+    Future<HostController> spawned({
+      required void Function() onSpawn,
+      Future<HostFile> Function()? spawn,
+      DateTime Function()? now,
+      Future<void> Function(Duration d)? delay,
+    }) async {
+      final c = HostController(
+        readHost: () async => null,
+        pidAlive: (pid) async => false,
+        ping: (h) async => true,
+        devMode: () => false,
+        now: now,
+        delay: delay ?? (_) async {}, // no real backoff sleep in tests
+        spawnHost:
+            spawn ??
+            () async {
+              onSpawn();
+              return _host(pid: 500);
+            },
+      );
+      await c.ensureHost();
+      c.ownedHostPid = 500;
+      return c;
+    }
+
+    /// Drive [c] into [HostPhase.failed] by exhausting the crash-loop budget.
+    /// Re-arms `ownedHostPid` after each exit because [HostController.handleHostExit]
+    /// clears it.
+    Future<void> driveToFailed(HostController c) async {
+      for (var i = 0; i < 5; i++) {
+        c.handleHostExit(generation: c.spawnGeneration, pid: 500, exitCode: 1);
+        await settle();
+        c.ownedHostPid = 500;
+      }
+    }
+
+    test('respawns after an unexpected exit and reports the phases', () async {
+      var spawns = 0;
+      final c = await spawned(onSpawn: () => spawns++);
+      expect(spawns, 1);
+      expect(c.status.phase, HostPhase.up);
+
+      final seen = <HostPhase>[];
+      final sub = c.statusStream.listen((s) => seen.add(s.phase));
+
+      c.handleHostExit(generation: 1, pid: 500, exitCode: 1);
+      expect(c.status.phase, HostPhase.restarting);
+      await settle();
+
+      expect(spawns, 2, reason: 'the dead host was respawned');
+      expect(c.status.phase, HostPhase.up);
+      expect(seen, containsAllInOrder([HostPhase.restarting, HostPhase.up]));
+      await sub.cancel();
+    });
+
+    test('an exit we caused is not respawned', () async {
+      var spawns = 0;
+      final c = await spawned(onSpawn: () => spawns++);
+      await c.shutdownOwnedHost(); // marks the exit as expected
+      c.handleHostExit(generation: 1, pid: 500, exitCode: 0);
+      await settle();
+      expect(spawns, 1, reason: 'teardown must not resurrect the host');
+      expect(c.status.phase, HostPhase.stopped);
+    });
+
+    test('a stale generation exit is ignored', () async {
+      var spawns = 0;
+      final c = await spawned(onSpawn: () => spawns++);
+      // Generation 0 = a process already replaced by the current one.
+      c.handleHostExit(generation: 0, pid: 499, exitCode: 1);
+      await settle();
+      expect(spawns, 1);
+      expect(c.status.phase, HostPhase.up);
+      expect(c.ownedHostPid, 500, reason: 'the live host is untouched');
+    });
+
+    test('crash loop gives up after the budget and reports failed', () async {
+      var spawns = 0;
+      // Frozen clock → every exit lands inside the same restart window.
+      final c = await spawned(
+        onSpawn: () => spawns++,
+        now: () => DateTime(2026),
+      );
+      await driveToFailed(c);
+      // 1 initial + 3 supervised restarts, then the guard trips.
+      expect(spawns, 4);
+      expect(c.status.phase, HostPhase.failed);
+      expect(c.status.detail, contains('Automatic restart is paused'));
+    });
+
+    test('retryNow clears the crash-loop budget and spawns again', () async {
+      var spawns = 0;
+      final c = await spawned(
+        onSpawn: () => spawns++,
+        now: () => DateTime(2026),
+      );
+      await driveToFailed(c);
+      expect(c.status.phase, HostPhase.failed);
+
+      await c.retryNow();
+      expect(spawns, 5);
+      expect(c.status.phase, HostPhase.up);
+    });
+
+    test('a late expected exit does not clobber a failed verdict', () async {
+      var spawns = 0;
+      final c = await spawned(
+        onSpawn: () => spawns++,
+        now: () => DateTime(2026),
+      );
+      await driveToFailed(c);
+      expect(c.status.phase, HostPhase.failed);
+
+      // Teardown marks the exit expected; the late exitCode callback must not
+      // downgrade the failed verdict to stopped (that would hide the banner
+      // and its retry affordance).
+      await c.shutdownOwnedHost();
+      c.handleHostExit(
+        generation: c.spawnGeneration,
+        pid: 500,
+        exitCode: 1,
+      );
+      await settle();
+      expect(c.status.phase, HostPhase.failed);
+    });
+
+    test('teardown during the backoff cancels the pending restart', () async {
+      var spawns = 0;
+      final gate = Completer<void>();
+      final c = await spawned(
+        onSpawn: () => spawns++,
+        delay: (_) => gate.future, // hold the restart in its backoff sleep
+      );
+      c.handleHostExit(generation: 1, pid: 500, exitCode: 1);
+      expect(c.status.phase, HostPhase.restarting);
+
+      // The crash already cleared ownedHostPid — teardown must STILL cancel
+      // the sleeping restart, or quitting the app races a respawn to life.
+      await c.shutdownOwnedHost();
+      gate.complete();
+      await settle();
+      expect(spawns, 1, reason: 'the abandoned restart must not respawn');
+    });
+
+    test('a deliberate spawn after a recovered crash reports starting, '
+        'not restarting', () async {
+      var spawns = 0;
+      final c = await spawned(
+        onSpawn: () => spawns++,
+        now: () => DateTime(2026),
+      );
+      c.handleHostExit(generation: 1, pid: 500, exitCode: 1);
+      await settle();
+      expect(c.status.phase, HostPhase.up);
+      final recoveredGeneration = c.status.generation;
+
+      // Ordinary spawn inside the 60s window (e.g. a forced respawn on
+      // sign-in). The unpaid crash budget must not relabel it as a crash.
+      final seen = <HostStatus>[];
+      final sub = c.statusStream.listen(seen.add);
+      c.invalidate();
+      c.ownedHostPid = null;
+      await c.ensureHost();
+      await settle(); // flush queued stream deliveries before cancelling
+      await sub.cancel();
+
+      expect(seen.map((s) => s.phase), contains(HostPhase.starting));
+      expect(seen.map((s) => s.phase), isNot(contains(HostPhase.restarting)));
+      // And the new `up` carries a fresh generation, which is what tells the
+      // rebind provider the process underneath the open sessions was replaced.
+      expect(c.status.phase, HostPhase.up);
+      expect(c.status.generation, greaterThan(recoveredGeneration));
+    });
+
+    test('a respawn that fails to start keeps retrying, then fails', () async {
+      var spawns = 0;
+      final c = await spawned(
+        onSpawn: () => spawns++,
+        now: () => DateTime(2026),
+        spawn: () async {
+          spawns++;
+          if (spawns > 1) throw StateError('bun missing');
+          return _host(pid: 500);
+        },
+      );
+      c.handleHostExit(generation: 1, pid: 500, exitCode: 1);
+      // Each failed spawn schedules the next until the budget is spent.
+      for (var i = 0; i < 5; i++) {
+        await settle();
+      }
+      expect(spawns, 4); // initial + 3 failed restart attempts
+      expect(c.status.phase, HostPhase.failed);
+    });
   });
 
   group('resolveHostCommand', () {

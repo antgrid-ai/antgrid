@@ -1,7 +1,7 @@
-import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../connection/supervisor_state.dart';
 import '../../design/ab_colors.dart';
 import '../../design/ab_status_tone.dart';
 import '../../design/ab_tokens.dart';
@@ -11,7 +11,7 @@ import '../../design/widgets/ab_separator.dart';
 import '../../design/widgets/ab_status_dot.dart';
 import '../../models/recent_session_row.dart';
 import '../../providers/recent_sessions.dart';
-import '../../providers/relay_connection.dart';
+import '../../providers/supervisor_status.dart';
 import '../ab_status_helpers.dart';
 import 'recent_session_row_widget.dart';
 
@@ -385,10 +385,13 @@ class _GroupHeader extends StatelessWidget {
   }
 }
 
-/// "Connecting…" pill shown next to a machine's group header while its
-/// control-plane socket is mid-handshake. Reads [machineConnectionPhaseProvider]
-/// (peek-only, never dials) — invisible once `paired` (the fresh row list
-/// already communicates "connected") or when nothing has been dialed yet.
+/// Ladder pill shown next to a machine's group header while its control-plane
+/// socket is climbing, or once it has stopped on a reason. Reads
+/// [supervisorStatusProvider] (peek-only, never dials) — invisible once
+/// `Connected` (the fresh row list already communicates "connected", and this
+/// is a real peer-presence signal now, not just socket auth), once `Released`
+/// (torn down on purpose, not "connecting"), or when nothing has been dialed
+/// yet.
 class _ConnectingIndicator extends ConsumerWidget {
   const _ConnectingIndicator({required this.machineUuid});
 
@@ -396,24 +399,25 @@ class _ConnectingIndicator extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final phase = ref.watch(machineConnectionPhaseProvider(machineUuid)).value;
-    final connecting =
-        phase != null &&
-        phase != RelayConnectionState.paired &&
-        phase != RelayConnectionState.disconnected;
-    if (!connecting) return const SizedBox.shrink();
+    final status = ref.watch(supervisorStatusProvider(machineUuid)).value;
+    if (status == null || status is Connected || status is Released) {
+      return const SizedBox.shrink();
+    }
 
-    final (tone, label) = connectionDisplayInfo(phase);
+    // A block is sticky until the user or an out-of-band event clears it, so it
+    // gets neither the pulse nor the trailing ellipsis that say "still working".
+    final inProgress = status is Climbing;
+    final (tone, label) = connectionDisplayInfo(status);
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        AbStatusDot(tone: tone, size: AbDotSize.sm, pulse: true),
+        AbStatusDot(tone: tone, size: AbDotSize.sm, pulse: inProgress),
         const SizedBox(width: AbTokens.space6),
         Text(
-          '$label…',
+          inProgress ? '$label…' : label,
           style: AbTokens.sansStyle(
             fontSize: AbTokens.fontXxs,
-            color: context.antgrid.accent,
+            color: tone.color(context),
           ),
         ),
       ],

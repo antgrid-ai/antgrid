@@ -6,7 +6,7 @@ import type { Env } from "../env.js";
 import { requireUser, type AuthVars } from "../auth/middleware.js";
 import { requireBearerJwt } from "../auth/jwt-bearer.js";
 import { listMobileEnabledAgents } from "../models/agent-inventory.js";
-import { listAppDeviceKeys } from "../models/device.js";
+import { listAppDevicePeers } from "../models/device.js";
 
 const HeartbeatBody = z.object({
   deviceUuid: z.string().uuid(),
@@ -58,8 +58,16 @@ export function agentRoutes(deps: { db: DB; auth: Auth; env: Env }) {
 
   r.get("/account/devices/me/peers", async (c) => {
     const userId = c.get("userId");
-    const keys = await listAppDeviceKeys(deps.db, userId);
-    return c.json({ keys: keys.map((k) => k.toString("base64")) });
+    const peers = await listAppDevicePeers(deps.db, userId);
+    return c.json({
+      // keys: unconsumed by any current client; devices below is what
+      // bridge/src/trusted-peers.ts reads.
+      keys: peers.map((p) => p.publicKey.toString("base64")),
+      devices: peers.map((p) => ({
+        deviceId: p.deviceId,
+        ed25519Pub: p.publicKey.toString("base64"),
+      })),
+    });
   });
 
   r.post("/account/devices/me/heartbeat", async (c) => {

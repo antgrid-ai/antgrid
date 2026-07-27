@@ -7,6 +7,7 @@ import '../models/file_tree_models.dart';
 import '../models/preferences_models.dart';
 import '../models/ab_message.dart';
 import '../project/project_session.dart';
+import 'reply_latch.dart';
 
 /// Per-project file tree + git status + viewing-file service.
 ///
@@ -38,8 +39,18 @@ class FileService {
   /// lands, so the recovery coordinator can reset its retry counter.
   void Function(FragHint hint)? onFragmentSuccess;
 
-  FileService.fromSession(this.session)
-    : _state = FileTreeState(projectId: session.projectId) {
+  /// Wall-clock bound for the one-shot git:diff verb. The frag-abort backstop
+  /// ([handleFragmentFailure]) only fires once a fragmented transfer STARTS then
+  /// aborts; a send dropped before any frame arrives (keyless relay window /
+  /// session down) has no backstop and would strand [GitState.diffLoading].
+  /// Injectable so tests drive a short window.
+  final Duration gitActionTimeout;
+  ReplyLatch? _diffLatch;
+
+  FileService.fromSession(
+    this.session, {
+    this.gitActionTimeout = const Duration(seconds: 15),
+  }) : _state = FileTreeState(projectId: session.projectId) {
     _heavySub = session.heavyStream.listen(_onHeavyJson);
     _statusSub = session.statusStream.listen(_onStatusJson);
   }
@@ -92,15 +103,19 @@ class FileService {
       return;
     }
     if (parsed is GitCommitResultMessage) {
-      _emitOpFeedback(parsed.success
-          ? (parsed.sha != null ? 'Committed ${parsed.sha}' : 'Committed')
-          : (parsed.error ?? 'Commit failed'));
+      _emitOpFeedback(
+        parsed.success
+            ? (parsed.sha != null ? 'Committed ${parsed.sha}' : 'Committed')
+            : (parsed.error ?? 'Commit failed'),
+      );
       return;
     }
     if (parsed is GitDiscardResultMessage) {
-      _emitOpFeedback(parsed.success
-          ? 'Discarded changes'
-          : (parsed.error ?? 'Discard failed'));
+      _emitOpFeedback(
+        parsed.success
+            ? 'Discarded changes'
+            : (parsed.error ?? 'Discard failed'),
+      );
       return;
     }
   }
@@ -109,10 +124,9 @@ class FileService {
   /// distinct event so the toaster re-fires even on an identical message — no
   /// clear-first dance, no coupling to the toaster's de-dup internals.
   void _emitOpFeedback(String message) {
-    _setState(_state.copyWith(
-      gitOpFeedback: message,
-      gitOpFeedbackSeq: ++_gitOpSeq,
-    ));
+    _setState(
+      _state.copyWith(gitOpFeedback: message, gitOpFeedbackSeq: ++_gitOpSeq),
+    );
   }
 
   void _handleTreeFull(TreeFullMessage msg) {
@@ -202,6 +216,8 @@ class FileService {
   void _handleGitDiffContent(GitDiffContentMessage msg) {
     onFragmentSuccess?.call(FragHint('git:diff-content', msg.path));
     if (msg.path != _state.git.diffPath) return;
+    _diffLatch?.settle();
+    _diffLatch = null;
     _setState(
       _state.copyWith(
         git: _state.git.copyWith(
@@ -247,6 +263,8 @@ class FileService {
 
   void _failDiff(String path) {
     if (path != _state.git.diffPath) return;
+    _diffLatch?.settle();
+    _diffLatch = null;
     _setState(_state.copyWith(git: _state.git.copyWith(diffLoading: false)));
   }
 
@@ -351,7 +369,11 @@ class FileService {
             : _state.files.copyWith(selectedFilePath: selected),
       ),
     );
-    if (selected != null) requestFileContent(selected);
+    if (selected != null) {
+      session.hydrate('file:selected', _hydrateSelectedFile);
+    } else {
+      session.unhydrate('file:selected');
+    }
   }
 
   void toggleExpanded(String path) {
@@ -382,13 +404,30 @@ class FileService {
         ),
       ),
     );
-    requestFileContent(path);
+    // Register (fires now if established) rather than sending inline — see
+    // [_hydrateSelectedFile]. Re-registering under the same key supersedes, so
+    // opening a new file replaces the prior file's hydrator.
+    session.hydrate('file:selected', _hydrateSelectedFile);
   }
 
   void requestFileContent(String path) {
     session.send(
       createAbMessage('file:read', {'projectId': projectId, 'path': path}),
     );
+  }
+
+  /// Tier-3 hydrator for the open file. [selectFile] / [applyPreferences]
+  /// register this instead of sending `file:read` inline, so the read re-fires
+  /// on every (re)establishment (the reconciliation checkpoint) AND a selection
+  /// made during a session-down window — where an inline send seals-and-vanishes
+  /// and leaves `isLoading` stuck — lands once the stream establishes. Reads the
+  /// selection from `_state` dynamically so a re-register (opening a different
+  /// file) always pulls the file that is CURRENTLY open.
+  Future<void> _hydrateSelectedFile() async {
+    if (_disposed) return;
+    final selected = _state.files.selectedFilePath;
+    if (selected == null) return;
+    requestFileContent(selected);
   }
 
   void requestFullTree() {
@@ -415,6 +454,9 @@ class FileService {
         ),
       ),
     );
+    // Nothing open — drop the re-drive so a reconnect doesn't re-pull a closed
+    // file.
+    session.unhydrate('file:selected');
   }
 
   /// Stage [files] and commit them with [message]. Result (success or error)
@@ -434,10 +476,7 @@ class FileService {
   /// clean). Unrecoverable -- callers must confirm first.
   void discard(List<String> files) {
     session.send(
-      createAbMessage('git:discard', {
-        'projectId': projectId,
-        'files': files,
-      }),
+      createAbMessage('git:discard', {'projectId': projectId, 'files': files}),
     );
   }
 
@@ -451,8 +490,27 @@ class FileService {
         ),
       ),
     );
+    // Tier-2 one-shot: bound git:diff on wall-clock so a send dropped before any
+    // frame arrives clears diffLoading. Guarded on diffPath so a superseding
+    // diff (or a navigate-away) can't have its spinner cleared by a stale
+    // timeout. The frag-abort backstop still handles mid-transfer aborts.
+    _diffLatch?.settle();
+    final latch = _diffLatch = ReplyLatch();
     session.send(
       createAbMessage('git:diff', {'projectId': projectId, 'path': path}),
+    );
+    unawaited(
+      session.action(() => latch.done, timeout: gitActionTimeout).catchError((
+        _,
+      ) {
+        if (_disposed || _diffLatch != latch || _state.git.diffPath != path) {
+          return;
+        }
+        _diffLatch = null;
+        _setState(
+          _state.copyWith(git: _state.git.copyWith(diffLoading: false)),
+        );
+      }),
     );
   }
 
@@ -461,6 +519,9 @@ class FileService {
   }
 
   void clearDiff() {
+    // Superseded by the user closing the diff — a clean end, not a strand.
+    _diffLatch?.settle();
+    _diffLatch = null;
     _setState(_state.copyWith(git: _state.git.copyWith(clearDiff: true)));
   }
 
@@ -489,6 +550,10 @@ class FileService {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    // Resolve any in-flight git:diff action so its timeout timer is cancelled.
+    _diffLatch?.settle();
+    _diffLatch = null;
+    session.unhydrate('file:selected');
     await _heavySub?.cancel();
     _heavySub = null;
     await _statusSub?.cancel();

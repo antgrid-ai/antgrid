@@ -2,9 +2,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' show min;
 
 import 'package:flutter/foundation.dart';
 
+import '../providers/seeded_stream.dart';
 import 'discovery.dart' show isPidAlive, terminatePid, terminateTree;
 import 'host_control_client.dart';
 import 'host_discovery.dart';
@@ -13,6 +15,73 @@ import '../util/ab_log.dart';
 import '../util/log_rotation.dart';
 
 void _log(String msg) => AbLog.info('HostController', msg);
+
+/// Lifecycle of the machine's bridge host as the app understands it.
+enum HostPhase {
+  /// Nothing has needed the host yet this launch.
+  idle,
+
+  /// A spawn is in flight (first one this launch).
+  starting,
+
+  /// A host is live and answering the control plane.
+  up,
+
+  /// The supervised host exited on its own and a respawn is scheduled or in
+  /// flight.
+  restarting,
+
+  /// The host exited because WE asked it to (app teardown, forced respawn).
+  stopped,
+
+  /// Spawning is given up on: too many unexpected exits inside the crash-loop
+  /// window, or a spawn that never produced a live control plane. Only a
+  /// [HostController.retryNow] (or an explicit `ensureHost`) leaves this.
+  failed,
+}
+
+/// Supervision state of the host process, surfaced to the UI so a dead bridge
+/// isn't silent until the next thing that happens to need it.
+@immutable
+class HostStatus {
+  const HostStatus(
+    this.phase, {
+    this.detail,
+    this.attempt = 0,
+    this.generation = 0,
+  });
+
+  final HostPhase phase;
+
+  /// Human-readable cause, set for [HostPhase.restarting]/[HostPhase.failed].
+  final String? detail;
+
+  /// 1-based restart attempt inside the current crash-loop window; 0 outside a
+  /// supervised restart.
+  final int attempt;
+
+  /// Spawn counter of the process behind an [HostPhase.up] status (0 for a
+  /// host we merely attached to). A consumer that sees `up` with a DIFFERENT
+  /// generation than the last `up` knows the process underneath it was
+  /// replaced — regardless of which intermediate phases it happened to
+  /// observe — so anything bound to the old process's sockets is dead.
+  final int generation;
+
+  @override
+  bool operator ==(Object other) =>
+      other is HostStatus &&
+      other.phase == phase &&
+      other.detail == detail &&
+      other.attempt == attempt &&
+      other.generation == generation;
+
+  @override
+  int get hashCode => Object.hash(phase, detail, attempt, generation);
+
+  @override
+  String toString() =>
+      'HostStatus($phase, attempt=$attempt, gen=$generation, detail=$detail)';
+}
 
 /// Owns the singleton host process for this machine: discovery, liveness
 /// verification, and single-flighted respawn. One per app process.
@@ -29,6 +98,7 @@ class HostController {
     DateTime Function()? now,
     bool Function()? devMode,
     bool Function(String startedAtIso)? bridgeStale,
+    Future<void> Function(Duration d)? delay,
   })  : _readHost = readHost ?? _defaultReadHost,
         _pidAlive = pidAlive ?? isPidAlive,
         _ping = ping ?? _defaultPing,
@@ -36,6 +106,7 @@ class HostController {
         _now = now ?? DateTime.now,
         _devMode = devMode ?? _defaultDevMode,
         _bridgeStale = bridgeStale ?? _defaultBridgeStale,
+        _delay = delay ?? Future<void>.delayed,
         _spawnHost = spawnHost {
     // _spawnHost defaults to the real spawn only when not injected. We can't
     // reference an instance method in an initializer, so bind it here.
@@ -49,6 +120,7 @@ class HostController {
   final DateTime Function() _now;
   final bool Function() _devMode;
   final bool Function(String startedAtIso) _bridgeStale;
+  final Future<void> Function(Duration d) _delay;
   final Future<HostFile> Function()? _spawnHost;
   late final Future<HostFile> Function() _spawnHostFn;
 
@@ -92,6 +164,64 @@ class HostController {
   HostFile? _verified;
   DateTime? _verifiedAt;
   static const _verifyTtl = Duration(seconds: 3);
+
+  // --- Supervision -------------------------------------------------------
+  // A host we spawned can die on its own (bridge crash, OOM, user kills it in
+  // Task Manager). Without supervision that is silent to the desktop user until
+  // the next thing that happens to call ensureHost. We watch the owned
+  // process's exitCode and respawn with equal backoff, bounded by a crash-loop
+  // guard so a bridge that dies on boot doesn't spin forever.
+  //
+  // Scope: only a host THIS app spawned (we hold its Process). A host we merely
+  // ATTACHED to (prior app run) has no exit handle here — its death is still
+  // caught lazily by ensureHost's stale-pid path.
+  static const _restartWindow = Duration(seconds: 60);
+  static const _maxRestartsPerWindow = 3;
+  static const _restartBaseDelay = Duration(seconds: 1);
+  static const _restartMaxDelay = Duration(seconds: 8);
+
+  /// Bumped per spawn so a late `exitCode` from a superseded process can't
+  /// drive supervision for the host that replaced it.
+  int _spawnGeneration = 0;
+
+  @visibleForTesting
+  int get spawnGeneration => _spawnGeneration;
+
+  /// Generation whose exit WE caused (teardown, forced respawn, reaping a
+  /// wedged host, spawn-timeout kill) — consumed once, never restarted.
+  int? _expectedExitGeneration;
+
+  /// Bumped to abandon a restart that is sleeping out its backoff.
+  int _restartEpoch = 0;
+  bool _restartPending = false;
+  int _restartsInWindow = 0;
+  DateTime? _restartWindowStart;
+  bool _disposed = false;
+
+  /// True only while `_restartAfter` is driving a spawn — the reliable "is
+  /// this spawn a supervised restart?" signal. (`_restartsInWindow > 0` is
+  /// NOT that signal: the budget is deliberately not repaid on success, so a
+  /// later ordinary spawn inside the 60s window would be mislabelled.)
+  bool _supervisedSpawn = false;
+
+  HostStatus _status = const HostStatus(HostPhase.idle);
+  final _statusCtl = StreamController<HostStatus>.broadcast();
+
+  /// Current supervision state (synchronous read for non-stream callers).
+  HostStatus get status => _status;
+
+  /// Supervision state, seeded with [status] then live. Each read returns a
+  /// FRESH single-subscription stream (the seed is delivered per listen), so
+  /// call the getter once per consumer — do not share one returned stream
+  /// between listeners.
+  Stream<HostStatus> get statusStream =>
+      seededStream(() => _status, _statusCtl.stream);
+
+  void _setStatus(HostStatus s) {
+    if (s == _status) return;
+    _status = s;
+    if (!_statusCtl.isClosed) _statusCtl.add(s);
+  }
 
   /// Builds the stdin bootstrap for a fresh host spawn. The launcher assigns it
   /// (it knows the first project + optional device record) before the first
@@ -157,6 +287,135 @@ class HostController {
     _verifiedAt = null;
   }
 
+  /// Called when a host process we spawned exits. Public for tests — production
+  /// wiring is the `proc.exitCode` listener in [_realSpawnHost].
+  ///
+  /// [generation] identifies the spawn: a stale generation means this exit
+  /// belongs to a host we already replaced, so it must not drive supervision.
+  @visibleForTesting
+  void handleHostExit({
+    required int generation,
+    required int pid,
+    int? exitCode,
+  }) {
+    if (generation != _spawnGeneration) return;
+    if (ownedHostPid == pid) ownedHostPid = null;
+    // Whatever we last handed out pointed at this process.
+    invalidate();
+
+    if (_expectedExitGeneration == generation) {
+      _expectedExitGeneration = null;
+      // A verdict already on the board outranks the bare fact the process
+      // died: a spawn-timeout kill publishes `failed` (and a queued restart
+      // `restarting`) BEFORE this late exitCode callback lands — clobbering
+      // either with `stopped` would hide the banner and its retry affordance.
+      if (_status.phase != HostPhase.failed &&
+          _status.phase != HostPhase.restarting) {
+        _setStatus(const HostStatus(HostPhase.stopped));
+      }
+      return;
+    }
+    _log('host pid=$pid exited unexpectedly (code=$exitCode) — supervising');
+    _scheduleRestart(exitCode);
+  }
+
+  /// Clear the crash-loop budget and try again now. Backs the UI's retry
+  /// affordance on [HostPhase.failed]; rethrows so the caller can show the
+  /// spawn error.
+  Future<void> retryNow() async {
+    _restartsInWindow = 0;
+    _restartWindowStart = null;
+    _restartEpoch++;
+    _restartPending = false;
+    invalidate();
+    await ensureHost();
+  }
+
+  /// Mark the current spawn's exit as ours, so [handleHostExit] reports
+  /// [HostPhase.stopped] instead of respawning.
+  void _expectExit() {
+    _expectedExitGeneration = _spawnGeneration;
+    // A teardown also cancels any restart still sleeping out its backoff —
+    // otherwise "quit the app" would race a respawn back to life.
+    _restartEpoch++;
+    _restartPending = false;
+  }
+
+  /// Like [_expectExit] but WITHOUT cancelling a pending supervised restart —
+  /// for kills that are themselves part of a recovery (the spawn-timeout
+  /// reap, the wedged-host reap), where the restart chain that triggered the
+  /// spawn still owns what happens next. Using [_expectExit] here would bump
+  /// `_restartEpoch` and make `_restartAfter`'s guard abandon its own chain
+  /// after a single failed attempt.
+  void _expectExitKeepRestart() {
+    _expectedExitGeneration = _spawnGeneration;
+  }
+
+  void _scheduleRestart(int? exitCode) {
+    if (_disposed || _restartPending) return;
+
+    final now = _now();
+    final windowStart = _restartWindowStart;
+    if (windowStart == null || now.difference(windowStart) > _restartWindow) {
+      _restartWindowStart = now;
+      _restartsInWindow = 0;
+    }
+    if (_restartsInWindow >= _maxRestartsPerWindow) {
+      _setStatus(
+        HostStatus(
+          HostPhase.failed,
+          detail: 'The local bridge exited $_maxRestartsPerWindow times in a '
+              'row (last exit code $exitCode). Automatic restart is paused.',
+        ),
+      );
+      return;
+    }
+
+    final attempt = _restartsInWindow++;
+    // Equal-jitter-free exponential backoff, capped: the host is local, so the
+    // thing we're pacing is a crash loop, not a congested peer.
+    final wait = Duration(
+      milliseconds: min(
+        _restartBaseDelay.inMilliseconds << attempt,
+        _restartMaxDelay.inMilliseconds,
+      ),
+    );
+    _restartPending = true;
+    _setStatus(
+      HostStatus(
+        HostPhase.restarting,
+        attempt: attempt + 1,
+        detail: 'The local bridge stopped (exit code $exitCode). Restarting…',
+      ),
+    );
+    unawaited(_restartAfter(wait, exitCode, _restartEpoch));
+  }
+
+  Future<void> _restartAfter(Duration wait, int? exitCode, int epoch) async {
+    await _delay(wait);
+    // Superseded by a teardown / manual retry / newer restart while we slept
+    // (the canceller also cleared `_restartPending`).
+    if (_disposed || epoch != _restartEpoch) return;
+    // `_restartPending` stays true THROUGH the spawn attempt: it is what tells
+    // `_spawn`'s catch that this failure already has an owner (us), so it must
+    // not publish a transient `failed` between two `restarting` states.
+    _supervisedSpawn = true;
+    try {
+      await ensureHost();
+      _restartPending = false;
+      _log('supervised respawn succeeded');
+    } catch (e) {
+      _restartPending = false;
+      if (_disposed || epoch != _restartEpoch) return;
+      _log('supervised respawn failed: $e');
+      // Count the failed spawn against the same crash-loop budget so a bridge
+      // that can't even start still converges on HostPhase.failed.
+      _scheduleRestart(exitCode);
+    } finally {
+      _supervisedSpawn = false;
+    }
+  }
+
   /// Await any spawn already in flight (swallowing its outcome) so a caller that
   /// must spawn FRESH — `warmHost(forceRespawn: true)` — doesn't get joined to it
   /// by [ensureHost]'s single-flight and silently inherit its bootstrap. After
@@ -182,6 +441,11 @@ class HostController {
   /// force-kills the whole tree as a backstop if it overstays. Best-effort: a
   /// failure here must never block app exit.
   Future<void> shutdownOwnedHost() async {
+    // We are the reason for whatever dies from here on — no supervised
+    // respawn. Runs BEFORE the owned-pid check on purpose: a crash that
+    // already cleared `ownedHostPid` may have a restart sleeping out its
+    // backoff, and a teardown must cancel that too.
+    _expectExit();
     final owned = ownedHostPid;
     if (owned == null) return;
 
@@ -208,7 +472,7 @@ class HostController {
     // (a /T kill reaps the host's PTY grandchildren too).
     final deadline = _now().add(const Duration(seconds: 3));
     while (_now().isBefore(deadline)) {
-      if (!await isPidAlive(owned)) {
+      if (!await _pidAlive(owned)) {
         ownedHostPid = null;
         return;
       }
@@ -247,15 +511,20 @@ class HostController {
           _log('dev mode: bridge changed since host start — '
               'terminating pid=${disc.pid} for fresh code');
           await _terminate(disc.pid);
-          return _markVerified(await _spawnHostFn());
+          return _markVerified(await _spawn());
         }
         _log('attached to running host pid=${disc.pid} port=${disc.controlPort}');
+        _setStatus(HostStatus(HostPhase.up, generation: _spawnGeneration));
         return _markVerified(disc);
       }
       // Ping failed: probe the PID to tell a wedged host (alive → reap before
       // respawn) from a stale dead one.
       if (await _pidAlive(disc.pid)) {
         _log('unhealthy host pid=${disc.pid}; terminating before respawn');
+        // Reaping our own wedged host is a deliberate exit — the respawn below
+        // IS the recovery, so supervision must not schedule a second one. Keep
+        // any pending restart alive: this ensureHost may BE that restart.
+        if (disc.pid == ownedHostPid) _expectExitKeepRestart();
         await _terminate(disc.pid);
       } else {
         _log('stale host (dead pid=${disc.pid}); respawning');
@@ -263,7 +532,36 @@ class HostController {
     } else {
       _log('no host.json; spawning host');
     }
-    return _markVerified(await _spawnHostFn());
+    return _markVerified(await _spawn());
+  }
+
+  /// [_spawnHostFn] wrapped in status reporting, so every spawn — cold, dev
+  /// refresh, or supervised restart — moves the UI-visible phase.
+  Future<HostFile> _spawn() async {
+    // Generation is bumped HERE, not in _realSpawnHost, so it advances for
+    // injected spawns too — supervision's stale-exit guard is the same code in
+    // tests as in production.
+    _spawnGeneration++;
+    final restarting = _supervisedSpawn;
+    _setStatus(
+      HostStatus(
+        restarting ? HostPhase.restarting : HostPhase.starting,
+        attempt: restarting ? _restartsInWindow : 0,
+        detail: restarting ? _status.detail : null,
+      ),
+    );
+    try {
+      final h = await _spawnHostFn();
+      _setStatus(HostStatus(HostPhase.up, generation: _spawnGeneration));
+      return h;
+    } catch (e) {
+      // A restart already queued (the host died mid-boot) owns the phase —
+      // reporting `failed` here would flap the banner between the two.
+      if (!_restartPending) {
+        _setStatus(HostStatus(HostPhase.failed, detail: '$e'));
+      }
+      rethrow;
+    }
   }
 
   /// Real spawn: start the bridge binary, write the bootstrap to stdin, then
@@ -274,6 +572,8 @@ class HostController {
       throw StateError('HostController: bootstrapBuilder is required to spawn');
     }
     final payload = builder();
+    // Read before the first await: _spawn() bumped it for exactly this spawn.
+    final generation = _spawnGeneration;
     final proc = await spawnHostProcess(payload);
     _proc = proc;
     ownedHostPid = proc.pid;
@@ -292,7 +592,10 @@ class HostController {
 
     // Local flag scoped to THIS spawn so a prior exit never poisons a retry.
     var exited = false;
-    unawaited(proc.exitCode.then((_) => exited = true));
+    unawaited(proc.exitCode.then((code) {
+      exited = true;
+      handleHostExit(generation: generation, pid: proc.pid, exitCode: code);
+    }));
 
     const intervalMs = 100;
     final spawnedAt = _now();
@@ -320,6 +623,11 @@ class HostController {
         ]);
       }
     }
+    // Killing a host that never came up is our own doing — let ensureHost's
+    // caller (or the supervised restart loop) decide what happens next. The
+    // keep-restart variant is load-bearing: this spawn may have been driven by
+    // `_restartAfter`, whose chain a `_restartEpoch` bump would abandon.
+    if (!exited && generation == _spawnGeneration) _expectExitKeepRestart();
     try {
       proc.kill();
     } catch (_) {}
@@ -457,10 +765,14 @@ class HostController {
   }
 
   Future<void> shutdown() async {
+    _disposed = true;
+    _expectExit();
+    _setStatus(const HostStatus(HostPhase.stopped));
     try {
       _proc?.kill();
     } catch (_) {}
     await _events.close();
+    await _statusCtl.close();
   }
 }
 

@@ -129,6 +129,12 @@ describe("handshake MITM", () => {
   });
 
   // ── Scenario 5: reconnect re-handshake ───────────────────────────────────
+  // Explicit timeout (matches gate-harness-pairfree.test.ts's 30_000, the other
+  // file whose test body pays a full setupTestEnv — spawn a relay + a real
+  // bridge agent subprocess, account-trust handshake, then poll for a dialable
+  // stream advert — on top of its own assertions; bun:test's 5_000ms default is
+  // tuned for tests that reuse a describe-level env from beforeAll and isn't
+  // enough headroom for a second cold env spun up inside the test itself).
   test("phone disconnect+reconnect triggers a fresh handshake on new keys", async () => {
     // This test uses its own isolated env to avoid interference with other
     // tests. (beforeEach reconnects env.app but we need a known-clean state.)
@@ -172,5 +178,5 @@ describe("handshake MITM", () => {
     } finally {
       await localEnv.teardown();
     }
-  });
+  }, 30_000);
 });

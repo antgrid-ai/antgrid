@@ -38,6 +38,14 @@ final _chatCapDriver =
       () => ValueController(<String>{'claude-code'}),
     );
 
+/// Mounts/unmounts the composer inside a single, persistent ProviderScope so a
+/// mount → unmount → re-mount cycle keeps the SAME container — the setup the
+/// autoDispose regression test needs (a fresh ProviderScope per pumpWidget
+/// would drop the very provider state under test).
+final _composerVisible = NotifierProvider<ValueController<bool>, bool>(
+  () => ValueController(true),
+);
+
 /// Base overrides every test needs: one local source, and detection/chat-
 /// capability futures stubbed so the widget never touches a real host
 /// controller. Callers append target/agent overrides on top.
@@ -199,6 +207,41 @@ void main() {
     expect(sendButton.onTap, isNull);
   });
 
+  testWidgets('context row survives a long machine label at phone width', (
+    tester,
+  ) async {
+    // A machine label carrying its device-uuid suffix used to push the
+    // environment + project chips past a 1080px-class phone width, tripping
+    // the render overflow (which flutter_test surfaces as a test failure).
+    tester.view.physicalSize = const Size(1080, 2340);
+    tester.view.devicePixelRatio = 2.625;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(
+      _host(
+        overrides: [
+          pickerSourcesProvider.overrideWithValue(const [
+            PickerSource(
+              id: 'machine:M',
+              label: 'RadhaAI - 96352d',
+              isLocal: false,
+              projects: [],
+              machineUuid: 'M',
+            ),
+          ]),
+          newSessionDetectedToolsProvider.overrideWith(
+            (ref) async => const <String>{},
+          ),
+          newSessionChatCapableToolsProvider.overrideWith((ref) async => null),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('RadhaAI - 96352d'), findsOneWidget);
+    expect(find.text('Select project…'), findsOneWidget);
+  });
+
   testWidgets('terminal-only agent pins mode chip to TERMINAL disabled', (
     tester,
   ) async {
@@ -344,6 +387,81 @@ void main() {
     // runs before addTearDown, so the safety-net tearDown alone isn't enough.
     debugDefaultTargetPlatformOverride = null;
   });
+
+  testWidgets(
+    'remount after an off-screen chat-capability re-emission does not crash '
+    'the build (autoDispose regression)',
+    (tester) async {
+      // Repro of the "UncontrolledProviderScope cannot be marked as needing to
+      // build ... currently building NewSessionComposer" crash: while the
+      // composer is unmounted, a control-plane push re-emits
+      // newSessionChatCapableToolsProvider. If that provider (and its sync
+      // dependent newSessionSupportsChatProvider) outlive the composer, the
+      // next mount's `ref.listen` flushes the stale provider mid-build and
+      // synchronously reschedules the still-live dependent via setState on the
+      // scope — illegal during build. autoDispose disposes both with the
+      // composer, so each mount starts clean. Guards against dropping it.
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pickerSourcesProvider.overrideWithValue(const [_localSource]),
+            newSessionDetectedToolsProvider.overrideWith(
+              (ref) async => const {'claude-code'},
+            ),
+            newSessionChatCapableToolsProvider.overrideWith(
+              (ref) async => ref.watch(_chatCapDriver),
+            ),
+            selectedTargetProjectProvider.overrideWith(
+              () => ValueController(_project),
+            ),
+          ],
+          child: MaterialApp(
+            theme: buildAbTheme(),
+            home: Scaffold(
+              body: Align(
+                alignment: Alignment.bottomCenter,
+                child: Consumer(
+                  builder: (context, ref, _) => ref.watch(_composerVisible)
+                      ? NewSessionComposer(
+                          onOpenFolder: () {},
+                          submit: (_) async {},
+                        )
+                      : const SizedBox.shrink(),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(Consumer)),
+      );
+      // Sanity: the dependent is alive and resolved (chat-capable → Chat).
+      expect(container.read(newSessionModeProvider), 'chat');
+
+      // Composer leaves the tree.
+      container.read(_composerVisible.notifier).set(false);
+      await tester.pumpAndSettle();
+      expect(find.byType(NewSessionComposer), findsNothing);
+
+      // Off-screen control-plane push re-emits a reference-distinct Set, then
+      // the composer re-mounts in the same turn — so the provider is still
+      // dirty when the new build's `ref.listen` flushes it.
+      container.read(_chatCapDriver.notifier).set({'claude-code'});
+      container.read(_composerVisible.notifier).set(true);
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(find.byType(NewSessionComposer), findsOneWidget);
+
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
 
   // Ported from the deleted test/widgets/new_session_mode_toggle_test.dart
   // (SessionConfig's mode toggle), retargeted onto the composer's mode chip.

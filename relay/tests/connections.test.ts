@@ -149,3 +149,41 @@ describe("Connections.clear", () => {
     expect(c.getConnectionCountByIp("1.2.3.4")).toBe(0);
   });
 });
+
+describe("getByAccountDevice", () => {
+  // An app registers one per-machine slot (`<accountDeviceUuid>#<machine>`) per
+  // machine it holds open, so anything driven by an account device id — the
+  // internal revoke route — must reach all of them, not just an exact hit.
+  it("returns every per-machine slot scoped under the account device", () => {
+    const c = new Connections();
+    const a = makeConn({ deviceId: "acct-1#machine-a", deviceType: "app" });
+    const b = makeConn({ deviceId: "acct-1#machine-b", deviceType: "app" });
+    c.insert(a);
+    c.insert(b);
+
+    expect(new Set(c.getByAccountDevice("acct-1"))).toEqual(new Set([a, b]));
+  });
+
+  it("returns the bare holder when the device registered unscoped", () => {
+    const c = new Connections();
+    const agent = makeConn({ deviceId: "acct-1", deviceType: "agent" });
+    c.insert(agent);
+
+    expect(c.getByAccountDevice("acct-1")).toEqual([agent]);
+  });
+
+  it("does not match an account device that merely shares a prefix", () => {
+    const c = new Connections();
+    c.insert(makeConn({ deviceId: "acct-10#machine-a", deviceType: "app" }));
+    c.insert(makeConn({ deviceId: "acct-1-other", deviceType: "app" }));
+
+    expect(c.getByAccountDevice("acct-1")).toEqual([]);
+  });
+
+  it("returns nothing for a device with no live connection", () => {
+    const c = new Connections();
+    c.insert(makeConn({ deviceId: "acct-2#machine-a", deviceType: "app" }));
+
+    expect(c.getByAccountDevice("acct-1")).toEqual([]);
+  });
+});

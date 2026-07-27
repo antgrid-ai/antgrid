@@ -12,7 +12,7 @@ class _FakeNotifier extends MobileDevicesHubNotifier {
   Future<PhonesList> build() async => const PhonesList(
         phones: [PairedPhoneSummary(
           phonePubkey: 'pk-1', phoneDeviceId: 'ph-1', label: 'iPhone',
-          pairedAt: 'x', lastSeenAt: 'y', admission: 'same-account',
+          pairedAt: 'x', lastSeenAt: 'y',
           allowedProjects: ['p1'])],
         knownProjects: [
           KnownProject(projectId: 'p1', label: 'Proj One', path: '/p1', running: true),

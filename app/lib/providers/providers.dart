@@ -1,15 +1,16 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:uuid/uuid.dart';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
 import '../config/storage_scope.dart';
+import '../connection/supervisor_state.dart';
 import '../models/ab_message.dart'
     show CommandInfo, NotificationPushMessage, TerminalNotificationMessage;
 import '../models/qr_payload.dart';
@@ -18,17 +19,16 @@ import '../models/terminal_models.dart';
 import '../project/project_session.dart';
 import '../project/project_session_registry.dart';
 import '../services/license_token_minter.dart';
-import '../services/pairing_service.dart';
-import '../services/phone_identity.dart';
 import '../services/storage_service.dart';
-import 'analytics.dart';
 import 'auth.dart';
+import 'connection_identity.dart';
 import 'device_provisioning.dart';
 import 'entry_cleanup.dart';
 import 'agent_transport.dart';
 import 'provider_retry.dart';
 import 'relay_connection.dart';
 import 'seeded_stream.dart';
+import 'supervisor_status.dart';
 import 'recent_agents.dart';
 import '../storage/recent_agents_store.dart';
 import '../models/file_tree_models.dart';
@@ -65,10 +65,6 @@ final storageServiceProvider = Provider<StorageService>(
 );
 
 final cryptoServiceProvider = Provider<CryptoService>((ref) => CryptoService());
-
-final phoneIdentityProvider = Provider<PhoneIdentity>(
-  (ref) => PhoneIdentity.secure(),
-);
 
 /// Builds a `LicenseTokenMinter` from the current keychain `DeviceRecord`.
 /// Returns `null` when the user hasn't been provisioned yet (signed out, or
@@ -116,43 +112,6 @@ final relayEpochProvider = FutureProvider<int>((ref) async {
     // reconnect retry — not a correctness hazard.
   }
   return epoch;
-});
-
-/// A [PairingService] bound to the single relay socket of the machine
-/// [machineDeviceId] (bare `deviceUuid`). v3: pairing is machine-level — one
-/// grant per (machine, phone-key) lifetime over the one socket. The compound
-/// project id is reduced to its base machine inside the service.
-final pairingServiceForProvider = Provider.family<PairingService, String>((
-  ref,
-  machineDeviceId,
-) {
-  final relay = ref
-      .read(relayConnectionManagerProvider)
-      .connectionFor(machineDeviceId)
-      .relay;
-  return PairingService(
-    relay: relay,
-    phoneIdentity: ref.read(phoneIdentityProvider),
-    recentAgentsStore: ref.read(recentAgentsStoreProvider),
-    deviceStore: ref.read(keychainDeviceStoreProvider),
-    registrationId: machineDeviceId,
-    epochProvider: () => ref.read(relayEpochProvider.future),
-    analytics: ref.read(analyticsServiceProvider),
-    tokenProvider: () async {
-      // Returns `null` only when the user is not provisioned (signed-out or
-      // pre-sign-in): autoOpen can then degrade gracefully into the
-      // "phone hasn't authed" path. Once a minter exists, any failure to
-      // produce a token is propagated — autoOpen has no pairCode fallback,
-      // so swallowing here would only convert one error (transient mint
-      // failure) into another, less informative one (UNKNOWN_PHONE rejection
-      // from the agent).
-      final minter = await ref.read(licenseTokenMinterProvider.future);
-      if (minter == null) return null;
-      final cached = minter.getToken();
-      if (cached != null) return cached;
-      return minter.mint();
-    },
-  );
 });
 
 /// Per-project TerminalService façade.
@@ -599,37 +558,6 @@ final agentSessionStateProvider = StreamProvider.family<AgentSessionState, Strin
   );
 });
 
-final deviceIdentityProvider =
-    AsyncNotifierProvider<DeviceIdentityNotifier, DeviceIdentity>(
-      DeviceIdentityNotifier.new,
-    );
-
-class DeviceIdentityNotifier extends AsyncNotifier<DeviceIdentity> {
-  @override
-  Future<DeviceIdentity> build() async {
-    final storage = ref.read(storageServiceProvider);
-    final existing = await storage.loadIdentity();
-    if (existing != null) return existing;
-
-    // Generate new identity on first launch
-    final crypto = ref.read(cryptoServiceProvider);
-    final (ed25519Priv, ed25519Pub) = await crypto.generateEd25519KeyPair();
-    final (x25519Priv, x25519Pub) = await crypto.generateX25519KeyPair();
-
-    final identity = DeviceIdentity(
-      deviceId: const Uuid().v4(),
-      name: 'Antgrid App',
-      ed25519PrivateKey: ed25519Priv,
-      ed25519PublicKey: ed25519Pub,
-      x25519PrivateKey: x25519Priv,
-      x25519PublicKey: x25519Pub,
-    );
-
-    await storage.saveIdentity(identity);
-    return identity;
-  }
-}
-
 final connectionStateProvider = StreamProvider<AppState>((ref) {
   // Follow the selected remote connection's own socket (was the single
   // `_shared` relay). Guard on the target TYPE, not the id string: a selected
@@ -649,32 +577,47 @@ final connectionStateProvider = StreamProvider<AppState>((ref) {
 
 /// Whether the active agent is reachable through the relay.
 ///
-/// - `connecting` — WebSocket / auth handshake / pair-request still in flight.
-/// - `online` — paired with the agent over the relay.
-/// - `offline` — authenticated to the relay but the agent isn't available
-///   (the most common case is `PAIR_TIMEOUT` from the relay because no agent
-///   with that deviceId is currently registered).
+/// - `connecting` — the supervisor hasn't reached [Connected] yet (climbing,
+///   released, or nothing dialed at all).
+/// - `online` — the ladder is fully climbed (`Connected`).
+/// - `offline` — the ladder stopped specifically because the agent never
+///   showed up (`Blocked(agentOffline)`). Every OTHER block reason (license,
+///   revoked, superseded…) still needs the user or an out-of-band re-mint, not
+///   a bare reconnect attempt, so it stays `connecting` here rather than
+///   collapsing into the same "not reachable" bucket.
 enum AgentReachability { connecting, online, offline }
 
+/// Pure mapping, pulled out of [agentReachabilityProvider] so the derivation
+/// is pinned against literal [SupervisorStatus] values without dialling a
+/// live supervisor or fighting a StreamProvider's async first emission — see
+/// `supervisor_status_test.dart`.
+@visibleForTesting
+AgentReachability reachabilityForStatus(SupervisorStatus? status) =>
+    switch (status) {
+      Connected() => AgentReachability.online,
+      Blocked(reason: BlockReason.agentOffline) => AgentReachability.offline,
+      _ => AgentReachability.connecting,
+    };
+
 final agentReachabilityProvider = Provider<AgentReachability>((ref) {
-  final asyncState = ref.watch(connectionStateProvider);
-  final state = asyncState.value;
-  if (state == null) return AgentReachability.connecting;
-  switch (state.connectionState) {
-    case RelayConnectionState.paired:
-      return AgentReachability.online;
-    case RelayConnectionState.authenticated:
-      // PAIR_TIMEOUT = the agent never showed up. Other authenticated-with-
-      // no-error states are still "connecting" (pair-request hasn't fired
-      // or is in flight).
-      if (state.errorCode == 'PAIR_TIMEOUT') return AgentReachability.offline;
-      return AgentReachability.connecting;
-    case RelayConnectionState.disconnected:
-    case RelayConnectionState.connecting:
-    case RelayConnectionState.authenticating:
-    case RelayConnectionState.pairing:
-      return AgentReachability.connecting;
-  }
+  final id = ref.watch(selectedRegistrationIdProvider);
+  if (id == null) return AgentReachability.connecting;
+  return reachabilityForStatus(ref.watch(supervisorStatusProvider(id)).value);
+});
+
+/// True when the focused machine's ladder has STOPPED on a [Blocked] reason.
+///
+/// [AgentReachability] deliberately folds every block except `agentOffline`
+/// into `connecting`, which reads correctly as "not usable yet" but is wrong
+/// for anything that treats `connecting` as "an attempt is in flight, wait for
+/// it". A blocked ladder never stops being `connecting` on its own, so such a
+/// guard would wait forever — including the drawer's duplicate-tap guard,
+/// which would then swallow every tap and leave the user unable to reach the
+/// error surface that holds Retry.
+final focusedAgentBlockedProvider = Provider<bool>((ref) {
+  final id = ref.watch(selectedRegistrationIdProvider);
+  if (id == null) return false;
+  return ref.watch(supervisorStatusProvider(id)).value is Blocked;
 });
 
 /// True iff the currently focused id corresponds to a relay-paired remote
@@ -731,7 +674,14 @@ class PairedAgentNotifier extends AsyncNotifier<List<PairedAgent>> {
     }
   }
 
-  Future<void> pair(QrPayload qr) async {
+  /// Import a machine's COORDINATES from a scanned QR code and focus it.
+  ///
+  /// There is no rendezvous left to run: admission is account trust, so the QR
+  /// only tells us where the machine lives and which Ed25519 key to pin it
+  /// against. Persisting that and focusing the machine is the whole flow —
+  /// reading its transport provider brings the supervisor up, which dials and
+  /// drives the E2E handshake as this app's own DeviceRecord.
+  Future<void> importCoordinates(QrPayload qr) async {
     final user = await ref.read(currentUserProvider.future);
     if (requiresProForMobile(user?.tier)) {
       throw PairException(
@@ -741,18 +691,32 @@ class PairedAgentNotifier extends AsyncNotifier<List<PairedAgent>> {
     final agents = await _pairedAgentsSnapshot();
 
     try {
-      final identity = await _identityForRelay();
-      final pairing = ref.read(pairingServiceForProvider(qr.agentDeviceId));
-      // QR-driven first-pair flow → grant. The E2E session (keys) is established
-      // lazily by the machine's MachineSession once its transport is read.
-      final ra = await pairing.pairWithAgent(qr, identity);
+      // Resolved for its side effect: the import fails loudly here when the app
+      // has no device record to connect with at all, rather than silently
+      // persisting coordinates it can never dial.
+      await ref.read(connectionDeviceRecordProvider.future);
+      final now = DateTime.now();
+      await ref
+          .read(recentAgentsStoreProvider)
+          .upsert(
+            RecentAgent(
+              agentDeviceId: qr.agentDeviceId,
+              agentLabel: qr.agentName,
+              agentEd25519Pubkey: base64.encode(qr.agentEd25519PublicKey),
+              relayUrl: qr.relayUrl,
+              pairedAt: now,
+              lastConnectedAt: now,
+              hostMachineName: qr.hostMachineName,
+            ),
+          );
+
       final agent = PairedAgent(
-        relayUrl: ra.relayUrl,
-        agentDeviceId: ra.agentDeviceId,
-        agentName: ra.agentLabel,
+        relayUrl: qr.relayUrl,
+        agentDeviceId: qr.agentDeviceId,
+        agentName: qr.agentName,
       );
 
-      // Replace if already exists (re-pair), otherwise append
+      // Replace if already exists (re-import), otherwise append
       final idx = agents.indexWhere(
         (a) => a.agentDeviceId == agent.agentDeviceId,
       );
@@ -767,7 +731,7 @@ class PairedAgentNotifier extends AsyncNotifier<List<PairedAgent>> {
       await storage.savePairedAgents(agents);
 
       // Focus the new agent; reading its transport provider (driven by the
-      // workspace boot path) opens the dedicated socket and runs the handshake.
+      // workspace boot path) opens the machine socket and runs the handshake.
       ref
           .read(selectedTargetProvider.notifier)
           .set(RemoteTarget.legacy(agent.agentDeviceId));
@@ -814,7 +778,6 @@ class PairedAgentNotifier extends AsyncNotifier<List<PairedAgent>> {
     final mgr = ref.read(relayConnectionManagerProvider);
     final registry = ref.read(projectSessionRegistryProvider.notifier);
     for (final id in forgottenIds) {
-      mgr.peek(id)?.unpair();
       mgr.release(id);
       // `AndSettle` (awaited) before purge: eviction's `onEvict` writes the
       // status cache that `purgeEntryState` then deletes — ordering matters.
@@ -836,15 +799,7 @@ class PairedAgentNotifier extends AsyncNotifier<List<PairedAgent>> {
       }
     }
 
-    await ref.read(phoneIdentityProvider).deleteKeypair(machineUuid);
     state = AsyncData(remainingAgents);
-  }
-
-  /// Re-arms the agent's connection after an app resume. Reading its transport
-  /// provider opens + handshakes the dedicated socket (a no-op if it is already
-  /// live, since `RelayConnection.open` is idempotent).
-  Future<void> ensureListenersRunning(PairedAgent agent) async {
-    await ref.read(agentTransportForProvider(agent.agentDeviceId).future);
   }
 
   /// User-initiated escape from the workspace boot screen — clears the
@@ -861,40 +816,42 @@ class PairedAgentNotifier extends AsyncNotifier<List<PairedAgent>> {
     if (activeId != null) {
       final mgr = ref.read(relayConnectionManagerProvider);
       final machineUuid = baseDeviceUuid(activeId);
-      mgr.peek(machineUuid)?.unpair();
       mgr.release(machineUuid);
       ref.read(projectSessionRegistryProvider.notifier).forceEvict(activeId);
     }
   }
 
-  /// User-initiated retry from the "Agent offline" panel.
+  /// User-initiated retry from the boot panel or the connection-error screen.
   ///
-  /// Loads the `RecentAgent` for the active agent and runs the reconnect
-  /// flow (fresh nonce, signed pair-approval verification) over the agent's
-  /// dedicated socket. Idempotent when the session is already healthy.
+  /// Hands the machine's [ConnectionSupervisor] its `retry()` input — clearing
+  /// the block and the backoff — rather than dialling here: a second component
+  /// deciding when to reconnect is exactly what the supervisor replaced.
+  ///
+  /// BOTH halves are required. `retry()` alone leaves the transport provider
+  /// holding the `ConnectionBlockedException` the block already threw, and the
+  /// error screen keeps rendering that settled error; the invalidate alone
+  /// re-enters `ensureStarted`, which no-ops on the live supervisor and
+  /// re-reads the same Blocked status the supervisor replays to every new
+  /// listener. With no supervisor yet (nothing dialled for this machine), the
+  /// rebuild is what starts one.
+  ///
+  /// The target comes from the FOCUS, not the paired-agent list: a remote
+  /// project focus is `<machineUuid>.<projectId>` and never matches a
+  /// `PairedAgent` row keyed by the bare machine uuid.
   Future<void> retryAgentConnection() async {
-    final agent = ref.read(activeAgentProvider);
-    if (agent == null) return;
-    final ra = _findRecentAgent(agent.agentDeviceId);
-    if (ra == null) return;
-    AbLog.info('relay', 'retry → reconnect', fields: {'target': agent.agentDeviceId});
-    final identity = await _identityForRelay();
-    final pairing = ref.read(pairingServiceForProvider(agent.agentDeviceId));
-    await pairing.reconnect(ra, identity);
-  }
-
-  RecentAgent? _findRecentAgent(String agentDeviceId) {
-    final store = ref.read(recentAgentsStoreProvider);
-    for (final r in store.list()) {
-      if (r.agentDeviceId == agentDeviceId) return r;
-    }
-    return null;
-  }
-
-  /// The phone now identifies to the relay using its locally-generated random
-  /// device id; the agent's signed pair-approval is what authorizes the
-  /// session, so we no longer need to overlay an api-issued device id.
-  Future<DeviceIdentity> _identityForRelay() {
-    return ref.read(deviceIdentityProvider.future);
+    final target = ref.read(selectedTargetProvider);
+    if (target == null || target.isLocal) return;
+    final registrationId = target.registrationId;
+    AbLog.info(
+      'relay',
+      'retry → supervisor',
+      fields: {'target': registrationId},
+    );
+    ref
+        .read(relayConnectionManagerProvider)
+        .peek(registrationId)
+        ?.supervisor
+        ?.retry();
+    ref.invalidate(agentTransportForProvider(registrationId));
   }
 }

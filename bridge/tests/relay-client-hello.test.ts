@@ -7,7 +7,7 @@ import { sign, verify } from "node:crypto";
 import { buildHelloSigBody, normalizeRelayHost } from "antgrid-wire";
 import { RelayClient } from "../src/relay-client";
 import { MessageBus } from "../src/message-bus";
-import { rawSeedToPkcs8 } from "../src/pair-approval";
+import { rawSeedToPkcs8 } from "../src/e2e";
 import { ED25519_SPKI_PREFIX } from "../src/ed25519-der";
 import vector from "../../evals/fixtures/relay-hello-vector.json";
 
@@ -22,6 +22,26 @@ function signEd25519(seedB64: string, data: Uint8Array): string {
 
 let clients: RelayClient[] = [];
 afterEach(() => { for (const c of clients.splice(0)) try { c.close(); } catch {} });
+
+/** A stand-in WebSocket so `redialWithFreshToken` can drive a real `doConnect()`
+ *  (which does `new WebSocket(url)`) without a live relay. Captures the dialed
+ *  URL + any frames written after `fireOpen()` triggers `sendHello`. */
+class FakeWS {
+  static OPEN = 1;
+  static CONNECTING = 0;
+  static CLOSING = 2;
+  static CLOSED = 3;
+  static instances: FakeWS[] = [];
+  readyState = FakeWS.CONNECTING;
+  url: string;
+  sent: string[] = [];
+  private listeners: Record<string, Array<(ev?: unknown) => void>> = {};
+  constructor(url: string) { this.url = url; FakeWS.instances.push(this); }
+  addEventListener(type: string, cb: (ev?: unknown) => void) { (this.listeners[type] ??= []).push(cb); }
+  send(d: string) { this.sent.push(d); }
+  close() { this.readyState = FakeWS.CLOSED; }
+  fireOpen() { this.readyState = FakeWS.OPEN; for (const cb of this.listeners.open ?? []) cb(); }
+}
 
 /** A client whose socket is stubbed OPEN so `sendHello` writes to `sent`
  *  without a live network connection. */
@@ -140,9 +160,9 @@ test("close after a retryable:false error frame does NOT schedule a reconnect", 
   (client as any).scheduleReconnect = () => { scheduled = true; origSchedule(); };
 
   (client as any).handleTextMessage(JSON.stringify({
-    type: "error", code: "NOT_AUTHORIZED", message: "no grant", retryable: false,
+    type: "error", code: "PROTOCOL_VIOLATION", message: "bad frame", retryable: false,
   }));
-  expect((client as any).lastError).toEqual({ code: "NOT_AUTHORIZED", retryable: false });
+  expect((client as any).lastError).toEqual({ code: "PROTOCOL_VIOLATION", retryable: false });
 
   // Drive the close handler's reconnect decision directly (mirrors the real
   // ws "close" listener body without needing an actual socket close event).
@@ -190,8 +210,10 @@ test("SUPERSEDED stops reconnecting (retryable:false) WITHOUT firing onAuthRevok
   expect((client as any).lastError).toEqual({ code: "SUPERSEDED", retryable: false });
 });
 
-for (const code of ["LICENSE_INVALID", "LICENSE_EXPIRED", "LICENSE_REVOKED"]) {
-  test(`${code} fires onAuthRevoked (the kept exception)`, () => {
+// Identity-dead verdicts stay terminal-exit (onAuthRevoked → re-enroll). EXPIRED
+// is split out below — it is recoverable by time (lapsed-then-renewed sub).
+for (const code of ["LICENSE_INVALID", "LICENSE_REVOKED"]) {
+  test(`${code} fires onAuthRevoked (terminal identity verdicts)`, () => {
     let revoked = false;
     const { client } = makeClient();
     (client as any).opts.onAuthRevoked = () => { revoked = true; };
@@ -202,12 +224,92 @@ for (const code of ["LICENSE_INVALID", "LICENSE_EXPIRED", "LICENSE_REVOKED"]) {
   });
 }
 
-test("PAIR_REJECTED (retryable:false) does NOT fire onAuthRevoked — only the license codes do", () => {
+test("LICENSE_EXPIRED does NOT fire onAuthRevoked — it stops reconnect and waits for a fresh mint", () => {
   let revoked = false;
   const { client } = makeClient();
   (client as any).opts.onAuthRevoked = () => { revoked = true; };
 
-  (client as any).handleErrorFrame({ code: "PAIR_REJECTED", message: "declined", retryable: false });
+  (client as any).handleErrorFrame({ code: "LICENSE_EXPIRED", message: "expired", retryable: false });
+
+  // Recoverable by time: never tells the user to re-enroll...
+  expect(revoked).toBe(false);
+  // ...but still terminal-for-socket — retryable:false stops the reconnect at
+  // the close handler (mirrors the SUPERSEDED stop above).
+  expect((client as any).lastError).toEqual({ code: "LICENSE_EXPIRED", retryable: false });
+});
+
+test("redialWithFreshToken after LICENSE_EXPIRED clears the stop and reconnects with a fresh token fetch", async () => {
+  let tokenFetches = 0;
+  const { client } = makeClient({
+    getLicenseToken: () => { tokenFetches++; return vector.fields.licenseToken; },
+  });
+
+  // Enter the expired-stop, then simulate the socket having closed underneath us.
+  (client as any).handleErrorFrame({ code: "LICENSE_EXPIRED", message: "expired", retryable: false });
+  (client as any).ws = null;
+
+  const realWS = globalThis.WebSocket;
+  FakeWS.instances.length = 0;
+  (globalThis as any).WebSocket = FakeWS;
+  try {
+    client.redialWithFreshToken();
+
+    // A REAL fresh dial to the relay URL — not just a flag flip.
+    expect(FakeWS.instances.length).toBe(1);
+    expect(FakeWS.instances[0].url).toBe("ws://relay.antgrid.ai:8443/ws");
+    // The stop is cleared and backoff reset (INITIAL_BACKOFF = 1000ms).
+    expect((client as any).lastError).toBeNull();
+    expect((client as any).backoff).toBe(1000);
+
+    // Fire open → sendHello fetches a FRESH token and writes the hello frame.
+    FakeWS.instances[0].fireOpen();
+    await new Promise((r) => setTimeout(r, 0)); // let async sendHello settle
+    expect(tokenFetches).toBeGreaterThanOrEqual(1);
+    const hello = JSON.parse(FakeWS.instances[0].sent[0]);
+    expect(hello.type).toBe("hello");
+    expect(hello.licenseToken).toBe(vector.fields.licenseToken);
+  } finally {
+    (globalThis as any).WebSocket = realWS;
+  }
+});
+
+test("redialWithFreshToken is a no-op when not expired-stopped", () => {
+  const { client } = makeClient();
+  // Fresh client: lastError is null (never received an expired verdict).
+  (client as any).ws = null;
+
+  const realWS = globalThis.WebSocket;
+  FakeWS.instances.length = 0;
+  (globalThis as any).WebSocket = FakeWS;
+  try {
+    client.redialWithFreshToken();
+    expect(FakeWS.instances.length).toBe(0); // no dial
+  } finally {
+    (globalThis as any).WebSocket = realWS;
+  }
+});
+
+test("redialWithFreshToken is a no-op when the socket is already open", () => {
+  const { client } = makeClient(); // makeClient stubs ws OPEN
+  (client as any).handleErrorFrame({ code: "LICENSE_EXPIRED", message: "expired", retryable: false });
+
+  const realWS = globalThis.WebSocket;
+  FakeWS.instances.length = 0;
+  (globalThis as any).WebSocket = FakeWS;
+  try {
+    client.redialWithFreshToken(); // ws.readyState === OPEN → guard returns
+    expect(FakeWS.instances.length).toBe(0);
+  } finally {
+    (globalThis as any).WebSocket = realWS;
+  }
+});
+
+test("SUPERSEDED (retryable:false) does NOT fire onAuthRevoked — only the license codes do", () => {
+  let revoked = false;
+  const { client } = makeClient();
+  (client as any).opts.onAuthRevoked = () => { revoked = true; };
+
+  (client as any).handleErrorFrame({ code: "SUPERSEDED", message: "newer connection", retryable: false });
 
   expect(revoked).toBe(false);
 });

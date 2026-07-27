@@ -144,11 +144,21 @@ class ComposerChip extends StatelessWidget {
                 children: [
                   AbIcon(icon, size: 12, color: fg),
                   const SizedBox(width: AbTokens.space6),
-                  Text(
-                    label,
-                    style: AbTokens.monoStyle(
-                      fontSize: AbTokens.fontSm,
-                      color: fg,
+                  // Ellipsize rather than overflow: labels are user/machine
+                  // supplied (a machine name can carry a device-uuid suffix),
+                  // so the chip must survive a narrow row. Requires callers to
+                  // give the chip a bounded width — a flex slot, not a bare
+                  // Row child.
+                  Flexible(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      softWrap: false,
+                      overflow: TextOverflow.ellipsis,
+                      style: AbTokens.monoStyle(
+                        fontSize: AbTokens.fontSm,
+                        color: fg,
+                      ),
                     ),
                   ),
                   const SizedBox(width: AbTokens.space6),

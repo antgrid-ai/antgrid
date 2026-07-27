@@ -1,4 +1,5 @@
 import type { ServerWebSocket } from "bun";
+import { isSlotOf } from "antgrid-wire";
 import { logger } from "./logger.js";
 
 /**
@@ -69,11 +70,23 @@ export interface ConnectionSummary {
 export class Connections {
   private readonly byConnectionId = new Map<string, Connection>();
   private readonly byDeviceId = new Map<string, Connection>();
+  // Per-account index so same-account fan-out (presencePeers) is O(peers), not
+  // an O(n) scan of every live connection on every hello/disconnect.
+  private readonly byUid = new Map<string, Set<Connection>>();
   private readonly ipCounts = new Map<string, number>();
 
   insert(conn: Connection): void {
     this.byConnectionId.set(conn.connectionId, conn);
     this.byDeviceId.set(conn.deviceId, conn);
+    const uid = conn.claims?.uid;
+    if (uid !== undefined) {
+      let set = this.byUid.get(uid);
+      if (!set) {
+        set = new Set<Connection>();
+        this.byUid.set(uid, set);
+      }
+      set.add(conn);
+    }
   }
 
   /**
@@ -87,6 +100,14 @@ export class Connections {
     if (this.byDeviceId.get(conn.deviceId) === conn) {
       this.byDeviceId.delete(conn.deviceId);
     }
+    const uid = conn.claims?.uid;
+    if (uid !== undefined) {
+      const set = this.byUid.get(uid);
+      if (set) {
+        set.delete(conn);
+        if (set.size === 0) this.byUid.delete(uid);
+      }
+    }
   }
 
   getByConnectionId(connectionId: string): Connection | undefined {
@@ -97,12 +118,27 @@ export class Connections {
     return this.byDeviceId.get(deviceId);
   }
 
-  getConnectionsForUser(userId: string): Connection[] {
-    const out: Connection[] = [];
+  /**
+   * Every live connection belonging to ACCOUNT device [deviceId]: the exact
+   * holder plus any per-machine app slot scoped under it (`<deviceId>#<machine>`).
+   *
+   * An agent registers under its bare `deviceUuid`, but an app registers one
+   * slot per machine it holds open, so anything driven by an account device id
+   * — revocation above all — must not stop at `getByDeviceId`. O(n) is fine:
+   * the only caller is the internal revoke route.
+   */
+  getByAccountDevice(deviceId: string): Connection[] {
+    const exact = this.byDeviceId.get(deviceId);
+    const out: Connection[] = exact ? [exact] : [];
     for (const c of this.byDeviceId.values()) {
-      if (c.claims?.uid === userId) out.push(c);
+      if (c !== exact && isSlotOf(c.deviceId, deviceId)) out.push(c);
     }
     return out;
+  }
+
+  getConnectionsForUser(userId: string): Connection[] {
+    const set = this.byUid.get(userId);
+    return set ? [...set] : [];
   }
 
   /**
@@ -169,6 +205,7 @@ export class Connections {
   clear(): void {
     this.byConnectionId.clear();
     this.byDeviceId.clear();
+    this.byUid.clear();
     this.ipCounts.clear();
     logger.debug("connections cleared");
   }

@@ -2,9 +2,6 @@ export interface RelayConfig {
   port: number;
   maxConnections: number;
   rateLimitConnPerIp: number;
-  /** Deadline clamp for a pending pair-request (design §5.2). */
-  pairRequestTimeoutMs: number;
-  pairRateLimitPerIp: number;
   rateLimitMsgPerSec: number;
   /** Sustained refill rate (msg/s) of the per-connection JSON-control bucket. */
   jsonRateLimitPerSec: number;
@@ -14,8 +11,6 @@ export interface RelayConfig {
   clockSkewMs: number;
   /** How long a `(deviceId, nonce)` hello pair is remembered (replay guard). */
   replayTtlMs: number;
-  /** Idle age after which an unused grant is swept (design §13.3). */
-  staleGrantDays: number;
   pingIntervalMs: number;
   pongTimeoutMs: number;
   logLevel: "debug" | "info" | "warn" | "error";
@@ -114,14 +109,11 @@ export function loadConfig(): RelayConfig {
     port: parseInt(process.env.PORT || "8080", 10),
     maxConnections: parseInt(process.env.MAX_CONNECTIONS || "10000", 10),
     rateLimitConnPerIp: parseInt(process.env.RATE_LIMIT_CONN_PER_IP || "10", 10),
-    pairRequestTimeoutMs: parseInt(process.env.PAIR_REQUEST_TIMEOUT_MS || "60000", 10),
-    pairRateLimitPerIp: parseInt(process.env.PAIR_RATE_LIMIT_PER_IP || "5", 10),
     rateLimitMsgPerSec: parseInt(process.env.RATE_LIMIT_MSG_PER_SEC || "100", 10),
     jsonRateLimitPerSec: parseInt(process.env.JSON_RATE_LIMIT_PER_SEC || "10", 10),
     jsonRateLimitBurst: parseInt(process.env.JSON_RATE_LIMIT_BURST || "30", 10),
     clockSkewMs,
     replayTtlMs,
-    staleGrantDays: parseInt(process.env.STALE_GRANT_DAYS || "30", 10),
     pingIntervalMs: parseInt(process.env.PING_INTERVAL_MS || "30000", 10),
     pongTimeoutMs: parseInt(process.env.PONG_TIMEOUT_MS || "10000", 10),
     logLevel: (process.env.LOG_LEVEL as RelayConfig["logLevel"]) || "info",

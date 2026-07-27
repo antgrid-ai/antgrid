@@ -55,16 +55,21 @@ test("agent:enableRelay promotes: pairingReady emitted, local channel intact", a
     }),
   );
 
+  // pairingReady lands almost immediately, well before a freshly-spawned PTY
+  // has echoed anything — wait for both signals under one deadline so the
+  // "OK" assertion below isn't racing the shell.
   const deadline = Date.now() + 8_000;
-  while (Date.now() < deadline && !seen.some((m) => m.type === "agent:pairingReady")) {
+  const sawOutput = () => seen.some((m) => m.type === "terminal:output" && m.data.includes("OK"));
+  while (
+    Date.now() < deadline &&
+    (!seen.some((m) => m.type === "agent:pairingReady") || !sawOutput())
+  ) {
     await Bun.sleep(100);
   }
 
   expect(seen.filter((m) => m.type === "agent:relayError")).toEqual([]);
   const ready = seen.find((m) => m.type === "agent:pairingReady");
   expect(ready).toBeDefined();
-  // @ts-expect-error narrowed at runtime
-  expect(typeof ready.pairCode).toBe("string");
 
   const outputs = seen
     .filter((m): m is Extract<AbMessage, { type: "terminal:output" }> => m.type === "terminal:output")

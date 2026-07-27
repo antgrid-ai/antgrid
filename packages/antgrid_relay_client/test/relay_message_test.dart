@@ -1,5 +1,3 @@
-import 'dart:convert';
-
 import 'package:test/test.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
@@ -41,18 +39,6 @@ void main() {
           parseRelayMessage({'type': 'stream-closed', 'streamId': 's1'});
       expect(closed, isA<StreamClosedMessage>());
       expect((closed as StreamClosedMessage).streamId, 's1');
-    });
-
-    test('parses grant-revoked with reason', () {
-      final msg = parseRelayMessage({
-        'type': 'grant-revoked',
-        'peerDeviceId': 'phone-1',
-        'reason': 'PEER_REPLACED',
-      });
-      expect(msg, isA<GrantRevokedMessage>());
-      final g = msg as GrantRevokedMessage;
-      expect(g.peerDeviceId, 'phone-1');
-      expect(g.reason, 'PEER_REPLACED');
     });
 
     test('parses error with retryable/ref/serverTime', () {
@@ -107,67 +93,27 @@ void main() {
       expect(msg.serverTime, isNull);
     });
 
-    test('parses pair-approval with pairId', () {
-      final raw = jsonDecode('''
-        {"type":"pair-approval","pairId":"pid","phonePubkey":"pk","phoneDeviceId":"d1","nonce":"n","expiresAt":"2026-04-29T10:00:00.000Z","signature":"sig"}
-      ''') as Map<String, dynamic>;
-      final m = parseRelayMessage(raw);
-      expect(m, isA<PairApprovalMessage>());
-      final approval = m as PairApprovalMessage;
-      expect(approval.pairId, 'pid');
-      expect(approval.phonePubkey, 'pk');
-      expect(approval.phoneDeviceId, 'd1');
-      expect(approval.nonce, 'n');
-      expect(approval.signature, 'sig');
-      expect(approval.expiresAt.toUtc().toIso8601String(),
-          '2026-04-29T10:00:00.000Z');
-    });
-
-    test('pair-approval without pairId returns null', () {
-      final raw = jsonDecode('''
-        {"type":"pair-approval","phonePubkey":"pk","phoneDeviceId":"d1","nonce":"n","expiresAt":"2026-04-29T10:00:00.000Z","signature":"sig"}
-      ''') as Map<String, dynamic>;
-      expect(parseRelayMessage(raw), isNull);
-    });
-
-    test('parses pair-rejected with pairId and reason', () {
-      final raw = jsonDecode('''
-        {"type":"pair-rejected","pairId":"pid","phonePubkey":"pk","reason":"UNKNOWN_PHONE"}
-      ''') as Map<String, dynamic>;
-      final m = parseRelayMessage(raw);
-      expect(m, isA<PairRejectedMessage>());
-      final rejected = m as PairRejectedMessage;
-      expect(rejected.pairId, 'pid');
-      expect(rejected.phonePubkey, 'pk');
-      expect(rejected.reason, 'UNKNOWN_PHONE');
-    });
-
-    test('pair-rejected without pairId returns null', () {
-      expect(
-        parseRelayMessage(
-            {'type': 'pair-rejected', 'phonePubkey': 'pk', 'reason': 'X'}),
-        isNull,
-      );
-    });
-
-    test('parses pair-connected, peer-online, peer-offline', () {
-      expect(
-        parseRelayMessage({
-          'type': 'pair-connected',
-          'peerId': 'a',
-          'peerName': 'n',
-          'peerType': 'agent',
-        }),
-        isA<PairConnectedMessage>(),
-      );
+    test('parses peer-online, peer-offline', () {
       expect(parseRelayMessage({'type': 'peer-online', 'peerId': 'a'}),
           isA<PeerOnlineMessage>());
       expect(parseRelayMessage({'type': 'peer-offline', 'peerId': 'a'}),
           isA<PeerOfflineMessage>());
     });
 
-    test('removed v2 types no longer dispatch', () {
-      for (final t in ['challenge', 'authenticated', 'pair-disconnected']) {
+    test('retired types no longer dispatch', () {
+      // The pairing frames are retired app-side but a Phase C-era relay may
+      // still emit them: they must parse to null (ignored), never throw.
+      // relay_legacy_pair_frames_test.dart pins the socket-level consequence.
+      const retired = [
+        'challenge',
+        'authenticated',
+        'pair-disconnected',
+        'pair-connected',
+        'pair-approval',
+        'pair-rejected',
+        'grant-revoked',
+      ];
+      for (final t in retired) {
         expect(parseRelayMessage({'type': t}), isNull,
             reason: '$t should not resolve in v3');
       }
@@ -211,56 +157,6 @@ void main() {
           {'type': 'stream-open', 'streamId': 's1'});
       expect(const StreamCloseMessage(streamId: 's1').toJson(),
           {'type': 'stream-close', 'streamId': 's1'});
-    });
-
-    test('GrantRevokeMessage.toJson', () {
-      expect(const GrantRevokeMessage(peerDeviceId: 'phone-1').toJson(),
-          {'type': 'grant-revoke', 'peerDeviceId': 'phone-1'});
-    });
-
-    test('PairRequestMessage.toJson includes deadline and omits pairId', () {
-      final m = PairRequestMessage(
-        agentDeviceId: 'a1',
-        phonePubkey: 'pk',
-        phoneDeviceId: 'p1',
-        nonce: 'n',
-        requestedAt: '2030-01-01T00:00:00.000Z',
-        deadline: 1893456000000,
-        phoneSignature: 'sig',
-        pairCode: 'pc',
-        label: 'iPhone',
-      );
-      expect(m.toJson(), {
-        'type': 'pair-request',
-        'agentDeviceId': 'a1',
-        'phonePubkey': 'pk',
-        'phoneDeviceId': 'p1',
-        'nonce': 'n',
-        'requestedAt': '2030-01-01T00:00:00.000Z',
-        'deadline': 1893456000000,
-        'phoneSignature': 'sig',
-        'pairCode': 'pc',
-        'label': 'iPhone',
-      });
-      expect(m.toJson().containsKey('pairId'), isFalse);
-    });
-
-    test('PairRequestMessage.toJson omits null pairCode/label/account fields',
-        () {
-      final m = PairRequestMessage(
-        agentDeviceId: 'a1',
-        phonePubkey: 'pk',
-        phoneDeviceId: 'p1',
-        nonce: 'n',
-        requestedAt: '2030-01-01T00:00:00.000Z',
-        deadline: 1,
-        phoneSignature: 'sig',
-      );
-      final j = m.toJson();
-      expect(j.containsKey('pairCode'), isFalse);
-      expect(j.containsKey('label'), isFalse);
-      expect(j.containsKey('accountDevicePubkey'), isFalse);
-      expect(j.containsKey('accountMembershipSig'), isFalse);
     });
   });
 

@@ -1,0 +1,321 @@
+{
+  "comment": "Golden control-envelope samples. Shape pin only — values (incl. retryable) are samples, not relay behavior. Regenerate: cd packages/antgrid-wire && bun run scripts/gen-envelope-vectors.ts",
+  "server": [
+    {
+      "name": "welcome",
+      "dart": "parsed",
+      "json": {
+        "type": "welcome",
+        "deviceId": "11111111-1111-4111-8111-111111111111#22222222-2222-4222-8222-222222222222",
+        "epoch": 1752624000,
+        "serverTime": "2026-07-16T00:00:00.000Z"
+      }
+    },
+    {
+      "name": "stream-opened",
+      "dart": "parsed",
+      "json": {
+        "type": "stream-opened",
+        "streamId": "s-7"
+      }
+    },
+    {
+      "name": "stream-closed",
+      "dart": "parsed",
+      "json": {
+        "type": "stream-closed",
+        "streamId": "s-7"
+      }
+    },
+    {
+      "name": "error:AUTH_FAILED",
+      "dart": "parsed",
+      "json": {
+        "type": "error",
+        "code": "AUTH_FAILED",
+        "message": "sample AUTH_FAILED",
+        "retryable": false,
+        "serverTime": "2026-07-16T00:00:00.000Z"
+      }
+    },
+    {
+      "name": "error:MAX_CONNECTIONS",
+      "dart": "parsed",
+      "json": {
+        "type": "error",
+        "code": "MAX_CONNECTIONS",
+        "message": "sample MAX_CONNECTIONS",
+        "retryable": false
+      }
+    },
+    {
+      "name": "error:RATE_LIMITED",
+      "dart": "parsed",
+      "json": {
+        "type": "error",
+        "code": "RATE_LIMITED",
+        "message": "sample RATE_LIMITED",
+        "retryable": true
+      }
+    },
+    {
+      "name": "error:INVALID_MESSAGE",
+      "dart": "parsed",
+      "json": {
+        "type": "error",
+        "code": "INVALID_MESSAGE",
+        "message": "sample INVALID_MESSAGE",
+        "retryable": false
+      }
+    },
+    {
+      "name": "error:NOT_AUTHENTICATED",
+      "dart": "parsed",
+      "json": {
+        "type": "error",
+        "code": "NOT_AUTHENTICATED",
+        "message": "sample NOT_AUTHENTICATED",
+        "retryable": false
+      }
+    },
+    {
+      "name": "error:WRONG_DEVICE_TYPE",
+      "dart": "parsed",
+      "json": {
+        "type": "error",
+        "code": "WRONG_DEVICE_TYPE",
+        "message": "sample WRONG_DEVICE_TYPE",
+        "retryable": false
+      }
+    },
+    {
+      "name": "error:ROUTE_FAILED",
+      "dart": "parsed",
+      "json": {
+        "type": "error",
+        "code": "ROUTE_FAILED",
+        "message": "sample ROUTE_FAILED",
+        "retryable": false
+      }
+    },
+    {
+      "name": "error:MESSAGE_RATE_LIMITED",
+      "dart": "parsed",
+      "json": {
+        "type": "error",
+        "code": "MESSAGE_RATE_LIMITED",
+        "message": "sample MESSAGE_RATE_LIMITED",
+        "retryable": true
+      }
+    },
+    {
+      "name": "error:LICENSE_INVALID",
+      "dart": "parsed",
+      "json": {
+        "type": "error",
+        "code": "LICENSE_INVALID",
+        "message": "sample LICENSE_INVALID",
+        "retryable": false
+      }
+    },
+    {
+      "name": "error:LICENSE_EXPIRED",
+      "dart": "parsed",
+      "json": {
+        "type": "error",
+        "code": "LICENSE_EXPIRED",
+        "message": "sample LICENSE_EXPIRED",
+        "retryable": false
+      }
+    },
+    {
+      "name": "error:LICENSE_REVOKED",
+      "dart": "parsed",
+      "json": {
+        "type": "error",
+        "code": "LICENSE_REVOKED",
+        "message": "sample LICENSE_REVOKED",
+        "retryable": false
+      }
+    },
+    {
+      "name": "error:LICENSE_REQUIRED",
+      "dart": "parsed",
+      "json": {
+        "type": "error",
+        "code": "LICENSE_REQUIRED",
+        "message": "sample LICENSE_REQUIRED",
+        "retryable": false
+      }
+    },
+    {
+      "name": "error:LICENSE_UNAVAILABLE",
+      "dart": "parsed",
+      "json": {
+        "type": "error",
+        "code": "LICENSE_UNAVAILABLE",
+        "message": "sample LICENSE_UNAVAILABLE",
+        "retryable": true
+      }
+    },
+    {
+      "name": "error:SESSION_LIMIT_EXCEEDED",
+      "dart": "parsed",
+      "json": {
+        "type": "error",
+        "code": "SESSION_LIMIT_EXCEEDED",
+        "message": "sample SESSION_LIMIT_EXCEEDED",
+        "retryable": false,
+        "ref": "s-7"
+      }
+    },
+    {
+      "name": "error:UNKNOWN_PHONE",
+      "dart": "parsed",
+      "json": {
+        "type": "error",
+        "code": "UNKNOWN_PHONE",
+        "message": "sample UNKNOWN_PHONE",
+        "retryable": false
+      }
+    },
+    {
+      "name": "error:NONCE_MISMATCH",
+      "dart": "parsed",
+      "json": {
+        "type": "error",
+        "code": "NONCE_MISMATCH",
+        "message": "sample NONCE_MISMATCH",
+        "retryable": false
+      }
+    },
+    {
+      "name": "error:APPROVAL_EXPIRED",
+      "dart": "parsed",
+      "json": {
+        "type": "error",
+        "code": "APPROVAL_EXPIRED",
+        "message": "sample APPROVAL_EXPIRED",
+        "retryable": false
+      }
+    },
+    {
+      "name": "error:SUPERSEDED",
+      "dart": "parsed",
+      "json": {
+        "type": "error",
+        "code": "SUPERSEDED",
+        "message": "sample SUPERSEDED",
+        "retryable": false
+      }
+    },
+    {
+      "name": "error:PEER_OFFLINE",
+      "dart": "parsed",
+      "json": {
+        "type": "error",
+        "code": "PEER_OFFLINE",
+        "message": "sample PEER_OFFLINE",
+        "retryable": true
+      }
+    },
+    {
+      "name": "error:PROTOCOL_VIOLATION",
+      "dart": "parsed",
+      "json": {
+        "type": "error",
+        "code": "PROTOCOL_VIOLATION",
+        "message": "sample PROTOCOL_VIOLATION",
+        "retryable": false
+      }
+    },
+    {
+      "name": "peer-online",
+      "dart": "parsed",
+      "json": {
+        "type": "peer-online",
+        "peerId": "33333333-3333-4333-8333-333333333333"
+      }
+    },
+    {
+      "name": "peer-offline",
+      "dart": "parsed",
+      "json": {
+        "type": "peer-offline",
+        "peerId": "33333333-3333-4333-8333-333333333333"
+      }
+    },
+    {
+      "name": "pong",
+      "dart": "tolerated",
+      "json": {
+        "type": "pong"
+      }
+    },
+    {
+      "name": "push:result",
+      "dart": "tolerated",
+      "json": {
+        "type": "push:result",
+        "pushToken": "tok-1",
+        "ok": false,
+        "reason": "unregistered"
+      }
+    }
+  ],
+  "client": [
+    {
+      "name": "hello",
+      "dartEmits": true,
+      "json": {
+        "type": "hello",
+        "protocolVersion": 3,
+        "deviceType": "app",
+        "deviceId": "11111111-1111-4111-8111-111111111111#22222222-2222-4222-8222-222222222222",
+        "name": "Deterministic Phone",
+        "publicKey": "n/YgTWG1mp5hr91k/fKUv+ihZoe6BTiCO6Wdtst7If8=",
+        "epoch": 1752624000,
+        "licenseToken": "test-license-token.deterministic.payload",
+        "ts": "2026-07-16T00:00:00.000Z",
+        "nonce": "BwcHBwcHBwcHBwcHBwcHBw==",
+        "sig": "ORt1T7qaueHx0g0ap3NMClaJ9w8PNPExKuLAdj/7vyM4NWy4hPKZHTnjyrAjl9g0++0HxsOTD2QowObKBZlNBg=="
+      }
+    },
+    {
+      "name": "stream-open",
+      "dartEmits": true,
+      "json": {
+        "type": "stream-open",
+        "streamId": "s-7"
+      }
+    },
+    {
+      "name": "stream-close",
+      "dartEmits": true,
+      "json": {
+        "type": "stream-close",
+        "streamId": "s-7"
+      }
+    },
+    {
+      "name": "ping",
+      "dartEmits": false,
+      "json": {
+        "type": "ping"
+      }
+    },
+    {
+      "name": "push:deliver",
+      "dartEmits": false,
+      "json": {
+        "type": "push:deliver",
+        "pushToken": "tok-1",
+        "provider": "fcm",
+        "blob": {
+          "epk": "n/YgTWG1mp5hr91k/fKUv+ihZoe6BTiCO6Wdtst7If8=",
+          "box": "BwcHBwcHBwcHBwcHBwcHBw=="
+        }
+      }
+    }
+  ]
+}

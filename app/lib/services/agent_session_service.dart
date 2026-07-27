@@ -161,6 +161,19 @@ class AgentSessionService {
   // transcript that IS about to arrive.
   final Set<String> _hydrating = {};
 
+  // sessionIds whose hydration is registered but whose pull hasn't fired yet
+  // because the relay stream isn't established (firing now would seal-and-vanish
+  // and burn the RPC timeout). Purely a `loading` signal so the view spins
+  // rather than flashing the empty state: the actual deferral + re-drive is
+  // owned by the transport's hydrator registry (see [hydrateIfNeeded]), which
+  // fires the pull on establishment via refreshSnapshot — the same wave the
+  // durable snapshot rides. Cleared when [_hydrate] runs.
+  final Set<String> _awaitingHydrate = {};
+
+  // sessionIds registered as transcript hydrators, so [dispose] can deregister
+  // them from the transport.
+  final Set<String> _hydratedSessions = {};
+
   String get projectId => session.projectId;
 
   AgentSessionService.fromSession(this.session) {
@@ -180,7 +193,11 @@ class AgentSessionService {
 
   void _setState(String sessionId, AgentSessionState s) {
     if (_disposed) return;
-    s = s.copyWith(loading: _hydrating.contains(sessionId));
+    s = s.copyWith(
+      loading:
+          _hydrating.contains(sessionId) ||
+          _awaitingHydrate.contains(sessionId),
+    );
     _states[sessionId] = s;
     _controllers[sessionId]?.add(s);
   }
@@ -562,10 +579,12 @@ class AgentSessionService {
   /// it replies with that turn's `agent:turn-end`, which is what lets the UI
   /// recover from a lost turn-end instead of showing a turn that never closes.
   void cancel(String sessionId) {
-    session.send(createAbMessage('agent:cancel', {
-      'sessionId': sessionId,
-      'turnId': ?stateFor(sessionId).openTurn?.turnId,
-    }));
+    session.send(
+      createAbMessage('agent:cancel', {
+        'sessionId': sessionId,
+        'turnId': ?stateFor(sessionId).openTurn?.turnId,
+      }),
+    );
   }
 
   /// Ask the bridge to run the agent CLI's in-app self-update. Optimistically
@@ -670,8 +689,44 @@ class AgentSessionService {
   /// mobile client attaching to a session desktop started earlier. Idempotent:
   /// safe to call repeatedly (a call while turns are already populated is a
   /// harmless no-op refresh).
-  Future<void> hydrateIfNeeded(String sessionId) =>
-      _hydrate(sessionId, armRetryOnEmpty: true);
+  ///
+  /// Deferral is the load-bearing part: on a relay session whose E2E stream
+  /// hasn't established yet, the transcript RPC would be silently dropped and
+  /// burn its full timeout, leaving the transcript blank until an unrelated
+  /// re-attach happened to fire it post-establishment (the "old messages don't
+  /// come until I background+reopen" bug). The transport's tier-3 hydrator
+  /// registry owns that deferral: [session.hydrate] fires the pull now if the
+  /// stream is established, else registers it to fire on establishment (and
+  /// re-fire on every reconnect, so the transcript rides the establishment wave
+  /// the durable snapshot does). We only mark `_awaitingHydrate` so the view
+  /// spins while a registered-but-unfired pull waits.
+  Future<void> hydrateIfNeeded(String sessionId) async {
+    _hydratedSessions.add(sessionId);
+    // Spin until the pull fires: covers the pre-establish window even when a
+    // state entry already exists with loading:false (e.g. capabilities landed
+    // first). Skip when turns are already present — nothing to load.
+    if (stateFor(sessionId).turns.isEmpty && _awaitingHydrate.add(sessionId)) {
+      _setState(sessionId, stateFor(sessionId));
+    }
+    await session.hydrate(
+      'transcript:$sessionId',
+      () => _hydrate(sessionId, armRetryOnEmpty: true),
+    );
+  }
+
+  /// Deregister the transcript hydrator for a session whose view is going away.
+  /// Symmetric with [hydrateIfNeeded], and the reason its registration is not a
+  /// leak: without this every session ever viewed would keep its hydrator for
+  /// the service's whole life, so each reconnect would re-pull a
+  /// transcriptSnapshot for ALL of them — not just the one(s) on screen. The
+  /// config/sessions/file:selected hydrators are singletons; the transcript one
+  /// is per-session, so it must be scoped to the live view.
+  void stopHydrating(String sessionId) {
+    if (!_hydratedSessions.remove(sessionId)) return;
+    session.unhydrate('transcript:$sessionId');
+    _awaitingHydrate.remove(sessionId);
+    _pendingHydrationRetry.remove(sessionId);
+  }
 
   // Shared by the public entry point and the one-shot turn-end retry below.
   // armRetryOnEmpty is false for the retry call itself so a backend that keeps
@@ -682,6 +737,9 @@ class AgentSessionService {
     required bool armRetryOnEmpty,
   }) async {
     if (_disposed) return;
+    // The pull is firing now — drop the pre-establish spinner marker; `loading`
+    // is carried by _hydrating membership from here.
+    _awaitingHydrate.remove(sessionId);
     // Coalesce onto a fetch already in flight (a double-tapped row; the shell's
     // auto-bootstrap racing a manual activate) — one snapshot serves both
     // callers. Load-bearing beyond saving an RPC: `loading` is derived from set
@@ -729,12 +787,17 @@ class AgentSessionService {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    for (final id in _hydratedSessions) {
+      session.unhydrate('transcript:$id');
+    }
+    _hydratedSessions.clear();
     await _heavySub?.cancel();
     await _statusSub?.cancel();
     _deltaBuffers.clear();
     _terminalBuffers.clear();
     _dirtyItems.clear();
     _hydrating.clear();
+    _awaitingHydrate.clear();
     for (final c in _controllers.values) {
       await c.close();
     }

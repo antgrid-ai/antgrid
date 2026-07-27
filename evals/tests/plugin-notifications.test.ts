@@ -13,8 +13,9 @@ test("bridge /notify delivers notification:push to the app", async () => {
   const env: TestEnv = await setupTestEnv({ fixtureName: "basic" });
   try {
     // The api-server writes its dynamically-allocated port to abDir/api.port on
-    // startup (same file the harness's openPairingWindow reads). AgentHandle.port
-    // is always 0 — the file is the only place the HTTP port is exposed.
+    // startup (same file `spawnAgent` reads in evals/helpers/harness.ts).
+    // AgentHandle.port is always 0 — the file is the only place the HTTP port
+    // is exposed.
     const apiPort = Number(readFileSync(join(env.abDir, "api.port"), "utf8").trim());
 
     const res = await fetch(`http://127.0.0.1:${apiPort}/notify`, {

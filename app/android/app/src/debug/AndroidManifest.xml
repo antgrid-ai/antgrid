@@ -4,4 +4,7 @@
          to allow setting breakpoints, to provide hot reload, etc.
     -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Debug-only: a local dev stack is plain ws://+http:// on a LAN address.
+         This manifest is never merged into a release build. -->
+    <application android:usesCleartextTraffic="true"/>
 </manifest>

@@ -37,8 +37,6 @@ RecentAgent remoteAgent({
       agentLabel: agentLabel,
       agentEd25519Pubkey: 'pk',
       relayUrl: 'ws://relay',
-      phoneDeviceId: 'phone',
-      phoneEd25519Pubkey: 'ppk',
       pairedAt: DateTime(2026),
       lastConnectedAt: DateTime(2026),
       hostMachineName: hostMachineName,

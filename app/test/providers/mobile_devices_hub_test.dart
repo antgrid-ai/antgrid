@@ -29,7 +29,6 @@ HostControlClient _fakeClient(Map<String, int> calls, {String? failVerb}) {
               'label': 'iPhone',
               'pairedAt': 'x',
               'lastSeenAt': 'y',
-              'admission': 'same-account',
               'allowedProjects': ['p1'],
             },
           ],

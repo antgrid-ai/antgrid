@@ -47,7 +47,6 @@ async function startRestartedAgent(opts: { allowedProjects: (projectId: string) 
     phoneDeviceId: "phone-1",
     pairedAt: new Date().toISOString(),
     lastSeenAt: new Date().toISOString(),
-    admission: "same-account",
     allowedProjects: opts.allowedProjects(projectId),
     pushPubkey: phonePush.publicKey.toString("base64"),
     pushToken: "TOKEN",

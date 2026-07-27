@@ -170,9 +170,10 @@ class _ThrowingLauncher extends LocalAgentLauncher {
   }
 }
 
-// KeychainDeviceStore (app/lib/services/keychain_device_store.dart:65) is a
-// concrete class; a fake must implement ALL its public methods — read,
-// readIfMatchesUser, write, clear — or it won't satisfy the implicit interface.
+// KeychainDeviceStore is a concrete class; a fake must implement ALL its public
+// methods — both the main and the controller slot — or it won't satisfy the
+// implicit interface. Only the main slot is exercised here (local-host warm-up
+// never reads the remote-control controller record).
 class _FakeKeychain implements KeychainDeviceStore {
   _FakeKeychain({required Future<DeviceRecord?> Function() read})
     : _read = read;
@@ -185,4 +186,13 @@ class _FakeKeychain implements KeychainDeviceStore {
   Future<void> write(DeviceRecord record) async {}
   @override
   Future<void> clear() async {}
+  @override
+  Future<DeviceRecord?> readController() async => null;
+  @override
+  Future<DeviceRecord?> readControllerIfMatchesUser(String userId) async =>
+      null;
+  @override
+  Future<void> writeController(DeviceRecord record) async {}
+  @override
+  Future<void> clearController() async {}
 }

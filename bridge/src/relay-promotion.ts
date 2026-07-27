@@ -4,8 +4,7 @@ import { AgentEnableRelayMessage, createMessage, type AbMessage } from "./protoc
 import { MessageBus } from "./message-bus";
 import type { AttachStreamOpts, StreamHandle } from "./stream-mux";
 import type { ProjectCoreRemoteDeps } from "./project-core";
-import { buildPairingUri } from "./pairing";
-import type { PairingWindow } from "./pairing-window";
+import { buildConnectUri } from "./connect-uri";
 import type { AgentCore } from "./agent-core";
 
 type EnableMsg = Extract<AbMessage, { type: "agent:enableRelay" }>;
@@ -21,8 +20,6 @@ export interface MachineRelaySession {
   attachStream(bus: MessageBus, opts: AttachStreamOpts): StreamHandle;
   currentPeerPubkey(): string | null;
   sendPushDeliver(msg: { pushToken: string; provider: "fcm" | "apns"; blob: { epk: string; box: string } }): void;
-  /** The machine control-plane pairing window (opened for a wizard pair). */
-  pairingWindow: PairingWindow;
   /** Bare machine deviceUuid — the QR `d=` payload (no `.projectId`; §7.4). */
   agentDeviceId: string;
   /** Account-device Ed25519 public key (standard base64). */
@@ -66,8 +63,8 @@ export interface RelayPromotionController {
  * listener. When the user enables mobile access, the app sends
  * `agent:enableRelay` carrying the signed-in account device's credentials. In
  * v3 this controller does NOT build its own relay connection: it asks the host
- * to bring the single machine socket up (design §7), opens the pairing window,
- * builds the QR (bare deviceUuid), and attaches the local core's bus as a
+ * to bring the single machine socket up (design §7), builds the QR (bare
+ * deviceUuid), and attaches the local core's bus as a
  * stream. `agent:disableRelay` detaches the stream — the machine socket stays,
  * owned by the control plane.
  *
@@ -90,24 +87,20 @@ export function createRelayPromotion(deps: RelayPromotionDeps): RelayPromotionCo
     bus.publish(createMessage("agent:relayError", { code, message }), "control");
   }
 
-  function openPairingAndEmit(s: MachineRelaySession): void {
-    const { code, expiresAt } = s.pairingWindow.open();
-    const pairingQr = buildPairingUri({
+  function emitConnectQr(s: MachineRelaySession): void {
+    const pairingQr = buildConnectUri({
       relayUrl: s.relayBase,
       agentDeviceId: s.agentDeviceId,
       // Standard base64 to match how the app encodes ed25519Pub and how the
       // relay decodes it — keep the decoder symmetric rather than leaning on
       // Node's lenient base64url alphabet.
       agentEd25519PublicKey: Buffer.from(s.ed25519Pub, "base64"),
-      pairCode: code,
       agentName: core.identity.deviceName,
       hostMachineName: hostName,
     });
     bus.publish(
       createMessage("agent:pairingReady", {
         pairingQr,
-        pairCode: code,
-        pairCodeExpiresAt: expiresAt,
         agentDeviceId: s.agentDeviceId,
       }),
       "control",
@@ -117,10 +110,10 @@ export function createRelayPromotion(deps: RelayPromotionDeps): RelayPromotionCo
   async function start(msg: EnableMsg): Promise<void> {
     if (starting) return; // coalesce a concurrent enable — see finally.
     if (session && attachment) {
-      // Already promoted. A repeat enableRelay ("Pair another phone") re-opens a
-      // fresh pairing window against the existing machine session. Guard on
-      // isOpen() so a window still live from a prior request isn't rotated.
-      if (!session.pairingWindow.isOpen()) openPairingAndEmit(session);
+      // Already promoted. A repeat enableRelay ("Pair another phone") just
+      // re-publishes the QR against the existing machine session — there is
+      // no pairing window left to gate a re-open on.
+      emitConnectQr(session);
       return;
     }
     starting = true;
@@ -163,7 +156,7 @@ export function createRelayPromotion(deps: RelayPromotionDeps): RelayPromotionCo
       };
       attachment = deps.attach(remote);
       session = ensured;
-      if (!ensured.pairingWindow.isOpen()) openPairingAndEmit(ensured);
+      emitConnectQr(ensured);
     } catch (e) {
       emitError("ENABLE_FAILED", e instanceof Error ? e.message : String(e));
       stop();
@@ -178,10 +171,7 @@ export function createRelayPromotion(deps: RelayPromotionDeps): RelayPromotionCo
       try { attachment.detach(); } catch { /* best-effort */ }
       attachment = null;
     }
-    if (session) {
-      try { session.pairingWindow.close(); } catch { /* best-effort */ }
-      session = null;
-    }
+    session = null;
   }
 
   return {

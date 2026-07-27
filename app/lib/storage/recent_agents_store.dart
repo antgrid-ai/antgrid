@@ -6,18 +6,16 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../config/storage_scope.dart';
 import 'scoped_prefs.dart';
 
-/// One agent the phone has previously paired with. The phone is the system of
-/// record for "agents I trust" — after a successful pairing, we persist enough
-/// to reconnect without rescanning the QR code: the agent's identity (device
-/// id + Ed25519 pubkey + relay URL) and the phone's per-agent keypair (so the
-/// agent can recognize us on the next handshake).
+/// A machine this app has coordinates for. Admission is account trust, so this
+/// is a pure COORDINATES cache — where the machine lives (`relayUrl`) and which
+/// Ed25519 key to pin it against — kept so a reconnect needs neither a QR rescan
+/// nor a reachable `/account/agents`. Public values only: nothing here is a
+/// credential, and no private key material may ever land in SharedPreferences.
 class RecentAgent {
   final String agentDeviceId;
   final String agentLabel;
   final String agentEd25519Pubkey;
   final String relayUrl;
-  final String phoneDeviceId;
-  final String phoneEd25519Pubkey;
   final DateTime pairedAt;
   final DateTime lastConnectedAt;
   final String? hostMachineName;
@@ -27,8 +25,6 @@ class RecentAgent {
     required this.agentLabel,
     required this.agentEd25519Pubkey,
     required this.relayUrl,
-    required this.phoneDeviceId,
-    required this.phoneEd25519Pubkey,
     required this.pairedAt,
     required this.lastConnectedAt,
     this.hostMachineName,
@@ -39,8 +35,6 @@ class RecentAgent {
     agentLabel: agentLabel,
     agentEd25519Pubkey: agentEd25519Pubkey,
     relayUrl: relayUrl,
-    phoneDeviceId: phoneDeviceId,
-    phoneEd25519Pubkey: phoneEd25519Pubkey,
     pairedAt: pairedAt,
     lastConnectedAt: lastConnectedAt ?? this.lastConnectedAt,
     hostMachineName: hostMachineName,
@@ -51,8 +45,6 @@ class RecentAgent {
     'agentLabel': agentLabel,
     'agentEd25519Pubkey': agentEd25519Pubkey,
     'relayUrl': relayUrl,
-    'phoneDeviceId': phoneDeviceId,
-    'phoneEd25519Pubkey': phoneEd25519Pubkey,
     'pairedAt': pairedAt.toIso8601String(),
     'lastConnectedAt': lastConnectedAt.toIso8601String(),
     'hostMachineName': hostMachineName,
@@ -63,8 +55,6 @@ class RecentAgent {
     agentLabel: j['agentLabel'] as String,
     agentEd25519Pubkey: j['agentEd25519Pubkey'] as String,
     relayUrl: j['relayUrl'] as String,
-    phoneDeviceId: j['phoneDeviceId'] as String,
-    phoneEd25519Pubkey: j['phoneEd25519Pubkey'] as String,
     pairedAt: DateTime.parse(j['pairedAt'] as String),
     lastConnectedAt: DateTime.parse(j['lastConnectedAt'] as String),
     hostMachineName: j['hostMachineName'] as String?,
@@ -76,13 +66,14 @@ class RecentAgent {
 ///
 /// The store is the single source of truth: every successful mutation emits
 /// a fresh immutable snapshot on [changes], which lets Riverpod notifiers
-/// stay in sync regardless of which call site wrote (e.g. direct writes from
-/// `PairingService`).
+/// stay in sync regardless of which call site wrote.
 class RecentAgentsStore {
-  // Bumped to v3 so stale compound-`agentDeviceId` rows from the v2
-  // socket-per-project era are dropped rather than migrated (pre-release):
-  // `agentDeviceId` now always carries the bare machine deviceUuid.
-  static final _key = scopedStorageKey('antgrid.recent_agents.v3');
+  // Bumped to v4 when the per-machine phone-key fields were retired. The new
+  // fromJson ignores them, so it is the OTHER direction that needs the bump: a
+  // v3 build (a branch switch on a dev machine) still requires those fields and
+  // would throw on every row this build writes. A distinct key keeps the two
+  // shapes from ever meeting; pre-release, so no migration (v3 precedent).
+  static final _key = scopedStorageKey('antgrid.recent_agents.v4');
   final SharedPreferencesWithCache _prefs;
   final StreamController<List<RecentAgent>> _changes =
       StreamController<List<RecentAgent>>.broadcast();
@@ -122,8 +113,8 @@ class RecentAgentsStore {
     await _write(all);
   }
 
-  /// Drops every remembered agent. Used by hard sign-out — the stored phone
-  /// keypairs these rows reference are wiped alongside, so the rows are dead.
+  /// Drops every remembered agent. Used by hard sign-out — the account these
+  /// coordinates were reachable under is gone, so the rows are dead.
   Future<void> clear() => _write(const <RecentAgent>[]);
 
   /// Closes the change stream. Production callers normally let the store

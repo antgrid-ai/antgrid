@@ -1,18 +1,12 @@
 import 'package:antgrid/providers/control_plane.dart';
 import 'package:antgrid/providers/new_session_action.dart';
-import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/recent_agents.dart';
-import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/services/control_plane_client.dart';
-import 'package:antgrid/services/pairing_service.dart';
-import 'package:antgrid/services/phone_identity.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
-import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'dart:typed_data';
 
 import '../helpers/prefs_test_mock.dart';
 import '../helpers/test_store_overrides.dart';
@@ -28,41 +22,9 @@ RecentAgent _recentAgent() {
     agentLabel: 'Remote Agent',
     agentEd25519Pubkey: '',
     relayUrl: 'wss://relay.example.test/ws',
-    phoneDeviceId: 'phone-device',
-    phoneEd25519Pubkey: '',
     pairedAt: now,
     lastConnectedAt: now,
   );
-}
-
-class _StubDeviceIdentityNotifier extends DeviceIdentityNotifier {
-  @override
-  Future<DeviceIdentity> build() async => DeviceIdentity(
-    deviceId: 'phone-device',
-    name: 'Test Phone',
-    ed25519PrivateKey: Uint8List(64),
-    ed25519PublicKey: Uint8List(32),
-    x25519PrivateKey: Uint8List(32),
-    x25519PublicKey: Uint8List(32),
-  );
-}
-
-class _NoopPairingService extends PairingService {
-  _NoopPairingService(RecentAgentsStore store, String resolvedId)
-    : super(
-        relay: RelayService(crypto: CryptoService()),
-        phoneIdentity: PhoneIdentity.inMemory(),
-        recentAgentsStore: store,
-        registrationId: resolvedId,
-      );
-  @override
-  Future<RecentAgent> reconnect(
-    RecentAgent ra,
-    DeviceIdentity identity,
-  ) async => ra;
-  @override
-  Future<RecentAgent> autoOpen(InventoryAgent agent, DeviceIdentity identity) =>
-      throw StateError('autoOpen must not run when a recent matches');
 }
 
 class _SeededRecentAgentsNotifier extends RecentAgentsNotifier {
@@ -109,17 +71,8 @@ void main() {
         ProviderScope(
           overrides: [
             ...stores.overrides,
-            deviceIdentityProvider.overrideWith(
-              () => _StubDeviceIdentityNotifier(),
-            ),
             recentAgentsProvider.overrideWith(
               () => _SeededRecentAgentsNotifier([recent]),
-            ),
-            pairingServiceForProvider(recent.agentDeviceId).overrideWithValue(
-              _NoopPairingService(
-                stores.recentAgentsStore,
-                recent.agentDeviceId,
-              ),
             ),
             controlPlaneClientForProvider(
               _machineUuid,

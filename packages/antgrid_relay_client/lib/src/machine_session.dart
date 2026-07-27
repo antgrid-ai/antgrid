@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:developer' as developer;
 
 import 'agent_transport.dart';
 import 'buffered_agent_transport.dart';
@@ -16,7 +17,6 @@ import 'relay_service.dart';
 const int kPingSilenceSeconds = 20;
 const int kMaxMissedPongs = 2;
 const int _kConsecutiveTimeoutsToRekey = 3;
-const int _kMaxInitialHandshakeAttempts = 6;
 
 /// Drives ONE E2E handshake attempt-cycle over a [MachineSession]'s socket,
 /// completing only after the agent's sealed `established` (design §6.1 step 5).
@@ -31,9 +31,10 @@ abstract class SessionHandshaker {
   void abort();
 }
 
-/// Thrown into [MachineSession.ready] when the initial E2E handshake fails
-/// repeatedly while the grant is live. Surfaces as the workspace error screen
-/// (whose Retry rebuilds the connection) rather than an indefinite spinner.
+/// Thrown by [MachineSession.ensureEstablished] when the one handshake attempt
+/// it drove did not reach `established`. Retry pacing and give-up belong to the
+/// caller (the app's connection supervisor), which is why this reports a single
+/// failed attempt rather than an exhausted budget.
 class HandshakeException implements Exception {
   final String message;
   HandshakeException(this.message);
@@ -67,10 +68,18 @@ class MachineSession {
 
   final SessionHandshaker _handshaker;
 
+  /// Builds the `project:start` control message used to re-bind a project the
+  /// agent has declared dead (`stream-invalid`). Injected rather than built here
+  /// because message construction (uuid ids) lives in the app layer, not in this
+  /// pure-Dart package. Omitted → no self-heal, just the forgotten binding.
+  final Map<String, dynamic> Function(String projectId)?
+  projectStartMessageBuilder;
+
   MachineSession({
     required this.relay,
     required this.machineDeviceId,
     required SessionHandshaker handshaker,
+    this.projectStartMessageBuilder,
   }) : _handshaker = handshaker {
     // [ready] is observation-optional: failReady/dispose may completeError
     // before any awaiter attaches (see the getter doc). ignore() pre-registers
@@ -91,13 +100,16 @@ class MachineSession {
 
   bool _disposed = false;
   bool _established = false;
-  bool _routable = false;
   bool _handshakeInFlight = false;
   bool _peerWasOffline = false;
   int _missedPongs = 0;
   int _consecutiveTimeouts = 0;
   int _fragCounter = 0;
   DateTime _lastRecv = DateTime.now();
+
+  /// The attempt [ensureEstablished] joins instead of starting a second one.
+  /// Null whenever no handshake is running.
+  Future<void>? _handshakeFuture;
 
   final _readyCompleter = Completer<void>();
 
@@ -106,6 +118,9 @@ class MachineSession {
   /// instead of failing on the transient keyless window.
   late Completer<void> _keysReady;
 
+  final _established$ = StreamController<void>.broadcast();
+  final _takeovers = StreamController<void>.broadcast();
+  final _sessionDown = StreamController<void>.broadcast();
   final _fragAborts = StreamController<FragHint>.broadcast();
   final _fragSendErrors = StreamController<FragSendError>.broadcast();
   final _streamReadyController =
@@ -114,6 +129,20 @@ class MachineSession {
   /// projectId → streamId, learned from `agent:projects` / `stream-ready`.
   final Map<String, String> _projectStreamIds = {};
   final Map<String, Completer<String>> _streamReadyWaiters = {};
+
+  /// Stream ids the agent has answered `stream-invalid` for. The binding itself
+  /// is deliberately LEFT in [_projectStreamIds]: `_recordProjectStream` needs
+  /// the dead id as `prev` to re-point the live [StreamTransport] onto the new
+  /// one. This set is what makes every reader treat it as unbound meanwhile.
+  final Set<String> _invalidStreamIds = {};
+
+  /// Dead ids whose re-bind is sent and still unanswered. Deliberately NOT the
+  /// same set as [_invalidStreamIds]: that one stays marked until a replacement
+  /// id arrives, so using it as the send guard would let ONE failed re-bind (a
+  /// socket blip before `stream-ready`, a bind timeout, a rejected verb) swallow
+  /// every later notice for the id — re-stranding the project on the dead stream
+  /// with no way back.
+  final Set<String> _rebindInFlight = {};
 
   late final FragReassembler _reassembler = FragReassembler(
     timeoutMs: kTransferTimeoutMs,
@@ -124,18 +153,40 @@ class MachineSession {
     },
   );
 
-  /// Completes on first `established`; errors with [HandshakeException] if the
-  /// initial handshake exhausts its attempts, or if the session is disposed.
+  /// Completes on the FIRST `established`; errors if the session is disposed
+  /// beforehand. One-shot — never await it to observe a re-establishment (use
+  /// [ensureEstablished] or [established]).
   ///
-  /// Errors may land before anyone awaits (e.g. [failReady] when the pair step
-  /// throws and the caller rethrows the ORIGINAL error instead of awaiting
-  /// [ready], or dispose-before-established) — the `ignore()` in the
-  /// constructor keeps those from surfacing as unhandled async errors while
-  /// real awaiters still observe them.
+  /// Errors may land before anyone awaits (dispose-before-established) — the
+  /// `ignore()` in the constructor keeps those from surfacing as unhandled
+  /// async errors while real awaiters still observe them.
   Future<void> get ready => _readyCompleter.future;
 
   /// `true` once the E2E session is established at least once and still live.
   bool get isEstablished => _established;
+
+  /// Fires on EVERY (re)establishment, including rekeys. [ready] cannot serve
+  /// that purpose — it is one-shot, so after the first establishment it can no
+  /// longer tell a caller that the session came back.
+  Stream<void> get established => _established$.stream;
+
+  /// Fires when the agent hands this machine's E2E session to another device
+  /// (sealed `session-takeover`). Report-only: the session is already torn down
+  /// when this emits and NOTHING here re-establishes it, because two devices
+  /// each reclaiming on takeover would evict each other forever.
+  Stream<void> get takeoverEvents => _takeovers.stream;
+
+  /// Fires when a handshake attempt ends with no live session — the E2E layer
+  /// died while the socket underneath it stayed up (a rekey the peer never
+  /// confirmed).
+  ///
+  /// Nothing here retries: retry pacing and give-up belong to the caller's
+  /// connection supervisor, and a supervisor can only re-drive what it is told
+  /// about. Without this signal the socket looks healthy, the `established`
+  /// rung reads satisfied off a torn-down session, and the ladder never runs
+  /// again. The socket-death and takeover paths have their own signals, so
+  /// this one deliberately does not double-report them.
+  Stream<void> get sessionDownEvents => _sessionDown.stream;
 
   Stream<FragHint> get fragmentAborts => _fragAborts.stream;
   Stream<FragSendError> get fragmentSendErrors => _fragSendErrors.stream;
@@ -146,11 +197,24 @@ class MachineSession {
       _streamReadyController.stream;
 
   /// The streamId the agent has advertised for [projectId], or null if not yet
-  /// bound. A non-null result means [streamFor] can bind at 0 RTT.
-  String? streamIdForProject(String projectId) => _projectStreamIds[projectId];
+  /// bound. A non-null result means [streamFor] can bind at 0 RTT. An id the
+  /// agent has since declared dead reads as unbound, so a transport rebuilt off
+  /// this never re-adopts it.
+  String? streamIdForProject(String projectId) => _liveStreamFor(projectId);
 
-  /// Begin driving the session: subscribe to the socket, arm the paired→
-  /// handshake trigger. Call once, right after construction.
+  String? _liveStreamFor(String projectId) {
+    final id = _projectStreamIds[projectId];
+    if (id == null || _invalidStreamIds.contains(id)) return null;
+    return id;
+  }
+
+  /// Begin driving the session: subscribe to the socket, liveness and presence.
+  /// Call once, right after construction.
+  ///
+  /// Deliberately does NOT start a handshake. The connection supervisor climbs
+  /// the ladder and calls [ensureEstablished] once the agent is reachable —
+  /// having two components decide when to handshake is what the level-triggered
+  /// supervisor replaced.
   void start() {
     _msgSub = relay.messageStream.listen(_onRouted);
     _stateSub = relay.stateStream.listen(_onState);
@@ -159,16 +223,22 @@ class MachineSession {
       const Duration(seconds: 2),
       (_) => _reassembler.sweep(),
     );
-    if (relay.currentState.connectionState == RelayConnectionState.paired) {
-      _routable = true;
-      unawaited(_runHandshake(rekey: false));
-    }
   }
 
-  /// Fail [ready] with [error] — used when the pairing step (grant creation)
-  /// fails before a handshake can even start.
-  void failReady(Object error, StackTrace st) {
-    if (!_readyCompleter.isCompleted) _readyCompleter.completeError(error, st);
+  /// Drive ONE handshake attempt unless the session is already established (or
+  /// an attempt is already running, in which case this joins it).
+  ///
+  /// Resolves only once [isEstablished] reads true, and throws
+  /// [HandshakeException] otherwise: the caller scores a step that "succeeded"
+  /// onto a still-broken rung as a failure, so resolving early would turn a
+  /// healthy session into a give-up.
+  Future<void> ensureEstablished() async {
+    if (_disposed) throw StateError('session disposed');
+    if (_established) return;
+    await (_handshakeFuture ?? _runHandshake());
+    if (!_established) {
+      throw HandshakeException('E2E handshake attempt did not establish');
+    }
   }
 
   /// Create/return the [AgentTransport] view for [streamId]. `"0"` is the
@@ -192,7 +262,7 @@ class MachineSession {
     Map<String, dynamic> startMessage, {
     Duration timeout = const Duration(seconds: 20),
   }) async {
-    final known = _projectStreamIds[projectId];
+    final known = _liveStreamFor(projectId);
     if (known != null) return known;
     // One deadline spans both waits below, so a bind can never take 2×[timeout].
     final deadline = DateTime.now().add(timeout);
@@ -208,7 +278,7 @@ class MachineSession {
       }
       // The post-establish `agent:projects` re-advert may have bound the
       // project while we waited — no need to ask the agent to start it again.
-      final rebound = _projectStreamIds[projectId];
+      final rebound = _liveStreamFor(projectId);
       if (rebound != null) return rebound;
     }
     final waiter = _streamReadyWaiters.putIfAbsent(projectId, () {
@@ -251,10 +321,12 @@ class MachineSession {
       }
       if (bytes > kMaxTransferBytes) {
         if (!_fragSendErrors.isClosed) {
-          _fragSendErrors.add(FragSendError(
-            'MESSAGE_TOO_LARGE',
-            '${message['type'] ?? 'message'} exceeds kMaxTransferBytes',
-          ));
+          _fragSendErrors.add(
+            FragSendError(
+              'MESSAGE_TOO_LARGE',
+              '${message['type'] ?? 'message'} exceeds kMaxTransferBytes',
+            ),
+          );
         }
         return;
       }
@@ -292,16 +364,13 @@ class MachineSession {
 
   // --- socket / presence transitions ---------------------------------------
 
+  /// Session keys are per-CONNECTION, so only the socket dying invalidates
+  /// them. Every other transition is left alone: with pairing gone there is no
+  /// grant whose loss could strand an otherwise-live session, and the
+  /// supervisor re-drives [ensureEstablished] on whatever it observes.
   void _onState(AppState s) {
-    final paired = s.connectionState == RelayConnectionState.paired;
-    if (paired && !_routable) {
-      _routable = true;
-      if (!_established && !_handshakeInFlight) {
-        unawaited(_runHandshake(rekey: false));
-      }
-    }
     if (s.connectionState == RelayConnectionState.disconnected) {
-      _onSocketDown();
+      _teardownSession();
     }
   }
 
@@ -323,14 +392,23 @@ class MachineSession {
     _keysReady.future.ignore();
   }
 
-  void _onSocketDown() {
-    // Session keys are per-connection; a socket drop invalidates them. A fresh
-    // paired transition on the reconnected socket re-establishes.
+  void _teardownSession() {
+    // Drop all session state — called when the socket dies and when the agent
+    // hands the session to another device. Session keys are per-connection;
+    // either event invalidates them. Clearing `_established` is also what
+    // silences every rekey trigger (liveness, RPC timeouts, peer-online), all
+    // of which are gated on a live session.
     _established = false;
-    _routable = false;
     _stopLiveness();
     _keys?.zeroize();
     _keys = null;
+    // Fail every in-flight RPC now: their replies can never arrive on a dead
+    // session, so waiting out each timeout is a pure fail-slow spinner. Tier-3
+    // hydration re-drives on the next establishment (streamReadyEvents); tier-2
+    // actions surface the failure for the user to retry.
+    for (final s in _streams.values) {
+      s.failAllPending(code: 'E_SESSION_DOWN', message: 'relay session down');
+    }
     // Re-arm only from the completed state: a second blip before the first
     // establishment would otherwise orphan whoever is already awaiting.
     if (_keysReady.isCompleted) _armKeysReady();
@@ -340,66 +418,65 @@ class MachineSession {
 
   Future<void> _rekey() async {
     if (_disposed || !_established) return;
-    await _runHandshake(rekey: true);
+    await _runHandshake();
   }
 
-  Future<void> _runHandshake({required bool rekey}) async {
-    if (_disposed || _handshakeInFlight) return;
+  /// Runs a single attempt and publishes it as [_handshakeFuture] so a
+  /// concurrent [ensureEstablished] joins it instead of racing a second one.
+  Future<void> _runHandshake() {
+    if (_disposed || _handshakeInFlight) return Future<void>.value();
     _handshakeInFlight = true;
-    try {
-      var attempt = 0;
-      while (!_disposed) {
-        final newKeys = await _handshaker.perform();
-        if (_disposed) {
-          newKeys?.zeroize();
-          return;
-        }
-        if (newKeys != null) {
-          // Make-before-break: swap AFTER the new attempt confirmed, then
-          // zeroize the superseded keys (no dropped traffic on the old keys).
-          final old = _keys;
-          _keys = newKeys;
-          old?.zeroize();
-          if (!_keysReady.isCompleted) _keysReady.complete();
-          _established = true;
-          _peerWasOffline = false;
-          _lastRecv = DateTime.now();
-          _missedPongs = 0;
-          _consecutiveTimeouts = 0;
-          _startLiveness();
-          if (!_readyCompleter.isCompleted) _readyCompleter.complete();
-          // Re-pull durable state on every (re)establish so late subscribers
-          // (a ControlPlaneClient, a just-bound project stream) replay it.
-          for (final s in _streams.values) {
-            unawaited(s.refreshSnapshot());
-          }
-          return;
-        }
-        // Failed attempt. The phone owns retry pacing with jittered backoff.
-        attempt++;
-        if (!rekey && attempt >= _kMaxInitialHandshakeAttempts) {
-          if (!_readyCompleter.isCompleted) {
-            _readyCompleter.completeError(
-              HandshakeException(
-                'E2E handshake failed after $attempt attempts',
-              ),
-            );
-          }
-          return;
-        }
-        await Future<void>.delayed(_handshakeBackoff(attempt));
-        if (_disposed || !_routable) return;
-      }
-    } finally {
+    late final Future<void> attempt;
+    attempt = _handshakeAttempt().whenComplete(() {
       _handshakeInFlight = false;
-    }
+      if (identical(_handshakeFuture, attempt)) _handshakeFuture = null;
+      // Reported only after the in-flight flags clear, so the supervisor's
+      // immediate re-drive starts a genuinely fresh attempt instead of joining
+      // the one that just failed and scoring it a second time.
+      if (!_disposed && !_established && !_sessionDown.isClosed) {
+        _sessionDown.add(null);
+      }
+    });
+    _handshakeFuture = attempt;
+    return attempt;
   }
 
-  Duration _handshakeBackoff(int attempt) {
-    final shift = attempt.clamp(0, 5);
-    final ms = 500 * (1 << shift);
-    final capped = ms > 15000 ? 15000 : ms;
-    return Duration(milliseconds: capped);
+  /// ONE attempt, no retry: the app's connection supervisor owns backoff and
+  /// give-up, so a loop here would nest inside its backoff and multiply it.
+  Future<void> _handshakeAttempt() async {
+    final newKeys = await _handshaker.perform();
+    if (_disposed) {
+      newKeys?.zeroize();
+      return;
+    }
+    if (newKeys == null) {
+      // A rekey only ever runs because the session already looks dead
+      // (missed pongs, repeated RPC timeouts, a peer that bounced), so keeping
+      // the old keys after a failed attempt preserves a session the peer has
+      // most likely already dropped — and, with `_established` still true,
+      // leaves nothing able to notice.
+      _teardownSession();
+      return;
+    }
+    // Make-before-break: swap AFTER the new attempt confirmed, then zeroize
+    // the superseded keys (no dropped traffic on the old keys).
+    final old = _keys;
+    _keys = newKeys;
+    old?.zeroize();
+    if (!_keysReady.isCompleted) _keysReady.complete();
+    _established = true;
+    _peerWasOffline = false;
+    _lastRecv = DateTime.now();
+    _missedPongs = 0;
+    _consecutiveTimeouts = 0;
+    _startLiveness();
+    if (!_readyCompleter.isCompleted) _readyCompleter.complete();
+    if (!_established$.isClosed) _established$.add(null);
+    // Re-pull durable state on every (re)establish so late subscribers
+    // (a ControlPlaneClient, a just-bound project stream) replay it.
+    for (final s in _streams.values) {
+      unawaited(s.refreshSnapshot());
+    }
   }
 
   // --- liveness -------------------------------------------------------------
@@ -447,9 +524,10 @@ class MachineSession {
     IncomingRouteMessage msg,
     SessionKeys keys,
   ) async {
-    final plaintext =
-        await E2eTransportDart(sendKey: keys.p2a, recvKey: keys.a2p)
-            .open(msg.payload);
+    final plaintext = await E2eTransportDart(
+      sendKey: keys.p2a,
+      recvKey: keys.a2p,
+    ).open(msg.payload);
     // A candidate-key handshake frame during rekey (agent-ready/established) or
     // garbage → decrypt-or-drop.
     if (plaintext == null) return;
@@ -484,6 +562,20 @@ class MachineSession {
     final st = _streams[sid];
     if (st != null && m is Map<String, dynamic>) {
       st.dispatchFromSession(m, channel);
+      return;
+    }
+    // A project frame for a streamId we hold no transport for is dropped. This
+    // is the phone-side mirror of the bridge's "unknown streamId" warn — once a
+    // symptom-only silent hole (a host restart changed the id and the transport
+    // wasn't re-pointed). `_recordProjectStream` now migrates the transport, so
+    // reaching here signals a genuine anomaly (a race, or a stream torn down
+    // mid-flight), not the routine restart case. "0" legitimately has no
+    // transport (adverts are snooped above), so it's never a drop.
+    if (st == null && sid != kControlStreamId) {
+      developer.log(
+        'dropping inbound frame for unknown streamId $sid',
+        name: 'antgrid.relay',
+      );
     }
   }
 
@@ -499,7 +591,8 @@ class MachineSession {
     if (type == 'stream-ready') {
       final pid = m['projectId'];
       final streamId = m['streamId'];
-      if (pid is String && streamId is String) _recordProjectStream(pid, streamId);
+      if (pid is String && streamId is String)
+        _recordProjectStream(pid, streamId);
     } else if (type == 'agent:projects') {
       final projects = m['projects'];
       if (projects is List) {
@@ -515,9 +608,31 @@ class MachineSession {
             if (pid is String && streamId is String) next[pid] = streamId;
           }
         }
-        _projectStreamIds.removeWhere((pid, _) => !next.containsKey(pid));
+        final dropped = <String, String>{};
+        _projectStreamIds.removeWhere((pid, sid) {
+          final gone = !next.containsKey(pid);
+          if (gone) dropped[pid] = sid;
+          return gone;
+        });
+        // A restarted host re-opens a project LOCALLY first, so the advert that
+        // announces it back is dialable:false — it carries no replacement id for
+        // `_recordProjectStream` to migrate onto. Forgetting the binding is not
+        // enough: the transport ProjectSession and all 7 services hold is still
+        // aimed at the dead id and every send vanishes. Re-drive project:start
+        // for exactly those, which promotes the core and answers stream-ready.
+        for (final e in dropped.entries) {
+          if (_streams.containsKey(e.value)) {
+            _projectStreamIds[e.key] = e.value;
+            _onStreamInvalid(e.value);
+          } else {
+            _invalidStreamIds.remove(e.value);
+          }
+        }
         next.forEach(_recordProjectStream);
       }
+    } else if (type == 'stream-invalid') {
+      final streamId = m['streamId'];
+      if (streamId is String) _onStreamInvalid(streamId);
     } else if (type == 'control:result' &&
         m['ok'] == false &&
         m['verb'] == 'project:start') {
@@ -532,16 +647,81 @@ class MachineSession {
         final waiter = _streamReadyWaiters.remove(pid);
         if (waiter != null && !waiter.isCompleted) {
           final err = m['error'];
-          waiter.completeError(ProjectBindException(
-            err is Map && err['code'] is String ? err['code'] as String : 'UNKNOWN',
-            err is Map && err['message'] is String ? err['message'] as String : '',
-          ));
+          waiter.completeError(
+            ProjectBindException(
+              err is Map && err['code'] is String
+                  ? err['code'] as String
+                  : 'UNKNOWN',
+              err is Map && err['message'] is String
+                  ? err['message'] as String
+                  : '',
+            ),
+          );
         }
       }
     }
   }
 
+  /// The agent holds no stream for [streamId] — a host restart re-attached every
+  /// project under fresh random ids and ours died with the old process. Without
+  /// this the phone keeps sending on the dead id and every verb times out with
+  /// no signal to renegotiate (the bridge only warned and dropped).
+  ///
+  /// Re-drive `project:start` rather than wait for a re-advert: the project may
+  /// not even be open on the restarted host, and the advert that would carry the
+  /// new id is exactly what didn't reach us.
+  void _onStreamInvalid(String streamId) {
+    _invalidStreamIds.add(streamId);
+    if (_rebindInFlight.contains(streamId)) return;
+    String? projectId;
+    for (final e in _projectStreamIds.entries) {
+      if (e.value == streamId) {
+        projectId = e.key;
+        break;
+      }
+    }
+    // An id we hold no binding for is already healed (a re-advert beat the
+    // notice) or was never ours — nothing to re-drive.
+    if (projectId == null) {
+      _invalidStreamIds.remove(streamId);
+      return;
+    }
+    final build = projectStartMessageBuilder;
+    if (build == null) return;
+    // Failure is not fatal: the binding stays marked dead and the in-flight
+    // guard is released, so the agent's NEXT notice (it answers every frame the
+    // phone replays onto the dead id) re-drives. Swallowed rather than surfaced
+    // — this is a background self-heal with no caller to report to.
+    _rebindInFlight.add(streamId);
+    unawaited(
+      bindProject(projectId, build(projectId))
+          .catchError((_) => '')
+          .whenComplete(() => _rebindInFlight.remove(streamId)),
+    );
+  }
+
   void _recordProjectStream(String projectId, String streamId) {
+    final prev = _projectStreamIds[projectId];
+    _invalidStreamIds.remove(streamId);
+    if (prev != null && prev != streamId) {
+      _invalidStreamIds.remove(prev);
+      // A host restart re-attaches the project under a fresh streamId (ids are
+      // random per attach — bridge/stream-mux.ts). Re-point the LIVE transport,
+      // held by the ProjectSession and every service, from the dead id to the
+      // new one instead of orphaning it. Left un-migrated, outbound sends target
+      // the old id — the restarted host logs "unknown streamId" and drops them —
+      // and inbound frames arrive on the new id with no transport to receive.
+      // Don't clobber an existing transport already bound to the new id.
+      final migrated = _streams[prev];
+      if (migrated != null && !_streams.containsKey(streamId)) {
+        _streams.remove(prev);
+        migrated._retarget(streamId);
+        _streams[streamId] = migrated;
+        // Re-hydrate over the live stream: the reconnect's refreshSnapshot ran
+        // against the dead id and was dropped.
+        if (_established) unawaited(migrated.refreshSnapshot());
+      }
+    }
     _projectStreamIds[projectId] = streamId;
     final waiter = _streamReadyWaiters.remove(projectId);
     if (waiter != null && !waiter.isCompleted) waiter.complete(streamId);
@@ -558,6 +738,13 @@ class MachineSession {
       case 'pong':
         _missedPongs = 0;
         break;
+      case 'session-takeover':
+        // The agent is switching to another device and is about to drop our
+        // keys. Tear down (which also disarms every rekey trigger) and REPORT —
+        // re-establishing here would fight the other device for the session.
+        _teardownSession();
+        if (!_takeovers.isClosed) _takeovers.add(null);
+        break;
       // 'established' / 'handshake:agent-ready' are decrypted under the
       // handshake's candidate keys and owned by the driver; a stale copy here
       // (already-swapped keys) is ignored.
@@ -567,8 +754,10 @@ class MachineSession {
   Future<void> _sendSessionFrame(Map<String, dynamic> obj) async {
     final keys = _keys;
     if (keys == null) return;
-    final ct = await E2eTransportDart(sendKey: keys.p2a, recvKey: keys.a2p)
-        .seal(jsonEncode(obj));
+    final ct = await E2eTransportDart(
+      sendKey: keys.p2a,
+      recvKey: keys.a2p,
+    ).seal(jsonEncode(obj));
     relay.sendMessage(machineDeviceId, 'control', ct);
   }
 
@@ -588,6 +777,9 @@ class MachineSession {
       if (!w.isCompleted) w.completeError(StateError('session disposed'));
     }
     _streamReadyWaiters.clear();
+    await _established$.close();
+    await _takeovers.close();
+    await _sessionDown.close();
     await _fragAborts.close();
     await _fragSendErrors.close();
     await _streamReadyController.close();
@@ -616,12 +808,29 @@ Duration _remainingUntil(DateTime deadline) {
 /// `dispatchFromSession` receives only this stream's decoded messages.
 class StreamTransport extends BufferedAgentTransport {
   final MachineSession session;
-  final String streamId;
+
+  /// The stream this transport currently targets. Not final: a host restart
+  /// re-attaches the project under a fresh streamId, and [MachineSession]
+  /// re-points this transport in place via [_retarget] (see
+  /// `_recordProjectStream`) so the ProjectSession and its services keep sending
+  /// on the live stream rather than a dead id the restarted host drops.
+  String streamId;
 
   StreamTransport({required this.session, required this.streamId});
 
+  /// Migrate this transport onto [newStreamId] after a host-restart re-advert.
+  /// Called by [MachineSession] only, which owns the `_streams` re-keying.
+  void _retarget(String newStreamId) => streamId = newStreamId;
+
   @override
   bool get isLocal => false;
+
+  // A stream stays TransportState.connected across a session-down window (the
+  // socket may be fine; only the E2E session drops), so the base "connected ==
+  // established" is wrong here — a hydrator firing then would seal-and-vanish.
+  // The live E2E session is the truth.
+  @override
+  bool get isEstablished => session.isEstablished;
 
   @override
   Future<void> connect() async {
@@ -638,8 +847,7 @@ class StreamTransport extends BufferedAgentTransport {
   Future<void> send(
     Map<String, dynamic> message, {
     String channel = 'control',
-  }) =>
-      session.sendOnStream(streamId, message, channel);
+  }) => session.sendOnStream(streamId, message, channel);
 
   @override
   Future<Map<String, dynamic>> request(
@@ -662,9 +870,15 @@ class StreamTransport extends BufferedAgentTransport {
   void dispatchFromSession(Map<String, dynamic> json, String channel) =>
       dispatchDecoded(json, channel);
 
-  /// Re-pull the durable-state snapshot now that session keys are (re)installed.
-  Future<void> refreshSnapshot() =>
-      _fetchSnapshot(timeout: const Duration(seconds: 5));
+  /// Re-pull the durable-state snapshot now that session keys are (re)installed,
+  /// then re-drive the tier-3 hydrators. Order matters: the snapshot replays the
+  /// durable state first, then hydrators pull the view-state the snapshot does
+  /// not carry (session list, config, the reopened file, the transcript). This
+  /// is the per-stream reconciliation checkpoint.
+  Future<void> refreshSnapshot() async {
+    await _fetchSnapshot(timeout: const Duration(seconds: 5));
+    redriveHydrators();
+  }
 
   Future<void> _fetchSnapshot({required Duration timeout}) async {
     try {
@@ -705,6 +919,7 @@ class StreamTransport extends BufferedAgentTransport {
   @override
   Future<void> dispose() async {
     failAllPending();
+    clearHydrators();
     snapshotCache.clear();
     session.removeStream(streamId);
     await outbound.close();

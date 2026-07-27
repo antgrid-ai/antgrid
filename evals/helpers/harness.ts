@@ -2,28 +2,33 @@ import { type Subprocess } from "bun";
 import { resolve, join } from "node:path";
 import { mkdtempSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { generateKeyPairSync, randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomUUID, createHmac } from "node:crypto";
 import { createTestProject } from "./fixtures";
-import { RelayClient } from "./relay-client";
+import { RelayClient, type PhoneIdentity } from "./relay-client";
 import { DartAppClient } from "./dart-app-client";
 import { computeProjectId } from "../../bridge/src/project-id";
-import { loadPairedPhones } from "../../bridge/src/paired-phones";
+import { loadPairedPhones, type PairedPhone } from "../../bridge/src/paired-phones";
+import type { TrustedPeer } from "../../bridge/src/trusted-peers";
+import type { RelayConfig } from "../../relay/src/config";
+import type { LicenseGate } from "../../relay/src/license/gate";
+import type { LicenseCacheEntry } from "../../relay/src/license/cache";
 
 const ROOT = resolve(import.meta.dir, "../..");
 
 /**
- * Phase B: a freshly-paired phone has an EMPTY per-project allowlist, so the
- * agent-core gate silently DROPS every project verb until the project is
- * explicitly allowed for that phone (spec: machine-level-trust-design.md
- * §28-31, §96-100, §167-168). The legacy scenario tests pair-and-drive without
- * allowlisting, so this models "a phone that has been granted access" by
- * allowing `projectId` for every paired phone in the machine store.
+ * Account-trusted phones get an EMPTY per-project allowlist on first admission
+ * (spec: machine-level-trust-design.md §28-31, §96-100, §167-168) — the agent-core
+ * gate silently DROPS every project verb until the project is explicitly allowed.
+ * The eval suites drive verbs right after connecting, so this models "a phone
+ * that has been granted access" by allowing `projectId` for every trusted phone
+ * in the machine store (still `paired-phones.json` — trust is machine-level,
+ * not tied to a pairing ceremony).
  *
  * The host watches paired-phones.json via fs.watch (50ms debounce) and reloads
  * its in-memory view, so we write through a store on the SAME abDir and give the
  * watcher a beat to propagate before driving verbs — mirroring machine-trust.test.ts.
  */
-async function allowProjectForPairedPhones(abDir: string, projectId: string): Promise<void> {
+async function allowProjectForTrustedPhones(abDir: string, projectId: string): Promise<void> {
   const store = loadPairedPhones(abDir);
   const phones = store.list();
   for (const phone of phones) {
@@ -31,6 +36,24 @@ async function allowProjectForPairedPhones(abDir: string, projectId: string): Pr
   }
   // Give the host's fs.watch debounce (50ms) time to reload the allowlist.
   await Bun.sleep(400);
+}
+
+/** Generate a fresh Ed25519 app identity: a `deviceId` + the `PhoneIdentity`
+ *  keypair `RelayClient.connectAndAuth({ identity })` reuses across connections.
+ *  Registering `{deviceId, ed25519Pub: publicKeyBase64}` with the fake account
+ *  inventory (`startFakeLicenseApi({ accountDevices })`) is what admits it —
+ *  the bridge's `TrustedPeersProvider` is deviceId-keyed (see
+ *  `bridge/src/relay-client.ts`'s `resolvePhoneEd25519PubB64`), so a never-
+ *  registered identity cannot be admitted on any attempt, retried or not.
+ *  Shared with `gate-account-trust.test.ts` (imported, not duplicated). */
+export async function generateAppIdentity(): Promise<PhoneIdentity & { deviceId: string }> {
+  const deviceId = randomUUID();
+  const keyPair = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
+  const pubRaw = await crypto.subtle.exportKey("raw", keyPair.publicKey as CryptoKey);
+  const publicKeyBase64 = Buffer.from(pubRaw).toString("base64");
+  const pkcs8Der = Buffer.from(await crypto.subtle.exportKey("pkcs8", keyPair.privateKey as CryptoKey));
+  const privateKeySeed = Buffer.from(pkcs8Der.subarray(pkcs8Der.length - 32));
+  return { deviceId, publicKeyBase64, privateKey: keyPair.privateKey as CryptoKey, privateKeySeed };
 }
 
 export interface AgentHandle {
@@ -42,6 +65,18 @@ export interface AgentHandle {
   /** The agent's stable Ed25519 public key (base64) — its relay-auth pubkey. */
   ed25519Pubkey: string;
   kill(): Promise<void>;
+  /** Kill the current process and respawn a fresh one against the SAME
+   *  abDir/auth/projectDir — deviceId/pubkey and paired-phones.json trust
+   *  survive; only the process (and its relay epoch) is new. Mutates this
+   *  SAME handle's `process` field in place, so a caller holding this
+   *  reference (e.g. `env.agent`) observes the fresh process without
+   *  needing a new handle. Mirrors the pre-Task-1 `setupPairFlowTestEnv`'s
+   *  `restartAgent` (recovered from git history at fe6de19a^). */
+  restart(): Promise<void>;
+  /** Fresh read of this agent's `<abDir>/agents/paired-phones.json` — the
+   *  machine-level trust store. Resolution lifted from
+   *  `allowProjectForTrustedPhones` below rather than re-derived. */
+  pairedPhones(): PairedPhone[];
 }
 
 export interface RelayHandle {
@@ -68,6 +103,18 @@ export function allocatePort(): number {
 
 export const TEST_LICENSE_TOKEN = "eval-license-token";
 
+/** Sentinel app token `FakeLicenseApi.mintAppToken()` returns exactly once
+ *  after `expireNextToken()` arms it — `fakeLicenseGate.verifyAppToken`
+ *  recognizes this exact string and answers `LICENSE_EXPIRED`, letting the
+ *  token-expiry gate suite drive a real relay rejection without a real JWT. */
+const EXPIRED_APP_TOKEN = "eval-license-token-EXPIRED";
+
+/** Shared relay-internal HMAC secret every eval relay config uses (16+ chars,
+ *  the relay's minimum) — a single source so a divergent copy never surfaces
+ *  as an opaque 401 on `/internal/*` routes in a file that hand-rolls its own
+ *  relay config instead of `startRelay`. */
+export const RELAY_INTERNAL_SECRET = "x".repeat(16);
+
 /** Fixed account id every eval device shares. sessionLimit is counted per this
  *  uid across all agent streams, so the X4 cap test can drive it deterministically. */
 const EVAL_USER_ID = "eval-user";
@@ -79,27 +126,34 @@ const EVAL_USER_ID = "eval-user";
  * it defaults high enough that a spawned agent can attach its firstProject
  * stream, and the X4 cap test overrides it (e.g. `sessionLimit: 2`).
  */
-function fakeLicenseGate(opts: { sessionLimit?: number } = {}) {
+function fakeLicenseGate(opts: { sessionLimit?: number } = {}): LicenseGate {
   const sessionLimit = opts.sessionLimit ?? 100;
-  const entryFor = (deviceId: string) => ({
+  // `pk` mirrors the real gate's `claims.pk` (the pubkey the token attests).
+  // The relay stamps sessions from userId/tier/sessionLimit/jti only, so the
+  // value is inert here — echoing the presented key keeps it from reading as
+  // a meaningful assertion.
+  const entryFor = (deviceId: string, pk: string): LicenseCacheEntry => ({
     jti: `eval-jti-${deviceId}`,
     deviceId,
     userId: EVAL_USER_ID,
-    tier: "pro" as const,
+    tier: "pro",
     sessionLimit,
-    expiresAt: Date.now() + 3600_000,
+    pk,
     revoked: false,
   });
   return {
-    async verify(token: string, deviceId: string) {
-      if (!token) return { ok: false as const, code: "LICENSE_INVALID" as const };
-      return { ok: true as const, entry: entryFor(deviceId) };
+    async verify(token, deviceId, publicKeyBase64) {
+      if (!token) return { ok: false, code: "LICENSE_INVALID" };
+      return { ok: true, entry: entryFor(deviceId, publicKeyBase64) };
     },
     // v3 apps present their own account token; the fake accepts TEST_LICENSE_TOKEN
     // and returns a fixed uid so the grant/session accounting has an account id.
-    async verifyAppToken(token: string) {
-      if (!token) return { ok: false as const, code: "LICENSE_INVALID" as const };
-      return { ok: true as const, entry: entryFor(`app-${EVAL_USER_ID}`) };
+    async verifyAppToken(token) {
+      if (!token) return { ok: false, code: "LICENSE_INVALID" };
+      if (token === EXPIRED_APP_TOKEN) return { ok: false, code: "LICENSE_EXPIRED" };
+      // No pubkey is presented to this path (the real gate deliberately skips
+      // the slot bind for apps), so there is nothing to echo.
+      return { ok: true, entry: entryFor(`app-${EVAL_USER_ID}`, "") };
     },
   };
 }
@@ -144,6 +198,33 @@ export function generateEvalAuth(): EvalAuth {
 export interface FakeLicenseApi {
   url: string;
   stop(): void;
+  /** Arm the NEXT `mintAppToken()` call to return an already-expired app
+   *  token — the relay's `fakeLicenseGate.verifyAppToken` recognizes the
+   *  sentinel and answers `LICENSE_EXPIRED`. Consumed on that one mint; the
+   *  mint after it is a normal token again. */
+  expireNextToken(): void;
+  /** Mint the current app token — normal, unless a prior `expireNextToken()`
+   *  armed this exact call, in which case it returns (and consumes) the
+   *  expired sentinel. `TestApp.reconnect()` calls this before each redial,
+   *  mirroring the real app re-minting its account token on every connect. */
+  mintAppToken(): string;
+  /** Register a fresh account device AFTER construction — visible to a
+   *  bridge only on its NEXT `/account/devices/me/peers` poll, not whatever
+   *  it already cached at startup (the inventory-miss row's whole point).
+   *  `deviceId`/`identity` let a caller pin a SPECIFIC device id and/or reuse
+   *  an existing Ed25519 keypair (e.g. one account device registered across
+   *  two separate `FakeLicenseApi`s for the multi-machine-slots row);
+   *  omitted, both are freshly generated. */
+  addAccountDevice(opts?: {
+    kind?: "app" | "agent";
+    deviceId?: string;
+    identity?: PhoneIdentity;
+  }): Promise<PhoneIdentity & { deviceId: string }>;
+  /** POST /internal/revoke on the relay (HMAC-signed over `RELAY_INTERNAL_SECRET`,
+   *  mirroring `relay-cascade.test.ts`'s hand-rolled version) for `deviceId`.
+   *  Requires `startFakeLicenseApi({ relayInternalUrl })` to have been set —
+   *  `setupTestEnv` wires this to `relay.httpUrl` automatically. */
+  revokeDevice(deviceId: string): Promise<void>;
 }
 
 /**
@@ -153,13 +234,25 @@ export interface FakeLicenseApi {
  * `fakeLicenseGate` accepts any non-empty token, so we return a fixed one and
  * 200 everything else (the heartbeat is best-effort on the agent side).
  *
- * For the account-membership auto-pair path, the agent fetches its account's
- * enrolled app-device key set from `GET /account/devices/me/peers` over this
- * same Bearer channel (see `bridge/src/account-peers.ts`). Pass
- * `opts.accountPeerKeys` to seed a known key set; absent → empty set.
+ * For account-trust admission, the agent fetches its account's enrolled
+ * app-device set from `GET /account/devices/me/peers` over this same Bearer
+ * channel (see `bridge/src/trusted-peers.ts`'s `TrustedPeersProvider`). Pass
+ * `opts.accountDevices` to seed known peers; absent → empty set.
  */
-export function startFakeLicenseApi(opts: { accountPeerKeys?: string[] } = {}): FakeLicenseApi {
+export function startFakeLicenseApi(
+  opts: {
+    accountPeerKeys?: string[];
+    accountDevices?: TrustedPeer[];
+    /** Relay HTTP base (`RelayHandle.httpUrl`) — required for `revokeDevice`.
+     *  `setupTestEnv` wires this automatically since it always has a relay. */
+    relayInternalUrl?: string;
+  } = {},
+): FakeLicenseApi {
   const peerKeys = opts.accountPeerKeys ?? [];
+  // Mutable: addAccountDevice pushes onto this SAME array, so the next
+  // /account/devices/me/peers poll (closure reads it live) sees the addition.
+  const devices: TrustedPeer[] = opts.accountDevices ? [...opts.accountDevices] : [];
+  let expireNext = false;
   const server = Bun.serve({
     port: 0,
     fetch(req) {
@@ -173,9 +266,11 @@ export function startFakeLicenseApi(opts: { accountPeerKeys?: string[] } = {}): 
       }
       // Account-membership peer-key set (Bearer-gated in prod; the fake accepts
       // any token, matching the relay's fakeLicenseGate). Mirrors web's
-      // `GET /account/devices/me/peers` → `{ keys: string[] }`.
+      // `GET /account/devices/me/peers` → `{ keys: string[], devices: [{deviceId, ed25519Pub}] }`
+      // (Task 4: `devices[]` is the enabling delta for the bridge's
+      // TrustedPeersProvider — `{keys}` alone has no deviceId to key off).
       if (url.pathname === "/account/devices/me/peers") {
-        return Response.json({ keys: peerKeys });
+        return Response.json({ keys: peerKeys, devices });
       }
       // Heartbeat + anything else — agent treats non-2xx as a soft warning.
       return Response.json({ ok: true });
@@ -186,19 +281,50 @@ export function startFakeLicenseApi(opts: { accountPeerKeys?: string[] } = {}): 
     stop() {
       server.stop(true);
     },
+    expireNextToken() {
+      expireNext = true;
+    },
+    mintAppToken() {
+      if (expireNext) {
+        expireNext = false;
+        return EXPIRED_APP_TOKEN;
+      }
+      return TEST_LICENSE_TOKEN;
+    },
+    async addAccountDevice(o = {}) {
+      const generated = o.identity ? null : await generateAppIdentity();
+      const identity: PhoneIdentity = o.identity ?? generated!;
+      const deviceId = o.deviceId ?? generated!.deviceId;
+      devices.push({ deviceId, ed25519Pub: identity.publicKeyBase64 });
+      return { ...identity, deviceId };
+    },
+    async revokeDevice(deviceId: string): Promise<void> {
+      if (!opts.relayInternalUrl) {
+        throw new Error(
+          "FakeLicenseApi.revokeDevice requires relayInternalUrl (setupTestEnv wires this automatically)",
+        );
+      }
+      const body = JSON.stringify({ deviceId });
+      const sig = createHmac("sha256", RELAY_INTERNAL_SECRET).update(body).digest("hex");
+      const res = await fetch(`${opts.relayInternalUrl}/internal/revoke`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-antgrid-signature": sig },
+        body,
+      });
+      if (!res.ok) {
+        throw new Error(`/internal/revoke failed: ${res.status} ${await res.text()}`);
+      }
+    },
   };
 }
 
 export async function startRelay(opts: {
   port: number;
-  pairRequestTimeoutMs?: number;
   /** ± window a hello `ts` may deviate from server time (default 120s). The R
    *  skew forge test lands `skewTsMs` outside this. */
   clockSkewMs?: number;
   /** `(deviceId, nonce)` hello replay TTL (default 5min). */
   replayTtlMs?: number;
-  /** Idle age (days) after which an unused grant is swept (default 30). */
-  staleGrantDays?: number;
   /** Per-connection JSON-control message rate (default generous; the X3
    *  JSON-flood test lowers it to force MESSAGE_RATE_LIMITED). */
   jsonRateLimitPerSec?: number;
@@ -209,31 +335,30 @@ export async function startRelay(opts: {
    *  X4's cap test passes `2`. Default 100 (spawned agents attach streams). */
   sessionLimit?: number;
 }): Promise<RelayHandle> {
-  const { startServer } = await import(
-    resolve(ROOT, "relay/src/server.ts")
-  );
-  const server = startServer(
-    {
-      port: opts.port,
-      maxConnections: 100,
-      rateLimitConnPerIp: 10,
-      pairRequestTimeoutMs: opts.pairRequestTimeoutMs ?? 5_000,
-      pairRateLimitPerIp: 20,
-      rateLimitMsgPerSec: opts.rateLimitMsgPerSec ?? 100,
-      jsonRateLimitPerSec: opts.jsonRateLimitPerSec ?? 100,
-      jsonRateLimitBurst: opts.jsonRateLimitBurst ?? 200,
-      clockSkewMs: opts.clockSkewMs ?? 120_000,
-      replayTtlMs: opts.replayTtlMs ?? 300_000,
-      staleGrantDays: opts.staleGrantDays ?? 30,
-      pingIntervalMs: 30_000,
-      pongTimeoutMs: 10_000,
-      logLevel: "error",
-      licenseApiUrl: "http://license-api.eval",
-      relayInternalSecret: "x".repeat(16),
-      licenseCacheMaxEntries: 1000,
-    },
-    { licenseGate: fakeLicenseGate({ sessionLimit: opts.sessionLimit }) },
-  );
+  // Static specifier, not `import(resolve(ROOT, ...))`: a computed specifier
+  // types `startServer` as `any`, which silently stops type-checking BOTH the
+  // config literal below (missing/renamed relay keys) and every property read
+  // off the returned server — the exact way a relay change slips past the evals.
+  const { startServer } = await import("../../relay/src/server");
+  const cfg: RelayConfig = {
+    port: opts.port,
+    maxConnections: 100,
+    rateLimitConnPerIp: 10,
+    rateLimitMsgPerSec: opts.rateLimitMsgPerSec ?? 100,
+    jsonRateLimitPerSec: opts.jsonRateLimitPerSec ?? 100,
+    jsonRateLimitBurst: opts.jsonRateLimitBurst ?? 200,
+    clockSkewMs: opts.clockSkewMs ?? 120_000,
+    replayTtlMs: opts.replayTtlMs ?? 300_000,
+    pingIntervalMs: 30_000,
+    pongTimeoutMs: 10_000,
+    logLevel: "error",
+    licenseApiUrl: "http://license-api.eval",
+    relayInternalSecret: RELAY_INTERNAL_SECRET,
+    licenseCacheMaxEntries: 1000,
+  };
+  const server = startServer(cfg, {
+    licenseGate: fakeLicenseGate({ sessionLimit: opts.sessionLimit }),
+  });
 
   return {
     port: opts.port,
@@ -289,62 +414,83 @@ export async function spawnAgent(opts: {
     },
   };
 
-  const proc = Bun.spawn(
-    ["bun", "run", resolve(ROOT, "bridge/src/index.ts")],
-    {
-      cwd: opts.projectDir,
-      stdin: "pipe",
-      stdout: "ignore",
-      stderr: "ignore",
-      env: {
-        ...process.env,
-        LOG_LEVEL: "error",
-        ANTGRID_DIR: opts.abDir,
-        ...opts.env,
-      },
-    },
-  );
-
-  // Hand the agent its bootstrap payload, then close stdin so
-  // `readBootstrapPayload` (which reads until EOF) resolves.
-  proc.stdin.write(JSON.stringify(payload) + "\n");
-  await proc.stdin.end();
-
-  // Poll for API port file — written by api-server.ts when agent is ready
   const portFile = join(opts.abDir, "api.port");
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if (proc.exitCode !== null) {
-      throw new Error(`Agent process exited early with code ${proc.exitCode}`);
+
+  async function launch(): Promise<Subprocess> {
+    const proc = Bun.spawn(
+      ["bun", "run", resolve(ROOT, "bridge/src/index.ts")],
+      {
+        cwd: opts.projectDir,
+        stdin: "pipe",
+        stdout: "ignore",
+        stderr: "ignore",
+        env: {
+          ...process.env,
+          LOG_LEVEL: "error",
+          ANTGRID_DIR: opts.abDir,
+          ...opts.env,
+        },
+      },
+    );
+
+    // Hand the agent its bootstrap payload, then close stdin so
+    // `readBootstrapPayload` (which reads until EOF) resolves.
+    proc.stdin.write(JSON.stringify(payload) + "\n");
+    await proc.stdin.end();
+
+    // Poll for API port file — written by api-server.ts when agent is ready
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      if (proc.exitCode !== null) {
+        throw new Error(`Agent process exited early with code ${proc.exitCode}`);
+      }
+      if (existsSync(portFile)) break;
+      await Bun.sleep(100);
     }
-    if (existsSync(portFile)) break;
-    await Bun.sleep(100);
-  }
-  if (!existsSync(portFile)) {
-    throw new Error("Timed out waiting for agent API port file");
+    if (!existsSync(portFile)) {
+      throw new Error("Timed out waiting for agent API port file");
+    }
+    return proc;
   }
 
-  return {
+  async function killProc(proc: Subprocess): Promise<void> {
+    // On Windows `proc.kill()` doesn't reap the agent's PTY children (node
+    // REPLs / echo terminals) — they orphan and accumulate across suites,
+    // starving later agents until their pairing windows time out. Kill the
+    // whole tree via taskkill before awaiting exit.
+    if (process.platform === "win32") {
+      const taskkill = `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\taskkill.exe`;
+      try {
+        Bun.spawnSync([taskkill, "/PID", String(proc.pid), "/T", "/F"]);
+      } catch { /* best-effort */ }
+    }
+    proc.kill();
+    await proc.exited;
+  }
+
+  const initialProc = await launch();
+
+  const handle: AgentHandle = {
     port: 0,
     url: opts.relayUrl,
-    process: proc,
+    process: initialProc,
     deviceUuid: opts.auth.deviceUuid,
     ed25519Pubkey: opts.auth.ed25519Pub,
     async kill() {
-      // On Windows `proc.kill()` doesn't reap the agent's PTY children (node
-      // REPLs / echo terminals) — they orphan and accumulate across suites,
-      // starving later agents until their pairing windows time out. Kill the
-      // whole tree via taskkill before awaiting exit.
-      if (process.platform === "win32") {
-        const taskkill = `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\taskkill.exe`;
-        try {
-          Bun.spawnSync([taskkill, "/PID", String(proc.pid), "/T", "/F"]);
-        } catch { /* best-effort */ }
-      }
-      proc.kill();
-      await proc.exited;
+      await killProc(handle.process);
+    },
+    async restart() {
+      await killProc(handle.process);
+      // Drop the stale port file so `launch()`'s poll waits for the FRESH
+      // process rather than racing the old value still on disk.
+      try { rmSync(portFile, { force: true }); } catch { /* ignore */ }
+      handle.process = await launch();
+    },
+    pairedPhones() {
+      return loadPairedPhones(opts.abDir).list();
     },
   };
+  return handle;
 }
 
 /** @deprecated Use spawnAgent instead */
@@ -360,56 +506,80 @@ export function agentRegistrationId(deviceUuid: string, projectDir: string): str
   return `${deviceUuid}.${computeProjectId(projectDir)}`;
 }
 
-/** Raw 32-byte base64 of an Ed25519 SPKI public key (the agent's account-peer-key
- *  encoding), used to seed the QR-less account-membership pair path. */
-function rawEdPubB64(pub: import("node:crypto").KeyObject): string {
-  const der = pub.export({ format: "der", type: "spki" });
-  return Buffer.from(der.subarray(der.length - 32)).toString("base64");
-}
-
 /**
- * Pair an app with the agent, retrying to absorb the startup race: the agent
- * writes `api.port` BEFORE it finishes authenticating to the relay, so an early
- * `pair-request` targets an agent the relay hasn't seen yet → typed
- * `error{AGENT_OFFLINE, retryable}` (v3 keeps the socket open; a bare close is
- * the fallback). `PairAgentOfflineError` marks the retryable miss; `reconnect`
- * re-arms the socket only if the fallback close fired.
+ * Retry the E2E handshake to absorb two startup races that have no ceremony
+ * left to paper over them: the bridge's `TrustedPeersProvider` cache is empty
+ * on the first unknown identity (a throttled background refresh warms it —
+ * `noteMiss()`), and the relay's same-account presence fan-out (`peer-online`)
+ * must reach the agent before its `client-hello` does. Both self-heal within a
+ * few hundred ms, so a short retry loop on the ALREADY-authenticated socket
+ * (no reconnect needed — unlike the old pair-request path, a failed handshake
+ * attempt never closes the socket) is enough. Shared with
+ * `gate-account-trust.test.ts` (imported, not duplicated) — keep the retry
+ * constants in lockstep, since drift here shows up as intermittent eval flake.
  */
-async function pairWithRetry(
-  abDir: string,
+export async function handshakeWithoutPairing(
+  app: RelayClient,
   agentDeviceId: string,
-  pair: () => Promise<void>,
-  opts: { attempts?: number; gapMs?: number; reconnect?: () => Promise<void> } = {},
+  agentEd25519Pub: string,
+  opts: { attempts?: number; perAttemptTimeoutMs?: number; gapMs?: number } = {},
 ): Promise<void> {
-  const attempts = opts.attempts ?? 8;
+  // `setupTestEnv` calls this with the default before its own STREAM_ADVERT_*
+  // retry loop (~20 lines below), and gate-harness-pairfree wraps the whole
+  // `setupTestEnv` call in a 30s bun:test timeout — so the two loops' worst
+  // cases must fit together under that budget with room for the rest of
+  // setup. STREAM_ADVERT's 12s worst case already assumes this loop is fast;
+  // 6 * (2_000ms + 300ms) = 13.8s worst case leaves the remaining ~4s for
+  // agent spawn, connect, and the test body itself.
+  const attempts = opts.attempts ?? 6;
+  const perAttemptTimeoutMs = opts.perAttemptTimeoutMs ?? 2_000;
+  const gapMs = opts.gapMs ?? 300;
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
-      // Re-arm a live socket before every retry (a prior AGENT_OFFLINE may have
-      // closed it as a fallback). No-op before the first attempt.
-      if (i > 0 && opts.reconnect) await opts.reconnect();
-      await pair();
+      app.setPeerId(agentDeviceId);
+      await app.performE2EHandshake(agentDeviceId, perAttemptTimeoutMs, { agentEd25519Pub });
       return;
     } catch (err) {
       lastErr = err;
-      await Bun.sleep(opts.gapMs ?? 300);
+      await Bun.sleep(gapMs);
     }
   }
-  throw new Error(`pairing ${agentDeviceId} failed after ${attempts} attempts: ${String(lastErr)}`);
+  throw new Error(
+    `pair-free handshake with ${agentDeviceId} failed after ${attempts} attempts: ${String(lastErr)}`,
+  );
 }
 
 export interface TestEnv {
   relay: RelayHandle;
   agent: AgentHandle;
   app: RelayClient;
+  /** The account identity `app` connected with, registered with the fake
+   *  account inventory (`startFakeLicenseApi({ accountDevices })`) — reuse it
+   *  (via `TestApp.connect(env)`) to open additional admitted app connections
+   *  against this same env. A different, never-registered identity cannot be
+   *  admitted (the bridge's trust source is deviceId-keyed). */
+  appIdentity: PhoneIdentity & { deviceId: string };
+  /** This env's fake account/license API — `expireNextToken`/`addAccountDevice`/
+   *  `revokeDevice` for the failure-matrix suites (token expiry, inventory
+   *  miss, multi-machine revoke). */
+  license: FakeLicenseApi;
   abDir: string;
   projectId: string;
   /** Absolute path to the temp project dir — lets a scenario write/read files the
    *  agent serves (e.g. seeding an oversize file for the fragmentation test). */
   projectDir: string;
-  /** Bare machine `deviceUuid` — the id the app pairs/handshakes against in v3
-   *  (one machine socket; projects are streams). */
+  /** Bare machine `deviceUuid` — the id the app handshakes against (one machine
+   *  socket; projects are streams). */
   agentDeviceId: string;
+  /** Kill the current agent process and respawn a fresh one reusing the SAME
+   *  `abDir`/`auth`/`projectDir` — the on-disk paired-phones trust and the
+   *  agent's deviceId/pubkey survive; only the process (and its relay epoch)
+   *  is new. `env.agent` is NOT replaced in place (its deviceId/ed25519Pubkey
+   *  are stable across a restart, so existing references stay valid); a
+   *  caller that needs the fresh process handle's other fields should not
+   *  rely on this method for that. */
+  restartAgent(): Promise<void>;
   teardown(): Promise<void>;
 }
 
@@ -427,22 +597,30 @@ export interface DartTestEnv {
 export async function setupTestEnv(opts: {
   fixtureName: string;
   replacements?: Record<string, string>;
+  /** Reuse an already-running relay instead of starting a fresh one — the
+   *  multi-machine-slots row needs TWO real bridges live against the SAME
+   *  relay (the pre-fix bug was specifically about the relay conflating two
+   *  same-account connections). The owning env's `teardown()` stops the
+   *  relay; a caller passing this must not also let the owning env's
+   *  teardown race a still-in-use relay (tear this env down first). */
+  relay?: RelayHandle;
 }): Promise<TestEnv> {
-  const relayPort = allocatePort();
   const abDir = mkdtempSync(join(tmpdir(), "antgrid-eval-home-"));
 
-  // v3 pairs the ONE machine socket (bare deviceUuid) on the control plane; the
-  // control plane has no test pairing-window hook, so admit via the QR-less
-  // account-membership proof (design §5.1) — seed the fake account peer set.
-  const accountKp = generateKeyPairSync("ed25519");
-  const accountPubB64 = rawEdPubB64(accountKp.publicKey);
+  // Account trust (Phases A+B): the app admits with NO pairing ceremony, as
+  // long as its identity is in the account's device inventory — seed the fake
+  // license API with the SAME identity `app` connects as below.
+  const appIdentity = await generateAppIdentity();
 
-  const relay = await startRelay({ port: relayPort, pairRequestTimeoutMs: 15_000 });
-  const licenseApi = startFakeLicenseApi({ accountPeerKeys: [accountPubB64] });
+  const relay = opts.relay ?? (await startRelay({ port: allocatePort() }));
+  const licenseApi = startFakeLicenseApi({
+    accountDevices: [{ deviceId: appIdentity.deviceId, ed25519Pub: appIdentity.publicKeyBase64 }],
+    relayInternalUrl: relay.httpUrl,
+  });
   const auth = generateEvalAuth();
 
   const project = createTestProject(opts.fixtureName, {
-    "__RELAY_URL__": `ws://localhost:${relayPort}`,
+    "__RELAY_URL__": relay.url.replace(/\/ws$/, ""),
     ...opts.replacements,
   });
 
@@ -458,43 +636,86 @@ export async function setupTestEnv(opts: {
   const projectId = computeProjectId(project.dir);
   const deviceUuid = auth.deviceUuid;
 
-  const app = await RelayClient.connectAndAuth(relay.url, { deviceType: "app", name: "eval-app" });
-  await pairWithRetry(
-    abDir,
-    deviceUuid,
-    async () => {
-      const pairResult = await app.pairWith(deviceUuid, {
-        timeoutMs: 8_000,
-        accountKey: { pubB64: accountPubB64, privateKey: accountKp.privateKey },
-      });
-      app.setPeerId(pairResult.peerId);
-    },
-    { reconnect: () => (app.isClosed ? app.reconnectAndAuth(relay.url) : Promise.resolve()) },
-  );
-
-  await app.performE2EHandshake(deviceUuid, 10_000, {
-    agentEd25519Pub: auth.ed25519Pub,
+  const app = await RelayClient.connectAndAuth(relay.url, {
+    deviceType: "app",
+    name: "eval-app",
+    identity: appIdentity,
+    deviceId: appIdentity.deviceId,
   });
+  app.setPeerId(deviceUuid);
+  await handshakeWithoutPairing(app, deviceUuid, auth.ed25519Pub);
 
-  // Phase B: grant the just-paired phone access to this project (see helper).
-  await allowProjectForPairedPhones(abDir, projectId);
+  // Account-trusted phones start with an empty per-project allowlist.
+  await allowProjectForTrustedPhones(abDir, projectId);
 
   // Welcome-replay: pull the cached snapshot (agent:status/tree:full/git:status)
   // like the production app, instead of racing the agent's de-duped live burst.
+  //
+  // `state.snapshot` recomputes `agent:projects` fresh (host-server.ts's
+  // `dispatchControlPlaneInbound`), but firstProject's auto-start (making its
+  // core a registered relay stream, which is what makes it "dialable" and
+  // gives it a streamId) is asynchronous and can still be in flight for a beat
+  // after the E2E handshake establishes. The old pair-request round trip (and
+  // its own AGENT_OFFLINE retries) incidentally absorbed this; the pair-free
+  // path is fast enough to win the race and land before the project registers
+  // — so poll until the advert actually carries a streamId for it. Once
+  // dialable, it stays dialable for the rest of the test, so the final pull
+  // below leaves a genuinely fresh advert queued for callers like
+  // `firstProjectStream`.
+  // Bounded well under the tightest caller timeout: gate-harness-pairfree's
+  // guard test wraps setupTestEnv in a 30s bun:test timeout, and 20 attempts *
+  // (2_000ms wait + 200ms gap) was a ~44s worst case — already past that
+  // budget before the rest of setup/the test body runs a step. A fresh advert
+  // lands within "a beat" of the E2E handshake (see the comment above), so a
+  // much shorter per-attempt wait is enough; 15 * (700ms + 100ms) = 12s worst
+  // case leaves ~18s of headroom under the 30s callers use.
+  const STREAM_ADVERT_ATTEMPTS = 15;
+  const STREAM_ADVERT_WAIT_MS = 700;
+  const STREAM_ADVERT_GAP_MS = 100;
+  let advertised = false;
+  for (let i = 0; i < STREAM_ADVERT_ATTEMPTS; i++) {
+    app.drainQueued("agent:projects");
+    await app.pullStateSnapshot();
+    const advert = await app.waitForAbType("agent:projects", STREAM_ADVERT_WAIT_MS).catch(() => null);
+    if (advert?.projects.some((p) => p.projectId === projectId && p.streamId)) {
+      advertised = true;
+      break;
+    }
+    await Bun.sleep(STREAM_ADVERT_GAP_MS);
+  }
+  if (!advertised) {
+    throw new Error(
+      `no streamId advertised for project ${projectId} after ${STREAM_ADVERT_ATTEMPTS} attempts ` +
+        `(~${STREAM_ADVERT_ATTEMPTS * (STREAM_ADVERT_WAIT_MS + STREAM_ADVERT_GAP_MS)}ms) — the agent's ` +
+        `project stream never registered as dialable`,
+    );
+  }
+  app.drainQueued("agent:projects");
   await app.pullStateSnapshot();
 
   return {
     relay,
     agent,
     app,
+    appIdentity,
+    license: licenseApi,
     abDir,
     projectId,
     projectDir: project.dir,
     agentDeviceId: deviceUuid,
+    // Delegates to AgentHandle.restart() rather than re-spawning here: that
+    // mutates `agent.process` in place instead of rebinding the closure-local
+    // `agent` variable, so the `agent` this env object already captured stays
+    // live instead of going stale after a restart.
+    restartAgent() {
+      return agent.restart();
+    },
     async teardown() {
       await app.disconnect();
       await agent.kill();
-      relay.stop();
+      // A caller-supplied relay (opts.relay) is owned by whoever started it —
+      // stopping it here would pull it out from under that env's own agent.
+      if (!opts.relay) relay.stop();
       licenseApi.stop();
       project.cleanup();
       try { rmSync(abDir, { recursive: true, force: true }); } catch {}
@@ -514,17 +735,19 @@ export async function setupDartTestEnv(opts: {
 }): Promise<DartTestEnv> {
   const relayPort = allocatePort();
   const abDir = mkdtempSync(join(tmpdir(), "antgrid-eval-dart-"));
-  const accountKp = generateKeyPairSync("ed25519");
-  const accountPubB64 = rawEdPubB64(accountKp.publicKey);
-  const licenseApi = startFakeLicenseApi({ accountPeerKeys: [accountPubB64] });
   const auth = generateEvalAuth();
 
   // Dart VM cold-start is slow (~3-10s). Spawn it in parallel with the relay
-  // startup since the two are independent until `app.connect(relay.url)`.
+  // startup — the two are independent until `app.connect(relay.url)` — but the
+  // fake license API needs the Dart client's OWN identity (learned only once
+  // `create()` resolves) to admit it without pairing, so it starts after.
   const [relay, app] = await Promise.all([
-    startRelay({ port: relayPort, pairRequestTimeoutMs: 15_000 }),
+    startRelay({ port: relayPort }),
     DartAppClient.create(opts.clientName ?? "eval-dart-app"),
   ]);
+  const licenseApi = startFakeLicenseApi({
+    accountDevices: [{ deviceId: app.deviceId, ed25519Pub: app.ed25519PublicKey }],
+  });
 
   const project = createTestProject(opts.fixtureName, {
     "__RELAY_URL__": `ws://localhost:${relayPort}`,
@@ -544,16 +767,19 @@ export async function setupDartTestEnv(opts: {
   const deviceUuid = auth.deviceUuid;
 
   // v3: app hello now carries a mandatory license token (design §4.2); the Dart
-  // eval CLI forwards it to RelayService.connect. NOTE: the Dart CLI's `pair`
-  // action does not yet support the account-membership proof, so pairing against
-  // the bare-deviceUuid control plane is not yet reachable from the Dart client
-  // (an eval-CLI gap, not a relay/bridge one).
+  // eval CLI forwards it to RelayService.connect.
   await app.connect(relay.url, TEST_LICENSE_TOKEN);
-  await pairWithRetry(abDir, deviceUuid, () => app.pairWith(deviceUuid, { timeoutMs: 8_000 }));
+  // KNOWN GAP (eval-CLI, not relay/bridge): `_handleHandshake` in
+  // packages/antgrid_eval_client/lib/src/commands.dart addresses the agent via
+  // `_relay.currentState.peerDeviceId`, which only the now-deleted `pair`
+  // action ever set. There is no `handshake` param to target an agent
+  // directly, so a pair-free Dart handshake cannot succeed until the Dart CLI
+  // grows one — this call is expected to fail (see the `describe.skip` dart-
+  // client-e2e scenarios) until that lands.
   await app.performHandshake(auth.ed25519Pub);
 
-  // Phase B: grant the just-paired phone access to this project (see helper).
-  await allowProjectForPairedPhones(abDir, projectId);
+  // Account-trusted phones start with an empty per-project allowlist.
+  await allowProjectForTrustedPhones(abDir, projectId);
 
   // Welcome-replay: pull the cached snapshot like the production app.
   await app.pullStateSnapshot();

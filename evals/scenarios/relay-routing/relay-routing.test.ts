@@ -2,8 +2,10 @@ import { describe, test, expect, beforeAll, afterAll, afterEach } from "bun:test
 import { startRelay, allocatePort, type RelayHandle } from "../../helpers/harness";
 import { RelayClient } from "../../helpers/relay-client";
 
-// TODO Tasks 28-33 will replace this with new pair-request v3 evals.
-// Old pair-request shape is incompatible with the current relay protocol.
+// Skipped: drives a bare `startRelay` + `RelayClient.connectAndAuth`, which
+// predates account trust. Routing is now `mayRoute` on a shared `claims.uid`,
+// so these devices never become mutually routable and every send times out.
+// Restoring this means rebuilding the setup on the license-gate-backed env.
 describe.skip("relay routing", () => {
   let relay: RelayHandle;
   const clients: RelayClient[] = [];
@@ -26,8 +28,9 @@ describe.skip("relay routing", () => {
     const app = await RelayClient.connectAndAuth(relay.url, { deviceType: "app" });
     clients.push(agent, app);
 
-    await app.pairWith(agent.deviceId, 5_000);
-    await agent.waitForType("pair-connected", 5_000);
+    // This eval's fakeLicenseGate stamps every device with the same account
+    // uid, so mayRoute (relay/src/authz.ts) admits app<->agent routing with
+    // zero grant/pairing setup.
 
     // App → Agent
     app.sendMessage(agent.deviceId, "control", "hello-from-app");
@@ -48,16 +51,10 @@ describe.skip("relay routing", () => {
     const app1 = await RelayClient.connectAndAuth(relay.url, { deviceType: "app", name: "app-1" });
     clients.push(agent1, app1);
 
-    await app1.pairWith(agent1.deviceId, 5_000);
-    await agent1.waitForType("pair-connected", 5_000);
-
     // Pair 2
     const agent2 = await RelayClient.connectAndAuth(relay.url, { deviceType: "agent", name: "agent-2" });
     const app2 = await RelayClient.connectAndAuth(relay.url, { deviceType: "app", name: "app-2" });
     clients.push(agent2, app2);
-
-    await app2.pairWith(agent2.deviceId, 5_000);
-    await agent2.waitForType("pair-connected", 5_000);
 
     // Send message in pair 1
     app1.sendMessage(agent1.deviceId, "control", "pair-1-secret");
@@ -90,9 +87,6 @@ describe.skip("relay routing", () => {
     const agent = await RelayClient.connectAndAuth(relay.url, { deviceType: "agent" });
     const app = await RelayClient.connectAndAuth(relay.url, { deviceType: "app" });
     clients.push(agent, app);
-
-    await app.pairWith(agent.deviceId, 5_000);
-    await agent.waitForType("pair-connected", 5_000);
 
     // Send on control channel
     app.sendMessage(agent.deviceId, "control", "control-msg");

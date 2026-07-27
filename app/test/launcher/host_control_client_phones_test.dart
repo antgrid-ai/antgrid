@@ -14,7 +14,7 @@ void main() {
         'phones': [{
           'phonePubkey': 'pk-1', 'phoneDeviceId': 'ph-1', 'label': 'iPhone',
           'pairedAt': '2026-01-01T00:00:00.000Z', 'lastSeenAt': '2026-01-02T00:00:00.000Z',
-          'allowedProjects': ['p1'], 'admission': 'same-account',
+          'allowedProjects': ['p1'],
         }],
         'knownProjects': [{'projectId': 'p1', 'label': 'Proj', 'path': '/x', 'running': true}],
       }), 200);
@@ -59,6 +59,26 @@ void main() {
       () => c.phonesList(),
       throwsA(isA<HostControlException>().having((e) => e.code, 'code', 'BAD_RESPONSE')),
     );
+  });
+
+  test('phonesList tolerates a stale admission key from an older bridge', () async {
+    final mock = MockClient((req) async {
+      final body = jsonDecode(req.body) as Map<String, dynamic>;
+      return http.Response(jsonEncode({
+        'id': body['id'], 'ok': true, 'type': 'phones:list',
+        'phones': [{
+          'phonePubkey': 'pk-1', 'phoneDeviceId': 'ph-1', 'label': 'iPhone',
+          'pairedAt': '2026-01-01T00:00:00.000Z', 'lastSeenAt': '2026-01-02T00:00:00.000Z',
+          'allowedProjects': ['p1'],
+          // Older bridges still send this; the app no longer models it.
+          'admission': 'same-account',
+        }],
+        'knownProjects': <Map<String, dynamic>>[],
+      }), 200);
+    });
+    final c = HostControlClient(port: 1, token: 't', httpClient: mock);
+    final res = await c.phonesList();
+    expect(res.phones.single.phonePubkey, 'pk-1');
   });
 
   test('mobileAccessGet parses project ids', () async {
