@@ -89,7 +89,11 @@ export function loadPairedPhones(abDir: string): PairedPhonesStore {
     has: (pk) => phones.some((p) => p.phonePubkey === pk),
     get: (pk) => phones.find((p) => p.phonePubkey === pk),
     upsert: (phone: UpsertPhone) => {
-      phones = phones.filter((p) => p.phonePubkey !== phone.phonePubkey);
+      phones = phones.filter(
+        (p) =>
+          p.phonePubkey !== phone.phonePubkey &&
+          !(phone.phoneDeviceId && p.phoneDeviceId === phone.phoneDeviceId),
+      );
       phones.push({ ...phone, allowedProjects: phone.allowedProjects ?? [] });
       flush();
     },

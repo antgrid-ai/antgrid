@@ -212,6 +212,9 @@ export async function handleInboundPairRequest(args: HandlePairRequestArgs): Pro
 
   const now = new Date().toISOString();
   if (accountMember) {
+    const prior = pairedPhones.list().find((p) => p.phoneDeviceId === msg.phoneDeviceId);
+    const defaults = args.sameAccountDefaultProjects?.() ?? [];
+    const allowedProjects = [...new Set([...(prior?.allowedProjects ?? []), ...defaults])];
     pairedPhones.upsert({
       phonePubkey: msg.phonePubkey,
       phoneDeviceId: msg.phoneDeviceId,
@@ -219,7 +222,7 @@ export async function handleInboundPairRequest(args: HandlePairRequestArgs): Pro
       pairedAt: now,
       lastSeenAt: now,
       admission: "same-account",
-      allowedProjects: args.sameAccountDefaultProjects?.() ?? [],
+      allowedProjects,
     });
   } else if (windowMatches) {
     // Explicit pair-code admits fail-closed; allowlist changes happen separately.

@@ -189,6 +189,73 @@ describe("handleInboundPairRequest", () => {
     }
   });
 
+  it("re-pair after a keypair rotation replaces the old row and carries its grants", async () => {
+    const { dir, cleanup } = freshSetup();
+    try {
+      const phones = loadPairedPhones(dir);
+      phones.upsert({
+        phonePubkey: "old-phone-pk",
+        phoneDeviceId: "phone-same",
+        pairedAt: "2026-01-01T00:00:00.000Z",
+        lastSeenAt: "2026-01-01T00:00:00.000Z",
+        admission: "same-account",
+        allowedProjects: ["projA", "projB"],
+        pushToken: "stale-tok",
+        pushPubkey: "stale-ppk",
+        pushProvider: "fcm",
+      });
+
+      const win = createPairingWindow();
+      const sent: any[] = [];
+      const { kp, phonePubkey } = makePhoneKp();
+      const nonce = Buffer.alloc(16, 9).toString("base64");
+      const sig = signRequest({
+        kp,
+        phonePubkey,
+        agentDeviceId: "a1",
+        phoneDeviceId: "phone-same",
+        nonce,
+      });
+      const proof = makeMembership({
+        agentDeviceId: "a1",
+        phoneDeviceId: "phone-same",
+        phonePubkey,
+        nonce,
+      });
+
+      await handleInboundPairRequest({
+        msg: {
+          type: "pair-request",
+          pairId: "pair-1",
+          agentDeviceId: "a1",
+          phonePubkey,
+          phoneDeviceId: "phone-same",
+          nonce,
+          requestedAt: sig.requestedAt,
+          phoneSignature: sig.phoneSignature,
+          accountDevicePubkey: proof.accountDevicePubkey,
+          accountMembershipSig: proof.accountMembershipSig,
+        },
+        pairedPhones: phones,
+        pairingWindow: win,
+        agentDeviceId: "a1",
+        agentEd25519Priv: Buffer.alloc(32, 1),
+        getAccountPeerKeys: async () => new Set([proof.accountDevicePubkey]),
+        sameAccountDefaultProjects: () => ["projC"],
+        send: (m) => sent.push(m),
+      });
+
+      expect(sent[0].type).toBe("pair-approval");
+      expect(phones.list()).toHaveLength(1);
+      expect(phones.get("old-phone-pk")).toBeUndefined();
+      const row = phones.get(phonePubkey)!;
+      expect([...row.allowedProjects].sort()).toEqual(["projA", "projB", "projC"]);
+      expect(row.pushToken).toBeUndefined();
+    } finally {
+      cleanup();
+    }
+  });
+
   it("approves trusted phone on reconnect (no pairCode) and bumps lastSeenAt", async () => {
     const { dir, cleanup } = freshSetup();
     try {
