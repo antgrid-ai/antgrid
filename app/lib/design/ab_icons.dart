@@ -13,7 +13,11 @@ abstract final class AbIcons {
   static const account = Codicon.account;
   static const signIn = Codicon.sign_in;
   static const signOut = Codicon.sign_out;
-  static const expand = Codicon.screen_full;
+  // MDI, not Codicon: the Codicon set has no diagonal expand/collapse pair
+  // (`screen_full`/`screen_normal` are bracketed boxes that read as "fullscreen
+  // the window" rather than "grow this pane").
+  static const expand = Mdi.arrow_expand;
+  static const collapse = Mdi.arrow_collapse;
   static const close = Codicon.close;
   // Pane-visibility toggle, macOS/Xcode convention: the glyph depicts the
   // CURRENT state (filled edge = pane showing), not the result of clicking.

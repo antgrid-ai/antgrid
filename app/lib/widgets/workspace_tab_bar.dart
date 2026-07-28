@@ -81,7 +81,7 @@ class WorkspaceTabBar extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.only(right: AbTokens.space6),
               child: AbIconButton(
-                icon: isExpanded ? AbIcons.close : AbIcons.expand,
+                icon: isExpanded ? AbIcons.collapse : AbIcons.expand,
                 tooltip: isExpanded ? 'Restore' : 'Expand',
                 onTap: onToggleExpand,
               ),
