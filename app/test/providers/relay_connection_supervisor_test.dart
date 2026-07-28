@@ -309,7 +309,7 @@ void main() {
     conn.ensureStarted(mechanisms: mechanisms());
     await _waitUntil(() => relay.dialedTokens.length == 1);
 
-    conn.dispose();
+    await conn.dispose();
 
     // An orphaned socket keeps counting against the relay's sessionLimit, so
     // dispose must go through the mechanisms' release, not just drop the

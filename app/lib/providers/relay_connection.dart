@@ -193,7 +193,15 @@ class RelayConnection {
   /// Terminal teardown: disposes the [MachineSession] (which fails its pending
   /// RPCs, cancels subscriptions, zeroizes keys) and the underlying
   /// [RelayService]. Only called when dropping a machine for good.
-  void dispose() {
+  ///
+  /// Everything observable synchronously — status, streams, supervisor — is gone
+  /// the moment this returns, but the socket itself drops only when the returned
+  /// future completes: releasing the E2E session is asynchronous, and the
+  /// supervisor cannot do it for us (`setWanted(false)` only schedules its
+  /// evaluation, and the `dispose()` below cancels it). Fire-and-forget callers
+  /// may ignore the future; anyone who must not touch the [RelayService] until
+  /// it is really gone has to await it.
+  Future<void> dispose() {
     _disposed = true;
     for (final sub in _subs) {
       unawaited(sub.cancel());
@@ -211,24 +219,25 @@ class RelayConnection {
     unawaited(_sessionReplacements.close());
     final supervisor = _supervisor;
     _supervisor = null;
-    if (supervisor != null) {
-      // `ConnectionSupervisor.dispose` deliberately does NOT release, so
-      // disposing alone would leave an authenticated socket and a live E2E
-      // session with nothing managing them — still counting against the
-      // account's relay sessionLimit. Release explicitly (it is idempotent, so
-      // a release the supervisor already ran is harmless).
-      supervisor.setWanted(false);
-      unawaited(supervisor.dispose());
-    }
+    // `ConnectionSupervisor.dispose` deliberately does NOT release, so disposing
+    // alone would leave an authenticated socket and a live E2E session with
+    // nothing managing them — still counting against the account's relay
+    // sessionLimit. Release explicitly (it is idempotent, so a release the
+    // supervisor already ran is harmless).
+    supervisor?.setWanted(false);
     final mechanisms = _mechanisms;
     _mechanisms = null;
-    unawaited(_teardown(mechanisms));
+    return _teardown(supervisor, mechanisms);
   }
 
   /// Release BEFORE disposing the relay: release closes the E2E session and
   /// drops the socket through the live [RelayService], and doing that after
   /// `dispose()` closed its controllers throws on the state emit.
-  Future<void> _teardown(RelayMechanisms? mechanisms) async {
+  Future<void> _teardown(
+    ConnectionSupervisor? supervisor,
+    RelayMechanisms? mechanisms,
+  ) async {
+    if (supervisor != null) await supervisor.dispose();
     if (mechanisms != null) await mechanisms.release();
     relay.dispose();
   }
@@ -317,14 +326,14 @@ class RelayConnectionManager {
   void release(String machineDeviceId) {
     final removed = _connections.remove(baseDeviceUuid(machineDeviceId));
     if (removed != null) {
-      removed.dispose();
+      unawaited(removed.dispose());
       _notifyChanged();
     }
   }
 
   void disposeAll() {
     for (final c in _connections.values) {
-      c.dispose();
+      unawaited(c.dispose());
     }
     _connections.clear();
     _changesController.close();
