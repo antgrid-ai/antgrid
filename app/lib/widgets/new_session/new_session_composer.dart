@@ -66,7 +66,7 @@ class NewSessionComposer extends ConsumerStatefulWidget {
 
   /// Injectable seam for tests; production callers never pass this — it
   /// defaults to the real [startNewSession].
-  final Future<void> Function(WidgetRef ref) submit;
+  final Future<void> Function(ProviderContainer ref) submit;
 
   @override
   ConsumerState<NewSessionComposer> createState() => _NewSessionComposerState();
@@ -184,13 +184,13 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     if (!_canStart) return;
     setState(() => _starting = true);
     try {
-      await widget.submit(ref);
+      await widget.submit(ref.container);
     } on SessionLimitExceededException catch (e) {
       // Paid-axis cap, not a transient failure — route to the upgrade flow
       // rather than a retry hint.
       if (mounted) {
         showAbSnackBar(context, e.message);
-        await openUpgrade(context, ref);
+        await openUpgrade(context, ref.container);
       }
     } catch (e) {
       if (mounted) {
@@ -211,7 +211,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     // prompt field so the next keystroke describes the task — the
     // composer's analogue of the old SessionConfig's name-field grab.
     ref.listen(selectedTargetProjectProvider, (_, next) {
-      seedNewSessionAgentForTarget(ref, next);
+      seedNewSessionAgentForTarget(ref.container, next);
       if (next != null) _promptFocus.requestFocus();
     });
     ref.listen(newSessionAgentProvider, (_, next) => _applyModeDefault(next));

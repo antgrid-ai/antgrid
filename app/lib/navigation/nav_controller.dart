@@ -133,7 +133,10 @@ class NavController extends Notifier<NavState> {
 /// here would double-record one tap and strand a phantom entry back() lands on.
 /// Reads the already-written [selectedTargetProvider], so call AFTER the focus
 /// write.
-void recordProjectFocus(WidgetRef ref) {
+///
+/// Takes the container, not a `WidgetRef`: every caller reaches here after an
+/// await, by which point the row that started the activation may be gone.
+void recordProjectFocus(ProviderContainer ref) {
   if (ref.read(pendingActiveSessionIdProvider) != null) return;
   ref
       .read(navControllerProvider.notifier)

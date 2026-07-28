@@ -105,7 +105,7 @@ class _SessionRowState extends ConsumerState<SessionRow> {
     final sessionId = session.id;
     _exitEdit();
     if (!changed) return;
-    final svc = await sessionsServiceFor(ref, entryId);
+    final svc = await sessionsServiceFor(ref.container, entryId);
     if (svc != null) unawaited(svc.rename(sessionId, name));
   }
 
@@ -215,7 +215,7 @@ class _SessionRowState extends ConsumerState<SessionRow> {
           // Small vertical margin so adjacent rows don't touch.
           margin: const EdgeInsets.symmetric(vertical: 1),
           // Disable activation while editing so taps stay in the field.
-          onTap: _editing ? null : () => _activate(context, ref),
+          onTap: _editing ? null : () => _activate(context, ref.container),
           // Desktop: double-tap a running session (in any warm project) to
           // rename it inline. The row's SerialTap recognizer keeps single-tap
           // selection instant, so wiring this on many rows costs no latency.
@@ -227,7 +227,11 @@ class _SessionRowState extends ConsumerState<SessionRow> {
     );
   }
 
-  Future<void> _activate(BuildContext context, WidgetRef ref) async {
+  /// Takes the [ProviderContainer], never this row's `ref`: activating a cold
+  /// remote project can run for ~30s, and the switch it triggers rebuilds the
+  /// drawer (and pops it on mobile) — this row is routinely disposed before the
+  /// awaits below return, and a `WidgetRef` read past that point throws.
+  Future<void> _activate(BuildContext context, ProviderContainer ref) async {
     if (_activating) return;
     _activating = true;
     try {
@@ -237,7 +241,10 @@ class _SessionRowState extends ConsumerState<SessionRow> {
     }
   }
 
-  Future<void> _activateInner(BuildContext context, WidgetRef ref) async {
+  Future<void> _activateInner(
+    BuildContext context,
+    ProviderContainer ref,
+  ) async {
     final liveId = ref.read(selectedRegistrationIdProvider);
     if (widget.entryId == liveId) {
       // Same project — local fast path. For a same-project remote `liveId`
@@ -249,9 +256,10 @@ class _SessionRowState extends ConsumerState<SessionRow> {
       final svc = ref.read(sessionsServiceProvider);
       if (!session.running) {
         await svc.start(session.id);
-        // start() can outlive this row (drawer closes, list rebuilds); every
-        // ref use below would throw on a disposed ConsumerState.
-        if (!mounted) return;
+        // A different project can be activated while start() is in flight. The
+        // writes below (focus, surface, nav entry) all belong to THIS project,
+        // so drop them rather than commit them against the new focus.
+        if (ref.read(selectedRegistrationIdProvider) != liveId) return;
       }
       // Transcript hydration is driven by AgentTranscriptView.initState (the
       // single per-session chokepoint), not here — see hydrateAttachedChatIfNeeded.
@@ -272,7 +280,7 @@ class _SessionRowState extends ConsumerState<SessionRow> {
     _showFocusedSessionSurface(ref);
   }
 
-  void _showFocusedSessionSurface(WidgetRef ref) {
+  void _showFocusedSessionSurface(ProviderContainer ref) {
     ref.read(workbenchSurfaceProvider.notifier).set(WorkbenchSurface.workspace);
     // Clear any half-filled New Session form (the user may have been on that
     // page). We reset the form directly rather than calling leaveNewSession:
@@ -353,7 +361,7 @@ enum _SessionAction { start, stop, rename, archive, delete }
 /// session); bounded by [timeout] so an unreachable agent can't hang. Returns
 /// null when it can't be reached, so callers no-op rather than misroute.
 Future<SessionsService?> sessionsServiceFor(
-  WidgetRef ref,
+  ProviderContainer ref,
   String entryId, {
   Duration timeout = const Duration(seconds: 10),
 }) async {
@@ -376,7 +384,7 @@ class _SessionMenu extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     return Builder(
       builder: (anchor) {
-        void open() => _openMenu(anchor, ref);
+        void open() => _openMenu(anchor, ref.container);
         // The parent row drives single/double tap through a
         // [SerialTapGestureRecognizer] that eagerly claims the gesture arena on
         // pointer-up (to keep single-tap selection instant). A plain button
@@ -415,7 +423,7 @@ class _SessionMenu extends ConsumerWidget {
     );
   }
 
-  Future<void> _openMenu(BuildContext anchor, WidgetRef ref) async {
+  Future<void> _openMenu(BuildContext anchor, ProviderContainer ref) async {
     final anchorRect = abMenuAnchorRect(anchor);
     if (anchorRect == null) return;
     final action = await showAbMenu<_SessionAction>(
@@ -470,7 +478,7 @@ class _SessionMenu extends ConsumerWidget {
   /// [activeSessionsProvider] because `_stopAllServices()` empties the
   /// session list synchronously during a project switch — a listener would
   /// race that and partially undo the switch.
-  void _disconnectIfEmpty(WidgetRef ref) {
+  void _disconnectIfEmpty(ProviderContainer ref) {
     // Only the focused project's connection/selection is ours to touch — a
     // kebab action on a non-focused warm project must not disconnect the one
     // in view.

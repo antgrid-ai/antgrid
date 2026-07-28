@@ -37,7 +37,7 @@ class NewSessionContent extends ConsumerWidget {
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.escape): () =>
-            leaveNewSession(ref),
+            leaveNewSession(ref.container),
       },
       child: Focus(
         autofocus: true,
@@ -106,9 +106,15 @@ class NewSessionContent extends ConsumerWidget {
     // effects. select: false — the pick is a composer form input, not "open
     // this project": focusing it here flipped the route to WorkspaceShell
     // (visible flash) and unmounted this widget before the target was set.
+    //
+    // The container, not `ref`, for everything past the picker: the OS dialog
+    // can outlive this widget (a desktop resize across the layout breakpoint
+    // tears the canvas down), and a `WidgetRef` read after that throws — yet
+    // the target write below must still land.
+    final container = ref.container;
     final String? id;
     try {
-      id = await openFolderPicker(ref, select: false);
+      id = await openFolderPicker(container, select: false);
     } catch (e) {
       if (context.mounted) {
         showAbSnackBar(context, 'Could not open folder: $e');
@@ -117,13 +123,13 @@ class NewSessionContent extends ConsumerWidget {
     }
     if (id == null) return; // cancelled the OS picker
 
-    final picked = ref
+    final picked = container
         .read(projectsProvider)
         .where((p) => p.projectId == id)
         .firstOrNull;
     if (picked == null) return;
 
-    ref
+    container
         .read(selectedTargetProjectProvider.notifier)
         .set(
           PickerProject(

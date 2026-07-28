@@ -72,7 +72,10 @@ final signedInProvider = Provider<bool?>((ref) {
 /// True when the signed-in user needs Pro for mobile/relay features.
 bool requiresProForMobile(String? tier) => tier == null || tier == 'free';
 
-Future<void> openUpgradeInBrowser(WidgetRef ref, {String? planId}) async {
+Future<void> openUpgradeInBrowser(
+  ProviderContainer ref, {
+  String? planId,
+}) async {
   ref.read(analyticsServiceProvider)?.track(AnalyticsEvents.checkoutOpened);
   final base = ref.read(licenseApiUrlProvider).replaceAll(RegExp(r'/+$'), '');
   final path = planId == null ? '/upgrade' : '/checkout?planId=$planId';

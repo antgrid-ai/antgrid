@@ -534,7 +534,7 @@ final nativeUpgradePlatformProvider = Provider<bool>(
 
 Future<bool> maybeShowCrossPlatformBillingDialog(
   BuildContext context,
-  WidgetRef ref, {
+  ProviderContainer ref, {
   SubscriptionInfo? info,
   PricingCatalog? catalog,
 }) async {
@@ -550,9 +550,11 @@ Future<bool> maybeShowCrossPlatformBillingDialog(
   return true;
 }
 
+/// Takes the container, not a `WidgetRef`: the invalidates below run after the
+/// upgrade route pops, long after the widget that opened it may have gone.
 Future<void> openUpgrade(
   BuildContext context,
-  WidgetRef ref, {
+  ProviderContainer ref, {
   NativeUpgradePlatformCheck? platformCheck,
 }) async {
   final useNative = platformCheck != null

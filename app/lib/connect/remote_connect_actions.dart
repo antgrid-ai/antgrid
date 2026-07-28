@@ -36,7 +36,7 @@ mixin RemoteConnectActions<T extends ConsumerStatefulWidget>
         ref.read(analyticsServiceProvider)?.track(AnalyticsEvents.upgradeDialogShown, props: {'context': 'mobile_gate'});
         final upgrade = await showMobileUpgradeDialog(context);
         if (upgrade && mounted) {
-          await openUpgrade(context, ref);
+          await openUpgrade(context, ref.container);
         }
         return;
       }

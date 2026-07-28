@@ -279,7 +279,7 @@ void main() {
     );
 
     ref.read(newSessionPromptProvider.notifier).set('leftover text');
-    resetNewSessionForm(ref);
+    resetNewSessionForm(ref.container);
     await tester.pump();
 
     expect(ref.read(newSessionPromptProvider), '');

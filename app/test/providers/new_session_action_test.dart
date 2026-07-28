@@ -97,7 +97,7 @@ void main() {
                     key: const Key('go'),
                     onPressed: () async {
                       returnedId = await activateTargetProjectForTest(
-                        ref,
+                        ref.container,
                         const PickerProject(
                           id: _compoundId,
                           name: 'p1',

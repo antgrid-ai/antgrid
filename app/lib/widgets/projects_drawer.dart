@@ -151,7 +151,7 @@ class _NavActions extends ConsumerWidget {
           color: context.antgrid.accent,
           fontSize: AbTokens.fontBody,
           leading: AbIcon(AbIcons.add, size: 12, color: context.antgrid.accent),
-          onTap: () => enterNewSession(ref),
+          onTap: () => enterNewSession(ref.container),
         ),
       ),
     );
@@ -581,7 +581,7 @@ class _AdvertisedProjectRow extends ConsumerWidget {
 
   void _newSessionForProject(BuildContext context, WidgetRef ref) {
     enterNewSessionForRemoteProject(
-      ref,
+      ref.container,
       machineUuid: machineUuid,
       project: project,
     );

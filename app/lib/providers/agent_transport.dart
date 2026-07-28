@@ -52,7 +52,10 @@ final selectedRegistrationIdProvider = Provider<String?>(
 /// and snap the UI back to its loading state ("waiting for agent", empty
 /// sessions list). For a switch to a different id the provider re-runs
 /// naturally because it `ref.watch`es the selection.
-void selectProject(WidgetRef ref, String projectId) {
+///
+/// Takes the container, not a `WidgetRef`: callers reach here after an await
+/// (folder pick, project persist), by which point the widget may be gone.
+void selectProject(ProviderContainer ref, String projectId) {
   final priorId = ref.read(selectedRegistrationIdProvider);
   final target = LocalProject(projectId);
   if (ref.read(selectedTargetProvider) != target) {

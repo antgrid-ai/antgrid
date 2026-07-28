@@ -577,7 +577,10 @@ final newSessionHasValidTargetProvider = Provider<bool>((ref) {
 /// Reset the ephemeral New Session form + selection to defaults. Called on every
 /// exit (Start success / Cancel / Esc) so reopening the page starts clean and a
 /// stale name never attaches to the next session.
-void resetNewSessionForm(WidgetRef ref) {
+///
+/// Takes the container, not a `WidgetRef`: the session-activation callers reach
+/// here after an await, by which point the row that started it may be gone.
+void resetNewSessionForm(ProviderContainer ref) {
   ref.read(newSessionAgentProvider.notifier).set(NewSessionAgent.claudeCode);
   ref.read(newSessionCustomCmdProvider.notifier).set('');
   ref.read(newSessionCliArgsProvider.notifier).set('');
@@ -593,7 +596,7 @@ void resetNewSessionForm(WidgetRef ref) {
 /// Leave the New Session page: reset the form, clear new-session mode, and
 /// record the return to workspace. Callers are the genuine "exit New Session"
 /// sites (Cancel / Esc / back).
-void leaveNewSession(WidgetRef ref) {
+void leaveNewSession(ProviderContainer ref) {
   // Record a history entry ONLY when we were actually on the New Session
   // surface. The read happens before resetNewSessionForm, which never touches
   // workbenchSurfaceProvider, so the captured value reflects the entry surface.
@@ -626,7 +629,10 @@ void leaveNewSession(WidgetRef ref) {
 ///
 /// Best-effort: a missing/loading status (common for a remote target keyed by
 /// bare deviceUuid) yields claudeCode with empty command/args. Never throws.
-void seedNewSessionAgentForTarget(WidgetRef ref, PickerProject? target) {
+void seedNewSessionAgentForTarget(
+  ProviderContainer ref,
+  PickerProject? target,
+) {
   if (ref.read(newSessionAgentTouchedProvider)) return;
   final hello = target == null
       ? null
@@ -658,7 +664,10 @@ void seedNewSessionAgentForTarget(WidgetRef ref, PickerProject? target) {
 /// dropdown; a custom (toolless) `command` selects `custom` and seeds the command
 /// field; `args` seeds the CLI-args field. Falls back to claudeCode when the
 /// session carries neither a tool nor a command.
-void seedNewSessionAgentFromSession(WidgetRef ref, SessionEntry session) {
+void seedNewSessionAgentFromSession(
+  ProviderContainer ref,
+  SessionEntry session,
+) {
   if (ref.read(newSessionAgentTouchedProvider)) return;
   final tool = session.tool;
   final command = session.command;
@@ -685,7 +694,7 @@ void seedNewSessionAgentFromSession(WidgetRef ref, SessionEntry session) {
 /// [enterNewSession] but sources the target from the drawer's advert instead of
 /// the current focus (the tapped project need not be focused, or even warm).
 void enterNewSessionForRemoteProject(
-  WidgetRef ref, {
+  ProviderContainer ref, {
   required String machineUuid,
   required AdvertisedProject project,
 }) {
@@ -730,7 +739,7 @@ void enterNewSessionForRemoteProject(
 /// Matching mirrors the id namespaces the picker uses: local targets key by
 /// `projectId` (direct), remote targets key by the compound registration id
 /// `<deviceUuid>.<projectId>` (matches the focus id directly).
-void enterNewSession(WidgetRef ref) {
+void enterNewSession(ProviderContainer ref) {
   resetNewSessionForm(ref);
   ref.read(workbenchSurfaceProvider.notifier).set(WorkbenchSurface.newSession);
 

@@ -198,7 +198,7 @@ String _localDeviceLabel(List<InventoryAgent> inventory, String? localUuid) {
 /// `session_row.dart`'s `_showFocusedSessionSurface` does.
 Future<void> openRecentSession(
   BuildContext context,
-  WidgetRef ref,
+  ProviderContainer ref,
   RecentSessionRow row,
 ) async {
   // Seed the desired active session BEFORE activation; clear it if the switch
@@ -242,7 +242,7 @@ enum RecentSessionDeleteOutcome { deleted, offline, failed }
 /// Remote → control-plane `sessions.delete` RPC, which works whether the
 /// project is running or stopped.
 Future<RecentSessionDeleteOutcome> deleteRecentSession(
-  WidgetRef ref,
+  ProviderContainer ref,
   RecentSessionRow row,
 ) async {
   final o = row.origin;

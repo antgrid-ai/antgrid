@@ -91,7 +91,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
           confirmLabel: 'Manage subscription',
         );
         if (!mounted) return;
-        if (go) await openUpgradeInBrowser(ref);
+        if (go) await openUpgradeInBrowser(ref.container);
       case DeleteAccountResult.error:
         showAbSnackBar(
           context,
@@ -138,7 +138,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                     body: [
                       const SizedBox(height: AbTokens.space8),
                       InkWell(
-                        onTap: () => openUpgrade(context, ref),
+                        onTap: () => openUpgrade(context, ref.container),
                         borderRadius: AbTokens.borderRadius,
                         child: Padding(
                           padding: const EdgeInsets.symmetric(
@@ -155,7 +155,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                               const Spacer(),
                               AbIconButton(
                                 icon: AbIcons.chevronRight,
-                                onTap: () => openUpgrade(context, ref),
+                                onTap: () => openUpgrade(context, ref.container),
                               ),
                             ],
                           ),

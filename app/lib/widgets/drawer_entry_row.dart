@@ -337,6 +337,9 @@ class _RemoveButtonState extends ConsumerState<_RemoveButton> {
 
   Future<void> _confirmRemove({required bool isLocal}) async {
     final entry = widget.entry;
+    // Captured before the dialog await: the removal below must still run if the
+    // drawer rebuilt this row away while the confirm was open.
+    final container = ref.container;
     final ok = await AbConfirmDialog.show(
       context: context,
       title: isLocal
@@ -356,9 +359,9 @@ class _RemoveButtonState extends ConsumerState<_RemoveButton> {
           // `ProjectsNotifier.remove` owns the local teardown: it stops the
           // project's sessions/terminals, disposes its services + transport,
           // then forgets the record.
-          await ref.read(projectsProvider.notifier).remove(e.id);
+          await container.read(projectsProvider.notifier).remove(e.id);
         case RemoteAgentEntry e:
-          await ref
+          await container
               .read(pairedAgentProvider.notifier)
               .forgetMachine(e.agent.agentDeviceId);
         case InventoryAgentEntry _:
@@ -381,7 +384,7 @@ class _RemoveButtonState extends ConsumerState<_RemoveButton> {
 /// to restore the previous selection.
 Future<bool> selectRemoteAgent(
   BuildContext context,
-  WidgetRef ref,
+  ProviderContainer ref,
   String agentDeviceId,
 ) async {
   try {
@@ -417,7 +420,7 @@ Future<bool> selectRemoteAgent(
 /// in-flight connect.
 Future<bool> ensureRemoteOnline(
   BuildContext context,
-  WidgetRef ref,
+  ProviderContainer ref,
   String agentDeviceId,
 ) async {
   if (ref.read(agentReachabilityProvider) != AgentReachability.offline) {
@@ -433,9 +436,15 @@ Future<bool> ensureRemoteOnline(
 /// updates `lastOpenedAt` + persists + calls `selectProject`; for
 /// remote entries it calls [selectRemoteAgent] and restores the prior local
 /// selection on failure.
+///
+/// Takes the [ProviderContainer], never a caller's `WidgetRef`: activation is
+/// the thing that tears the caller down (the switch rebuilds the drawer, and
+/// pops it on mobile), yet the target save/restore below must still land — and
+/// a cold remote open can run for ~30s before it does. `context` stays a widget
+/// context, but only ever behind a `context.mounted` guard for UI.
 Future<bool> activateDrawerEntryById(
   BuildContext context,
-  WidgetRef ref,
+  ProviderContainer ref,
   String entryId,
 ) async {
   final entries = ref.read(drawerEntriesProvider);
@@ -529,7 +538,7 @@ Future<bool> activateDrawerEntryById(
 /// regId. Returns false (caller treats as a no-op) when the id isn't a compound
 /// id or the project isn't currently warm — this path never opens a cold
 /// project, it only switches focus to one whose transport is already live.
-bool _focusOpenRemoteProject(WidgetRef ref, String regId) {
+bool _focusOpenRemoteProject(ProviderContainer ref, String regId) {
   if (!regId.contains('.')) return false;
   final isOpen = ref.read(projectSessionRegistryProvider).contains(regId);
   if (!isOpen) return false;
@@ -550,7 +559,7 @@ bool _focusOpenRemoteProject(WidgetRef ref, String regId) {
 /// branches.
 Future<bool> _openColdRemoteProject(
   BuildContext context,
-  WidgetRef ref,
+  ProviderContainer ref,
   String regId,
 ) async {
   if (!regId.contains('.')) return false;
@@ -616,18 +625,24 @@ class _NewSessionButtonState extends ConsumerState<_NewSessionButton> {
   }
 
   Future<void> _newSessionForEntry() async {
+    // The container, not `ref`: activating + warming the project outlives this
+    // row (the entry is usually gone once the switch lands), and a `WidgetRef`
+    // read past that point throws.
+    final container = ref.container;
     final entryId = widget.entry.id;
     final machineUuid = widget.entry.machineUuid;
     if (machineUuid != null) {
       // A machine row is a control-plane container, not a project transport.
       // Route to its project picker instead of focusing the bare deviceUuid as
       // a legacy remote project, which would tear down the control plane.
-      enterNewSession(ref);
-      ref.read(selectedSourceIdProvider.notifier).set('machine:$machineUuid');
-      ref.read(selectedTargetProjectProvider.notifier).set(null);
+      enterNewSession(container);
+      container
+          .read(selectedSourceIdProvider.notifier)
+          .set('machine:$machineUuid');
+      container.read(selectedTargetProjectProvider.notifier).set(null);
       return;
     }
-    final liveId = ref.read(selectedRegistrationIdProvider);
+    final liveId = container.read(selectedRegistrationIdProvider);
     final isLive = entryId == liveId;
     try {
       // Activate the entry's project (select local / reconnect remote) unless
@@ -635,10 +650,14 @@ class _NewSessionButtonState extends ConsumerState<_NewSessionButton> {
       // that project preselected so the user picks an agent (no cold-start).
       // Creation itself is owned by `startNewSession` in `new_session_action.dart`.
       if (!isLive) {
-        final ok = await activateDrawerEntryById(context, ref, entryId);
+        final ok = await activateDrawerEntryById(context, container, entryId);
         if (!ok) return; // activation failed; snackbar already shown
       } else if (widget.entry case RemoteAgentEntry e) {
-        if (!await ensureRemoteOnline(context, ref, e.agent.agentDeviceId)) {
+        if (!await ensureRemoteOnline(
+          context,
+          container,
+          e.agent.agentDeviceId,
+        )) {
           return;
         }
       }
@@ -646,19 +665,19 @@ class _NewSessionButtonState extends ConsumerState<_NewSessionButton> {
       // Activation resolves the focus id (a remote entry's id may differ from
       // the live `agentDeviceId` it reconnects/auto-pairs to), so read it back
       // rather than reusing `entryId`.
-      final pid = ref.read(selectedRegistrationIdProvider);
+      final pid = container.read(selectedRegistrationIdProvider);
       if (pid == null) return;
 
       // Warm the per-project ProjectSession (transport + services) so the
       // New Session page — and the subsequent startNewSession — find a ready
       // session rather than racing the async factory.
-      await ref.read(projectSessionProvider(pid).future);
-      if (ref.read(selectedRegistrationIdProvider) != pid) return;
+      await container.read(projectSessionProvider(pid).future);
+      if (container.read(selectedRegistrationIdProvider) != pid) return;
 
       // Route to the New Session page with this project preselected (it is the
       // current focus, so enterNewSession reverse-looks-it-up as the target and
       // seeds the agent dropdown from its agent:hello).
-      enterNewSession(ref);
+      enterNewSession(container);
     } catch (e) {
       if (mounted) {
         showAbSnackBar(context, 'New session failed: $e');

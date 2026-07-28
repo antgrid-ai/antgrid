@@ -147,7 +147,7 @@ class _NoSessionEmptyState extends ConsumerWidget {
         title: 'No active session',
         action: AbButton(
           label: 'New session',
-          onTap: () => enterNewSession(ref),
+          onTap: () => enterNewSession(ref.container),
         ),
       ),
     );

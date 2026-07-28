@@ -41,7 +41,7 @@ void main() {
       // Sanity: no history yet.
       expect(capturedRef.read(navControllerProvider).current, isNull);
 
-      leaveNewSession(capturedRef);
+      leaveNewSession(capturedRef.container);
       await tester.pump();
 
       // Surface must now be workspace.
@@ -83,7 +83,7 @@ void main() {
       // No history yet.
       expect(capturedRef.read(navControllerProvider).current, isNull);
 
-      leaveNewSession(capturedRef);
+      leaveNewSession(capturedRef.container);
       await tester.pump();
 
       // Surface remains workspace.

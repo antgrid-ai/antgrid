@@ -64,7 +64,7 @@ void main() {
       final ref = await pumpRefHost(tester);
 
       final id = await tester.runAsync(
-        () => registerPickedFolder(ref, folder, select: false),
+        () => registerPickedFolder(ref.container, folder, select: false),
       );
 
       expect(id, isNotNull);
@@ -86,7 +86,9 @@ void main() {
   ) async {
     final ref = await pumpRefHost(tester);
 
-    final id = await tester.runAsync(() => registerPickedFolder(ref, folder));
+    final id = await tester.runAsync(
+      () => registerPickedFolder(ref.container, folder),
+    );
 
     expect(id, isNotNull);
     expect(ref.read(selectedRegistrationIdProvider), id);

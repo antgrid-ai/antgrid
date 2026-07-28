@@ -62,7 +62,7 @@ void main() {
                   children: [
                     GestureDetector(
                       key: const Key('select'),
-                      onTap: () => selectProject(ref, 'proj-1'),
+                      onTap: () => selectProject(ref.container, 'proj-1'),
                       child: const Text('select'),
                     ),
                     Text('${ref.watch(selectedTargetProvider)}'),

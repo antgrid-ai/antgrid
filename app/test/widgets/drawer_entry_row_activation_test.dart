@@ -100,7 +100,7 @@ Future<void> _pumpActivationHarness(
                 key: const Key('activate'),
                 onPressed: () {
                   ref.read(selectedTargetProvider.notifier).set(priorTarget);
-                  activateDrawerEntryById(context, ref, entry.id);
+                  activateDrawerEntryById(context, ref.container, entry.id);
                 },
                 child: const Text('activate'),
               );
@@ -232,7 +232,7 @@ void main() {
                   return TextButton(
                     key: const Key('go'),
                     onPressed: () =>
-                        activateDrawerEntryById(context, ref, 'M.p1'),
+                        activateDrawerEntryById(context, ref.container, 'M.p1'),
                     child: const Text('go'),
                   );
                 },

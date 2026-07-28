@@ -135,9 +135,9 @@ class AccountFooter extends ConsumerWidget {
     final targetContext = scaffoldContext ?? context;
     if (!targetContext.mounted) return;
     if (Platform.isIOS || Platform.isAndroid) {
-      await openUpgrade(targetContext, ref);
+      await openUpgrade(targetContext, ref.container);
     } else {
-      await openUpgradeInBrowser(ref);
+      await openUpgradeInBrowser(ref.container);
     }
   }
 

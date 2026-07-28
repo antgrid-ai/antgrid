@@ -71,7 +71,7 @@ class _RecentSessionRowWidgetState
       ),
       row.session.running,
     );
-    void onTap() => openRecentSession(context, ref, row);
+    void onTap() => openRecentSession(context, ref.container, row);
 
     final content = Container(
       color: _hovered ? t.bgHover : null,
@@ -132,12 +132,15 @@ class _RecentSessionRowWidgetState
   }
 
   Future<void> _confirmDelete(BuildContext context, WidgetRef ref) async {
+    // Captured before the dialog await: a confirmed delete must still run if
+    // this row was rebuilt away while the dialog was open.
+    final container = ref.container;
     final confirmed = await showDeleteRecentSessionDialog(
       context,
       row.session.name,
     );
     if (!confirmed) return;
-    final outcome = await deleteRecentSession(ref, row);
+    final outcome = await deleteRecentSession(container, row);
     if (!context.mounted) return;
     switch (outcome) {
       case RecentSessionDeleteOutcome.deleted:

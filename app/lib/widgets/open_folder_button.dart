@@ -27,7 +27,7 @@ bool _isDesktopPlatform() =>
 /// 2. A persisted anonymous UUID in SharedPreferences (key `antgrid.local_host_uuid`),
 ///    lazily generated with UUIDv4 the first time. This covers local-only
 ///    (no sign-in) users and ensures `isLocalFor` keeps working across restarts.
-Future<String> _resolveLocalHostUuid(WidgetRef ref) async {
+Future<String> _resolveLocalHostUuid(ProviderContainer ref) async {
   final record = await ref.read(keychainDeviceStoreProvider).read();
   if (record != null) return record.deviceUuid;
 
@@ -58,7 +58,10 @@ Future<String> _resolveLocalHostUuid(WidgetRef ref) async {
 /// Pass false when picking a folder as a form input (the composer's project
 /// chip): focusing it from the New Session landing flips AppShell's route to
 /// WorkspaceShell mid-flow, unmounting the caller before it can act.
-Future<String?> openFolderPicker(WidgetRef ref, {bool select = true}) async {
+Future<String?> openFolderPicker(
+  ProviderContainer ref, {
+  bool select = true,
+}) async {
   if (!_isDesktopPlatform()) return null;
   final folder = await getDirectoryPath();
   if (folder == null) return null;
@@ -69,7 +72,7 @@ Future<String?> openFolderPicker(WidgetRef ref, {bool select = true}) async {
 /// for a known one) and returns its id. Focuses the project only when
 /// [select] is true — see [openFolderPicker] for why callers opt out.
 Future<String?> registerPickedFolder(
-  WidgetRef ref,
+  ProviderContainer ref,
   String folder, {
   bool select = true,
 }) async {
@@ -103,7 +106,10 @@ class OpenFolderButton extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     if (!_isDesktopPlatform()) return const SizedBox.shrink();
-    return AbButton(label: 'Open Folder', onTap: () => openFolderPicker(ref));
+    return AbButton(
+      label: 'Open Folder',
+      onTap: () => openFolderPicker(ref.container),
+    );
   }
 }
 

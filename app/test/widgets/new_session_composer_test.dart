@@ -75,7 +75,7 @@ String _selectedMode(WidgetTester tester) => tester
 
 Widget _host({
   required List<Override> overrides,
-  Future<void> Function(WidgetRef ref)? submit,
+  Future<void> Function(ProviderContainer ref)? submit,
   VoidCallback? onOpenFolder,
   Widget Function(Widget composer)? wrap,
 }) {

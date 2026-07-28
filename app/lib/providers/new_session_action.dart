@@ -72,7 +72,7 @@ Never throwProjectStartFailure(
 /// and lets the connection supervisor bring that machine's socket up.
 ///
 /// Throws on activation/create failure; callers surface the error.
-Future<void> startNewSession(WidgetRef ref) async {
+Future<void> startNewSession(ProviderContainer ref) async {
   final target = ref.read(selectedTargetProjectProvider);
   if (target == null) return;
   ref.read(newSessionStartInFlightProvider.notifier).set(true);
@@ -161,7 +161,7 @@ Future<void> startNewSession(WidgetRef ref) async {
 /// target/return-id contract can be asserted in isolation.
 @visibleForTesting
 Future<String> activateTargetProjectForTest(
-  WidgetRef ref,
+  ProviderContainer ref,
   PickerProject target,
 ) => _activateTargetProject(ref, target);
 
@@ -170,7 +170,7 @@ Future<String> activateTargetProjectForTest(
 /// `selectedRegistrationIdProvider` resolves to (local projectId or remote
 /// agentDeviceId), so the caller can await the right [projectSessionProvider].
 Future<String> _activateTargetProject(
-  WidgetRef ref,
+  ProviderContainer ref,
   PickerProject target,
 ) async {
   if (target.isLocal) {
@@ -214,7 +214,7 @@ Future<String> _activateTargetProject(
 /// transport for regId opens its own project socket; the machine keypair
 /// (baseDeviceUuid(regId) == machineUuid) signs its handshake.
 Future<String> openRemoteProjectForActivation(
-  WidgetRef ref, {
+  ProviderContainer ref, {
   required String machineUuid,
   required String projectId,
 }) async {
