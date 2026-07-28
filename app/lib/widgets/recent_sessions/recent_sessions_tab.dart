@@ -13,6 +13,7 @@ import '../../models/recent_session_row.dart';
 import '../../providers/project_work_status.dart';
 import '../../providers/recent_sessions.dart';
 import '../../providers/supervisor_status.dart';
+import '../../services/control_plane_client.dart';
 import '../ab_status_helpers.dart';
 import 'recent_session_row_widget.dart';
 

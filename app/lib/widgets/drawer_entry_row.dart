@@ -1,11 +1,11 @@
 // app/lib/widgets/drawer_entry_row.dart
 import 'dart:async';
 
-import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../connection/supervisor_state.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
@@ -39,7 +39,7 @@ import '../providers/project_work_status.dart';
 import '../providers/projects.dart';
 import '../providers/providers.dart';
 import '../providers/recent_agents.dart';
-import '../providers/relay_connection.dart';
+import '../providers/supervisor_status.dart';
 import '../screens/upgrade_screen.dart';
 import '../services/control_plane_client.dart';
 import 'ab_status_helpers.dart';
@@ -668,8 +668,8 @@ class _NewSessionButtonState extends ConsumerState<_NewSessionButton> {
 }
 
 /// Online/offline dot for a remote machine header. Peek-only
-/// ([machineConnectionPhaseProvider] never dials), so a collapsed-but-healthy
-/// machine isn't mislabelled: a null phase (never connected → unknown) renders
+/// ([supervisorStatusProvider] never dials), so a collapsed-but-healthy
+/// machine isn't mislabelled: a null status (never connected → unknown) renders
 /// nothing, and the dot appears once the socket is dialed (on expand / refresh).
 class _MachineOnlineDot extends ConsumerWidget {
   const _MachineOnlineDot({required this.machineUuid});
@@ -678,17 +678,17 @@ class _MachineOnlineDot extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final phase = ref.watch(machineConnectionPhaseProvider(machineUuid)).value;
-    if (phase == null) return const SizedBox.shrink();
-    final (tone, _) = connectionDisplayInfo(phase);
-    final online = phase == RelayConnectionState.paired;
+    final status = ref.watch(supervisorStatusProvider(machineUuid)).value;
+    if (status == null) return const SizedBox.shrink();
+    final (tone, _) = connectionDisplayInfo(status);
+    final online = status is Connected;
     return Padding(
       padding: const EdgeInsets.only(right: AbTokens.space6),
       child: AbStatusDot(
         tone: tone,
         style: online ? AbDotStyle.filled : AbDotStyle.hollow,
-        // Pulse while mid-handshake; a settled offline (disconnected) dot holds.
-        pulse: !online && phase != RelayConnectionState.disconnected,
+        // Pulse while mid-handshake; a settled offline (released) dot holds.
+        pulse: !online && status is! Released,
       ),
     );
   }
