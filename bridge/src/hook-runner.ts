@@ -216,17 +216,23 @@ async function buildPosts(
           },
         });
       }
-      if (!input.message || !/waiting/i.test(input.message)) {
-        posts.push({
-          port,
-          path: "/notify",
-          body: {
-            type: "permission_request",
-            ...(terminalId ? { terminalId } : {}),
-            ...(input.message ? { message: input.message } : {}),
-          },
-        });
-      }
+      // Claude Code fires this same "notification" hook, with the identical
+      // "Claude is waiting for your input" message, both for a genuine mid-turn
+      // block (e.g. a question tool with no stop event yet) and for its generic
+      // post-completion idle nudge. We can't tell those apart from the message
+      // alone, so tag it "awaiting_input" rather than "permission_request" and
+      // let work-status.ts's turn-state-aware reduction decide whether it's a
+      // live call-to-action or a stale nudge to ignore.
+      const isWaitingNudge = !!input.message && /waiting/i.test(input.message);
+      posts.push({
+        port,
+        path: "/notify",
+        body: {
+          type: isWaitingNudge ? "awaiting_input" : "permission_request",
+          ...(terminalId ? { terminalId } : {}),
+          ...(input.message ? { message: input.message } : {}),
+        },
+      });
     }
   } else if (invocation.agent === "codex") {
     if (invocation.event === "after-agent") {

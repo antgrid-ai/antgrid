@@ -29,7 +29,8 @@ export const initialWorkStatus: WorkStatusState = {
 function derive(lastNotification: NotificationType | null, runningCount: number): WorkStatus {
   if (runningCount === 0) return "done";
   switch (lastNotification) {
-    case "permission_request": return "attention";
+    case "permission_request":
+    case "awaiting_input": return "attention";
     case "error": return "error";
     case "task_complete":
     case "idle": return "done";
@@ -57,17 +58,26 @@ export function reduceWorkStatus(prev: WorkStatusState, msg: AbMessage): WorkSta
   let { lastNotification, runningCount } = prev;
   if (msg.type === "notification:push") {
     if (msg.notificationType === lastNotification) return prev;
+    // "awaiting_input" fires from the same idle-timeout signal whether the
+    // agent is genuinely blocked mid-turn (no prior task_complete this turn)
+    // or just idling after the turn already ended — the hook can't tell those
+    // apart. Once a turn has resolved to task_complete, a later awaiting_input
+    // ping is the stale post-completion nudge: ignore it so a finished session
+    // doesn't flip back to "attention" just because the user hasn't looked yet.
+    if (msg.notificationType === "awaiting_input" && lastNotification === "task_complete") return prev;
     lastNotification = msg.notificationType;
   } else if (msg.type === "session:updated") {
     const running = msg.sessions.filter((s) => s.running && !s.archived).length;
     if (running === runningCount) return prev;
     // A newly-started session is a fresh turn of work — clear stale done-type
     // turn-end notifications (task_complete, idle) so status returns to
-    // "working". permission_request and error are LIVE call-to-action signals
-    // for an already-running session; a new session starting does not resolve
-    // an outstanding permission prompt or clear an error on a sibling session.
+    // "working". permission_request, awaiting_input, and error are LIVE
+    // call-to-action signals for an already-running session; a new session
+    // starting does not resolve an outstanding prompt or clear an error/block
+    // on a sibling session.
     if (running > runningCount &&
         lastNotification !== "permission_request" &&
+        lastNotification !== "awaiting_input" &&
         lastNotification !== "error") {
       lastNotification = null;
     }

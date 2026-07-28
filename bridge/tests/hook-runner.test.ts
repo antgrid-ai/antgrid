@@ -143,20 +143,21 @@ describe("Claude hooks", () => {
     expect(notify?.body).toEqual({ type: "task_complete", agent: "claude", transcriptPath: "/tmp/t.jsonl" });
   });
 
-  test("waiting notification suppresses duplicate notification but keeps handler event", async () => {
+  test("waiting notification posts awaiting_input, not permission_request, plus the handler event", async () => {
     const h = harness({
       agent: "claude",
       event: "notification",
       stdin: JSON.stringify({ message: "Claude is waiting for your input" }),
     });
     await h.run();
-    expect(h.posts).toEqual([
+    expect(h.posts).toEqual(expect.arrayContaining([
+      { port: 43123, path: "/notify", body: { type: "awaiting_input", terminalId: "term-1", message: "Claude is waiting for your input" } },
       {
         port: 43123,
         path: "/handler-event",
         body: { terminalId: "term-1", agent: "claude", event: "awaiting_input", transcriptPath: "", sessionId: "" },
       },
-    ]);
+    ]));
   });
 });
 

@@ -41,6 +41,30 @@ test("task_complete / idle resolve to done even while a session is alive", () =>
   expect(fold([sessions(1), push("idle")]).status).toBe("done");
 });
 
+test("awaiting_input yields attention when the turn hasn't resolved yet (a genuine mid-turn block)", () => {
+  expect(fold([sessions(1), push("awaiting_input")]).status).toBe("attention");
+});
+
+test("awaiting_input after task_complete is a stale nudge and is ignored (stays done)", () => {
+  const done = fold([sessions(1), push("task_complete")]);
+  expect(done.status).toBe("done");
+  const after = reduceWorkStatus(done, push("awaiting_input"));
+  expect(after.status).toBe("done");
+  expect(after).toBe(done);
+});
+
+test("a new session does NOT clear an active awaiting_input (sibling session still blocked)", () => {
+  const blocked = fold([sessions(1), push("awaiting_input")]);
+  expect(blocked.status).toBe("attention");
+  expect(reduceWorkStatus(blocked, sessions(2)).status).toBe("attention");
+});
+
+test("a turn-start clears a stale awaiting_input (question answered, work resumed)", () => {
+  const blocked = fold([sessions(1), push("awaiting_input")]);
+  expect(blocked.status).toBe("attention");
+  expect(turnStart(blocked).status).toBe("working");
+});
+
 test("attention > error > working precedence: a fresh permission wins over a live session", () => {
   // error then permission_request: latest turn-end signal wins.
   expect(fold([sessions(1), push("error"), push("permission_request")]).status).toBe("attention");

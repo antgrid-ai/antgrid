@@ -2,6 +2,7 @@ import type { AbMessage } from "../protocol";
 
 const AGENT_LABELS: Record<string, string> = {
   permission_request: "Permission needed",
+  awaiting_input: "Needs your input",
   task_complete: "Task complete",
   idle: "Waiting for you",
   error: "Agent error",

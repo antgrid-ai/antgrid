@@ -517,7 +517,7 @@ const CommandDoneMessage = BaseMessage.extend({
   exitCode: z.number().int().nullable(),
 });
 
-export const NotificationTypeSchema = z.enum(["task_complete", "permission_request", "idle", "error"]);
+export const NotificationTypeSchema = z.enum(["task_complete", "permission_request", "awaiting_input", "idle", "error"]);
 export type NotificationType = z.infer<typeof NotificationTypeSchema>;
 
 const NotificationPushMessage = BaseMessage.extend({
