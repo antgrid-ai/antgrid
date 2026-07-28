@@ -232,6 +232,58 @@ class _SessionsHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.antgrid;
+
+    final title = Text(
+      'Sessions · $total total',
+      overflow: TextOverflow.ellipsis,
+      style: AbTokens.sansStyle(
+        fontSize: AbTokens.fontMd,
+        color: t.textPrimary,
+        fontWeight: FontWeight.w600,
+      ),
+    );
+
+    final chips = [
+      _GroupChip(
+        label: 'Machine',
+        selected: groupBy == _RecentGroupBy.machine,
+        onTap: () => onGroupBy(_RecentGroupBy.machine),
+      ),
+      const SizedBox(width: AbTokens.space6),
+      _GroupChip(
+        label: 'Project',
+        selected: groupBy == _RecentGroupBy.project,
+        onTap: () => onGroupBy(_RecentGroupBy.project),
+      ),
+      const SizedBox(width: AbTokens.space6),
+      _GroupChip(
+        label: 'Status',
+        selected: groupBy == _RecentGroupBy.status,
+        onTap: () => onGroupBy(_RecentGroupBy.status),
+      ),
+    ];
+
+    final badges = Wrap(
+      alignment: WrapAlignment.end,
+      spacing: AbTokens.space8,
+      runSpacing: AbTokens.space6,
+      children: [
+        for (final s in _statusOrder)
+          if ((counts[s] ?? 0) > 0)
+            _SummaryBadge(
+              label: '${counts[s]} ${workStatusLabel(s).toLowerCase()}',
+              color: _color(context, s),
+              // Pulse the live states (working + attention) so activity
+              // registers without reading the numbers.
+              live:
+                  s == AgentWorkStatus.working || s == AgentWorkStatus.attention,
+              tone: s,
+            ),
+      ],
+    );
+
+    final isNarrow = MediaQuery.sizeOf(context).width < 600;
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         AbTokens.space16,
@@ -242,67 +294,30 @@ class _SessionsHeader extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
-            children: [
-              Expanded(
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    'Sessions · $total total',
-                    overflow: TextOverflow.ellipsis,
-                    style: AbTokens.sansStyle(
-                      fontSize: AbTokens.fontMd,
-                      color: t.textPrimary,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
+          if (isNarrow) ...[
+            Row(
+              children: [
+                Expanded(child: Align(alignment: Alignment.centerLeft, child: title)),
+                const SizedBox(width: AbTokens.space10),
+                badges,
+              ],
+            ),
+            const SizedBox(height: AbTokens.space8),
+            Row(mainAxisAlignment: MainAxisAlignment.end, children: chips),
+          ] else
+            Row(
+              children: [
+                Expanded(
+                  child: Align(alignment: Alignment.centerLeft, child: title),
                 ),
-              ),
-              const SizedBox(width: AbTokens.space10),
-              _GroupChip(
-                label: 'Machine',
-                selected: groupBy == _RecentGroupBy.machine,
-                onTap: () => onGroupBy(_RecentGroupBy.machine),
-              ),
-              const SizedBox(width: AbTokens.space6),
-              _GroupChip(
-                label: 'Project',
-                selected: groupBy == _RecentGroupBy.project,
-                onTap: () => onGroupBy(_RecentGroupBy.project),
-              ),
-              const SizedBox(width: AbTokens.space6),
-              _GroupChip(
-                label: 'Status',
-                selected: groupBy == _RecentGroupBy.status,
-                onTap: () => onGroupBy(_RecentGroupBy.status),
-              ),
-              const SizedBox(width: AbTokens.space10),
-              Expanded(
-                child: Align(
-                  alignment: Alignment.centerRight,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    spacing: AbTokens.space8,
-                    children: [
-                      for (final s in _statusOrder)
-                        if ((counts[s] ?? 0) > 0)
-                          _SummaryBadge(
-                            label:
-                                '${counts[s]} ${workStatusLabel(s).toLowerCase()}',
-                            color: _color(context, s),
-                            // Pulse the live states (working + attention) so
-                            // activity registers without reading the numbers.
-                            live:
-                                s == AgentWorkStatus.working ||
-                                s == AgentWorkStatus.attention,
-                            tone: s,
-                          ),
-                    ],
-                  ),
+                const SizedBox(width: AbTokens.space10),
+                ...chips,
+                const SizedBox(width: AbTokens.space10),
+                Expanded(
+                  child: Align(alignment: Alignment.centerRight, child: badges),
                 ),
-              ),
-            ],
-          ),
+              ],
+            ),
           const SizedBox(height: AbTokens.space8),
           const AbSeparator.horizontal(),
         ],

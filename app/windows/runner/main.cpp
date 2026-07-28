@@ -6,11 +6,47 @@
 #include "utils.h"
 #include "app_links/app_links_plugin_c_api.h"
 
+// Window class + title alone aren't enough to identify "our" instance: every
+// antgrid build (dev debug build, a locally installed release, the packaged
+// MSIX) produces a window with this same class and title, so a naive
+// FindWindow match forwards app-links into — and exits in favor of — a
+// window owned by a completely different build. Require the found window's
+// owning process to be running from this exact executable, so distinct
+// builds/installs can coexist (e.g. developing antgrid while the installed
+// build stays open).
+bool IsSameExecutable(HWND hwnd) {
+  DWORD pid = 0;
+  ::GetWindowThreadProcessId(hwnd, &pid);
+  if (pid == 0) {
+    return false;
+  }
+
+  HANDLE process = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (!process) {
+    return false;
+  }
+
+  wchar_t other_path[MAX_PATH];
+  DWORD other_path_len = MAX_PATH;
+  BOOL got_path = ::QueryFullProcessImageNameW(process, 0, other_path, &other_path_len);
+  ::CloseHandle(process);
+  if (!got_path) {
+    return false;
+  }
+
+  wchar_t self_path[MAX_PATH];
+  if (::GetModuleFileNameW(nullptr, self_path, MAX_PATH) == 0) {
+    return false;
+  }
+
+  return ::_wcsicmp(self_path, other_path) == 0;
+}
+
 bool SendAppLinkToInstance(const std::wstring& title) {
   // Find our exact window
   HWND hwnd = ::FindWindow(L"FLUTTER_RUNNER_WIN32_WINDOW", title.c_str());
 
-  if (hwnd) {
+  if (hwnd && IsSameExecutable(hwnd)) {
     // Dispatch new link to current window
     SendAppLink(hwnd);
 
