@@ -17,6 +17,7 @@ import '../providers/relay_connection.dart';
 import '../providers/ui_attention_providers.dart';
 import '../services/control_plane_client.dart';
 import '../storage/cached_sessions_store.dart';
+import '../launcher/host_control_client.dart';
 import '../util/ab_log.dart';
 import 'new_session_screen.dart';
 import 'workspace_shell.dart';
@@ -214,10 +215,44 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
   final Map<String, ProviderSubscription<AsyncValue<ControlPlaneState>>>
   _labelSubs = {};
 
-  // entryIds ('$machineUuid.$projectId') with an in-flight listSessions seed
-  // fetch, so a slow reply isn't re-requested on every subsequent advert
-  // emission for the same never-cached project. See _seedNeverSyncedSessions.
+  // Periodic poll of the HOST CONTROL PLANE (desktop only) for LOCAL project
+  // work status. Feeds bare-key entries into remoteProjectStatusProvider so the
+  // drawer shows working/attention/error/done for projects started from mobile
+  // without a loopback connection from the Windows app.
+  Timer? _hostStatusTimer;
+
+  // True while a _pollLocalProjectStatus round-trip is in flight, so a tick
+  // that fires before the previous one returns is skipped rather than risking
+  // a slower, earlier-started poll overwriting a faster, later one with stale
+  // statuses (setLocalStatuses is a full replace, not a merge).
+  bool _pollingLocalStatus = false;
+
+  // entryIds ('$machineUuid.$projectId') with an in-flight listSessions peek,
+  // so a slow reply isn't re-requested on every subsequent advert emission for
+  // the same project. See _peekProjectSessions.
   final Set<String> _seedingSessions = {};
+
+  // Last-seen per-project advert `running`, keyed by entryId. A project-level
+  // run-state transition re-peeks that project's session list so cached Recent /
+  // sidebar rows track the agent's live work without a manual pull-to-refresh.
+  final Map<String, bool> _lastAdvertRunning = {};
+
+  // Last-seen per-project advert work status, keyed by entryId. `running`
+  // (dialability) flips only on core register/deregister, NOT when an
+  // already-registered agent starts or finishes a turn — so run-state alone
+  // misses working↔done↔attention transitions. Re-peeking on a status change
+  // refreshes the cached per-session `running` flags a NON-focused Recent row
+  // reads (the focused project overlays its live state directly, see
+  // recentSessionsProvider). Absent key = never observed (first advert).
+  final Map<String, AgentWorkStatus?> _lastAdvertStatus = {};
+
+  // Last-seen per-project advert running-session count, keyed by entryId. A
+  // count change is the bridge's "the session list actually changed" signal —
+  // it fires when a session starts/exits on the DESKTOP (done→working there is
+  // filtered out of _lastAdvertStatus's trigger, and `running` never moves), so
+  // without this the Recent row for a desktop-started session stays stale until
+  // attention/error or a manual pull-to-refresh. Null value = older bridge.
+  final Map<String, int?> _lastAdvertRunningCount = {};
 
   @override
   void initState() {
@@ -257,6 +292,14 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
     ref.listenManual<void>(relayConnectionChangesProvider, (prev, next) {
       if (mounted) _syncLabelSubscriptions();
     });
+    // Desktop only: periodically poll the host control plane for local project
+    // work status. Mobile has no local host; skip to avoid pointless reads.
+    if (!isMobilePlatform) {
+      _hostStatusTimer = Timer.periodic(
+        const Duration(seconds: 2),
+        (_) { if (mounted) _pollLocalProjectStatus(); },
+      );
+    }
   }
 
   /// Keep [_labelSubs] in lockstep with the manager's currently-open
@@ -273,6 +316,22 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
     for (final uuid in _labelSubs.keys.toList()) {
       if (!openIds.contains(uuid)) {
         _labelSubs.remove(uuid)?.close();
+        // Socket closed → its advert can't refresh; drop the machine's live
+        // status so rows fall back to session-running instead of showing stale
+        // work state. Labels intentionally persist; status is cleared from both
+        // the live provider and the on-disk cache so a cold boot after a
+        // disconnect doesn't re-seed stale badges for an offline machine.
+        ref
+            .read(remoteProjectStatusProvider.notifier)
+            .setMachineStatuses(uuid, const {});
+        ref.read(cachedSessionsStoreProvider).clearStatusesForMachine('$uuid.');
+        // Clear stale advert-delta tracking so a reconnect triggers a fresh
+        // re-peek regardless of whether the new advert matches the pre-disconnect
+        // snapshot (the common case — agent didn't stop during the gap).
+        final prefix = '$uuid.';
+        _lastAdvertRunning.removeWhere((k, _) => k.startsWith(prefix));
+        _lastAdvertStatus.removeWhere((k, _) => k.startsWith(prefix));
+        _lastAdvertRunningCount.removeWhere((k, _) => k.startsWith(prefix));
       }
     }
     for (final uuid in openIds) {
@@ -290,49 +349,101 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
     if (state == null) return;
     final store = ref.read(cachedSessionsStoreProvider);
     final labels = ref.read(remoteProjectLabelsProvider.notifier);
-    for (final ap in state.projects) {
-      final label = ap.label;
-      if (label == null || label.isEmpty) continue;
-      final entryId = '$uuid.${ap.projectId}';
-      // Write through so the NEXT cold boot / offline visit still shows the
-      // real name instead of falling back to the raw projectId.
-      store.putLabel(entryId, label);
-      labels.put(entryId, label);
+    // Fold the advert's per-project work status into the live status map (one
+    // write for the whole machine, so a project dropped from the advert clears).
+    // Null status (older bridge / cold project) is simply omitted → the row
+    // falls back to session-running.
+    final statuses = <String, AgentWorkStatus>{
+      for (final ap in state.projects)
+        if (ap.status != null) '$uuid.${ap.projectId}': ap.status!,
+    };
+    ref
+        .read(remoteProjectStatusProvider.notifier)
+        .setMachineStatuses(uuid, statuses);
+    // Persist the new statuses so a cold boot can seed the status map before
+    // the first advert arrives. Only projects in the current advert are written;
+    // projects dropped from the advert are cleared via clearStatusesForMachine
+    // before writing so the cache never grows with stale entries.
+    store.clearStatusesForMachine('$uuid.');
+    for (final e in statuses.entries) {
+      store.putStatus(e.key, e.value.name);
     }
-    _seedNeverSyncedSessions(uuid, state, store);
+    // Peeked (never dialed) from the transport this advert already came from —
+    // matches _syncLabelSubscriptions' peek-only contract; null when no live
+    // socket. The eager auto-connect-everywhere design caused connection storms,
+    // so this only ever reuses a socket already open for an unrelated reason.
+    final cp = ref.read(controlPlaneClientForProvider(uuid)).value;
+    for (final ap in state.projects) {
+      final entryId = '$uuid.${ap.projectId}';
+      final label = ap.label;
+      if (label != null && label.isNotEmpty) {
+        // Write through so the NEXT cold boot / offline visit still shows the
+        // real name instead of falling back to the raw projectId.
+        store.putLabel(entryId, label);
+        labels.put(entryId, label);
+      }
+      final prevRunning = _lastAdvertRunning[entryId];
+      _lastAdvertRunning[entryId] = ap.running;
+      final hadStatus = _lastAdvertStatus.containsKey(entryId);
+      final prevStatus = _lastAdvertStatus[entryId];
+      _lastAdvertStatus[entryId] = ap.status;
+      final hadCount = _lastAdvertRunningCount.containsKey(entryId);
+      final prevCount = _lastAdvertRunningCount[entryId];
+      _lastAdvertRunningCount[entryId] = ap.runningSessions;
+      if (cp == null) continue;
+      // Seed a never-synced project's sessions, OR re-peek when its advertised
+      // run-state or work status flips — the bridge peek reports true per-session
+      // `running`, so a cached Recent/sidebar row tracks the agent's live work
+      // without a manual pull-to-refresh. A status flip (working↔done↔attention)
+      // is the signal an already-registered agent started/finished a turn, which
+      // never moves `running`. Without the seed, Recent would stay empty for an
+      // allowed, actively-running project until the user pulls to refresh AND it
+      // already has a cached row (pull-to-refresh only re-syncs known rows, see
+      // refreshRecentSessions), or opens it manually.
+      final neverSynced = !store.has(entryId);
+      final runStateFlipped = prevRunning != null && prevRunning != ap.running;
+      // Re-peek on status flip only when transitioning TO a call-to-action state
+      // (attention/error). Regular working↔done cycling on a cached project never
+      // changes session running flags — peeking on every turn boundary causes
+      // redundant RPCs and cache writes that rebuild recentSessionsProvider each turn.
+      final statusFlipped = hadStatus && prevStatus != ap.status &&
+          (ap.status == AgentWorkStatus.attention ||
+              ap.status == AgentWorkStatus.error);
+      // Running-session count moved → the session list itself changed (a
+      // session started/exited, e.g. from the desktop app). Precise where the
+      // status filter above is deliberately coarse: a re-prompt cycles
+      // working↔done without moving the count, so this never peeks on mere
+      // turn boundaries.
+      final sessionCountChanged =
+          hadCount && prevCount != ap.runningSessions;
+      if (neverSynced || runStateFlipped || statusFlipped ||
+          sessionCountChanged) {
+        _peekProjectSessions(cp, ap.projectId, entryId, store);
+      }
+    }
   }
 
-  /// Seed the Recent cache with a project's session list the FIRST time this
-  /// machine's live advert reveals a project the phone has never synced
-  /// before — otherwise Recent stays empty for an allowed, actively-running
-  /// project until the user happens to pull-to-refresh AND that project
-  /// already has a cached row (pull-to-refresh only re-syncs known rows, see
-  /// refreshRecentSessions), or opens it manually. Never dials: `cp` is
-  /// peeked from the transport this control-plane state already came from —
-  /// matches _syncLabelSubscriptions' peek-only contract (the preceding
-  /// eager-auto-connect-everywhere design caused connection storms; this only
-  /// ever uses a socket that's already open for an unrelated reason).
-  void _seedNeverSyncedSessions(
-    String uuid,
-    ControlPlaneState state,
+  /// Peek a remote project's session list over an ALREADY-open control-plane
+  /// socket and write it through to the Recent cache. Dedup-guarded via
+  /// [_seedingSessions] so a slow reply isn't re-requested while in flight.
+  /// Never dials — `cp` is peeked by the caller (see [_onControlPlaneState]).
+  void _peekProjectSessions(
+    ControlPlaneClient cp,
+    String projectId,
+    String entryId,
     CachedSessionsStore store,
   ) {
-    final cp = ref.read(controlPlaneClientForProvider(uuid)).value;
-    if (cp == null) return;
-    for (final ap in state.projects) {
-      final entryId = '$uuid.${ap.projectId}';
-      if (store.has(entryId) || _seedingSessions.contains(entryId)) continue;
-      _seedingSessions.add(entryId);
-      unawaited(
-        cp
-            .listSessions(ap.projectId)
-            .then((sessions) => store.put(entryId, sessions))
-            .catchError(
-              (_) {},
-            ) // offline/NOT_ALLOWED — retried on the next advert
-            .whenComplete(() => _seedingSessions.remove(entryId)),
-      );
-    }
+    if (_seedingSessions.contains(entryId)) return;
+    _seedingSessions.add(entryId);
+    unawaited(
+      cp
+          .listSessions(projectId)
+          .then((sessions) => store.put(entryId, sessions))
+          .catchError(
+            (_) {},
+          ) // offline/NOT_ALLOWED — retried on the next advert
+          .whenComplete(() => _seedingSessions.remove(entryId)),
+    );
   }
 
   /// Release every open control-plane socket whose machine is neither viewed nor
@@ -361,11 +472,50 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
 
   @override
   void dispose() {
+    _hostStatusTimer?.cancel();
+    _hostStatusTimer = null;
     for (final sub in _labelSubs.values) {
       sub.close();
     }
     _labelSubs.clear();
     super.dispose();
+  }
+
+  /// Poll the host control plane for all warm local projects and their work
+  /// status, then write bare-key entries to [remoteProjectStatusProvider].
+  /// Uses [peekHost] so a dead host (not yet spawned, or crashed) is a no-op
+  /// rather than triggering a respawn on every timer tick.
+  Future<void> _pollLocalProjectStatus() async {
+    if (_pollingLocalStatus) return;
+    _pollingLocalStatus = true;
+    try {
+      final host = ref.read(hostControllerProvider);
+      final hostFile = await host.peekHost();
+      if (hostFile == null) return;
+      if (!mounted) return;
+      final client = HostControlClient(
+        port: hostFile.controlPort,
+        token: hostFile.token,
+      );
+      try {
+        final projects = await client.projectList();
+        if (!mounted) return;
+        final statuses = <String, AgentWorkStatus>{};
+        for (final p in projects) {
+          final s = AgentWorkStatus.fromWire(p.workStatus);
+          if (s != null) statuses[p.projectId] = s;
+        }
+        ref
+            .read(remoteProjectStatusProvider.notifier)
+            .setLocalStatuses(statuses);
+      } catch (_) {
+        // Host went away between peek and list — ignore; next tick will retry.
+      } finally {
+        client.close();
+      }
+    } finally {
+      _pollingLocalStatus = false;
+    }
   }
 
   @override

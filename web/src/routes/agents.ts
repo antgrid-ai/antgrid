@@ -8,9 +8,12 @@ import { requireBearerJwt } from "../auth/jwt-bearer.js";
 import { listMobileEnabledAgents } from "../models/agent-inventory.js";
 import { listAppDevicePeers } from "../models/device.js";
 
+// mobileAccessEnabled/relayUrl/machineName are agent-only concepts (the
+// bridge always sends them); an app (phone) heartbeat sends only deviceUuid,
+// so all three are optional and only applied when present — see the handler.
 const HeartbeatBody = z.object({
   deviceUuid: z.string().uuid(),
-  mobileAccessEnabled: z.boolean(),
+  mobileAccessEnabled: z.boolean().optional(),
   relayUrl: z.string().url().nullable().optional(),
   machineName: z.string().min(1).max(120).nullable().optional(),
 });
@@ -18,9 +21,9 @@ const HeartbeatBody = z.object({
 export function agentRoutes(deps: { db: DB; auth: Auth; env: Env }) {
   const r = new Hono<{ Variables: AuthVars }>();
 
-  // Heartbeat is called by the agent, which presents an OAuth
-  // `client_credentials` JWT (NOT a Better-Auth session cookie). Gate it
-  // with Bearer-JWT verification against web's own JWKS.
+  // Heartbeat is called by both agent (bridge) and app (phone) devices, each
+  // presenting an OAuth `client_credentials` JWT (NOT a Better-Auth session
+  // cookie). Gate it with Bearer-JWT verification against web's own JWKS.
   r.use(
     "/account/devices/me/heartbeat",
     requireBearerJwt({ auth: deps.auth, env: deps.env })
@@ -80,8 +83,10 @@ export function agentRoutes(deps: { db: DB; auth: Auth; env: Env }) {
       where: { userId, deviceId: body.deviceUuid, revokedAt: null },
       data: {
         lastSeenAt: new Date(),
-        mobileAccessEnabled: body.mobileAccessEnabled,
-        relayUrl: body.relayUrl ?? null,
+        ...(body.mobileAccessEnabled != null
+          ? { mobileAccessEnabled: body.mobileAccessEnabled }
+          : {}),
+        ...(body.relayUrl !== undefined ? { relayUrl: body.relayUrl } : {}),
         ...(body.machineName != null ? { machineName: body.machineName } : {}),
       },
     });

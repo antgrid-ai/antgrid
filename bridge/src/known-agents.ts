@@ -3,7 +3,6 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { logger } from "./logger";
 const log = logger.child({ component: "known-agents" });
-import { buildGeminiHooks, composeGeminiDefaults } from "./gemini-defaults";
 import { resolveHookCommand, type HookCommand } from "./hook-command";
 import { resolveAbDir } from "./antgrid-dir";
 
@@ -45,17 +44,6 @@ export const KNOWN_AGENTS: Record<string, KnownAgent> = {
   // via KILO_TUI_CONFIG injection (see resolveAgentEnv); the app's default-blur
   // (DEC 1004) supplies the blur it waits on.
   "kilo":           { bin: "kilo",     hookDir: null,                notificationSource: "osc",    titleSource: "osc" },
-  // Notifications default off and fail OPEN on focus — only blocker is the
-  // default, enabled via the GEMINI_CLI_SYSTEM_DEFAULTS_PATH injection. Gets a
-  // hooks-based structured title too (buildGeminiHooks), but resolveAgentEnv's
-  // injectConfig() exposes no injection-success signal to fail open on, unlike
-  // augmentAgentLaunch's notificationsInjected — stays "osc" until that gap
-  // is closed, so a failed write can't silently kill auto-naming.
-  "gemini":         { bin: "gemini",   hookDir: null,                notificationSource: "osc",    titleSource: "osc" },
-  // gemini fork but diverged: terminalBell defaults ON and fails CLOSED on
-  // focus, so the app's default-blur (DEC 1004) is all it needs — no injection.
-  // Same structured-title caveat as gemini above.
-  "qwen":           { bin: "qwen",     hookDir: null,                notificationSource: "osc",    titleSource: "osc" },
   // Signals only with a bare terminal bell (no OSC 9/777). Since the bell now
   // rings audibly instead of raising a desktop notification, kimi is heard, not
   // notified — no OSC notification source exists to coerce it into.
@@ -97,8 +85,8 @@ export function listKnownTools(): string[] {
  * Some agents won't emit terminal notifications until a config enables them.
  * We can't edit the user's own config, so we point a per-agent env var at a
  * bridge-owned file that flips the relevant default. Each injected file merges
- * BELOW the user's config (opencode/kilo: TUI_CONFIG precedence; gemini:
- * system-defaults is the lowest tier), so an explicit user opt-out still wins.
+ * BELOW the user's config (opencode/kilo: TUI_CONFIG precedence), so an
+ * explicit user opt-out still wins.
  * Driving the actual focus/blur state is the app+engine's job (DEC 1004) — see
  * the per-agent notes in KNOWN_AGENTS for which agents need injection vs. ride
  * the default-blur alone.
@@ -121,24 +109,6 @@ export function resolveAgentEnv(
       return injectConfig("KILO_TUI_CONFIG", abDir, "kilo-tui.json", {
         attention: { enabled: true },
       });
-    case "gemini": {
-      // Single system-defaults file (GEMINI_CLI_SYSTEM_DEFAULTS_PATH names ONE
-      // file): compose the notification block AND the resume/title capture hooks
-      // together so neither clobbers the other. osc777 pinned for deterministic
-      // notifications under our fixed TERM_PROGRAM=ghostty.
-      return injectConfig("GEMINI_CLI_SYSTEM_DEFAULTS_PATH", abDir, "gemini-defaults.json",
-        composeGeminiDefaults({
-          general: { enableNotifications: true, notificationMethod: "osc777" },
-          hooks: buildGeminiHooks(hookCommand, "gemini"),
-        }));
-    }
-    case "qwen": {
-      // Qwen needs no notification injection (terminalBell defaults on + fails
-      // closed on focus), but DOES need the capture hooks for resume. Hooks-only
-      // defaults file via QWEN_CODE_SYSTEM_DEFAULTS_PATH.
-      return injectConfig("QWEN_CODE_SYSTEM_DEFAULTS_PATH", abDir, "qwen-defaults.json",
-        composeGeminiDefaults({ hooks: buildGeminiHooks(hookCommand, "qwen") }));
-    }
     default:
       return {};
   }

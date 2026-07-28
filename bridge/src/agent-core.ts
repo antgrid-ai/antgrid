@@ -19,7 +19,7 @@ import { loadConfig, findConfigFile, projectName, type AbConfig } from "./config
 import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from "./bootstrap";
 import { resolveAgent, listKnownTools } from "./known-agents";
 import { augmentAgentLaunch } from "./agent-launch-augmenter";
-import { createMessage, type AbMessage, type RpcRequest } from "./protocol";
+import { createMessage, type AbMessage, type RpcRequest, type SessionEntry } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
 import { MessageBus } from "./message-bus";
@@ -129,6 +129,12 @@ export interface AgentCore {
    *  initialized yet (pre-handshake). The control-plane delete RPC calls this
    *  for a warm core so the on-disk file and in-memory state stay consistent. */
   deleteSession(id: string): boolean;
+  /** Live session list with true per-session `running` (via SessionManager's
+   *  in-memory PTY/chat sets), for the control-plane `sessions.list` peek when a
+   *  warm core owns the project — the disk-only `readPersisted` reports every
+   *  session not-running. Returns null before sessions are initialized
+   *  (pre-handshake), signalling the caller to fall back to the on-disk list. */
+  listSessions(includeArchived: boolean): SessionEntry[] | null;
 }
 
 export interface BuildAgentCoreOptions {
@@ -148,6 +154,10 @@ export interface BuildAgentCoreOptions {
   /** Shared machine-level paired-phones store. When omitted, a machine-level
    *  store is loaded from abDir (single shared file, not per-project). */
   pairedPhones?: PairedPhonesStore;
+  /** Fired when a turn-start hook pings the api-server (`POST /turn-start`), so
+   *  the owning ProjectCore can reset its control-plane work status to "working"
+   *  on a fresh turn. Bridge-internal — never surfaces to the app. */
+  onTurnStart?: () => void;
   /** Relay base URL of the machine socket this core attaches to. Host-supplied
    *  in remote mode: only a standalone agent with an explicit `relayUrl:` in its
    *  antgrid.yaml can learn it from config, so without this a host-spawned
@@ -1088,6 +1098,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Re-send file tree
     for (const fw of fileWatchers.values()) fw.sendFullTree();
 
+    // Re-emit the detected-port list. ports:update is only pushed on change,
+    // so a phone that binds after detection would otherwise never see ports
+    // found before it connected (preview:snapshot only covers config-declared
+    // preview ports, not ad-hoc detections).
+    portDetector?.emitCurrent();
+
     // Re-send terminal scrollback so the app has current output
     if (manager) {
       for (const t of manager.getStatus()) {
@@ -1568,8 +1584,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (
           body.agent === "claude" ||
           body.agent === "codex" ||
-          body.agent === "gemini" ||
-          body.agent === "qwen" ||
           body.agent === "github-copilot"
         ) {
         const title = await resolveStructuredTitle(body.agent, {
@@ -1580,6 +1594,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       }
     },
     onHookAlive: (terminalId) => { codexHookAlive.add(terminalId); },
+    onTurnStart: () => opts.onTurnStart?.(),
   });
 
   const TranscriptSnapshotParams = z.object({ sessionId: z.string() });
@@ -1680,6 +1695,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     deleteSession(id: string): boolean {
       if (!sessions) return false;
       return sessions.delete(id);
+    },
+    listSessions(includeArchived: boolean): SessionEntry[] | null {
+      return sessions ? sessions.list(includeArchived) : null;
     },
   };
 }

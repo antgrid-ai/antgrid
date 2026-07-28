@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { logger } from "./logger";
 const log = logger.child({ component: "title-resolver" });
 
-export type StructuredAgent = "claude" | "codex" | "gemini" | "qwen" | "github-copilot";
+export type StructuredAgent = "claude" | "codex" | "github-copilot";
 
 /** Read a UTF-8 file, returning null on any error (missing / unreadable). Async
  *  so a large Claude transcript can't block the single-threaded bridge event
@@ -220,51 +220,6 @@ export async function resolveClaudeTranscriptTitle(transcriptPath: string): Prom
   return lastCustom ?? lastSummary ?? firstUser;
 }
 
-/**
- * Extract plain text from a Gemini/Qwen `content` field.
- * Gemini/Qwen persist content as `string | Part[]` where a Part is `{text}`
- * with NO `type` field — distinct from Claude's `{type:'text', text}` parts,
- * so this can't reuse messageText.
- */
-function geminiPartText(content: unknown): string | null {
-  if (typeof content === "string") {
-    const s = content.trim();
-    return s || null;
-  }
-  if (Array.isArray(content)) {
-    for (const part of content) {
-      if (part && typeof part === "object" && typeof (part as any).text === "string") {
-        const s = (part as any).text.trim();
-        if (s) return s;
-      }
-    }
-  }
-  return null;
-}
-
-/**
- * Gemini/Qwen session transcript title: first user message's text. Their chat
- * jsonl is a metadata line followed by message records {type, content}.
- * Gemini/Qwen persist `content` as `string | Part[]` where a Part is `{text}`
- * (no `type` field) — distinct from Claude's `{type:'text', text}` parts, so
- * this can't reuse messageText. Never throws.
- */
-export async function resolveGeminiTranscriptTitle(transcriptPath: string): Promise<string | null> {
-  const raw = await readOrNull(transcriptPath);
-  if (raw === null) return null;
-  for (const line of raw.split("\n")) {
-    const t = line.trim();
-    if (!t) continue;
-    let obj: any;
-    try { obj = JSON.parse(t); } catch { continue; }
-    if (obj?.type === "user") {
-      const text = geminiPartText(obj.content ?? obj.message?.content);
-      if (text) return text;
-    }
-  }
-  return null;
-}
-
 /** Dispatch to the right resolver. opencode never reaches here (its title is
  *  supplied inline by the plugin POST). Returns null on any miss. */
 export async function resolveStructuredTitle(
@@ -285,9 +240,6 @@ export async function resolveStructuredTitle(
     }
     if (agent === "claude") {
       return args.transcriptPath ? await resolveClaudeTranscriptTitle(args.transcriptPath) : null;
-    }
-    if (agent === "gemini" || agent === "qwen") {
-      return args.transcriptPath ? await resolveGeminiTranscriptTitle(args.transcriptPath) : null;
     }
     if (agent === "github-copilot") {
       const copilotHome = opts.copilotHome ?? process.env.COPILOT_HOME ?? join(homedir(), ".copilot");

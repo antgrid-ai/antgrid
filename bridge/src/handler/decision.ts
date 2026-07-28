@@ -20,7 +20,7 @@ export type HandlerDecision = z.infer<typeof HandlerDecisionSchema>;
 
 // claude/codex/opencode each accept a one-shot prompt in non-interactive mode and
 // print to stdout. Returning null gates Handler off for tools without a verified
-// headless judge (gemini/cursor/etc) — they escalate-only, never auto-reply.
+// headless judge (cursor/etc) — they escalate-only, never auto-reply.
 export function buildJudgeCommand(
   tool: string, model: string | undefined, prompt: string,
 ): string[] | null {

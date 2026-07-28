@@ -5,6 +5,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../connection/supervisor_state.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
@@ -14,6 +15,7 @@ import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_chip.dart';
 import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_status_dot.dart';
 import '../models/drawer_entry.dart';
 import '../models/session_target.dart';
 import '../navigation/nav_controller.dart';
@@ -33,10 +35,15 @@ import '../providers/new_session_picker.dart'
         enterNewSession,
         selectedSourceIdProvider,
         selectedTargetProjectProvider;
+import '../providers/project_work_status.dart';
 import '../providers/projects.dart';
 import '../providers/providers.dart';
 import '../providers/recent_agents.dart';
+import '../providers/supervisor_status.dart';
 import '../screens/upgrade_screen.dart';
+import '../services/control_plane_client.dart';
+import 'ab_status_helpers.dart';
+import 'agent_work_status_dot.dart';
 
 /// One row in the projects drawer.
 class DrawerEntryRow extends ConsumerStatefulWidget {
@@ -65,6 +72,8 @@ class MachineDrawerHeaderRow extends ConsumerWidget {
         title: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
+            _MachineOnlineDot(machineUuid: machineUuid),
+            _MachineAggregateDot(machineUuid: machineUuid),
             Flexible(
               child: Text(
                 entry.displayName,
@@ -240,11 +249,22 @@ class _DrawerEntryTrailing extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final statusAsync = ref.watch(projectStatusProvider(entry.id));
     final status = statusAsync.value ?? const ProjectStatus.empty();
+    // Effective work status: the live control-plane advert (working/attention/
+    // error/done) when this machine's socket is open, else session-running from
+    // the peek-fed cache — so the row reflects the agent's actual state without
+    // dialing anything from here. "done" renders nothing, keeping idle rows
+    // clean; the two call-to-action states (attention/error) always show.
+    final workStatus = ref.watch(projectWorkStatusProvider(entry.id));
 
     return Row(
       mainAxisSize: MainAxisSize.min,
       spacing: AbTokens.space4,
       children: [
+        if (workStatus != AgentWorkStatus.done)
+          AgentWorkStatusDot(
+            key: ValueKey('drawer-status-dot-${entry.id}'),
+            status: workStatus,
+          ),
         if (status.configError)
           _ErrorDot(
             key: ValueKey('drawer-error-dot-${entry.id}'),
@@ -271,7 +291,10 @@ class _DrawerEntryTrailing extends ConsumerWidget {
             mainAxisSize: MainAxisSize.min,
             spacing: AbTokens.space4,
             children: [
-              _NewSessionButton(entry: entry),
+              // No per-machine "New session" +: a machine is a container, not a
+              // project, so a session must name a project. The + lives on each
+              // advertised project row instead (see `_AdvertisedProjectRow`).
+              if (entry.machineUuid == null) _NewSessionButton(entry: entry),
               _RemoveButton(entry: entry),
             ],
           ),
@@ -641,6 +664,60 @@ class _NewSessionButtonState extends ConsumerState<_NewSessionButton> {
         showAbSnackBar(context, 'New session failed: $e');
       }
     }
+  }
+}
+
+/// Online/offline dot for a remote machine header. Peek-only
+/// ([supervisorStatusProvider] never dials), so a collapsed-but-healthy
+/// machine isn't mislabelled: a null status (never connected → unknown) renders
+/// nothing, and the dot appears once the socket is dialed (on expand / refresh).
+class _MachineOnlineDot extends ConsumerWidget {
+  const _MachineOnlineDot({required this.machineUuid});
+
+  final String machineUuid;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final status = ref.watch(supervisorStatusProvider(machineUuid)).value;
+    if (status == null) return const SizedBox.shrink();
+    final (tone, _) = connectionDisplayInfo(status);
+    final online = status is Connected;
+    return Padding(
+      padding: const EdgeInsets.only(right: AbTokens.space6),
+      child: AbStatusDot(
+        tone: tone,
+        style: online ? AbDotStyle.filled : AbDotStyle.hollow,
+        // Pulse while mid-handshake; a settled offline (released) dot holds.
+        pulse: !online && status is! Released,
+      ),
+    );
+  }
+}
+
+/// Aggregate work-status dot for a collapsed machine header: shows only the
+/// call-to-action states (attention/error) across ALL projects on [machineUuid].
+/// Hidden when expanded — individual project rows carry their own dots — and
+/// hidden when status is working/done, keeping idle machine headers clean.
+class _MachineAggregateDot extends ConsumerWidget {
+  const _MachineAggregateDot({required this.machineUuid});
+
+  final String machineUuid;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final expanded =
+        ref.watch(expandedDrawerIdsProvider).contains(machineUuid);
+    if (expanded) return const SizedBox.shrink();
+    final status = ref.watch(machineWorkStatusProvider(machineUuid));
+    if (status == null ||
+        status == AgentWorkStatus.done ||
+        status == AgentWorkStatus.working) {
+      return const SizedBox.shrink();
+    }
+    return Padding(
+      padding: const EdgeInsets.only(right: AbTokens.space6),
+      child: AgentWorkStatusDot(status: status),
+    );
   }
 }
 

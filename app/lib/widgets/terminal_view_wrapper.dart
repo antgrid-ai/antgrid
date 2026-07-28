@@ -9,11 +9,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 
-import '../design/ab_icons.dart';
 import '../design/ab_status_tone.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
-import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../models/terminal_models.dart';
@@ -24,6 +22,7 @@ import '../services/terminal_service.dart';
 import '../services/upload_service.dart';
 import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
+import 'terminal_quick_actions_bar.dart';
 import 'terminal_upload_button.dart';
 
 /// True on desktop platforms (not web) where a physical keyboard is guaranteed.
@@ -65,6 +64,12 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// must scope its effect to the focused terminal — `HardwareKeyboard`
   /// handlers fire app-wide otherwise.
   final FocusScopeNode _focusScope = FocusScopeNode();
+
+  /// Explicit soft-keyboard handle for mobile. Terminal taps scroll/select
+  /// only (`showKeyboardOnInteraction: false`); the IME is summoned solely by
+  /// the Keyboard quick-action, so reading output never pops the keyboard.
+  final GhosttyTerminalSoftKeyboardController _softKeyboardController =
+      GhosttyTerminalSoftKeyboardController();
 
   /// Exact float cell metrics reported post-frame by Ghostty
   /// (`onCellMetricsChanged`). Null until the first frame settles; the
@@ -351,6 +356,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     final terminalView = GhosttyTerminalView(
       controller: tab.ghostty,
       autofocus: true,
+      // Mobile: taps scroll/read; the IME comes only from the Keyboard
+      // quick-action. Desktop has no IME bridge, so `true` is a no-op there.
+      showKeyboardOnInteraction: _hasPhysicalKeyboard,
+      softKeyboardController: _softKeyboardController,
       // Scale with the app's UI Size setting (injected as a MediaQuery
       // textScaler): the view lays out its own TextPainters, so the ambient
       // scaler never reaches them — pre-scale the size instead. `_hPad` is
@@ -646,124 +655,27 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   }
 
   Widget _buildQuickActions() {
-    return Container(
-      color: Theme.of(context).colorScheme.surfaceContainerHighest,
-      padding: const EdgeInsets.symmetric(
-        vertical: AbTokens.space4,
-        horizontal: AbTokens.space4,
-      ),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          children: [
-            TerminalUploadButton(
-              pick: pickUploadFile,
-              upload: (name, bytes) {
-                final svc = serviceWhenReady(ref, uploadServiceProvider);
-                if (svc == null) {
-                  throw const UploadException('OFFLINE', 'Not connected');
-                }
-                return svc.upload(fileName: name, bytes: bytes);
-              },
-              // Double-quoted + trailing space: paste-a-path semantics identical to
-              // desktop drag-drop; quotes survive spaces in both PowerShell and POSIX shells.
-              onInsertPath: (path) => widget.terminalService.sendInput(
-                widget.tab.terminalId,
-                '"$path" ',
-              ),
-              onError: (m) {
-                if (mounted) showAbSnackBar(context, m);
-              },
-            ),
-            _zoomButton(
-              icon: AbIcons.zoomOut,
-              semanticLabel: 'Decrease terminal text size',
-              onPressed: () => _stepZoom(-0.1),
-            ),
-            _zoomButton(
-              icon: AbIcons.zoomIn,
-              semanticLabel: 'Increase terminal text size',
-              onPressed: () => _stepZoom(0.1),
-            ),
-            _actionButton('Tab', '\t'),
-            _actionButton('Esc', '\x1b'),
-            _actionButton('Ctrl+C', '\x03'),
-            _actionButton('Ctrl+D', '\x04'),
-            _actionButton('↑', '\x1b[A'),
-            _actionButton('↓', '\x1b[B'),
-            _actionButton('→', '\x1b[C'),
-            _actionButton('←', '\x1b[D'),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// Quick-action zoom step. Mirrors `_actionButton`'s visual style but wraps
-  /// the button in a 44dp minimum box (WCAG 2.5.5 mobile tap-target floor —
-  /// the other keys inherit the row's compact hit area, but zoom is a repeated
-  /// precision-free action worth the full target). Long-press resets to 1.0.
-  Widget _zoomButton({
-    required String icon,
-    required String semanticLabel,
-    required VoidCallback onPressed,
-  }) {
-    final color = Theme.of(
-      context,
-    ).colorScheme.onSurface.withValues(alpha: 0.7);
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: AbTokens.space2),
-      child: GestureDetector(
-        // TextButton has no long-press slot; the detector receives long-press
-        // everywhere, and its tap only fires on the box area OUTSIDE the
-        // button (the button's own recognizer wins the arena over it) — so
-        // the whole 44dp box taps without double-firing on the button itself.
-        behavior: HitTestBehavior.opaque,
-        onTap: onPressed,
-        onLongPress: () => ref
-            .read(appSettingsServiceProvider.notifier)
-            .setTerminalZoom(1.0),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
-          child: Center(
-            child: TextButton(
-              style: TextButton.styleFrom(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: AbTokens.space10,
-                ),
-                minimumSize: Size.zero,
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              ),
-              onPressed: onPressed,
-              child: Semantics(
-                label: semanticLabel,
-                button: true,
-                child: AbIcon(icon, size: AbTokens.fontLg, color: color),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _actionButton(String label, String data) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: AbTokens.space2),
-      child: SizedBox(
-        height: AbTokens.rowHeightSm,
-        child: TextButton(
-          style: TextButton.styleFrom(
-            padding: const EdgeInsets.symmetric(horizontal: AbTokens.space10),
-            minimumSize: Size.zero,
-            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          ),
-          onPressed: () {
-            widget.terminalService.sendInput(widget.tab.terminalId, data);
-          },
-          child: Text(label, style: const TextStyle(fontSize: AbTokens.fontSm)),
-        ),
-      ),
+    return TerminalQuickActionsBar(
+      softKeyboardController: _softKeyboardController,
+      onPick: pickUploadFile,
+      onUpload: (name, bytes) {
+        final svc = serviceWhenReady(ref, uploadServiceProvider);
+        if (svc == null) {
+          throw const UploadException('OFFLINE', 'Not connected');
+        }
+        return svc.upload(fileName: name, bytes: bytes);
+      },
+      onInsertPath: (path) =>
+          widget.terminalService.sendInput(widget.tab.terminalId, '"$path" '),
+      onUploadError: (m) {
+        if (mounted) showAbSnackBar(context, m);
+      },
+      onSendInput: (data) =>
+          widget.terminalService.sendInput(widget.tab.terminalId, data),
+      onZoomOut: () => _stepZoom(-0.1),
+      onZoomIn: () => _stepZoom(0.1),
+      onZoomReset: () =>
+          ref.read(appSettingsServiceProvider.notifier).setTerminalZoom(1.0),
     );
   }
 }

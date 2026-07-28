@@ -6,8 +6,12 @@ import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/models/drawer_entry.dart';
 import 'package:antgrid/models/ab_project.dart';
+import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/project/project_status.dart';
+import 'package:antgrid/providers/project_work_status.dart';
+import 'package:antgrid/providers/sessions.dart';
+import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/widgets/drawer_entry_row.dart';
 
 import '../helpers/test_store_overrides.dart';
@@ -61,6 +65,77 @@ void main() {
 
       expect(find.byKey(const ValueKey('drawer-error-dot-p1')), findsOneWidget);
     });
+
+    SessionEntry session({required bool running}) => SessionEntry(
+      id: 's1',
+      name: 'S',
+      createdAt: 1,
+      lastUsedAt: 2,
+      archived: false,
+      running: running,
+    );
+
+    testWidgets('renders status dot when a session is running', (tester) async {
+      final entry = _entry('p1');
+      await tester.pumpWidget(
+        _wrap(
+          DrawerEntryRow(entry),
+          overrides: [
+            ...stores.overrides,
+            sessionsForEntryProvider(
+              'p1',
+            ).overrideWith((ref) => [session(running: true)]),
+          ],
+        ),
+      );
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('drawer-status-dot-p1')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('no status dot when all sessions are idle (done)', (
+      tester,
+    ) async {
+      final entry = _entry('p1');
+      await tester.pumpWidget(
+        _wrap(
+          DrawerEntryRow(entry),
+          overrides: [
+            ...stores.overrides,
+            sessionsForEntryProvider(
+              'p1',
+            ).overrideWith((ref) => [session(running: false)]),
+          ],
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byKey(const ValueKey('drawer-status-dot-p1')), findsNothing);
+    });
+
+    for (final status in [AgentWorkStatus.attention, AgentWorkStatus.error]) {
+      testWidgets('renders status dot for ${status.name}', (tester) async {
+        final entry = _entry('p1');
+        await tester.pumpWidget(
+          _wrap(
+            DrawerEntryRow(entry),
+            overrides: [
+              ...stores.overrides,
+              projectWorkStatusProvider('p1').overrideWithValue(status),
+            ],
+          ),
+        );
+        await tester.pump();
+
+        expect(
+          find.byKey(const ValueKey('drawer-status-dot-p1')),
+          findsOneWidget,
+        );
+      });
+    }
 
     testWidgets('tapping the error dot surfaces configErrorMessage', (
       tester,

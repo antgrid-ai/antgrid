@@ -23,7 +23,7 @@ describe("augmentAgentLaunch", () => {
     expect(a.env).toEqual({});
     expect(a.notificationsInjected).toBe(true);
     const hooks = JSON.parse(readFileSync(join(a.args[1], "hooks", "hooks.json"), "utf8"));
-    for (const event of ["SessionStart", "Stop", "Notification"]) {
+    for (const event of ["SessionStart", "Stop", "Notification", "UserPromptSubmit"]) {
       expect(hooks.hooks[event]).toHaveLength(1);
       expect(hooks.hooks[event][0].hooks).toHaveLength(1);
       expect(hooks.hooks[event][0].hooks[0].command).toBe(HOOK_COMMAND.binary);

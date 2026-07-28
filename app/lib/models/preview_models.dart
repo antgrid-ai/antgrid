@@ -4,7 +4,17 @@ class PortInfo {
   final String? processName;
   final String? label;
 
-  const PortInfo({required this.port, this.pid, this.processName, this.label});
+  /// Dev-server scheme detected by the bridge ('http'/'https'). Null when the
+  /// bridge hasn't seen a URL for this port yet — treat as http.
+  final String? scheme;
+
+  const PortInfo({
+    required this.port,
+    this.pid,
+    this.processName,
+    this.label,
+    this.scheme,
+  });
 
   static PortInfo? fromJson(Map<String, dynamic> json) {
     final port = json['port'];
@@ -14,6 +24,7 @@ class PortInfo {
       pid: json['pid'] as int?,
       processName: json['processName'] as String?,
       label: json['label'] as String?,
+      scheme: json['scheme'] as String?,
     );
   }
 }

@@ -1,5 +1,8 @@
 const MAX_BODY_SIZE = 100 * 1024 * 1024; // 100MB
-const FETCH_TIMEOUT_MS = 10_000;
+// Generous: dev-server cold compiles (Next/webpack first page) routinely
+// exceed 10s. Kept under the app's 30s tunnel timeout so the bridge's 502
+// (with the real error) wins over a phone-side TimeoutException.
+const FETCH_TIMEOUT_MS = 25_000;
 
 const ALLOWED_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]", "0.0.0.0"]);
 
@@ -78,7 +81,12 @@ export async function fetchLocalhost(opts: {
   const setCookies = resp.headers.getSetCookie();
   const respHeaders: Record<string, string> = {};
   resp.headers.forEach((v, k) => {
-    if (k !== "set-cookie") respHeaders[k] = v;
+    // fetch() transparently decompressed the body, so the origin's
+    // content-encoding/content-length describe bytes we no longer have —
+    // forwarding them makes the WebView gunzip plain text (garbled CSS/JS)
+    // or truncate on the stale length. The phone-side proxy re-frames.
+    if (k === "set-cookie" || k === "content-encoding" || k === "content-length" || k === "transfer-encoding") return;
+    respHeaders[k] = v;
   });
 
   const contentType = resp.headers.get("content-type") ?? "";

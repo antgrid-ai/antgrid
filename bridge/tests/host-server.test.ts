@@ -302,6 +302,11 @@ test("host:shutdown returns ok and fires onShutdownRequested (after the response
   const body = await res.json();
   expect(res.status).toBe(200);
   expect(body).toEqual({ id: "1", ok: true, type: "host:shutdown" });
+  // The complete OK above IS the deferred-teardown proof (the response
+  // flushed before any teardown could kill the listener). No `=== 0` check
+  // here: the server's 0ms defer timer can legitimately fire before the
+  // client finishes parsing, so that assertion is a scheduling race (flaked
+  // under full-suite load).
   for (let i = 0; i < 100 && shutdownCalls === 0; i++) await new Promise((r) => setTimeout(r, 5));
   expect(shutdownCalls).toBe(1);
 });

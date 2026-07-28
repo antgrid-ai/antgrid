@@ -30,6 +30,8 @@ export interface ProjectSummary {
   path: string;
   running: boolean;
   mode: "local" | "remote";
+  /** Live work status for warm cores. Absent until the first bus frame arrives. */
+  workStatus?: string;
 }
 
 /** One paired phone as surfaced to the desktop allowlist hub. Mirror of the

@@ -89,7 +89,7 @@ interface PersistedEntry {
   // resumed on the next start(). See agent-resume.ts.
   agentSessionId?: string;
   // The agent's transcript/session file path when its hook supplied one
-  // (claude/gemini/qwen). Used for the pre-flight existence check. Codex/
+  // (claude). Used for the pre-flight existence check. Codex/
   // opencode don't post a path.
   agentTranscriptPath?: string;
   // Session-scoped structured-driver selections keyed by the wire config key the
@@ -407,8 +407,8 @@ export class SessionManager {
     const entry = this.entries.get(id);
     if (!entry) return;
     // Keep a previously captured path if this report omits one for the SAME
-    // session — e.g. gemini's SessionStart fires before the transcript path is
-    // known, then a later AfterAgent supplies it. A new session id resets it.
+    // session — an agent's SessionStart can fire before the transcript path is
+    // known, then a later turn-end report supplies it. A new session id resets it.
     const nextPath =
       agentSessionId === entry.agentSessionId
         ? (agentTranscriptPath ?? entry.agentTranscriptPath)

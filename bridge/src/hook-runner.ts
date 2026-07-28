@@ -19,11 +19,16 @@ const HOOK_POST_TIMEOUT_MS = 4000;
 // runner acts on. Rust/serde agents serialize an absent field as JSON `null`,
 // so every optional field is `.nullish()`; `.optional()` alone rejects `null`,
 // which fails the whole parse and silently drops every post for that event.
+// "user-prompt" (→ /turn-start) is Claude-specific: Claude exposes a
+// UserPromptSubmit hook that fires before each new turn, which the bridge uses
+// to reset work status to "working" when a user re-prompts an existing session.
+// Codex/Cursor have no equivalent pre-turn hook — for those agents
+// only a new session (count increase) resets the status; re-prompting an
+// existing session leaves status at "done" or "attention" until the next
+// turn-end notification arrives (after-agent / stop).
 const HOOK_EVENTS: Record<string, readonly string[]> = {
-  claude: ["session-start", "stop", "notification"],
+  claude: ["session-start", "stop", "notification", "user-prompt"],
   codex: ["after-agent", "permission-request", "stop", "session-start"],
-  gemini: ["session-start", "after-agent"],
-  qwen: ["session-start", "after-agent"],
   cursor: ["session-start", "stop"],
   "github-copilot": ["session-start", "agent-stop"],
 };
@@ -70,6 +75,7 @@ export type HookPath =
   | "/session-title"
   | "/notify"
   | "/handler-event"
+  | "/turn-start"
   | "/hook-alive";
 
 export interface HookPost {
@@ -160,6 +166,17 @@ async function buildPosts(
         }),
       );
     }
+    if (invocation.event === "user-prompt") {
+      // A fresh turn began — reset control-plane work status to "working" so a
+      // re-prompt of an existing session (or one resumed after a granted
+      // permission) stops showing the previous turn's done/attention. No
+      // notification: this is state, not a user-facing alert.
+      posts.push({
+        port,
+        path: "/turn-start",
+        body: { ...(terminalId ? { terminalId } : {}) },
+      });
+    }
     if (invocation.event === "stop") {
       posts.push({
         port,
@@ -199,17 +216,23 @@ async function buildPosts(
           },
         });
       }
-      if (!input.message || !/waiting/i.test(input.message)) {
-        posts.push({
-          port,
-          path: "/notify",
-          body: {
-            type: "permission_request",
-            ...(terminalId ? { terminalId } : {}),
-            ...(input.message ? { message: input.message } : {}),
-          },
-        });
-      }
+      // Claude Code fires this same "notification" hook, with the identical
+      // "Claude is waiting for your input" message, both for a genuine mid-turn
+      // block (e.g. a question tool with no stop event yet) and for its generic
+      // post-completion idle nudge. We can't tell those apart from the message
+      // alone, so tag it "awaiting_input" rather than "permission_request" and
+      // let work-status.ts's turn-state-aware reduction decide whether it's a
+      // live call-to-action or a stale nudge to ignore.
+      const isWaitingNudge = !!input.message && /waiting/i.test(input.message);
+      posts.push({
+        port,
+        path: "/notify",
+        body: {
+          type: isWaitingNudge ? "awaiting_input" : "permission_request",
+          ...(terminalId ? { terminalId } : {}),
+          ...(input.message ? { message: input.message } : {}),
+        },
+      });
     }
   } else if (invocation.agent === "codex") {
     if (invocation.event === "after-agent") {
@@ -243,14 +266,6 @@ async function buildPosts(
         posts.push({ port, path: "/hook-alive", body: { terminalId } });
       }
     }
-  } else if (invocation.agent === "gemini" || invocation.agent === "qwen") {
-    const input = parseOrEmpty(SessionPayloadSchema, await deps.readStdin());
-    if (!input) return [];
-    posts.push(
-      titlePost(port, terminalId, input.session_id, invocation.agent, {
-        ...(input.transcript_path ? { transcriptPath: input.transcript_path } : {}),
-      }),
-    );
   } else if (invocation.agent === "cursor") {
     const raw = await deps.readStdin();
     if (invocation.event === "session-start") {

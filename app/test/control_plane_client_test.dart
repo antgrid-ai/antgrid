@@ -39,6 +39,65 @@ void main() {
     await client.dispose();
   });
 
+  test(
+    'agent:projects parses the work status, null when absent/unknown',
+    () async {
+      final t = FakeAgentTransport();
+      final client = ControlPlaneClient(transport: t);
+      addTearDown(client.dispose);
+
+      t.emit('agent:projects', {
+        'projects': [
+          {'projectId': 'a', 'running': true, 'status': 'working'},
+          {'projectId': 'b', 'running': true, 'status': 'attention'},
+          {'projectId': 'c', 'running': false, 'status': 'error'},
+          {'projectId': 'd', 'running': false, 'status': 'done'},
+          {'projectId': 'e', 'running': false, 'status': 'bogus'},
+          {'projectId': 'f', 'running': false},
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      final byId = {
+        for (final p in client.currentState.projects) p.projectId: p.status,
+      };
+      expect(byId['a'], AgentWorkStatus.working);
+      expect(byId['b'], AgentWorkStatus.attention);
+      expect(byId['c'], AgentWorkStatus.error);
+      expect(byId['d'], AgentWorkStatus.done);
+      // Unknown value (newer bridge) and a missing field both degrade to null —
+      // the app falls back to `running`.
+      expect(byId['e'], isNull);
+      expect(byId['f'], isNull);
+    },
+  );
+
+  test(
+    'agent:projects parses runningSessions, null when absent (older bridge)',
+    () async {
+      final t = FakeAgentTransport();
+      final client = ControlPlaneClient(transport: t);
+      addTearDown(client.dispose);
+
+      t.emit('agent:projects', {
+        'projects': [
+          {'projectId': 'a', 'running': true, 'runningSessions': 2},
+          {'projectId': 'b', 'running': true, 'runningSessions': 0},
+          {'projectId': 'c', 'running': false},
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      final byId = {
+        for (final p in client.currentState.projects)
+          p.projectId: p.runningSessions,
+      };
+      expect(byId['a'], 2);
+      expect(byId['b'], 0);
+      expect(byId['c'], isNull);
+    },
+  );
+
   test('startProject sends a project:start with the projectId', () async {
     final t = FakeAgentTransport();
     final client = ControlPlaneClient(transport: t);

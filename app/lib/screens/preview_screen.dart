@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:webview_all/webview_all.dart';
@@ -40,6 +42,12 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   // the target scheme (http/https). Used to re-anchor address-bar input and as
   // the rebuild key — so a same-port http↔https toggle still reloads.
   String _origin = '';
+  // What the address bar presents as the origin: the logical target
+  // (`scheme://localhost:<selectedPort>`), not the plain-http proxy origin the
+  // webview actually loads — otherwise an https target reads as "http://…"
+  // and the real port is hidden behind the proxy's random one. Identical to
+  // [_origin] in local mode.
+  String _displayOrigin = '';
   bool _canGoBack = false;
   bool _canGoForward = false;
 
@@ -54,10 +62,30 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     // Discard unsubmitted edits on blur — restore the live URL.
     // (Select-all-on-focus is handled by AbUrlField.)
     _addrFocus.addListener(() {
-      if (!_addrFocus.hasFocus && _addrController.text != _currentUrl) {
-        _addrController.text = _currentUrl;
+      if (!_addrFocus.hasFocus) {
+        final display = _toDisplayUrl(_currentUrl);
+        if (_addrController.text != display) {
+          _addrController.text = display;
+        }
       }
     });
+  }
+
+  /// Maps a real webview URL onto its user-facing form by swapping the proxy
+  /// origin for the logical target origin. Identity when they already match
+  /// (local mode) or the URL is foreign to the preview origin.
+  String _toDisplayUrl(String url) {
+    if (_origin.isEmpty ||
+        _displayOrigin.isEmpty ||
+        _origin == _displayOrigin) {
+      return url;
+    }
+    if (!url.startsWith(_origin)) return url;
+    // Origin boundary: 'http://localhost:5678' must not claim
+    // 'http://localhost:56789/...' — the port digits have to end here.
+    final rest = url.substring(_origin.length);
+    if (rest.isNotEmpty && !'/?#'.contains(rest[0])) return url;
+    return '$_displayOrigin$rest';
   }
 
   /// Build a webview controller anchored at [initialUrl]. JS on; navigation
@@ -81,7 +109,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
               setState(() {
                 _currentUrl = url;
               });
-              _syncAddrField(url);
+              _syncAddrField(_toDisplayUrl(url));
             }
             _refreshHistoryFlags();
           },
@@ -180,7 +208,9 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
           .read(previewServiceProvider)
           .selectPort(port, scheme: scheme);
       if (result != SelectPortResult.portInUse) {
-        ref.read(analyticsServiceProvider)?.track(AnalyticsEvents.previewOpened);
+        ref
+            .read(analyticsServiceProvider)
+            ?.track(AnalyticsEvents.previewOpened);
         return;
       }
       if (!mounted) return;
@@ -234,8 +264,14 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
           state.currentUrl ?? 'http://localhost:${state.localProxyPort}';
       if (_origin != origin) {
         _origin = origin;
+        // Present the logical target, not the proxy: in relay mode the webview
+        // loads http://localhost:<random proxy port>, but the user selected
+        // scheme://localhost:<selectedPort>.
+        _displayOrigin = state.selectedPort != null
+            ? '${state.scheme}://localhost:${state.selectedPort}'
+            : origin;
         _currentUrl = origin;
-        _syncAddrField(_currentUrl);
+        _syncAddrField(_toDisplayUrl(_currentUrl));
         // webview_flutter builds the controller eagerly (unlike inappwebview's
         // onWebViewCreated), so recreate it here on every origin change and let
         // the ValueKey below swap the underlying platform view.
@@ -250,6 +286,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     // build path stays cheap and doesn't construct the session/service.
     if (state.ports.isEmpty) {
       _origin = '';
+      _displayOrigin = '';
       _webViewController = null;
       final projectId = ref.watch(selectedRegistrationIdProvider);
       return PreviewEmptyState(
@@ -268,11 +305,12 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
 
     // Ports available but none selected -- show port list
     _origin = '';
+    _displayOrigin = '';
     _webViewController = null;
     return PortListWidget(
       ports: state.ports,
       selectedPort: null,
-      onPortSelected: (port) => unawaited(_openPort(port, 'http')),
+      onPortSelected: (port, scheme) => unawaited(_openPort(port, scheme)),
     );
   }
 
@@ -344,6 +382,16 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
                   child: WebViewWidget(
                     key: ValueKey('preview-$_origin'),
                     controller: _webViewController!,
+                    // Claim every gesture over the page surface: inside the
+                    // mobile PageView the platform view otherwise loses the
+                    // arena to the pager's drag recognizer and web scrolling
+                    // dies. Page-switching stays available via the bottom nav
+                    // and swipes outside the webview.
+                    gestureRecognizers: const {
+                      Factory<OneSequenceGestureRecognizer>(
+                        EagerGestureRecognizer.new,
+                      ),
+                    },
                   ),
                 ),
         ),

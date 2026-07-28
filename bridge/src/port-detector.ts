@@ -20,23 +20,39 @@ const PORT_PATTERNS = [
   /listening\s+on\s+(?:port\s+)?(\d{4,5})/i,
   // "started on :5173" or "running on :3000"
   /(?:started|running)\s+on\s+:(\d{4,5})/i,
-  // General ":NNNN" (4+ digit port after colon)
-  /:(\d{4,5})\b/,
 ];
+
+// General ":NNNN" fallback. Unlike PORT_PATTERNS this matches file:line
+// references too (`agent-core.ts:1091`, `bundle.js:10234`) — agent output is
+// full of those, and each one used to register a ghost port. Two guards:
+// the lookbehind rejects the `<name>.<ext>:<line>` shape itself (a path like
+// `host-server.ts:1091` contains hint words, so the hint alone isn't enough;
+// letter-led extensions only, so `127.0.0.1:8080` stays matchable), and the
+// pattern is only applied when the line also reads like a serving
+// announcement (prefix-match on purpose: "listening", "serving", "localhost:"
+// all hit).
+const BARE_PORT_PATTERN = /(?<!\.[A-Za-z]\w{0,9}):(\d{4,5})\b/;
+const SERVING_HINT =
+  /\b(port|listen|serv|running|started|local|host|url|http|available|ready|expose)/i;
 
 const MAX_LINE_BUFFER = 64 * 1024; // 64KB — truncate if no newline arrives
 
+function toValidPort(raw: string): number | null {
+  const port = parseInt(raw, 10);
+  return port >= 1024 && port <= 65535 ? port : null;
+}
+
 function extractPort(line: string): number | null {
-  if (!line.includes(":")) {
-    const lower = line.toLowerCase();
-    if (!lower.includes("port") && !lower.includes("listening") && !lower.includes("running")) return null;
-  }
   for (const pattern of PORT_PATTERNS) {
     const match = line.match(pattern);
     if (match) {
-      const port = parseInt(match[1], 10);
-      if (port >= 1024 && port <= 65535) return port;
+      const port = toValidPort(match[1]);
+      if (port !== null) return port;
     }
+  }
+  if (SERVING_HINT.test(line)) {
+    const match = line.match(BARE_PORT_PATTERN);
+    if (match) return toValidPort(match[1]);
   }
   return null;
 }
@@ -59,10 +75,17 @@ export class PortDetector {
 
   observeOutput(sessionId: string, chunk: string): void {
     if (!chunk.includes("://")) return;
+    let schemeChanged = false;
     for (const raw of extractUrls(chunk)) {
       const hit = canonicalize(raw);
       const url = toUrlString(hit);
-      if (this.lastDetections.get(hit.port)?.url === url) continue;
+      const prev = this.lastDetections.get(hit.port);
+      if (prev?.url === url) continue;
+      // Only a port that's actually in the advertised list can change it — a
+      // sighting for an unadvertised port would re-emit an identical list.
+      if (prev?.scheme !== hit.scheme && this.isAdvertised(hit.port)) {
+        schemeChanged = true;
+      }
       this.lastDetections.set(hit.port, { url, scheme: hit.scheme, source: "output" });
       this.emit({
         port: hit.port,
@@ -72,6 +95,9 @@ export class PortDetector {
         sourceSessionId: sessionId,
       });
     }
+    // A URL sighting can reveal (or flip) a port's scheme after the line-based
+    // feed() already advertised it — re-emit so ports:update carries the scheme.
+    if (schemeChanged) this.emitPorts();
   }
 
   private emit(event: PortDetectionEvent): void {
@@ -154,6 +180,22 @@ export class PortDetector {
     return this.lastDetections;
   }
 
+  /** Whether the port appears in emitted `ports:update` lists (terminal-
+   *  detected or config-declared). URL sightings alone don't advertise. */
+  private isAdvertised(port: number): boolean {
+    if (this.configuredPorts.has(port)) return true;
+    for (const ports of this.terminalPorts.values()) {
+      if (ports.has(port)) return true;
+    }
+    return false;
+  }
+
+  /** Re-emits the current port list unconditionally — for app-reconnect
+   *  resync, where the change-driven emit has already fired and gone. */
+  emitCurrent(): void {
+    this.emitPorts();
+  }
+
   stop(): void {
     this.terminalPorts.clear();
     this.lineBuffers.clear();
@@ -174,6 +216,9 @@ export class PortDetector {
       .map((port) => ({
         port,
         ...(this.portLabels.has(port) ? { label: this.portLabels.get(port) } : {}),
+        ...(this.lastDetections.has(port)
+          ? { scheme: this.lastDetections.get(port)!.scheme }
+          : {}),
       }));
 
     this.onPortsChange?.(portInfos);

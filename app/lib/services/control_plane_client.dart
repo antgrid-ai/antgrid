@@ -5,16 +5,45 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import '../models/ab_message.dart';
 import '../models/session_entry.dart';
 
+/// Reduced per-project agent work status carried on the control plane. Mirrors
+/// the bridge `WorkStatus` enum (protocol.ts). `attention` = the agent is
+/// blocked on a permission/prompt (the call-to-action); distinct from
+/// `running`, which is "dialable / holds a relay slot", not activity.
+enum AgentWorkStatus {
+  working,
+  attention,
+  done,
+  error;
+
+  static AgentWorkStatus? fromWire(Object? raw) => switch (raw) {
+    'working' => AgentWorkStatus.working,
+    'attention' => AgentWorkStatus.attention,
+    'done' => AgentWorkStatus.done,
+    'error' => AgentWorkStatus.error,
+    _ => null,
+  };
+}
+
 /// A project advertised by the agent over the control-plane connection.
 ///
 /// Hand-mirrors the bridge `agent:projects` entry schema
-/// (`{ projectId, label?, path?, running }`) per the package convention that
-/// the Dart side mirrors the TS Zod schemas by hand.
+/// (`{ projectId, label?, path?, running, status?, runningSessions? }`) per the
+/// package convention that the Dart side mirrors the TS Zod schemas by hand.
 class AdvertisedProject {
   final String projectId;
   final String? label;
   final String? path;
   final bool running;
+
+  /// Live work status, present only for warm cores. Null when talking to an
+  /// older bridge, or for a cold project — callers fall back to [running].
+  final AgentWorkStatus? status;
+
+  /// Live non-archived running-session count, present only for warm cores.
+  /// Null on an older bridge or a cold project. A change here means the
+  /// project's session list actually changed — the trigger for re-peeking it
+  /// (see app_shell's _onControlPlaneState), which `status` alone can't signal.
+  final int? runningSessions;
   final String? lastActiveAt;
 
   const AdvertisedProject({
@@ -22,6 +51,8 @@ class AdvertisedProject {
     this.label,
     this.path,
     required this.running,
+    this.status,
+    this.runningSessions,
     this.lastActiveAt,
   });
 
@@ -34,6 +65,8 @@ class AdvertisedProject {
       label: json['label'] as String?,
       path: json['path'] as String?,
       running: running,
+      status: AgentWorkStatus.fromWire(json['status']),
+      runningSessions: (json['runningSessions'] as num?)?.toInt(),
       lastActiveAt: json['lastActiveAt'] as String?,
     );
   }

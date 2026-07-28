@@ -11,21 +11,17 @@ describe("known-agents registry", () => {
         "claude-code",
         "codex",
         "cursor-agent",
-        "gemini",
         "github-copilot",
         "kilo",
         "kimi",
         "mistral-vibe",
         "opencode",
-        "qwen",
       ],
     );
   });
 
   it("resolves the new agents to their CLI bins", () => {
     expect(resolveAgent("kilo").bin).toBe("kilo");
-    expect(resolveAgent("gemini").bin).toBe("gemini");
-    expect(resolveAgent("qwen").bin).toBe("qwen");
     expect(resolveAgent("kimi").bin).toBe("kimi");
     expect(resolveAgent("mistral-vibe").bin).toBe("vibe");
   });
@@ -80,8 +76,6 @@ describe("known-agents registry", () => {
 
   it("titleSourceFor is osc for agents without a fail-open injection signal, or no structured resolver at all", () => {
     expect(titleSourceFor("cursor-agent")).toBe("osc");
-    expect(titleSourceFor("gemini")).toBe("osc");
-    expect(titleSourceFor("qwen")).toBe("osc");
     expect(titleSourceFor("kilo")).toBe("osc");
     expect(titleSourceFor("kimi")).toBe("osc");
     expect(titleSourceFor("mistral-vibe")).toBe("osc");
@@ -123,38 +117,10 @@ test("kilo env points KILO_TUI_CONFIG at an attention-enabled config file", () =
   expect(cfg.attention.enabled).toBe(true);
 });
 
-test("gemini env points GEMINI_CLI_SYSTEM_DEFAULTS_PATH at a notifications-enabled defaults file", () => {
-  const base = mkdtempSync(join(tmpdir(), "ab-known-agents-"));
-  const env = resolveAgentEnv("gemini", base, { binary: "/app/antgrid-bridge", preargs: ["hook"] });
-
-  const path = env.GEMINI_CLI_SYSTEM_DEFAULTS_PATH;
-  expect(path).toBeTruthy();
-  expect(existsSync(path!)).toBe(true);
-
-  const cfg = JSON.parse(readFileSync(path!, "utf8"));
-  expect(cfg.general.enableNotifications).toBe(true);
-  expect(cfg.general.notificationMethod).toBe("osc777");
-  expect(cfg.hooks.SessionStart[0].hooks[0].command).toContain("antgrid-bridge");
-  expect(cfg.hooks.SessionStart[0].hooks[0].command).not.toMatch(/\bnode(?:\.exe)?\b/i);
-  expect(cfg.hooks.Stop[0].hooks[0].command).toContain("gemini");
-});
-
-test("qwen env points QWEN_CODE_SYSTEM_DEFAULTS_PATH at a hooks-only defaults file", () => {
-  const base = mkdtempSync(join(tmpdir(), "ab-known-agents-"));
-  const env = resolveAgentEnv("qwen", base, { binary: "/app/antgrid-bridge", preargs: ["hook"] });
-  const path = env.QWEN_CODE_SYSTEM_DEFAULTS_PATH;
-  expect(path).toBeTruthy();
-  expect(existsSync(path!)).toBe(true);
-  const cfg = JSON.parse(readFileSync(path!, "utf8"));
-  expect(cfg.general).toBeUndefined();
-  expect(cfg.hooks.Stop[0].hooks[0].command).toContain("qwen");
-});
-
 test("entry-only agents get no extra launch env", () => {
   const base = mkdtempSync(join(tmpdir(), "ab-known-agents-"));
   // These notify by default (or via the focus-routing default-blur) so they
   // need no injected config — only a registry entry.
-  // qwen is excluded here — it uses a hooks-only defaults file (own test above)
   expect(resolveAgentEnv("kimi", base)).toEqual({});
   expect(resolveAgentEnv("mistral-vibe", base)).toEqual({});
   expect(resolveAgentEnv("codex", base)).toEqual({});

@@ -4,7 +4,8 @@ import { MessageBus } from "./message-bus";
 import { LocalListener } from "./local-listener";
 import { createRelayPromotion, type RelayPromotionController, type RelayPromotionDeps } from "./relay-promotion";
 import type { AttachStreamOpts, StreamHandle } from "./stream-mux";
-import { createMessage } from "./protocol";
+import { createMessage, type AbMessage, type SessionEntry, type WorkStatus } from "./protocol";
+import { initialWorkStatus, reduceWorkStatus, turnStart, type WorkStatusState } from "./work-status";
 import { logger } from "./logger";
 const log = logger.child({ component: "project-core" });
 import { createPushDispatcher } from "./push/push-dispatcher";
@@ -78,10 +79,70 @@ export class ProjectCore {
   private relayRegistered = false;
   private _localConnectInfo: { port: number; token: string } | null = null;
 
+  // Reduced per-project work status for the always-on control-plane advert, so
+  // the app's Recent/sidebar reflect activity WITHOUT warming this core. The
+  // reduction is a pure fold over outbound bus frames — see work-status.ts.
+  private _work: WorkStatusState = initialWorkStatus;
+  private _onWorkStatusChange: (() => void) | null = null;
+  /** Set by {@link observeWorkStatus} for the message it just folded: true when
+   *  the reduction was a no-op (exact-repeat or the awaiting_input-after-
+   *  task_complete stale nudge). The push subscriber (attached later, so its
+   *  bus callback always runs after this one for the same publish()) reads
+   *  this to skip pushing a notification that carries no new information —
+   *  see attachRelayStream. */
+  private _lastNotificationRedundant = false;
+
   constructor(private readonly deps: ProjectCoreDeps) {}
 
   get projectId(): string { return this.core?.projectId ?? ""; }
   get localConnectInfo(): { port: number; token: string } | null { return this._localConnectInfo; }
+
+  /** Current reduced work status (working/attention/done/error) for the
+   *  control-plane advert. Defaults to "done" before any signal. */
+  get workStatus(): WorkStatus { return this._work.status; }
+
+  /** Live non-archived running-session count from the same reduction, carried
+   *  in the control-plane advert (`runningSessions`) so the app re-peeks the
+   *  session list exactly when it actually changed — see protocol.ts. */
+  get workRunningCount(): number { return this._work.runningCount; }
+
+  /** Register a callback fired whenever {@link workStatus} or
+   *  {@link workRunningCount} CHANGES (deduped), so the host can re-advertise
+   *  the control plane on a real transition rather than polling. Pass null to
+   *  clear. */
+  onWorkStatusChange(cb: (() => void) | null): void { this._onWorkStatusChange = cb; }
+
+  /** Commit a new work-status reduction, firing {@link onWorkStatusChange} only
+   *  on a real transition of status OR running-session count (a fresh object
+   *  with both unchanged — e.g. a turn-start while already working —
+   *  re-advertises nothing). Count changes with an unchanged status (a 2nd
+   *  session starting while one is working) must still re-advertise, or the
+   *  phone's Recent list misses the new session until an unrelated flip. */
+  private commitWork(next: WorkStatusState): void {
+    if (next === this._work) return;
+    const changed = next.status !== this._work.status
+      || next.runningCount !== this._work.runningCount;
+    this._work = next;
+    if (changed) this._onWorkStatusChange?.();
+  }
+
+  /** Fold one outbound bus frame into the work-status reduction. Must never
+   *  throw — the bus lets subscriber throws propagate, and this rides the same
+   *  publish() as the live relay subscriber (reduceWorkStatus is pure/total). */
+  private observeWorkStatus(msg: AbMessage): void {
+    const next = reduceWorkStatus(this._work, msg);
+    this._lastNotificationRedundant = msg.type === "notification:push" && next === this._work;
+    this.commitWork(next);
+  }
+
+  /** A turn-start hook fired (user submitted a prompt): clear a stale turn-end
+   *  notification so re-prompting an existing session returns to "working"
+   *  rather than showing the previous turn's done/attention. Routed here from
+   *  the per-core api-server (never a bus frame — the app must not see it as a
+   *  notification), via {@link AgentContext.onTurnStart}. */
+  noteTurnStart(): void {
+    this.commitWork(turnStart(this._work));
+  }
 
   /** First register outcome of a REMOTE-mode core's primary relay slot (null in
    *  local mode, or before start()). Lets the host gate the phone-facing
@@ -106,6 +167,13 @@ export class ProjectCore {
     return this.core?.deleteSession(id) ?? false;
   }
 
+  /** Forward the live session list (with true per-session `running`) to the
+   *  control-plane `sessions.list` peek. Returns null if not started, so the
+   *  caller can fall back to the on-disk persisted list. */
+  listSessions(includeArchived: boolean): SessionEntry[] | null {
+    return this.core?.listSessions(includeArchived) ?? null;
+  }
+
   async start(): Promise<void> {
     // Validate host-injected deps before building the core so a misconfigured
     // remote launch fails fast (and predictably) rather than spinning up
@@ -119,12 +187,16 @@ export class ProjectCore {
       mode: this.deps.mode,
       identity: this.deps.identity,
       pairedPhones: this.deps.pairedPhones,
+      onTurnStart: () => this.noteTurnStart(),
       relayUrl: this.deps.relayUrl,
     });
     this.core = core;
     const bus = new MessageBus();
     this.bus = bus;
     core.attachTransport(bus);
+    // Fold outbound frames into the control-plane work-status reduction. Additive
+    // subscriber (like the push dispatcher); lives for the bus's lifetime.
+    bus.subscribe({ deliver: (msg) => this.observeWorkStatus(msg) });
     if (this.deps.mode === "local") {
       await this.startLocal(core, bus);
     } else {
@@ -311,6 +383,13 @@ export class ProjectCore {
     });
     const unsubscribePush = bus.subscribe({
       deliver: (msg) => {
+        // The work-status subscriber (subscribed in start(), before this one)
+        // already folded this same message and flagged it redundant — e.g. the
+        // generic post-completion "awaiting_input" nudge that follows a
+        // task_complete this turn. That fold carries no new information for the
+        // phone either, so skip the push rather than pinging a backgrounded user
+        // for a turn that already resolved.
+        if (msg.type === "notification:push" && this._lastNotificationRedundant) return;
         // Isolate the push dispatcher: a throw here (malformed target, seal
         // failure) must NOT abort publish() and starve the live stream subscriber
         // on the same message. push is best-effort, so we log.

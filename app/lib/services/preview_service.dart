@@ -99,9 +99,23 @@ class PreviewService {
   }
 
   void _handlePreviewSnapshot(PreviewSnapshotMessage msg) {
-    final ports = msg.urls
-        .map((e) => PortInfo(port: e.port, label: e.label))
-        .toList();
+    // MERGE with the current list, never replace: the snapshot only covers
+    // config-declared preview ports, while ports:update carries every
+    // detected port. On rebind both arrive in arbitrary order — a replace
+    // here would wipe detected ports whenever the snapshot lands last.
+    final byPort = {for (final p in _state.ports) p.port: p};
+    for (final e in msg.urls) {
+      final existing = byPort[e.port];
+      byPort[e.port] = PortInfo(
+        port: e.port,
+        label: e.label ?? existing?.label,
+        scheme: e.scheme ?? existing?.scheme,
+        pid: existing?.pid,
+        processName: existing?.processName,
+      );
+    }
+    final ports = byPort.values.toList()
+      ..sort((a, b) => a.port.compareTo(b.port));
     _setState(_state.copyWith(ports: ports));
   }
 
@@ -113,6 +127,9 @@ class PreviewService {
 
   Future<TunnelHttpResponse> proxyRequest(
     TunnelHttpRequest request, {
+    // Must stay ABOVE the bridge's FETCH_TIMEOUT_MS (localhost-fetch.ts) so a
+    // slow dev server yields the bridge's 502 (with the real error), never a
+    // phone-side TimeoutException.
     Duration timeout = const Duration(seconds: 30),
   }) {
     final pending = PendingReply<TunnelHttpResponse>(

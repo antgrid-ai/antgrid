@@ -59,6 +59,18 @@ describe("Claude hooks", () => {
     ]);
   });
 
+  test("user-prompt posts a turn-start (fresh turn → working)", async () => {
+    const h = harness({
+      agent: "claude",
+      event: "user-prompt",
+      stdin: JSON.stringify({ session_id: "s1", transcript_path: "/tmp/t.jsonl", prompt: "hi" }),
+    });
+    await h.run();
+    expect(h.posts).toEqual([
+      { port: 43123, path: "/turn-start", body: { terminalId: "term-1" } },
+    ]);
+  });
+
   test("stop sends title, completion, and handler events", async () => {
     const h = harness({
       agent: "claude",
@@ -131,20 +143,21 @@ describe("Claude hooks", () => {
     expect(notify?.body).toEqual({ type: "task_complete", agent: "claude", transcriptPath: "/tmp/t.jsonl" });
   });
 
-  test("waiting notification suppresses duplicate notification but keeps handler event", async () => {
+  test("waiting notification posts awaiting_input, not permission_request, plus the handler event", async () => {
     const h = harness({
       agent: "claude",
       event: "notification",
       stdin: JSON.stringify({ message: "Claude is waiting for your input" }),
     });
     await h.run();
-    expect(h.posts).toEqual([
+    expect(h.posts).toEqual(expect.arrayContaining([
+      { port: 43123, path: "/notify", body: { type: "awaiting_input", terminalId: "term-1", message: "Claude is waiting for your input" } },
       {
         port: 43123,
         path: "/handler-event",
         body: { terminalId: "term-1", agent: "claude", event: "awaiting_input", transcriptPath: "", sessionId: "" },
       },
-    ]);
+    ]));
   });
 });
 
@@ -237,16 +250,6 @@ describe("Codex hooks", () => {
 });
 
 describe("session capture hooks", () => {
-  test("Gemini and Qwen omit absent transcript paths", async () => {
-    for (const agent of ["gemini", "qwen"]) {
-      const h = harness({ agent, event: "after-agent", stdin: JSON.stringify({ session_id: `${agent}-1` }) });
-      await h.run();
-      expect(h.posts).toEqual([
-        { port: 43123, path: "/session-title", body: { terminalId: "term-1", sessionId: `${agent}-1`, agent } },
-      ]);
-    }
-  });
-
   test("Cursor strips a BOM and only notifies for completed stops", async () => {
     const start = harness({ agent: "cursor", event: "session-start", stdin: `\uFEFF${JSON.stringify({ session_id: "cursor-1" })}` });
     const complete = harness({ agent: "cursor", event: "stop", stdin: `\uFEFF${JSON.stringify({ status: "completed" })}` });

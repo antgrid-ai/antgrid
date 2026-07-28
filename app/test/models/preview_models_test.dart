@@ -25,6 +25,13 @@ void main() {
       expect(info.pid, isNull);
       expect(info.processName, isNull);
       expect(info.label, isNull);
+      expect(info.scheme, isNull);
+    });
+
+    test('fromJson parses detected scheme', () {
+      final info = PortInfo.fromJson({'port': 8443, 'scheme': 'https'});
+      expect(info, isNotNull);
+      expect(info!.scheme, 'https');
     });
 
     test('fromJson returns null for missing port', () {

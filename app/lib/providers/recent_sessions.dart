@@ -1,8 +1,10 @@
+import 'package:collection/collection.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/recent_session_row.dart';
 import '../services/account_agents_api.dart';
+import '../services/control_plane_client.dart';
 import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
 import '../project/project_session_registry.dart';
@@ -54,6 +56,88 @@ class RemoteProjectLabelsController extends Notifier<Map<String, String>> {
   }
 }
 
+/// Live per-project work status (working/attention/error/done) from each
+/// ALREADY-open machine's control-plane advert, keyed by drawer entryId
+/// (`"<machineUuid>.<projectId>"`). Written imperatively by the app_shell
+/// control-plane reaper — the SAME single-writer pattern as
+/// [remoteProjectLabelsProvider], and for the same reason (a per-machine
+/// `ref.watch` fan-in into one provider reproduced Riverpod's "rebuilt multiple
+/// times in the same frame" crash). Seeded from [CachedSessionsStore] on cold
+/// boot (last-known state before the first advert arrives); cleared from the
+/// cache when a socket closes so offline machines don't seed stale badges.
+final remoteProjectStatusProvider =
+    NotifierProvider<
+      RemoteProjectStatusController,
+      Map<String, AgentWorkStatus>
+    >(RemoteProjectStatusController.new);
+
+class RemoteProjectStatusController
+    extends Notifier<Map<String, AgentWorkStatus>> {
+  @override
+  Map<String, AgentWorkStatus> build() {
+    // Seed from the persisted status cache so a cold-boot row can show the
+    // last-known CALL-TO-ACTION (attention/error) before the first advert
+    // arrives. Only those two are seeded: working/done are re-derived from
+    // cached session-running by projectWorkStatusProvider, so seeding a stale
+    // "working" here would paint a live-activity pulse on an offline machine
+    // whose cached sessions are idle — a visible contradiction. attention/error
+    // add real information the fallback can't express and self-heal the moment
+    // the socket dials (the advert overwrites the whole machine).
+    //
+    // Guarded: a widget/provider test that never touches cached sessions won't
+    // override cachedSessionsStoreProvider (which throws by contract when
+    // unset), and reading status must not force that store into existence —
+    // degrade to an empty map rather than throwing out of build().
+    try {
+      final raw = ref.read(cachedSessionsStoreProvider).allStatuses();
+      final result = <String, AgentWorkStatus>{};
+      for (final e in raw.entries) {
+        final s = AgentWorkStatus.fromWire(e.value);
+        if (s == AgentWorkStatus.attention || s == AgentWorkStatus.error) {
+          result[e.key] = s!;
+        }
+      }
+      return result;
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  /// Replace every entry for [machineUuid] with [statuses] in one write:
+  /// handles additions, transitions, and removals (a project dropped from the
+  /// advert — or the whole socket closing → empty map — clears its status so the
+  /// row falls back to session-running). No-op when nothing changed for this
+  /// machine, so an unchanged advert re-delivery triggers no rebuild.
+  void setMachineStatuses(
+    String machineUuid,
+    Map<String, AgentWorkStatus> statuses,
+  ) {
+    final prefix = '$machineUuid.';
+    final next = <String, AgentWorkStatus>{
+      for (final e in state.entries)
+        if (!e.key.startsWith(prefix)) e.key: e.value,
+      ...statuses,
+    };
+    if (const MapEquality<String, AgentWorkStatus>().equals(state, next)) return;
+    state = next;
+  }
+
+  /// Update work status for LOCAL (bare-key) projects from the host control
+  /// plane's `project:list` poll. [statuses] is keyed by bare projectId.
+  /// Compound `uuid.projectId` keys from relay adverts are left untouched.
+  /// Called by the desktop periodic poll in [_ControlPlaneReaperState].
+  void setLocalStatuses(Map<String, AgentWorkStatus> statuses) {
+    final next = <String, AgentWorkStatus>{
+      for (final e in state.entries)
+        if (e.key.contains('.')) e.key: e.value,
+      ...statuses,
+    };
+    if (const MapEquality<String, AgentWorkStatus>().equals(state, next)) return;
+    state = next;
+  }
+}
+
+
 /// Flat, recency-sorted list of every cached session across all projects and
 /// devices. Rebuilds when the cache changes (via [cacheChangesProvider]) or any
 /// metadata source (projects / recent agents / inventory / local uuid /
@@ -71,8 +155,21 @@ final recentSessionsProvider = Provider<List<RecentSessionRow>>((ref) {
   final localLabel = _localDeviceLabel(inventory, localUuid);
   final remoteProjectLabels = ref.watch(remoteProjectLabelsProvider);
 
+  // Overlay the focused project's LIVE session list on top of the cache — the
+  // SAME live-or-cached rule the drawer's [sessionsForEntryProvider] uses. A
+  // just-created/updated session lands in the live SessionsService state
+  // immediately, but its cache write-through can lag (or be clobbered by a
+  // stale control-plane listSessions peek), which is why a new session shows in
+  // the sidebar yet not here. Reading the live state makes Recent authoritative
+  // for the focused project, exactly like the sidebar.
+  final cached = {...store.entries()};
+  final fresh = ref.watch(freshSessionsStateProvider);
+  if (fresh != null) {
+    cached[fresh.projectId] = fresh.sessions;
+  }
+
   return buildRecentSessions(
-    cached: store.entries(),
+    cached: cached,
     locals: locals,
     remotes: remotes,
     inventory: inventory,

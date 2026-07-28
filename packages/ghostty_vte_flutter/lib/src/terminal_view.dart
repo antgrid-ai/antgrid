@@ -119,6 +119,32 @@ const Key _selectionEndHandleKey = ValueKey<String>(
 
 enum _TerminalSelectionHandleEdge { start, end }
 
+/// Imperative handle for the terminal's soft keyboard (mobile IME), for hosts
+/// that disable [GhosttyTerminalView.showKeyboardOnInteraction] and provide
+/// their own affordance. Detached (no-op) while no view is attached; a view
+/// attaches itself for its lifetime.
+class GhosttyTerminalSoftKeyboardController {
+  VoidCallback? _show;
+  VoidCallback? _hide;
+  ValueGetter<bool>? _isVisible;
+
+  /// Focuses the attached terminal and opens the soft keyboard.
+  void show() => _show?.call();
+
+  /// Closes the soft keyboard (terminal keeps focus).
+  void hide() => _hide?.call();
+
+  /// Whether the soft keyboard (IME connection) is currently up. Reads the
+  /// attached view's live state, so it stays correct even after a system
+  /// dismiss (Android Back) that closes the IME without any explicit hide().
+  bool get isVisible => _isVisible?.call() ?? false;
+
+  /// Raises the keyboard if down, dismisses it if up. Reads [isVisible] live
+  /// on each call, so a single button can toggle without desyncing from a
+  /// Back-button dismiss.
+  void toggle() => isVisible ? hide() : show();
+}
+
 /// Painter-based terminal widget that renders lines from [GhosttyTerminalController].
 ///
 /// The controller keeps a real [VtTerminal] alive, and this widget sizes that
@@ -138,6 +164,8 @@ class GhosttyTerminalView extends StatefulWidget {
     this.scrollPhysics,
     this.autoFollowOnActivity = false,
     this.focusOnInteraction = true,
+    this.showKeyboardOnInteraction = true,
+    this.softKeyboardController,
     this.onTapTerminal,
     this.focusNode,
     this.backgroundColor = const Color(0xFF0A0F14),
@@ -208,6 +236,18 @@ class GhosttyTerminalView extends StatefulWidget {
 
   /// Whether terminal gestures should request focus for keyboard input.
   final bool focusOnInteraction;
+
+  /// Whether focus/tap interactions summon the platform soft keyboard (mobile
+  /// IME). When `false`, taps still focus the terminal (hardware keys work)
+  /// but the on-screen keyboard only appears via [softKeyboardController] —
+  /// for hosts that reserve taps for scrolling/selection and provide their
+  /// own explicit keyboard affordance. No effect on desktop/web, which have
+  /// no IME bridge.
+  final bool showKeyboardOnInteraction;
+
+  /// Imperative handle to show/hide the soft keyboard from outside the view
+  /// (e.g. a toolbar button). Only meaningful on mobile.
+  final GhosttyTerminalSoftKeyboardController? softKeyboardController;
 
   /// Optional callback invoked when the terminal receives a tap interaction.
   final VoidCallback? onTapTerminal;
@@ -566,19 +606,63 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
         onEnter: _sendEnter,
       );
     }
+    _attachSoftKeyboardController(widget.softKeyboardController);
     _syncEngineColors();
+  }
+
+  void _attachSoftKeyboardController(
+    GhosttyTerminalSoftKeyboardController? controller,
+  ) {
+    if (controller == null) {
+      return;
+    }
+    controller._show = _showSoftKeyboardExplicitly;
+    controller._hide = () => _softKeyboard?.hide();
+    controller._isVisible = () => _softKeyboard?.isActive ?? false;
+  }
+
+  void _detachSoftKeyboardController(
+    GhosttyTerminalSoftKeyboardController? controller,
+  ) {
+    if (controller == null) {
+      return;
+    }
+    // Ownership check: on a same-frame remount the NEW view's initState runs
+    // before the OLD view's dispose (Flutter finalizes the tree after build),
+    // so an unconditional null here would wipe hooks the replacement just
+    // attached. Only detach what this view attached. (Tear-offs of the same
+    // instance method compare equal, so == identifies our own hook.)
+    if (controller._show == _showSoftKeyboardExplicitly) {
+      controller._show = null;
+      controller._hide = null;
+      controller._isVisible = null;
+    }
+  }
+
+  /// Controller-driven keyboard summon: focus first — the IME connection is
+  /// only attached while the terminal holds focus — then show.
+  void _showSoftKeyboardExplicitly() {
+    if (!_focusNode.hasFocus) {
+      FocusScope.of(context).requestFocus(_focusNode);
+    }
+    _softKeyboard?.show();
   }
 
   /// Shows the soft keyboard while the terminal holds focus and hides it when
   /// focus leaves — the IME connection is only meaningful while the user is
-  /// actually driving this terminal.
+  /// actually driving this terminal. Auto-show on focus-gain is suppressed
+  /// when the host reserves keyboard summoning for its own affordance
+  /// ([GhosttyTerminalView.showKeyboardOnInteraction] false); hide-on-blur
+  /// always applies so a dismissed terminal never leaves a stale IME up.
   void _handleFocusChangedForSoftKeyboard() {
     final keyboard = _softKeyboard;
     if (keyboard == null) {
       return;
     }
     if (_focusNode.hasFocus) {
-      keyboard.show();
+      if (widget.showKeyboardOnInteraction) {
+        keyboard.show();
+      }
     } else {
       keyboard.hide();
     }
@@ -697,6 +781,10 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
         !widget.showSelectionContextMenu) {
       _removeSelectionContextMenu();
     }
+    if (oldWidget.softKeyboardController != widget.softKeyboardController) {
+      _detachSoftKeyboardController(oldWidget.softKeyboardController);
+      _attachSoftKeyboardController(widget.softKeyboardController);
+    }
     if (oldWidget.palette != widget.palette ||
         oldWidget.foregroundColor != widget.foregroundColor ||
         oldWidget.backgroundColor != widget.backgroundColor ||
@@ -719,6 +807,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   void dispose() {
     _removeSelectionContextMenu();
     _stopAutoScroll();
+    _detachSoftKeyboardController(widget.softKeyboardController);
     _softKeyboard?.hide();
     widget.controller.removeListener(_onControllerChanged);
     _scrollController.removeListener(_onScrollControllerChanged);
@@ -842,13 +931,25 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     final controlText = ghosttyTerminalControlText(event, modifiers: modifiers);
 
     // When the IME soft-keyboard bridge is attached (mobile), the platform
-    // delivers plain text, Backspace, and Enter through the input connection
-    // (see [_GhosttyTerminalSoftKeyboard]). A hardware/Bluetooth keyboard also
+    // delivers plain text and Enter through the input connection (see
+    // [_GhosttyTerminalSoftKeyboard]). A hardware/Bluetooth keyboard also
     // surfaces those as raw KeyEvents here, so handling both paths would type
     // every character twice. Defer them to the IME; keep control chords,
     // navigation/function keys, and copy/paste shortcuts (which the IME does
     // not deliver). The whole guard is inert on desktop/web where
     // `_softKeyboard` is null.
+    //
+    // Backspace is deliberately NOT deferred. IMEs (Gboard/LatinIME) often
+    // send backspace as a bare KEYCODE_DEL key event instead of
+    // deleteSurroundingText, and the engine's InputConnectionAdaptor fallback
+    // has no KEYCODE_DEL case (getUnicodeChar() is 0 → returns false), so a
+    // deferred backspace is dropped on the floor — nothing ever reaches the
+    // editable to produce a deletion delta. The two backspace channels are
+    // mutually exclusive per press (an IME either edits the editable, which
+    // dispatches no KeyEvent, or sends the key event, which never touches the
+    // editable), so handling the raw event here cannot double-delete. Enter
+    // differs: the engine fallback DOES translate KEYCODE_ENTER into a "\n"
+    // insertion on a multiline field, so deferring it delivers exactly once.
     final imeOwnsText = _softKeyboard?.isActive ?? false;
     final plainChord =
         !modifiers.controlPressed &&
@@ -856,10 +957,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
         !modifiers.metaPressed;
 
     if (key != null) {
-      if (imeOwnsText &&
-          plainChord &&
-          (key == GhosttyKey.GHOSTTY_KEY_ENTER ||
-              key == GhosttyKey.GHOSTTY_KEY_BACKSPACE)) {
+      if (imeOwnsText && plainChord && key == GhosttyKey.GHOSTTY_KEY_ENTER) {
         return KeyEventResult.ignored;
       }
       _jumpToLiveBottom();
@@ -2282,8 +2380,9 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     // Re-assert the soft keyboard on every interaction, not just focus-gain:
     // dismissing it (Android Back) closes the IME connection while the terminal
     // keeps focus, so a plain focus-change listener would never bring it back
-    // on the next tap.
-    if (_focusNode.hasFocus) {
+    // on the next tap. Skipped when the host owns keyboard summoning
+    // (showKeyboardOnInteraction false) — taps then scroll/select only.
+    if (widget.showKeyboardOnInteraction && _focusNode.hasFocus) {
       _softKeyboard?.show();
     }
   }

@@ -434,11 +434,15 @@ export class HostServer {
       .filter((id) => this.seenProjects.has(id) || warm.has(id))
       .map((id) => {
         const seen = this.seenProjects.get(id);
-        const dialable = this.cores.get(id)?.core.isRelayRegistered() ?? false;
+        const entry = this.cores.get(id);
+        const dialable = entry?.core.isRelayRegistered() ?? false;
         // A reconnecting phone binds its ProjectSession to this streamId without a
         // fresh project:start (design §7.4). Only surfaced for a dialable stream.
         const streamId = dialable ? this.streamIds.get(id) : undefined;
-        return { projectId: id, label: seen?.label, path: seen?.path, running: dialable, lastActiveAt: seen?.lastActiveAt, streamId };
+        // Live work status + running-session count for warm cores only. Cold
+        // projects omit both (their agent PTY isn't alive → nothing "working");
+        // the app falls back to `running` for those, reading them as done/offline.
+        return { projectId: id, label: seen?.label, path: seen?.path, running: dialable, status: entry?.core.workStatus, runningSessions: entry?.core.workRunningCount, lastActiveAt: seen?.lastActiveAt, streamId };
       });
   }
 
@@ -681,7 +685,15 @@ export class HostServer {
         error: { code: "NOT_ALLOWED", message: "project not in phone allowlist" },
       });
     }
-    const sessions = await SessionManager.readPersisted(resolveAbDir(), projectId, includeArchived);
+    // A WARM core (open/promoted) owns the live PTY/chat state — delegate so the
+    // peek reports true per-session `running`; a stopped project has no warm core
+    // and its disk file is authoritative (every session genuinely not-running).
+    // listSessions returns null when the core hasn't finished initializing yet
+    // (pre-handshake), in which case fall back to disk exactly as for a cold core.
+    // Mirrors handleSessionsDeleteRpc's warm-core-vs-disk routing.
+    const entry = this.cores.get(projectId);
+    const liveSessions = entry?.core.listSessions(includeArchived ?? false);
+    const sessions = liveSessions ?? await SessionManager.readPersisted(resolveAbDir(), projectId, includeArchived);
     return createMessage("response", { requestId: req.requestId, ok: true, result: { sessions } });
   }
 
@@ -1016,6 +1028,10 @@ export class HostServer {
     await core.start();
     const entry: CatalogEntry = { core, path: projectPath, mode, lastFocusedMs: this.tick() };
     this.cores.set(projectId, entry);
+    // Re-advertise on a real work-status transition so the phone's Recent/sidebar
+    // track activity (working/attention/error/done) without warming this core
+    // themselves. Deduped inside the core, so this fires on transitions only.
+    core.onWorkStatusChange(() => this.readvertiseToControlPlane());
     // Record in the non-authoritative hint catalog so a later stop()/evict still
     // lets us advertise this project as known-but-stopped. NOT removed on stop.
     // The in-memory .set() is what matters for runtime; the flush is a non-secret
@@ -1023,6 +1039,10 @@ export class HostServer {
     // read path already "never throws into the caller" — extend that to writes).
     this.seenProjects.set(projectId, { path: projectPath, label: basename(projectPath), lastActiveAt: new Date().toISOString() });
     this.flushSeen();
+    // Push the newly-warm project to the connected phone NOW — without this,
+    // a project opened from the desktop reaches the phone only when its first
+    // work-status transition happens to re-advertise (i.e. late or never).
+    this.readvertiseToControlPlane();
     log.info(`host: opened project ${projectId} (mode=${mode}, ${this.cores.size} core(s) warm)`);
     await this.evictIfNeeded(projectId);
     // An open that no phone asked for (host restart re-opening a project, a
@@ -1109,7 +1129,10 @@ export class HostServer {
   }
 
   list(): ProjectSummary[] {
-    return [...this.cores.entries()].map(([projectId, e]) => ({ projectId, path: e.path, running: true, mode: e.mode }));
+    return [...this.cores.entries()].map(([projectId, e]) => ({
+      projectId, path: e.path, running: true, mode: e.mode,
+      workStatus: e.core.workStatus,
+    }));
   }
 
   async stop(projectId: string): Promise<void> {

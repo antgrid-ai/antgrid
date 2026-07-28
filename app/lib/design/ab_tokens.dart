@@ -204,13 +204,17 @@ abstract final class AbTokens {
   static const rowHeightMd =
       38.0; // panel headers (formerly statusHeaderHeight)
   static const rowHeightLg = 44.0; // mobile-friendly hit-target rows
+  static const rowHeightXl = 52.0; // roomy touch bars (mobile terminal quick-actions)
 
   /// Deprecated: use [rowHeightMd]. Retained for migration only.
   static const statusHeaderHeight = rowHeightMd;
 
-  // Icon button — one canonical visual box. No size param.
+  // Icon button — one canonical visual box (chrome default).
   static const iconButtonBox = 24.0;
   static const iconButtonGlyph = 14.0;
+  // Larger glyph for touch affordances (e.g. the mobile terminal
+  // quick-actions bar), where a 14px glyph reads small in a tall touch row.
+  static const iconButtonGlyphXl = 26.0; // keyboard-key-sized (the IME toggle)
 
   // Minimum interactive-target edge: 44 splits Apple HIG's 44pt and Android's
   // 48dp guidance. Enforced on mobile only, via AbTapTarget — desktop pointers

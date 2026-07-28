@@ -26,6 +26,11 @@ export interface AgentContext {
   onHandlerEvent?: (body: HandlerEventBody) => void;
   /** Called when an injected hook pings /hook-alive (codex drift probe). */
   onHookAlive?: (terminalId: string) => void;
+  /** Called when a turn-start hook pings /turn-start (a fresh turn began), so
+   *  the control-plane work status resets to "working". Bridge-internal: this
+   *  never emits an app-facing frame — unlike /notify, a turn-start is not a
+   *  user-facing notification. */
+  onTurnStart?: () => void;
 }
 
 const VERSION = "0.1.0";
@@ -40,7 +45,7 @@ export const NotifyBodySchema = z.object({
   terminalId: z.string().optional(),
   // Hooks post pointers and the bridge reads.
   transcriptPath: z.string().optional(),
-  agent: z.enum(["claude", "codex", "opencode", "gemini", "qwen", "github-copilot", "cursor"]).optional(),
+  agent: z.enum(["claude", "codex", "opencode", "github-copilot", "cursor"]).optional(),
 });
 
 export const SessionTitleSchema = z.object({
@@ -48,7 +53,7 @@ export const SessionTitleSchema = z.object({
   sessionId: z.string().min(1),
   title: z.string().optional(),
   transcriptPath: z.string().optional(),
-  agent: z.enum(["claude", "codex", "opencode", "gemini", "qwen", "github-copilot", "cursor"]).optional(),
+  agent: z.enum(["claude", "codex", "opencode", "github-copilot", "cursor"]).optional(),
   titleOnly: z.boolean().optional(),
 });
 export type SessionTitleBody = z.infer<typeof SessionTitleSchema>;
@@ -246,6 +251,15 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
           sessionTitle,
           projectId: project.id,
         }));
+        return json({ ok: true });
+      }
+
+      if (req.method === "POST" && path === "/turn-start") {
+        // Body is accepted but not required — the api-server is per-core, so the
+        // owning project is unambiguous without a terminalId. Drained so the
+        // hook's POST doesn't block on an unread body.
+        try { await req.json(); } catch { /* empty/invalid body is fine */ }
+        ctx.onTurnStart?.();
         return json({ ok: true });
       }
 

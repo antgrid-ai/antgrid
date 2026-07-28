@@ -275,6 +275,9 @@ const PortInfoSchema = z.object({
   pid: z.number().optional(),
   processName: z.string().optional(),
   label: z.string().optional(),
+  // Detected dev-server scheme (from terminal-output URL sightings). Absent
+  // means unknown; consumers should fall back to http.
+  scheme: z.enum(["http", "https"]).optional(),
 });
 
 const PortsUpdateMessage = BaseMessage.extend({
@@ -296,6 +299,16 @@ const AgentDisconnectingMessage = BaseMessage.extend({
   reason: z.string().optional(),
 });
 
+// Per-project agent work status carried on the always-on control plane so the
+// app's Recent/sidebar reflect live activity WITHOUT opening (warming) a
+// project. Distinct from `running` (which means "dialable / holds a relay
+// slot"): `attention` is the call-to-action (agent blocked on a permission/
+// prompt). Optional on the wire — an older bridge omits it and the app falls
+// back to `running`; an older app ignores it. Precedence when a project has
+// multiple live signals: attention > error > working > done.
+export const WorkStatusSchema = z.enum(["working", "attention", "done", "error"]);
+export type WorkStatus = z.infer<typeof WorkStatusSchema>;
+
 // Outbound agent→app: the always-on control plane advertises which of the
 // phone's allowed projects exist (allowed ∩ catalog), with a running flag per
 // project. E2E-opaque to the relay (like preview:url). No inbound switch case.
@@ -307,6 +320,14 @@ const AgentProjectsMessage = BaseMessage.extend({
       label: z.string().optional(),
       path: z.string().optional(),
       running: z.boolean(),
+      status: WorkStatusSchema.optional(),
+      // Live non-archived running-session count for warm cores (absent when
+      // cold, like `status`). The app re-peeks a project's session list when
+      // this changes — `status` alone can't signal it: a 2nd session starting
+      // while one is already working stays "working", and done→working is
+      // ambiguous between new-session and re-prompt (see app_shell's
+      // _onControlPlaneState).
+      runningSessions: z.number().int().nonnegative().optional(),
       lastActiveAt: z.string().optional(),
       // Present when the project has an admitted relay data-plane stream: the
       // phone binds its ProjectSession services to this streamId without a fresh
@@ -508,9 +529,12 @@ const CommandDoneMessage = BaseMessage.extend({
   exitCode: z.number().int().nullable(),
 });
 
+export const NotificationTypeSchema = z.enum(["task_complete", "permission_request", "awaiting_input", "idle", "error"]);
+export type NotificationType = z.infer<typeof NotificationTypeSchema>;
+
 const NotificationPushMessage = BaseMessage.extend({
   type: z.literal("notification:push"),
-  notificationType: z.enum(["task_complete", "permission_request", "idle", "error"]),
+  notificationType: NotificationTypeSchema,
   message: z.string().optional(),
   // Names the session that fired this (SessionEntry.name). Hand-mirrored in the
   // app's NotificationPushMessage — keep the two in lockstep.
@@ -869,6 +893,9 @@ const PreviewUrlEntrySchema = z.object({
   port: z.number().int().positive(),
   url: z.string(),
   label: z.string().optional(),
+  // Detected dev-server scheme — mirrors PortInfoSchema.scheme so a
+  // welcome-replayed snapshot doesn't lose it (absent = unknown → http).
+  scheme: z.enum(["http", "https"]).optional(),
 });
 
 const PreviewSnapshotMessage = BaseMessage.extend({

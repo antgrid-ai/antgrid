@@ -1,4 +1,5 @@
 import 'package:iconify_flutter/icons/codicon.dart';
+import 'package:iconify_flutter/icons/mdi.dart';
 
 /// Icon constants using VS Code Codicons via Iconify (SVG-rendered).
 abstract final class AbIcons {
@@ -21,6 +22,7 @@ abstract final class AbIcons {
   static const chevronLeft = Codicon.chevron_left;
   static const chevronRight = Codicon.chevron_right;
   static const chevronDown = Codicon.chevron_down;
+  static const chevronUp = Codicon.chevron_up;
   static const refresh = Codicon.refresh;
   static const revert = Codicon.discard;
   static const pin = Codicon.pin;
@@ -64,4 +66,11 @@ abstract final class AbIcons {
   static const upload = Codicon.cloud_upload;
   static const zoomIn = Codicon.zoom_in;
   static const zoomOut = Codicon.zoom_out;
+  // Codicons ship no paperclip — Mdi's is the one non-codicon glyph. Route
+  // any future exceptions through here so this file stays the icon choke
+  // point.
+  static const attach = Mdi.paperclip;
+  // Codicons ship no literal keyboard glyph; record_keys (key caps) is VS
+  // Code's own keyboard-shortcuts icon.
+  static const keyboard = Codicon.record_keys;
 }

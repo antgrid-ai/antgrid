@@ -231,6 +231,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   void _onAgentNotificationPush(NotificationPushMessage msg) {
     const labels = {
       'permission_request': 'Permission needed',
+      'awaiting_input': 'Needs your input',
       'task_complete': 'Task complete',
       'idle': 'Waiting for you',
       'error': 'Agent error',

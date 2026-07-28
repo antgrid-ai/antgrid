@@ -94,6 +94,59 @@ describe("paired-phones store (machine-level)", () => {
     rmSync(dir, { recursive: true });
   });
 
+  it("upsert with a new pubkey for the same device REPLACES the row (no orphan)", () => {
+    const dir = tempAbDir();
+    const store = loadPairedPhones(dir);
+    store.upsert({
+      phonePubkey: "old-pk", phoneDeviceId: "device-1",
+      pairedAt: "2026-01-01T00:00:00Z", lastSeenAt: "2026-01-01T00:00:00Z",
+      allowedProjects: ["projA"],
+      pushToken: "tok-old", pushPubkey: "ppk-old", pushProvider: "fcm",
+    });
+    store.upsert({
+      phonePubkey: "new-pk", phoneDeviceId: "device-1",
+      pairedAt: "2026-02-01T00:00:00Z", lastSeenAt: "2026-02-01T00:00:00Z",
+      allowedProjects: ["projA"],
+      pushToken: "tok-new", pushPubkey: "ppk-new", pushProvider: "fcm",
+    });
+    const rows = store.list();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.phonePubkey).toBe("new-pk");
+    expect(store.get("old-pk")).toBeUndefined();
+    // Survives a fresh load from disk.
+    expect(loadPairedPhones(dir).list()).toHaveLength(1);
+    rmSync(dir, { recursive: true });
+  });
+
+  it("upsert does not collapse distinct devices that share no phoneDeviceId", () => {
+    const dir = tempAbDir();
+    const store = loadPairedPhones(dir);
+    store.upsert({
+      phonePubkey: "pk-a", phoneDeviceId: "device-a",
+      pairedAt: "x", lastSeenAt: "x", allowedProjects: [],
+    });
+    store.upsert({
+      phonePubkey: "pk-b", phoneDeviceId: "device-b",
+      pairedAt: "x", lastSeenAt: "x", allowedProjects: [],
+    });
+    expect(store.list()).toHaveLength(2);
+    rmSync(dir, { recursive: true });
+  });
+
+  it("upsert with a truthy id does not evict legacy rows that have no phoneDeviceId", () => {
+    const dir = seedFile([
+      { phonePubkey: "legacy1", phoneDeviceId: "", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: [] },
+      { phonePubkey: "legacy2", phoneDeviceId: "", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: [] },
+    ]);
+    const store = loadPairedPhones(dir);
+    store.upsert({
+      phonePubkey: "modern", phoneDeviceId: "device-real",
+      pairedAt: "x", lastSeenAt: "x", allowedProjects: [],
+    });
+    expect(store.list().map((p) => p.phonePubkey).sort()).toEqual(["legacy1", "legacy2", "modern"]);
+    rmSync(dir, { recursive: true });
+  });
+
   it("remove persists to disk (fresh load reflects deletion)", () => {
     const dir = tempAbDir();
     const store = loadPairedPhones(dir);

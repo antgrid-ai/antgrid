@@ -96,11 +96,11 @@ class PreviewProxyServer {
   Future<shelf.Response> _handleHttpRequest(shelf.Request request) async {
     final requestId = const Uuid().v4();
 
-    // Read request body if present
+    // Read request body if present. Any method may carry one (DELETE with a
+    // payload is legal and some dev APIs use it) — only GET/HEAD are defined
+    // as bodyless.
     String? body;
-    if (request.method == 'POST' ||
-        request.method == 'PUT' ||
-        request.method == 'PATCH') {
+    if (request.method != 'GET' && request.method != 'HEAD') {
       body = await request.readAsString();
       if (body.isEmpty) body = null;
     }
@@ -136,8 +136,13 @@ class PreviewProxyServer {
 
       // Decode body based on encoding
       final responseHeaders = <String, Object>{...response.headers};
-      // Remove transfer-encoding as shelf handles that
+      // Remove framing/encoding headers: shelf re-frames the response, and the
+      // bridge already decompressed the body (its fetch is transparent), so a
+      // surviving content-encoding would make the WebView gunzip plain text —
+      // garbled CSS/JS — and a stale content-length would truncate it.
       responseHeaders.remove('transfer-encoding');
+      responseHeaders.remove('content-encoding');
+      responseHeaders.remove('content-length');
 
       // Set-Cookie can repeat (e.g. a sign-in response mints the session and
       // clears its handoff cookie at once); the tunnel carries the values as a
@@ -147,17 +152,16 @@ class PreviewProxyServer {
         responseHeaders['set-cookie'] = response.setCookies;
       }
 
-      // Fallback bind: the WebView's origin is our proxy port, not the dev
-      // server's. An absolute redirect back to localhost:<targetPort> would
-      // send the WebView straight at that port — which on a paired phone is the
-      // phone's own localhost, outside the tunnel — so repoint it at the proxy
-      // origin. (No-op when bound on the exact port; redirects already match.)
-      if (_rewriteHost) {
-        final location = responseHeaders['location'];
-        if (location is String) {
-          final rewritten = _rewriteRedirectLocation(location);
-          if (rewritten != null) responseHeaders['location'] = rewritten;
-        }
+      // An absolute redirect back to the dev server would send the WebView
+      // around the tunnel: on a fallback bind, localhost:<targetPort> is the
+      // phone's own localhost; and an https target's redirect keeps `https://`,
+      // which the plain-HTTP proxy can't serve even on the exact port. Repoint
+      // both at the proxy origin. (Exact-port http redirects rewrite to
+      // themselves — a no-op.)
+      final location = responseHeaders['location'];
+      if (location is String) {
+        final rewritten = _rewriteRedirectLocation(location);
+        if (rewritten != null) responseHeaders['location'] = rewritten;
       }
 
       if (response.bodyEncoding == 'base64') {
@@ -182,11 +186,15 @@ class PreviewProxyServer {
   /// Returns [location] repointed at the proxy origin if it's an absolute
   /// loopback URL on the target port, else null (relative or unrelated URLs
   /// are left untouched — they already resolve against the proxy origin).
+  /// The scheme is forced to http: the proxy never speaks TLS, TLS to the dev
+  /// server is the bridge's job.
   String? _rewriteRedirectLocation(String location) {
     final uri = Uri.tryParse(location);
     if (uri == null || !uri.hasScheme) return null;
     final isLoopback = uri.host == 'localhost' || uri.host == '127.0.0.1';
     if (!isLoopback || uri.port != targetPort) return null;
-    return uri.replace(host: 'localhost', port: _localPort).toString();
+    return uri
+        .replace(scheme: 'http', host: 'localhost', port: _localPort)
+        .toString();
   }
 }

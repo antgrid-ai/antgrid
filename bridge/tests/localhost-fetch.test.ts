@@ -36,6 +36,19 @@ function startTestServer() {
         h.append("Set-Cookie", "csrf=123; Path=/");
         return new Response("ok", { headers: h });
       }
+      if (url.pathname === "/gzipped.css") {
+        // Pre-gzipped body + content-encoding, like a dev server compressing
+        // assets. fetch() must decompress it AND the stale framing headers
+        // must not survive into the forwarded response.
+        const gz = Bun.gzipSync(Buffer.from("body { color: red; }"));
+        return new Response(gz, {
+          headers: {
+            "Content-Type": "text/css",
+            "Content-Encoding": "gzip",
+            "Content-Length": String(gz.byteLength),
+          },
+        });
+      }
       return new Response("Hello");
     },
   });
@@ -51,6 +64,19 @@ describe("fetchLocalhost", () => {
     const result = await fetchLocalhost({ url: "http://example.com/test" });
     expect(result.status).toBe(403);
     expect(result.body).toContain("Forbidden");
+  });
+
+  it("decompresses gzipped bodies and strips stale framing headers", async () => {
+    const server = startTestServer();
+    const result = await fetchLocalhost({
+      url: `http://localhost:${server.port}/gzipped.css`,
+    });
+    expect(result.status).toBe(200);
+    expect(result.bodyEncoding).toBe("utf8");
+    expect(result.body).toBe("body { color: red; }");
+    expect(result.headers["content-encoding"]).toBeUndefined();
+    expect(result.headers["content-length"]).toBeUndefined();
+    expect(result.headers["transfer-encoding"]).toBeUndefined();
   });
 
   it("fetches JSON from localhost", async () => {

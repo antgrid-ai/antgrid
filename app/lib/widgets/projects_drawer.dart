@@ -26,11 +26,13 @@ import '../providers/drawer_order.dart';
 import '../providers/collapsed_drawer.dart';
 import '../providers/new_session_action.dart';
 import '../providers/new_session_picker.dart';
+import '../providers/project_work_status.dart';
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
 import '../services/control_plane_client.dart';
 import '../utils/platform_utils.dart';
 import 'account_footer.dart';
+import 'agent_work_status_dot.dart';
 import 'drawer_entry_row.dart' show DrawerEntryRow, MachineDrawerHeaderRow;
 import 'session_row.dart';
 
@@ -508,6 +510,7 @@ class _AdvertisedProjectRow extends ConsumerWidget {
       projectId: project.projectId,
     ).registrationId;
     final expanded = ref.watch(expandedDrawerIdsProvider).contains(regId);
+    final workStatus = ref.watch(projectWorkStatusProvider(regId));
     final t = context.antgrid;
     final name = (project.label != null && project.label!.isNotEmpty)
         ? project.label!
@@ -546,7 +549,26 @@ class _AdvertisedProjectRow extends ConsumerWidget {
                 color: t.textSecondary,
               ),
             ),
-            trailing: _ProjectRunStateIcon(running: project.running),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              spacing: AbTokens.space4,
+              children: [
+                if (workStatus != AgentWorkStatus.done)
+                  AgentWorkStatusDot(
+                    key: ValueKey('project-status-dot-$regId'),
+                    status: workStatus,
+                  ),
+                // Create a session in THIS project (not the machine): lands on
+                // New Session already targeting it — the user only picks the
+                // agent and hits Start.
+                AbIconButton(
+                  icon: AbIcons.add,
+                  tooltip: 'New session',
+                  onTap: () => _newSessionForProject(context, ref),
+                ),
+                _ProjectRunStateIcon(running: project.running),
+              ],
+            ),
             margin: const EdgeInsets.symmetric(vertical: AbTokens.space2),
             onTap: () =>
                 ref.read(expandedDrawerIdsProvider.notifier).toggle(regId),
@@ -555,6 +577,20 @@ class _AdvertisedProjectRow extends ConsumerWidget {
         if (expanded) _ProjectSessions(regId: regId),
       ],
     );
+  }
+
+  void _newSessionForProject(BuildContext context, WidgetRef ref) {
+    enterNewSessionForRemoteProject(
+      ref,
+      machineUuid: machineUuid,
+      project: project,
+    );
+    // Mobile: the drawer is a slide-in overlay — close it so the New Session
+    // page is visible. No-op on desktop (drawer is always-on, not a route).
+    final scaffold = Scaffold.maybeOf(context);
+    if (scaffold?.hasDrawer == true && scaffold!.isDrawerOpen) {
+      Navigator.of(context).pop();
+    }
   }
 }
 
