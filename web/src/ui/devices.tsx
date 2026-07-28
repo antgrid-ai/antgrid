@@ -57,12 +57,10 @@ export function DevicesTable({ devices }: { devices: DeviceRow[] }) {
   );
 }
 
-/** `lastSeenAt` is written only by the agent heartbeat (routes/agents.ts), so an
- *  app row is null forever. Rendering both as "—" conflates "has never checked
- *  in" (actionable — the agent isn't reaching the account service) with "cannot
- *  ever check in" (by design). */
+/** Both agent (bridge) and app (phone) devices call `/account/devices/me/heartbeat`
+ *  (routes/agents.ts), so `lastSeenAt` applies uniformly — "—" just means this
+ *  device hasn't checked in yet. */
 function lastSeenLabel(device: DeviceRow): string {
-  if (device.kind === "app") return "n/a";
   if (!device.lastSeenAt) return "—";
   return new Date(device.lastSeenAt).toISOString().slice(0, 16).replace("T", " ");
 }

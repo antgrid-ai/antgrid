@@ -273,6 +273,46 @@ describe("POST /account/devices/me/heartbeat", () => {
     expect(after?.machineName).toBe("Mac Studio");
   });
 
+  test("a minimal heartbeat (deviceUuid only, as an app/phone sends) updates "
+    + "lastSeenAt without requiring mobileAccessEnabled and without clobbering "
+    + "an agent's existing fields", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const user = await createTestUser(pg.db, "judy@example.com");
+    await createTestSubscription(pg.db, user.id, { tier: "pro" });
+    const { cookie } = await createTestSession(pg.db, user.id);
+
+    const { token, deviceUuid } = await provisionAndMintToken(app, cookie);
+
+    // Establish agent-set fields first, as the bridge would.
+    await app.request("/account/devices/me/heartbeat", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        deviceUuid,
+        mobileAccessEnabled: true,
+        relayUrl: "wss://relay.antgrid.ai",
+        machineName: "Mac Studio",
+      }),
+    });
+
+    // App/phone heartbeat sends only deviceUuid.
+    const res = await app.request("/account/devices/me/heartbeat", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ deviceUuid }),
+    });
+    expect(res.status).toBe(200);
+
+    const after = await pg.db.device.findUnique({
+      where: { userId_deviceId: { userId: user.id, deviceId: deviceUuid } },
+      select: { lastSeenAt: true, mobileAccessEnabled: true, relayUrl: true, machineName: true },
+    });
+    expect(after?.lastSeenAt).not.toBeNull();
+    expect(after?.mobileAccessEnabled).toBe(true);
+    expect(after?.relayUrl).toBe("wss://relay.antgrid.ai");
+    expect(after?.machineName).toBe("Mac Studio");
+  });
+
   test("rejects a session cookie (heartbeat is Bearer-only)", async () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const user = await createTestUser(pg.db, "dave2@example.com");

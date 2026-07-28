@@ -20,6 +20,7 @@ import 'project/limits.dart';
 import 'project/perf_recorder.dart';
 import 'project/project_session.dart';
 import 'project/project_session_registry.dart';
+import 'providers/account_heartbeat.dart';
 import 'providers/analytics.dart';
 import 'providers/auth.dart';
 import 'providers/cached_sessions.dart';
@@ -167,6 +168,10 @@ Future<void> main() async {
   // `ref.listen(currentUserProvider, ...)` live for the container's lifetime.
   container.listen(postSignInProvisioningProvider, (_, _) {});
 
+  // Same "must stay listened" reasoning as above: keeps this device's
+  // `lastSeenAt` fresh in the account Devices dashboard for the app's lifetime.
+  container.listen(accountHeartbeatProvider, (_, _) {});
+
   // Eagerly warm the local bridge host + control plane on launch (desktop-only,
   // non-blocking). Same "must stay listened" reasoning as above.
   container.listen(localHostWarmupProvider, (_, _) {});
@@ -207,7 +212,11 @@ Future<void> main() async {
     });
     unawaited(
       pushService.init(sessions: warmSessions).catchError((Object e) {
-        AbLog.error('Main', 'PushMessagingService.init failed', fields: {'error': '$e'});
+        AbLog.error(
+          'Main',
+          'PushMessagingService.init failed',
+          fields: {'error': '$e'},
+        );
       }),
     );
   }
