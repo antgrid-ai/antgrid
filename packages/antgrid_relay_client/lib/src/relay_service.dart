@@ -96,8 +96,14 @@ class RelayService {
 
   RelayService({required CryptoService crypto}) : _crypto = crypto;
 
+  /// A dial outlives this object: `connect()` deliberately does not await
+  /// `_doConnect`, so a socket that fails (or a `channel.ready` that rejects
+  /// because `dispose()` just closed the sink) lands here after the controllers
+  /// are closed. That emit throws `Bad state` inside an unawaited future, where
+  /// no caller can catch it — keep the last state, drop the notification.
   void _setState(AppState state) {
     _currentState = state;
+    if (_stateController.isClosed) return;
     _stateController.add(state);
   }
 
@@ -346,11 +352,11 @@ class RelayService {
       if (!_isThisMachine(msg.peerId)) return;
       // Presence only — the connection state describes OUR socket, and the agent
       // showing up does not change it.
-      _peerPresenceController.add(true);
+      if (!_peerPresenceController.isClosed) _peerPresenceController.add(true);
     } else if (msg is PeerOfflineMessage) {
       if (!_isThisMachine(msg.peerId)) return;
       // v3: the machine's socket dropped but ours stays open (no cascade close).
-      _peerPresenceController.add(false);
+      if (!_peerPresenceController.isClosed) _peerPresenceController.add(false);
       _setState(_currentState.copyWith(error: 'Peer offline'));
     }
   }
@@ -453,6 +459,7 @@ class RelayService {
       decoded.kind,
     );
     if (msg == null) return;
+    if (_messageController.isClosed) return;
     _messageController.add(msg);
   }
 
