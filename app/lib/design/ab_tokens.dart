@@ -211,7 +211,11 @@ abstract final class AbTokens {
   // Icon button — one canonical visual box. No size param.
   static const iconButtonBox = 24.0;
   static const iconButtonGlyph = 14.0;
-  static const iconButtonHitMin = 32.0; // mobile tap target
+
+  // Minimum interactive-target edge: 44 splits Apple HIG's 44pt and Android's
+  // 48dp guidance. Enforced on mobile only, via AbTapTarget — desktop pointers
+  // are precise and dense toolbars must stay compact.
+  static const tapTargetMin = 44.0;
 
   // Status dots.
   static const double dotSizeSm = 6.0;

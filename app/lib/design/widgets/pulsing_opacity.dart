@@ -20,7 +20,22 @@ class _PulsingOpacityState extends State<PulsingOpacity>
     _ctrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 900),
-    )..repeat(reverse: true);
+    );
+  }
+
+  // Started here (not initState) so the reduce-motion flag is readable, and
+  // because didChangeDependencies re-fires on MediaQuery change — a live
+  // reduce-motion flip stops/restarts the pulse without extra plumbing.
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _ctrl.stop();
+      // Pin at full opacity — the glyph itself already conveys "running".
+      _ctrl.value = 1.0;
+    } else if (!_ctrl.isAnimating) {
+      _ctrl.repeat(reverse: true);
+    }
   }
 
   @override

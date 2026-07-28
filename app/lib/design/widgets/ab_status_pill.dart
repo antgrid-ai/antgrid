@@ -27,19 +27,30 @@ class _AbStatusPillState extends State<AbStatusPill>
     duration: const Duration(milliseconds: 1500),
   );
 
+  // Started in didChangeDependencies (not initState) so the reduce-motion
+  // flag is readable; it re-fires on MediaQuery change, so a live flip
+  // stops/restarts the pulse. didUpdateWidget funnels through the same sync
+  // so status changes respect the flag too.
   @override
-  void initState() {
-    super.initState();
-    if (_pulses) _ctrl.repeat(reverse: true);
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _syncPulse();
   }
 
   @override
   void didUpdateWidget(covariant AbStatusPill oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (_pulses && !_ctrl.isAnimating) {
+    _syncPulse();
+  }
+
+  void _syncPulse() {
+    final animate = _pulses && !MediaQuery.disableAnimationsOf(context);
+    if (animate && !_ctrl.isAnimating) {
       _ctrl.repeat(reverse: true);
-    } else if (!_pulses && _ctrl.isAnimating) {
+    } else if (!animate && _ctrl.isAnimating) {
       _ctrl.stop();
+      // Rewind so the dot rests at full opacity, not frozen mid-fade.
+      _ctrl.value = 0;
     }
   }
 

@@ -261,7 +261,7 @@ class _AbTextFieldState extends State<AbTextField> {
                   disabledBorder: InputBorder.none,
                   hintText: widget.hintText,
                   hintStyle: AbTokens.sansStyle(
-                    color: context.antgrid.textDisabled,
+                    color: context.antgrid.textMuted,
                   ),
                   contentPadding: EdgeInsets.zero,
                 ),

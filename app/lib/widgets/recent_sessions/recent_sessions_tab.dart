@@ -369,7 +369,7 @@ class _GroupHeader extends StatelessWidget {
             '· $count',
             style: AbTokens.monoStyle(
               fontSize: AbTokens.fontXxs,
-              color: t.textDisabled,
+              color: t.textMuted,
               letterSpacing: 0.66,
             ),
           ),

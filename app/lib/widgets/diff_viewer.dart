@@ -304,7 +304,7 @@ class DiffViewer extends StatelessWidget {
                 fontSize: AbTokens.fontXs,
                 color: line.type == _DiffLineType.deletion
                     ? context.antgrid.error.withValues(alpha: 0.6)
-                    : context.antgrid.textDisabled,
+                    : context.antgrid.textMuted,
               ),
             ),
           ),
@@ -317,7 +317,7 @@ class DiffViewer extends StatelessWidget {
                 fontSize: AbTokens.fontXs,
                 color: line.type == _DiffLineType.addition
                     ? context.antgrid.success.withValues(alpha: 0.6)
-                    : context.antgrid.textDisabled,
+                    : context.antgrid.textMuted,
               ),
             ),
           ),

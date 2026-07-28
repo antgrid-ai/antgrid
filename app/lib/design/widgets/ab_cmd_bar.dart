@@ -88,7 +88,7 @@ class _CmdButtonState extends State<_CmdButton> {
     Widget? lastWidget;
     final last = widget.cmd.last;
     if (last != null) {
-      Color lastColor = p.textDisabled;
+      Color lastColor = p.textMuted;
       String prefix = '';
       switch (widget.cmd.state) {
         case AbCmdState.success:
@@ -103,7 +103,7 @@ class _CmdButtonState extends State<_CmdButton> {
           lastColor = p.statusRunning.withValues(alpha: 0.7);
           break;
         case AbCmdState.idle:
-          lastColor = p.textDisabled;
+          lastColor = p.textMuted;
           break;
       }
       lastWidget = Padding(

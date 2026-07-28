@@ -13,6 +13,11 @@ final _kCustomBg = scopedStorageKey('app.theme.custom.bg');
 final _kCustomPrimary = scopedStorageKey('app.theme.custom.primary');
 final _kCustomAccent = scopedStorageKey('app.theme.custom.accent');
 final _kUiScale = scopedStorageKey('antgrid.ui_scale.v1');
+final _kTerminalZoom = scopedStorageKey('antgrid.terminal_zoom.v1');
+final _kReduceMotion = scopedStorageKey('antgrid.reduce_motion.v1');
+final _kFollowSystemBrightness = scopedStorageKey(
+  'antgrid.follow_system_brightness.v1',
+);
 final _kTelemetryEnabled = scopedStorageKey('app.telemetry.enabled');
 
 /// Every key AppSettings persists. The WithCache instance backing app settings
@@ -24,6 +29,9 @@ final appSettingsPrefsKeys = <String>{
   _kCustomPrimary,
   _kCustomAccent,
   _kUiScale,
+  _kTerminalZoom,
+  _kReduceMotion,
+  _kFollowSystemBrightness,
   _kTelemetryEnabled,
 };
 
@@ -36,6 +44,9 @@ class AppSettings {
     this.customPrimary,
     this.customAccent,
     this.uiScale = 1.0,
+    this.terminalZoom = 1.0,
+    this.reduceMotion = false,
+    this.followSystemBrightness = false,
     this.telemetryEnabled = true,
   });
 
@@ -45,6 +56,9 @@ class AppSettings {
   final Color? customPrimary;
   final Color? customAccent;
   final double uiScale;
+  final double terminalZoom;
+  final bool reduceMotion;
+  final bool followSystemBrightness;
   final bool telemetryEnabled;
 
   static const defaults = AppSettings();
@@ -57,6 +71,9 @@ class AppSettings {
     Color? customPrimary,
     Color? customAccent,
     double? uiScale,
+    double? terminalZoom,
+    bool? reduceMotion,
+    bool? followSystemBrightness,
     bool? telemetryEnabled,
   }) {
     return AppSettings(
@@ -68,6 +85,10 @@ class AppSettings {
       customPrimary: customPrimary ?? this.customPrimary,
       customAccent: customAccent ?? this.customAccent,
       uiScale: uiScale ?? this.uiScale,
+      terminalZoom: terminalZoom ?? this.terminalZoom,
+      reduceMotion: reduceMotion ?? this.reduceMotion,
+      followSystemBrightness:
+          followSystemBrightness ?? this.followSystemBrightness,
       telemetryEnabled: telemetryEnabled ?? this.telemetryEnabled,
     );
   }
@@ -90,6 +111,10 @@ class AppSettings {
       customPrimary: readColor(_kCustomPrimary),
       customAccent: readColor(_kCustomAccent),
       uiScale: prefs.getDouble(_kUiScale) ?? 1.0,
+      terminalZoom: prefs.getDouble(_kTerminalZoom) ?? 1.0,
+      reduceMotion: prefs.getBool(_kReduceMotion) ?? false,
+      followSystemBrightness:
+          prefs.getBool(_kFollowSystemBrightness) ?? false,
       telemetryEnabled: prefs.getBool(_kTelemetryEnabled) ?? true,
     );
   }
@@ -167,6 +192,27 @@ class AppSettingsService extends Notifier<AppSettings> {
     await _prefs.setDouble(_kUiScale, scale);
   }
 
+  /// Bounds mirror the terminal pinch/step zoom range: below 0.5 text is
+  /// unreadable, above 3.0 a single cell dwarfs the viewport.
+  static const double minTerminalZoom = 0.5;
+  static const double maxTerminalZoom = 3.0;
+
+  Future<void> setTerminalZoom(double zoom) async {
+    final clamped = zoom.clamp(minTerminalZoom, maxTerminalZoom);
+    state = state.copyWith(terminalZoom: clamped);
+    await _prefs.setDouble(_kTerminalZoom, clamped);
+  }
+
+  Future<void> setReduceMotion(bool enabled) async {
+    state = state.copyWith(reduceMotion: enabled);
+    await _prefs.setBool(_kReduceMotion, enabled);
+  }
+
+  Future<void> setFollowSystemBrightness(bool enabled) async {
+    state = state.copyWith(followSystemBrightness: enabled);
+    await _prefs.setBool(_kFollowSystemBrightness, enabled);
+  }
+
   Future<void> setTelemetryEnabled(bool enabled) async {
     state = state.copyWith(telemetryEnabled: enabled);
     await _prefs.setBool(_kTelemetryEnabled, enabled);
@@ -181,6 +227,9 @@ class AppSettingsService extends Notifier<AppSettings> {
       _prefs.remove(_kCustomPrimary),
       _prefs.remove(_kCustomAccent),
       _prefs.remove(_kUiScale),
+      _prefs.remove(_kTerminalZoom),
+      _prefs.remove(_kReduceMotion),
+      _prefs.remove(_kFollowSystemBrightness),
       _prefs.remove(_kTelemetryEnabled),
     ]);
   }

@@ -28,6 +28,9 @@ export 'src/terminal_render_model.dart';
 /// Pre-built named ANSI palettes (Campbell, etc.) shared by app and tests.
 export 'src/palettes.dart';
 
+/// WCAG contrast helpers backing [GhosttyTerminalView.minimumContrastRatio].
+export 'src/contrast.dart';
+
 /// Shared mutable selection state for terminal widgets.
 export 'src/terminal_selection_session.dart';
 

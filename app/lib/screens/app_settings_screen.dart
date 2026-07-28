@@ -11,6 +11,7 @@ import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_panel_header.dart';
 import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_tap_target.dart';
 import '../design/widgets/ab_text_field.dart';
 import '../providers/auth.dart';
 import '../providers/sign_out.dart';
@@ -214,6 +215,11 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                           _PresetTile(
                             preset: preset,
                             selected: settings.preset == preset,
+                            caption:
+                                settings.followSystemBrightness &&
+                                    preset == AbThemePreset.light
+                                ? 'used when system is light'
+                                : null,
                             onTap: () => preset == AbThemePreset.custom
                                 ? service.setCustomColors(
                                     bg: settings.customBg ?? palette.bgDeepest,
@@ -226,6 +232,17 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                                 : service.setPreset(preset),
                           ),
                       ],
+                    ),
+                    const SizedBox(height: AbTokens.space8),
+                    _ToggleRow(
+                      title: 'Follow system light/dark',
+                      caption:
+                          'System light mode shows the Light preset; dark mode '
+                          'shows your chosen preset.',
+                      enabled: settings.followSystemBrightness,
+                      onTap: () => service.setFollowSystemBrightness(
+                        !settings.followSystemBrightness,
+                      ),
                     ),
                     if (settings.preset == AbThemePreset.custom) ...[
                       const SizedBox(height: AbTokens.space12),
@@ -302,6 +319,22 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                     ),
                   ],
                 ),
+                const SizedBox(height: AbTokens.space12),
+                _Section(
+                  title: 'ACCESSIBILITY',
+                  body: [
+                    const SizedBox(height: AbTokens.space8),
+                    _ToggleRow(
+                      title: 'Reduce motion',
+                      caption:
+                          'Stops pulsing status dots and loading animations. '
+                          'Indicators hold a static "busy" state instead.',
+                      enabled: settings.reduceMotion,
+                      onTap: () =>
+                          service.setReduceMotion(!settings.reduceMotion),
+                    ),
+                  ],
+                ),
                 // Dev-only: the design gallery is a developer reference, not a
                 // user-facing feature — keep it out of release builds.
                 if (!kReleaseMode) ...[
@@ -326,37 +359,13 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                   title: 'PRIVACY',
                   body: [
                     const SizedBox(height: AbTokens.space8),
-                    GestureDetector(
+                    _ToggleRow(
+                      title: 'Anonymous usage analytics',
+                      caption:
+                          'No code, files, or prompts — ever. Opt out anytime.',
+                      enabled: settings.telemetryEnabled,
                       onTap: () => service.setTelemetryEnabled(
                         !settings.telemetryEnabled,
-                      ),
-                      behavior: HitTestBehavior.opaque,
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'Anonymous usage analytics',
-                                  style: AbTokens.sansStyle(
-                                    color: antgrid.textPrimary,
-                                  ),
-                                ),
-                                const SizedBox(height: AbTokens.space2),
-                                Text(
-                                  'No code, files, or prompts — ever. Opt out anytime.',
-                                  style: AbTokens.sansStyle(
-                                    fontSize: AbTokens.fontXxs,
-                                    color: antgrid.textMuted,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(width: AbTokens.space12),
-                          _TelemetryToggle(enabled: settings.telemetryEnabled),
-                        ],
                       ),
                     ),
                   ],
@@ -423,11 +432,16 @@ class _PresetTile extends StatelessWidget {
     required this.preset,
     required this.selected,
     required this.onTap,
+    this.caption,
   });
 
   final AbThemePreset preset;
   final bool selected;
   final VoidCallback onTap;
+
+  /// Optional role hint under the preset name (e.g. the light preset's
+  /// "used when system is light" while follow-system is on).
+  final String? caption;
 
   AbColors _peek(BuildContext context) {
     if (preset == AbThemePreset.custom) {
@@ -476,6 +490,18 @@ class _PresetTile extends StatelessWidget {
                 fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
               ),
             ),
+            if (caption != null) ...[
+              const SizedBox(height: AbTokens.space2),
+              Text(
+                caption!,
+                // Colored with the TILE's palette (not the ambient theme) so
+                // the hint stays legible on the light preview surface.
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontXxs,
+                  color: p.textMuted,
+                ),
+              ),
+            ],
           ],
         ),
       ),
@@ -500,11 +526,67 @@ class _Swatch extends StatelessWidget {
   }
 }
 
+/// Full-width settings row: title + muted caption on the left, a
+/// [_SettingsToggle] on the right; the whole row is the hit area. Vertical
+/// space8 padding lifts the two-line row past [AbTokens.tapTargetMin] —
+/// AbTapTarget's shrink-wrapping Center can't hold a Row with an Expanded,
+/// so padding is the tap-target mechanism here.
+class _ToggleRow extends StatelessWidget {
+  const _ToggleRow({
+    required this.title,
+    required this.caption,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  final String title;
+  final String caption;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final antgrid = context.antgrid;
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: AbTokens.space8),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: AbTokens.sansStyle(color: antgrid.textPrimary),
+                  ),
+                  const SizedBox(height: AbTokens.space2),
+                  Text(
+                    caption,
+                    style: AbTokens.sansStyle(
+                      fontSize: AbTokens.fontXxs,
+                      color: antgrid.textMuted,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: AbTokens.space12),
+            _SettingsToggle(enabled: enabled),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// A compact on/off track+knob toggle built entirely from design-system
 /// primitives. No Material Switch, no InkWell, no elevation or ripple.
-/// Tapping is handled by the parent GestureDetector in the PRIVACY section.
-class _TelemetryToggle extends StatelessWidget {
-  const _TelemetryToggle({required this.enabled});
+/// Tapping is handled by the parent [_ToggleRow]'s GestureDetector.
+class _SettingsToggle extends StatelessWidget {
+  const _SettingsToggle({required this.enabled});
 
   final bool enabled;
 
@@ -561,42 +643,46 @@ class _UiScaleChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final antgrid = context.antgrid;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: AbTokens.borderRadius5,
-      child: Container(
-        width: 110,
-        padding: const EdgeInsets.symmetric(
-          horizontal: AbTokens.space10,
-          vertical: AbTokens.space8,
-        ),
-        decoration: BoxDecoration(
-          border: Border.all(
-            color: selected ? antgrid.accent : antgrid.borderDefault,
-            width: selected ? 1.5 : 1,
+    // InkWell keeps the tap; AbTapTarget only guarantees the mobile-minimum
+    // hit box in case a future restyle shrinks the chip below 44dp.
+    return AbTapTarget(
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: AbTokens.borderRadius5,
+        child: Container(
+          width: 110,
+          padding: const EdgeInsets.symmetric(
+            horizontal: AbTokens.space10,
+            vertical: AbTokens.space8,
           ),
-          borderRadius: AbTokens.borderRadius5,
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              step.label,
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontSm,
-                color: antgrid.textPrimary,
-                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-              ),
+          decoration: BoxDecoration(
+            border: Border.all(
+              color: selected ? antgrid.accent : antgrid.borderDefault,
+              width: selected ? 1.5 : 1,
             ),
-            const SizedBox(height: AbTokens.space2),
-            Text(
-              '${step.value.toStringAsFixed(2)}×',
-              style: AbTokens.monoStyle(
-                fontSize: AbTokens.fontXs,
-                color: antgrid.textMuted,
+            borderRadius: AbTokens.borderRadius5,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                step.label,
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontSm,
+                  color: antgrid.textPrimary,
+                  fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                ),
               ),
-            ),
-          ],
+              const SizedBox(height: AbTokens.space2),
+              Text(
+                '${step.value.toStringAsFixed(2)}×',
+                style: AbTokens.monoStyle(
+                  fontSize: AbTokens.fontXs,
+                  color: antgrid.textMuted,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

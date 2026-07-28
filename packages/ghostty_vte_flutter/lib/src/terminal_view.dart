@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -7,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:ghostty_vte/ghostty_vte.dart';
 
+import 'contrast.dart';
 import 'keyboard_input.dart';
 import 'terminal_auto_scroll_session.dart';
 import 'terminal_controller.dart';
@@ -90,6 +92,11 @@ final class GhosttyTerminalSelectionContextMenuDetails {
 }
 
 const double _terminalHeaderHeight = 28.0;
+
+/// Cap for the contrast-floor memo; ~4096 (fg, bg) pairs vastly exceeds any
+/// realistic on-screen color population, so hitting it means pathological
+/// churn — clearing wholesale is then cheaper than tracking recency.
+const int _contrastFloorCacheMaxEntries = 4096;
 const Set<PointerDeviceKind> _mouseLikePointerDevices = <PointerDeviceKind>{
   PointerDeviceKind.mouse,
   PointerDeviceKind.stylus,
@@ -147,6 +154,7 @@ class GhosttyTerminalView extends StatefulWidget {
     this.padding = const EdgeInsets.all(8),
     this.cellAlignment = Alignment.topLeft,
     this.palette = GhosttyTerminalPalette.xterm,
+    this.minimumContrastRatio,
     this.cursorColor = const Color(0xFF9AD1C0),
     this.selectionColor = const Color(0x665DA9FF),
     this.hyperlinkColor = const Color(0xFF61AFEF),
@@ -167,6 +175,8 @@ class GhosttyTerminalView extends StatefulWidget {
     this.onPasteRequest,
     this.onOpenHyperlink,
     this.onCellMetricsChanged,
+    this.onZoomUpdate,
+    this.onZoomEnd,
   });
 
   /// Session controller that owns the live VT terminal and process transport.
@@ -265,6 +275,19 @@ class GhosttyTerminalView extends StatefulWidget {
   /// ANSI and 256-color palette used to resolve terminal color tokens.
   final GhosttyTerminalPalette palette;
 
+  /// Minimum WCAG 2.x contrast ratio enforced between each cell's foreground
+  /// and its effective background, applied per-cell at render time to
+  /// foregrounds only.
+  ///
+  /// Null (the default) disables the floor entirely — rendering is identical
+  /// to a build without the feature. When set (e.g. `4.5` for WCAG AA),
+  /// foregrounds falling below the ratio against the CELL's background (not
+  /// the widget default — TUIs paint their own backgrounds) are nudged along
+  /// HSL lightness away from the background's luminance until they meet it
+  /// (see [ensureMinimumContrast]). The palette, cell backgrounds, and cells
+  /// styled invisible (deliberate fg == bg) are never modified.
+  final double? minimumContrastRatio;
+
   /// Cursor fill or stroke color, depending on cursor style.
   final Color cursorColor;
 
@@ -334,6 +357,18 @@ class GhosttyTerminalView extends StatefulWidget {
   final void Function(double charWidth, double linePixels)?
   onCellMetricsChanged;
 
+  /// Reports a live zoom gesture (touch pinch or trackpad pinch) as a scale
+  /// factor relative to the gesture's start (1.0 = unchanged). The gesture
+  /// handling lives inside this view — not the host — because the host cannot
+  /// win the pointer against the view's recognizer stack (pan / long-press /
+  /// vertical-drag arena claimer) from outside. Null disables pinch handling
+  /// entirely: two-finger behavior is identical to a build without the feature.
+  final ValueChanged<double>? onZoomUpdate;
+
+  /// Called once when an active zoom gesture ends (a pinch finger lifts or the
+  /// trackpad pinch sequence completes). Hosts commit the final factor here.
+  final VoidCallback? onZoomEnd;
+
   @override
   State<GhosttyTerminalView> createState() => _GhosttyTerminalViewState();
 }
@@ -352,6 +387,13 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   double _panZoomScrollAccumPx = 0;
   int _lastReportedCols = -1;
   int _lastReportedRows = -1;
+
+  /// Last cell pixel metrics pushed through `controller.resize`. Tracked
+  /// separately from cols/rows so a metrics-only change (font size changed but
+  /// the grid dimensions happen to match) still re-syncs the engine's
+  /// cellWidthPx/cellHeightPx instead of leaving them stale.
+  int _lastSyncedCellWidthPx = -1;
+  int _lastSyncedCellHeightPx = -1;
   double? _lastMetricCharWidth;
   double? _lastMetricLinePixels;
 
@@ -408,6 +450,14 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       _TerminalTextPainterCache(maxEntries: 512);
   final _TerminalTextIntrinsicWidthCache _nativeRunIntrinsicWidthCache =
       _TerminalTextIntrinsicWidthCache(maxEntries: 1024);
+
+  /// (fg ARGB, effective-bg ARGB) → contrast-floored foreground memo for
+  /// [GhosttyTerminalView.minimumContrastRatio]. State-owned (the painter is
+  /// rebuilt every frame) so it survives repaints; cleared wholesale in
+  /// [didUpdateWidget] when the inputs that determine an entry's validity
+  /// change. The ratio itself is NOT part of the key for that same reason.
+  final HashMap<(int, int), Color> _contrastFloorCache =
+      HashMap<(int, int), Color>();
   ContextMenuController? _selectionContextMenuController;
   int _pendingSerialTapCount = 0;
   PointerDeviceKind _lastPointerKind = PointerDeviceKind.mouse;
@@ -428,6 +478,36 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   // is what keeps a second finger from corrupting the tracked finger's state;
   // see `_TouchGesture`. Null between gestures.
   _TouchGesture? _active;
+
+  // --- Pinch-to-zoom (touch + trackpad) ---
+  // Fed by the raw Listener, which sees every pointer regardless of gesture
+  // arena — the single-tracked `_TouchGesture` above deliberately ignores a
+  // second finger, so pinch needs its own per-pointer position ledger. Only
+  // populated while `widget.onZoomUpdate` is non-null.
+  final Map<int, Offset> _zoomPointerPositions = <int, Offset>{};
+
+  /// The two pointer ids driving the active touch pinch; null = no pinch.
+  (int, int)? _zoomPinchPointers;
+  double _zoomPinchInitialDistance = 0;
+
+  /// True from the first scaled trackpad pan-zoom update until the gesture
+  /// ends: once a pan-zoom sequence reads as a pinch, its remaining updates
+  /// must not also scroll (a pinch always carries small pan deltas).
+  bool _trackpadZoomActive = false;
+
+  /// Minimum deviation from 1.0 before a pan-zoom sequence latches as a pinch.
+  /// The platform reports a scale on every update, and a two-finger SCROLL
+  /// rides at ~1.0 with incidental drift; an exact `!= 1.0` test would let one
+  /// jittery sample latch zoom mode for the rest of the gesture and kill
+  /// scrolling outright.
+  static const double _trackpadZoomDeadband = 0.01;
+
+  bool get _pinchZoomActive => _zoomPinchPointers != null;
+
+  /// Below this start distance a scale quotient is numerically meaningless
+  /// (two fingers landing on the same spot) — never divide by it.
+  static const double _zoomMinInitialDistance = 1.0;
+
   bool _touchLongPressSelecting = false;
   _TerminalSelectionHandleEdge? _selectionHandleDragEdge;
   Offset? _lastSelectionHandleDragPosition;
@@ -573,6 +653,8 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       widget.controller.addListener(_onControllerChanged);
       _lastReportedCols = -1;
       _lastReportedRows = -1;
+      _lastSyncedCellWidthPx = -1;
+      _lastSyncedCellHeightPx = -1;
       _scrollOffsetLines = 0;
       // Abandon any in-flight touch gesture: its remaining moves and deferred
       // tap belong to the old terminal, not the one being attached.
@@ -621,6 +703,15 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
         oldWidget.cursorColor != widget.cursorColor ||
         oldWidget.controller != widget.controller) {
       _syncEngineColors();
+    }
+    if (oldWidget.minimumContrastRatio != widget.minimumContrastRatio ||
+        oldWidget.palette != widget.palette ||
+        oldWidget.backgroundColor != widget.backgroundColor) {
+      // Entries were floored against the old ratio / default background (a
+      // palette change re-resolves the engine colors the fg keys came from),
+      // so every memoized value may now be wrong — drop them all. Painted-run
+      // TextPainter caches key on the final color, so they self-invalidate.
+      _contrastFloorCache.clear();
     }
   }
 
@@ -1474,12 +1565,23 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
 
     final cols = math.max(1, (contentWidth / metrics.charWidth).floor());
     final rows = math.max(1, (contentHeight / metrics.linePixels).floor());
-    if (cols == _lastReportedCols && rows == _lastReportedRows) {
+    final cellWidthPx = metrics.charWidth.round();
+    final cellHeightPx = metrics.linePixels.round();
+    // Skip only when cols, rows, AND the cell pixel metrics all match the last
+    // sync — a font-size change can leave the grid dimensions unchanged while
+    // the engine's cellWidthPx/cellHeightPx (pixel-size reports, CSI 14 t) go
+    // stale.
+    if (cols == _lastReportedCols &&
+        rows == _lastReportedRows &&
+        cellWidthPx == _lastSyncedCellWidthPx &&
+        cellHeightPx == _lastSyncedCellHeightPx) {
       return;
     }
 
     _lastReportedCols = cols;
     _lastReportedRows = rows;
+    _lastSyncedCellWidthPx = cellWidthPx;
+    _lastSyncedCellHeightPx = cellHeightPx;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) {
         return;
@@ -1487,8 +1589,8 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       widget.controller.resize(
         cols: cols,
         rows: rows,
-        cellWidthPx: metrics.charWidth.round(),
-        cellHeightPx: metrics.linePixels.round(),
+        cellWidthPx: cellWidthPx,
+        cellHeightPx: cellHeightPx,
       );
     });
   }
@@ -1550,6 +1652,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
 
   void _handlePointerPanZoomStart(PointerPanZoomStartEvent event) {
     _panZoomScrollAccumPx = 0;
+    _trackpadZoomActive = false;
     _requestTerminalFocus();
   }
 
@@ -1568,6 +1671,20 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     Size size,
     _TerminalMetrics metrics,
   ) {
+    // A scaled update marks the whole gesture as a pinch: report the
+    // cumulative `event.scale` (already relative to gesture start) and stop
+    // treating the sequence as scroll — a pinch always carries incidental pan
+    // deltas, and letting them through would scroll while zooming.
+    if (widget.onZoomUpdate != null &&
+        (_trackpadZoomActive ||
+            (event.scale - 1.0).abs() > _trackpadZoomDeadband)) {
+      if (!_trackpadZoomActive) {
+        _trackpadZoomActive = true;
+        _setSelection(null);
+      }
+      widget.onZoomUpdate!(event.scale);
+      return;
+    }
     if (_terminalMouseReportingEnabled) return;
     _panZoomScrollAccumPx += event.panDelta.dy;
     final deltaLines = (_panZoomScrollAccumPx / metrics.linePixels).truncate();
@@ -1578,6 +1695,10 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
 
   void _handlePointerPanZoomEnd(PointerPanZoomEndEvent event) {
     _panZoomScrollAccumPx = 0;
+    if (_trackpadZoomActive) {
+      _trackpadZoomActive = false;
+      widget.onZoomEnd?.call();
+    }
   }
 
   VtMouseEncoderSize _mouseEncoderSize(Size size, _TerminalMetrics metrics) {
@@ -2204,6 +2325,81 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     _touchSelectionActive = false;
   }
 
+  // --- Touch pinch-to-zoom ---
+  // Runs off the raw Listener like the scroll/mouse-forward paths, NOT a
+  // ScaleGestureRecognizer: a recognizer would enter the arena against the
+  // view's own pan/long-press/vertical-drag recognizers and the host app's
+  // horizontal pager, and any winner breaks somebody. The Listener sees both
+  // fingers unconditionally, so a pinch can be derived without arena stakes.
+
+  void _pinchZoomPointerDown(PointerDownEvent event) {
+    if (widget.onZoomUpdate == null ||
+        event.kind != PointerDeviceKind.touch) {
+      return;
+    }
+    _zoomPointerPositions[event.pointer] = event.position;
+    if (_pinchZoomActive || _zoomPointerPositions.length != 2) {
+      return;
+    }
+    final ids = _zoomPointerPositions.keys.toList();
+    final distance =
+        (_zoomPointerPositions[ids[0]]! - _zoomPointerPositions[ids[1]]!)
+            .distance;
+    if (distance < _zoomMinInitialDistance) {
+      return;
+    }
+    _zoomPinchPointers = (ids[0], ids[1]);
+    _zoomPinchInitialDistance = distance;
+    // The pinch owns both fingers now: drop the single-finger gesture the
+    // first finger started (scroll or mouse-forward), abandon a long-press in
+    // flight, and clear any selection so the pinch doesn't drag-extend it.
+    _resetActiveGesture();
+    _touchLongPressSelecting = false;
+    _stopAutoScroll();
+    _setSelection(null);
+  }
+
+  void _pinchZoomPointerMove(PointerMoveEvent event) {
+    if (widget.onZoomUpdate == null ||
+        event.kind != PointerDeviceKind.touch) {
+      return;
+    }
+    if (!_zoomPointerPositions.containsKey(event.pointer)) {
+      return;
+    }
+    _zoomPointerPositions[event.pointer] = event.position;
+    final pinch = _zoomPinchPointers;
+    if (pinch == null ||
+        (event.pointer != pinch.$1 && event.pointer != pinch.$2)) {
+      return;
+    }
+    final a = _zoomPointerPositions[pinch.$1];
+    final b = _zoomPointerPositions[pinch.$2];
+    if (a == null || b == null) {
+      return;
+    }
+    final scale = (a - b).distance / _zoomPinchInitialDistance;
+    if (!scale.isFinite) {
+      return;
+    }
+    widget.onZoomUpdate!(scale);
+  }
+
+  void _pinchZoomPointerUpOrCancel(PointerEvent event) {
+    if (event.kind != PointerDeviceKind.touch) {
+      return;
+    }
+    _zoomPointerPositions.remove(event.pointer);
+    final pinch = _zoomPinchPointers;
+    if (pinch == null ||
+        (event.pointer != pinch.$1 && event.pointer != pinch.$2)) {
+      return;
+    }
+    _zoomPinchPointers = null;
+    _zoomPinchInitialDistance = 0;
+    widget.onZoomEnd?.call();
+  }
+
   void _startTouchScroll(PointerDownEvent event) {
     // Single-finger: a second finger must not replace the tracked gesture.
     if (_active != null || !_touchPointerShouldScroll(event)) {
@@ -2437,6 +2633,11 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     Size size,
     _TerminalMetrics metrics,
   ) {
+    // Pinch owns both fingers — a selection recognizer that limps through the
+    // arena mid-pinch must not start a drag-select under them.
+    if (_pinchZoomActive) {
+      return;
+    }
     if (_currentPointerUsesTerminalMouse) {
       return;
     }
@@ -2502,6 +2703,10 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     Size size,
     _TerminalMetrics metrics,
   ) {
+    // See `_beginSelection`: no selection updates while a pinch is active.
+    if (_pinchZoomActive) {
+      return;
+    }
     // Extending a long-press selection stays local even in mouse mode (see
     // `_beginLineSelection`).
     if (_currentPointerUsesTerminalMouse && !_touchLongPressSelecting) {
@@ -2617,6 +2822,11 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     _TerminalSelectionGranularity granularity =
         _TerminalSelectionGranularity.line,
   }) {
+    // See `_beginSelection`: a slow pinch can sit inside long-press slop long
+    // enough for the recognizer to fire — swallow it while the pinch is live.
+    if (_pinchZoomActive) {
+      return;
+    }
     // A long-press selects even while mouse mode captures touch — that gesture
     // is never claimed by the TUI, so it stays the local copy affordance.
     if (_currentPointerUsesTerminalMouse && !_touchLongPressSelecting) {
@@ -2854,6 +3064,9 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
                 // converts drag into wheel scroll; only real mice press on down.
                 if (event.kind == PointerDeviceKind.touch) {
                   _onTouchMousePointerDown(event);
+                  // After the single-finger starters: a second finger promotes
+                  // the gesture to a pinch, which resets whatever they tracked.
+                  _pinchZoomPointerDown(event);
                 } else {
                   _sendMouseEvent(
                     GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS,
@@ -2865,6 +3078,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
               },
               onPointerMove: (event) {
                 if (event.kind == PointerDeviceKind.touch) {
+                  _pinchZoomPointerMove(event);
                   _updateTouchScroll(event, size, metrics);
                   _onTouchMousePointerMove(event, size, metrics);
                 } else {
@@ -2878,6 +3092,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
               },
               onPointerUp: (event) {
                 if (event.kind == PointerDeviceKind.touch) {
+                  _pinchZoomPointerUpOrCancel(event);
                   _endTouchScroll(event);
                   _onTouchMousePointerUp(event, size, metrics);
                 } else {
@@ -2891,6 +3106,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
               },
               onPointerCancel: (event) {
                 if (event.kind == PointerDeviceKind.touch) {
+                  _pinchZoomPointerUpOrCancel(event);
                   _endTouchScroll(event);
                   _onTouchMousePointerCancel(event);
                 } else {
@@ -2955,6 +3171,8 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
                             cursorColor: widget.cursorColor,
                             selectionColor: widget.selectionColor,
                             hyperlinkColor: widget.hyperlinkColor,
+                            minimumContrastRatio: widget.minimumContrastRatio,
+                            contrastFloorCache: _contrastFloorCache,
                             fontSize: widget.fontSize,
                             fontFamily: widget.fontFamily ?? 'monospace',
                             fontFamilyFallback: widget.fontFamilyFallback,
@@ -3406,6 +3624,8 @@ class _GhosttyTerminalPainter extends CustomPainter {
     required this.cursorColor,
     required this.selectionColor,
     required this.hyperlinkColor,
+    required this.minimumContrastRatio,
+    required this.contrastFloorCache,
     required this.fontSize,
     required this.fontFamily,
     required this.fontFamilyFallback,
@@ -3439,6 +3659,10 @@ class _GhosttyTerminalPainter extends CustomPainter {
   final Color cursorColor;
   final Color selectionColor;
   final Color hyperlinkColor;
+  final double? minimumContrastRatio;
+
+  /// Shared with (and cleared by) the owning State — see `_contrastFloorCache`.
+  final HashMap<(int, int), Color> contrastFloorCache;
   final double fontSize;
   final String fontFamily;
   final List<String>? fontFamilyFallback;
@@ -3615,6 +3839,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
         cursorColor != oldDelegate.cursorColor ||
         selectionColor != oldDelegate.selectionColor ||
         hyperlinkColor != oldDelegate.hyperlinkColor ||
+        minimumContrastRatio != oldDelegate.minimumContrastRatio ||
         selection != oldDelegate.selection ||
         renderer != oldDelegate.renderer ||
         !_renderSnapshotEquals(renderSnapshot, oldDelegate.renderSnapshot) ||
@@ -3697,10 +3922,10 @@ class _GhosttyTerminalPainter extends CustomPainter {
             ),
             hasHyperlink: run.hasHyperlink,
           );
-          final textForeground =
-              !run.style.hasExplicitForeground && run.hasHyperlink
-              ? hyperlinkColor
-              : foreground;
+          // _resolveNativeForeground already applies the hyperlink override
+          // (and the contrast floor on top of it); re-deriving it here from
+          // the raw hyperlinkColor would bypass the floor.
+          final textForeground = foreground;
           final decorationColor = run.style.hasExplicitUnderlineColor
               ? run.style.underlineColor
               : textForeground;
@@ -4303,7 +4528,19 @@ class _GhosttyTerminalPainter extends CustomPainter {
       metadataColor: metadataColor,
     );
     if (hasHyperlink && !style.hasExplicitForeground) {
-      return hyperlinkColor;
+      final ratio = minimumContrastRatio;
+      if (ratio == null || style.invisible) {
+        return hyperlinkColor;
+      }
+      // The hyperlink override replaces the already-floored resolved
+      // foreground, so it needs its own floor against the same cell bg.
+      return _flooredForeground(
+        hyperlinkColor,
+        resolved.background == Colors.transparent
+            ? defaultBackground
+            : resolved.background,
+        ratio,
+      );
     }
     return resolved.foreground;
   }
@@ -4333,7 +4570,40 @@ class _GhosttyTerminalPainter extends CustomPainter {
             style.background == nativeDefaultBackground
         ? Colors.transparent
         : resolved.background;
-    return (foreground: foreground, background: background);
+    final ratio = minimumContrastRatio;
+    if (ratio == null || style.invisible) {
+      // Invisible is deliberate fg == bg (SGR 8) — flooring it would reveal
+      // hidden text. Faint/dim text is NOT exempt: dim must stay readable.
+      return (foreground: foreground, background: background);
+    }
+    // Floor against the CELL's effective background, not the widget default —
+    // TUIs paint their own backgrounds, and a fg readable on the widget bg can
+    // be unreadable on the cell's. Transparent means "widget default bg".
+    return (
+      foreground: _flooredForeground(
+        foreground,
+        background == Colors.transparent ? defaultBackground : background,
+        ratio,
+      ),
+      background: background,
+    );
+  }
+
+  /// Memoized [ensureMinimumContrast]. Clear-when-full beats LRU here: the
+  /// working set (distinct on-screen fg/bg pairs) sits far below the cap and
+  /// recomputation is cheap, so eviction bookkeeping isn't worth carrying.
+  Color _flooredForeground(Color foreground, Color background, double ratio) {
+    final key = (foreground.toARGB32(), background.toARGB32());
+    final cached = contrastFloorCache[key];
+    if (cached != null) {
+      return cached;
+    }
+    final floored = ensureMinimumContrast(foreground, background, ratio);
+    if (contrastFloorCache.length >= _contrastFloorCacheMaxEntries) {
+      contrastFloorCache.clear();
+    }
+    contrastFloorCache[key] = floored;
+    return floored;
   }
 
   Color _resolvedNativeBackground({

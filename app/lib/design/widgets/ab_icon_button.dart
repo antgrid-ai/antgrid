@@ -5,6 +5,7 @@ import '../ab_tokens.dart';
 import '../ab_colors.dart';
 import 'ab_focus_ring.dart';
 import 'ab_icon.dart';
+import 'ab_tap_target.dart';
 
 /// Tone variants — replace the deprecated `size` param.
 enum AbIconButtonTone { normal, muted, accent, danger, success }
@@ -13,6 +14,8 @@ enum AbIconButtonTone { normal, muted, accent, danger, success }
 ///
 /// Visual box is always [AbTokens.iconButtonBox] (24px). Glyph is always
 /// [AbTokens.iconButtonGlyph] (14px). Use [tone] for color variation.
+/// On mobile the hit area is inflated to [AbTokens.tapTargetMin] via
+/// [AbTapTarget] while the visual box stays 24px; desktop is untouched.
 ///
 /// Pass `onTap: null` to render the button in a disabled state
 /// (opacity 0.4, no hover, no focus, basic cursor). See the
@@ -84,7 +87,9 @@ class _AbIconButtonState extends State<AbIconButton> {
 
     Widget button;
     if (disabled) {
-      button = Opacity(opacity: 0.4, child: visual);
+      // Same AbTapTarget footprint as the enabled state so rows don't shift
+      // when a button toggles disabled on mobile.
+      button = AbTapTarget(child: Opacity(opacity: 0.4, child: visual));
     } else {
       button = FocusableActionDetector(
         mouseCursor: SystemMouseCursors.click,
@@ -102,7 +107,10 @@ class _AbIconButtonState extends State<AbIconButton> {
             },
           ),
         },
-        child: GestureDetector(
+        // Focus detector stays OUTSIDE the tap target so keyboard focus spans
+        // the whole inflated area; the ring stays INSIDE, hugging the 24px
+        // visual, so its geometry is identical on desktop and mobile.
+        child: AbTapTarget(
           onTap: widget.onTap,
           child: AbFocusRing(
             focused: _focused,

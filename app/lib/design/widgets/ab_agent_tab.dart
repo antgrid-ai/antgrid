@@ -5,6 +5,7 @@ import '../ab_icons.dart';
 import '../ab_tokens.dart';
 import 'ab_icon.dart';
 import 'ab_status_pill.dart';
+import 'ab_tap_target.dart';
 
 class AbAgentTab extends StatefulWidget {
   const AbAgentTab({
@@ -38,19 +39,29 @@ class _AbAgentTabState extends State<AbAgentTab>
     duration: const Duration(milliseconds: 1400),
   );
 
+  // See _AbStatusPillState._syncPulse — same reduce-motion contract: started
+  // in didChangeDependencies so a live MediaQuery flip stops/restarts, and
+  // didUpdateWidget funnels through the same sync for status changes.
   @override
-  void initState() {
-    super.initState();
-    if (_pulses) _ctrl.repeat(reverse: true);
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _syncPulse();
   }
 
   @override
   void didUpdateWidget(covariant AbAgentTab oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (_pulses && !_ctrl.isAnimating) {
+    _syncPulse();
+  }
+
+  void _syncPulse() {
+    final animate = _pulses && !MediaQuery.disableAnimationsOf(context);
+    if (animate && !_ctrl.isAnimating) {
       _ctrl.repeat(reverse: true);
-    } else if (!_pulses && _ctrl.isAnimating) {
+    } else if (!animate && _ctrl.isAnimating) {
       _ctrl.stop();
+      // Rewind so the dot rests at full opacity, not frozen mid-fade.
+      _ctrl.value = 0;
     }
   }
 
@@ -147,13 +158,18 @@ class _AbAgentTabState extends State<AbAgentTab>
                   widget.duration!,
                   style: AbTokens.sansStyle(
                     fontSize: AbTokens.fontXs,
-                    color: widget.active ? p.textMuted : p.textDisabled,
+                    // Inactive tabs de-emphasize via the name color; the
+                    // duration stays muted so it remains readable.
+                    color: p.textMuted,
                   ),
                 ),
               ],
               const SizedBox(width: 6),
+              // AbTapTarget owns the tap: inflates the 11px glyph's target on
+              // touch platforms (capped by the tab's height constraint) and is
+              // an opaque same-size hit area on desktop.
               if (_hover)
-                GestureDetector(
+                AbTapTarget(
                   onTap: widget.onClose,
                   child: AbIcon(AbIcons.close, size: 11, color: p.textMuted),
                 ),

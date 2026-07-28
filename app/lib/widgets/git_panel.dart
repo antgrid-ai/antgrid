@@ -237,7 +237,7 @@ class _GitPanelBody extends StatelessWidget {
       return Center(
         child: Text(
           'No changed files',
-          style: TextStyle(color: context.antgrid.textDisabled),
+          style: TextStyle(color: context.antgrid.textMuted),
         ),
       );
     }
@@ -295,7 +295,7 @@ class _GitPanelBody extends StatelessWidget {
       return Center(
         child: Text(
           'No changes',
-          style: TextStyle(color: context.antgrid.textDisabled),
+          style: TextStyle(color: context.antgrid.textMuted),
         ),
       );
     }
@@ -314,7 +314,7 @@ class _GitPanelBody extends StatelessWidget {
     return Center(
       child: Text(
         'Select a file to view',
-        style: TextStyle(color: context.antgrid.textDisabled),
+        style: TextStyle(color: context.antgrid.textMuted),
       ),
     );
   }

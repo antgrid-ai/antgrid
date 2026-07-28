@@ -122,7 +122,7 @@ class _RichComposerState extends State<RichComposer> {
                     child: IgnorePointer(
                       child: Text(
                         widget.hintText!,
-                        style: AbTokens.sansStyle(color: colors.textDisabled),
+                        style: AbTokens.sansStyle(color: colors.textMuted),
                       ),
                     ),
                   )

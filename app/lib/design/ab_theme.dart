@@ -96,7 +96,9 @@ ThemeData buildAbTheme([AbColors palette = kDefaultPalette]) {
         horizontal: AbTokens.space10,
         vertical: AbTokens.space8,
       ),
-      hintStyle: AbTokens.sansStyle(color: palette.textDisabled),
+      // Hints are readable guidance, not disabled chrome — muted keeps them
+      // de-emphasized while clearing WCAG AA.
+      hintStyle: AbTokens.sansStyle(color: palette.textMuted),
     ),
   );
 }

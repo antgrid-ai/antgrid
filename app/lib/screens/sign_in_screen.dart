@@ -448,7 +448,7 @@ class _OrDivider extends StatelessWidget {
             'or continue with',
             style: AbTokens.sansStyle(
               fontSize: AbTokens.fontXs,
-              color: antgrid.textDisabled,
+              color: antgrid.textMuted,
             ),
           ),
         ),

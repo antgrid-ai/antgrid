@@ -205,7 +205,7 @@ class _CommentContentState extends State<_CommentContent> {
             widget.sourceLabel,
             style: AbTokens.monoStyle(
               fontSize: AbTokens.fontXs,
-              color: context.antgrid.textDisabled,
+              color: context.antgrid.textMuted,
             ),
           ),
           const SizedBox(height: AbTokens.space8),
@@ -236,7 +236,7 @@ class _CommentContentState extends State<_CommentContent> {
               hintText: 'Add a comment (optional)',
               hintStyle: AbTokens.sansStyle(
                 fontSize: AbTokens.fontMd,
-                color: context.antgrid.textDisabled,
+                color: context.antgrid.textMuted,
               ),
               isDense: true,
               contentPadding: const EdgeInsets.symmetric(

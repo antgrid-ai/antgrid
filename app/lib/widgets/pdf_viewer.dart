@@ -37,7 +37,7 @@ class FilePdfViewer extends StatelessWidget {
                   ? Center(
                       child: Text(
                         "Couldn't render this PDF",
-                        style: AbTokens.monoStyle(color: c.textDisabled),
+                        style: AbTokens.monoStyle(color: c.textMuted),
                       ),
                     )
                   : PdfViewer.data(

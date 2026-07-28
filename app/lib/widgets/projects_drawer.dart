@@ -193,7 +193,7 @@ class _GroupLabel extends ConsumerWidget {
             '· $count',
             style: AbTokens.sansStyle(
               fontSize: AbTokens.fontXs,
-              color: context.antgrid.textDisabled,
+              color: context.antgrid.textMuted,
             ),
           ),
           const Spacer(),

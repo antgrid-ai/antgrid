@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:app_links/app_links.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:http/http.dart' as http;
@@ -12,9 +13,11 @@ import 'analytics/crash_reporting.dart';
 import 'analytics/events.dart';
 import 'analytics/install_id.dart';
 import 'config/environment.dart';
+import 'design/ab_colors.dart';
 import 'design/ab_text_density.dart';
 import 'design/ab_theme.dart';
 import 'design/ab_tokens.dart';
+import 'design/theme_presets.dart';
 import 'launcher/host_teardown.dart';
 import 'project/limits.dart';
 import 'project/perf_recorder.dart';
@@ -82,6 +85,12 @@ Future<void> main() async {
     defaultDebugPrint(message, wrapWidth: wrapWidth);
   };
   WidgetsFlutterBinding.ensureInitialized();
+  // Draw behind transparent system bars on mobile so the app's own dark
+  // surfaces reach the screen edges (no opaque OS bar bands). Bar icon
+  // brightness is applied per-palette via the AnnotatedRegion in AbApp.
+  if (isMobilePlatform) {
+    unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
+  }
   // Register the background-message handler before runApp so background and
   // terminated deliveries reach our isolate. This registration covers the
   // backgrounded-but-alive case, where push routes to this existing engine;
@@ -268,6 +277,61 @@ class _TelemetryLifecycleObserver extends WidgetsBindingObserver {
   }
 }
 
+/// System-bar overlay style for [palette]: transparent bars (the app draws
+/// edge-to-edge on mobile, see main()) with icon brightness flipped off the
+/// background luminance so bar icons stay legible on light presets too.
+@visibleForTesting
+SystemUiOverlayStyle systemBarStyleFor(AbColors palette) {
+  final iconBrightness = palette.bgDeepest.computeLuminance() > 0.5
+      ? Brightness.dark
+      : Brightness.light;
+  return SystemUiOverlayStyle(
+    statusBarColor: Colors.transparent,
+    statusBarIconBrightness: iconBrightness,
+    // iOS reads statusBarBrightness as the brightness of the bar's BACKGROUND
+    // (the app surface behind it), i.e. the inverse of the icon brightness.
+    statusBarBrightness: iconBrightness == Brightness.dark
+        ? Brightness.light
+        : Brightness.dark,
+    systemNavigationBarColor: Colors.transparent,
+    systemNavigationBarIconBrightness: iconBrightness,
+  );
+}
+
+/// Effective text scaler for the app subtree. Desktop replaces the OS scaler
+/// outright — the in-app UI Size setting is the single source of truth there.
+/// Mobile composes with the OS accessibility setting: `scale(1.0)`
+/// deliberately linearizes Android 14+ nonlinear scaling (a nonlinear curve
+/// composed with our own factor double-distorts mid sizes), and the product is
+/// clamped so extreme OS settings can't break the terminal grid.
+@visibleForTesting
+TextScaler composedTextScalerFor({
+  required double uiScale,
+  required TextScaler osTextScaler,
+}) {
+  if (!isMobilePlatform) return TextScaler.linear(uiScale);
+  final composed = (uiScale * osTextScaler.scale(1.0)).clamp(0.85, 2.0);
+  return TextScaler.linear(composed.toDouble());
+}
+
+/// Palette actually rendered, after the follow-system-brightness setting.
+/// When enabled: OS-light renders the `light` preset; OS-dark renders the
+/// user's chosen preset — unless that chosen preset IS light, which would
+/// blind in a dark room, so it falls back to the default dark palette.
+/// When disabled the chosen palette passes through untouched.
+@visibleForTesting
+AbColors effectivePaletteFor({
+  required AppSettings settings,
+  required AbColors chosen,
+  required Brightness platformBrightness,
+}) {
+  if (!settings.followSystemBrightness) return chosen;
+  if (platformBrightness == Brightness.light) {
+    return kPresets[AbThemePreset.light]!;
+  }
+  return settings.preset == AbThemePreset.light ? kDefaultPalette : chosen;
+}
+
 class AbApp extends ConsumerWidget {
   const AbApp({super.key});
 
@@ -291,30 +355,63 @@ class AbApp extends ConsumerWidget {
       theme: theme,
       darkTheme: theme,
       builder: (context, child) {
+        // The OS-provided MediaQuery, captured BEFORE our copyWith below
+        // replaces scaler/animation fields — its textScaler, disableAnimations
+        // and platformBrightness are the accessibility inputs we compose with.
+        final osMediaQuery = MediaQuery.of(context);
+
         // The snackBarTheme (floating, styling) lives in buildAbTheme; only
         // the width is dynamic — it can't live in the static theme because it
         // needs MediaQuery. A floating SnackBar with `width` is centered at
         // that width, so it doesn't span the full window on desktop/tablet
         // and isn't edge-to-edge on mobile.
-        final windowWidth = MediaQuery.sizeOf(context).width;
+        final windowWidth = osMediaQuery.size.width;
         final snackBarWidth = (windowWidth - 2 * AbTokens.space16).clamp(
           0.0,
           480.0,
         );
 
-        // Replace (don't compose with) the OS-provided text scaler so the
-        // in-app UI Size setting is the single source of truth for text
-        // scale. DPI scaling still flows via devicePixelRatio at the
-        // engine layer — that is unaffected.
-        return MediaQuery(
-          data: MediaQuery.of(
-            context,
-          ).copyWith(textScaler: TextScaler.linear(settings.uiScale)),
-          child: Theme(
-            data: theme.copyWith(
-              snackBarTheme: theme.snackBarTheme.copyWith(width: snackBarWidth),
+        // Resolved here (not in AbApp.build) so MediaQuery.platformBrightnessOf
+        // re-runs the builder on every OS light/dark flip. MaterialApp's
+        // `theme:` above is only the pre-follow chosen theme; everything
+        // visible renders under the Theme override below, so swapping the
+        // effective theme + bar style here flips the whole app in lockstep.
+        final effectivePalette = effectivePaletteFor(
+          settings: settings,
+          chosen: palette,
+          platformBrightness: MediaQuery.platformBrightnessOf(context),
+        );
+        final effectiveTheme = identical(effectivePalette, palette)
+            ? theme
+            : buildAbTheme(effectivePalette);
+
+        // DPI scaling still flows via devicePixelRatio at the engine layer —
+        // the textScaler override is unaffected by it.
+        // System bars track the LIVE effective palette: the builder re-runs on
+        // every settings change, so a preset switch restyles bar icons
+        // immediately.
+        return AnnotatedRegion<SystemUiOverlayStyle>(
+          value: systemBarStyleFor(effectivePalette),
+          child: MediaQuery(
+            data: osMediaQuery.copyWith(
+              textScaler: composedTextScalerFor(
+                uiScale: settings.uiScale,
+                osTextScaler: osMediaQuery.textScaler,
+              ),
+              // OS reduce-motion OR the in-app toggle — design widgets read
+              // only MediaQuery.disableAnimationsOf, so this is the single
+              // distribution point (no Riverpod in the design system).
+              disableAnimations:
+                  osMediaQuery.disableAnimations || settings.reduceMotion,
             ),
-            child: AbTextDensity(child: child!),
+            child: Theme(
+              data: effectiveTheme.copyWith(
+                snackBarTheme: effectiveTheme.snackBarTheme.copyWith(
+                  width: snackBarWidth,
+                ),
+              ),
+              child: AbTextDensity(child: child!),
+            ),
           ),
         );
       },

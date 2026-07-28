@@ -31,7 +31,7 @@ Widget buildViewerHeader({
               const SizedBox(width: AbTokens.space2),
               Text(
                 formatFileSize(size),
-                style: AbTokens.monoStyle(color: context.antgrid.textDisabled),
+                style: AbTokens.monoStyle(color: context.antgrid.textMuted),
               ),
             ],
           ),

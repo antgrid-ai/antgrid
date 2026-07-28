@@ -42,16 +42,31 @@ class _AbMobileCtaState extends State<AbMobileCta>
       vsync: this,
       duration: const Duration(milliseconds: 2200),
     );
-    if (widget.active) _ctrl.repeat(reverse: true);
+  }
+
+  // See _AbStatusPillState._syncPulse — same reduce-motion contract: started
+  // in didChangeDependencies so a live MediaQuery flip stops/restarts, and
+  // didUpdateWidget funnels through the same sync for active changes.
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _syncPulse();
   }
 
   @override
   void didUpdateWidget(covariant AbMobileCta oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.active && !_ctrl.isAnimating) {
+    _syncPulse();
+  }
+
+  void _syncPulse() {
+    final animate = widget.active && !MediaQuery.disableAnimationsOf(context);
+    if (animate && !_ctrl.isAnimating) {
       _ctrl.repeat(reverse: true);
-    } else if (!widget.active && _ctrl.isAnimating) {
+    } else if (!animate && _ctrl.isAnimating) {
       _ctrl.stop();
+      // Rewind so the dot rests at full opacity, not frozen mid-fade.
+      _ctrl.value = 0;
     }
   }
 

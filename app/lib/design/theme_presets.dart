@@ -53,7 +53,8 @@ const _zinc = AbColors(
   borderStrong: Color(0xFF383838),
   textPrimary: Color(0xFFD8D8D8),
   textSecondary: Color(0xFFA6A6A6),
-  textMuted: Color(0xFF737373),
+  // Floor for WCAG AA (>= 4.5:1) on bgSurface — see palette_contrast_test.
+  textMuted: Color(0xFF858585),
   textDisabled: Color(0xFF4D4D4D),
   accent: Color(0xFFC6C6C6),
   accentHighlight: Color(0xFFE0E0E0),
@@ -84,7 +85,8 @@ const _slate = AbColors(
   borderStrong: Color(0xFF3B4A66),
   textPrimary: Color(0xFFE2E8F0),
   textSecondary: Color(0xFF94A3B8),
-  textMuted: Color(0xFF64748B),
+  // Between slate-400/500 — slate-500 lands 3.5:1 on bgSurface, below AA.
+  textMuted: Color(0xFF7C8CA2),
   textDisabled: Color(0xFF475569),
   accent: Color(0xFF38BDF8),
   accentHighlight: Color(0xFF7DD3FC),
@@ -179,17 +181,19 @@ const _light = AbColors(
   textSecondary: Color(0xFF3F3F46),
   textMuted: Color(0xFF71717A),
   textDisabled: Color(0xFFA1A1AA),
-  accent: Color(0xFF6366F1),
-  accentHighlight: Color(0xFF818CF8),
-  accentMuted: Color(0xFF4F46E5),
+  // Accent + semantics sit one shade darker than the dark presets' hues so
+  // they clear WCAG AA (>= 4.5:1) as text on white — see palette_contrast_test.
+  accent: Color(0xFF4F46E5),
+  accentHighlight: Color(0xFF6366F1),
+  accentMuted: Color(0xFF4338CA),
   accentForeground: Color(0xFFFFFFFF),
   statusIdle: Color(0xFF61656D),
   statusThinking: Color(0xFFE2C792),
   statusRunning: Color(0xFF8FCFAE),
   statusAttention: Color(0xFFE5A055),
-  success: Color(0xFF16A34A),
+  success: Color(0xFF15803D),
   error: Color(0xFFDC2626),
-  warning: Color(0xFFCA8A04),
+  warning: Color(0xFFA16207),
   signalMut: Color(0xFF9333EA),
 );
 
@@ -276,12 +280,34 @@ _deriveTextShades(Color bg, {required bool isLightBg}) {
   // 4 evenly-spaced shades pulling toward bg lightness.
   HSLColor shade(double l) =>
       HSLColor.fromAHSL(1.0, bgHsl.hue, 0.05, l.clamp(0.0, 1.0));
+  // Muted is the dimmest shade still meant to be READ (disabled is WCAG-
+  // exempt). The fixed 0.35 step can land below AA on some backgrounds
+  // (e.g. pure white → ~4.2:1), so walk muted back toward secondary until it
+  // clears 4.5:1 against the derived bgSurface — the layer text sits on.
+  // The walk stops AT secondary, never past it: on mid-lightness backgrounds
+  // (#7F7F7F) no shade reaches AA, and an unbounded walk would run muted all
+  // the way to primary — rendering muted text brighter than the secondary
+  // shade above it and inverting the emphasis ramp.
+  final secondaryL = primaryL + 0.20 * stepSign;
+  final surface = _shiftLightness(bg, 0.06 * (isLightBg ? -1.0 : 1.0));
+  var mutedL = primaryL + 0.35 * stepSign;
+  while ((mutedL - secondaryL) * stepSign > 0 &&
+      _contrastRatio(shade(mutedL).toColor(), surface) < 4.5) {
+    mutedL -= 0.01 * stepSign;
+  }
   return (
     primary: shade(primaryL).toColor(),
-    secondary: shade(primaryL + 0.20 * stepSign).toColor(),
-    muted: shade(primaryL + 0.35 * stepSign).toColor(),
+    secondary: shade(secondaryL).toColor(),
+    muted: shade(mutedL).toColor(),
     disabled: shade(primaryL + 0.50 * stepSign).toColor(),
   );
+}
+
+/// WCAG 2.x contrast ratio between two opaque colors.
+double _contrastRatio(Color a, Color b) {
+  final la = a.computeLuminance() + 0.05;
+  final lb = b.computeLuminance() + 0.05;
+  return la > lb ? la / lb : lb / la;
 }
 
 /// Shift HSL lightness by [amount] in [-1, 1]. Clamps to [0, 1].

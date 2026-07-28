@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:webview_all/webview_all.dart';
 
 import '../analytics/events.dart';
+import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_icon_button.dart';
@@ -63,8 +64,13 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// callbacks mirror the old inappwebview handlers (onPageFinished ←
   /// onLoadStop, onUrlChange ← onUpdateVisitedHistory, onWebResourceError ←
   /// onReceivedError).
-  WebViewController _buildController(String initialUrl) {
+  WebViewController _buildController(String initialUrl, Color background) {
     return WebViewController()
+      // Without this the webview paints white during page load/navigation — a
+      // hard flash in a near-black UI. webview_all silently no-ops this on
+      // macOS (native overlay platform view); the ColoredBox underlay in
+      // _buildPreviewView covers that gap.
+      ..setBackgroundColor(background)
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setNavigationDelegate(
         NavigationDelegate(
@@ -233,7 +239,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         // webview_flutter builds the controller eagerly (unlike inappwebview's
         // onWebViewCreated), so recreate it here on every origin change and let
         // the ValueKey below swap the underlying platform view.
-        _webViewController = _buildController(origin);
+        _webViewController = _buildController(origin, context.antgrid.bgDeepest);
       }
 
       return _buildPreviewView();
@@ -330,9 +336,15 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         Expanded(
           child: _webViewController == null
               ? const SizedBox.shrink()
-              : WebViewWidget(
-                  key: ValueKey('preview-$_origin'),
-                  controller: _webViewController!,
+              // Dark underlay so the beat before the platform view first
+              // paints (and platforms that ignore setBackgroundColor, e.g.
+              // macOS) never flashes white.
+              : ColoredBox(
+                  color: context.antgrid.bgDeepest,
+                  child: WebViewWidget(
+                    key: ValueKey('preview-$_origin'),
+                    controller: _webViewController!,
+                  ),
                 ),
         ),
       ],

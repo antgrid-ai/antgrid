@@ -88,7 +88,7 @@ class _AbComposerState extends State<AbComposer> {
                     contentPadding: EdgeInsets.zero,
                     border: InputBorder.none,
                     hintText: widget.placeholder,
-                    hintStyle: TextStyle(color: p.textDisabled, fontSize: AbTokens.fontMd),
+                    hintStyle: TextStyle(color: p.textMuted, fontSize: AbTokens.fontMd),
                   ),
                   onSubmitted: (_) => _submit(),
                 ),

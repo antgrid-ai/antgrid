@@ -31,11 +31,26 @@ class _AbLoadingState extends State<AbLoading>
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 800),
-    )..repeat(reverse: true);
+    );
     _opacity = Tween(
       begin: 0.2,
       end: 1.0,
     ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
+  }
+
+  // Started here (not initState) so the reduce-motion flag is readable, and
+  // because didChangeDependencies re-fires on MediaQuery change — a live
+  // reduce-motion flip stops/restarts the pulse without extra plumbing.
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _controller.stop();
+      // Pin mid-pulse so the indicator still reads "busy", just statically.
+      _controller.value = 0.5;
+    } else if (!_controller.isAnimating) {
+      _controller.repeat(reverse: true);
+    }
   }
 
   @override
@@ -67,7 +82,7 @@ class _AbLoadingState extends State<AbLoading>
               widget.message!,
               style: AbTokens.sansStyle(
                 fontSize: AbTokens.fontXs,
-                color: context.antgrid.textDisabled,
+                color: context.antgrid.textMuted,
               ),
             ),
           ],
@@ -100,11 +115,24 @@ class _AbLoadingDotState extends State<AbLoadingDot>
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 600),
-    )..repeat(reverse: true);
+    );
     _scale = Tween(
       begin: 0.4,
       end: 1.0,
     ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
+  }
+
+  // See _AbLoadingState.didChangeDependencies — same reduce-motion contract.
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _controller.stop();
+      // Pin mid-pulse so the dot still reads "busy", just statically.
+      _controller.value = 0.5;
+    } else if (!_controller.isAnimating) {
+      _controller.repeat(reverse: true);
+    }
   }
 
   @override

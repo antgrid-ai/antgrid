@@ -99,6 +99,8 @@ void main() {
       onSelectionContentChanged,
       Future<void> Function(String text)? onCopySelection,
       Future<void> Function(String uri)? onOpenHyperlink,
+      ValueChanged<double>? onZoomUpdate,
+      VoidCallback? onZoomEnd,
     }) {
       return MaterialApp(
         home: Scaffold(
@@ -132,6 +134,8 @@ void main() {
               onSelectionContentChanged: onSelectionContentChanged,
               onCopySelection: onCopySelection,
               onOpenHyperlink: onOpenHyperlink,
+              onZoomUpdate: onZoomUpdate,
+              onZoomEnd: onZoomEnd,
             ),
           ),
         ),
@@ -2769,6 +2773,106 @@ void main() {
       expect(currentSelection, isNull);
     });
 
+    testWidgets(
+      'two-finger pinch spread emits increasing zoom updates then an end',
+      (tester) async {
+        final updates = <double>[];
+        var endCount = 0;
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 600,
+                height: 400,
+                child: GhosttyTerminalView(
+                  controller: controller,
+                  showHeader: false,
+                  onZoomUpdate: updates.add,
+                  onZoomEnd: () => endCount++,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+
+        final first = await tester.createGesture(
+          kind: ui.PointerDeviceKind.touch,
+          pointer: 7,
+        );
+        final second = await tester.createGesture(
+          kind: ui.PointerDeviceKind.touch,
+          pointer: 8,
+        );
+        // 100px apart at pinch start.
+        await first.down(const Offset(250, 200));
+        await second.down(const Offset(350, 200));
+        await tester.pump();
+
+        // Spread to 150px, then 200px → factors 1.5 and 2.0.
+        await first.moveTo(const Offset(200, 200));
+        await tester.pump();
+        await second.moveTo(const Offset(400, 200));
+        await tester.pump();
+
+        expect(updates, [closeTo(1.5, 1e-9), closeTo(2.0, 1e-9)]);
+        expect(endCount, 0);
+
+        await first.up();
+        await tester.pump();
+        expect(endCount, 1);
+
+        // The surviving finger's lift must not fire a second end.
+        await second.up();
+        await tester.pump();
+        expect(endCount, 1);
+
+        // Flush the serial-tap timeout timers armed by the pointer downs.
+        await tester.pumpAndSettle();
+      },
+    );
+
+    testWidgets('trackpad pan-zoom scale is reported as zoom updates', (
+      tester,
+    ) async {
+      final updates = <double>[];
+      var endCount = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 600,
+              height: 400,
+              child: GhosttyTerminalView(
+                controller: controller,
+                showHeader: false,
+                onZoomUpdate: updates.add,
+                onZoomEnd: () => endCount++,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final gesture = await tester.createGesture(
+        kind: ui.PointerDeviceKind.trackpad,
+      );
+      await gesture.panZoomStart(const Offset(300, 200));
+      await tester.pump();
+      await gesture.panZoomUpdate(const Offset(300, 200), scale: 1.2);
+      await tester.pump();
+      await gesture.panZoomUpdate(const Offset(300, 200), scale: 1.5);
+      await tester.pump();
+
+      expect(updates, [closeTo(1.2, 1e-9), closeTo(1.5, 1e-9)]);
+      expect(endCount, 0);
+
+      await gesture.panZoomEnd();
+      await tester.pump();
+      expect(endCount, 1);
+    });
+
     testWidgets('touch long press starts terminal selection', (tester) async {
       if (!_hasNativeTerminal) {
         return;
@@ -4908,6 +5012,221 @@ void main() {
       variant: _android,
     );
   });
+
+  group('minimum contrast floor', () {
+    testWidgets(
+      'low-contrast painted foreground is floored when a ratio is set and '
+      'untouched when null',
+      (tester) async {
+        if (!_hasNativeTerminal) {
+          return;
+        }
+
+        const bg = Color(0xFF141414);
+        final rawBlue = campbellAnsi[4]; // #0037DA, ~2.2:1 on bg
+        final floored = ensureMinimumContrast(rawBlue, bg, 4.5);
+
+        final controller = GhosttyTerminalController();
+        addTearDown(controller.dispose);
+        controller.appendDebugOutput('\x1b[34mMMMMMMMM\x1b[0m');
+
+        final key = GlobalKey();
+        Widget build(double? ratio) => MaterialApp(
+          home: Scaffold(
+            body: RepaintBoundary(
+              key: key,
+              child: SizedBox(
+                width: 600,
+                height: 400,
+                child: GhosttyTerminalView(
+                  controller: controller,
+                  showHeader: false,
+                  renderer: GhosttyTerminalRendererMode.renderState,
+                  backgroundColor: bg,
+                  foregroundColor: campbellForeground,
+                  palette: campbellPalette,
+                  minimumContrastRatio: ratio,
+                ),
+              ),
+            ),
+          ),
+        );
+
+        await tester.pumpWidget(build(null));
+        await tester.pumpAndSettle();
+        // The painted path under test only exists with engine viewport data;
+        // hosts whose native lib loads but yields no render state skip
+        // silently, matching the other native-gated tests.
+        final renderSnapshot = controller.renderSnapshot;
+        if (renderSnapshot == null || !renderSnapshot.hasViewportData) {
+          return;
+        }
+
+        final rawImage = await _captureTerminalImageData(tester, key);
+        final rawCount = _countPixelsNearColor(
+          rawImage,
+          color: rawBlue,
+          tolerance: 24,
+        );
+        expect(
+          rawCount,
+          greaterThan(8),
+          reason: 'null ratio must paint the raw palette color unchanged',
+        );
+
+        await tester.pumpWidget(build(4.5));
+        await tester.pumpAndSettle();
+        final flooredImage = await _captureTerminalImageData(tester, key);
+        expect(
+          _countPixelsNearColor(flooredImage, color: floored, tolerance: 24),
+          greaterThan(8),
+          reason: 'ratio 4.5 must paint the contrast-floored color',
+        );
+        expect(
+          _countPixelsNearColor(flooredImage, color: rawBlue, tolerance: 8),
+          lessThan(rawCount ~/ 4),
+          reason: 'the raw low-contrast color must no longer be painted',
+        );
+      },
+    );
+  });
+
+  group('grid metric sync', () {
+    Widget buildSized({
+      required GhosttyTerminalController controller,
+      required double fontSize,
+      required double width,
+      required double height,
+    }) {
+      return MaterialApp(
+        home: Scaffold(
+          body: Center(
+            child: SizedBox(
+              width: width,
+              height: height,
+              child: GhosttyTerminalView(
+                controller: controller,
+                showHeader: false,
+                fontSize: fontSize,
+                lineHeight: 1.35,
+                padding: const EdgeInsets.all(12),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    testWidgets('font size change re-syncs cell pixel metrics via resize', (
+      tester,
+    ) async {
+      final controller = _RecordingResizeController();
+      addTearDown(controller.dispose);
+
+      await tester.pumpWidget(
+        buildSized(
+          controller: controller,
+          fontSize: 14,
+          width: 600,
+          height: 400,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(controller.resizeCalls, isNotEmpty);
+      final first = controller.resizeCalls.last;
+      expect(first.cellWidthPx, greaterThan(0));
+      expect(first.cellHeightPx, greaterThan(0));
+
+      await tester.pumpWidget(
+        buildSized(
+          controller: controller,
+          fontSize: 18,
+          width: 600,
+          height: 400,
+        ),
+      );
+      await tester.pumpAndSettle();
+      final second = controller.resizeCalls.last;
+      expect(second.cellWidthPx, greaterThan(first.cellWidthPx));
+      expect(second.cellHeightPx, greaterThan(first.cellHeightPx));
+    });
+
+    testWidgets(
+      'metrics-only change (same cols/rows) still pushes fresh pixel metrics',
+      (tester) async {
+        final controller = _RecordingResizeController();
+        addTearDown(controller.dispose);
+
+        // 30x30 with EdgeInsets.all(12) leaves 6px of content per axis, so
+        // cols and rows clamp to 1 at every font size — isolating the
+        // metrics-only path that the old cols/rows-only skip dropped.
+        await tester.pumpWidget(
+          buildSized(
+            controller: controller,
+            fontSize: 14,
+            width: 30,
+            height: 30,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(controller.resizeCalls, isNotEmpty);
+        final first = controller.resizeCalls.last;
+        expect(first.cols, 1);
+        expect(first.rows, 1);
+        final callCountAfterFirst = controller.resizeCalls.length;
+
+        await tester.pumpWidget(
+          buildSized(
+            controller: controller,
+            fontSize: 18,
+            width: 30,
+            height: 30,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          controller.resizeCalls.length,
+          greaterThan(callCountAfterFirst),
+          reason:
+              'a metrics-only change (grid dims unchanged) must still call '
+              'resize with the fresh cell pixel metrics',
+        );
+        final second = controller.resizeCalls.last;
+        expect(second.cols, 1);
+        expect(second.rows, 1);
+        expect(second.cellWidthPx, greaterThan(first.cellWidthPx));
+        expect(second.cellHeightPx, greaterThan(first.cellHeightPx));
+      },
+    );
+  });
+}
+
+/// Records every `resize` the view pushes (including cell pixel metrics) so
+/// grid-sync behavior is observable without the native engine.
+final class _RecordingResizeController extends GhosttyTerminalController {
+  final List<({int cols, int rows, int cellWidthPx, int cellHeightPx})>
+  resizeCalls = [];
+
+  @override
+  void resize({
+    required int cols,
+    required int rows,
+    int cellWidthPx = 0,
+    int cellHeightPx = 0,
+  }) {
+    resizeCalls.add((
+      cols: cols,
+      rows: rows,
+      cellWidthPx: cellWidthPx,
+      cellHeightPx: cellHeightPx,
+    ));
+    super.resize(
+      cols: cols,
+      rows: rows,
+      cellWidthPx: cellWidthPx,
+      cellHeightPx: cellHeightPx,
+    );
+  }
 }
 
 /// Builds one encoded `TextEditingDelta` map in the platform wire format that

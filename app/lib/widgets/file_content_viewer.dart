@@ -428,7 +428,7 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
       return Center(
         child: Text(
           'No content',
-          style: AbTokens.monoStyle(color: context.antgrid.textDisabled),
+          style: AbTokens.monoStyle(color: context.antgrid.textMuted),
         ),
       );
     }
@@ -532,7 +532,7 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
               const SizedBox(width: AbTokens.space8),
               Text(
                 formatFileSize(size),
-                style: AbTokens.monoStyle(color: context.antgrid.textDisabled),
+                style: AbTokens.monoStyle(color: context.antgrid.textMuted),
               ),
             ],
           ),

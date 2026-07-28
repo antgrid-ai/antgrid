@@ -337,7 +337,7 @@ class _ChangedFileRow extends StatelessWidget {
                         dirPath,
                         style: AbTokens.monoStyle(
                           fontSize: AbTokens.fontXxs,
-                          color: context.antgrid.textDisabled,
+                          color: context.antgrid.textMuted,
                         ),
                         overflow: TextOverflow.ellipsis,
                       ),

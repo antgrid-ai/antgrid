@@ -9,6 +9,7 @@ import 'package:antgrid/models/terminal_models.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/providers/client_id.dart';
 import 'package:antgrid/providers/providers.dart';
+import 'package:antgrid/services/app_settings_service.dart';
 import 'package:antgrid/services/terminal_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
@@ -18,8 +19,13 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../helpers/prefs_test_mock.dart';
+
+/// Opened per-test in `setUp`; the wrapper watches terminalZoom, so `_wrap`
+/// must override the (default-throwing) settings provider.
+late SharedPreferencesWithCache _settingsPrefs;
 
 const _myClientId = 'this-install';
 const _otherClientId = 'some-other-device';
@@ -71,6 +77,12 @@ Widget _wrap(Widget child) => ProviderScope(
     // overlay; these tabs are not the agent, so pin it null to keep the
     // throwing focused-session façades out of the test.
     agentTerminalProvider.overrideWith((ref) => null),
+    appSettingsServiceProvider.overrideWith(
+      () => AppSettingsService(
+        _settingsPrefs,
+        AppSettings.fromPrefs(_settingsPrefs),
+      ),
+    ),
   ],
   child: MaterialApp(
     theme: ThemeData.dark().copyWith(
@@ -83,7 +95,10 @@ Widget _wrap(Widget child) => ProviderScope(
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  setUp(useInMemoryPrefs);
+  setUp(() async {
+    useInMemoryPrefs();
+    _settingsPrefs = await openAppSettingsPrefs();
+  });
 
   testWidgets(
     'non-driver wider-than-viewport grid yields a horizontal scroll view',

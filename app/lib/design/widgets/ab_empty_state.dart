@@ -64,7 +64,7 @@ class AbEmptyState extends StatelessWidget {
           title,
           style: AbTokens.sansStyle(
             fontSize: AbTokens.fontSm,
-            color: context.antgrid.textDisabled,
+            color: context.antgrid.textMuted,
           ),
           textAlign: TextAlign.center,
         ),
@@ -104,7 +104,7 @@ class AbEmptyState extends StatelessWidget {
                 subtitle!,
                 style: AbTokens.sansStyle(
                   fontSize: AbTokens.fontXxs,
-                  color: context.antgrid.textDisabled,
+                  color: context.antgrid.textMuted,
                 ),
                 textAlign: TextAlign.center,
               ),

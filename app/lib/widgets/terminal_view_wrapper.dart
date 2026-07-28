@@ -9,14 +9,17 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 
+import '../design/ab_icons.dart';
 import '../design/ab_status_tone.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
+import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../models/terminal_models.dart';
 import '../providers/client_id.dart';
 import '../providers/providers.dart';
+import '../services/app_settings_service.dart';
 import '../services/terminal_service.dart';
 import '../services/upload_service.dart';
 import 'send_to_agent_button.dart';
@@ -104,6 +107,39 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   }
 
   bool get _hasSelection => (_selectedText ?? '').isNotEmpty;
+
+  /// In-flight pinch scale relative to gesture start, applied multiplicatively
+  /// over the persisted zoom so text tracks the fingers live. 1.0 between
+  /// gestures; committed into the setting only on gesture end (no debounce —
+  /// a mid-gesture persist would re-derive font metrics every frame).
+  double _liveZoomFactor = 1.0;
+
+  void _onZoomUpdate(double factor) {
+    // The package guards its division, but keep the wrapper self-defending:
+    // a non-finite or non-positive factor must never reach layout.
+    if (!factor.isFinite || factor <= 0) return;
+    if (factor == _liveZoomFactor) return;
+    setState(() => _liveZoomFactor = factor);
+  }
+
+  void _onZoomEnd() {
+    final settings = ref.read(appSettingsServiceProvider);
+    final target = settings.terminalZoom * _liveZoomFactor;
+    if (target.isFinite && target > 0 && _liveZoomFactor != 1.0) {
+      // setTerminalZoom clamps to the allowed range and updates provider state
+      // synchronously, so resetting the live factor in the same frame cannot
+      // flash back to the pre-gesture size.
+      ref.read(appSettingsServiceProvider.notifier).setTerminalZoom(target);
+    }
+    setState(() => _liveZoomFactor = 1.0);
+  }
+
+  void _stepZoom(double delta) {
+    final current = ref.read(appSettingsServiceProvider).terminalZoom;
+    ref
+        .read(appSettingsServiceProvider.notifier)
+        .setTerminalZoom(current + delta);
+  }
 
   @override
   void initState() {
@@ -267,6 +303,13 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     );
   }
 
+  /// WCAG AA floor for terminal text. Campbell's dark ANSI colors (blue
+  /// #0037DA at 2.24:1, magenta at 2.30:1, black at 1.06:1 on bgDeepest) are
+  /// unreadable without it. Render-time only — the painted foreground is
+  /// nudged per-cell against that cell's background; the palette itself (and
+  /// what the PTY/agent sees) is untouched.
+  static const double _minContrastRatio = 4.5;
+
   /// Must equal GhosttyTerminalView's own default padding total per axis
   /// (`EdgeInsets.all(8)` → 16px). Subtracted from the viewport before deriving
   /// native cols/rows, and added back when sizing the non-driver authoritative
@@ -295,10 +338,26 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         ? true
         : tab.driverClientId == myClientId;
 
+    // Persisted zoom × live pinch factor, clamped so an in-flight gesture
+    // can't momentarily exceed the range the commit will clamp to anyway.
+    final persistedZoom = ref.watch(
+      appSettingsServiceProvider.select((s) => s.terminalZoom),
+    );
+    final effectiveZoom = (persistedZoom * _liveZoomFactor).clamp(
+      AppSettingsService.minTerminalZoom,
+      AppSettingsService.maxTerminalZoom,
+    );
+
     final terminalView = GhosttyTerminalView(
       controller: tab.ghostty,
       autofocus: true,
-      fontSize: AbTokens.fontBody,
+      // Scale with the app's UI Size setting (injected as a MediaQuery
+      // textScaler): the view lays out its own TextPainters, so the ambient
+      // scaler never reaches them — pre-scale the size instead. `_hPad` is
+      // deliberately font-independent and must not scale with this.
+      fontSize:
+          MediaQuery.textScalerOf(context).scale(AbTokens.fontBody) *
+          effectiveZoom,
       // Use the design-system mono face per platform (Cascadia Mono on
       // Windows, Menlo on Apple). Hardcoding 'Cascadia Mono' silently fell
       // back on macOS — where it isn't installed — to a non-mono face.
@@ -334,9 +393,17 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       scrollbarThickness: 6,
       scrollbarThumbColor: context.antgrid.borderStrong,
       scrollbarTrackColor: const Color(0x00000000),
+      minimumContrastRatio: _minContrastRatio,
       onCellMetricsChanged: (charWidth, linePixels) {
-        _charWidth = charWidth;
-        _lineHeightPx = linePixels;
+        // Compare-then-setState: `_maybeSendResize` derives cols/rows from
+        // these during build, so a bare assignment would leave it computing on
+        // stale metrics with no corrective rebuild after a font-size change.
+        if (!mounted) return;
+        if (_charWidth == charWidth && _lineHeightPx == linePixels) return;
+        setState(() {
+          _charWidth = charWidth;
+          _lineHeightPx = linePixels;
+        });
       },
       onSelectionContentChanged: (content) {
         final text = content?.text;
@@ -344,6 +411,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
           setState(() => _selectedText = text);
         }
       },
+      onZoomUpdate: _onZoomUpdate,
+      onZoomEnd: _onZoomEnd,
     );
 
     // ColoredBox underlay paints `bgDeepest` across the full widget bounds.
@@ -606,6 +675,16 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                 if (mounted) showAbSnackBar(context, m);
               },
             ),
+            _zoomButton(
+              icon: AbIcons.zoomOut,
+              semanticLabel: 'Decrease terminal text size',
+              onPressed: () => _stepZoom(-0.1),
+            ),
+            _zoomButton(
+              icon: AbIcons.zoomIn,
+              semanticLabel: 'Increase terminal text size',
+              onPressed: () => _stepZoom(0.1),
+            ),
             _actionButton('Tab', '\t'),
             _actionButton('Esc', '\x1b'),
             _actionButton('Ctrl+C', '\x03'),
@@ -615,6 +694,54 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
             _actionButton('→', '\x1b[C'),
             _actionButton('←', '\x1b[D'),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// Quick-action zoom step. Mirrors `_actionButton`'s visual style but wraps
+  /// the button in a 44dp minimum box (WCAG 2.5.5 mobile tap-target floor —
+  /// the other keys inherit the row's compact hit area, but zoom is a repeated
+  /// precision-free action worth the full target). Long-press resets to 1.0.
+  Widget _zoomButton({
+    required String icon,
+    required String semanticLabel,
+    required VoidCallback onPressed,
+  }) {
+    final color = Theme.of(
+      context,
+    ).colorScheme.onSurface.withValues(alpha: 0.7);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: AbTokens.space2),
+      child: GestureDetector(
+        // TextButton has no long-press slot; the detector receives long-press
+        // everywhere, and its tap only fires on the box area OUTSIDE the
+        // button (the button's own recognizer wins the arena over it) — so
+        // the whole 44dp box taps without double-firing on the button itself.
+        behavior: HitTestBehavior.opaque,
+        onTap: onPressed,
+        onLongPress: () => ref
+            .read(appSettingsServiceProvider.notifier)
+            .setTerminalZoom(1.0),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+          child: Center(
+            child: TextButton(
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: AbTokens.space10,
+                ),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              onPressed: onPressed,
+              child: Semantics(
+                label: semanticLabel,
+                button: true,
+                child: AbIcon(icon, size: AbTokens.fontLg, color: color),
+              ),
+            ),
+          ),
         ),
       ),
     );

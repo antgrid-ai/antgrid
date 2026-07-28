@@ -14,6 +14,9 @@ abstract final class AbIcons {
   static const signOut = Codicon.sign_out;
   static const expand = Codicon.screen_full;
   static const close = Codicon.close;
+  static const chromeMinimize = Codicon.chrome_minimize;
+  static const chromeMaximize = Codicon.chrome_maximize;
+  static const chromeRestore = Codicon.chrome_restore;
   static const back = Codicon.arrow_left;
   static const chevronLeft = Codicon.chevron_left;
   static const chevronRight = Codicon.chevron_right;
@@ -59,4 +62,6 @@ abstract final class AbIcons {
   // Unchecked-state indicator for toggle rows (outline only, no fill).
   static const circle = Codicon.circle_large_outline;
   static const upload = Codicon.cloud_upload;
+  static const zoomIn = Codicon.zoom_in;
+  static const zoomOut = Codicon.zoom_out;
 }

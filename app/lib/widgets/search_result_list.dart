@@ -153,7 +153,7 @@ class _MatchRow extends StatelessWidget {
                 width: 48,
                 child: Text(
                   '${match.line}',
-                  style: AbTokens.monoStyle(color: context.antgrid.textDisabled),
+                  style: AbTokens.monoStyle(color: context.antgrid.textMuted),
                   textAlign: TextAlign.right,
                 ),
               ),

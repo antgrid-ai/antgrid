@@ -526,7 +526,7 @@ class _PromptField extends StatelessWidget {
         focusedBorder: InputBorder.none,
         disabledBorder: InputBorder.none,
         hintText: hintText,
-        hintStyle: AbTokens.sansStyle(color: context.antgrid.textDisabled),
+        hintStyle: AbTokens.sansStyle(color: context.antgrid.textMuted),
         contentPadding: EdgeInsets.zero,
       ),
     );
