@@ -117,6 +117,23 @@ test("a new session does NOT clear an active error", () => {
   expect(reduceWorkStatus(errored, sessions(2)).status).toBe("error");
 });
 
+test("a new session after ALL sessions stopped does not inherit the stale error", () => {
+  // Full stop-then-start cycle: the sibling protection has no sibling left to
+  // protect, so the fresh session must read working, not the previous
+  // session's error.
+  const stopped = fold([sessions(1), push("error"), sessions(0)]);
+  expect(stopped.status).toBe("done");
+  const fresh = reduceWorkStatus(stopped, sessions(1));
+  expect(fresh.status).toBe("working");
+  expect(fresh.lastNotification).toBeNull();
+});
+
+test("a new session after ALL sessions stopped does not inherit stale attention", () => {
+  const stopped = fold([sessions(1), push("permission_request"), sessions(0)]);
+  expect(stopped.status).toBe("done");
+  expect(reduceWorkStatus(stopped, sessions(1)).status).toBe("working");
+});
+
 test("a turn-start clears a stale task_complete so a same-session re-run reads working", () => {
   // The common gap: prompt an existing session again — no new session, so the
   // count-increase clear never fires. The turn-start hook clears it.

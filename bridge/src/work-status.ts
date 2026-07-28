@@ -75,10 +75,18 @@ export function reduceWorkStatus(prev: WorkStatusState, msg: AbMessage): WorkSta
     // call-to-action signals for an already-running session; a new session
     // starting does not resolve an outstanding prompt or clear an error/block
     // on a sibling session.
+    //
+    // That sibling protection only applies while a sibling is actually
+    // running. From 0 the call-to-action has no session left to belong to —
+    // `derive` already masks it to "done" for display, but the value survives,
+    // so without this an unrelated next session would inherit the previous
+    // one's error/attention on its 0→1 transition.
+    const noLiveSibling = runningCount === 0;
     if (running > runningCount &&
-        lastNotification !== "permission_request" &&
-        lastNotification !== "awaiting_input" &&
-        lastNotification !== "error") {
+        (noLiveSibling ||
+          (lastNotification !== "permission_request" &&
+            lastNotification !== "awaiting_input" &&
+            lastNotification !== "error"))) {
       lastNotification = null;
     }
     runningCount = running;

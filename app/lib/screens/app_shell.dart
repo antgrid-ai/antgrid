@@ -513,6 +513,11 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
       } finally {
         client.close();
       }
+    } catch (_) {
+      // peekHost() reads host.json off disk and can throw on a TOCTOU race
+      // (rewritten mid-read) or a permissions blip. The timer calls us
+      // unawaited, so an escaping throw is an unhandled rejection every tick —
+      // matching the guard host_controller.dart already puts on the same read.
     } finally {
       _pollingLocalStatus = false;
     }
