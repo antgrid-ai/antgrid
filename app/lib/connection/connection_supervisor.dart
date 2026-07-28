@@ -536,8 +536,23 @@ class ConnectionSupervisor {
 
   // ---------------------------------------------------------------- helpers
 
+  /// Defers the evaluation to a fresh microtask instead of running
+  /// [evaluate]'s synchronous prefix on the input's own call stack. Inputs
+  /// arrive from arbitrary stacks — including Riverpod notification listeners
+  /// firing inside the provider flush pass (ControlPlaneReaper's reconcile →
+  /// [setWanted]) — and the ladder's first step can synchronously mutate
+  /// providers (the coords rung's inventory refresh invalidates
+  /// accountAgentsProvider). A provider mutation mid-flush trips Riverpod's
+  /// reentrant-build guard ("Tried to rebuild ... multiple times in the same
+  /// frame"; seen live on a drawer expand while a revoked machine's ladder was
+  /// mid-retry). The supervisor is level-triggered, so evaluating one
+  /// microtask later is semantically free — keep every side effect off the
+  /// caller's stack.
   void _kick() {
-    unawaited(evaluate());
+    scheduleMicrotask(() {
+      if (_disposed) return;
+      unawaited(evaluate());
+    });
   }
 
   void _block(BlockReason reason) {

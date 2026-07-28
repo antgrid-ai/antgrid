@@ -467,6 +467,10 @@ void main() {
       mech.sessionEstablishedValue = false;
       mech.dialFailures = 1;
       sup.noteRelayError('SUPERSEDED', retryable: false);
+      // Inputs evaluate on a microtask (see _kick), so the stale Connected
+      // status survives until the deferred evaluation runs — drain first or
+      // the waitUntil below matches it before the ladder even starts.
+      await settle();
       await waitUntil(() => sup.status == const Connected());
 
       expect(mech.dialCalls, 3);
