@@ -221,6 +221,12 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
   // without a loopback connection from the Windows app.
   Timer? _hostStatusTimer;
 
+  // True while a _pollLocalProjectStatus round-trip is in flight, so a tick
+  // that fires before the previous one returns is skipped rather than risking
+  // a slower, earlier-started poll overwriting a faster, later one with stale
+  // statuses (setLocalStatuses is a full replace, not a merge).
+  bool _pollingLocalStatus = false;
+
   // entryIds ('$machineUuid.$projectId') with an in-flight listSessions peek,
   // so a slow reply isn't re-requested on every subsequent advert emission for
   // the same project. See _peekProjectSessions.
@@ -480,27 +486,35 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
   /// Uses [peekHost] so a dead host (not yet spawned, or crashed) is a no-op
   /// rather than triggering a respawn on every timer tick.
   Future<void> _pollLocalProjectStatus() async {
-    final host = ref.read(hostControllerProvider);
-    final hostFile = await host.peekHost();
-    if (hostFile == null) return;
-    if (!mounted) return;
-    final client = HostControlClient(
-      port: hostFile.controlPort,
-      token: hostFile.token,
-    );
+    if (_pollingLocalStatus) return;
+    _pollingLocalStatus = true;
     try {
-      final projects = await client.projectList();
+      final host = ref.read(hostControllerProvider);
+      final hostFile = await host.peekHost();
+      if (hostFile == null) return;
       if (!mounted) return;
-      final statuses = <String, AgentWorkStatus>{};
-      for (final p in projects) {
-        final s = AgentWorkStatus.fromWire(p.workStatus);
-        if (s != null) statuses[p.projectId] = s;
+      final client = HostControlClient(
+        port: hostFile.controlPort,
+        token: hostFile.token,
+      );
+      try {
+        final projects = await client.projectList();
+        if (!mounted) return;
+        final statuses = <String, AgentWorkStatus>{};
+        for (final p in projects) {
+          final s = AgentWorkStatus.fromWire(p.workStatus);
+          if (s != null) statuses[p.projectId] = s;
+        }
+        ref
+            .read(remoteProjectStatusProvider.notifier)
+            .setLocalStatuses(statuses);
+      } catch (_) {
+        // Host went away between peek and list — ignore; next tick will retry.
+      } finally {
+        client.close();
       }
-      ref.read(remoteProjectStatusProvider.notifier).setLocalStatuses(statuses);
-    } catch (_) {
-      // Host went away between peek and list — ignore; next tick will retry.
     } finally {
-      client.close();
+      _pollingLocalStatus = false;
     }
   }
 

@@ -3,6 +3,7 @@ import 'package:flutter/widgets.dart';
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_status_tone.dart';
+import '../design/ab_tokens.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../services/control_plane_client.dart';
@@ -48,7 +49,11 @@ class AgentWorkStatusDot extends StatelessWidget {
               size: AbDotSize.sm,
               style: AbDotStyle.hollow,
             ),
-            AbIcon(AbIcons.check, size: 8, color: context.antgrid.success),
+            AbIcon(
+              AbIcons.check,
+              size: AbTokens.space8,
+              color: context.antgrid.success,
+            ),
           ],
         );
     }

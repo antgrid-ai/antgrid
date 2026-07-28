@@ -26,26 +26,30 @@ final accountHeartbeatProvider = Provider<void>((ref) {
   Timer? timer;
 
   Future<void> beat() async {
-    final user = ref.read(currentUserProvider).value;
-    if (user == null) return;
-    final store = ref.read(keychainDeviceStoreProvider);
-    final record = await store.readIfMatchesUser(user.userId);
-    if (record == null) return;
-    if (!ref.mounted) return;
-    final minter = await ref.read(licenseTokenMinterProvider.future);
-    if (minter == null || !ref.mounted) return;
-    String token;
+    // Wraps the whole body, not just the mint() call: a keychain read
+    // (readIfMatchesUser) or the minter provider future can also throw (e.g. a
+    // locked/corrupted platform keystore), and beat() is invoked via bare
+    // unawaited() below with no .catchError — an unguarded throw here becomes
+    // a recurring unhandled Future rejection every heartbeat interval.
     try {
-      token = minter.getToken() ?? await minter.mint();
+      final user = ref.read(currentUserProvider).value;
+      if (user == null) return;
+      final store = ref.read(keychainDeviceStoreProvider);
+      final record = await store.readIfMatchesUser(user.userId);
+      if (record == null) return;
+      if (!ref.mounted) return;
+      final minter = await ref.read(licenseTokenMinterProvider.future);
+      if (minter == null || !ref.mounted) return;
+      final token = minter.getToken() ?? await minter.mint();
+      if (!ref.mounted) return;
+      await sendAccountHeartbeat(
+        licenseApiUrl: ref.read(licenseApiUrlProvider),
+        token: token,
+        deviceUuid: record.deviceUuid,
+      );
     } catch (_) {
-      return;
+      // Best-effort: the next periodic tick retries.
     }
-    if (!ref.mounted) return;
-    await sendAccountHeartbeat(
-      licenseApiUrl: ref.read(licenseApiUrlProvider),
-      token: token,
-      deviceUuid: record.deviceUuid,
-    );
   }
 
   ref.listen<AsyncValue<CurrentUser?>>(currentUserProvider, (prev, next) {

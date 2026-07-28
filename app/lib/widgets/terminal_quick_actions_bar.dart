@@ -38,7 +38,7 @@ class TerminalQuickActionsBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      color: context.antgrid.bgElevated,
       padding: const EdgeInsets.symmetric(
         vertical: AbTokens.space4,
         horizontal: AbTokens.space4,
@@ -59,14 +59,14 @@ class TerminalQuickActionsBar extends StatelessWidget {
                     onInsertPath: onInsertPath,
                     onError: onUploadError,
                   ),
-                  _actionButton('Tab', '\t'),
-                  _actionButton('Esc', '\x1b'),
-                  _actionButton('Ctrl+C', '\x03'),
-                  _actionButton('Ctrl+D', '\x04'),
-                  _actionButton('↑', '\x1b[A'),
-                  _actionButton('↓', '\x1b[B'),
-                  _actionButton('→', '\x1b[C'),
-                  _actionButton('←', '\x1b[D'),
+                  _actionButton(context, 'Tab', '\t'),
+                  _actionButton(context, 'Esc', '\x1b'),
+                  _actionButton(context, 'Ctrl+C', '\x03'),
+                  _actionButton(context, 'Ctrl+D', '\x04'),
+                  _actionButton(context, '↑', '\x1b[A'),
+                  _actionButton(context, '↓', '\x1b[B'),
+                  _actionButton(context, '→', '\x1b[C'),
+                  _actionButton(context, '←', '\x1b[D'),
                 ],
               ),
             ),
@@ -88,19 +88,29 @@ class TerminalQuickActionsBar extends StatelessWidget {
     );
   }
 
-  Widget _actionButton(String label, String data) {
+  Widget _actionButton(BuildContext context, String label, String data) {
+    final p = context.antgrid;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: AbTokens.space2),
-      child: SizedBox(
-        height: AbTokens.rowHeightXl,
-        child: TextButton(
-          style: TextButton.styleFrom(
-            padding: const EdgeInsets.symmetric(horizontal: AbTokens.space10),
-            minimumSize: Size.zero,
-            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => onSendInput(data),
+        child: Container(
+          height: AbTokens.rowHeightXl,
+          padding: const EdgeInsets.symmetric(horizontal: AbTokens.space10),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: p.bgSurface,
+            borderRadius: AbTokens.borderRadius5,
+            border: Border.all(color: p.borderDefault),
           ),
-          onPressed: () => onSendInput(data),
-          child: Text(label, style: const TextStyle(fontSize: AbTokens.fontLg)),
+          child: Text(
+            label,
+            style: AbTokens.monoStyle(
+              fontSize: AbTokens.fontLg,
+              color: p.textSecondary,
+            ),
+          ),
         ),
       ),
     );

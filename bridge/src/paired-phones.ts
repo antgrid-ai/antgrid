@@ -164,12 +164,20 @@ export function loadPairedPhones(abDir: string, opts: PairedPhonesOptions = {}):
     has: (pk) => phones.some((p) => p.phonePubkey === pk),
     get: (pk) => phones.find((p) => p.phonePubkey === pk),
     upsert: (phone: UpsertPhone) => {
-      phones = phones.filter(
+      const displaced = phones.filter(
         (p) =>
-          p.phonePubkey !== phone.phonePubkey &&
-          !(phone.phoneDeviceId && p.phoneDeviceId === phone.phoneDeviceId),
+          p.phonePubkey === phone.phonePubkey ||
+          (phone.phoneDeviceId && p.phoneDeviceId === phone.phoneDeviceId),
       );
-      phones.push({ ...phone, allowedProjects: phone.allowedProjects ?? [] });
+      phones = phones.filter((p) => !displaced.includes(p));
+      // A rekey (same device, new pubkey — matched above by phoneDeviceId) must
+      // carry forward whatever the device was already explicitly granted, or a
+      // routine key rotation silently reverts the phone to just the same-account
+      // defaults. Union rather than replace: the caller's `allowedProjects`
+      // (typically just the defaults on a rekey) never revokes an existing grant.
+      const carriedProjects = new Set(displaced.flatMap((p) => p.allowedProjects));
+      for (const projectId of phone.allowedProjects ?? []) carriedProjects.add(projectId);
+      phones.push({ ...phone, allowedProjects: Array.from(carriedProjects) });
       flush();
     },
     remove: (pk) => {

@@ -84,6 +84,13 @@ export class ProjectCore {
   // reduction is a pure fold over outbound bus frames — see work-status.ts.
   private _work: WorkStatusState = initialWorkStatus;
   private _onWorkStatusChange: (() => void) | null = null;
+  /** Set by {@link observeWorkStatus} for the message it just folded: true when
+   *  the reduction was a no-op (exact-repeat or the awaiting_input-after-
+   *  task_complete stale nudge). The push subscriber (attached later, so its
+   *  bus callback always runs after this one for the same publish()) reads
+   *  this to skip pushing a notification that carries no new information —
+   *  see attachRelayStream. */
+  private _lastNotificationRedundant = false;
 
   constructor(private readonly deps: ProjectCoreDeps) {}
 
@@ -123,7 +130,9 @@ export class ProjectCore {
    *  throw — the bus lets subscriber throws propagate, and this rides the same
    *  publish() as the live relay subscriber (reduceWorkStatus is pure/total). */
   private observeWorkStatus(msg: AbMessage): void {
-    this.commitWork(reduceWorkStatus(this._work, msg));
+    const next = reduceWorkStatus(this._work, msg);
+    this._lastNotificationRedundant = msg.type === "notification:push" && next === this._work;
+    this.commitWork(next);
   }
 
   /** A turn-start hook fired (user submitted a prompt): clear a stale turn-end
@@ -374,6 +383,13 @@ export class ProjectCore {
     });
     const unsubscribePush = bus.subscribe({
       deliver: (msg) => {
+        // The work-status subscriber (subscribed in start(), before this one)
+        // already folded this same message and flagged it redundant — e.g. the
+        // generic post-completion "awaiting_input" nudge that follows a
+        // task_complete this turn. That fold carries no new information for the
+        // phone either, so skip the push rather than pinging a backgrounded user
+        // for a turn that already resolved.
+        if (msg.type === "notification:push" && this._lastNotificationRedundant) return;
         // Isolate the push dispatcher: a throw here (malformed target, seal
         // failure) must NOT abort publish() and starve the live stream subscriber
         // on the same message. push is best-effort, so we log.
