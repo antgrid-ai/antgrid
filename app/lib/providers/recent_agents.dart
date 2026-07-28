@@ -13,7 +13,7 @@ final recentAgentsStoreProvider = Provider<RecentAgentsStore>((_) {
 
 /// In-memory mirror of [RecentAgentsStore]. Seeds from `store.list()` on
 /// construction and then follows `store.changes`, so writes from any path
-/// (including direct `RecentAgentsStore.upsert` calls inside `PairingService`)
+/// (including direct `RecentAgentsStore.upsert` calls in the transport builder)
 /// are reflected here automatically.
 class RecentAgentsNotifier extends Notifier<List<RecentAgent>> {
   @override

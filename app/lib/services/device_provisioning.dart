@@ -42,6 +42,72 @@ class DeviceProvisioning {
     ).whenComplete(() => _inFlight = null);
   }
 
+  /// Separate from [_inFlight]: the two slots provision independently and a
+  /// controller attempt must not be answered by the main record's future.
+  Future<DeviceRecord>? _controllerInFlight;
+
+  /// The desktop CONTROLLER record: a second `kind:"app"` account device this
+  /// machine dials remote machines with. Desktop's main record is the local
+  /// bridge's relay identity (`kind:"agent"`), so connecting as it would put
+  /// two live sockets on one deviceId and epoch arbitration would evict one.
+  Future<DeviceRecord> ensureControllerProvisioned({
+    required String userId,
+    required String displayName,
+  }) {
+    return _controllerInFlight ??= _doEnsureControllerProvisioned(
+      userId: userId,
+      displayName: displayName,
+    ).whenComplete(() => _controllerInFlight = null);
+  }
+
+  Future<DeviceRecord> _doEnsureControllerProvisioned({
+    required String userId,
+    required String displayName,
+  }) async {
+    final cached = await store.readControllerIfMatchesUser(userId);
+    if (cached != null) return cached;
+    await store.clearController();
+
+    final keys = await AgentKeys.generate();
+    // Always a fresh uuid — never the main record's, and never an anonymous
+    // local-host uuid: the controller is a distinct account device.
+    final deviceUuid = const Uuid().v4();
+    final created = await api.createDevice(
+      deviceUuid: deviceUuid,
+      ed25519Pub: keys.ed25519PubBase64,
+      x25519Pub: keys.x25519PubBase64,
+      platform: platform,
+      displayName: displayName,
+      // Overrides the platform derivation, which would make a desktop an
+      // `agent`. The peers inventory (bridge E2E admission) serves `app` rows.
+      kind: 'app',
+    );
+
+    if (created.clientSecret == null) {
+      throw ProvisioningException(
+        'UNKNOWN',
+        'server returned existing device without secret on fresh provision',
+      );
+    }
+
+    final rec = DeviceRecord(
+      userId: userId,
+      deviceUuid: created.deviceUuid,
+      clientId: created.clientId,
+      clientSecret: created.clientSecret!,
+      ed25519Pub: keys.ed25519PubBase64,
+      ed25519Priv: keys.ed25519PrivBase64,
+      x25519Pub: keys.x25519PubBase64,
+      x25519Priv: keys.x25519PrivBase64,
+    );
+    try {
+      await store.writeController(rec);
+    } catch (e) {
+      throw ProvisioningException('UNKNOWN', 'keychain write failed: $e');
+    }
+    return rec;
+  }
+
   Future<DeviceRecord> _doEnsureProvisioned({
     required String userId,
     required String displayName,

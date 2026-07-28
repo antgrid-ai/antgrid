@@ -4,12 +4,12 @@ import { hostname } from "node:os";
 import { basename, join } from "node:path";
 import { ProjectCore, type ProjectCoreDeps, type ProjectCoreRemoteDeps, type PromotionHandle, type RegisterOutcome } from "./project-core";
 import { OAuthClient, startTokenMaintenance } from "./auth/oauth-client";
-import { cachedAccountPeerKeys } from "./account-peers";
 import { sendHeartbeat } from "./heartbeat";
 import { ControlListener } from "./control-listener";
 import type { ControlRequest, ControlResponse } from "./control-protocol";
 import { hostFilePath, writeHostFile, removeHostFile } from "./host-discovery";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
+import { TrustedPeersProvider } from "./trusted-peers";
 import { loadMobileAccessPolicy, type MobileAccessPolicyStore } from "./mobile-access-policy";
 import { resolveAbDir } from "./antgrid-dir";
 import { VERSION } from "./version";
@@ -22,7 +22,6 @@ import type { MachineRelaySession } from "./relay-promotion";
 import type { AgentEnableRelay } from "./protocol";
 import { MessageBus, type Channel } from "./message-bus";
 import { dispatchRpc } from "./rpc/methods";
-import { createPairingWindow, type PairingWindow } from "./pairing-window";
 import { generateEphemeralKeypair } from "./key-exchange";
 import { joinRelayWsPath } from "./relay-url";
 import { createMessage } from "./protocol";
@@ -56,11 +55,14 @@ export interface HostServerOptions {
   warmCap?: number;
   /** Test seam: builds the lazy machine OAuth runtime on the first remote open.
    *  Defaults to {@link buildRemoteRuntime} (real OAuth + token maintenance). */
-  remoteRuntimeFactory?: (r: HostRemoteConfig) => Promise<RemoteRuntime>;
+  remoteRuntimeFactory?: (r: HostRemoteConfig, onMinted?: () => void) => Promise<RemoteRuntime>;
   /** Test seam: builds the single machine {@link RelayClient}. Defaults to a
    *  real `new RelayClient(opts)` — overridden in tests to observe stream
    *  admission (onAdmitted/onRejected) without a live relay socket. */
   relayClientFactory?: (opts: RelayClientOptions) => RelayClient;
+  /** Test seam: override the pushHeartbeat() cadence. Defaults to
+   *  {@link HEARTBEAT_REFRESH_INTERVAL_MS} (60s). */
+  heartbeatIntervalMs?: number;
   /** Invoked when a `host:shutdown` control verb arrives (the app is closing).
    *  The entrypoint wires this to its process-level graceful shutdown (which
    *  calls {@link HostServer.shutdown} then exits). Absent → the verb is a
@@ -79,14 +81,13 @@ export interface HostRemoteConfig {
 
 export interface RemoteRuntime {
   maint: { getToken: () => string; stop: () => void };
-  getAccountPeerKeys: () => Promise<Set<string>>;
 }
 
-/** The real machine OAuth runtime: mint an initial token, keep it fresh, and
- *  expose the account-peer-keys cache. Swappable via
- *  {@link HostServerOptions.remoteRuntimeFactory} for tests. The returned
- *  `oauth` client is captured inside `maint`; the host never needs it directly. */
-async function buildRemoteRuntime(r: HostRemoteConfig): Promise<RemoteRuntime> {
+/** The real machine OAuth runtime: mint an initial token and keep it fresh.
+ *  Swappable via {@link HostServerOptions.remoteRuntimeFactory} for tests. The
+ *  returned `oauth` client is captured inside `maint`; the host never needs it
+ *  directly. */
+async function buildRemoteRuntime(r: HostRemoteConfig, onMinted?: () => void): Promise<RemoteRuntime> {
   const oauth = new OAuthClient({
     licenseApiUrl: r.licenseApiUrl,
     clientId: r.auth.clientId,
@@ -94,12 +95,10 @@ async function buildRemoteRuntime(r: HostRemoteConfig): Promise<RemoteRuntime> {
     onAuthRevoked: r.onAuthRevoked,
   });
   const initial = await oauth.mint();
-  const maint = startTokenMaintenance(oauth, initial);
-  const getAccountPeerKeys = cachedAccountPeerKeys({
-    licenseApiUrl: r.licenseApiUrl,
-    getToken: () => maint.getToken(),
-  });
-  return { maint, getAccountPeerKeys };
+  // onMinted redials the machine socket after a LICENSE_EXPIRED stop (recoverable
+  // by time); the initial mint deliberately doesn't fire it.
+  const maint = startTokenMaintenance(oauth, initial, { onMinted });
+  return { maint };
 }
 
 interface CatalogEntry {
@@ -118,6 +117,13 @@ export interface OpenResult {
   running: boolean;
   connect: ConnectInfo | null;
 }
+
+// pushHeartbeat() rides one cadence for both the device heartbeat POST and the
+// trustedPeers inventory refresh (see pushHeartbeat()'s doc comment). 60s
+// mirrors the interval this device-heartbeat design already settled on for a
+// no-reconnect-hook periodic POST (the original design predates account-trust
+// admission replacing pair-request auto-approve; the interval choice stands).
+const HEARTBEAT_REFRESH_INTERVAL_MS = 60_000;
 
 export class HostServer {
   private readonly cores = new Map<string, CatalogEntry>();
@@ -152,6 +158,15 @@ export class HostServer {
   private controlPlaneRelay: RelayClient | null = null;
   // retained to prevent GC of the bus before shutdown
   private controlPlaneBus: MessageBus | null = null;
+  // Account device inventory, the primary E2E-admission trust source (spec
+  // 2026-07-24 §3.3). Built once on the first startRemoteControlPlane() call
+  // and reused across reconnects so its in-memory cache stays warm; refreshed
+  // on the existing heartbeat cadence (see pushHeartbeat()).
+  private trustedPeers: TrustedPeersProvider | null = null;
+  // Owns the periodic pushHeartbeat() cadence (started once, in
+  // startRemoteControlPlane; cleared in shutdown()). unref'd so it never keeps
+  // the process alive on its own — mirrors owner-watchdog.ts's idiom.
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   // Machine remote config synthesized from the desktop wizard's `agent:enableRelay`
   // credentials when the host was launched WITHOUT remote config (local-only). Lets
   // `requireRemoteConfig()` bring the one machine socket up on demand.
@@ -160,10 +175,6 @@ export class HostServer {
   // buildProjectsAdvertisement (per-project streamId) and stream-ready. Populated
   // when a core attaches (remoteDepsFor's wrapper), cleared on detach.
   private readonly streamIds = new Map<string, string>();
-  // Single-use pairing window for the control-plane registration. A phone pairs
-  // to the bare deviceUuid here, distinct from per-project core pairings. Used
-  // only when remote config is present (the control plane never opens otherwise).
-  private readonly pairingWindow: PairingWindow = createPairingWindow();
 
   constructor(private readonly opts: HostServerOptions) {
     // Watch the backing file so external edits (e.g. `antgrid phones allow/deny`)
@@ -272,6 +283,18 @@ export class HostServer {
     await this.ensureRemoteRuntime();
     const rt = this.remoteRuntime!;
     const bus = new MessageBus();
+    const abDir = resolveAbDir();
+
+    // Built once and reused across reconnects (same licenseApiUrl/getToken the
+    // heartbeat push already uses — see pushHeartbeat()) so the on-disk cache
+    // and in-memory map survive socket churn.
+    if (!this.trustedPeers) {
+      this.trustedPeers = new TrustedPeersProvider({
+        licenseApiUrl: r.licenseApiUrl,
+        getToken: rt.maint.getToken,
+        filePath: join(abDir, "trusted-peers.json"),
+      });
+    }
 
     const buildClient = this.opts.relayClientFactory ?? ((o: RelayClientOptions) => new RelayClient(o));
     const client = buildClient({
@@ -279,15 +302,14 @@ export class HostServer {
       // Bare deviceUuid: this is the ONLY registration shape in v3 — one socket
       // per machine, project cores attach as multiplexed streams (design §7).
       identity: { ...r.identity, deviceId: r.auth.deviceUuid },
-      abDir: resolveAbDir(),
+      abDir,
       // Kept exception (B2): a terminal relay LICENSE verdict tells the user to
       // re-enroll (index.ts writes auth_revoked + exits). SUPERSEDED never does.
       onAuthRevoked: () => this.requireRemoteConfig().onAuthRevoked(),
-      getAccountPeerKeys: rt.getAccountPeerKeys,
       sameAccountDefaultProjects: () => this.mobileAccessPolicy.listSameAccountDefaultProjects(),
       getLicenseToken: () => Promise.resolve(rt.maint.getToken()),
       pairedPhones: this.pairedPhonesStore,
-      pairingWindow: this.pairingWindow,
+      trustedPeers: this.trustedPeers,
       generateKeypair: () => generateEphemeralKeypair(),
       onTunnelMessage: () => {}, // no preview tunnel on the control plane
       // The always-on control plane is the registration a phone's autoOpen dials,
@@ -303,10 +325,6 @@ export class HostServer {
         if (pk) this.sendProjectsAdvertisement(pk, bus); // Task 4.3 — STUB for now
         this.sendToolsAdvertisement(bus); // machine-level; no phone-pubkey needed
       },
-      onPaired: (_id, name) => {
-        log.info("Phone '%s' paired to control plane", name);
-        this.readvertiseToControlPlane();
-      },
       // A bridge-side reconnect to the RELAY (heartbeat lapse, network blip on
       // this machine — NOT the phone dropping) clears `_peerId` for the gap and
       // restores it here on `peer-online`, with NO fresh E2E handshake in
@@ -319,15 +337,13 @@ export class HostServer {
       // stuck on a stale catalog until an unrelated project:start forces a
       // full recompute.
       onPeerOnline: () => this.readvertiseToControlPlane(),
-      // A transient disconnect is NOT a revocation. Multiple phones share this
-      // one control-plane registration, so onUnpaired fires per-peer; demoting
-      // here would tear down promoted slots that OTHER still-connected phones
-      // are actively using, and force a re-promote round-trip when this phone
-      // reconnects. Promotions are torn down only by allowlist changes
-      // (phones:deny / phones:unpair → demoteIfOrphaned) and core lifecycle
-      // (stop / evict / shutdown). The promoted slot is a bounded idle outbound
-      // socket meanwhile; it reconnects with the core.
-      onUnpaired: (id) => log.info("Control-plane phone %s disconnected — promotions left intact", id),
+      // No peer-disconnect hook is wired on purpose. A transient disconnect is
+      // NOT a revocation, and multiple phones share this one control-plane
+      // registration, so demoting here would tear down promoted slots that OTHER
+      // still-connected phones are actively using. Promotions are torn down only
+      // by allowlist changes (phones:deny / phones:unpair → demoteIfOrphaned) and
+      // core lifecycle (stop / evict / shutdown). The promoted slot is a bounded
+      // idle outbound socket meanwhile; it reconnects with the core.
     });
 
     bus.setInboundHandler((msg, channel) => {
@@ -341,6 +357,16 @@ export class HostServer {
     this.controlPlaneBus = bus;
     client.connect();
     log.info("host: remote control plane relay opened (device=%s)", client.deviceId);
+
+    // pushHeartbeat() was previously event-triggered only (onAuthenticated +
+    // mobile-access mutations), so a long-lived, stably-connected bridge never
+    // re-fetched trustedPeers — a removed/re-keyed phone's stale identity stuck
+    // around indefinitely. Give it the actual cadence the design describes.
+    if (!this.heartbeatTimer) {
+      const intervalMs = this.opts.heartbeatIntervalMs ?? HEARTBEAT_REFRESH_INTERVAL_MS;
+      this.heartbeatTimer = setInterval(() => this.pushHeartbeat(), intervalMs);
+      this.heartbeatTimer.unref?.();
+    }
   }
 
   /** Bring the machine relay socket up (from the desktop wizard's credentials if
@@ -377,7 +403,6 @@ export class HostServer {
       attachStream: (bus, opts) => client.attachStream(bus, opts),
       currentPeerPubkey: () => client.currentPeerPubkey(),
       sendPushDeliver: (m) => client.sendPushDeliver(m),
-      pairingWindow: this.pairingWindow,
       agentDeviceId: auth.deviceUuid,
       ed25519Pub: auth.ed25519Pub,
       relayBase,
@@ -430,7 +455,6 @@ export class HostServer {
       label: p.label,
       pairedAt: p.pairedAt,
       lastSeenAt: p.lastSeenAt,
-      admission: p.admission,
       allowedProjects: p.allowedProjects,
     }));
   }
@@ -584,10 +608,10 @@ export class HostServer {
 
   /** Handle a mobile-access defaults verb over the loopback control plane. The
    *  bridge is the single writer of mobile-access-policy.json. enable-project
-   *  both stores the default and bulk-grants every same-account-admitted phone so
-   *  they gain access immediately without a reconnect. disable-project clears the
-   *  default and revokes the project from every phone (regardless of admission) so
-   *  a re-paired phone doesn't re-inherit a stale grant. */
+   *  both stores the default and bulk-grants every known phone so they gain
+   *  access immediately without a reconnect. disable-project clears the
+   *  default and revokes the project from every phone so a phone that
+   *  re-registers doesn't re-inherit a stale grant. */
   async handleMobileAccessVerb(req: ControlRequest): Promise<ControlResponse> {
     switch (req.type) {
       case "mobile-access:get":
@@ -611,10 +635,9 @@ export class HostServer {
         };
       case "mobile-access:disable-project":
         this.mobileAccessPolicy.disableProject(req.projectId);
-        // Revoke from same-account phones only — the toggle governs the
-        // same-account default, so a pair-code phone granted this project
-        // explicitly via `phones allow` keeps it. (forget() revokes ALL phones;
-        // that's project deletion, a different operation.)
+        // Revokes this project from every phone's allowlist (however the grant
+        // arrived — default or explicit `phones allow`). forget() revokes ALL
+        // projects from a phone; that's project deletion, a different operation.
         this.pairedPhonesStore.denyProjectForSameAccount(req.projectId);
         this.demoteIfOrphaned(req.projectId);
         this.readvertiseToControlPlane();
@@ -875,11 +898,12 @@ export class HostServer {
   /** Tear down every active relay slot (PromotionHandle) and return each core
    *  to loopback-only. An explicit "drop all relay slots" primitive (e.g. a
    *  future go-offline command) — NOT wired to phone disconnect, which must not
-   *  demote (a transient drop is not a revocation; see the control plane's
-   *  onUnpaired). Idempotent: safe to call when no core is promoted. The core
-   *  itself — and its live loopback session — is left ENTIRELY untouched; only
-   *  the additive relay slot is stopped. Public so tests can invoke it directly
-   *  without standing up a real relay connection. */
+   *  demote (a transient drop is not a revocation; revocation reaches us via
+   *  phones:deny / phones:unpair → demoteIfOrphaned). Idempotent: safe to call
+   *  when no core is promoted. The core itself — and its live loopback session —
+   *  is left ENTIRELY untouched; only the additive relay slot is stopped. Public
+   *  so tests can invoke it directly without standing up a real relay
+   *  connection. */
   demoteAllPromoted(): void {
     for (const [projectId, entry] of this.cores) {
       if (!entry.promotion) continue;
@@ -978,6 +1002,7 @@ export class HostServer {
 
   private async startCore(projectId: string, projectPath: string, mode: "local" | "remote"): Promise<OpenResult> {
     let remote: ProjectCoreRemoteDeps | undefined;
+    let relayUrl: string | undefined;
     if (mode === "remote") {
       await this.ensureRemoteRuntime();
       // A remote core attaches to the ONE machine socket (design §7); ensure it
@@ -985,11 +1010,16 @@ export class HostServer {
       // config — this guards the wizard-bootstrapped path).
       if (!this.controlPlaneRelay) await this.startRemoteControlPlane();
       remote = this.remoteDepsFor(projectId);
+      // The core can't derive this itself — only a standalone agent with an
+      // explicit antgrid.yaml `relayUrl:` has one in config, so a host-spawned
+      // core would otherwise banner a connect URI with no relay coordinate.
+      relayUrl = this.requireRemoteConfig().relayUrl;
     }
     const core = new ProjectCore({
       folder: projectPath,
       mode,
       identity: this.identityFor(mode),
+      ...(relayUrl ? { relayUrl } : {}),
       pairedPhones: this.pairedPhonesStore,
       sameAccountDefaultProjects: () => this.mobileAccessPolicy.listSameAccountDefaultProjects(),
       ensureMachineRelay: (msg) => this.ensureMachineRelay(msg),
@@ -1015,6 +1045,13 @@ export class HostServer {
     this.readvertiseToControlPlane();
     log.info(`host: opened project ${projectId} (mode=${mode}, ${this.cores.size} core(s) warm)`);
     await this.evictIfNeeded(projectId);
+    // An open that no phone asked for (host restart re-opening a project, a
+    // desktop-side open) changes the catalog with nothing else to announce it —
+    // handleControlPlaneVerb only re-advertises for a phone's own project:start.
+    // A restart in particular opens projects AFTER the handshake advert has
+    // already gone out, so without this the phone's catalog is a snapshot of a
+    // host that had nothing open. Payload-equal adverts are deduped by the bus.
+    this.readvertiseToControlPlane();
     return this.resultFor(entry);
   }
 
@@ -1026,8 +1063,14 @@ export class HostServer {
     if (this.remoteRuntimePromise) return this.remoteRuntimePromise;
     const r = this.requireRemoteConfig();
     const build = this.opts.remoteRuntimeFactory ?? buildRemoteRuntime;
+    // Late binding: the machine RelayClient is constructed AFTER the runtime (its
+    // token maintenance) in startRemoteControlPlane/startCore, so this closure
+    // reads controlPlaneRelay lazily at each re-mint. A LICENSE_EXPIRED stop keeps
+    // maintenance re-minting; the first fresh mint redials the stopped socket. The
+    // `?.` no-ops before the client exists and after a real revoke.
+    const onMinted = () => this.controlPlaneRelay?.redialWithFreshToken();
     const promise = (async () => {
-      this.remoteRuntime = await build(r);
+      this.remoteRuntime = await build(r, onMinted);
       return this.remoteRuntime;
     })();
     // Hold the in-flight promise so concurrent callers share it; clear it on
@@ -1041,9 +1084,16 @@ export class HostServer {
    *  Single chokepoint so the "requires machine remote config" invariant and
    *  message live in one place. */
   private requireRemoteConfig(): HostRemoteConfig {
-    const r = this.opts.remote ?? this.wizardRemote;
+    const r = this.remoteConfig();
     if (!r) throw new Error("HostServer: remote mode requires machine remote config");
     return r;
+  }
+
+  /** The machine remote config, or null. `wizardRemote` is the desktop-wizard
+   *  promotion of a host launched local-only, so anything that reads only
+   *  `opts.remote` silently no-ops on that whole path. */
+  private remoteConfig(): HostRemoteConfig | null {
+    return this.opts.remote ?? this.wizardRemote;
   }
 
   /** Push the machine's current mobile-access state (relayUrl, machineName,
@@ -1055,9 +1105,12 @@ export class HostServer {
    *  runtime exists — every real caller has already gone through
    *  startRemoteControlPlane/ensureRemoteRuntime by the time this can fire. */
   private pushHeartbeat(): void {
-    if (!this.opts.remote || !this.remoteRuntime) return;
-    const r = this.opts.remote;
+    const r = this.remoteConfig();
+    if (!r || !this.remoteRuntime) return;
     const rt = this.remoteRuntime;
+    // Rides the heartbeat cadence to keep the E2E-admission inventory cache
+    // warm without a dedicated poll loop.
+    void this.trustedPeers?.refresh();
     void sendHeartbeat({
       licenseApiUrl: r.licenseApiUrl,
       getToken: rt.maint.getToken,
@@ -1107,7 +1160,7 @@ export class HostServer {
     await this.stop(projectId);
     this.deleteProjectStores(projectId);
     if (this.seenProjects.delete(projectId)) this.flushSeen();
-    // Clear the same-account default so a later same-account pairing doesn't
+    // Clear the same-account default so a later same-account phone doesn't
     // re-inherit a grant for a deleted project.
     const defaultChanged = this.mobileAccessPolicy.disableProject(projectId);
     let revokedAny = false;
@@ -1142,6 +1195,10 @@ export class HostServer {
     // (and so it survives even if a force-kill backstop fires before the slower
     // core teardown below finishes).
     this.flushSeen();
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
     this.controlPlaneRelay?.close();
     this.controlPlaneRelay = null;
     this.controlPlaneBus = null;
@@ -1150,6 +1207,9 @@ export class HostServer {
     // was never started, so tests don't leak handles (Windows EBUSY).
     this.stopPhonesWatch?.();
     this.stopPhonesWatch = null;
+    // Persist admissions coalesced since the last touch flush, so `last seen`
+    // reflects the end of the session rather than the last whole minute of it.
+    this.pairedPhonesStore.close();
     await this.control?.stop();
     if (this.control) removeHostFile(hostFilePath());
     this.control = null;

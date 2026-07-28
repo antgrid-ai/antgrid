@@ -5,6 +5,7 @@ import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/control_plane.dart';
+import 'package:antgrid/providers/eager_control_planes.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/relay_connection.dart';
@@ -80,6 +81,9 @@ void main() {
           selectedSourceIdProvider.overrideWith(
             () => ValueController(selectedSourceId),
           ),
+          // flutter_test runs as Android → the eager union would read the
+          // recents store, which this harness deliberately doesn't provide.
+          eagerControlPlanesEnabledProvider.overrideWithValue(false),
         ],
       );
     }
@@ -144,6 +148,7 @@ void main() {
             workbenchSurfaceProvider.overrideWith(
               () => ValueController(WorkbenchSurface.workspace),
             ),
+            eagerControlPlanesEnabledProvider.overrideWithValue(false),
           ],
         );
         addTearDown(c.dispose);
@@ -203,6 +208,7 @@ void main() {
             ),
           ]),
           selectedSourceIdProvider.overrideWith(() => ValueController('local')),
+          eagerControlPlanesEnabledProvider.overrideWithValue(false),
         ],
       );
       addTearDown(c.dispose);
@@ -244,6 +250,7 @@ void main() {
             workbenchSurfaceProvider.overrideWith(
               () => ValueController(WorkbenchSurface.workspace),
             ),
+            eagerControlPlanesEnabledProvider.overrideWithValue(false),
           ],
         );
         addTearDown(c.dispose);

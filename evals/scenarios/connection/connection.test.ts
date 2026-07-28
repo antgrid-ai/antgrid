@@ -1,7 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { generateKeyPairSync, type KeyObject } from "node:crypto";
-import { startRelay, allocatePort } from "../../helpers/harness";
-import { setupPairFlowTestEnv, type TestEnv } from "../../helpers/test-env";
+import { startRelay, allocatePort, setupTestEnv } from "../../helpers/harness";
 import { RelayClient } from "../../helpers/relay-client";
 
 /**
@@ -13,43 +11,14 @@ import { RelayClient } from "../../helpers/relay-client";
  * failure (PEER_OFFLINE, NOT_AUTHORIZED, MESSAGE_RATE_LIMITED).
  */
 
-function rawEdPubB64(pub: KeyObject): string {
-  const der = pub.export({ format: "der", type: "spki" });
-  return Buffer.from(der.subarray(der.length - 32)).toString("base64");
-}
-
-async function pairApp(
-  env: TestEnv,
-  accountKey: { pubB64: string; privateKey: KeyObject },
-): Promise<RelayClient> {
-  const app = await RelayClient.connectAndAuth(env.relay.url, { deviceType: "app", name: "eval-phone" });
-  for (let i = 0; i < 50; i++) {
-    try {
-      const r = await app.pairWith(env.agent.deviceId, { timeoutMs: 8_000, accountKey });
-      app.setPeerId(r.peerId);
-      await app.performE2EHandshake(env.agent.deviceId, 10_000, {
-        agentEd25519Pub: env.agent.ed25519Pubkey,
-      });
-      return app;
-    } catch {
-      if (app.isClosed) await app.reconnectAndAuth(env.relay.url);
-      await Bun.sleep(150);
-    }
-  }
-  await app.disconnect();
-  throw new Error("agent never reached a pairable state in time");
-}
-
 describe("connection resilience (v3)", () => {
   test("routed send to an offline peer is rejected PEER_OFFLINE and never queued", async () => {
-    const accountKp = generateKeyPairSync("ed25519");
-    const accountPubB64 = rawEdPubB64(accountKp.publicKey);
-    const env = await setupPairFlowTestEnv({ accountPeerKeys: [accountPubB64] });
-    let app: RelayClient | null = null;
+    const env = await setupTestEnv({ fixtureName: "basic" });
     try {
-      // Pairing + a completed E2E handshake already prove routing works while the
-      // agent is live (both required relayed round-trips).
-      app = await pairApp(env, { pubB64: accountPubB64, privateKey: accountKp.privateKey });
+      // setupTestEnv's account-trust admission + a completed E2E handshake
+      // already prove routing works while the agent is live (both required
+      // relayed round-trips) — no pairing ceremony involved.
+      const app = env.app;
 
       const offlineP = app.waitForType("peer-offline", 8_000);
       await env.agent.kill();
@@ -60,7 +29,7 @@ describe("connection resilience (v3)", () => {
       // bounces — a queue would have silently accepted them.
       for (let i = 0; i < 3; i++) {
         const errP = app.waitForType("error", 4_000);
-        app!.sendMessage(env.agent.deviceId, "control", JSON.stringify({ type: "test", seq: i }));
+        app.sendMessage(env.agentDeviceId, "control", JSON.stringify({ type: "test", seq: i }));
         const err = await errP;
         expect(err.code).toBe("PEER_OFFLINE");
         expect(err.retryable).toBe(true);
@@ -68,7 +37,6 @@ describe("connection resilience (v3)", () => {
       // Application-layer failure — the phone's socket stays open.
       expect(app.isClosed).toBe(false);
     } finally {
-      await app?.disconnect();
       await env.teardown();
     }
   }, 60_000);
@@ -96,17 +64,19 @@ describe("connection resilience (v3)", () => {
     }
   }, 20_000);
 
-  test("unpaired routed send is rejected NOT_AUTHORIZED without close", async () => {
+  test("routed send with no same-account target is rejected PEER_OFFLINE without close", async () => {
     const relay = await startRelay({ port: allocatePort() });
     let app: RelayClient | null = null;
     try {
       app = await RelayClient.connectAndAuth(relay.url, { deviceType: "app" });
       const errP = app.waitForType("error", 5_000);
-      // No grant links this phone to the target → routing is refused.
+      // No same-account target and no grant → uniform PEER_OFFLINE (spec
+      // 2026-07-24 §3.2: deny and offline are indistinguishable, no presence
+      // oracle for an unauthorized sender). Mirrors relay/tests/routing.test.ts.
       app.sendMessage(crypto.randomUUID(), "control", "should-fail");
       const error = await errP;
-      expect(error.code).toBe("NOT_AUTHORIZED");
-      expect(error.retryable).toBe(false);
+      expect(error.code).toBe("PEER_OFFLINE");
+      expect(error.retryable).toBe(true);
       // The rejection is application-layer, so the socket must remain open.
       expect(await app.waitForClose(500)).toBe(false);
     } finally {

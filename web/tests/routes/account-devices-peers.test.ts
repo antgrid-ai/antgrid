@@ -80,11 +80,12 @@ describe("GET /account/devices/me/peers", () => {
     const { token } = await provisionAndMintToken(app, cookie);
 
     const appKey = Buffer.alloc(32, 1);
+    const appDeviceId = crypto.randomUUID();
 
     // Included: app kind, non-revoked
     await createTestDevice(pg.db, {
       userId: user.id,
-      deviceId: crypto.randomUUID(),
+      deviceId: appDeviceId,
       kind: "app",
       platform: "ios",
       displayName: "Alice's iPhone",
@@ -121,8 +122,16 @@ describe("GET /account/devices/me/peers", () => {
     });
 
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { keys: string[] };
+    const body = (await res.json()) as {
+      keys: string[];
+      devices: { deviceId: string; ed25519Pub: string }[];
+    };
     expect(body.keys).toEqual([appKey.toString("base64")]);
+    // devices[] carries deviceId alongside the key (for Task 5/6 inventory
+    // admission); revoked/non-app devices excluded same as keys[].
+    expect(body.devices).toEqual([
+      { deviceId: appDeviceId, ed25519Pub: appKey.toString("base64") },
+    ]);
   });
 
   test("returns empty array when no app devices exist", async () => {
@@ -137,8 +146,12 @@ describe("GET /account/devices/me/peers", () => {
     });
 
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { keys: string[] };
+    const body = (await res.json()) as {
+      keys: string[];
+      devices: { deviceId: string; ed25519Pub: string }[];
+    };
     expect(body.keys).toEqual([]);
+    expect(body.devices).toEqual([]);
   });
 
   test("returns 401 when unauthenticated", async () => {

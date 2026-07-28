@@ -52,7 +52,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
       _lastSnackbar = now;
       showAbSnackBar(
         context,
-        'Not a valid Antgrid pairing code',
+        'Not a valid Antgrid connect code',
         duration: const Duration(seconds: 2),
       );
     }

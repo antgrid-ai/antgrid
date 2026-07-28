@@ -306,11 +306,18 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                 AbTokens.space10,
                 0,
               ),
+              // Both chips are flexible so a long machine or project label
+              // ellipsizes inside its chip instead of overflowing the row on a
+              // phone-width screen — the labels are data (a machine name can
+              // carry a device-uuid suffix), so their intrinsic widths are
+              // unbounded in practice.
               child: Row(
                 children: [
-                  const EnvironmentChip(),
+                  const Flexible(child: EnvironmentChip()),
                   const SizedBox(width: AbTokens.space6),
-                  ProjectChip(onOpenFolder: widget.onOpenFolder),
+                  Flexible(
+                    child: ProjectChip(onOpenFolder: widget.onOpenFolder),
+                  ),
                 ],
               ),
             ),

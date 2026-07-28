@@ -67,67 +67,6 @@ class StreamCloseMessage {
   };
 }
 
-/// Sent by either grant party to sever the grant (replaces v2 `unpair`).
-class GrantRevokeMessage {
-  final String peerDeviceId;
-
-  const GrantRevokeMessage({required this.peerDeviceId});
-
-  Map<String, dynamic> toJson() => {
-    'type': 'grant-revoke',
-    'peerDeviceId': peerDeviceId,
-  };
-}
-
-class PairRequestMessage {
-  final String agentDeviceId;
-  final String phonePubkey;
-  final String phoneDeviceId;
-  final String nonce;
-  final String requestedAt;
-
-  /// Epoch ms; set by the phone from its own timeout. The relay expires the
-  /// pending pair (error EXPIRED, ref=nonce) once past it.
-  final int deadline;
-  final String phoneSignature;
-  final String? pairCode;
-  final String? label;
-  final String? accountDevicePubkey;
-  final String? accountMembershipSig;
-
-  const PairRequestMessage({
-    required this.agentDeviceId,
-    required this.phonePubkey,
-    required this.phoneDeviceId,
-    required this.nonce,
-    required this.requestedAt,
-    required this.deadline,
-    required this.phoneSignature,
-    this.pairCode,
-    this.label,
-    this.accountDevicePubkey,
-    this.accountMembershipSig,
-  });
-
-  // Clients never set `pairId`: the relay stamps it when forwarding to the
-  // agent (its handler overwrites any client-supplied value) and it becomes
-  // the approval-routing key.
-  Map<String, dynamic> toJson() => {
-    'type': 'pair-request',
-    'agentDeviceId': agentDeviceId,
-    'phonePubkey': phonePubkey,
-    'phoneDeviceId': phoneDeviceId,
-    'nonce': nonce,
-    'requestedAt': requestedAt,
-    'deadline': deadline,
-    'phoneSignature': phoneSignature,
-    if (pairCode != null) 'pairCode': pairCode,
-    if (label != null) 'label': label,
-    if (accountDevicePubkey != null) 'accountDevicePubkey': accountDevicePubkey,
-    if (accountMembershipSig != null) 'accountMembershipSig': accountMembershipSig,
-  };
-}
-
 // --- Relay → Client ---
 
 /// Terminal success frame for the `hello` handshake (replaces v2
@@ -183,26 +122,6 @@ class StreamClosedMessage {
   }
 }
 
-/// Relay → client: a grant linking this device to `peerDeviceId` was severed
-/// (replaces v2 `pair-disconnected`). `reason` is one of PEER_REPLACED,
-/// REVOKED, STALE.
-class GrantRevokedMessage {
-  final String peerDeviceId;
-  final String reason;
-
-  const GrantRevokedMessage({
-    required this.peerDeviceId,
-    required this.reason,
-  });
-
-  static GrantRevokedMessage? fromJson(Map<String, dynamic> json) {
-    final peerDeviceId = json['peerDeviceId'];
-    final reason = json['reason'];
-    if (peerDeviceId is! String || reason is! String) return null;
-    return GrantRevokedMessage(peerDeviceId: peerDeviceId, reason: reason);
-  }
-}
-
 class ErrorMessage {
   final String code;
   final String message;
@@ -212,7 +131,7 @@ class ErrorMessage {
   /// lives on the wire, not in per-client code lists.
   final bool retryable;
 
-  /// Echoes the pair-request nonce / streamId the error refers to.
+  /// Echoes the streamId the error refers to.
   final String? ref;
 
   /// Server clock, present on clock-skew AUTH_FAILED only.
@@ -245,32 +164,6 @@ class ErrorMessage {
   }
 }
 
-class PairConnectedMessage {
-  final String peerId;
-  final String peerName;
-  final String peerType;
-
-  const PairConnectedMessage({
-    required this.peerId,
-    required this.peerName,
-    required this.peerType,
-  });
-
-  static PairConnectedMessage? fromJson(Map<String, dynamic> json) {
-    final peerId = json['peerId'];
-    final peerName = json['peerName'];
-    final peerType = json['peerType'];
-    if (peerId is! String || peerName is! String || peerType is! String) {
-      return null;
-    }
-    return PairConnectedMessage(
-      peerId: peerId,
-      peerName: peerName,
-      peerType: peerType,
-    );
-  }
-}
-
 class PeerOnlineMessage {
   final String peerId;
 
@@ -292,86 +185,6 @@ class PeerOfflineMessage {
     final peerId = json['peerId'];
     if (peerId is! String) return null;
     return PeerOfflineMessage(peerId: peerId);
-  }
-}
-
-/// Relay → app: the agent approved a phone's pair-request. The relay routes
-/// the approval to the requesting phone by the relay-stamped `pairId`.
-/// Consumers verify the Ed25519 signature against the agent's pubkey before
-/// trusting.
-class PairApprovalMessage {
-  final String pairId;
-  final String phonePubkey;
-  final String phoneDeviceId;
-  final String nonce;
-  final DateTime expiresAt;
-  final String signature;
-
-  const PairApprovalMessage({
-    required this.pairId,
-    required this.phonePubkey,
-    required this.phoneDeviceId,
-    required this.nonce,
-    required this.expiresAt,
-    required this.signature,
-  });
-
-  static PairApprovalMessage? fromJson(Map<String, dynamic> json) {
-    final pairId = json['pairId'];
-    final phonePubkey = json['phonePubkey'];
-    final phoneDeviceId = json['phoneDeviceId'];
-    final nonce = json['nonce'];
-    final expiresAt = json['expiresAt'];
-    final signature = json['signature'];
-    if (pairId is! String ||
-        phonePubkey is! String ||
-        phoneDeviceId is! String ||
-        nonce is! String ||
-        expiresAt is! String ||
-        signature is! String) {
-      return null;
-    }
-    DateTime parsed;
-    try {
-      parsed = DateTime.parse(expiresAt);
-    } catch (_) {
-      return null;
-    }
-    return PairApprovalMessage(
-      pairId: pairId,
-      phonePubkey: phonePubkey,
-      phoneDeviceId: phoneDeviceId,
-      nonce: nonce,
-      expiresAt: parsed,
-      signature: signature,
-    );
-  }
-}
-
-/// Relay → app: pairing was rejected (unknown phone, window closed, etc).
-class PairRejectedMessage {
-  final String pairId;
-  final String phonePubkey;
-  final String reason;
-
-  const PairRejectedMessage({
-    required this.pairId,
-    required this.phonePubkey,
-    required this.reason,
-  });
-
-  static PairRejectedMessage? fromJson(Map<String, dynamic> json) {
-    final pairId = json['pairId'];
-    final phonePubkey = json['phonePubkey'];
-    final reason = json['reason'];
-    if (pairId is! String || phonePubkey is! String || reason is! String) {
-      return null;
-    }
-    return PairRejectedMessage(
-      pairId: pairId,
-      phonePubkey: phonePubkey,
-      reason: reason,
-    );
   }
 }
 
@@ -416,6 +229,11 @@ class IncomingRouteMessage {
 
 /// Parses a relay message JSON map into the appropriate typed message.
 /// Returns null if the type is unrecognized or the message is malformed.
+///
+/// Returning null (rather than throwing) is the tolerance contract: an
+/// un-upgraded relay still sending the deleted pairing frames — `pair-connected`,
+/// `grant-revoked`, `pair-*` — must be ignorable by a v3 app, not fatal to its
+/// socket.
 Object? parseRelayMessage(Map<String, dynamic> json) {
   final type = json['type'] as String?;
   switch (type) {
@@ -425,20 +243,12 @@ Object? parseRelayMessage(Map<String, dynamic> json) {
       return StreamOpenedMessage.fromJson(json);
     case 'stream-closed':
       return StreamClosedMessage.fromJson(json);
-    case 'grant-revoked':
-      return GrantRevokedMessage.fromJson(json);
     case 'error':
       return ErrorMessage.fromJson(json);
-    case 'pair-connected':
-      return PairConnectedMessage.fromJson(json);
     case 'peer-online':
       return PeerOnlineMessage.fromJson(json);
     case 'peer-offline':
       return PeerOfflineMessage.fromJson(json);
-    case 'pair-approval':
-      return PairApprovalMessage.fromJson(json);
-    case 'pair-rejected':
-      return PairRejectedMessage.fromJson(json);
     default:
       return null;
   }

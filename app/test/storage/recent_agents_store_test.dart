@@ -12,8 +12,6 @@ void main() {
     String agentLabel = 'My Mac',
     String agentEd25519Pubkey = 'pub-agent-1',
     String relayUrl = 'wss://relay.example/ws',
-    String phoneDeviceId = 'phone-1',
-    String phoneEd25519Pubkey = 'pub-phone-1',
     DateTime? pairedAt,
     DateTime? lastConnectedAt,
   }) {
@@ -23,8 +21,6 @@ void main() {
       agentLabel: agentLabel,
       agentEd25519Pubkey: agentEd25519Pubkey,
       relayUrl: relayUrl,
-      phoneDeviceId: phoneDeviceId,
-      phoneEd25519Pubkey: phoneEd25519Pubkey,
       pairedAt: pairedAt ?? t,
       lastConnectedAt: lastConnectedAt ?? t,
     );

@@ -12,6 +12,7 @@ import '../providers/agent_transport.dart';
 import '../providers/cached_sessions.dart';
 import '../providers/control_plane.dart';
 import '../providers/recent_sessions.dart';
+import '../providers/connection_identity.dart';
 import '../providers/relay_connection.dart';
 import '../providers/ui_attention_providers.dart';
 import '../services/control_plane_client.dart';
@@ -31,6 +32,14 @@ class AppShell extends ConsumerStatefulWidget {
 class _AppShellState extends ConsumerState<AppShell> {
   late final AppLifecycleListener _lifecycleListener;
   MobileLifecycleObserver? _mobileLifecycle;
+  Future<void>? _eagerKick;
+  DateTime? _lastRemint;
+
+  /// Floor between out-of-band re-mint attempts. Eager pinning keeps a lapsed
+  /// account's machines Blocked(licenseExpired) in the manager for the whole
+  /// session, so `hasLicenseExpiredBlock` is persistently true there — without
+  /// a cooldown every single foregrounding would cost a doomed network mint.
+  static const _kRemintCooldown = Duration(minutes: 10);
 
   @override
   void initState() {
@@ -54,6 +63,23 @@ class _AppShellState extends ConsumerState<AppShell> {
         _mobileLifecycle?.handleState(state);
       },
     );
+    // Mobile launch: dial the recently-used machines now, so the first paint
+    // shows live status and sessions instead of offline rows waiting for a
+    // drawer expand (see kickEagerControlPlaneDials — no-op on desktop).
+    // Post-frame so the kick's invalidates never run mid-build.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _kickEagerDials();
+    });
+  }
+
+  /// One kick at a time: a single foregrounding fires both onRestart and
+  /// onResume (and cold launch adds the startup resume to the post-frame
+  /// kick), and a second concurrent kick would re-invalidate the providers the
+  /// first one's dials are still mid-building — restarting them for nothing.
+  void _kickEagerDials() {
+    _eagerKick ??= kickEagerControlPlaneDials(
+      RefreshRef.of(ref),
+    ).whenComplete(() => _eagerKick = null);
   }
 
   @override
@@ -75,12 +101,47 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   void _reconnectRelay() {
     ref.invalidate(licenseTokenMinterProvider);
-    final notifier = ref.read(pairedAgentProvider.notifier);
-    final agent = ref.read(activeAgentProvider);
-    if (agent != null) {
-      AbLog.info('AppShell', 'app resumed, reconnecting to relay');
-      notifier.ensureListenersRunning(agent).ignore();
+    AbLog.info('AppShell', 'app resumed — re-evaluating machine ladders');
+    ref.invalidate(connectionTokenMinterProvider);
+    final manager = ref.read(relayConnectionManagerProvider);
+    // Level-triggered: every live machine re-evaluates its ladder now instead
+    // of waiting out a backoff timer the OS may have frozen while suspended.
+    // Fans out to every live machine, including ones with no focused project.
+    manager.noteResume();
+    // noteResume() alone is a pure re-evaluate that skips a Blocked status
+    // outright (ConnectionSupervisor._runOnce), so a machine sitting on
+    // Blocked(licenseExpired) needs its own out-of-band re-mint to recover —
+    // resume is the one place that can happen without the user pressing
+    // Retry. Never wired through the ladder's own in-rung mintToken(): that
+    // would reset the socket rung's backoff mid-step (see
+    // ConnectionSupervisor.noteFreshToken's doc comment). Gated on an actual
+    // license block so a foreground/background flap with nothing stuck never
+    // costs a network mint or resets a healthy machine's backoff.
+    if (manager.hasLicenseExpiredBlock &&
+        (_lastRemint == null ||
+            DateTime.now().difference(_lastRemint!) >= _kRemintCooldown)) {
+      _lastRemint = DateTime.now();
+      unawaited(_remintAndUnblock());
     }
+    // Resume is "the user opened the phone" too: an eager machine that had no
+    // live connection when the app was backgrounded (offline then, or a failed
+    // launch dial) gets a fresh attempt now. Healthy machines are skipped
+    // inside the kick — noteResume() above already re-evaluated their ladders.
+    _kickEagerDials();
+  }
+
+  Future<void> _remintAndUnblock() async {
+    try {
+      final minter = await ref.read(connectionTokenMinterProvider.future);
+      if (minter == null) return;
+      await minter.mint();
+    } catch (_) {
+      // Best-effort: the ladder's own dial-time mint remains authoritative —
+      // this only wakes a machine already stuck on Blocked(licenseExpired).
+      return;
+    }
+    if (!mounted) return;
+    ref.read(relayConnectionManagerProvider).noteFreshTokenEverywhere();
   }
 
   @override
@@ -380,7 +441,9 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
   }
 
   /// Release every open control-plane socket whose machine is neither viewed nor
-  /// backing an open project (i.e. absent from [alive]).
+  /// backing an open project (i.e. absent from [alive]); assert `wanted` on the
+  /// survivors. See [reconcileControlPlaneWantedness] for the pure decision the
+  /// widget applies its invalidations around.
   void _reconcile(Set<String> alive) {
     final mgr = ref.read(relayConnectionManagerProvider);
     // A currently-open project is never a reapable control-plane socket. The
@@ -389,20 +452,15 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
     // connection accidentally materialized for a local project would be released
     // and its transport invalidated mid-open — disposing the live ProjectSession.
     final openProjects = ref.read(projectSessionRegistryProvider).toSet();
-    for (final id in mgr.openControlPlaneIds()) {
-      if (!alive.contains(id) && !openProjects.contains(id)) {
-        mgr.release(id);
-        // The control-plane client is built atop the non-autoDispose transport
-        // family (controlPlaneClientForProvider watches
-        // agentTransportForProvider(id).future), so the transport entry must be
-        // invalidated too — otherwise a re-view rebuilds the client on the
-        // released, now-dead transport (it serves the cached element instead of
-        // re-running connectionFor) and the machine renders permanently offline.
-        // Mirrors the registry onEvict rationale in main.dart.
-        ref.invalidate(agentTransportForProvider(id));
-        ref.invalidate(controlPlaneClientForProvider(id));
-        ref.invalidate(controlPlaneStateProvider(id));
-      }
+    final released = reconcileControlPlaneWantedness(
+      mgr: mgr,
+      alive: alive,
+      openProjects: openProjects,
+    );
+    for (final id in released) {
+      // Always the full chain — see invalidateControlPlaneProviders for why a
+      // partial invalidate leaves the machine rendering permanently offline.
+      invalidateControlPlaneProviders(RefreshRef.of(ref), id);
     }
   }
 
@@ -453,4 +511,35 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
     // subscription itself lives in initState (see listenManual above).
     return widget.child;
   }
+}
+
+/// The reaper's release decision, pulled out of [_ControlPlaneReaperState] so
+/// it's testable without pumping a widget tree: for every open control-plane
+/// socket, feed its supervisor `wanted` — true while [alive] or an
+/// [openProjects] entry claims it, false (then released) otherwise. Returns
+/// the ids actually released, so the caller can invalidate their downstream
+/// providers.
+///
+/// `setWanted(false)` is this function's OWN call, made explicitly before
+/// `mgr.release(id)` rather than left to whatever `release()` happens to do
+/// internally — `mgr` is an injected dependency (a test fake, or a future
+/// reworking of `RelayConnectionManager`), so the ladder must not depend on a
+/// release implementation detail to ever learn it was torn down on purpose.
+@visibleForTesting
+List<String> reconcileControlPlaneWantedness({
+  required RelayConnectionManager mgr,
+  required Set<String> alive,
+  required Set<String> openProjects,
+}) {
+  final released = <String>[];
+  for (final id in mgr.openControlPlaneIds()) {
+    if (alive.contains(id) || openProjects.contains(id)) {
+      mgr.peek(id)?.supervisor?.setWanted(true);
+      continue;
+    }
+    mgr.peek(id)?.supervisor?.setWanted(false);
+    mgr.release(id);
+    released.add(id);
+  }
+  return released;
 }

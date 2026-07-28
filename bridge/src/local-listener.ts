@@ -34,8 +34,8 @@ export class LocalListener implements TransportSubscriber {
   constructor(private opts: LocalListenerOptions) {}
 
   /** True while a desktop owner is connected over the loopback socket. The
-   *  relay slot's `onUnpaired` (phone left) consults this so it never tears
-   *  down core services that a live loopback owner is still using. */
+   *  relay slot's `onPeerOffline` (phone left) consults this so it never
+   *  suppresses the bus a live loopback owner is still streaming from. */
   get hasOwner(): boolean {
     return this.ownerSocket !== null;
   }

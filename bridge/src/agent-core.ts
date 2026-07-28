@@ -26,7 +26,6 @@ import { MessageBus } from "./message-bus";
 import { resolveAbDir } from "./antgrid-dir";
 import { computeProjectId } from "./project-id";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
-import { createPairingWindow, type PairingWindow } from "./pairing-window";
 import { ConfigController } from "./config-controller";
 import { detectInstalledTools } from "./tool-detector";
 import { SessionManager } from "./session-manager";
@@ -105,12 +104,9 @@ export interface AgentCore {
   readonly nextKeypair: () => EphemeralKeypair;
   /** Persistent trust list for paired phones (machine-level, shared across projects). */
   readonly pairedPhones: PairedPhonesStore;
-  /** Single-use pair-window state. Open on `agent:enableRelay`. */
-  readonly pairingWindow: PairingWindow;
   /** Lifecycle hooks the transport invokes. */
   handleTunnelMessage(raw: unknown): void;
   onHandshakeComplete(): void;
-  onUnpaired(): void;
   /** Wire the transport's plaintext (tunnel) sender. The MessageBus only
    *  carries strict AbMessages; tunnel-protocol messages bypass the bus
    *  and are sent through this hook directly. Pass `null` to clear it (the
@@ -162,6 +158,11 @@ export interface BuildAgentCoreOptions {
    *  the owning ProjectCore can reset its control-plane work status to "working"
    *  on a fresh turn. Bridge-internal — never surfaces to the app. */
   onTurnStart?: () => void;
+  /** Relay base URL of the machine socket this core attaches to. Host-supplied
+   *  in remote mode: only a standalone agent with an explicit `relayUrl:` in its
+   *  antgrid.yaml can learn it from config, so without this a host-spawned
+   *  remote core has no relay coordinate to put in its banner/connect URI. */
+  relayUrl?: string;
 }
 
 export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<AgentCore> {
@@ -198,8 +199,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // Identity is always caller-supplied.
   const identity = opts.identity;
 
-  // relayBase is optional: required for remote mode, not for local mode.
-  const relayBase = config.relayUrl ?? null;
+  // relayBase is optional: required for remote mode, not for local mode. The
+  // host-supplied URL wins — config.relayUrl only exists for a standalone agent
+  // that pinned one in its antgrid.yaml.
+  const relayBase = opts.relayUrl ?? config.relayUrl ?? null;
 
   // Lightweight project info used by subsystems
   const project = {
@@ -223,11 +226,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     needsFirstRun = true;
   }
 
-  // Paired-phone trust list + single-use pair-window — both are needed by the
-  // relay-client's inbound `pair-request` handler. Constructed eagerly so they
-  // exist whether the agent runs in local or remote mode.
+  // Paired-phone trust list, constructed eagerly so it exists whether the
+  // agent runs in local or remote mode.
   const pairedPhones = opts.pairedPhones ?? loadPairedPhones(abDir);
-  const pairingWindow = createPairingWindow();
 
   // Resolve synthetic agent terminal (if any)
   interface AgentTerminalSpec {
@@ -278,21 +279,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // Shared: generate initial keypair and display banner (same for both modes)
   const initialKeypair = generateEphemeralKeypair();
 
-  // Remote mode: open a pair-window so the banner QR has a real code.
-  // Local mode: no banner (agent is spawned headless by the App).
-  let bannerPairCode: string | undefined;
-  if (relayBase && opts.mode === "remote") {
-    bannerPairCode = pairingWindow.open().code;
-  }
-
   // The banner is human-facing. In local mode the agent is spawned headless by
   // the App; banner output goes to a log nobody reads — skip it.
   if (opts.mode === "remote") {
     await displayStartupBanner({
       version: VERSION,
-      relayUrl: relayBase ?? "(local mode)",
+      relayUrl: relayBase,
       identity,
-      pubkey: initialKeypair.publicKey,
       mode: "agent",
       terminalCount: (buildAgentTerminalSpec() ? 1 : 0) + getServices().length || 1,
       commandCount: config.commands?.length,
@@ -300,7 +293,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       projectPath: project.path,
       projectId: project.id,
       ed25519PublicKey: identity.ed25519PublicKey,
-      pairCode: bannerPairCode,
     }).catch((err) => log.warn("Banner display failed: %s", err));
   }
 
@@ -1551,7 +1543,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     log.info("app:ready / owner-connect — emitting hello and (re)syncing state");
     // Re-emit hello on every handshake; app-side notifiers are
     // latest-wins, so this is a no-op when unchanged and self-healing
-    // otherwise. (Local mode has no onUnpaired to reset a guard.)
+    // otherwise.
     sendAb(buildAgentHello(config, VERSION));
     // Re-sync the config-error dot on every connect (see emitConfigState).
     emitConfigState();
@@ -1561,11 +1553,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     void setupServices().catch((err) => log.error("setupServices failed: %s", err));
   }
 
-  function onUnpaired() {
-    log.info("App unpaired, tearing down services");
-    teardownServices();
-  }
-
   // Start local API server for MCP/hook integration (works in both modes)
   apiServer = startApiServer({
     manager: () => manager,
@@ -1573,7 +1560,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     project: () => project,
     sendAb: (msg) => sendAb(msg),
     sessionName: (terminalId) => sessions?.get(terminalId)?.name,
-    pairingWindow: () => pairingWindow,
     onHandlerEvent: (body) => {
       handlerEngine.handleEvent({
         terminalId: body.terminalId, event: body.event,
@@ -1701,10 +1687,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     abDir,
     nextKeypair,
     pairedPhones,
-    pairingWindow,
     handleTunnelMessage,
     onHandshakeComplete,
-    onUnpaired,
     setPlainHook,
     setPeerPubkeyProvider,
     connState,

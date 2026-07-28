@@ -57,6 +57,31 @@ abstract class AgentTransport {
     Duration timeout = const Duration(seconds: 10),
   });
 
+  /// `true` once the transport can carry an RPC — a local session from the
+  /// start, a relay stream once its E2E session is established. Distinct from
+  /// [currentState] == connected: a relay stream stays connected across a
+  /// session-down window where a send would silently drop.
+  bool get isEstablished;
+
+  /// Tier-3: register [run] as the hydrator for [key], invoking it now when the
+  /// transport is already established and re-invoking it on every future
+  /// (re)establishment (the reconciliation checkpoint — a reconnect re-pulls
+  /// idempotent view-state instead of leaving it stale). A re-register under
+  /// [key] supersedes. [run] owns its own bounded wait + flag lifecycle.
+  Future<void> hydrate(String key, Future<void> Function() run);
+
+  /// Deregister the hydrator for [key]. No-op if absent.
+  void unhydrate(String key);
+
+  /// Tier-2: run a one-shot user action bounded by [timeout] so the caller's
+  /// flag lifecycle always settles (no reply-clears-the-flag stranding). NOT
+  /// re-driven on reconnect. STREAMING actions pass a [run] with its own
+  /// idle-timeout and leave [timeout] as an outer net (or `null`).
+  Future<T> action<T>(
+    Future<T> Function() run, {
+    Duration? timeout = const Duration(seconds: 15),
+  });
+
   /// Tear down the connection and release resources.
   Future<void> dispose();
 }

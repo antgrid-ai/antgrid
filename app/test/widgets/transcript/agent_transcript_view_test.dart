@@ -8,8 +8,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/models/agent_event.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
+import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/providers.dart';
+import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/services/agent_session_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
@@ -266,6 +268,42 @@ void main() {
       expect(find.text("Couldn't load earlier messages"), findsOneWidget);
       expect(find.text('Retry'), findsOneWidget);
       expect(find.text('Send a message to start'), findsNothing);
+
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
+    'mounting for the active chat session with no turns hydrates it',
+    (tester) async {
+      // The single chokepoint: the view is keyed per active session, so its
+      // initState is where EVERY activation path (drill-in, cross-project open,
+      // nav restore) converges. Mounting it must pull the transcript without any
+      // external hydrateAttachedChatIfNeeded call at the activation site.
+      const entry = SessionEntry(
+        id: _sessionId,
+        name: 'Chat',
+        createdAt: 0,
+        lastUsedAt: 0,
+        archived: false,
+        running: true,
+        mode: 'chat',
+        agentSessionId: 'agent-sess-1',
+      );
+      final t = await _pumpWithService(
+        tester,
+        const AgentSessionState(),
+        extraOverrides: [activeSessionProvider.overrideWithValue(entry)],
+      );
+      t.requestHandler = (method, params) => {'frames': <dynamic>[]};
+      // Let the post-frame hydration callback + its async pull run.
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        t.requests.where((r) => r.method == 'session.transcriptSnapshot'),
+        isNotEmpty,
+      );
 
       await tester.pumpWidget(const SizedBox());
     },

@@ -14,7 +14,7 @@ function fakeRemoteConfig(): HostRemoteConfig {
   };
 }
 function fakeRuntime(): RemoteRuntime {
-  return { maint: { getToken: () => "tok", stop: () => {} }, getAccountPeerKeys: async () => new Set<string>() };
+  return { maint: { getToken: () => "tok", stop: () => {} } };
 }
 
 let host: HostServer | null = null;
@@ -46,7 +46,7 @@ afterEach(async () => {
 test("allowed phone gets the persisted list WITHOUT starting a core", async () => {
   const h = host!;
   seedSessions("projA", [{ id: "a", name: "A", createdAt: 1, lastUsedAt: 10, archived: false }]);
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["projA"] });
+  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projA"] });
 
   const res = (await h.handleSessionsListRpc(req("projA"), "pk1")) as any;
   expect(res.ok).toBe(true);
@@ -66,7 +66,7 @@ test("a WARM core is delegated to so the peek reports LIVE per-session running",
   // (not the disk file) is the source.
   const h = host!;
   seedSessions("projWarm", [{ id: "live", name: "Live", createdAt: 1, lastUsedAt: 10, archived: false, running: false }]);
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["projWarm"] });
+  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projWarm"] });
   const captured: { includeArchived: boolean | null } = { includeArchived: null };
   (h as any).cores.set("projWarm", {
     core: {
@@ -88,7 +88,7 @@ test("a WARM core is delegated to so the peek reports LIVE per-session running",
 
 test("buildProjectsAdvertisement carries a warm core's work status", () => {
   const h = host!;
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["projWarm"] });
+  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projWarm"] });
   // Inject a fake warm core exposing the reduced work status the advert folds in
   // (mirrors the warm-core injection pattern above; no real core spawned).
   (h as any).cores.set("projWarm", {
@@ -105,7 +105,7 @@ test("non-allowed phone is rejected NOT_ALLOWED (no disk read leaked)", async ()
   const h = host!;
   seedSessions("projA", [{ id: "a", name: "A", createdAt: 1, lastUsedAt: 10, archived: false }]);
   // pk1 paired but projA NOT in its allowlist.
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: [] });
+  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: [] });
 
   const res = (await h.handleSessionsListRpc(req("projA"), "pk1")) as any;
   expect(res.ok).toBe(false);
@@ -115,7 +115,7 @@ test("non-allowed phone is rejected NOT_ALLOWED (no disk read leaked)", async ()
 test("a stopped project's list is served from disk (no core ever opened)", async () => {
   const h = host!;
   seedSessions("stopped", [{ id: "s", name: "S", createdAt: 1, lastUsedAt: 5, archived: false }]);
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["stopped"] });
+  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["stopped"] });
 
   const res = (await h.handleSessionsListRpc(req("stopped"), "pk1")) as any;
   expect(res.ok).toBe(true);
@@ -125,7 +125,7 @@ test("a stopped project's list is served from disk (no core ever opened)", async
 
 test("a projectId with path separators is rejected E_BAD_PARAMS", async () => {
   const h = host!;
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["../etc"] });
+  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["../etc"] });
   const res = (await h.handleSessionsListRpc(req("../etc"), "pk1")) as any;
   expect(res.ok).toBe(false);
   expect(res.error.code).toBe("E_BAD_PARAMS");
@@ -142,7 +142,7 @@ test("a projectId containing '..' (e.g. foo..bar) is rejected E_BAD_PARAMS by th
   const h = host!;
   // Phone explicitly allows "foo..bar" — so if the allowlist gate fired first,
   // this would return NOT_ALLOWED (wrong). E_BAD_PARAMS proves the path guard runs first.
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["foo..bar"] });
+  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["foo..bar"] });
   const res = (await h.handleSessionsListRpc(req("foo..bar"), "pk1")) as any;
   expect(res.ok).toBe(false);
   expect(res.error.code).toBe("E_BAD_PARAMS");
@@ -153,7 +153,7 @@ test("a leading-dot projectId (e.g. .ssh) is rejected E_BAD_PARAMS by the path g
   // Hidden-dir name: the old regex /^[A-Za-z0-9._-]+$/ accepted it. Phone
   // explicitly allows ".ssh" so a passing path guard, not the allowlist, must
   // be what rejects it.
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: [".ssh"] });
+  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: [".ssh"] });
   const res = (await h.handleSessionsListRpc(req(".ssh"), "pk1")) as any;
   expect(res.ok).toBe(false);
   expect(res.error.code).toBe("E_BAD_PARAMS");

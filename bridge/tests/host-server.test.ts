@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
 import { computeProjectId } from "../src/project-id";
+import type { AgentEnableRelay } from "../src/protocol";
+import type { RelayClient } from "../src/relay-client";
 
 // A remote config pointing at unreachable endpoints. The OAuth mint is never hit
 // because these tests inject `remoteRuntimeFactory`; RelayClient.connect() is
@@ -19,7 +21,20 @@ function fakeRemoteConfig(): HostRemoteConfig {
 }
 
 function fakeRuntime(): RemoteRuntime {
-  return { maint: { getToken: () => "tok", stop: () => {} }, getAccountPeerKeys: async () => new Set<string>() };
+  return { maint: { getToken: () => "tok", stop: () => {} } };
+}
+
+// Inert machine relay client: keeps startRemoteControlPlane off a real socket.
+function stubRelayClient(): RelayClient {
+  return {
+    deviceId: "control-plane-dev",
+    currentPeerPubkey: () => null,
+    setBus: () => {},
+    connect: () => {},
+    close: () => {},
+    attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: () => {} }),
+    sendPushDeliver: () => {},
+  } as unknown as RelayClient;
 }
 
 let host: HostServer | null = null;
@@ -253,7 +268,7 @@ test("shares one paired-phones store across cores", async () => {
   await host.open("projA", pathA, "local");
   await host.open("projB", pathB, "local");
   host.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1",
-    pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: [] });
+    pairedAt: "x", lastSeenAt: "x", allowedProjects: [] });
   host.pairedPhones.allowProject("pk1", "projA");
   expect(host.pairedPhones.isAllowed("pk1", "projA")).toBe(true);
   expect(host.pairedPhones.isAllowed("pk1", "projB")).toBe(false);
@@ -294,6 +309,73 @@ test("host:shutdown returns ok and fires onShutdownRequested (after the response
   // under full-suite load).
   for (let i = 0; i < 100 && shutdownCalls === 0; i++) await new Promise((r) => setTimeout(r, 5));
   expect(shutdownCalls).toBe(1);
+});
+
+// M6: pushHeartbeat() previously fired only from onAuthenticated + the two
+// mobile-access:* mutations — a stably-connected bridge never re-ran it, so
+// trustedPeers.json (the E2E-admission inventory cache) never refreshed on
+// its own. The design spec calls for "the existing heartbeat cadence"; this
+// proves that cadence is now a real, owned, disposable timer.
+test("startControlPlane's remote control plane runs pushHeartbeat on an actual cadence, and shutdown clears the timer", async () => {
+  let calls = 0;
+  host = new HostServer({
+    remote: fakeRemoteConfig(),
+    remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
+    heartbeatIntervalMs: 15,
+  });
+  // Stub the tick body itself (already covered elsewhere) — this test is only
+  // about the timer's lifecycle: does it fire repeatedly, and does it stop.
+  (host as unknown as { pushHeartbeat: () => void }).pushHeartbeat = () => { calls++; };
+
+  await host.startControlPlane();
+  expect((host as unknown as { heartbeatTimer: unknown }).heartbeatTimer).not.toBeNull();
+
+  await new Promise((r) => setTimeout(r, 60));
+  expect(calls).toBeGreaterThanOrEqual(2);
+
+  await host.shutdown();
+  expect((host as unknown as { heartbeatTimer: unknown }).heartbeatTimer).toBeNull();
+
+  const callsAtShutdown = calls;
+  await new Promise((r) => setTimeout(r, 40));
+  expect(calls).toBe(callsAtShutdown); // no ticks survive shutdown
+});
+
+// A host launched local-only and promoted by the desktop wizard has no
+// `opts.remote` — its machine config lives in `wizardRemote`. The heartbeat
+// cadence has to answer to the SAME resolution the rest of
+// startRemoteControlPlane uses, or the timer ticks into a no-op and
+// trusted-peers.json (the E2E-admission inventory cache) never refreshes on
+// exactly the path the wizard creates.
+test("a wizard-promoted host (no opts.remote) actually pushes on the heartbeat cadence", async () => {
+  host = new HostServer({
+    remoteRuntimeFactory: () => Promise.resolve(fakeRuntime()),
+    relayClientFactory: () => stubRelayClient(),
+    heartbeatIntervalMs: 15,
+  });
+
+  await host.ensureMachineRelay({
+    id: "1",
+    type: "agent:enableRelay",
+    relayUrl: "ws://127.0.0.1:1",
+    licenseApiUrl: "http://127.0.0.1:1",
+    auth: {
+      deviceUuid: "11111111-2222-3333-4444-555555555555",
+      ed25519Pub: "cHVi",
+      ed25519Priv: "cHJpdg==",
+      clientId: "cid",
+      clientSecret: "secret",
+    },
+  } as AgentEnableRelay);
+
+  // The tick's observable work: warming the trusted-peers cache.
+  let refreshes = 0;
+  (host as unknown as { trustedPeers: { refresh: () => Promise<void> } }).trustedPeers = {
+    refresh: () => { refreshes++; return Promise.resolve(); },
+  };
+
+  await new Promise((r) => setTimeout(r, 80));
+  expect(refreshes).toBeGreaterThanOrEqual(2);
 });
 
 test("prunes seen-catalog entries whose folder no longer exists, on load", () => {

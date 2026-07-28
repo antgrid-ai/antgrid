@@ -1,9 +1,9 @@
 // v3 desktop "enable mobile access" wizard (design §7.4, plan B5). In v2
 // relay-promotion.ts built its own RelayClient and reacted to its connection
-// events (onAuthenticated/onPaired/onUnpaired/onError). In v3 there is exactly
+// events (onAuthenticated/onPaired/onError). In v3 there is exactly
 // ONE machine RelayClient, owned by HostServer — this controller just asks the
 // host to bring it up (`ensureMachineRelay`), attaches the local core's bus as
-// a stream (`attach`), and opens the pairing window. All the reconnect/auth/
+// a stream (`attach`), and publishes the connect QR. All the reconnect/auth/
 // unpair reactivity that used to live here moved to HostServer's control-plane
 // wiring and ProjectCore's attachRelayStream (see host-promotion.test.ts,
 // project-core.test.ts).
@@ -11,7 +11,6 @@ import { expect, test } from "bun:test";
 import { MessageBus } from "../src/message-bus";
 import { createMessage, type AbMessage } from "../src/protocol";
 import { createRelayPromotion, type MachineRelaySession, type LocalStreamAttachment } from "../src/relay-promotion";
-import { createPairingWindow } from "../src/pairing-window";
 import type { StreamHandle } from "../src/stream-mux";
 
 function makeCoreStub() {
@@ -24,7 +23,6 @@ function makeCoreStub() {
     pairedPhones: { has: () => false } as any,
     handleTunnelMessage: () => {},
     onHandshakeComplete: () => {},
-    onUnpaired: () => {},
     setPlainHook: () => {},
     setPeerPubkeyProvider: () => {},
     attachTransport: () => {},
@@ -47,7 +45,6 @@ function makeMachineSession(overrides: Partial<MachineRelaySession> = {}): Machi
     attachStream: () => ({ streamId: "s1", detach: () => {}, sendTunnel: () => {} }),
     currentPeerPubkey: () => null,
     sendPushDeliver: () => {},
-    pairingWindow: createPairingWindow(),
     agentDeviceId: "0bbd1111-2222-3333-4444-555566667777",
     ed25519Pub: Buffer.from("edpub").toString("base64"),
     relayBase: "https://relay.example.com",
@@ -98,27 +95,7 @@ test("enableRelay attaches the core as a stream and emits pairingReady from the 
   unsub();
 });
 
-test("a repeat enableRelay while the pairing window is still open is idempotent (no second attach)", async () => {
-  const bus = new MessageBus();
-  const out: AbMessage[] = [];
-  bus.setInboundHandler(() => {});
-  const unsub = bus.subscribe({ deliver: (m) => out.push(m) });
-  const deps = makeDeps(makeMachineSession());
-  const ctrl = createRelayPromotion({ core: makeCoreStub(), bus, hostName: "test-host", ...deps });
-
-  expect(ctrl.handleInbound(ENABLE)).toBe(true);
-  await Bun.sleep(10);
-  expect(ctrl.handleInbound(ENABLE)).toBe(true);
-  await Bun.sleep(10);
-
-  expect(deps.calls.ensureMachineRelay).toBe(1);
-  expect(deps.calls.attach).toBe(1);
-  expect(out.filter((m) => m.type === "agent:pairingReady").length).toBe(1);
-  ctrl.stop();
-  unsub();
-});
-
-test("'Pair another phone' (window closed, already promoted) re-opens pairing WITHOUT a second attach", async () => {
+test("'Pair another phone' (already promoted) re-publishes the connect QR WITHOUT a second attach", async () => {
   const bus = new MessageBus();
   const out: AbMessage[] = [];
   bus.setInboundHandler(() => {});
@@ -131,9 +108,9 @@ test("'Pair another phone' (window closed, already promoted) re-opens pairing WI
   await Bun.sleep(10);
   expect(out.filter((m) => m.type === "agent:pairingReady").length).toBe(1);
 
-  // First phone paired → window consumed. "Pair another phone" re-sends
-  // enableRelay against the ALREADY-promoted session.
-  session.pairingWindow.close();
+  // Under account trust there is no pairing window to gate on — a repeat
+  // enableRelay ("Pair another phone") against the ALREADY-promoted session
+  // just re-publishes the QR unconditionally.
   expect(ctrl.handleInbound(ENABLE)).toBe(true);
   await Bun.sleep(10);
 

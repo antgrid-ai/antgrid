@@ -24,7 +24,6 @@ import '../providers/new_session_picker.dart';
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
-import '../services/attach_hydration.dart';
 import '../services/sessions_service.dart';
 import 'drawer_entry_row.dart' show activateDrawerEntryById, ensureRemoteOnline;
 import 'session_rename_dialog.dart';
@@ -248,14 +247,14 @@ class _SessionRowState extends ConsumerState<SessionRow> {
       }
       ref.read(activeSessionIdProvider.notifier).set(session.id);
       final svc = ref.read(sessionsServiceProvider);
-      var entry = session;
       if (!session.running) {
-        entry = await svc.start(session.id) ?? session;
+        await svc.start(session.id);
         // start() can outlive this row (drawer closes, list rebuilds); every
         // ref use below would throw on a disposed ConsumerState.
         if (!mounted) return;
       }
-      hydrateAttachedChatIfNeeded(ref, entry);
+      // Transcript hydration is driven by AgentTranscriptView.initState (the
+      // single per-session chokepoint), not here — see hydrateAttachedChatIfNeeded.
       svc.focus(session.id);
       _showFocusedSessionSurface(ref);
       return;

@@ -1,9 +1,16 @@
 import { randomBytes } from "node:crypto";
 import { CONTROL_STREAM_ID } from "antgrid-wire";
 import type { Channel, MessageBus } from "./message-bus";
-import { parseMessageFast } from "./protocol";
+import { createMessage, parseMessageFast } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { logger } from "./logger";
+
+/** One `stream-invalid` per dead id per this window: a stranded phone replays a
+ *  burst of verbs, and one notice is enough for it to rebind. */
+export const INVALID_NOTICE_COOLDOWN_MS = 5_000;
+/** How long a dead id stays in the rate-limit map. Past this the phone is either
+ *  rebound (no more frames) or genuinely stuck and deserves a fresh notice. */
+export const INVALID_NOTICE_TTL_MS = 60_000;
 
 /** A project's attachment to the single machine relay socket. Opaque `streamId`
  *  namespaces this project's sealed frames inside the one E2E session (design
@@ -27,8 +34,6 @@ export interface AttachStreamOpts {
    *  so a drill-in stream resumes immediately. */
   onPeerOnline?: () => void;
   onPeerOffline?: () => void;
-  /** The grant was severed (phone unpaired / displaced). */
-  onUnpaired?: () => void;
   /** A preview-channel tunnel-protocol message routed to this stream. */
   onTunnel?: (raw: unknown) => void;
 }
@@ -61,8 +66,15 @@ export class StreamMux {
   private readonly streams = new Map<string, StreamEntry>();
   /** Last broadcast peer state, so a stream attached mid-session inherits it. */
   private peerOnline = false;
+  /** Dead streamId → when we last told the phone about it, so a phone that keeps
+   *  replaying on it (or ignores the notice) can't turn every dropped frame into
+   *  a control-plane send. */
+  private readonly invalidNotifiedAt = new Map<string, number>();
 
-  constructor(private readonly transport: StreamMuxTransport) {}
+  constructor(
+    private readonly transport: StreamMuxTransport,
+    private readonly now: () => number = Date.now,
+  ) {}
 
   attach(bus: MessageBus, opts: AttachStreamOpts): StreamHandle {
     // 16 hex chars from 8 random bytes — opaque, allocated agent-side (§7.1).
@@ -101,7 +113,7 @@ export class StreamMux {
   /** A relay `error{ref}` — routed here iff `ref` is a live streamId (a
    *  stream-open rejection, notably `SESSION_LIMIT_EXCEEDED`). Returns false when
    *  `ref` is not one of our streams so the caller keeps normal error handling
-   *  (pair-request nonces never collide with 16-hex streamIds). */
+   *  (a streamId is the only kind of `ref` the relay ever sends). */
   onError(ref: string, code: string, message: string): boolean {
     const entry = this.streams.get(ref);
     if (!entry) return false;
@@ -112,11 +124,35 @@ export class StreamMux {
     return true;
   }
 
+  /** Tell the phone a streamId is dead so it renegotiates instead of replaying
+   *  onto it forever. Stream-scoped like the relay's `error{ref}`: the socket,
+   *  the control plane and every live stream are untouched. Rate-limited per id
+   *  because the phone's retries arrive as a burst, and the map is swept so a
+   *  long-lived host can't accumulate an entry per dead id. */
+  private notifyStreamInvalid(streamId: string): void {
+    const now = this.now();
+    const last = this.invalidNotifiedAt.get(streamId);
+    if (last !== undefined && now - last < INVALID_NOTICE_COOLDOWN_MS) return;
+    for (const [id, at] of this.invalidNotifiedAt) {
+      if (now - at >= INVALID_NOTICE_TTL_MS) this.invalidNotifiedAt.delete(id);
+    }
+    this.invalidNotifiedAt.set(streamId, now);
+    this.transport.sendEnvelope(
+      CONTROL_STREAM_ID,
+      createMessage("stream-invalid", { streamId }),
+      "control",
+    );
+  }
+
   /** Route an inbound envelope's message (`m`, serialized) to its stream. Returns
-   *  false for an unknown streamId so the caller drops + logs. */
+   *  false for an unknown streamId so the caller drops + logs — and answers the
+   *  phone with `stream-invalid` so a host restart self-heals. */
   dispatchInbound(streamId: string, mJson: string, channel: Channel): boolean {
     const entry = this.streams.get(streamId);
-    if (!entry) return false;
+    if (!entry) {
+      this.notifyStreamInvalid(streamId);
+      return false;
+    }
     const msg = parseMessageFast(mJson);
     if (msg) {
       entry.bus.dispatchInbound(msg, channel, "relay");
@@ -135,11 +171,6 @@ export class StreamMux {
   notifyPeerOffline(): void {
     this.peerOnline = false;
     for (const entry of this.streams.values()) entry.opts.onPeerOffline?.();
-  }
-
-  notifyUnpaired(): void {
-    this.peerOnline = false;
-    for (const entry of this.streams.values()) entry.opts.onUnpaired?.();
   }
 
   /** Re-send `stream-open` for every attached stream. Called on `welcome` after

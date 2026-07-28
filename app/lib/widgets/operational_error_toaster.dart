@@ -35,6 +35,7 @@ class _OperationalErrorToasterState
   // projectId -> last error string already toasted, per channel. One entry
   // per visited project; lives for the app session.
   final Map<String, String?> _lastGitError = {};
+  final Map<String, String?> _lastBranchesError = {};
   final Map<String, String?> _lastSessionError = {};
   // git op feedback de-dups on the op SEQUENCE, not the message string: two
   // ops can carry identical text ("Discarded changes") and must each toast.
@@ -86,6 +87,14 @@ class _OperationalErrorToasterState
       // gitCheckoutError, so surface the message verbatim rather than
       // re-prefixing (which would read "Checkout failed: Checkout failed").
       (_, next) => _announce(_lastGitError, next.$1, next.$2, (e) => e),
+    );
+    ref.listen(
+      terminalStateProvider.select(
+        (s) => (s.value?.projectId, s.value?.gitBranchesError),
+      ),
+      // Same verbatim surface as gitCheckoutError: the service stores a full
+      // message, and the branch picker has no in-context error UI of its own.
+      (_, next) => _announce(_lastBranchesError, next.$1, next.$2, (e) => e),
     );
     ref.listen(
       sessionsStateProvider.select(

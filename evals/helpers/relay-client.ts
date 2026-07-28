@@ -8,10 +8,8 @@ import {
   verifyConfirmTag,
   E2eTransport,
   verifyTranscriptSig,
+  rawSeedToPkcs8,
 } from "../../bridge/src/e2e";
-import { rawSeedToPkcs8 } from "../../bridge/src/pair-approval";
-import { buildPairRequestSigBody } from "../../bridge/src/pair-request-verify";
-import { buildMembershipSigBody } from "../../bridge/src/account-membership-verify";
 import { sign as nodeSign } from "node:crypto";
 import { createMessage, parseMessage, type AbMessage } from "../../bridge/src/protocol";
 import {
@@ -67,20 +65,6 @@ export interface HelloForgeOpts {
   licenseToken?: string;
 }
 
-/**
- * Thrown by `pairWith` when the relay reports the target agent is not connected.
- * In v3 this is a typed `error{code: AGENT_OFFLINE, retryable: true}` frame and
- * the socket STAYS OPEN — `pairWithRetry` reconnects/retries. The bare-close
- * branch survives only as a fallback. Mirrors the app's
- * `PairException(agentOffline: true)`.
- */
-export class PairAgentOfflineError extends Error {
-  constructor() {
-    super("AGENT_OFFLINE: agent not connected");
-    this.name = "PairAgentOfflineError";
-  }
-}
-
 /** The current E2E receive/send context (confirmed session or a rekey candidate). */
 interface E2eContext {
   attemptId: string;
@@ -102,14 +86,31 @@ export class RelayClient {
    *  supersession, network drop, or our own disconnect). Drives `waitForClose`. */
   private wsClosed = false;
   private closeWaiters: Array<() => void> = [];
+  /** WS close code from the most recent close event (e.g. 4002 for the
+   *  relay's `/internal/revoke` — see `internal-routes.ts`'s `closeWithLicense`). */
+  lastCloseCode: number | null = null;
+  /** Bumped at the start of every `connectAndAuthenticate` call. The close
+   *  listener captures its own value and compares before mutating shared
+   *  state, so a STALE close event from a socket a later reconnect already
+   *  superseded (e.g. `dropSocket()` immediately followed by a redial) can't
+   *  clobber the fresh connection's `wsClosed`/`lastCloseCode`. */
+  private wsGeneration = 0;
 
   readonly deviceId: string;
+  /** The ACCOUNT device the E2E transcript binds — `deviceId` may be a
+   *  per-machine SLOT (`<transcriptDeviceId>#<machineDeviceId>`), but the
+   *  transcript (the HKDF salt) always binds the bare account device on both
+   *  sides. Defaults to `deviceId`, so an unscoped connection is unaffected. */
+  readonly transcriptDeviceId: string;
   readonly deviceType: "agent" | "app";
   readonly name: string;
   private publicKeyBase64: string;
   private privateKey: CryptoKey;
   /** Raw 32-byte Ed25519 seed — used for E2E transcript signing (node:crypto). */
   private privateKeySeed: Buffer;
+  /** Tap for every outbound text-JSON frame (hello + raw control messages) —
+   *  lets a caller assert a negative on the wire (e.g. "never sent pair-request"). */
+  private onOutbound?: (raw: string) => void;
 
   /** Per-connection hello forge/override hooks. */
   private helloOpts: HelloForgeOpts = {};
@@ -156,18 +157,22 @@ export class RelayClient {
 
   private constructor(
     deviceId: string,
+    transcriptDeviceId: string,
     deviceType: "agent" | "app",
     name: string,
     publicKeyBase64: string,
     privateKey: CryptoKey,
     privateKeySeed: Buffer,
+    onOutbound: ((raw: string) => void) | undefined,
   ) {
     this.deviceId = deviceId;
+    this.transcriptDeviceId = transcriptDeviceId;
     this.deviceType = deviceType;
     this.name = name;
     this.publicKeyBase64 = publicKeyBase64;
     this.privateKey = privateKey;
     this.privateKeySeed = privateKeySeed;
+    this.onOutbound = onOutbound;
   }
 
   /** Create a relay client, connect, and authenticate with a single signed
@@ -180,9 +185,16 @@ export class RelayClient {
       name?: string;
       identity?: PhoneIdentity;
       deviceId?: string;
+      /** ACCOUNT device the E2E transcript binds. Defaults to `deviceId` — only
+       *  a slotted `deviceId` (`<transcriptDeviceId>#<machineDeviceId>`) needs
+       *  this set separately. */
+      transcriptDeviceId?: string;
+      /** Tap for every outbound text-JSON frame this client sends. */
+      onOutbound?: (raw: string) => void;
     } & HelloForgeOpts,
   ): Promise<RelayClient> {
     const deviceId = opts.deviceId ?? crypto.randomUUID();
+    const transcriptDeviceId = opts.transcriptDeviceId ?? deviceId;
     const name = opts.name ?? `test-${opts.deviceType}`;
 
     let publicKeyBase64: string;
@@ -206,7 +218,16 @@ export class RelayClient {
       privateKey = keyPair.privateKey as CryptoKey;
     }
 
-    const client = new RelayClient(deviceId, opts.deviceType, name, publicKeyBase64, privateKey, privateKeySeed);
+    const client = new RelayClient(
+      deviceId,
+      transcriptDeviceId,
+      opts.deviceType,
+      name,
+      publicKeyBase64,
+      privateKey,
+      privateKeySeed,
+      opts.onOutbound,
+    );
     client.helloOpts = {
       corruptHelloSig: opts.corruptHelloSig,
       reuseNonce: opts.reuseNonce,
@@ -229,6 +250,7 @@ export class RelayClient {
   }
 
   private connectAndAuthenticate(relayUrl: string): Promise<void> {
+    const myGeneration = ++this.wsGeneration;
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(relayUrl);
       const timeout = setTimeout(() => reject(new Error("Auth timed out")), 10_000);
@@ -266,14 +288,18 @@ export class RelayClient {
           return;
         }
 
-        // Post-auth text JSON: relay control messages (pair-approval, peer-online,
-        // grant-revoked, error, stream-* acks, …).
+        // Post-auth text JSON: relay control messages (peer-online, peer-offline,
+        // error, stream-* acks, …).
         this.deliver(data);
       });
 
       ws.addEventListener("error", () => reject(new Error("WebSocket error")));
-      ws.addEventListener("close", () => {
+      ws.addEventListener("close", (event: any) => {
+        // A superseded generation's close (e.g. `dropSocket()` immediately
+        // followed by a redial) must not clobber the fresh connection's state.
+        if (myGeneration !== this.wsGeneration) return;
         this.wsClosed = true;
+        this.lastCloseCode = typeof event?.code === "number" ? event.code : null;
         const waiters = this.closeWaiters.splice(0);
         for (const w of waiters) w();
         if (!authDone) reject(new Error("Closed during auth"));
@@ -308,21 +334,21 @@ export class RelayClient {
       sig = bad.toString("base64");
     }
 
-    this.ws?.send(
-      JSON.stringify({
-        type: "hello",
-        protocolVersion: 3,
-        deviceType: this.deviceType,
-        deviceId: this.deviceId,
-        name: this.name,
-        publicKey: this.publicKeyBase64,
-        epoch,
-        licenseToken,
-        ts,
-        nonce,
-        sig,
-      }),
-    );
+    const raw = JSON.stringify({
+      type: "hello",
+      protocolVersion: 3,
+      deviceType: this.deviceType,
+      deviceId: this.deviceId,
+      name: this.name,
+      publicKey: this.publicKeyBase64,
+      epoch,
+      licenseToken,
+      ts,
+      nonce,
+      sig,
+    });
+    this.onOutbound?.(raw);
+    this.ws?.send(raw);
   }
 
   /** Resolve once the underlying socket has closed (true), or false on timeout.
@@ -444,6 +470,13 @@ export class RelayClient {
       }
       case "pong":
         this.missedPongs = 0;
+        return;
+      case "session-takeover":
+        // Sent by the bridge's single-active-phone takeover (spec 2026-07-24
+        // §4.3) to the session it's about to tear down. Deliver it like any
+        // other session frame so a test can `waitFor` the mechanism directly,
+        // instead of only inferring it from a later dead round trip.
+        this.deliver(obj);
         return;
       default:
         return; // unexpected session frame — drop
@@ -577,7 +610,7 @@ export class RelayClient {
         registrationId: agentDeviceId,
         role: "phone",
         agentDeviceId,
-        phoneDeviceId: this.deviceId,
+        phoneDeviceId: this.transcriptDeviceId,
         agentX25519Pub: Buffer.alloc(0),
         phoneX25519Pub,
         nonce,
@@ -612,7 +645,7 @@ export class RelayClient {
       registrationId: agentDeviceId,
       role: "agent",
       agentDeviceId,
-      phoneDeviceId: this.deviceId,
+      phoneDeviceId: this.transcriptDeviceId,
       agentX25519Pub,
       phoneX25519Pub,
       nonce,
@@ -684,7 +717,7 @@ export class RelayClient {
         registrationId: agentDeviceId,
         role: "phone",
         agentDeviceId,
-        phoneDeviceId: this.deviceId,
+        phoneDeviceId: this.transcriptDeviceId,
         agentX25519Pub: Buffer.alloc(0),
         phoneX25519Pub,
         nonce,
@@ -708,7 +741,7 @@ export class RelayClient {
         registrationId: agentDeviceId,
         role: "agent",
         agentDeviceId,
-        phoneDeviceId: this.deviceId,
+        phoneDeviceId: this.transcriptDeviceId,
         agentX25519Pub,
         phoneX25519Pub,
         nonce,
@@ -794,116 +827,6 @@ export class RelayClient {
     return this.waitFor((m: any) => m.type === type && m._streamId === streamId, timeoutMs);
   }
 
-  // --- Pairing (design §5) ---
-
-  /**
-   * Send a v3 `pair-request` (Ed25519 possession proof) and await the agent's
-   * `pair-approval`. The pair-request now carries a `deadline` (default
-   * `now + timeoutMs`); the relay stamps a `pairId` echoed in the approval.
-   * `AGENT_OFFLINE` arrives as a typed error frame (socket stays open) →
-   * `PairAgentOfflineError`. On success the paired peer id (the BARE agent
-   * deviceUuid) is returned.
-   */
-  async pairWith(
-    agentDeviceId: string,
-    optsOrTimeout:
-      | {
-          pairCode?: string;
-          timeoutMs?: number;
-          /** Deadline (epoch ms). Default `now + timeoutMs`. The relay expires
-           *  the pending pair past it (design §5.2). */
-          deadline?: number;
-          /** Account-membership auto-pair proof (QR-less). */
-          accountKey?: { pubB64: string; privateKey: import("node:crypto").KeyObject };
-          /** Forge the (no-longer-trusted) relay `sameAccount` stamp WITHOUT a
-           *  membership proof (security regression). */
-          forgeSameAccount?: boolean;
-        }
-      | number = {},
-  ): Promise<{ peerId: string; pairId?: string }> {
-    const opts = typeof optsOrTimeout === "number" ? { timeoutMs: optsOrTimeout } : optsOrTimeout;
-    const timeoutMs = opts.timeoutMs ?? 10_000;
-    const deadline = opts.deadline ?? Date.now() + timeoutMs;
-    const nonce = randomBytes(24).toString("base64");
-    const requestedAt = new Date().toISOString();
-    const sigBody = buildPairRequestSigBody({
-      agentDeviceId,
-      phonePubkey: this.publicKeyBase64,
-      phoneDeviceId: this.deviceId,
-      nonce,
-      requestedAt,
-    });
-    const sig = await crypto.subtle.sign("Ed25519", this.privateKey, Buffer.from(sigBody));
-    const phoneSignature = Buffer.from(sig).toString("base64");
-
-    let accountDevicePubkey: string | undefined;
-    let accountMembershipSig: string | undefined;
-    if (opts.accountKey) {
-      const { sign } = await import("node:crypto");
-      const body = buildMembershipSigBody({
-        agentDeviceId,
-        phoneDeviceId: this.deviceId,
-        phonePubkey: this.publicKeyBase64,
-        accountDevicePubkey: opts.accountKey.pubB64,
-        nonce,
-      });
-      accountDevicePubkey = opts.accountKey.pubB64;
-      accountMembershipSig = sign(null, body, opts.accountKey.privateKey).toString("base64");
-    }
-
-    // Arm cancelable waiters BEFORE send so a fast approval/rejection isn't raced,
-    // and an abandoned waiter can't steal a later attempt's message.
-    const approval = this.waitForCancelable(
-      (m) => m.type === "pair-approval" && m.phonePubkey === this.publicKeyBase64 && m.nonce === nonce,
-      timeoutMs,
-    );
-    const rejection = this.waitForCancelable(
-      (m) => m.type === "pair-rejected" && m.phonePubkey === this.publicKeyBase64,
-      timeoutMs,
-    );
-    const error = this.waitForCancelable((m) => m.type === "error", timeoutMs);
-    const approvalP = approval.promise.then((m) => ({ kind: "approval" as const, m })).catch(() => null);
-    const rejectionP = rejection.promise.then((m) => ({ kind: "rejection" as const, m })).catch(() => null);
-    const errorP = error.promise.then((m) => ({ kind: "error" as const, m })).catch(() => null);
-    // Fallback only: v3 answers AGENT_OFFLINE with a typed error and keeps the
-    // socket open, but a bare close still resolves null → we surface it below.
-    const closeP = this.waitForClose(timeoutMs).then((closed) => (closed ? ({ kind: "closed" as const }) : null));
-
-    try {
-      this.sendRaw({
-        type: "pair-request",
-        agentDeviceId,
-        phonePubkey: this.publicKeyBase64,
-        phoneDeviceId: this.deviceId,
-        nonce,
-        requestedAt,
-        deadline,
-        phoneSignature,
-        ...(opts.pairCode ? { pairCode: opts.pairCode } : {}),
-        ...(opts.forgeSameAccount ? { sameAccount: true } : {}),
-        ...(accountDevicePubkey ? { accountDevicePubkey } : {}),
-        ...(accountMembershipSig ? { accountMembershipSig } : {}),
-      });
-
-      const winner = await Promise.race([approvalP, rejectionP, errorP, closeP]);
-      if (!winner) throw new Error(`pair-request timed out after ${timeoutMs}ms`);
-      if (winner.kind === "rejection") throw new Error(`pair-request rejected: ${winner.m.reason}`);
-      if (winner.kind === "error") {
-        const code = winner.m.code;
-        // Typed AGENT_OFFLINE (socket stays open) — retryable startup-race miss.
-        if (code === "AGENT_OFFLINE") throw new PairAgentOfflineError();
-        throw new Error(`pair-request error: ${code ?? winner.m.message}`);
-      }
-      if (winner.kind === "closed") throw new PairAgentOfflineError();
-      this._pairedPeerId = agentDeviceId;
-      return { peerId: agentDeviceId, pairId: (winner.m as any).pairId };
-    } finally {
-      approval.cancel();
-      rejection.cancel();
-      error.cancel();
-    }
-  }
-
   // --- Sending ---
 
   /** Send an AbMessage on the machine CONTROL PLANE (`s` omitted), sealed. */
@@ -942,7 +865,9 @@ export class RelayClient {
 
   private _pairedPeerId: string | null = null;
 
-  /** Set the paired peer id (the BARE agent deviceUuid). Call after `pairWith`. */
+  /** Set the addressed peer id (the BARE agent deviceUuid) that outbound app
+   *  traffic routes to. Admission is account-trust, not a pairing ceremony —
+   *  this is local addressing bookkeeping only, never sent over the wire. */
   setPeerId(peerId: string): void {
     this._pairedPeerId = peerId;
   }
@@ -967,10 +892,12 @@ export class RelayClient {
     this.sendBinary(encodeRouteFrame({ type: "message", to, channel: ch }, payloadBytes, FrameKind.sealed));
   }
 
-  /** Send raw JSON to the relay (control messages: pair-request, grant-revoke). */
+  /** Send raw JSON to the relay (control messages, e.g. `stream-open`/`stream-close`). */
   sendRaw(data: any): void {
     if (!this.ws) throw new Error("Not connected");
-    this.ws.send(JSON.stringify(data));
+    const raw = JSON.stringify(data);
+    this.onOutbound?.(raw);
+    this.ws.send(raw);
   }
 
   private sendBinary(data: Uint8Array): void {
@@ -1039,6 +966,17 @@ export class RelayClient {
 
   waitFor(match: (msg: any) => boolean, timeoutMs = 5_000): Promise<any> {
     return this.waitForCancelable(match, timeoutMs).promise;
+  }
+
+  /** Drop already-queued messages of a type so a later `waitFor` binds to a
+   *  FRESH occurrence, not a stale queued one. `waitForCancelable` scans the
+   *  queue first, so without this a presence event emitted at an earlier
+   *  connect can satisfy a waiter meant for a later one. Returns the count
+   *  dropped. */
+  drainQueued(type: string): number {
+    const before = this.messageQueue.length;
+    this.messageQueue = this.messageQueue.filter((m) => m?.type !== type);
+    return before - this.messageQueue.length;
   }
 
   private waitForCancelable(
@@ -1111,6 +1049,25 @@ export class RelayClient {
    *  unpaired close (does NOT restore a paired peer id). */
   async reconnectAndAuth(relayUrl: string): Promise<void> {
     await this.connectAndAuthenticate(relayUrl);
+  }
+
+  /** Hard-close the socket WITHOUT touching E2E/session bookkeeping —
+   *  simulates an unintentional network drop (unlike `disconnect()`, a
+   *  deliberate app-side teardown that also resets E2E state and clears the
+   *  paired peer id). Leaves `_pairedPeerId`/E2E context intact so a
+   *  subsequent `reconnectAndAuth` + `performE2EHandshake` mirrors a real
+   *  redial, not a fresh pairing. */
+  dropSocket(): void {
+    this.ws?.close();
+    this.ws = null;
+  }
+
+  /** Override the `licenseToken` presented on the NEXT hello (a fresh
+   *  `connectAndAuth`/`reconnectAndAuth`). Lets a caller simulate an app
+   *  token that expires mid-session and recovers on the next mint (design §8
+   *  token-expiry row) without a real JWT. Persists until overridden again. */
+  setLicenseToken(token: string): void {
+    this.helloOpts.licenseToken = token;
   }
 
   /** Reconnect with the SAME identity, restoring the paired peer id — the grant

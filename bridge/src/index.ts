@@ -189,7 +189,7 @@ program
 // antgrid phones subcommand — manage paired-phone allowlists.
 program
   .command("phones")
-  .description("Manage paired phones and per-project allowlists")
+  .description("Manage trusted phones and per-project allowlists")
   .argument("[verb]", "list | allow | deny | remove")
   .argument("[target]", "Project path/label (allow/deny) or phone ref (remove)")
   .option("--phone <ref>", "Phone pubkey, deviceId, or label")
@@ -263,10 +263,10 @@ program
       const all = store.list();
       if (all.length === 1) return all[0].phonePubkey;
       if (all.length === 0) {
-        console.error("no phones paired");
+        console.error("no phones on this machine");
         return null;
       }
-      console.error("multiple phones paired — specify one with --phone <id|label>");
+      console.error("multiple phones known — specify one with --phone <id|label>");
       return null;
     }
 

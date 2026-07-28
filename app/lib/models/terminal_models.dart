@@ -86,6 +86,7 @@ class TerminalState {
   final String? gitBranch;
   final List<String> gitBranches;
   final bool gitBranchesLoading;
+  final String? gitBranchesError;
   final String? gitCheckoutError;
   final bool? needsFirstRun;
 
@@ -99,6 +100,7 @@ class TerminalState {
     this.gitBranch,
     this.gitBranches = const [],
     this.gitBranchesLoading = false,
+    this.gitBranchesError,
     this.gitCheckoutError,
     this.needsFirstRun,
   });
@@ -125,6 +127,8 @@ class TerminalState {
     String? gitBranch,
     List<String>? gitBranches,
     bool? gitBranchesLoading,
+    String? gitBranchesError,
+    bool clearGitBranchesError = false,
     String? gitCheckoutError,
     bool clearGitCheckoutError = false,
     bool clearActiveTerminal = false,
@@ -142,6 +146,9 @@ class TerminalState {
       gitBranch: gitBranch ?? this.gitBranch,
       gitBranches: gitBranches ?? this.gitBranches,
       gitBranchesLoading: gitBranchesLoading ?? this.gitBranchesLoading,
+      gitBranchesError: clearGitBranchesError
+          ? null
+          : (gitBranchesError ?? this.gitBranchesError),
       gitCheckoutError: clearGitCheckoutError
           ? null
           : (gitCheckoutError ?? this.gitCheckoutError),

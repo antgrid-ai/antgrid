@@ -3,7 +3,8 @@
 // handshake and v2 RelayConfig shape (maxQueueMessages, stalePairTimeoutHours,
 // ...) — it will not run against the v3 relay. It's a manual perf harness, not
 // part of `bun test`, so R10 left it unconverted; port it to `hello` +
-// epoch/grant/stream-open when someone next needs to load-test the relay.
+// epoch/stream-open when someone next needs to load-test the relay. Routing
+// under v3 is account-derived (`mayRoute`) — there is no pairing step to port.
 /**
  * Load test for the relay server.
  * Usage: bun run tests/load.ts [--pairs N] [--duration S]
@@ -29,14 +30,11 @@ const config: RelayConfig = {
   port: 0,
   maxConnections: NUM_PAIRS * 2 + 10,
   rateLimitConnPerIp: NUM_PAIRS * 2 + 10,
-  pairRequestTimeoutMs: 30000,
-  pairRateLimitPerIp: NUM_PAIRS * 2,
   rateLimitMsgPerSec: 10000,
   jsonRateLimitPerSec: 10000,
   jsonRateLimitBurst: 10000,
   clockSkewMs: 120000,
   replayTtlMs: 300000,
-  staleGrantDays: 30,
   pingIntervalMs: 0,
   pongTimeoutMs: 10000,
   logLevel: "error" as const,
@@ -133,13 +131,6 @@ for (let i = 0; i < NUM_PAIRS; i++) {
 
   await authenticateWs(agentWs, agentId, agentKeys.keyPair, agentKeys.publicKeyBase64, "agent");
   await authenticateWs(appWs, appId, appKeys.keyPair, appKeys.publicKeyBase64, "app");
-
-  // Pair
-  const appPairPromise = waitForMessage(appWs);
-  const agentPairPromise = waitForMessage(agentWs);
-  appWs.send(JSON.stringify({ type: "pair-request", targetDeviceId: agentId }));
-  await appPairPromise;
-  await agentPairPromise;
 
   pairs.push({ agentWs, appWs, agentId, appId });
 

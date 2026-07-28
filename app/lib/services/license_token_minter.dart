@@ -8,13 +8,13 @@ import 'package:http/http.dart' as http;
 class DeviceRevokedException implements Exception {
   const DeviceRevokedException();
   @override
-  String toString() => 'DeviceRevokedException: device revoked or client deleted';
+  String toString() =>
+      'DeviceRevokedException: device revoked or client deleted';
 }
 
 /// Thin OAuth `client_credentials` minter. Mirrors `bridge/src/auth/oauth-client.ts`.
 ///
-/// In-memory only: callers hold the minter and pass `getToken` to
-/// `PairingService.tokenProvider`. The minter does NOT persist tokens — the
+/// In-memory only: the minter does NOT persist tokens — the
 /// `clientId`/`clientSecret` it was constructed with live in the keychain
 /// via `KeychainDeviceStore`.
 class LicenseTokenMinter {
@@ -78,7 +78,7 @@ class LicenseTokenMinter {
   }
 
   /// Sync accessor — returns the most recently minted token, or `null` if
-  /// `mint()` has not yet succeeded. Suitable for `PairingService.tokenProvider`.
+  /// `mint()` has not yet succeeded.
   String? getToken() => _current;
 
   Timer? _refreshTimer;

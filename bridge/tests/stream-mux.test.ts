@@ -6,7 +6,10 @@
 import { describe, test, expect, afterEach } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 import { buildFragments, encodeRouteFrame, FrameKind } from "antgrid-wire";
-import { StreamMux, type StreamMuxTransport } from "../src/stream-mux";
+import {
+  StreamMux, CONTROL_STREAM_ID, INVALID_NOTICE_COOLDOWN_MS,
+  type StreamMuxTransport,
+} from "../src/stream-mux";
 import { MessageBus, type Channel } from "../src/message-bus";
 import { createMessage } from "../src/protocol";
 import { RelayClient } from "../src/relay-client";
@@ -70,11 +73,60 @@ describe("StreamMux (unit, stub transport)", () => {
     expect(received).toEqual([msg]);
   });
 
-  test("dispatchInbound for an unknown streamId returns false so the caller drops + logs", () => {
-    const { transport } = makeTransport();
+  test("dispatchInbound for an unknown streamId returns false so the caller drops + logs, and answers stream-invalid", () => {
+    const { transport, sent } = makeTransport();
     const mux = new StreamMux(transport);
     const ok = mux.dispatchInbound("deadbeefdeadbeef", JSON.stringify(createMessage("pong", {})), "control");
     expect(ok).toBe(false);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.streamId).toBe(CONTROL_STREAM_ID);
+    expect(sent[0]!.channel).toBe("control");
+    expect(sent[0]!.msg).toMatchObject({ type: "stream-invalid", streamId: "deadbeefdeadbeef" });
+  });
+
+  // Regression: a bridge restart re-attaches every project under fresh random
+  // ids, so the phone's cached id is dead forever. The old behaviour dropped +
+  // warned only, which stranded the phone on the dead id until it was force
+  // quit — backing out of the project and re-entering never renegotiated.
+  test("a phone replaying on a dead streamId after a host restart is told the stream is invalid", () => {
+    const { transport, sent } = makeTransport();
+    const restarted = new StreamMux(transport);
+    // The fresh process's stream for the same project — a different id.
+    const live = restarted.attach(new MessageBus(), {});
+    const deadId = "aaaabbbbccccdddd";
+    expect(deadId).not.toBe(live.streamId);
+    sent.length = 0;
+
+    expect(restarted.dispatchInbound(deadId, JSON.stringify(createMessage("file:read", { projectId: "p1", path: "a.txt" })), "control")).toBe(false);
+
+    expect(sent).toEqual([{
+      streamId: CONTROL_STREAM_ID,
+      channel: "control",
+      msg: expect.objectContaining({ type: "stream-invalid", streamId: deadId }),
+    }]);
+    // The live stream is untouched — stream-scoped, like the relay's error{ref}.
+    const msg = createMessage("pong", {});
+    expect(restarted.dispatchInbound(live.streamId, JSON.stringify(msg), "control")).toBe(true);
+  });
+
+  test("stream-invalid is rate-limited per dead id — a burst of replays yields one notice, each dead id its own", () => {
+    let now = 1_000_000;
+    const { transport, sent } = makeTransport();
+    const mux = new StreamMux(transport, () => now);
+    const body = JSON.stringify(createMessage("pong", {}));
+
+    for (let i = 0; i < 5; i++) mux.dispatchInbound("deadbeefdeadbeef", body, "control");
+    expect(sent).toHaveLength(1);
+
+    // A second dead id is a distinct binding to renegotiate, not a repeat.
+    mux.dispatchInbound("beefdeadbeefdead", body, "control");
+    expect(sent).toHaveLength(2);
+
+    // Still stranded past the cooldown → say it again rather than go quiet.
+    now += INVALID_NOTICE_COOLDOWN_MS + 1;
+    mux.dispatchInbound("deadbeefdeadbeef", body, "control");
+    expect(sent).toHaveLength(3);
+    expect(sent[2]!.msg).toMatchObject({ type: "stream-invalid", streamId: "deadbeefdeadbeef" });
   });
 
   test("a stream-open rejection (SESSION_LIMIT_EXCEEDED) settles onRejected for that stream only — the transport and every other stream stay live", () => {
@@ -118,14 +170,13 @@ describe("StreamMux (unit, stub transport)", () => {
     expect(opened.sort()).toEqual([a.streamId, b.streamId].sort());
   });
 
-  test("notifyPeerOnline/Offline/Unpaired broadcast to every attached stream; a late attach inherits an already-online session", () => {
+  test("notifyPeerOnline/Offline broadcast to every attached stream; a late attach inherits an already-online session", () => {
     const { transport } = makeTransport();
     const mux = new StreamMux(transport);
     const events: string[] = [];
     mux.attach(new MessageBus(), {
       onPeerOnline: () => events.push("a-online"),
       onPeerOffline: () => events.push("a-offline"),
-      onUnpaired: () => events.push("a-unpaired"),
     });
     mux.notifyPeerOnline();
     expect(events).toEqual(["a-online"]);
@@ -137,8 +188,6 @@ describe("StreamMux (unit, stub transport)", () => {
 
     mux.notifyPeerOffline();
     expect(events).toContain("a-offline");
-    mux.notifyUnpaired();
-    expect(events).toContain("a-unpaired");
   });
 
   test("detachAll tears every stream down", () => {
@@ -271,16 +320,24 @@ describe("StreamMux over a live RelayClient (wire-level envelope tagging)", () =
     expect(received).toEqual([msg]);
   });
 
-  test("inbound envelope for an unknown streamId is dropped (no stream sees it, no crash)", () => {
-    const { client, phoneTransport } = establish();
+  test("inbound envelope for an unknown streamId is dropped (no stream sees it) and answered with a sealed control-plane stream-invalid", () => {
+    const { client, sent, phoneTransport } = establish();
     const bus = new MessageBus();
     const received: unknown[] = [];
     bus.setInboundHandler((m) => received.push(m));
     client.attachStream(bus, {});
+    sent.length = 0;
 
     injectFrame(client, FrameKind.sealed, phoneTransport.seal(JSON.stringify({ s: "deadbeefdeadbeef", m: createMessage("pong", {}) })));
 
     expect(received).toEqual([]);
+    // The notice rides the control plane (`s` omitted), so the phone reads it
+    // without a stream binding — which is the whole point: it has none.
+    const sealedReplies = sent.filter((s): s is Buffer => Buffer.isBuffer(s));
+    expect(sealedReplies).toHaveLength(1);
+    const envelope = JSON.parse(phoneTransport.open(sealedReplies[0]!)!);
+    expect(envelope.s).toBeUndefined();
+    expect(envelope.m).toMatchObject({ type: "stream-invalid", streamId: "deadbeefdeadbeef" });
   });
 
   test("a fragmented inbound envelope reassembles with `s` intact", () => {

@@ -87,13 +87,12 @@ describe("loadConfig", () => {
     expect(cfg.licenseCacheMaxEntries).toBe(42);
   });
 
-  test("v3 keys default: clockSkewMs, replayTtlMs, staleGrantDays, jsonRateLimit*", () => {
+  test("v3 keys default: clockSkewMs, replayTtlMs, jsonRateLimit*", () => {
     process.env.LICENSE_API_URL = "http://localhost:8787";
     process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;
     const cfg = loadConfig();
     expect(cfg.clockSkewMs).toBe(120_000);
     expect(cfg.replayTtlMs).toBe(300_000);
-    expect(cfg.staleGrantDays).toBe(30);
     expect(cfg.jsonRateLimitPerSec).toBe(10);
     expect(cfg.jsonRateLimitBurst).toBe(30);
   });
@@ -103,20 +102,17 @@ describe("loadConfig", () => {
     process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;
     process.env.CLOCK_SKEW_MS = "5000";
     process.env.REPLAY_TTL_MS = "20000"; // must stay >= 2 * CLOCK_SKEW_MS
-    process.env.STALE_GRANT_DAYS = "7";
     process.env.JSON_RATE_LIMIT_PER_SEC = "1";
     process.env.JSON_RATE_LIMIT_BURST = "2";
     try {
       const cfg = loadConfig();
       expect(cfg.clockSkewMs).toBe(5000);
       expect(cfg.replayTtlMs).toBe(20000);
-      expect(cfg.staleGrantDays).toBe(7);
       expect(cfg.jsonRateLimitPerSec).toBe(1);
       expect(cfg.jsonRateLimitBurst).toBe(2);
     } finally {
       delete process.env.CLOCK_SKEW_MS;
       delete process.env.REPLAY_TTL_MS;
-      delete process.env.STALE_GRANT_DAYS;
       delete process.env.JSON_RATE_LIMIT_PER_SEC;
       delete process.env.JSON_RATE_LIMIT_BURST;
     }
@@ -158,5 +154,26 @@ describe("loadConfig", () => {
     for (const removed of ["maxQueueMessages", "maxQueueSizeBytes", "stalePairTimeoutHours"]) {
       expect(cfg).not.toHaveProperty(removed);
     }
+  });
+
+  // R1 deletes the pairing rendezvous outright — pin absence so a
+  // reintroduction doesn't slip back in unnoticed.
+  test("pairing rendezvous knobs are gone", () => {
+    process.env.LICENSE_API_URL = "http://localhost:8787";
+    process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;
+    const cfg = loadConfig() as unknown as Record<string, unknown>;
+    for (const removed of ["pairRequestTimeoutMs", "pairRateLimitPerIp"]) {
+      expect(cfg).not.toHaveProperty(removed);
+    }
+  });
+
+  // Task 4 deletes the grant table outright (mayRoute is the only routing
+  // authority) — pin absence of its config knob so a reintroduction doesn't
+  // slip back in unnoticed.
+  test("grant sweeper knob is gone", () => {
+    process.env.LICENSE_API_URL = "http://localhost:8787";
+    process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;
+    const cfg = loadConfig() as unknown as Record<string, unknown>;
+    expect(cfg).not.toHaveProperty("staleGrantDays");
   });
 });

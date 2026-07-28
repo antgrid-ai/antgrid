@@ -1,19 +1,12 @@
-import 'dart:typed_data';
-
 import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/control_plane.dart';
 import 'package:antgrid/providers/new_session_action.dart';
-import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/recent_agents.dart';
-import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/services/control_plane_client.dart';
-import 'package:antgrid/services/pairing_service.dart';
-import 'package:antgrid/services/phone_identity.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
-import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -34,54 +27,9 @@ RecentAgent _recentAgent() {
     agentLabel: 'Remote Agent',
     agentEd25519Pubkey: '',
     relayUrl: 'wss://relay.example.test/ws',
-    phoneDeviceId: 'phone-device',
-    phoneEd25519Pubkey: '',
     pairedAt: now,
     lastConnectedAt: now,
   );
-}
-
-class _StubDeviceIdentityNotifier extends DeviceIdentityNotifier {
-  @override
-  Future<DeviceIdentity> build() async {
-    return DeviceIdentity(
-      deviceId: 'phone-device',
-      name: 'Test Phone',
-      ed25519PrivateKey: Uint8List(64),
-      ed25519PublicKey: Uint8List(32),
-      x25519PrivateKey: Uint8List(32),
-      x25519PublicKey: Uint8List(32),
-    );
-  }
-}
-
-class _RecordingPairingService extends PairingService {
-  _RecordingPairingService(
-    RecentAgentsStore recentAgentsStore, {
-    required this.resolvedId,
-    required this.onReconnect,
-  }) : super(
-         relay: RelayService(crypto: CryptoService()),
-         phoneIdentity: PhoneIdentity.inMemory(),
-         recentAgentsStore: recentAgentsStore,
-         registrationId: resolvedId,
-       );
-
-  /// The family arg the provider was resolved for — must be the MACHINE id,
-  /// never the compound target id.
-  final String resolvedId;
-  final void Function(String resolvedId) onReconnect;
-
-  @override
-  Future<RecentAgent> reconnect(RecentAgent ra, DeviceIdentity identity) async {
-    onReconnect(resolvedId);
-    return ra;
-  }
-
-  @override
-  Future<RecentAgent> autoOpen(InventoryAgent agent, DeviceIdentity identity) {
-    throw StateError('autoOpen must not run when a recent matches');
-  }
 }
 
 /// Records sends and auto-acks `project:start` by emitting a running:true advert,
@@ -109,7 +57,7 @@ void main() {
 
   testWidgets(
     'drill-in activation always promotes (project:start) even when running:true, '
-    'sets RemoteProject, returns compound id, pairs machine',
+    'sets RemoteProject, returns compound id, uses the MACHINE control plane',
     (tester) async {
       useInMemoryPrefs();
       final stores = await buildTestStoreOverrides();
@@ -121,28 +69,18 @@ void main() {
       // regardless, and auto-acks it so awaitProjectRunning resolves.
       final cpTransport = _AutoStartTransport();
       addTearDown(cpTransport.dispose);
-      String? pairedFor;
 
       late String returnedId;
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
             ...stores.overrides,
-            deviceIdentityProvider.overrideWith(
-              () => _StubDeviceIdentityNotifier(),
-            ),
             recentAgentsProvider.overrideWith(
               () => _SeededRecentAgentsNotifier([recent]),
             ),
-            // The provider MUST be resolved for the machine (recent's
-            // agentDeviceId), not the compound target id.
-            pairingServiceForProvider(recent.agentDeviceId).overrideWithValue(
-              _RecordingPairingService(
-                stores.recentAgentsStore,
-                resolvedId: recent.agentDeviceId,
-                onReconnect: (id) => pairedFor = id,
-              ),
-            ),
+            // Keyed by the MACHINE uuid, never the compound target id: a
+            // compound-keyed resolution would build the REAL control-plane
+            // provider (and with it a real relay transport) and fail.
             controlPlaneClientForProvider(_machineUuid).overrideWith((
               ref,
             ) async {
@@ -205,14 +143,7 @@ void main() {
       );
       // 2. Returned id is the compound registrationId.
       expect(returnedId, _compoundId);
-      // 3. Pairing resolved for the MACHINE, not the compound id.
-      // Guards machine-level resolution: the fake is registered ONLY for the
-      // machine-keyed family arg. A compound-keyed resolution would build the
-      // real PairingService, the fake's reconnect would never run, and
-      // pairedFor stays null.
-      expect(pairedFor, recent.agentDeviceId);
-      expect(pairedFor, isNot(_compoundId));
-      // 4. Regression: activation ALWAYS sends project:start to promote the relay
+      // 3. Regression: activation ALWAYS sends project:start to promote the relay
       // slot, even though the project advertised running:true (warm ≠ promoted).
       // Skipping it here is what left the phone dialing an empty data-plane slot
       // and looping AGENT_OFFLINE.

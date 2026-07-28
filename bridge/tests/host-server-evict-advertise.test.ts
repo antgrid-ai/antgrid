@@ -43,6 +43,43 @@ function tempFolder(): string {
   return f;
 }
 
+// Regression (Phase C smoke, 2026-07-27): after a bridge restart the host
+// re-opens projects on its own, AFTER the handshake advert has already gone out
+// — so the phone's catalog stayed a snapshot of a host with nothing open, and
+// nothing ever told it the project was back. handleControlPlaneVerb only
+// re-advertises for a phone's own project:start, which a phone that believes it
+// is still bound never sends.
+test("re-advertises agent:projects when a project is opened without a phone asking (restart / desktop-side open)", async () => {
+  host = new HostServer({});
+
+  const f = tempFolder();
+  const id = computeProjectId(f);
+  host.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1",
+    pairedAt: "x", lastSeenAt: "x", allowedProjects: [] });
+  host.pairedPhones.allowProject("pk1", id);
+
+  const bus = new MessageBus();
+  const published: { msg: AbMessage; channel: Channel }[] = [];
+  bus.subscribe({ deliver: (msg, channel) => published.push({ msg, channel }) });
+  // Seed the control-plane wiring with the pre-open catalog — the empty advert
+  // a just-restarted host sends at handshake time.
+  host.readvertiseForTest(bus, "pk1");
+  const seed = published.filter((p) => p.msg.type === "agent:projects").pop()!.msg as AbMessage & {
+    projects: { projectId: string }[];
+  };
+  expect(seed.projects.find((p) => p.projectId === id)).toBeUndefined();
+  published.length = 0;
+
+  await host.open(id, f, "local");
+
+  const projectsMsgs = published.filter((p) => p.msg.type === "agent:projects");
+  expect(projectsMsgs.length).toBeGreaterThan(0);
+  const last = projectsMsgs[projectsMsgs.length - 1]!.msg as AbMessage & {
+    projects: { projectId: string; running: boolean }[];
+  };
+  expect(last.projects.find((p) => p.projectId === id)).toBeDefined();
+});
+
 test("re-advertises agent:projects on core eviction (evicted flips to running:false / absent)", async () => {
   host = new HostServer({ warmCap: 1 });
 
@@ -54,7 +91,7 @@ test("re-advertises agent:projects on core eviction (evicted flips to running:fa
   const idB = computeProjectId(fB);
 
   host.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1",
-    pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: [] });
+    pairedAt: "x", lastSeenAt: "x", allowedProjects: [] });
   host.pairedPhones.allowProject("pk1", idA);
   host.pairedPhones.allowProject("pk1", idB);
 

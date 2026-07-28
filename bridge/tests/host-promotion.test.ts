@@ -30,7 +30,6 @@ function makeCountingFactory(): { factory: () => Promise<RemoteRuntime>; tokenCa
       factoryCalls++;
       return Promise.resolve({
         maint: { getToken: () => { tokenCalls++; return "tok"; }, stop: () => {} },
-        getAccountPeerKeys: async () => new Set<string>(),
       });
     },
     tokenCalls: () => tokenCalls,
@@ -124,7 +123,6 @@ test("project:start promotes an already-open LOCAL core via the ONE shared runti
     phoneDeviceId: "d1",
     pairedAt: "x",
     lastSeenAt: "x",
-    admission: "pair-code",
     allowedProjects: ["projX"],
   });
   const bus = new MessageBus();
@@ -164,7 +162,6 @@ test("project:start reports a SESSION_LIMIT_EXCEEDED register rejection to the p
     phoneDeviceId: "d1",
     pairedAt: "x",
     lastSeenAt: "x",
-    admission: "pair-code",
     allowedProjects: ["projX"],
   });
 
@@ -209,7 +206,6 @@ test("advert running=false for a warm-but-unpromoted local core; flips true afte
     phoneDeviceId: "d1",
     pairedAt: "x",
     lastSeenAt: "x",
-    admission: "pair-code",
     allowedProjects: ["projX"],
   });
 
@@ -247,7 +243,6 @@ test("phones:deny demotes the relay slot when no other phone allows the project"
     phoneDeviceId: "d1",
     pairedAt: "x",
     lastSeenAt: "x",
-    admission: "pair-code",
     allowedProjects: ["projX"],
   });
   const bus = new MessageBus();
@@ -282,8 +277,8 @@ test("phones:deny does NOT demote when another phone still allows the project", 
   await h.open("projX", tempFolder(), "local");
 
   // Two phones both allowed for projX.
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["projX"] });
-  h.pairedPhones.upsert({ phonePubkey: "pk2", phoneDeviceId: "d2", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["projX"] });
+  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projX"] });
+  h.pairedPhones.upsert({ phonePubkey: "pk2", phoneDeviceId: "d2", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projX"] });
   const bus = new MessageBus();
   const res = await h.handleControlPlaneVerb({ type: "project:start", projectId: "projX" } as any, "pk1", bus);
   expect(res.ok).toBe(true);
@@ -308,7 +303,7 @@ test("phones:unpair demotes the relay slot when no other phone allows the projec
   expect(loopbackBefore).not.toBeNull();
 
   // Admit pk1 (the sole allowing phone) for projX and promote.
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["projX"] });
+  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projX"] });
   const bus = new MessageBus();
   const res = await h.handleControlPlaneVerb({ type: "project:start", projectId: "projX" } as any, "pk1", bus);
   expect(res.ok).toBe(true);
@@ -340,8 +335,8 @@ test("phones:unpair does NOT demote when another phone still allows the project"
   await h.open("projX", tempFolder(), "local");
 
   // Two phones both allowed for projX.
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["projX"] });
-  h.pairedPhones.upsert({ phonePubkey: "pk2", phoneDeviceId: "d2", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["projX"] });
+  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projX"] });
+  h.pairedPhones.upsert({ phonePubkey: "pk2", phoneDeviceId: "d2", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projX"] });
   const bus = new MessageBus();
   const res = await h.handleControlPlaneVerb({ type: "project:start", projectId: "projX" } as any, "pk1", bus);
   expect(res.ok).toBe(true);
@@ -371,7 +366,6 @@ test("demoteAllPromoted tears down the relay slot and leaves the core warm/loopb
     phoneDeviceId: "d1",
     pairedAt: "x",
     lastSeenAt: "x",
-    admission: "pair-code",
     allowedProjects: ["projX"],
   });
   const bus = new MessageBus();

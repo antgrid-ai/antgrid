@@ -117,6 +117,18 @@ class ProjectSessionRegistry extends ChangeNotifier {
     };
   }
 
+  /// Open ids served by the LOCAL bridge host, per the same `_isLocal` flag
+  /// that buckets eviction. NOT the dot-free-id heuristic: a bare machine
+  /// uuid is also dot-free but names a REMOTE control-plane session
+  /// (`agent_transport.dart`'s bare-id branch), which must not be torn down
+  /// when the local host respawns. These are exactly the sessions whose
+  /// loopback transport dies with the host process, so host supervision
+  /// re-binds them after a respawn.
+  List<String> localOpenProjects() => [
+    for (final id in _open)
+      if (_isLocal[id] ?? false) id,
+  ];
+
   void _maybeEvict({String? protect}) {
     _evictBucket(isLocal: true, cap: localCap, protect: protect);
     _evictBucket(isLocal: false, cap: relayCap, protect: protect);
@@ -170,6 +182,7 @@ class ProjectSessionRegistryController extends Notifier<List<String>> {
   Future<void> forceEvictAndSettle(String projectId) =>
       registry.forceEvictAndSettle(projectId);
   Set<String> machinesWithOpenProjects() => registry.machinesWithOpenProjects();
+  List<String> localOpenProjects() => registry.localOpenProjects();
 }
 
 /// App-wired controller: builds the registry with a placeholder onEvict, then

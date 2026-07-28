@@ -6,6 +6,7 @@ import '../analytics/events.dart';
 import '../models/search_models.dart';
 import '../models/ab_message.dart';
 import '../project/project_session.dart';
+import 'idle_action_guard.dart';
 
 /// Per-project file search service.
 ///
@@ -20,6 +21,14 @@ class SearchService {
   StreamSubscription<Map<String, dynamic>>? _heavySub;
   bool _disposed = false;
 
+  /// Idle-timeout for the in-flight search. A search that neither yields a
+  /// result nor a `file:search-done` within this window has stranded (dropped
+  /// send / session down): the reply that clears [SearchState.isSearching] is
+  /// never coming. Not a wall-clock cap — a large repo search resets it on
+  /// every result frame.
+  final Duration searchIdleTimeout;
+  IdleActionGuard? _searchGuard;
+
   final _stateController = StreamController<SearchState>.broadcast();
   SearchState _state = const SearchState();
   Map<String, int> _resultIndex = {};
@@ -29,7 +38,10 @@ class SearchService {
 
   String get projectId => session.projectId;
 
-  SearchService.fromSession(this.session) {
+  SearchService.fromSession(
+    this.session, {
+    this.searchIdleTimeout = const Duration(seconds: 12),
+  }) {
     _heavySub = session.heavyStream.listen(_onHeavyJson);
   }
 
@@ -89,6 +101,25 @@ class SearchService {
         'requestId': requestId,
       }),
     );
+
+    // Tier-2 streaming action: bound by inactivity, not wall-clock (`timeout:
+    // null` — a large search legitimately streams for a while). If neither a
+    // result nor file:search-done lands within the idle window, settle the
+    // spinner rather than strand it. Guarded on requestId so a superseding
+    // search's timeout can't clear the newer one.
+    final guard = _searchGuard = IdleActionGuard(searchIdleTimeout);
+    unawaited(
+      session.action(() => guard.done, timeout: null).catchError((_) {
+        if (_disposed || _state.currentRequestId != requestId) return;
+        _setState(
+          _state.copyWith(
+            isSearching: false,
+            clearCurrentRequestId: true,
+            error: 'Search stalled — no response from the agent',
+          ),
+        );
+      }),
+    );
   }
 
   void toggleCaseSensitive() {
@@ -135,12 +166,16 @@ class SearchService {
       }
     }
 
+    // Activity — the search is alive; reset the idle clock.
+    _searchGuard?.poke();
     _setState(_state.copyWith(results: resultsCopy));
   }
 
   void _handleSearchDone(FileSearchDoneMessage msg) {
     if (msg.requestId != _state.currentRequestId) return;
 
+    _searchGuard?.settle();
+    _searchGuard = null;
     _setState(
       _state.copyWith(
         isSearching: false,
@@ -155,6 +190,9 @@ class SearchService {
   }
 
   void _cancelCurrent() {
+    // Superseded / cleared — a clean end, not a strand.
+    _searchGuard?.settle();
+    _searchGuard = null;
     final requestId = _state.currentRequestId;
     if (requestId != null && _state.isSearching) {
       session.send(
@@ -169,6 +207,8 @@ class SearchService {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    _searchGuard?.settle();
+    _searchGuard = null;
     await _heavySub?.cancel();
     _heavySub = null;
     await _stateController.close();

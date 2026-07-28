@@ -366,4 +366,58 @@ void main() {
 
     await session.close();
   });
+
+  group('git:diff bounded by tier-2 action', () {
+    test('requestDiff whose content never arrives clears diffLoading after '
+        'the timeout', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(
+        session,
+        gitActionTimeout: const Duration(milliseconds: 40),
+      );
+
+      svc.requestDiff('a.txt');
+      expect(svc.currentState.git.diffLoading, isTrue);
+
+      // No git:diff-content and no frag abort — the send-dropped strand the
+      // frag backstop can't see. The tier-2 action must clear the spinner.
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      expect(svc.currentState.git.diffLoading, isFalse);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test(
+      'git:diff-content cancels the action — no spurious re-clear',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = FileService.fromSession(
+          session,
+          gitActionTimeout: const Duration(milliseconds: 40),
+        );
+
+        svc.requestDiff('a.txt');
+        t.emit('git:diff-content', {
+          'projectId': 'p',
+          'path': 'a.txt',
+          'diff': '@@ -1 +1 @@',
+          'additions': 1,
+          'deletions': 0,
+        });
+        await Future<void>.delayed(Duration.zero);
+        expect(svc.currentState.git.diffLoading, isFalse);
+        expect(svc.currentState.git.diffContent, '@@ -1 +1 @@');
+
+        // Past the window: the settled action must not touch the diff state.
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(svc.currentState.git.diffContent, '@@ -1 +1 @@');
+
+        await svc.dispose();
+        await session.close();
+      },
+    );
+  });
 }

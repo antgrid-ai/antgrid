@@ -2,8 +2,12 @@ import { describe, test, expect, beforeAll, afterAll, afterEach } from "bun:test
 import { startRelay, allocatePort, type RelayHandle } from "../../helpers/harness";
 import { RelayClient } from "../../helpers/relay-client";
 
-// TODO Tasks 28-33 will replace this with new pair-request v3 evals.
-// Old pair-request shape is incompatible with the current relay protocol.
+// Skipped for two independent reasons. The routing cases drive a bare
+// `startRelay` + `RelayClient.connectAndAuth`, which predates account trust —
+// the two devices never share a `claims.uid`, so `mayRoute` never admits the
+// send and each waiter times out. And the v1-rejection case expects
+// UPGRADE_REQUIRED for a `register` frame, which no longer has a schema at
+// all, so it fails validation and draws INVALID_MESSAGE instead.
 describe.skip("binary framing end-to-end", () => {
   let relay: RelayHandle;
   const clients: RelayClient[] = [];
@@ -26,8 +30,9 @@ describe.skip("binary framing end-to-end", () => {
     const app = await RelayClient.connectAndAuth(relay.url, { deviceType: "app" });
     clients.push(agent, app);
 
-    await app.pairWith(agent.deviceId, 5_000);
-    await agent.waitForType("pair-connected", 5_000);
+    // This eval's fakeLicenseGate stamps every device with the same account
+    // uid, so mayRoute (relay/src/authz.ts) admits app<->agent routing with
+    // zero grant/pairing setup — no ceremony needed here at all.
 
     // Build a 50KB payload with a recognisable pattern (byte index mod 256)
     const payload = new Uint8Array(50_000);
@@ -46,9 +51,6 @@ describe.skip("binary framing end-to-end", () => {
     const agent = await RelayClient.connectAndAuth(relay.url, { deviceType: "agent" });
     const app = await RelayClient.connectAndAuth(relay.url, { deviceType: "app" });
     clients.push(agent, app);
-
-    await app.pairWith(agent.deviceId, 5_000);
-    await agent.waitForType("pair-connected", 5_000);
 
     // PNG magic header + random-ish body to simulate a preview HTTP response
     const header = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);

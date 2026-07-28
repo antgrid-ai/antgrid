@@ -9,6 +9,7 @@ import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/control_plane.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
+import 'package:antgrid/providers/eager_control_planes.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/relay_connection.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
@@ -111,6 +112,9 @@ void main() {
           workbenchSurfaceProvider.overrideWith(
             () => ValueController(WorkbenchSurface.workspace),
           ),
+          // flutter_test runs as Android → the eager union would read the
+          // recents store, which this harness deliberately doesn't provide.
+          eagerControlPlanesEnabledProvider.overrideWithValue(false),
         ],
       );
       addTearDown(container.dispose);
@@ -230,6 +234,7 @@ void main() {
             builds[id] = (builds[id] ?? 0) + 1;
             return null;
           }),
+          eagerControlPlanesEnabledProvider.overrideWithValue(false),
         ],
       );
       addTearDown(container.dispose);

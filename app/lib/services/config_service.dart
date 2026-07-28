@@ -75,6 +75,16 @@ class ConfigService {
     this.requestTimeout = const Duration(seconds: 15),
   }) {
     _statusSub = session.statusStream.listen(_onStatusJson);
+    // Tier-3: re-read the config on every (re)establishment so a reconnect
+    // refreshes it (the reconciliation checkpoint). Deliberately a plain send,
+    // NOT read(): config:read-result updates state via _handleReadResult with
+    // or without a tracked _read, so the re-drive neither arms (and leaks) the
+    // caller-timeout timer nor supersedes a settings-screen read() in flight.
+    session.hydrate('config:read', _redriveRead);
+  }
+
+  Future<void> _redriveRead() async {
+    await _send(createAbMessage('config:read', {}));
   }
 
   void _setState(ConfigState s) {
@@ -95,6 +105,7 @@ class ConfigService {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    session.unhydrate('config:read');
     _failPending(StateError('ConfigService disposed'));
     await _statusSub?.cancel();
     _statusSub = null;
@@ -222,13 +233,20 @@ class ConfigService {
   /// a project whose real `antgrid.yaml` we simply never heard back about.
   Future<AbConfig?> read() {
     _setState(_state.copyWith(loading: true, clearError: true));
-    return _request<AbConfig?>('config:read', {}, _setRead, onTimeout: () {
-      _read = null;
-      _setState(_state.copyWith(
-        loading: false,
-        error: 'No reply from the agent — config read timed out',
-      ));
-    });
+    return _request<AbConfig?>(
+      'config:read',
+      {},
+      _setRead,
+      onTimeout: () {
+        _read = null;
+        _setState(
+          _state.copyWith(
+            loading: false,
+            error: 'No reply from the agent — config read timed out',
+          ),
+        );
+      },
+    );
   }
 
   /// Returns `null` on success, list of error strings on failure. A lost reply

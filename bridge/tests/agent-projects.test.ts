@@ -49,7 +49,7 @@ test("advertises allowed ∩ catalog, excludes non-allowed; running = relay-admi
   await host.stop("projB");                            // now known-but-stopped (in seenProjects, not in cores)
 
   host.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1",
-    pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["projA", "projB"] });
+    pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projA", "projB"] });
 
   const adv = host.buildProjectsAdvertisement("pk1");
   expect(adv.map((p) => p.projectId).sort()).toEqual(["projA", "projB"]);
@@ -71,7 +71,7 @@ test("known-but-stopped project carries its catalog label + path", async () => {
   await host.stop("projB");
 
   host.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1",
-    pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["projB"] });
+    pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projB"] });
 
   const adv = host.buildProjectsAdvertisement("pk1");
   const b = adv.find((p) => p.projectId === "projB");
@@ -87,7 +87,7 @@ test("advertised projects carry lastActiveAt when known", async () => {
   await host.open("projA", tempFolder(), "local");   // stamps lastActiveAt on startCore
 
   host.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1",
-    pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["projA"] });
+    pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projA"] });
 
   const adv = host.buildProjectsAdvertisement("pk1");
   const a = adv.find((p) => p.projectId === "projA");
@@ -103,7 +103,7 @@ test("warm core advertises runningSessions; a stopped project omits it (like sta
   await host.stop("projB");
 
   host.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1",
-    pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["projA", "projB"] });
+    pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projA", "projB"] });
 
   const adv = host.buildProjectsAdvertisement("pk1");
   // Warm, no sessions started yet → an explicit 0 (the app's re-peek trigger
@@ -117,7 +117,7 @@ test("phone with empty allowlist gets an empty advertisement", async () => {
   host = new HostServer({});
   await host.open("projA", tempFolder(), "local");
   host.pairedPhones.upsert({ phonePubkey: "pk2", phoneDeviceId: "d2",
-    pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: [] });
+    pairedAt: "x", lastSeenAt: "x", allowedProjects: [] });
   expect(host.buildProjectsAdvertisement("pk2")).toEqual([]);
 });
 
@@ -131,7 +131,7 @@ test("allowlist change re-advertises to the connected control-plane phone", asyn
   host = new HostServer({});
   await host.open("projA", tempFolder(), "local");
   host.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1",
-    pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: [] }); // connected, nothing allowed yet
+    pairedAt: "x", lastSeenAt: "x", allowedProjects: [] }); // connected, nothing allowed yet
 
   const bus = new MessageBus();
   const seen: AbMessage[] = [];

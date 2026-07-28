@@ -37,6 +37,20 @@ void main() {
     expect(reg.openProjects, containsAll(['M.r1', 'M.r2'])); // relay untouched
   });
 
+  test('localOpenProjects follows the isLocal flag, not the id shape', () {
+    final reg = ProjectSessionRegistry(
+      localCap: 4,
+      relayCap: 4,
+      onEvict: (id) async {},
+    );
+    reg.touch('localA', isLocal: true);
+    reg.touch('M.r1', isLocal: false);
+    // A bare machine uuid is dot-free but names a REMOTE control-plane
+    // session — a local-host respawn must not tear it down.
+    reg.touch('96352d71-dc6f-4479-904b-79cd7a5b5bab', isLocal: false);
+    expect(reg.localOpenProjects(), ['localA']);
+  });
+
   test('forceEvictAndSettle awaits the onEvict callback before returning', () {
     // The delete paths purge a project's status-cache file right after evicting
     // it, but `onEvict` WRITES that file (final-status snapshot). If the evict

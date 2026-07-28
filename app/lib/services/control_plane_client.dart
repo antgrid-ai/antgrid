@@ -294,12 +294,29 @@ class ControlPlaneClient {
 
   /// Ask the agent to start (spin up) the project with [projectId]. The
   /// agent re-advertises `agent:projects` with `running:true` once the
-  /// project is up, which updates [currentState].
+  /// project is up, which [awaitProjectRunning] watches for (up to 30s).
+  ///
+  /// Tier-2 fail-fast, NOT tier-3 re-drive: auto-replaying a start on every
+  /// reconnect would spuriously boot stopped projects. project:start has no RPC
+  /// reply, so the bound is on DELIVERABILITY. During a keyless (session-down)
+  /// window the stream still reads `connected` but the send SILENTLY DROPS
+  /// (`sendOnStream` no-ops without keys) — project:start never reaches the host
+  /// and `awaitProjectRunning` then burns the full 30s before a generic failure.
+  /// Refuse to fire into that window (throw an [RpcException]) so the caller can
+  /// surface a retry now instead of waiting it out.
   Future<void> startProject(String projectId) async {
     if (_disposed) return;
-    await transport.send(
-      createAbMessage('project:start', {'projectId': projectId}),
-    );
+    await transport.action(() async {
+      if (!transport.isEstablished) {
+        throw RpcException(
+          'E_NOT_ESTABLISHED',
+          'project:start not delivered — the session is reconnecting',
+        );
+      }
+      await transport.send(
+        createAbMessage('project:start', {'projectId': projectId}),
+      );
+    });
   }
 
   /// Fetch the persisted session list for [projectId] over the control plane —

@@ -22,13 +22,11 @@ beforeEach(() => {
         {
           phonePubkey: "pk-1", phoneDeviceId: "ph-1", label: "iPhone",
           pairedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-02T00:00:00.000Z",
-          admission: "same-account",
           allowedProjects: ["proj-allowed"],
         },
         {
           phonePubkey: "pk-2", phoneDeviceId: "ph-2", label: "Android",
           pairedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-02T00:00:00.000Z",
-          admission: "pair-code",
           allowedProjects: ["proj-allowed"],
         },
       ],
@@ -91,7 +89,7 @@ test("phones:list returns phones + knownProjects", async () => {
   expect(Array.isArray(res.knownProjects)).toBe(true);
 });
 
-test("mobile-access:enable-project stores default and grants same-account phones", async () => {
+test("mobile-access:enable-project stores default and grants every known phone", async () => {
   const host = new HostServer({});
   const res = await host.handleMobileAccessVerb({
     id: "m1",
@@ -104,15 +102,15 @@ test("mobile-access:enable-project stores default and grants same-account phones
   expect(get.projectIds).toEqual(["proj-new"]);
 
   const phones = host.listPairedPhones();
-  const sameAccount = phones.find((p) => p.phonePubkey === "pk-1")!;
-  const pairCode = phones.find((p) => p.phonePubkey === "pk-2")!;
-  // same-account phone receives the new grant immediately
-  expect(sameAccount.allowedProjects.sort()).toEqual(["proj-allowed", "proj-new"]);
-  // pair-code phone is never seeded from same-account defaults (fail-closed)
-  expect(pairCode.allowedProjects).toEqual(["proj-allowed"]);
+  const pk1 = phones.find((p) => p.phonePubkey === "pk-1")!;
+  const pk2 = phones.find((p) => p.phonePubkey === "pk-2")!;
+  // every phone in the store receives the new grant immediately — there is no
+  // longer a second admitted-but-excluded phone class
+  expect(pk1.allowedProjects.sort()).toEqual(["proj-allowed", "proj-new"]);
+  expect(pk2.allowedProjects.sort()).toEqual(["proj-allowed", "proj-new"]);
 });
 
-test("mobile-access:disable-project clears default and revokes same-account phones only", async () => {
+test("mobile-access:disable-project clears default and revokes it from every phone", async () => {
   const host = new HostServer({});
   await host.handleMobileAccessVerb({
     id: "m1",
@@ -131,13 +129,22 @@ test("mobile-access:disable-project clears default and revokes same-account phon
   expect(get.projectIds).toEqual([]);
 
   const phones = host.listPairedPhones();
-  const sameAccount = phones.find((p) => p.phonePubkey === "pk-1")!;
-  const pairCode = phones.find((p) => p.phonePubkey === "pk-2")!;
-  // The same-account default toggle revokes same-account phones...
-  expect(sameAccount.allowedProjects).toEqual([]);
-  // ...but leaves a pair-code phone's explicit `phones allow` grant intact:
-  // disabling the default is not the same as un-granting a manually-trusted phone.
-  expect(pairCode.allowedProjects).toEqual(["proj-allowed"]);
+  const pk1 = phones.find((p) => p.phonePubkey === "pk-1")!;
+  const pk2 = phones.find((p) => p.phonePubkey === "pk-2")!;
+  expect(pk1.allowedProjects).toEqual([]);
+  expect(pk2.allowedProjects).toEqual([]);
+});
+
+test("mobile-access:disable-project does not touch an unrelated explicit grant", async () => {
+  const host = new HostServer({});
+  await host.handlePhonesVerb({ id: "p1", type: "phones:allow", phonePubkey: "pk-2", projectId: "proj-other" });
+  await host.handleMobileAccessVerb({ id: "m1", type: "mobile-access:enable-project", projectId: "proj-allowed" });
+
+  await host.handleMobileAccessVerb({ id: "m2", type: "mobile-access:disable-project", projectId: "proj-allowed" });
+
+  const pk2 = host.listPairedPhones().find((p) => p.phonePubkey === "pk-2")!;
+  // disabling proj-allowed's default must not sweep a grant for a different project
+  expect(pk2.allowedProjects).toEqual(["proj-other"]);
 });
 
 test("project:forget clears same-account default grant", async () => {

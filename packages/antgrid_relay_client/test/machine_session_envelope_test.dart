@@ -10,7 +10,7 @@ import 'dart:typed_data';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:test/test.dart';
 
-import 'support/fake_paired_relay.dart';
+import 'support/fake_live_relay.dart';
 
 /// Opens the payload MachineSession sealed with the phone's send key (p2a) —
 /// i.e. the transport's perspective when reading what MachineSession sent.
@@ -24,13 +24,13 @@ Future<Uint8List> _sealFromAgent(SessionKeys keys, String plaintext) =>
     E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a).seal(plaintext);
 
 void main() {
-  late FakePairedRelay relay;
+  late FakeLiveRelay relay;
   late FakeHandshaker handshaker;
   late SessionKeys keys;
   late MachineSession session;
 
   setUp(() async {
-    relay = FakePairedRelay();
+    relay = FakeLiveRelay();
     keys = fixedKeys(1);
     handshaker = FakeHandshaker(keys);
     session = MachineSession(
@@ -39,7 +39,7 @@ void main() {
       handshaker: handshaker,
     );
     session.start();
-    await session.ready;
+    await session.ensureEstablished();
   });
 
   tearDown(() async {

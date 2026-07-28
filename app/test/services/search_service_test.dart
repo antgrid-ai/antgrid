@@ -190,4 +190,101 @@ void main() {
       await session.close();
     });
   });
+
+  group('SearchService idle-timeout (tier-2 streaming action)', () {
+    test('a search whose reply never arrives clears isSearching after the idle '
+        'window', () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = SearchService.fromSession(
+        session,
+        searchIdleTimeout: const Duration(milliseconds: 40),
+      );
+
+      svc.search('foo');
+      expect(svc.currentState.isSearching, isTrue);
+
+      // No result and no file:search-done: the strand. The idle guard must
+      // settle the spinner instead of leaving it spinning forever.
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+
+      expect(svc.currentState.isSearching, isFalse);
+      expect(svc.currentState.error, isNotNull);
+      expect(svc.currentState.currentRequestId, isNull);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test(
+      'a streaming result resets the idle clock so a live search survives',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await newSession(t);
+        final svc = SearchService.fromSession(
+          session,
+          searchIdleTimeout: const Duration(milliseconds: 80),
+        );
+
+        svc.search('foo');
+        final reqId = svc.currentState.currentRequestId;
+
+        // A result lands before the idle window elapses, resetting it.
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        t.emit('file:search-result', {
+          'projectId': 'p',
+          'requestId': reqId,
+          'matches': [
+            {
+              'path': 'a.txt',
+              'line': 1,
+              'column': 0,
+              'lineContent': 'foo',
+              'contextBefore': <String>[],
+              'contextAfter': <String>[],
+            },
+          ],
+        });
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+
+        // 100ms total > 80ms idle, but the result at 50ms reset it — still alive.
+        expect(svc.currentState.isSearching, isTrue);
+
+        await svc.dispose();
+        await session.close();
+      },
+    );
+
+    test(
+      'file:search-done cancels the idle guard — no late stall error',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await newSession(t);
+        final svc = SearchService.fromSession(
+          session,
+          searchIdleTimeout: const Duration(milliseconds: 40),
+        );
+
+        svc.search('foo');
+        final reqId = svc.currentState.currentRequestId;
+        t.emit('file:search-done', {
+          'projectId': 'p',
+          'requestId': reqId,
+          'totalMatches': 0,
+          'totalFiles': 0,
+          'duration': 1,
+          'engine': 'ripgrep',
+        });
+        await Future<void>.delayed(Duration.zero);
+        expect(svc.currentState.isSearching, isFalse);
+
+        // Past the idle window: a settled guard must not fire a spurious error.
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(svc.currentState.error, isNull);
+
+        await svc.dispose();
+        await session.close();
+      },
+    );
+  });
 }

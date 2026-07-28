@@ -4,13 +4,13 @@ import { firstProjectStream } from "../support/stream";
 import { createMessage } from "../../bridge/src/protocol";
 
 /**
- * v3 reconnect without re-pairing (design §5.1). Pairing is an authorization
- * FACT the relay holds (a grant keyed by agent + phone pubkey), not a connection
- * state. When the phone's socket drops and it reconnects under the SAME identity,
- * the grant still exists, so routing resumes immediately after a fresh E2E
- * handshake — no second pair-request, no QR. This replaces the v2 trusted-
- * reconnect-via-pairCode test (the control-plane pairCode window has no eval
- * open-hook in v3 — evals pair via the account-membership path, see setupTestEnv).
+ * v3 reconnect with no pairing at all (design §5.1, Phase A/B). Admission is
+ * relay same-account routing (`mayRoute`) + the bridge's account-inventory
+ * trust (`TrustedPeersProvider`), neither of which is a per-connection state —
+ * both are authorization FACTS that outlive a dropped socket. When the phone
+ * reconnects under the SAME identity, routing resumes immediately after a
+ * fresh E2E handshake — no pair-request, no QR, ever. This replaces the v2
+ * trusted-reconnect-via-pairCode test.
  */
 test("phone reconnects under the same identity and routes without re-pairing", async () => {
   const env = await setupTestEnv({ fixtureName: "basic" });
@@ -21,7 +21,8 @@ test("phone reconnects under the same identity and routes without re-pairing", a
     expect((await env.app.waitForStreamAbType(before, "file:content", 8_000)).path).toBe("README.md");
 
     // Drop the phone socket, then reconnect with the SAME phone identity. No
-    // pairWith() call — the relay-side grant must carry routing across the drop.
+    // pairing ceremony — routing must survive the drop on account-trust
+    // (relay same-account `mayRoute` + bridge inventory trust) alone.
     const peerId = env.agentDeviceId;
     const identity = env.app.exportIdentity();
     const deviceId = env.app.deviceId;

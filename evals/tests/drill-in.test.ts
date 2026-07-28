@@ -1,6 +1,7 @@
 // E2E v3 drill-in (start-on-open) over the REAL bridge + relay (design §7.4):
-//   1. Pair ONE phone once against the control plane (bare deviceUuid) via the
-//      QR-less account-membership path; complete the E2E handshake.
+//   1. setupTestEnv admits ONE app once against the control plane (bare
+//      deviceUuid) with account-trust — no pairing ceremony — and completes
+//      the E2E handshake.
 //   2. Advertise two allowed projects, one STOPPED (projB): projA (firstProject,
 //      running) + projB (opened remote then stopped → advertised running:false,
 //      startable because it stays in seenProjects).
@@ -15,20 +16,14 @@
 //
 // Known Windows test noise (NOT failures): fs.watch EPERM/EBUSY on teardown.
 import { test, expect } from "bun:test";
-import { generateKeyPairSync } from "node:crypto";
-import { join } from "node:path";
-import { setupPairFlowTestEnv } from "../helpers/test-env";
-import { RelayClient } from "../helpers/relay-client";
+import { setupTestEnv } from "../helpers/harness";
 import { createTestProject } from "../helpers/fixtures";
 import { computeProjectId } from "../../bridge/src/project-id";
 import { loadPairedPhones } from "../../bridge/src/paired-phones";
 import { readHostFile } from "../../bridge/src/host-discovery";
 import { createMessage } from "../../bridge/src/protocol";
-
-function rawEdPubB64(pub: import("node:crypto").KeyObject): string {
-  const der = pub.export({ format: "der", type: "spki" });
-  return Buffer.from(der.subarray(der.length - 32)).toString("base64");
-}
+import { allowAndResolveStream } from "../support/stream";
+import { join } from "node:path";
 
 async function loopbackControl(abDir: string, body: object): Promise<any> {
   const hf = readHostFile(join(abDir, "host.json"));
@@ -42,16 +37,11 @@ async function loopbackControl(abDir: string, body: object): Promise<any> {
 }
 
 test("drill-in: start a stopped project as a stream on the ONE socket, zero new connections, zero pairs", async () => {
-  const accountKp = generateKeyPairSync("ed25519");
-  const accountPubB64 = rawEdPubB64(accountKp.publicKey);
-  const env = await setupPairFlowTestEnv({ accountPeerKeys: [accountPubB64] });
+  const env = await setupTestEnv({ fixtureName: "basic" });
   const projBdir = createTestProject("basic", { "__RELAY_URL__": env.relay.url.replace(/\/ws$/, "") });
 
-  let cp: RelayClient | null = null;
   try {
-    const relayUrl = env.relay.url;
-    const deviceUuid = env.agent.deviceId;
-    const agentEd25519Pub = env.agent.ed25519Pubkey;
+    const cp = env.app;
     const projA = env.projectId;
     const projB = computeProjectId(projBdir.dir);
 
@@ -59,35 +49,19 @@ test("drill-in: start a stopped project as a stream on the ONE socket, zero new 
     expect((await loopbackControl(env.abDir, { id: "open-b", type: "project:open", projectId: projB, projectPath: projBdir.dir, mode: "remote" })).ok).toBe(true);
     expect((await loopbackControl(env.abDir, { id: "stop-b", type: "project:stop", projectId: projB })).ok).toBe(true);
 
-    // Pair ONCE against the control plane (account-membership), handshake once.
-    cp = await RelayClient.connectAndAuth(relayUrl, { deviceType: "app", name: "eval-phone-cp" });
-    const phoneIdentity = cp.exportIdentity();
-    for (let i = 0; i < 50; i++) {
-      try {
-        const r = await cp.pairWith(deviceUuid, { timeoutMs: 8_000, accountKey: { pubB64: accountPubB64, privateKey: accountKp.privateKey } });
-        cp.setPeerId(r.peerId);
-        await cp.performE2EHandshake(deviceUuid, 10_000, { agentEd25519Pub });
-        break;
-      } catch {
-        if (cp.isClosed) await cp.reconnectAndAuth(relayUrl);
-        await Bun.sleep(150);
-      }
-    }
-
-    // Allow both projects for this phone, then let the host reload the allowlist.
-    const store = loadPairedPhones(env.abDir);
-    expect(store.has(phoneIdentity.publicKeyBase64)).toBe(true);
-    store.allowProject(phoneIdentity.publicKeyBase64, projA);
-    store.allowProject(phoneIdentity.publicKeyBase64, projB);
-    await Bun.sleep(400);
-    await cp.pullStateSnapshot();
-
-    // projB is advertised but not running (drill target).
-    const advert = await cp.waitFor(
-      (m: any) => m.type === "agent:projects" &&
-        m.projects.some((p: any) => p.projectId === projB && p.running === false),
-      8_000,
-    );
+    // projA is already allowed (setupTestEnv allows the firstProject for every
+    // account-trusted phone). Allow projB too, then let the host reload it —
+    // retrying the write (see allowAndResolveStream's docstring) since a lost
+    // fs.watch event on paired-phones.json would otherwise strand this on a
+    // no-op-once-present allowlist write with no advert ever produced to wait on.
+    expect(loadPairedPhones(env.abDir).has(env.appIdentity.publicKeyBase64)).toBe(true);
+    const advert = await allowAndResolveStream(cp, env.abDir, projB, {
+      resolve: (app) =>
+        app.waitFor(
+          (m: any) => m.type === "agent:projects" && m.projects.some((p: any) => p.projectId === projB && p.running === false),
+          3_000,
+        ),
+    });
     expect(advert.projects.map((p: any) => p.projectId)).toContain(projA);
 
     // === Drill in: this must add NO new relay connection and run NO pair. ===
@@ -107,7 +81,6 @@ test("drill-in: start a stopped project as a stream on the ONE socket, zero new 
     expect((listResult as { requestId?: string }).requestId).toBe(requestId);
     expect(Array.isArray((listResult as { sessions?: unknown[] }).sessions)).toBe(true);
   } finally {
-    await cp?.disconnect();
     await env.teardown();
     try { projBdir.cleanup(); } catch { /* Windows EBUSY teardown race */ }
   }

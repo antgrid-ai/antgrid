@@ -45,6 +45,7 @@ class _FakeDevicesApi implements DevicesApiCreator {
     required String x25519Pub,
     required String platform,
     required String displayName,
+    String? kind,
   }) async {
     calls++;
     if (gate != null) await gate!.future;

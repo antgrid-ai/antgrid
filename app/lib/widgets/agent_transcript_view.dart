@@ -32,6 +32,7 @@ import '../providers/capability_catalog.dart';
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
 import '../services/agent_session_service.dart';
+import '../services/attach_hydration.dart';
 import '../services/upload_service.dart';
 import '../util/ab_log.dart';
 import '../utils/platform_utils.dart';
@@ -115,11 +116,56 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
   String? _lastCachedSig;
   final List<ComposerAttachment> _attachments = [];
 
+  // The service the transcript hydrator was registered on, pinned so dispose can
+  // deregister the exact instance without ref.watch (illegal there). See
+  // AgentSessionService.stopHydrating. Also the key [_armHydration] compares
+  // against to detect a service swap.
+  AgentSessionService? _hydratedOn;
+  bool _armScheduled = false;
+
   @override
   void initState() {
     super.initState();
     _input.addListener(_onInputChanged);
     _inputFocus.addListener(_onInputFocusChanged);
+  }
+
+  // Load prior turns for this session, re-arming on every SERVICE SWAP rather
+  // than once at mount. AgentPanel keys this view by session id, so a fresh
+  // State mounts for whichever chat session becomes active — but the mount
+  // instant is NOT when the service is necessarily resolved, and it is not the
+  // only time the session this view must hydrate against changes:
+  //
+  //  - A reconnect (session-takeover → "take back", a supervisor block the user
+  //    retried) invalidates `projectSessionProvider`, which builds a WHOLE new
+  //    ProjectSession: new transport, new AgentSessionService, empty transcript.
+  //    Its predecessor's hydrator dies with its transport.
+  //  - Around that swap `sessionsStateProvider` serves the OUTGOING service's
+  //    list for a frame (Riverpod retains the previous AsyncData while it
+  //    re-subscribes — see freshSessionsStateProvider), so the view can mount,
+  //    or remount, before the incoming session has resolved.
+  //
+  // A mount-only hydrate loses both: the pull is either never registered or
+  // registered on a service whose transport is already dead, and the user is
+  // left on "Send a message to start" with the history intact on the bridge
+  // until they leave the session and reopen it. Keying off the resolved service
+  // identity is what makes every one of those paths converge here.
+  void _armHydration() {
+    final svc = serviceWhenReady(ref, agentSessionServiceProvider);
+    if (svc == null || identical(svc, _hydratedOn) || _armScheduled) return;
+    _armScheduled = true;
+    // Post-frame, not inline: hydrateIfNeeded publishes state synchronously, and
+    // emitting into a provider mid-build is illegal.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _armScheduled = false;
+      if (!mounted) return;
+      final entry = ref.read(activeSessionProvider);
+      if (entry == null || entry.id != widget.sessionId) return;
+      final armed = hydrateAttachedChatIfNeeded(ref, entry);
+      if (armed == null || identical(armed, _hydratedOn)) return;
+      _hydratedOn?.stopHydrating(widget.sessionId);
+      _hydratedOn = armed;
+    });
   }
 
   void _onInputFocusChanged() {
@@ -139,6 +185,10 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
 
   @override
   void dispose() {
+    // Stop re-pulling this session's transcript on every reconnect now that its
+    // view is gone — the view is keyed per session id, so this fires exactly
+    // when the user navigates off / switches to another session.
+    _hydratedOn?.stopHydrating(widget.sessionId);
     _input.removeListener(_onInputChanged);
     _inputFocus.removeListener(_onInputFocusChanged);
     _inputFocus.dispose();
@@ -321,7 +371,9 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
       serviceWhenReady(ref, agentSessionServiceProvider);
 
   void _retryHydration() {
-    final f = _service()?.hydrateIfNeeded(widget.sessionId);
+    final svc = _service();
+    _hydratedOn = svc ?? _hydratedOn;
+    final f = svc?.hydrateIfNeeded(widget.sessionId);
     if (f != null) unawaited(f);
   }
 
@@ -461,6 +513,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
 
   @override
   Widget build(BuildContext context) {
+    _armHydration();
     final stateAsync = ref.watch(agentSessionStateProvider(widget.sessionId));
     // `.value` (nullable), not `.value ?? const AgentSessionState()`: the
     // latter collapses AsyncValue.loading into the empty state, flashing

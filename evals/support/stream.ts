@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { RelayClient } from "../helpers/relay-client";
 import { createMessage, type AbMessage } from "../../bridge/src/protocol";
+import { loadPairedPhones } from "../../bridge/src/paired-phones";
 
 /**
  * v3 project data-plane helpers.
@@ -57,6 +58,50 @@ export async function streamSnapshot(
   const res = (await responseP) as { ok?: boolean; result?: { frames?: AbMessage[] } } | null;
   if (!res?.ok) return [];
   return res.result?.frames ?? [];
+}
+
+/**
+ * Allow `projectId` for every paired phone, then resolve some project-scoped
+ * fact about it (default: its advertised streamId) — retrying the ALLOW with
+ * an UNCONDITIONAL `upsert` (not the no-op-once-present `allowProject`) each
+ * attempt. Bun's fs.watch on `paired-phones.json` has been observed to
+ * occasionally miss or coalesce a change event under load in this sandbox; a
+ * single write's watch event can be lost with nothing left to re-trigger it
+ * (`allowProject` no-ops once the entry already exists), so this re-flushes
+ * (forcing a fresh watch event) each attempt until `resolve` confirms the
+ * agent's own reload — not just a fixed sleep, and not an advert `waitFor`
+ * alone: a predicate that only matches specific advert CONTENT self-heals
+ * past a stale QUEUED advert, but proves nothing if the agent never reloads
+ * at all and no matching advert is ever produced.
+ */
+export async function allowAndResolveStream<T = string>(
+  app: RelayClient,
+  abDir: string,
+  projectId: string,
+  opts: { attempts?: number; resolve?: (app: RelayClient) => Promise<T> } = {},
+): Promise<T> {
+  const attempts = opts.attempts ?? 10;
+  const resolve =
+    opts.resolve ?? ((a: RelayClient) => firstProjectStream(a, projectId, 3_000) as unknown as Promise<T>);
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    const store = loadPairedPhones(abDir);
+    for (const phone of store.list()) {
+      const next = phone.allowedProjects.includes(projectId)
+        ? phone.allowedProjects
+        : [...phone.allowedProjects, projectId];
+      store.upsert({ ...phone, allowedProjects: next });
+    }
+    await Bun.sleep(400); // fs.watch debounce on the agent's paired-phones.json watcher
+    app.drainQueued("agent:projects");
+    await app.pullStateSnapshot();
+    try {
+      return await resolve(app);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw new Error(`allowAndResolveStream(${projectId}) never resolved: ${String(lastErr)}`);
 }
 
 /** Resolve the firstProject stream AND its snapshot frames in one step. */

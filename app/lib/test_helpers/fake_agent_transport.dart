@@ -19,6 +19,7 @@ class FakeAgentTransport implements AgentTransport {
   requestHandler;
 
   TransportState _state = TransportState.connected;
+  bool _established = true;
   bool _disposed = false;
 
   @override
@@ -32,6 +33,59 @@ class FakeAgentTransport implements AgentTransport {
 
   @override
   bool get isLocal => false; // tests can override via subclassing if needed
+
+  @override
+  bool get isEstablished => _established;
+
+  /// Test control: simulate the E2E session (un)establishing independently of
+  /// the socket state — a relay stream can be `connected` yet not yet
+  /// established (a send would seal-and-vanish). Transitioning to established
+  /// re-drives hydrators, exactly as [StreamTransport.refreshSnapshot] does on
+  /// each handshake.
+  void setEstablished(bool value) {
+    _established = value;
+    if (value) redriveHydrators();
+  }
+
+  final Map<String, Future<void> Function()> _hydrators = {};
+
+  @override
+  Future<void> hydrate(String key, Future<void> Function() run) {
+    _hydrators[key] = run;
+    if (isEstablished) return _runHydrator(run);
+    return Future<void>.value();
+  }
+
+  @override
+  void unhydrate(String key) => _hydrators.remove(key);
+
+  /// Mirrors [BufferedAgentTransport]'s swallow: one failing hydrator is
+  /// isolated, so a constructor-registered hydrator whose pull fails (e.g. its
+  /// pending reply is failed on dispose) never surfaces as an unhandled error.
+  Future<void> _runHydrator(Future<void> Function() run) async {
+    try {
+      await run();
+    } catch (_) {
+      // Isolated on purpose — see doc above.
+    }
+  }
+
+  @override
+  Future<T> action<T>(
+    Future<T> Function() run, {
+    Duration? timeout = const Duration(seconds: 15),
+  }) {
+    final f = run();
+    return timeout == null ? f : f.timeout(timeout);
+  }
+
+  /// Test helper: simulate a (re)establishment, re-driving every registered
+  /// hydrator (what StreamTransport.refreshSnapshot does on each handshake).
+  void redriveHydrators() {
+    for (final run in _hydrators.values) {
+      unawaited(_runHydrator(run));
+    }
+  }
 
   @override
   Future<void> connect() async {

@@ -6,12 +6,12 @@ import { setupDartTestEnv, type DartTestEnv } from "../../helpers/harness";
  * Dart client (antgrid_eval_client CLI subprocess) to exercise the production
  * Dart crypto and relay code paths.
  */
-// TODO(evals,v3): setupDartTestEnv can't pair in v3 — the Dart eval CLI (packages/antgrid_eval_client)
-// only supports pairCode pairing, but v3 pairs the bare deviceUuid via the QR-less
-// account-membership proof, which the frozen helpers (setupDartTestEnv + DartAppClient.pairWith)
-// do not thread an accountKey through. Extending only the Dart package is insufficient
-// while those helpers are frozen, so this suite is skipped until the harness grows a
-// Dart account-membership pair path. Project verbs would also need the stream data plane.
+// setupDartTestEnv admits the Dart client via account trust, but the Dart
+// eval CLI's `_handleHandshake` (packages/antgrid_eval_client/lib/src/commands.dart)
+// addresses the agent via `_relay.currentState.peerDeviceId`, which nothing
+// sets any more — its JSON action protocol has no `handshake` param to target
+// an agent directly, so a pair-free Dart handshake cannot succeed until the
+// Dart CLI grows one (see harness.ts's `setupDartTestEnv`).
 describe.skip("dart-terminal", () => {
   let env: DartTestEnv;
 

@@ -59,17 +59,23 @@ export class DartAppClient {
 
   readonly deviceId: string;
   readonly x25519PublicKey: string;
+  /** Raw 32-byte Ed25519 pubkey (base64) — the identity `startFakeLicenseApi({
+   *  accountDevices })` must register for this client to be admitted without
+   *  a pairing ceremony (see `setupDartTestEnv`). */
+  readonly ed25519PublicKey: string;
 
   private constructor(
     proc: { kill(): void },
     stdin: import("bun").FileSink,
     deviceId: string,
     x25519PublicKey: string,
+    ed25519PublicKey: string,
   ) {
     this.proc = proc;
     this.stdin = stdin;
     this.deviceId = deviceId;
     this.x25519PublicKey = x25519PublicKey;
+    this.ed25519PublicKey = ed25519PublicKey;
   }
 
   /**
@@ -120,6 +126,7 @@ export class DartAppClient {
       procStdin,
       initEvent.deviceId as string,
       initEvent.x25519PublicKey as string,
+      initEvent.publicKey as string,
     );
 
     // The early read loop holds a reference to earlyQueue and earlyWaiters.
@@ -232,25 +239,14 @@ export class DartAppClient {
   }
 
   async connect(relayUrl: string, licenseToken?: string): Promise<void> {
-    // App/phone clients no longer send a licenseToken — they inherit auth
-    // from a paired agent via signed pair-approval. Only forward a token if
-    // a caller explicitly opts in (e.g. legacy / agent-shaped tests).
+    // App/phone clients no longer send a licenseToken by default — admission
+    // is account trust (the bridge's device inventory), not a license claim.
+    // Only forward a token if a caller explicitly opts in (e.g. legacy /
+    // agent-shaped tests).
     const cmd: Record<string, unknown> = { action: "connect", relayUrl };
     if (licenseToken !== undefined) cmd.licenseToken = licenseToken;
     this.sendCommand(cmd);
     await this.waitForState("authenticated");
-  }
-
-  async pairWith(
-    agentDeviceId: string,
-    opts: { pairCode?: string; timeoutMs?: number } = {},
-  ): Promise<void> {
-    this.sendCommand({
-      action: "pair",
-      targetDeviceId: agentDeviceId,
-      ...(opts.pairCode ? { pairCode: opts.pairCode } : {}),
-    });
-    await this.waitForState("paired", opts.timeoutMs ?? 10_000);
   }
 
   /**

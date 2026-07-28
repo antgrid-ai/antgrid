@@ -135,7 +135,6 @@ test("drops session.transcriptSnapshot from a trusted-but-not-allowed phone", as
     phoneDeviceId: "phone-dev-transcript-snap",
     pairedAt: new Date().toISOString(),
     lastSeenAt: new Date().toISOString(),
-    admission: "pair-code",
     allowedProjects: [],
   });
 

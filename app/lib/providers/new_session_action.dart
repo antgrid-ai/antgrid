@@ -1,6 +1,8 @@
 // app/lib/providers/new_session_action.dart
 import 'dart:async';
 
+import 'package:antgrid_relay_client/antgrid_relay_client.dart'
+    show RpcException;
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -65,10 +67,9 @@ Never throwProjectStartFailure(
 /// pick-target → configure → Start flow.
 ///
 /// Per-variant activation mirrors `activateDrawerEntryById` in
-/// `drawer_entry_row.dart`:
-///   - local target → [selectProject];
-///   - remote target already in [recentAgentsProvider] → `reconnect`;
-///   - remote target only in the account inventory → `autoOpen`.
+/// `drawer_entry_row.dart`: a local target goes through [selectProject]; a
+/// remote one resolves its machine (cached recent, else the account inventory)
+/// and lets the connection supervisor bring that machine's socket up.
 ///
 /// Throws on activation/create failure; callers surface the error.
 Future<void> startNewSession(WidgetRef ref) async {
@@ -222,31 +223,19 @@ Future<String> openRemoteProjectForActivation(
     projectId: projectId,
   ).registrationId; // "<uuid>.<projId>"
 
-  final identity = await ref.read(deviceIdentityProvider.future);
-
+  // No pairing step: the control-plane read below is what declares the machine
+  // socket wanted, and the supervisor owns the dial + E2E handshake from there.
+  // Await the inventory when we hold no cached coordinates, so a still-loading
+  // inventory isn't mistaken for "machine unknown".
   final recent = ref
       .read(recentAgentsProvider)
       .where((r) => baseDeviceUuid(r.agentDeviceId) == machineUuid)
       .firstOrNull;
-  if (recent != null) {
-    await ref
-        .read(pairingServiceForProvider(recent.agentDeviceId))
-        .reconnect(recent, identity);
-  } else {
-    // Await the inventory future so a still-loading inventory isn't mistaken for
-    // empty (which would spuriously throw "unavailable"). A provider error
-    // propagates as the real error; the orElse below only fires if the machine
-    // is genuinely absent post-load.
+  if (recent == null) {
     final inventory = await ref.read(accountAgentsProvider.future);
-    final agent = inventory.firstWhere(
-      (a) => a.deviceUuid == machineUuid,
-      orElse: () => throw StateError(
-        'Selected remote machine $machineUuid is unavailable',
-      ),
-    );
-    await ref
-        .read(pairingServiceForProvider(agent.deviceUuid))
-        .autoOpen(agent, identity);
+    if (!inventory.any((a) => a.deviceUuid == machineUuid)) {
+      throw StateError('Selected remote machine $machineUuid is unavailable');
+    }
   }
 
   // ALWAYS send project:start before dialing the data plane — never gate on the
@@ -270,7 +259,19 @@ Future<String> openRemoteProjectForActivation(
   if (cpClient == null) {
     throw StateError('Machine $machineUuid is offline; cannot start project');
   }
-  await cpClient.startProject(projectId);
+  try {
+    await cpClient.startProject(projectId);
+  } on RpcException {
+    // The send couldn't be delivered (keyless reconnect window) — fail fast via
+    // the standard start-failure surface instead of letting awaitProjectRunning
+    // burn the full 30s. lastError won't be SESSION_LIMIT here, so this maps to
+    // the generic transient "couldn't start" the user can retry.
+    throwProjectStartFailure(
+      projectId,
+      machineUuid,
+      cpClient.currentState.lastError,
+    );
+  }
   final ok = await awaitProjectRunning(cpClient, projectId);
   if (!ok) {
     // Distinguish the paid-axis session cap (→ upgrade flow) from a generic
@@ -319,28 +320,19 @@ final drawerProjectSessionsProvider = FutureProvider.autoDispose.family<void, St
   }
   final projectId = regId.substring(machineUuid.length + 1);
 
-  // 1. Machine-level pairing must be live so the control-plane socket exists.
-  // Idempotent against an already-open control-plane connection (see the
-  // autoOpen/reconnect idempotency contract).
-  final identity = await ref.read(deviceIdentityProvider.future);
+  // 1. The machine must be one we can reach. The control-plane read in step 2
+  // declares its socket wanted (the supervisor dials and handshakes); all this
+  // needs to do is fail early on a machine we hold no coordinates for, without
+  // mistaking a still-loading inventory for an empty one.
   final recent = ref
       .read(recentAgentsProvider)
       .where((r) => baseDeviceUuid(r.agentDeviceId) == machineUuid)
       .firstOrNull;
-  if (recent != null) {
-    await ref
-        .read(pairingServiceForProvider(recent.agentDeviceId))
-        .reconnect(recent, identity);
-  } else {
+  if (recent == null) {
     final inventory = await ref.read(accountAgentsProvider.future);
-    final agent = inventory.firstWhere(
-      (a) => a.deviceUuid == machineUuid,
-      orElse: () =>
-          throw StateError('Remote machine $machineUuid is unavailable'),
-    );
-    await ref
-        .read(pairingServiceForProvider(agent.deviceUuid))
-        .autoOpen(agent, identity);
+    if (!inventory.any((a) => a.deviceUuid == machineUuid)) {
+      throw StateError('Remote machine $machineUuid is unavailable');
+    }
   }
 
   // 2. Fetch the session list over the CONTROL PLANE — no data-plane socket, no

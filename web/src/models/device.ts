@@ -109,4 +109,17 @@ export async function listAppDeviceKeys(db: Tx, userId: string): Promise<Buffer[
   return rows.map((r) => Buffer.from(r.publicKey));
 }
 
+export async function listAppDevicePeers(
+  db: Tx,
+  userId: string
+): Promise<{ deviceId: string; publicKey: Buffer }[]> {
+  // Same filter as listAppDeviceKeys — keep the two in lockstep until Phase C
+  // deletes the keys-only variant.
+  const rows = await db.device.findMany({
+    where: { userId, kind: "app" as DeviceKind, revokedAt: null },
+    select: { deviceId: true, publicKey: true },
+  });
+  return rows.map((r) => ({ deviceId: r.deviceId, publicKey: Buffer.from(r.publicKey) }));
+}
+
 export { Prisma };

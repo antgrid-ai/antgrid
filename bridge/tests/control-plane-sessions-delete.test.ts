@@ -15,7 +15,7 @@ function fakeRemoteConfig(): HostRemoteConfig {
   };
 }
 function fakeRuntime(): RemoteRuntime {
-  return { maint: { getToken: () => "tok", stop: () => {} }, getAccountPeerKeys: async () => new Set<string>() };
+  return { maint: { getToken: () => "tok", stop: () => {} } };
 }
 
 let host: HostServer | null = null;
@@ -50,7 +50,7 @@ test("allowed phone deletes a stopped project's session from disk (no core warme
     { id: "a", name: "A", createdAt: 1, lastUsedAt: 10, archived: false },
     { id: "b", name: "B", createdAt: 2, lastUsedAt: 20, archived: false },
   ]);
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["projA"] });
+  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projA"] });
 
   const res = (await h.handleSessionsDeleteRpc(delReq("projA", "a"), "pk1")) as any;
   expect(res.ok).toBe(true);
@@ -63,7 +63,7 @@ test("allowed phone deletes a stopped project's session from disk (no core warme
 test("deleting a missing session returns ok with deleted:false", async () => {
   const h = host!;
   seedSessions("projA", [{ id: "a", name: "A", createdAt: 1, lastUsedAt: 10, archived: false }]);
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["projA"] });
+  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projA"] });
   const res = (await h.handleSessionsDeleteRpc(delReq("projA", "ghost"), "pk1")) as any;
   expect(res.ok).toBe(true);
   expect(res.result.deleted).toBe(false);
@@ -77,7 +77,7 @@ test("a WARM core is delegated to and the disk file is NOT mutated", async () =>
   // is left untouched.
   const h = host!;
   seedSessions("projWarm", [{ id: "a", name: "A", createdAt: 1, lastUsedAt: 10, archived: false }]);
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["projWarm"] });
+  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projWarm"] });
   const captured: { id: string | null } = { id: null };
   (h as any).cores.set("projWarm", {
     core: { deleteSession: (id: string) => { captured.id = id; return true; }, shutdown: async () => {} },
@@ -96,7 +96,7 @@ test("a WARM core is delegated to and the disk file is NOT mutated", async () =>
 test("non-allowed phone is rejected NOT_ALLOWED (no disk mutation)", async () => {
   const h = host!;
   seedSessions("projA", [{ id: "a", name: "A", createdAt: 1, lastUsedAt: 10, archived: false }]);
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: [] });
+  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: [] });
   const res = (await h.handleSessionsDeleteRpc(delReq("projA", "a"), "pk1")) as any;
   expect(res.ok).toBe(false);
   expect(res.error.code).toBe("NOT_ALLOWED");
@@ -106,7 +106,7 @@ test("non-allowed phone is rejected NOT_ALLOWED (no disk mutation)", async () =>
 
 test("a projectId with path separators is rejected E_BAD_PARAMS", async () => {
   const h = host!;
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["../etc"] });
+  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["../etc"] });
   const res = (await h.handleSessionsDeleteRpc(delReq("../etc", "a"), "pk1")) as any;
   expect(res.ok).toBe(false);
   expect(res.error.code).toBe("E_BAD_PARAMS");
@@ -114,7 +114,7 @@ test("a projectId with path separators is rejected E_BAD_PARAMS", async () => {
 
 test("a non-string sessionId is rejected E_BAD_PARAMS", async () => {
   const h = host!;
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: ["projA"] });
+  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projA"] });
   const res = (await h.handleSessionsDeleteRpc(delReq("projA", 123), "pk1")) as any;
   expect(res.ok).toBe(false);
   expect(res.error.code).toBe("E_BAD_PARAMS");

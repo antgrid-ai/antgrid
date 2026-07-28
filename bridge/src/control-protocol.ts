@@ -43,7 +43,6 @@ export interface PairedPhoneSummary {
   label?: string;
   pairedAt: string;
   lastSeenAt: string;
-  admission: "same-account" | "pair-code";
   allowedProjects: string[];
 }
 

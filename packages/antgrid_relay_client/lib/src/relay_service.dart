@@ -14,27 +14,53 @@ import 'crypto_service.dart';
 import 'frame.dart';
 import 'relay_auth.dart';
 
+/// Why a single [RelayService.connect] attempt did not reach `welcome`.
+///
+/// Carries the relay's own error contract ([code]/[retryable]) so the caller —
+/// the one component that owns retry — can classify without reading WS close
+/// codes, which the Dart client cannot see.
+class RelayConnectException implements Exception {
+  RelayConnectException({this.code, required this.retryable, this.message});
+
+  final String? code;
+  final bool retryable;
+  final String? message;
+
+  @override
+  String toString() =>
+      'RelayConnectException(${code ?? 'CLOSED'}, retryable: $retryable)'
+      '${message == null ? '' : ': $message'}';
+}
+
 /// One machine↔relay WebSocket for one phone identity. v3: authenticates with a
 /// single signed `hello` frame (proof-of-possession over `buildHelloSigBody`),
 /// the relay answers `welcome` (→ authenticated) or a typed `error`. There is
 /// no register/challenge/response round trip and no per-project socket — a
 /// single [MachineSession] multiplexes project streams over this one socket.
+///
+/// ONE attempt per [connect], never a retry: redial timing, backoff and give-up
+/// belong to the app's connection supervisor, so there is exactly one component
+/// deciding when to try again.
 class RelayService {
   final CryptoService _crypto;
 
   WebSocketChannel? _channel;
   StreamSubscription? _subscription;
-  DeviceIdentity? _identity;
-  bool _intentionalDisconnect = false;
-  int _reconnectAttempt = 0;
-  Timer? _reconnectTimer;
-  String? _currentRelayUrl;
-  String? _currentLicenseToken;
   int _epoch = 0;
 
-  // Herd mitigation only, not a security control — plain Random per the
-  // hardening spec (equal jitter on the scheduled reconnect delay).
-  final Random _jitter = Random();
+  /// Resolves on `welcome`, rejects on any close/terminal error before it.
+  Completer<void>? _connect;
+  Timer? _connectTimeout;
+  Duration _connectTimeoutDuration = const Duration(seconds: 15);
+
+  /// The bare machine `deviceUuid` this socket serves. Phase A fans
+  /// `peer-online`/`peer-offline` out account-wide (all of a user's machines),
+  /// so this scopes which presence frames may drive THIS connection's state.
+  String? _machineDeviceId;
+
+  /// Hello-nonce source only — not a security control (the relay's replay cache
+  /// is keyed on `(deviceId, nonce)`, and a signed hello is what authenticates).
+  final Random _rng = Random();
 
   /// Clock-skew self-heal (design §13.1): an `AUTH_FAILED` carrying `serverTime`
   /// yields an offset that is applied to the NEXT hello's `ts`. Applied at most
@@ -46,14 +72,8 @@ class RelayService {
 
   final _stateController = StreamController<AppState>.broadcast();
   final _messageController = StreamController<IncomingRouteMessage>.broadcast();
-  final _licenseErrorController =
-      StreamController<RelayLicenseErrorCode>.broadcast();
   final _errorController = StreamController<ErrorMessage>.broadcast();
   final _peerPresenceController = StreamController<bool>.broadcast();
-  final _pairApprovalController =
-      StreamController<PairApprovalMessage>.broadcast();
-  final _pairRejectedController =
-      StreamController<PairRejectedMessage>.broadcast();
 
   AppState _currentState = const AppState();
 
@@ -62,30 +82,15 @@ class RelayService {
 
   /// Every typed relay `error` frame (design §3.3). The `retryable`/`ref` fields
   /// are the failure-signalling contract the Dart client cannot get from WS
-  /// close codes; [MachineSession] and pairing classify failures off this.
+  /// close codes; [MachineSession] and the connection supervisor classify
+  /// failures off this.
   Stream<ErrorMessage> get errorStream => _errorController.stream;
 
-  /// Peer-presence transitions derived from `peer-online`/`peer-offline`/
-  /// `pair-connected`/`grant-revoked`. Drives [MachineSession]'s
-  /// online-after-offline rekey trigger.
+  /// Peer-presence transitions derived from `peer-online`/`peer-offline` for
+  /// THIS machine (and a socket drop). Drives [MachineSession]'s
+  /// online-after-offline rekey trigger, and is the ONLY agent-presence signal —
+  /// the connection state tracks the socket, not the peer.
   Stream<bool> get peerPresenceStream => _peerPresenceController.stream;
-
-  /// Inbound `pair-approval` frames (agent approved a phone's pair-request).
-  /// Consumers verify the Ed25519 signature before trusting.
-  Stream<PairApprovalMessage> get pairApprovalStream =>
-      _pairApprovalController.stream;
-
-  /// Inbound `pair-rejected` frames (pairing refused).
-  Stream<PairRejectedMessage> get pairRejectedStream =>
-      _pairRejectedController.stream;
-
-  /// Fires when the relay rejects the `hello` with a license verdict (M4
-  /// close-code 1008 codes). Terminal — the service marks the disconnect
-  /// intentional so no auto-reconnect is attempted until re-activation. NOTE:
-  /// `SUPERSEDED` is terminal-for-this-socket but is NOT a license error and
-  /// never surfaces here (must not render as "re-activate").
-  Stream<RelayLicenseErrorCode> get licenseErrorStream =>
-      _licenseErrorController.stream;
 
   AppState get currentState => _currentState;
 
@@ -96,7 +101,15 @@ class RelayService {
     _stateController.add(state);
   }
 
-  /// Connect to a relay server and authenticate with a signed `hello`.
+  /// ONE dial attempt: opens the socket, sends the signed `hello`, and
+  /// completes when the relay answers `welcome`. Throws
+  /// [RelayConnectException] if the socket closes or the relay rejects us
+  /// first. Never retries — see the class doc.
+  ///
+  /// The returned future must not resolve before [currentState] reads
+  /// `authenticated`, because the caller re-reads that flag the instant this
+  /// resolves and scores a "successful" dial onto a still-unauthenticated
+  /// socket as a failure.
   ///
   /// [licenseToken] is REQUIRED in v3 — apps authenticate with their own account
   /// token (design §4.2). [epoch] is a per-device monotonic counter (the app
@@ -106,31 +119,66 @@ class RelayService {
     DeviceIdentity identity, {
     required String licenseToken,
     required int epoch,
+    String? machineDeviceId,
   }) async {
-    _identity = identity;
-    _currentRelayUrl = relayUrl;
-    _currentLicenseToken = licenseToken;
     _epoch = epoch;
-    _intentionalDisconnect = false;
-    _reconnectAttempt = 0;
-    await _doConnect(relayUrl, identity);
+    _machineDeviceId = machineDeviceId;
+    // A superseded in-flight attempt must not leave its caller hanging.
+    _failConnect(
+      RelayConnectException(
+        retryable: true,
+        message: 'superseded by a new dial',
+      ),
+    );
+    final attempt = _connect = Completer<void>();
+    // The caller only attaches to this future once _doConnect below returns, so
+    // a failure landing in that window (a disconnect() while the socket is
+    // still opening) would have no listener and surface as an unhandled async
+    // error. Pre-registering a swallowing one is harmless: the real await still
+    // receives the error.
+    attempt.future.ignore();
+    // Without this the socket can open, the hello go out, and the relay simply
+    // never answer — a dial that hangs forever stalls the whole ladder. The
+    // relay's own hello-or-die timer is 10s, so this only ever fires when the
+    // answer is lost, not when it is slow.
+    _connectTimeout = Timer(_connectTimeoutDuration, () {
+      _failConnect(
+        RelayConnectException(
+          code: 'HELLO_TIMEOUT',
+          retryable: true,
+          message: 'no welcome within 15s',
+        ),
+      );
+      _channel?.sink.close();
+    });
+    // Not awaited, so the timer above is the ONLY thing that bounds a dial. An
+    // await here would let anything slow inside `_doConnect` outlive the
+    // watchdog: the timer would fail `attempt` while this method had not yet
+    // returned its future, so the caller would still be waiting on a step that
+    // can never settle — and the supervisor's single-flight `evaluate()` wedges
+    // permanently, never scheduling another attempt. `_doConnect` reports its
+    // own failures through `_failConnect`.
+    unawaited(_doConnect(relayUrl, identity, licenseToken));
+    return attempt.future;
   }
 
-  Future<void> _doConnect(String relayUrl, DeviceIdentity identity) async {
-    // A manual connect() and a fired reconnect timer can both reach here, and a
-    // second attempt must supersede the first. Tear down any prior
-    // subscription/timer/channel up front and listen the channel via a LOCAL
-    // (not the shared `_channel` field re-read after `await ready`); re-reading
-    // `_channel` post-await let a concurrent attempt's channel be listened twice.
+  Future<void> _doConnect(
+    String relayUrl,
+    DeviceIdentity identity,
+    String licenseToken,
+  ) async {
+    // Two connect() calls can overlap (a redial racing a late close), and the
+    // second must supersede the first. Tear down any prior subscription/channel
+    // up front and listen the channel via a LOCAL (not the shared `_channel`
+    // field re-read after `await ready`); re-reading `_channel` post-await let a
+    // concurrent attempt's channel be listened twice.
     _subscription?.cancel();
     _subscription = null;
-    _reconnectTimer?.cancel();
-    _reconnectTimer = null;
     final prevChannel = _channel;
 
-    _setState(_currentState.copyWith(
-      connectionState: RelayConnectionState.connecting,
-    ));
+    _setState(
+      _currentState.copyWith(connectionState: RelayConnectionState.connecting),
+    );
 
     try {
       var wsUrl = relayUrl;
@@ -148,7 +196,12 @@ class RelayService {
       developer.log('connecting to relay $wsUrl', name: 'antgrid.relay');
       final channel = WebSocketChannel.connect(Uri.parse(wsUrl));
       _channel = channel;
-      await prevChannel?.sink.close();
+      // Deliberately NOT awaited: a relay killed without a close handshake
+      // leaves `sink.close()` waiting for a FIN that never arrives, and this
+      // dial would then open its socket, send nothing, and hang — the relay
+      // closes it on the 10s hello timer while the ladder waits forever.
+      // Retiring the old channel is housekeeping; nothing below reads it.
+      unawaited(prevChannel?.sink.close() ?? Future<void>.value());
       await channel.ready;
 
       // A newer `_doConnect` may have replaced `_channel` while we awaited.
@@ -157,9 +210,11 @@ class RelayService {
         return;
       }
 
-      _setState(_currentState.copyWith(
-        connectionState: RelayConnectionState.authenticating,
-      ));
+      _setState(
+        _currentState.copyWith(
+          connectionState: RelayConnectionState.authenticating,
+        ),
+      );
 
       _subscription = channel.stream.listen(
         _onMessage,
@@ -167,7 +222,7 @@ class RelayService {
         onError: (Object error) => _onDisconnected(error),
       );
 
-      final hello = await _buildHello(wsUrl, identity);
+      final hello = await _buildHello(wsUrl, identity, licenseToken);
       // Signing is async; a newer attempt may have superseded us meanwhile.
       if (!identical(_channel, channel)) {
         await channel.sink.close();
@@ -181,26 +236,30 @@ class RelayService {
         error: e,
         stackTrace: st,
       );
-      _setState(_currentState.copyWith(
-        connectionState: RelayConnectionState.disconnected,
-        error: 'Connection failed: $e',
-      ));
-      _scheduleReconnect();
+      _setState(
+        _currentState.copyWith(
+          connectionState: RelayConnectionState.disconnected,
+          error: 'Connection failed: $e',
+        ),
+      );
+      _failConnect(
+        RelayConnectException(retryable: true, message: 'connect failed: $e'),
+      );
     }
   }
 
   Future<Map<String, dynamic>> _buildHello(
     String wsUrl,
     DeviceIdentity identity,
+    String licenseToken,
   ) async {
     final ts = DateTime.now().toUtc().add(_clockOffset).toIso8601String();
     final nonceBytes = Uint8List.fromList(
-      List<int>.generate(16, (_) => _jitter.nextInt(256)),
+      List<int>.generate(16, (_) => _rng.nextInt(256)),
     );
     final nonce = base64.encode(nonceBytes);
     final publicKey = base64.encode(identity.ed25519PublicKey);
     final relayHost = normalizeRelayHost(wsUrl);
-    final licenseToken = _currentLicenseToken ?? '';
     final body = buildHelloSigBody(
       relayHost: relayHost,
       deviceType: 'app',
@@ -211,11 +270,13 @@ class RelayService {
       ts: ts,
       nonce: nonce,
     );
-    final sig = base64.encode(await _crypto.ed25519Sign(
-      body,
-      identity.ed25519PrivateKey,
-      identity.ed25519PublicKey,
-    ));
+    final sig = base64.encode(
+      await _crypto.ed25519Sign(
+        body,
+        identity.ed25519PrivateKey,
+        identity.ed25519PublicKey,
+      ),
+    );
     return HelloMessage(
       deviceType: 'app',
       deviceId: identity.deviceId,
@@ -244,6 +305,21 @@ class RelayService {
   /// without standing up a live WebSocket. Not part of the supported API.
   void debugHandleFrame(dynamic frame) => _onMessage(frame);
 
+  /// Test-only seam: set the machine deviceId this socket serves without
+  /// driving a real `connect()`/handshake. Not part of the supported API.
+  void debugSetMachineDeviceId(String? machineDeviceId) =>
+      _machineDeviceId = machineDeviceId;
+
+  /// Test-only seam: shorten the dial watchdog so a test can assert the bound
+  /// without waiting out the real 15s. Not part of the supported API.
+  void debugSetConnectTimeout(Duration timeout) => _connectTimeoutDuration =
+      timeout;
+
+  /// Test-only seam: install the channel a subsequent `connect()` will see as
+  /// its `prevChannel`, so a test can stand in a socket whose close never
+  /// completes. Not part of the supported API.
+  void debugSetChannel(WebSocketChannel channel) => _channel = channel;
+
   void _handleText(String data) {
     Map<String, dynamic> json;
     try {
@@ -256,95 +332,102 @@ class RelayService {
     if (msg == null) return;
 
     if (msg is WelcomeMessage) {
-      // Authenticated: reset backoff (only proven auth progress does this).
-      _reconnectAttempt = 0;
-      _setState(_currentState.copyWith(
-        connectionState: RelayConnectionState.authenticated,
-      ));
+      // State first, then the completer: whoever awaits connect() re-reads the
+      // connection state the instant it resolves.
+      _setState(
+        _currentState.copyWith(
+          connectionState: RelayConnectionState.authenticated,
+        ),
+      );
+      _completeConnect();
     } else if (msg is ErrorMessage) {
       _handleError(msg);
-    } else if (msg is PairConnectedMessage) {
-      _peerPresenceController.add(true);
-      _setState(_currentState.copyWith(
-        connectionState: RelayConnectionState.paired,
-        peerDeviceId: msg.peerId,
-        peerName: msg.peerName,
-        connectedAt: _currentState.connectedAt ?? DateTime.now(),
-      ));
-    } else if (msg is GrantRevokedMessage) {
-      _peerPresenceController.add(false);
-      _setState(_currentState.copyWith(
-        connectionState: RelayConnectionState.authenticated,
-        peerDeviceId: null,
-        peerName: null,
-      ));
     } else if (msg is PeerOnlineMessage) {
+      if (!_isThisMachine(msg.peerId)) return;
+      // Presence only — the connection state describes OUR socket, and the agent
+      // showing up does not change it.
       _peerPresenceController.add(true);
-      _setState(_currentState.copyWith(
-        connectionState: RelayConnectionState.paired,
-      ));
     } else if (msg is PeerOfflineMessage) {
+      if (!_isThisMachine(msg.peerId)) return;
       // v3: the machine's socket dropped but ours stays open (no cascade close).
       _peerPresenceController.add(false);
-      _setState(_currentState.copyWith(
-        error: 'Peer offline',
-      ));
-    } else if (msg is PairApprovalMessage) {
-      _pairApprovalController.add(msg);
-    } else if (msg is PairRejectedMessage) {
-      _pairRejectedController.add(msg);
+      _setState(_currentState.copyWith(error: 'Peer offline'));
     }
   }
+
+  /// Presence frames are account-wide since Phase A; only the machine this
+  /// socket serves may drive this connection's presence state. Fail CLOSED when
+  /// the machine id is unset (no live connect() supplied one): attribute no
+  /// presence rather than fail open and let any sibling machine's frame flip
+  /// this socket's state.
+  bool _isThisMachine(String peerId) =>
+      _machineDeviceId != null && peerId == _machineDeviceId;
 
   void _handleError(ErrorMessage msg) {
     if (!_errorController.isClosed) _errorController.add(msg);
 
     // Clock-skew AUTH_FAILED (retryable): record the offset and let the socket
-    // close → the scheduled reconnect re-sends the hello with the adjusted `ts`.
+    // close → the caller's next dial re-sends the hello with the adjusted `ts`.
     if (msg.code == 'AUTH_FAILED' && msg.serverTime != null) {
       _maybeApplySkew(msg.serverTime!);
       return;
     }
 
+    // LICENSE_* verdicts are fatal regardless of the relay's `retryable` flag
+    // (device/config state, not a transient failure), so they must be
+    // classified and closed here, ahead of the generic `!msg.retryable`
+    // branch below.
     final licenseCode = RelayLicenseErrorCode.fromWire(msg.code);
     if (licenseCode != null) {
-      _intentionalDisconnect = true;
-      _setState(_currentState.copyWith(
-        connectionState: RelayConnectionState.disconnected,
-        errorCode: msg.code,
-        error: '${msg.code}: ${msg.message}',
-      ));
-      _licenseErrorController.add(licenseCode);
+      _setState(
+        _currentState.copyWith(
+          connectionState: RelayConnectionState.disconnected,
+          errorCode: msg.code,
+          error: '${msg.code}: ${msg.message}',
+        ),
+      );
+      _failConnect(
+        RelayConnectException(
+          code: msg.code,
+          retryable: false,
+          message: msg.message,
+        ),
+      );
       _channel?.sink.close();
       return;
     }
 
     // Terminal-vs-retryable is the error contract (design §3.3): a
-    // `retryable:false` frame precedes an intentional close, so stop
-    // reconnecting. SUPERSEDED/PROTOCOL_VIOLATION/NOT_AUTHORIZED land here —
-    // none is a license error, so `licenseErrorStream` stays silent.
+    // `retryable:false` frame precedes an intentional close, so the caller must
+    // not dial again. SUPERSEDED/PROTOCOL_VIOLATION/NOT_AUTHORIZED land here —
+    // none is a license error.
     if (!msg.retryable) {
-      _intentionalDisconnect = true;
-      _setState(_currentState.copyWith(
-        connectionState: RelayConnectionState.disconnected,
-        errorCode: msg.code,
-        error: '${msg.code}: ${msg.message}',
-      ));
+      _setState(
+        _currentState.copyWith(
+          connectionState: RelayConnectionState.disconnected,
+          errorCode: msg.code,
+          error: '${msg.code}: ${msg.message}',
+        ),
+      );
+      _failConnect(
+        RelayConnectException(
+          code: msg.code,
+          retryable: false,
+          message: msg.message,
+        ),
+      );
       _channel?.sink.close();
       return;
     }
 
-    // Retryable application error (pairing / stream / routing): socket stays
-    // open. Revert an in-flight pairing to authenticated so the flow can retry.
-    final revertState =
-        _currentState.connectionState == RelayConnectionState.pairing
-            ? RelayConnectionState.authenticated
-            : null;
-    _setState(_currentState.copyWith(
-      connectionState: revertState,
-      errorCode: msg.code,
-      error: '${msg.code}: ${msg.message}',
-    ));
+    // Retryable application error (stream / routing): the socket stays open and
+    // the connection state is unchanged — only the error fields move.
+    _setState(
+      _currentState.copyWith(
+        errorCode: msg.code,
+        error: '${msg.code}: ${msg.message}',
+      ),
+    );
   }
 
   void _maybeApplySkew(String serverTime) {
@@ -382,96 +465,54 @@ class RelayService {
       );
     }
     _cleanup();
+    // Retire the dead channel: left here it becomes the `prevChannel` of the
+    // NEXT dial, which would then tidy up a socket the peer already abandoned
+    // on a path where any delay costs the whole attempt. Only on the DROP path
+    // — `disconnect()` calls `_cleanup()` too, and still needs the handle to
+    // close the socket itself.
+    _channel = null;
     // A socket drop makes the peer unreachable regardless of the grant — feed
     // presence=false so consumers (ControlPlaneClient advert, MachineSession
     // rekey arming) react without waiting for a peer-offline frame that a
     // network drop never delivers.
     if (!_peerPresenceController.isClosed) _peerPresenceController.add(false);
-    _setState(_currentState.copyWith(
-      connectionState: RelayConnectionState.disconnected,
-      clearConnectedAt: true,
-      // Carry forward a deliberate errorCode across the close it caused (a
-      // terminal error sets errorCode then closes → onDone fires here, and
-      // copyWith does NOT preserve fields). A fresh _doConnect resets it.
-      errorCode: _currentState.errorCode,
-      error: error != null ? 'Socket error: $error' : null,
-    ));
-    if (!_intentionalDisconnect) {
-      _scheduleReconnect();
-    }
+    _setState(
+      _currentState.copyWith(
+        connectionState: RelayConnectionState.disconnected,
+        clearConnectedAt: true,
+        // Carry forward a deliberate errorCode across the close it caused (a
+        // terminal error sets errorCode then closes → onDone fires here, and
+        // copyWith does NOT preserve fields). A fresh _doConnect resets it.
+        errorCode: _currentState.errorCode,
+        error: error != null ? 'Socket error: $error' : null,
+      ),
+    );
+    _failConnect(
+      RelayConnectException(
+        code: _currentState.errorCode,
+        // A bare close carries no verdict, so it is retryable by default; a
+        // terminal frame already failed the attempt with retryable:false above
+        // and _failConnect only honours the FIRST failure.
+        retryable: true,
+        message: 'socket closed before welcome',
+      ),
+    );
   }
 
-  void _scheduleReconnect() {
-    if (_intentionalDisconnect ||
-        _currentRelayUrl == null ||
-        _identity == null) {
-      return;
-    }
-
-    final delayMs = _delayMsFor(_reconnectAttempt);
-    _reconnectAttempt++;
-    _reconnectTimer = Timer(Duration(milliseconds: delayMs), () {
-      if (!_intentionalDisconnect &&
-          _currentRelayUrl != null &&
-          _identity != null) {
-        _doConnect(_currentRelayUrl!, _identity!);
-      }
-    });
+  void _completeConnect() {
+    _connectTimeout?.cancel();
+    _connectTimeout = null;
+    final c = _connect;
+    _connect = null;
+    if (c != null && !c.isCompleted) c.complete();
   }
 
-  int _backoffMs(int attempt) {
-    // Clamp the SHIFT at both ends: `1 << negative` throws and a large shift
-    // overflows to a zero-delay reconnect storm (both reachable from a public
-    // seam). 2^5 * 1000 = 32000, then capped to 30000.
-    final shift = attempt.clamp(0, 5);
-    final ms = 1000 * (1 << shift);
-    return ms > 30000 ? 30000 : ms;
-  }
-
-  int _delayMsFor(int attempt) {
-    final backoff = _backoffMs(attempt);
-    // Equal jitter applied to the SCHEDULED delay only — uniform in
-    // [backoff/2, backoff]. `backoff` itself stays deterministic.
-    final half = backoff ~/ 2;
-    return half + _jitter.nextInt(backoff - half + 1);
-  }
-
-  /// Test seam: the jittered reconnect delay that attempt [attempt] would
-  /// schedule. Same code path as [_scheduleReconnect].
-  int debugBackoffMs(int attempt) => _delayMsFor(attempt);
-
-  /// Send a pair-request to the relay. Consumers should listen on
-  /// [pairApprovalStream] / [pairRejectedStream] (or [errorStream]) for the
-  /// result.
-  void requestPair({
-    required String agentDeviceId,
-    required String phonePubkey,
-    required String phoneDeviceId,
-    required String nonce,
-    required String requestedAt,
-    required int deadline,
-    required String phoneSignature,
-    String? pairCode,
-    String? label,
-    String? accountDevicePubkey,
-    String? accountMembershipSig,
-  }) {
-    _setState(_currentState.copyWith(
-      connectionState: RelayConnectionState.pairing,
-    ));
-    _send(PairRequestMessage(
-      agentDeviceId: agentDeviceId,
-      phonePubkey: phonePubkey,
-      phoneDeviceId: phoneDeviceId,
-      nonce: nonce,
-      requestedAt: requestedAt,
-      deadline: deadline,
-      phoneSignature: phoneSignature,
-      pairCode: pairCode,
-      label: label,
-      accountDevicePubkey: accountDevicePubkey,
-      accountMembershipSig: accountMembershipSig,
-    ).toJson());
+  void _failConnect(RelayConnectException e) {
+    _connectTimeout?.cancel();
+    _connectTimeout = null;
+    final c = _connect;
+    _connect = null;
+    if (c != null && !c.isCompleted) c.completeError(e);
   }
 
   /// Send a routed frame to the machine peer. [kind] defaults to `sealed`
@@ -496,28 +537,11 @@ class RelayService {
     }
   }
 
-  /// Sever the grant with [peerDeviceId] (v3 `grant-revoke`, replaces `unpair`).
-  void grantRevoke(String peerDeviceId) {
-    _send(GrantRevokeMessage(peerDeviceId: peerDeviceId).toJson());
-    _setState(_currentState.copyWith(
-      connectionState: RelayConnectionState.authenticated,
-    ));
-  }
-
-  /// Sever the grant with the currently-paired peer, if any.
-  void unpair() {
-    final peer = _currentState.peerDeviceId;
-    if (peer != null) {
-      _send(GrantRevokeMessage(peerDeviceId: peer).toJson());
-    }
-    _setState(_currentState.copyWith(
-      connectionState: RelayConnectionState.authenticated,
-    ));
-  }
-
-  /// Disconnect intentionally (no reconnect).
+  /// Drop the socket. Idempotent; callers own whether/when to dial again.
   void disconnect() {
-    _intentionalDisconnect = true;
+    _failConnect(
+      RelayConnectException(retryable: true, message: 'disconnected by caller'),
+    );
     _cleanup();
     _channel?.sink.close();
     _channel = null;
@@ -531,18 +555,13 @@ class RelayService {
   void _cleanup() {
     _subscription?.cancel();
     _subscription = null;
-    _reconnectTimer?.cancel();
-    _reconnectTimer = null;
   }
 
   void dispose() {
     disconnect();
     _stateController.close();
     _messageController.close();
-    _licenseErrorController.close();
     _errorController.close();
     _peerPresenceController.close();
-    _pairApprovalController.close();
-    _pairRejectedController.close();
   }
 }

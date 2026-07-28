@@ -11,7 +11,6 @@ import {
   connect,
   generateKeyPair as genRelayKeyPair,
   makeHello,
-  completePairFlow,
   waitForMessage,
   waitForType,
 } from "../helpers/relay-harness.js";
@@ -133,7 +132,9 @@ async function helloAgent(opts: {
   const ws = await connect(opts.relay);
   const welcome = waitForMessage(ws);
   ws.send(JSON.stringify(hello));
-  expect((await welcome).type).toBe("welcome");
+  // toMatchObject, not `.type` equality: an admission failure here is a typed
+  // error frame, and its `code` is the whole diagnosis.
+  expect(await welcome).toMatchObject({ type: "welcome" });
   return { ws, publicKeyBase64: identity.publicKeyBase64, privateSeed: identity.privateSeed };
 }
 
@@ -143,10 +144,14 @@ async function helloApp(opts: {
   deviceId: string;
   uid?: string;
   azp?: string;
+  /** The token's `deviceUuid` claim when it differs from the id dialled with —
+   *  the real shape once the app addresses each machine on its own relay slot
+   *  (`verifyAppToken` deliberately does not bind the two). */
+  tokenDeviceUuid?: string;
 }): Promise<{ ws: WebSocket; publicKeyBase64: string; privateSeed: Uint8Array }> {
   const identity = await genRelayKeyPair();
   const token = await mintToken(opts.signer, {
-    deviceUuid: opts.deviceId,
+    deviceUuid: opts.tokenDeviceUuid ?? opts.deviceId,
     uid: opts.uid,
     azp: opts.azp,
     pk: identity.publicKeyBase64,
@@ -161,7 +166,9 @@ async function helloApp(opts: {
   const ws = await connect(opts.relay);
   const welcome = waitForMessage(ws);
   ws.send(JSON.stringify(hello));
-  expect((await welcome).type).toBe("welcome");
+  // toMatchObject, not `.type` equality: an admission failure here is a typed
+  // error frame, and its `code` is the whole diagnosis.
+  expect(await welcome).toMatchObject({ type: "welcome" });
   return { ws, publicKeyBase64: identity.publicKeyBase64, privateSeed: identity.privateSeed };
 }
 
@@ -195,21 +202,18 @@ test("revoke: bad signature -> 401, no side effects", async () => {
   r.stop();
 });
 
-test("revoke: closes the agent ws 4002 with a typed LICENSE_REVOKED error first, revokes its grants, and phones stay alive with grant-revoked + peer-offline", async () => {
+test("revoke: closes the agent ws 4002 with a typed LICENSE_REVOKED error first, and its same-account phone gets peer-offline and stays alive", async () => {
   const { signer, jwks } = await makeSigner();
   const cache = new LicenseCache({ maxEntries: 100 });
   const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
   const r = startWith({ licenseGate: gate, licenseCache: cache });
 
+  // No pairing, no grant — mayRoute's account match (both default to
+  // uid "user-1") is the only thing that ever linked these two.
   const agent = await helloAgent({ relay: r, signer, deviceId: "dev-2", azp: "client-2" });
   const phone = await helloApp({ relay: r, signer, deviceId: "phone-2", uid: "user-1", azp: "phone-client-2" });
-  await completePairFlow({
-    agentWs: agent.ws, appWs: phone.ws, agentId: "dev-2", appId: "phone-2",
-    agentPrivSeed: agent.privateSeed,
-  });
 
   const agentEvt = nextMessageOrClose(agent.ws);
-  const phoneRevoked = waitForType(phone.ws, "grant-revoked");
   const phonePeerOffline = waitForType(phone.ws, "peer-offline");
 
   const res = await postInternal(r.server.port!, "/internal/revoke", { deviceId: "dev-2" });
@@ -221,7 +225,6 @@ test("revoke: closes the agent ws 4002 with a typed LICENSE_REVOKED error first,
   expect(result.closeCode).toBe(4002);
   expect(cache.get("dev-2")?.revoked).toBe(true);
 
-  expect(await phoneRevoked).toEqual({ type: "grant-revoked", peerDeviceId: "dev-2", reason: "REVOKED" });
   expect(await phonePeerOffline).toEqual({ type: "peer-offline", peerId: "dev-2" });
   expect(phone.ws.readyState).toBe(1);
 
@@ -311,29 +314,25 @@ test("expire: multi-device user -> all closed and revoked", async () => {
   r.stop();
 });
 
-test("expire: an agent's grants are severed too — its phone gets grant-revoked + peer-offline and stays alive", async () => {
+test("expire: closes only the target user's connections; a different uid stays open", async () => {
   const { signer, jwks } = await makeSigner();
   const cache = new LicenseCache({ maxEntries: 100 });
   const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
   const r = startWith({ licenseGate: gate, licenseCache: cache });
 
-  const agent = await helloAgent({ relay: r, signer, deviceId: "dev-expire-agent", uid: "expire-user", azp: "client-ea" });
-  const phone = await helloApp({ relay: r, signer, deviceId: "phone-expire", uid: "some-other-user", azp: "client-ep" });
-  await completePairFlow({
-    agentWs: agent.ws, appWs: phone.ws, agentId: "dev-expire-agent", appId: "phone-expire",
-    agentPrivSeed: agent.privateSeed,
-  });
+  const agent = await helloAgent({ relay: r, signer, deviceId: "dev-expire-user", uid: "expire-user", azp: "client-expire" });
+  const other = await helloApp({ relay: r, signer, deviceId: "dev-other-uid", uid: "other-user", azp: "client-other" });
 
   const agentEvt = nextMessageOrClose(agent.ws);
-  const phoneRevoked = waitForType(phone.ws, "grant-revoked");
-  const phonePeerOffline = waitForType(phone.ws, "peer-offline");
 
   const res = await postInternal(r.server.port!, "/internal/expire", { userId: "expire-user" });
   expect(res.status).toBe(200);
-  expect((await agentEvt).closeCode).toBe(4002);
-  expect(await phoneRevoked).toEqual({ type: "grant-revoked", peerDeviceId: "dev-expire-agent", reason: "REVOKED" });
-  expect(await phonePeerOffline).toEqual({ type: "peer-offline", peerId: "dev-expire-agent" });
-  expect(phone.ws.readyState).toBe(1);
+
+  const result = await agentEvt;
+  expect(result.msg).toMatchObject({ type: "error", code: "LICENSE_EXPIRED", retryable: false });
+  expect(result.closeCode).toBe(4002);
+
+  expect(other.ws.readyState).toBe(1);
 
   r.stop();
 });
@@ -450,5 +449,36 @@ test("connections: unknown userId -> 200 with empty list", async () => {
   const res = await postInternal(r.server.port!, "/internal/connections", { issuedAt: Date.now(), userId: "ghost-user" });
   expect(res.status).toBe(200);
   expect(await res.json()).toEqual({ connections: [] });
+  r.stop();
+});
+
+// Per-machine relay slots: an app's `hello.deviceId` is
+// `<accountDeviceUuid>#<machineDeviceUuid>`, so revocation — which web issues
+// against the bare account device — must reach every slot the app holds. A
+// bare-id lookup finds none of them and leaves a revoked phone routing.
+test("revoke: closes every per-machine slot an app holds under the revoked account device", async () => {
+  const { signer, jwks } = await makeSigner();
+  const cache = new LicenseCache({ maxEntries: 100 });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
+  const r = startWith({ licenseGate: gate, licenseCache: cache });
+
+  // One phone, two machines open at once — two sockets, one account device.
+  const slotA = await helloApp({ relay: r, signer, deviceId: "phone-slots#machine-a", tokenDeviceUuid: "phone-slots", uid: "user-slots", azp: "phone-client-slots" });
+  const slotB = await helloApp({ relay: r, signer, deviceId: "phone-slots#machine-b", tokenDeviceUuid: "phone-slots", uid: "user-slots", azp: "phone-client-slots" });
+  // A same-account phone that was NOT revoked must be left alone.
+  const bystander = await helloApp({ relay: r, signer, deviceId: "phone-other#machine-a", tokenDeviceUuid: "phone-other", uid: "user-slots", azp: "phone-client-other" });
+
+  const evtA = nextMessageOrClose(slotA.ws);
+  const evtB = nextMessageOrClose(slotB.ws);
+
+  const res = await postInternal(r.server.port!, "/internal/revoke", { deviceId: "phone-slots" });
+  expect(res.status).toBe(200);
+
+  for (const evt of [await evtA, await evtB]) {
+    expect(evt.msg).toMatchObject({ type: "error", code: "LICENSE_REVOKED", retryable: false });
+    expect(evt.closeCode).toBe(4002);
+  }
+  expect(bystander.ws.readyState).toBe(1);
+
   r.stop();
 });

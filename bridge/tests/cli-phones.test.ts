@@ -1,5 +1,5 @@
-import { describe, it, expect } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { describe, it, expect, spyOn } from "bun:test";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPairedPhones } from "../src/paired-phones";
@@ -11,7 +11,6 @@ function seeded() {
   store.upsert({
     phonePubkey: "pk1", phoneDeviceId: "d1", label: "Pixel",
     pairedAt: "2026-01-01T00:00:00Z", lastSeenAt: "2026-01-01T00:00:00Z",
-    admission: "pair-code",
     allowedProjects: [],
   });
   return { dir, store };
@@ -80,6 +79,34 @@ describe("antgrid phones CLI", () => {
     rmSync(dir, { recursive: true });
   });
 
+  it("list surfaces each phone's last seen (the value the touch refresh keeps current)", () => {
+    const { dir, store } = seeded();
+    store.touchLastSeen("pk1", "2026-07-27T09:30:00.000Z");
+    const lines: string[] = [];
+    const log = spyOn(console, "log").mockImplementation((...args: unknown[]) => { lines.push(args.join(" ")); });
+    expect(phonesList(store)).toBe(0);
+    log.mockRestore();
+    expect(lines).toEqual(["Pixel  [d1]  last seen: 2026-07-27T09:30:00.000Z  allowed: (none)"]);
+    store.close();
+    rmSync(dir, { recursive: true });
+  });
+
+  it("list renders a row with no lastSeenAt as unknown, not the string undefined", () => {
+    const dir = mkdtempSync(join(tmpdir(), "antgrid-cli-"));
+    mkdirSync(join(dir, "agents"), { recursive: true });
+    // A hand-edited file: readFile applies no per-field validation.
+    writeFileSync(
+      join(dir, "agents", "paired-phones.json"),
+      JSON.stringify({ version: 1, phones: [{ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", allowedProjects: [] }] }),
+    );
+    const lines: string[] = [];
+    const log = spyOn(console, "log").mockImplementation((...args: unknown[]) => { lines.push(args.join(" ")); });
+    phonesList(loadPairedPhones(dir));
+    log.mockRestore();
+    expect(lines[0]).toContain("last seen: unknown");
+    rmSync(dir, { recursive: true });
+  });
+
   it("remove drops the phone entirely", () => {
     const { dir, store } = seeded();
     const code = phonesRemove(store, "pk1");
@@ -103,13 +130,11 @@ describe("antgrid phones CLI", () => {
     store.upsert({
       phonePubkey: "pkA", phoneDeviceId: "dA", label: "Pixel",
       pairedAt: "2026-01-01T00:00:00Z", lastSeenAt: "2026-01-01T00:00:00Z",
-      admission: "pair-code",
       allowedProjects: [],
     });
     store.upsert({
       phonePubkey: "pkB", phoneDeviceId: "dB", label: "Pixel",
       pairedAt: "2026-01-01T00:00:00Z", lastSeenAt: "2026-01-01T00:00:00Z",
-      admission: "pair-code",
       allowedProjects: [],
     });
     const code = phonesRemove(store, "Pixel");

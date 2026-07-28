@@ -11,21 +11,14 @@
 //
 // Known Windows test noise (NOT failures): fs.watch EPERM/EBUSY on teardown.
 import { test, expect } from "bun:test";
-import { generateKeyPairSync } from "node:crypto";
-import { join } from "node:path";
-import { setupPairFlowTestEnv } from "../helpers/test-env";
-import { RelayClient } from "../helpers/relay-client";
+import { setupTestEnv } from "../helpers/harness";
 import { createTestProject } from "../helpers/fixtures";
 import { computeProjectId } from "../../bridge/src/project-id";
-import { loadPairedPhones } from "../../bridge/src/paired-phones";
 import { readHostFile } from "../../bridge/src/host-discovery";
 import { createMessage } from "../../bridge/src/protocol";
-import { firstProjectStream } from "../support/stream";
+import { allowAndResolveStream, firstProjectStream } from "../support/stream";
+import { join } from "node:path";
 
-function rawEdPubB64(pub: import("node:crypto").KeyObject): string {
-  const der = pub.export({ format: "der", type: "spki" });
-  return Buffer.from(der.subarray(der.length - 32)).toString("base64");
-}
 async function loopbackControl(abDir: string, body: object): Promise<any> {
   const hf = readHostFile(join(abDir, "host.json"));
   if (!hf) throw new Error("no host.json for loopback control");
@@ -38,16 +31,11 @@ async function loopbackControl(abDir: string, body: object): Promise<any> {
 }
 
 test("one phone socket carries control + two project streams, isolated, on a single relay connection", async () => {
-  const accountKp = generateKeyPairSync("ed25519");
-  const accountPubB64 = rawEdPubB64(accountKp.publicKey);
-  const env = await setupPairFlowTestEnv({ accountPeerKeys: [accountPubB64] });
+  const env = await setupTestEnv({ fixtureName: "basic" });
   // projA is the firstProject (opened remote at boot). projB is a second project.
   const projBdir = createTestProject("basic", { "__RELAY_URL__": env.relay.url.replace(/\/ws$/, "") });
-  let app: RelayClient | null = null;
   try {
-    const relayUrl = env.relay.url;
-    const deviceUuid = env.agent.deviceId;
-    const agentEd25519Pub = env.agent.ed25519Pubkey;
+    const app = env.app;
     const projA = env.projectId;
     const projB = computeProjectId(projBdir.dir);
 
@@ -61,33 +49,28 @@ test("one phone socket carries control + two project streams, isolated, on a sin
     })).ok).toBe(true);
     expect((await loopbackControl(env.abDir, { id: "stop-b", type: "project:stop", projectId: projB })).ok).toBe(true);
 
-    // ONE socket, ONE session — pair via the QR-less account-membership proof.
-    app = await RelayClient.connectAndAuth(relayUrl, { deviceType: "app", name: "eval-phone" });
-    const phoneIdentity = app.exportIdentity();
-    for (let i = 0; i < 50; i++) {
-      try {
-        const r = await app.pairWith(deviceUuid, { timeoutMs: 8_000, accountKey: { pubB64: accountPubB64, privateKey: accountKp.privateKey } });
-        app.setPeerId(r.peerId);
-        await app.performE2EHandshake(deviceUuid, 10_000, { agentEd25519Pub });
-        break;
-      } catch {
-        if (app.isClosed) await app.reconnectAndAuth(relayUrl);
-        await Bun.sleep(150);
-      }
-    }
+    // ONE socket, ONE session — setupTestEnv already admitted it via account
+    // trust (no pairing ceremony).
 
-    // Allow both projects for this phone (fail-closed allowlist), then let the
-    // host's fs.watch reload.
-    const store = loadPairedPhones(env.abDir);
-    store.allowProject(phoneIdentity.publicKeyBase64, projA);
-    store.allowProject(phoneIdentity.publicKeyBase64, projB);
-    await Bun.sleep(400);
-    await app.pullStateSnapshot();
-
+    // Allow both projects for this phone (fail-closed allowlist; projA is
+    // already allowed by setupTestEnv), then let the host's fs.watch reload —
+    // retrying the write (see allowAndResolveStream's docstring) since a lost
+    // fs.watch event on paired-phones.json would otherwise strand this on a
+    // no-op-once-present allowlist write.
     // projA (already running) → streamId from the advert; projB → project:start
     // opens its stream (design §7.4). Both streams live in the ONE session.
+    // projB was explicitly stopped above, so this project:start takes the
+    // FRESH-open path (terminals: startup commands run), not the idempotent
+    // republish — 12s per attempt matches drill-in.test.ts's budget for that
+    // same genuine-open shape, not the few-hundred-ms an idempotent
+    // re-advertise would need. Fewer attempts (3, not allowAndResolveStream's
+    // default 10) keeps the worst case bounded well under this test's own
+    // 120s timeout.
+    const streamB = await allowAndResolveStream(app, env.abDir, projB, {
+      attempts: 3,
+      resolve: (a) => a.openProjectStream(projB, 12_000),
+    });
     const streamA = await firstProjectStream(app, projA, 10_000);
-    const streamB = await app.openProjectStream(projB, 12_000);
     expect(streamA).not.toBe(streamB);
 
     // Isolation: a verb on each stream returns tagged with THAT stream's id.
@@ -106,7 +89,6 @@ test("one phone socket carries control + two project streams, isolated, on a sin
     // The agent multiplexes both project streams over its single socket.
     expect(env.relay.streamCount()).toBeGreaterThanOrEqual(2);
   } finally {
-    await app?.disconnect();
     await env.teardown();
     try { projBdir.cleanup(); } catch { /* Windows EBUSY teardown race */ }
   }

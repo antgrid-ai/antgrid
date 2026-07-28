@@ -4,56 +4,10 @@ import { buildHelloSigBody, normalizeRelayHost, decodeRouteFrame } from "antgrid
 import type { RelayConfig } from "../../src/config.js";
 import type { LicenseGate } from "../../src/license/gate.js";
 
-// --- Inline pair-approval signer (mirrors bridge/src/pair-approval.ts) ---
-const PAIR_DOMAIN = "antgrid.pair-approval.v1";
-const PAIR_NUL = Buffer.from([0]);
 const ED25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 
 export function rawSeedToPkcs8(seed: Uint8Array): Buffer {
   return Buffer.concat([ED25519_PKCS8_PREFIX, Buffer.from(seed)]);
-}
-
-export function buildPairApprovalSigBody(args: {
-  agentDeviceId: string;
-  phonePubkey: string;
-  phoneDeviceId: string;
-  nonce: string;
-  expiresAt: string;
-}): Buffer {
-  return Buffer.concat([
-    Buffer.from(PAIR_DOMAIN, "utf8"),
-    PAIR_NUL,
-    Buffer.from(args.agentDeviceId, "utf8"),
-    PAIR_NUL,
-    Buffer.from(args.phonePubkey, "base64"),
-    PAIR_NUL,
-    Buffer.from(args.phoneDeviceId, "utf8"),
-    PAIR_NUL,
-    Buffer.from(args.nonce, "base64"),
-    PAIR_NUL,
-    Buffer.from(args.expiresAt, "utf8"),
-  ]);
-}
-
-export function signPairApproval(args: {
-  agentDeviceId: string;
-  phonePubkey: string;
-  phoneDeviceId: string;
-  nonce: string;
-  expiresAt: string;
-  agentEd25519Priv: Uint8Array;
-}): string {
-  const sigBody = buildPairApprovalSigBody(args);
-  const pkcs8 = rawSeedToPkcs8(args.agentEd25519Priv);
-  return edSign(null, sigBody, { key: pkcs8, format: "der", type: "pkcs8" }).toString("base64");
-}
-
-// Placeholder pair-request phoneSignature. The relay only validates message
-// shape — the agent verifies the actual phoneSignature. Any non-empty base64
-// passes relay-side Zod.
-export const RELAY_TEST_PLACEHOLDER_SIG = Buffer.alloc(64, 0).toString("base64");
-export function relayTestRequestedAt(): string {
-  return new Date().toISOString();
 }
 
 // Per-deviceId stable jti so reconnects look the same.
@@ -122,14 +76,11 @@ export const defaultConfig: RelayConfig = {
   port: 0,
   maxConnections: 100,
   rateLimitConnPerIp: 10,
-  pairRequestTimeoutMs: 60000,
-  pairRateLimitPerIp: 50,
   rateLimitMsgPerSec: 100,
   jsonRateLimitPerSec: 10,
   jsonRateLimitBurst: 30,
   clockSkewMs: 120000,
   replayTtlMs: 300000,
-  staleGrantDays: 30,
   pingIntervalMs: 0, // disabled in tests
   pongTimeoutMs: 10000,
   logLevel: "error" as const,
@@ -310,110 +261,6 @@ export async function connectHello(
   ws.send(JSON.stringify(hello));
   const welcome = await first;
   return { ws, publicKeyBase64, privateSeed, welcome };
-}
-
-/**
- * Drive the v3 pair flow: an app sends pair-request (with deadline), the agent
- * receives the relay-stamped forward, signs an approval echoing `pairId`, and
- * both sides observe `pair-connected`. Both sockets must already be past hello.
- *
- * The phone's PAIRING key defaults to a fresh keypair, distinct from the
- * connection key it authenticated with at hello. That mirrors the real app
- * (PhoneIdentity vs DeviceIdentity are independently generated) — reusing one
- * key for both roles hides bugs in which anchor the relay uses.
- */
-export async function completePairFlow(opts: {
-  agentWs: WebSocket;
-  appWs: WebSocket;
-  agentId: string;
-  appId: string;
-  agentPrivSeed: Uint8Array;
-  /** Override the phone's pairing key; defaults to a fresh, distinct keypair. */
-  pairingPubkey?: string;
-}): Promise<{ pairingPubkey: string }> {
-  const { agentWs, appWs, agentId, appId, agentPrivSeed } = opts;
-  const pairingPubkey = opts.pairingPubkey ?? (await generateKeyPair()).publicKeyBase64;
-  const nonce = Buffer.from(crypto.getRandomValues(new Uint8Array(24))).toString("base64");
-
-  const agentForwarded = new Promise<Record<string, unknown>>((resolve) => {
-    const h = (e: MessageEvent) => {
-      if (typeof e.data !== "string") return;
-      const m = JSON.parse(e.data);
-      if (m.type === "pair-request") {
-        agentWs.removeEventListener("message", h as never);
-        resolve(m);
-      }
-    };
-    agentWs.addEventListener("message", h as never);
-  });
-
-  appWs.send(JSON.stringify({
-    type: "pair-request",
-    agentDeviceId: agentId,
-    phonePubkey: pairingPubkey,
-    phoneDeviceId: appId,
-    nonce,
-    requestedAt: relayTestRequestedAt(),
-    deadline: Date.now() + 60_000,
-    phoneSignature: RELAY_TEST_PLACEHOLDER_SIG,
-  }));
-  const forwarded = await agentForwarded;
-  const pairId = forwarded.pairId as string;
-
-  const expiresAt = new Date(Date.now() + 60_000).toISOString();
-  const signature = signPairApproval({
-    agentDeviceId: agentId,
-    phonePubkey: pairingPubkey,
-    phoneDeviceId: appId,
-    nonce,
-    expiresAt,
-    agentEd25519Priv: agentPrivSeed,
-  });
-
-  const waitConnected = (ws: WebSocket) => new Promise<void>((resolve) => {
-    const h = (e: MessageEvent) => {
-      if (typeof e.data !== "string") return;
-      const m = JSON.parse(e.data);
-      if (m.type === "pair-connected") {
-        ws.removeEventListener("message", h as never);
-        resolve();
-      }
-    };
-    ws.addEventListener("message", h as never);
-  });
-  const agentConnected = waitConnected(agentWs);
-  const appConnected = waitConnected(appWs);
-
-  agentWs.send(JSON.stringify({
-    type: "pair-approval",
-    pairId,
-    phonePubkey: pairingPubkey,
-    phoneDeviceId: appId,
-    nonce,
-    expiresAt,
-    signature,
-  }));
-
-  await Promise.all([agentConnected, appConnected]);
-  return { pairingPubkey };
-}
-
-/** Connect an agent + app via hello and pair them, returning both sockets and keys. */
-export async function setupPairedDevices(relay: RelayServer, prefix: string) {
-  const agentId = `${prefix}-agent`;
-  const appId = `${prefix}-app`;
-  const agent = await connectHello(relay, { deviceId: agentId, deviceType: "agent" });
-  const app = await connectHello(relay, { deviceId: appId, deviceType: "app" });
-
-  await completePairFlow({
-    agentWs: agent.ws,
-    appWs: app.ws,
-    agentId,
-    appId,
-    agentPrivSeed: agent.privateSeed,
-  });
-
-  return { agentWs: agent.ws, appWs: app.ws, agent, app, agentId, appId };
 }
 
 export type { RelayServer, RelayServerDeps };

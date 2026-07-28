@@ -2,33 +2,9 @@ import { test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  generateKeyPairSync,
-  sign,
-  type KeyObject,
-} from "node:crypto";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
 import { MessageBus } from "../src/message-bus";
 import { createMessage } from "../src/protocol";
-import { handleInboundPairRequest } from "../src/relay-client";
-import { loadPairedPhones } from "../src/paired-phones";
-import { createPairingWindow } from "../src/pairing-window";
-import { buildPairRequestSigBody } from "../src/pair-request-verify";
-// The REAL relay-side verifier. Imported at runtime via a specifier tsc cannot
-// statically resolve, so bridge's `tsc --noEmit` (rootDir = bridge) does not try
-// to pull relay sources under its rootDir — while the test still exercises the
-// production verifier. This is the load-bearing security assertion: the approval
-// bytes signed over a bare deviceUuid must verify with the real relay verifier.
-type PairApprovalVerifier = (args: {
-  agentEd25519Pubkey: string;
-  agentDeviceId: string;
-  approval: { phonePubkey: string; phoneDeviceId: string; nonce: string; expiresAt: string; signature: string };
-  expectedNonce: string;
-}) => { ok: boolean };
-const relayVerifyPath = ["..", "..", "relay", "src", "pair-verify"].join("/");
-const verifyPairApproval = (
-  (await import(relayVerifyPath)) as { verifyPairApproval: PairApprovalVerifier }
-).verifyPairApproval;
 
 // --- shared fakes (mirror host-server.test.ts) -----------------------------
 
@@ -43,7 +19,7 @@ function fakeRemoteConfig(): HostRemoteConfig {
 }
 
 function fakeRuntime(): RemoteRuntime {
-  return { maint: { getToken: () => "tok", stop: () => {} }, getAccountPeerKeys: async () => new Set<string>() };
+  return { maint: { getToken: () => "tok", stop: () => {} } };
 }
 
 let host: HostServer | null = null;
@@ -179,7 +155,6 @@ test("onPeerOnline re-advertises to the recovered peer (bridge-side reconnect, p
     phoneDeviceId: "phone-1",
     pairedAt: "x",
     lastSeenAt: "x",
-    admission: "same-account",
     allowedProjects: ["proj-1"],
   });
 
@@ -276,115 +251,4 @@ test("control-plane state.snapshot RECOMPUTES projects (project visible after th
   expect(res?.ok).toBe(true);
   const projectsFrame = (res.result.frames as any[]).find((f) => f.type === "agent:projects");
   expect(projectsFrame.projects.map((p: any) => p.projectId)).toEqual(["proj-1"]);
-});
-
-// --- pair-approval over the bare deviceUuid round-trip ---------------------
-// Proves the trust bytes round-trip with agentDeviceId = a BARE deviceUuid:
-// the real relay verifier accepts the approval, and rejects it under a
-// different agentDeviceId (negative control). No relay/host is stood up — only
-// the pure signing + verify helpers are exercised.
-
-const ED25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
-
-function makePhoneKp() {
-  const kp = generateKeyPairSync("ed25519");
-  const spki = kp.publicKey.export({ type: "spki", format: "der" }) as Buffer;
-  const phonePubkey = spki.subarray(spki.length - 32).toString("base64");
-  return { kp, phonePubkey };
-}
-
-/** A real agent Ed25519 keypair, exposed as the raw 32-byte seed (what
- *  handleInboundPairRequest signs with) and the raw 32-byte public key (what
- *  verifyPairApproval checks against). */
-function makeAgentKp() {
-  const kp = generateKeyPairSync("ed25519");
-  const pkcs8 = kp.privateKey.export({ type: "pkcs8", format: "der" }) as Buffer;
-  const seed = pkcs8.subarray(pkcs8.length - 32); // raw 32-byte Ed25519 seed
-  const spki = kp.publicKey.export({ type: "spki", format: "der" }) as Buffer;
-  const pubB64 = spki.subarray(spki.length - 32).toString("base64");
-  return { seed, pubB64 };
-}
-
-function signRequest(opts: {
-  kp: { publicKey: KeyObject; privateKey: KeyObject };
-  phonePubkey: string;
-  agentDeviceId: string;
-  phoneDeviceId: string;
-  nonce: string;
-}): { requestedAt: string; phoneSignature: string } {
-  const requestedAt = new Date().toISOString();
-  const body = buildPairRequestSigBody({
-    agentDeviceId: opts.agentDeviceId,
-    phonePubkey: opts.phonePubkey,
-    phoneDeviceId: opts.phoneDeviceId,
-    nonce: opts.nonce,
-    requestedAt,
-  });
-  const phoneSignature = sign(null, body, opts.kp.privateKey).toString("base64");
-  return { requestedAt, phoneSignature };
-}
-
-test("pair-approval signed over the bare deviceUuid verifies (and fails for a different id)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "antgrid-cp-pair-"));
-  try {
-    const deviceUuid = "uuid-1"; // bare control-plane registration id
-    const phones = loadPairedPhones(dir);
-    const win = createPairingWindow();
-    const { code } = win.open();
-    const { kp, phonePubkey } = makePhoneKp();
-    const agent = makeAgentKp();
-    const nonce = Buffer.alloc(16, 7).toString("base64");
-    const sig = signRequest({
-      kp,
-      phonePubkey,
-      agentDeviceId: deviceUuid,
-      phoneDeviceId: "phone-1",
-      nonce,
-    });
-
-    const sent: any[] = [];
-    await handleInboundPairRequest({
-      msg: {
-        type: "pair-request",
-        agentDeviceId: deviceUuid,
-        pairId: "pair-test",
-        phonePubkey,
-        phoneDeviceId: "phone-1",
-        nonce,
-        requestedAt: sig.requestedAt,
-        phoneSignature: sig.phoneSignature,
-        pairCode: code,
-        label: "iPhone",
-      },
-      pairedPhones: phones,
-      pairingWindow: win,
-      agentDeviceId: deviceUuid,
-      agentEd25519Priv: agent.seed,
-      send: (m) => sent.push(m),
-    });
-
-    expect(sent.length).toBe(1);
-    expect(sent[0].type).toBe("pair-approval");
-    const approval = sent[0];
-
-    // REAL relay verifier accepts the approval bound to the bare deviceUuid.
-    const good = verifyPairApproval({
-      agentEd25519Pubkey: agent.pubB64,
-      agentDeviceId: deviceUuid,
-      approval,
-      expectedNonce: nonce,
-    });
-    expect(good.ok).toBe(true);
-
-    // Negative control: a different agentDeviceId must NOT verify.
-    const bad = verifyPairApproval({
-      agentEd25519Pubkey: agent.pubB64,
-      agentDeviceId: "uuid-DIFFERENT",
-      approval,
-      expectedNonce: nonce,
-    });
-    expect(bad.ok).toBe(false);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
 });

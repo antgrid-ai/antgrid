@@ -55,8 +55,6 @@ RecentAgent _remoteMachine() => RecentAgent(
   agentLabel: 'Remote pair',
   agentEd25519Pubkey: 'pub',
   relayUrl: 'wss://relay.example.com',
-  phoneDeviceId: 'phone-1',
-  phoneEd25519Pubkey: 'phone-pub',
   pairedAt: DateTime(2026, 1, 1),
   lastConnectedAt: DateTime(2026, 1, 2),
   hostMachineName: _machineName,

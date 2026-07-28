@@ -10,7 +10,7 @@ describe("paired-phones live reload", () => {
     const host = loadPairedPhones(dir);
     host.upsert({
       phonePubkey: "pk1", phoneDeviceId: "d1",
-      pairedAt: "x", lastSeenAt: "x", admission: "pair-code", allowedProjects: [],
+      pairedAt: "x", lastSeenAt: "x", allowedProjects: [],
     });
     let fired = 0;
     const stop = host.watch(() => { fired++; });

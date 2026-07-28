@@ -359,6 +359,18 @@ const StreamReadyMessage = BaseMessage.extend({
   streamId: z.string(),
 });
 
+// Outbound agent→app, control plane only: the phone addressed a streamId this
+// host process holds no stream for — almost always a host restart, whose fresh
+// process re-attaches every project under newly random ids (stream-mux.ts). The
+// old id is dead forever, so without this the phone replays onto it and every
+// verb times out with no signal to renegotiate. The phone answers by re-driving
+// `project:start` for the project it had bound to `streamId`. E2E-opaque to the
+// relay. No inbound switch case.
+const StreamInvalidMessage = BaseMessage.extend({
+  type: z.literal("stream-invalid"),
+  streamId: z.string(),
+});
+
 // Outbound result for a control-plane verb (e.g. project:start). Success is
 // usually conveyed by a fresh agent:projects re-advertisement; this carries the
 // FAILURE feedback (NOT_ALLOWED / UNKNOWN_PROJECT / OPEN_FAILED) back to the
@@ -673,10 +685,6 @@ const AgentRelayReadyMessage = BaseMessage.extend({
   type: z.literal("agent:relayReady"),
   agentDeviceId: z.string(),
   pairingQr: z.string(),
-  // Both optional so older app builds that connect to a v3-aware agent (or
-  // vice versa) keep parsing the message during the atomic rollout window.
-  pairCode: z.string().optional(),
-  pairCodeExpiresAt: z.string().optional(),
 });
 const AgentRelayErrorMessage = BaseMessage.extend({
   type: z.literal("agent:relayError"),
@@ -688,8 +696,6 @@ const AgentRelayErrorMessage = BaseMessage.extend({
 const AgentPairingReadyMessage = BaseMessage.extend({
   type: z.literal("agent:pairingReady"),
   pairingQr: z.string(),
-  pairCode: z.string(),
-  pairCodeExpiresAt: z.string(),
   agentDeviceId: z.string(),
 });
 
@@ -1265,6 +1271,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentProjectsMessage,
   AgentToolsMessage,
   StreamReadyMessage,
+  StreamInvalidMessage,
   ControlResultMessage,
   AppReadyMessage,
   CommandRunMessage,
@@ -1377,6 +1384,7 @@ export type AgentProjects = z.infer<typeof AgentProjectsMessage>;
 export type ProjectAdvertEntry = AgentProjects["projects"][number];
 export type AgentTools = z.infer<typeof AgentToolsMessage>;
 export type StreamReady = z.infer<typeof StreamReadyMessage>;
+export type StreamInvalid = z.infer<typeof StreamInvalidMessage>;
 export type ControlResult = z.infer<typeof ControlResultMessage>;
 export type AppReady = z.infer<typeof AppReadyMessage>;
 export type CommandRun = z.infer<typeof CommandRunMessage>;
@@ -1533,7 +1541,7 @@ const KNOWN_TYPES = new Set<string>([
   "ping", "pong", "handshake:challenge", "handshake:client-hello", "handshake:agent-hello", "handshake:agent-ready",
   "tree:full", "tree:update", "file:read", "file:content",
   "ports:update", "preview:url",
-  "agent:disconnecting", "agent:projects", "agent:tools", "stream-ready", "control:result", "app:ready",
+  "agent:disconnecting", "agent:projects", "agent:tools", "stream-ready", "stream-invalid", "control:result", "app:ready",
   "command:run", "command:output", "command:done", "notification:push", "push:register",
   "handler:configure", "handler:status", "handler:escalation", "handler:activity",
   "git:status", "git:diff", "git:diff-content",

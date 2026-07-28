@@ -4,8 +4,9 @@ import {
   startServer,
   defaultConfig,
   connectHello,
-  setupPairedDevices,
+  makeFakeLicenseGate,
   waitForMessage,
+  waitForType,
   decodeMessage,
   type RelayServer,
 } from "./helpers/relay-harness.js";
@@ -21,56 +22,153 @@ function frame(to: string, text: string, kind: FrameKind = FrameKind.sealed): Ui
   return encodeRouteFrame({ type: "message", to, channel: "control" }, new TextEncoder().encode(text), kind);
 }
 
-test("no grant -> NOT_AUTHORIZED in both directions", async () => {
+// mayRoute is the ONLY routing authority post-Task-4 — there is no pairing or
+// grant step left to skip. These two pin the property directly (spec
+// 2026-07-24 §3.2).
+test("same-account routing needs no grant", async () => {
+  const sharedToken = "task4-same-account";
+  const gate = makeFakeLicenseGate({ agentUid: () => `user-app-${sharedToken}` });
+  relay = startServer(defaultConfig, { licenseGate: gate });
+  const agent = await connectHello(relay, { deviceId: "task4-agent-u1", licenseToken: sharedToken });
+  const app = await connectHello(relay, { deviceId: "task4-app-u1", deviceType: "app", licenseToken: sharedToken });
+
+  // The app's hello also fans out `peer-online` on the agent socket (same
+  // account, both live) — filter for the routed frame specifically.
+  const received = waitForType(agent.ws, "message");
+  app.ws.send(frame("task4-agent-u1", "hi"));
+  const msg = await received;
+  expect(msg.from).toBe("task4-app-u1");
+});
+
+test("cross-account routing is denied as PEER_OFFLINE (no presence oracle)", async () => {
+  relay = startServer(defaultConfig);
+  const agent = await connectHello(relay, { deviceId: "task4-agent-u1" });
+  const app = await connectHello(relay, { deviceId: "task4-app-u2", deviceType: "app" });
+
+  const err = waitForMessage(app.ws);
+  app.ws.send(frame("task4-agent-u1", "hi"));
+  const errMsg = await err;
+  expect(errMsg.code).toBe("PEER_OFFLINE");
+  expect(errMsg.retryable).toBe(true);
+});
+
+// The harness's default fake gate derives an agent's uid from its deviceId
+// and an app's uid from its licenseToken, so two connections that don't share
+// a token/deviceId scheme land on different accounts by default — no grant
+// and no account match, so both directions get the uniform PEER_OFFLINE deny
+// (spec 2026-07-24 §3.2: no presence oracle for an unauthorized sender).
+test("no grant, cross-account -> PEER_OFFLINE in both directions", async () => {
   relay = startServer(defaultConfig);
   const agent = await connectHello(relay, { deviceId: "route-agent-nogrant" });
   const app = await connectHello(relay, { deviceId: "route-app-nogrant", deviceType: "app" });
 
   const errFromApp = waitForMessage(app.ws);
   app.ws.send(frame("route-agent-nogrant", "hi"));
-  expect(await errFromApp).toMatchObject({ type: "error", code: "NOT_AUTHORIZED", retryable: false });
+  expect(await errFromApp).toMatchObject({ type: "error", code: "PEER_OFFLINE", retryable: true });
 
   const errFromAgent = waitForMessage(agent.ws);
   agent.ws.send(frame("route-app-nogrant", "hi"));
-  expect(await errFromAgent).toMatchObject({ type: "error", code: "NOT_AUTHORIZED", retryable: false });
+  expect(await errFromAgent).toMatchObject({ type: "error", code: "PEER_OFFLINE", retryable: true });
 });
 
-// Deviation from the spec's literal text (see work order): the grant check
-// runs BEFORE reachability, so an ungranted sender learns nothing about
-// whether its target even exists — it always gets NOT_AUTHORIZED, never a
-// presence-leaking PEER_OFFLINE.
-test("deviation: an ungranted sender targeting a nonexistent device still gets NOT_AUTHORIZED, not PEER_OFFLINE", async () => {
+// No grant, no account match, and the target never even connected: the reply
+// is identical to the live-cross-account deny above — an unauthorized sender
+// learns nothing about whether its target exists (no presence oracle).
+test("no grant, target never connected -> PEER_OFFLINE, same reply as a live cross-account deny", async () => {
   relay = startServer(defaultConfig);
   const agent = await connectHello(relay, { deviceId: "route-agent-leak" });
 
   const err = waitForMessage(agent.ws);
   agent.ws.send(frame("totally-unknown-device", "hi"));
-  expect(await err).toMatchObject({ type: "error", code: "NOT_AUTHORIZED", retryable: false });
+  expect(await err).toMatchObject({ type: "error", code: "PEER_OFFLINE", retryable: true });
 });
 
-// Deviation: a live target reachable by deviceId but reconnected under a
-// pubkey the agent never approved must still be refused, not routed.
-test("deviation: a live target under a non-approved pubkey still gets NOT_AUTHORIZED", async () => {
-  relay = startServer(defaultConfig);
-  const { agentWs, appWs, agentId, appId } = await setupPairedDevices(relay, "route-keyrot");
+// mayRoute (relay/src/authz.ts): same-account connections route with zero
+// grant setup — it is the ONLY routing authority (spec 2026-07-24 §3.2).
+test("same-account, no grant, routes app->agent", async () => {
+  const sharedToken = "shared-acct-route";
+  const gate = makeFakeLicenseGate({ agentUid: () => `user-app-${sharedToken}` });
+  relay = startServer(defaultConfig, { licenseGate: gate });
+  const agent = await connectHello(relay, { deviceId: "route-agent-sameacct", licenseToken: sharedToken });
+  const app = await connectHello(relay, { deviceId: "route-app-sameacct", deviceType: "app", licenseToken: sharedToken });
 
-  appWs.close();
+  const received = waitForMessage(agent.ws);
+  app.ws.send(frame("route-agent-sameacct", "hi"));
+  const msg = await received;
+  expect(msg.type).toBe("message");
+  expect(msg.from).toBe("route-app-sameacct");
+  expect(msg.payload).toBe("hi");
+});
+
+test("cross-account, no grant -> PEER_OFFLINE; socket stays open for a follow-up", async () => {
+  relay = startServer(defaultConfig);
+  await connectHello(relay, { deviceId: "route-agent-crossacct" });
+  const app = await connectHello(relay, { deviceId: "route-app-crossacct", deviceType: "app" });
+
+  const err1 = waitForMessage(app.ws);
+  app.ws.send(frame("route-agent-crossacct", "hi"));
+  expect(await err1).toMatchObject({ type: "error", code: "PEER_OFFLINE", retryable: true });
+
+  const err2 = waitForMessage(app.ws);
+  app.ws.send(frame("route-agent-crossacct", "hi again"));
+  expect(await err2).toMatchObject({ type: "error", code: "PEER_OFFLINE", retryable: true });
+});
+
+test("offline same-account target -> PEER_OFFLINE retryable", async () => {
+  const sharedToken = "shared-acct-offline";
+  const gate = makeFakeLicenseGate({ agentUid: () => `user-app-${sharedToken}` });
+  relay = startServer(defaultConfig, { licenseGate: gate });
+  const app = await connectHello(relay, {
+    deviceId: "route-app-offline-sameacct",
+    deviceType: "app",
+    licenseToken: sharedToken,
+  });
+
+  const err = waitForMessage(app.ws);
+  app.ws.send(frame("route-agent-never-connected", "hi"));
+  expect(await err).toMatchObject({ type: "error", code: "PEER_OFFLINE", retryable: true });
+});
+
+// NOT_AUTHORIZED no longer exists as a routing outcome: mayRoute compares
+// only `claims.uid`, which a key rotation on the SAME account never changes.
+// A reconnect under a fresh keypair (same account) still routes; there is no
+// pubkey-anchored deny path left to deviate into.
+test("same-account, no grant: a reconnect under a fresh keypair still routes", async () => {
+  const sharedToken = "route-keyrot";
+  const gate = makeFakeLicenseGate({ agentUid: () => `user-app-${sharedToken}` });
+  relay = startServer(defaultConfig, { licenseGate: gate });
+  const agentId = "route-keyrot-agent";
+  const appId = "route-keyrot-app";
+  const agent = await connectHello(relay, { deviceId: agentId, licenseToken: sharedToken });
+  const app = await connectHello(relay, { deviceId: appId, deviceType: "app", licenseToken: sharedToken });
+
+  app.ws.close();
   await new Promise((r) => setTimeout(r, 50));
-  // Same deviceId, but a FRESH keypair — the agent's grant still points at
-  // the old pubkey, so this identity was never approved.
-  await connectHello(relay, { deviceId: appId, deviceType: "app" });
+  // Same deviceId, fresh keypair, same account.
+  const rejoined = await connectHello(relay, { deviceId: appId, deviceType: "app", licenseToken: sharedToken });
 
-  const err = waitForMessage(agentWs);
-  agentWs.send(frame(appId, "hi"));
-  expect(await err).toMatchObject({ type: "error", code: "NOT_AUTHORIZED", retryable: false });
+  // The rejoin also fans out `peer-online` on this same socket (same-account,
+  // the agent is still live) — filter for the routed frame specifically.
+  const received = waitForType(rejoined.ws, "message");
+  agent.ws.send(frame(appId, "hi"));
+  const msg = await received;
+  expect(msg.type).toBe("message");
+  expect(msg.from).toBe(agentId);
 });
 
-test("with a grant, frames are forwarded verbatim including the kind byte", async () => {
-  relay = startServer(defaultConfig);
-  const { agentWs, appWs, agentId, appId } = await setupPairedDevices(relay, "route-verbatim");
+test("frames are forwarded verbatim including the kind byte (same-account, no grant)", async () => {
+  const sharedToken = "route-verbatim";
+  const gate = makeFakeLicenseGate({ agentUid: () => `user-app-${sharedToken}` });
+  relay = startServer(defaultConfig, { licenseGate: gate });
+  const agentId = "route-verbatim-agent";
+  const appId = "route-verbatim-app";
+  const agent = await connectHello(relay, { deviceId: agentId, licenseToken: sharedToken });
+  const app = await connectHello(relay, { deviceId: appId, deviceType: "app", licenseToken: sharedToken });
 
-  const received = waitForMessage(agentWs);
-  appWs.send(frame(agentId, "handshake-payload", FrameKind.handshake));
+  // Same-account pair: the app's hello also fans out `peer-online` on the
+  // agent socket — filter for the routed frame specifically.
+  const received = waitForType(agent.ws, "message");
+  app.ws.send(frame(agentId, "handshake-payload", FrameKind.handshake));
   const msg = await received;
   expect(msg.kind).toBe(FrameKind.handshake);
   expect(msg.from).toBe(appId);
@@ -79,23 +177,29 @@ test("with a grant, frames are forwarded verbatim including the kind byte", asyn
 });
 
 test("peer offline -> PEER_OFFLINE retryable; nothing is queued, a reconnect delivers nothing", async () => {
-  relay = startServer(defaultConfig);
-  const { agentWs, appWs, app, agentId, appId } = await setupPairedDevices(relay, "route-offline");
+  const sharedToken = "route-offline";
+  const gate = makeFakeLicenseGate({ agentUid: () => `user-app-${sharedToken}` });
+  relay = startServer(defaultConfig, { licenseGate: gate });
+  const agentId = "route-offline-agent";
+  const appId = "route-offline-app";
+  const agent = await connectHello(relay, { deviceId: agentId, licenseToken: sharedToken });
+  const app = await connectHello(relay, { deviceId: appId, deviceType: "app", licenseToken: sharedToken });
 
-  appWs.close();
+  app.ws.close();
   await new Promise((r) => setTimeout(r, 50));
 
-  const err = waitForMessage(agentWs);
-  agentWs.send(frame(appId, "gone"));
+  const err = waitForMessage(agent.ws);
+  agent.ws.send(frame(appId, "gone"));
   expect(await err).toMatchObject({ type: "error", code: "PEER_OFFLINE", retryable: true });
 
-  // Reconnect under the SAME identity the grant links — if anything had been
-  // queued, this is the moment it would be flushed. A `peer-online` fan-out is
-  // expected on reconnect (the agent is still live); a routed `message` frame
-  // carrying the dropped "gone" payload is NOT — that's the actual queue check.
+  // Reconnect under the SAME identity — if anything had been queued, this is
+  // the moment it would be flushed. A `peer-online` fan-out is expected on
+  // reconnect (the agent is still live); a routed `message` frame carrying
+  // the dropped "gone" payload is NOT — that's the actual queue check.
   const rejoin = await connectHello(relay, {
     deviceId: appId,
     deviceType: "app",
+    licenseToken: sharedToken,
     publicKeyBase64: app.publicKeyBase64,
     privateSeed: app.privateSeed,
   });
@@ -130,3 +234,41 @@ test("JSON control-message flood -> MESSAGE_RATE_LIMITED (retryable); dropped, s
   ws.send(JSON.stringify({ type: "stream-open", streamId: "after-flood" }));
   expect(await opened).toEqual({ type: "stream-opened", streamId: "after-flood" });
 }, 8_000);
+
+// The pairing rendezvous is deleted (Task 3) and antgrid-wire no longer
+// exports PairRequestMessage at all (Task 8) — a hand-rolled pair-request
+// frame is now just malformed JSON as far as ClientMessage is concerned. It
+// fails `ClientMessage.safeParse` in `handleControlMessage`, which replies
+// `error{INVALID_MESSAGE, retryable:false}` WITHOUT closing the socket
+// (`sendError`, not `sendErrorAndClose` — see relay/CLAUDE.md's error
+// contract: only auth/protocol failures close the socket). This is a
+// stronger guarantee than the pre-Task-8 state (where the type still parsed
+// but had no switch case): the frame is now rejected at the schema boundary
+// rather than silently accepted and ignored.
+test("a hand-rolled pair-request frame is rejected INVALID_MESSAGE, forwards nothing, and leaves the socket open", async () => {
+  relay = startServer(defaultConfig);
+  const agent = await connectHello(relay, { deviceId: "route-pair-gone-agent" });
+  const app = await connectHello(relay, { deviceId: "route-pair-gone-app", deviceType: "app" });
+
+  let agentSawMessage = false;
+  agent.ws.onmessage = () => {
+    agentSawMessage = true;
+  };
+
+  const errP = waitForMessage(app.ws);
+  app.ws.send(JSON.stringify({
+    type: "pair-request",
+    agentDeviceId: "route-pair-gone-agent",
+    phonePubkey: "AAAA",
+    phoneDeviceId: "route-pair-gone-app",
+    nonce: "n".repeat(24),
+    requestedAt: new Date().toISOString(),
+    deadline: Date.now() + 10_000,
+    phoneSignature: "sig",
+  }));
+
+  expect(await errP).toMatchObject({ type: "error", code: "INVALID_MESSAGE", retryable: false });
+  await new Promise((r) => setTimeout(r, 200));
+  expect(agentSawMessage).toBe(false);
+  expect(app.ws.readyState).toBe(WebSocket.OPEN);
+});

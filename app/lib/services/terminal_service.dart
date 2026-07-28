@@ -6,6 +6,7 @@ import '../models/terminal_models.dart';
 import '../models/ab_message.dart';
 import '../project/project_session.dart';
 import '../utils/terminal_bell.dart';
+import 'reply_latch.dart';
 
 class TerminalService {
   final ProjectSession session;
@@ -23,6 +24,14 @@ class TerminalService {
   String? _clientId;
   void setClientId(String id) => _clientId = id;
 
+  /// Wall-clock bound for the one-shot git verbs (list-branches, checkout). A
+  /// reply that never lands (dropped send / session down) would otherwise strand
+  /// [TerminalState.gitBranchesLoading] on forever. Injectable so tests drive a
+  /// short window.
+  final Duration gitActionTimeout;
+  ReplyLatch? _branchesLatch;
+  ReplyLatch? _checkoutLatch;
+
   final _stateController = StreamController<TerminalState>.broadcast();
   final StreamController<TerminalNotificationMessage> _notificationController =
       StreamController<TerminalNotificationMessage>.broadcast();
@@ -38,7 +47,10 @@ class TerminalService {
   TerminalState get currentState => _state;
   String get projectId => session.projectId;
 
-  TerminalService.fromSession(this.session) {
+  TerminalService.fromSession(
+    this.session, {
+    this.gitActionTimeout = const Duration(seconds: 15),
+  }) {
     // Heavy tier — terminal:output + terminal:snapshot (HEAVY tier messages).
     _heavySub = session.heavyStream.listen(_onHeavyJson);
 
@@ -452,9 +464,33 @@ class TerminalService {
   }
 
   void requestBranches() {
-    _setState(_state.copyWith(gitBranchesLoading: true));
+    _setState(
+      _state.copyWith(gitBranchesLoading: true, clearGitBranchesError: true),
+    );
+    // Tier-2 one-shot: bound the wait on git:branches so a dropped send /
+    // session-down clears the spinner instead of stranding it.
+    _branchesLatch?.settle();
+    final latch = _branchesLatch = ReplyLatch();
     _send(
       createAbMessage('git:list-branches', {'projectId': _state.projectId}),
+    );
+    unawaited(
+      session.action(() => latch.done, timeout: gitActionTimeout).catchError((
+        _,
+      ) {
+        if (_disposed || _branchesLatch != latch) return;
+        _branchesLatch = null;
+        // Surface the drop, symmetric with checkoutBranch's timeout: an empty
+        // gitBranches with the spinner cleared is indistinguishable from a repo
+        // that genuinely has no branches, so a lost reply would read as success.
+        _setState(
+          _state.copyWith(
+            gitBranchesLoading: false,
+            gitBranchesError:
+                'Loading branches timed out — no response from the agent',
+          ),
+        );
+      }),
     );
   }
 
@@ -462,25 +498,46 @@ class TerminalService {
     _setState(
       _state.copyWith(gitBranchesLoading: true, clearGitCheckoutError: true),
     );
+    _checkoutLatch?.settle();
+    final latch = _checkoutLatch = ReplyLatch();
     _send(
       createAbMessage('git:checkout', {
         'projectId': _state.projectId,
         'branch': branch,
       }),
     );
+    unawaited(
+      session.action(() => latch.done, timeout: gitActionTimeout).catchError((
+        _,
+      ) {
+        if (_disposed || _checkoutLatch != latch) return;
+        _checkoutLatch = null;
+        _setState(
+          _state.copyWith(
+            gitBranchesLoading: false,
+            gitCheckoutError: 'Checkout timed out — no response from the agent',
+          ),
+        );
+      }),
+    );
   }
 
   void _handleGitBranches(GitBranchesMessage msg) {
+    _branchesLatch?.settle();
+    _branchesLatch = null;
     _setState(
       _state.copyWith(
         gitBranches: msg.branches,
         gitBranch: msg.current,
         gitBranchesLoading: false,
+        clearGitBranchesError: true,
       ),
     );
   }
 
   void _handleGitCheckoutResult(GitCheckoutResultMessage msg) {
+    _checkoutLatch?.settle();
+    _checkoutLatch = null;
     if (msg.success) {
       _setState(
         _state.copyWith(
@@ -514,6 +571,12 @@ class TerminalService {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    // Resolve any in-flight git action cleanly so its tier-2 timeout timer is
+    // cancelled instead of outliving the service.
+    _branchesLatch?.settle();
+    _branchesLatch = null;
+    _checkoutLatch?.settle();
+    _checkoutLatch = null;
     await _heavySub?.cancel();
     _heavySub = null;
     await _statusSub?.cancel();

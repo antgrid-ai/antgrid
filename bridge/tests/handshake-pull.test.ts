@@ -17,6 +17,7 @@ import {
 
 const AGENT_DEVICE_ID = "agent-1";
 const PHONE_ID = "phone-1";
+const PHONE_2_ID = "phone-2";
 
 let clients: RelayClient[] = [];
 afterEach(() => { for (const c of clients.splice(0)) try { c.close(); } catch {} });
@@ -36,8 +37,8 @@ function ed25519Pair(): { seedB64: string; pubB64: string } {
 /** Feed a binary route frame straight into the client's dispatch, exactly as
  *  `handleBinaryFrame` receives it off the socket — exercises the real
  *  kind-byte dispatch (kind 1 = handshake plaintext, kind 0 = sealed). */
-function injectFrame(client: RelayClient, kind: FrameKind, payload: Buffer, channel: "control" | "preview" = "control"): void {
-  const frame = encodeRouteFrame({ type: "message", from: PHONE_ID, channel }, payload, kind);
+function injectFrame(client: RelayClient, kind: FrameKind, payload: Buffer, channel: "control" | "preview" = "control", from: string = PHONE_ID): void {
+  const frame = encodeRouteFrame({ type: "message", from, channel }, payload, kind);
   (client as any).handleBinaryFrame(Buffer.from(frame));
 }
 
@@ -47,16 +48,18 @@ function signedClientHello(args: {
   attemptId: string;
   appX25519PubB64: string;
   phoneSeedB64: string;
+  phoneDeviceId?: string;
   nonce?: Buffer;
   sig?: string;
 }): Buffer {
   const nonce = args.nonce ?? Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]);
+  const phoneDeviceId = args.phoneDeviceId ?? PHONE_ID;
   const clientPubkey = Buffer.from(args.appX25519PubB64, "base64");
   const phoneTranscript = buildTranscript({
     registrationId: AGENT_DEVICE_ID,
     role: "phone",
     agentDeviceId: AGENT_DEVICE_ID,
-    phoneDeviceId: PHONE_ID,
+    phoneDeviceId,
     agentX25519Pub: Buffer.alloc(0),
     phoneX25519Pub: clientPubkey,
     nonce,
@@ -80,6 +83,7 @@ function buildPhoneTransport(args: {
   agentPubkeyB64: string;
   clientPubkeyB64: string;
   nonce: Buffer;
+  phoneDeviceId?: string;
 }): { transport: E2eTransport; keys: ReturnType<typeof deriveSessionKeys> } {
   const agentPubkey = Buffer.from(args.agentPubkeyB64, "base64");
   const clientPubkey = Buffer.from(args.clientPubkeyB64, "base64");
@@ -87,7 +91,7 @@ function buildPhoneTransport(args: {
     registrationId: AGENT_DEVICE_ID,
     role: "agent",
     agentDeviceId: AGENT_DEVICE_ID,
-    phoneDeviceId: PHONE_ID,
+    phoneDeviceId: args.phoneDeviceId ?? PHONE_ID,
     agentX25519Pub: agentPubkey,
     phoneX25519Pub: clientPubkey,
     nonce: args.nonce,
@@ -439,4 +443,310 @@ test("rekey mid-session: old keys decrypt until the new confirm, then swap + zer
   expect(seenMsgs.length).toBe(1);
 
   void keysA; // kept for symmetry/documentation of what phoneA was derived from
+});
+
+test("a different device's verified client-hello supersedes the live session, tears it down, and repoints the address (break-before-make)", () => {
+  const agentEd = ed25519Pair();
+  const phoneAEd = ed25519Pair();
+  const phoneBEd = ed25519Pair();
+
+  // Phone A holds the live session.
+  const { client, phoneTransport: phoneATransport } = establishSession({ agentEd, phoneEd: phoneAEd, attemptId: "attempt-a" });
+  const oldEstablished = (client as any).established as { sessionKeys: { a2p: Buffer; p2a: Buffer; confirm: Buffer }; transport: E2eTransport };
+  expect((client as any)._peerId).toBe(PHONE_ID);
+  expect((client as any).established.peerId).toBe(PHONE_ID);
+
+  // The agent knows phone B's pinned key (in production: account inventory).
+  (client as any).phoneEd25519ByDeviceId.set(PHONE_2_ID, phoneBEd.pubB64);
+
+  // Phone B — a DIFFERENT device — sends a signature-valid client-hello.
+  const appB = generateEphemeralKeypair();
+  const nonceB = Buffer.from([7, 7, 7, 7, 7, 7, 7, 7]);
+  const bSent: Array<string | Buffer> = [];
+  (client as any).sendPayload = (p: string | Buffer) => bSent.push(p);
+  injectFrame(
+    client,
+    FrameKind.handshake,
+    signedClientHello({ attemptId: "attempt-b", appX25519PubB64: appB.publicKey.toString("base64"), phoneSeedB64: phoneBEd.seedB64, phoneDeviceId: PHONE_2_ID, nonce: nonceB }),
+    "control",
+    PHONE_2_ID,
+  );
+
+  // Old session torn down explicitly (keys zeroized), address now phone B, and
+  // phone B is the pending candidate.
+  expect(oldEstablished.sessionKeys.a2p.every((b) => b === 0)).toBe(true);
+  expect((client as any).established).toBeNull();
+  expect((client as any)._peerId).toBe(PHONE_2_ID);
+  expect((client as any).pending?.attemptId).toBe("attempt-b");
+  expect((client as any).pending?.peerId).toBe(PHONE_2_ID);
+  // Displaced phone A gets a sealed session-takeover notice — sent FIRST,
+  // with A's own (still-live at send-time) keys, before agent-hello/agent-ready
+  // for the new candidate — so A learns explicitly instead of via liveness
+  // timeout and rekeying right back (two-device ping-pong).
+  expect(bSent.length).toBe(3);
+  const noticeText = phoneATransport.open(bSent[0] as Buffer);
+  expect(JSON.parse(noticeText!)).toEqual({ type: "session-takeover" });
+});
+
+test("same-device rekey does NOT send a session-takeover notice", () => {
+  const agentEd = ed25519Pair();
+  const phoneEd = ed25519Pair();
+  const { client, phoneTransport: phoneATransport } = establishSession({ agentEd, phoneEd, attemptId: "attempt-a" });
+
+  const app2 = generateEphemeralKeypair();
+  const nonce2 = Buffer.from([3, 3, 3, 3, 3, 3, 3, 3]);
+  const rekeySent: Array<string | Buffer> = [];
+  (client as any).sendPayload = (p: string | Buffer) => rekeySent.push(p);
+
+  injectFrame(
+    client,
+    FrameKind.handshake,
+    signedClientHello({ attemptId: "attempt-b", appX25519PubB64: app2.publicKey.toString("base64"), phoneSeedB64: phoneEd.seedB64, nonce: nonce2 }),
+  );
+
+  // Same-device rekey (established.peerId === from) never enters the
+  // different-device branch: only agent-hello + sealed agent-ready go out.
+  expect(rekeySent.length).toBe(2);
+  const notice = rekeySent.find((p) => {
+    if (typeof p === "string") return false;
+    const opened = phoneATransport.open(p as Buffer);
+    if (!opened) return false;
+    try { return JSON.parse(opened).type === "session-takeover"; } catch { return false; }
+  });
+  expect(notice).toBeUndefined();
+});
+
+test("different-device candidate, once app:ready confirms, becomes the established peer and the address", () => {
+  const agentEd = ed25519Pair();
+  const phoneAEd = ed25519Pair();
+  const phoneBEd = ed25519Pair();
+  const { client } = establishSession({ agentEd, phoneEd: phoneAEd, attemptId: "attempt-a" });
+  (client as any).phoneEd25519ByDeviceId.set(PHONE_2_ID, phoneBEd.pubB64);
+
+  const appB = generateEphemeralKeypair();
+  const nonceB = Buffer.from([7, 7, 7, 7, 7, 7, 7, 7]);
+  const bSent: Array<string | Buffer> = [];
+  (client as any).sendPayload = (p: string | Buffer) => bSent.push(p);
+  injectFrame(
+    client, FrameKind.handshake,
+    signedClientHello({ attemptId: "attempt-b", appX25519PubB64: appB.publicKey.toString("base64"), phoneSeedB64: phoneBEd.seedB64, phoneDeviceId: PHONE_2_ID, nonce: nonceB }),
+    "control", PHONE_2_ID,
+  );
+  // bSent[0] is the sealed session-takeover notice to displaced phone A;
+  // agent-hello (plaintext) for the new candidate is bSent[1].
+  const agentHelloB = JSON.parse(bSent[1] as string);
+  const { transport: phoneB, keys: keysB } = buildPhoneTransport({
+    phonePrivkey: appB.privateKey, agentPubkeyB64: agentHelloB.pubkey, clientPubkeyB64: appB.publicKey.toString("base64"), nonce: nonceB, phoneDeviceId: PHONE_2_ID,
+  });
+  const appReadyB = JSON.stringify({ type: "app:ready", attemptId: "attempt-b", confirm: phoneConfirmTag(keysB.confirm).toString("base64") });
+  injectFrame(client, FrameKind.sealed, phoneB.seal(appReadyB), "control", PHONE_2_ID);
+
+  expect(client._handshakeComplete()).toBe(true);
+  expect((client as any).established.attemptId).toBe("attempt-b");
+  expect((client as any).established.peerId).toBe(PHONE_2_ID);
+  expect((client as any)._peerId).toBe(PHONE_2_ID);
+});
+
+test("a sibling peer-online does not clobber the address of a live session", () => {
+  const { client } = establishSession({ agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a" });
+  expect((client as any)._peerId).toBe(PHONE_ID);
+
+  // A same-account sibling comes online — presence, NOT a handshake.
+  (client as any).handleTextMessage(JSON.stringify({ type: "peer-online", peerId: PHONE_2_ID }));
+
+  expect((client as any)._peerId).toBe(PHONE_ID);       // address unchanged
+  expect(client._handshakeComplete()).toBe(true);        // session intact
+});
+
+test("peer-online adopts the peer as the address when no session is established", () => {
+  const client = RelayClient.forTest({
+    generateKeypair: generateEphemeralKeypair,
+    sendPayload: () => {},
+    peerId: PHONE_ID,
+    deviceId: AGENT_DEVICE_ID,
+  });
+  clients.push(client);
+  expect((client as any).established).toBeNull();
+
+  (client as any).handleTextMessage(JSON.stringify({ type: "peer-online", peerId: PHONE_2_ID }));
+
+  expect((client as any)._peerId).toBe(PHONE_2_ID);
+});
+
+// `pair-connected` no longer parses as a ServerMessage, so `handleTextMessage`
+// drops the frame before it ever reaches the switch. The relay never emits it
+// — admission is account-derived trust resolved at client-hello time, not
+// this presence notification. Either way, it must neither clobber a live
+// session's address nor adopt a peer when idle.
+test("pair-connected never touches the reply address, live session or idle", () => {
+  const { client } = establishSession({ agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a" });
+  expect((client as any)._peerId).toBe(PHONE_ID);
+
+  (client as any).handleTextMessage(JSON.stringify({ type: "pair-connected", peerId: PHONE_2_ID, peerName: "phone-2", peerType: "app" }));
+
+  expect((client as any)._peerId).toBe(PHONE_ID);       // address unchanged
+  expect(client._handshakeComplete()).toBe(true);        // session intact
+
+  const idle = RelayClient.forTest({
+    generateKeypair: generateEphemeralKeypair,
+    sendPayload: () => {},
+    peerId: PHONE_ID,
+    deviceId: AGENT_DEVICE_ID,
+  });
+  clients.push(idle);
+  (idle as any)._peerId = null;
+
+  (idle as any).handleTextMessage(JSON.stringify({ type: "pair-connected", peerId: PHONE_2_ID, peerName: "phone-2", peerType: "app" }));
+
+  expect((idle as any)._peerId).toBeNull(); // no longer adopted — pair-connected is dead
+});
+
+// Per-machine relay slots: the app addresses each machine on its own
+// `<accountDeviceUuid>#<machineDeviceUuid>` slot so it can hold several
+// machines open at once (the relay arbitrates per `hello.deviceId` and
+// supersedes an equal epoch). The slot is a TRANSPORT address — identity
+// resolution and the transcript stay on the bare account device.
+const PHONE_SLOT = `${PHONE_ID}#${AGENT_DEVICE_ID}`;
+
+test("a client-hello from a per-machine slot admits against the bare account identity", () => {
+  const agentEd = ed25519Pair();
+  const phoneEd = ed25519Pair();
+  const sent: Array<string | Buffer> = [];
+  const client = RelayClient.forTest({
+    generateKeypair: generateEphemeralKeypair,
+    sendPayload: (p) => sent.push(p),
+    peerId: PHONE_SLOT,
+    deviceId: AGENT_DEVICE_ID,
+    agentEd25519PrivB64: agentEd.seedB64,
+    // Deliberately no phoneEd25519PubB64: seeding the in-memory cache under the
+    // slot id would resolve without ever consulting a base-keyed store, which
+    // is the thing under test.
+  });
+  clients.push(client);
+  // The account inventory only ever holds the bare account deviceUuid.
+  (client as any).opts.trustedPeers = {
+    lookup: (id: string) => (id === PHONE_ID ? phoneEd.pubB64 : undefined),
+    noteMiss: () => {},
+    refresh: async () => {},
+  };
+
+  const app = generateEphemeralKeypair();
+  const nonce = Buffer.from([9, 8, 7, 6, 5, 4, 3, 2]);
+  injectFrame(
+    client,
+    FrameKind.handshake,
+    // Signed over the BARE id even though the frame arrives from the slot.
+    signedClientHello({
+      attemptId: "attempt-slot",
+      appX25519PubB64: app.publicKey.toString("base64"),
+      phoneSeedB64: phoneEd.seedB64,
+      nonce,
+    }),
+    "control",
+    PHONE_SLOT,
+  );
+
+  expect(sent.length).toBe(2);
+  const agentHello = JSON.parse(sent[0] as string);
+  expect(agentHello.type).toBe("handshake:agent-hello");
+
+  const { transport, keys } = buildPhoneTransport({
+    phonePrivkey: app.privateKey,
+    agentPubkeyB64: agentHello.pubkey,
+    clientPubkeyB64: app.publicKey.toString("base64"),
+    nonce,
+  });
+  injectFrame(
+    client,
+    FrameKind.sealed,
+    transport.seal(JSON.stringify({
+      type: "app:ready",
+      attemptId: "attempt-slot",
+      confirm: phoneConfirmTag(keys.confirm).toString("base64"),
+    })),
+    "control",
+    PHONE_SLOT,
+  );
+
+  expect(client._handshakeComplete()).toBe(true);
+  // The reply address stays the SLOT — that is the socket the phone is on.
+  expect((client as any)._peerId).toBe(PHONE_SLOT);
+});
+
+// The relay fans presence to every same-account peer of the opposite type, so
+// one phone holding N machines open reaches each agent once per slot. Adopting
+// a sibling slot would point our reply address at a socket whose E2E session
+// cannot open our frames.
+test("presence for a slot scoped at another machine is ignored", () => {
+  const client = RelayClient.forTest({
+    generateKeypair: generateEphemeralKeypair,
+    sendPayload: () => {},
+    peerId: PHONE_ID,
+    deviceId: AGENT_DEVICE_ID,
+  });
+  clients.push(client);
+  (client as any)._peerId = null;
+
+  (client as any).handleTextMessage(
+    JSON.stringify({ type: "peer-online", peerId: `${PHONE_ID}#some-other-agent` }),
+  );
+
+  expect((client as any)._peerId).toBeNull();
+});
+
+test("presence for our own slot is adopted as the reply address", () => {
+  const client = RelayClient.forTest({
+    generateKeypair: generateEphemeralKeypair,
+    sendPayload: () => {},
+    peerId: PHONE_ID,
+    deviceId: AGENT_DEVICE_ID,
+  });
+  clients.push(client);
+  (client as any)._peerId = null;
+
+  (client as any).handleTextMessage(
+    JSON.stringify({ type: "peer-online", peerId: PHONE_SLOT }),
+  );
+
+  expect((client as any)._peerId).toBe(PHONE_SLOT);
+});
+
+// An unscoped id carries no claim about who it is for, and every pre-slot
+// client sends one — it must keep the old adopt-when-idle behaviour.
+test("presence for an unscoped peer id is still adopted", () => {
+  const client = RelayClient.forTest({
+    generateKeypair: generateEphemeralKeypair,
+    sendPayload: () => {},
+    peerId: PHONE_ID,
+    deviceId: AGENT_DEVICE_ID,
+  });
+  clients.push(client);
+  (client as any)._peerId = null;
+
+  (client as any).handleTextMessage(
+    JSON.stringify({ type: "peer-online", peerId: PHONE_2_ID }),
+  );
+
+  expect((client as any)._peerId).toBe(PHONE_2_ID);
+});
+
+// The nastier half of the same fan-out: peer-offline suppresses the heavy
+// stream. Charging that to a sibling slot means dropping one machine in the
+// drawer silently stops the OTHER machine's terminal output.
+test("peer-offline for a slot scoped at another machine does not suppress our stream", () => {
+  const { client } = establishSession({ agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a" });
+  const mux = (client as any).mux;
+  let suppressed = false;
+  mux.notifyPeerOffline = () => { suppressed = true; };
+
+  (client as any).handleTextMessage(
+    JSON.stringify({ type: "peer-offline", peerId: `${PHONE_ID}#some-other-agent` }),
+  );
+  expect(suppressed).toBe(false);
+
+  // …but our own machine's slot going offline still suppresses it.
+  (client as any).handleTextMessage(
+    JSON.stringify({ type: "peer-offline", peerId: PHONE_SLOT }),
+  );
+  expect(suppressed).toBe(true);
 });

@@ -1,39 +1,72 @@
 // E2E eval: same-account mobile access defaults (Task 6).
 //
 // Proves that if `mobile-access:enable-project` is sent for projA BEFORE any
-// phone pairs, then a same-account phone connecting via account-membership
-// (QR-less) sees projA in its FIRST `agent:projects` advertisement.
+// phone connects, then a same-account phone connecting via account-trust
+// (no pairing ceremony) sees projA in its FIRST `agent:projects` advertisement.
+//
+// Because the ordering under test ("enable BEFORE the phone connects") is the
+// whole point of this eval, it can't use `setupTestEnv` (which connects+
+// handshakes its app as part of the same call) — it drives its own relay +
+// agent + phone sequence, mirroring `setupTestEnv`'s internals but delaying
+// the phone's connection until after the enable-project call.
 //
 // Pair-code / manual negative assertion:
-//   `setupPairFlowTestEnv`'s control plane has NO test-only pairing-window hook
-//   (that hook is per-project, on AgentCore — see the comment on `accountPeerKeys`
-//   in test-env.ts). We therefore CANNOT admit a genuine pair-code phone on the
-//   control-plane registration in this harness. Instead we assert the scoped
-//   negative that IS cleanly expressible: a project that was NEVER enabled is
-//   absent from the same-account phone's advert (defaults are per-project, not
-//   blanket). The one project in the fixture (env.projectId) is the only project
-//   we enable; a made-up id we never enable must NOT appear. The pair-code-phone
-//   empty-advert assertion belongs to the bridge unit tests that exercise the
-//   per-project pairing-window path (relay-pair-handling.test.ts).
+//   There is no test-only pairing-window hook left to admit a genuine
+//   pair-code phone (that mechanism, and pairing itself, is gone). Instead we
+//   assert the scoped negative that IS cleanly expressible: a SECOND project
+//   that is genuinely opened on the host (via the loopback `project:open`
+//   verb — mirrors multi-stream-coexistence.test.ts) but never passed to
+//   `mobile-access:enable-project` must be absent from the same-account
+//   phone's advert. `buildProjectsAdvertisement` (host-server.ts) filters
+//   from `phone.allowedProjects` first, so a warm-but-unenabled project is
+//   excluded regardless of catalog visibility — a made-up project id could
+//   never appear either way (agent:projects only carries real opened
+//   projects), so it wouldn't exercise that filter.
 //
 // Known Windows test noise (NOT failures): fs.watch EPERM/EBUSY on teardown,
 // temp-dir cleanup races. Judge by pass/fail counts.
 import { test, expect } from "bun:test";
-import { generateKeyPairSync } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setupPairFlowTestEnv } from "../../helpers/test-env";
-import { RelayClient, PairAgentOfflineError } from "../../helpers/relay-client";
+import {
+  allocatePort,
+  generateAppIdentity,
+  generateEvalAuth,
+  handshakeWithoutPairing,
+  spawnAgent,
+  startFakeLicenseApi,
+  startRelay,
+  type AgentHandle,
+  type FakeLicenseApi,
+  type RelayHandle,
+} from "../../helpers/harness";
+import { createTestProject, type TestProject } from "../../helpers/fixtures";
+import { computeProjectId } from "../../../bridge/src/project-id";
+import { RelayClient } from "../../helpers/relay-client";
 
-/** Raw 32-byte base64 of an Ed25519 SPKI public key (matches the agent's
- *  account-peer-key encoding). */
-function rawEdPubB64(pub: import("node:crypto").KeyObject): string {
-  const der = pub.export({ format: "der", type: "spki" });
-  return Buffer.from(der.subarray(der.length - 32)).toString("base64");
+/** POST a control-plane verb over the loopback control port (see host.json's
+ *  `controlPort`/`token`) — used here to open a second project remotely
+ *  without going through mobile-access:enable-project, mirroring
+ *  multi-stream-coexistence.test.ts's `loopbackControl`. */
+async function loopbackControl(
+  abDir: string,
+  body: object,
+): Promise<{ ok: boolean; [k: string]: unknown }> {
+  const { readHostFile } = await import("@bridge/host-discovery");
+  const hf = readHostFile(join(abDir, "host.json"));
+  if (!hf) throw new Error("no host.json for loopback control");
+  const res = await fetch(`http://127.0.0.1:${hf.controlPort}/control`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${hf.token}` },
+    body: JSON.stringify(body),
+  });
+  return res.json();
 }
 
 /** Poll readHostFile until host.json appears (agent writes it during startup).
- *  The test sends `mobile-access:enable-project` BEFORE pairing any phone, so
- *  host.json must exist first. Cap: 5 s. */
+ *  The test sends `mobile-access:enable-project` BEFORE connecting any phone,
+ *  so host.json must exist first. Cap: 5 s. */
 async function waitForHostFile(
   abDir: string,
   timeoutMs = 5_000,
@@ -48,48 +81,48 @@ async function waitForHostFile(
   throw new Error("host.json did not appear within timeout");
 }
 
-/** Retry pairWith until the control-plane relay slot is up (~10s window).
- *  An AGENT_OFFLINE close (slot not yet authenticated) reopens the socket and
- *  retries. A genuine rejection surfaces immediately. */
-async function pairWithRetry(
-  cp: RelayClient,
-  relayUrl: string,
-  deviceUuid: string,
-  opts: Parameters<RelayClient["pairWith"]>[1],
-): Promise<Awaited<ReturnType<RelayClient["pairWith"]>>> {
-  let lastErr: unknown;
-  for (let i = 0; i < 20; i++) {
-    try {
-      if (i > 0 && cp.isClosed) await cp.reconnectAndAuth(relayUrl);
-      return await cp.pairWith(deviceUuid, opts);
-    } catch (err) {
-      if (err instanceof PairAgentOfflineError) {
-        lastErr = err;
-        await Bun.sleep(300);
-        continue;
-      }
-      throw err;
-    }
-  }
-  throw new Error(`control-plane pair-request never reached agent: ${String(lastErr)}`);
-}
-
 test(
   "same-account phone receives enabled project in first agent:projects advertisement",
   async () => {
-    // Account-membership key — the QR-less control-plane admission anchor.
-    const accountKp = generateKeyPairSync("ed25519");
-    const accountPubB64 = rawEdPubB64(accountKp.publicKey);
-
-    const env = await setupPairFlowTestEnv({ accountPeerKeys: [accountPubB64] });
-
+    // relay/licenseApi/project are constructed INSIDE the try (not hoisted
+    // above it): a throw from either of the latter two after the relay is up
+    // would otherwise skip the finally block entirely and leak the relay
+    // (port + process) for the life of the test run — declare the handles
+    // above the try so finally can reach them, but create them inside it.
+    let abDir: string | undefined;
+    let relay: RelayHandle | undefined;
+    let licenseApi: FakeLicenseApi | undefined;
+    let project: TestProject | undefined;
+    let neverEnabledProject: TestProject | undefined;
+    let agent: AgentHandle | undefined;
     let cp: RelayClient | null = null;
     try {
-      // ── Step 1: enable projA BEFORE any phone pairs ────────────────────────
-      //
-      // We read host.json from the child agent's abDir (not the test process's
-      // resolveAbDir()). The agent may still be starting up, so we poll briefly.
-      const hf = await waitForHostFile(env.abDir);
+      const relayPort = allocatePort();
+      abDir = mkdtempSync(join(tmpdir(), "antgrid-mobile-defaults-"));
+      const appIdentity = await generateAppIdentity();
+
+      relay = await startRelay({ port: relayPort });
+      licenseApi = startFakeLicenseApi({
+        accountDevices: [{ deviceId: appIdentity.deviceId, ed25519Pub: appIdentity.publicKeyBase64 }],
+      });
+      const auth = generateEvalAuth();
+      project = createTestProject("basic", {
+        "__RELAY_URL__": `ws://localhost:${relayPort}`,
+      });
+      const projectId = computeProjectId(project.dir);
+      const deviceUuid = auth.deviceUuid;
+
+      agent = await spawnAgent({
+        relayUrl: relay.url,
+        licenseApiUrl: licenseApi.url,
+        abDir,
+        projectDir: project.dir,
+        auth,
+        env: { ANTGRID_EVAL_TEST: "1" },
+      });
+
+      // ── Step 1: enable projA BEFORE any phone connects ────────────────────
+      const hf = await waitForHostFile(abDir);
 
       const enableRes = await fetch(`http://127.0.0.1:${hf.controlPort}/control`, {
         method: "POST",
@@ -100,7 +133,7 @@ test(
         body: JSON.stringify({
           id: "eval-enable",
           type: "mobile-access:enable-project",
-          projectId: env.projectId,
+          projectId,
         }),
       });
       const enableBody = (await enableRes.json()) as {
@@ -110,33 +143,40 @@ test(
 
       // Confirm the policy verb succeeded and stored projA.
       expect(enableBody.ok).toBe(true);
-      expect(enableBody.projectIds).toContain(env.projectId);
+      expect(enableBody.projectIds).toContain(projectId);
 
-      // ── Step 2: pair a same-account phone on the control plane ─────────────
+      // ── Step 1b: open a SECOND project remotely, but never enable it ───────
+      neverEnabledProject = createTestProject("basic", {
+        "__RELAY_URL__": `ws://localhost:${relayPort}`,
+      });
+      const neverEnabledId = computeProjectId(neverEnabledProject.dir);
+      const openRes = await loopbackControl(abDir, {
+        id: "open-never-enabled",
+        type: "project:open",
+        projectId: neverEnabledId,
+        projectPath: neverEnabledProject.dir,
+        mode: "remote",
+      });
+      expect(openRes.ok).toBe(true);
+
+      // ── Step 2: connect a same-account phone on the control plane ─────────
       //
       // Control-plane registration is under the bare deviceUuid (no projectId).
-      // Account-membership proof is the QR-less admission path.
-      const relayUrl = env.relay.url;
-      const deviceUuid = env.agent.rawDeviceId;
-      const agentEd25519Pub = env.agent.ed25519Pubkey;
-
-      cp = await RelayClient.connectAndAuth(relayUrl, {
+      // Account-trust (inventory) admission is the QR-less path — no pairing.
+      cp = await RelayClient.connectAndAuth(relay.url, {
         deviceType: "app",
         name: "eval-phone-defaults",
+        identity: appIdentity,
+        deviceId: appIdentity.deviceId,
       });
-      const cpPair = await pairWithRetry(cp, relayUrl, deviceUuid, {
-        timeoutMs: 10_000,
-        accountKey: { pubB64: accountPubB64, privateKey: accountKp.privateKey },
-      });
-      cp.setPeerId(cpPair.peerId);
-      await cp.performE2EHandshake(deviceUuid, 10_000, { agentEd25519Pub });
+      await handshakeWithoutPairing(cp, deviceUuid, auth.ed25519Pub);
 
       // ── Step 3: assert first agent:projects advert contains projA ──────────
       //
       // On handshake-complete the control plane sends `agent:projects` with the
-      // phone's allowedProjects. Since enable-project ran before pairing, the
+      // phone's allowedProjects. Since enable-project ran before connecting, the
       // same-account admission seeds the phone's allowlist from the policy store
-      // (relay-client.ts#handleInboundPairRequest → sameAccountDefaultProjects).
+      // (relay-client.ts's inbound admission → sameAccountDefaultProjects).
       // `agent:projects` shape: { type: "agent:projects", projects: ProjectAdvertEntry[] }
       // where each entry has a `projectId` field (host-server.ts buildProjectsAdvertisement).
       // Pull the control-plane snapshot (re-emits agent:projects) rather than
@@ -149,16 +189,24 @@ test(
       expect(Array.isArray(projects)).toBe(true);
 
       // Primary positive: projA appears in the very first advert.
-      expect(projects.map((p) => p.projectId)).toContain(env.projectId);
+      expect(projects.map((p) => p.projectId)).toContain(projectId);
 
-      // Scoped negative: a project that was NEVER enabled must NOT appear.
-      // This proves defaults are per-project (not blanket same-account access).
-      // We assert on a made-up id that was never passed to enable-project.
-      const neverEnabledId = "never-enabled-project-id-fixture";
+      // Scoped negative: a project that is genuinely open on the host but
+      // was NEVER enable-project'd must NOT appear. This proves defaults are
+      // per-project (not blanket same-account access) — buildProjectsAdvertisement
+      // filters from the phone's allowedProjects first, so warmth/catalog
+      // visibility alone isn't enough.
       expect(projects.map((p) => p.projectId)).not.toContain(neverEnabledId);
     } finally {
       await cp?.disconnect();
-      await env.teardown();
+      await agent?.kill();
+      relay?.stop();
+      licenseApi?.stop();
+      project?.cleanup();
+      try { neverEnabledProject?.cleanup(); } catch { /* Windows EBUSY teardown race */ }
+      if (abDir) {
+        try { rmSync(abDir, { recursive: true, force: true }); } catch {}
+      }
     }
   },
   120_000,

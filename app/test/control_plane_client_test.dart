@@ -110,6 +110,26 @@ void main() {
     await client.dispose();
   });
 
+  test('startProject fails fast (no silent drop) when the session is not '
+      'established', () async {
+    final t = FakeAgentTransport();
+    final client = ControlPlaneClient(transport: t);
+
+    // Keyless window: the stream reads connected but a send would silently drop
+    // (sendOnStream no-ops without keys). Tier-2 fail-fast so awaitProjectRunning
+    // never burns the full 30s on an undeliverable start.
+    t.setEstablished(false);
+
+    await expectLater(
+      client.startProject('projA'),
+      throwsA(isA<RpcException>()),
+    );
+    // Nothing was pushed onto the wire — the caller gets to retry, not strand.
+    expect(t.sent.any((m) => m['type'] == 'project:start'), isFalse);
+
+    await client.dispose();
+  });
+
   test('NOT_ALLOWED error response surfaces error state, no throw', () async {
     final t = FakeAgentTransport();
     final client = ControlPlaneClient(transport: t);

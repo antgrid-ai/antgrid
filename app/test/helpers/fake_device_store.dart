@@ -27,8 +27,17 @@ class InMemoryDeviceSecretStorage implements DeviceSecretStorage {
 KeychainDeviceStore fakeDeviceStoreFromRecord(DeviceRecord record) {
   return KeychainDeviceStore(
     storage: InMemoryDeviceSecretStorage(jsonEncode(record.toJson())),
+    controllerStorage: InMemoryDeviceSecretStorage(null),
   );
 }
+
+/// A [KeychainDeviceStore] with BOTH slots empty and in memory — for tests that
+/// exercise provisioning rather than seed a record. Every slot must be
+/// overridden: an unset one falls back to real platform secure storage.
+KeychainDeviceStore inMemoryDeviceStore() => KeychainDeviceStore(
+  storage: InMemoryDeviceSecretStorage(null),
+  controllerStorage: InMemoryDeviceSecretStorage(null),
+);
 
 /// Convenience: builds a [KeychainDeviceStore] from a real Ed25519 keypair
 /// derived from [seed] (a 32-byte list).  Stores both the raw seed (as

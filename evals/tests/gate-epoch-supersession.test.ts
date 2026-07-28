@@ -1,45 +1,32 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { generateKeyPairSync } from "node:crypto";
-import { allocatePort, startRelay, type RelayHandle } from "../helpers/harness";
-import { setupPairFlowTestEnv, type TestEnv } from "../helpers/test-env";
-import { RelayClient, PairAgentOfflineError } from "../helpers/relay-client";
+import { allocatePort, startRelay, setupTestEnv, type RelayHandle, type TestEnv } from "../helpers/harness";
+import { RelayClient } from "../helpers/relay-client";
 import { createMessage } from "../../bridge/src/protocol";
-import { loadPairedPhones } from "../../bridge/src/paired-phones";
-
-/** Mirrors harness.ts's private `allowProjectForPairedPhones` (unexported, and
- *  helpers/* is read-only for this phase) — setupPairFlowTestEnv deliberately
- *  does no project-allowlisting itself (X4 needs restartAgent, which only
- *  that helper provides; setupTestEnv provides allowlisting but no restart).
- *  Uses `upsert` (unconditional flush), not `allowProject` (no-ops once
- *  already present) — Bun's fs.watch on paired-phones.json was observed to
- *  occasionally miss/coalesce the change event under load in this sandbox
- *  (see gate-session-limit.test.ts for the reproduction), and an `allowProject`
- *  no-op retry can never recover from that since it skips its own flush(). */
-async function allowProjectForPairedPhones(abDir: string, projectId: string): Promise<void> {
-  const store = loadPairedPhones(abDir);
-  for (const phone of store.list()) {
-    const next = phone.allowedProjects.includes(projectId) ? phone.allowedProjects : [...phone.allowedProjects, projectId];
-    store.upsert({ ...phone, allowedProjects: next });
-  }
-  await Bun.sleep(600); // fs.watch debounce on the agent's paired-phones.json watcher
-}
-
-function rawEdPubB64(pub: import("node:crypto").KeyObject): string {
-  const der = pub.export({ format: "der", type: "spki" });
-  return Buffer.from(der.subarray(der.length - 32)).toString("base64");
-}
 
 /**
  * HELPER GAP (relay-client.ts, read-only for this phase): `openProjectStream`
- * only resolves on a `stream-ready` frame. But `firstProject` is opened by the
+ * only resolves on a `stream-ready` frame. `firstProject` is opened by the
  * agent itself at boot (mode "remote", host-server.ts's index.ts bootstrap),
  * so by the time a phone sends `project:start` for it, the agent takes the
- * ALREADY-remote "idempotent" branch (host-server.ts:774-779), which only
- * re-advertises `agent:projects` (carrying the streamId per design §7.4) and
- * never emits `stream-ready`. `dispatchAbMessage` only populates
- * `streamByProject` from `stream-ready`, so `openProjectStream` hangs forever
- * on an already-open project. Worked around here by also listening for the
- * `agent:projects` advert and reading the streamId out of it directly.
+ * ALREADY-remote "idempotent" branch of `handleControlPlaneVerb`.
+ *
+ * Corrected: this comment previously claimed that branch "never emits
+ * stream-ready". As of host-server.ts's "make a lost reply fail honestly
+ * instead of hanging" fix (bridge commit 01cb42e4, 2026-07-22 — this comment
+ * predates it, from 7ffc36ea on 2026-07-16), the idempotent branch DOES
+ * republish `stream-ready` (dedup-immune, unlike the advert) whenever the
+ * project's relay slot is already registered — see
+ * `multi-stream-coexistence.test.ts`, which relies on exactly that republish
+ * for its own already-open-project case. What remains true: the republish is
+ * gated on `core.isRelayRegistered()`, so a `project:start` that lands in the
+ * narrow window before that project's OWN relay slot finishes registering
+ * still gets only the `agent:projects` re-advert, no `stream-ready` —
+ * `dispatchAbMessage` only populates `streamByProject` from `stream-ready`,
+ * so a plain `openProjectStream` could still hang in that window. Kept the
+ * dual-listener workaround below (also reading the streamId out of the
+ * `agent:projects` advert) as defensive belt-and-suspenders for that
+ * remaining window, even though the common case is now covered by the
+ * bridge-side republish.
  */
 async function drillIntoProject(app: RelayClient, projectId: string, timeoutMs = 10_000): Promise<string> {
   const cached = (app as any).streamByProject.get(projectId);
@@ -164,43 +151,19 @@ describe("gate: epoch supersession — relay arbitration", () => {
 
 describe("gate: epoch supersession — agent restart end-to-end", () => {
   let env: TestEnv;
-  let accountKp: { publicKey: import("node:crypto").KeyObject; privateKey: import("node:crypto").KeyObject };
-  let accountPubB64: string;
-  let app: RelayClient;
 
   beforeAll(async () => {
-    accountKp = generateKeyPairSync("ed25519");
-    accountPubB64 = rawEdPubB64(accountKp.publicKey);
-    env = await setupPairFlowTestEnv({ accountPeerKeys: [accountPubB64] });
-
-    app = await RelayClient.connectAndAuth(env.relay.url, { deviceType: "app", name: "gate-epoch-app" });
-    for (let i = 0; i < 30; i++) {
-      try {
-        const r = await app.pairWith(env.agent.deviceId, {
-          timeoutMs: 8_000,
-          accountKey: { pubB64: accountPubB64, privateKey: accountKp.privateKey },
-        });
-        app.setPeerId(r.peerId);
-        break;
-      } catch (err) {
-        if (err instanceof PairAgentOfflineError) {
-          if (app.isClosed) await app.reconnectAndAuth(env.relay.url);
-          await Bun.sleep(200);
-          continue;
-        }
-        throw err;
-      }
-    }
-    await app.performE2EHandshake(env.agent.deviceId, 10_000, { agentEd25519Pub: env.agent.ed25519Pubkey });
-    await allowProjectForPairedPhones(env.abDir, env.projectId);
+    // setupTestEnv already admits `env.app` with NO pairing ceremony and
+    // allows the firstProject for it.
+    env = await setupTestEnv({ fixtureName: "basic" });
   });
 
   afterAll(async () => {
-    await app?.disconnect();
     await env?.teardown();
   });
 
   test("restartAgent mid-session: admitted fast, phone recovers, streams rebind, traffic flows", async () => {
+    const app = env.app;
     // Baseline: control-plane RPC and the project stream both work pre-restart.
     const baselineId = "gate-epoch-baseline";
     const baselineP = app.waitFor((m: any) => m.type === "response" && m.requestId === baselineId, 5_000);
@@ -208,6 +171,14 @@ describe("gate: epoch supersession — agent restart end-to-end", () => {
     await baselineP;
     const preStreamId = await drillIntoProject(app, env.projectId, 8_000);
     expect(typeof preStreamId).toBe("string");
+
+    // Phase A's same-account presence fan-out emits a peer-online to this phone
+    // at the agent's INITIAL connect (spec 2026-07-24 §4), which the client
+    // queues. Drop it so the waiter below binds to the genuinely-fresh
+    // post-restart peer-online (emitted when the new agent re-registers and is
+    // routable), not the stale queued one — otherwise the one-shot rekey fires
+    // before the restarted agent is reachable and its client-hello is dropped.
+    app.drainQueued("peer-online");
 
     const t0 = Date.now();
     const peerOnlineP = app.waitForType("peer-online", 15_000);
@@ -221,7 +192,7 @@ describe("gate: epoch supersession — agent restart end-to-end", () => {
 
     // The fake phone has no "peer-online ⇒ auto-rekey" wiring (see file
     // header) — the real app does this itself; drive it explicitly here.
-    await app.rekey(env.agent.deviceId, env.agent.ed25519Pubkey, 10_000);
+    await app.rekey(env.agentDeviceId, env.agent.ed25519Pubkey, 10_000);
 
     // Streams rebind: the pre-restart streamId is invalid — the relay closes
     // an agent's streams on disconnect (design §6.4) — so the cached entry

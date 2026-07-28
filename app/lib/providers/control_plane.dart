@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 
+import '../connection/supervisor_state.dart';
 import '../launcher/host_controller.dart';
 import '../launcher/local_agent_launcher.dart';
 import '../project/project_session_registry.dart';
@@ -9,6 +10,7 @@ import '../util/device_id.dart';
 import 'account_agents.dart';
 import 'agent_transport.dart';
 import 'drawer_expansion.dart';
+import 'eager_control_planes.dart';
 import 'new_session_picker.dart';
 import 'provider_retry.dart';
 import 'relay_connection.dart';
@@ -90,6 +92,10 @@ abstract interface class RefreshRef {
   T read<T>(ProviderListenable<T> provider);
   void invalidate(ProviderOrFamily provider);
 
+  /// Whether [provider] currently has a live element. Lets a helper inspect a
+  /// family member's cached state without `read`'s side effect of building it.
+  bool exists(ProviderBase<Object?> provider);
+
   /// False once the underlying widget has unmounted (always true for the
   /// container variant — tests own their container's lifecycle directly).
   /// The refresh helpers below re-check this after every `await`: they run
@@ -111,6 +117,8 @@ class _WidgetRefreshRef implements RefreshRef {
   @override
   void invalidate(ProviderOrFamily provider) => _ref.invalidate(provider);
   @override
+  bool exists(ProviderBase<Object?> provider) => _ref.exists(provider);
+  @override
   bool get mounted => _ref.context.mounted;
 }
 
@@ -121,6 +129,8 @@ class _ContainerRefreshRef implements RefreshRef {
   T read<T>(ProviderListenable<T> provider) => _container.read(provider);
   @override
   void invalidate(ProviderOrFamily provider) => _container.invalidate(provider);
+  @override
+  bool exists(ProviderBase<Object?> provider) => _container.exists(provider);
   @override
   bool get mounted => true;
 }
@@ -166,6 +176,27 @@ Future<void> _probeAndReconcile(ControlPlaneClient client) async {
   if (!await client.refresh()) client.clearAdvert();
 }
 
+/// Invalidates the full per-machine control-plane provider chain
+/// (transport → client → state) together. Always all three: the client is
+/// built atop the non-autoDispose transport family, so invalidating it alone
+/// rebuilds atop the cached — possibly released and dead — transport (it
+/// serves the cached element instead of re-running connectionFor) and the
+/// machine renders permanently offline. Mirrors the registry onEvict rationale
+/// in main.dart.
+void invalidateControlPlaneProviders(RefreshRef ref, String uuid) {
+  ref.invalidate(agentTransportForProvider(uuid));
+  ref.invalidate(controlPlaneClientForProvider(uuid));
+  ref.invalidate(controlPlaneStateProvider(uuid));
+}
+
+/// Upper bound a refresh gesture waits on any one machine's dial. The dial
+/// itself keeps going past this — the supervisor owns it — the gesture just
+/// stops riding the outcome. Above the ~6s an offline agent needs to reject,
+/// far below awaitSession's 90s relay-unreachable worst case, which would
+/// otherwise pin the RefreshIndicator (eager targets put unviewed machines in
+/// the refreshed set).
+const _kRefreshDialWait = Duration(seconds: 8);
+
 /// Refresh machine inventory, then force a fresh control-plane attempt for the
 /// requested machines. This is the manual "device may have come online" path:
 /// an earlier offline attempt can leave the transport/client providers in an
@@ -188,9 +219,11 @@ Future<void> refreshMachineInventoryAndControlPlanes(
   await Future.wait(
     targets.map((uuid) async {
       try {
-        final client = await ref.read(
-          controlPlaneClientForProvider(uuid).future,
-        );
+        // A mid-climb machine leaves this read pending until its dial settles;
+        // the timeout throws into the catch below, forcing the fresh attempt.
+        final client = await ref
+            .read(controlPlaneClientForProvider(uuid).future)
+            .timeout(_kRefreshDialWait);
         if (client != null) {
           await _probeAndReconcile(client);
           return;
@@ -200,11 +233,69 @@ Future<void> refreshMachineInventoryAndControlPlanes(
       }
       if (!ref.mounted) return;
 
-      relayManager.release(uuid);
-      ref.invalidate(controlPlaneClientForProvider(uuid));
-      ref.invalidate(agentTransportForProvider(uuid));
-      ref.invalidate(controlPlaneStateProvider(uuid));
-      await refreshControlPlanes(ref, [uuid]);
+      // A machine can sit Connected UNDER a stale cached rejection (a failed
+      // eager launch dial that later self-recovered via peer presence).
+      // Releasing it would kill the live E2E session and every project stream
+      // riding the socket — and the invalidate + re-read below succeeds on the
+      // live connection anyway, so only a not-connected machine is torn down
+      // for its fresh attempt.
+      if (relayManager.peek(uuid)?.supervisor?.status is! Connected) {
+        relayManager.release(uuid);
+      }
+      invalidateControlPlaneProviders(ref, uuid);
+      await refreshControlPlanes(
+        ref,
+        [uuid],
+      ).timeout(_kRefreshDialWait, onTimeout: () {});
+    }),
+  );
+}
+
+/// Dial every eager target (see [eagerControlPlaneTargetsProvider]) so opening
+/// the phone shows live machine status and session lists without a drawer
+/// expand or pull-to-refresh first. Runs at app launch and again on resume.
+///
+/// Per machine, three states:
+///   - No connection: dial it (invalidating first — the providers may hold a
+///     stale rejection from an attempt that never materialized a socket).
+///   - Live connection whose provider chain is healthy, still building, or was
+///     never built: skip — the supervisor owns in-flight recovery, and a kick
+///     here would only churn it.
+///   - Live connection whose chain SETTLED on a cached rejection
+///     (noProviderRetry): repair it. This is the failed-at-launch machine —
+///     the dial materialized the connection before awaitSession threw, so a
+///     bare peek-skip would strand the cached error forever. A Connected
+///     machine keeps its socket (the rebuilt read rides the live session); a
+///     stuck ladder is released first so the redial is a genuinely fresh
+///     attempt — resume/presence never re-enter a Blocked ladder on their own.
+///
+/// Failures are swallowed per machine: the drawer still renders from cache,
+/// and pull-to-refresh remains the manual retry — the eager targets sit in the
+/// reaper's alive set, so refreshDrawer force-retries them too.
+Future<void> kickEagerControlPlaneDials(RefreshRef ref) async {
+  final targets = ref.read(eagerControlPlaneTargetsProvider);
+  if (targets.isEmpty) return;
+  final mgr = ref.read(relayConnectionManagerProvider);
+  await Future.wait(
+    targets.map((uuid) async {
+      final existing = mgr.peek(uuid);
+      if (existing != null) {
+        final clientProvider = controlPlaneClientForProvider(uuid);
+        // exists() first: read() would build a never-watched member as a side
+        // effect, and a connection with no built chain has nothing to repair.
+        if (!ref.exists(clientProvider)) return;
+        final cached = ref.read(clientProvider);
+        // isLoading covers a rebuild in flight — Riverpod retains the previous
+        // error while refreshing, so hasError alone would misread it as stale.
+        if (cached.isLoading || !cached.hasError) return;
+        if (existing.supervisor?.status is! Connected) mgr.release(uuid);
+      }
+      invalidateControlPlaneProviders(ref, uuid);
+      try {
+        await ref.read(controlPlaneClientForProvider(uuid).future);
+      } catch (_) {
+        // Offline / unreachable machine — leave it to the manual refresh path.
+      }
     }),
   );
 }
@@ -284,5 +375,10 @@ final controlPlaneAliveTargetsProvider = Provider<Set<String>>((ref) {
   for (final id in expanded) {
     if (!id.contains('.')) alive.add(id);
   }
+  // Mobile's proactive launch/resume dials (see [kickEagerControlPlaneDials]):
+  // eager machines are wanted the moment the app opens, before any selection
+  // or expansion exists to claim them. Without this union the reaper would
+  // close each eager socket moments after the kick opened it.
+  alive.addAll(ref.watch(eagerControlPlaneTargetsProvider));
   return alive;
 });

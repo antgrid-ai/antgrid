@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:uuid/uuid.dart';
 
+import '../models/ab_message.dart';
 import 'project_message_classification.dart';
 
 /// Splits a transport's inbound control-channel stream into status and heavy
@@ -45,7 +46,33 @@ class MessageRouter {
         _heavyCtrl.add(raw.json);
         break;
       case MessageTier.ignore:
+        assert(
+          _isExpectedIgnore(raw.json),
+          'Inbound type "${raw.json['type']}" has a parseAbMessage case but '
+          'classifies as MessageTier.ignore, so it is being silently dropped. '
+          'Classify it (_statusTypes / _heavyTypes) or add it to '
+          'kUnroutedInboundTypes — see classification_gate_test.dart.',
+        );
         break;
+    }
+  }
+
+  /// Debug-only backstop for the classification gate: a control-channel frame
+  /// whose type the parser recognizes yet the classifier ignores is a silent
+  /// drop. Genuinely-ignored session frames (ping/pong/handshake) return null
+  /// from [parseAbMessage], so they never trip this; the parseable-but-unrouted
+  /// types (preview tunnel, outbound loopback, snapshot requests) are enumerated
+  /// in [kUnroutedInboundTypes]. Anchoring on the parser — not the classifier's
+  /// broad ignore bucket — is what keeps this free of false positives.
+  static bool _isExpectedIgnore(Map<String, dynamic> json) {
+    final type = json['type'];
+    if (type is! String || type.isEmpty) return true;
+    if (kUnroutedInboundTypes.contains(type)) return true;
+    try {
+      return parseAbMessage(json) == null;
+    } catch (_) {
+      // A malformed payload is not a classification bug.
+      return true;
     }
   }
 

@@ -9,7 +9,6 @@ import { createMessage, type AbMessage } from "./protocol";
 import type { TerminalManager } from "./terminal-manager";
 import type { AbConfig } from "./config";
 import type { ProjectInfo } from "./file-watcher";
-import type { PairingWindow } from "./pairing-window";
 import { lastAssistantText } from "./transcript-tail";
 
 export interface AgentContext {
@@ -32,12 +31,6 @@ export interface AgentContext {
    *  never emits an app-facing frame — unlike /notify, a turn-start is not a
    *  user-facing notification. */
   onTurnStart?: () => void;
-  /**
-   * Test-only accessor for the per-project pairing window. Wired in
-   * `buildAgentCore` and only exposed via the `/test/open-pairing-window`
-   * route when `ANTGRID_EVAL_TEST=1`.
-   */
-  pairingWindow?: () => PairingWindow;
 }
 
 const VERSION = "0.1.0";
@@ -210,24 +203,6 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
           }));
 
           return json({ exitCode, output: chunks.join("") });
-        } catch (err) {
-          return json({ error: String(err) }, 500);
-        }
-      }
-
-      // Test-only: open the pairing window and return the code. Used by the
-      // eval harness to drive the pair flow E2E. Gated on ANTGRID_EVAL_TEST=1
-      // so it is unreachable in production builds.
-      if (
-        req.method === "POST" &&
-        path === "/test/open-pairing-window" &&
-        process.env.ANTGRID_EVAL_TEST === "1" &&
-        ctx.pairingWindow
-      ) {
-        try {
-          const win = ctx.pairingWindow();
-          const { code, expiresAt } = win.open();
-          return json({ code, expiresAt });
         } catch (err) {
           return json({ error: String(err) }, 500);
         }

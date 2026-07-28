@@ -4,12 +4,10 @@ import type { ServerWebSocket } from "bun";
 import { logger } from "../logger.js";
 import type { LicenseCache } from "./cache.js";
 import type { Connections, Connection, WsData } from "../connections.js";
-import type { Grants } from "../grants.js";
 
 export interface InternalRouteDeps {
   licenseCache: LicenseCache;
   connections: Connections;
-  grants: Grants;
   relayInternalSecret: string;
 }
 
@@ -87,22 +85,6 @@ function closeWithLicense(conn: Connection, code: "LICENSE_REVOKED" | "LICENSE_E
   return true;
 }
 
-/**
- * Sever the agent's grants and notify each granted phone (`grant-revoked` +
- * `peer-offline`, sockets stay open per design §6.4). Called BEFORE the agent
- * socket closes so its close handler finds no grants to double-notify.
- */
-function revokeAgentGrants(deps: InternalRouteDeps, agentDeviceId: string): void {
-  for (const g of deps.grants.peersOf(agentDeviceId)) {
-    deps.grants.revoke(g.agentDeviceId, g.phonePubkey, "REVOKED");
-    const phone = deps.connections.getByDeviceId(g.phoneDeviceId);
-    if (phone && phone.ws.readyState === 1) {
-      phone.ws.send(JSON.stringify({ type: "grant-revoked", peerDeviceId: agentDeviceId, reason: "REVOKED" }));
-      phone.ws.send(JSON.stringify({ type: "peer-offline", peerId: agentDeviceId }));
-    }
-  }
-}
-
 export async function handleRevoke(req: Request, deps: InternalRouteDeps): Promise<Response> {
   const verified = await verifyAndParse(req, deps.relayInternalSecret, RevokeBody);
   if (!verified.ok) {
@@ -111,13 +93,16 @@ export async function handleRevoke(req: Request, deps: InternalRouteDeps): Promi
   }
   const { deviceId } = verified.data;
   deps.licenseCache.markRevoked(deviceId);
-  const conn = deps.connections.getByDeviceId(deviceId);
-  let wsClosed = false;
-  if (conn) {
-    revokeAgentGrants(deps, deviceId);
-    wsClosed = closeWithLicense(conn, "LICENSE_REVOKED");
+  // Every socket the account device holds, not just `getByDeviceId(deviceId)`:
+  // an app registers one per-machine slot (`<deviceId>#<machine>`) per machine
+  // it controls, so a bare-id lookup would leave a revoked phone's live E2E
+  // sessions routing until it chose to disconnect.
+  const conns = deps.connections.getByAccountDevice(deviceId);
+  let closed = 0;
+  for (const conn of conns) {
+    if (closeWithLicense(conn, "LICENSE_REVOKED")) closed += 1;
   }
-  logger.info("license_revoke", { deviceId, wsClosed });
+  logger.info("license_revoke", { deviceId, wsClosed: closed > 0, socketsClosed: closed });
   return Response.json({ ok: true });
 }
 
@@ -149,7 +134,6 @@ export async function handleExpire(req: Request, deps: InternalRouteDeps): Promi
   const ids = deps.licenseCache.dropByUser(userId);
   let closed = 0;
   for (const conn of deps.connections.getConnectionsForUser(userId)) {
-    if (conn.deviceType === "agent") revokeAgentGrants(deps, conn.deviceId);
     if (closeWithLicense(conn, "LICENSE_EXPIRED")) closed += 1;
   }
   logger.info("license_expire", { userId, devicesRevoked: ids.length, wsClosed: closed });

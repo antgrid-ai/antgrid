@@ -32,8 +32,6 @@ void main() {
       agentLabel: 'dev-server',
       agentEd25519Pubkey: '',
       relayUrl: '',
-      phoneDeviceId: '',
-      phoneEd25519Pubkey: '',
       pairedAt: t0,
       lastConnectedAt: t1,
     );
@@ -95,8 +93,6 @@ void main() {
         agentLabel: 'work-server',
         agentEd25519Pubkey: '',
         relayUrl: '',
-        phoneDeviceId: '',
-        phoneEd25519Pubkey: '',
         pairedAt: t0,
         lastConnectedAt: t1,
       );
@@ -126,8 +122,6 @@ void main() {
         agentLabel: 'qr-paired',
         agentEd25519Pubkey: '',
         relayUrl: '',
-        phoneDeviceId: '',
-        phoneEd25519Pubkey: '',
         pairedAt: t0,
         lastConnectedAt: t1,
       );
@@ -185,8 +179,6 @@ void main() {
         agentLabel: agentLabel,
         agentEd25519Pubkey: '',
         relayUrl: '',
-        phoneDeviceId: '',
-        phoneEd25519Pubkey: '',
         pairedAt: t0,
         lastConnectedAt: t1,
         hostMachineName: hostMachineName,
@@ -203,7 +195,11 @@ void main() {
 
       test('machine name falls back to label, then to the uuid', () {
         final labelled = RemoteAgentEntry(
-          recent(agentDeviceId: 'u1', agentLabel: 'work', hostMachineName: '  '),
+          recent(
+            agentDeviceId: 'u1',
+            agentLabel: 'work',
+            hostMachineName: '  ',
+          ),
         );
         expect(labelled.displayName, 'work');
         final bare = RemoteAgentEntry(

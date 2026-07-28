@@ -1,7 +1,8 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import {
-  agentRegistrationId,
+  generateAppIdentity,
   generateEvalAuth,
+  handshakeWithoutPairing,
   spawnAgent,
   startFakeLicenseApi,
   startRelay,
@@ -10,7 +11,7 @@ import {
   type RelayHandle,
 } from "../../helpers/harness";
 import { createTestProject, type TestProject } from "../../helpers/fixtures";
-import { RelayClient } from "../../helpers/relay-client";
+import { RelayClient, type PhoneIdentity } from "../../helpers/relay-client";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -21,8 +22,9 @@ import { tmpdir } from "node:os";
  *   then ECDH handshake through relay message routing,
  *   then encrypted AbMessage exchange.
  */
-// TODO Tasks 28-33 will replace this with new pair-request v3 evals.
-// Old pair-request shape is incompatible with the current relay protocol.
+// Skipped: its relay/client setup predates account trust, so the two devices
+// never share a `claims.uid` and `mayRoute` never admits the routing this
+// suite asserts. Restoring it means rebuilding on the license-gate-backed env.
 describe.skip("central-relay-e2e", () => {
   let relay: RelayHandle;
   let agent: AgentHandle;
@@ -30,6 +32,7 @@ describe.skip("central-relay-e2e", () => {
   let project: TestProject;
   let abDir: string;
   let licenseApi: FakeLicenseApi;
+  let appIdentity: PhoneIdentity & { deviceId: string };
 
   const relayPort = 19500 + Math.floor(Math.random() * 500);
 
@@ -37,9 +40,14 @@ describe.skip("central-relay-e2e", () => {
     // 1. Create isolated antgrid dir (avoids polluting ~/.antgrid/)
     abDir = mkdtempSync(join(tmpdir(), "antgrid-eval-home-"));
 
-    // 2. Start central relay with longer pair timeout (agent needs time to start)
-    relay = await startRelay({ port: relayPort, pairRequestTimeoutMs: 15_000 });
-    licenseApi = startFakeLicenseApi();
+    // 2. Start central relay.
+    relay = await startRelay({ port: relayPort });
+    // Account trust (Phases A+B): the app admits with no pairing ceremony, as
+    // long as its identity is in the account's device inventory.
+    appIdentity = await generateAppIdentity();
+    licenseApi = startFakeLicenseApi({
+      accountDevices: [{ deviceId: appIdentity.deviceId, ed25519Pub: appIdentity.publicKeyBase64 }],
+    });
     const auth = generateEvalAuth();
 
     // 3. Create test project with relay URL in config
@@ -57,20 +65,22 @@ describe.skip("central-relay-e2e", () => {
       auth,
     });
 
-    // 5. The agent registers on the relay as `${deviceUuid}.${projectId}`.
-    const registrationId = agentRegistrationId(auth.deviceUuid, project.dir);
+    // 5. The agent registers on the relay as the bare deviceUuid (v3: one
+    //    machine socket; projects are streams, not compound registrations).
+    const registrationId = auth.deviceUuid;
 
-    // 6. Connect app to relay, authenticate, pair with agent
+    // 6. Connect app to relay, authenticate with the SAME identity seeded
+    //    into the account inventory above.
     app = await RelayClient.connectAndAuth(relay.url, {
       deviceType: "app",
       name: "eval-app",
+      identity: appIdentity,
+      deviceId: appIdentity.deviceId,
     });
 
-    const pairResult = await app.pairWith(registrationId, 15_000);
-    app.setPeerId(pairResult.peerId);
-
-    // 7. Perform E2E handshake through relay
-    await app.performE2EHandshake(registrationId, 15_000);
+    // 7. Perform E2E handshake through relay — no pair-request ever sent;
+    //    admission is relay same-account routing + bridge inventory trust.
+    await handshakeWithoutPairing(app, registrationId, auth.ed25519Pub);
   }, 30_000);
 
   afterAll(async () => {

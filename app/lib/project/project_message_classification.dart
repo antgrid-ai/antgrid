@@ -77,6 +77,33 @@ const Set<String> _statusTypes = <String>{
   'file:upload-result',
 };
 
+/// Inbound parser types (`parseAbMessage` cases in `models/ab_message.dart`)
+/// that are DELIBERATELY not routed to a UI reducer via
+/// [classifyAbMessageByType] — so a type that parses yet classifies as
+/// [MessageTier.ignore] is a documented decision here, not a silent omission.
+///
+/// This is the receive-side of the reconciliation-checkpoint hazard: the parser
+/// switch is the one place you MUST touch to receive a new agent→app type, so
+/// `classification_gate_test.dart` derives the inbound-type set from it and
+/// asserts every case is either classified non-ignore or listed here. That is
+/// what makes "add an inbound type without classifying it" fail CI instead of
+/// silently dropping the frame.
+///
+///   - `tunnel:http-response` arrives on the `preview` channel and is consumed
+///     by PreviewService's direct transport subscription, bypassing the control
+///     classification path entirely.
+///   - `client:focus-state` is app→agent (outbound); it parses only for the
+///     agent / loopback side.
+///   - the three `*:snapshot:request` types are snapshot REQUESTS serviced
+///     outside the heavy/status reducers.
+const Set<String> kUnroutedInboundTypes = <String>{
+  'tunnel:http-response',
+  'client:focus-state',
+  'terminal:snapshot:request',
+  'file:tree:snapshot:request',
+  'preview:snapshot:request',
+};
+
 const Set<String> _heavyTypes = <String>{
   'terminal:output',
   'terminal:snapshot',

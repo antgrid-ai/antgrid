@@ -1,6 +1,8 @@
 // E2E machine-level trust (v3 stream data planes):
-//   1. Pair ONE phone once against the CONTROL PLANE (bare deviceUuid).
-//   2. Allow projA + projB for that phone (machine-level paired-phones store).
+//   1. setupTestEnv admits ONE app once against the CONTROL PLANE (bare
+//      deviceUuid) with no pairing ceremony.
+//   2. Allow projA + projB for that phone (machine-level paired-phones store;
+//      projA is already allowed by setupTestEnv itself).
 //   3. Drive `terminal:start` on the projA AND projB STREAMS → both succeed.
 //   4. Drill into projC (NOT allowed) → control-plane project:start is rejected
 //      NOT_ALLOWED; the phone gets no projC stream.
@@ -17,21 +19,15 @@
 //
 // Known Windows test noise (NOT failures): fs.watch EPERM/EBUSY on teardown.
 import { test, expect } from "bun:test";
-import { generateKeyPairSync } from "node:crypto";
 import { join } from "node:path";
-import { setupPairFlowTestEnv } from "../helpers/test-env";
-import { RelayClient } from "../helpers/relay-client";
+import { setupTestEnv } from "../helpers/harness";
+import type { RelayClient } from "../helpers/relay-client";
 import { createTestProject } from "../helpers/fixtures";
 import { computeProjectId } from "../../bridge/src/project-id";
 import { loadPairedPhones } from "../../bridge/src/paired-phones";
 import { readHostFile } from "../../bridge/src/host-discovery";
 import { createMessage } from "../../bridge/src/protocol";
-import { firstProjectStream } from "../support/stream";
-
-function rawEdPubB64(pub: import("node:crypto").KeyObject): string {
-  const der = pub.export({ format: "der", type: "spki" });
-  return Buffer.from(der.subarray(der.length - 32)).toString("base64");
-}
+import { allowAndResolveStream, firstProjectStream } from "../support/stream";
 
 async function loopbackControl(abDir: string, body: object): Promise<any> {
   const hf = readHostFile(join(abDir, "host.json"));
@@ -44,8 +40,10 @@ async function loopbackControl(abDir: string, body: object): Promise<any> {
   return res.json();
 }
 
-/** Resolve the advertised streamId for `projectId` from a fresh advert. */
+/** Resolve the advertised streamId for `projectId` from a fresh advert
+ *  (already-allowed project — no allowlist retry needed). */
 async function streamFor(app: RelayClient, projectId: string): Promise<string> {
+  app.drainQueued("agent:projects");
   await app.pullStateSnapshot();
   return firstProjectStream(app, projectId, 8_000);
 }
@@ -79,19 +77,12 @@ async function driveTerminal(app: RelayClient, streamId: string, terminalId: str
 }
 
 test("machine trust: pair once, allow two, drive two streams, reject a third, on-demand start", async () => {
-  const accountKp = generateKeyPairSync("ed25519");
-  const accountPubB64 = rawEdPubB64(accountKp.publicKey);
-  const env = await setupPairFlowTestEnv({ accountPeerKeys: [accountPubB64] });
-
+  const env = await setupTestEnv({ fixtureName: "basic" });
   const projBdir = createTestProject("basic", { "__RELAY_URL__": env.relay.url.replace(/\/ws$/, "") });
   const projCdir = createTestProject("basic", { "__RELAY_URL__": env.relay.url.replace(/\/ws$/, "") });
 
-  let cp: RelayClient | null = null;
   try {
-    const relayUrl = env.relay.url;
-    const deviceUuid = env.agent.deviceId;
-    const agentEd25519Pub = env.agent.ed25519Pubkey;
-
+    const cp = env.app;
     const projA = env.projectId;
     const projB = computeProjectId(projBdir.dir);
     const projC = computeProjectId(projCdir.dir);
@@ -100,27 +91,21 @@ test("machine trust: pair once, allow two, drive two streams, reject a third, on
     expect((await loopbackControl(env.abDir, { id: "open-b", type: "project:open", projectId: projB, projectPath: projBdir.dir, mode: "remote" })).ok).toBe(true);
     expect((await loopbackControl(env.abDir, { id: "open-c", type: "project:open", projectId: projC, projectPath: projCdir.dir, mode: "remote" })).ok).toBe(true);
 
-    // === STEP 1: pair ONCE against the control plane (account-membership) ===
-    cp = await RelayClient.connectAndAuth(relayUrl, { deviceType: "app", name: "eval-phone-cp" });
-    const phoneIdentity = cp.exportIdentity();
-    const cpPair = await cp.pairWith(deviceUuid, { timeoutMs: 10_000, accountKey: { pubB64: accountPubB64, privateKey: accountKp.privateKey } });
-    cp.setPeerId(cpPair.peerId);
-    await cp.performE2EHandshake(deviceUuid, 10_000, { agentEd25519Pub });
+    // === STEP 1: setupTestEnv already admitted ONE app against the control
+    // plane (account trust, no pairing ceremony). ===
+    const phonePubkey = env.appIdentity.publicKeyBase64;
 
-    // === STEP 2: allow projA + projB (fail-closed store) ===
-    const phonePubkey = phoneIdentity.publicKeyBase64;
-    const store = loadPairedPhones(env.abDir);
-    expect(store.has(phonePubkey)).toBe(true);
-    store.allowProject(phonePubkey, projA);
-    store.allowProject(phonePubkey, projB);
-    await Bun.sleep(400);
+    // === STEP 2: confirm projA is already allowed (setupTestEnv's own admission) ===
+    expect(loadPairedPhones(env.abDir).has(phonePubkey)).toBe(true);
 
     // === STEP 3: drive terminal:start on the projA AND projB streams ===
     const streamA = await streamFor(cp, projA);
     const outA = await driveTerminal(cp, streamA, "tA", "ALLOW_A");
     expect(outA).toContain("ALLOW_A");
 
-    const streamB = await streamFor(cp, projB);
+    // Allow projB (retrying the allowlist write until the agent's own reload
+    // is confirmed — see allowAndResolveStream's docstring).
+    const streamB = await allowAndResolveStream(cp, env.abDir, projB);
     const outB = await driveTerminal(cp, streamB, "tB", "ALLOW_B");
     expect(outB).toContain("ALLOW_B");
 
@@ -144,7 +129,6 @@ test("machine trust: pair once, allow two, drive two streams, reject a third, on
     const finalAdvert = await cp.waitForAbType("agent:projects", 8_000);
     expect(finalAdvert.projects.map((p: any) => p.projectId)).not.toContain(projC);
   } finally {
-    await cp?.disconnect();
     await env.teardown();
     try { projBdir.cleanup(); } catch { /* Windows EBUSY teardown race */ }
     try { projCdir.cleanup(); } catch { /* Windows EBUSY teardown race */ }

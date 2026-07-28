@@ -1,10 +1,13 @@
+/// Phases of the machine socket itself, ordered cold → live. Consumers compare
+/// by `index`, so the order is load-bearing. Admission is account trust: there
+/// is no pairing rung, and `authenticated` (the relay answered `welcome`) is the
+/// terminal state — agent presence is reported separately, on
+/// `RelayService.peerPresenceStream`.
 enum RelayConnectionState {
   disconnected,
   connecting,
   authenticating,
   authenticated,
-  pairing,
-  paired,
 }
 
 /// Sentinel value used in [AppState.copyWith] to explicitly clear a field.
@@ -36,11 +39,10 @@ class AppState {
   /// Pass [_cleared] to explicitly set a field to null.
   /// Pass null (the default) to keep the existing value — EXCEPT [errorCode]
   /// and [error], which deliberately auto-clear on any copy: they describe one
-  /// failure instant, and every state transition supersedes it. PairingService
-  /// relies on this ("non-null errorCode on disconnect" == "the relay told us
-  /// why — don't retry"), so a carried-forward stale code would kill its retry
-  /// loop. Callers that must preserve them across a transition re-pass them
-  /// explicitly (see _onDisconnected).
+  /// failure instant, and every state transition supersedes it. A carried-forward
+  /// stale code would keep reading as "the relay just told us why". Callers that
+  /// must preserve them across a transition re-pass them explicitly (see
+  /// _onDisconnected).
   AppState copyWith({
     RelayConnectionState? connectionState,
     String? errorCode,

@@ -1,12 +1,6 @@
-// Step 1 finding (QR target — no bridge change needed):
-// bridge/src/pairing.ts buildPairingUri emits `...&d=${args.agentDeviceId}...`.
-// Both callers in bridge/src/banner.ts (lines 41, 91) pass
-// `agentDeviceId: identity.deviceId` — the BARE deviceUuid, NOT the compound
-// `<deviceUuid>.<projectId>`. The app's app/lib/models/qr_payload.dart parses
-// `d=<deviceId>` as the bare agentDeviceId, and RemotePairActions.scanAndPair
-// pushes ScannerScreen → pairedAgentProvider.notifier.pair(qr) keyed by the
-// bare id. Conclusion: the existing scanAndPair CTA already pairs at the machine
-// level. This task is copy/UX + button styling + this test — no new plumbing.
+// The QR's `d=` carries the bare agent deviceUuid, never the compound
+// `<deviceUuid>.<projectId>` slot id — RemoteConnectActions.scanAndConnect
+// imports coordinates keyed by that bare id.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';

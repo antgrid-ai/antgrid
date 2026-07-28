@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { OAuthClient } from "../../src/auth/oauth-client";
+import { OAuthClient, startTokenMaintenance, type MintedToken } from "../../src/auth/oauth-client";
 
 function makeServer(handler: (req: Request) => Response | Promise<Response>): {
   url: string;
@@ -95,6 +95,49 @@ describe("OAuthClient", () => {
       await c.mint();
     } finally {
       srv.close();
+    }
+  });
+});
+
+describe("startTokenMaintenance", () => {
+  it("onMinted fires after each successful re-mint, not the initial", async () => {
+    // The real refresh timer waits 0.8×60s (the ttl floor) — far too long for a
+    // unit test — so capture the scheduled callback and drive re-mints by hand.
+    // A microtask flush after each invocation lets the async mint + re-schedule
+    // settle before the next drive.
+    const realSetTimeout = globalThis.setTimeout;
+    let pending: (() => void) | null = null;
+    (globalThis as any).setTimeout = ((fn: () => void) => { pending = fn; return 0; });
+    const flush = () => new Promise((r) => realSetTimeout(r, 0));
+
+    let mintCalls = 0;
+    const client = {
+      mint: async (): Promise<MintedToken> => {
+        mintCalls++;
+        return { accessToken: `t${mintCalls}`, expiresAt: Date.now() + 3_600_000 };
+      },
+    } as unknown as OAuthClient;
+    const initial: MintedToken = { accessToken: "t0", expiresAt: Date.now() + 3_600_000 };
+
+    try {
+      let minted = 0;
+      const maint = startTokenMaintenance(client, initial, { onMinted: () => minted++ });
+
+      // The initial token is provided by the caller, not minted here → no fire.
+      expect(minted).toBe(0);
+      expect(maint.getToken()).toBe("t0");
+
+      pending!(); await flush();               // first re-mint
+      expect(minted).toBe(1);
+      expect(maint.getToken()).toBe("t1");
+
+      pending!(); await flush();               // second re-mint
+      expect(minted).toBe(2);
+      expect(maint.getToken()).toBe("t2");
+
+      maint.stop(); // cancel the outstanding timer — no leaked maintenance loop
+    } finally {
+      (globalThis as any).setTimeout = realSetTimeout;
     }
   });
 });
