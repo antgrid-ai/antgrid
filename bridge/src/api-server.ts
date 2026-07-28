@@ -78,7 +78,14 @@ function textResponse(data: string, status = 200) {
   return new Response(data, { status, headers: { "Content-Type": "text/plain" } });
 }
 
+// Cursor merges hook tiers, so a machine with both the project-tier entries
+// (plugin installer) and the user-tier entries (spawn augmenter) runs two
+// identical hook processes per event, and both POST /notify. Collapse exact
+// duplicates inside a short window so the phone gets one notification.
+const NOTIFY_DEDUP_WINDOW_MS = 5_000;
+
 export function startApiServer(ctx: AgentContext): ApiServerHandle {
+  const recentNotifies = new Map<string, number>();
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -212,6 +219,13 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         }
         const parsed = NotifyBodySchema.safeParse(raw);
         if (!parsed.success) return json({ error: "Invalid body" }, 400);
+        const dedupKey = JSON.stringify(parsed.data);
+        const now = Date.now();
+        for (const [key, at] of recentNotifies) {
+          if (now - at > NOTIFY_DEDUP_WINDOW_MS) recentNotifies.delete(key);
+        }
+        if (recentNotifies.has(dedupKey)) return json({ ok: true, deduped: true });
+        recentNotifies.set(dedupKey, now);
         const project = ctx.project();
         const { type, terminalId, transcriptPath, agent } = parsed.data;
         // An agent that carries its final message inline wins; only claude needs

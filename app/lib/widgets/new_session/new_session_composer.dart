@@ -5,12 +5,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_chip.dart';
 import '../../design/widgets/ab_composer_send_button.dart';
-import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_kbd.dart';
 import '../../design/widgets/ab_menu.dart';
+import '../../design/widgets/ab_segmented.dart';
 import '../../design/widgets/ab_snack_bar.dart';
 import '../../design/widgets/ab_text_field.dart';
 
@@ -49,6 +48,12 @@ bool newSessionCanStart({
 /// Minimum row slack (hint intrinsic width + trailing gap, with margin)
 /// before the Enter-to-start hint is worth rendering at all.
 const double _enterHintMinWidth = 96;
+
+/// Bottom-row width below which the controls degrade: the mode segmented
+/// control drops its cell icons and the agent selector's slot absorbs the
+/// row slack (ellipsizing its label) instead of the desktop Enter-hint slot.
+/// Degradation order is icons → hint → label; the labels never drop.
+const double _composerRowRoomyMinWidth = 460;
 
 class NewSessionComposer extends ConsumerStatefulWidget {
   const NewSessionComposer({
@@ -366,28 +371,6 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                 ],
               ),
             ),
-            if (!isCustom && !supportsChat)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(
-                  AbTokens.space12,
-                  0,
-                  AbTokens.space12,
-                  AbTokens.space6,
-                ),
-                child: Row(
-                  children: [
-                    AbIcon(AbIcons.terminal, size: 11, color: p.textMuted),
-                    const SizedBox(width: AbTokens.space6),
-                    Text(
-                      'Starts a terminal session',
-                      style: AbTokens.sansStyle(
-                        fontSize: AbTokens.fontSm,
-                        color: p.textMuted,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
             Padding(
               padding: const EdgeInsets.fromLTRB(
                 AbTokens.space10,
@@ -395,27 +378,38 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                 AbTokens.space10,
                 AbTokens.space10,
               ),
-              child: Row(
-                children: [
-                  _ModeChip(supportsChat: supportsChat),
-                  const SizedBox(width: AbTokens.space8),
-                  Builder(
-                    builder: (gearContext) => AbIconButton(
-                      key: const Key('new-session-gear-button'),
-                      icon: AbIcons.settings,
-                      onTap: () => _openGear(gearContext),
-                    ),
-                  ),
-                  // Hardware-Enter hint — desktop only (soft keyboards have
-                  // no meaningful Enter-to-send). Fades rather than pops so
-                  // the row doesn't reflow as readiness changes. It lives in
-                  // the row's slack (not after a Spacer) so a narrow pane
-                  // drops it instead of overflowing — the invisible hint
-                  // still occupies layout space.
-                  Expanded(
-                    child: isMobilePlatform
-                        ? const SizedBox.shrink()
-                        : LayoutBuilder(
+              child: LayoutBuilder(
+                builder: (context, rowConstraints) {
+                  // Tight rows (phones, narrow desktop panes) degrade before
+                  // overflowing: the segmented control drops its cell icons
+                  // and the agent selector's slot takes the row slack so its
+                  // label ellipsizes (see _composerRowRoomyMinWidth).
+                  final roomy =
+                      rowConstraints.maxWidth >= _composerRowRoomyMinWidth;
+                  return Row(
+                    children: [
+                      _ModeSegmented(
+                        supportsChat: supportsChat,
+                        showIcons: roomy,
+                      ),
+                      const SizedBox(width: AbTokens.space8),
+                      Builder(
+                        builder: (gearContext) => AbIconButton(
+                          key: const Key('new-session-gear-button'),
+                          icon: AbIcons.settings,
+                          onTap: () => _openGear(gearContext),
+                        ),
+                      ),
+                      if (roomy && !isMobilePlatform) ...[
+                        // Hardware-Enter hint — desktop only (soft keyboards
+                        // have no meaningful Enter-to-send). Fades rather
+                        // than pops so the row doesn't reflow as readiness
+                        // changes. It lives in the row's slack (not after a
+                        // Spacer) so a narrow pane drops it instead of
+                        // overflowing — the invisible hint still occupies
+                        // layout space.
+                        Expanded(
+                          child: LayoutBuilder(
                             builder: (context, constraints) {
                               if (constraints.maxWidth < _enterHintMinWidth) {
                                 return const SizedBox.shrink();
@@ -433,7 +427,9 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
                                         const AbKbd('⏎'),
-                                        const SizedBox(width: AbTokens.space6),
+                                        const SizedBox(
+                                          width: AbTokens.space6,
+                                        ),
                                         Text(
                                           'to start',
                                           style: AbTokens.sansStyle(
@@ -448,15 +444,27 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                               );
                             },
                           ),
-                  ),
-                  const _AgentSelector(),
-                  const SizedBox(width: AbTokens.space8),
-                  ComposerSendButton(
-                    key: const Key('new-session-send-button'),
-                    busy: _starting,
-                    onTap: canSend ? _submit : null,
-                  ),
-                ],
+                        ),
+                        const _AgentSelector(),
+                      ] else
+                        // No hint slot: hand the slack to the selector so a
+                        // long agent label ellipsizes inside it (ComposerChip
+                        // needs a bounded width) instead of overflowing.
+                        const Expanded(
+                          child: Align(
+                            alignment: Alignment.centerRight,
+                            child: _AgentSelector(),
+                          ),
+                        ),
+                      const SizedBox(width: AbTokens.space8),
+                      ComposerSendButton(
+                        key: const Key('new-session-send-button'),
+                        busy: _starting,
+                        onTap: canSend ? _submit : null,
+                      ),
+                    ],
+                  );
+                },
               ),
             ),
           ],
@@ -530,33 +538,50 @@ class _PromptField extends StatelessWidget {
   }
 }
 
-/// Single chip showing the current mode (CHAT/TERMINAL); tap toggles when
-/// [supportsChat], else pinned to Terminal with no interaction.
-class _ModeChip extends ConsumerWidget {
-  const _ModeChip({required this.supportsChat});
+/// Mode segmented control ([ CHAT | TERMINAL ]): both options always visible,
+/// the selected cell accented. When the agent can't chat, the Chat cell
+/// disables and carries the reason (tooltip on hover, snack bar on tap —
+/// AbSegmented's default disabled feedback).
+class _ModeSegmented extends ConsumerWidget {
+  const _ModeSegmented({required this.supportsChat, this.showIcons = true});
 
   final bool supportsChat;
+
+  /// Icons are garnish (labels always render); tight rows drop them first.
+  final bool showIcons;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final mode = ref.watch(newSessionModeProvider);
-    // Pin the DISPLAYED label to Terminal whenever chat isn't supported,
+    final agent = ref.watch(newSessionAgentProvider);
+    // Pin the DISPLAYED selection to Terminal whenever chat isn't supported,
     // rather than trusting `mode` to already carry 'terminal' — detection
     // (newSessionChatCapableToolsProvider) can resolve a frame after the
     // agent-default heuristic runs, so `mode` briefly lags the true support
     // state. The provider itself still gets corrected by the agent listener.
     final displayMode = supportsChat ? mode : 'terminal';
-    return AbChip.toggle(
+    return AbSegmented<String>(
       key: const Key('new-session-mode-chip'),
-      label: displayMode == 'chat' ? 'Chat' : 'Terminal',
-      selected: true,
-      enabled: supportsChat,
-      color: context.antgrid.accent,
-      onTap: supportsChat
-          ? () => ref
-                .read(newSessionModeProvider.notifier)
-                .set(mode == 'chat' ? 'terminal' : 'chat')
-          : null,
+      segments: [
+        AbSegment(
+          key: const Key('new-session-mode-chat'),
+          value: 'chat',
+          label: 'Chat',
+          icon: showIcons ? AbIcons.comment : null,
+          enabled: supportsChat,
+          disabledReason: supportsChat
+              ? null
+              : "${newSessionAgentLabel(agent)} doesn't support chat sessions",
+        ),
+        AbSegment(
+          key: const Key('new-session-mode-terminal'),
+          value: 'terminal',
+          label: 'Terminal',
+          icon: showIcons ? AbIcons.terminal : null,
+        ),
+      ],
+      selected: displayMode,
+      onSelect: (m) => ref.read(newSessionModeProvider.notifier).set(m),
     );
   }
 }

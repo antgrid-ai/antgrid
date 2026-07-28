@@ -15,7 +15,15 @@ export function cursorHookCommand(
   // invocation. A leading `&` would be the program name — a bogus executable to
   // the tokenizer and a syntax error to cmd.exe ("& was unexpected at this
   // time") — so it must be omitted.
-  return hookShellCommand(command, "cursor", event, { callOperator: false });
+  // Double quotes on every platform for the same tokenizer reason: it strips
+  // double quotes (the format proven on Windows), while POSIX single quotes
+  // are shell syntax — under the tokenizer model they'd survive into the
+  // program path as literal bytes and the hook would silently never spawn.
+  // Double quotes stay valid even if a build does route through a POSIX shell.
+  return hookShellCommand(command, "cursor", event, {
+    callOperator: false,
+    forceDoubleQuotes: true,
+  });
 }
 
 // The two managed `.cursor/hooks.json` command strings for a given bridge
@@ -67,8 +75,11 @@ function isManagedCommand(
       value.includes("/bridge/src/index.ts") ||
       // Junk minted by pre-isolation bridge test runs: Bun.main under `bun
       // test` is the TEST FILE, so the baked command was `<bun> <x.test.ts>
-      // hook cursor <event>`. Recognize so real spawns replace them.
-      value.includes(".test.ts") ||
+      // hook cursor <event>`. Match that argv shape — the test-file token
+      // followed by the literal hook/cursor arguments — NOT a bare `.test.ts`
+      // substring, which would claim a user's own ~/.cursor/hooks/*.test.ts
+      // script (its path alone supplies "hook", "cursor", and the event word).
+      /\.test\.ts['"]?\s+['"]?hook['"]?\s+['"]?cursor['"]?/.test(value) ||
       (token.length > 0 && value.includes(token))) &&
     value.includes("hook") &&
     value.includes("cursor") &&

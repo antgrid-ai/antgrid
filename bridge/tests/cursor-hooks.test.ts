@@ -90,6 +90,25 @@ test("replaces junk entries minted by pre-isolation test runs (Bun.main = test f
   ]);
 });
 
+test("does not claim a user's own .test.ts hook script as bridge-managed", () => {
+  const current = {
+    sessionStart: '"/app/antgrid-bridge" "hook" "cursor" "session-start"',
+    stop: '"/app/antgrid-bridge" "hook" "cursor" "stop"',
+  };
+  // Every junk-matcher conjunct except the argv tail comes free from the
+  // path: "hooks/" supplies "hook", ".cursor" supplies "cursor", "on-stop"
+  // supplies the event word, and the extension supplies ".test.ts".
+  const userHook = "bun /home/me/.cursor/hooks/on-stop.test.ts";
+  const data = { hooks: { stop: [{ command: userHook }] } };
+
+  const replaced = replaceManagedCursorHookEntries(data, current);
+
+  expect(replaced!.hooks.stop).toEqual([
+    { command: userHook },
+    { command: current.stop, timeout: 5 },
+  ]);
+});
+
 test("returns null when current managed hooks are already exact", () => {
   const commands = {
     sessionStart: '"/app/antgrid-bridge" "hook" "cursor" "session-start"',

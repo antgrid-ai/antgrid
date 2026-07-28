@@ -79,9 +79,17 @@ describe("augmentAgentLaunch", () => {
 
     const hooks = JSON.parse(readFileSync(join(cursorDir, "hooks.json"), "utf8"));
     expect(hooks.hooks.sessionStart[0].command).toContain("antgrid-bridge.exe");
-    // cursorHookCommand quotes per host platform and (unlike raw
-    // hookShellCommand) omits the `&` call operator that Cursor supplies itself,
-    // so assert against it rather than a literal quoting style.
+    // cursor-agent tokenizes the command into argv itself (cmd.exe on Windows,
+    // never PowerShell), so the command must be double-quoted on every
+    // platform and must never start with PowerShell's `&` call operator — a
+    // leading `&` becomes the program name and breaks every cursor hook on
+    // Windows. Pin both independently here: the toBe equalities below track
+    // the producer (cursorHookCommand) and would follow a regression in it.
+    for (const event of ["sessionStart", "stop"] as const) {
+      const command: string = hooks.hooks[event][0].command;
+      expect(command.startsWith("&")).toBe(false);
+      expect(command.startsWith('"')).toBe(true);
+    }
     expect(hooks.hooks.sessionStart[0].command).toBe(
       cursorHookCommand(HOOK_COMMAND, "session-start"),
     );

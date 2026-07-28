@@ -20,6 +20,7 @@ class AbFocusRing extends StatelessWidget {
     required this.focused,
     required this.child,
     this.borderRadius,
+    this.inset = false,
   });
 
   /// Whether the wrapped element currently has visible keyboard focus.
@@ -28,6 +29,11 @@ class AbFocusRing extends StatelessWidget {
 
   /// Optional border radius matched to the child's own corners. Null = square.
   final BorderRadius? borderRadius;
+
+  /// Paint the ring just inside the child's bounds instead of 2px outside.
+  /// For children under an ancestor clip (e.g. a segmented control's
+  /// ClipRRect) where the default outset ring would be clipped away.
+  final bool inset;
 
   final Widget child;
 
@@ -38,7 +44,7 @@ class AbFocusRing extends StatelessWidget {
       foregroundPainter: _FocusRingPainter(
         color: context.antgrid.accent,
         width: AbTokens.focusRingWidth,
-        offset: AbTokens.focusRingOffset,
+        offset: inset ? -AbTokens.focusRingOffset : AbTokens.focusRingOffset,
         borderRadius: borderRadius,
       ),
       child: child,
@@ -72,14 +78,21 @@ class _FocusRingPainter extends CustomPainter {
       size.height + offset * 2,
     );
     if (borderRadius != null) {
-      // Expand corners by offset so the ring traces parallel to the child edge.
+      // Expand corners by offset so the ring traces parallel to the child
+      // edge. A negative offset (inset ring) shrinks them instead; clamp at
+      // square rather than folding a corner inside out.
       final r = borderRadius!;
+      double rad(double corner) {
+        final v = corner + offset;
+        return v < 0 ? 0 : v;
+      }
+
       final rr = RRect.fromRectAndCorners(
         rect,
-        topLeft: Radius.circular(r.topLeft.x + offset),
-        topRight: Radius.circular(r.topRight.x + offset),
-        bottomLeft: Radius.circular(r.bottomLeft.x + offset),
-        bottomRight: Radius.circular(r.bottomRight.x + offset),
+        topLeft: Radius.circular(rad(r.topLeft.x)),
+        topRight: Radius.circular(rad(r.topRight.x)),
+        bottomLeft: Radius.circular(rad(r.bottomLeft.x)),
+        bottomRight: Radius.circular(rad(r.bottomRight.x)),
       );
       canvas.drawRRect(rr, paint);
     } else {

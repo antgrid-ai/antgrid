@@ -72,8 +72,9 @@ function buildHooks(stopEvent: string, notifMatcher: string) {
 // the only channel: --plugin-dir cannot carry hooks (plugin hooks are
 // discovery-only in current cursor-agent builds — nothing feeds them to the
 // hook executor). Cursor MERGES tiers, so with both installed a bridge spawn
-// fires both entries. The merge/dedupe logic itself is shared via
-// cursor-hooks.ts so a fix only has to happen once.
+// fires both entries — collapsed by the /notify dedup window in api-server.ts,
+// so the phone still gets one notification. The merge/dedupe logic itself is
+// shared via cursor-hooks.ts so a fix only has to happen once.
 
 
 function removeAbEntries(path: string, hookKeys: string[]) {
@@ -203,12 +204,23 @@ function makeCLIs(): CLIConfig[] {
         console.log("  + .cursor/hooks.json — sessionStart + stop hooks configured");
       },
       uninstall(projectDir) {
-        const hooksPath = join(projectDir, ".cursor", "hooks.json");
-        if (!existsSync(hooksPath)) return;
-        const data = readJson(hooksPath);
         const commands = managedCursorCommands(HOOK_COMMAND);
-        writeJsonOrDelete(hooksPath, removeManagedCursorHookEntries(data, commands));
-        console.log("  - .cursor/hooks.json — sessionStart + stop hooks removed");
+        // Both tiers: this installer's project tier, plus the USER tier
+        // (~/.cursor/hooks.json) that ensureGlobalCursorHooks writes on every
+        // bridge-managed spawn — no other uninstall path touches it, and a
+        // leftover entry would keep every cursor-agent run machine-wide
+        // spawning the removed bridge binary forever.
+        for (const hooksPath of [
+          join(projectDir, ".cursor", "hooks.json"),
+          join(home, ".cursor", "hooks.json"),
+        ]) {
+          if (!existsSync(hooksPath)) continue;
+          writeJsonOrDelete(
+            hooksPath,
+            removeManagedCursorHookEntries(readJson(hooksPath), commands),
+          );
+        }
+        console.log("  - .cursor/hooks.json — hooks removed (project + user tier)");
       },
     },
   ];

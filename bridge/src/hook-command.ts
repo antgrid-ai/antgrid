@@ -42,18 +42,31 @@ export interface HookShellCommandOptions {
   platform?: NodeJS.Platform;
   /**
    * Whether to emit PowerShell's `&` call operator. Turn this off only for a
-   * consumer that supplies its own — see the note on the call operator below.
+   * consumer that does not route the command through PowerShell (cursor
+   * tokenizes the string into argv itself) — see the note below.
    */
   callOperator?: boolean;
+  /**
+   * Quote every token with double quotes regardless of platform — for a
+   * consumer that tokenizes the command into argv itself instead of handing
+   * it to the platform shell. POSIX single quotes are shell syntax; under an
+   * argv tokenizer they survive as literal bytes in the program path.
+   */
+  forceDoubleQuotes?: boolean;
 }
 
 export function hookShellCommand(
   command: HookCommand,
   agent: string,
   event: string,
-  { platform = process.platform, callOperator = true }: HookShellCommandOptions = {},
+  {
+    platform = process.platform,
+    callOperator = true,
+    forceDoubleQuotes = false,
+  }: HookShellCommandOptions = {},
 ): string {
-  const quote = platform === "win32" ? quoteWindows : quotePosix;
+  const quote =
+    platform === "win32" || forceDoubleQuotes ? quoteWindows : quotePosix;
   const rendered = hookArgv(command, agent, event).map(quote).join(" ");
   // Agents run hook commands through the user's shell, which on Windows is
   // PowerShell (codex hard-codes that; copilot was measured to match). There a

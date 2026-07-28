@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { homedir } from "node:os";
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { atomicWriteFile } from "./discovery";
 import { logger } from "./logger";
 const log = logger.child({ component: "agent-launch" });
@@ -197,7 +198,11 @@ export function augmentAgentLaunch(
         // workspace trust — an untrusted dir prompts in the TUI and exits 1
         // headless, before any hook runs. Opening a project in the bridge IS
         // the user's trust decision, so pre-trust rather than re-asking.
-        return { args: ["--trust"], env: {}, notificationsInjected };
+        return {
+          args: cursorSupportsTrust() ? ["--trust"] : [],
+          env: {},
+          notificationsInjected,
+        };
       }
       default:
         return NONE;
@@ -206,6 +211,31 @@ export function augmentAgentLaunch(
     log.warn("agent launch augmentation failed for %s: %s", tool, err);
     return NONE;
   }
+}
+
+// Memoized once per process: cursor-agent builds predating --trust hard-exit
+// on the unknown option (commander), which would kill every spawn on that
+// machine. An inconclusive probe (binary not on PATH, empty/failed --help)
+// counts as support: current builds have the flag, and a missing binary fails
+// the spawn regardless of argv.
+let cursorTrustSupported: boolean | null = null;
+function cursorSupportsTrust(): boolean {
+  if (cursorTrustSupported !== null) return cursorTrustSupported;
+  try {
+    const bin = Bun.which("cursor-agent");
+    if (bin) {
+      const res = spawnSync(bin, ["--help"], { timeout: 3000, encoding: "utf8" });
+      const help = `${res.stdout ?? ""}\n${res.stderr ?? ""}`;
+      if (help.trim().length > 0) {
+        cursorTrustSupported = help.includes("--trust");
+        return cursorTrustSupported;
+      }
+    }
+  } catch (err) {
+    log.warn("cursor-agent --trust probe failed, assuming support: %s", err);
+  }
+  cursorTrustSupported = true;
+  return cursorTrustSupported;
 }
 
 // The user-tier file (~/.cursor/hooks.json) is cursor-agent's only workable
@@ -219,8 +249,16 @@ export function augmentAgentLaunch(
 // the bridge costs one short-lived process and no stdin wait.
 function ensureGlobalCursorHooks(
   command: HookCommand,
-  cursorDir: string = join(homedir(), ".cursor"),
+  cursorDir?: string,
 ): boolean {
+  if (cursorDir === undefined) {
+    // Structural guard, not a convention: under `bun test` Bun.main is the
+    // TEST FILE, so a default-resolved hook command is junk — refuse to write
+    // it into the developer's real ~/.cursor. Tests exercising the write path
+    // inject an isolated cursorDir, which skips this guard.
+    if (/\.(test|spec)\.[cm]?[jt]sx?$/.test(Bun.main)) return false;
+    cursorDir = join(homedir(), ".cursor");
+  }
   const hooksPath = join(cursorDir, "hooks.json");
   const commands = managedCursorCommands(command);
   try {

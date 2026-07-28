@@ -55,10 +55,11 @@ interface SessionManagerOpts {
   codexHome?: string;
   /** Override for the Copilot session store dir (resume pre-flight). */
   copilotHome?: string;
-  /** Override for the cursor-agent hooks dir (~/.cursor). Unset in production;
-   *  tests MUST inject an isolated dir — the augmenter writes hooks.json there,
-   *  and under `bun test` the baked hook command is the test file (Bun.main),
-   *  which would land junk entries in the developer's real config. */
+  /** Override for the cursor-agent hooks dir (~/.cursor). Unset in production.
+   *  Tests exercising the hooks write MUST inject an isolated dir; one that
+   *  forgets gets a no-op rather than junk in the developer's real config —
+   *  ensureGlobalCursorHooks refuses the homedir default under `bun test`,
+   *  because the baked hook command there is the test file (Bun.main). */
   cursorDir?: string;
   /** Called by start()/stop() for a mode:'chat' session instead of the PTY path.
    *  Injected by agent-core to drive the StructuredAgentManager. */

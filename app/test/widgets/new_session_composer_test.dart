@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/design/ab_theme.dart';
+import 'package:antgrid/design/widgets/ab_segmented.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/widgets/new_session/new_session_composer.dart';
@@ -62,6 +63,15 @@ List<Override> _baseOverrides({
       selectedTargetProjectProvider.overrideWith(() => ValueController(target)),
   ];
 }
+
+/// The mode segmented control renders BOTH labels at all times, so
+/// `find.text('CHAT')` no longer distinguishes the current mode — read the
+/// selection off the widget instead.
+String _selectedMode(WidgetTester tester) => tester
+    .widget<AbSegmented<String>>(
+      find.byKey(const Key('new-session-mode-chip')),
+    )
+    .selected;
 
 Widget _host({
   required List<Override> overrides,
@@ -242,7 +252,7 @@ void main() {
     expect(find.text('Select project…'), findsOneWidget);
   });
 
-  testWidgets('terminal-only agent pins mode chip to TERMINAL disabled', (
+  testWidgets('terminal-only agent pins mode to TERMINAL, Chat cell dead', (
     tester,
   ) async {
     // Empty (non-null) wire chatCapable set excludes every agent, so the
@@ -254,16 +264,22 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('TERMINAL'), findsOneWidget);
+    expect(_selectedMode(tester), 'terminal');
 
     final container = ProviderScope.containerOf(
       tester.element(find.byType(NewSessionComposer)),
     );
-    await tester.tap(find.byKey(const Key('new-session-mode-chip')));
+    // Tapping the disabled Chat cell must not change the mode. (On the
+    // default Android test platform the tap surfaces the reason as a snack
+    // bar — pump past its duration so its dismiss timer isn't pending at
+    // test end.)
+    await tester.tap(find.byKey(const Key('new-session-mode-chat')));
     await tester.pumpAndSettle();
 
     expect(container.read(newSessionModeProvider), 'terminal');
-    expect(find.text('TERMINAL'), findsOneWidget);
+    expect(_selectedMode(tester), 'terminal');
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
   });
 
   testWidgets(
@@ -365,13 +381,12 @@ void main() {
       tester.element(find.byType(NewSessionComposer)),
     );
 
-    // Chat-capable claude-code → mode defaults to Chat. (AbChip.toggle
-    // uppercases its label.)
+    // Chat-capable claude-code → mode defaults to Chat.
     expect(container.read(newSessionModeProvider), 'chat');
-    expect(find.text('CHAT'), findsOneWidget);
+    expect(_selectedMode(tester), 'chat');
 
     // User explicitly switches to Terminal.
-    await tester.tap(find.byKey(const Key('new-session-mode-chip')));
+    await tester.tap(find.byKey(const Key('new-session-mode-terminal')));
     await tester.pumpAndSettle();
     expect(container.read(newSessionModeProvider), 'terminal');
 
@@ -381,7 +396,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(container.read(newSessionModeProvider), 'terminal');
-    expect(find.text('TERMINAL'), findsOneWidget);
+    expect(_selectedMode(tester), 'terminal');
 
     // Reset inside the body: the framework's foundation-var invariant check
     // runs before addTearDown, so the safety-net tearDown alone isn't enough.
@@ -464,13 +479,13 @@ void main() {
   );
 
   // Ported from the deleted test/widgets/new_session_mode_toggle_test.dart
-  // (SessionConfig's mode toggle), retargeted onto the composer's mode chip.
-  // No wire chatCapable data (chatCapable: null, the _baseOverrides default)
-  // → the static fallback (newSessionAgentSupportsChat) governs, which is
-  // what's under test here: chat-capable agents default to Chat, others are
-  // pinned to Terminal and the chip ignores taps.
-  group('mode chip: static-fallback matrix (no wire chatCapable data)', () {
-    testWidgets('codex agent: chip enabled and defaults to Chat', (
+  // (SessionConfig's mode toggle), retargeted onto the composer's mode
+  // segmented control. No wire chatCapable data (chatCapable: null, the
+  // _baseOverrides default) → the static fallback (newSessionAgentSupportsChat)
+  // governs, which is what's under test here: chat-capable agents default to
+  // Chat, others are pinned to Terminal with a dead Chat cell.
+  group('mode control: static-fallback matrix (no wire chatCapable data)', () {
+    testWidgets('codex agent: control enabled and defaults to Chat', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -489,10 +504,10 @@ void main() {
         tester.element(find.byType(NewSessionComposer)),
       );
       expect(container.read(newSessionModeProvider), 'chat');
-      expect(find.text('CHAT'), findsOneWidget);
+      expect(_selectedMode(tester), 'chat');
     });
 
-    testWidgets('claudeCode agent: chip enabled and defaults to Chat', (
+    testWidgets('claudeCode agent: control enabled and defaults to Chat', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -511,11 +526,11 @@ void main() {
         tester.element(find.byType(NewSessionComposer)),
       );
       expect(container.read(newSessionModeProvider), 'chat');
-      expect(find.text('CHAT'), findsOneWidget);
+      expect(_selectedMode(tester), 'chat');
     });
 
     testWidgets(
-      'cursorAgent: chip disabled, mode forced Terminal, taps ignored',
+      'cursorAgent: Chat cell disabled, mode forced Terminal, taps ignored',
       (tester) async {
         await tester.pumpWidget(
           _host(
@@ -533,13 +548,17 @@ void main() {
           tester.element(find.byType(NewSessionComposer)),
         );
         expect(container.read(newSessionModeProvider), 'terminal');
-        expect(find.text('TERMINAL'), findsOneWidget);
+        expect(_selectedMode(tester), 'terminal');
 
-        await tester.tap(find.byKey(const Key('new-session-mode-chip')));
+        await tester.tap(find.byKey(const Key('new-session-mode-chat')));
         await tester.pumpAndSettle();
 
         expect(container.read(newSessionModeProvider), 'terminal');
-        expect(find.text('TERMINAL'), findsOneWidget);
+        expect(_selectedMode(tester), 'terminal');
+        // Drain the disabled-tap snack bar's dismiss timer (Android default
+        // test platform takes the mobile feedback path).
+        await tester.pump(const Duration(seconds: 5));
+        await tester.pumpAndSettle();
       },
     );
   });
