@@ -56,7 +56,18 @@ concurrency:
   cancel-in-progress: ${{ !inputs.release }}
 
 env:
-  FLUTTER_VERSION: '3.44.2'   # keep in lockstep with .github/actions/setup-android
+  # Keep in lockstep with .github/actions/setup-android.
+  #
+  # The SDK install is deliberately NOT cached here (no `cache: true` on
+  # flutter-action) — only the pub cache is. A repo gets 10 GB of Actions cache
+  # with LRU eviction, and three copies of the SDK were 5.5 GB of it while buying
+  # very little: a hit restores ~2 GB in ~50s against a ~2 min cold install, and
+  # on Windows the post-step save alone cost ~3 min. Worse, the Windows entry
+  # could never hit at all — build-desktop runs only from a v* tag or a dispatch,
+  # and a cache is readable only from its own ref or the DEFAULT branch, so every
+  # release wrote 1.8 GB into a scope the next release could not read. The pub
+  # cache is the opposite trade (~158 MB, ~12s) and is worth its bytes.
+  FLUTTER_VERSION: '3.44.2'
   LICENSE_API_URL: 'https://app.antgrid.ai'
   # The only hand-maintained part of the version. Bump for a deliberate product
   # major; the rest of the string is stamped from the clock and the run counter.
@@ -178,11 +189,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # `cache: true` is intentionally absent — it caches the SDK, not just pub,
+      # and that is a losing trade against the 10 GB budget (see FLUTTER_VERSION
+      # above). The pub cache below is kept explicitly.
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
           flutter-version: ${{ env.FLUTTER_VERSION }}
-          cache: true
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -191,7 +204,20 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
+          # Deliberately NO restore-keys prefix (unlike setup-android's copy):
+          # actions/cache re-saves the directory as it stands, so a partial
+          # restore compounds into a superset and bun never prunes the versions
+          # a lockfile bump dropped.
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+
+      # The half of flutter-action's caching that is worth its bytes. Flutter
+      # puts PUB_CACHE at %LOCALAPPDATA%\Pub\Cache on Windows and ~/.pub-cache
+      # everywhere else; both are the SDK's own defaults, so this stays correct
+      # whether or not flutter-action exports PUB_CACHE itself.
+      - uses: actions/cache@v6
+        with:
+          path: ${{ runner.os == 'Windows' && '~/AppData/Local/Pub/Cache' || '~/.pub-cache' }}
+          key: pub-${{ runner.os }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('**/pubspec.lock') }}
 
       - name: Flutter pub get
         working-directory: app
@@ -370,11 +396,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # `cache: true` is intentionally absent — it caches the SDK, not just pub,
+      # and that is a losing trade against the 10 GB budget (see FLUTTER_VERSION
+      # above). The pub cache below is kept explicitly.
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
           flutter-version: ${{ env.FLUTTER_VERSION }}
-          cache: true
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -383,7 +411,20 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
+          # Deliberately NO restore-keys prefix (unlike setup-android's copy):
+          # actions/cache re-saves the directory as it stands, so a partial
+          # restore compounds into a superset and bun never prunes the versions
+          # a lockfile bump dropped.
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+
+      # The half of flutter-action's caching that is worth its bytes. Flutter
+      # puts PUB_CACHE at %LOCALAPPDATA%\Pub\Cache on Windows and ~/.pub-cache
+      # everywhere else; both are the SDK's own defaults, so this stays correct
+      # whether or not flutter-action exports PUB_CACHE itself.
+      - uses: actions/cache@v6
+        with:
+          path: ${{ runner.os == 'Windows' && '~/AppData/Local/Pub/Cache' || '~/.pub-cache' }}
+          key: pub-${{ runner.os }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('**/pubspec.lock') }}
 
       - name: Flutter pub get
         working-directory: app
@@ -498,11 +539,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # `cache: true` is intentionally absent — it caches the SDK, not just pub,
+      # and that is a losing trade against the 10 GB budget (see FLUTTER_VERSION
+      # above). The pub cache below is kept explicitly.
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
           flutter-version: ${{ env.FLUTTER_VERSION }}
-          cache: true
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -511,7 +554,20 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
+          # Deliberately NO restore-keys prefix (unlike setup-android's copy):
+          # actions/cache re-saves the directory as it stands, so a partial
+          # restore compounds into a superset and bun never prunes the versions
+          # a lockfile bump dropped.
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+
+      # The half of flutter-action's caching that is worth its bytes. Flutter
+      # puts PUB_CACHE at %LOCALAPPDATA%\Pub\Cache on Windows and ~/.pub-cache
+      # everywhere else; both are the SDK's own defaults, so this stays correct
+      # whether or not flutter-action exports PUB_CACHE itself.
+      - uses: actions/cache@v6
+        with:
+          path: ${{ runner.os == 'Windows' && '~/AppData/Local/Pub/Cache' || '~/.pub-cache' }}
+          key: pub-${{ runner.os }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('**/pubspec.lock') }}
 
       # Flutter's Linux desktop toolchain + this app's plugin deps:
       #   - ninja/gtk/pkg-config/clang: the base `flutter build linux` toolchain.
