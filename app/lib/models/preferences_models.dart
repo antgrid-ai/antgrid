@@ -1,12 +1,33 @@
 import 'package:flutter/foundation.dart';
 
+/// Legacy-ordinal targets for [ProjectPreferences.panelMode]. Keep in lockstep
+/// with `_PanelMode` in `screens/workspace_shell.dart` — that enum's `.name` is
+/// what gets written. A drift here only breaks migration of pre-name prefs, and
+/// the shell resolves an unrecognized name to "unchosen", so the blast radius
+/// is a lost legacy preference rather than a crash.
+abstract final class _PanelModeNames {
+  static const contextHidden = 'contextHidden';
+  static const contextExpanded = 'contextExpanded';
+}
+
 class ProjectPreferences {
   final double splitRatio;
   final int workspaceViewIndex;
   final Set<String> expandedPaths;
   final String? selectedFilePath;
   final bool showChangedOnly;
-  final int panelMode; // 0=normal, 1=agentExpanded, 2=contextExpanded
+  /// Persisted `_PanelMode` NAME (`normal` / `contextHidden` /
+  /// `contextExpanded`), or null when the user has never chosen — which is NOT
+  /// the same as choosing `normal`: the shell derives a viewport-dependent
+  /// default while this stays null (see
+  /// `WorkspaceShellState._defaultPanelMode`), and any explicit toggle pins a
+  /// concrete value that wins from then on.
+  ///
+  /// A name rather than the enum ordinal, so reordering `_PanelMode` can't
+  /// silently reinterpret stored preferences — the failure mode
+  /// [workspaceViewIndex] has already shipped once (see the NOTE in
+  /// `WorkspaceShellState._applyPrefs`).
+  final String? panelMode;
 
   const ProjectPreferences({
     this.splitRatio = 0.5,
@@ -14,7 +35,7 @@ class ProjectPreferences {
     this.expandedPaths = const {},
     this.selectedFilePath,
     this.showChangedOnly = false,
-    this.panelMode = 0,
+    this.panelMode,
   });
 
   ProjectPreferences copyWith({
@@ -24,7 +45,7 @@ class ProjectPreferences {
     String? selectedFilePath,
     bool clearSelectedFilePath = false,
     bool? showChangedOnly,
-    int? panelMode,
+    String? panelMode,
   }) {
     return ProjectPreferences(
       splitRatio: splitRatio ?? this.splitRatio,
@@ -44,7 +65,9 @@ class ProjectPreferences {
     'expandedPaths': expandedPaths.toList(),
     if (selectedFilePath != null) 'selectedFilePath': selectedFilePath,
     'showChangedOnly': showChangedOnly,
-    'panelMode': panelMode,
+    // Omitted while unchosen so a reload still reads null and re-derives the
+    // viewport default, rather than freezing whatever this device resolved.
+    if (panelMode != null) 'panelMode': panelMode,
   };
 
   static ProjectPreferences fromJson(Map<String, dynamic> json) {
@@ -54,15 +77,25 @@ class ProjectPreferences {
         json['rightTabIndex'] as int? ??
         1;
 
-    // Backward compat: map old bool fields to panelMode int
-    int panelMode = json['panelMode'] as int? ?? 0;
-    if (panelMode == 0 && !json.containsKey('panelMode')) {
+    // panelMode moved from enum ordinal to enum name. A legacy 1 or 2 was only
+    // ever reachable by an explicit user toggle, so it maps to a real choice.
+    // A legacy 0 is ambiguous and must NOT: the previous toJson wrote the key
+    // unconditionally, so every project ever opened has one on disk, and
+    // honouring it would suppress the viewport default for every existing
+    // install. Same reasoning for both legacy bools reading false.
+    String? panelMode = switch (json['panelMode']) {
+      String s => s,
+      1 => _PanelModeNames.contextHidden,
+      2 => _PanelModeNames.contextExpanded,
+      _ => null,
+    };
+    if (panelMode == null) {
       final agentExp = json['agentPanelExpanded'] as bool? ?? false;
       final ctxExp = json['contextPanelExpanded'] as bool? ?? false;
       if (agentExp && !ctxExp) {
-        panelMode = 1;
+        panelMode = _PanelModeNames.contextHidden;
       } else if (ctxExp && !agentExp) {
-        panelMode = 2;
+        panelMode = _PanelModeNames.contextExpanded;
       }
     }
 

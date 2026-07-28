@@ -36,7 +36,22 @@ import 'remote_host_chip.dart';
 import 'session_rename_dialog.dart';
 
 class AgentPanel extends ConsumerWidget {
-  const AgentPanel({super.key});
+  const AgentPanel({
+    super.key,
+    this.contextPanelHidden = false,
+    this.onToggleContextPanel,
+  });
+
+  /// Current visibility of the desktop context panel, for the header toggle's
+  /// glyph. Meaningless when [onToggleContextPanel] is null.
+  final bool contextPanelHidden;
+
+  /// Shows/hides the desktop context panel. Null on mobile (a PageView with no
+  /// panel modes), which is what hides the toggle there. The control lives in
+  /// THIS header rather than the context panel's own tab bar because that tab
+  /// bar goes off screen with the panel it belongs to — the restore affordance
+  /// has to sit on a surface that is always mounted.
+  final VoidCallback? onToggleContextPanel;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -57,7 +72,10 @@ class AgentPanel extends ConsumerWidget {
 
     return Column(
       children: [
-        const _AgentStatusHeader(),
+        _AgentStatusHeader(
+          contextPanelHidden: contextPanelHidden,
+          onToggleContextPanel: onToggleContextPanel,
+        ),
         Expanded(
           child: isChat
               // Keyed by session so switching sessions rebuilds the State —
@@ -79,7 +97,13 @@ class AgentPanel extends ConsumerWidget {
 }
 
 class _AgentStatusHeader extends ConsumerWidget {
-  const _AgentStatusHeader();
+  const _AgentStatusHeader({
+    required this.contextPanelHidden,
+    required this.onToggleContextPanel,
+  });
+
+  final bool contextPanelHidden;
+  final VoidCallback? onToggleContextPanel;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -150,6 +174,23 @@ class _AgentStatusHeader extends ConsumerWidget {
         const HandlerHeaderControl(),
         const SizedBox(width: AbTokens.space8),
         ..._localProjectActions(ref),
+        if (onToggleContextPanel != null) ...[
+          const SizedBox(width: AbTokens.space8),
+          AbIconButton(
+            icon: contextPanelHidden
+                ? AbIcons.layoutSidebarRightOff
+                : AbIcons.layoutSidebarRight,
+            // Same emphasis in both states: while hidden this button is the
+            // ONLY way back (there is no collapsed strip), so dimming it would
+            // make the sole recovery affordance the faintest thing in the
+            // header — and hidden is the DEFAULT on tablets and phone
+            // landscape, i.e. the first thing those users see.
+            tooltip: contextPanelHidden
+                ? 'Show context panel'
+                : 'Hide context panel',
+            onTap: onToggleContextPanel,
+          ),
+        ],
       ],
     );
   }

@@ -43,6 +43,7 @@ import '../services/push_background_handler.dart'
 import '../services/push_identity.dart';
 import '../util/ab_log.dart';
 import '../utils/notification_routing.dart';
+import '../utils/platform_utils.dart';
 import '../widgets/agent_panel.dart';
 import '../widgets/mobile_bottom_nav.dart';
 import '../widgets/operational_error_toaster.dart';
@@ -64,7 +65,10 @@ final _mobileDrawerOpenProvider = NotifierProvider<ValueController<bool>, bool>(
   () => ValueController(false),
 );
 
-enum _PanelMode { normal, agentExpanded, contextExpanded }
+/// Desktop panel arrangement. Persisted by NAME as
+/// `ProjectPreferences.panelMode`, so reordering these is safe; renaming one
+/// drops that stored preference back to unchosen (see `_PanelModeNames` there).
+enum _PanelMode { normal, contextHidden, contextExpanded }
 
 /// Root layout orchestrator.
 ///
@@ -83,7 +87,12 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   late PageController _pageController;
   WorkspaceView _selectedView = WorkspaceView.files;
   double _splitRatio = 0.5;
-  _PanelMode _panelMode = _PanelMode.normal;
+  /// Null until the user picks a mode (or a stored pref supplies one), so
+  /// [_effectivePanelMode] can keep re-deriving the viewport default. Resolving
+  /// lazily rather than freezing a value at prefs-apply time is what makes a
+  /// phone rotated into landscape pick up the hidden default — prefs are
+  /// applied once, while in portrait.
+  _PanelMode? _panelMode;
   bool _prefsApplied = false;
   final _drawerSearchFocus = FocusNode();
   final _mobileScaffoldKey = GlobalKey<ScaffoldState>();
@@ -280,7 +289,12 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   /// called from build — the build will use the updated values immediately).
   void _applyPrefs(ProjectPreferences prefs) {
     _splitRatio = prefs.splitRatio;
-    _panelMode = _PanelMode.values[prefs.panelMode.clamp(0, 2)];
+    // An unrecognized name resolves to null — unchosen, so the viewport default
+    // applies — rather than throwing on prefs written by a newer build.
+    final storedMode = prefs.panelMode;
+    _panelMode = storedMode == null
+        ? null
+        : _PanelMode.values.asNameMap()[storedMode];
 
     // NOTE: workspaceViewIndex is a raw WorkspaceView ordinal persisted to
     // disk, so adding/removing enum values shifts it. A stale index can restore
@@ -302,7 +316,10 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       service.current.copyWith(
         splitRatio: _splitRatio,
         workspaceViewIndex: _selectedView.index,
-        panelMode: _panelMode.index,
+        // Null while unchosen, which copyWith reads as "leave alone" — so a
+        // split-drag or tab switch never pins the derived default as if the
+        // user had picked it.
+        panelMode: _panelMode?.name,
       ),
     );
   }
@@ -631,6 +648,19 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
             nav.back,
         const SingleActivator(LogicalKeyboardKey.bracketRight, meta: true):
             nav.forward,
+        // ⌥⌘→ / Ctrl+Alt+→ — macOS's inspector-pane toggle. Distinct from the
+        // alt-only forward binding above: SingleActivator requires an exact
+        // modifier match, so alt+meta never lands on alt.
+        const SingleActivator(
+          LogicalKeyboardKey.arrowRight,
+          alt: true,
+          meta: true,
+        ): _toggleContextPanel,
+        const SingleActivator(
+          LogicalKeyboardKey.arrowRight,
+          alt: true,
+          control: true,
+        ): _toggleContextPanel,
       },
       child: Listener(
         onPointerDown: (event) {
@@ -856,8 +886,39 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     };
   }
 
+  /// Show/hide the context panel, preserving [_splitRatio] across the round
+  /// trip. Hiding from [_PanelMode.contextExpanded] is allowed — the agent
+  /// panel comes back with it, which is the only sane restore for a mode whose
+  /// own affordances are off screen.
+  void _toggleContextPanel() {
+    // No-op on the mobile layout, which is a PageView with no panel modes —
+    // the keyboard binding is shared with desktop.
+    if (MediaQuery.sizeOf(context).width < kCompactBreakpoint) return;
+    setState(() {
+      _panelMode = _effectivePanelMode == _PanelMode.contextHidden
+          ? _PanelMode.normal
+          : _PanelMode.contextHidden;
+      _updatePrefs();
+    });
+  }
+
+  /// The user's stored choice, or [_defaultPanelMode] while they have none.
+  _PanelMode get _effectivePanelMode => _panelMode ?? _defaultPanelMode;
+
+  /// Tablets (either orientation) and phones in landscape reach the desktop
+  /// three-zone layout at a fraction of a desktop's width, where splitting it
+  /// leaves the agent terminal — the primary view — unusably narrow. So the
+  /// context panel starts hidden there and stays one tap away in the header.
+  ///
+  /// Keyed on [isMobilePlatform], not width alone: a deliberately narrow
+  /// desktop window is still a desktop, and a tablet in landscape is still a
+  /// tablet at 1024px. Phone portrait never reaches here — it renders the
+  /// PageView, which has no panel modes.
+  _PanelMode get _defaultPanelMode =>
+      isMobilePlatform ? _PanelMode.contextHidden : _PanelMode.normal;
+
   List<Widget> _buildPanels() {
-    switch (_panelMode) {
+    switch (_effectivePanelMode) {
       case _PanelMode.normal:
         return [
           Expanded(
@@ -867,7 +928,10 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
                 _splitRatio = r;
                 _updatePrefs();
               },
-              left: AgentPanel(),
+              left: AgentPanel(
+                contextPanelHidden: false,
+                onToggleContextPanel: _toggleContextPanel,
+              ),
               right: WorkspacePanel(
                 selectedView: _selectedView,
                 onViewSelected: _onSidebarSelected,
@@ -882,33 +946,22 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           ),
         ];
 
-      case _PanelMode.agentExpanded:
+      // Fully hidden, not collapsed to a strip: the header toggle in the agent
+      // panel is the restore affordance, so a vertical stub would be dead
+      // chrome eating horizontal space the user just asked to reclaim.
+      case _PanelMode.contextHidden:
         return [
           Expanded(
-            child: Container(
-              decoration: BoxDecoration(
-                border: Border(
-                  right: BorderSide(color: context.antgrid.borderDefault),
-                ),
-              ),
-              child: AgentPanel(),
+            child: AgentPanel(
+              contextPanelHidden: true,
+              onToggleContextPanel: _toggleContextPanel,
             ),
-          ),
-          _buildCollapsedStrip(
-            label: _selectedView.label,
-            isAgent: false,
-            onTap: () => setState(() {
-              _panelMode = _PanelMode.normal;
-              _updatePrefs();
-            }),
           ),
         ];
 
       case _PanelMode.contextExpanded:
         return [
-          _buildCollapsedStrip(
-            label: 'Agent',
-            isAgent: true,
+          _buildCollapsedAgentStrip(
             onTap: () => setState(() {
               _panelMode = _PanelMode.normal;
               _updatePrefs();
@@ -932,28 +985,25 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
   // ── Collapsed strip ──────────────────────────────────────────────────
 
-  Widget _buildCollapsedStrip({
-    required String label,
-    required bool isAgent,
-    required VoidCallback onTap,
-  }) {
+  /// The agent side's collapsed stub, shown only in
+  /// [_PanelMode.contextExpanded]. The context side has no equivalent — see
+  /// the comment on that case in [_buildPanels].
+  Widget _buildCollapsedAgentStrip({required VoidCallback onTap}) {
     return GestureDetector(
       onTap: onTap,
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
         child: Container(
           width: AbTokens.collapsedStripWidth,
-          color: isAgent ? context.antgrid.bgDeep : context.antgrid.bgDeepest,
+          color: context.antgrid.bgDeep,
           child: Center(
             child: RotatedBox(
               quarterTurns: 1,
               child: Text(
-                label,
+                'Agent',
                 style: AbTokens.sansStyle(
                   fontSize: AbTokens.fontXs,
-                  color: isAgent
-                      ? context.antgrid.accent
-                      : context.antgrid.textSecondary,
+                  color: context.antgrid.accent,
                 ),
               ),
             ),
@@ -968,10 +1018,6 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   void _onSidebarSelected(WorkspaceView view) {
     setState(() {
       _selectedView = view;
-      // If context panel was collapsed (agent expanded), restore it
-      if (_panelMode == _PanelMode.agentExpanded) {
-        _panelMode = _PanelMode.normal;
-      }
       _updatePrefs();
     });
   }

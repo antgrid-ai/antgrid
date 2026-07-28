@@ -15,6 +15,10 @@ abstract final class AbIcons {
   static const signOut = Codicon.sign_out;
   static const expand = Codicon.screen_full;
   static const close = Codicon.close;
+  // Pane-visibility toggle, macOS/Xcode convention: the glyph depicts the
+  // CURRENT state (filled edge = pane showing), not the result of clicking.
+  static const layoutSidebarRight = Codicon.layout_sidebar_right;
+  static const layoutSidebarRightOff = Codicon.layout_sidebar_right_off;
   static const chromeMinimize = Codicon.chrome_minimize;
   static const chromeMaximize = Codicon.chrome_maximize;
   static const chromeRestore = Codicon.chrome_restore;
