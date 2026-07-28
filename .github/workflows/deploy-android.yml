@@ -59,13 +59,39 @@ jobs:
           storeFile=../upload-keystore.jks
           EOF
 
+      # versionName is stamped, not read from pubspec — see the `version` job in
+      # build-desktop.yml for the format. VERSION_MAJOR must match the env of the
+      # same name there; nothing enforces it across workflow files, so bump both
+      # together or desktop and mobile will report the same release under
+      # different majors.
+      - name: Stamp version
+        id: version
+        env:
+          VERSION_MAJOR: '1'
+        run: |
+          set -euo pipefail
+          {
+            echo "name=${VERSION_MAJOR}.$(( $(date -u +%s) / 86400 )).${GITHUB_RUN_NUMBER}"
+            echo "sha=${GITHUB_SHA:0:6}"
+            echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+
       # Override pubspec's static +1 versionCode: Play rejects any upload whose
       # versionCode was already used, and every CI build would otherwise stamp 1.
       # github.run_number is monotonic per workflow, so each publish gets a fresh,
-      # increasing code. versionName still comes from pubspec (version: x.y.z).
+      # increasing code. It must stay this workflow's OWN run_number — sourcing it
+      # from another workflow's counter would restart the sequence below codes
+      # Play has already seen and every upload would be rejected.
       - name: Build signed release AAB
         working-directory: app
-        run: flutter build appbundle --release --build-number=${{ github.run_number }} --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }}
+        run: |
+          flutter build appbundle --release \
+            --build-name=${{ steps.version.outputs.name }} \
+            --build-number=${{ github.run_number }} \
+            --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }} \
+            --dart-define=APP_VERSION=${{ steps.version.outputs.name }} \
+            --dart-define=GIT_SHA=${{ steps.version.outputs.sha }} \
+            --dart-define=BUILD_TIME=${{ steps.version.outputs.built }}
 
       - name: Verify 16 KB alignment
         run: |

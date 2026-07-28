@@ -160,16 +160,38 @@ jobs:
           </plist>
           EOF
 
+      # CFBundleShortVersionString is stamped, not read from pubspec — see the
+      # `version` job in build-desktop.yml for the format. VERSION_MAJOR must
+      # match the env of the same name there; nothing enforces it across
+      # workflow files, so bump both together or desktop and mobile will report
+      # the same release under different majors.
+      - name: Stamp version
+        id: version
+        env:
+          VERSION_MAJOR: '1'
+        run: |
+          set -euo pipefail
+          {
+            echo "name=${VERSION_MAJOR}.$(( $(date -u +%s) / 86400 )).${GITHUB_RUN_NUMBER}"
+            echo "sha=${GITHUB_SHA:0:6}"
+            echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+
       # github.run_number is monotonic per workflow, so each upload gets a fresh,
       # increasing CFBundleVersion — App Store Connect rejects a duplicate build
-      # number, exactly like Play rejects a reused versionCode. The marketing
-      # version (CFBundleShortVersionString) still comes from pubspec (version: x.y.z).
+      # number, exactly like Play rejects a reused versionCode. It must stay this
+      # workflow's OWN run_number: sourcing it from another workflow's counter
+      # would restart the sequence below build numbers ASC has already accepted.
       - name: Build signed release IPA
         working-directory: app
         run: |
           flutter build ipa --release \
+            --build-name=${{ steps.version.outputs.name }} \
             --build-number=${{ github.run_number }} \
             --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }} \
+            --dart-define=APP_VERSION=${{ steps.version.outputs.name }} \
+            --dart-define=GIT_SHA=${{ steps.version.outputs.sha }} \
+            --dart-define=BUILD_TIME=${{ steps.version.outputs.built }} \
             --export-options-plist="$RUNNER_TEMP/ExportOptions.plist"
 
       - name: Upload to TestFlight

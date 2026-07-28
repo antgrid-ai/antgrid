@@ -16,6 +16,9 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
+# Local builds only. Every shipped build overrides this with --build-name /
+# --build-number stamped by CI (see the `version` job in build-desktop.yml), so
+# bumping this by hand changes nothing users see.
 version: 1.0.6+7
 
 environment:
@@ -185,6 +188,7 @@ msix_config:
   publisher_display_name: Radha AI Product
   identity_name: RadhaAIProduct.antgrid
   publisher: CN=D6BFB7D7-5E99-4B9B-B4E0-29315D52C52B
+  # Local `dart run msix:create` only — CI passes --version explicitly.
   msix_version: 1.0.7.0
   # Same tileless monogram the old Inno installer + the exe/taskbar use
   # (windows/runner/resources/app_icon.ico), rendered transparent and square from

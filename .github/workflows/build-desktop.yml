@@ -9,6 +9,9 @@ name: Build — desktop (macOS / Windows / Linux)
 #                             <asset> — the mac/linux asset filenames
 #                             (antgrid-macos.dmg / antgrid-linux.AppImage) are
 #                             load-bearing, never rename them.
+#   - Dispatch release=true -> the normal way to ship. Stamps the version from
+#                             the clock (see the `version` job), pushes the tag,
+#                             and takes the same publish path as a v* tag.
 #   - Manual dispatch      -> builds selected platform/mode, artifacts only
 #                             (no publish). Run from the Actions tab or
 #                             `gh workflow run build-desktop.yml`.
@@ -39,21 +42,129 @@ on:
         type: choice
         default: release
         options: [release, profile, debug]
+      release:
+        description: 'Cut a release: stamp the version, tag it, and publish'
+        type: boolean
+        default: false
 
 concurrency:
   # Distinct (platform, mode) dispatches on the same branch must not cancel each
   # other — only a newer dispatch of the SAME config supersedes an in-flight one.
-  group: build-desktop-${{ github.ref }}-${{ inputs.platform }}-${{ inputs.build_mode }}
-  cancel-in-progress: true
+  # A release carries `release` in the key and opts out of cancellation entirely,
+  # so an ordinary dispatch can never kill a publish that is already uploading.
+  group: build-desktop-${{ github.ref }}-${{ inputs.platform }}-${{ inputs.build_mode }}-${{ inputs.release }}
+  cancel-in-progress: ${{ !inputs.release }}
 
 env:
   FLUTTER_VERSION: '3.44.2'   # keep in lockstep with .github/actions/setup-android
   LICENSE_API_URL: 'https://app.antgrid.ai'
+  # The only hand-maintained part of the version. Bump for a deliberate product
+  # major; the rest of the string is stamped from the clock and the run counter.
+  VERSION_MAJOR: '1'
 
 jobs:
+  # Single source of truth for the version string every downstream job stamps.
+  # CalVer-ish: <major>.<days since Unix epoch>.<run number>, e.g. 1.20662.412.
+  #   - days-since-epoch is UTC integer division, so it has no leading-zero or
+  #     DST hazard and increases exactly once a day, forever.
+  #   - run_number discriminates several releases within the same day.
+  # The commit and the build time are NOT encoded here (a hex sha is not a legal
+  # version component in semver, App Store, or MSIX) — they ride alongside as
+  # dart-defines.
+  version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      name: ${{ steps.compute.outputs.name }}
+      build_name: ${{ steps.compute.outputs.build_name }}
+      msix: ${{ steps.compute.outputs.msix }}
+      tag: ${{ steps.compute.outputs.tag }}
+      sha: ${{ steps.compute.outputs.sha }}
+      built: ${{ steps.compute.outputs.built }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: compute
+        env:
+          IS_RELEASE: ${{ inputs.release }}
+          MODE: ${{ inputs.build_mode || 'release' }}
+          PLATFORM: ${{ inputs.platform || 'all' }}
+        run: |
+          set -euo pipefail
+
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            # A hand-pushed v* tag stays authoritative: the tag IS the version.
+            name="${GITHUB_REF_NAME#v}"
+          else
+            if [ "$IS_RELEASE" = true ] && [ "$MODE" != release ]; then
+              echo "::error::release=true needs build_mode=release — the stores reject debug/profile packages"
+              exit 1
+            fi
+            # publish needs both macos and linux; a narrower platform would skip
+            # it silently and burn a version number on nothing.
+            if [ "$IS_RELEASE" = true ] && [ "$PLATFORM" != all ]; then
+              echo "::error::release=true needs platform=all — publish requires the macOS and Linux artifacts"
+              exit 1
+            fi
+            name="${VERSION_MAJOR}.$(( $(date -u +%s) / 86400 )).${GITHUB_RUN_NUMBER}"
+          fi
+
+          # MSIX takes four 16-bit integers with the revision pinned to 0, and it
+          # cannot express a pre-release suffix — validate here rather than
+          # discovering it 20 minutes into the Windows job.
+          core="${name%%-*}"
+          case "$core" in
+            *.*.*.*|*[!0-9.]*|.*|*.) echo "::error::version '$name' is not three integer components"; exit 1 ;;
+          esac
+          IFS=. read -r a b c <<< "$core"
+          for part in "$a" "$b" "$c"; do
+            [ -n "$part" ] || { echo "::error::version '$name' is not three integer components"; exit 1; }
+            [ "$part" -le 65535 ] || { echo "::error::component $part exceeds the MSIX 65535 ceiling"; exit 1; }
+          done
+
+          # build_name feeds --build-name, which every desktop platform splits
+          # into three integers (Windows expands them straight into Runner.rc's
+          # VERSION_AS_NUMBER, macOS into CFBundleShortVersionString) — so it
+          # gets the numeric core, never a `-beta.1` suffix. `name` keeps the
+          # full string for the tag, the release title, and APP_VERSION.
+          {
+            echo "name=$name"
+            echo "build_name=$core"
+            echo "msix=$core.0"
+            echo "tag=v$name"
+            echo "sha=${GITHUB_SHA:0:6}"
+            echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+
+      # Tag the commit that produced the release. Pushing with GITHUB_TOKEN
+      # deliberately does NOT re-trigger this workflow's `push: tags` path
+      # (GitHub's recursion guard) — this same run already builds and publishes,
+      # so a second run would be a duplicate, not a missing step.
+      #
+      # Idempotent because run_number is stable across re-runs (only run_attempt
+      # increments): re-running a release that died in a later job recomputes the
+      # same tag, and a hard failure here would strand the release with the tag
+      # already pushed and no way to finish it.
+      - name: Tag the release
+        if: ${{ github.ref_type != 'tag' && inputs.release }}
+        env:
+          TAG: ${{ steps.compute.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "::notice::$TAG already on origin — re-run of an earlier attempt, leaving it in place"
+            exit 0
+          fi
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git tag -a "$TAG" -m "Antgrid $TAG"
+          git push origin "$TAG"
+
   macos:
     # Empty inputs = tag push = build everything.
     if: ${{ github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'both' || inputs.platform == 'macos' }}
+    needs: [version]
     runs-on: macos-15
     env:
       # Tag pushes carry no inputs — default to a release build.
@@ -115,7 +226,14 @@ jobs:
       - name: Build macOS app
         id: build
         working-directory: app
-        run: flutter build macos --${{ env.BUILD_MODE }} --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }}
+        run: |
+          flutter build macos --${{ env.BUILD_MODE }} \
+            --build-name=${{ needs.version.outputs.build_name }} \
+            --build-number=${{ github.run_number }} \
+            --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }} \
+            --dart-define=APP_VERSION=${{ needs.version.outputs.name }} \
+            --dart-define=GIT_SHA=${{ needs.version.outputs.sha }} \
+            --dart-define=BUILD_TIME=${{ needs.version.outputs.built }}
 
       - name: Copy bridge into .app bundle
         if: ${{ steps.build.outcome == 'success' }}
@@ -237,6 +355,7 @@ jobs:
 
   windows:
     if: ${{ github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'both' || inputs.platform == 'windows' }}
+    needs: [version]
     runs-on: windows-latest
     env:
       BUILD_MODE: ${{ inputs.build_mode || 'release' }}
@@ -289,7 +408,7 @@ jobs:
       - name: Build Windows app
         id: build
         working-directory: app
-        run: flutter build windows --${{ env.BUILD_MODE }} --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }}
+        run: flutter build windows --${{ env.BUILD_MODE }} --build-name=${{ needs.version.outputs.build_name }} --build-number=${{ github.run_number }} --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }} --dart-define=APP_VERSION=${{ needs.version.outputs.name }} --dart-define=GIT_SHA=${{ needs.version.outputs.sha }} --dart-define=BUILD_TIME=${{ needs.version.outputs.built }}
 
       - name: Copy bridge into output folder
         if: ${{ steps.build.outcome == 'success' }}
@@ -315,7 +434,7 @@ jobs:
         if: ${{ env.BUILD_MODE == 'release' && steps.build.outcome == 'success' }}
         shell: pwsh
         working-directory: app
-        run: dart run msix:create --store --build-windows false --output-path "$env:GITHUB_WORKSPACE" --output-name antgrid-store
+        run: dart run msix:create --store --build-windows false --version ${{ needs.version.outputs.msix }} --output-path "$env:GITHUB_WORKSPACE" --output-name antgrid-store
 
       - name: Verify MSIX protocol activation
         if: ${{ env.BUILD_MODE == 'release' && steps.build.outcome == 'success' }}
@@ -343,14 +462,16 @@ jobs:
       # Secrets (repo Settings → Secrets and variables → Actions):
       #   MSSTORE_TENANT_ID / MSSTORE_CLIENT_ID / MSSTORE_CLIENT_SECRET /
       #   MSSTORE_SELLER_ID  (secrets)   +   MSSTORE_APP_ID (variable)
-      # Entra client secrets expire, and this step only runs on a tag — dispatch
-      # store-smoke.yml to check the credentials without cutting a release.
+      # Entra client secrets expire, and these steps only run on a tag push or a
+      # release dispatch — dispatch store-smoke.yml to check the credentials
+      # without cutting a release. The event_name guard matters: a plain
+      # artifact-only dispatch launched from a tag ref must not reach the Store.
       - name: Configure Microsoft Store CLI
-        if: ${{ startsWith(github.ref, 'refs/tags/') && env.MSSTORE_CLIENT_ID != '' && env.MSSTORE_APP_ID != '' && steps.build.outcome == 'success' }}
+        if: ${{ ((github.event_name == 'push' && github.ref_type == 'tag') || inputs.release) && env.MSSTORE_CLIENT_ID != '' && env.MSSTORE_APP_ID != '' && steps.build.outcome == 'success' }}
         uses: microsoft/microsoft-store-apppublisher@v1.3
 
       - name: Publish to Microsoft Store
-        if: ${{ startsWith(github.ref, 'refs/tags/') && env.MSSTORE_CLIENT_ID != '' && env.MSSTORE_APP_ID != '' && steps.build.outcome == 'success' }}
+        if: ${{ ((github.event_name == 'push' && github.ref_type == 'tag') || inputs.release) && env.MSSTORE_CLIENT_ID != '' && env.MSSTORE_APP_ID != '' && steps.build.outcome == 'success' }}
         shell: pwsh
         env:
           MSSTORE_TENANT_ID: ${{ secrets.MSSTORE_TENANT_ID }}
@@ -367,6 +488,7 @@ jobs:
 
   linux:
     if: ${{ github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'linux' }}
+    needs: [version]
     runs-on: ubuntu-latest
     env:
       BUILD_MODE: ${{ inputs.build_mode || 'release' }}
@@ -436,7 +558,14 @@ jobs:
       - name: Build Linux app
         id: build
         working-directory: app
-        run: flutter build linux --${{ env.BUILD_MODE }} --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }}
+        run: |
+          flutter build linux --${{ env.BUILD_MODE }} \
+            --build-name=${{ needs.version.outputs.build_name }} \
+            --build-number=${{ github.run_number }} \
+            --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }} \
+            --dart-define=APP_VERSION=${{ needs.version.outputs.name }} \
+            --dart-define=GIT_SHA=${{ needs.version.outputs.sha }} \
+            --dart-define=BUILD_TIME=${{ needs.version.outputs.built }}
 
       - name: Copy bridge into the app bundle
         if: ${{ steps.build.outcome == 'success' }}
@@ -490,8 +619,11 @@ jobs:
   # a fine-grained PAT scoped to that repo (contents: read/write) — GITHUB_TOKEN
   # cannot write cross-repo.
   publish:
-    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-    needs: [macos, linux]
+    # Publishing needs a tag PUSH or an explicit release dispatch. Checking
+    # ref_type alone would also fire for an artifact-only dispatch launched from
+    # a tag ref, which is how you rebuild an old release without republishing it.
+    if: ${{ (github.event_name == 'push' && github.ref_type == 'tag') || inputs.release }}
+    needs: [version, macos, linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v7
@@ -502,7 +634,9 @@ jobs:
       - name: Create release on antgrid-releases
         env:
           GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.version.outputs.tag }}
+          SHA: ${{ needs.version.outputs.sha }}
+          BUILT: ${{ needs.version.outputs.built }}
         run: |
           set -euo pipefail
           # A pre-release tag (v1.1.0-beta.1) must never move releases/latest —
@@ -516,6 +650,8 @@ jobs:
 
           - **macOS** (antgrid-macos.dmg): signed and notarized. Open the .dmg and drag Antgrid to Applications.
           - **Windows**: install from the [Microsoft Store](https://apps.microsoft.com/detail/9N0P7ZRL4D9W).
-          - **Linux** (antgrid-linux.AppImage): \`chmod +x antgrid-linux.AppImage\` then run it. Needs GTK 3 and WebKit2GTK on the host (\`libgtk-3-0\`, \`libwebkit2gtk-4.1-0\`, \`libsecret-1-0\`)." \
+          - **Linux** (antgrid-linux.AppImage): \`chmod +x antgrid-linux.AppImage\` then run it. Needs GTK 3 and WebKit2GTK on the host (\`libgtk-3-0\`, \`libwebkit2gtk-4.1-0\`, \`libsecret-1-0\`).
+
+          Built from \`$SHA\` at $BUILT." \
             $prerelease \
             antgrid-macos.dmg antgrid-linux.AppImage

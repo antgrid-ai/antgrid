@@ -12,6 +12,7 @@ import 'package:push/push.dart';
 import 'analytics/crash_reporting.dart';
 import 'analytics/events.dart';
 import 'analytics/install_id.dart';
+import 'config/build_info.dart';
 import 'config/environment.dart';
 import 'design/ab_colors.dart';
 import 'design/ab_text_density.dart';
@@ -130,13 +131,12 @@ Future<void> main() async {
 
   final installId = await SecureInstallIdStore().ensure();
   final platform = analyticsPlatformTag(defaultTargetPlatform);
-  const appVersion = String.fromEnvironment('APP_VERSION', defaultValue: 'dev');
   late final ProviderContainer container;
   final analytics = buildAnalyticsService(
     client: http.Client(),
     installId: installId,
     platform: platform,
-    appVersion: appVersion,
+    appVersion: BuildInfo.version,
     enabled: () => container.read(appSettingsServiceProvider).telemetryEnabled,
     plausibleUrl: AppEnvironment.plausibleUrl,
     plausibleDomain: AppEnvironment.plausibleDomain,
