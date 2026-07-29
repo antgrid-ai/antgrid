@@ -13,5 +13,19 @@
   },
   "worktree": {
     "bgIsolation": "none"
+  },
+  "enabledMcpjsonServers": ["dart"],
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "grep -qE '(flutter|dart)[[:space:]]+analyze' && printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"additionalContext\":\"Prefer the Dart MCP analyze_files tool over this CLI call: it reuses ONE warm analysis server (repeat calls are near-instant), while flutter analyze boots a fresh ~1GB server every run. CRITICAL: flutter analyze and dart analyze both route through flutter/bin/internal/shared.bat, which takes a startup lock in a sleepless retry loop with stderr suppressed - a second concurrent invocation spins forever, emits nothing, and never times out. Never run two analyzes at once. Run flutter analyze once, from the controller, only for the CI-equivalent gate.\"}}' || true"
+          }
+        ]
+      }
+    ]
   }
 }

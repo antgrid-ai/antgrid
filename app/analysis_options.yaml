@@ -9,15 +9,14 @@
 # packages, and plugins designed to encourage good coding practices.
 include: package:flutter_lints/flutter.yaml
 
-# riverpod_lint (analysis_server_plugin, not custom_lint) only loads under
-# `dart analyze` / the IDE — `flutter analyze` silently skips it (CI runs
-# `flutter analyze`, so this plugin does not gate CI). Its diagnostics also
-# cannot be suppressed with `// ignore:` / `// ignore_for_file:` — the
-# analyzer emits `duplicate_ignore` but the plugin fires anyway. Both
-# verified against riverpod_lint 3.1.4 / analyzer 12.1.0 / Dart 3.12.2.
-# Every finding below is fixed at the source, not ignored, because of this.
-plugins:
-  riverpod_lint: ^3.1.4
+# riverpod_lint is deliberately NOT enabled here. Its analysis_server_plugin
+# hangs the analysis server: a 3-file package took 42s to accept analysis roots
+# and then never settled, while the same package with no plugin settled in
+# 0.5s. Reproduced on both 3.1.4/analyzer 12.1.0 and 3.1.8/analyzer 13.3.0, so
+# it is not a version or scale problem. `flutter analyze` silently skips
+# plugins, which is why CI never saw this — but `dart analyze`, the IDE, and
+# the Dart MCP server all load plugins and hang. Re-adding it re-breaks those
+# three and rules out any warm-analysis-server tooling.
 
 analyzer:
   errors:

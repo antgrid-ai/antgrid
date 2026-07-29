@@ -4,6 +4,7 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../constants/breakpoints.dart';
 import '../project/limits.dart';
 import '../project/mobile_lifecycle.dart';
 import '../project/project_session_registry.dart';
@@ -19,6 +20,7 @@ import '../services/control_plane_client.dart';
 import '../storage/cached_sessions_store.dart';
 import '../launcher/host_control_client.dart';
 import '../util/ab_log.dart';
+import '../widgets/window_title_bar.dart';
 import 'new_session_screen.dart';
 import 'workspace_shell.dart';
 
@@ -146,7 +148,23 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   @override
   Widget build(BuildContext context) {
-    return _buildAgentRouting();
+    final routed = _buildAgentRouting();
+    // Mounted here rather than inside WorkspaceShell because the OS bar is
+    // hidden process-wide (initDesktopWindowChrome): any full-window route
+    // that renders without the bar strands the user with no drag region and
+    // no close button. From here it covers NewSessionScreen and every
+    // WorkspaceShell early return (blocking error, boot status) alike.
+    //
+    // Nothing may take vertical space above it on macOS: AppKit positions the
+    // traffic lights in window coordinates and they do not move with Flutter
+    // layout.
+    if (MediaQuery.sizeOf(context).width < kCompactBreakpoint) return routed;
+    return Column(
+      children: [
+        const WindowTitleBar(child: WindowTitleBarContents()),
+        Expanded(child: routed),
+      ],
+    );
   }
 
   Widget _buildAgentRouting() {

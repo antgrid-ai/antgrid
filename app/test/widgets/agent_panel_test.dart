@@ -1,7 +1,7 @@
-// Tests for the agent panel header's per-project action logic.
+// Tests for the window title bar's per-project action logic.
 //
 // These exercise the real `localProjectActions` seam (the production
-// `_AgentStatusHeader` delegates to it), including the
+// `WindowTitleBarContents` delegates to it), including the
 // selectedRegistrationIdProvider → projectsProvider lookup: a per-project
 // mobile-access toggle (AbMobileCta) for local projects, a RemoteHostChip for
 // remote projects, and nothing when no project is focused.
@@ -13,6 +13,7 @@ import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/mobile_devices_hub.dart';
 import 'package:antgrid/widgets/agent_panel.dart';
 import 'package:antgrid/widgets/remote_host_chip.dart';
+import 'package:antgrid/widgets/window_title_bar.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -212,6 +213,65 @@ void main() {
 
       expect(find.byType(RemoteHostChip), findsNothing);
       expect(find.byType(AbMobileCta), findsNothing);
+    },
+  );
+
+  // Desktop's window title bar never mounts below kCompactBreakpoint, so the
+  // mobile agent page needs its own drawer button and breadcrumb — see
+  // AgentPanel.build's mobile-only header.
+  testWidgets(
+    'at a narrow width AgentPanel shows the drawer button and breadcrumb',
+    (tester) async {
+      try {
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.reset);
+
+        final stores = await buildTestStoreOverrides();
+        addTearDown(stores.close);
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [...stores.overrides],
+            child: const MaterialApp(home: Scaffold(body: AgentPanel())),
+          ),
+        );
+        await tester.pump();
+
+        expect(find.byTooltip('Projects'), findsOneWidget);
+        expect(find.byType(TitleBarBreadcrumb), findsOneWidget);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
+
+  testWidgets(
+    'at a wide width AgentPanel shows neither the drawer button nor the breadcrumb',
+    (tester) async {
+      try {
+        debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+        tester.view.physicalSize = const Size(1000, 800);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.reset);
+
+        final stores = await buildTestStoreOverrides();
+        addTearDown(stores.close);
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [...stores.overrides],
+            child: const MaterialApp(home: Scaffold(body: AgentPanel())),
+          ),
+        );
+        await tester.pump();
+
+        expect(find.byTooltip('Projects'), findsNothing);
+        expect(find.byType(TitleBarBreadcrumb), findsNothing);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
     },
   );
 }

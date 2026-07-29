@@ -19,6 +19,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { ensureDartMcp } from "./ensure-dart-mcp";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const LICENSE_ENV = resolve(ROOT, "web/.env");
@@ -227,6 +228,10 @@ async function main() {
   // blocked. See scripts/build-pty-android.ts.
   console.log("\nBuilding 16 KB-aligned Android PTY override (skipped if Rust/NDK absent)...");
   spawnSync("bun", ["run", "scripts/build-pty-android.ts"], { cwd: ROOT, stdio: "inherit" });
+
+  // --- Agent tooling: Dart MCP server ---
+  console.log("\nRegistering the Dart MCP server for coding agents...");
+  ensureDartMcp(ROOT);
 
   console.log("\n=== Done ===\n");
   console.log("Run the stack:");

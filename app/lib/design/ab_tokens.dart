@@ -216,6 +216,28 @@ abstract final class AbTokens {
   // quick-actions bar), where a 14px glyph reads small in a tall touch row.
   static const iconButtonGlyphXl = 26.0; // keyboard-key-sized (the IME toggle)
 
+  // Windows caption buttons (minimize/maximize/close). They mimic the OS
+  // control block, so they ignore the icon-button sizing above: 46px wide,
+  // full bar height, square, and butted together with no gap — the metrics
+  // WinUI and VS Code both use.
+  static const captionButtonWidth = 46.0;
+
+  /// Edge of the square the caption glyph is drawn into. Not comparable to
+  /// [iconButtonGlyph]: these glyphs are painted edge to edge, where an icon
+  /// from the set spends about a third of its box on internal padding. Matched
+  /// against a real Windows caption block, not chosen from the scale.
+  static const captionButtonGlyph = 10.0;
+
+  /// Close-button hover fill. Deliberately NOT a theme color: every Windows
+  /// app shows the same red here, so following the palette would break the
+  /// one caption affordance users recognise without reading it.
+  static const captionCloseHover = Color(0xFFC42B1C);
+  static const captionClosePressed = Color(0xFF9B2117);
+
+  /// Glyph on the filled close button — white in every theme, because the
+  /// fill behind it is fixed.
+  static const captionCloseForeground = Color(0xFFFFFFFF);
+
   // Minimum interactive-target edge: 44 splits Apple HIG's 44pt and Android's
   // 48dp guidance. Enforced on mobile only, via AbTapTarget — desktop pointers
   // are precise and dense toolbars must stay compact.

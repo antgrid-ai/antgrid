@@ -35,6 +35,7 @@
 import { existsSync, copyFileSync, mkdirSync } from "node:fs";
 import { resolve, dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { ensureDartMcp } from "./ensure-dart-mcp";
 
 type Opts = {
   name?: string;
@@ -172,6 +173,9 @@ function provision(worktreePath: string, mainRoot: string, opts: Opts): void {
   console.log(`\n→ Copying env files from main checkout`);
   copyEnv("web/.env", mainRoot, worktreePath);
   copyEnv("relay/.env", mainRoot, worktreePath);
+
+  // --- 2b. Dart MCP server (.mcp.json is gitignored, so a worktree starts without it) ---
+  ensureDartMcp(worktreePath);
 
   // --- 3. TS deps (hoisted to worktree root) ---
   run("bun", ["install"], worktreePath, "bun install (all workspaces)");

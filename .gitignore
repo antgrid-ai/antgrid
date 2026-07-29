@@ -94,11 +94,12 @@ docs/superpowers/plans/
 docs/superpowers/specs/
 
 # Generated plugin configs (created by bridge/plugin/setup.ts).
-# NOTE: .claude/settings.json is intentionally TRACKED (committed) so cloud
-# sessions load enabledPlugins at clone time. The plugin installer merges
-# machine-local `hooks` into it non-destructively; if that local churn is
-# noisy, run `git update-index --skip-worktree .claude/settings.json`.
-.mcp.json
+# NOTE: .claude/settings.json and .mcp.json are intentionally TRACKED
+# (committed) so cloud sessions get enabledPlugins and the Dart MCP server at
+# clone time — nothing runs `npm run setup` there to generate them. The plugin
+# installer merges into both non-destructively (machine-local `hooks`, and the
+# `antgrid` MCP entry), so the only local churn is its own keys appearing; if
+# that is noisy, run `git update-index --skip-worktree <file>`.
 .codex/
 .gemini/
 

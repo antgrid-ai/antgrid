@@ -4,8 +4,8 @@ import '../design/ab_colors.dart';
 import '../design/widgets/ab_chip.dart';
 import '../services/auth_service.dart';
 
-/// Small status chip rendered in the agent panel header and drawer footer
-/// showing the app user's subscription tier:
+/// Small status chip rendered via `AccountFooter` in the drawer, showing the
+/// app user's subscription tier:
 ///   - promotional grant (unpurchased) → amber "FREE", regardless of tier
 ///   - `tier == 'pro'` (real subscription) → accent "PRO"
 ///   - else (trial / unknown) → amber tier label, defaulting to "TRIAL"

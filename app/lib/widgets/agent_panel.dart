@@ -1,13 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../constants/breakpoints.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
-import '../design/widgets/ab_branch_pill.dart';
-import '../design/widgets/ab_breadcrumb.dart';
 import '../design/widgets/ab_chip.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_snack_bar.dart';
@@ -16,42 +13,23 @@ import '../models/handler_state.dart';
 import '../models/session_entry.dart';
 import '../project/project_session_registry.dart';
 import '../providers/agent_transport.dart';
-import '../providers/auth.dart';
 import '../providers/device_provisioning.dart';
 import '../providers/projects.dart';
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
-import '../providers/project_work_status.dart';
 import '../screens/terminal_screen.dart';
-import '../services/control_plane_client.dart';
 import '../utils/platform_utils.dart';
 import 'agent_transcript_view.dart';
-import 'agent_work_status_dot.dart';
-import 'auth_status_pill.dart';
 import 'command_bar.dart';
 import 'command_output_overlay.dart';
 import 'handler/handler_enable_sheet.dart';
 import 'mobile_access_toggle.dart';
 import 'remote_host_chip.dart';
 import 'session_rename_dialog.dart';
+import 'window_title_bar.dart';
 
 class AgentPanel extends ConsumerWidget {
-  const AgentPanel({
-    super.key,
-    this.contextPanelHidden = false,
-    this.onToggleContextPanel,
-  });
-
-  /// Current visibility of the desktop context panel, for the header toggle's
-  /// glyph. Meaningless when [onToggleContextPanel] is null.
-  final bool contextPanelHidden;
-
-  /// Shows/hides the desktop context panel. Null on mobile (a PageView with no
-  /// panel modes), which is what hides the toggle there. The control lives in
-  /// THIS header rather than the context panel's own tab bar because that tab
-  /// bar goes off screen with the panel it belongs to — the restore affordance
-  /// has to sit on a surface that is always mounted.
-  final VoidCallback? onToggleContextPanel;
+  const AgentPanel({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -72,10 +50,25 @@ class AgentPanel extends ConsumerWidget {
 
     return Column(
       children: [
-        _AgentStatusHeader(
-          contextPanelHidden: contextPanelHidden,
-          onToggleContextPanel: onToggleContextPanel,
-        ),
+        // Desktop replaced the old shared header with the window title bar,
+        // but on mobile no title bar mounts, so the drawer button and
+        // project/session context (breadcrumb, branch pill) must survive here.
+        if (MediaQuery.sizeOf(context).width < kCompactBreakpoint)
+          AbToolbar.custom(
+            children: [
+              Builder(
+                builder: (innerCtx) => AbIconButton(
+                  icon: AbIcons.menu,
+                  tooltip: 'Projects',
+                  onTap: () => Scaffold.of(innerCtx).openDrawer(),
+                ),
+              ),
+              const SizedBox(width: AbTokens.space6),
+              const Expanded(child: TitleBarBreadcrumb()),
+              const SizedBox(width: AbTokens.space8),
+              const HandlerHeaderControl(),
+            ],
+          ),
         Expanded(
           child: isChat
               // Keyed by session so switching sessions rebuilds the State —
@@ -96,144 +89,16 @@ class AgentPanel extends ConsumerWidget {
   }
 }
 
-class _AgentStatusHeader extends ConsumerWidget {
-  const _AgentStatusHeader({
-    required this.contextPanelHidden,
-    required this.onToggleContextPanel,
-  });
-
-  final bool contextPanelHidden;
-  final VoidCallback? onToggleContextPanel;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final terminalState = ref.watch(terminalStateProvider).value;
-    final activeId = ref.watch(selectedRegistrationIdProvider);
-    final agentName =
-        terminalState?.agentInfo?.name ??
-        (activeId != null ? projectNameFromId(activeId) : 'Antgrid');
-
-    final gitBranch = terminalState?.gitBranch;
-    final active = ref.watch(activeSessionProvider);
-    // Leaf slot must exist for the '/' separator + leafOverride to render; the
-    // string is a fallback only — the editable leaf renders the live name.
-    final segments = [agentName, if (active != null) active.name];
-    // Live work status for the focused project — shows working/attention/error
-    // next to the breadcrumb. Omitted when done to keep idle headers clean.
-    final workStatus =
-        activeId != null ? ref.watch(projectWorkStatusProvider(activeId)) : null;
-
-    return AbToolbar.custom(
-      children: [
-        if (MediaQuery.sizeOf(context).width < kCompactBreakpoint) ...[
-          Builder(
-            builder: (innerCtx) => AbIconButton(
-              icon: AbIcons.menu,
-              tooltip: 'Projects',
-              onTap: () => Scaffold.of(innerCtx).openDrawer(),
-            ),
-          ),
-          const SizedBox(width: AbTokens.space6),
-        ],
-        if (workStatus != null && workStatus != AgentWorkStatus.done) ...[
-          AgentWorkStatusDot(status: workStatus),
-          const SizedBox(width: AbTokens.space8),
-        ],
-        Expanded(
-          child: Row(
-            children: [
-              Flexible(
-                child: AbBreadcrumb(
-                  segments: segments,
-                  leafOverride: active == null
-                      ? null
-                      : _EditableSessionLeaf(session: active),
-                ),
-              ),
-              if (gitBranch != null) ...[
-                const SizedBox(width: AbTokens.space8),
-                AbBranchPill(
-                  branch: gitBranch,
-                  onTap: () async {
-                    await Clipboard.setData(ClipboardData(text: gitBranch));
-                    if (!context.mounted) return;
-                    showAbSnackBar(
-                      context,
-                      'Copied "$gitBranch"',
-                      duration: const Duration(seconds: 2),
-                    );
-                  },
-                ),
-              ],
-            ],
-          ),
-        ),
-        const SizedBox(width: AbTokens.space8),
-        ..._authStatusWidgets(context, ref),
-        const SizedBox(width: AbTokens.space8),
-        const HandlerHeaderControl(),
-        const SizedBox(width: AbTokens.space8),
-        ..._localProjectActions(ref),
-        if (onToggleContextPanel != null) ...[
-          const SizedBox(width: AbTokens.space8),
-          AbIconButton(
-            icon: contextPanelHidden
-                ? AbIcons.layoutSidebarRightOff
-                : AbIcons.layoutSidebarRight,
-            // Same emphasis in both states: while hidden this button is the
-            // ONLY way back (there is no collapsed strip), so dimming it would
-            // make the sole recovery affordance the faintest thing in the
-            // header — and hidden is the DEFAULT on tablets and phone
-            // landscape, i.e. the first thing those users see.
-            tooltip: contextPanelHidden
-                ? 'Show context panel'
-                : 'Hide context panel',
-            onTap: onToggleContextPanel,
-          ),
-        ],
-      ],
-    );
-  }
-
-  /// Renders the signed-in user's email + tier pill from [currentUserProvider].
-  /// Hidden while loading, when the user is not signed in, or when the focused
-  /// project is a local folder (login/plan only applies to relay-paired
-  /// remote agents).
-  List<Widget> _authStatusWidgets(BuildContext context, WidgetRef ref) {
-    if (!ref.watch(focusedIsRelayProvider)) return const [];
-    final user = ref.watch(currentUserProvider).value;
-    if (user == null) return const [];
-    return [
-      Padding(
-        padding: const EdgeInsets.only(right: AbTokens.space6),
-        child: Text(
-          user.email,
-          style: AbTokens.monoStyle(
-            fontSize: AbTokens.fontXxs,
-            color: context.antgrid.textSecondary,
-          ),
-          overflow: TextOverflow.ellipsis,
-        ),
-      ),
-      AuthStatusPill(user),
-      const SizedBox(width: AbTokens.space8),
-    ];
-  }
-
-  List<Widget> _localProjectActions(WidgetRef ref) => localProjectActions(ref);
-}
-
 /// Per-project header action for the focused project:
 ///  - **Local project** → a [MobileAccessToggle] (Enable/Disable mobile access),
 ///    which drives the paired-phone allowlist for this project.
 ///  - **Remote project** → a read-only [RemoteHostChip] (the host machine name);
 ///    you cannot manage another machine's allowlist from here.
 ///
-/// Top-level (and `@visibleForTesting`) rather than a private method so the
-/// header's per-project action logic — including the
-/// `selectedRegistrationIdProvider` → `projectsProvider` lookup — can be
-/// exercised directly in tests without re-implementing it.
-@visibleForTesting
+/// Top-level rather than a private method so the per-project action logic —
+/// including the `selectedRegistrationIdProvider` → `projectsProvider`
+/// lookup — has one implementation, used by `WindowTitleBarContents`, and can
+/// be exercised directly in tests without re-implementing it.
 List<Widget> localProjectActions(WidgetRef ref) {
   if (isMobilePlatform) return const [];
   final selectedId = ref.watch(selectedRegistrationIdProvider);
@@ -254,7 +119,7 @@ List<Widget> localProjectActions(WidgetRef ref) {
   ];
 }
 
-/// Handler status pill + configure button rendered in the agent panel header.
+/// Handler status pill + configure button rendered in the window title bar.
 ///
 /// Shows a state pill (WATCHING / HANDLING / NEEDS YOU `n`) when Handler is
 /// enabled, and an icon button that opens [showHandlerEnableSheet] to
@@ -331,9 +196,9 @@ class HandlerHeaderControl extends ConsumerWidget {
 /// shared [promptSessionRename] dialog (desktop and mobile alike). Commits via
 /// the focused project's [sessionsServiceProvider] — the active session always
 /// belongs to the focused project.
-class _EditableSessionLeaf extends ConsumerWidget {
+class EditableSessionLeaf extends ConsumerWidget {
   final SessionEntry session;
-  const _EditableSessionLeaf({required this.session});
+  const EditableSessionLeaf({super.key, required this.session});
 
   Future<void> _rename(BuildContext context, WidgetRef ref) async {
     final id = session.id;

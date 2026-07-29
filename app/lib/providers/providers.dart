@@ -115,17 +115,10 @@ final relayEpochProvider = FutureProvider<int>((ref) async {
 });
 
 /// Per-project TerminalService façade.
-final terminalServiceProvider = Provider<TerminalService>((ref) {
-  final id = ref.watch(selectedRegistrationIdProvider);
-  if (id == null) {
-    throw StateError(
-      'No project focused. Open a folder or pair an agent first.',
-    );
-  }
-  final session = ref.watch(projectSessionProvider(id)).value;
-  if (session == null) throw _ProjectSessionLoading(id);
-  return session.terminalService;
-});
+final terminalServiceProvider = _focusedService<TerminalService>(
+  (s) => s.terminalService,
+  name: 'terminalService',
+);
 
 final terminalStateProvider = StreamProvider<TerminalState>((ref) {
   final service = focusedSessionOrNull(ref)?.terminalService;
@@ -241,43 +234,22 @@ final agentTerminalProvider = Provider<TerminalTab?>((ref) {
 });
 
 /// Per-project CommandService façade.
-final commandServiceProvider = Provider<CommandService>((ref) {
-  final id = ref.watch(selectedRegistrationIdProvider);
-  if (id == null) {
-    throw StateError(
-      'No project focused. Open a folder or pair an agent first.',
-    );
-  }
-  final session = ref.watch(projectSessionProvider(id)).value;
-  if (session == null) throw _ProjectSessionLoading(id);
-  return session.commandService;
-});
+final commandServiceProvider = _focusedService<CommandService>(
+  (s) => s.commandService,
+  name: 'commandService',
+);
 
 /// Per-project ConfigService façade.
-final configServiceProvider = Provider<ConfigService>((ref) {
-  final id = ref.watch(selectedRegistrationIdProvider);
-  if (id == null) {
-    throw StateError(
-      'No project focused. Open a folder or pair an agent first.',
-    );
-  }
-  final session = ref.watch(projectSessionProvider(id)).value;
-  if (session == null) throw _ProjectSessionLoading(id);
-  return session.configService;
-});
+final configServiceProvider = _focusedService<ConfigService>(
+  (s) => s.configService,
+  name: 'configService',
+);
 
 /// Per-project HandlerService façade.
-final handlerServiceProvider = Provider<HandlerService>((ref) {
-  final id = ref.watch(selectedRegistrationIdProvider);
-  if (id == null) {
-    throw StateError(
-      'No project focused. Open a folder or pair an agent first.',
-    );
-  }
-  final session = ref.watch(projectSessionProvider(id)).value;
-  if (session == null) throw _ProjectSessionLoading(id);
-  return session.handlerService;
-});
+final handlerServiceProvider = _focusedService<HandlerService>(
+  (s) => s.handlerService,
+  name: 'handlerService',
+);
 
 final handlerStateProvider = StreamProvider<HandlerState>((ref) {
   final service = focusedSessionOrNull(ref)?.handlerService;
@@ -286,17 +258,10 @@ final handlerStateProvider = StreamProvider<HandlerState>((ref) {
 });
 
 /// Per-project SessionsService façade.
-final sessionsServiceProvider = Provider<SessionsService>((ref) {
-  final id = ref.watch(selectedRegistrationIdProvider);
-  if (id == null) {
-    throw StateError(
-      'No project focused. Open a folder or pair an agent first.',
-    );
-  }
-  final session = ref.watch(projectSessionProvider(id)).value;
-  if (session == null) throw _ProjectSessionLoading(id);
-  return session.sessionsService;
-});
+final sessionsServiceProvider = _focusedService<SessionsService>(
+  (s) => s.sessionsService,
+  name: 'sessionsService',
+);
 
 /// Transient error thrown by the per-project service façades while the
 /// underlying [projectSessionProvider] future is still resolving (transport
@@ -311,6 +276,34 @@ class _ProjectSessionLoading implements Exception {
   @override
   String toString() => 'ProjectSession "$projectId" is still initializing.';
 }
+
+/// Builds a per-project service façade: resolves the focused project's
+/// [ProjectSession] and picks one service off it.
+///
+/// NEVER `ref.watch` a façade built here — it throws while the session resolves,
+/// and Riverpod re-runs a throwing synchronous provider that HAS listeners on
+/// every dependency change (e.g. each project switch). That re-run happens
+/// outside any `build()`, so the throw lands as an unhandled exception. Derived
+/// providers source their service from [focusedSessionOrNull]; widgets read it
+/// via [serviceWhenReady].
+///
+/// [name] must be passed explicitly: Riverpod only infers a provider's debug
+/// name from the variable under codegen, which this app does not use, so a
+/// factory-built provider is otherwise anonymous in devtools and errors.
+Provider<T> _focusedService<T>(
+  T Function(ProjectSession) pick, {
+  required String name,
+}) => Provider<T>((ref) {
+  final id = ref.watch(selectedRegistrationIdProvider);
+  if (id == null) {
+    throw StateError(
+      'No project focused. Open a folder or pair an agent first.',
+    );
+  }
+  final session = ref.watch(projectSessionProvider(id)).value;
+  if (session == null) throw _ProjectSessionLoading(id);
+  return pick(session);
+}, name: name);
 
 /// The focused project's [ProjectSession] once it has finished constructing,
 /// else null (no project focused, or the session is still resolving after a
@@ -399,83 +392,69 @@ final projectPreferencesProvider = StreamProvider<ProjectPreferences>((ref) {
 });
 
 /// Per-project FileService façade.
-final fileServiceProvider = Provider<FileService>((ref) {
-  final id = ref.watch(selectedRegistrationIdProvider);
-  if (id == null) {
-    throw StateError(
-      'No project focused. Open a folder or pair an agent first.',
-    );
-  }
-  final session = ref.watch(projectSessionProvider(id)).value;
-  if (session == null) throw _ProjectSessionLoading(id);
-  return session.fileService;
-});
+final fileServiceProvider = _focusedService<FileService>(
+  (s) => s.fileService,
+  name: 'fileService',
+);
 
-/// Per-project UploadService façade. Throwing façade — read via
-/// [serviceWhenReady], never `ref.watch`.
-final uploadServiceProvider = Provider<UploadService>((ref) {
-  final id = ref.watch(selectedRegistrationIdProvider);
-  if (id == null) {
-    throw StateError(
-      'No project focused. Open a folder or pair an agent first.',
-    );
-  }
-  final session = ref.watch(projectSessionProvider(id)).value;
-  if (session == null) throw _ProjectSessionLoading(id);
-  return session.uploadService;
-});
+/// Per-project UploadService façade.
+final uploadServiceProvider = _focusedService<UploadService>(
+  (s) => s.uploadService,
+  name: 'uploadService',
+);
 
-/// Module-level state for the preferences→FileService binding.
+/// Owns the preferences→FileService binding for ONE [ProviderContainer].
 ///
-/// These globals are intentionally singletons — they mirror the singleton
-/// nature of the Riverpod providers they serve. A side-effect is that
-/// multiple [ProviderContainer]s in the same Dart isolate (e.g. in tests)
-/// can interfere with each other if containers are not disposed between
-/// tests. The [ref.onDispose] cleanup in [_maybeBindPreferencesSync] resets
-/// all three flags, so as long as each test disposes its container the
-/// residual risk is acceptable.
-FileService? _prefsBoundService;
-StreamSubscription<dynamic>? _prefsBoundSub;
-bool _disposerRegistered = false;
+/// Container-scoped, not module-global: as a global, the first container to
+/// bind latched the only `onDispose`, so its teardown silently unbound every
+/// other live container — and an `identical` service hit made a later container
+/// skip binding entirely. Both bite any isolate that runs more than one
+/// container, which is the whole test suite.
+class _PrefsBinding {
+  FileService? _service;
+  StreamSubscription<dynamic>? _sub;
 
-void _maybeBindPreferencesSync(Ref ref, FileService service) {
-  if (identical(_prefsBoundService, service)) return;
-  _prefsBoundSub?.cancel();
-  _prefsBoundService = service;
-  final prefsService = ref.read(preferencesServiceProvider);
-  Set<String>? lastExpanded;
-  String? lastSelectedFile;
-  bool? lastShowChanged;
-  _prefsBoundSub = service.stateStream.listen((state) {
-    if (prefsService.projectId == null) return;
-    final selectedFile = state.files.selectedFilePath;
-    if (identical(state.expandedPaths, lastExpanded) &&
-        selectedFile == lastSelectedFile &&
-        state.showChangedOnly == lastShowChanged) {
-      return;
-    }
-    lastExpanded = state.expandedPaths;
-    lastSelectedFile = selectedFile;
-    lastShowChanged = state.showChangedOnly;
-    prefsService.update(
-      prefsService.current.copyWith(
-        expandedPaths: state.expandedPaths,
-        selectedFilePath: selectedFile,
-        clearSelectedFilePath: selectedFile == null,
-        showChangedOnly: state.showChangedOnly,
-      ),
-    );
-  });
-  if (!_disposerRegistered) {
-    _disposerRegistered = true;
-    ref.onDispose(() {
-      _prefsBoundSub?.cancel();
-      _prefsBoundSub = null;
-      _prefsBoundService = null;
-      _disposerRegistered = false;
+  void bind(FileService service, PreferencesService prefsService) {
+    if (identical(_service, service)) return;
+    _sub?.cancel();
+    _service = service;
+    Set<String>? lastExpanded;
+    String? lastSelectedFile;
+    bool? lastShowChanged;
+    _sub = service.stateStream.listen((state) {
+      if (prefsService.projectId == null) return;
+      final selectedFile = state.files.selectedFilePath;
+      if (identical(state.expandedPaths, lastExpanded) &&
+          selectedFile == lastSelectedFile &&
+          state.showChangedOnly == lastShowChanged) {
+        return;
+      }
+      lastExpanded = state.expandedPaths;
+      lastSelectedFile = selectedFile;
+      lastShowChanged = state.showChangedOnly;
+      prefsService.update(
+        prefsService.current.copyWith(
+          expandedPaths: state.expandedPaths,
+          selectedFilePath: selectedFile,
+          clearSelectedFilePath: selectedFile == null,
+          showChangedOnly: state.showChangedOnly,
+        ),
+      );
     });
   }
+
+  void dispose() {
+    _sub?.cancel();
+    _sub = null;
+    _service = null;
+  }
 }
+
+final _prefsBindingProvider = Provider<_PrefsBinding>((ref) {
+  final binding = _PrefsBinding();
+  ref.onDispose(binding.dispose);
+  return binding;
+}, name: 'prefsBinding');
 
 final fileTreeStateProvider = StreamProvider<FileTreeState>((ref) {
   final service = focusedSessionOrNull(ref)?.fileService;
@@ -484,7 +463,9 @@ final fileTreeStateProvider = StreamProvider<FileTreeState>((ref) {
   // long-lived watcher of the focused FileService (kept alive by the workspace
   // shell), and it sources the service safely. Previously the binding hung off
   // fileServiceProvider, but nothing may `watch` that throwing façade anymore.
-  _maybeBindPreferencesSync(ref, service);
+  ref
+      .watch(_prefsBindingProvider)
+      .bind(service, ref.read(preferencesServiceProvider));
   return seededStream(() => service.currentState, service.stateStream);
   // retry: a tree-load error must surface to the screen's error state, not spin
   // in Riverpod 3's default retry loop (which would leave the UI on "loading").
@@ -492,53 +473,34 @@ final fileTreeStateProvider = StreamProvider<FileTreeState>((ref) {
 }, retry: noProviderRetry);
 
 /// Per-project SearchService façade.
-final searchServiceProvider = Provider<SearchService>((ref) {
-  final id = ref.watch(selectedRegistrationIdProvider);
-  if (id == null) {
-    throw StateError(
-      'No project focused. Open a folder or pair an agent first.',
-    );
-  }
-  final session = ref.watch(projectSessionProvider(id)).value;
-  if (session == null) throw _ProjectSessionLoading(id);
-  return session.searchService;
-});
+final searchServiceProvider = _focusedService<SearchService>(
+  (s) => s.searchService,
+  name: 'searchService',
+);
 
 final searchStateProvider = StreamProvider<SearchState>((ref) {
-  final service = ref.watch(searchServiceProvider);
+  final service = focusedSessionOrNull(ref)?.searchService;
+  if (service == null) return const Stream<SearchState>.empty();
   return seededStream(() => service.currentState, service.stateStream);
 });
 
 /// Per-project PreviewService façade.
-final previewServiceProvider = Provider<PreviewService>((ref) {
-  final id = ref.watch(selectedRegistrationIdProvider);
-  if (id == null) {
-    throw StateError(
-      'No project focused. Open a folder or pair an agent first.',
-    );
-  }
-  final session = ref.watch(projectSessionProvider(id)).value;
-  if (session == null) throw _ProjectSessionLoading(id);
-  return session.previewService;
-});
+final previewServiceProvider = _focusedService<PreviewService>(
+  (s) => s.previewService,
+  name: 'previewService',
+);
 
 final previewStateProvider = StreamProvider<PreviewState>((ref) {
-  final service = ref.watch(previewServiceProvider);
+  final service = focusedSessionOrNull(ref)?.previewService;
+  if (service == null) return const Stream<PreviewState>.empty();
   return seededStream(() => service.currentState, service.stateStream);
 });
 
 /// Per-project structured-agent service façade.
-final agentSessionServiceProvider = Provider<AgentSessionService>((ref) {
-  final id = ref.watch(selectedRegistrationIdProvider);
-  if (id == null) {
-    throw StateError(
-      'No project focused. Open a folder or pair an agent first.',
-    );
-  }
-  final session = ref.watch(projectSessionProvider(id)).value;
-  if (session == null) throw _ProjectSessionLoading(id);
-  return session.agentSessionService;
-});
+final agentSessionServiceProvider = _focusedService<AgentSessionService>(
+  (s) => s.agentSessionService,
+  name: 'agentSessionService',
+);
 
 /// Per-session structured-agent state. Keyed by chat session id so one project
 /// can hold several concurrent chat sessions (see AgentSessionService).
@@ -634,6 +596,22 @@ final switchToAgentProvider =
     NotifierProvider<ValueController<VoidCallback?>, VoidCallback?>(
       () => ValueController(null),
     );
+
+/// The desktop context panel's visibility plus the callback that flips it.
+///
+/// Set by WorkspaceShell (which owns panel mode) and rendered by the window
+/// title bar, which mounts above every route and cannot reach that State — the
+/// same shape as [switchToAgentProvider]. Null whenever no workspace is
+/// mounted, which is what hides the control on the New Session route.
+///
+/// Hiding the context panel takes its own tab bar off screen with it, so this
+/// control is the only way back; it must live on a surface that stays mounted
+/// in both states.
+final contextPanelControlProvider =
+    NotifierProvider<
+      ValueController<({bool hidden, VoidCallback toggle})?>,
+      ({bool hidden, VoidCallback toggle})?
+    >(() => ValueController(null));
 
 final pairedAgentProvider =
     AsyncNotifierProvider<PairedAgentNotifier, List<PairedAgent>>(

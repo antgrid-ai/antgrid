@@ -23,9 +23,6 @@ abstract final class AbIcons {
   // CURRENT state (filled edge = pane showing), not the result of clicking.
   static const layoutSidebarRight = Codicon.layout_sidebar_right;
   static const layoutSidebarRightOff = Codicon.layout_sidebar_right_off;
-  static const chromeMinimize = Codicon.chrome_minimize;
-  static const chromeMaximize = Codicon.chrome_maximize;
-  static const chromeRestore = Codicon.chrome_restore;
   static const back = Codicon.arrow_left;
   static const chevronLeft = Codicon.chevron_left;
   static const chevronRight = Codicon.chevron_right;

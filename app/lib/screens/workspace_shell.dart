@@ -87,6 +87,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   late PageController _pageController;
   WorkspaceView _selectedView = WorkspaceView.files;
   double _splitRatio = 0.5;
+
   /// Null until the user picks a mode (or a stored pref supplies one), so
   /// [_effectivePanelMode] can keep re-deriving the viewport default. Resolving
   /// lazily rather than freezing a value at prefs-apply time is what makes a
@@ -163,7 +164,11 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           _onAgentNotification(title: decoded.title, body: decoded.body);
         } catch (e) {
           // Async listener: an uncaught throw here is an unhandled rejection.
-          AbLog.error('WorkspaceShell', 'foreground push failed', fields: {'error': '$e'});
+          AbLog.error(
+            'WorkspaceShell',
+            'foreground push failed',
+            fields: {'error': '$e'},
+          );
         }
       });
     }
@@ -190,6 +195,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // defer the state write so it doesn't happen mid-build when the widget
     // tree is being restructured (e.g. project switch).
     final notifier = ref.read(switchToAgentProvider.notifier);
+    // Same lifetime: the title bar outlives this route, so a stale panel
+    // control would leave a dead toggle on the New Session page.
+    final panelNotifier = ref.read(contextPanelControlProvider.notifier);
     // `scheduleMicrotask` defers the write off the current build/restructure
     // phase (same intent as the previous `Future(() => ...)`) but does not
     // create a Timer, so it doesn't leak in widget tests under fake_async.
@@ -199,6 +207,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     scheduleMicrotask(() {
       try {
         notifier.set(null);
+        panelNotifier.set(null);
       } catch (_) {
         // Provider already disposed (Riverpod 3 throws UnmountedRefException,
         // which is @internal and not a StateError, so catch broadly); nothing
@@ -625,11 +634,19 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // PageView's onPageChanged (and the mobile initializer), so only force-true
     // here on desktop to avoid clobbering the mobile page state.
     if (!isMobile) {
+      final control = (
+        hidden: _effectivePanelMode == _PanelMode.contextHidden,
+        toggle: _toggleContextPanel,
+      );
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         if (!ref.read(agentSurfaceVisibleProvider)) {
           ref.read(agentSurfaceVisibleProvider.notifier).set(true);
         }
+        // Publish the panel control for the title bar, which mounts above this
+        // route and so cannot reach this State. A record of equal fields is ==,
+        // so an unchanged mode re-publishes without notifying.
+        ref.read(contextPanelControlProvider.notifier).set(control);
       });
     }
 
@@ -908,7 +925,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   /// Tablets (either orientation) and phones in landscape reach the desktop
   /// three-zone layout at a fraction of a desktop's width, where splitting it
   /// leaves the agent terminal — the primary view — unusably narrow. So the
-  /// context panel starts hidden there and stays one tap away in the header.
+  /// context panel starts hidden there and stays one tap away in the title bar.
   ///
   /// Keyed on [isMobilePlatform], not width alone: a deliberately narrow
   /// desktop window is still a desktop, and a tablet in landscape is still a
@@ -928,10 +945,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
                 _splitRatio = r;
                 _updatePrefs();
               },
-              left: AgentPanel(
-                contextPanelHidden: false,
-                onToggleContextPanel: _toggleContextPanel,
-              ),
+              left: const AgentPanel(),
               right: WorkspacePanel(
                 selectedView: _selectedView,
                 onViewSelected: _onSidebarSelected,
@@ -946,18 +960,12 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           ),
         ];
 
-      // Fully hidden, not collapsed to a strip: the header toggle in the agent
-      // panel is the restore affordance, so a vertical stub would be dead
-      // chrome eating horizontal space the user just asked to reclaim.
+      // Fully hidden, not collapsed to a strip: the window title bar's panel
+      // control is the restore affordance (see [contextPanelControlProvider]),
+      // so a vertical stub would be dead chrome eating horizontal space the
+      // user just asked to reclaim.
       case _PanelMode.contextHidden:
-        return [
-          Expanded(
-            child: AgentPanel(
-              contextPanelHidden: true,
-              onToggleContextPanel: _toggleContextPanel,
-            ),
-          ),
-        ];
+        return [const Expanded(child: AgentPanel())];
 
       case _PanelMode.contextExpanded:
         return [
