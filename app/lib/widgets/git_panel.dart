@@ -10,6 +10,7 @@ import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_tap_target.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_separator.dart';
 import '../models/file_tree_models.dart';
@@ -133,36 +134,43 @@ class _GitChangesHeader extends StatelessWidget {
         horizontal: AbTokens.space12,
         vertical: AbTokens.space8,
       ),
-      child: Row(
-        children: [
-          if (onBack != null) ...[
-            AbIconButton(
-              icon: AbIcons.back,
-              onTap: onBack,
-              tooltip: 'Back to changed files',
+      // Hand-rolled header, but the same rhythm as an AbToolbar: type sets the
+      // height, the back button is inline chrome inside it.
+      child: AbCompactTapTargets(
+        child: Row(
+          children: [
+            if (onBack != null) ...[
+              AbIconButton(
+                icon: AbIcons.back,
+                onTap: onBack,
+                tooltip: 'Back to changed files',
+              ),
+              const SizedBox(width: AbTokens.space8),
+            ],
+            Text(
+              'Changes',
+              style: AbTokens.monoStyle(color: context.antgrid.textMuted),
             ),
-            const SizedBox(width: AbTokens.space8),
-          ],
-          Text(
-            'Changes',
-            style: AbTokens.monoStyle(color: context.antgrid.textMuted),
-          ),
-          const Spacer(),
-          AbButton(
-            label:
-                statuses.isEmpty ? 'Commit' : 'Commit (${statuses.length})',
-            leading:
-                AbIcon(AbIcons.gitCommit, size: AbTokens.iconButtonGlyph),
-            variant: AbButtonVariant.primary,
-            onTap: statuses.isEmpty
-                ? null
-                : () => GitCommitSheet.show(
+            const Spacer(),
+            AbButton(
+              label: statuses.isEmpty
+                  ? 'Commit'
+                  : 'Commit (${statuses.length})',
+              leading: AbIcon(
+                AbIcons.gitCommit,
+                size: AbTokens.iconButtonGlyph,
+              ),
+              variant: AbButtonVariant.primary,
+              onTap: statuses.isEmpty
+                  ? null
+                  : () => GitCommitSheet.show(
                       context: context,
                       changedFiles: statuses,
                       onCommit: fileService.commit,
                     ),
-          ),
-        ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -306,7 +314,8 @@ class _GitPanelBody extends StatelessWidget {
         isLoading: git.viewingLoading,
         selectedFilePath: git.viewingPath,
         fileWasModified: false,
-        onRefreshContent: () => fileService.requestFileContent(git.viewingPath!),
+        onRefreshContent: () =>
+            fileService.requestFileContent(git.viewingPath!),
         onClose: () => fileService.clearGitViewing(),
       );
     }

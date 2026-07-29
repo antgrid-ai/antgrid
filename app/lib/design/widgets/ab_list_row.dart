@@ -5,6 +5,7 @@ import '../ab_tokens.dart';
 import '../ab_colors.dart';
 import 'ab_focus_ring.dart';
 import 'ab_icon_button.dart';
+import 'ab_tap_target.dart';
 
 enum AbRowDensity { sm, md, lg }
 
@@ -119,11 +120,13 @@ class _AbListRowState extends State<AbListRow> {
   bool _hovered = false;
 
   EdgeInsets get _padding {
-    final v = widget.verticalPadding ?? switch (widget.density) {
-      AbRowDensity.sm => AbTokens.space6,
-      AbRowDensity.md => AbTokens.space8,
-      AbRowDensity.lg => AbTokens.space10,
-    };
+    final v =
+        widget.verticalPadding ??
+        switch (widget.density) {
+          AbRowDensity.sm => AbTokens.space6,
+          AbRowDensity.md => AbTokens.space8,
+          AbRowDensity.lg => AbTokens.space10,
+        };
     return EdgeInsets.symmetric(
       horizontal: widget.horizontalPadding ?? AbTokens.space12,
       vertical: v,
@@ -198,7 +201,11 @@ class _AbListRowState extends State<AbListRow> {
             ? Border(bottom: BorderSide(color: context.antgrid.borderSubtle))
             : null,
       ),
-      child: Row(children: children),
+      // The row spans the full width and (when interactive) takes taps across
+      // its whole height, so it — not its trailing icons — owns the vertical
+      // touch dimension. Declared unconditionally so an informational row
+      // keeps the same height as its interactive neighbours in the same list.
+      child: AbCompactTapTargets(child: Row(children: children)),
     );
 
     if (_isSelected && widget.selectionStyle == AbRowSelection.accentBar) {
@@ -237,7 +244,8 @@ class _AbListRowState extends State<AbListRow> {
       return Opacity(opacity: 0.4, child: content);
     }
 
-    final interactive = widget.onTap != null ||
+    final interactive =
+        widget.onTap != null ||
         widget.onDoubleTap != null ||
         widget.onLongPress != null;
     if (interactive) {

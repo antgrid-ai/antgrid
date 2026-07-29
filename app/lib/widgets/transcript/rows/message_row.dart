@@ -5,6 +5,7 @@ import '../../../design/ab_colors.dart';
 import '../../../design/ab_icons.dart';
 import '../../../design/ab_tokens.dart';
 import '../../../design/widgets/ab_icon_button.dart';
+import '../../../design/widgets/ab_tap_target.dart';
 import '../../../design/widgets/ab_tooltip.dart';
 import '../../../models/agent_event.dart';
 import '../../../providers/now_ticker.dart';
@@ -188,30 +189,34 @@ class _MessageMetaRow extends ConsumerWidget {
     return SelectionContainer.disabled(
       child: Padding(
         padding: const EdgeInsets.only(top: AbTokens.space4),
-        child: Row(
-          children: [
-            if (ts != null)
-              AbTooltip(
-                message: absoluteTime(ts),
-                child: Text(
-                  relativeTime(ts, now: now),
-                  style: AbTokens.sansStyle(
-                    fontSize: AbTokens.fontSm,
-                    color: c.textMuted,
+        // Meta line: timestamp/usage type sets the height. Its actions are
+        // inline chrome, so they must not inflate every message's footer.
+        child: AbCompactTapTargets(
+          child: Row(
+            children: [
+              if (ts != null)
+                AbTooltip(
+                  message: absoluteTime(ts),
+                  child: Text(
+                    relativeTime(ts, now: now),
+                    style: AbTokens.sansStyle(
+                      fontSize: AbTokens.fontSm,
+                      color: c.textMuted,
+                    ),
                   ),
-                ),
-              )
-            else
-              const SizedBox.shrink(),
-            if (hasUsage) ...[
-              if (ts != null) const SizedBox(width: AbTokens.space8),
-              Expanded(child: UsageFooterRow(usage: usage!)),
+                )
+              else
+                const SizedBox.shrink(),
+              if (hasUsage) ...[
+                if (ts != null) const SizedBox(width: AbTokens.space8),
+                Expanded(child: UsageFooterRow(usage: usage!)),
+              ],
+              if (actions.isNotEmpty) ...[
+                if (!hasUsage) const Spacer(),
+                Row(mainAxisSize: MainAxisSize.min, children: actions),
+              ],
             ],
-            if (actions.isNotEmpty) ...[
-              if (!hasUsage) const Spacer(),
-              Row(mainAxisSize: MainAxisSize.min, children: actions),
-            ],
-          ],
+          ),
         ),
       ),
     );

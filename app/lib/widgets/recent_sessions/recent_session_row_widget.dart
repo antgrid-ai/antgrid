@@ -8,6 +8,7 @@ import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_confirm_dialog.dart';
 import '../../design/widgets/ab_focus_ring.dart';
 import '../../design/widgets/ab_icon_button.dart';
+import '../../design/widgets/ab_tap_target.dart';
 import '../../design/widgets/ab_snack_bar.dart';
 import '../../models/recent_session_row.dart';
 import '../../providers/new_session_picker.dart';
@@ -184,65 +185,69 @@ class _DesktopLayout extends StatelessWidget {
     // Two-column scan line: names anchor the left edge, metadata hugs a
     // right rail (agent · project · time) so the eye can sweep either
     // column without zig-zagging through mid-row chips.
-    return Row(
-      children: [
-        _SessionStatus(status: status),
-        const SizedBox(width: AbTokens.space12),
-        // Name + slack share the row's ONLY flexible child. A loose Flexible
-        // anywhere in the rail would dump its unused allotment at the row's
-        // END (RenderFlex puts leftover space after the last child), shifting
-        // the rail left by a different amount per row — the times would go
-        // ragged. Pooling slack here keeps the rail pinned to the right edge.
-        Expanded(
-          child: Row(
-            children: [
-              Flexible(child: _SessionName(name: row.session.name)),
-              const SizedBox(width: AbTokens.space12),
-            ],
-          ),
-        ),
-        _AgentChip(label: agentLabel),
-        Text(
-          '  ·  ',
-          style: AbTokens.monoStyle(
-            fontSize: AbTokens.fontXs,
-            color: t.textDisabled,
-          ),
-        ),
-        // Fixed cap (no flex) keeps a huge remote path from eating the name
-        // column; the < 560px compact fallback above owns the too-narrow case.
-        ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 220),
-          child: _ProjectLabel(name: _projectDisplayText(row.origin)),
-        ),
-        const SizedBox(width: AbTokens.space12),
-        // Delete swaps IN PLACE of the time on hover (cross-fade in a
-        // right-aligned Stack) instead of reserving a trailing slot — the
-        // times stay truly flush with the row's right edge, and the rail
-        // never shifts because the Stack's width is the wider of the two.
-        Stack(
-          alignment: Alignment.centerRight,
-          children: [
-            AnimatedOpacity(
-              duration: AbTokens.motionSnap,
-              opacity: showDelete ? 0 : 1,
-              child: _TimeLabel(label: relTime),
+    // Reached on a tablet too, where the touch inflation would otherwise
+    // out-height the scan line the two-column layout depends on.
+    return AbCompactTapTargets(
+      child: Row(
+        children: [
+          _SessionStatus(status: status),
+          const SizedBox(width: AbTokens.space12),
+          // Name + slack share the row's ONLY flexible child. A loose Flexible
+          // anywhere in the rail would dump its unused allotment at the row's
+          // END (RenderFlex puts leftover space after the last child), shifting
+          // the rail left by a different amount per row — the times would go
+          // ragged. Pooling slack here keeps the rail pinned to the right edge.
+          Expanded(
+            child: Row(
+              children: [
+                Flexible(child: _SessionName(name: row.session.name)),
+                const SizedBox(width: AbTokens.space12),
+              ],
             ),
-            AnimatedOpacity(
-              duration: AbTokens.motionSnap,
-              opacity: showDelete ? 1 : 0,
-              child: IgnorePointer(
-                ignoring: !showDelete,
-                child: AbIconButton(
-                  icon: AbIcons.trash,
-                  tooltip: 'Delete session',
-                  onTap: onDelete,
+          ),
+          _AgentChip(label: agentLabel),
+          Text(
+            '  ·  ',
+            style: AbTokens.monoStyle(
+              fontSize: AbTokens.fontXs,
+              color: t.textDisabled,
+            ),
+          ),
+          // Fixed cap (no flex) keeps a huge remote path from eating the name
+          // column; the < 560px compact fallback above owns the too-narrow case.
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 220),
+            child: _ProjectLabel(name: _projectDisplayText(row.origin)),
+          ),
+          const SizedBox(width: AbTokens.space12),
+          // Delete swaps IN PLACE of the time on hover (cross-fade in a
+          // right-aligned Stack) instead of reserving a trailing slot — the
+          // times stay truly flush with the row's right edge, and the rail
+          // never shifts because the Stack's width is the wider of the two.
+          Stack(
+            alignment: Alignment.centerRight,
+            children: [
+              AnimatedOpacity(
+                duration: AbTokens.motionSnap,
+                opacity: showDelete ? 0 : 1,
+                child: _TimeLabel(label: relTime),
+              ),
+              AnimatedOpacity(
+                duration: AbTokens.motionSnap,
+                opacity: showDelete ? 1 : 0,
+                child: IgnorePointer(
+                  ignoring: !showDelete,
+                  child: AbIconButton(
+                    icon: AbIcons.trash,
+                    tooltip: 'Delete session',
+                    onTap: onDelete,
+                  ),
                 ),
               ),
-            ),
-          ],
-        ),
-      ],
+            ],
+          ),
+        ],
+      ),
     );
   }
 }
@@ -273,22 +278,26 @@ class _MobileLayout extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Row(
-          children: [
-            _SessionStatus(status: status),
-            const SizedBox(width: AbTokens.space12),
-            Expanded(child: _SessionName(name: row.session.name)),
-            const SizedBox(width: AbTokens.space8),
-            _AgentChip(label: agentLabel),
-            const SizedBox(width: AbTokens.space8),
-            _TimeLabel(label: relTime),
-            const SizedBox(width: AbTokens.space4),
-            AbIconButton(
-              icon: AbIcons.trash,
-              tooltip: 'Delete session',
-              onTap: onDelete,
-            ),
-          ],
+        // The whole row is the tap target for opening the session, so the
+        // trash glyph is inline chrome — it must not set the line's height.
+        AbCompactTapTargets(
+          child: Row(
+            children: [
+              _SessionStatus(status: status),
+              const SizedBox(width: AbTokens.space12),
+              Expanded(child: _SessionName(name: row.session.name)),
+              const SizedBox(width: AbTokens.space8),
+              _AgentChip(label: agentLabel),
+              const SizedBox(width: AbTokens.space8),
+              _TimeLabel(label: relTime),
+              const SizedBox(width: AbTokens.space4),
+              AbIconButton(
+                icon: AbIcons.trash,
+                tooltip: 'Delete session',
+                onTap: onDelete,
+              ),
+            ],
+          ),
         ),
         const SizedBox(height: AbTokens.space2),
         Padding(

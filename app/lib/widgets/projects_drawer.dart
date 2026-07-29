@@ -16,6 +16,7 @@ import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_search_field.dart';
+import '../design/widgets/ab_tap_target.dart';
 import '../models/drawer_entry.dart';
 import '../models/session_target.dart';
 import '../providers/account_agents.dart';
@@ -181,35 +182,39 @@ class _GroupLabel extends ConsumerWidget {
         AbTokens.drawerGutter,
         AbTokens.space6,
       ),
-      child: Row(
-        children: [
-          Text(
-            label,
-            style: AbTokens.sansStyle(
-              fontSize: AbTokens.fontXs,
-              color: context.antgrid.textMuted,
-              letterSpacing: 1.4,
-              fontWeight: FontWeight.w600,
+      // A section header's height is its type + padding; the refresh button is
+      // inline chrome inside it, not a standalone touch affordance.
+      child: AbCompactTapTargets(
+        child: Row(
+          children: [
+            Text(
+              label,
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXs,
+                color: context.antgrid.textMuted,
+                letterSpacing: 1.4,
+                fontWeight: FontWeight.w600,
+              ),
             ),
-          ),
-          const SizedBox(width: AbTokens.space6),
-          Text(
-            '· $count',
-            style: AbTokens.sansStyle(
-              fontSize: AbTokens.fontXs,
-              color: context.antgrid.textMuted,
+            const SizedBox(width: AbTokens.space6),
+            Text(
+              '· $count',
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXs,
+                color: context.antgrid.textMuted,
+              ),
             ),
-          ),
-          const Spacer(),
-          AbIconButton(
-            icon: AbIcons.refresh,
-            tone: AbIconButtonTone.muted,
-            tooltip: 'Refresh',
-            // Disabled while an inventory fetch is in flight so a double-tap
-            // can't stack redundant /account/agents requests.
-            onTap: refreshing ? null : () => refreshDrawer(ref),
-          ),
-        ],
+            const Spacer(),
+            AbIconButton(
+              icon: AbIcons.refresh,
+              tone: AbIconButtonTone.muted,
+              tooltip: 'Refresh',
+              // Disabled while an inventory fetch is in flight so a double-tap
+              // can't stack redundant /account/agents requests.
+              onTap: refreshing ? null : () => refreshDrawer(ref),
+            ),
+          ],
+        ),
       ),
     );
   }
