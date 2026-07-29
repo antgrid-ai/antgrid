@@ -156,8 +156,9 @@ export interface BuildAgentCoreOptions {
   pairedPhones?: PairedPhonesStore;
   /** Fired when a turn-start hook pings the api-server (`POST /turn-start`), so
    *  the owning ProjectCore can reset its control-plane work status to "working"
-   *  on a fresh turn. Bridge-internal — never surfaces to the app. */
-  onTurnStart?: () => void;
+   *  on a fresh turn. Bridge-internal — never surfaces to the app.
+   *  [sessionId] is the session the hook fired for, when it carried one. */
+  onTurnStart?: (sessionId?: string) => void;
   /** Relay base URL of the machine socket this core attaches to. Host-supplied
    *  in remote mode: only a standalone agent with an explicit `relayUrl:` in its
    *  antgrid.yaml can learn it from config, so without this a host-spawned
@@ -1594,7 +1595,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       }
     },
     onHookAlive: (terminalId) => { codexHookAlive.add(terminalId); },
-    onTurnStart: () => opts.onTurnStart?.(),
+    onTurnStart: (terminalId) => opts.onTurnStart?.(terminalId),
   });
 
   const TranscriptSnapshotParams = z.object({ sessionId: z.string() });

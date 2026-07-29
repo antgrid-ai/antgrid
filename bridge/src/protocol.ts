@@ -539,6 +539,10 @@ const NotificationPushMessage = BaseMessage.extend({
   // Names the session that fired this (SessionEntry.name). Hand-mirrored in the
   // app's NotificationPushMessage — keep the two in lockstep.
   sessionTitle: z.string().optional(),
+  // Which session fired it, when the hook carried a terminal id. Absent from the
+  // app's mirror on purpose (it renders sessionTitle); the work-status reduction
+  // uses it to close that session's turn — see work-status.ts.
+  sessionId: z.string().optional(),
   projectId: z.string().optional(),
 });
 

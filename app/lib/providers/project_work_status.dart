@@ -2,43 +2,44 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../services/control_plane_client.dart';
 import 'recent_sessions.dart';
-import 'sessions.dart';
 
 /// Effective per-project work status for the Recent list and the sidebar dot.
 ///
-/// Prefers the live control-plane advert — which carries working/attention/
-/// error/done for a project WITHOUT warming (opening) it — read from
+/// The live control-plane advert — which carries working/attention/error/done
+/// for a project WITHOUT warming (opening) it — is the ONLY source, read from
 /// [remoteProjectStatusProvider], a plain map the app_shell reaper fills from
 /// ALREADY-open machine sockets. Reading that map never dials a socket (the
 /// heavy control-plane graph is the reaper's job, not this hot per-row
-/// provider). Falls back to session-running (working vs done) from the
-/// live/cached session list when no advert status applies: an older bridge, a
-/// cold project, a local project (bare id, no advert), or a closed socket.
+/// provider).
+///
+/// No advert (older bridge, cold project, closed socket) ⇒ "done". A running
+/// session is deliberately NOT a fallback for "working": the bridge only calls
+/// a project working while a prompt is actually in flight (see the bridge's
+/// work-status.ts), and an open-but-idle chat reading "working" was exactly the
+/// bug that rule fixes — re-deriving it here from the session list would put it
+/// straight back for every project whose advert hasn't arrived.
 final projectWorkStatusProvider = Provider.family<AgentWorkStatus, String>((
   ref,
   entryId,
 ) {
-  final advertised = ref.watch(
-    remoteProjectStatusProvider.select((m) => m[entryId]),
-  );
-  if (advertised != null) return advertised;
-  final running = ref.watch(
-    sessionsForEntryProvider(
-      entryId,
-    ).select((list) => list.any((s) => !s.archived && s.running)),
-  );
-  return running ? AgentWorkStatus.working : AgentWorkStatus.done;
+  return ref.watch(
+        remoteProjectStatusProvider.select((m) => m[entryId]),
+      ) ??
+      AgentWorkStatus.done;
 });
 
-/// Effective status for a single Recent row: the project-level [advert]
-/// attention/error (which concern the whole project) win; otherwise fall to
-/// this session's own [running] flag. [advert] is null when no live advert is
-/// available (older bridge, cold project, closed socket).
+/// Effective status for a single Recent row: the project-level [advert] applies
+/// to this row only while the session itself is [running] — a stopped session
+/// can neither be working nor be the one blocked on a permission. [advert] is
+/// null when no live advert is available (older bridge, cold project, closed
+/// socket), which reads as done.
+///
+/// The advert is project-level, so with two live sessions on one project both
+/// rows show the busy/blocked state. That's the honest resolution available:
+/// the wire carries no per-session turn flag.
 AgentWorkStatus recentRowStatus(AgentWorkStatus? advert, bool running) {
-  if (advert == AgentWorkStatus.attention || advert == AgentWorkStatus.error) {
-    return advert!;
-  }
-  return running ? AgentWorkStatus.working : AgentWorkStatus.done;
+  if (!running) return AgentWorkStatus.done;
+  return advert ?? AgentWorkStatus.done;
 }
 
 /// Aggregate work status for a machine: the most severe status across ALL of

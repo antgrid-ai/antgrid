@@ -85,8 +85,9 @@ export class ProjectCore {
   private _work: WorkStatusState = initialWorkStatus;
   private _onWorkStatusChange: (() => void) | null = null;
   /** Set by {@link observeWorkStatus} for the message it just folded: true when
-   *  the reduction was a no-op (exact-repeat or the awaiting_input-after-
-   *  task_complete stale nudge). The push subscriber (attached later, so its
+   *  the notification carried nothing new (exact-repeat or the
+   *  awaiting_input-after-task_complete stale nudge). The push subscriber
+   *  (attached later, so its
    *  bus callback always runs after this one for the same publish()) reads
    *  this to skip pushing a notification that carries no new information —
    *  see attachRelayStream. */
@@ -131,17 +132,24 @@ export class ProjectCore {
    *  publish() as the live relay subscriber (reduceWorkStatus is pure/total). */
   private observeWorkStatus(msg: AbMessage): void {
     const next = reduceWorkStatus(this._work, msg);
-    this._lastNotificationRedundant = msg.type === "notification:push" && next === this._work;
+    // Redundant = the notification told us nothing new (exact repeat, or the
+    // awaiting_input-after-task_complete stale nudge). Keyed on the folded
+    // notification alone, not on object identity: a repeat notification still
+    // closes its session's turn, so it yields a new state object while carrying
+    // no news worth pushing to the phone.
+    this._lastNotificationRedundant = msg.type === "notification:push"
+      && next.lastNotification === this._work.lastNotification;
     this.commitWork(next);
   }
 
-  /** A turn-start hook fired (user submitted a prompt): clear a stale turn-end
-   *  notification so re-prompting an existing session returns to "working"
-   *  rather than showing the previous turn's done/attention. Routed here from
-   *  the per-core api-server (never a bus frame — the app must not see it as a
-   *  notification), via {@link AgentContext.onTurnStart}. */
-  noteTurnStart(): void {
-    this.commitWork(turnStart(this._work));
+  /** A turn-start hook fired (user submitted a prompt): open [sessionId]'s turn
+   *  and clear a stale turn-end notification, so a terminal-mode session reads
+   *  "working" for as long as the prompt actually runs. Routed here from the
+   *  per-core api-server (never a bus frame — the app must not see it as a
+   *  notification), via {@link AgentContext.onTurnStart}. Chat sessions need no
+   *  hook: their drivers emit `agent:turn-start`/`-end` on the bus. */
+  noteTurnStart(sessionId?: string): void {
+    this.commitWork(turnStart(this._work, sessionId));
   }
 
   /** First register outcome of a REMOTE-mode core's primary relay slot (null in
@@ -187,7 +195,7 @@ export class ProjectCore {
       mode: this.deps.mode,
       identity: this.deps.identity,
       pairedPhones: this.deps.pairedPhones,
-      onTurnStart: () => this.noteTurnStart(),
+      onTurnStart: (sessionId) => this.noteTurnStart(sessionId),
       relayUrl: this.deps.relayUrl,
     });
     this.core = core;

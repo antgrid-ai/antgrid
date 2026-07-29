@@ -75,16 +75,18 @@ void main() {
       running: running,
     );
 
-    testWidgets('renders status dot when a session is running', (tester) async {
+    testWidgets('renders status dot when the advert says working', (
+      tester,
+    ) async {
       final entry = _entry('p1');
       await tester.pumpWidget(
         _wrap(
           DrawerEntryRow(entry),
           overrides: [
             ...stores.overrides,
-            sessionsForEntryProvider(
+            projectWorkStatusProvider(
               'p1',
-            ).overrideWith((ref) => [session(running: true)]),
+            ).overrideWithValue(AgentWorkStatus.working),
           ],
         ),
       );
@@ -96,9 +98,11 @@ void main() {
       );
     });
 
-    testWidgets('no status dot when all sessions are idle (done)', (
+    testWidgets('a merely-running session is NOT working (no dot)', (
       tester,
     ) async {
+      // Sessions alive but no advert: an open chat with nothing running in it
+      // must stay clean — only a prompt in flight lights the dot.
       final entry = _entry('p1');
       await tester.pumpWidget(
         _wrap(
@@ -107,7 +111,7 @@ void main() {
             ...stores.overrides,
             sessionsForEntryProvider(
               'p1',
-            ).overrideWith((ref) => [session(running: false)]),
+            ).overrideWith((ref) => [session(running: true)]),
           ],
         ),
       );
