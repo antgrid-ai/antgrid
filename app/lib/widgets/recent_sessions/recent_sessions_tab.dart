@@ -80,8 +80,8 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
       );
     }
 
-    // Effective per-row status (project-level attention/error overlaid on the
-    // session's own running flag), computed once here and reused for grouping
+    // Effective per-row status (the project advert, masked to done for a
+    // stopped session), computed once here and reused for grouping
     // and the header counts. Watches the live advert map ONCE (not per row) —
     // keyed by row identity, distinct instances per build.
     final advert = ref.watch(remoteProjectStatusProvider);

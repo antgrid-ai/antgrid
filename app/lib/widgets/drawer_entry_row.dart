@@ -249,11 +249,11 @@ class _DrawerEntryTrailing extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final statusAsync = ref.watch(projectStatusProvider(entry.id));
     final status = statusAsync.value ?? const ProjectStatus.empty();
-    // Effective work status: the live control-plane advert (working/attention/
-    // error/done) when this machine's socket is open, else session-running from
-    // the peek-fed cache — so the row reflects the agent's actual state without
-    // dialing anything from here. "done" renders nothing, keeping idle rows
-    // clean; the two call-to-action states (attention/error) always show.
+    // Effective work status from the live control-plane advert (working =
+    // a prompt actually in flight, plus attention/error/done) — so the row
+    // reflects the agent's actual state without dialing anything from here.
+    // "done" renders nothing, keeping idle rows clean; the two call-to-action
+    // states (attention/error) always show.
     final workStatus = ref.watch(projectWorkStatusProvider(entry.id));
 
     return Row(

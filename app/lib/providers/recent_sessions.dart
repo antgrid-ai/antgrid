@@ -77,12 +77,12 @@ class RemoteProjectStatusController
   Map<String, AgentWorkStatus> build() {
     // Seed from the persisted status cache so a cold-boot row can show the
     // last-known CALL-TO-ACTION (attention/error) before the first advert
-    // arrives. Only those two are seeded: working/done are re-derived from
-    // cached session-running by projectWorkStatusProvider, so seeding a stale
-    // "working" here would paint a live-activity pulse on an offline machine
-    // whose cached sessions are idle — a visible contradiction. attention/error
-    // add real information the fallback can't express and self-heal the moment
-    // the socket dials (the advert overwrites the whole machine).
+    // arrives. Only those two are seeded: "working" means a prompt is in flight
+    // RIGHT NOW, which a cached value from a previous launch cannot possibly
+    // know — seeding it would paint a live-activity pulse on a machine we
+    // aren't even connected to. attention/error are durable ("this project
+    // needs you") and self-heal the moment the socket dials (the advert
+    // overwrites the whole machine).
     //
     // Guarded: a widget/provider test that never touches cached sessions won't
     // override cachedSessionsStoreProvider (which throws by contract when
@@ -106,7 +106,7 @@ class RemoteProjectStatusController
   /// Replace every entry for [machineUuid] with [statuses] in one write:
   /// handles additions, transitions, and removals (a project dropped from the
   /// advert — or the whole socket closing → empty map — clears its status so the
-  /// row falls back to session-running). No-op when nothing changed for this
+  /// row reads "done"). No-op when nothing changed for this
   /// machine, so an unchanged advert re-delivery triggers no rebuild.
   void setMachineStatuses(
     String machineUuid,

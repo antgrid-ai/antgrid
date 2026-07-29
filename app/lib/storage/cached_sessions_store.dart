@@ -25,8 +25,9 @@ class CachedSessionsStore {
   // Last-seen per-project work status from live control-plane adverts. Persisted
   // so a cold boot can seed remoteProjectStatusProvider with the last-known
   // call-to-action (attention/error) before the first advert arrives; the seed
-  // deliberately ignores working/done, which are re-derived from cached
-  // session-running (see remoteProjectStatusProvider.build). Cleared per machine
+  // deliberately ignores working/done — "working" means a prompt is in flight
+  // right now, which a value from a previous launch cannot know (see
+  // remoteProjectStatusProvider.build). Cleared per machine
   // on socket close so an offline machine doesn't re-seed on the next boot.
   static final _statusKey =
       scopedStorageKey('antgrid.session_cache.status.v1');

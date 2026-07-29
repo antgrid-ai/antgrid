@@ -61,9 +61,9 @@ class _RecentSessionRowWidgetState
     final t = context.antgrid;
     final agentLabel = sessionAgentDisplayLabel(row.session);
     final relTime = relativeTime(when, now: now);
-    // Project-level attention/error (from the live advert) overlaid on this
-    // session's own running flag — so a blocked/errored agent is unmistakable
-    // in the list even on its idle sessions. Reads the advert map directly (not
+    // Project-level status (from the live advert), masked to done for a stopped
+    // session — so a blocked/errored agent is unmistakable in the list while a
+    // dead row never claims to be busy. Reads the advert map directly (not
     // projectWorkStatusProvider) since the row already owns its running flag.
     final status = recentRowStatus(
       ref.watch(

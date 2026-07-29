@@ -335,8 +335,8 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
       if (!openIds.contains(uuid)) {
         _labelSubs.remove(uuid)?.close();
         // Socket closed → its advert can't refresh; drop the machine's live
-        // status so rows fall back to session-running instead of showing stale
-        // work state. Labels intentionally persist; status is cleared from both
+        // status so rows read "done" (no advert) instead of showing stale work
+        // state. Labels intentionally persist; status is cleared from both
         // the live provider and the on-disk cache so a cold boot after a
         // disconnect doesn't re-seed stale badges for an offline machine.
         ref
@@ -370,7 +370,7 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
     // Fold the advert's per-project work status into the live status map (one
     // write for the whole machine, so a project dropped from the advert clears).
     // Null status (older bridge / cold project) is simply omitted → the row
-    // falls back to session-running.
+    // reads "done", the only honest answer without an advert.
     final statuses = <String, AgentWorkStatus>{
       for (final ap in state.projects)
         if (ap.status != null) '$uuid.${ap.projectId}': ap.status!,

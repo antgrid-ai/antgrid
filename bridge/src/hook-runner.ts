@@ -20,12 +20,13 @@ const HOOK_POST_TIMEOUT_MS = 4000;
 // so every optional field is `.nullish()`; `.optional()` alone rejects `null`,
 // which fails the whole parse and silently drops every post for that event.
 // "user-prompt" (→ /turn-start) is Claude-specific: Claude exposes a
-// UserPromptSubmit hook that fires before each new turn, which the bridge uses
-// to reset work status to "working" when a user re-prompts an existing session.
-// Codex/Cursor have no equivalent pre-turn hook — for those agents
-// only a new session (count increase) resets the status; re-prompting an
-// existing session leaves status at "done" or "attention" until the next
-// turn-end notification arrives (after-agent / stop).
+// UserPromptSubmit hook that fires before each new turn, and it is the ONLY
+// turn-start signal a terminal-mode session has (chat sessions get precise
+// `agent:turn-start` frames from their driver instead). Codex/Cursor/Copilot
+// expose no pre-turn hook, so a terminal-mode session of those agents reads
+// "done" while it works — the work-status reduction only calls a project
+// working while a turn is open, and theirs never opens. Their turn-END hooks
+// still deliver attention/error/done.
 const HOOK_EVENTS: Record<string, readonly string[]> = {
   claude: ["session-start", "stop", "notification", "user-prompt"],
   codex: ["after-agent", "permission-request", "stop", "session-start"],
