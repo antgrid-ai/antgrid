@@ -28,6 +28,19 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<!-- Sparkle (auto_updater plugin). Automatic checks stay OFF: detection is
+	     the app's own poll of the same appcast Sparkle installs from
+	     (UpdateGate -> drawer UpdateRow), and
+	     Sparkle only runs when the user clicks Update. Without this key Sparkle
+	     would show its own "check automatically?" permission prompt at launch.
+	     No SUPublicEDKey: updates verify via the Developer ID code signature
+	     (old and new app signed by the same team). If an EdDSA key is ever
+	     added, every later release MUST be sign_update-signed — see
+	     docs/runbooks/macos-sparkle-updates.md. -->
+	<key>SUEnableAutomaticChecks</key>
+	<false/>
+	<key>SUAutomaticallyUpdate</key>
+	<false/>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

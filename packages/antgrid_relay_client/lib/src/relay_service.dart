@@ -127,6 +127,17 @@ class RelayService {
     required int epoch,
     String? machineDeviceId,
   }) async {
+    // dispose() closed the controllers, so a dial from here would open a
+    // REAL socket whose every event is silently dropped — and whose fresh
+    // epoch could supersede the machine's live replacement connection at
+    // the relay. Fail the attempt loudly instead; non-retryable because the
+    // owner is gone and no redial can ever succeed on this instance.
+    if (_stateController.isClosed) {
+      throw RelayConnectException(
+        retryable: false,
+        message: 'connect() after dispose()',
+      );
+    }
     _epoch = epoch;
     _machineDeviceId = machineDeviceId;
     // A superseded in-flight attempt must not leave its caller hanging.

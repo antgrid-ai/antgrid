@@ -6,6 +6,7 @@
 
 #include <memory>
 
+#include "store_update_channel.h"
 #include "win32_window.h"
 
 // A window that does nothing but host a Flutter view.
@@ -28,6 +29,9 @@ class FlutterWindow : public Win32Window {
 
   // The Flutter instance hosted by this window.
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
+
+  // Microsoft Store in-app update bridge ("antgrid/store_update").
+  std::unique_ptr<StoreUpdateChannel> store_update_channel_;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

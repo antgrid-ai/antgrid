@@ -77,11 +77,15 @@ class AbToast extends StatelessWidget {
             child: AbIcon(icon, size: 12, color: iconColor ?? p.statusRunning),
           ),
           const SizedBox(width: 10),
-          // Expand the text so the action sits on the trailing edge. Only with
-          // an action present: action toasts are always laid out in bounded
-          // width, whereas action-less toasts render in width-unbounded overlays
-          // where Expanded would assert.
-          if (hasAction) Expanded(child: textColumn) else textColumn,
+          // Both flex so long text WRAPS under the host's width cap instead
+          // of overflowing the Row. Expanded (tight) pins the action to the
+          // trailing edge; loose Flexible keeps action-less toasts
+          // shrink-wrapped below the cap. Either way the host must bound the
+          // Row's width — see showAbToastOverlay's ConstrainedBox.
+          if (hasAction)
+            Expanded(child: textColumn)
+          else
+            Flexible(child: textColumn),
           if (hasAction) ...[
             const SizedBox(width: 12),
             GestureDetector(
@@ -136,7 +140,18 @@ void showAbToastOverlay(
     builder: (ctx) => Positioned(
       top: MediaQuery.paddingOf(ctx).top + AbTokens.space16,
       right: AbTokens.space16,
-      child: Material(color: Colors.transparent, child: toast),
+      // The overlay theater hands a top/right-only Positioned unbounded
+      // width, and the toast's flex children assert without a finite max —
+      // cap it, screen-fitted on narrow phones. The clamp also floors at 0:
+      // a window dragged below the margins would otherwise produce negative
+      // (invalid) constraints.
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: (MediaQuery.sizeOf(ctx).width - AbTokens.space16 * 2)
+              .clamp(0.0, 360.0),
+        ),
+        child: Material(color: Colors.transparent, child: toast),
+      ),
     ),
   );
   overlay.insert(entry);

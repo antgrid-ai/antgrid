@@ -35,6 +35,7 @@ import 'account_footer.dart';
 import 'agent_work_status_dot.dart';
 import 'drawer_entry_row.dart' show DrawerEntryRow, MachineDrawerHeaderRow;
 import 'session_row.dart';
+import 'update_row.dart';
 
 /// Always-visible (desktop) / slide-in (mobile) drawer listing local projects
 /// and paired remote agents merged by last-access. Width is fixed at 288px on
@@ -106,6 +107,7 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
             Expanded(
               child: _Body(entries: filtered, hasFilter: filter.isNotEmpty),
             ),
+            const UpdateRow(),
             const _Footer(),
           ],
         ),
