@@ -63,6 +63,46 @@ describe("OAuthClient", () => {
     }
   });
 
+  // Better-Auth answers a deleted OAuth client with 400, not 401 — signing out
+  // rotates the account device and drops its client row. Treating that as a
+  // generic error left the host retrying a client the web no longer has, so the
+  // machine never reached the relay and phones saw it as offline forever.
+  it("calls onAuthRevoked and throws on 400 invalid_client (client deleted)", async () => {
+    const srv = makeServer(() =>
+      Response.json({ error: "invalid_client", error_description: "missing client" }, { status: 400 }),
+    );
+    try {
+      let revoked = false;
+      const c = new OAuthClient({
+        licenseApiUrl: srv.url,
+        clientId: "stale",
+        clientSecret: "stale",
+        onAuthRevoked: () => { revoked = true; },
+      });
+      await expect(c.mint()).rejects.toThrow(/invalid_client/);
+      expect(revoked).toBe(true);
+    } finally {
+      srv.close();
+    }
+  });
+
+  it("does NOT call onAuthRevoked on a 400 that isn't invalid_client", async () => {
+    const srv = makeServer(() => Response.json({ error: "invalid_scope" }, { status: 400 }));
+    try {
+      let revoked = false;
+      const c = new OAuthClient({
+        licenseApiUrl: srv.url,
+        clientId: "id",
+        clientSecret: "secret",
+        onAuthRevoked: () => { revoked = true; },
+      });
+      await expect(c.mint()).rejects.toThrow();
+      expect(revoked).toBe(false);
+    } finally {
+      srv.close();
+    }
+  });
+
   it("does NOT call onAuthRevoked on 5xx", async () => {
     const srv = makeServer(() => new Response("oops", { status: 500 }));
     try {

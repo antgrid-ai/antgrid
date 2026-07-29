@@ -171,6 +171,9 @@ export class HostServer {
   // credentials when the host was launched WITHOUT remote config (local-only). Lets
   // `requireRemoteConfig()` bring the one machine socket up on demand.
   private wizardRemote: HostRemoteConfig | null = null;
+  // Whether an `invalid_client` verdict may kill the process. Disarmed for the
+  // duration of the boot-time control-plane start only — see start().
+  private fatalRevokeArmed = true;
   // projectId → the streamId its relay data-plane stream was allocated. Read by
   // buildProjectsAdvertisement (per-project streamId) and stream-ready. Populated
   // when a core attaches (remoteDepsFor's wrapper), cleared on detach.
@@ -267,9 +270,20 @@ export class HostServer {
     // clears remoteRuntimePromise on failure, so that later open() can still
     // retry the mint — we don't double-consume the failure here.
     if (this.opts.remote) {
+      // Disarmed across this call because the swallow below CANNOT catch an
+      // `invalid_client` verdict: index.ts's onAuthRevoked calls process.exit,
+      // so the host would die here — after host.json and the ready marker have
+      // already gone out — and the app's supervisor would respawn it straight
+      // back into the same dead credential pair. A rotated-away OAuth client is
+      // the common way to reach this, so the loop would be permanent. The
+      // credentials are re-supplied by a respawn (local_host_warmup.dart), not
+      // by anything this process can do, so exiting buys nothing here; a revoke
+      // detected LATER, by token maintenance, stays fatal.
+      this.fatalRevokeArmed = false;
       await this.startRemoteControlPlane().catch((err) =>
         log.warn("host: remote control plane failed to start (will not retry): %s", err?.message ?? err),
       );
+      this.fatalRevokeArmed = true;
     }
     return { port: listener.port, token };
   }
@@ -379,6 +393,40 @@ export class HostServer {
     }
     const relayBase = msg.relayUrl ?? this.opts.remote?.relayUrl ?? process.env.RELAY_URL ?? null;
     if (!relayBase) throw new Error("no relay URL configured");
+    // The host's boot credentials arrive once, on stdin, and are never re-read.
+    // If that pair was already dead when the host started, its mint failed and
+    // nothing came up — no token maintenance, no machine socket. Adopt the
+    // caller's freshly-authenticated pair instead of retrying a client the web
+    // has deleted. Deliberately gated on "nothing is live and nothing is being
+    // built": swapping under a live runtime would orphan its token maintenance,
+    // and swapping under an IN-FLIGHT mint would leave that build racing this
+    // one, with only the last-assigned runtime ever stopped at shutdown.
+    const existing = this.remoteConfig();
+    if (
+      existing &&
+      auth.clientId &&
+      auth.clientSecret &&
+      auth.clientId !== existing.auth.clientId &&
+      !this.controlPlaneRelay &&
+      !this.remoteRuntime &&
+      !this.remoteRuntimePromise
+    ) {
+      existing.auth = {
+        clientId: auth.clientId,
+        clientSecret: auth.clientSecret,
+        deviceUuid: auth.deviceUuid,
+      };
+      // The identity travels WITH the auth block. A sign-out rotates the whole
+      // account device, so keeping the old Ed25519 pair here would sign the
+      // relay's v3 hello with a key that is not the one registered for the new
+      // deviceUuid — AUTH_FAILED, and the socket never comes up at all.
+      existing.identity = {
+        ...existing.identity,
+        deviceId: auth.deviceUuid,
+        ed25519PublicKey: auth.ed25519Pub,
+        ed25519PrivateKey: auth.ed25519Priv,
+      };
+    }
     // Synthesize a machine remote config from the wizard creds when the host has
     // none (local-only launch). requireRemoteConfig() then returns it.
     if (!this.opts.remote && !this.wizardRemote) {
@@ -1062,6 +1110,16 @@ export class HostServer {
     if (this.remoteRuntime) return Promise.resolve(this.remoteRuntime);
     if (this.remoteRuntimePromise) return this.remoteRuntimePromise;
     const r = this.requireRemoteConfig();
+    // OAuthClient captures the callback once, at build time, so route it
+    // through a closure that reads the arming flag live — that is what lets
+    // start() disarm the boot window without rebuilding the runtime.
+    const cfg: HostRemoteConfig = {
+      ...r,
+      onAuthRevoked: () => {
+        if (this.fatalRevokeArmed) r.onAuthRevoked();
+        else log.warn("host: credentials rejected at boot; serving loopback only until respawned");
+      },
+    };
     const build = this.opts.remoteRuntimeFactory ?? buildRemoteRuntime;
     // Late binding: the machine RelayClient is constructed AFTER the runtime (its
     // token maintenance) in startRemoteControlPlane/startCore, so this closure
@@ -1070,7 +1128,7 @@ export class HostServer {
     // `?.` no-ops before the client exists and after a real revoke.
     const onMinted = () => this.controlPlaneRelay?.redialWithFreshToken();
     const promise = (async () => {
-      this.remoteRuntime = await build(r, onMinted);
+      this.remoteRuntime = await build(cfg, onMinted);
       return this.remoteRuntime;
     })();
     // Hold the in-flight promise so concurrent callers share it; clear it on
