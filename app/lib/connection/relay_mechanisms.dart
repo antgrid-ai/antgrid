@@ -3,8 +3,8 @@ import 'dart:async';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
 import '../models/ab_message.dart';
-import '../relay/connection_handshake.dart';
 import '../services/license_token_minter.dart';
+import '../util/ab_log.dart';
 import 'connection_supervisor.dart';
 import 'supervisor_state.dart';
 
@@ -270,6 +270,7 @@ class RelayMechanisms implements ConnMechanisms {
         phoneDeviceId: _phoneDeviceId,
         agentEd25519PubB64: agentEd25519PubB64,
         phoneEd25519Seed: _phoneEd25519Seed,
+        logger: _logHandshake,
       ),
       projectStartMessageBuilder: (projectId) =>
           createAbMessage('project:start', {'projectId': projectId}),
@@ -279,5 +280,21 @@ class RelayMechanisms implements ConnMechanisms {
     session.start();
     _sessionPin = agentEd25519PubB64;
     return _session = session;
+  }
+}
+
+/// Route the (Flutter-free) handshake driver's diagnostics into `app.log` —
+/// a connection that won't establish is diagnosed from those lines.
+void _logHandshake(
+  HandshakeLogLevel level,
+  String message, {
+  Map<String, Object?>? fields,
+}) {
+  const component = 'ConnectionHandshake';
+  switch (level) {
+    case HandshakeLogLevel.debug:
+      AbLog.debug(component, message, fields: fields);
+    case HandshakeLogLevel.error:
+      AbLog.error(component, message, fields: fields);
   }
 }

@@ -1,9 +1,10 @@
 name: CI — android
 
-# PR/main verification for the Flutter app: analyze + test + a release AAB build
-# gated on 16 KB ELF alignment. This is the ONLY Android job on a PR — the Play
-# Store publish (deploy-android.yml) no longer runs on PRs, so the toolchain is
-# set up once per PR, not twice. Shared setup lives in .github/actions/setup-android.
+# PR/main verification for the Flutter app: analyze (app + the first-party Dart
+# packages) + test + a release AAB build gated on 16 KB ELF alignment. This is
+# the ONLY Android job on a PR — the Play Store publish (deploy-android.yml) no
+# longer runs on PRs, so the toolchain is set up once per PR, not twice. Shared
+# setup lives in .github/actions/setup-android.
 
 on:
   pull_request:
@@ -54,6 +55,24 @@ jobs:
       - name: Flutter analyze
         working-directory: app
         run: flutter analyze
+
+      # `flutter analyze` only walks the package it runs in — a path dependency
+      # is type-checked as consumed, never analyzed itself. So this workflow
+      # triggers on `packages/**` while nothing here reads it. Analyze the
+      # first-party Dart packages explicitly. Vendored ghostty_vte /
+      # ghostty_vte_flutter / portable_pty stay out: upstream code
+      # (kingwill101/dart_terminal) carrying its own analysis_options.
+      - name: Analyze Dart packages
+        run: |
+          fail=0
+          for pkg in antgrid_relay_client antgrid_eval_client; do
+            echo "::group::analyze $pkg"
+            # Subshell so the cd can't leak into the next iteration. Each package
+            # needs its OWN pub get — app's resolves into app/.dart_tool only.
+            ( cd "packages/$pkg" && dart pub get && dart analyze ) || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail
 
       - name: Flutter test
         working-directory: app
