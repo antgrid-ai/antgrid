@@ -421,6 +421,13 @@ export class SessionManager {
     this.changed();
   }
 
+  /** Handler-judge lookup. agentTranscriptPath is deliberately ABSENT from
+   *  toWire()/SessionEntry (persisted-only, never on the wire) — do NOT expose
+   *  it by adding it to toWire; this getter is the sanctioned read path. */
+  getAgentTranscriptPath(id: string): string | undefined {
+    return this.entries.get(id)?.agentTranscriptPath;
+  }
+
   /**
    * Persist a structured-driver selection (model/effort/mode) for a chat slot,
    * overwrite-latest per key. The sibling of setAgentSession: persisted-only,

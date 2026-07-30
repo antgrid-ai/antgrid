@@ -27,8 +27,9 @@ class _HandlerReplyForm extends StatefulWidget {
 }
 
 class _HandlerReplyFormState extends State<_HandlerReplyForm> {
-  late final TextEditingController _controller =
-      TextEditingController(text: widget.escalation.draftReply);
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.escalation.draftReply,
+  );
 
   @override
   void dispose() {
@@ -78,6 +79,10 @@ class _HandlerReplyFormState extends State<_HandlerReplyForm> {
                 ),
               ),
               const SizedBox(height: AbTokens.space12),
+              if (e.floorRule != null) ...[
+                _FloorBanner(rule: e.floorRule!),
+                const SizedBox(height: AbTokens.space8),
+              ],
               AbTextField(
                 controller: _controller,
                 hintText: 'Your reply',
@@ -97,10 +102,7 @@ class _HandlerReplyFormState extends State<_HandlerReplyForm> {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
-              AbButton(
-                label: 'Cancel',
-                onTap: () => Navigator.pop(context),
-              ),
+              AbButton(label: 'Cancel', onTap: () => Navigator.pop(context)),
               const SizedBox(width: AbTokens.space8),
               // Disabled while the field is blank: an empty answer would submit
               // a bare Enter into the PTY (see HandlerService.reply). Rebuilds
@@ -119,6 +121,37 @@ class _HandlerReplyFormState extends State<_HandlerReplyForm> {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Warns that approving sends the reply as the user, not the agent — shown
+/// only when the escalation crossed a standing-order safety floor (spec
+/// §Safety invariants: floor blocks always route through a human).
+class _FloorBanner extends StatelessWidget {
+  const _FloorBanner({required this.rule});
+  final String rule;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AbTokens.space8,
+        vertical: AbTokens.space6,
+      ),
+      decoration: BoxDecoration(
+        border: Border.all(color: p.warning),
+        borderRadius: AbTokens.borderRadius3,
+      ),
+      child: Text(
+        '⛔ Safety floor: $rule — approving sends this as YOUR reply',
+        style: AbTokens.sansStyle(
+          fontSize: AbTokens.fontXs,
+          fontWeight: FontWeight.w600,
+          color: p.warning,
+        ),
+      ),
     );
   }
 }

@@ -19,7 +19,7 @@ import { loadConfig, findConfigFile, projectName, type AbConfig } from "./config
 import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from "./bootstrap";
 import { resolveAgent, listKnownTools } from "./known-agents";
 import { augmentAgentLaunch } from "./agent-launch-augmenter";
-import { createMessage, type AbMessage, type RpcRequest, type SessionEntry } from "./protocol";
+import { createMessage, HandlerConfigureWire, type AbMessage, type RpcRequest, type SessionEntry } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
 import { MessageBus } from "./message-bus";
@@ -32,6 +32,8 @@ import { SessionManager } from "./session-manager";
 import { SessionNamer } from "./session-namer";
 import { resolveStructuredTitle } from "./title-resolver";
 import { HandlerEngine } from "./handler/engine";
+import { createDispatchAdapter, createPtyAdapter } from "./handler/session-adapter";
+import { createStructuredAdapter } from "./handler/structured-adapter";
 import { dispatchRpc } from "./rpc/methods";
 import { StructuredAgentManager } from "./structured/structured-manager";
 import { CodexDriver } from "./codex/codex-driver";
@@ -358,11 +360,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   function handleAbMessage(msg: AbMessage) {
     switch (msg.type) {
       case "agent:prompt":
+      case "agent:permission-resolve":
+      case "agent:question-resolve":
+        // A human answer from the app — reset the runaway guard and clear
+        // pending escalations, mirroring what terminal:input does for PTY
+        // slots. The "\r" sentinel exists because onUserReply's CR gate is
+        // built for per-keystroke PTY input; an app-routed prompt/resolve IS
+        // a submitted answer by definition. The engine's own auto-reply calls
+        // structured.handleAgentMessage directly and never passes through
+        // here (it must not reset the guard that counts it).
+        handlerEngine.onUserReply(msg.sessionId, "\r");
+        void structured?.handleAgentMessage(msg);
+        return;
       case "agent:cancel":
       case "agent:set-config":
       case "agent:session-action":
-      case "agent:permission-resolve":
-      case "agent:question-resolve":
         void structured?.handleAgentMessage(msg);
         return;
     }
@@ -373,11 +385,43 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // Typing into a session counts as activity — float it up the drawer.
         // No-ops for non-session terminals (service PTYs).
         sessions?.touch(msg.terminalId);
-        // A user reply resets the handler's runaway guard and clears the pending count.
-        handlerEngine.onUserReply(msg.terminalId);
+        // A user reply resets the handler's runaway guard; a submitted line
+        // (data carrying CR/LF) also clears the pending escalations.
+        handlerEngine.onUserReply(msg.terminalId, msg.data);
         break;
-      case "handler:configure":
-        handlerEngine.configure({ enabled: msg.enabled, template: msg.template, model: msg.model });
+      case "handler:configure": {
+        // parseMessageFast (the encrypted/local hot path) validates only the
+        // message type — every field below is still untrusted, and validating
+        // just the brief is not enough: a `notifyOnly` that arrives absent or
+        // non-bool reads as falsy and would arm an auto-injecting session the
+        // user asked to be notify-only.
+        const parsed = HandlerConfigureWire.safeParse(msg);
+        if (parsed.success && parsed.data.armed && parsed.data.brief) {
+          const { terminalId, brief, notifyOnly, judgeTool, judgeModel } = parsed.data;
+          handlerEngine.arm({ terminalId, brief, notifyOnly, judgeTool, judgeModel });
+        } else if (parsed.success) {
+          handlerEngine.disarm(parsed.data.terminalId);
+        } else {
+          // Reject WITHOUT disarming: a malformed arm/edit must not tear down
+          // the live armed session it failed to replace, and refusing to arm
+          // already closes the notifyOnly hole. Re-emit status so the sender's
+          // UI resyncs to the state that actually holds.
+          logger.warn("handler:configure rejected: malformed payload");
+          handlerEngine.emitStatus();
+        }
+        break;
+      }
+      case "handler:planRequest":
+        // Same untrusted-payload rule: a non-string terminalId would spend a full
+        // judge spawn planning against an empty context for a slot that can't exist.
+        if (typeof msg.terminalId !== "string") {
+          logger.warn("handler:planRequest ignored: malformed payload");
+          break;
+        }
+        handlerEngine.plan(msg.terminalId, {
+          judgeTool: typeof msg.judgeTool === "string" ? msg.judgeTool : undefined,
+          judgeModel: typeof msg.judgeModel === "string" ? msg.judgeModel : undefined,
+        }).catch((err) => logger.error("Handler plan failed: %s", err));
         break;
       case "terminal:start": {
         const savedService = getServices().find((s) => s.name === msg.terminalId);
@@ -806,16 +850,42 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   // Eager, factory-scoped (NOT in setupServices): handleAbMessage and startApiServer
   // are wired synchronously and can fire before setupServices resolves. The arrow
-  // deps defer their reads, so a later-assigned sendAb/manager is picked up correctly.
-  // No SessionManager dependency. Recent output comes from the existing scrollback buffer.
+  // deps defer their reads, so a later-assigned sendAb/manager/sessions is picked
+  // up correctly, same pattern as the existing manager? deps.
   const handlerEngine = new HandlerEngine({
     projectId: project.id,
     projectPath: project.path,
-    tool: () => config.agent?.tool ?? "claude-code",
+    tool: (terminalId) =>
+      (terminalId ? sessions?.get(terminalId)?.tool : undefined) ?? config.agent?.tool ?? "claude-code",
+    agentSessionId: (terminalId) => sessions?.get(terminalId)?.agentSessionId,
     abDir,
-    write: (terminalId, data) => manager?.write(terminalId, data),
+    adapter: createDispatchAdapter({
+      isChat: (id) => sessions?.get(id)?.mode === "chat",
+      pty: createPtyAdapter({
+        write: (terminalId, data) => manager?.write(terminalId, data),
+        getRecentOutput: (terminalId) => manager?.getScrollback(terminalId)?.text ?? "",
+        getTranscriptPath: (terminalId) => sessions?.getAgentTranscriptPath(terminalId),
+      }),
+      chat: createStructuredAdapter({
+        // Through handleAgentMessage, not driver.prompt directly: a dead or
+        // missing driver then surfaces as agent:error instead of a silent
+        // throw. This path never re-enters handleAbMessage, so an auto-reply
+        // cannot reset the runaway guard that counts it.
+        prompt: (id, text) => {
+          // requestId is required by AgentPromptMessage; drivers use it only
+          // for send-correlation, so a fresh UUID is sufficient.
+          void structured?.handleAgentMessage(createMessage("agent:prompt", {
+            sessionId: id, requestId: crypto.randomUUID(), text,
+          }));
+        },
+        getTranscriptPath: (id) => sessions?.getAgentTranscriptPath(id),
+        getSnapshot: (id) => structured?.getTranscriptSnapshot(id) ?? Promise.resolve([]),
+      }),
+    }),
     sendAb: (msg) => sendAb(msg),
-    getRecentOutput: (terminalId) => manager?.getScrollback(terminalId)?.text ?? "",
+    sendPush: (message) => sendAb(createMessage("notification:push", {
+      notificationType: "task_complete", message, projectId: project.id,
+    })),
   });
 
   let cachedGitBranch: string | null = null;
@@ -1195,8 +1265,41 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // project/config/spawnCodex/spawnOpencode, not on `sessions`; the one back-
     // reference (onAgentSession → sessions) is a closure that resolves at call
     // time, after `sessions` is assigned. Both stay hoisted `let` bindings.
+    //
+    // Chat-mode Handler event source: structured drivers emit turn/permission/
+    // question frames in-process, so tap the outbound funnel instead of relying
+    // on injected hooks. The PTY path keeps its hook POSTs; onHandlerEvent
+    // drops hook events for chat slots so claude/codex chat spawns (which reuse
+    // the terminal-mode plugin) don't fire every turn_end twice.
+    const observeChatFrameForHandler = (msg: AbMessage) => {
+      let evt:
+        | { terminalId: string; event: "turn_end" | "permission_request" | "question"; detail?: string }
+        | null = null;
+      // "error" counts as a turn boundary, not just "end_turn": a turn that died
+      // leaves the agent idle and blocked, which is precisely when a supervising
+      // handler must act. Skipping it let an armed session go silent forever on
+      // the one outcome the user most wants to be woken for. "cancelled" stays
+      // ignored — the user cancelled it, so they are already present.
+      if (msg.type === "agent:turn-end" && (msg.stopReason === "end_turn" || msg.stopReason === "error")) {
+        evt = { terminalId: msg.sessionId, event: "turn_end" };
+      } else if (msg.type === "agent:permission-request") {
+        evt = { terminalId: msg.sessionId, event: "permission_request", detail: msg.title };
+      } else if (msg.type === "agent:question") {
+        evt = { terminalId: msg.sessionId, event: "question", detail: msg.prompt };
+      } else if (msg.type === "agent:request-retracted") {
+        // The blocking prompt is gone — clear its forced escalation instead of
+        // leaving a "needs you" row pointing at a prompt that no longer exists.
+        handlerEngine.onPromptRetracted(msg.sessionId);
+      }
+      if (evt) {
+        handlerEngine.handleEvent(evt).catch((err) => logger.error("Handler chat event failed: %s", err));
+      }
+    };
     structured = new StructuredAgentManager({
-      sendMessage: (msg) => sendAb(msg),
+      sendMessage: (msg) => {
+        observeChatFrameForHandler(msg);
+        sendAb(msg);
+      },
       dropSessionReplay: (sessionId) => dropSessionReplay(sessionId),
       onAgentSession: (sessionId, agentSessionId) => sessions?.setAgentSession(sessionId, agentSessionId),
       onSetConfig: (sessionId, key, value) => sessions?.setSessionConfig(sessionId, key, value),
@@ -1326,7 +1429,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           }));
         });
       },
-      onStopChat: (id) => { void structured?.stopChat(id); },
+      onStopChat: (id) => {
+        // Mirrors onTerminalExited for PTYs: reclaim guard + pending state and
+        // auto-disarm — a stopped driver can't be supervised.
+        handlerEngine.onTerminalExit(id);
+        void structured?.stopChat(id);
+      },
     });
 
     // Policy unit that turns title signals (OSC-2 + injected hook/plugin POSTs)
@@ -1547,6 +1655,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sendAb(buildAgentHello(config, VERSION));
     // Re-sync the config-error dot on every connect (see emitConfigState).
     emitConfigState();
+    // Seed the app's Handler defaults (judge overrides, notify-only) even when
+    // nothing is armed — the briefing sheet arms with what it was seeded with.
+    handlerEngine.emitStatus();
     // Sessions are no longer auto-created on connect; the app routes the user
     // to the New Session page when the list is empty so they pick an agent.
     // Existing sessions are still restored + listed by session:list.
@@ -1561,6 +1672,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sendAb: (msg) => sendAb(msg),
     sessionName: (terminalId) => sessions?.get(terminalId)?.name,
     onHandlerEvent: (body) => {
+      // Chat slots are fed by the in-process driver tap (observeChatFrameForHandler);
+      // the reused title plugin's hooks still POST here for claude/codex chat
+      // spawns — drop those or every turn_end fires twice.
+      if (sessions?.get(body.terminalId)?.mode === "chat") return;
       handlerEngine.handleEvent({
         terminalId: body.terminalId, event: body.event,
         transcriptPath: body.transcriptPath, sessionId: body.sessionId,

@@ -568,36 +568,125 @@ const PushRegisterMessage = BaseMessage.extend({
   pushPubkey: PushPubkeyB64,
 });
 
-const HandlerTemplateEnum = z.enum(["watchdog", "closer", "autopilot"]);
+// Wire shape for a handler's brief — what it will/won't do, when to wake the
+// user, and the running to-do ledger. Shared by configure (set), status
+// (per-session snapshot), and planResult (proposed/previous).
+export const HandlerBriefWire = z.object({
+  taskSummary: z.string(),
+  willHandle: z.array(z.string()),
+  wakeFor: z.array(z.string()),
+  doneWhen: z.string().optional(),
+  thenItems: z.array(z.string()),
+});
+
+const HandlerPlanRequestMessage = BaseMessage.extend({
+  type: z.literal("handler:planRequest"),
+  projectId: z.string(),
+  terminalId: z.string(),
+  // One-shot judge choice for THIS plan call ('' = the session's default
+  // tool): lets "pick a judge, regenerate" draft with the judge the user
+  // picked instead of the stored one. Not persisted — arming persists.
+  judgeTool: z.string().optional(),
+  judgeModel: z.string().optional(),
+});
+
+const HandlerPlanResultMessage = BaseMessage.extend({
+  type: z.literal("handler:planResult"),
+  projectId: z.string(),
+  terminalId: z.string(),
+  fallback: z.boolean(),
+  brief: HandlerBriefWire.optional(),
+  previousBrief: HandlerBriefWire.optional(),
+  // The session's STORED judge choice (record on disk / armed session), so a
+  // freshly restarted app can seed the briefing sheet's picker — status
+  // snapshots only cover armed sessions, and a disarmed session's pick would
+  // otherwise be unreachable.
+  judgeTool: z.string().optional(),
+  judgeModel: z.string().optional(),
+});
+
+// `armed: true` requires a brief (see refine below) — the invariant that
+// distinguishes "handler configured but idle" from "handler actively armed".
+// parseMessageFast skips this refine AND every field check below (it matches
+// KNOWN_TYPES and nothing else); agent-core re-validates the whole payload with
+// HandlerConfigureWire before arming on that hot path.
+const HandlerConfigureFields = z.object({
+  terminalId: z.string(),
+  armed: z.boolean(),
+  brief: HandlerBriefWire.optional(),
+  notifyOnly: z.boolean(),
+  // Per-SESSION judge choice, persisted in the terminal's handler-session
+  // record by arm(). Empty string = clear back to default (the session's own
+  // tool / CLI default model); absent = leave the stored choice untouched.
+  judgeTool: z.string().optional(),
+  judgeModel: z.string().optional(),
+});
+const armedRequiresBrief = (m: { armed: boolean; brief?: unknown }) => !m.armed || !!m.brief;
+
+// Payload-only re-validation for the parseMessageFast hot path, which checks the
+// message type and NOTHING else. agent-core parses with this before arming:
+// `notifyOnly` is as safety-relevant as the brief — arriving absent it would read
+// as falsy and silently run an auto-injecting session the user asked to be
+// notify-only. Keep in lockstep with HandlerConfigureMessage below.
+export const HandlerConfigureWire = HandlerConfigureFields.refine(armedRequiresBrief, {
+  message: "armed requires a brief",
+});
 
 const HandlerConfigureMessage = BaseMessage.extend({
   type: z.literal("handler:configure"),
   projectId: z.string(),
-  enabled: z.boolean(),
-  template: HandlerTemplateEnum,
-  model: z.string().optional(),
+}).extend(HandlerConfigureFields.shape).refine(armedRequiresBrief, { message: "armed requires a brief" });
+
+// Shared by the one-shot escalation push and the per-session status snapshot
+// (which replays unanswered escalations so a reconnecting/restarted app can
+// rebuild answerable rows, not just a pending count).
+const OpenEscalationWire = z.object({
+  escalationId: z.string(),
+  question: z.string(),
+  reasoning: z.string(),
+  draftReply: z.string(),
+  urgency: z.enum(["normal", "high"]),
+  floorRule: z.string().optional(),
+  // How the app collects the answer: absent/"reply" = free-text reply sheet;
+  // "resolve_in_session" = an option-based prompt (permission / structured
+  // question) that must be resolved in the chat UI — injected text can't
+  // answer it, and auto-approval is deliberately impossible (see engine).
+  kind: z.enum(["reply", "resolve_in_session"]).optional(),
+  at: z.number(),
+});
+
+const HandlerSessionSnapshot = z.object({
+  terminalId: z.string(),
+  notifyOnly: z.boolean(),
+  state: z.enum(["watching", "handling", "needs_you"]),
+  pendingEscalations: z.number().int().nonnegative(),
+  armedAt: z.number(),
+  doneWhenMet: z.boolean(),
+  brief: HandlerBriefWire,
+  ledger: z.array(z.object({ item: z.string(), evidence: z.string(), at: z.number() })),
+  escalations: z.array(OpenEscalationWire),
+  // Per-session judge choice (absent = session default tool / CLI default model).
+  judgeTool: z.string().optional(),
+  judgeModel: z.string().optional(),
 });
 
 const HandlerStatusMessage = BaseMessage.extend({
   type: z.literal("handler:status"),
   projectId: z.string(),
-  enabled: z.boolean(),
-  template: HandlerTemplateEnum,
-  model: z.string().optional(),
-  state: z.enum(["off", "watching", "handling", "needs_you"]),
-  pendingEscalations: z.number().int().nonnegative(),
+  // What an absent per-session judgeTool resolves to for PTY slots (the
+  // project agent tool) — chat slots resolve from their own SessionEntry.tool
+  // app-side. Judge overrides themselves are per-session (see snapshot).
+  defaultTool: z.string().optional(),
+  // Project default for the briefing sheet's notify-only seed (config v2).
+  defaultNotifyOnly: z.boolean(),
+  sessions: z.array(HandlerSessionSnapshot),
 });
 
 const HandlerEscalationMessage = BaseMessage.extend({
   type: z.literal("handler:escalation"),
   projectId: z.string(),
-  escalationId: z.string(),
   terminalId: z.string(),
-  question: z.string(),
-  reasoning: z.string(),
-  draftReply: z.string(),
-  urgency: z.enum(["normal", "high"]),
-});
+}).extend(OpenEscalationWire.shape);
 
 const HandlerActivityMessage = BaseMessage.extend({
   type: z.literal("handler:activity"),
@@ -605,7 +694,10 @@ const HandlerActivityMessage = BaseMessage.extend({
   recordId: z.string(),
   at: z.number(),
   terminalId: z.string(),
-  decision: z.enum(["continue", "handle", "escalate"]),
+  decision: z.enum([
+    "continue", "handle", "escalate",
+    "brief_armed", "brief_edited", "item_satisfied", "wrapped_up",
+  ]),
   reason: z.string(),
   detail: z.string().optional(),
 });
@@ -1279,6 +1371,8 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   CommandDoneMessage,
   NotificationPushMessage,
   PushRegisterMessage,
+  HandlerPlanRequestMessage,
+  HandlerPlanResultMessage,
   HandlerConfigureMessage,
   HandlerStatusMessage,
   HandlerEscalationMessage,
@@ -1392,7 +1486,11 @@ export type CommandOutput = z.infer<typeof CommandOutputMessage>;
 export type CommandDone = z.infer<typeof CommandDoneMessage>;
 export type NotificationPush = z.infer<typeof NotificationPushMessage>;
 export type PushRegister = z.infer<typeof PushRegisterMessage>;
+export type HandlerBrief = z.infer<typeof HandlerBriefWire>;
+export type HandlerPlanRequest = z.infer<typeof HandlerPlanRequestMessage>;
+export type HandlerPlanResult = z.infer<typeof HandlerPlanResultMessage>;
 export type HandlerConfigureMsg = z.infer<typeof HandlerConfigureMessage>;
+export type HandlerSessionSnapshot = z.infer<typeof HandlerSessionSnapshot>;
 export type HandlerStatusMsg = z.infer<typeof HandlerStatusMessage>;
 export type HandlerEscalationMsg = z.infer<typeof HandlerEscalationMessage>;
 export type HandlerActivityMsg = z.infer<typeof HandlerActivityMessage>;
@@ -1543,6 +1641,7 @@ const KNOWN_TYPES = new Set<string>([
   "ports:update", "preview:url",
   "agent:disconnecting", "agent:projects", "agent:tools", "stream-ready", "stream-invalid", "control:result", "app:ready",
   "command:run", "command:output", "command:done", "notification:push", "push:register",
+  "handler:planRequest", "handler:planResult",
   "handler:configure", "handler:status", "handler:escalation", "handler:activity",
   "git:status", "git:diff", "git:diff-content",
   "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",

@@ -1,32 +1,161 @@
-import { test, expect } from "bun:test";
-import { createMessage, parseMessage } from "../../src/protocol";
+import { describe, test, expect, it } from "bun:test";
+import { createMessage, parseMessage, HandlerConfigureWire } from "../../src/protocol";
 
-test("handler:configure round-trips through parseMessage", () => {
-  const m = createMessage("handler:configure", {
-    projectId: "p1", enabled: true, template: "closer", model: "haiku",
+describe("handler wire v2", () => {
+  const brief = { taskSummary: "t", willHandle: ["a"], wakeFor: ["b"], thenItems: [] as string[] };
+
+  test("parses planRequest/planResult", () => {
+    expect(parseMessage(JSON.stringify(createMessage("handler:planRequest", { projectId: "p", terminalId: "t1" })))).toBeTruthy();
+    expect(parseMessage(JSON.stringify(createMessage("handler:planResult", { projectId: "p", terminalId: "t1", fallback: true })))).toBeTruthy();
   });
-  const parsed = parseMessage(JSON.stringify(m));
-  expect(parsed).not.toBeNull();
-  expect(parsed!.type).toBe("handler:configure");
-  expect((parsed as any).template).toBe("closer");
+
+  test("configure requires a brief when armed", () => {
+    const armedNoBrief = createMessage("handler:configure", { projectId: "p", terminalId: "t1", armed: true, notifyOnly: false } as never);
+    expect(parseMessage(JSON.stringify(armedNoBrief))).toBeNull();
+    const ok = createMessage("handler:configure", { projectId: "p", terminalId: "t1", armed: true, notifyOnly: false, brief });
+    expect(parseMessage(JSON.stringify(ok))).toBeTruthy();
+  });
+
+  test("configure and status carry the judge override fields", () => {
+    const cfg = createMessage("handler:configure", {
+      projectId: "p", terminalId: "t1", armed: true, notifyOnly: false, brief,
+      judgeTool: "codex", judgeModel: "",
+    });
+    expect(parseMessage(JSON.stringify(cfg))).toBeTruthy();
+    const status = createMessage("handler:status", {
+      projectId: "p", defaultTool: "claude-code", defaultNotifyOnly: false,
+      sessions: [{
+        terminalId: "t1", notifyOnly: false, state: "watching", pendingEscalations: 0,
+        armedAt: 1, doneWhenMet: false, brief, ledger: [],
+        escalations: [], judgeTool: "codex", judgeModel: "m",
+      }],
+    });
+    const parsed = parseMessage(JSON.stringify(status)) as any;
+    expect(parsed).toBeTruthy();
+    expect(parsed.sessions[0].judgeTool).toBe("codex");
+    expect(parsed.sessions[0].judgeModel).toBe("m");
+  });
+
+  test("status carries per-session snapshots with open escalations", () => {
+    const msg = createMessage("handler:status", {
+      projectId: "p", defaultNotifyOnly: false, sessions: [{
+        terminalId: "t1", notifyOnly: false, state: "watching", pendingEscalations: 1,
+        armedAt: 1, doneWhenMet: false, brief, ledger: [],
+        escalations: [{
+          escalationId: "e1", question: "q", reasoning: "r", draftReply: "",
+          urgency: "normal", at: 2,
+        }],
+      }],
+    });
+    expect(parseMessage(JSON.stringify(msg))).toBeTruthy();
+  });
+
+  test("activity accepts the new kinds; escalation accepts floorRule", () => {
+    const act = createMessage("handler:activity", {
+      projectId: "p", recordId: "r", at: 1, terminalId: "t1",
+      decision: "wrapped_up", reason: "done",
+    });
+    expect(parseMessage(JSON.stringify(act))).toBeTruthy();
+    const esc = createMessage("handler:escalation", {
+      projectId: "p", escalationId: "e", terminalId: "t1", question: "q",
+      reasoning: "r", draftReply: "", urgency: "normal", floorRule: "force-push", at: 1,
+    });
+    expect(parseMessage(JSON.stringify(esc))).toBeTruthy();
+  });
+
+  test("escalation accepts optional kind; unknown values rejected", () => {
+    const base = {
+      projectId: "p", escalationId: "e1", terminalId: "t1", question: "q",
+      reasoning: "r", draftReply: "", urgency: "normal", at: 1,
+    } as const;
+    expect(parseMessage(JSON.stringify(createMessage("handler:escalation", base)))).toBeTruthy();
+    expect(parseMessage(JSON.stringify(createMessage("handler:escalation", {
+      ...base, kind: "resolve_in_session",
+    })))).toBeTruthy();
+    expect(parseMessage(JSON.stringify({
+      ...createMessage("handler:escalation", base), kind: "bogus",
+    }))).toBeNull();
+  });
+
+  test("status snapshot escalations carry kind through the replay", () => {
+    const msg = createMessage("handler:status", {
+      projectId: "p", defaultNotifyOnly: false, sessions: [{
+        terminalId: "t1", notifyOnly: true, state: "needs_you", pendingEscalations: 1,
+        armedAt: 1, doneWhenMet: false, brief, ledger: [],
+        escalations: [{
+          escalationId: "e1", question: "q", reasoning: "r", draftReply: "",
+          urgency: "high", at: 2, kind: "resolve_in_session",
+        }],
+      }],
+    });
+    expect(parseMessage(JSON.stringify(msg))).toBeTruthy();
+  });
+
+  test("handler:planRequest accepts optional judge overrides", () => {
+    const msg = createMessage("handler:planRequest", {
+      projectId: "p", terminalId: "t", judgeTool: "codex", judgeModel: "gpt-5.3-codex",
+    });
+    const parsed = parseMessage(JSON.stringify(msg));
+    expect(parsed?.type).toBe("handler:planRequest");
+    expect((parsed as any).judgeTool).toBe("codex");
+  });
+
+  test("handler:planResult echoes the stored judge", () => {
+    const msg = createMessage("handler:planResult", {
+      projectId: "p", terminalId: "t", fallback: false,
+      judgeTool: "opencode", judgeModel: "m",
+    });
+    const parsed = parseMessage(JSON.stringify(msg));
+    expect((parsed as any).judgeTool).toBe("opencode");
+  });
+
+  test("handler:status carries judge per session, not at top level", () => {
+    const msg = createMessage("handler:status", {
+      projectId: "p", defaultTool: "claude-code", defaultNotifyOnly: false,
+      sessions: [{
+        terminalId: "t", notifyOnly: false, state: "watching", pendingEscalations: 0,
+        armedAt: 1, doneWhenMet: false,
+        brief: { taskSummary: "x", willHandle: [], wakeFor: [], thenItems: [] },
+        ledger: [], escalations: [], judgeTool: "codex", judgeModel: "gpt-5.3-codex",
+      }],
+    });
+    const parsed = parseMessage(JSON.stringify(msg)) as any;
+    expect(parsed.sessions[0].judgeTool).toBe("codex");
+    expect(parsed.tool).toBeUndefined();
+    expect(parsed.model).toBeUndefined();
+  });
 });
 
-test("handler:escalation round-trips with all fields", () => {
-  const m = createMessage("handler:escalation", {
-    projectId: "p1", escalationId: "e1", terminalId: "t1",
-    question: "bun or vitest?", reasoning: "architecture call", draftReply: "use bun", urgency: "normal",
-  });
-  const parsed = parseMessage(JSON.stringify(m));
-  expect((parsed as any).draftReply).toBe("use bun");
-});
+// parseMessageFast validates ONLY the message type, so agent-core re-parses the
+// configure payload with HandlerConfigureWire before arming. notifyOnly is as
+// safety-relevant as the brief: absent, it reads as falsy and would arm an
+// auto-injecting session for a user who asked for notify-only.
+describe("HandlerConfigureWire (hot-path re-validation)", () => {
+  const brief = { taskSummary: "s", willHandle: [], wakeFor: [], thenItems: [] };
 
-test("handler:configure rejects an unknown template", () => {
-  // Valid uuid + timestamp so the ONLY failing constraint is the template enum.
-  // (BaseMessage.id is z.string().uuid(); a junk id would make this pass for the
-  // wrong reason — i.e. it would still pass even if the template enum were broken.)
-  const bad = JSON.stringify({
-    id: "00000000-0000-4000-8000-000000000000", timestamp: 1,
-    type: "handler:configure", projectId: "p", enabled: true, template: "nope",
+  it("accepts a well-formed arm payload", () => {
+    const r = HandlerConfigureWire.safeParse({ terminalId: "t1", armed: true, notifyOnly: true, brief });
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data.notifyOnly).toBe(true);
   });
-  expect(parseMessage(bad)).toBeNull();
+
+  it("rejects a missing notifyOnly instead of letting it read as false", () => {
+    expect(HandlerConfigureWire.safeParse({ terminalId: "t1", armed: true, brief }).success).toBe(false);
+  });
+
+  it("rejects a non-boolean notifyOnly", () => {
+    expect(
+      HandlerConfigureWire.safeParse({ terminalId: "t1", armed: true, notifyOnly: "false", brief }).success,
+    ).toBe(false);
+  });
+
+  it("rejects a non-string terminalId and a non-boolean armed", () => {
+    expect(HandlerConfigureWire.safeParse({ terminalId: 7, armed: false, notifyOnly: false }).success).toBe(false);
+    expect(HandlerConfigureWire.safeParse({ terminalId: "t1", armed: "yes", notifyOnly: false }).success).toBe(false);
+  });
+
+  it("still enforces armed-requires-a-brief", () => {
+    expect(HandlerConfigureWire.safeParse({ terminalId: "t1", armed: true, notifyOnly: false }).success).toBe(false);
+    expect(HandlerConfigureWire.safeParse({ terminalId: "t1", armed: false, notifyOnly: false }).success).toBe(true);
+  });
 });

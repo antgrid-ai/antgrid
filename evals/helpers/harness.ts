@@ -604,6 +604,8 @@ export async function setupTestEnv(opts: {
    *  relay; a caller passing this must not also let the owning env's
    *  teardown race a still-in-use relay (tear this env down first). */
   relay?: RelayHandle;
+  /** Extra agent env (e.g. the judge-script override for Task 16's Handler eval). */
+  env?: Record<string, string>;
 }): Promise<TestEnv> {
   const abDir = mkdtempSync(join(tmpdir(), "antgrid-eval-home-"));
 
@@ -630,7 +632,7 @@ export async function setupTestEnv(opts: {
     abDir,
     projectDir: project.dir,
     auth,
-    env: { ANTGRID_EVAL_TEST: "1" },
+    env: { ANTGRID_EVAL_TEST: "1", ...opts.env },
   });
 
   const projectId = computeProjectId(project.dir);
