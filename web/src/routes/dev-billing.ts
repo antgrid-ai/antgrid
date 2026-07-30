@@ -15,7 +15,7 @@ const BodySchema = z.object({
   planSlug: z.string().min(1).optional(),
   tier: z.string().min(1).optional(),
   status: z.string().min(1).optional(),
-  sessionLimit: z.number().int().positive().optional(),
+  workerLimit: z.number().int().positive().optional(),
   // ISO-8601 instant for the period end (e.g. "2027-01-01T00:00:00Z").
   currentPeriodEnd: z.iso.datetime().optional(),
 });
@@ -47,7 +47,12 @@ export function devBillingRoutes(deps: { db: DB }) {
         plan_id: sub.planId,
         provider: sub.provider,
         status: sub.status,
-        session_limit: sub.sessionLimit,
+        worker_limit: sub.workerLimit,
+        // Compatibility mirror for app builds already in the field, which parse
+        // `session_limit` as non-null. Drop once the worker_limit app release
+        // ships — see "Deploy order" in
+        // docs/plans/2026-07-30-worker-limit-pricing.md.
+        session_limit: sub.workerLimit,
         device_limit: sub.deviceLimit,
         current_period_end: sub.currentPeriodEnd,
       },

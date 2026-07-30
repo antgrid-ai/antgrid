@@ -1654,10 +1654,9 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
           headline: 'the relay would not accept this device',
           // LICENSE_INVALID covers far more than a revoked device: a token the
           // relay cannot verify (wrong issuer — a build pointed at the wrong
-          // LICENSE_API_URL), a malformed one, and a missing/invalid
-          // sessionLimit claim all land here alongside LICENSE_REVOKED. So the
-          // copy has to be true for every cause while still naming the one
-          // action that fixes the common ones.
+          // LICENSE_API_URL) and a malformed one land here alongside
+          // LICENSE_REVOKED. So the copy has to be true for every cause while
+          // still naming the one action that fixes the common ones.
           tip:
               'The relay rejected this device\'s access token — it was '
               'revoked, it no longer matches your plan, or this build is '

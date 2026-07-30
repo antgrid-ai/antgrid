@@ -610,9 +610,9 @@ class ConnectionSupervisor {
   ///
   /// So a caller that wires lifetime the obvious way — `ref.onDispose(dispose)`
   /// — leaves an authenticated relay socket and a live E2E session with nothing
-  /// left to manage them, and that orphaned socket keeps counting against the
-  /// account's relay `sessionLimit` until the process exits. To tear down, call
-  /// `setWanted(false)` and let the release land first.
+  /// left to manage them, and that orphaned socket holds the machine's relay
+  /// slot (blocking a clean reconnect on it) until the process exits. To tear
+  /// down, call `setWanted(false)` and let the release land first.
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;

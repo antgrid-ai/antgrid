@@ -62,7 +62,7 @@ describe("applySubscriptionEvent", () => {
       status: "active",
       planId: PLAN_UUID.pro_yearly,
       provider: "paddle",
-      sessionLimit: 10,
+      workerLimit: 3,
       promotional: false,
       cancelledAt: null,
     });

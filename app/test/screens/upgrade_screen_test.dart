@@ -24,7 +24,7 @@ PricingCatalog _catalog() => PricingCatalog(
     PricingPlan(
       slug: 'trial',
       label: 'Trial',
-      sessionLimit: 2,
+      workerLimit: 2,
       recurring: true,
       trial: true,
       priceDisplay: r'$49',
@@ -32,7 +32,7 @@ PricingCatalog _catalog() => PricingCatalog(
     PricingPlan(
       slug: 'pro_yearly',
       label: 'Pro Yearly',
-      sessionLimit: 10,
+      workerLimit: 3,
       recurring: true,
       trial: false,
       priceDisplay: r'$49',
@@ -40,7 +40,7 @@ PricingCatalog _catalog() => PricingCatalog(
     PricingPlan(
       slug: 'pro_lifetime',
       label: 'Pro Lifetime',
-      sessionLimit: 10,
+      workerLimit: 3,
       recurring: false,
       trial: false,
       priceDisplay: r'$99',

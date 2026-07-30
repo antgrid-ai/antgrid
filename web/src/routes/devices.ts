@@ -70,16 +70,16 @@ export function deviceRoutes(deps: { db: DB; auth: Auth; relay: RelayPushConfig 
     await provisionProductAccountForUser(deps.db, userId);
     const sub = await activeSubscriptionForUser(deps.db, userId);
     if (!sub) return c.json({ error: "NO_SUBSCRIPTION" }, 500);
-    const { deviceLimit } = resolveEntitlement(sub);
+    const { deviceLimit, workerLimit } = resolveEntitlement(sub);
 
-    // Device registration is gated only by the fair-use device cap — including
-    // free tier. The paid axis (concurrent remote agents, `sessionLimit`) is
-    // enforced at the relay on connect, so a free account may register devices
-    // but its agents won't be promoted to a relay slot.
+    // Two caps, both settled here at registration — a calm moment — rather than
+    // mid-work: the fair-use `deviceLimit` across all kinds, and the paid
+    // `workerLimit` on agent machines.
     const capResult = await deps.db.$transaction((tx) =>
       checkCapAndUpsert(tx, {
         userId,
         deviceLimit,
+        workerLimit,
         deviceId: body.deviceUuid,
         publicKey: Buffer.from(body.ed25519Pub, "base64"),
         kind,
@@ -91,6 +91,23 @@ export function deviceRoutes(deps: { db: DB; auth: Auth; relay: RelayPushConfig 
       return c.json(
         {
           error: "DEVICE_CAP",
+          limit: capResult.limit,
+          devices: capResult.devices.map((d) => ({
+            id: d.id,
+            device_id: d.deviceId,
+            display_name: d.displayName,
+          })),
+        },
+        402
+      );
+    }
+    // Deliberately NOT folded into DEVICE_CAP: the remedy differs. DEVICE_CAP
+    // is fair-use and is only ever resolved by removing a device, while
+    // WORKER_CAP is the paid axis and upgrading resolves it too.
+    if (capResult.kind === "worker_cap") {
+      return c.json(
+        {
+          error: "WORKER_CAP",
           limit: capResult.limit,
           devices: capResult.devices.map((d) => ({
             id: d.id,
@@ -165,12 +182,17 @@ export function deviceRoutes(deps: { db: DB; auth: Auth; relay: RelayPushConfig 
     await provisionProductAccountForUser(deps.db, userId);
     const sub = await activeSubscriptionForUser(deps.db, userId);
     if (!sub) return c.json({ error: "NO_SUBSCRIPTION" }, 500);
-    const { tier, sessionLimit, deviceLimit, promotional } = resolveEntitlement(sub);
+    const { tier, workerLimit, deviceLimit, promotional } = resolveEntitlement(sub);
     return c.json({
       userId,
       email,
       tier,
-      session_limit: sessionLimit,
+      worker_limit: workerLimit,
+      // Compatibility mirror for app builds already in the field, which parse
+      // `session_limit` as non-null. Drop once the worker_limit app release
+      // ships — see "Deploy order" in
+      // docs/plans/2026-07-30-worker-limit-pricing.md.
+      session_limit: workerLimit,
       device_limit: deviceLimit,
       promotional,
     });

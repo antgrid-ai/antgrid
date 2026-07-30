@@ -151,7 +151,8 @@ describe("POST /account/devices", () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const user = await createTestUser(pg.db, "bob@example.com");
     const { cookie } = await createTestSession(pg.db, user.id);
-    // No subscription created → provisioned as free (sessionLimit 0, deviceLimit 10).
+    // No subscription created → provisioned by the default grant, whose caps are
+    // generous enough that a first device is never the thing that trips them.
 
     const res = await app.request("/account/devices", {
       method: "POST",
@@ -203,5 +204,149 @@ describe("POST /account/devices", () => {
     const body = (await capped.json()) as { error: string; limit: number };
     expect(body.error).toBe("DEVICE_CAP");
     expect(body.limit).toBe(3);
+  });
+});
+
+type CapBody = {
+  error: string;
+  limit: number;
+  devices: { id: string; device_id: string; display_name: string }[];
+};
+
+let seed = 0;
+function registerBody(overrides: Record<string, unknown> = {}) {
+  seed += 1;
+  return {
+    deviceUuid: crypto.randomUUID(),
+    ed25519Pub: Buffer.alloc(32, seed % 251).toString("base64"),
+    x25519Pub: Buffer.alloc(32, (seed + 97) % 251).toString("base64"),
+    platform: "linux",
+    displayName: `Device ${seed}`,
+    ...overrides,
+  };
+}
+
+type TestApp = ReturnType<typeof buildTestApp>["app"];
+
+async function register(app: TestApp, cookie: string, body: Record<string, unknown>) {
+  return app.request("/account/devices", {
+    method: "POST",
+    headers: { cookie, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+describe("POST /account/devices — worker cap", () => {
+  test("returns 402 WORKER_CAP listing only agent rows once the worker cap is full", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const user = await createTestUser(pg.db, "workers@example.com");
+    const { cookie } = await createTestSession(pg.db, user.id);
+    await createTestSubscription(pg.db, user.id, { tier: "pro", workerLimit: 2, deviceLimit: 10 });
+
+    const first = await register(app, cookie, registerBody({ displayName: "Worker one" }));
+    const second = await register(app, cookie, registerBody({ displayName: "Worker two" }));
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+
+    // A phone consumes device_limit but never worker_limit, and must not be
+    // offered as something to sign out.
+    const phone = await register(
+      app,
+      cookie,
+      registerBody({ platform: "ios", displayName: "Phone" })
+    );
+    expect(phone.status).toBe(201);
+
+    const capped = await register(app, cookie, registerBody({ displayName: "Worker three" }));
+    expect(capped.status).toBe(402);
+    const body = (await capped.json()) as CapBody;
+    expect(body.error).toBe("WORKER_CAP");
+    expect(body.limit).toBe(2);
+    expect(body.devices.map((d) => d.display_name).sort()).toEqual(["Worker one", "Worker two"]);
+  });
+
+  test("an already-active worker re-registers at the cap", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const user = await createTestUser(pg.db, "reconnect@example.com");
+    const { cookie } = await createTestSession(pg.db, user.id);
+    await createTestSubscription(pg.db, user.id, { tier: "pro", workerLimit: 2, deviceLimit: 10 });
+
+    const existing = registerBody({ displayName: "Worker one" });
+    expect((await register(app, cookie, existing)).status).toBe(201);
+    expect((await register(app, cookie, registerBody({ displayName: "Worker two" }))).status).toBe(
+      201
+    );
+
+    // The cap is full, but a machine that already holds a slot must never be
+    // locked out of its own re-provisioning.
+    const again = await register(app, cookie, existing);
+    expect(again.status).toBe(200);
+  });
+
+  test("an app device registers freely while the worker cap is full", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const user = await createTestUser(pg.db, "apps@example.com");
+    const { cookie } = await createTestSession(pg.db, user.id);
+    await createTestSubscription(pg.db, user.id, { tier: "pro", workerLimit: 1, deviceLimit: 10 });
+
+    expect((await register(app, cookie, registerBody({ displayName: "Worker" }))).status).toBe(201);
+
+    const phone = await register(
+      app,
+      cookie,
+      registerBody({ platform: "android", displayName: "Phone" })
+    );
+    expect(phone.status).toBe(201);
+
+    // The desktop controller registers as kind:"app" on a desktop platform —
+    // the case where only the explicit kind keeps it off the worker meter.
+    const controller = await register(
+      app,
+      cookie,
+      registerBody({ platform: "macos", kind: "app", displayName: "Desktop controller" })
+    );
+    expect(controller.status).toBe(201);
+  });
+
+  // `kind` and `deviceUuid` are both client-supplied, so the reactivation
+  // exemption has to be scoped to agent rows. Exempting any active row would
+  // let an account at its cap register cheap app rows and promote them,
+  // raising the paid axis to device_limit.
+  test("an active app row cannot be flipped to a worker while the cap is full", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const user = await createTestUser(pg.db, "flip@example.com");
+    const { cookie } = await createTestSession(pg.db, user.id);
+    await createTestSubscription(pg.db, user.id, { tier: "pro", workerLimit: 1, deviceLimit: 10 });
+
+    expect((await register(app, cookie, registerBody({ displayName: "Worker" }))).status).toBe(201);
+
+    const phone = registerBody({ platform: "ios", displayName: "Phone" });
+    expect((await register(app, cookie, phone)).status).toBe(201);
+
+    const flipped = await register(app, cookie, { ...phone, kind: "agent" });
+    expect(flipped.status).toBe(402);
+    expect(((await flipped.json()) as CapBody).error).toBe("WORKER_CAP");
+
+    // And the row must not have been promoted on the way out.
+    const row = await pg.db.device.findUnique({
+      where: { userId_deviceId: { userId: user.id, deviceId: phone.deviceUuid as string } },
+    });
+    expect(row?.kind).toBe("app");
+  });
+
+  test("the device cap still fires first when workers are under their own limit", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const user = await createTestUser(pg.db, "independent@example.com");
+    const { cookie } = await createTestSession(pg.db, user.id);
+    await createTestSubscription(pg.db, user.id, { tier: "pro", workerLimit: 5, deviceLimit: 2 });
+
+    expect((await register(app, cookie, registerBody())).status).toBe(201);
+    expect((await register(app, cookie, registerBody())).status).toBe(201);
+
+    const capped = await register(app, cookie, registerBody());
+    expect(capped.status).toBe(402);
+    const body = (await capped.json()) as CapBody;
+    expect(body.error).toBe("DEVICE_CAP");
+    expect(body.limit).toBe(2);
   });
 });

@@ -125,6 +125,10 @@ class DeviceProvisioning {
     // the anonymous→signed-in transition so inventory dedup, isLocalFor(), and
     // any project rows already stamped with the prefs UUID continue to align.
     final deviceUuid = existingDeviceUuid ?? const Uuid().v4();
+    // No `kind` — the server derives it from the platform, which makes a
+    // desktop an `agent` and therefore spends a worker slot. That is why this
+    // call can throw WORKER_CAP mid-sign-in; callers must route that to the
+    // remediation dialog, not to a generic failure.
     final created = await api.createDevice(
       deviceUuid: deviceUuid,
       ed25519Pub: keys.ed25519PubBase64,

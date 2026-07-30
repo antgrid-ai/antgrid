@@ -11,12 +11,13 @@ import type { Env } from "../env.js";
  * access tokens that the relay verifies against `/api/auth/jwks`.
  *
  * `customAccessTokenClaims` injects the binding fields the relay reads from
- * the JWT (`uid`, `deviceUuid`, `tier`, `sessionLimit`, `email`, `pk`). The
- * `sessionLimit` claim is the account's concurrent remote-agent cap; the relay
- * enforces it at agent register. The `pk` claim is the
+ * the JWT (`uid`, `deviceUuid`, `tier`, `email`, `pk`). The `pk` claim is the
  * agent's Ed25519 pubkey (base64); relay's `gate.ts` compares it against the
  * pubkey presented at WS handshake — this preserves today's pubkey-binding
  * security property without any custom signing infra.
+ *
+ * No cap travels in the token: the paid axis is the worker count, enforced at
+ * device registration in web, not at relay admission.
  *
  * For M2M (client_credentials) tokens, `user` in the claims hook is undefined;
  * device owner comes from `metadata.userId`.
@@ -47,7 +48,7 @@ export function abOAuthProviderPlugins(deps: { db: DB; env: Env }) {
         await provisionProductAccountForUser(deps.db, meta.userId);
         const sub = await activeSubscriptionForUser(deps.db, meta.userId);
         if (!sub) throw new Error("no subscription for user");
-        const { tier, sessionLimit } = resolveEntitlement(sub);
+        const { tier } = resolveEntitlement(sub);
         const user = await deps.db.user.findUnique({
           where: { id: meta.userId },
           select: { email: true },
@@ -56,7 +57,6 @@ export function abOAuthProviderPlugins(deps: { db: DB; env: Env }) {
           uid: meta.userId,
           deviceUuid: meta.deviceUuid,
           tier,
-          sessionLimit,
           email: user?.email ?? null,
           pk: meta.ed25519Pub,
         };

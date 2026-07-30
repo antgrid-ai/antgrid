@@ -25,7 +25,11 @@ const discountPct = plan.listUsd ? Math.round((1 - plan.priceUsd / plan.listUsd)
     ))}
   </div>
   <div class="mt-auto">
-    <Button href={links.checkout(plan.checkoutId ?? plan.id)} variant={plan.recommended ? "primary" : "outline"} class="w-full justify-center">{plan.cta}</Button>
+    {plan.comingSoon ? (
+      <button type="button" disabled class="inline-flex w-full cursor-not-allowed items-center justify-center gap-2 rounded-md border border-edge px-6 py-3 text-sm font-medium text-faint">Coming soon</button>
+    ) : (
+      <Button href={plan.ctaHref ?? links.checkout(plan.checkoutId ?? plan.id)} variant={plan.recommended ? "primary" : "outline"} class="w-full justify-center">{plan.cta}</Button>
+    )}
     <div class="mt-2.5 text-center text-[11px] text-faint">{plan.ctaFooter}</div>
   </div>
 </div>

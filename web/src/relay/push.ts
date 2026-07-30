@@ -37,10 +37,11 @@ export async function pushRevoke(cfg: RelayPushConfig, deviceId: string, fetchIm
  * Identity-free liveness row returned by the relay's /internal/connections.
  * Keep in lockstep with relay's `src/connections.ts` ConnectionSummary.
  *
- * `openStreamCount` is the billable quantity: an agent holds ONE socket under
- * its bare account `deviceUuid` and multiplexes projects as sealed streams, so
- * the deviceId alone says nothing about how many sessions are running. The
- * relay cannot resolve those streams to projects, so only the count exists.
+ * `openStreamCount` is liveness telemetry, not a billed quantity — the paid
+ * axis is the worker (agent machine) count. An agent holds ONE socket under its
+ * bare account `deviceUuid` and multiplexes projects as sealed streams, so the
+ * deviceId alone says nothing about how many sessions are running. The relay
+ * cannot resolve those streams to projects, so only the count exists.
  */
 const ConnectionSummarySchema = z.object({
   deviceId: z.string(),

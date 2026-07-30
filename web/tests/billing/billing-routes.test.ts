@@ -65,6 +65,8 @@ describe("GET /billing/plans", () => {
       expect(plan).toMatchObject({
         slug: expect.any(String),
         label: expect.any(String),
+        worker_limit: expect.any(Number),
+        // Compatibility mirror for app builds already in the field (Phase 1.5).
         session_limit: expect.any(Number),
       });
       expect(plan).not.toHaveProperty("paddle_price_id");

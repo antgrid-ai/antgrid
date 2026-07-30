@@ -73,10 +73,14 @@ final postSignInProvisioningProvider = Provider<void>((ref) {
         if (ref.read(currentUserProvider).value?.userId != user.userId) {
           return;
         }
-        if (e.code == 'DEVICE_CAP' && e.cap != null) {
-          // Fair-use cap reached — surface the actionable "remove a device"
-          // flow (see deviceCapProvider watcher), NOT a silent failure or an
-          // upgrade prompt (upgrading can't raise deviceLimit; it's flat).
+        final capped = e.code == 'DEVICE_CAP' || e.code == 'WORKER_CAP';
+        if (capped && e.cap != null) {
+          // Both caps reach the user mid-sign-in — desktop registers its
+          // `kind:"agent"` record here, so signing in on one machine too many
+          // is rejected by the worker cap right at this call. Surface the
+          // actionable free-a-slot flow (see deviceCapProvider watcher); a
+          // WORKER_CAP left to fall through would land as a generic failure
+          // with no remediation at all.
           ref.read(deviceCapProvider.notifier).set(e.cap);
         } else {
           AbLog.error(

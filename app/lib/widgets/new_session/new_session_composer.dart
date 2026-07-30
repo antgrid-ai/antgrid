@@ -186,10 +186,10 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     try {
       await widget.submit(ref.container);
     } on SessionLimitExceededException catch (e) {
-      // Paid-axis cap, not a transient failure — route to the upgrade flow
-      // rather than a retry hint.
+      // A legacy relay's retired cap, not a transient failure — retrying won't
+      // clear it, so say what will and show the plan the account is on.
       if (mounted) {
-        showAbSnackBar(context, e.message);
+        showAbSnackBar(context, e.userMessage);
         await openUpgrade(context, ref.container);
       }
     } catch (e) {

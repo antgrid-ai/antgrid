@@ -83,11 +83,12 @@ Future<void> openUpgradeInBrowser(
   await launchUrl(uri, mode: LaunchMode.externalApplication);
 }
 
-/// Non-null when device provisioning was rejected by the fair-use device cap
-/// (HTTP 402 `DEVICE_CAP`). Carries the limit + already-registered devices so
-/// the remediation UI can offer to revoke one. This is NOT a paid gate — the
-/// remedy is to remove a device, never to upgrade — so it must not route to the
-/// upgrade screen. Cleared on success, sign-out, and dialog dismissal.
+/// Non-null when device provisioning was rejected by either cap (HTTP 402
+/// `DEVICE_CAP` or `WORKER_CAP`). Carries the limit + already-registered
+/// devices so the remediation UI can offer to revoke one, and
+/// [DeviceCapInfo.kind] so it renders the right remedy: freeing a slot is the
+/// ONLY fix for the fair-use device cap, while the worker cap is the paid axis.
+/// Cleared on success, sign-out, and dialog dismissal.
 final deviceCapProvider =
     NotifierProvider<ValueController<DeviceCapInfo?>, DeviceCapInfo?>(
       () => ValueController(null),

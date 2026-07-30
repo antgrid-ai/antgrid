@@ -26,21 +26,31 @@ import 'providers.dart';
 import 'recent_agents.dart';
 import 'sessions.dart';
 
-/// Thrown when activating a remote project fails because the account is at its
-/// concurrent remote-agent cap (the relay's `SESSION_LIMIT_EXCEEDED`, surfaced
-/// by the host as a `project:start` control-plane error). Distinct from a
-/// generic start failure so the UI routes it to the upgrade flow instead of a
-/// transient "couldn't start" hint — the user must free a slot or upgrade, and
-/// a retry without that won't help. [message] is the relay's human string.
+/// Thrown when activating a remote project is refused by the retired
+/// concurrent-remote-agent cap (`SESSION_LIMIT_EXCEEDED`, surfaced by the host
+/// as a `project:start` control-plane error). Current relays never emit it —
+/// the paid axis is the per-account worker cap, enforced at device
+/// registration — so this only fires against a relay that has not been
+/// upgraded. Kept distinct from a generic start failure because a retry alone
+/// won't clear it. [message] is the relay's human string.
 class SessionLimitExceededException implements Exception {
   final String message;
   const SessionLimitExceededException(this.message);
+
+  /// What the user is shown. The relay's [message] describes a cap that no
+  /// longer exists, so every surface renders this instead — one place to
+  /// delete when the code itself goes.
+  String get userMessage =>
+      'This machine is on an older relay that still limits how many remote '
+      'projects can run at once. Update it, or close another remote project '
+      'and try again.';
+
   @override
   String toString() => 'SessionLimitExceededException: $message';
 }
 
 /// Map a failed `project:start` outcome to the exception the caller throws. The
-/// session-limit rejection is the relay's paid-axis cap (see
+/// session-limit rejection is a legacy-relay path (see
 /// [SessionLimitExceededException]); everything else (NOT_ALLOWED, OPEN_FAILED,
 /// timeout → no error) is a generic, transient failure. `lastError` is the
 /// control plane's last error after [awaitProjectRunning] returned false.
@@ -49,6 +59,8 @@ Never throwProjectStartFailure(
   String machineUuid,
   ControlPlaneError? lastError,
 ) {
+  // Retired on current relays, retained so an un-upgraded one still produces a
+  // typed rejection rather than an opaque StateError.
   if (lastError?.code == 'SESSION_LIMIT_EXCEEDED') {
     throw SessionLimitExceededException(lastError!.message);
   }
@@ -246,7 +258,8 @@ Future<String> openRemoteProjectForActivation(
   // and is idempotent for an already-dialable core. awaitProjectRunning then
   // returns immediately ONLY when the advert truthfully reads running (i.e. the
   // slot is admitted); for a not-yet-dialable core it waits for the host's
-  // post-register advert, or surfaces the SESSION_LIMIT_EXCEEDED control:result.
+  // post-register advert (or, on a legacy relay, the retired
+  // SESSION_LIMIT_EXCEEDED control:result).
   //
   // Keep-alive dependency: the caller must still be holding machine:M's socket
   // open (the picker via its viewed source; the drawer via the expanded
@@ -264,8 +277,8 @@ Future<String> openRemoteProjectForActivation(
   } on RpcException {
     // The send couldn't be delivered (keyless reconnect window) — fail fast via
     // the standard start-failure surface instead of letting awaitProjectRunning
-    // burn the full 30s. lastError won't be SESSION_LIMIT here, so this maps to
-    // the generic transient "couldn't start" the user can retry.
+    // burn the full 30s. lastError won't be a session-limit code here, so this
+    // maps to the generic transient "couldn't start" the user can retry.
     throwProjectStartFailure(
       projectId,
       machineUuid,
@@ -274,9 +287,9 @@ Future<String> openRemoteProjectForActivation(
   }
   final ok = await awaitProjectRunning(cpClient, projectId);
   if (!ok) {
-    // Distinguish the paid-axis session cap (→ upgrade flow) from a generic
-    // transient start failure. The host pushes SESSION_LIMIT_EXCEEDED as the
-    // project:start control-plane error once the relay rejects the slot.
+    // Distinguish a legacy relay's retired session cap from a generic transient
+    // start failure: an old host still pushes SESSION_LIMIT_EXCEEDED as the
+    // project:start control-plane error when it rejects the slot.
     throwProjectStartFailure(
       projectId,
       machineUuid,

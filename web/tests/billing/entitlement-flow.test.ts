@@ -35,7 +35,7 @@ describe("paddle webhook → entitlement", () => {
     expect((await before.json()).subscription).toMatchObject({
       tier: "pro",
       account_id: account.id,
-      session_limit: 10,
+      worker_limit: 3,
       promotional: true,
     });
 

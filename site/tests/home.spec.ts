@@ -45,7 +45,7 @@ test("cross-agent shows agents and the 3 steps", async ({ page }) => {
 test("closing CTA: Start free, direct downloads, store chips, correct pricing copy", async ({ page }) => {
   await page.goto("/#download");
   const band = page.locator("#download");
-  await expect(band).toContainText("Local sessions are free");
+  await expect(band).toContainText("Free on 2 machines");
   await expect(band.getByRole("link", { name: /^Start free/ })).toHaveAttribute("href", /app\.antgrid\.ai\/login/);
   await expect(band.getByRole("link", { name: /download for macos/i })).toHaveAttribute(
     "href",

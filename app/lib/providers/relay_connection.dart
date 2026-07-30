@@ -221,9 +221,9 @@ class RelayConnection {
     _supervisor = null;
     // `ConnectionSupervisor.dispose` deliberately does NOT release, so disposing
     // alone would leave an authenticated socket and a live E2E session with
-    // nothing managing them — still counting against the account's relay
-    // sessionLimit. Release explicitly (it is idempotent, so a release the
-    // supervisor already ran is harmless).
+    // nothing managing them — still holding this machine's relay slot. Release
+    // explicitly (it is idempotent, so a release the supervisor already ran is
+    // harmless).
     supervisor?.setWanted(false);
     final mechanisms = _mechanisms;
     _mechanisms = null;

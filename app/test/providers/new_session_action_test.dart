@@ -229,7 +229,8 @@ void main() {
 
   group('throwProjectStartFailure', () {
     test(
-      'SESSION_LIMIT_EXCEEDED → SessionLimitExceededException with message',
+      'legacy relay SESSION_LIMIT_EXCEEDED → SessionLimitExceededException, '
+      'surfaced with the legacy-relay copy',
       () {
         expect(
           () => throwProjectStartFailure(
@@ -241,11 +242,15 @@ void main() {
             ),
           ),
           throwsA(
-            isA<SessionLimitExceededException>().having(
-              (e) => e.message,
-              'message',
-              contains('limit reached'),
-            ),
+            isA<SessionLimitExceededException>()
+                .having((e) => e.message, 'message', contains('limit reached'))
+                // The relay's own string names a cap that no longer exists, so
+                // the UI must never render it verbatim.
+                .having(
+                  (e) => e.userMessage,
+                  'userMessage',
+                  contains('older relay'),
+                ),
           ),
         );
       },

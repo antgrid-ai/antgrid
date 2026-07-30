@@ -95,12 +95,19 @@ class DevicesApi extends CookieApiClient implements DevicesApiCreator {
       throw ProvisioningException('AUTH', 'Session expired');
     }
     if (res.statusCode == 402) {
+      if (_isWorkerCapBody(res.body)) {
+        // The paid axis: how many machines the account may run an agent on.
+        // Registering a `kind:"agent"` record consumes a worker slot, so this
+        // rejection CAN be answered by upgrading — the opposite remedy to
+        // DEVICE_CAP below, which is why the two codes must stay distinct.
+        final cap = _deviceCapFromBody(res.body, kind: DeviceCapKind.worker);
+        throw ProvisioningException('WORKER_CAP', cap.message, cap: cap);
+      }
       // Two-axis pricing: device registration is gated only by the fair-use
       // device cap (`deviceLimit`, identical across ALL tiers incl. free) — NOT
       // a paid/subscription gate. The remedy is to remove a device, never to
-      // upgrade; the paid axis (concurrent remote agents, `sessionLimit`) is
-      // enforced relay-side, never here. See web/src/routes/devices.ts
-      // (DEVICE_CAP body) and docs/plans/pricing-active-sessions.md.
+      // upgrade. See web/src/routes/devices.ts (DEVICE_CAP body) and
+      // docs/plans/2026-07-30-worker-limit-pricing.md.
       final cap = _deviceCapFromBody(res.body);
       throw ProvisioningException('DEVICE_CAP', cap.message, cap: cap);
     }
@@ -134,20 +141,28 @@ class CreatedDevice {
 
 class ProvisioningException implements Exception {
   ProvisioningException(this.code, this.message, {this.cap});
-  final String code; // 'AUTH' | 'DEVICE_CAP' | 'NETWORK' | 'UNKNOWN'
+
+  /// 'AUTH' | 'DEVICE_CAP' | 'WORKER_CAP' | 'NETWORK' | 'UNKNOWN'
+  final String code;
   final String message;
 
-  /// Populated only when [code] is `'DEVICE_CAP'`: the limit and the devices
-  /// already registered, so the UI can offer to revoke one. Null otherwise.
+  /// Populated only for the two cap codes: the limit and the devices already
+  /// registered, so the UI can offer to revoke one. Null otherwise.
   final DeviceCapInfo? cap;
 
   @override
   String toString() => 'ProvisioningException($code): $message';
 }
 
+/// Which of the two independent caps a 402 rejected against. They share a
+/// payload shape and a remediation dialog but not a remedy: [device] is the
+/// flat fair-use ceiling (free a slot), [worker] is the paid axis (free a slot
+/// OR upgrade).
+enum DeviceCapKind { device, worker }
+
 /// One device already registered against the account, as carried in a 402
-/// `DEVICE_CAP` response body. Lighter than [DeviceSummary] — the cap payload
-/// only includes the fields needed to identify and revoke a device.
+/// cap response body. Lighter than [DeviceSummary] — the cap payload only
+/// includes the fields needed to identify and revoke a device.
 class CappedDevice {
   CappedDevice({
     required this.id,
@@ -159,20 +174,42 @@ class CappedDevice {
   final String displayName;
 }
 
-/// Structured detail of a fair-use device-cap rejection (HTTP 402 `DEVICE_CAP`).
+/// Structured detail of a cap rejection (HTTP 402 `DEVICE_CAP`/`WORKER_CAP`).
 class DeviceCapInfo {
-  DeviceCapInfo({required this.message, this.limit, this.devices = const []});
+  DeviceCapInfo({
+    required this.message,
+    this.kind = DeviceCapKind.device,
+    this.limit,
+    this.devices = const [],
+  });
 
-  /// Human, actionable message — always about removing a device, never upgrading.
+  /// Human, actionable message. Always leads with freeing a slot — for
+  /// [DeviceCapKind.device] that is the only remedy there will ever be.
   final String message;
+  final DeviceCapKind kind;
   final int? limit;
   final List<CappedDevice> devices;
 }
 
-/// Parse the 402 `DEVICE_CAP` body into [DeviceCapInfo]. Defensive: a body that
-/// doesn't parse (or lacks the fields) still yields a usable generic cap notice
-/// rather than masking the 402 as an opaque failure.
-DeviceCapInfo _deviceCapFromBody(String body) {
+/// True when a 402 body names the worker cap rather than the device cap. A body
+/// that doesn't parse falls back to the device cap: it is the older, stricter
+/// copy, so mislabelling never promises an upgrade path that isn't there.
+bool _isWorkerCapBody(String body) {
+  try {
+    final decoded = jsonDecode(body);
+    return decoded is Map<String, dynamic> && decoded['error'] == 'WORKER_CAP';
+  } catch (_) {
+    return false;
+  }
+}
+
+/// Parse a 402 cap body into [DeviceCapInfo]. Defensive: a body that doesn't
+/// parse (or lacks the fields) still yields a usable generic cap notice rather
+/// than masking the 402 as an opaque failure.
+DeviceCapInfo _deviceCapFromBody(
+  String body, {
+  DeviceCapKind kind = DeviceCapKind.device,
+}) {
   int? limit;
   var devices = const <CappedDevice>[];
   try {
@@ -204,8 +241,20 @@ DeviceCapInfo _deviceCapFromBody(String body) {
   } catch (_) {
     // Fall through to the generic message below.
   }
-  final message = limit == null
-      ? 'Device limit reached. Remove a device to register this one.'
-      : 'Device limit reached ($limit/$limit). Remove a device to register this one.';
-  return DeviceCapInfo(message: message, limit: limit, devices: devices);
+  final message = switch ((kind, limit)) {
+    (DeviceCapKind.worker, null) =>
+      'You are using all of your workers — sign one out to add this machine.',
+    (DeviceCapKind.worker, final l) =>
+      'You are using all $l workers — sign one out to add this machine.',
+    (DeviceCapKind.device, null) =>
+      'Device limit reached. Remove a device to register this one.',
+    (DeviceCapKind.device, final l) =>
+      'Device limit reached ($l/$l). Remove a device to register this one.',
+  };
+  return DeviceCapInfo(
+    message: message,
+    kind: kind,
+    limit: limit,
+    devices: devices,
+  );
 }

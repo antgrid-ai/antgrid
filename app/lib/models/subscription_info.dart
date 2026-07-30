@@ -77,7 +77,7 @@ class PricingPlan {
   PricingPlan({
     required this.slug,
     required this.label,
-    required this.sessionLimit,
+    required this.workerLimit,
     this.priceDisplay,
     required this.recurring,
     required this.trial,
@@ -85,16 +85,22 @@ class PricingPlan {
 
   final String slug;
   final String label;
-  final int sessionLimit;
+
+  /// How many machines the plan may run an agent on.
+  final int workerLimit;
   final String? priceDisplay;
   final bool recurring;
   final bool trial;
 
   factory PricingPlan.fromJson(Map<String, dynamic> json) {
+    // `session_limit` is the retired name for this field. The server mirrors
+    // both for one release so an app built either side of the rename parses;
+    // drop the fallback once no deployed relay/web emits the old key.
+    final limit = json['worker_limit'] ?? json['session_limit'];
     return PricingPlan(
       slug: json['slug'] as String,
       label: json['label'] as String,
-      sessionLimit: json['session_limit'] as int,
+      workerLimit: (limit as num).toInt(),
       priceDisplay: json['price_display'] as String?,
       recurring: json['recurring'] as bool? ?? false,
       trial: json['trial'] as bool? ?? false,

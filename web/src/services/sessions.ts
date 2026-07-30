@@ -6,7 +6,8 @@ export type UserSession = {
   deviceUuid: string;
   displayName: string;
   connectedAt: number;
-  /** Open project streams on this machine — the paid axis, summed per user. */
+  /** Open project streams on this machine. Liveness only — nothing is billed
+   *  against it; the paid axis is the worker (agent machine) count. */
   openStreamCount: number;
 };
 
@@ -48,9 +49,8 @@ export async function listUserSessions(
 }
 
 /**
- * The number the relay enforces `sessionLimit` against: streams summed across
- * every live agent connection, NOT the machine count. An idle agent holding no
- * project stream costs nothing, so it must not consume the displayed quota.
+ * Streams summed across every live agent connection, NOT the machine count.
+ * Display-only: no cap is enforced against it anywhere.
  */
 export function runningSessionCount(sessions: UserSession[]): number {
   return sessions.reduce((n, s) => n + s.openStreamCount, 0);

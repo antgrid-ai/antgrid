@@ -40,11 +40,11 @@ model Plan {
   slug         String  @unique
   label        String
   tier         String
-  // Concurrent remote-running-agent cap (the paid axis). Local agents are free
-  // and uncounted; this gates simultaneous relay-promoted agents per account.
-  sessionLimit Int     @map("session_limit")
+  // How many machines the account may run an agent on (the paid axis). One
+  // active `kind:"agent"` device row is one worker; app rows are never counted.
+  workerLimit  Int     @map("worker_limit")
   // Fair-use cap on how many devices an account may register. Not the paid
-  // axis — pricing is `sessionLimit`. Kept generous (10) for all tiers.
+  // axis — pricing is `workerLimit`. Kept generous (10) for all tiers.
   deviceLimit  Int     @map("device_limit")
   recurring    Boolean
   trial        Boolean
@@ -66,7 +66,7 @@ model Subscription {
   tier                   String
   status                 String
   // Snapshotted from the plan at apply time (see applyPlanToAccountSubscription).
-  sessionLimit           Int       @map("session_limit")
+  workerLimit            Int       @map("worker_limit")
   deviceLimit            Int       @map("device_limit")
   // Temporary pro-tier grant (no real purchase behind it) while in-app
   // purchases aren't live yet. Always false for real purchases — see

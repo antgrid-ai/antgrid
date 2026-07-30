@@ -126,7 +126,7 @@ void main() {
       // Switching accounts without a hard sign-out leaves the previous user's
       // controller in the slot. Its clientId/clientSecret mint OAuth tokens
       // under THAT account, so reusing it would make the relay stamp this
-      // socket's userId — and therefore sessionLimit and peer visibility —
+      // socket's userId — and therefore entitlement and peer visibility —
       // with the wrong account.
       final stale = DeviceRecord(
         userId: 'u-previous',
