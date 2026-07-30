@@ -18,8 +18,10 @@
 //
 // Known Windows test noise (NOT failures): fs.watch EPERM/EBUSY on teardown.
 import { test, expect } from "bun:test";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { setMobileAccess, setupTestEnv } from "../helpers/harness";
+import { generateEphemeralKeypair } from "../../bridge/src/key-exchange";
 import type { RelayClient } from "../helpers/relay-client";
 import { createTestProject } from "../helpers/fixtures";
 import { computeProjectId } from "../../bridge/src/project-id";
@@ -73,6 +75,86 @@ async function driveTerminal(app: RelayClient, streamId: string, terminalId: str
   await collect;
   return outputs.join("");
 }
+
+/** Fire a host-side notification through the per-core api-server's loopback
+ *  `/notify`. Host-side on purpose: the phone-driven path is closed while the
+ *  switch is off, so a phone-triggered notification could not tell "the gate
+ *  refused the push" from "the gate refused the trigger". The bus publish
+ *  happens before the HTTP response, so `ok` means the dispatcher ran. */
+async function notify(abDir: string, notificationType: string, message: string): Promise<void> {
+  const apiPort = Number(readFileSync(join(abDir, "api.port"), "utf8").trim());
+  const res = await fetch(`http://127.0.0.1:${apiPort}/notify`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ type: notificationType, message }),
+  });
+  if (!res.ok) throw new Error(`/notify ${notificationType} failed: ${res.status}`);
+}
+
+async function waitForPushCount(relay: { pushDeliveries(): unknown[] }, want: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (relay.pushDeliveries().length >= want) return;
+    await Bun.sleep(50);
+  }
+}
+
+// Push is the one path that reaches the phone without the phone asking, so the
+// machine switch has to gate it too — a stale token on a machine you've marked
+// unreachable must go quiet. The bridge unit test
+// (bridge/tests/push/push-restart-targeting.test.ts) stubs `resolveTargets`;
+// this proves the switch is actually wired to the real dispatcher, through a
+// real relay, end to end.
+test("push rides the machine switch: delivered while on, silent while off, and alive again after", async () => {
+  const env = await setupTestEnv({ fixtureName: "basic" });
+
+  try {
+    const streamId = await firstProjectStream(env.app, env.projectId, 10_000);
+
+    // A real X25519 key: `sealPush` derives against it, so a junk pubkey would
+    // fail inside the dispatcher and read as a (wrong) passing negative.
+    const pushKeys = generateEphemeralKeypair();
+    const pushToken = "EVAL_PUSH_TOKEN";
+    env.app.sendOnStream(
+      streamId,
+      createMessage("push:register", {
+        pushToken,
+        provider: "fcm",
+        pushPubkey: pushKeys.publicKey.toString("base64"),
+      } as never),
+    );
+    // Push is the FALLBACK path — it only fires when the phone can't receive
+    // in-band. The app is connected here, so background it explicitly.
+    env.app.sendOnStream(streamId, createMessage("client:focus-state", { paused: true } as never));
+    await Bun.sleep(500); // both are fire-and-forget; let the core apply them
+
+    // === Switch ON: the push actually lands ===
+    // This half is the control. Without it a broken push pipeline would make
+    // the negative below pass for the wrong reason.
+    await notify(env.abDir, "task_complete", "on-switch");
+    await waitForPushCount(env.relay, 1, 10_000);
+    const afterOn = env.relay.pushDeliveries();
+    expect(afterOn).toHaveLength(1);
+    expect(afterOn[0].pushToken).toBe(pushToken);
+
+    // === Switch OFF: the same registered token gets nothing ===
+    // A DIFFERENT notificationType each time: reduceWorkStatus folds a repeat of
+    // the previous type into "redundant" and the dispatcher skips it, which
+    // would make this negative vacuous.
+    await setMobileAccess(env.abDir, false);
+    await notify(env.abDir, "permission_request", "off-switch");
+    await Bun.sleep(2_500); // a push, if the gate leaked, would be out well inside this
+    expect(env.relay.pushDeliveries()).toHaveLength(1);
+
+    // === Switch back ON: it was the switch, not a dead pipeline ===
+    await setMobileAccess(env.abDir, true);
+    await notify(env.abDir, "error", "on-again");
+    await waitForPushCount(env.relay, 2, 10_000);
+    expect(env.relay.pushDeliveries()).toHaveLength(2);
+  } finally {
+    await env.teardown();
+  }
+}, 120_000);
 
 test("machine switch on: the whole catalog is drivable; switch off: the catalog empties and every start is refused", async () => {
   const env = await setupTestEnv({ fixtureName: "basic" });

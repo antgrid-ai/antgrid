@@ -96,10 +96,22 @@ export interface AgentHandle {
   pairedPhones(): PairedPhone[];
 }
 
+/** One sealed notification the relay forwarded to FCM/APNs. The relay is
+ *  zero-knowledge, so the ciphertext is all an eval can see — presence and
+ *  target token are the assertable facts. */
+export interface PushDelivery {
+  pushToken: string;
+  epk: string;
+  box: string;
+}
+
 export interface RelayHandle {
   port: number;
   url: string;
   httpUrl: string;
+  /** Sealed pushes the relay forwarded, oldest first. Snapshot — call it again
+   *  for later deliveries. */
+  pushDeliveries(): PushDelivery[];
   /** Live relay connection count (past hello). X3's drill-in test asserts zero
    *  additional connections; the multi-stream test asserts one per side. */
   connectionCount(): number;
@@ -365,14 +377,32 @@ export async function startRelay(opts: {
     relayInternalSecret: RELAY_INTERNAL_SECRET,
     licenseCacheMaxEntries: 1000,
   };
+  // Recording stand-in for FCM/APNs. Installed unconditionally: without a
+  // sender the relay answers `push:deliver` with `unconfigured` and drops it, so
+  // there is no way to tell "the bridge never sent one" from "the relay had
+  // nowhere to put it" — which is exactly the distinction a push gate test rests
+  // on. Inert for every eval that never registers a push token.
+  const pushDeliveries: PushDelivery[] = [];
+  const recordingSender = {
+    async send(pushToken: string, data: Record<string, string>): Promise<"ok"> {
+      pushDeliveries.push({ pushToken, epk: data.epk ?? "", box: data.box ?? "" });
+      return "ok";
+    },
+  };
+
   const server = startServer(cfg, {
     licenseGate: fakeLicenseGate(),
+    fcmSender: recordingSender,
+    apnsSender: recordingSender,
   });
 
   return {
     port: opts.port,
     url: `ws://localhost:${opts.port}/ws`,
     httpUrl: `http://localhost:${opts.port}`,
+    pushDeliveries() {
+      return [...pushDeliveries];
+    },
     connectionCount() {
       return server.connections.getConnectionCount();
     },
