@@ -382,7 +382,7 @@ test("connections: returns identity-free liveness rows for live devices", async 
   const body = (await res.json()) as { connections: Array<Record<string, unknown>> };
   const row = body.connections.find((c) => c.deviceId === "conn-1");
   expect(row).toBeDefined();
-  expect(row).toMatchObject({ deviceId: "conn-1", deviceType: "agent" });
+  expect(row).toMatchObject({ deviceId: "conn-1", deviceType: "agent", openStreamCount: 0 });
   for (const leak of ["ip", "publicKey", "jti", "userId", "tier"]) {
     expect(row).not.toHaveProperty(leak);
   }
@@ -441,6 +441,40 @@ test("connections: userId scopes to that user's connections (identity-free)", as
     expect(row).not.toHaveProperty(leak);
   }
 
+  r.stop();
+});
+
+// Web reads its "N / sessionLimit running" straight off this projection, so the
+// count here must be the same one `countOpenStreamsForUser` admits against.
+test("connections: openStreamCount tracks live streams without exposing stream ids", async () => {
+  const { signer, jwks } = await makeSigner();
+  const cache = new LicenseCache({ maxEntries: 100 });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
+  const r = startWith({ licenseGate: gate, licenseCache: cache });
+
+  const { ws } = await helloAgent({ relay: r, signer, deviceId: "streamer", uid: "user-S", azp: "client-S" });
+
+  for (const streamId of ["stream-alpha", "stream-beta"]) {
+    const opened = waitForType(ws, "stream-opened");
+    ws.send(JSON.stringify({ type: "stream-open", streamId }));
+    expect(await opened).toMatchObject({ streamId });
+  }
+
+  const res = await postInternal(r.server.port!, "/internal/connections", { issuedAt: Date.now(), userId: "user-S" });
+  const raw = await res.text();
+  const body = JSON.parse(raw) as { connections: Array<Record<string, unknown>> };
+  expect(body.connections.find((c) => c.deviceId === "streamer")).toMatchObject({ openStreamCount: 2 });
+  expect(raw).not.toContain("stream-alpha");
+
+  const closed = waitForType(ws, "stream-closed");
+  ws.send(JSON.stringify({ type: "stream-close", streamId: "stream-alpha" }));
+  await closed;
+
+  const after = await postInternal(r.server.port!, "/internal/connections", { issuedAt: Date.now(), userId: "user-S" });
+  const afterBody = (await after.json()) as { connections: Array<Record<string, unknown>> };
+  expect(afterBody.connections.find((c) => c.deviceId === "streamer")).toMatchObject({ openStreamCount: 1 });
+
+  ws.close();
   r.stop();
 });
 

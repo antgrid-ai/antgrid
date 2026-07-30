@@ -1,4 +1,4 @@
-import type { UserSession } from "../services/sessions.js";
+import { runningSessionCount, type UserSession } from "../services/sessions.js";
 import { fmtAge } from "./format.js";
 import { FREE_TIER } from "../billing/plans.js";
 
@@ -37,7 +37,7 @@ export function ActiveSessionsCard(props: {
         <h2 class="font-mono text-lg font-semibold">Active sessions</h2>
         {sessions ? (
           <span class="font-mono text-xs text-base-content/50">
-            {sessions.length} / {sessionLimit} running
+            {runningSessionCount(sessions)} / {sessionLimit} running
           </span>
         ) : null}
       </div>
@@ -63,15 +63,19 @@ export function ActiveSessionsCard(props: {
             <thead>
               <tr class="text-xs uppercase tracking-wide text-base-content/60">
                 <th>Device</th>
-                <th>Project</th>
+                <th>Sessions</th>
                 <th>Connected</th>
               </tr>
             </thead>
             <tbody>
+              {/* One row per machine, not per project: the relay multiplexes
+                  projects as sealed streams and cannot name them. */}
               {sessions.map((s) => (
                 <tr class="font-mono text-sm">
                   <td>{s.displayName}</td>
-                  <td>{s.projectId}</td>
+                  <td class={s.openStreamCount === 0 ? "text-base-content/60" : ""}>
+                    {s.openStreamCount === 0 ? "idle" : s.openStreamCount}
+                  </td>
                   <td class="text-base-content/60">{fmtAge(s.connectedAt, now)} ago</td>
                 </tr>
               ))}

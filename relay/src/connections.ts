@@ -51,12 +51,22 @@ export interface Connection {
   openStreams: Set<string>;
 }
 
-/** Identity-free row for the internal connections view (web enriches the rest). */
+/**
+ * Identity-free row for the internal connections view (web enriches the rest).
+ * Keep in lockstep with web's `src/relay/push.ts` ConnectionSummary.
+ *
+ * `openStreamCount` is the same quantity `countOpenStreamsForUser` sums for
+ * sessionLimit admission — it is what makes a connection billable, since an
+ * agent registers under a bare `deviceUuid` and multiplexes every project as a
+ * sealed stream. The COUNT is all that crosses: stream ids are opaque and the
+ * relay cannot see the projectIds behind them.
+ */
 export interface ConnectionSummary {
   deviceId: string;
   deviceType: "agent" | "app";
   connectedAt: number;
   lastSeen: number;
+  openStreamCount: number;
 }
 
 /**
@@ -187,6 +197,7 @@ export class Connections {
       deviceType: c.deviceType,
       connectedAt: c.connectedAt,
       lastSeen: c.lastSeen,
+      openStreamCount: c.openStreams.size,
     };
   }
 

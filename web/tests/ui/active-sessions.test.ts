@@ -4,7 +4,7 @@ import type { UserSession } from "../../src/services/sessions.js";
 
 const NOW = 1_000_000;
 function session(p: Partial<UserSession> = {}): UserSession {
-  return { deviceUuid: "uuid-a", projectId: "proj1", displayName: "My Mac", connectedAt: NOW - 5000, ...p };
+  return { deviceUuid: "uuid-a", displayName: "My Mac", connectedAt: NOW - 5000, openStreamCount: 1, ...p };
 }
 
 describe("ActiveSessionsCard", () => {
@@ -15,18 +15,39 @@ describe("ActiveSessionsCard", () => {
     expect(html).not.toContain("<table");
   });
 
-  test("pro tier with sessions renders a row per session", () => {
+  test("pro tier with sessions renders a row per machine", () => {
     const html = ActiveSessionsCard({
       tier: "pro",
-      sessions: [session(), session({ projectId: "proj2", displayName: "Work PC" })],
+      sessions: [session(), session({ deviceUuid: "uuid-b", displayName: "Work PC" })],
       sessionLimit: 10,
       now: NOW,
     }).toString();
     expect(html).toContain("My Mac");
-    expect(html).toContain("proj1");
     expect(html).toContain("Work PC");
-    expect(html).toContain("proj2");
-    expect(html).toContain("2 / 10 running");
+  });
+
+  // The header must track the relay's denominator (streams), not the row count,
+  // or a two-machine user running four projects reads as "2 / 10".
+  test("the running count sums open streams, not machines", () => {
+    const html = ActiveSessionsCard({
+      tier: "pro",
+      sessions: [session({ openStreamCount: 3 }), session({ deviceUuid: "uuid-b", openStreamCount: 1 })],
+      sessionLimit: 10,
+      now: NOW,
+    }).toString();
+    expect(html).toContain("4 / 10 running");
+  });
+
+  test("a connected machine with no open stream shows as idle and costs no quota", () => {
+    const html = ActiveSessionsCard({
+      tier: "pro",
+      sessions: [session({ openStreamCount: 0 })],
+      sessionLimit: 10,
+      now: NOW,
+    }).toString();
+    expect(html).toContain("My Mac");
+    expect(html).toContain("idle");
+    expect(html).toContain("0 / 10 running");
   });
 
   test("pro tier with zero sessions renders the empty state", () => {
