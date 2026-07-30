@@ -29,12 +29,20 @@ export function loadMobileAccessPolicy(abDir: string): MobileAccessPolicyStore {
     if (process.platform !== "win32") chmodSync(path, 0o600);
   }
 
-  const current = readCurrent(path);
-  let enabled = current ?? migrateFromV1(path, join(dir, "paired-phones.json"));
+  const stored = readStored(path);
+  let enabled = stored.kind === "v2" ? stored.enabled : migrateFromV1(path, join(dir, "paired-phones.json"));
   // Write v2 even when the migration landed on `false`: without a v2 file on
   // disk the migration re-runs every load, and a later `setEnabled(false)` would
   // be undone on the next reboot by grants still sitting in paired-phones.json.
-  if (current === null) flush();
+  //
+  // But NEVER write over bytes we could not parse. `writeFileSync` truncates
+  // before it writes, so a load racing a `setEnabled` flush (the host toggling
+  // while `antgrid phones remove` runs its migration) can read a torn file — and
+  // once the v1 grants are shed, re-deriving from them yields `false`. Flushing
+  // that would silently revoke a machine the user had enabled, with the damage
+  // only surfacing at the next restart. Unreadable is fail-closed in memory and
+  // untouched on disk, so a clean read later still recovers the real value.
+  if (stored.kind === "migrate") flush();
 
   return {
     isEnabled: () => enabled,
@@ -47,17 +55,33 @@ export function loadMobileAccessPolicy(abDir: string): MobileAccessPolicyStore {
   };
 }
 
-/** The current (v2) value, or null when the file is absent, unreadable, or
- *  still on v1 — all of which mean "migrate". */
-function readCurrent(path: string): boolean | null {
-  if (!existsSync(path)) return null;
+/** What the backing file holds. `migrate` and `unreadable` both derive the value
+ *  from the v1 stores; they differ only in whether that derivation may be
+ *  written back (see the flush in {@link loadMobileAccessPolicy}). */
+type StoredPolicy =
+  | { kind: "v2"; enabled: boolean }
+  /** Absent, or well-formed but on an older version — a real state to upgrade. */
+  | { kind: "migrate" }
+  /** Bytes we could not make sense of; the real value is unknown, not absent. */
+  | { kind: "unreadable" };
+
+function readStored(path: string): StoredPolicy {
+  if (!existsSync(path)) return { kind: "migrate" };
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<FileShape>;
-    if (parsed.version !== 2 || typeof parsed.enabled !== "boolean") return null;
-    return parsed.enabled;
+    parsed = JSON.parse(readFileSync(path, "utf8"));
   } catch {
-    return null;
+    return { kind: "unreadable" };
   }
+  if (typeof parsed !== "object" || parsed === null) return { kind: "unreadable" };
+  const { version, enabled } = parsed as Partial<FileShape>;
+  if (version === 2) {
+    // A v2 file whose `enabled` isn't a boolean is corrupt, not older.
+    return typeof enabled === "boolean" ? { kind: "v2", enabled } : { kind: "unreadable" };
+  }
+  // A recognisable older version upgrades; an unknown one (a newer build wrote
+  // it, then the user rolled back) must not be overwritten with a guess.
+  return version === 1 ? { kind: "migrate" } : { kind: "unreadable" };
 }
 
 /**

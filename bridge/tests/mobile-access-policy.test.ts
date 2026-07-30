@@ -136,6 +136,22 @@ test("a malformed policy file re-migrates rather than throwing", () => {
   expect(loadMobileAccessPolicy(dir).isEnabled()).toBe(true);
 });
 
+test("an unreadable policy file is never written over with the re-derived value", () => {
+  // The silent-revocation path: `writeFileSync` truncates before it writes, so a
+  // load racing a `setEnabled` flush can read a torn file. Post-migration the v1
+  // grants are gone, so re-deriving yields `false` — flushing that would revoke
+  // an enabled machine for good, surfacing only at the next restart.
+  seedAgents();
+  writeFileSync(policyPath(), '{"version": 2, "ena');
+
+  expect(loadMobileAccessPolicy(dir).isEnabled()).toBe(false); // fail closed in memory
+  expect(readFileSync(policyPath(), "utf8")).toBe('{"version": 2, "ena'); // untouched on disk
+
+  // A clean read afterwards still recovers what the user actually chose.
+  writeFileSync(policyPath(), JSON.stringify({ version: 2, enabled: true }));
+  expect(loadMobileAccessPolicy(dir).isEnabled()).toBe(true);
+});
+
 test("the file is created under agents/ on first load", () => {
   loadMobileAccessPolicy(dir);
   expect(existsSync(policyPath())).toBe(true);
