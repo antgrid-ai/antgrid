@@ -57,6 +57,43 @@ void main() {
       await session.close();
     });
 
+    test('a live preview:url merges like a one-entry snapshot', () async {
+      // preview:url used to parse to null and be dropped on the floor, so the
+      // live push was dead weight and only the welcome-replayed snapshot fed
+      // preview entries in. Both now land through the same merge, so a re-push
+      // (the bridge re-sends when a port's scheme is detected after the first
+      // entry went out) updates in place instead of duplicating the port.
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = session.previewService;
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('preview:url', {
+        'projectId': 'p',
+        'port': 3000,
+        'url': 'http://relay.test/preview/3000/',
+        'label': 'web',
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.ports.single.label, 'web');
+      expect(svc.currentState.ports.single.scheme, isNull);
+
+      t.emit('preview:url', {
+        'projectId': 'p',
+        'port': 3000,
+        'url': 'http://relay.test/preview/3000/',
+        'label': 'web',
+        'scheme': 'https',
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.ports, hasLength(1));
+      expect(svc.currentState.ports.single.scheme, 'https');
+
+      await sub.cancel();
+      await session.close();
+    });
+
     test('ports:update (status) populates state.ports', () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);

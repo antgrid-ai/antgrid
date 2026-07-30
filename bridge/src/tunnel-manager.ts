@@ -48,33 +48,40 @@ export class TunnelManager {
     // and the message has no consumer in that path.
     if (!this.relayHost) return;
     for (const p of ports) {
-      // A port can gain a scheme after its entry was first sent (URL sighting
-      // lands later than the line-based detection) — keep the snapshot fresh.
       const existing = this.sentUrlDetails.get(p.port);
-      if (existing && p.scheme && existing.scheme !== p.scheme) {
-        this.sentUrlDetails.set(p.port, { ...existing, scheme: p.scheme });
-      }
-      if (!this.sentUrlDetails.has(p.port) && this.previewPorts.has(p.port)) {
-        const url = `http://${this.relayHost}/preview/${p.port}/`;
-        const label = this.portLabels.get(p.port) ?? p.label;
-        const entry: PreviewUrlEntry = {
-          port: p.port,
-          url,
-          ...(label ? { label } : {}),
-          ...(p.scheme ? { scheme: p.scheme } : {}),
-        };
-        this.sentUrlDetails.set(p.port, entry);
-        if (this.connState.suppressed) continue;
-        this.sendEncrypted(
-          createMessage("preview:url", {
-            projectId: this.projectId,
-            port: p.port,
-            url,
-            ...(label ? { label } : {}),
-          }),
-        );
-        log.info("Sent preview:url for port %d → %s", p.port, url);
-      }
+      if (!existing && !this.previewPorts.has(p.port)) continue;
+
+      const label = this.portLabels.get(p.port) ?? p.label ?? existing?.label;
+      // Absent scheme means "no URL sighting yet", not http — never downgrade
+      // a scheme already known for this port.
+      const scheme = p.scheme ?? existing?.scheme;
+      const entry: PreviewUrlEntry = {
+        port: p.port,
+        url: `http://${this.relayHost}/preview/${p.port}/`,
+        ...(label ? { label } : {}),
+        ...(scheme ? { scheme } : {}),
+      };
+      // A port's scheme (or label) can change after its entry was first sent —
+      // the URL sighting lands later than the line-based detection — so re-push
+      // rather than only re-caching, keeping the live push and the
+      // welcome-replayed snapshot describing the same entry.
+      if (existing && existing.label === entry.label && existing.scheme === entry.scheme) continue;
+
+      // Recorded even while suppressed: getPreviewSnapshot() is what the
+      // welcome replay serves, so a port detected offline must still show up
+      // when the phone reconnects.
+      this.sentUrlDetails.set(p.port, entry);
+      if (this.connState.suppressed) continue;
+      this.sendEncrypted(
+        createMessage("preview:url", {
+          projectId: this.projectId,
+          port: entry.port,
+          url: entry.url,
+          ...(entry.label ? { label: entry.label } : {}),
+          ...(entry.scheme ? { scheme: entry.scheme } : {}),
+        }),
+      );
+      log.info("Sent preview:url for port %d → %s", entry.port, entry.url);
     }
   }
 

@@ -292,6 +292,10 @@ const PreviewUrlMessage = BaseMessage.extend({
   port: z.number(),
   url: z.string(),
   label: z.string().optional(),
+  // Keep in lockstep with PreviewUrlEntrySchema.scheme: the live push and the
+  // welcome-replayed snapshot carry the same entry, so a consumer must not need
+  // to know which one it got (absent = no URL sighting yet, treat as http).
+  scheme: z.enum(["http", "https"]).optional(),
 });
 
 const AgentDisconnectingMessage = BaseMessage.extend({

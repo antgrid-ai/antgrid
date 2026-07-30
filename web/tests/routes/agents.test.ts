@@ -313,6 +313,47 @@ describe("POST /account/devices/me/heartbeat", () => {
     expect(after?.machineName).toBe("Mac Studio");
   });
 
+  test("mobileAccessEnabled:false and relayUrl:null turn remote access back off", async () => {
+    // The three optional fields are NOT applied uniformly, and the asymmetry is
+    // deliberate: `false`/`null` are how the bridge reports remote access being
+    // switched off, so those two must reach the row. machineName has no "clear
+    // it" story (the bridge always sends one), so its `!= null` guard treats an
+    // explicit null as absent — asserted below so a uniformity refactor trips.
+    const { app } = buildTestApp(pg.db, pg.url);
+    const user = await createTestUser(pg.db, "judy2@example.com");
+    await createTestSubscription(pg.db, user.id, { tier: "pro" });
+    const { cookie } = await createTestSession(pg.db, user.id);
+
+    const { token, deviceUuid } = await provisionAndMintToken(app, cookie);
+    const beat = (extra: Record<string, unknown>) =>
+      app.request("/account/devices/me/heartbeat", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ deviceUuid, ...extra }),
+      });
+
+    await beat({
+      mobileAccessEnabled: true,
+      relayUrl: "wss://relay.antgrid.ai",
+      machineName: "Mac Studio",
+    });
+
+    const res = await beat({
+      mobileAccessEnabled: false,
+      relayUrl: null,
+      machineName: null,
+    });
+    expect(res.status).toBe(200);
+
+    const after = await pg.db.device.findUnique({
+      where: { userId_deviceId: { userId: user.id, deviceId: deviceUuid } },
+      select: { mobileAccessEnabled: true, relayUrl: true, machineName: true },
+    });
+    expect(after?.mobileAccessEnabled).toBe(false);
+    expect(after?.relayUrl).toBeNull();
+    expect(after?.machineName).toBe("Mac Studio");
+  });
+
   test("rejects a session cookie (heartbeat is Bearer-only)", async () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const user = await createTestUser(pg.db, "dave2@example.com");
