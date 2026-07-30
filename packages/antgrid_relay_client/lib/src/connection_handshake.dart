@@ -42,6 +42,12 @@ typedef HandshakeLogger =
 /// conversation for a full protocol revision while its scenarios stayed
 /// skipped.
 class ConnectionHandshake {
+  /// How long one attempt waits for the agent's sealed `established`. Sized for
+  /// a phone on a real network; a caller that drives its own retry loop wants a
+  /// shorter one, so that the loop's worst case stays inside its budget rather
+  /// than being set by this single figure.
+  static const Duration defaultAttemptTimeout = Duration(seconds: 10);
+
   ConnectionHandshake({
     required RelayService relay,
     required CryptoService crypto,
@@ -50,7 +56,7 @@ class ConnectionHandshake {
     required String agentEd25519PubB64,
     required List<int> phoneEd25519Seed,
     HandshakeLogger? logger,
-    Duration attemptTimeout = const Duration(seconds: 10),
+    Duration attemptTimeout = defaultAttemptTimeout,
     Duration appReadyRetransmit = const Duration(seconds: 2),
   }) : _relay = relay,
        _crypto = crypto,
@@ -336,13 +342,15 @@ class AppSessionHandshaker implements SessionHandshaker {
     required String agentEd25519PubB64,
     required List<int> phoneEd25519Seed,
     HandshakeLogger? logger,
+    Duration attemptTimeout = ConnectionHandshake.defaultAttemptTimeout,
   }) : _relay = relay,
        _crypto = crypto,
        _machineDeviceId = machineDeviceId,
        _phoneDeviceId = phoneDeviceId,
        _agentEd25519PubB64 = agentEd25519PubB64,
        _phoneEd25519Seed = phoneEd25519Seed,
-       _logger = logger;
+       _logger = logger,
+       _attemptTimeout = attemptTimeout;
 
   final RelayService _relay;
   final CryptoService _crypto;
@@ -351,6 +359,7 @@ class AppSessionHandshaker implements SessionHandshaker {
   final String _agentEd25519PubB64;
   final List<int> _phoneEd25519Seed;
   final HandshakeLogger? _logger;
+  final Duration _attemptTimeout;
 
   ConnectionHandshake? _current;
   bool _aborted = false;
@@ -366,6 +375,7 @@ class AppSessionHandshaker implements SessionHandshaker {
       agentEd25519PubB64: _agentEd25519PubB64,
       phoneEd25519Seed: _phoneEd25519Seed,
       logger: _logger,
+      attemptTimeout: _attemptTimeout,
     );
     try {
       return await hs.run();

@@ -156,6 +156,8 @@ class CommandHandler {
       return;
     }
 
+    final attemptTimeoutMs = cmd['attemptTimeoutMs'] as int?;
+
     await _teardownSession();
 
     // The eval-client plays the "phone" role: the agent resolves this same
@@ -176,6 +178,12 @@ class CommandHandler {
         'message': message,
         if (fields != null) 'fields': fields.map((k, v) => MapEntry(k, '$v')),
       }),
+      // The harness owns the retry loop, so it owns the per-attempt budget too:
+      // both numbers have to be read together to know the worst case, and
+      // splitting them across the two languages is how they drift apart.
+      attemptTimeout: attemptTimeoutMs == null
+          ? ConnectionHandshake.defaultAttemptTimeout
+          : Duration(milliseconds: attemptTimeoutMs),
     );
     final session = _session = MachineSession(
       relay: _relay!,

@@ -766,7 +766,35 @@ export async function setupDartTestEnv(opts: {
   // Pair-free: the phone addresses the agent by the coordinates it already
   // holds (bare machine deviceUuid + pinned Ed25519 pub), because nothing hands
   // it a peer id any more.
-  await app.performHandshake(auth.ed25519Pub, deviceUuid);
+  //
+  // Retried for the same two startup races `handshakeWithoutPairing` documents
+  // (cold TrustedPeersProvider cache, `peer-online` fan-out not yet delivered)
+  // — both self-heal in a few hundred ms. The Dart driver runs exactly ONE
+  // attempt per call and delegates give-up to the caller's supervisor, which
+  // the eval CLI has none of, so without this loop a slow agent start is a
+  // hard failure rather than a retryable one. Keep the budget in step with
+  // `handshakeWithoutPairing`: 6 * (2_000 + 300) = 13.8s worst case.
+  const HANDSHAKE_ATTEMPTS = 6;
+  const HANDSHAKE_ATTEMPT_TIMEOUT_MS = 2_000;
+  const HANDSHAKE_GAP_MS = 300;
+  let handshakeErr: unknown;
+  let established = false;
+  for (let i = 0; i < HANDSHAKE_ATTEMPTS; i++) {
+    try {
+      await app.performHandshake(auth.ed25519Pub, deviceUuid, HANDSHAKE_ATTEMPT_TIMEOUT_MS);
+      established = true;
+      break;
+    } catch (err) {
+      handshakeErr = err;
+      await Bun.sleep(HANDSHAKE_GAP_MS);
+    }
+  }
+  if (!established) {
+    throw new Error(
+      `pair-free Dart handshake with ${deviceUuid} failed after ` +
+        `${HANDSHAKE_ATTEMPTS} attempts: ${String(handshakeErr)}`,
+    );
+  }
 
   // Account-trusted phones start with an empty per-project allowlist. The row
   // itself is created by the client-hello above, so this MUST come after it.

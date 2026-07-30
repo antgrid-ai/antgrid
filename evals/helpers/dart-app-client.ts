@@ -264,15 +264,24 @@ export class DartAppClient {
    * `machineDeviceId` is the agent's bare deviceUuid: with pairing gone the
    * relay hands out no peer id, so the phone addresses coordinates it already
    * holds — exactly as the app dials from its account inventory.
+   *
+   * Runs ONE attempt: the Dart driver leaves give-up to the caller's
+   * supervisor, which no eval has, so callers racing agent startup must retry.
+   * `attemptTimeoutMs` caps that attempt (default 10s) — shorten it when
+   * looping so the loop's worst case stays bounded.
    */
-  async performHandshake(agentEd25519Pub: string, machineDeviceId: string): Promise<void> {
+  async performHandshake(
+    agentEd25519Pub: string,
+    machineDeviceId: string,
+    attemptTimeoutMs?: number,
+  ): Promise<void> {
     const done = this.waitForEvent(
       (e) =>
         e.event === "handshake-complete" ||
         (e.event === "error" && String(e.message).startsWith("Handshake failed")),
       30_000,
     );
-    this.sendCommand({ action: "handshake", agentEd25519Pub, machineDeviceId });
+    this.sendCommand({ action: "handshake", agentEd25519Pub, machineDeviceId, attemptTimeoutMs });
     const result = await done;
     if (result.event !== "handshake-complete") throw new Error(String(result.message));
   }
