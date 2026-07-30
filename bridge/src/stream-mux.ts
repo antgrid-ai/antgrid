@@ -38,6 +38,14 @@ export interface AttachStreamOpts {
   onPeerOffline?: () => void;
   /** A preview-channel tunnel-protocol message routed to this stream. */
   onTunnel?: (raw: unknown) => void;
+  /** Outbound authorization: consulted on EVERY frame this stream would send.
+   *  The mirror of the core's inbound gate — a stream carries project data off
+   *  the machine, so it rides the same machine mobile-access switch that every
+   *  inbound verb does, read live so a `mobile-access:set` takes effect without
+   *  tearing the stream down. Absent = always deliver (local/wizard callers that
+   *  answer to no switch); callers that HAVE a switch must fail closed in their
+   *  own provider, not here. */
+  mayDeliver?: () => boolean;
 }
 
 /** The slice of the machine {@link RelayClient} the mux drives. Kept minimal so
@@ -81,8 +89,17 @@ export class StreamMux {
   attach(bus: MessageBus, opts: AttachStreamOpts): StreamHandle {
     // 16 hex chars from 8 random bytes — opaque, allocated agent-side (§7.1).
     const streamId = randomBytes(8).toString("hex");
+    // Gate at the send, not at attach/detach: the stream stays open and the core
+    // keeps running, so flipping the switch back on resumes delivery with no
+    // re-attach and no lost core. Dropping mid-flight can strand an RPC the phone
+    // is awaiting — acceptable, since the same switch already refuses its next
+    // request; the app times that out and resyncs from a snapshot.
+    const mayDeliver = () => opts.mayDeliver?.() ?? true;
     const unsub = bus.subscribe({
-      deliver: (msg, channel) => this.transport.sendEnvelope(streamId, msg, channel),
+      deliver: (msg, channel) => {
+        if (!mayDeliver()) return;
+        this.transport.sendEnvelope(streamId, msg, channel);
+      },
     });
     this.streams.set(streamId, { bus, unsub, opts, settled: false });
     this.transport.openStream(streamId);
@@ -92,7 +109,12 @@ export class StreamMux {
     return {
       streamId,
       detach: () => this.detach(streamId),
-      sendTunnel: (data) => this.transport.sendEnvelope(streamId, data, "preview"),
+      // Gated too: tunnel frames bypass the bus (see setPlainHook), so the
+      // subscriber check above never sees them.
+      sendTunnel: (data) => {
+        if (!mayDeliver()) return;
+        this.transport.sendEnvelope(streamId, data, "preview");
+      },
     };
   }
 

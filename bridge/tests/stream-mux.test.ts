@@ -60,6 +60,39 @@ describe("StreamMux (unit, stub transport)", () => {
     expect(sent).toEqual([{ streamId: handle.streamId, msg, channel: "control" }]);
   });
 
+  test("mayDeliver gates outbound bus AND tunnel frames, and is re-read on every send", () => {
+    // The outbound half of the machine mobile-access gate. Read live, not
+    // captured: flipping the switch back on must resume the SAME stream — the
+    // whole point of gating at the send rather than detaching.
+    const { transport, sent } = makeTransport();
+    const mux = new StreamMux(transport);
+    const bus = new MessageBus();
+    let allowed = false;
+    const handle = mux.attach(bus, { mayDeliver: () => allowed });
+
+    bus.publish(createMessage("pong", {}), "control");
+    handle.sendTunnel({ t: "tunnel:http-response" });
+    expect(sent).toEqual([]);
+
+    allowed = true;
+    const msg = createMessage("pong", {});
+    bus.publish(msg, "control");
+    handle.sendTunnel({ t: "tunnel:http-response" });
+    expect(sent).toEqual([
+      { streamId: handle.streamId, msg, channel: "control" },
+      { streamId: handle.streamId, msg: { t: "tunnel:http-response" }, channel: "preview" },
+    ]);
+  });
+
+  test("a stream attached without mayDeliver delivers (local/wizard callers answer to no switch)", () => {
+    const { transport, sent } = makeTransport();
+    const mux = new StreamMux(transport);
+    const bus = new MessageBus();
+    mux.attach(bus, {});
+    bus.publish(createMessage("pong", {}), "control");
+    expect(sent).toHaveLength(1);
+  });
+
   test("dispatchInbound routes a parsed AbMessage to the attached stream's bus", () => {
     const { transport } = makeTransport();
     const mux = new StreamMux(transport);

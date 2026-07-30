@@ -309,6 +309,13 @@ export class ProjectCore {
     let peerConnected = false;
 
     const handle = remote.attachStream(bus, {
+      // Outbound half of the mobile-access gate. The inbound half (agent-core's
+      // currentPhoneAllowed) only stops the phone DRIVING this project; without
+      // this one a core the phone cold-started keeps streaming its terminal, file
+      // tree and git status to that phone after the machine switch is turned off,
+      // because a remote-mode core holds no PromotionHandle for demoteAllPromoted
+      // to tear down. Fail-closed, same as the inbound side.
+      mayDeliver: () => this.deps.mobileAccessEnabled?.() ?? false,
       onAdmitted: () => { this.relayRegistered = true; settleOnce({ ok: true }); },
       onRejected: (code, message) => { this.relayRegistered = false; settleOnce({ ok: false, code, message }); },
       // Suppress the heavy stream while the phone is gone; it rebuilds from

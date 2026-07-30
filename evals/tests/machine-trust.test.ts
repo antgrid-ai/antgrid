@@ -91,6 +91,29 @@ async function notify(abDir: string, notificationType: string, message: string):
   if (!res.ok) throw new Error(`/notify ${notificationType} failed: ${res.status}`);
 }
 
+/** Collect `terminal:output` for `terminalId` on `streamId` until `want` frames
+ *  arrive or the window closes. Returns everything seen — the caller decides
+ *  whether a non-empty result is the pass or the failure. */
+async function collectOutput(
+  app: RelayClient,
+  streamId: string,
+  terminalId: string,
+  windowMs: number,
+  want = Number.POSITIVE_INFINITY,
+): Promise<string[]> {
+  const out: string[] = [];
+  const deadline = Date.now() + windowMs;
+  while (Date.now() < deadline && out.length < want) {
+    try {
+      const m = await app.waitForStreamAbType(streamId, "terminal:output", deadline - Date.now());
+      if ((m as any).terminalId === terminalId) out.push((m as any).data);
+    } catch {
+      break; // window closed with nothing more to read
+    }
+  }
+  return out;
+}
+
 async function waitForPushCount(relay: { pushDeliveries(): unknown[] }, want: number, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -155,6 +178,68 @@ test("push rides the machine switch: delivered while on, silent while off, and a
     await env.teardown();
   }
 }, 120_000);
+
+// The switch has to gate the stream in BOTH directions. Dropping inbound only
+// stops the phone DRIVING a project; a core it cold-started keeps pushing
+// terminal output, the file tree and git status at it, because a remote-mode
+// core holds no PromotionHandle for `demoteAllPromoted` to tear down. The gate
+// is at the send (stream-mux `mayDeliver`), not at attach — hence the third leg,
+// which is the property a detach-based fix could not deliver.
+test("outbound rides the machine switch: a cold-started project goes quiet while off and resumes on the SAME stream", async () => {
+  const env = await setupTestEnv({ fixtureName: "basic" });
+  const projBdir = createTestProject("basic", { "__RELAY_URL__": env.relay.url.replace(/\/ws$/, "") });
+
+  try {
+    const cp = env.app;
+    const projB = computeProjectId(projBdir.dir);
+
+    // Production shape: projB is in the host catalog but NOT running, so the
+    // phone's project:start takes host-server's `!entry` branch and opens a
+    // mode:"remote" core. A promoted (desktop-opened) core would prove less —
+    // that one demoteAllPromoted does tear down.
+    expect((await loopbackControl(env.abDir, { id: "open-b", type: "project:open", projectId: projB, projectPath: projBdir.dir, mode: "remote" })).ok).toBe(true);
+    await resolveOnFreshAdvert(cp, projB);
+    expect((await loopbackControl(env.abDir, { id: "stop-b", type: "project:stop", projectId: projB })).ok).toBe(true);
+    const streamB = await cp.openProjectStream(projB, 12_000);
+
+    // A terminal that keeps emitting on its own, so "did anything arrive?" is a
+    // question about the STREAM, not about whether the phone could ask again.
+    const win = process.platform === "win32";
+    cp.sendOnStream(streamB, createMessage("terminal:start", {
+      terminalId: "ticker",
+      name: "ticker",
+      command: win ? "cmd.exe" : "bash",
+      // `ping -n 2` for the delay, not `timeout /t` — a Git Bash PATH shadows
+      // cmd's `timeout` with GNU coreutils, which rejects `/t`.
+      args: win
+        ? ["/c", "for /L %i in (1,1,600) do @(echo TICK_%i & ping -n 2 127.0.0.1 >nul)"]
+        : ["-c", "for i in $(seq 1 600); do echo TICK_$i; sleep 1; done"],
+    } as never));
+
+    // === Switch ON: output flows ===
+    // The control. Without it the silence below would pass for a terminal that
+    // never started.
+    const whileOn = await collectOutput(cp, streamB, "ticker", 15_000, 3);
+    expect(whileOn.join("")).toContain("TICK_");
+
+    // === Switch OFF: the same bound stream goes quiet ===
+    await setMobileAccess(env.abDir, false);
+    cp.drainQueued("terminal:output"); // in-flight frames sent before the flip
+    const whileOff = await collectOutput(cp, streamB, "ticker", 6_000);
+    expect(whileOff).toEqual([]);
+
+    // === Switch back ON: the SAME streamId resumes ===
+    // Gating at the send keeps the core and the stream alive, so nothing has to
+    // be re-opened and no work was destroyed. A fix that stopped the core or
+    // detached the stream would fail here.
+    await setMobileAccess(env.abDir, true);
+    const whileOnAgain = await collectOutput(cp, streamB, "ticker", 15_000, 2);
+    expect(whileOnAgain.join("")).toContain("TICK_");
+  } finally {
+    await env.teardown();
+    try { projBdir.cleanup(); } catch { /* Windows EBUSY teardown race */ }
+  }
+}, 180_000);
 
 test("machine switch on: the whole catalog is drivable; switch off: the catalog empties and every start is refused", async () => {
   const env = await setupTestEnv({ fixtureName: "basic" });
