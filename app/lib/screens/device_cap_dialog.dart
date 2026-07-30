@@ -45,11 +45,17 @@ class DeviceCapDialog extends ConsumerStatefulWidget {
 }
 
 class _DeviceCapDialogState extends ConsumerState<DeviceCapDialog> {
-  late final List<CappedDevice> _devices = List.of(widget.info.devices);
+  /// The cap currently being remediated. Held in state, not read off the
+  /// widget: the two caps are independent, so freeing a slot for one can expose
+  /// the other, and the retry's rejection is the only thing that knows which is
+  /// live now. Rendering the opening cap after that swap would offer the wrong
+  /// remedy against the wrong device list.
+  late DeviceCapInfo _info = widget.info;
+  late List<CappedDevice> _devices = List.of(widget.info.devices);
   String? _busyId;
   String? _error;
 
-  bool get _isWorker => widget.info.kind == DeviceCapKind.worker;
+  bool get _isWorker => _info.kind == DeviceCapKind.worker;
 
   Future<void> _remove(CappedDevice d) async {
     final confirmed = await AbConfirmDialog.show(
@@ -95,11 +101,19 @@ class _DeviceCapDialogState extends ConsumerState<DeviceCapDialog> {
       // Still capped (or transient) — keep the dialog open; the list already
       // reflects the removal so the user can free another slot.
       final stillCapped = e.code == 'DEVICE_CAP' || e.code == 'WORKER_CAP';
-      setState(
-        () => _error = stillCapped
+      setState(() {
+        // Re-seat on the cap the server just named. Removing a phone can clear
+        // DEVICE_CAP and leave WORKER_CAP standing (and vice versa), and only
+        // this rejection carries the new kind, limit and remediable devices.
+        final next = stillCapped ? e.cap : null;
+        if (next != null) {
+          _info = next;
+          _devices = List.of(next.devices);
+        }
+        _error = stillCapped
             ? null
-            : 'Removed, but registration failed: ${e.message}',
-      );
+            : 'Removed, but registration failed: ${e.message}';
+      });
     } catch (_) {
       // The device is already revoked; a non-provisioning failure here (e.g. a
       // keychain/secure-storage read throwing) must not escape as an unhandled
@@ -144,7 +158,7 @@ class _DeviceCapDialogState extends ConsumerState<DeviceCapDialog> {
               ),
               const SizedBox(height: AbTokens.space12),
               Text(
-                widget.info.message,
+                _info.message,
                 style: TextStyle(
                   fontSize: AbTokens.fontSm,
                   color: p.textSecondary,
