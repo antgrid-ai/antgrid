@@ -74,7 +74,7 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
   }
 
   /// Best-effort: ask the local bridge host to erase the project's persisted
-  /// store (sessions.json + seen-catalog entry + phone allowlist grants). Bounded
+  /// store (sessions.json + seen-catalog entry). Bounded
   /// + swallowed so a slow/unreachable host never blocks or fails the delete —
   /// the app-side removal already succeeded. Uses `peekHost` (NOT `ensureHost`):
   /// a delete must never cold-SPAWN a host. The common delete happens with the

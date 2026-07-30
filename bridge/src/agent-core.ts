@@ -104,7 +104,8 @@ export interface AgentCore {
   readonly projectId: string;
   readonly abDir: string;
   readonly nextKeypair: () => EphemeralKeypair;
-  /** Persistent trust list for paired phones (machine-level, shared across projects). */
+  /** Machine-level phone registry (identity, label, push routing), shared across
+   *  projects. Not an authorization store — see mobile-access-policy.ts. */
   readonly pairedPhones: PairedPhonesStore;
   /** Lifecycle hooks the transport invokes. */
   handleTunnelMessage(raw: unknown): void;
@@ -117,11 +118,11 @@ export interface AgentCore {
   setPlainHook(fn: ((data: object) => void) | null): void;
   /** Wire a provider that returns the Ed25519 pubkey (standard base64) of the
    *  phone currently paired on the transport, or null when there is no relay
-   *  peer (e.g. local/loopback transport, or pre-handshake). The allowlist gate
-   *  consults this on every inbound message to authorize project verbs per
-   *  phone. The remote transport wires it to `RelayClient.currentPeerPubkey()`;
-   *  local mode never sets it (so it stays null and the gate is skipped). Pass
-   *  `null` to clear it. */
+   *  peer (e.g. local/loopback transport, or pre-handshake). The mobile-access
+   *  gate consults this only to tell a remote peer from the local owner — it
+   *  authorizes nothing per phone. The remote transport wires it to
+   *  `RelayClient.currentPeerPubkey()`; local mode never sets it (so it stays
+   *  null and the gate is skipped). Pass `null` to clear it. */
   setPeerPubkeyProvider(fn: (() => string | null) | null): void;
   /** Stream-gating state. The transport's peer-online/offline callbacks flip
    *  `peerOnline` to suppress the heavy stream while the paired phone is gone. */
@@ -154,8 +155,14 @@ export interface BuildAgentCoreOptions {
    */
   identity: DeviceIdentity;
   /** Shared machine-level paired-phones store. When omitted, a machine-level
-   *  store is loaded from abDir (single shared file, not per-project). */
+   *  store is loaded from abDir (single shared file, not per-project). Identity,
+   *  labels and push routing only — it carries no authorization. */
   pairedPhones?: PairedPhonesStore;
+  /** Whether this machine is reachable from mobile — the sole authorization gate
+   *  for a remote phone (see mobile-access-policy.ts). Host-supplied; a bare
+   *  agent with no host omits it and the gate reads FAIL-CLOSED, so an
+   *  unwired core can never be driven by a phone. */
+  mobileAccessEnabled?: () => boolean;
   /** Fired when a turn-start hook pings the api-server (`POST /turn-start`), so
    *  the owning ProjectCore can reset its control-plane work status to "working"
    *  on a fresh turn. Bridge-internal — never surfaces to the app. */
@@ -228,9 +235,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     needsFirstRun = true;
   }
 
-  // Paired-phone trust list, constructed eagerly so it exists whether the
-  // agent runs in local or remote mode.
+  // Paired-phone identity/push registry, constructed eagerly so it exists
+  // whether the agent runs in local or remote mode.
   const pairedPhones = opts.pairedPhones ?? loadPairedPhones(abDir);
+  const mobileAccessEnabled = opts.mobileAccessEnabled ?? (() => false);
 
   // Resolve synthetic agent terminal (if any)
   interface AgentTerminalSpec {
@@ -319,35 +327,35 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     return generateEphemeralKeypair();
   }
 
-  // Connected-phone pubkey provider for the allowlist gate (Phase B). Wired by
-  // the remote/promotion transports to RelayClient.currentPeerPubkey(); unset
-  // (null) in local mode, where there is no relay peer and the gate is skipped.
+  // "Is this a REMOTE peer?" signal, not an authorization input. Wired by the
+  // remote/promotion transports to RelayClient.currentPeerPubkey(); unset (null)
+  // in local mode, where there is no relay peer.
   let peerPubkeyProvider: (() => string | null) | null = null;
   function setPeerPubkeyProvider(fn: (() => string | null) | null) {
     peerPubkeyProvider = fn;
   }
 
-  // Allowlist gate (Phase B), shared by every inbound path (bus verbs AND the
-  // tunnel/HTTP-proxy path, which bypasses the bus). A trusted phone may drive a
-  // project only if that project is on its explicit allowlist — trust alone is
-  // not enough. Fail-closed: drop when a phone pubkey IS present but not allowed.
-  // When no phone pubkey is present (local/loopback transport has no relay peer,
-  // or pre-pair) the gate is skipped — local control's trust boundary is the
-  // loopback socket + token, and there is no admitted phone to scope yet.
+  // Mobile-access gate, shared by every inbound path (bus verbs AND the
+  // tunnel/HTTP-proxy path, which bypasses the bus). An account-trusted phone
+  // may drive this project only while the machine is mobile-reachable. When no
+  // phone pubkey is present (local/loopback transport has no relay peer) the
+  // gate is skipped — local control's trust boundary is the loopback socket +
+  // token, and the desktop must keep driving its own machine with mobile access
+  // off. Fail-closed otherwise: an unwired provider defaults to disabled.
   function currentPhoneAllowed(): boolean {
     const phonePubkey = peerPubkeyProvider?.() ?? null;
     if (!phonePubkey) return true;
-    return pairedPhones.isAllowed(phonePubkey, project.id);
+    return mobileAccessEnabled();
   }
 
   function handleTunnelMessage(raw: unknown) {
     const msg = parseTunnelMessage(raw as string | object);
     if (!msg) { log.warn("Invalid tunnel message, dropping"); return; }
     // Tunnel verbs proxy arbitrary HTTP to localhost:<port> and return the body,
-    // so a not-allowed phone could otherwise read a project's dev-server/preview
-    // data without ever touching the bus dispatch gate. Gate here too.
+    // so a phone could otherwise read a project's dev-server/preview data
+    // without ever touching the bus dispatch gate. Gate here too.
     if (!currentPhoneAllowed()) {
-      log.warn("Dropping tunnel %s from not-allowed phone for project %s", msg.type, project.id);
+      log.warn("Dropping tunnel %s: mobile access is disabled (project %s)", msg.type, project.id);
       return;
     }
     if (msg.type === "tunnel:http-request" && tunnelManager) {
@@ -616,7 +624,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "agent:update": {
-        // In-app self-update. Reaches here only through the allowlist gate, so no
+        // In-app self-update. Reaches here only through the mobile-access gate, so no
         // extra authz. Dispatch by canonical tool id; a tool with no known self-
         // updater fails soft with a message (never touches an install).
         const spec = updateSpecFor(msg.tool);
@@ -1717,8 +1725,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // Intercepted before the generic dispatchRpc registry — like sessions.list/
   // sessions.delete's own special-casing — because it needs `structured`
   // (StructuredAgentManager) in closure scope, which rpc/methods.ts's registry
-  // doesn't have access to. Runs through the SAME allowlist gate as every other
-  // inbound verb (see the currentPhoneAllowed() check in attachTransport below);
+  // doesn't have access to. Runs through the SAME mobile-access gate as every
+  // other inbound verb (see the currentPhoneAllowed() check in attachTransport);
   // no separate authz here.
   async function handleTranscriptSnapshotRequest(msg: RpcRequest): Promise<AbMessage> {
     const parsed = TranscriptSnapshotParams.safeParse(msg.params ?? {});
@@ -1742,24 +1750,24 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Plaintext (tunnel) sender bypasses the bus — see setPlainHook.
     sendPlain = (data) => busPlainHook?.(data);
     bus.setInboundHandler((msg, channel, source) => {
-      // Allowlist gate (Phase B): the single chokepoint through which both RPC
+      // Mobile-access gate: the single chokepoint through which both RPC
       // requests and plain Ab messages enter the core dispatch. Drops EVERY
-      // inbound verb when the connected phone is not allowed for this project,
-      // so a trusted-but-not-allowed phone sees nothing. This sits at the VERB
-      // layer by design (not the pairing/handshake layer): the phone connects
-      // and completes the handshake, but the data plane is inert until an
-      // explicit `allow`. See currentPhoneAllowed() for the local-mode / no-peer
+      // inbound verb while the machine is not mobile-reachable, so an
+      // account-trusted phone sees nothing. This sits at the VERB layer by
+      // design (not the pairing/handshake layer): the phone connects and
+      // completes the handshake, but the data plane is inert until the machine
+      // switch is on. See currentPhoneAllowed() for the local-mode / no-peer
       // skip rationale. The tunnel/HTTP-proxy path is gated separately in
       // handleTunnelMessage (it bypasses this bus).
       //
       // Only RELAY-origin frames are gated. Loopback frames are the desktop
       // owner (trusted by the loopback socket + token); after promotion the
       // loopback session and the relay slot share this one handler, so without
-      // the source check a promoted core would gate the desktop's own input by
-      // the phone's allowlist and silently drop the user's local typing.
+      // the source check a promoted core would gate the desktop's own input on
+      // the machine switch and silently drop the user's local typing.
       if (source !== "loopback" && !currentPhoneAllowed()) {
         log.warn(
-          "Dropping inbound %s from not-allowed phone for project %s",
+          "Dropping inbound %s: mobile access is disabled (project %s)",
           msg.type,
           project.id,
         );

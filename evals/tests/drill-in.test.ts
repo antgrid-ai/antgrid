@@ -2,7 +2,7 @@
 //   1. setupTestEnv admits ONE app once against the control plane (bare
 //      deviceUuid) with account-trust — no pairing ceremony — and completes
 //      the E2E handshake.
-//   2. Advertise two allowed projects, one STOPPED (projB): projA (firstProject,
+//   2. Advertise two catalog projects, one STOPPED (projB): projA (firstProject,
 //      running) + projB (opened remote then stopped → advertised running:false,
 //      startable because it stays in seenProjects).
 //   3. Drill into the STOPPED projB via the control-plane `project:start`; the
@@ -22,7 +22,7 @@ import { computeProjectId } from "../../bridge/src/project-id";
 import { loadPairedPhones } from "../../bridge/src/paired-phones";
 import { readHostFile } from "../../bridge/src/host-discovery";
 import { createMessage } from "../../bridge/src/protocol";
-import { allowAndResolveStream } from "../support/stream";
+import { resolveOnFreshAdvert } from "../support/stream";
 import { join } from "node:path";
 
 async function loopbackControl(abDir: string, body: object): Promise<any> {
@@ -49,13 +49,11 @@ test("drill-in: start a stopped project as a stream on the ONE socket, zero new 
     expect((await loopbackControl(env.abDir, { id: "open-b", type: "project:open", projectId: projB, projectPath: projBdir.dir, mode: "remote" })).ok).toBe(true);
     expect((await loopbackControl(env.abDir, { id: "stop-b", type: "project:stop", projectId: projB })).ok).toBe(true);
 
-    // projA is already allowed (setupTestEnv allows the firstProject for every
-    // account-trusted phone). Allow projB too, then let the host reload it —
-    // retrying the write (see allowAndResolveStream's docstring) since a lost
-    // fs.watch event on paired-phones.json would otherwise strand this on a
-    // no-op-once-present allowlist write with no advert ever produced to wait on.
+    // The phone is authorized machine-wide (setupTestEnv turned the switch on),
+    // so projB needs no grant — only a fresh advert carrying it, which lands a
+    // beat after the loopback open/stop above.
     expect(loadPairedPhones(env.abDir).has(env.appIdentity.publicKeyBase64)).toBe(true);
-    const advert = await allowAndResolveStream(cp, env.abDir, projB, {
+    const advert = await resolveOnFreshAdvert(cp, projB, {
       resolve: (app) =>
         app.waitFor(
           (m: any) => m.type === "agent:projects" && m.projects.some((p: any) => p.projectId === projB && p.running === false),

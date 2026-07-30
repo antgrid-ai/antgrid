@@ -28,9 +28,9 @@ describe.skipIf(!HAVE_CODEX)("chat-session (codex)", () => {
   beforeAll(async () => {
     // `codex-chat` fixture declares `agent.tool: codex` and no autoStart
     // service, so nothing spawns until the eval creates a chat session.
-    // setupTestEnv pairs the app, allowlists the project for the paired phone
-    // (the Phase-B gate would otherwise silently drop every session verb), and
-    // pulls the welcome snapshot.
+    // setupTestEnv admits the app, turns the machine's mobile-access switch on
+    // (the gate would otherwise silently drop every session verb), and pulls the
+    // welcome snapshot.
     env = await setupTestEnv({ fixtureName: "codex-chat" });
     // Read core readiness out of the project snapshot rather than awaiting a
     // live `agent:hello`: it is a REPLAY_TYPE, and v3 dedups the welcome-replayed

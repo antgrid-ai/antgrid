@@ -186,117 +186,41 @@ program
     console.log(`Written to ${path}. Run 'antgrid' to start the agent.`);
   });
 
-// antgrid phones subcommand — manage paired-phone allowlists.
+// antgrid phones subcommand — inspect and drop local phone records. Whether a
+// phone may drive this machine is one machine-wide switch (mobile-access), not
+// anything this CLI manages.
 program
   .command("phones")
-  .description("Manage trusted phones and per-project allowlists")
-  .argument("[verb]", "list | allow | deny | remove")
-  .argument("[target]", "Project path/label (allow/deny) or phone ref (remove)")
+  .description("Inspect trusted phones and drop their local records")
+  .argument("[verb]", "list | remove")
+  .argument("[target]", "Phone ref (remove)")
   .option("--phone <ref>", "Phone pubkey, deviceId, or label")
   .action(async (verb?: string, target?: string, opts?: { phone?: string }) => {
     const { loadPairedPhones } = await import("./paired-phones");
-    const phonesModule = await import("./cli/phones");
-    const { phonesList, phonesAllow, phonesDeny, phonesRemove } = phonesModule;
-    type CatalogResolver = import("./cli/phones").CatalogResolver;
-    const { readHostFile, hostFilePath } = await import("./host-discovery");
+    const { phonesList, phonesRemove } = await import("./cli/phones");
 
     const abDir = resolveAbDir();
     // This CLI resolves ANTGRID_DIR from its own shell env, which is only
     // correct when it matches whatever env the target host was started with
     // (e.g. a dev host launched via `npm run dev`/`npm run aspire` runs on
     // ~/.antgrid-dev, not this default) — printed so a mismatch is visible
-    // instead of a silent "allowed" that the running host never sees.
+    // instead of a silent success the running host never sees.
     console.error(`[antgrid phones] using ${join(abDir, "agents", "paired-phones.json")}`);
     const store = loadPairedPhones(abDir);
-
-    // M3 catalog resolver: try the loopback control plane (host.json) if running;
-    // otherwise fall back to treating the input as a literal projectId.
-    // Task 4.x will add richer path→projectId resolution via the host catalog.
-    const catalog: CatalogResolver = {
-      async resolve(pathOrLabel: string): Promise<string | null> {
-        const hf = readHostFile(hostFilePath());
-        if (hf) {
-          try {
-            const res = await fetch(`http://127.0.0.1:${hf.controlPort}/control`, {
-              method: "POST",
-              headers: {
-                "content-type": "application/json",
-                authorization: `Bearer ${hf.token}`,
-              },
-              body: JSON.stringify({ id: "cli-resolve", type: "project:list" }),
-            });
-            if (res.ok) {
-              const data = (await res.json()) as { projects?: Array<{ projectId: string; path: string }> };
-              const projects = data.projects ?? [];
-              // Match by exact projectId or path suffix/basename
-              const match = projects.find(
-                (p) =>
-                  p.projectId === pathOrLabel ||
-                  p.path === pathOrLabel ||
-                  p.path.endsWith(`/${pathOrLabel}`) ||
-                  p.path.endsWith(`\\${pathOrLabel}`),
-              );
-              if (match) return match.projectId;
-              // No match from running host — fail closed
-              return null;
-            }
-          } catch {
-            // Fall through to literal fallback
-          }
-        }
-        // Host not running — accept only a literal string that looks like a
-        // projectId (no slashes, no spaces). Hint the user to open the project.
-        if (/^[A-Za-z0-9_\-.]+$/.test(pathOrLabel)) {
-          console.error(
-            `hint: host not running — treating "${pathOrLabel}" as a literal projectId. ` +
-              `Start the app with this project open to enable path/label resolution.`,
-          );
-          return pathOrLabel;
-        }
-        return null;
-      },
-    };
-
-    // Resolve the default phone when --phone is omitted
-    function resolvePhoneRef(explicitRef?: string): string | null {
-      if (explicitRef) return explicitRef;
-      const all = store.list();
-      if (all.length === 1) return all[0].phonePubkey;
-      if (all.length === 0) {
-        console.error("no phones on this machine");
-        return null;
-      }
-      console.error("multiple phones known — specify one with --phone <id|label>");
-      return null;
-    }
 
     let code = 1;
     switch (verb ?? "list") {
       case "list":
         code = phonesList(store);
         break;
-      case "allow": {
-        if (!target) { console.error("usage: antgrid phones allow <project> [--phone <ref>]"); break; }
-        const phoneRef = resolvePhoneRef(opts?.phone);
-        if (!phoneRef) break;
-        code = await phonesAllow(store, catalog, target, phoneRef);
-        break;
-      }
-      case "deny": {
-        if (!target) { console.error("usage: antgrid phones deny <project> [--phone <ref>]"); break; }
-        const phoneRef = resolvePhoneRef(opts?.phone);
-        if (!phoneRef) break;
-        code = await phonesDeny(store, catalog, target, phoneRef);
-        break;
-      }
       case "remove": {
         const ref = opts?.phone ?? target;
         if (!ref) { console.error("usage: antgrid phones remove <phone> | --phone <ref>"); break; }
-        code = phonesRemove(store, ref);
+        code = phonesRemove(store, ref, abDir);
         break;
       }
       default:
-        console.error(`unknown verb "${verb}". Use: list | allow | deny | remove`);
+        console.error(`unknown verb "${verb}". Use: list | remove`);
         code = 1;
     }
     process.exit(code);

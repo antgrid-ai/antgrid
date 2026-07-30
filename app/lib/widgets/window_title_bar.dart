@@ -194,7 +194,7 @@ class WindowTitleBarContents extends ConsumerWidget {
             key: chipSlotKey,
             child: Row(
               mainAxisSize: MainAxisSize.min,
-              children: localProjectActions(ref),
+              children: titleBarProjectActions(ref),
             ),
           ),
           const SizedBox(width: AbTokens.space8),

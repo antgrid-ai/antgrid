@@ -1,13 +1,14 @@
 // Account-trust admission (spec 2026-07-24 §3.3) has no pair-request, so the
-// client-hello path is the ONLY place a same-account phone's allowlist row can
-// be created. Without it `buildProjectsAdvertisement` returns [] forever for a
-// fully connected phone, and `antgrid phones list` can't even show it to grant.
+// client-hello path is the ONLY place a same-account phone's row can be created.
+// The row grants nothing — authorization is the machine's mobile-access switch —
+// but without it a fully connected phone is invisible to `antgrid phones list`
+// and unreachable by push.
 import { test, expect, afterEach } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 import { encodeRouteFrame, FrameKind } from "antgrid-wire";
 import { generateEphemeralKeypair } from "../src/key-exchange";
 import { RelayClient } from "../src/relay-client";
-import type { PairedPhone, PairedPhonesStore, UpsertPhone } from "../src/paired-phones";
+import type { PairedPhone, PairedPhonesStore } from "../src/paired-phones";
 import { buildTranscript, signTranscript } from "../src/e2e";
 
 const AGENT_DEVICE_ID = "agent-1";
@@ -26,9 +27,9 @@ function ed25519Pair(): { seedB64: string; pubB64: string } {
 
 /** In-memory stand-in for the on-disk store, counting writes: a rewrite per
  *  rekey would flush the file and trip its watcher's re-advertise. */
-function fakeStore(seed: PairedPhone[] = []): PairedPhonesStore & { upserts: UpsertPhone[]; touches: string[] } {
+function fakeStore(seed: PairedPhone[] = []): PairedPhonesStore & { upserts: PairedPhone[]; touches: string[] } {
   const phones = [...seed];
-  const upserts: UpsertPhone[] = [];
+  const upserts: PairedPhone[] = [];
   const touches: string[] = [];
   return {
     upserts,
@@ -36,18 +37,17 @@ function fakeStore(seed: PairedPhone[] = []): PairedPhonesStore & { upserts: Ups
     list: () => phones.slice(),
     has: (pk: string) => phones.some((p) => p.phonePubkey === pk),
     get: (pk: string) => phones.find((p) => p.phonePubkey === pk),
-    upsert: (phone: UpsertPhone) => {
+    upsert: (phone: PairedPhone) => {
       upserts.push(phone);
       const i = phones.findIndex((p) => p.phonePubkey === phone.phonePubkey);
-      const row = { ...phone, allowedProjects: phone.allowedProjects ?? [] };
-      if (i >= 0) phones[i] = row; else phones.push(row);
+      if (i >= 0) phones[i] = { ...phone }; else phones.push({ ...phone });
     },
     touchLastSeen: (pk: string, at?: string) => {
       touches.push(pk);
       const phone = phones.find((p) => p.phonePubkey === pk);
       if (phone) phone.lastSeenAt = at ?? new Date().toISOString();
     },
-  } as unknown as PairedPhonesStore & { upserts: UpsertPhone[]; touches: string[] };
+  } as unknown as PairedPhonesStore & { upserts: PairedPhone[]; touches: string[] };
 }
 
 function clientHello(args: { attemptId: string; appX25519PubB64: string; phoneSeedB64: string; sign?: boolean }): Buffer {
@@ -73,7 +73,7 @@ function clientHello(args: { attemptId: string; appX25519PubB64: string; phoneSe
   }));
 }
 
-function makeClient(store: PairedPhonesStore, defaults: string[], phoneEd: { pubB64: string }, agentEd: { seedB64: string }): RelayClient {
+function makeClient(store: PairedPhonesStore, phoneEd: { pubB64: string }, agentEd: { seedB64: string }): RelayClient {
   const client = RelayClient.forTest({
     generateKeypair: generateEphemeralKeypair,
     sendPayload: () => {},
@@ -83,9 +83,8 @@ function makeClient(store: PairedPhonesStore, defaults: string[], phoneEd: { pub
     phoneEd25519PubB64: phoneEd.pubB64,
   });
   clients.push(client);
-  const opts = (client as unknown as { opts: { pairedPhones?: PairedPhonesStore; sameAccountDefaultProjects?: () => string[] } }).opts;
+  const opts = (client as unknown as { opts: { pairedPhones?: PairedPhonesStore } }).opts;
   opts.pairedPhones = store;
-  opts.sameAccountDefaultProjects = () => defaults;
   return client;
 }
 
@@ -96,26 +95,31 @@ function sendHello(client: RelayClient, phoneSeedB64: string, attemptId: string,
   (client as unknown as { handleBinaryFrame: (b: Buffer) => void }).handleBinaryFrame(Buffer.from(frame));
 }
 
-test("a verified client-hello registers an unknown account-trusted phone with the mobile-access defaults", () => {
+test("a verified client-hello registers an unknown account-trusted phone", () => {
   const agentEd = ed25519Pair();
   const phoneEd = ed25519Pair();
   const store = fakeStore();
-  sendHello(makeClient(store, ["proj-a", "proj-b"], phoneEd, agentEd), phoneEd.seedB64, "attempt-a");
+  sendHello(makeClient(store, phoneEd, agentEd), phoneEd.seedB64, "attempt-a");
 
   expect(store.list()).toEqual([
-    expect.objectContaining({
-      phonePubkey: phoneEd.pubB64,
-      phoneDeviceId: PHONE_ID,
-      allowedProjects: ["proj-a", "proj-b"],
-    }),
+    expect.objectContaining({ phonePubkey: phoneEd.pubB64, phoneDeviceId: PHONE_ID }),
   ]);
+});
+
+test("registration seeds no per-project grants — the row is identity only", () => {
+  const agentEd = ed25519Pair();
+  const phoneEd = ed25519Pair();
+  const store = fakeStore();
+  sendHello(makeClient(store, phoneEd, agentEd), phoneEd.seedB64, "attempt-a");
+
+  expect(store.upserts[0]).not.toHaveProperty("allowedProjects");
 });
 
 test("a rekey does not rewrite the row — one write, not one per handshake", () => {
   const agentEd = ed25519Pair();
   const phoneEd = ed25519Pair();
   const store = fakeStore();
-  const client = makeClient(store, ["proj-a"], phoneEd, agentEd);
+  const client = makeClient(store, phoneEd, agentEd);
 
   sendHello(client, phoneEd.seedB64, "attempt-a");
   sendHello(client, phoneEd.seedB64, "attempt-b");
@@ -131,9 +135,8 @@ test("an admission against an existing row refreshes lastSeenAt (not frozen at c
     phoneDeviceId: PHONE_ID,
     pairedAt: "2026-01-01T00:00:00.000Z",
     lastSeenAt: "2026-01-01T00:00:00.000Z",
-    allowedProjects: ["projA"],
   }]);
-  sendHello(makeClient(store, [], phoneEd, agentEd), phoneEd.seedB64, "attempt-a");
+  sendHello(makeClient(store, phoneEd, agentEd), phoneEd.seedB64, "attempt-a");
 
   expect(store.touches).toEqual([phoneEd.pubB64]);
   expect(store.list()[0]!.lastSeenAt).not.toBe("2026-01-01T00:00:00.000Z");
@@ -150,35 +153,18 @@ test("a client-hello that fails verification never refreshes lastSeenAt", () => 
     phoneDeviceId: PHONE_ID,
     pairedAt: "2026-01-01T00:00:00.000Z",
     lastSeenAt: "2026-01-01T00:00:00.000Z",
-    allowedProjects: ["projA"],
   }]);
-  sendHello(makeClient(store, [], phoneEd, agentEd), phoneEd.seedB64, "attempt-a", false);
+  sendHello(makeClient(store, phoneEd, agentEd), phoneEd.seedB64, "attempt-a", false);
 
   expect(store.touches).toEqual([]);
   expect(store.list()[0]!.lastSeenAt).toBe("2026-01-01T00:00:00.000Z");
-});
-
-test("an existing row keeps its allowlist when the mobile-access defaults have since changed", () => {
-  const agentEd = ed25519Pair();
-  const phoneEd = ed25519Pair();
-  const store = fakeStore([{
-    phonePubkey: phoneEd.pubB64,
-    phoneDeviceId: PHONE_ID,
-    pairedAt: "2026-01-01T00:00:00.000Z",
-    lastSeenAt: "2026-01-01T00:00:00.000Z",
-    allowedProjects: ["granted-earlier"],
-  }]);
-  sendHello(makeClient(store, ["a-newer-default"], phoneEd, agentEd), phoneEd.seedB64, "attempt-a");
-
-  expect(store.upserts.length).toBe(0);
-  expect(store.list()[0]!.allowedProjects).toEqual(["granted-earlier"]);
 });
 
 test("a client-hello whose signature does not verify registers nothing", () => {
   const agentEd = ed25519Pair();
   const phoneEd = ed25519Pair();
   const store = fakeStore();
-  sendHello(makeClient(store, ["proj-a"], phoneEd, agentEd), phoneEd.seedB64, "attempt-a", false);
+  sendHello(makeClient(store, phoneEd, agentEd), phoneEd.seedB64, "attempt-a", false);
 
   expect(store.list()).toEqual([]);
 });

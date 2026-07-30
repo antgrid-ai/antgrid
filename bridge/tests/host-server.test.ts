@@ -263,15 +263,17 @@ test("control plane: project:open then project:list round-trip over HTTP", async
 
 test("shares one paired-phones store across cores", async () => {
   host = new HostServer({});
-  const pathA = tempFolder();
-  const pathB = tempFolder();
-  await host.open("projA", pathA, "local");
-  await host.open("projB", pathB, "local");
+  await host.open("projA", tempFolder(), "local");
+  await host.open("projB", tempFolder(), "local");
+  // Identity, not contents: every core must read the SAME in-memory view, so a
+  // concurrent `antgrid phones remove` reloaded by the watcher reaches all of
+  // them at once (push targeting and phones:list read it live).
+  const cores = (host as any).cores;
+  expect(cores.get("projA").core.deps.pairedPhones).toBe(host.pairedPhones);
+  expect(cores.get("projB").core.deps.pairedPhones).toBe(host.pairedPhones);
   host.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1",
-    pairedAt: "x", lastSeenAt: "x", allowedProjects: [] });
-  host.pairedPhones.allowProject("pk1", "projA");
-  expect(host.pairedPhones.isAllowed("pk1", "projA")).toBe(true);
-  expect(host.pairedPhones.isAllowed("pk1", "projB")).toBe(false);
+    pairedAt: "x", lastSeenAt: "x", label: "pixel" });
+  expect(cores.get("projB").core.deps.pairedPhones.get("pk1")?.label).toBe("pixel");
   // afterEach calls host.shutdown()
 });
 
@@ -311,8 +313,8 @@ test("host:shutdown returns ok and fires onShutdownRequested (after the response
   expect(shutdownCalls).toBe(1);
 });
 
-// M6: pushHeartbeat() previously fired only from onAuthenticated + the two
-// mobile-access:* mutations — a stably-connected bridge never re-ran it, so
+// M6: pushHeartbeat() previously fired only from onAuthenticated + the
+// mobile-access mutation — a stably-connected bridge never re-ran it, so
 // trustedPeers.json (the E2E-admission inventory cache) never refreshed on
 // its own. The design spec calls for "the existing heartbeat cadence"; this
 // proves that cadence is now a real, owned, disposable timer.

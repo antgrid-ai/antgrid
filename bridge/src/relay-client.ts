@@ -66,12 +66,13 @@ export interface RelayClientOptions {
    * always present a token.
    */
   getLicenseToken: () => Promise<string> | string;
-  /** Trust list for paired phones; required to admit reconnects of known phones. */
+  /** Phone identity/push registry. Grants nothing — it is where a verified
+   *  client-hello records the device, and where `backfillPeerPubkey` recovers a
+   *  reconnecting phone's pubkey after an agent restart. */
   pairedPhones?: PairedPhonesStore;
   /** Account device inventory (spec 2026-07-24 §3.3); consulted before the
    *  paired-phones store when resolving a phone's Ed25519 pubkey. */
   trustedPeers?: TrustedPeersProvider;
-  sameAccountDefaultProjects?: () => string[];
   /** Test seam: overrides the half-open handshake-attempt expiry (design §6.2's
    *  30s default). Production never sets this. */
   halfOpenMs?: number;
@@ -233,17 +234,20 @@ export class RelayClient {
   /** The Ed25519 pubkey (standard base64) of the phone currently paired on this
    *  connection, or null. Resolves `_peerId` → pubkey via `phoneEd25519ByDeviceId`
    *  (populated at a client-hello's verified identity, or backfilled from the
-   *  paired-phones store on a trusted reconnect). Used by the per-project
-   *  allowlist gate. */
+   *  paired-phones store on a trusted reconnect). Read by the core's
+   *  mobile-access gate as its "this peer is remote" signal, and by push
+   *  targeting to name the live device. */
   currentPeerPubkey(): string | null {
     if (!this._peerId) return null;
     return this.phoneEd25519ByDeviceId.get(this._peerId) ?? null;
   }
 
   /** Ensure `phoneEd25519ByDeviceId` has an entry for `peerId` by recovering it
-   *  from the persistent trust list. Used on a trusted reconnect (peer-online
-   *  with no fresh handshake) so the allowlist gate can still identify the
-   *  phone after an agent restart. No-op when already known or not trusted. */
+   *  from the persistent phone registry. Used on a trusted reconnect
+   *  (peer-online with no fresh handshake) so `currentPeerPubkey()` still
+   *  resolves after an agent restart — without it the control-plane dispatch
+   *  drops every frame (`if (!pk) return`). No-op when already known or
+   *  unregistered. */
   private backfillPeerPubkey(peerId: string): void {
     if (this.phoneEd25519ByDeviceId.has(peerId)) return;
     // Cache under the route id we were given, look up under the account device
@@ -813,13 +817,11 @@ export class RelayClient {
     this.phoneEd25519ByDeviceId.set(peerId, phoneEd25519PubB64);
 
     // Account trust admits without a pair-request, so nothing else ever creates
-    // this phone's allowlist row — and `buildProjectsAdvertisement` returns []
-    // for a phone the store doesn't know. Without this a fully connected phone
-    // reads "offline" forever and can't be granted out of it, because
-    // `antgrid phones list` wouldn't show it either. The row is the ALLOWLIST
-    // half of paired-phones.json, never a trust claim: it is written only after
-    // the transcript signature verified against an account identity, and it
-    // grants exactly what the desktop's mobile-access policy already shares.
+    // this phone's row. The row grants NOTHING — authorization is the machine's
+    // one mobile-access switch — it is the identity/push/last-seen record: what
+    // `antgrid phones list` shows, what push targeting resolves tokens from, and
+    // what `backfillPeerPubkey` recovers from after a reconnect. Without it a
+    // fully connected phone is invisible to the operator and unreachable by push.
     //
     // Creation only. A rekey re-runs this hello, and rewriting the row would
     // flush the file — tripping its watcher's re-advertise — on every one.
@@ -827,7 +829,6 @@ export class RelayClient {
     // coalesces the write, so `last seen` tracks admissions without that cost.
     if (this.opts.pairedPhones && !this.opts.pairedPhones.has(phoneEd25519PubB64)) {
       const now = new Date().toISOString();
-      const allowedProjects = this.opts.sameAccountDefaultProjects?.() ?? [];
       this.opts.pairedPhones.upsert({
         phonePubkey: phoneEd25519PubB64,
         // The ACCOUNT device, not the slot it happened to reach us on: trust is
@@ -837,13 +838,8 @@ export class RelayClient {
         phoneDeviceId: peerBaseId,
         pairedAt: now,
         lastSeenAt: now,
-        allowedProjects,
       });
-      log.info(
-        "Registered account-trusted phone %s with %d default project(s)",
-        peerBaseId,
-        allowedProjects.length,
-      );
+      log.info("Registered account-trusted phone %s", peerBaseId);
     } else {
       this.opts.pairedPhones?.touchLastSeen(phoneEd25519PubB64);
     }

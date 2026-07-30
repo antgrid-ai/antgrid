@@ -8,6 +8,7 @@ import { RelayClient, type PhoneIdentity } from "./relay-client";
 import { DartAppClient } from "./dart-app-client";
 import { computeProjectId } from "../../bridge/src/project-id";
 import { loadPairedPhones, type PairedPhone } from "../../bridge/src/paired-phones";
+import { readHostFile, type HostFile } from "../../bridge/src/host-discovery";
 import type { TrustedPeer } from "../../bridge/src/trusted-peers";
 import type { RelayConfig } from "../../relay/src/config";
 import type { LicenseGate } from "../../relay/src/license/gate";
@@ -15,27 +16,42 @@ import type { LicenseCacheEntry } from "../../relay/src/license/cache";
 
 const ROOT = resolve(import.meta.dir, "../..");
 
-/**
- * Account-trusted phones get an EMPTY per-project allowlist on first admission
- * (spec: machine-level-trust-design.md §28-31, §96-100, §167-168) — the agent-core
- * gate silently DROPS every project verb until the project is explicitly allowed.
- * The eval suites drive verbs right after connecting, so this models "a phone
- * that has been granted access" by allowing `projectId` for every trusted phone
- * in the machine store (still `paired-phones.json` — trust is machine-level,
- * not tied to a pairing ceremony).
- *
- * The host watches paired-phones.json via fs.watch (50ms debounce) and reloads
- * its in-memory view, so we write through a store on the SAME abDir and give the
- * watcher a beat to propagate before driving verbs — mirroring machine-trust.test.ts.
- */
-async function allowProjectForTrustedPhones(abDir: string, projectId: string): Promise<void> {
-  const store = loadPairedPhones(abDir);
-  const phones = store.list();
-  for (const phone of phones) {
-    store.allowProject(phone.phonePubkey, projectId);
+/** Poll `<abDir>/host.json` for the loopback control port + token. The host
+ *  publishes it in `startControlPlane()`, before the first project opens, so it
+ *  is already on disk by the time `spawnAgent` resolves — the poll only covers
+ *  a slow start. */
+export async function waitForHostFile(abDir: string, timeoutMs = 5_000): Promise<HostFile> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const hf = readHostFile(join(abDir, "host.json"));
+    if (hf) return hf;
+    await Bun.sleep(100);
   }
-  // Give the host's fs.watch debounce (50ms) time to reload the allowlist.
-  await Bun.sleep(400);
+  throw new Error(`host.json did not appear in ${abDir} within ${timeoutMs}ms`);
+}
+
+/**
+ * Flip the machine-level mobile-access switch through the loopback
+ * `mobile-access:set` verb — the same path the desktop toggle drives.
+ *
+ * A fresh machine is OFF, and that one boolean is the whole authorization gate
+ * for an account-trusted phone, so every eval that drives a project verb has to
+ * turn it on. It MUST go through the verb rather than writing
+ * `mobile-access-policy.json` directly: the policy store is read once at
+ * construction and deliberately has no fs watcher, so a file written after the
+ * host is up would never be observed.
+ */
+export async function setMobileAccess(abDir: string, enabled: boolean): Promise<void> {
+  const hf = await waitForHostFile(abDir);
+  const res = await fetch(`http://127.0.0.1:${hf.controlPort}/control`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${hf.token}` },
+    body: JSON.stringify({ id: `eval-mobile-access-${enabled}`, type: "mobile-access:set", enabled }),
+  });
+  const body = (await res.json()) as { ok?: boolean; enabled?: boolean };
+  if (!body.ok || body.enabled !== enabled) {
+    throw new Error(`mobile-access:set ${enabled} failed: ${JSON.stringify(body)}`);
+  }
 }
 
 /** Generate a fresh Ed25519 app identity: a `deviceId` + the `PhoneIdentity`
@@ -66,16 +82,17 @@ export interface AgentHandle {
   ed25519Pubkey: string;
   kill(): Promise<void>;
   /** Kill the current process and respawn a fresh one against the SAME
-   *  abDir/auth/projectDir — deviceId/pubkey and paired-phones.json trust
-   *  survive; only the process (and its relay epoch) is new. Mutates this
+   *  abDir/auth/projectDir — deviceId/pubkey, the paired-phones row and the
+   *  machine's mobile-access switch all survive on disk; only the process (and
+   *  its relay epoch) is new. Mutates this
    *  SAME handle's `process` field in place, so a caller holding this
    *  reference (e.g. `env.agent`) observes the fresh process without
    *  needing a new handle. Mirrors the pre-Task-1 `setupPairFlowTestEnv`'s
    *  `restartAgent` (recovered from git history at fe6de19a^). */
   restart(): Promise<void>;
   /** Fresh read of this agent's `<abDir>/agents/paired-phones.json` — the
-   *  machine-level trust store. Resolution lifted from
-   *  `allowProjectForTrustedPhones` below rather than re-derived. */
+   *  per-phone identity/push/last-seen rows. Not an authorization record:
+   *  a phone's access is the machine switch (`setMobileAccess`). */
   pairedPhones(): PairedPhone[];
 }
 
@@ -565,8 +582,9 @@ export interface TestEnv {
    *  socket; projects are streams). */
   agentDeviceId: string;
   /** Kill the current agent process and respawn a fresh one reusing the SAME
-   *  `abDir`/`auth`/`projectDir` — the on-disk paired-phones trust and the
-   *  agent's deviceId/pubkey survive; only the process (and its relay epoch)
+   *  `abDir`/`auth`/`projectDir` — the on-disk paired-phones row, the machine's
+   *  mobile-access switch and the agent's deviceId/pubkey survive; only the
+   *  process (and its relay epoch)
    *  is new. `env.agent` is NOT replaced in place (its deviceId/ed25519Pubkey
    *  are stable across a restart, so existing references stay valid); a
    *  caller that needs the fresh process handle's other fields should not
@@ -631,6 +649,12 @@ export async function setupTestEnv(opts: {
   const projectId = computeProjectId(project.dir);
   const deviceUuid = auth.deviceUuid;
 
+  // A fresh machine is not mobile-reachable, and that switch is the only gate on
+  // every project verb — flip it BEFORE the app connects, so the phone's first
+  // advert already carries the catalog. Same ordering a real user gets: turn the
+  // desktop switch on, then pick the machine up on the phone.
+  await setMobileAccess(abDir, true);
+
   const app = await RelayClient.connectAndAuth(relay.url, {
     deviceType: "app",
     name: "eval-app",
@@ -639,9 +663,6 @@ export async function setupTestEnv(opts: {
   });
   app.setPeerId(deviceUuid);
   await handshakeWithoutPairing(app, deviceUuid, auth.ed25519Pub);
-
-  // Account-trusted phones start with an empty per-project allowlist.
-  await allowProjectForTrustedPhones(abDir, projectId);
 
   // Welcome-replay: pull the cached snapshot (agent:status/tree:full/git:status)
   // like the production app, instead of racing the agent's de-duped live burst.
@@ -761,6 +782,10 @@ export async function setupDartTestEnv(opts: {
   const projectId = computeProjectId(project.dir);
   const deviceUuid = auth.deviceUuid;
 
+  // The machine switch gates every project verb and starts off — flip it before
+  // the Dart client connects (see setupTestEnv for the ordering rationale).
+  await setMobileAccess(abDir, true);
+
   // v3: app hello now carries a mandatory license token (design §4.2); the Dart
   // eval CLI forwards it to RelayService.connect.
   await app.connect(relay.url, TEST_LICENSE_TOKEN);
@@ -797,20 +822,16 @@ export async function setupDartTestEnv(opts: {
     );
   }
 
-  // Account-trusted phones start with an empty per-project allowlist. The row
-  // itself is created by the client-hello above, so this MUST come after it.
-  await allowProjectForTrustedPhones(abDir, projectId);
-
   // Welcome-replay: pull the control-plane snapshot (the `agent:projects`
   // catalog) like the production app.
   await app.pullStateSnapshot();
 
   // v3: bind the firstProject stream every project verb rides. `project:start`
-  // is also the promote trigger, so retry it — the allowlist reload above is an
-  // fs.watch away and firstProject's auto-start can still be in flight for a
-  // beat after the handshake establishes (same race setupTestEnv polls the
-  // advert for; here bindProject's own `stream-ready` wait absorbs it, and a
-  // NOT_ALLOWED rejection is what needs the outer retry).
+  // is also the promote trigger, so retry it — firstProject's auto-start can
+  // still be in flight for a beat after the handshake establishes (same race
+  // setupTestEnv polls the advert for; here bindProject's own `stream-ready`
+  // wait absorbs it, and an UNKNOWN_PROJECT rejection — the catalog hint not
+  // yet recorded — is what needs the outer retry).
   const STREAM_BIND_ATTEMPTS = 8;
   let streamId: string | undefined;
   let lastBindErr: unknown;

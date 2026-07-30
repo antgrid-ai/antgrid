@@ -89,33 +89,49 @@ class AgentPanel extends ConsumerWidget {
   }
 }
 
-/// Per-project header action for the focused project:
-///  - **Local project** → a [MobileAccessToggle] (Enable/Disable mobile access),
-///    which drives the paired-phone allowlist for this project.
-///  - **Remote project** → a read-only [RemoteHostChip] (the host machine name);
-///    you cannot manage another machine's allowlist from here.
+/// Trailing actions for the desktop window title bar. The two have DIFFERENT
+/// scopes and are therefore derived independently:
+///  - [MobileAccessToggle] is machine-wide ("is this machine reachable from
+///    mobile"), so it hangs off `localDeviceUuidProvider` alone and renders
+///    regardless of which project is focused. That provider mints an anonymous
+///    host uuid on desktop precisely so this affordance can show, and is null on
+///    mobile/web where there is no local host.
+///  - [RemoteHostChip] is focus-derived: it names the machine hosting the
+///    FOCUSED project. It may render next to the switch — a remote project in
+///    focus plus your own machine's switch is a coherent pair, since the switch
+///    governs your machine, not theirs.
 ///
-/// Top-level rather than a private method so the per-project action logic —
-/// including the `selectedRegistrationIdProvider` → `projectsProvider`
-/// lookup — has one implementation, used by `WindowTitleBarContents`, and can
-/// be exercised directly in tests without re-implementing it.
-List<Widget> localProjectActions(WidgetRef ref) {
+/// Desktop only: the mobile early return exists so a phone has no surface to
+/// grant itself the machine.
+///
+/// Top-level rather than a private method so the derivation has one
+/// implementation, used by `WindowTitleBarContents`, and can be exercised
+/// directly in tests without re-implementing it.
+List<Widget> titleBarProjectActions(WidgetRef ref) {
   if (isMobilePlatform) return const [];
-  final selectedId = ref.watch(selectedRegistrationIdProvider);
-  if (selectedId == null) return const [];
-  final projects = ref.watch(projectsProvider);
-  final matches = projects.where((p) => p.projectId == selectedId);
-  if (matches.isEmpty) return const [];
-  final project = matches.first;
   final localUuid = ref.watch(localDeviceUuidProvider).value;
-  // Still resolving — show nothing to avoid an incorrect flash.
-  if (localUuid == null) return const [];
-  if (project.isLocalFor(localUuid)) {
-    return [MobileAccessToggle(projectId: project.projectId)];
-  }
-  // TODO(task-13): derive platform from welcome message / agent inventory.
+  final selectedId = ref.watch(selectedRegistrationIdProvider);
+  final projects = ref.watch(projectsProvider);
+
+  // A null selectedId matches nothing: projectId is non-nullable.
+  final matches = projects.where((p) => p.projectId == selectedId);
+  final focused = matches.isEmpty ? null : matches.first;
+  // Until the local uuid resolves, local-vs-remote is undecidable — withhold the
+  // chip rather than flashing the wrong one.
+  final remoteHost =
+      focused != null && localUuid != null && !focused.isLocalFor(localUuid)
+      ? focused.hostMachineName
+      : null;
+
   return [
-    RemoteHostChip(hostMachineName: project.hostMachineName, platform: 'macos'),
+    // Rendered even while the policy is unloaded — MobileAccessToggle shows an
+    // inert CTA rather than vanishing, deliberately (see its build()).
+    if (localUuid != null) const MobileAccessToggle(),
+    if (localUuid != null && remoteHost != null)
+      const SizedBox(width: AbTokens.space8),
+    if (remoteHost != null)
+      // TODO(task-13): derive platform from welcome message / agent inventory.
+      RemoteHostChip(hostMachineName: remoteHost, platform: 'macos'),
   ];
 }
 

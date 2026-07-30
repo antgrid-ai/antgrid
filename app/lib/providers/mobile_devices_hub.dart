@@ -15,7 +15,7 @@ final hostControlClientProvider = FutureProvider<HostControlClient>((
   return client;
 });
 
-/// Loads the paired-phone allowlist for the desktop hub and mutates it over the
+/// Loads the paired-phone roster for the desktop hub and mutates it over the
 /// loopback control plane (the bridge is the single writer). Every mutation
 /// refreshes from the bridge so the UI reflects the authoritative state.
 final mobileDevicesHubProvider =
@@ -50,50 +50,8 @@ class MobileDevicesHubNotifier extends AsyncNotifier<PhonesList> {
     }
   }
 
-  Future<void> allow({
-    required String phonePubkey,
-    required String projectId,
-  }) => _mutate(
-    (c) => c.phonesAllow(phonePubkey: phonePubkey, projectId: projectId),
-  );
-
-  Future<void> deny({required String phonePubkey, required String projectId}) =>
-      _mutate(
-        (c) => c.phonesDeny(phonePubkey: phonePubkey, projectId: projectId),
-      );
-
   Future<void> unpair({required String phonePubkey}) =>
       _mutate((c) => c.phonesUnpair(phonePubkey: phonePubkey));
-
-  /// Grant ([enabled]) or revoke this project across EVERY paired phone, then
-  /// refresh once. Backs the agent-panel per-project mobile-access toggle, whose
-  /// "enabled" reading is "at least one phone allows it"; flipping it on grants
-  /// to all phones missing the grant, off revokes from all that have it. Phones
-  /// already in the target state are skipped. Shares [_mutate]'s loading/refresh/
-  /// error contract so the toggle can never drift from the hub's other
-  /// mutations, and issues the per-phone calls concurrently (independent
-  /// single-writer verbs) rather than serially.
-  Future<void> setMobileAccessForAll({
-    required String projectId,
-    required bool enabled,
-  }) {
-    final phones = state.value?.phones ?? const <PairedPhoneSummary>[];
-    return _mutate(
-      (c) => Future.wait([
-        for (final phone in phones)
-          if (phone.allowedProjects.contains(projectId) != enabled)
-            enabled
-                ? c.phonesAllow(
-                    phonePubkey: phone.phonePubkey,
-                    projectId: projectId,
-                  )
-                : c.phonesDeny(
-                    phonePubkey: phone.phonePubkey,
-                    projectId: projectId,
-                  ),
-      ]),
-    );
-  }
 }
 
 final mobileAccessPolicyProvider =
@@ -122,9 +80,8 @@ class MobileAccessPolicyNotifier extends AsyncNotifier<MobileAccessPolicy> {
     }
   }
 
-  Future<void> enableProject(String projectId) =>
-      _mutate((c) => c.mobileAccessEnableProject(projectId));
-
-  Future<void> disableProject(String projectId) =>
-      _mutate((c) => c.mobileAccessDisableProject(projectId));
+  /// Flip the machine-wide switch. The bridge's response is the resulting
+  /// state, so the notifier never has to guess what landed.
+  Future<void> setEnabled(bool enabled) =>
+      _mutate((c) => c.mobileAccessSet(enabled));
 }

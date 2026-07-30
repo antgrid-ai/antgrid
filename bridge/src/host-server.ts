@@ -137,22 +137,27 @@ export class HostServer {
   // token-maintenance timer and orphan all but the last (a leaked re-mint loop).
   private remoteRuntimePromise: Promise<RemoteRuntime> | null = null;
   private control: ControlListener | null = null;
-  // The single machine-level trust store, shared by every project core so the
-  // per-project allowlist gate reads one in-memory view. Constructed once here;
-  // each core receives this exact instance via startCore().
+  // The single machine-level phone registry (identity, label, push routing),
+  // shared by every project core so they read one in-memory view. Carries no
+  // authorization. Constructed once here; each core receives this exact instance
+  // via startCore().
   private readonly pairedPhonesStore: PairedPhonesStore = loadPairedPhones(resolveAbDir());
+  // The one authorization gate for remote phones: is this machine reachable
+  // from mobile at all. Every project verb from a phone is checked against it.
   private readonly mobileAccessPolicy: MobileAccessPolicyStore = loadMobileAccessPolicy(resolveAbDir());
   private stopPhonesWatch: (() => void) | null = null;
-  // NON-AUTHORITATIVE hint catalog: projectId → {path, label}. Carries ZERO
-  // trust state — authorization ALWAYS flows through pairedPhonesStore.isAllowed.
-  // It only answers "where does projectId X live + what's its label" so a
-  // known-but-STOPPED project can still be advertised. If projects.json is lost,
-  // worst case a stopped project isn't advertised until reopened — no security
-  // consequence. Persisted to <abDir>/projects.json.
+  // projectId → {path, label} for every project this machine has opened. Since
+  // the per-phone allowlist went away this is the ONLY per-project bound on what
+  // a phone may name: `mobileAccessPolicy` says whether ANY project is
+  // reachable, and membership here says WHICH ids exist — so every phone-facing
+  // verb that takes a projectId must look it up (project:start, sessions.list,
+  // sessions.delete) and the advert is derived from it. It still holds no trust
+  // state of its own. Persisted to <abDir>/projects.json; if that file is lost,
+  // worst case a stopped project isn't advertised until reopened.
   private readonly seenProjects: Map<string, SeenProject> = loadSeenProjects(seenProjectsPath());
   // The always-on, coreless control-plane relay registered under the BARE
   // deviceUuid (no projectId), used to advertise the project catalog and accept
-  // allowlist-gated project verbs from a paired phone. Opened only when remote
+  // mobile-access-gated project verbs from a paired phone. Opened only when remote
   // config is present; one phone at a time on this registration (concurrent
   // multi-phone control is out of scope). null until startRemoteControlPlane().
   private controlPlaneRelay: RelayClient | null = null;
@@ -180,12 +185,11 @@ export class HostServer {
   private readonly streamIds = new Map<string, string>();
 
   constructor(private readonly opts: HostServerOptions) {
-    // Watch the backing file so external edits (e.g. `antgrid phones allow/deny`)
-    // reload the shared store before the callback runs — every core's gate reads
-    // the refreshed in-memory `phones` array live. On top of the reload we
-    // re-advertise to the currently-connected control-plane phone so its project
-    // picker reflects an allowlist change WITHOUT requiring a reconnect (the
-    // advertisement is otherwise only sent on handshake / after project:start).
+    // Watch the backing file so an external edit (e.g. `antgrid phones remove`)
+    // reloads the shared store before the callback runs — push targeting and
+    // `phones:list` read the refreshed in-memory `phones` array live. On top of
+    // the reload we re-advertise to the currently-connected control-plane phone,
+    // since the removed row may be the peer we were advertising to.
     // The fs.watch handle MUST be closed in shutdown() (see stopPhonesWatch).
     this.stopPhonesWatch = this.pairedPhonesStore.watch(() => {
       this.readvertiseToControlPlane();
@@ -213,22 +217,22 @@ export class HostServer {
   }
 
   /** Push a fresh `agent:projects` to the connected control-plane phone, if any.
-   *  No-op when the control plane isn't open or no phone is connected. Reads the
-   *  (already-reloaded) allowlist live, so an `allow`/`deny` immediately updates
-   *  the phone's picker. */
+   *  No-op when the control plane isn't open or no phone is connected. Recomputes
+   *  from the live catalog + machine switch, so a `mobile-access:set` or a
+   *  catalog change immediately updates the phone's picker. */
   private readvertiseToControlPlane(): void {
     const client = this.controlPlaneRelay;
     const bus = this.controlPlaneBus;
     if (!client || !bus) return;
-    const pk = client.currentPeerPubkey();
-    if (!pk) return;
-    this.sendProjectsAdvertisement(pk, bus);
+    // No authenticated peer → nothing to tell; the next handshake advertises.
+    if (!client.currentPeerPubkey()) return;
+    this.sendProjectsAdvertisement(bus);
     this.sendToolsAdvertisement(bus);
   }
 
   /** TEST SEAM: install a control-plane bus + a fake connected peer, then run
    *  the exact re-advertise the file-watch callback runs. Lets the
-   *  allowlist-change → re-advertise path be verified without standing up a
+   *  policy/catalog-change → re-advertise path be verified without standing up a
    *  live relay (the fake relay URL never connects, so no real peer exists). */
   readvertiseForTest(bus: MessageBus, peerPubkey: string): void {
     this.controlPlaneBus = bus;
@@ -239,7 +243,7 @@ export class HostServer {
     this.readvertiseToControlPlane();
   }
 
-  /** The single machine-level paired-phones store shared across all cores. */
+  /** The single machine-level phone registry shared across all cores. */
   get pairedPhones(): PairedPhonesStore {
     return this.pairedPhonesStore;
   }
@@ -291,7 +295,7 @@ export class HostServer {
   /** Open the always-on, coreless control-plane RelayClient registered under the
    *  bare deviceUuid (no projectId → registrationId === deviceUuid). It carries
    *  no preview tunnel and owns no terminal; it advertises the project catalog
-   *  (Task 4.3) and dispatches allowlist-gated project verbs (Task 4.4). */
+   *  and dispatches mobile-access-gated project verbs. */
   private async startRemoteControlPlane(): Promise<void> {
     const r = this.requireRemoteConfig();
     await this.ensureRemoteRuntime();
@@ -320,7 +324,6 @@ export class HostServer {
       // Kept exception (B2): a terminal relay LICENSE verdict tells the user to
       // re-enroll (index.ts writes auth_revoked + exits). SUPERSEDED never does.
       onAuthRevoked: () => this.requireRemoteConfig().onAuthRevoked(),
-      sameAccountDefaultProjects: () => this.mobileAccessPolicy.listSameAccountDefaultProjects(),
       getLicenseToken: () => Promise.resolve(rt.maint.getToken()),
       pairedPhones: this.pairedPhonesStore,
       trustedPeers: this.trustedPeers,
@@ -335,9 +338,8 @@ export class HostServer {
       // current relayUrl each time the control plane comes up.
       onAuthenticated: () => this.pushHeartbeat(),
       onHandshakeComplete: () => {
-        const pk = client.currentPeerPubkey();
-        if (pk) this.sendProjectsAdvertisement(pk, bus); // Task 4.3 — STUB for now
-        this.sendToolsAdvertisement(bus); // machine-level; no phone-pubkey needed
+        this.sendProjectsAdvertisement(bus);
+        this.sendToolsAdvertisement(bus);
       },
       // A bridge-side reconnect to the RELAY (heartbeat lapse, network blip on
       // this machine — NOT the phone dropping) clears `_peerId` for the gap and
@@ -355,15 +357,17 @@ export class HostServer {
       // NOT a revocation, and multiple phones share this one control-plane
       // registration, so demoting here would tear down promoted slots that OTHER
       // still-connected phones are actively using. Promotions are torn down only
-      // by allowlist changes (phones:deny / phones:unpair → demoteIfOrphaned) and
+      // by turning mobile access off (mobile-access:set → demoteAllPromoted) and
       // core lifecycle (stop / evict / shutdown). The promoted slot is a bounded
       // idle outbound socket meanwhile; it reconnects with the core.
     });
 
     bus.setInboundHandler((msg, channel) => {
-      const pk = client.currentPeerPubkey();
-      if (!pk) return; // no authenticated peer → ignore
-      this.dispatchControlPlaneInbound(msg, channel, pk, bus);
+      // Admission is "an account-trusted phone completed the E2E handshake";
+      // WHICH phone no longer changes any answer, so the pubkey is only checked
+      // for presence here. Authorization is the machine switch, applied per verb.
+      if (!client.currentPeerPubkey()) return;
+      this.dispatchControlPlaneInbound(msg, channel, bus);
     });
     client.setBus(bus);
 
@@ -457,11 +461,11 @@ export class HostServer {
     };
   }
 
-  /** Build the project advertisement for a paired phone: the phones's
-   *  `allowedProjects` ∩ (seen catalog ∪ warm cores), each tagged with whether
-   *  it's DIALABLE. Security invariant: the result starts from
-   *  `phone.allowedProjects`, so a project NOT in the phone's allowlist NEVER
-   *  appears, even if warm/seen. Unknown phone → empty.
+  /** Build the project advertisement for the connected phone: the machine's
+   *  whole catalog (seen hints ∪ warm cores), each tagged with whether it's
+   *  DIALABLE — or NOTHING at all while mobile access is off. Every
+   *  account-trusted phone sees the same list; the machine switch is the only
+   *  thing that varies, which is why this takes no phone identity.
    *
    *  `running` here means "has an admitted relay data-plane slot" (the core's
    *  {@link ProjectCore.isRelayRegistered}), NOT merely "warm/open on the host".
@@ -475,12 +479,10 @@ export class HostServer {
    *  visibility filter still includes warm cores, so the project is listed — it's
    *  just flagged not-yet-dialable. (The desktop hub advertises plain warmth via
    *  `knownProjectsForHub`, which is a different question; keep them distinct.) */
-  buildProjectsAdvertisement(phonePubkey: string): ProjectAdvertEntry[] {
-    const phone = this.pairedPhonesStore.get(phonePubkey);
-    if (!phone) return [];
+  buildProjectsAdvertisement(): ProjectAdvertEntry[] {
+    if (!this.mobileAccessPolicy.isEnabled()) return [];
     const warm = new Set(this.cores.keys());
-    return phone.allowedProjects
-      .filter((id) => this.seenProjects.has(id) || warm.has(id))
+    return [...new Set([...this.seenProjects.keys(), ...warm])]
       .map((id) => {
         const seen = this.seenProjects.get(id);
         const entry = this.cores.get(id);
@@ -495,8 +497,8 @@ export class HostServer {
       });
   }
 
-  /** All paired phones for the desktop allowlist hub. Reads the shared store
-   *  live, so a CLI `allow`/`deny` between calls is reflected. */
+  /** All registered phones for the desktop mobile-devices hub. Reads the shared
+   *  store live, so a CLI `phones remove` between calls is reflected. */
   listPairedPhones(): PairedPhoneSummary[] {
     return this.pairedPhonesStore.list().map((p) => ({
       phonePubkey: p.phonePubkey,
@@ -504,13 +506,11 @@ export class HostServer {
       label: p.label,
       pairedAt: p.pairedAt,
       lastSeenAt: p.lastSeenAt,
-      allowedProjects: p.allowedProjects,
     }));
   }
 
-  /** The machine's known projects (warm cores ∪ seen-catalog hints) for the
-   *  hub's column set. The hub additionally renders any allowlisted id absent
-   *  here, so a CLI-granted-but-unopened project is never hidden. */
+  /** The machine's known projects (warm cores ∪ seen-catalog hints) — the same
+   *  catalog a phone is shown while mobile access is on. */
   knownProjectsForHub(): KnownProject[] {
     const warm = new Set(this.cores.keys());
     const ids = new Set<string>([...this.seenProjects.keys(), ...warm]);
@@ -520,15 +520,15 @@ export class HostServer {
     });
   }
 
-  private sendProjectsAdvertisement(phonePubkey: string, bus: MessageBus): void {
+  private sendProjectsAdvertisement(bus: MessageBus): void {
     bus.publish(
-      createMessage("agent:projects", { projects: this.buildProjectsAdvertisement(phonePubkey) }),
+      createMessage("agent:projects", { projects: this.buildProjectsAdvertisement() }),
       "control",
     );
   }
 
-  /** Machine-level installed-tool catalog for the control plane. Not gated by
-   *  the allowlist — tools are a property of the machine, not of any project.
+  /** Machine-level installed-tool catalog for the control plane. Not per-project
+   *  — tools are a property of the machine, not of any project.
    *  `chatCapable` is stamped here so the wire is authoritative over which
    *  tools support Chat mode; the app's static list is a fallback only. */
   buildToolsAdvertisement(opts: DetectOptions = {}): Array<{ tool: string; path: string; chatCapable: boolean }> {
@@ -547,7 +547,6 @@ export class HostServer {
   dispatchControlPlaneInbound(
     msg: AbMessage,
     channel: Channel,
-    phonePubkey: string,
     bus: MessageBus,
   ): void {
     // The app's RelayTransport.connect() fires a `state.snapshot` request to
@@ -559,30 +558,30 @@ export class HostServer {
     // the handshake adverts didn't already grant this paired phone.
     if (msg.type === "request") {
       // RECOMPUTE the adverts fresh before answering — the snapshot is the
-      // phone's pull, and it fires only once the phone is fully connected and
-      // upserted, which is STRICTLY later than the handshake push. If that
-      // push ran before this phone's allowlist/catalog was ready it cached an
-      // empty `agent:projects`, and replay alone would faithfully echo the
-      // empty frame forever (the bus's payload-dedup also suppresses an
-      // identical re-push). Re-publishing here updates the replay cache that
-      // dispatchRpc then reads; an unchanged payload is still a cheap no-op.
+      // phone's pull, and it fires only once the phone is fully connected,
+      // which is STRICTLY later than the handshake push. If that push ran
+      // before the catalog was ready it cached an empty `agent:projects`, and
+      // replay alone would faithfully echo the empty frame forever (the bus's
+      // payload-dedup also suppresses an identical re-push). Re-publishing here
+      // updates the replay cache that dispatchRpc then reads; an unchanged
+      // payload is still a cheap no-op.
       if (msg.method === "state.snapshot") {
-        this.sendProjectsAdvertisement(phonePubkey, bus);
+        this.sendProjectsAdvertisement(bus);
         this.sendToolsAdvertisement(bus);
       }
       if (msg.method === "sessions.list") {
         // Gated, core-free session peek — handled HERE (not in the generic
-        // dispatchRpc) because authz needs phonePubkey + the host's allowlist
-        // store, which dispatchRpc's (bus, params) signature can't see. Async:
-        // the handler reads sessions.json off the event loop (see
+        // dispatchRpc) because authz needs the host's mobile-access policy and
+        // seen-catalog, which dispatchRpc's (bus, params) signature can't see.
+        // Async: the handler reads sessions.json off the event loop (see
         // SessionManager.readPersisted), so publish on resolve.
-        void this.handleSessionsListRpc(msg, phonePubkey)
+        void this.handleSessionsListRpc(msg)
           .then((res) => bus.publish(res, channel))
           .catch((err) => log.warn("sessions.list handler threw: %s", err));
         return;
       }
       if (msg.method === "sessions.delete") {
-        void this.handleSessionsDeleteRpc(msg, phonePubkey)
+        void this.handleSessionsDeleteRpc(msg)
           .then((res) => bus.publish(res, channel))
           .catch((err) => log.warn("sessions.delete handler threw: %s", err));
         return;
@@ -594,7 +593,7 @@ export class HostServer {
     // control:result so a rejected start (NOT_ALLOWED/UNKNOWN_PROJECT/OPEN_FAILED)
     // isn't silently dropped. Success re-advertises agent:projects inside the
     // handler, so we only publish on !ok. `.catch` guards an unexpected throw.
-    void this.handleControlPlaneVerb(msg, phonePubkey, bus)
+    void this.handleControlPlaneVerb(msg, bus)
       .then((res) => {
         if (!res.ok) {
           // projectId lets the phone fail the exact pending bind (MachineSession
@@ -609,44 +608,21 @@ export class HostServer {
       .catch((err) => log.warn("control-plane verb handler threw: %s", err));
   }
 
-  /** Handle a desktop allowlist-hub verb over the loopback control plane. The
-   *  bridge is the single writer of paired-phones.json — the app NEVER writes it
-   *  directly. Each mutation re-advertises to any connected control-plane phone
-   *  so its project picker updates without a reconnect.
+  /** Handle a desktop mobile-devices-hub verb over the loopback control plane.
+   *  The bridge is the single writer of paired-phones.json — the app NEVER
+   *  writes it directly.
    *
-   *  `phones:deny` and `phones:unpair` update the allowlist, re-advertise, and
-   *  — if no remaining paired phone still allows an affected project — tear down
-   *  its promoted relay slot (hygiene; the allowlist gate already blocks inbound
-   *  at the per-message level the instant the mutation returns). */
+   *  `phones:unpair` drops the phone's identity/push row and re-advertises. It
+   *  is NOT a revocation: admission is the account inventory, so the next
+   *  client-hello from that device recreates the row. Revoking a device means
+   *  signing it out of the account, or turning this machine's mobile access
+   *  off for every phone. */
   async handlePhonesVerb(req: ControlRequest): Promise<ControlResponse> {
     switch (req.type) {
       case "phones:list":
         return { id: req.id, ok: true, type: "phones:list", phones: this.listPairedPhones(), knownProjects: this.knownProjectsForHub() };
-      case "phones:allow":
-        this.pairedPhonesStore.allowProject(req.phonePubkey, req.projectId);
-        this.readvertiseToControlPlane();
-        return { id: req.id, ok: true, type: "phones:allow" };
-      case "phones:deny": {
-        // denyProject returns false when the grant didn't exist — a no-op. Only
-        // run the side effects (demote check, re-advertise) when something
-        // actually changed; the verb is still idempotently ok either way.
-        const changed = this.pairedPhonesStore.denyProject(req.phonePubkey, req.projectId);
-        if (changed) {
-          this.demoteIfOrphaned(req.projectId);
-          this.readvertiseToControlPlane();
-        }
-        return { id: req.id, ok: true, type: "phones:deny" };
-      }
       case "phones:unpair": {
-        // Snapshot the unpaired phone's grants BEFORE removal, then demote any
-        // slot left orphaned — symmetric to phones:deny. demoteIfOrphaned reads
-        // the store AFTER the mutation, so it only tears down a project no
-        // remaining paired phone still allows.
-        const removed = this.pairedPhonesStore.get(req.phonePubkey);
         this.pairedPhonesStore.remove(req.phonePubkey);
-        for (const projectId of removed?.allowedProjects ?? []) {
-          this.demoteIfOrphaned(projectId);
-        }
         this.readvertiseToControlPlane();
         return { id: req.id, ok: true, type: "phones:unpair" };
       }
@@ -655,59 +631,40 @@ export class HostServer {
     }
   }
 
-  /** Handle a mobile-access defaults verb over the loopback control plane. The
-   *  bridge is the single writer of mobile-access-policy.json. enable-project
-   *  both stores the default and bulk-grants every known phone so they gain
-   *  access immediately without a reconnect. disable-project clears the
-   *  default and revokes the project from every phone so a phone that
-   *  re-registers doesn't re-inherit a stale grant. */
+  /** Handle the machine mobile-access switch over the loopback control plane.
+   *  The bridge is the single writer of mobile-access-policy.json, and this
+   *  verb is its only mutation path (the store has no fs watcher).
+   *
+   *  Turning it OFF is machine-wide and immediate: every promoted relay slot is
+   *  torn down, so no project is left dialable. The socket itself stays
+   *  registered — this switch is authorization, not presence — but the catalog
+   *  goes empty and every project verb is rejected. */
   async handleMobileAccessVerb(req: ControlRequest): Promise<ControlResponse> {
     switch (req.type) {
       case "mobile-access:get":
-        return {
-          id: req.id,
-          ok: true,
-          type: "mobile-access:get",
-          projectIds: this.mobileAccessPolicy.listSameAccountDefaultProjects(),
-        };
-      case "mobile-access:enable-project":
-        this.mobileAccessPolicy.enableProject(req.projectId);
-        // Grant existing same-account phones in one flush (not one per phone).
-        this.pairedPhonesStore.allowProjectForSameAccount(req.projectId);
-        this.readvertiseToControlPlane();
-        this.pushHeartbeat();
-        return {
-          id: req.id,
-          ok: true,
-          type: "mobile-access:enable-project",
-          projectIds: this.mobileAccessPolicy.listSameAccountDefaultProjects(),
-        };
-      case "mobile-access:disable-project":
-        this.mobileAccessPolicy.disableProject(req.projectId);
-        // Revokes this project from every phone's allowlist (however the grant
-        // arrived — default or explicit `phones allow`). forget() revokes ALL
-        // projects from a phone; that's project deletion, a different operation.
-        this.pairedPhonesStore.denyProjectForSameAccount(req.projectId);
-        this.demoteIfOrphaned(req.projectId);
-        this.readvertiseToControlPlane();
-        this.pushHeartbeat();
-        return {
-          id: req.id,
-          ok: true,
-          type: "mobile-access:disable-project",
-          projectIds: this.mobileAccessPolicy.listSameAccountDefaultProjects(),
-        };
+        return { id: req.id, ok: true, type: "mobile-access:get", enabled: this.mobileAccessPolicy.isEnabled() };
+      case "mobile-access:set": {
+        const changed = this.mobileAccessPolicy.setEnabled(req.enabled);
+        if (changed && !req.enabled) this.demoteAllPromoted();
+        if (changed) {
+          // The advert derives from the switch, and `Device.mobileAccessEnabled`
+          // in the account inventory must not lag until the next reconnect.
+          this.readvertiseToControlPlane();
+          this.pushHeartbeat();
+        }
+        return { id: req.id, ok: true, type: "mobile-access:set", enabled: this.mobileAccessPolicy.isEnabled() };
+      }
       default:
         return { id: req.id, ok: false, error: { code: "UNKNOWN_VERB", message: `not a mobile-access verb: ${(req as ControlRequest).type}` } };
     }
   }
 
-  /** Answer the drawer's `sessions.list` control-plane RPC: an allowlist-gated,
-   *  core-free session-list peek. Reads the persisted sessions.json directly —
-   *  no project:start, no data-plane socket, no side effect of running a stopped
+  /** Answer the drawer's `sessions.list` control-plane RPC: a gated, core-free
+   *  session-list peek. Reads the persisted sessions.json directly — no
+   *  project:start, no data-plane socket, no side effect of running a stopped
    *  project's startup terminals. Returns a `response` envelope mirroring
    *  dispatchRpc's shape so the app correlates by requestId unchanged. */
-  async handleSessionsListRpc(req: RpcRequest, phonePubkey: string): Promise<AbMessage> {
+  async handleSessionsListRpc(req: RpcRequest): Promise<AbMessage> {
     const parsed = SessionsListParams.safeParse(req.params ?? {});
     if (!parsed.success) {
       return createMessage("response", {
@@ -717,21 +674,30 @@ export class HostServer {
     }
     const { projectId, includeArchived } = parsed.data;
     // SECURITY: reject path separators / dot dirs / hidden names so projectId
-    // can never escape or target a dotfile under agents/ (defense-in-depth; the
-    // allowlist already confines it to host-catalog ids, which never contain
-    // separators).
+    // can never escape or target a dotfile under agents/. Shape only — the
+    // catalog lookup below is what confines it to a real project.
     if (!isSafeProjectId(projectId)) {
       return createMessage("response", {
         requestId: req.requestId, ok: false,
         error: { code: "E_BAD_PARAMS", message: "invalid projectId" },
       });
     }
-    // SECURITY: same gate as project:start — a trusted-but-not-allowed phone
-    // sees nothing of this project.
-    if (!this.pairedPhonesStore.isAllowed(phonePubkey, projectId)) {
+    // SECURITY: same gate as project:start — with mobile access off a phone
+    // sees nothing of this machine.
+    if (!this.mobileAccessPolicy.isEnabled()) {
       return createMessage("response", {
         requestId: req.requestId, ok: false,
-        error: { code: "NOT_ALLOWED", message: "project not in phone allowlist" },
+        error: { code: "NOT_ALLOWED", message: "mobile access is disabled on this machine" },
+      });
+    }
+    // SECURITY: the machine switch is machine-wide, so the seen catalog is the
+    // ONLY thing bounding WHICH project this reads. Without it any
+    // separator-free id would be accepted and `agents/<anything>/sessions.json`
+    // read off disk.
+    if (!this.seenProjects.has(projectId)) {
+      return createMessage("response", {
+        requestId: req.requestId, ok: false,
+        error: { code: "UNKNOWN_PROJECT", message: "no such project on this machine" },
       });
     }
     // A WARM core (open/promoted) owns the live PTY/chat state — delegate so the
@@ -746,12 +712,12 @@ export class HostServer {
     return createMessage("response", { requestId: req.requestId, ok: true, result: { sessions } });
   }
 
-  /** Answer the Recent tab's `sessions.delete` control-plane RPC: allowlist-gated
-   *  session delete. A WARM core (promoted/open) is delegated to its live
+  /** Answer the Recent tab's `sessions.delete` control-plane RPC: gated session
+   *  delete. A WARM core (promoted/open) is delegated to its live
    *  SessionManager so in-memory state and sessions.json stay consistent; a
    *  STOPPED project is mutated on disk via SessionManager.deletePersisted. Never
    *  warms a stopped core just to delete. */
-  async handleSessionsDeleteRpc(req: RpcRequest, phonePubkey: string): Promise<AbMessage> {
+  async handleSessionsDeleteRpc(req: RpcRequest): Promise<AbMessage> {
     const parsed = SessionsDeleteParams.safeParse(req.params ?? {});
     if (!parsed.success) {
       return createMessage("response", {
@@ -760,16 +726,28 @@ export class HostServer {
       });
     }
     const { projectId, sessionId } = parsed.data;
+    // SECURITY: shape check only (no separators / dot dirs / hidden names) —
+    // the catalog lookup below is what confines it to a real project.
     if (!isSafeProjectId(projectId)) {
       return createMessage("response", {
         requestId: req.requestId, ok: false,
         error: { code: "E_BAD_PARAMS", message: "invalid projectId" },
       });
     }
-    if (!this.pairedPhonesStore.isAllowed(phonePubkey, projectId)) {
+    if (!this.mobileAccessPolicy.isEnabled()) {
       return createMessage("response", {
         requestId: req.requestId, ok: false,
-        error: { code: "NOT_ALLOWED", message: "project not in phone allowlist" },
+        error: { code: "NOT_ALLOWED", message: "mobile access is disabled on this machine" },
+      });
+    }
+    // SECURITY: load-bearing, and more so here than on the read path — this verb
+    // DELETES. The machine switch says whether any project is reachable; only
+    // the seen catalog says which ids exist, so without this an unknown
+    // separator-free id would mutate `agents/<anything>/sessions.json`.
+    if (!this.seenProjects.has(projectId)) {
+      return createMessage("response", {
+        requestId: req.requestId, ok: false,
+        error: { code: "UNKNOWN_PROJECT", message: "no such project on this machine" },
       });
     }
     const entry = this.cores.get(projectId);
@@ -784,24 +762,23 @@ export class HostServer {
     return createMessage("response", { requestId: req.requestId, ok: true, result: { deleted } });
   }
 
-  /** Dispatch an E2E control-plane verb from the paired phone identified by
-   *  phonePubkey. Returns a structured result; callers on the bus path discard
-   *  it (void). */
+  /** Dispatch an E2E control-plane verb from the connected account-trusted
+   *  phone. Returns a structured result; callers on the bus path discard it
+   *  (void). */
   async handleControlPlaneVerb(
     verb: AbMessage,
-    phonePubkey: string,
     bus: MessageBus,
   ): Promise<{ ok: true } | { ok: false; error: { code: string; message: string } }> {
     if (verb.type === "project:start") {
-      // SECURITY: the allowlist is the ONLY gate, checked BEFORE open() — open()
-      // runs the project's `terminals:` startup commands, so a non-allowed
-      // project must be rejected with NO core created.
-      if (!this.pairedPhonesStore.isAllowed(phonePubkey, verb.projectId)) {
-        return { ok: false, error: { code: "NOT_ALLOWED", message: "project not in phone allowlist" } };
+      // SECURITY: checked BEFORE open() — open() runs the project's `terminals:`
+      // startup commands, so a rejected start must create NO core.
+      if (!this.mobileAccessPolicy.isEnabled()) {
+        return { ok: false, error: { code: "NOT_ALLOWED", message: "mobile access is disabled on this machine" } };
       }
       // SECURITY: the path comes from the host's OWN catalog, never from the
-      // phone's message (the message has no path field). An allowed projectId
-      // with no path on record is rejected — never opened with a guessed path.
+      // phone's message (the message has no path field). This lookup is also the
+      // only per-project bound on what a phone may name — an id with no path on
+      // record is rejected, never opened with a guessed path.
       const seen = this.seenProjects.get(verb.projectId);
       if (!seen) return { ok: false, error: { code: "UNKNOWN_PROJECT", message: "no path on record; open from desktop first" } };
       const entry = this.cores.get(verb.projectId);
@@ -826,7 +803,7 @@ export class HostServer {
         // surface a terminal rejection (only the retired SESSION_LIMIT_EXCEEDED,
         // from a relay predating the worker-limit change). project:start
         // itself returns ok immediately — the outcome is pushed asynchronously.
-        this.reportFirstRegister(handle.firstRegister, projectId, phonePubkey, bus, () => {
+        this.reportFirstRegister(handle.firstRegister, projectId, bus, () => {
           // Tear the rejected slot down so a later retry can re-promote, and so
           // the core reads not-promoted again.
           try { handle.stop(); } catch {}
@@ -846,7 +823,7 @@ export class HostServer {
         const coreRef = this.cores.get(projectId)?.core;
         const firstRegister = coreRef?.whenRelayRegistered();
         if (firstRegister) {
-          this.reportFirstRegister(firstRegister, projectId, phonePubkey, bus, () => {
+          this.reportFirstRegister(firstRegister, projectId, bus, () => {
             // A fresh remote core's relay slot IS its primary session — a rejected
             // register leaves it unreachable, so close it for a clean retry. Guard
             // on identity (like the promote path's `e?.promotion === handle`): a
@@ -876,7 +853,7 @@ export class HostServer {
       // (running:true only if the slot is actually relay-admitted —
       // buildProjectsAdvertisement gates on that, so a promoted-but-not-yet-
       // registered core still reads not-running here).
-      this.sendProjectsAdvertisement(phonePubkey, bus);
+      this.sendProjectsAdvertisement(bus);
       return { ok: true };
     }
     return { ok: false, error: { code: "UNKNOWN_VERB", message: `unsupported control-plane verb: ${verb.type}` } };
@@ -892,7 +869,6 @@ export class HostServer {
   private reportFirstRegister(
     firstRegister: Promise<RegisterOutcome>,
     projectId: string,
-    phonePubkey: string,
     bus: MessageBus,
     onFatal: () => void,
   ): void {
@@ -905,7 +881,7 @@ export class HostServer {
           if (streamId) {
             bus.publish(createMessage("stream-ready", { projectId, streamId }), "control");
           }
-          this.sendProjectsAdvertisement(phonePubkey, bus);
+          this.sendProjectsAdvertisement(bus);
           return;
         }
         onFatal();
@@ -928,32 +904,14 @@ export class HostServer {
     return !!this.cores.get(id)?.promotion;
   }
 
-  /** Stop the promoted relay slot for `projectId` if no paired phone still has
-   *  it in their allowlist. The loopback session and AgentCore are untouched.
-   *  Called after denyProject so the now-orphaned outbound slot is torn down
-   *  as hygiene (the allowlist gate already blocks inbound per-message). */
-  private demoteIfOrphaned(projectId: string): void {
-    const entry = this.cores.get(projectId);
-    if (!entry?.promotion) return;
-    const stillAllowed = this.listPairedPhones().some((p) => p.allowedProjects.includes(projectId));
-    if (stillAllowed) return;
-    try {
-      entry.promotion.stop();
-    } catch (e) {
-      log.warn("Failed to demote orphaned core %s: %s", projectId, e instanceof Error ? e.message : String(e));
-    }
-    entry.promotion = undefined;
-  }
-
   /** Tear down every active relay slot (PromotionHandle) and return each core
-   *  to loopback-only. An explicit "drop all relay slots" primitive (e.g. a
-   *  future go-offline command) — NOT wired to phone disconnect, which must not
-   *  demote (a transient drop is not a revocation; revocation reaches us via
-   *  phones:deny / phones:unpair → demoteIfOrphaned). Idempotent: safe to call
-   *  when no core is promoted. The core itself — and its live loopback session —
-   *  is left ENTIRELY untouched; only the additive relay slot is stopped. Public
-   *  so tests can invoke it directly without standing up a real relay
-   *  connection. */
+   *  to loopback-only. Called when `mobile-access:set` turns the machine off:
+   *  the switch is machine-wide, so no project may be left dialable. NOT wired
+   *  to phone disconnect, which must not demote (a transient drop is not a
+   *  revocation). Idempotent: safe to call when no core is promoted. The core
+   *  itself — and its live loopback session — is left ENTIRELY untouched; only
+   *  the additive relay slot is stopped. Public so tests can invoke it directly
+   *  without standing up a real relay connection. */
   demoteAllPromoted(): void {
     for (const [projectId, entry] of this.cores) {
       if (!entry.promotion) continue;
@@ -1015,13 +973,10 @@ export class HostServer {
         setTimeout(() => this.opts.onShutdownRequested?.(), 0);
         return { id: req.id, ok: true, type: "host:shutdown" };
       case "phones:list":
-      case "phones:allow":
-      case "phones:deny":
       case "phones:unpair":
         return this.handlePhonesVerb(req);
       case "mobile-access:get":
-      case "mobile-access:enable-project":
-      case "mobile-access:disable-project":
+      case "mobile-access:set":
         return this.handleMobileAccessVerb(req);
     }
   }
@@ -1071,7 +1026,9 @@ export class HostServer {
       identity: this.identityFor(mode),
       ...(relayUrl ? { relayUrl } : {}),
       pairedPhones: this.pairedPhonesStore,
-      sameAccountDefaultProjects: () => this.mobileAccessPolicy.listSameAccountDefaultProjects(),
+      // Read live, not captured: a `mobile-access:set` must take effect on every
+      // already-warm core's gate without restarting it.
+      mobileAccessEnabled: () => this.mobileAccessPolicy.isEnabled(),
       ensureMachineRelay: (msg) => this.ensureMachineRelay(msg),
       ...(mode === "remote" ? { remote } : {}),
     });
@@ -1156,12 +1113,12 @@ export class HostServer {
     return this.opts.remote ?? this.wizardRemote;
   }
 
-  /** Push the machine's current mobile-access state (relayUrl, machineName,
-   *  and whether ANY same-account project is enabled) to the account
-   *  inventory. Called both on relay (re)authentication and immediately after
-   *  a `mobile-access:*` toggle mutation, so `Device.mobileAccessEnabled` in
-   *  the web DB reflects the actual policy rather than lagging until the next
-   *  reconnect. No-op without remote config or before the machine OAuth
+  /** Push the machine's current mobile-access state (relayUrl, machineName, and
+   *  the machine switch) to the account inventory. Called both on relay
+   *  (re)authentication and immediately after a `mobile-access:set`, so
+   *  `Device.mobileAccessEnabled` in the web DB reflects the actual policy
+   *  rather than lagging until the next reconnect — the two are now the same
+   *  boolean, not a projection. No-op without remote config or before the OAuth
    *  runtime exists — every real caller has already gone through
    *  startRemoteControlPlane/ensureRemoteRuntime by the time this can fire. */
   private pushHeartbeat(): void {
@@ -1175,7 +1132,7 @@ export class HostServer {
       licenseApiUrl: r.licenseApiUrl,
       getToken: rt.maint.getToken,
       deviceUuid: r.auth.deviceUuid,
-      mobileAccessEnabled: this.mobileAccessPolicy.listSameAccountDefaultProjects().length > 0,
+      mobileAccessEnabled: this.mobileAccessPolicy.isEnabled(),
       relayUrl: r.relayUrl,
       machineName: process.env.ANTGRID_HOST_NAME ?? hostname(),
     }).then((ok) => {
@@ -1213,23 +1170,19 @@ export class HostServer {
    *  best-effort — a failure in one must never strand the others:
    *    1. stop a warm core (kills its PTYs + any relay slot),
    *    2. delete the on-disk store dir (`agents/<id>/`, holding sessions.json),
-   *    3. drop the seen-catalog hint (also clears the stale projects.json entry),
-   *    4. revoke the project from every paired phone's allowlist.
+   *    3. drop the seen-catalog hint (also clears the stale projects.json entry).
+   *  Deliberately does NOT touch the machine's mobile-access switch: that is
+   *  machine-wide policy, and deleting one project must not turn the machine
+   *  off (or on) for every other.
    *  Idempotent: forgetting an unknown/already-forgotten id is a no-op. */
   async forget(projectId: string): Promise<void> {
     await this.stop(projectId);
     this.deleteProjectStores(projectId);
     if (this.seenProjects.delete(projectId)) this.flushSeen();
-    // Clear the same-account default so a later same-account phone doesn't
-    // re-inherit a grant for a deleted project.
-    const defaultChanged = this.mobileAccessPolicy.disableProject(projectId);
-    let revokedAny = false;
-    for (const phone of this.pairedPhonesStore.list()) {
-      if (this.pairedPhonesStore.denyProject(phone.phonePubkey, projectId)) revokedAny = true;
-    }
-    // A forgotten project must vanish from a live phone's picker without a
-    // reconnect (the advertisement is otherwise only re-sent on handshake).
-    if (revokedAny || defaultChanged) this.readvertiseToControlPlane();
+    // Unconditional: the advert IS the seen catalog now, so a forgotten project
+    // must vanish from a live phone's picker without waiting for a reconnect
+    // (the advertisement is otherwise only re-sent on handshake).
+    this.readvertiseToControlPlane();
   }
 
   /** Delete a project's on-disk per-project dirs (best-effort). Two locations,

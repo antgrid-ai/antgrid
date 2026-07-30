@@ -20,7 +20,7 @@ function fakeTrustedPeers(byDeviceId: Record<string, string>): TrustedPeersProvi
 }
 
 function fakePairedPhones(phoneDeviceId: string, phonePubkey: string): PairedPhonesStore {
-  return { list: () => [{ phonePubkey, phoneDeviceId, pairedAt: "x", lastSeenAt: "x", allowedProjects: [] }] } as unknown as PairedPhonesStore;
+  return { list: () => [{ phonePubkey, phoneDeviceId, pairedAt: "x", lastSeenAt: "x" }] } as unknown as PairedPhonesStore;
 }
 
 type Resolution = { pub: string | undefined; known: number };

@@ -9,12 +9,12 @@
 // re-emitted on re-advertise; this is the ONLY test that closes the
 // delivery-timing risk by asserting a paired app actually receives the frame.
 //
-// `agent:tools` is MACHINE-LEVEL — it is not a project verb, so the Phase B
-// allowlist gate does NOT apply. The phone receives it on handshake-complete
-// without any `allowProject`. We therefore assert ONLY on `agent:tools` to keep
-// the test focused and avoid the allowlist trap. The agent-under-test may or may
-// not have a real KNOWN_AGENTS bin on PATH, so we assert the frame ARRIVES with
-// an array payload rather than a specific tool being present.
+// `agent:tools` describes the MACHINE, not any project, so it carries no
+// project id to resolve and needs no project stream — which is exactly why it
+// is the right frame to prove control-plane delivery timing on its own. The
+// agent-under-test may or may not have a real KNOWN_AGENTS bin on PATH, so we
+// assert the frame ARRIVES with an array payload rather than a specific tool
+// being present.
 //
 // Known Windows test noise (NOT failures): fs.watch EPERM/EBUSY on teardown,
 // temp-dir cleanup races. Judge by pass/fail counts.
@@ -24,7 +24,7 @@ import { setupTestEnv } from "../helpers/harness";
 test("control plane delivers agent:tools to an account-trusted app over a real relay handshake", async () => {
   const env = await setupTestEnv({ fixtureName: "basic" });
   try {
-    // setupTestEnv already paired ONCE against the control plane (bare
+    // setupTestEnv already admitted this app against the control plane (bare
     // deviceUuid) with NO pairing ceremony and completed the E2E handshake. No
     // per-project data plane is ever opened — discovery must happen on the
     // control plane.

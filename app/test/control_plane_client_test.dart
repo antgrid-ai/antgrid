@@ -138,13 +138,13 @@ void main() {
     t.emitJson({
       'type': 'project:start',
       'ok': false,
-      'error': {'code': 'NOT_ALLOWED', 'message': 'Phone not allowlisted'},
+      'error': {'code': 'NOT_ALLOWED', 'message': 'mobile access is disabled on this machine'},
     });
     await Future<void>.delayed(Duration.zero);
 
     expect(client.currentState.lastError, isNotNull);
     expect(client.currentState.lastError!.code, 'NOT_ALLOWED');
-    expect(client.currentState.lastError!.message, 'Phone not allowlisted');
+    expect(client.currentState.lastError!.message, 'mobile access is disabled on this machine');
 
     await client.dispose();
   });

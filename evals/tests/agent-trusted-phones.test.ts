@@ -6,10 +6,11 @@ import { createMessage } from "../../bridge/src/protocol";
 
 /**
  * Account-level trust survives an agent restart (design §5.1 + §6.3). After the
- * agent restarts (new epoch supersedes its old relay connection), the agent
- * reloads its on-disk paired-phones trust list — so the same phone resumes
- * routing WITHOUT re-pairing: peer-offline → peer-online, a fresh E2E handshake
- * over the surviving account-trust admission, and project verbs flow again.
+ * agent restarts (new epoch supersedes its old relay connection), the same phone
+ * resumes routing WITHOUT re-pairing: peer-offline → peer-online, a fresh E2E
+ * handshake over the surviving account-trust admission, and project verbs flow
+ * again — because both halves of the answer are on disk in the abDir the restart
+ * reuses: account-trust admission and the machine's mobile-access switch.
  */
 async function fileRead(app: RelayClient, projectId: string): Promise<string> {
   await app.pullStateSnapshot();
@@ -22,8 +23,8 @@ async function fileRead(app: RelayClient, projectId: string): Promise<string> {
 test("trusted phone survives agent restart and resumes without re-pairing", async () => {
   const env = await setupTestEnv({ fixtureName: "basic" });
   try {
-    // Baseline: firstProject is already allowed by setupTestEnv — use it as a
-    // liveness probe.
+    // Baseline: setupTestEnv left the machine mobile-enabled — use firstProject
+    // as a liveness probe.
     expect(await fileRead(env.app, env.projectId)).toContain("Eval Test Project");
 
     // Restart the agent, then let the phone reconnect its socket under the SAME

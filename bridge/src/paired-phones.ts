@@ -3,13 +3,16 @@ import { join } from "node:path";
 import { logger } from "./logger";
 const log = logger.child({ component: "paired-phones" });
 
+/** A phone's identity/bookkeeping row: label, last-seen, push routing. NOT an
+ *  authorization record — admission is the account inventory (see
+ *  `relay-client.ts` `handleClientHello`) and authorization is the machine-level
+ *  switch in `mobile-access-policy.ts`. */
 export interface PairedPhone {
   phonePubkey: string;
   phoneDeviceId: string;
   label?: string;
   pairedAt: string;
   lastSeenAt: string;
-  allowedProjects: string[];
   // Push (Phase 1): persistent X25519 push pubkey + current FCM token. The relay
   // never stores these; the bridge supplies them per push:deliver.
   pushPubkey?: string;
@@ -18,35 +21,12 @@ export interface PairedPhone {
   pushUpdatedAt?: string;
 }
 
-/** Input to upsert. `allowedProjects` is optional here (defaults to []) so the
- *  pairing path — which doesn't manage the allowlist — needn't supply it.
- *  Reads always return the required-field PairedPhone. */
-export type UpsertPhone = Omit<PairedPhone, "allowedProjects"> & {
-  allowedProjects?: string[];
-};
-
 export interface PairedPhonesStore {
   list(): PairedPhone[];
   has(phonePubkey: string): boolean;
   get(phonePubkey: string): PairedPhone | undefined;
-  upsert(phone: UpsertPhone): void;
+  upsert(phone: PairedPhone): void;
   remove(phonePubkey: string): void;
-  isAllowed(phonePubkey: string, projectId: string): boolean;
-  allowProject(phonePubkey: string, projectId: string): void;
-  /** Revoke `projectId` from the phone's allowlist. Returns true if the project
-   *  was present and removed, false if the phone or grant didn't exist (no-op).
-   *  Callers use the return value to avoid reporting a revocation that did
-   *  nothing — a silent no-op reads as "access revoked" when it isn't. */
-  denyProject(phonePubkey: string, projectId: string): boolean;
-  /** Grant `projectId` to every phone missing it, flushing ONCE. The
-   *  same-account default toggle is inherently a bulk op; looping
-   *  allowProject would rewrite the whole file (and trip the watcher) once per
-   *  phone. Returns true if any phone changed. */
-  allowProjectForSameAccount(projectId: string): boolean;
-  /** Revoke `projectId` from every phone's allowlist, flushing ONCE —
-   *  regardless of whether the grant came from the same-account default or an
-   *  explicit `allowProject`. Returns true if any phone changed. */
-  denyProjectForSameAccount(projectId: string): boolean;
   /** Record a fresh admission for `phonePubkey` WITHOUT writing to disk.
    *  A phone rekeys on a schedule and every rekey re-runs the client-hello, so
    *  a straight `upsert` here would rewrite (and re-flush) the file on each one
@@ -65,9 +45,9 @@ export interface PairedPhonesStore {
    *  50ms debounce) and reloads the in-memory store on each change. Returns a
    *  stop function that cancels the watcher and any pending debounce timer.
    *
-   *  A `flushLastSeen` write is deliberately NOT reported: it carries no
-   *  authorization change, and `onChange` drives a re-advertise to every
-   *  connected phone. Suppression is one-shot and applies only to a write that
+   *  A `flushLastSeen` write is deliberately NOT reported: it carries nothing a
+   *  connected phone could observe, and `onChange` drives a re-advertise to
+   *  every one of them. Suppression is one-shot and applies only to a write that
    *  carried touches alone — a flush that absorbed a concurrent external edit
    *  still notifies, and so does any later edit. */
   watch(onChange: () => void): () => void;
@@ -85,15 +65,6 @@ const DEFAULT_LAST_SEEN_FLUSH_MS = 60_000;
 interface FileShape {
   version: 1;
   phones: PairedPhone[];
-}
-
-/** On-disk representation: allowedProjects may be absent in legacy files. */
-interface PhoneOnDisk extends Omit<PairedPhone, "allowedProjects"> {
-  allowedProjects?: string[];
-}
-interface FileShapeOnDisk {
-  version: 1;
-  phones: PhoneOnDisk[];
 }
 
 export function loadPairedPhones(abDir: string, opts: PairedPhonesOptions = {}): PairedPhonesStore {
@@ -119,8 +90,8 @@ export function loadPairedPhones(abDir: string, opts: PairedPhonesOptions = {}):
     const raw = JSON.stringify(data, null, 2);
     writeFileSync(path, raw);
     if (process.platform !== "win32") chmodSync(path, 0o600);
-    // Cleared on any authorization-bearing write: those MUST still notify, and
-    // a stale value could silence a later external edit that happens to match.
+    // Cleared on any write carrying more than touches: those MUST still notify,
+    // and a stale value could silence a later external edit that happens to match.
     touchWriteRaw = silent ? raw : null;
   }
 
@@ -132,18 +103,18 @@ export function loadPairedPhones(abDir: string, opts: PairedPhonesOptions = {}):
     if (pendingTouches.size === 0) return;
     // Merge onto the on-disk rows rather than writing our in-memory array.
     // Unlike every other flush this one fires on a background timer, so it can
-    // land in the window between a CLI `phones allow` writing the file and our
+    // land in the window between a CLI `phones remove` writing the file and our
     // watcher debounce reloading it — and the self-write check below would then
-    // hide the clobbered grant entirely. Disk is authoritative here because all
+    // hide the resurrected row entirely. Disk is authoritative here because all
     // other mutators flush synchronously; pending touches are the only state
     // memory legitimately holds ahead of it.
     //
     // Adopt only a SUCCESSFUL read. A row-count guard would take `phones remove
-    // <last phone>` for a failure and write the removed row — grants included —
-    // straight back; an existence guard has the mirror failure, adopting the
-    // zero rows a torn concurrent write or malformed JSON yields and flushing
-    // the whole store away. `readFile` separates the two: null = could not
-    // read, [] = a well-formed empty file.
+    // <last phone>` for a failure and write the removed row straight back; an
+    // existence guard has the mirror failure, adopting the zero rows a torn
+    // concurrent write or malformed JSON yields and flushing the whole store
+    // away. `readFile` separates the two: null = could not read, [] = a
+    // well-formed empty file.
     const before = JSON.stringify(phones);
     const disk = readFile(path);
     if (disk) phones = disk;
@@ -163,66 +134,21 @@ export function loadPairedPhones(abDir: string, opts: PairedPhonesOptions = {}):
     list: () => phones.slice(),
     has: (pk) => phones.some((p) => p.phonePubkey === pk),
     get: (pk) => phones.find((p) => p.phonePubkey === pk),
-    upsert: (phone: UpsertPhone) => {
+    upsert: (phone: PairedPhone) => {
+      // Displace by pubkey OR device id, so a rekey (same device, new pubkey)
+      // replaces the old row instead of leaving an orphan alongside it.
       const displaced = phones.filter(
         (p) =>
           p.phonePubkey === phone.phonePubkey ||
           (phone.phoneDeviceId && p.phoneDeviceId === phone.phoneDeviceId),
       );
       phones = phones.filter((p) => !displaced.includes(p));
-      // A rekey (same device, new pubkey — matched above by phoneDeviceId) must
-      // carry forward whatever the device was already explicitly granted, or a
-      // routine key rotation silently reverts the phone to just the same-account
-      // defaults. Union rather than replace: the caller's `allowedProjects`
-      // (typically just the defaults on a rekey) never revokes an existing grant.
-      const carriedProjects = new Set(displaced.flatMap((p) => p.allowedProjects));
-      for (const projectId of phone.allowedProjects ?? []) carriedProjects.add(projectId);
-      phones.push({ ...phone, allowedProjects: Array.from(carriedProjects) });
+      phones.push({ ...phone });
       flush();
     },
     remove: (pk) => {
       phones = phones.filter((p) => p.phonePubkey !== pk);
       flush();
-    },
-    isAllowed: (pk, projectId) => {
-      const phone = phones.find((p) => p.phonePubkey === pk);
-      return !!phone && phone.allowedProjects.includes(projectId);
-    },
-    allowProject: (pk, projectId) => {
-      const phone = phones.find((p) => p.phonePubkey === pk);
-      if (!phone || phone.allowedProjects.includes(projectId)) return;
-      phone.allowedProjects.push(projectId);
-      flush();
-    },
-    denyProject: (pk, projectId) => {
-      const phone = phones.find((p) => p.phonePubkey === pk);
-      if (!phone) return false;
-      const next = phone.allowedProjects.filter((p) => p !== projectId);
-      if (next.length === phone.allowedProjects.length) return false;
-      phone.allowedProjects = next;
-      flush();
-      return true;
-    },
-    allowProjectForSameAccount: (projectId) => {
-      let changed = false;
-      for (const phone of phones) {
-        if (phone.allowedProjects.includes(projectId)) continue;
-        phone.allowedProjects.push(projectId);
-        changed = true;
-      }
-      if (changed) flush();
-      return changed;
-    },
-    denyProjectForSameAccount: (projectId) => {
-      let changed = false;
-      for (const phone of phones) {
-        const next = phone.allowedProjects.filter((p) => p !== projectId);
-        if (next.length === phone.allowedProjects.length) continue;
-        phone.allowedProjects = next;
-        changed = true;
-      }
-      if (changed) flush();
-      return changed;
     },
     touchLastSeen: (pk, at) => {
       const phone = phones.find((p) => p.phonePubkey === pk);
@@ -252,10 +178,9 @@ export function loadPairedPhones(abDir: string, opts: PairedPhonesOptions = {}):
           // Resolve the touch-write snapshot on EVERY fire, not only a matching
           // one: an external write landing inside the debounce makes our own
           // event read someone else's bytes, and a snapshot left armed past
-          // that would silence a LATER external edit that happens to restore
-          // it (allow-then-deny of one project round-trips the file exactly),
-          // losing the revocation until restart. Re-notifying costs a
-          // re-advertise; under-notifying costs the gate.
+          // that would silence a LATER external edit that happens to restore it
+          // byte-for-byte, stranding the running host on rows it no longer has.
+          // Re-notifying costs a re-advertise; under-notifying costs correctness.
           const armed = touchWriteRaw;
           touchWriteRaw = null;
           // Our own touch flush: memory already holds it, and re-advertising on
@@ -294,22 +219,26 @@ function readRaw(path: string): string | null {
  * torn by a concurrent write, or malformed. Callers holding in-memory state
  * MUST distinguish that from `[]` (a well-formed file with no rows, which is
  * what `phones remove <last phone>` leaves): adopting a failed read as an empty
- * store and flushing it back wipes every phone's trust row and grants.
+ * store and flushing it back wipes every phone's label and push routing.
  */
 function readFile(path: string): PairedPhone[] | null {
   if (!existsSync(path)) return null;
   try {
     const raw = readFileSync(path, "utf8");
-    const parsed = JSON.parse(raw) as FileShapeOnDisk;
+    const parsed = JSON.parse(raw) as FileShape;
     if (parsed.version !== 1 || !Array.isArray(parsed.phones)) return null;
-    // Destructure off the stale `admission` key left on disk by a
-    // pre-account-trust build (shed on the next flush()) instead of a `{...p}`
-    // spread; unlike an explicit field whitelist, new `PairedPhone` fields
-    // forward automatically without needing a matching edit here.
-    return parsed.phones.map(({ admission: _stale, allowedProjects, ...rest }: PhoneOnDisk & { admission?: string }) => ({
-      ...rest,
-      allowedProjects: allowedProjects ?? [],
-    }));
+    // Destructure off the stale keys older builds left on disk — `admission`
+    // (pre-account-trust) and `allowedProjects` (pre-machine-switch) — instead
+    // of a `{...p}` spread; unlike an explicit field whitelist, new
+    // `PairedPhone` fields forward automatically without an edit here. Both are
+    // shed on the next flush(); the file stays `version: 1` so an older bridge
+    // reading one we wrote still works.
+    return parsed.phones.map(
+      ({ admission: _admission, allowedProjects: _allowedProjects, ...rest }: PairedPhone & {
+        admission?: string;
+        allowedProjects?: string[];
+      }) => ({ ...rest }),
+    );
   } catch {
     return null;
   }

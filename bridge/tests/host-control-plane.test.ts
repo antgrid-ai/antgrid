@@ -87,15 +87,15 @@ test("control plane heartbeats the current relayUrl on authenticate (keeps inven
     expect(hb).toBeDefined();
     expect(hb!.body.deviceUuid).toBe("uuid-1");
     expect(hb!.body.relayUrl).toBe(fakeRemoteConfig().relayUrl);
-    // Fresh ANTGRID_DIR → no project has been enabled for mobile access yet, so
-    // the reported flag must be false (not the old hardcoded-true).
+    // Fresh ANTGRID_DIR → the machine switch defaults to off, so the reported
+    // flag must be false (not the old hardcoded-true).
     expect(hb!.body.mobileAccessEnabled).toBe(false);
   } finally {
     fetchSpy.mockRestore();
   }
 });
 
-test("mobile-access:enable-project immediately pushes a heartbeat reflecting the new state", async () => {
+test("mobile-access:set immediately pushes a heartbeat reflecting the new state", async () => {
   // Regression test: toggling mobile access on used to only mutate local state
   // (mobile-access-policy.json) and never told the account inventory — the DB's
   // relayUrl/mobileAccessEnabled stayed stale until an unrelated relay reconnect.
@@ -117,9 +117,9 @@ test("mobile-access:enable-project immediately pushes a heartbeat reflecting the
 
     const res = await host.handleMobileAccessVerb({
       id: "req-1",
-      type: "mobile-access:enable-project",
-      projectId: "proj-1",
-    } as any);
+      type: "mobile-access:set",
+      enabled: true,
+    });
     expect(res.ok).toBe(true);
 
     const hb = calls.find((c) => c.url.endsWith("/account/devices/me/heartbeat"));
@@ -155,7 +155,6 @@ test("onPeerOnline re-advertises to the recovered peer (bridge-side reconnect, p
     phoneDeviceId: "phone-1",
     pairedAt: "x",
     lastSeenAt: "x",
-    allowedProjects: ["proj-1"],
   });
 
   const delivered: any[] = [];
@@ -179,19 +178,17 @@ test("no remote config → no control-plane relay opened", async () => {
 });
 
 // Build a standalone HostServer with just the fields the control-plane advert
-// recompute reads — no live relay/runtime. `phone` is the paired-phone record
-// `pairedPhonesStore.get(pk)` returns (undefined → unknown phone → empty advert).
+// recompute reads — no live relay/runtime. The advert is the machine switch
+// applied to the seen catalog, so those two are all it needs.
 function standaloneForSnapshot(opts: {
-  phone?: { allowedProjects: string[] } | undefined;
+  mobileAccess?: boolean;
   seen?: Array<[string, { path: string; label: string; lastActiveAt: string }]>;
 }): HostServer {
   const standalone = Object.create(HostServer.prototype) as HostServer;
-  (standalone as any).pairedPhonesStore = { get: () => opts.phone };
   (standalone as any).seenProjects = new Map(opts.seen ?? []);
   (standalone as any).cores = new Map();
-  // sendProjectsAdvertisement reads the same-account defaults (for its debug log
-  // and the advert); stub it so the advert recompute doesn't deref undefined.
-  (standalone as any).mobileAccessPolicy = { listSameAccountDefaultProjects: () => [] };
+  (standalone as any).streamIds = new Map();
+  (standalone as any).mobileAccessPolicy = { isEnabled: () => opts.mobileAccess ?? false };
   return standalone;
 }
 
@@ -200,7 +197,7 @@ function standaloneForSnapshot(opts: {
 // the durable handshake adverts (agent:tools / agent:projects) never reach a
 // late-subscribing ControlPlaneClient and the first picker render shows no tools.
 test("control-plane state.snapshot answers with both advert types (welcome-replay)", async () => {
-  const standalone = standaloneForSnapshot({ phone: undefined });
+  const standalone = standaloneForSnapshot({});
   const bus = new MessageBus();
   // A stale empty projects frame from the handshake push (REPLAY_TYPES → cached).
   bus.publish(createMessage("agent:projects", { projects: [] }), "control");
@@ -213,7 +210,7 @@ test("control-plane state.snapshot answers with both advert types (welcome-repla
     method: "state.snapshot",
     params: { types: ["*"] },
   });
-  standalone.dispatchControlPlaneInbound(req as any, "control", "phone-pub", bus);
+  standalone.dispatchControlPlaneInbound(req as any, "control", bus);
   await new Promise((r) => setTimeout(r, 0)); // flush dispatchRpc microtask
 
   const res = delivered.find((m) => m.type === "response") as any;
@@ -223,13 +220,13 @@ test("control-plane state.snapshot answers with both advert types (welcome-repla
   expect(types).toEqual(["agent:projects", "agent:tools"]);
 });
 
-// The bug: the handshake push can run before this phone's allowlist/catalog is
-// ready, caching an empty `agent:projects`. The snapshot pull must RECOMPUTE so
+// The bug: the handshake push can run before the catalog is ready, caching an
+// empty `agent:projects`. The snapshot pull must RECOMPUTE so
 // a project that became visible after the push still reaches the phone — replay
 // alone (plus the bus's payload-dedup) would echo the empty frame forever.
 test("control-plane state.snapshot RECOMPUTES projects (project visible after the empty handshake push appears)", async () => {
   const standalone = standaloneForSnapshot({
-    phone: { allowedProjects: ["proj-1"] },
+    mobileAccess: true,
     seen: [["proj-1", { path: "/p/proj-1", label: "proj-1", lastActiveAt: "2026-01-01T00:00:00.000Z" }]],
   });
   const bus = new MessageBus();
@@ -244,7 +241,7 @@ test("control-plane state.snapshot RECOMPUTES projects (project visible after th
     method: "state.snapshot",
     params: { types: ["agent:projects"] },
   });
-  standalone.dispatchControlPlaneInbound(req as any, "control", "phone-pub", bus);
+  standalone.dispatchControlPlaneInbound(req as any, "control", bus);
   await new Promise((r) => setTimeout(r, 0));
 
   const res = delivered.find((m) => m.type === "response") as any;

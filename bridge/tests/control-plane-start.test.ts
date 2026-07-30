@@ -55,6 +55,11 @@ function tempFolder(): string {
   return f;
 }
 
+/** Flip the machine switch through its only mutation path, the loopback verb. */
+async function setMobileAccess(h: HostServer, enabled: boolean): Promise<void> {
+  await h.handleMobileAccessVerb({ id: "t", type: "mobile-access:set", enabled });
+}
+
 beforeEach(() => {
   prevAbDir = process.env.ANTGRID_DIR;
   abDir = mkdtempSync(join(tmpdir(), "antgrid-cp-start-abdir-"));
@@ -72,46 +77,43 @@ afterEach(async () => {
   if (abDir) rmSync(abDir, { recursive: true, force: true });
 });
 
-test("starts an allowed stopped project; rejects a non-allowed one", async () => {
+test("starts a known stopped project when mobile access is on", async () => {
   const h = host!;
   // Seed projA known-but-stopped: open then stop (now in seenProjects, not warm).
   await h.open("projA", tempFolder(), "remote");
   await h.stop("projA");
   expect(h.get("projA")).toBeNull(); // stopped, not warm
-
-  h.pairedPhones.upsert({
-    phonePubkey: "pk1",
-    phoneDeviceId: "d1",
-    pairedAt: "x",
-    lastSeenAt: "x",
-    allowedProjects: ["projA"],
-  });
+  await setMobileAccess(h, true);
   const bus = new MessageBus();
 
-  const ok = await h.handleControlPlaneVerb({ type: "project:start", projectId: "projA" } as any, "pk1", bus);
+  const ok = await h.handleControlPlaneVerb({ type: "project:start", projectId: "projA" } as any, bus);
   expect(ok.ok).toBe(true);
   expect(h.get("projA")?.running).toBe(true);
-
-  // SECURITY: projB is NOT in the phone allowlist → rejected, NO core created.
-  const denied = await h.handleControlPlaneVerb({ type: "project:start", projectId: "projB" } as any, "pk1", bus);
-  expect(denied.ok).toBe(false);
-  if (!denied.ok) expect(denied.error.code).toBe("NOT_ALLOWED");
-  expect(h.get("projB")).toBeNull();
 });
 
-test("rejects an allowed projectId with no path on record (UNKNOWN_PROJECT, no core)", async () => {
+test("rejects project:start while mobile access is off (NOT_ALLOWED, no core)", async () => {
   const h = host!;
-  h.pairedPhones.upsert({
-    phonePubkey: "pk1",
-    phoneDeviceId: "d1",
-    pairedAt: "x",
-    lastSeenAt: "x",
-    allowedProjects: ["ghost"],
-  });
+  await h.open("projA", tempFolder(), "remote");
+  await h.stop("projA");
+  // Machine switch left at its default (off) — a fresh install is unreachable.
   const bus = new MessageBus();
 
-  // "ghost" is allowed but was never opened → absent from seenProjects.
-  const res = await h.handleControlPlaneVerb({ type: "project:start", projectId: "ghost" } as any, "pk1", bus);
+  // SECURITY: checked before open(), which would run the project's startup
+  // terminals — a rejected start must leave NO core.
+  const denied = await h.handleControlPlaneVerb({ type: "project:start", projectId: "projA" } as any, bus);
+  expect(denied.ok).toBe(false);
+  if (!denied.ok) expect(denied.error.code).toBe("NOT_ALLOWED");
+  expect(h.get("projA")).toBeNull();
+});
+
+test("rejects a projectId with no path on record (UNKNOWN_PROJECT, no core)", async () => {
+  const h = host!;
+  await setMobileAccess(h, true);
+  const bus = new MessageBus();
+
+  // The seen catalog is the only per-project bound left: "ghost" was never
+  // opened, so it has no path on record.
+  const res = await h.handleControlPlaneVerb({ type: "project:start", projectId: "ghost" } as any, bus);
   expect(res.ok).toBe(false);
   if (!res.ok) expect(res.error.code).toBe("UNKNOWN_PROJECT");
   expect(h.get("ghost")).toBeNull(); // SECURITY: no core created, no guessed path.
@@ -121,7 +123,7 @@ test("open() throwing resolves to OPEN_FAILED (never rejects into the void calle
   // Tear down the beforeEach host; this case needs a host whose remote runtime
   // ALWAYS fails to mint, so open() throws deterministically.
   await host?.shutdown();
-  // Pre-seed projects.json so "boom" is allowed+known WITHOUT a prior successful
+  // Pre-seed projects.json so "boom" is in the catalog WITHOUT a prior successful
   // open (which would cache a working runtime and defeat the failure injection).
   const agentsDir = join(abDir!, "agents");
   mkdirSync(agentsDir, { recursive: true });
@@ -135,17 +137,11 @@ test("open() throwing resolves to OPEN_FAILED (never rejects into the void calle
     remoteRuntimeFactory: () => Promise.reject(new Error("mint failed")),
   });
   const h = host;
-  h.pairedPhones.upsert({
-    phonePubkey: "pk1",
-    phoneDeviceId: "d1",
-    pairedAt: "x",
-    lastSeenAt: "x",
-    allowedProjects: ["boom"],
-  });
+  await setMobileAccess(h, true);
   const bus = new MessageBus();
 
   // Crucially: the call RESOLVES (no unhandled rejection) with a structured error.
-  const res = await h.handleControlPlaneVerb({ type: "project:start", projectId: "boom" } as any, "pk1", bus);
+  const res = await h.handleControlPlaneVerb({ type: "project:start", projectId: "boom" } as any, bus);
   expect(res.ok).toBe(false);
   if (!res.ok) expect(res.error.code).toBe("OPEN_FAILED");
   expect(h.get("boom")).toBeNull(); // no warm core left behind
@@ -167,13 +163,7 @@ test("idempotent project:start on an already-promoted, relay-registered core re-
   const h = host;
 
   await h.open("projX", tempFolder(), "local");
-  h.pairedPhones.upsert({
-    phonePubkey: "pk1",
-    phoneDeviceId: "d1",
-    pairedAt: "x",
-    lastSeenAt: "x",
-    allowedProjects: ["projX"],
-  });
+  await setMobileAccess(h, true);
 
   const bus = new MessageBus();
   bus.setInboundHandler(() => {});
@@ -181,14 +171,14 @@ test("idempotent project:start on an already-promoted, relay-registered core re-
   bus.subscribe({ deliver: (m) => out.push(m) });
 
   // First start: promote + register (instant-admit stub).
-  const first = await h.handleControlPlaneVerb({ type: "project:start", projectId: "projX" } as any, "pk1", bus);
+  const first = await h.handleControlPlaneVerb({ type: "project:start", projectId: "projX" } as any, bus);
   expect(first.ok).toBe(true);
   await new Promise((r) => setTimeout(r, 20));
   expect(out.some((m) => m.type === "stream-ready" && m.projectId === "projX" && m.streamId === "s1")).toBe(true);
 
   // Reconnect scenario: a SECOND project:start hits the idempotent branch.
   out.length = 0;
-  const again = await h.handleControlPlaneVerb({ type: "project:start", projectId: "projX" } as any, "pk1", bus);
+  const again = await h.handleControlPlaneVerb({ type: "project:start", projectId: "projX" } as any, bus);
   expect(again.ok).toBe(true);
   const ready = out.find((m) => m.type === "stream-ready");
   expect(ready).toBeDefined();
@@ -203,12 +193,11 @@ test("a rejected verb's control:result carries projectId so the phone can correl
   const out: any[] = [];
   bus.subscribe({ deliver: (m) => out.push(m) });
 
-  // pk1 has NO allowlist entry → NOT_ALLOWED via the async dispatch path (the
-  // one the phone actually exercises).
+  // Mobile access is off → NOT_ALLOWED via the async dispatch path (the one the
+  // phone actually exercises).
   h.dispatchControlPlaneInbound(
     { type: "project:start", projectId: "projB" } as any,
     "control",
-    "pk1",
     bus,
   );
   await new Promise((r) => setTimeout(r, 20));
@@ -224,7 +213,7 @@ test("a rejected verb's control:result carries projectId so the phone can correl
 test("an unknown verb type is rejected without effect", async () => {
   const h = host!;
   const bus = new MessageBus();
-  const res = await h.handleControlPlaneVerb({ type: "ping" } as any, "pk1", bus);
+  const res = await h.handleControlPlaneVerb({ type: "ping" } as any, bus);
   expect(res.ok).toBe(false);
   if (!res.ok) expect(res.error.code).toBe("UNKNOWN_VERB");
 });

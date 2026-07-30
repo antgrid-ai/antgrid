@@ -107,11 +107,11 @@ void main() {
     t.emitJson({
       'type': 'control:result',
       'ok': false,
-      'error': {'code': 'NOT_ALLOWED', 'message': 'project not in allowlist'},
+      'error': {'code': 'NOT_ALLOWED', 'message': 'mobile access is disabled on this machine'},
     });
     await tester.pump();
 
-    expect(find.text('project not in allowlist'), findsOneWidget);
+    expect(find.text('mobile access is disabled on this machine'), findsOneWidget);
     // The list is still shown alongside the banner.
     expect(find.byType(AbListRow), findsNWidgets(2));
   });

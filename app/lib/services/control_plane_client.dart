@@ -100,7 +100,8 @@ class AdvertisedTool {
 
 /// A structured error reported by the agent in response to a control-plane
 /// verb (e.g. `project:start`). Mirrors the agent's `{ ok:false, error:{ code,
-/// message } }` shape — `NOT_ALLOWED` is the per-phone allowlist rejection.
+/// message } }` shape — `NOT_ALLOWED` means mobile access is switched off on
+/// that machine.
 class ControlPlaneError {
   final String code;
   final String message;

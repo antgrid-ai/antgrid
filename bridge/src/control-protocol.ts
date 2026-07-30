@@ -15,12 +15,9 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1), type: z.literal("project:forget"), projectId: z.string().min(1) }),
   z.object({ id: z.string().min(1), type: z.literal("host:shutdown") }),
   z.object({ id: z.string().min(1), type: z.literal("phones:list") }),
-  z.object({ id: z.string().min(1), type: z.literal("phones:allow"), phonePubkey: z.string().min(1), projectId: z.string().min(1) }),
-  z.object({ id: z.string().min(1), type: z.literal("phones:deny"), phonePubkey: z.string().min(1), projectId: z.string().min(1) }),
   z.object({ id: z.string().min(1), type: z.literal("phones:unpair"), phonePubkey: z.string().min(1) }),
   z.object({ id: z.string().min(1), type: z.literal("mobile-access:get") }),
-  z.object({ id: z.string().min(1), type: z.literal("mobile-access:enable-project"), projectId: z.string().min(1) }),
-  z.object({ id: z.string().min(1), type: z.literal("mobile-access:disable-project"), projectId: z.string().min(1) }),
+  z.object({ id: z.string().min(1), type: z.literal("mobile-access:set"), enabled: z.boolean() }),
 ]);
 export type ControlRequest = z.infer<typeof ControlRequestSchema>;
 
@@ -34,7 +31,7 @@ export interface ProjectSummary {
   workStatus?: string;
 }
 
-/** One paired phone as surfaced to the desktop allowlist hub. Mirror of the
+/** One paired phone as surfaced to the desktop mobile-devices hub. Mirror of the
  *  PairedPhone shape in paired-phones.ts (decoupled so the control protocol
  *  doesn't import the store). */
 export interface PairedPhoneSummary {
@@ -43,12 +40,10 @@ export interface PairedPhoneSummary {
   label?: string;
   pairedAt: string;
   lastSeenAt: string;
-  allowedProjects: string[];
 }
 
-/** One project the machine knows about (warm core or seen-catalog hint),
- *  for the hub's column set. `path`/`label` absent only for ids known solely
- *  via a phone's allowlist. */
+/** One project the machine knows about (warm core or seen-catalog hint).
+ *  `path`/`label` are absent for a hint recorded without them. */
 export interface KnownProject {
   projectId: string;
   label?: string;
@@ -80,10 +75,7 @@ export type ControlResponse =
   | { id: string; ok: true; type: "project:forget" }
   | { id: string; ok: true; type: "host:shutdown" }
   | { id: string; ok: true; type: "phones:list"; phones: PairedPhoneSummary[]; knownProjects: KnownProject[] }
-  | { id: string; ok: true; type: "phones:allow" }
-  | { id: string; ok: true; type: "phones:deny" }
   | { id: string; ok: true; type: "phones:unpair" }
-  | { id: string; ok: true; type: "mobile-access:get"; projectIds: string[] }
-  | { id: string; ok: true; type: "mobile-access:enable-project"; projectIds: string[] }
-  | { id: string; ok: true; type: "mobile-access:disable-project"; projectIds: string[] }
+  | { id: string; ok: true; type: "mobile-access:get"; enabled: boolean }
+  | { id: string; ok: true; type: "mobile-access:set"; enabled: boolean }
   | { id: string; ok: false; error: { code: string; message: string } };

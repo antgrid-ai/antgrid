@@ -1,10 +1,10 @@
-// Tests for the window title bar's per-project action logic.
+// Tests for the window title bar's trailing actions.
 //
-// These exercise the real `localProjectActions` seam (the production
-// `WindowTitleBarContents` delegates to it), including the
-// selectedRegistrationIdProvider → projectsProvider lookup: a per-project
-// mobile-access toggle (AbMobileCta) for local projects, a RemoteHostChip for
-// remote projects, and nothing when no project is focused.
+// These exercise the real `titleBarProjectActions` seam (the production
+// `WindowTitleBarContents` delegates to it), covering the two independent
+// derivations: the machine-wide mobile-access switch (AbMobileCta), which hangs
+// off `localDeviceUuidProvider` alone, and the focus-derived RemoteHostChip,
+// which comes from the selectedRegistrationIdProvider → projectsProvider lookup.
 import 'package:antgrid/design/widgets/ab_mobile_cta.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/models/ab_project.dart';
@@ -32,16 +32,6 @@ class _FakePolicyNotifier extends MobileAccessPolicyNotifier {
 const _localUuid = 'local-device-uuid';
 const _remoteUuid = 'remote-device-uuid';
 
-/// Fake hub notifier that returns a fixed phones list without touching the real
-/// loopback host control client. Mutation methods are unused in these
-/// render-only tests.
-class _FakeHubNotifier extends MobileDevicesHubNotifier {
-  _FakeHubNotifier(this._list);
-  final PhonesList _list;
-  @override
-  Future<PhonesList> build() async => _list;
-}
-
 AbProject _localProject() => AbProject(
   projectId: 'local-proj',
   folder: '/tmp/local-proj',
@@ -60,42 +50,42 @@ AbProject _remoteProject() => AbProject(
   lastOpenedAt: DateTime.now(),
 );
 
-/// Renders the result of the real production [localProjectActions] so the
+/// Renders the result of the real production [titleBarProjectActions] so the
 /// header's lookup + branching is exercised directly (not re-implemented).
 class _ActionsHarness extends ConsumerWidget {
   const _ActionsHarness();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) =>
-      Row(mainAxisSize: MainAxisSize.min, children: localProjectActions(ref));
+      Row(mainAxisSize: MainAxisSize.min, children: titleBarProjectActions(ref));
 }
 
 /// Pumps the harness with [project] seeded into the store and optionally
-/// focused. Pass `selectedId: null` to leave no project focused. [platform]
-/// drives `isMobilePlatform`; it is reset before returning so the foundation
-/// debug-var invariant holds (the tree is already built by then).
+/// focused. Pass `selectedId: null` to leave no project focused. Pass
+/// `localUuid: null` to model mobile/web, where there is no local host.
+/// [platform] drives `isMobilePlatform`; it is reset before returning so the
+/// foundation debug-var invariant holds (the tree is already built by then).
 Future<void> _pump(
   WidgetTester tester, {
   required TestStoreOverrides stores,
   AbProject? project,
   required String? selectedId,
   TargetPlatform platform = TargetPlatform.macOS,
-  PhonesList? phones,
-  MobileAccessPolicy? policy,
+  String? localUuid = _localUuid,
+  bool mobileAccessEnabled = false,
 }) async {
   debugDefaultTargetPlatformOverride = platform;
   if (project != null) await stores.projectStore.upsert(project);
-  final hubList =
-      phones ?? const PhonesList(phones: [], knownProjects: []);
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
         ...stores.overrides,
-        localDeviceUuidProvider.overrideWith((ref) async => _localUuid),
+        localDeviceUuidProvider.overrideWith((ref) async => localUuid),
         selectedRegistrationIdProvider.overrideWith((_) => selectedId),
-        mobileDevicesHubProvider.overrideWith(() => _FakeHubNotifier(hubList)),
         mobileAccessPolicyProvider.overrideWith(
-          () => _FakePolicyNotifier(policy ?? const MobileAccessPolicy(projectIds: [])),
+          () => _FakePolicyNotifier(
+            MobileAccessPolicy(enabled: mobileAccessEnabled),
+          ),
         ),
       ],
       child: const MaterialApp(
@@ -103,7 +93,8 @@ Future<void> _pump(
       ),
     ),
   );
-  // Let the localDeviceUuidProvider future resolve.
+  // Let the localDeviceUuidProvider future resolve. Not pumpAndSettle: an
+  // enabled AbMobileCta pulses forever and would time out.
   await tester.pump();
   await tester.pump();
   debugDefaultTargetPlatformOverride = null;
@@ -115,7 +106,7 @@ void main() {
   setUp(useInMemoryPrefs);
 
   testWidgets(
-    'local project with no phone allowing it shows "Enable mobile access"',
+    'mobile access off shows "Enable mobile access"',
     (tester) async {
       final stores = await buildTestStoreOverrides();
       addTearDown(stores.close);
@@ -126,7 +117,7 @@ void main() {
         stores: stores,
         project: project,
         selectedId: project.projectId,
-        policy: const MobileAccessPolicy(projectIds: []),
+        mobileAccessEnabled: false,
       );
 
       expect(find.byType(AbMobileCta), findsOneWidget);
@@ -136,7 +127,7 @@ void main() {
   );
 
   testWidgets(
-    'local project allowed by a paired phone shows "Disable mobile access"',
+    'mobile access on shows "Disable mobile access"',
     (tester) async {
       final stores = await buildTestStoreOverrides();
       addTearDown(stores.close);
@@ -147,7 +138,7 @@ void main() {
         stores: stores,
         project: project,
         selectedId: project.projectId,
-        policy: MobileAccessPolicy(projectIds: [project.projectId]),
+        mobileAccessEnabled: true,
       );
 
       expect(find.byType(AbMobileCta), findsOneWidget);
@@ -157,8 +148,10 @@ void main() {
   );
 
   testWidgets(
-    'remote project header renders RemoteHostChip',
+    'a focused remote project renders the chip AND keeps the machine switch',
     (tester) async {
+      // The switch governs YOUR machine, not the focused project's host, so
+      // focusing a remote project must not take it away.
       final stores = await buildTestStoreOverrides();
       addTearDown(stores.close);
 
@@ -171,12 +164,12 @@ void main() {
       );
 
       expect(find.byType(RemoteHostChip), findsOneWidget);
-      expect(find.byType(AbMobileCta), findsNothing);
+      expect(find.byType(AbMobileCta), findsOneWidget);
     },
   );
 
   testWidgets(
-    'no focused project renders no actions',
+    'no focused project still renders the machine switch, without the chip',
     (tester) async {
       final stores = await buildTestStoreOverrides();
       addTearDown(stores.close);
@@ -190,6 +183,26 @@ void main() {
       );
 
       expect(find.byType(RemoteHostChip), findsNothing);
+      expect(find.byType(AbMobileCta), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'no local host uuid renders no switch',
+    (tester) async {
+      // localDeviceUuidProvider is null where there is no local bridge to
+      // govern; withholding the switch there is what keeps it machine-scoped.
+      final stores = await buildTestStoreOverrides();
+      addTearDown(stores.close);
+
+      await _pump(
+        tester,
+        stores: stores,
+        project: _remoteProject(),
+        selectedId: null,
+        localUuid: null,
+      );
+
       expect(find.byType(AbMobileCta), findsNothing);
     },
   );
@@ -197,8 +210,8 @@ void main() {
   testWidgets(
     'mobile form factor renders no actions even for a focused remote project',
     (tester) async {
-      // Mobile-access promotion is a desktop-host concept — never surfaced on
-      // phones, regardless of the focused project.
+      // The switch is desktop-only: a phone must have no surface to grant
+      // itself the machine.
       final stores = await buildTestStoreOverrides();
       addTearDown(stores.close);
 
