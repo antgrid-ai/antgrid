@@ -470,7 +470,8 @@ export class HostServer {
    *  never admitted, looping AGENT_OFFLINE. So a warm-but-unpromoted core reads
    *  `running:false` until project:start promotes it and the slot registers; the
    *  phone's awaitProjectRunning then keys correctly off the post-register advert
-   *  (and off the SESSION_LIMIT_EXCEEDED control:result on rejection). The
+   *  (and off the rejection control:result, which current relays never send —
+   *  the retired SESSION_LIMIT_EXCEEDED came from older ones). The
    *  visibility filter still includes warm cores, so the project is listed — it's
    *  just flagged not-yet-dialable. (The desktop hub advertises plain warmth via
    *  `knownProjectsForHub`, which is a different question; keep them distinct.) */
@@ -822,11 +823,12 @@ export class HostServer {
         }
         entry.promotion = handle;
         // Gate the phone-facing running advert on a REAL relay register and
-        // surface a terminal rejection (e.g. SESSION_LIMIT_EXCEEDED). project:start
+        // surface a terminal rejection (only the retired SESSION_LIMIT_EXCEEDED,
+        // from a relay predating the worker-limit change). project:start
         // itself returns ok immediately — the outcome is pushed asynchronously.
         this.reportFirstRegister(handle.firstRegister, projectId, phonePubkey, bus, () => {
-          // Tear the rejected slot down so a retry (after the user upgrades / frees
-          // a slot) can re-promote, and so the core reads not-promoted again.
+          // Tear the rejected slot down so a later retry can re-promote, and so
+          // the core reads not-promoted again.
           try { handle.stop(); } catch {}
           const e = this.cores.get(projectId);
           if (e?.promotion === handle) e.promotion = undefined;
@@ -885,7 +887,7 @@ export class HostServer {
    *  phone never dials a data-plane slot the gate hasn't admitted (the empty-slot
    *  AGENT_OFFLINE loop). On a terminal rejection, run `onFatal` (tear the dead
    *  slot down) and push a structured `control:result` so the phone surfaces the
-   *  real reason (e.g. a session-limit upgrade prompt) instead of retrying.
+   *  real reason instead of retrying.
    *  Non-blocking + never throws into the caller. */
   private reportFirstRegister(
     firstRegister: Promise<RegisterOutcome>,

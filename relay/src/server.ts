@@ -253,7 +253,6 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       claims = {
         uid: gateResult.entry.userId,
         tier: gateResult.entry.tier,
-        sessionLimit: gateResult.entry.sessionLimit,
         jti: gateResult.entry.jti,
       };
     } else {
@@ -285,8 +284,8 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       }
       if (hello.epoch > existing.epoch) {
         // Release the superseded connection (dropping its openStreams) BEFORE
-        // inserting the successor, so sessionLimit counting never double-counts
-        // one device across a restart (design §7.3).
+        // inserting the successor, so one device is never counted twice across
+        // a restart (design §7.3).
         connections.remove(existing);
         sendErrorAndClose(existing.ws, "SUPERSEDED", "replaced by a newer connection", false, 1008);
       } else {
@@ -376,23 +375,11 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
           sendError(ws, "WRONG_DEVICE_TYPE", "Only agents can open streams", false);
           return;
         }
-        // Count → admit MUST stay await-free. The event loop is single-threaded,
-        // so with no yield between counting and adding, two concurrent opens
-        // cannot both pass the cap. Inserting an `await` here reopens a
-        // count→admit TOCTOU — don't.
-        const uid = conn.claims?.uid ?? "";
-        const sessionLimit = conn.claims?.sessionLimit ?? 0;
-        const open = connections.countOpenStreamsForUser(uid);
-        if (open >= sessionLimit) {
-          sendError(
-            ws,
-            "SESSION_LIMIT_EXCEEDED",
-            `Concurrent remote agent limit reached (${sessionLimit})`,
-            false,
-            { ref: msg.streamId },
-          );
-          return;
-        }
+        // Admission MUST stay await-free. The event loop is single-threaded, so
+        // with no yield between the type guard and the add, concurrent opens
+        // cannot interleave into an inconsistent stream table. Any future check
+        // added here must observe the same discipline — inserting an `await`
+        // reopens a check→admit TOCTOU.
         conn.openStreams.add(msg.streamId);
         sendJson(ws, { type: "stream-opened", streamId: msg.streamId });
         return;

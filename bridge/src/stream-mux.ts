@@ -26,8 +26,10 @@ export interface StreamHandle {
 export interface AttachStreamOpts {
   /** Relay acked the stream-open (data-plane slot admitted). */
   onAdmitted?: (streamId: string) => void;
-  /** Relay rejected the stream-open (e.g. `SESSION_LIMIT_EXCEEDED`); the socket
-   *  and every other stream stay live. */
+  /** Relay rejected the stream-open; the socket and every other stream stay
+   *  live. Current relays admit every stream — the only rejection code we still
+   *  decode, `SESSION_LIMIT_EXCEEDED`, is retired and reaches us only from a
+   *  relay predating the worker-limit change. */
   onRejected?: (code: string, message: string) => void;
   /** The machine's paired phone became reachable (session established / peer
    *  online). Also fired at attach time when the session is already established,
@@ -111,7 +113,8 @@ export class StreamMux {
   }
 
   /** A relay `error{ref}` — routed here iff `ref` is a live streamId (a
-   *  stream-open rejection, notably `SESSION_LIMIT_EXCEEDED`). Returns false when
+   *  stream-open rejection, e.g. the retired `SESSION_LIMIT_EXCEEDED` from an
+   *  older relay). Returns false when
    *  `ref` is not one of our streams so the caller keeps normal error handling
    *  (a streamId is the only kind of `ref` the relay ever sends). */
   onError(ref: string, code: string, message: string): boolean {
@@ -174,8 +177,8 @@ export class StreamMux {
   }
 
   /** Re-send `stream-open` for every attached stream. Called on `welcome` after
-   *  a reconnect: the relay dropped its openStreams on the disconnect, so the
-   *  count (sessionLimit) must be re-established before app traffic resumes.
+   *  a reconnect: the relay dropped its openStreams on the disconnect, so every
+   *  stream must be re-admitted before app traffic resumes.
    *  Already-settled streams keep their firstRegister outcome (onOpened no-ops). */
   reopenAll(): void {
     for (const streamId of this.streams.keys()) this.transport.openStream(streamId);

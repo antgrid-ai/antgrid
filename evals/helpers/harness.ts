@@ -86,8 +86,7 @@ export interface RelayHandle {
   /** Live relay connection count (past hello). X3's drill-in test asserts zero
    *  additional connections; the multi-stream test asserts one per side. */
   connectionCount(): number;
-  /** Open project streams across all eval agent connections (sessionLimit
-   *  denominator). */
+  /** Open project streams across all eval agent connections. */
   streamCount(): number;
   stop(): void;
 }
@@ -115,29 +114,24 @@ const EXPIRED_APP_TOKEN = "eval-license-token-EXPIRED";
  *  relay config instead of `startRelay`. */
 export const RELAY_INTERNAL_SECRET = "x".repeat(16);
 
-/** Fixed account id every eval device shares. sessionLimit is counted per this
- *  uid across all agent streams, so the X4 cap test can drive it deterministically. */
+/** Fixed account id every eval device shares — `streamCount()` and routing
+ *  authorization both key off it. */
 const EVAL_USER_ID = "eval-user";
 
 /**
  * Fake v3 LicenseGate. Accepts any non-empty token (agents and apps alike —
- * v3 requires a token for BOTH, design §4.2) and returns a fixed uid. The
- * `sessionLimit` claim is what the relay enforces at `stream-open` admission;
- * it defaults high enough that a spawned agent can attach its firstProject
- * stream, and the X4 cap test overrides it (e.g. `sessionLimit: 2`).
+ * v3 requires a token for BOTH, design §4.2) and returns a fixed uid.
  */
-function fakeLicenseGate(opts: { sessionLimit?: number } = {}): LicenseGate {
-  const sessionLimit = opts.sessionLimit ?? 100;
+function fakeLicenseGate(): LicenseGate {
   // `pk` mirrors the real gate's `claims.pk` (the pubkey the token attests).
-  // The relay stamps sessions from userId/tier/sessionLimit/jti only, so the
-  // value is inert here — echoing the presented key keeps it from reading as
-  // a meaningful assertion.
+  // The relay stamps sessions from userId/tier/jti only, so the value is inert
+  // here — echoing the presented key keeps it from reading as a meaningful
+  // assertion.
   const entryFor = (deviceId: string, pk: string): LicenseCacheEntry => ({
     jti: `eval-jti-${deviceId}`,
     deviceId,
     userId: EVAL_USER_ID,
     tier: "pro",
-    sessionLimit,
     pk,
     revoked: false,
   });
@@ -331,9 +325,6 @@ export async function startRelay(opts: {
   jsonRateLimitBurst?: number;
   /** Per-pair binary/message frame rate (default generous). */
   rateLimitMsgPerSec?: number;
-  /** Paid-axis cap injected into the fake license gate's `sessionLimit` claim.
-   *  X4's cap test passes `2`. Default 100 (spawned agents attach streams). */
-  sessionLimit?: number;
 }): Promise<RelayHandle> {
   // Static specifier, not `import(resolve(ROOT, ...))`: a computed specifier
   // types `startServer` as `any`, which silently stops type-checking BOTH the
@@ -357,7 +348,7 @@ export async function startRelay(opts: {
     licenseCacheMaxEntries: 1000,
   };
   const server = startServer(cfg, {
-    licenseGate: fakeLicenseGate({ sessionLimit: opts.sessionLimit }),
+    licenseGate: fakeLicenseGate(),
   });
 
   return {

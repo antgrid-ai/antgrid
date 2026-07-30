@@ -102,9 +102,10 @@ export const ErrorCode = z.enum([
   // License verification infrastructure (JWKS) unreachable — the client's
   // credentials may be fine; retryable, unlike the LICENSE_* verdicts above.
   "LICENSE_UNAVAILABLE",
-  // Account is at its concurrent remote-running-agent cap (the paid axis).
-  // Distinct from LICENSE_* (auth is valid) — enforced at stream-open
-  // admission, with `ref` echoing the rejected streamId.
+  // RETIRED: the relay no longer meters open streams and never emits this.
+  // Reserved (not removed) because bridge and app still decode it from relays
+  // predating the worker-limit change, and because reusing the name for a new
+  // meaning would silently mis-handle those older relays' rejections.
   "SESSION_LIMIT_EXCEEDED",
   "UNKNOWN_PHONE",
   "NONCE_MISMATCH",

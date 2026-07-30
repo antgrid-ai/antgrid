@@ -46,7 +46,6 @@ interface MintOpts {
   azp?: string;
   expSecondsFromNow?: number;
   pk?: string;
-  sessionLimit?: number;
 }
 
 async function mintToken(signer: SignerCtx["signer"], opts: MintOpts): Promise<string> {
@@ -58,7 +57,6 @@ async function mintToken(signer: SignerCtx["signer"], opts: MintOpts): Promise<s
     pk: opts.pk ?? "ignored-pk",
     deviceUuid: opts.deviceUuid,
     azp: opts.azp ?? `client-${Math.random().toString(36).slice(2)}`,
-    sessionLimit: opts.sessionLimit ?? 10,
   })
     .setProtectedHeader({ alg: "EdDSA", kid: signer.kid })
     .setIssuer(TOKEN_ISS)
@@ -213,14 +211,14 @@ test("agent hello: pk claim mismatch -> LICENSE_INVALID", async () => {
   r.stop();
 });
 
-test("free tier agent hello still succeeds — tier no longer gates hello (only sessionLimit gates stream-open)", async () => {
+test("free tier agent hello still succeeds — tier gates nothing on the relay", async () => {
   const { signer, jwks } = await makeSigner();
   const cache = new LicenseCache({ maxEntries: 100 });
   const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
   const r = startWith({ licenseGate: gate, licenseCache: cache });
 
   const identity = await genRelayKeyPair();
-  const token = await mintToken(signer, { deviceUuid: "dev-free", tier: "free", pk: identity.publicKeyBase64, sessionLimit: 0 });
+  const token = await mintToken(signer, { deviceUuid: "dev-free", tier: "free", pk: identity.publicKeyBase64 });
   const { msg } = await sendHello(r, {
     deviceId: "dev-free", deviceType: "agent", licenseToken: token,
     publicKeyBase64: identity.publicKeyBase64, privateSeed: identity.privateSeed,
@@ -327,7 +325,6 @@ test("live JWKS over HTTP: relay fetches the real endpoint, verifies the pk clai
     pk: identity.publicKeyBase64,
     deviceUuid: "e2e-device",
     azp: "e2e-client-1",
-    sessionLimit: 10,
   })
     .setProtectedHeader({ alg: "EdDSA", kid: "e2e-kid-1" })
     .setIssuer(`http://localhost:${fakeApi.port}/api/auth`)
@@ -372,7 +369,7 @@ test("live JWKS over HTTP: an unreachable endpoint surfaces LICENSE_UNAVAILABLE,
 
   const identity = await genRelayKeyPair();
   const token = await new SignJWT({
-    uid: "user-x", tier: "pro", pk: identity.publicKeyBase64, deviceUuid: "dev-jwks-down", azp: "client-x", sessionLimit: 10,
+    uid: "user-x", tier: "pro", pk: identity.publicKeyBase64, deviceUuid: "dev-jwks-down", azp: "client-x",
   })
     .setProtectedHeader({ alg: "EdDSA", kid: "whatever" })
     .setIssuer(`http://localhost:${downApi.port}/api/auth`)

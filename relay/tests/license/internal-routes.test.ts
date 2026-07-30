@@ -55,14 +55,13 @@ async function mintToken(signer: SignerCtx["signer"], opts: MintOpts): Promise<s
   const now = Math.floor(Date.now() / 1000);
   const exp = now + (opts.expSecondsFromNow ?? 3600);
   // Mirror the real oauth-provider payload: deviceUuid + azp custom claims,
-  // no `sub`, no `jti`; sessionLimit is required (no tier fallback).
+  // no `sub`, no `jti`.
   return new SignJWT({
     uid: opts.uid ?? "user-1",
     tier: opts.tier ?? "pro",
     pk: opts.pk,
     deviceUuid: opts.deviceUuid,
     azp: opts.azp ?? `client-${Math.random().toString(36).slice(2)}`,
-    sessionLimit: 10,
   })
     .setProtectedHeader({ alg: "EdDSA", kid: signer.kid })
     .setIssuer(TOKEN_ISS)
@@ -233,7 +232,7 @@ test("revoke: closes the agent ws 4002 with a typed LICENSE_REVOKED error first,
 
 test("revoke: device not connected -> still 200, cache marked", async () => {
   const cache = new LicenseCache({ maxEntries: 100 });
-  cache.set({ jti: "jti-orphan", deviceId: "dev-orphan", userId: "user-1", tier: "pro", sessionLimit: 10, pk: "pk-orphan", revoked: false });
+  cache.set({ jti: "jti-orphan", deviceId: "dev-orphan", userId: "user-1", tier: "pro", pk: "pk-orphan", revoked: false });
   const r = startServerReal(baseConfig, { licenseCache: cache });
 
   const res = await postInternal(r.server.port!, "/internal/revoke", { deviceId: "dev-orphan" });
@@ -339,7 +338,7 @@ test("expire: closes only the target user's connections; a different uid stays o
 
 test("expire: bad signature -> 401", async () => {
   const cache = new LicenseCache({ maxEntries: 100 });
-  cache.set({ jti: "jti-x", deviceId: "dev-x", userId: "user-x", tier: "pro", sessionLimit: 10, pk: "pk-x", revoked: false });
+  cache.set({ jti: "jti-x", deviceId: "dev-x", userId: "user-x", tier: "pro", pk: "pk-x", revoked: false });
   const r = startServerReal(baseConfig, { licenseCache: cache });
 
   const res = await postInternal(r.server.port!, "/internal/expire", { userId: "user-x" }, "bad");
@@ -444,8 +443,8 @@ test("connections: userId scopes to that user's connections (identity-free)", as
   r.stop();
 });
 
-// Web reads its "N / sessionLimit running" straight off this projection, so the
-// count here must be the same one `countOpenStreamsForUser` admits against.
+// The connections dashboard reads this projection as liveness telemetry — it
+// gates nothing, so the count owes no agreement with any admission decision.
 test("connections: openStreamCount tracks live streams without exposing stream ids", async () => {
   const { signer, jwks } = await makeSigner();
   const cache = new LicenseCache({ maxEntries: 100 });

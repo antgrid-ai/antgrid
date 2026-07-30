@@ -60,6 +60,10 @@ describe("Connections indexing", () => {
   });
 });
 
+// `countOpenStreamsForUser` has no production caller — stream admission is
+// uncapped. It survives as the assertion helper epochs.test.ts uses to prove a
+// superseded connection releases its streams, so these cases pin the helper's
+// own semantics, not an admission rule.
 describe("Connections.countOpenStreamsForUser", () => {
   it("sums openStreams across agent connections for one uid, ignoring apps and other users", () => {
     const c = new Connections();

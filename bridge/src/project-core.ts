@@ -43,16 +43,18 @@ export interface ProjectCoreDeps extends BuildAgentCoreOptions {
 export interface PromotionHandle {
   stop(): void;
   /** Resolves with the FIRST register outcome of the added relay slot: `ok`
-   *  once the relay authenticates it, or a terminal rejection (e.g.
-   *  `SESSION_LIMIT_EXCEEDED`) the gate closed it with. Lets the host gate the
-   *  phone-facing `running:true` advert on a real slot and surface a paid-axis
-   *  rejection instead of letting the phone dial an empty data-plane slot. */
+   *  once the relay authenticates it, or a terminal rejection the gate closed it
+   *  with (only the retired `SESSION_LIMIT_EXCEEDED`, from a relay predating the
+   *  worker-limit change, reaches this today). Lets the host gate the
+   *  phone-facing `running:true` advert on a real slot and surface the rejection
+   *  instead of letting the phone dial an empty data-plane slot. */
   firstRegister: Promise<RegisterOutcome>;
 }
 
 /** Outcome of a relay stream's FIRST admission — `ok` once the relay acks the
- *  stream-open, otherwise the typed rejection (notably `SESSION_LIMIT_EXCEEDED`)
- *  the relay answered with. Stream admission is its own signal now (design §7.3):
+ *  stream-open, otherwise the typed rejection the relay answered with (current
+ *  relays admit unconditionally; the retired `SESSION_LIMIT_EXCEEDED` still
+ *  arrives from older ones). Stream admission is its own signal (design §7.3):
  *  a rejection leaves the socket and every other stream live. */
 export type RegisterOutcome =
   | { ok: true }
@@ -147,7 +149,8 @@ export class ProjectCore {
   /** First register outcome of a REMOTE-mode core's primary relay slot (null in
    *  local mode, or before start()). Lets the host gate the phone-facing
    *  `running:true` advert on a real register and surface a terminal rejection
-   *  (e.g. `SESSION_LIMIT_EXCEEDED`). Promotion's slot exposes the same via its
+   *  (today only the retired `SESSION_LIMIT_EXCEEDED`, from an older relay).
+   *  Promotion's slot exposes the same via its
    *  {@link PromotionHandle.firstRegister}. */
   whenRelayRegistered(): Promise<RegisterOutcome> | null { return this.relayFirstRegister; }
 

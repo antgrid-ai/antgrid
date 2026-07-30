@@ -636,8 +636,9 @@ class MachineSession {
     } else if (type == 'control:result' &&
         m['ok'] == false &&
         m['verb'] == 'project:start') {
-      // A rejected project:start (NOT_ALLOWED / OPEN_FAILED /
-      // SESSION_LIMIT_EXCEEDED) — fail the pending bind with the real reason
+      // A rejected project:start (NOT_ALLOWED / OPEN_FAILED, or the retired
+      // SESSION_LIMIT_EXCEEDED from a pre-worker-limit relay) — fail the
+      // pending bind with the real reason
       // instead of letting it run out its blind timeout. The `verb` match is
       // load-bearing: the bridge echoes `projectId` on EVERY failed
       // control-plane verb, so matching on `ok:false` alone would let an

@@ -24,14 +24,6 @@ export interface DeviceClaims {
   uid: string;
   tier: "free" | "trial" | "pro";
   /**
-   * Account's concurrent remote-running-agent cap — the paid axis the relay
-   * enforces at stream-open admission. Sourced from web's `sessionLimit` custom
-   * claim (web/src/auth/oauth-provider.ts). Pre-release there are no tokens
-   * predating the claim, so a missing or malformed value is `LICENSE_INVALID`
-   * (no tier fallback) rather than a silently-guessed cap.
-   */
-  sessionLimit: number;
-  /**
    * Per-credential revocation discriminator. Sourced from the OAuth `azp`
    * claim (the device's OAuth client id) — NOT a JWT `jti` (Better-Auth
    * client_credentials tokens carry none). `azp` is stable across token
@@ -139,22 +131,12 @@ export async function verifyDeviceToken(
     if (typeof claims.exp !== "number") {
       return failInvalid("exp missing or non-numeric");
     }
-    if (
-      typeof claims.sessionLimit !== "number" ||
-      !Number.isFinite(claims.sessionLimit) ||
-      claims.sessionLimit < 0
-    ) {
-      return failInvalid("sessionLimit missing or invalid");
-    }
-    const sessionLimit = claims.sessionLimit;
-
     return {
       ok: true,
       claims: {
         deviceUuid: claims.deviceUuid,
         uid: claims.uid,
         tier: claims.tier,
-        sessionLimit,
         jti: claims.azp,
         pk: claims.pk,
         exp: claims.exp,

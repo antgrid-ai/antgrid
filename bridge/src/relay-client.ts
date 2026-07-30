@@ -475,7 +475,7 @@ export class RelayClient {
         this.clockOffsetApplied = false;
         this.startHeartbeat();
         // Re-admit every attached stream: the relay lost its openStreams on the
-        // disconnect, so re-count them (sessionLimit) before app traffic resumes.
+        // disconnect, so they must be re-opened before app traffic resumes.
         this.mux.reopenAll();
         log.info("Authenticated with relay as %s (epoch %d)", msg.deviceId, msg.epoch);
         this.opts.onAuthenticated?.();
@@ -540,8 +540,9 @@ export class RelayClient {
   }
 
   private handleErrorFrame(msg: { code: string; message: string; retryable: boolean; ref?: string; serverTime?: string }): void {
-    // A stream-open rejection (ref === a live streamId, notably
-    // SESSION_LIMIT_EXCEEDED): the socket and every other stream stay live, so it
+    // A stream-open rejection (ref === a live streamId; the retired
+    // SESSION_LIMIT_EXCEEDED from an older relay is the only one still decoded):
+    // the socket and every other stream stay live, so it
     // must NOT be recorded as `lastError` — otherwise a later unrelated close
     // would read its retryable:false and wrongly stop reconnecting.
     if (msg.ref && this.mux.onError(msg.ref, msg.code, msg.message)) return;
