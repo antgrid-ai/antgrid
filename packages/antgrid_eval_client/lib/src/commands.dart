@@ -196,6 +196,12 @@ class CommandHandler {
     try {
       await session.ensureEstablished();
     } catch (e) {
+      // `start()` armed the session supervisor, which keeps re-driving a
+      // handshake on every peer-online. Leaving it up after reporting failure
+      // both churns in the background and leaves `_session` non-null, so a
+      // later send-encrypted/snapshot passes its guard and acts on a session
+      // that never established.
+      await _teardownSession();
       _emit({'event': 'error', 'message': 'Handshake failed: $e'});
       return;
     }

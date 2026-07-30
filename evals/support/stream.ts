@@ -48,8 +48,16 @@ export async function streamSnapshot(
   timeoutMs = 8_000,
 ): Promise<AbMessage[]> {
   const requestId = `snap-${randomBytes(6).toString("hex")}`;
+  // Correlate on `requestId`, not the `response` type alone. Several helpers
+  // issue RPCs on the same stream and `waitFor` takes the OLDEST queued match,
+  // so a type-only waiter can bind to an unrelated call's response — returning
+  // its frames, or `[]` because its unrelated `ok:false` looked like ours.
   const responseP = app
-    .waitForStreamAbType(streamId, "response" as AbMessage["type"], timeoutMs)
+    .waitFor(
+      (m: any) =>
+        m._streamId === streamId && m.type === "response" && m.requestId === requestId,
+      timeoutMs,
+    )
     .catch(() => null);
   app.sendOnStream(
     streamId,

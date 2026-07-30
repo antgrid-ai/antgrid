@@ -169,7 +169,21 @@ describe.skipIf(!HAVE_CODEX)("chat-session (codex)", () => {
 
   test("a model/effort selection survives stop → restart", async () => {
     // Read the live capabilities to pick a real, currently-unselected option.
-    const caps: any = await env.app.waitForStreamAbType(streamId, "agent:capabilities", 15_000);
+    // Match on a POPULATED frame for this session, not on the type alone:
+    // `session:stop` deliberately emits an empty `agent:capabilities
+    // {sessionId}` to clear the selectors (structured-manager's trackTeardown),
+    // and the previous test leaves one queued. Binding to that one makes every
+    // branch below fall through to the `!key` early return, so the test passes
+    // green while asserting nothing.
+    const caps: any = await env.app.waitFor(
+      (m: any) =>
+        m._streamId === streamId &&
+        m.type === "agent:capabilities" &&
+        m.sessionId === sessionId &&
+        Array.isArray(m.models) &&
+        m.models.length > 0,
+      15_000,
+    );
 
     // Prefer flipping the model; fall back to effort. Both are validated
     // server-side, so we must pick an id the backend actually advertises. Wire

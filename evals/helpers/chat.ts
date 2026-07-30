@@ -55,6 +55,10 @@ export async function promptUntilTurnStart(
       throw new Error(`agent:error before turn-start: ${lastErr}`);
     }
     await Bun.sleep(500);
+    // Re-check after the backoff: a prompt sent with no budget left to observe
+    // it is the same waste the timeout path avoids — the driver runs a full
+    // turn nobody reads, on real credits, leaving a stray user message.
+    if (Date.now() >= deadline) break;
     sendPrompt();
   }
   throw new Error(`no agent:turn-start within budget (last error: ${lastErr})`);
