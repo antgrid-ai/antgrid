@@ -13,14 +13,19 @@ enum AbIconButtonTone { normal, muted, accent, danger, success }
 /// Minimal icon button using Iconify (SVG-rendered).
 ///
 /// Visual box defaults to [AbTokens.iconButtonBox] (24px) and glyph to
-/// [AbTokens.iconButtonGlyph] (14px) — the canonical chrome sizing. Use
+/// [AbTokens.iconButtonGlyph] (14px) — the canonical chrome sizing. Both are
+/// multiplied by the ambient text scaler (UI Size on desktop, UI Size composed
+/// with the OS font scale on mobile) so icons track the type around them. Use
 /// [tone] for color variation. [boxSize]/[glyphSize] override the defaults
 /// ONLY for touch affordances that need a larger hit target and glyph (e.g.
-/// the mobile terminal quick-actions bar); keep chrome on the defaults.
+/// the mobile terminal quick-actions bar); keep chrome on the defaults. The
+/// overrides scale too — they are base sizes, not final pixel values.
 ///
 /// On mobile the hit area is inflated to [AbTokens.tapTargetMin] via
 /// [AbTapTarget] while the visual box keeps its own size; desktop is
-/// untouched.
+/// untouched. Inside [AbCompactTapTargets] only the width is inflated — the
+/// host row owns the vertical dimension — so there the scaled box is what
+/// sets the target's height.
 ///
 /// Pass `onTap: null` to render the button in a disabled state
 /// (opacity 0.4, no hover, no focus, basic cursor). See the
@@ -79,8 +84,19 @@ class _AbIconButtonState extends State<AbIconButton> {
     final disabled = widget.onTap == null;
     final glyphColor = widget.color ?? _toneColor();
 
+    // Chrome scales with type. Without this the glyph stays 14px and the box
+    // 24px next to text the user asked to double, so the icon shrinks
+    // relatively and — inside AbCompactTapTargets, where the box IS the
+    // target height — the target stops growing with the row. A bounded host
+    // (AbToolbar's fixed row height) clamps the box on its own.
+    final scaler = MediaQuery.textScalerOf(context);
+    final boxSize = scaler.scale(widget.boxSize ?? AbTokens.iconButtonBox);
+    final glyphSize = scaler.scale(
+      widget.glyphSize ?? AbTokens.iconButtonGlyph,
+    );
+
     final Widget visual = SizedBox.square(
-      dimension: widget.boxSize ?? AbTokens.iconButtonBox,
+      dimension: boxSize,
       child: DecoratedBox(
         decoration: BoxDecoration(
           color: _hovered && !disabled
@@ -89,11 +105,7 @@ class _AbIconButtonState extends State<AbIconButton> {
           borderRadius: AbTokens.borderRadius3,
         ),
         child: Center(
-          child: AbIcon(
-            widget.icon,
-            size: widget.glyphSize ?? AbTokens.iconButtonGlyph,
-            color: glyphColor,
-          ),
+          child: AbIcon(widget.icon, size: glyphSize, color: glyphColor),
         ),
       ),
     );

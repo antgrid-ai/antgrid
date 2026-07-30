@@ -10,6 +10,7 @@ import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_chip.dart';
 import '../design/widgets/ab_dialog.dart';
 import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_tap_target.dart';
 import '../design/widgets/ab_text_field.dart';
 import '../providers/recent_ports.dart';
 import '../storage/recent_ports_store.dart';
@@ -160,22 +161,25 @@ class _RecentPortPill extends StatelessWidget {
     final label = entry.scheme == 'https'
         ? 'https://${entry.port}'
         : '${entry.port}';
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        AbChip.toggle(
-          label: label,
-          selected: false,
-          size: AbChipSize.md,
-          onTap: onTap,
-        ),
-        AbIconButton(
-          icon: AbIcons.close,
-          tone: AbIconButtonTone.muted,
-          tooltip: 'Forget port ${entry.port}',
-          onTap: onRemove,
-        ),
-      ],
+    // The chip sets the row height; the forget button rides alongside it.
+    return AbCompactTapTargets(
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          AbChip.toggle(
+            label: label,
+            selected: false,
+            size: AbChipSize.md,
+            onTap: onTap,
+          ),
+          AbIconButton(
+            icon: AbIcons.close,
+            tone: AbIconButtonTone.muted,
+            tooltip: 'Forget port ${entry.port}',
+            onTap: onRemove,
+          ),
+        ],
+      ),
     );
   }
 }

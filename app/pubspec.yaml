@@ -94,6 +94,16 @@ dependencies:
   in_app_update: ^4.2.3
   device_info_plus: ^11.5.0
   window_manager: ^0.5.2
+  # macOS in-place updates via Sparkle (Windows uses the Microsoft Store
+  # instead — see lib/update/). Feed: appcast.xml on antgrid-releases.
+  auto_updater: ^1.0.0
+  package_info_plus: ^9.0.1
+  # Installed-version vs release-tag precedence in the update check —
+  # already in the tree transitively, promoted so lib/update/ can import it.
+  pub_semver: ^2.2.0
+  # Parses the Sparkle appcast macOS detects from (lib/update/). Transitive
+  # already; promoted for the same reason as pub_semver above.
+  xml: ^6.6.1
 
 dev_dependencies:
   flutter_test:
@@ -188,7 +198,10 @@ msix_config:
   publisher_display_name: Radha AI Product
   identity_name: RadhaAIProduct.antgrid
   publisher: CN=D6BFB7D7-5E99-4B9B-B4E0-29315D52C52B
-  # Local `dart run msix:create` only — CI passes --version explicitly.
+  # Local `dart run msix:create` only — CI passes --version explicitly (the
+  # `version` job's msix output). Partner Center rejects a submission whose
+  # package version does not strictly increase, and installed apps never see
+  # such a release as an update.
   msix_version: 1.0.7.0
   # Same tileless monogram the old Inno installer + the exe/taskbar use
   # (windows/runner/resources/app_icon.ico), rendered transparent and square from

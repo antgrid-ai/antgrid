@@ -8,7 +8,15 @@ name: Build — desktop (macOS / Windows / Linux)
 #                             download. The site links releases/latest/download/
 #                             <asset> — the mac/linux asset filenames
 #                             (antgrid-macos.dmg / antgrid-linux.AppImage) are
-#                             load-bearing, never rename them.
+#                             load-bearing, never rename them. Same for
+#                             appcast.xml: the macOS app's Sparkle updater
+#                             fetches releases/latest/download/appcast.xml
+#                             (see app/lib/update/macos_sparkle_update_service.dart).
+#                             And antgrid-linux.AppImage.zsync: the update
+#                             information embedded in every shipped AppImage
+#                             points at it, so a future in-app delta updater
+#                             (AppImageUpdate/zsync2) can patch installs in
+#                             place — publish it with every release.
 #   - Dispatch release=true -> the normal way to ship. Stamps the version from
 #                             the clock (see the `version` job), pushes the tag,
 #                             and takes the same publish path as a v* tag.
@@ -192,6 +200,7 @@ jobs:
       # `cache: true` is intentionally absent — it caches the SDK, not just pub,
       # and that is a losing trade against the 10 GB budget (see FLUTTER_VERSION
       # above). The pub cache below is kept explicitly.
+
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -307,6 +316,24 @@ jobs:
           while IFS= read -r -d '' dylib; do
             codesign --force --options runtime --timestamp --sign "$IDENTITY" "$dylib"
           done < <(find "$APP/Contents/Frameworks" -name '*.dylib' -print0)
+          # Sparkle (auto_updater) nests its own helpers inside the framework
+          # (XPC services, Autoupdate, Updater.app). Re-sign them inside-out
+          # with our identity BEFORE the outer framework seal below — the
+          # framework-level codesign does not descend into nested code, and
+          # notarization wants one consistent Developer ID chain.
+          # --preserve-metadata=entitlements keeps Sparkle's own XPC
+          # entitlements (Downloader.xpc carries network-client) intact.
+          # Paths follow Sparkle 2's Versions/B layout; each is guarded so a
+          # Sparkle version that drops one is skipped, not fatal.
+          SPARKLE_FW="$APP/Contents/Frameworks/Sparkle.framework"
+          if [ -d "$SPARKLE_FW" ]; then
+            for xpc in "$SPARKLE_FW"/Versions/B/XPCServices/*.xpc; do
+              [ -e "$xpc" ] && codesign --force --options runtime --timestamp \
+                --preserve-metadata=entitlements --sign "$IDENTITY" "$xpc"
+            done
+            [ -e "$SPARKLE_FW/Versions/B/Autoupdate" ] && codesign --force --options runtime --timestamp --sign "$IDENTITY" "$SPARKLE_FW/Versions/B/Autoupdate"
+            [ -e "$SPARKLE_FW/Versions/B/Updater.app" ] && codesign --force --options runtime --timestamp --sign "$IDENTITY" "$SPARKLE_FW/Versions/B/Updater.app"
+          fi
           for fw in "$APP"/Contents/Frameworks/*.framework; do
             [ -e "$fw" ] && codesign --force --options runtime --timestamp --sign "$IDENTITY" "$fw"
           done
@@ -372,6 +399,130 @@ jobs:
             --apple-id "$APPLE_ID" --password "$APPLE_PW" --team-id "$TEAM_ID" --wait
           xcrun stapler staple "antgrid-macos.dmg"
 
+      # Sparkle appcast for macOS in-app updates. Release paths only —
+      # published as a release asset and fetched by the app at
+      # releases/latest/download/appcast.xml (so a prerelease tag's appcast is
+      # inert: prereleases never move `latest`). The enclosure URL pins the
+      # TAG, not latest, so an already-fetched appcast keeps resolving after
+      # the next release. The gate requires an Apple-signed dmg: shipped apps
+      # carry no SUPublicEDKey in Info.plist, so Developer ID is the ONLY
+      # verification Sparkle can perform today — an EdDSA key alone must NOT
+      # publish an appcast (installed apps would download the unsigned dmg
+      # and fail verification, fleet-wide). EdDSA signing is additive on top
+      # when SPARKLE_ED_PRIVATE_KEY is set; only once SUPublicEDKey ships in
+      # Info.plist may the gate accept EdDSA without Apple signing. Runbook:
+      # docs/runbooks/macos-sparkle-updates.md.
+      - name: Generate Sparkle appcast
+        id: appcast
+        # The release-path half must match the publish job verbatim: a
+        # dispatch with release=true pushes the tag from a BRANCH ref, so
+        # github.ref stays refs/heads/* and a tags-only gate would skip this
+        # step on the documented way to ship — leaving publish to fail closed
+        # on its own missing-appcast probe. The signing half stays because a
+        # debug/profile dispatch skips signing, and an appcast generated
+        # there would advertise an unsigned dmg.
+        if: ${{ ((github.event_name == 'push' && github.ref_type == 'tag') || inputs.release) && steps.build.outcome == 'success' && env.APPLE_SIGNING_IDENTITY != '' && env.BUILD_MODE == 'release' }}
+        env:
+          # The version job's tag, not github.ref_name — on the dispatch path
+          # the ref is the branch, which would point the enclosure URL and the
+          # release-notes link at a tag that does not exist.
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.name }}
+          BUILD: ${{ github.run_number }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          # Sparkle tools release used for sign_update only (the framework the
+          # app embeds comes from the auto_updater pod, independently).
+          SPARKLE_TOOLS_VERSION: 2.6.4
+        run: |
+          set -euo pipefail
+          # The app's own detection compares the version triple, but Sparkle's
+          # install compares CFBundleVersion (--build-number, i.e. run_number)
+          # — a release whose triple rises while the build number does not
+          # lights the in-app row and then has Sparkle report "up to date": a
+          # permanently dead affordance.
+          # Enforce a strictly increasing build against the currently
+          # published appcast. 404 = first release / earlier appcasts skipped
+          # as unverifiable (nothing to compare); any OTHER fetch failure or
+          # an unparseable appcast FAILS the build — treating it like the 404
+          # case would silently disable this guard exactly when it matters.
+          APPCAST_URL="https://github.com/Radha-AI-Products/antgrid-releases/releases/latest/download/appcast.xml"
+          HTTP_CODE="$(curl -sSL --retry 3 -o prev-appcast.xml -w '%{http_code}' "$APPCAST_URL")" || HTTP_CODE=000
+          if [ "$HTTP_CODE" = "200" ]; then
+            # Bind both reads to the SAME first <item> via xmllint (already a
+            # dependency of this step) — two independent line-oriented scrapes
+            # could pair values from different items once the feed carries
+            # version history, silently disarming the guard.
+            PREV_BUILD="$(xmllint --xpath 'string(//item[1]/*[local-name()="version"])' prev-appcast.xml 2>/dev/null || true)"
+            PREV_VERSION="$(xmllint --xpath 'string(//item[1]/*[local-name()="shortVersionString"])' prev-appcast.xml 2>/dev/null || true)"
+            case "$PREV_BUILD" in
+              ''|*[!0-9]*)
+                echo "::error::published appcast fetched but its sparkle:version is missing or non-numeric — refusing to skip the monotonic +build guard. Inspect $APPCAST_URL."
+                exit 1
+                ;;
+            esac
+            # Re-running THIS tag's workflow (retry after a flaky publish,
+            # refreshed notarization) sees its own earlier appcast at latest —
+            # that is idempotent regeneration, not a version regression. The
+            # identity check reads shortVersionString (a field this step
+            # writes, and the `version` job derives both it and the tag from
+            # one string) rather than scraping the tag out of the enclosure
+            # URL, whose shape (host, asset name) this guard has no business
+            # pinning.
+            if [ "$PREV_VERSION" != "$VERSION" ] && [ "$BUILD" -le "$PREV_BUILD" ]; then
+              echo "::error::build number ($BUILD) must exceed the published appcast's sparkle:version ($PREV_BUILD) — the run counter went backwards; re-run from a newer workflow run."
+              exit 1
+            fi
+          elif [ "$HTTP_CODE" != "404" ]; then
+            echo "::error::could not fetch the published appcast (HTTP $HTTP_CODE) — refusing to skip the monotonic +build guard."
+            exit 1
+          fi
+          if [ -n "$SPARKLE_ED_PRIVATE_KEY" ]; then
+            curl -fsSL --retry 3 -o "$RUNNER_TEMP/sparkle.tar.xz" \
+              "https://github.com/sparkle-project/Sparkle/releases/download/$SPARKLE_TOOLS_VERSION/Sparkle-$SPARKLE_TOOLS_VERSION.tar.xz"
+            mkdir -p "$RUNNER_TEMP/sparkle"
+            tar -xJf "$RUNNER_TEMP/sparkle.tar.xz" -C "$RUNNER_TEMP/sparkle"
+            # sign_update emits the full attribute pair: sparkle:edSignature="..." length="..."
+            ENCLOSURE_ATTRS="$(printf '%s' "$SPARKLE_ED_PRIVATE_KEY" | "$RUNNER_TEMP/sparkle/bin/sign_update" --ed-key-file - antgrid-macos.dmg)"
+          else
+            ENCLOSURE_ATTRS="length=\"$(stat -f%z antgrid-macos.dmg)\""
+          fi
+          # minimumSystemVersion comes from the built app itself (Flutter sets
+          # LSMinimumSystemVersion from MACOSX_DEPLOYMENT_TARGET) — a value
+          # hardcoded here would drift the day the Xcode target moves, and
+          # Sparkle would then offer the update to Macs whose OS refuses to
+          # launch the new app. PlistBuddy failing (key gone) fails the step.
+          MIN_OS="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' \
+            "app/build/macos/Build/Products/$DEST/antgrid.app/Contents/Info.plist")"
+          [ -n "$MIN_OS" ]
+          cat > appcast.xml <<XML
+          <?xml version="1.0" encoding="utf-8"?>
+          <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+          <channel>
+          <title>Antgrid</title>
+          <item>
+          <title>Antgrid ${TAG}</title>
+          <sparkle:version>${BUILD}</sparkle:version>
+          <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
+          <sparkle:minimumSystemVersion>${MIN_OS}</sparkle:minimumSystemVersion>
+          <sparkle:releaseNotesLink>https://github.com/Radha-AI-Products/antgrid-releases/releases/tag/${TAG}</sparkle:releaseNotesLink>
+          <enclosure url="https://github.com/Radha-AI-Products/antgrid-releases/releases/download/${TAG}/antgrid-macos.dmg" ${ENCLOSURE_ATTRS} type="application/octet-stream"/>
+          </item>
+          </channel>
+          </rss>
+          XML
+          # The feed ships straight to installed apps with no other check —
+          # a malformed sign_update output or an odd tag must fail here, not
+          # brick every install's update check until the next release.
+          xmllint --noout appcast.xml
+
+      - uses: actions/upload-artifact@v7
+        # Exactly "the generate step ran" — no re-derived gate to keep in sync.
+        if: ${{ steps.appcast.outcome == 'success' }}
+        with:
+          name: antgrid-appcast
+          path: appcast.xml
+          if-no-files-found: error
+
       - uses: actions/upload-artifact@v7
         if: ${{ always() && steps.build.outcome == 'success' }}
         with:
@@ -399,6 +550,7 @@ jobs:
       # `cache: true` is intentionally absent — it caches the SDK, not just pub,
       # and that is a losing trade against the 10 GB budget (see FLUTTER_VERSION
       # above). The pub cache below is kept explicitly.
+
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -579,6 +731,8 @@ jobs:
       #   - libcurl4-openssl-dev: sentry_flutter's bundled sentry-native crash
       #     backend find_package(CURL)s its HTTP transport on Linux.
       #   - libfuse2: lets the downloaded appimagetool run (it is itself an AppImage).
+      #   - zsync: provides zsyncmake — appimagetool only emits the .zsync
+      #     delta-update control file when it finds zsyncmake on PATH.
       - name: Install Linux build dependencies
         run: |
           set -euo pipefail
@@ -587,7 +741,7 @@ jobs:
             ninja-build libgtk-3-dev pkg-config clang cmake \
             libwebkit2gtk-4.1-dev \
             libsecret-1-dev libayatana-appindicator3-dev \
-            libcurl4-openssl-dev libfuse2
+            libcurl4-openssl-dev libfuse2 zsync
 
       - name: Flutter pub get
         working-directory: app
@@ -659,13 +813,27 @@ jobs:
             https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x "$TOOL"
           # --appimage-extract-and-run avoids needing FUSE mounted for the tool.
-          ARCH=x86_64 "$TOOL" --appimage-extract-and-run "$APPDIR" antgrid-linux.AppImage
+          # -u embeds AppImageUpdate-style update information in the runtime's
+          # .upd_info ELF section and (via zsyncmake) emits the .zsync control
+          # file next to the output. No in-app consumer ships yet — embedding
+          # from day one means every install out there is already
+          # delta-updatable when one does. The zsync asset name is as
+          # load-bearing as the AppImage's own: installed apps resolve it by
+          # exact match against releases/latest.
+          UPDINFO="gh-releases-zsync|Radha-AI-Products|antgrid-releases|latest|antgrid-linux.AppImage.zsync"
+          ARCH=x86_64 "$TOOL" --appimage-extract-and-run \
+            -u "$UPDINFO" "$APPDIR" antgrid-linux.AppImage
+          # appimagetool silently skips the .zsync when zsyncmake is missing —
+          # fail here rather than publish a release that breaks delta updates.
+          test -f antgrid-linux.AppImage.zsync
 
       - uses: actions/upload-artifact@v7
         if: ${{ always() && steps.build.outcome == 'success' }}
         with:
           name: antgrid-linux-${{ env.BUILD_MODE }}
-          path: antgrid-linux.AppImage
+          path: |
+            antgrid-linux.AppImage
+            antgrid-linux.AppImage.zsync
           if-no-files-found: error
 
   # Tag pushes only: attach the macOS + Linux installers to a GitHub Release on
@@ -699,6 +867,30 @@ jobs:
           # the site's stable download URLs point there.
           prerelease=""
           case "$TAG" in *-*) prerelease="--prerelease" ;; esac
+          # appcast.xml is absent when the macos job skipped it (unsigned
+          # build). Publishing a STABLE release without it is only safe while
+          # no installed app polls the feed yet: once one appcast-bearing
+          # release exists, a stable release without one would 404
+          # releases/latest/download/appcast.xml for every installed app —
+          # fail instead. Prerelease tags never move `latest`, so they may
+          # always publish without an appcast. The probe fails CLOSED like
+          # its sibling in the macos job: only a definitive 404 proves nobody
+          # polls the feed yet — treating a transient error (or a redirect
+          # target rejecting the request) as 404 would ship the fleet-wide
+          # feed breakage this guard exists to prevent.
+          if [ ! -f appcast.xml ] && [ -z "$prerelease" ]; then
+            APPCAST_URL="https://github.com/Radha-AI-Products/antgrid-releases/releases/latest/download/appcast.xml"
+            HTTP_CODE="$(curl -sSL --retry 3 -o /dev/null -w '%{http_code}' "$APPCAST_URL")" || HTTP_CODE=000
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "::error::installed apps already poll an appcast, but this release has none (unsigned build?) — publishing would break the update feed."
+              exit 1
+            elif [ "$HTTP_CODE" != "404" ]; then
+              echo "::error::could not check for a published appcast (HTTP $HTTP_CODE) — refusing to risk breaking the update feed."
+              exit 1
+            fi
+          fi
+          assets="antgrid-macos.dmg antgrid-linux.AppImage antgrid-linux.AppImage.zsync"
+          [ -f appcast.xml ] && assets="$assets appcast.xml"
           gh release create "$TAG" \
             --repo Radha-AI-Products/antgrid-releases \
             --title "Antgrid $TAG" \
@@ -710,4 +902,4 @@ jobs:
 
           Built from \`$SHA\` at $BUILT." \
             $prerelease \
-            antgrid-macos.dmg antgrid-linux.AppImage
+            $assets

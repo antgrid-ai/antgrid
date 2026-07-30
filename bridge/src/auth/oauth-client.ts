@@ -13,13 +13,23 @@ export interface OAuthClientOptions {
   clientId: string;
   clientSecret: string;
   /**
-   * Called when the web returns 401 `invalid_client` — meaning the
-   * device has been revoked or the OAuth client deleted. Caller should
-   * terminate the process; emit `{"event":"auth_revoked"}` to stderr first
-   * so the App can observe.
+   * Called when the web rejects the credentials as `invalid_client` (401, or
+   * 400 when the client row is gone) — the device has been revoked or its
+   * OAuth client deleted. Caller should terminate the process; emit
+   * `{"event":"auth_revoked"}` to stderr first so the App can observe.
    */
   onAuthRevoked?: () => void;
   fetchImpl?: typeof fetch;
+}
+
+/** True when an OAuth error body carries `error: "invalid_client"`. Falls back
+ *  to a substring match so a non-JSON error page still classifies. */
+function isInvalidClient(body: string): boolean {
+  try {
+    return (JSON.parse(body) as { error?: unknown }).error === "invalid_client";
+  } catch {
+    return body.includes("invalid_client");
+  }
 }
 
 /**
@@ -60,12 +70,19 @@ export class OAuthClient {
       },
       body: body.toString(),
     });
-    if (res.status === 401) {
-      this.onAuthRevoked?.();
-      throw new Error("oauth: invalid_client (device revoked)");
-    }
     if (!res.ok) {
       const text = await res.text().catch(() => "");
+      // Better-Auth answers an unknown/deleted OAuth client with 400
+      // `invalid_client` ("missing client"), NOT 401 — signing out rotates the
+      // account device and drops its client row, so cached credentials die the
+      // same way a revoke kills them. Keying only on 401 left that case falling
+      // through to the generic branch, where the host logged a warning and gave
+      // up: the machine then never reached the relay and read as permanently
+      // offline, with re-authenticating in the app changing nothing.
+      if (res.status === 401 || isInvalidClient(text)) {
+        this.onAuthRevoked?.();
+        throw new Error(`oauth: invalid_client (device revoked or client deleted): ${text.slice(0, 200)}`);
+      }
       throw new Error(`oauth: token endpoint returned ${res.status}: ${text.slice(0, 200)}`);
     }
     const json = (await res.json()) as { access_token?: string; expires_in?: number };

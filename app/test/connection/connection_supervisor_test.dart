@@ -711,8 +711,13 @@ void main() {
     sup.setWanted(false);
     await settle();
     final dialsAtRelease = mech.dialCalls;
-
-    expect(mech.releaseCalls, 1);
+    // Deliberately not an exact count: release() is documented to run on EVERY
+    // evaluation while !wanted, and a starved runner can have two pending —
+    // the backoff timer's _kick and setWanted's — land in the same turn, since
+    // both timers come due together and neither callback drains microtasks
+    // before the other queues its own. Growth AFTER quiescence is the signal.
+    final releasesAtQuiesce = mech.releaseCalls;
+    expect(releasesAtQuiesce, greaterThanOrEqualTo(1));
     expect(sup.status, const Released());
 
     await Future<void>.delayed(const Duration(milliseconds: 60));
@@ -723,10 +728,11 @@ void main() {
     );
     // dialCalls alone cannot see a leaked timer — the !wanted branch returns
     // before any dial. release() is the observable: a surviving backoff timer
-    // fires _kick(), which re-runs that branch and releases a second time.
+    // fires _kick(), which re-runs that branch and releases again. Nothing is
+    // queued once settle() has drained, so any growth here is that timer.
     expect(
       mech.releaseCalls,
-      1,
+      releasesAtQuiesce,
       reason: 'the armed backoff timer must be cancelled, not merely ignored',
     );
   });

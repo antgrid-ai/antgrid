@@ -136,23 +136,27 @@ class AbToolbar extends StatelessWidget {
     final actions = _actions ?? const [];
 
     return [
-      if (leading != null) ...[
-        leading,
-        const SizedBox(width: AbTokens.space8),
-      ],
-      Text(
-        title!.toUpperCase(),
-        style: TextStyle(
-          fontFamily: AbTokens.fontSans,
-          fontFamilyFallback: AbTokens.fontSansFallbacks,
-          fontSize: AbTokens.fontXxs,
-          fontWeight: FontWeight.w500,
-          letterSpacing: 1.5,
-          color: context.antgrid.textSecondary,
-          height: 1.0, // line-metric centers caps inside the row
+      if (leading != null) ...[leading, const SizedBox(width: AbTokens.space8)],
+      // Expanded, not Text + Spacer: a bare Text cannot shrink, so a long
+      // title or a large text scale overflowed the row instead of ellipsizing.
+      // Expanded eats the same slack the Spacer did, so short titles are
+      // laid out identically.
+      Expanded(
+        child: Text(
+          title!.toUpperCase(),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            fontFamily: AbTokens.fontSans,
+            fontFamilyFallback: AbTokens.fontSansFallbacks,
+            fontSize: AbTokens.fontXxs,
+            fontWeight: FontWeight.w500,
+            letterSpacing: 1.5,
+            color: context.antgrid.textSecondary,
+            height: 1.0, // line-metric centers caps inside the row
+          ),
         ),
       ),
-      const Spacer(),
       ..._withSeparators(actions, separator: AbTokens.space4),
       if (trailing != null) ...[
         const SizedBox(width: AbTokens.space8),

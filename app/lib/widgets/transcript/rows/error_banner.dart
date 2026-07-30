@@ -5,6 +5,7 @@ import '../../../design/ab_icons.dart';
 import '../../../design/ab_tokens.dart';
 import '../../../design/widgets/ab_chip.dart';
 import '../../../design/widgets/ab_icon_button.dart';
+import '../../../design/widgets/ab_tap_target.dart';
 import '../transcript_rows.dart';
 
 /// Inline banner for a turn-level [ErrorRowData], with a dismiss affordance.
@@ -27,20 +28,23 @@ class ErrorBanner extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              AbChip.system(label: error.category, color: c.error),
-              if (error.provider != null) ...[
-                const SizedBox(width: AbTokens.space6),
-                AbChip.system(label: error.provider!, color: c.textMuted),
+          // Chip row: the banner's dismiss glyph must not out-height the chips.
+          AbCompactTapTargets(
+            child: Row(
+              children: [
+                AbChip.system(label: error.category, color: c.error),
+                if (error.provider != null) ...[
+                  const SizedBox(width: AbTokens.space6),
+                  AbChip.system(label: error.provider!, color: c.textMuted),
+                ],
+                const Spacer(),
+                AbIconButton(
+                  icon: AbIcons.close,
+                  tone: AbIconButtonTone.muted,
+                  onTap: onDismiss,
+                ),
               ],
-              const Spacer(),
-              AbIconButton(
-                icon: AbIcons.close,
-                tone: AbIconButtonTone.muted,
-                onTap: onDismiss,
-              ),
-            ],
+            ),
           ),
           const SizedBox(height: AbTokens.space4),
           Text(

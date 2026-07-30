@@ -1,4 +1,6 @@
 // app/test/providers/local_host_warmup_test.dart
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -22,6 +24,16 @@ class _RecordingLauncher extends LocalAgentLauncher {
         host: HostController(spawnHost: () async => throw UnimplementedError()),
       );
   final calls = <({bool hasDevice, bool forceRespawn})>[];
+
+  /// Which OAuth client each spawn carried — the host caches this pair for its
+  /// whole lifetime, so a respawn that reuses a rotated-away client is the bug
+  /// these tests guard.
+  final clientIds = <String?>[];
+
+  /// When set, warmHost records its call then parks until completed — holds a
+  /// respawn open so a second event can be delivered mid-flight.
+  Completer<void>? block;
+
   @override
   Future<void> warmHost({
     DeviceRecord? device,
@@ -30,13 +42,16 @@ class _RecordingLauncher extends LocalAgentLauncher {
     bool forceRespawn = false,
   }) async {
     calls.add((hasDevice: device != null, forceRespawn: forceRespawn));
+    clientIds.add(device?.clientId);
+    final gate = block;
+    if (gate != null) await gate.future;
   }
 }
 
-DeviceRecord _device() => DeviceRecord(
+DeviceRecord _device({String clientId = 'cid'}) => DeviceRecord(
   userId: 'u-1',
   deviceUuid: 'uuid-1',
-  clientId: 'cid',
+  clientId: clientId,
   clientSecret: 'csec',
   ed25519Pub: 'e-pub',
   ed25519Priv: 'e-priv',
@@ -102,9 +117,9 @@ void main() {
       // Simulate sign-in: device now provisioned + currentUser non-null. Flipping
       // _authState re-resolves currentUserProvider, which fires the warm-up's listener.
       stored = _device();
-      container.read(_authState.notifier).set(
-        CurrentUser(userId: 'u-1', email: 'a@b.c', tier: 'pro'),
-      );
+      container
+          .read(_authState.notifier)
+          .set(CurrentUser(userId: 'u-1', email: 'a@b.c', tier: 'pro'));
       await _settle();
 
       // Second call: force-respawn carrying the device.
@@ -112,6 +127,125 @@ void main() {
       expect(launcher.calls.length, 2);
     },
   );
+
+  // The host reads its OAuth credentials once, from its stdin bootstrap, and
+  // never re-reads them. Signing out rotates the account device and the web
+  // deletes its OAuth client, so a host left running on the old pair mints
+  // nothing, never reaches the relay, and shows up on phones as offline
+  // forever. Only a respawn can hand it the new pair.
+  test(
+    'sign-in with a ROTATED device respawns the already-device-bearing host',
+    () async {
+      final launcher = _RecordingLauncher();
+      var stored = _device(clientId: 'cid-old');
+      final keychain = _FakeKeychain(read: () async => stored);
+
+      final container = ProviderContainer(
+        overrides: [
+          localAgentLauncherProvider.overrideWithValue(launcher),
+          keychainDeviceStoreProvider.overrideWithValue(keychain),
+          currentUserProvider.overrideWith((ref) => ref.watch(_authState)),
+          defaultRelayUrlProvider.overrideWithValue('ws://test.relay'),
+          licenseApiUrlProvider.overrideWithValue('http://test.license'),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      container.listen(localHostWarmupProvider, (_, _) {});
+      await _settle();
+      expect(launcher.clientIds, ['cid-old']);
+
+      // Sign out and back in: same user, brand-new device + OAuth client.
+      stored = _device(clientId: 'cid-new');
+      container
+          .read(_authState.notifier)
+          .set(CurrentUser(userId: 'u-1', email: 'a@b.c', tier: 'pro'));
+      await _settle();
+
+      expect(launcher.calls.last, (hasDevice: true, forceRespawn: true));
+      expect(launcher.clientIds, ['cid-old', 'cid-new']);
+    },
+  );
+
+  // currentUserProvider is invalidated on app resume as well as on sign-in
+  // (main.dart, sign_in_screen.dart), so two AsyncData emissions can land
+  // inside one respawn's window. spawnedClientId only updates when warmHost
+  // returns, so without an in-flight guard the second event re-passes the
+  // mismatch check and tears the host down a second time.
+  test('overlapping sign-in events respawn only once', () async {
+    final launcher = _RecordingLauncher();
+    var stored = _device(clientId: 'cid-old');
+    final keychain = _FakeKeychain(read: () async => stored);
+
+    final container = ProviderContainer(
+      overrides: [
+        localAgentLauncherProvider.overrideWithValue(launcher),
+        keychainDeviceStoreProvider.overrideWithValue(keychain),
+        currentUserProvider.overrideWith((ref) => ref.watch(_authState)),
+        defaultRelayUrlProvider.overrideWithValue('ws://test.relay'),
+        licenseApiUrlProvider.overrideWithValue('http://test.license'),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    container.listen(localHostWarmupProvider, (_, _) {});
+    await _settle();
+    expect(launcher.clientIds, ['cid-old']);
+
+    stored = _device(clientId: 'cid-new');
+    final notifier = container.read(_authState.notifier);
+
+    // Park the first respawn inside warmHost, so spawnedClientId is still
+    // 'cid-old' when the second event arrives — the exact window a resume
+    // landing on the heels of a sign-in falls into.
+    final gate = Completer<void>();
+    launcher.block = gate;
+    notifier.set(CurrentUser(userId: 'u-1', email: 'a@b.c', tier: 'pro'));
+    await _settle();
+    expect(launcher.clientIds, ['cid-old', 'cid-new']); // respawn in flight
+
+    // Distinct email so this is a second emission, not a deduped rebuild.
+    notifier.set(CurrentUser(userId: 'u-1', email: 'a2@b.c', tier: 'pro'));
+    await _settle();
+    await _settle();
+
+    gate.complete();
+    await _settle();
+
+    // Without the in-flight guard the second event finds spawnedClientId still
+    // 'cid-old' and force-respawns again → a third entry.
+    expect(launcher.clientIds, ['cid-old', 'cid-new']);
+  });
+
+  test('sign-in on the SAME device does not respawn', () async {
+    final launcher = _RecordingLauncher();
+    final keychain = _FakeKeychain(
+      read: () async => _device(clientId: 'cid-1'),
+    );
+
+    final container = ProviderContainer(
+      overrides: [
+        localAgentLauncherProvider.overrideWithValue(launcher),
+        keychainDeviceStoreProvider.overrideWithValue(keychain),
+        currentUserProvider.overrideWith((ref) => ref.watch(_authState)),
+        defaultRelayUrlProvider.overrideWithValue('ws://test.relay'),
+        licenseApiUrlProvider.overrideWithValue('http://test.license'),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    container.listen(localHostWarmupProvider, (_, _) {});
+    await _settle();
+
+    container
+        .read(_authState.notifier)
+        .set(CurrentUser(userId: 'u-1', email: 'a@b.c', tier: 'pro'));
+    await _settle();
+
+    // A respawn tears down the live host (and any open project's loopback
+    // transport), so an unchanged device must not trigger one.
+    expect(launcher.calls, [(hasDevice: true, forceRespawn: false)]);
+  });
 
   test('warm-up failure is swallowed (does not throw)', () async {
     final launcher = _ThrowingLauncher();
@@ -127,7 +261,10 @@ void main() {
     );
     addTearDown(container.dispose);
 
-    container.listen(localHostWarmupProvider, (_, _) {}); // must not throw synchronously
+    container.listen(
+      localHostWarmupProvider,
+      (_, _) {},
+    ); // must not throw synchronously
     await _settle(); // the swallowed async failure must not surface here either
     // Provider<void> — the meaningful signal is that read + settle completed without
     // rethrowing. Verify the provider built by confirming it has a value in state.

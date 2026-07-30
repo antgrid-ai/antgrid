@@ -7,6 +7,7 @@ import 'git_status_color.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_chip.dart';
 import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_tap_target.dart';
 import '../models/file_tree_models.dart';
 
 /// A widget that renders a file tree with expand/collapse, file selection,
@@ -82,10 +83,7 @@ class FileTreeView extends StatelessWidget {
 
   Widget _buildChangedOnly(BuildContext context) {
     if (gitFileStatuses.isEmpty) {
-      return const AbEmptyState(
-        icon: AbIcons.check,
-        title: 'No changed files',
-      );
+      return const AbEmptyState(icon: AbIcons.check, title: 'No changed files');
     }
 
     final entries = gitFileStatuses.entries.toList();
@@ -275,7 +273,10 @@ class _GitBadge extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.only(right: AbTokens.space4),
-      child: AbChip.label(label: status, color: gitStatusColor(context, status)),
+      child: AbChip.label(
+        label: status,
+        color: gitStatusColor(context, status),
+      ),
     );
   }
 }
@@ -311,60 +312,64 @@ class _ChangedFileRow extends StatelessWidget {
             horizontal: AbTokens.space12,
             vertical: AbTokens.space6,
           ),
-          child: Row(
-            children: [
-              const SizedBox(width: AbTokens.space16),
-              Expanded(
-                child: Row(
-                  children: [
-                    // File name has priority: inflexible, so it's laid out at
-                    // full width first and the Expanded dir path below takes only
-                    // the leftover (ellipsizing, then vanishing when there's no
-                    // room). Only a name wider than the whole row can overflow.
-                    Text(
-                      fileName,
-                      style: AbTokens.monoStyle(
-                        fontSize: AbTokens.fontSm,
-                        color: isSelected
-                            ? context.antgrid.accent
-                            : context.antgrid.textPrimary,
-                      ),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    const SizedBox(width: AbTokens.space8),
-                    Expanded(
-                      child: Text(
-                        dirPath,
+          // A file row is tappable across its whole height, so the discard
+          // glyph is inline chrome and must not set the row's height.
+          child: AbCompactTapTargets(
+            child: Row(
+              children: [
+                const SizedBox(width: AbTokens.space16),
+                Expanded(
+                  child: Row(
+                    children: [
+                      // File name has priority: inflexible, so it's laid out at
+                      // full width first and the Expanded dir path below takes only
+                      // the leftover (ellipsizing, then vanishing when there's no
+                      // room). Only a name wider than the whole row can overflow.
+                      Text(
+                        fileName,
                         style: AbTokens.monoStyle(
-                          fontSize: AbTokens.fontXxs,
-                          color: context.antgrid.textMuted,
+                          fontSize: AbTokens.fontSm,
+                          color: isSelected
+                              ? context.antgrid.accent
+                              : context.antgrid.textPrimary,
                         ),
                         overflow: TextOverflow.ellipsis,
                       ),
-                    ),
-                  ],
+                      const SizedBox(width: AbTokens.space8),
+                      Expanded(
+                        child: Text(
+                          dirPath,
+                          style: AbTokens.monoStyle(
+                            fontSize: AbTokens.fontXxs,
+                            color: context.antgrid.textMuted,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-              const SizedBox(width: AbTokens.space8),
-              Text(
-                status,
-                style: TextStyle(
-                  fontFamily: AbTokens.fontSans,
-                  fontFamilyFallback: AbTokens.fontSansFallbacks,
-                  fontSize: AbTokens.fontXs,
-                  fontWeight: FontWeight.w600,
-                  color: badgeColor,
+                const SizedBox(width: AbTokens.space8),
+                Text(
+                  status,
+                  style: TextStyle(
+                    fontFamily: AbTokens.fontSans,
+                    fontFamilyFallback: AbTokens.fontSansFallbacks,
+                    fontSize: AbTokens.fontXs,
+                    fontWeight: FontWeight.w600,
+                    color: badgeColor,
+                  ),
                 ),
-              ),
-              if (onDiscard != null) ...[
-                const SizedBox(width: AbTokens.space4),
-                AbIconButton(
-                  icon: AbIcons.trash,
-                  onTap: onDiscard,
-                  tooltip: 'Discard changes',
-                ),
+                if (onDiscard != null) ...[
+                  const SizedBox(width: AbTokens.space4),
+                  AbIconButton(
+                    icon: AbIcons.trash,
+                    onTap: onDiscard,
+                    tooltip: 'Discard changes',
+                  ),
+                ],
               ],
-            ],
+            ),
           ),
         ),
       ),

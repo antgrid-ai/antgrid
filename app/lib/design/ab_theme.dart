@@ -29,6 +29,9 @@ ThemeData buildAbTheme([AbColors palette = kDefaultPalette]) {
     useMaterial3: true,
     brightness: isLight ? Brightness.light : Brightness.dark,
     colorScheme: colorScheme,
+    // Design rule: no ripples. Kills the Material splash animation on every
+    // InkWell/button app-wide; hover and highlight states are unaffected.
+    splashFactory: NoSplash.splashFactory,
     scaffoldBackgroundColor: palette.bgDeepest,
     fontFamily: AbTokens.fontSans,
     fontFamilyFallback: AbTokens.fontSansFallbacks,

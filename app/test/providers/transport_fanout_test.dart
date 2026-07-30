@@ -7,7 +7,6 @@ import 'package:antgrid/providers/recent_agents.dart';
 import 'package:antgrid/providers/relay_connection.dart';
 import 'package:antgrid/services/keychain_device_store.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
-import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -125,25 +124,21 @@ void main() {
     // Drill-in passes the COMPOUND registrationId; resolution must match by base.
     c.read(agentTransportForProvider('M.p1'));
     // connectionFor is idempotent (putIfAbsent), so this reads the SAME slot
-    // that _buildRelayTransportFor opens — the relay state on it is our
-    // discriminant. Poll until the supervisor's dial reaches relay.connect() →
-    // state transitions from disconnected to connecting. Without the fix (no
-    // base-match), resolve returns null, relay.connect() is never called, and
-    // the state stays disconnected.
+    // that _buildRelayTransportFor opens — its supervisor is our discriminant.
+    // Only ensureStarted() (called by _buildRelayTransportFor after resolution
+    // succeeds) constructs one, and it never resets to null, so this LATCHES —
+    // unlike the relay connectionState, which a fast-failing dial to the
+    // non-existent ws://x flips back to disconnected between polls. Without
+    // the fix (no base-match), resolve returns null, ensureStarted is never
+    // called, and the supervisor stays null.
     final conn = mgr.connectionFor('M.p1');
-    for (
-      var i = 0;
-      i < 50 &&
-          conn.relay.currentState.connectionState ==
-              RelayConnectionState.disconnected;
-      i++
-    ) {
+    for (var i = 0; i < 50 && conn.supervisor == null; i++) {
       await Future<void>.delayed(const Duration(milliseconds: 10));
     }
 
     expect(
-      conn.relay.currentState.connectionState,
-      isNot(RelayConnectionState.disconnected),
+      conn.supervisor,
+      isNotNull,
       reason:
           'compound id must resolve via the bare machine recent and open its machine connection',
     );

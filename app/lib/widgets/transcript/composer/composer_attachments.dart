@@ -6,6 +6,7 @@ import '../../../design/ab_colors.dart';
 import '../../../design/ab_icons.dart';
 import '../../../design/ab_tokens.dart';
 import '../../../design/widgets/ab_icon_button.dart';
+import '../../../design/widgets/ab_tap_target.dart';
 
 enum AttachmentStatus { uploading, done, error }
 
@@ -64,38 +65,42 @@ class ComposerAttachmentChips extends StatelessWidget {
         runSpacing: AbTokens.space4,
         children: [
           for (final a in attachments)
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  switch (a.status) {
-                    AttachmentStatus.uploading =>
-                      '${a.fileName} ${(a.progress * 100).round()}%',
-                    AttachmentStatus.done => a.fileName,
-                    AttachmentStatus.error => '${a.fileName} — failed',
-                  },
-                  style: AbTokens.monoStyle(
-                    fontSize: AbTokens.fontXs,
-                    color: switch (a.status) {
-                      AttachmentStatus.error => p.error,
-                      AttachmentStatus.done => p.textSecondary,
-                      AttachmentStatus.uploading => p.textMuted,
+            // Chip-sized row: the filename's type sets the height, not the
+            // retry/remove glyphs beside it.
+            AbCompactTapTargets(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    switch (a.status) {
+                      AttachmentStatus.uploading =>
+                        '${a.fileName} ${(a.progress * 100).round()}%',
+                      AttachmentStatus.done => a.fileName,
+                      AttachmentStatus.error => '${a.fileName} — failed',
                     },
+                    style: AbTokens.monoStyle(
+                      fontSize: AbTokens.fontXs,
+                      color: switch (a.status) {
+                        AttachmentStatus.error => p.error,
+                        AttachmentStatus.done => p.textSecondary,
+                        AttachmentStatus.uploading => p.textMuted,
+                      },
+                    ),
                   ),
-                ),
-                const SizedBox(width: AbTokens.space4),
-                if (a.status == AttachmentStatus.error)
+                  const SizedBox(width: AbTokens.space4),
+                  if (a.status == AttachmentStatus.error)
+                    AbIconButton(
+                      icon: AbIcons.refresh,
+                      tooltip: 'Retry upload',
+                      onTap: () => onRetry(a),
+                    ),
                   AbIconButton(
-                    icon: AbIcons.refresh,
-                    tooltip: 'Retry upload',
-                    onTap: () => onRetry(a),
+                    icon: AbIcons.close,
+                    tooltip: 'Remove attachment',
+                    onTap: () => onRemove(a),
                   ),
-                AbIconButton(
-                  icon: AbIcons.close,
-                  tooltip: 'Remove attachment',
-                  onTap: () => onRemove(a),
-                ),
-              ],
+                ],
+              ),
             ),
         ],
       ),

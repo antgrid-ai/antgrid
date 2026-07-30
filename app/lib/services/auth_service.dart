@@ -5,6 +5,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
+import '../config/build_info.dart';
 import '../config/storage_scope.dart';
 
 /// Abstract over secure storage so tests can substitute an in-memory impl.
@@ -76,19 +77,14 @@ class CurrentUser {
   final bool promotional;
 }
 
-/// App version surfaced in the sign-in User-Agent. Keep in lockstep with the
-/// `version:` field in `pubspec.yaml` (no runtime version source is wired up
-/// yet — `package_info_plus` is not a dependency).
-const String _kAppVersion = '1.0.0';
-
 /// User-Agent sent on account/sign-in requests so the magic-link approval page
 /// and email identify the requester as the Antgrid app on a specific OS,
 /// instead of the bare `Dart/<v> (dart:io)` default. Example:
-/// `Antgrid/1.0.0 (windows 10.0.26200)`.
+/// `Antgrid/1.0.6 (windows 10.0.26200)`.
 String _antgridUserAgent() {
   final os = Platform.operatingSystem;
   final version = Platform.operatingSystemVersion;
-  return 'Antgrid/$_kAppVersion ($os $version)';
+  return 'Antgrid/${BuildInfo.version} ($os $version)';
 }
 
 Uri buildOAuthStartUri({
