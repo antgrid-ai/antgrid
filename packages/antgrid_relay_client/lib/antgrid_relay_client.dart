@@ -1,5 +1,6 @@
 export 'src/agent_transport.dart';
 export 'src/buffered_agent_transport.dart';
+export 'src/connection_handshake.dart';
 export 'src/local_transport.dart';
 export 'src/machine_session.dart';
 export 'src/pair_exception.dart';

@@ -5,16 +5,10 @@ import { setupDartTestEnv, type DartTestEnv } from "../../helpers/harness";
 
 /**
  * Dart File Explorer E2E — mirrors file-explorer.test.ts but routes through
- * the real Dart client to exercise the production Dart crypto and relay code
- * paths for file tree + content messages.
+ * the real Dart client to exercise the production Dart crypto, session and
+ * stream code paths for file tree + content messages.
  */
-// setupDartTestEnv admits the Dart client via account trust, but the Dart
-// eval CLI's `_handleHandshake` (packages/antgrid_eval_client/lib/src/commands.dart)
-// addresses the agent via `_relay.currentState.peerDeviceId`, which nothing
-// sets any more — its JSON action protocol has no `handshake` param to target
-// an agent directly, so a pair-free Dart handshake cannot succeed until the
-// Dart CLI grows one (see harness.ts's `setupDartTestEnv`).
-describe.skip("dart-file-explorer", () => {
+describe("dart-file-explorer", () => {
   let env: DartTestEnv;
 
   beforeAll(async () => {
@@ -22,7 +16,7 @@ describe.skip("dart-file-explorer", () => {
       fixtureName: "basic",
       clientName: "eval-dart-files",
     });
-    await env.app.waitForAgentStatus(10_000);
+    await env.app.waitForAgentStatus(env.streamId, 10_000);
   }, 60_000);
 
   afterAll(async () => {
@@ -30,7 +24,7 @@ describe.skip("dart-file-explorer", () => {
   });
 
   test("receives full file tree via Dart client", async () => {
-    const tree = await env.app.waitForFileTree(10_000);
+    const tree = await env.app.waitForFileTree(env.streamId, 10_000);
     expect(tree.data.projectId).toBe(env.projectId);
     expect(tree.data.root.type).toBe("directory");
 
@@ -41,7 +35,12 @@ describe.skip("dart-file-explorer", () => {
   }, 15_000);
 
   test("reads file content via Dart client", async () => {
-    const content = await env.app.requestFileContent(env.projectId, "README.md", 10_000);
+    const content = await env.app.requestFileContent(
+      env.streamId,
+      env.projectId,
+      "README.md",
+      10_000,
+    );
     expect(content.data.type).toBe("file:content");
     expect(content.data.content).toContain("Eval Test Project");
     expect(content.data.size).toBeGreaterThan(0);
@@ -52,12 +51,12 @@ describe.skip("dart-file-explorer", () => {
   // temp-dir root) emits no add events for a cross-process write inside the
   // long-running agent on Windows, even with polling — yet identical standalone
   // chokidar detects it. A Bun+chokidar runtime quirk in this eval setup, not a
-  // protocol/pairing issue (tree:full + file:read pass). Real project dirs watch
-  // fine in production. Re-enable once incremental watching is reliable here.
+  // protocol issue (tree:full + file:read pass). Real project dirs watch fine
+  // in production. Re-enable once incremental watching is reliable here.
   test.skip("receives incremental tree update on file creation", async () => {
     writeFileSync(join(env.projectDir, "dart-created.txt"), "created during dart eval");
 
-    const update = await env.app.waitForTreeUpdate(10_000);
+    const update = await env.app.waitForTreeUpdate(env.streamId, 10_000);
     expect(update.data.projectId).toBe(env.projectId);
     expect(update.data.added.length).toBeGreaterThan(0);
 

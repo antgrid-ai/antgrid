@@ -1,6 +1,6 @@
 // End-to-end coverage for supervisor-driven `RelayConnection` bring-up against
 // the REAL v3 crypto handshake (via a fake agent responder, mirroring
-// connection_handshake_test.dart's harness).
+// antgrid_relay_client's connection_handshake_test.dart harness).
 //
 // Also covers two "provider wiring" claims that are naturally proven at this
 // layer, one connection/one handshake for real:
@@ -21,7 +21,7 @@ import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 // ---------------------------------------------------------------------------
-// Fakes (same shape as connection_handshake_test.dart's harness, plus a
+// Fakes (same shape as antgrid_relay_client's connection_handshake_test.dart harness, plus a
 // settable state stream and a peer-presence controller: the routable rung is
 // fed by the relay's peer-online, which it emits right after welcome for a
 // same-account agent).

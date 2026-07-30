@@ -581,6 +581,7 @@ export interface DartTestEnv {
   abDir: string;
   projectDir: string;
   projectId: string;
+  streamId: string;
   agentDeviceId: string;
   teardown(): Promise<void>;
 }
@@ -762,20 +763,48 @@ export async function setupDartTestEnv(opts: {
   // v3: app hello now carries a mandatory license token (design §4.2); the Dart
   // eval CLI forwards it to RelayService.connect.
   await app.connect(relay.url, TEST_LICENSE_TOKEN);
-  // KNOWN GAP (eval-CLI, not relay/bridge): `_handleHandshake` in
-  // packages/antgrid_eval_client/lib/src/commands.dart addresses the agent via
-  // `_relay.currentState.peerDeviceId`, which only the now-deleted `pair`
-  // action ever set. There is no `handshake` param to target an agent
-  // directly, so a pair-free Dart handshake cannot succeed until the Dart CLI
-  // grows one — this call is expected to fail (see the `describe.skip` dart-
-  // client-e2e scenarios) until that lands.
-  await app.performHandshake(auth.ed25519Pub);
+  // Pair-free: the phone addresses the agent by the coordinates it already
+  // holds (bare machine deviceUuid + pinned Ed25519 pub), because nothing hands
+  // it a peer id any more.
+  await app.performHandshake(auth.ed25519Pub, deviceUuid);
 
-  // Account-trusted phones start with an empty per-project allowlist.
+  // Account-trusted phones start with an empty per-project allowlist. The row
+  // itself is created by the client-hello above, so this MUST come after it.
   await allowProjectForTrustedPhones(abDir, projectId);
 
-  // Welcome-replay: pull the cached snapshot like the production app.
+  // Welcome-replay: pull the control-plane snapshot (the `agent:projects`
+  // catalog) like the production app.
   await app.pullStateSnapshot();
+
+  // v3: bind the firstProject stream every project verb rides. `project:start`
+  // is also the promote trigger, so retry it — the allowlist reload above is an
+  // fs.watch away and firstProject's auto-start can still be in flight for a
+  // beat after the handshake establishes (same race setupTestEnv polls the
+  // advert for; here bindProject's own `stream-ready` wait absorbs it, and a
+  // NOT_ALLOWED rejection is what needs the outer retry).
+  const STREAM_BIND_ATTEMPTS = 8;
+  let streamId: string | undefined;
+  let lastBindErr: unknown;
+  for (let i = 0; i < STREAM_BIND_ATTEMPTS; i++) {
+    try {
+      streamId = await app.openProjectStream(projectId, 5_000);
+      break;
+    } catch (err) {
+      lastBindErr = err;
+      await Bun.sleep(500);
+      app.drainQueued("agent:projects");
+      await app.pullStateSnapshot();
+    }
+  }
+  if (!streamId) {
+    throw new Error(
+      `Dart client never bound a stream for project ${projectId} after ` +
+        `${STREAM_BIND_ATTEMPTS} attempts: ${String(lastBindErr)}`,
+    );
+  }
+  // Per-project durable state (agent:status / tree:full / git:status) lives on
+  // the stream, not the control plane — pull it the way a ProjectSession does.
+  await app.pullStateSnapshot(streamId);
 
   return {
     relay,
@@ -784,6 +813,7 @@ export async function setupDartTestEnv(opts: {
     abDir,
     projectDir: project.dir,
     projectId,
+    streamId,
     agentDeviceId: deviceUuid,
     async teardown() {
       await app.disconnect();

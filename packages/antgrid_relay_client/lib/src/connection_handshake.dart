@@ -1,18 +1,46 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
+import 'dart:typed_data';
 
-import 'package:antgrid_relay_client/antgrid_relay_client.dart';
-import 'package:flutter/foundation.dart';
+import 'crypto_service.dart';
+import 'e2e/confirm.dart';
+import 'e2e/handshake_sig.dart';
+import 'e2e/key_schedule.dart';
+import 'e2e/transcript.dart';
+import 'e2e/transport.dart';
+import 'frame.dart';
+import 'machine_session.dart';
+import 'models/relay_message.dart';
+import 'relay_service.dart';
 
-import '../util/ab_log.dart';
-import '../util/secure_nonce.dart';
+/// Severity for [HandshakeLogger]. Only two levels exist because only two
+/// things are worth reporting: a rejected frame (debug — routine under an
+/// active attacker or a stale pin) and a driver failure (error).
+enum HandshakeLogLevel { debug, error }
 
-/// Runs ONE app-initiated v2-crypto handshake to `established` over a single
+/// Diagnostic sink for one handshake attempt. Injected rather than hard-wired
+/// so this driver stays Flutter-free: the app forwards to `AbLog` (a failed
+/// handshake is the first thing read out of `app.log` when a connection won't
+/// establish), the eval CLI forwards to its stdout event stream. Null = silent.
+typedef HandshakeLogger =
+    void Function(
+      HandshakeLogLevel level,
+      String message, {
+      Map<String, Object?>? fields,
+    });
+
+/// Runs ONE phone-initiated v2-crypto handshake to `established` over a single
 /// [RelayService] socket. v3 changes the conversation around the (unchanged)
 /// crypto: a phone-generated `attemptId` correlates every frame, frames go out
 /// kind-1 (handshake plaintext) / kind-0 (sealed), and the phone retransmits
 /// `app:ready` until the agent's sealed `established` arrives — only then does
 /// [run] complete (design §6.1). All per-run state is instance-local.
+///
+/// Lives in this package, not in the app, so the app and the eval CLI drive the
+/// SAME driver: a second copy is what let the eval client sit on the v2
+/// conversation for a full protocol revision while its scenarios stayed
+/// skipped.
 class ConnectionHandshake {
   ConnectionHandshake({
     required RelayService relay,
@@ -21,6 +49,7 @@ class ConnectionHandshake {
     required String phoneDeviceId,
     required String agentEd25519PubB64,
     required List<int> phoneEd25519Seed,
+    HandshakeLogger? logger,
     Duration attemptTimeout = const Duration(seconds: 10),
     Duration appReadyRetransmit = const Duration(seconds: 2),
   }) : _relay = relay,
@@ -29,6 +58,7 @@ class ConnectionHandshake {
        _phoneDeviceId = phoneDeviceId,
        _agentEd25519PubB64 = agentEd25519PubB64,
        _phoneEd25519Seed = phoneEd25519Seed,
+       _logger = logger,
        _attemptTimeout = attemptTimeout,
        _appReadyRetransmit = appReadyRetransmit;
 
@@ -41,6 +71,7 @@ class ConnectionHandshake {
   final String _phoneDeviceId;
   final String _agentEd25519PubB64;
   final List<int> _phoneEd25519Seed;
+  final HandshakeLogger? _logger;
   final Duration _attemptTimeout;
   final Duration _appReadyRetransmit;
 
@@ -62,8 +93,8 @@ class ConnectionHandshake {
   Future<SessionKeys?> run() async {
     if (_cancelled) return null;
 
-    final attemptId = secureNonceB64();
-    final nonceB64 = secureNonceB64();
+    final attemptId = _secureNonceB64();
+    final nonceB64 = _secureNonceB64();
     final nonce = base64.decode(nonceB64);
     final (phoneX25519Priv, phoneX25519Pub) =
         await _crypto.generateX25519KeyPair();
@@ -117,8 +148,8 @@ class ConnectionHandshake {
             sigB64: sig,
           );
           if (!ok) {
-            AbLog.debug(
-              'ConnectionHandshake',
+            _log(
+              HandshakeLogLevel.debug,
               'agent-hello v2 sig invalid (possible MITM)',
             );
             keysFuture = null;
@@ -168,8 +199,8 @@ class ConnectionHandshake {
           return;
         }
         if (!verifyConfirmTagV2(expectedAgentTag, presented)) {
-          AbLog.debug(
-            'ConnectionHandshake',
+          _log(
+            HandshakeLogLevel.debug,
             'agent-ready confirm tag invalid, rejecting',
           );
           return;
@@ -220,7 +251,11 @@ class ConnectionHandshake {
     } on TimeoutException {
       return null;
     } catch (e, st) {
-      AbLog.error('ConnectionHandshake', 'run error', fields: {'error': '$e', 'stack': '$st'});
+      _log(
+        HandshakeLogLevel.error,
+        'run error',
+        fields: {'error': '$e', 'stack': '$st'},
+      );
       return null;
     } finally {
       _appReadyTimer?.cancel();
@@ -248,7 +283,7 @@ class ConnectionHandshake {
         final phoneTag = await phoneConfirmTagV2(keys.confirm);
         final t = E2eTransportDart(sendKey: keys.p2a, recvKey: keys.a2p);
         // Bare session frame (matches the bridge's handleAppReady) — session
-        // frames are not `createAbMessage`-wrapped envelopes.
+        // frames are not `{s, m}` envelopes.
         final sealed = await t.seal(
           jsonEncode({
             'type': 'app:ready',
@@ -259,7 +294,11 @@ class ConnectionHandshake {
         if (_cancelled) return;
         _relay.sendMessage(_machineDeviceId, 'control', sealed);
       } catch (e) {
-        AbLog.error('ConnectionHandshake', 'app:ready seal/send failed', fields: {'error': '$e'});
+        _log(
+          HandshakeLogLevel.error,
+          'app:ready seal/send failed',
+          fields: {'error': '$e'},
+        );
       }
     }
 
@@ -267,11 +306,27 @@ class ConnectionHandshake {
     _appReadyTimer =
         Timer.periodic(_appReadyRetransmit, (_) => unawaited(send()));
   }
+
+  void _log(
+    HandshakeLogLevel level,
+    String message, {
+    Map<String, Object?>? fields,
+  }) => _logger?.call(level, message, fields: fields);
 }
 
-/// [SessionHandshaker] the pure-Dart [MachineSession] drives. Each [perform]
-/// runs a FRESH [ConnectionHandshake] (new `attemptId`) on the live socket, so
-/// a rekey never collides with a superseded attempt.
+/// A fresh, base64-encoded 16-byte nonce. Binds a handshake transcript
+/// signature (and the correlating `attemptId`) to a single exchange.
+String _secureNonceB64() {
+  final r = Random.secure();
+  return base64.encode(List<int>.generate(16, (_) => r.nextInt(256)));
+}
+
+/// The [SessionHandshaker] a [MachineSession] drives. Each [perform] runs a
+/// FRESH [ConnectionHandshake] (new `attemptId`) on the live socket, so a rekey
+/// never collides with a superseded attempt.
+///
+/// "App" is the ROLE, not the Flutter app: every phone-side client (the app,
+/// the eval CLI) is the initiating half of the handshake.
 class AppSessionHandshaker implements SessionHandshaker {
   AppSessionHandshaker({
     required RelayService relay,
@@ -280,12 +335,14 @@ class AppSessionHandshaker implements SessionHandshaker {
     required String phoneDeviceId,
     required String agentEd25519PubB64,
     required List<int> phoneEd25519Seed,
+    HandshakeLogger? logger,
   }) : _relay = relay,
        _crypto = crypto,
        _machineDeviceId = machineDeviceId,
        _phoneDeviceId = phoneDeviceId,
        _agentEd25519PubB64 = agentEd25519PubB64,
-       _phoneEd25519Seed = phoneEd25519Seed;
+       _phoneEd25519Seed = phoneEd25519Seed,
+       _logger = logger;
 
   final RelayService _relay;
   final CryptoService _crypto;
@@ -293,6 +350,7 @@ class AppSessionHandshaker implements SessionHandshaker {
   final String _phoneDeviceId;
   final String _agentEd25519PubB64;
   final List<int> _phoneEd25519Seed;
+  final HandshakeLogger? _logger;
 
   ConnectionHandshake? _current;
   bool _aborted = false;
@@ -307,6 +365,7 @@ class AppSessionHandshaker implements SessionHandshaker {
       phoneDeviceId: _phoneDeviceId,
       agentEd25519PubB64: _agentEd25519PubB64,
       phoneEd25519Seed: _phoneEd25519Seed,
+      logger: _logger,
     );
     try {
       return await hs.run();
