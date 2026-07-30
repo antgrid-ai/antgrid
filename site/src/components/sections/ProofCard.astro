@@ -1,33 +1,51 @@
 ---
 import { Icon } from "astro-icon/components";
+
+// Mirrors the real Handler brief surface (app/lib/widgets/handler/handler_screen.dart):
+// taskSummary, doneWhen (green + check once doneWhenMet), "N of M follow-ups done",
+// then ledger rows rendered as `item — evidence`. The evidence column is the point —
+// completion is judged on exit codes and test output, never on the agent's say-so.
+const ledger = [
+  { item: "auth suite", evidence: "142 passed · exit 0", met: true },
+  { item: "typecheck", evidence: "tsc exit 0 · 0 errors", met: true },
+  { item: "changelog entry", evidence: "waiting — no diff yet", met: false },
+];
 ---
 <div class="rounded-lg border border-edge bg-panel p-5">
-  <div class="mb-4 flex items-center justify-between">
-    <span class="text-sm font-medium text-ink">While you slept</span>
-    <span class="font-mono text-xs text-muted2">kept moving 7h 48m</span>
+  <div class="mb-3.5 flex items-center justify-between">
+    <span class="font-mono text-[11px] text-muted2">macbook-pro · api</span>
+    <span class="rounded border border-edge px-2 py-0.5 font-mono text-[10px] text-indigo">watching</span>
   </div>
-  <div class="mb-4 grid grid-cols-3 gap-2">
-    <div class="rounded-md bg-group p-3">
-      <div class="font-mono text-xl text-ink">21</div>
-      <div class="text-[11px] text-muted2">handled</div>
-    </div>
-    <div class="rounded-md border border-amberbg2 bg-amberbg p-3">
-      <div class="font-mono text-xl text-amber2">2</div>
-      <div class="text-[11px] text-amber">woke you</div>
-    </div>
-    <div class="rounded-md bg-group p-3">
-      <div class="font-mono text-xl text-ink">96</div>
-      <div class="text-[11px] text-muted2">stayed silent</div>
-    </div>
+
+  <div class="mb-1.5 text-sm font-medium text-ink">Migrate auth to session tokens</div>
+
+  <div class="mb-3.5 flex items-start gap-1.5 font-mono text-[11.5px] leading-relaxed text-ok">
+    <Icon name="tabler:check" class="mt-0.5 shrink-0" width="13" height="13" />
+    <span>done when: auth tests pass and typecheck is clean</span>
   </div>
-  <div class="flex flex-col gap-2 font-mono text-[11.5px]">
-    <div class="flex gap-2.5 rounded border-l-2 border-indigo bg-group px-3 py-2 text-ink2">
-      <Icon name="tabler:check" class="shrink-0 text-indigo" width="15" height="15" />
-      <span><span class="text-muted2">02:14</span> answered — chose strict TypeScript, per your rule</span>
-    </div>
-    <div class="flex gap-2.5 rounded border-l-2 border-amber bg-amberbg px-3 py-2 text-amber2">
-      <Icon name="tabler:alert-triangle" class="shrink-0 text-amber" width="15" height="15" />
-      <span><span class="text-amber/70">03:40</span> woke you — DB migration is destructive, needs your call</span>
-    </div>
+
+  <div class="mb-2.5 flex items-baseline justify-between border-t border-edge-inner pt-3">
+    <span class="text-[11px] text-muted2">2 of 3 follow-ups done</span>
+    <span class="font-mono text-[10px] uppercase tracking-[0.14em] text-faint">evidence</span>
+  </div>
+
+  <div class="mb-3.5 flex flex-col gap-1.5 font-mono text-[11.5px]">
+    {ledger.map((r) => (
+      <div class="flex items-center gap-2">
+        <Icon
+          name={r.met ? "tabler:check" : "tabler:minus"}
+          class={`shrink-0 ${r.met ? "text-ok" : "text-faint"}`}
+          width="13"
+          height="13"
+        />
+        <span class="shrink-0 text-ink2">{r.item}</span>
+        <span class="flex-1 truncate text-right text-muted2">{r.evidence}</span>
+      </div>
+    ))}
+  </div>
+
+  <div class="flex gap-2.5 rounded border-l-2 border-amber bg-amberbg px-3 py-2 font-mono text-[11.5px] text-amber2">
+    <Icon name="tabler:alert-triangle" class="shrink-0 text-amber" width="15" height="15" />
+    <span><span class="text-amber/70">03:40</span> woke you — the migration drops a column, needs your call</span>
   </div>
 </div>

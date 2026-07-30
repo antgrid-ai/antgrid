@@ -63,7 +63,7 @@ export const trial: PlanCardData = {
   unit: `/ ${TRIAL_DAYS} days`,
   note: `Full Pro for ${TRIAL_DAYS} days, then $${OFFER_ACTIVE ? YEARLY_OFFER_USD : YEARLY_LIST_USD}/year`,
   features: [
-    "AI supervisor — wakes you only when it matters",
+    "AI supervisor — evidence-gated \"done\", wakes you for the rest",
     `Up to ${TRIAL_WORKERS} worker machines`,
     "Everything in Free",
   ],
@@ -82,7 +82,7 @@ export const proYearly: PlanCardData = {
   unit: "/ year",
   note: `${TRIAL_DAYS}-day free trial, then $${OFFER_ACTIVE ? YEARLY_OFFER_USD : YEARLY_LIST_USD}/year`,
   features: [
-    "AI supervisor — wakes you only when it matters",
+    "AI supervisor — evidence-gated \"done\", wakes you for the rest",
     `Up to ${PRO_WORKERS} worker machines`,
     "Encrypted remote control from your phone",
     "Fleet view across all your machines",

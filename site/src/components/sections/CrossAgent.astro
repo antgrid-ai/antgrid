@@ -3,11 +3,14 @@ import { Icon } from "astro-icon/components";
 import Eyebrow from "../ui/Eyebrow.astro";
 import Chip from "../ui/Chip.astro";
 
-const agents = ["Claude Code", "Codex", "Cursor", "opencode", "Aider"];
+// Keep in lockstep with KNOWN_AGENTS in bridge/src/known-agents.ts — these are the
+// agents wired for notifications and session naming. Anything else still runs (the
+// "any terminal agent" chip), it just gets no integration, so it must not be named here.
+const agents = ["Claude Code", "Codex", "opencode", "Cursor", "GitHub Copilot", "Kilo", "Kimi", "Mistral Vibe"];
 const steps = [
   { n: 1, icon: "tabler:download", title: "Install on your machine", body: "The desktop app runs your agents in real terminals and links them to your phone — Windows, macOS, Linux.", accent: false },
   { n: 2, icon: "tabler:terminal-2", title: "Run any agent", body: "Start Claude Code, Codex or Cursor exactly how you do now. antgrid wraps them — no workflow change.", accent: false },
-  { n: 3, icon: "tabler:device-mobile", title: "Take it with you", body: "Watch, steer and approve from your phone. Step away — an AI supervisor keeps them moving and wakes you only when it matters.", accent: true },
+  { n: 3, icon: "tabler:device-mobile", title: "Take it with you", body: "Watch, steer and approve from your phone. Step away — an AI supervisor keeps the run moving, checks the work against real evidence, and wakes you for the calls it can't make.", accent: true },
 ];
 ---
 <section class="mx-auto max-w-5xl px-6 py-20">

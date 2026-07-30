@@ -7,13 +7,13 @@ test.describe("home head", () => {
     const desc = page.locator('meta[name="description"]');
     await expect(desc).toHaveAttribute("content", /end-to-end encrypted/i);
     const og = page.locator('meta[property="og:image"]');
-    await expect(og).toHaveAttribute("content", /while-you-slept\.png/);
+    await expect(og).toHaveAttribute("content", /knowing-it-finished\.png/);
   });
 });
 
 test("hero headline, E2E clause and CTAs", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByRole("heading", { level: 1 })).toHaveText(/stop babysitting your coding agents/i);
+  await expect(page.getByRole("heading", { level: 1 })).toContainText(/knowing it finished isn't/i);
   await expect(page.locator("section").first()).toContainText("End-to-end encrypted");
   await expect(page.getByRole("link", { name: /^Start free/ }).last()).toHaveAttribute("href", /app\.antgrid\.ai\/login/);
   await expect(page.getByText("woke you", { exact: false }).first()).toBeVisible();
