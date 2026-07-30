@@ -540,9 +540,9 @@ export class RelayClient {
   }
 
   private handleErrorFrame(msg: { code: string; message: string; retryable: boolean; ref?: string; serverTime?: string }): void {
-    // A stream-open rejection (ref === a live streamId; the retired
-    // SESSION_LIMIT_EXCEEDED from an older relay is the only one still decoded):
-    // the socket and every other stream stay live, so it
+    // A stream-open rejection (ref === a live streamId: STREAM_LIMIT_EXCEEDED
+    // from a current relay, or the retired SESSION_LIMIT_EXCEEDED from an older
+    // one): the socket and every other stream stay live, so it
     // must NOT be recorded as `lastError` — otherwise a later unrelated close
     // would read its retryable:false and wrongly stop reconnecting.
     if (msg.ref && this.mux.onError(msg.ref, msg.code, msg.message)) return;

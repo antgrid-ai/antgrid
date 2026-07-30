@@ -375,11 +375,31 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
           sendError(ws, "WRONG_DEVICE_TYPE", "Only agents can open streams", false);
           return;
         }
+        // Structural ceiling, NOT a return of the retired per-account quota:
+        // streams stay unmetered, but the set is attacker-growable (ids are
+        // client-chosen and nothing expires them until the socket dies), so it
+        // needs a bound that no real client can reach. Re-opening an id already
+        // held is exempt — it cannot grow the set, and the mux re-opens every
+        // attached stream on each `welcome`.
+        //
         // Admission MUST stay await-free. The event loop is single-threaded, so
-        // with no yield between the type guard and the add, concurrent opens
-        // cannot interleave into an inconsistent stream table. Any future check
-        // added here must observe the same discipline — inserting an `await`
-        // reopens a check→admit TOCTOU.
+        // with no yield between the checks and the add, concurrent opens cannot
+        // interleave past the ceiling or into an inconsistent stream table. Any
+        // future check added here must observe the same discipline — inserting
+        // an `await` reopens a check→admit TOCTOU.
+        if (
+          !conn.openStreams.has(msg.streamId) &&
+          conn.openStreams.size >= config.maxStreamsPerConnection
+        ) {
+          sendError(
+            ws,
+            "STREAM_LIMIT_EXCEEDED",
+            `Too many open streams on this connection (${config.maxStreamsPerConnection})`,
+            false,
+            { ref: msg.streamId },
+          );
+          return;
+        }
         conn.openStreams.add(msg.streamId);
         sendJson(ws, { type: "stream-opened", streamId: msg.streamId });
         return;

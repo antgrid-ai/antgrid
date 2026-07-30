@@ -7,6 +7,14 @@ export interface RelayConfig {
   jsonRateLimitPerSec: number;
   /** Burst capacity of the per-connection JSON-control bucket. */
   jsonRateLimitBurst: number;
+  /**
+   * Structural ceiling on ONE connection's `openStreams`, not a metered quota —
+   * the paid axis is the worker cap web enforces at registration. Real machines
+   * hold single digits (a project each), so this sits orders of magnitude above
+   * legitimate use and exists solely so an agent cannot grow the set until the
+   * relay runs out of memory. Raise it freely; it is not a product limit.
+   */
+  maxStreamsPerConnection: number;
   /** ± window a hello `ts` may deviate from server time (design §4.1 step 2). */
   clockSkewMs: number;
   /** How long a `(deviceId, nonce)` hello pair is remembered (replay guard). */
@@ -112,6 +120,7 @@ export function loadConfig(): RelayConfig {
     rateLimitMsgPerSec: parseInt(process.env.RATE_LIMIT_MSG_PER_SEC || "100", 10),
     jsonRateLimitPerSec: parseInt(process.env.JSON_RATE_LIMIT_PER_SEC || "10", 10),
     jsonRateLimitBurst: parseInt(process.env.JSON_RATE_LIMIT_BURST || "30", 10),
+    maxStreamsPerConnection: parseInt(process.env.MAX_STREAMS_PER_CONNECTION || "1024", 10),
     clockSkewMs,
     replayTtlMs,
     pingIntervalMs: parseInt(process.env.PING_INTERVAL_MS || "30000", 10),

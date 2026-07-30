@@ -59,6 +59,7 @@ const RELAY_CONFIG = {
   rateLimitMsgPerSec: 100,
   jsonRateLimitPerSec: 100,
   jsonRateLimitBurst: 200,
+  maxStreamsPerConnection: 1024,
   clockSkewMs: 120_000,
   replayTtlMs: 300_000,
   pingIntervalMs: 30_000,

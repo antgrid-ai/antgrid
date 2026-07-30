@@ -170,6 +170,16 @@
       }
     },
     {
+      "name": "error:STREAM_LIMIT_EXCEEDED",
+      "dart": "parsed",
+      "json": {
+        "type": "error",
+        "code": "STREAM_LIMIT_EXCEEDED",
+        "message": "sample STREAM_LIMIT_EXCEEDED",
+        "retryable": false
+      }
+    },
+    {
       "name": "error:UNKNOWN_PHONE",
       "dart": "parsed",
       "json": {

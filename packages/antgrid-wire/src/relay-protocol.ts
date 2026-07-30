@@ -107,6 +107,12 @@ export const ErrorCode = z.enum([
   // predating the worker-limit change, and because reusing the name for a new
   // meaning would silently mis-handle those older relays' rejections.
   "SESSION_LIMIT_EXCEEDED",
+  // Per-CONNECTION structural ceiling on `openStreams`, deliberately not a
+  // revival of the retired quota above: streams are not a metered axis, but the
+  // set still may not grow without limit. Sized so no legitimate client reaches
+  // it, so treat it as a bug signal rather than something to back off and retry
+  // — hence retryable: false.
+  "STREAM_LIMIT_EXCEEDED",
   "UNKNOWN_PHONE",
   "NONCE_MISMATCH",
   "APPROVAL_EXPIRED",

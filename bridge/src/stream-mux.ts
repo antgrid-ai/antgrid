@@ -113,8 +113,8 @@ export class StreamMux {
   }
 
   /** A relay `error{ref}` — routed here iff `ref` is a live streamId (a
-   *  stream-open rejection, e.g. the retired `SESSION_LIMIT_EXCEEDED` from an
-   *  older relay). Returns false when
+   *  stream-open rejection: `STREAM_LIMIT_EXCEEDED` from a current relay, or
+   *  the retired `SESSION_LIMIT_EXCEEDED` from an older one). Returns false when
    *  `ref` is not one of our streams so the caller keeps normal error handling
    *  (a streamId is the only kind of `ref` the relay ever sends). */
   onError(ref: string, code: string, message: string): boolean {

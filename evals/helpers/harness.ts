@@ -338,6 +338,7 @@ export async function startRelay(opts: {
     rateLimitMsgPerSec: opts.rateLimitMsgPerSec ?? 100,
     jsonRateLimitPerSec: opts.jsonRateLimitPerSec ?? 100,
     jsonRateLimitBurst: opts.jsonRateLimitBurst ?? 200,
+    maxStreamsPerConnection: 1024,
     clockSkewMs: opts.clockSkewMs ?? 120_000,
     replayTtlMs: opts.replayTtlMs ?? 300_000,
     pingIntervalMs: 30_000,
