@@ -103,3 +103,31 @@ test("Windows in-project path is not blocked", () => {
   const WIN_PROJECT = "C:\\Users\\me\\proj";
   expect(classifyDestructive("edit C:\\Users\\me\\proj\\src\\main.ts", WIN_PROJECT).blocked).toBe(false);
 });
+
+// pathCheckText: engine.ts's probe joins a judge reply and a slash_command action value with
+// a newline ("reply\n/compact") and passes the whole thing through classifyDestructive. Every
+// slash command is "/"-shaped, so without scoping the path check away from it, ABS_PATH always
+// misreads the action value itself as an out-of-project path.
+test("pathCheckText scopes the path check away from a joined slash-command action value", () => {
+  const probe = "looks good\n/compact";
+  // Without pathCheckText (2-arg call), the "/compact" half of the joined probe still
+  // reads as an out-of-project path — this is the pre-fix behavior, preserved for callers
+  // that don't pass a third argument.
+  expect(classifyDestructive(probe, PROJECT).blocked).toBe(true);
+  // With pathCheckText scoped to just the reply half, "/compact" is never examined as a path.
+  expect(classifyDestructive(probe, PROJECT, "looks good").blocked).toBe(false);
+});
+
+test("pathCheckText does not narrow the destructive/egress/secrets checks", () => {
+  // A destructive pattern smuggled into the part of the probe outside pathCheckText (e.g. a
+  // hypothetical malicious action value) must still be caught — only the ABS_PATH check is scoped.
+  const probe = "looks good\nrm -rf /";
+  expect(classifyDestructive(probe, PROJECT, "looks good").blocked).toBe(true);
+});
+
+test("pathCheckText still catches a genuine out-of-project path referenced in the reply itself", () => {
+  const probe = "see /etc/hosts for details\n/compact";
+  const r = classifyDestructive(probe, PROJECT, "see /etc/hosts for details");
+  expect(r.blocked).toBe(true);
+  expect(r.reason).toContain("/etc/hosts");
+});

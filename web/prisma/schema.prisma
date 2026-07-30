@@ -129,7 +129,11 @@ model Device {
   machineName         String?   @map("machine_name")
 
   @@unique([userId, deviceId], map: "devices_user_id_device_id_key")
-  @@index([userId], map: "devices_user_active_idx")
+  // `devices_user_active_idx` is a PARTIAL index (WHERE revoked_at IS NULL),
+  // defined via raw SQL at the end of the init migration. Prisma cannot model
+  // partial indexes, and it is blind to them on introspection — so declaring a
+  // plain `@@index` here makes every `migrate dev` try to CREATE a conflicting
+  // plain index (→ "already exists"). Leave it out; the raw-SQL index stands.
   @@index([userId, mobileAccessEnabled], map: "device_user_mobile_idx")
   @@map("devices")
 }
@@ -314,7 +318,10 @@ model OauthAccessToken {
   createdAt   DateTime @map("created_at") @db.Timestamptz(6)
   scopes      String[]
 
-  client OauthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
+  // onUpdate: NoAction matches the FK the OAuth migration actually created
+  // (ON DELETE CASCADE, no ON UPDATE clause → Postgres NO ACTION). Prisma's
+  // implicit onUpdate default is Cascade, which drifts every migrate dev.
+  client OauthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade, onUpdate: NoAction)
 
   @@index([clientId])
   @@index([sessionId])
@@ -336,7 +343,10 @@ model OauthRefreshToken {
   authTime    DateTime? @map("auth_time") @db.Timestamptz(6)
   scopes      String[]
 
-  client OauthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
+  // onUpdate: NoAction matches the FK the OAuth migration actually created
+  // (ON DELETE CASCADE, no ON UPDATE clause → Postgres NO ACTION). Prisma's
+  // implicit onUpdate default is Cascade, which drifts every migrate dev.
+  client OauthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade, onUpdate: NoAction)
 
   @@index([clientId])
   @@index([sessionId])
@@ -353,7 +363,10 @@ model OauthConsent {
   createdAt   DateTime @map("created_at") @db.Timestamptz(6)
   updatedAt   DateTime @map("updated_at") @db.Timestamptz(6)
 
-  client OauthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
+  // onUpdate: NoAction matches the FK the OAuth migration actually created
+  // (ON DELETE CASCADE, no ON UPDATE clause → Postgres NO ACTION). Prisma's
+  // implicit onUpdate default is Cascade, which drifts every migrate dev.
+  client OauthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade, onUpdate: NoAction)
 
   @@index([clientId])
   @@index([userId])

@@ -37,6 +37,11 @@ const REPLAY_TYPES: ReadonlySet<string> = new Set([
   "agent:tools",
   "git:status",
   "tree:full",
+  // Latest per-project handler snapshot (armed sessions + open escalations).
+  // Must be cached: the app rebuilds its escalation list from the status
+  // replay after a restart/reconnect — without this, an escalation raised
+  // while the app was away is invisible until the next live emit.
+  "handler:status",
 ]);
 
 /**

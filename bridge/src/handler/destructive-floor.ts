@@ -67,11 +67,18 @@ function isInsideProject(p: string, projectPath: string): boolean {
   return target === base || target.startsWith(`${base}/`);
 }
 
-export function classifyDestructive(text: string, projectPath: string): FloorResult {
+// pathCheckText scopes the outside-project check to the judge's free-text reply, not the
+// full probe: engine.ts rejects a slash_command action value that isn't a single "/"-free,
+// whitespace-free token before it ever reaches this floor, so by the time it's joined onto
+// the probe it cannot be a filesystem path — but it's still "/"-shaped, and callers
+// conventionally join it right after a newline, which the ABS_PATH anchor reads as a path
+// start. DESTRUCTIVE/EGRESS/SECRETS still scan the full `text` (default for pathCheckText
+// too) so a command value smuggling one of those patterns is still caught.
+export function classifyDestructive(text: string, projectPath: string, pathCheckText: string = text): FloorResult {
   for (const re of DESTRUCTIVE) if (re.test(text)) return { blocked: true, reason: `destructive command pattern (${re.source})` };
   for (const re of EGRESS) if (re.test(text)) return { blocked: true, reason: `network egress / reverse shell (${re.source})` };
   for (const re of SECRETS) if (re.test(text)) return { blocked: true, reason: `secret/credential reference (${re.source})` };
-  for (const m of text.matchAll(ABS_PATH)) {
+  for (const m of pathCheckText.matchAll(ABS_PATH)) {
     const p = m[1];
     if (!isInsideProject(p, projectPath)) return { blocked: true, reason: `absolute path outside project: ${p}` };
   }

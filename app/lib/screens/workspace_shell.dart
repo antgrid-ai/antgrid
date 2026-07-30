@@ -183,6 +183,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       ref.read(switchToAgentProvider.notifier).set(switchToAgentPage);
+      ref.read(revealHandlerTabProvider.notifier).set(revealHandlerTab);
       if (ref.read(selectedRegistrationIdProvider) != null) {
         _bootstrapSessions();
       }
@@ -191,13 +192,17 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
   @override
   void deactivate() {
-    // Capture the notifier synchronously (ref is still valid here), then
-    // defer the state write so it doesn't happen mid-build when the widget
+    // Capture the notifiers synchronously (ref is still valid here), then
+    // defer the state writes so they don't happen mid-build when the widget
     // tree is being restructured (e.g. project switch).
     final notifier = ref.read(switchToAgentProvider.notifier);
     // Same lifetime: the title bar outlives this route, so a stale panel
     // control would leave a dead toggle on the New Session page.
     final panelNotifier = ref.read(contextPanelControlProvider.notifier);
+    // The reveal callback closes over this State (setState + _pageController),
+    // so leaving it published would let the agent header's NEEDS YOU pill call
+    // into a disposed shell after a project switch.
+    final revealNotifier = ref.read(revealHandlerTabProvider.notifier);
     // `scheduleMicrotask` defers the write off the current build/restructure
     // phase (same intent as the previous `Future(() => ...)`) but does not
     // create a Timer, so it doesn't leak in widget tests under fake_async.
@@ -208,6 +213,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       try {
         notifier.set(null);
         panelNotifier.set(null);
+        revealNotifier.set(null);
       } catch (_) {
         // Provider already disposed (Riverpod 3 throws UnmountedRefException,
         // which is @internal and not a StateError, so catch broadly); nothing
@@ -464,6 +470,20 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     if (_pageController.hasClients) {
       _pageController.animateToPage(
         0,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeInOut,
+      );
+    }
+  }
+
+  /// Reveal the Handler workspace tab from anywhere (e.g. the agent header's
+  /// NEEDS YOU pill). Desktop: selects the sidebar view; mobile: also swipes
+  /// to the workspace page (page 1 — agent is page 0).
+  void revealHandlerTab() {
+    _onSidebarSelected(WorkspaceView.handler);
+    if (_pageController.hasClients) {
+      _pageController.animateToPage(
+        1,
         duration: const Duration(milliseconds: 300),
         curve: Curves.easeInOut,
       );

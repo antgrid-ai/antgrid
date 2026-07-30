@@ -14,6 +14,25 @@ void main() {
     useInMemoryPrefs();
   });
 
+  // Poll for [condition] instead of guessing a fixed delay. CommandService
+  // batches output via a 16ms flush timer; a fixed `Future.delayed` races that
+  // timer, and on Windows the ~15.6ms timer granularity puts a 16ms flush and a
+  // ~32ms wait on adjacent ticks — so the assertion sometimes fired before the
+  // flush ran (flaky, not deterministic). Waiting on the actual state is stable
+  // regardless of granularity.
+  Future<void> waitFor(
+    bool Function() condition, {
+    Duration timeout = const Duration(seconds: 2),
+  }) async {
+    final sw = Stopwatch()..start();
+    while (!condition()) {
+      if (sw.elapsed > timeout) {
+        throw StateError('Timed out waiting for condition');
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+  }
+
   Future<ProjectSession> newSession(
     FakeAgentTransport t, {
     String projectId = 'p',
@@ -110,7 +129,9 @@ void main() {
         'commandName': 'build',
         'exitCode': 0,
       });
-      await Future<void>.delayed(Duration.zero);
+      await waitFor(
+        () => svc.currentState.current!.status == CommandStatus.success,
+      );
 
       expect(svc.currentState.current!.status, CommandStatus.success);
       expect(svc.currentState.current!.exitCode, 0);
@@ -156,7 +177,9 @@ void main() {
           'commandName': 'build',
           'exitCode': 0,
         });
-        await Future<void>.delayed(Duration.zero);
+        await waitFor(
+          () => svc.currentState.current!.status == CommandStatus.success,
+        );
         expect(svc.currentState.current!.status, CommandStatus.success);
 
         await heavySub.cancel();

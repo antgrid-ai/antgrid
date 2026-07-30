@@ -44,4 +44,12 @@ export class RunawayGuard {
   }
 
   reset(terminalId: string): void { this.state.delete(terminalId); }
+
+  // A newly satisfied ledger item is evidence of non-looping: lift the consecutive
+  // cap but keep recentHashes — resending an identical reply is circular regardless
+  // of progress elsewhere.
+  recordProgress(terminalId: string): void {
+    const s = this.state.get(terminalId);
+    if (s) s.consecutive = 0;
+  }
 }

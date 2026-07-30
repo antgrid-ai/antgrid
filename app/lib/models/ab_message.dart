@@ -242,25 +242,53 @@ class TerminalSizeMessage {
   });
 }
 
+/// Raw per-session maps — typed parsing (brief, ledger, run state, judge)
+/// lives in `HandlerSessionState.fromWire` (`handler_state.dart`), not here.
 class HandlerStatusMessage {
   final String id;
   final int timestamp;
   final String projectId;
-  final bool enabled;
-  final String template; // 'watchdog' | 'closer' | 'autopilot'
-  final String? model;
-  final String state; // 'off' | 'watching' | 'handling' | 'needs_you'
-  final int pendingEscalations;
+
+  /// What an absent per-session judge tool resolves to for PTY slots (the
+  /// project's agent tool); chat slots resolve from their own session entry.
+  final String? defaultTool;
+  final bool defaultNotifyOnly;
+  final List<Map<String, dynamic>> sessions;
 
   const HandlerStatusMessage({
     required this.id,
     required this.timestamp,
     required this.projectId,
-    required this.enabled,
-    required this.template,
-    this.model,
-    required this.state,
-    required this.pendingEscalations,
+    this.defaultTool,
+    required this.defaultNotifyOnly,
+    required this.sessions,
+  });
+}
+
+class HandlerPlanResultMessage {
+  final String id;
+  final int timestamp;
+  final String projectId;
+  final String terminalId;
+  final bool fallback;
+  final Map<String, dynamic>? brief;
+  final Map<String, dynamic>? previousBrief;
+
+  /// The session's stored judge choice, echoed so the briefing sheet can seed
+  /// its picker after an app restart (status only covers armed sessions).
+  final String? judgeTool;
+  final String? judgeModel;
+
+  const HandlerPlanResultMessage({
+    required this.id,
+    required this.timestamp,
+    required this.projectId,
+    required this.terminalId,
+    required this.fallback,
+    this.brief,
+    this.previousBrief,
+    this.judgeTool,
+    this.judgeModel,
   });
 }
 
@@ -274,6 +302,8 @@ class HandlerEscalationMessage {
   final String reasoning;
   final String draftReply;
   final String urgency; // 'normal' | 'high'
+  final String? floorRule;
+  final String? kind;
 
   const HandlerEscalationMessage({
     required this.id,
@@ -285,6 +315,8 @@ class HandlerEscalationMessage {
     required this.reasoning,
     required this.draftReply,
     required this.urgency,
+    this.floorRule,
+    this.kind,
   });
 }
 
@@ -295,7 +327,9 @@ class HandlerActivityMessage {
   final String recordId;
   final int at;
   final String terminalId;
-  final String decision; // 'continue' | 'handle' | 'escalate'
+  // 'continue' | 'handle' | 'escalate' | 'brief_armed' | 'brief_edited' |
+  // 'item_satisfied' | 'wrapped_up'
+  final String decision;
   final String reason;
   final String? detail;
 
@@ -1167,26 +1201,52 @@ Object? parseAbMessage(Map<String, dynamic> json) {
     case 'handler:status':
       {
         final projectId = json['projectId'];
-        final enabled = json['enabled'];
-        final template = json['template'];
-        final state = json['state'];
-        final pending = json['pendingEscalations'];
-        if (projectId is! String ||
-            enabled is! bool ||
-            template is! String ||
-            state is! String ||
-            pending is! num) {
-          return null;
+        final sessionsJson = json['sessions'];
+        if (projectId is! String || sessionsJson is! List) return null;
+        final sessions = <Map<String, dynamic>>[];
+        for (final s in sessionsJson) {
+          if (s is Map<String, dynamic>) sessions.add(s);
         }
         return HandlerStatusMessage(
           id: id,
           timestamp: timestamp,
           projectId: projectId,
-          enabled: enabled,
-          template: template,
-          model: json['model'] is String ? json['model'] as String : null,
-          state: state,
-          pendingEscalations: pending.toInt(),
+          defaultTool: json['defaultTool'] is String
+              ? json['defaultTool'] as String
+              : null,
+          defaultNotifyOnly: json['defaultNotifyOnly'] == true,
+          sessions: sessions,
+        );
+      }
+
+    case 'handler:planResult':
+      {
+        final projectId = json['projectId'];
+        final terminalId = json['terminalId'];
+        final fallback = json['fallback'];
+        if (projectId is! String ||
+            terminalId is! String ||
+            fallback is! bool) {
+          return null;
+        }
+        final briefJson = json['brief'];
+        final previousBriefJson = json['previousBrief'];
+        return HandlerPlanResultMessage(
+          id: id,
+          timestamp: timestamp,
+          projectId: projectId,
+          terminalId: terminalId,
+          fallback: fallback,
+          brief: briefJson is Map<String, dynamic> ? briefJson : null,
+          previousBrief: previousBriefJson is Map<String, dynamic>
+              ? previousBriefJson
+              : null,
+          judgeTool: json['judgeTool'] is String
+              ? json['judgeTool'] as String
+              : null,
+          judgeModel: json['judgeModel'] is String
+              ? json['judgeModel'] as String
+              : null,
         );
       }
 
@@ -1208,6 +1268,7 @@ Object? parseAbMessage(Map<String, dynamic> json) {
             urgency is! String) {
           return null;
         }
+        final floorRule = json['floorRule'];
         return HandlerEscalationMessage(
           id: id,
           timestamp: timestamp,
@@ -1218,6 +1279,11 @@ Object? parseAbMessage(Map<String, dynamic> json) {
           reasoning: reasoning,
           draftReply: draftReply,
           urgency: urgency,
+          // is-check, not a cast: parseAbMessage has no try/catch, so a
+          // non-string here would throw out of the message stream instead of
+          // degrading to "no floor rule".
+          floorRule: floorRule is String ? floorRule : null,
+          kind: json['kind'] is String ? json['kind'] as String : null,
         );
       }
 
