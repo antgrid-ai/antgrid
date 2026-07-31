@@ -18,3 +18,39 @@ import 'package:flutter/widgets.dart' show AppLifecycleState;
 /// without standing up the workspace screen.
 bool shouldShowInAppToast(AppLifecycleState lifecycle) =>
     lifecycle == AppLifecycleState.resumed;
+
+/// Whether the user is already reading [sessionId] — in which case NO
+/// notification should fire for it, on either channel. The event is right there
+/// in the transcript they're looking at; announcing it is pure noise. Anything
+/// from another session still surfaces: that's the one they can't see.
+///
+/// All four conditions are required. The app must be focused ([lifecycle]
+/// resumed — a backgrounded app shows nothing, so nothing is "already read"),
+/// the workspace surface must be up ([onWorkspaceSurface] — the New Session
+/// canvas or settings is not the chat), the agent panel must actually be on
+/// screen ([agentSurfaceVisible]), and [sessionId] must be the active one.
+///
+/// [onWorkspaceSurface] and [agentSurfaceVisible] are both needed because
+/// neither implies the other. On mobile the workspace surface is a two-page
+/// PageView — agent | files/git/preview — so the surface being up says nothing
+/// about the transcript being visible; on desktop the agent panel is always
+/// visible in the 3-zone layout, including while settings covers the workspace.
+///
+/// A null/empty [sessionId] (a hook that carried no terminal id) matches
+/// nothing and always surfaces, rather than being silently swallowed. Session
+/// ids are uuids minted per session (bridge session-manager.ts), so the id alone
+/// identifies the chat — no project scoping needed.
+///
+/// Pure so the decision is unit-testable without standing up the workspace.
+bool isViewingSession({
+  required String? sessionId,
+  required String? activeSessionId,
+  required bool onWorkspaceSurface,
+  required bool agentSurfaceVisible,
+  required AppLifecycleState lifecycle,
+}) {
+  if (sessionId == null || sessionId.isEmpty) return false;
+  if (!shouldShowInAppToast(lifecycle)) return false;
+  if (!onWorkspaceSurface || !agentSurfaceVisible) return false;
+  return activeSessionId == sessionId;
+}

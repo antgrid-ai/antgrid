@@ -216,6 +216,11 @@ class NotificationPushMessage {
   notificationType; // task_complete | permission_request | awaiting_input | idle | error
   final String? message;
   final String? sessionTitle;
+
+  /// Which session fired this, when the hook carried a terminal id. Absent for
+  /// an unattributed hook. Lets the surfacer stay quiet about the chat the user
+  /// is already reading — see workspace_shell's _onAgentNotificationPush.
+  final String? sessionId;
   final String? projectId;
 
   const NotificationPushMessage({
@@ -224,6 +229,7 @@ class NotificationPushMessage {
     required this.notificationType,
     this.message,
     this.sessionTitle,
+    this.sessionId,
     this.projectId,
   });
 }
@@ -873,6 +879,7 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         notificationType: notificationType,
         message: json['message'] as String?,
         sessionTitle: json['sessionTitle'] as String?,
+        sessionId: json['sessionId'] as String?,
         projectId: json['projectId'] as String?,
       );
 
