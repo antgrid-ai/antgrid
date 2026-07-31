@@ -129,6 +129,36 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
+  testWidgets('park and resume render as activity rows', (tester) async {
+    final wake = DateTime(2026, 7, 31, 14, 5);
+    await pumpHandlerScreen(
+      tester,
+      stateWith(sessions: {'t1': sessionState('t1')}).copyWith(
+        activity: [
+          HandlerActivityRecord(
+            recordId: 'r1',
+            at: 1,
+            terminalId: 't1',
+            decision: 'parked',
+            reason: 'rate_limit',
+            detail: wake.toIso8601String(),
+          ),
+          const HandlerActivityRecord(
+            recordId: 'r2',
+            at: 2,
+            terminalId: 't1',
+            decision: 'resumed',
+            reason: 'park timer elapsed',
+          ),
+        ],
+      ),
+    );
+    expect(find.textContaining('Paused: rate_limit'), findsOneWidget);
+    expect(find.textContaining('14:05'), findsOneWidget);
+    expect(find.textContaining('Resumed: park timer elapsed'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('armed session row shows its judge chip', (tester) async {
     await pumpHandlerScreen(
       tester,

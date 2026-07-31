@@ -17,6 +17,14 @@ String relativeTime(DateTime when, {DateTime? now}) {
 
 String _plural(int n, String unit) => '$n $unit${n == 1 ? '' : 's'} ago';
 
+/// Local 24-hour wall-clock label (`14:05`) for same-day timestamps.
+String clockTime(DateTime when) {
+  final local = when.toLocal();
+  final h = local.hour.toString().padLeft(2, '0');
+  final m = local.minute.toString().padLeft(2, '0');
+  return '$h:$m';
+}
+
 const _months = [
   'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',

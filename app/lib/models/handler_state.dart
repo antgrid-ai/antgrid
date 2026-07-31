@@ -1,4 +1,4 @@
-enum HandlerRunState { watching, handling, needsYou }
+enum HandlerRunState { watching, handling, needsYou, parked }
 
 HandlerRunState? handlerRunStateFromWire(String s) {
   switch (s) {
@@ -9,6 +9,8 @@ HandlerRunState? handlerRunStateFromWire(String s) {
     case 'needsYou':
     case 'needs_you':
       return HandlerRunState.needsYou;
+    case 'parked':
+      return HandlerRunState.parked;
     default:
       return null;
   }
@@ -22,6 +24,8 @@ String handlerRunStateToWire(HandlerRunState s) {
       return 'handling';
     case HandlerRunState.needsYou:
       return 'needs_you';
+    case HandlerRunState.parked:
+      return 'parked';
   }
 }
 
@@ -123,6 +127,13 @@ class HandlerSessionState {
   final String? judgeTool;
   final String? judgeModel;
 
+  /// Why the handler is waiting ('limit' | 'outage') and the epoch-ms wake
+  /// deadline. Both are present only while [runState] is
+  /// [HandlerRunState.parked]; a park with no known deadline leaves
+  /// [parkedUntil] null.
+  final String? parkKind;
+  final int? parkedUntil;
+
   const HandlerSessionState({
     required this.terminalId,
     required this.notifyOnly,
@@ -135,6 +146,8 @@ class HandlerSessionState {
     required this.escalations,
     this.judgeTool,
     this.judgeModel,
+    this.parkKind,
+    this.parkedUntil,
   });
 
   /// Count of `brief.thenItems` this session's ledger already covers.
@@ -158,6 +171,8 @@ class HandlerSessionState {
     escalations: escalations ?? this.escalations,
     judgeTool: judgeTool,
     judgeModel: judgeModel,
+    parkKind: parkKind,
+    parkedUntil: parkedUntil,
   );
 
   static HandlerSessionState? fromWire(dynamic json) {
@@ -203,6 +218,10 @@ class HandlerSessionState {
     }
     final judgeTool = json['judgeTool'];
     final judgeModel = json['judgeModel'];
+    // Lenient like the rest: park detail is decoration on a session that must
+    // render either way.
+    final parkKind = json['parkKind'];
+    final parkedUntil = json['parkedUntil'];
     return HandlerSessionState(
       terminalId: terminalId,
       notifyOnly: notifyOnly,
@@ -215,6 +234,8 @@ class HandlerSessionState {
       escalations: escalations,
       judgeTool: judgeTool is String ? judgeTool : null,
       judgeModel: judgeModel is String ? judgeModel : null,
+      parkKind: parkKind is String ? parkKind : null,
+      parkedUntil: parkedUntil is num ? parkedUntil.toInt() : null,
     );
   }
 }
@@ -286,7 +307,7 @@ class HandlerActivityRecord {
   final int at;
   final String terminalId;
   // 'continue' | 'handle' | 'escalate' | 'brief_armed' | 'brief_edited' |
-  // 'item_satisfied' | 'wrapped_up'
+  // 'item_satisfied' | 'wrapped_up' | 'parked' | 'resumed'
   final String decision;
   final String reason;
   final String? detail;

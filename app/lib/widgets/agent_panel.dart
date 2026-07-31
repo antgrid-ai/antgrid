@@ -18,6 +18,7 @@ import '../providers/providers.dart';
 import '../providers/session_mode.dart';
 import '../providers/sessions.dart';
 import '../screens/terminal_screen.dart';
+import '../util/relative_time.dart';
 import '../utils/platform_utils.dart';
 import 'agent_transcript_view.dart';
 import 'command_bar.dart';
@@ -144,6 +145,17 @@ List<Widget> titleBarProjectActions(WidgetRef ref) {
   ];
 }
 
+/// Pill label for a parked session. A park always resumes on its own, so the
+/// wake time is the whole message; without a deadline (`selfResuming` parks
+/// have none) the bare state is all we can honestly promise.
+///
+/// Top-level so the derivation is exercised directly, like
+/// [titleBarProjectActions].
+String parkedPillLabel(int? parkedUntil) => parkedUntil == null
+    ? 'PARKED'
+    : 'PARKED · UNTIL '
+          '${clockTime(DateTime.fromMillisecondsSinceEpoch(parkedUntil))}';
+
 /// Handler status pill + shield rendered in the agent panel header, scoped to
 /// the FOCUSED session — arming is per-terminal, not per-project.
 ///
@@ -181,6 +193,10 @@ class HandlerHeaderControl extends ConsumerWidget {
           break;
         case HandlerRunState.watching:
           pillLabel = 'WATCHING';
+          pillColor = p.textMuted;
+          break;
+        case HandlerRunState.parked:
+          pillLabel = parkedPillLabel(session.parkedUntil);
           pillColor = p.textMuted;
           break;
       }

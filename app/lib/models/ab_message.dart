@@ -328,7 +328,7 @@ class HandlerActivityMessage {
   final int at;
   final String terminalId;
   // 'continue' | 'handle' | 'escalate' | 'brief_armed' | 'brief_edited' |
-  // 'item_satisfied' | 'wrapped_up'
+  // 'item_satisfied' | 'wrapped_up' | 'parked' | 'resumed'
   final String decision;
   final String reason;
   final String? detail;

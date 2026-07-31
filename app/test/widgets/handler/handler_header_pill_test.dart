@@ -1,0 +1,94 @@
+// The agent-header Handler pill for a parked session. A park is the one run
+// state with no call to action, so it must read as status and stay inert.
+import 'package:antgrid/models/handler_state.dart';
+import 'package:antgrid/providers/agent_transport.dart';
+import 'package:antgrid/providers/providers.dart';
+import 'package:antgrid/providers/sessions.dart';
+import 'package:antgrid/providers/value_controller.dart';
+import 'package:antgrid/widgets/agent_panel.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+HandlerSessionState _session(
+  String terminalId, {
+  HandlerRunState runState = HandlerRunState.parked,
+  int pendingEscalations = 0,
+  String? parkKind,
+  int? parkedUntil,
+}) => HandlerSessionState(
+  terminalId: terminalId,
+  notifyOnly: false,
+  runState: runState,
+  pendingEscalations: pendingEscalations,
+  armedAt: 1,
+  doneWhenMet: false,
+  brief: const HandlerBrief(
+    taskSummary: 'summary',
+    willHandle: [],
+    wakeFor: [],
+    thenItems: [],
+  ),
+  ledger: const [],
+  escalations: const [],
+  parkKind: parkKind,
+  parkedUntil: parkedUntil,
+);
+
+/// Focuses `t1` and renders the real production header control over
+/// [sessions]. No project is focused, so the handler service stays null —
+/// the pill derivation is all this exercises.
+Future<void> _pump(
+  WidgetTester tester,
+  Map<String, HandlerSessionState> sessions,
+) async {
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: [
+        activeSessionIdProvider.overrideWith(() => ValueController('t1')),
+        selectedRegistrationIdProvider.overrideWith((_) => null),
+        handlerStateProvider.overrideWith(
+          (ref) => Stream.value(
+            const HandlerState.initial().copyWith(sessions: sessions),
+          ),
+        ),
+      ],
+      child: const MaterialApp(home: Scaffold(body: HandlerHeaderControl())),
+    ),
+  );
+  await tester.pump();
+}
+
+void main() {
+  testWidgets('a parked session shows its wake time', (tester) async {
+    final until = DateTime(2026, 7, 31, 14, 5);
+    await _pump(tester, {
+      't1': _session(
+        't1',
+        parkKind: 'limit',
+        parkedUntil: until.millisecondsSinceEpoch,
+      ),
+    });
+    expect(find.text('PARKED · UNTIL 14:05'), findsOneWidget);
+  });
+
+  testWidgets('a park with no deadline shows a bare label', (tester) async {
+    await _pump(tester, {'t1': _session('t1', parkKind: 'outage')});
+    expect(find.text('PARKED'), findsOneWidget);
+  });
+
+  testWidgets('an escalation elsewhere still outranks a parked pill', (
+    tester,
+  ) async {
+    // A parked session must never hide another session's unanswered question.
+    await _pump(tester, {
+      't1': _session('t1', parkKind: 'limit'),
+      't2': _session(
+        't2',
+        runState: HandlerRunState.needsYou,
+        pendingEscalations: 2,
+      ),
+    });
+    expect(find.text('NEEDS YOU 2'), findsOneWidget);
+  });
+}

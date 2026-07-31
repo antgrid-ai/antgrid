@@ -55,6 +55,52 @@ void main() {
     expect(s.runState, HandlerRunState.watching);
   });
 
+  test('run-state wire mapping covers parked, unknown still yields null', () {
+    expect(handlerRunStateFromWire('parked'), HandlerRunState.parked);
+    expect(handlerRunStateToWire(HandlerRunState.parked), 'parked');
+    expect(handlerRunStateFromWire('napping'), isNull);
+  });
+
+  test('a parked wire session parses with its park fields', () {
+    // fromWire drops the WHOLE session when the run state is unmapped, so an
+    // unmapped "parked" would make parked sessions vanish from the app.
+    final s = HandlerSessionState.fromWire({
+      'terminalId': 't1',
+      'notifyOnly': false,
+      'state': 'parked',
+      'pendingEscalations': 0,
+      'armedAt': 1,
+      'doneWhenMet': false,
+      'brief': briefWire,
+      'ledger': [],
+      'parkKind': 'limit',
+      'parkedUntil': 1770000000000,
+    });
+    expect(s, isNotNull);
+    expect(s!.runState, HandlerRunState.parked);
+    expect(s.parkKind, 'limit');
+    expect(s.parkedUntil, 1770000000000);
+    expect(s.copyWith(pendingEscalations: 1).parkKind, 'limit');
+    expect(s.copyWith(pendingEscalations: 1).parkedUntil, 1770000000000);
+  });
+
+  test('park fields are absent on an unparked session', () {
+    final s = HandlerSessionState.fromWire({
+      'terminalId': 't1',
+      'notifyOnly': false,
+      'state': 'watching',
+      'pendingEscalations': 0,
+      'armedAt': 1,
+      'doneWhenMet': false,
+      'brief': briefWire,
+      'ledger': [],
+      'parkKind': 42,
+      'parkedUntil': 'soon',
+    })!;
+    expect(s.parkKind, isNull);
+    expect(s.parkedUntil, isNull);
+  });
+
   test('HandlerState aggregates pending across sessions', () {
     final state = HandlerState.initial().copyWith(
       sessions: {

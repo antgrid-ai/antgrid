@@ -10,15 +10,12 @@ import '../../design/widgets/ab_list_row.dart';
 import '../../models/handler_state.dart';
 import '../../providers/providers.dart';
 import '../../providers/sessions.dart';
+import '../../util/relative_time.dart';
 import 'handler_briefing_sheet.dart';
 import 'handler_reply_sheet.dart';
 
-String _fmtTime(int epochMs) {
-  final t = DateTime.fromMillisecondsSinceEpoch(epochMs);
-  final h = t.hour.toString().padLeft(2, '0');
-  final m = t.minute.toString().padLeft(2, '0');
-  return '$h:$m';
-}
+String _fmtTime(int epochMs) =>
+    clockTime(DateTime.fromMillisecondsSinceEpoch(epochMs));
 
 class HandlerScreen extends ConsumerWidget {
   const HandlerScreen({super.key});
@@ -409,6 +406,29 @@ class _ActivityRow extends StatelessWidget {
       case 'wrapped_up':
         return AbListRow(
           title: Text('Wrapped up', style: AbTokens.sansStyle()),
+          trailing: meta,
+        );
+      case 'parked':
+        // The bridge stamps the wake deadline into detail as an ISO instant.
+        final wake = record.detail == null
+            ? null
+            : DateTime.tryParse(record.detail!);
+        return AbListRow(
+          title: Text('Paused: ${record.reason}', style: AbTokens.sansStyle()),
+          subtitle: wake == null
+              ? null
+              : Text(
+                  'resuming around ${clockTime(wake)}',
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: p.textMuted,
+                  ),
+                ),
+          trailing: meta,
+        );
+      case 'resumed':
+        return AbListRow(
+          title: Text('Resumed: ${record.reason}', style: AbTokens.sansStyle()),
           trailing: meta,
         );
       default:
