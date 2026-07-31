@@ -1,4 +1,4 @@
-import { hookShellCommand, type HookCommand } from "./hook-command";
+import { hookShellCommand, type HookCommand } from "../../hook-command";
 
 export interface ManagedCursorCommands {
   sessionStart: string;

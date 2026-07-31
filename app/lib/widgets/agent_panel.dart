@@ -22,7 +22,7 @@ import '../utils/platform_utils.dart';
 import 'agent_transcript_view.dart';
 import 'command_bar.dart';
 import 'command_output_overlay.dart';
-import 'handler/handler_enable_sheet.dart';
+import 'handler/handler_briefing_sheet.dart';
 import 'mobile_access_toggle.dart';
 import 'remote_host_chip.dart';
 import 'session_rename_dialog.dart';
@@ -89,57 +89,82 @@ class AgentPanel extends ConsumerWidget {
   }
 }
 
-/// Per-project header action for the focused project:
-///  - **Local project** → a [MobileAccessToggle] (Enable/Disable mobile access),
-///    which drives the paired-phone allowlist for this project.
-///  - **Remote project** → a read-only [RemoteHostChip] (the host machine name);
-///    you cannot manage another machine's allowlist from here.
+/// Trailing actions for the desktop window title bar. The two have DIFFERENT
+/// scopes and are therefore derived independently:
+///  - [MobileAccessToggle] is machine-wide ("is this machine reachable from
+///    mobile"), so it hangs off `localDeviceUuidProvider` alone and renders
+///    regardless of which project is focused. That provider mints an anonymous
+///    host uuid on desktop precisely so this affordance can show, and is null on
+///    mobile/web where there is no local host.
+///  - [RemoteHostChip] is focus-derived: it names the machine hosting the
+///    FOCUSED project. It may render next to the switch — a remote project in
+///    focus plus your own machine's switch is a coherent pair, since the switch
+///    governs your machine, not theirs.
 ///
-/// Top-level rather than a private method so the per-project action logic —
-/// including the `selectedRegistrationIdProvider` → `projectsProvider`
-/// lookup — has one implementation, used by `WindowTitleBarContents`, and can
-/// be exercised directly in tests without re-implementing it.
-List<Widget> localProjectActions(WidgetRef ref) {
+/// Desktop only: the mobile early return exists so a phone has no surface to
+/// grant itself the machine.
+///
+/// Top-level rather than a private method so the derivation has one
+/// implementation, used by `WindowTitleBarContents`, and can be exercised
+/// directly in tests without re-implementing it.
+List<Widget> titleBarProjectActions(WidgetRef ref) {
   if (isMobilePlatform) return const [];
-  final selectedId = ref.watch(selectedRegistrationIdProvider);
-  if (selectedId == null) return const [];
-  final projects = ref.watch(projectsProvider);
-  final matches = projects.where((p) => p.projectId == selectedId);
-  if (matches.isEmpty) return const [];
-  final project = matches.first;
   final localUuid = ref.watch(localDeviceUuidProvider).value;
-  // Still resolving — show nothing to avoid an incorrect flash.
-  if (localUuid == null) return const [];
-  if (project.isLocalFor(localUuid)) {
-    return [MobileAccessToggle(projectId: project.projectId)];
-  }
-  // TODO(task-13): derive platform from welcome message / agent inventory.
+  final selectedId = ref.watch(selectedRegistrationIdProvider);
+  final projects = ref.watch(projectsProvider);
+
+  // A null selectedId matches nothing: projectId is non-nullable.
+  final matches = projects.where((p) => p.projectId == selectedId);
+  final focused = matches.isEmpty ? null : matches.first;
+  // Until the local uuid resolves, local-vs-remote is undecidable — withhold the
+  // chip rather than flashing the wrong one.
+  final remoteHost =
+      focused != null && localUuid != null && !focused.isLocalFor(localUuid)
+      ? focused.hostMachineName
+      : null;
+
   return [
-    RemoteHostChip(hostMachineName: project.hostMachineName, platform: 'macos'),
+    // Rendered even while the policy is unloaded — MobileAccessToggle shows an
+    // inert CTA rather than vanishing, deliberately (see its build()).
+    if (localUuid != null) const MobileAccessToggle(),
+    if (localUuid != null && remoteHost != null)
+      const SizedBox(width: AbTokens.space8),
+    if (remoteHost != null)
+      // TODO(task-13): derive platform from welcome message / agent inventory.
+      RemoteHostChip(hostMachineName: remoteHost, platform: 'macos'),
   ];
 }
 
-/// Handler status pill + configure button rendered in the window title bar.
+/// Handler status pill + shield rendered in the agent panel header, scoped to
+/// the FOCUSED session — arming is per-terminal, not per-project.
 ///
-/// Shows a state pill (WATCHING / HANDLING / NEEDS YOU `n`) when Handler is
-/// enabled, and an icon button that opens [showHandlerEnableSheet] to
-/// reconfigure or disable it.
+/// Shows a state pill (WATCHING / HANDLING / NEEDS YOU `n`) for the focused
+/// session when armed, falling back to the project-wide pending count so
+/// escalations on other sessions stay visible. Tapping the shield opens
+/// [showHandlerBriefingSheet] to arm, edit, or disarm.
 class HandlerHeaderControl extends ConsumerWidget {
   const HandlerHeaderControl({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final state = ref.watch(handlerStateProvider).value;
+    final activeId = ref.watch(activeSessionIdProvider);
+    final state =
+        ref.watch(handlerStateProvider).value ?? const HandlerState.initial();
+    // Escalations pending on OTHER sessions must stay visible whatever is
+    // focused, so no early return here even with nothing armable in focus.
+    final session = activeId != null ? state.sessions[activeId] : null;
     final service = serviceWhenReady(ref, handlerServiceProvider);
     final p = context.antgrid;
 
     String? pillLabel;
     Color pillColor = p.textMuted;
-    if (state != null && state.enabled) {
-      switch (state.runState) {
+    var pillNavigates = false;
+    if (session != null) {
+      switch (session.runState) {
         case HandlerRunState.needsYou:
-          pillLabel = 'NEEDS YOU ${state.pendingEscalations}';
+          pillLabel = 'NEEDS YOU ${session.pendingEscalations}';
           pillColor = p.accent;
+          pillNavigates = true;
           break;
         case HandlerRunState.handling:
           pillLabel = 'HANDLING';
@@ -149,40 +174,77 @@ class HandlerHeaderControl extends ConsumerWidget {
           pillLabel = 'WATCHING';
           pillColor = p.textMuted;
           break;
-        case HandlerRunState.off:
-          pillLabel = null;
-          break;
       }
+    }
+    // Surface escalations on OTHER sessions even when the focused session is
+    // armed — an unanswered question must never hide behind this session's
+    // WATCHING/HANDLING pill. When the focused session itself needs the user its
+    // own count already shows; when it's unarmed, otherPending is the full
+    // project-wide count (session-null case).
+    final otherPending =
+        state.pendingEscalations - (session?.pendingEscalations ?? 0);
+    if (session?.runState != HandlerRunState.needsYou && otherPending > 0) {
+      pillLabel = 'NEEDS YOU $otherPending';
+      pillColor = p.accent;
+      pillNavigates = true;
+    }
+
+    // A NEEDS YOU pill is a call to action, so it navigates to the Handler
+    // tab where the question is answerable; WATCHING/HANDLING are pure
+    // status and stay inert.
+    final pill = pillLabel == null
+        ? null
+        : pillNavigates
+            ? MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => ref.read(revealHandlerTabProvider)?.call(),
+                  child: AbChip.system(label: pillLabel, color: pillColor),
+                ),
+              )
+            : AbChip.system(label: pillLabel, color: pillColor);
+
+    // No armable focus target: hide the shield but keep the project-wide
+    // NEEDS YOU pill reachable.
+    if (activeId == null) {
+      return pill ?? const SizedBox.shrink();
     }
 
     Future<void> openSheet() async {
       if (service == null) return;
-      final cur = state ?? const HandlerState.initial();
-      final choice = await showHandlerEnableSheet(
+      final choice = await showHandlerBriefingSheet(
         context,
-        enabled: cur.enabled,
-        template: cur.template,
-        model: cur.model,
+        terminalId: activeId,
+        service: service,
+        initialBrief: session?.brief,
+        initialNotifyOnly: session?.notifyOnly,
       );
       if (choice == null) return;
-      service.configure(
-        enabled: choice.enabled,
-        template: choice.template,
-        model: choice.model,
-      );
+      if (choice.disarm) {
+        service.disarm(activeId);
+      } else {
+        service.arm(
+          terminalId: activeId,
+          brief: choice.brief,
+          notifyOnly: choice.notifyOnly,
+          judgeTool: choice.judgeTool,
+          judgeModel: choice.judgeModel,
+        );
+      }
     }
 
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (pillLabel != null) ...[
-          AbChip.system(label: pillLabel, color: pillColor),
+        if (pill != null) ...[
+          pill,
           const SizedBox(width: AbTokens.space6),
         ],
         AbIconButton(
           icon: AbIcons.shield,
-          tooltip: 'Configure Handler',
-          tone: (state?.enabled ?? false)
+          tooltip: 'Handler',
+          tone: session != null
               ? AbIconButtonTone.accent
               : AbIconButtonTone.normal,
           onTap: openSheet,

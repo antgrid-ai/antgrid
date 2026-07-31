@@ -16,7 +16,7 @@ import { createTestProject } from "../helpers/fixtures";
 import { computeProjectId } from "../../bridge/src/project-id";
 import { readHostFile } from "../../bridge/src/host-discovery";
 import { createMessage } from "../../bridge/src/protocol";
-import { allowAndResolveStream, firstProjectStream } from "../support/stream";
+import { resolveOnFreshAdvert, firstProjectStream } from "../support/stream";
 import { join } from "node:path";
 
 async function loopbackControl(abDir: string, body: object): Promise<any> {
@@ -52,21 +52,19 @@ test("one phone socket carries control + two project streams, isolated, on a sin
     // ONE socket, ONE session — setupTestEnv already admitted it via account
     // trust (no pairing ceremony).
 
-    // Allow both projects for this phone (fail-closed allowlist; projA is
-    // already allowed by setupTestEnv), then let the host's fs.watch reload —
-    // retrying the write (see allowAndResolveStream's docstring) since a lost
-    // fs.watch event on paired-phones.json would otherwise strand this on a
-    // no-op-once-present allowlist write.
+    // Both projects are reachable on one machine-wide switch (setupTestEnv
+    // turned it on) — what still needs retrying is the catalog catching up with
+    // the loopback open/stop above.
     // projA (already running) → streamId from the advert; projB → project:start
     // opens its stream (design §7.4). Both streams live in the ONE session.
     // projB was explicitly stopped above, so this project:start takes the
     // FRESH-open path (terminals: startup commands run), not the idempotent
     // republish — 12s per attempt matches drill-in.test.ts's budget for that
     // same genuine-open shape, not the few-hundred-ms an idempotent
-    // re-advertise would need. Fewer attempts (3, not allowAndResolveStream's
+    // re-advertise would need. Fewer attempts (3, not resolveOnFreshAdvert's
     // default 10) keeps the worst case bounded well under this test's own
     // 120s timeout.
-    const streamB = await allowAndResolveStream(app, env.abDir, projB, {
+    const streamB = await resolveOnFreshAdvert(app, projB, {
       attempts: 3,
       resolve: (a) => a.openProjectStream(projB, 12_000),
     });

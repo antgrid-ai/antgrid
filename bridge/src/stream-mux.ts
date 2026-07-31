@@ -26,8 +26,10 @@ export interface StreamHandle {
 export interface AttachStreamOpts {
   /** Relay acked the stream-open (data-plane slot admitted). */
   onAdmitted?: (streamId: string) => void;
-  /** Relay rejected the stream-open (e.g. `SESSION_LIMIT_EXCEEDED`); the socket
-   *  and every other stream stay live. */
+  /** Relay rejected the stream-open; the socket and every other stream stay
+   *  live. Current relays admit every stream — the only rejection code we still
+   *  decode, `SESSION_LIMIT_EXCEEDED`, is retired and reaches us only from a
+   *  relay predating the worker-limit change. */
   onRejected?: (code: string, message: string) => void;
   /** The machine's paired phone became reachable (session established / peer
    *  online). Also fired at attach time when the session is already established,
@@ -36,6 +38,14 @@ export interface AttachStreamOpts {
   onPeerOffline?: () => void;
   /** A preview-channel tunnel-protocol message routed to this stream. */
   onTunnel?: (raw: unknown) => void;
+  /** Outbound authorization: consulted on EVERY frame this stream would send.
+   *  The mirror of the core's inbound gate — a stream carries project data off
+   *  the machine, so it rides the same machine mobile-access switch that every
+   *  inbound verb does, read live so a `mobile-access:set` takes effect without
+   *  tearing the stream down. Absent = always deliver (local/wizard callers that
+   *  answer to no switch); callers that HAVE a switch must fail closed in their
+   *  own provider, not here. */
+  mayDeliver?: () => boolean;
 }
 
 /** The slice of the machine {@link RelayClient} the mux drives. Kept minimal so
@@ -79,8 +89,17 @@ export class StreamMux {
   attach(bus: MessageBus, opts: AttachStreamOpts): StreamHandle {
     // 16 hex chars from 8 random bytes — opaque, allocated agent-side (§7.1).
     const streamId = randomBytes(8).toString("hex");
+    // Gate at the send, not at attach/detach: the stream stays open and the core
+    // keeps running, so flipping the switch back on resumes delivery with no
+    // re-attach and no lost core. Dropping mid-flight can strand an RPC the phone
+    // is awaiting — acceptable, since the same switch already refuses its next
+    // request; the app times that out and resyncs from a snapshot.
+    const mayDeliver = () => opts.mayDeliver?.() ?? true;
     const unsub = bus.subscribe({
-      deliver: (msg, channel) => this.transport.sendEnvelope(streamId, msg, channel),
+      deliver: (msg, channel) => {
+        if (!mayDeliver()) return;
+        this.transport.sendEnvelope(streamId, msg, channel);
+      },
     });
     this.streams.set(streamId, { bus, unsub, opts, settled: false });
     this.transport.openStream(streamId);
@@ -90,7 +109,12 @@ export class StreamMux {
     return {
       streamId,
       detach: () => this.detach(streamId),
-      sendTunnel: (data) => this.transport.sendEnvelope(streamId, data, "preview"),
+      // Gated too: tunnel frames bypass the bus (see setPlainHook), so the
+      // subscriber check above never sees them.
+      sendTunnel: (data) => {
+        if (!mayDeliver()) return;
+        this.transport.sendEnvelope(streamId, data, "preview");
+      },
     };
   }
 
@@ -111,7 +135,8 @@ export class StreamMux {
   }
 
   /** A relay `error{ref}` — routed here iff `ref` is a live streamId (a
-   *  stream-open rejection, notably `SESSION_LIMIT_EXCEEDED`). Returns false when
+   *  stream-open rejection: `STREAM_LIMIT_EXCEEDED` from a current relay, or
+   *  the retired `SESSION_LIMIT_EXCEEDED` from an older one). Returns false when
    *  `ref` is not one of our streams so the caller keeps normal error handling
    *  (a streamId is the only kind of `ref` the relay ever sends). */
   onError(ref: string, code: string, message: string): boolean {
@@ -174,8 +199,8 @@ export class StreamMux {
   }
 
   /** Re-send `stream-open` for every attached stream. Called on `welcome` after
-   *  a reconnect: the relay dropped its openStreams on the disconnect, so the
-   *  count (sessionLimit) must be re-established before app traffic resumes.
+   *  a reconnect: the relay dropped its openStreams on the disconnect, so every
+   *  stream must be re-admitted before app traffic resumes.
    *  Already-settled streams keep their firstRegister outcome (onOpened no-ops). */
   reopenAll(): void {
     for (const streamId of this.streams.keys()) this.transport.openStream(streamId);

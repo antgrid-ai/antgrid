@@ -48,7 +48,6 @@ export interface OpencodeDriverOpts {
   sessionId: string;
   client: OpencodeClientLike;
   sendMessage: (msg: AbMessage) => void;
-  title?: string;
   onTitle?: (title: string) => void;
 }
 
@@ -56,7 +55,6 @@ export class OpencodeDriver {
   private readonly sessionId: string;
   private readonly client: OpencodeClientLike;
   private readonly send: (msg: AbMessage) => void;
-  private readonly title?: string;
   private readonly onTitle?: (title: string) => void;
 
   private rootSessionId = "";
@@ -112,7 +110,6 @@ export class OpencodeDriver {
     this.sessionId = opts.sessionId;
     this.client = opts.client;
     this.send = opts.sendMessage;
-    this.title = opts.title;
     this.onTitle = opts.onTitle;
   }
 
@@ -144,7 +141,11 @@ export class OpencodeDriver {
       }
       return this.rootSessionId;
     }
-    this.rootSessionId = await this.client.createSession({ title: this.title });
+    // No title: opencode generates one from the first prompt ONLY if the session
+    // doesn't already have one, and pushes it on session.updated. Seeding any
+    // title here (we used to seed the projectId) silently turns that generation
+    // off for the life of the session, leaving the app stuck on "Session N".
+    this.rootSessionId = await this.client.createSession({});
     return this.rootSessionId;
   }
 
@@ -219,7 +220,7 @@ export class OpencodeDriver {
   }
 
   async prompt(text: string, commandId?: string): Promise<void> {
-    if (!this.rootSessionId) this.rootSessionId = await this.client.createSession({ title: this.title });
+    if (!this.rootSessionId) this.rootSessionId = await this.client.createSession({});
     // compact drives its own lifecycle (same contract as agent:session-action).
     if (commandId === "builtin:compact") return this.compact();
     this.activeTurnId = `turn-${this.turnCounter++}`;
@@ -622,13 +623,14 @@ export class OpencodeDriver {
 
   // opencode's server generates a conversation title and pushes it on
   // session.updated. Forward it to the namer (per-session-safe: this driver ==
-  // this chat session). Skip the seed title we set at createSession — echoing it
-  // back would auto-name the session to its own project id, burying the default.
+  // this chat session). Root only, NOT inTree: subtask children get their own
+  // generated titles ("Find TODOs … (@explore subagent)"), and accepting one
+  // would rename the whole chat session after whatever a subagent last did.
   private onSessionUpdated(p: any): void {
     const info = p?.info ?? {};
-    if (!this.inTree(info.id)) return;
+    if (info.id !== this.rootSessionId) return;
     const title = typeof info.title === "string" ? info.title.trim() : "";
-    if (!title || title === this.title) return;
+    if (!title) return;
     this.onTitle?.(title);
   }
 

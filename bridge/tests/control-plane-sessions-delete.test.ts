@@ -27,6 +27,15 @@ function seedSessions(projectId: string, sessions: unknown[]): void {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "sessions.json"), JSON.stringify({ version: 1, sessions }));
 }
+/** Put a project in the host's seen catalog without spawning a real core — the
+ *  catalog is the only per-project bound left on a phone-named projectId. */
+function seedCatalog(h: HostServer, projectId: string): void {
+  (h as any).seenProjects.set(projectId, { path: "/p", label: projectId });
+}
+/** Flip the machine switch through its only mutation path, the loopback verb. */
+async function setMobileAccess(h: HostServer, enabled: boolean): Promise<void> {
+  await h.handleMobileAccessVerb({ id: "t", type: "mobile-access:set", enabled });
+}
 function delReq(projectId: unknown, sessionId: unknown) {
   return { id: "x", timestamp: 0, type: "request", requestId: "rq1", method: "sessions.delete", params: { projectId, sessionId } } as any;
 }
@@ -44,15 +53,16 @@ afterEach(async () => {
   if (abDir) rmSync(abDir, { recursive: true, force: true });
 });
 
-test("allowed phone deletes a stopped project's session from disk (no core warmed)", async () => {
+test("a mobile-enabled machine deletes a stopped project's session from disk (no core warmed)", async () => {
   const h = host!;
   seedSessions("projA", [
     { id: "a", name: "A", createdAt: 1, lastUsedAt: 10, archived: false },
     { id: "b", name: "B", createdAt: 2, lastUsedAt: 20, archived: false },
   ]);
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projA"] });
+  seedCatalog(h, "projA");
+  await setMobileAccess(h, true);
 
-  const res = (await h.handleSessionsDeleteRpc(delReq("projA", "a"), "pk1")) as any;
+  const res = (await h.handleSessionsDeleteRpc(delReq("projA", "a"))) as any;
   expect(res.ok).toBe(true);
   expect(res.result.deleted).toBe(true);
   expect(h.get("projA")).toBeNull(); // never warmed a core
@@ -63,8 +73,9 @@ test("allowed phone deletes a stopped project's session from disk (no core warme
 test("deleting a missing session returns ok with deleted:false", async () => {
   const h = host!;
   seedSessions("projA", [{ id: "a", name: "A", createdAt: 1, lastUsedAt: 10, archived: false }]);
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projA"] });
-  const res = (await h.handleSessionsDeleteRpc(delReq("projA", "ghost"), "pk1")) as any;
+  seedCatalog(h, "projA");
+  await setMobileAccess(h, true);
+  const res = (await h.handleSessionsDeleteRpc(delReq("projA", "ghost"))) as any;
   expect(res.ok).toBe(true);
   expect(res.result.deleted).toBe(false);
 });
@@ -77,14 +88,15 @@ test("a WARM core is delegated to and the disk file is NOT mutated", async () =>
   // is left untouched.
   const h = host!;
   seedSessions("projWarm", [{ id: "a", name: "A", createdAt: 1, lastUsedAt: 10, archived: false }]);
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projWarm"] });
+  seedCatalog(h, "projWarm");
+  await setMobileAccess(h, true);
   const captured: { id: string | null } = { id: null };
   (h as any).cores.set("projWarm", {
     core: { deleteSession: (id: string) => { captured.id = id; return true; }, shutdown: async () => {} },
     path: "/p", mode: "local", lastFocusedMs: 0,
   });
 
-  const res = (await h.handleSessionsDeleteRpc(delReq("projWarm", "a"), "pk1")) as any;
+  const res = (await h.handleSessionsDeleteRpc(delReq("projWarm", "a"))) as any;
   expect(res.ok).toBe(true);
   expect(res.result.deleted).toBe(true);
   expect(captured.id).toBe("a"); // routed to the live core, not the disk path
@@ -93,29 +105,46 @@ test("a WARM core is delegated to and the disk file is NOT mutated", async () =>
   expect(left.map((s: any) => s.id)).toEqual(["a"]);
 });
 
-test("non-allowed phone is rejected NOT_ALLOWED (no disk mutation)", async () => {
+test("with mobile access off the delete is rejected NOT_ALLOWED (no disk mutation)", async () => {
   const h = host!;
   seedSessions("projA", [{ id: "a", name: "A", createdAt: 1, lastUsedAt: 10, archived: false }]);
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: [] });
-  const res = (await h.handleSessionsDeleteRpc(delReq("projA", "a"), "pk1")) as any;
+  seedCatalog(h, "projA");
+  // Machine switch left at its default (off).
+  const res = (await h.handleSessionsDeleteRpc(delReq("projA", "a"))) as any;
   expect(res.ok).toBe(false);
   expect(res.error.code).toBe("NOT_ALLOWED");
   const left = await SessionManager.readPersisted(abDir!, "projA", true);
   expect(left.map((s: any) => s.id)).toEqual(["a"]); // untouched
 });
 
+test("an id absent from the machine's catalog is rejected UNKNOWN_PROJECT (no disk mutation)", async () => {
+  // This verb DELETES, so the catalog bound matters more here than on the read
+  // path: the machine switch says whether any project is reachable, only the
+  // catalog says which ids exist.
+  const h = host!;
+  seedSessions("ghost", [{ id: "a", name: "A", createdAt: 1, lastUsedAt: 10, archived: false }]);
+  await setMobileAccess(h, true);
+
+  const res = (await h.handleSessionsDeleteRpc(delReq("ghost", "a"))) as any;
+  expect(res.ok).toBe(false);
+  expect(res.error.code).toBe("UNKNOWN_PROJECT");
+  const left = await SessionManager.readPersisted(abDir!, "ghost", true);
+  expect(left.map((s: any) => s.id)).toEqual(["a"]); // untouched
+});
+
 test("a projectId with path separators is rejected E_BAD_PARAMS", async () => {
   const h = host!;
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["../etc"] });
-  const res = (await h.handleSessionsDeleteRpc(delReq("../etc", "a"), "pk1")) as any;
+  await setMobileAccess(h, true);
+  const res = (await h.handleSessionsDeleteRpc(delReq("../etc", "a"))) as any;
   expect(res.ok).toBe(false);
   expect(res.error.code).toBe("E_BAD_PARAMS");
 });
 
 test("a non-string sessionId is rejected E_BAD_PARAMS", async () => {
   const h = host!;
-  h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projA"] });
-  const res = (await h.handleSessionsDeleteRpc(delReq("projA", 123), "pk1")) as any;
+  seedCatalog(h, "projA");
+  await setMobileAccess(h, true);
+  const res = (await h.handleSessionsDeleteRpc(delReq("projA", 123))) as any;
   expect(res.ok).toBe(false);
   expect(res.error.code).toBe("E_BAD_PARAMS");
 });

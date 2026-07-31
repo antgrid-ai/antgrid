@@ -14,8 +14,9 @@ export type DashboardPageProps = {
   tier: string;
   deviceLimit: number;
   activeDevices: number;
+  workerLimit: number;
+  activeWorkers: number;
   sessions: UserSession[] | null;
-  sessionLimit: number;
   now: number;
   purchaseSuccess?: boolean;
   cancelNotice?: "immediate" | "pending" | "failed" | null;
@@ -109,12 +110,7 @@ export function DashboardPage(props: DashboardPageProps) {
       <div id="subscription-card">
         <SubscriptionCard {...props} />
       </div>
-      <ActiveSessionsCard
-        tier={props.tier}
-        sessions={props.sessions}
-        sessionLimit={props.sessionLimit}
-        now={props.now}
-      />
+      <ActiveSessionsCard sessions={props.sessions} now={props.now} />
 
       <script
         type="application/json"
@@ -126,12 +122,34 @@ export function DashboardPage(props: DashboardPageProps) {
   );
 }
 
+/**
+ * `Workers` is the paid axis (machines running an agent, `kind:"agent"` device
+ * rows); `Active devices` is the flat fair-use registration ceiling across every
+ * device kind. They are counted separately and only the first can be raised.
+ */
+function MeterStat({ label, used, limit }: { label: string; used: number; limit: number }) {
+  return (
+    <div class="stat">
+      <div class="stat-title">{label}</div>
+      <div class="stat-value text-2xl font-mono">
+        {used}
+        <span class="text-base-content/40">
+          {" / "}
+          {limit}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function SubscriptionCard({
   subscription,
   plan,
   tier,
   deviceLimit,
   activeDevices,
+  workerLimit,
+  activeWorkers,
 }: DashboardPageProps) {
   const pendingCancel = isPendingCancellation(subscription);
   const canCancel =
@@ -163,16 +181,8 @@ function SubscriptionCard({
             <span class="badge badge-ghost font-mono text-xs capitalize">{FREE_TIER}</span>
           </div>
           <div class="stats stats-horizontal mt-4 border border-base-300">
-            <div class="stat">
-              <div class="stat-title">Active devices</div>
-              <div class="stat-value text-2xl font-mono">
-                {activeDevices}
-                <span class="text-base-content/40">
-                  {" / "}
-                  {deviceLimit}
-                </span>
-              </div>
-            </div>
+            <MeterStat label="Workers" used={activeWorkers} limit={workerLimit} />
+            <MeterStat label="Active devices" used={activeDevices} limit={deviceLimit} />
           </div>
         </div>
       </div>
@@ -189,8 +199,9 @@ function SubscriptionCard({
                 <span class="badge badge-ghost font-mono text-xs capitalize">{FREE_TIER}</span>
               </div>
               <p class="text-sm text-base-content/70 mt-1 max-w-md">
-                Mobile and relay access require Pro — control multiple remote
-                agents at once. Pro Yearly from $49/yr or Lifetime for $99.
+                Remote control is included, capped at {workerLimit} worker
+                {workerLimit === 1 ? " machine" : " machines"}. Pro raises the
+                cap.
               </p>
             </div>
             <a class="btn btn-primary" href="/pricing">
@@ -198,16 +209,8 @@ function SubscriptionCard({
             </a>
           </div>
           <div class="stats stats-horizontal mt-4 border border-base-300">
-            <div class="stat">
-              <div class="stat-title">Active devices</div>
-              <div class="stat-value text-2xl font-mono">
-                {activeDevices}
-                <span class="text-base-content/40">
-                  {" / "}
-                  {deviceLimit}
-                </span>
-              </div>
-            </div>
+            <MeterStat label="Workers" used={activeWorkers} limit={workerLimit} />
+            <MeterStat label="Active devices" used={activeDevices} limit={deviceLimit} />
           </div>
         </div>
       </div>
@@ -227,16 +230,8 @@ function SubscriptionCard({
           )}
         </div>
         <div class="stats stats-horizontal mt-2 border border-base-300">
-          <div class="stat">
-            <div class="stat-title">Active devices</div>
-            <div class="stat-value text-2xl font-mono">
-              {activeDevices}
-              <span class="text-base-content/40">
-                {" / "}
-                {deviceLimit}
-              </span>
-            </div>
-          </div>
+          <MeterStat label="Workers" used={activeWorkers} limit={workerLimit} />
+          <MeterStat label="Active devices" used={activeDevices} limit={deviceLimit} />
           <div class="stat">
             <div class="stat-title">Started</div>
             <div class="stat-value text-base font-mono">

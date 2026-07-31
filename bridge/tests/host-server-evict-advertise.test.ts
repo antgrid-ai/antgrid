@@ -43,6 +43,11 @@ function tempFolder(): string {
   return f;
 }
 
+/** Flip the machine switch through its only mutation path, the loopback verb. */
+async function setMobileAccess(h: HostServer, enabled: boolean): Promise<void> {
+  await h.handleMobileAccessVerb({ id: "t", type: "mobile-access:set", enabled });
+}
+
 // Regression (Phase C smoke, 2026-07-27): after a bridge restart the host
 // re-opens projects on its own, AFTER the handshake advert has already gone out
 // — so the phone's catalog stayed a snapshot of a host with nothing open, and
@@ -54,9 +59,7 @@ test("re-advertises agent:projects when a project is opened without a phone aski
 
   const f = tempFolder();
   const id = computeProjectId(f);
-  host.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1",
-    pairedAt: "x", lastSeenAt: "x", allowedProjects: [] });
-  host.pairedPhones.allowProject("pk1", id);
+  await setMobileAccess(host, true);
 
   const bus = new MessageBus();
   const published: { msg: AbMessage; channel: Channel }[] = [];
@@ -90,10 +93,7 @@ test("re-advertises agent:projects on core eviction (evicted flips to running:fa
   const fB = tempFolder();
   const idB = computeProjectId(fB);
 
-  host.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1",
-    pairedAt: "x", lastSeenAt: "x", allowedProjects: [] });
-  host.pairedPhones.allowProject("pk1", idA);
-  host.pairedPhones.allowProject("pk1", idB);
+  await setMobileAccess(host, true);
 
   // Real MessageBus + a TransportSubscriber: publish delivers synchronously to
   // subscribers in-loop, so anything emitted during the awaited open() below is

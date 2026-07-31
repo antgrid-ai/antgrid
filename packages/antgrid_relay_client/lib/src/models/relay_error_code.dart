@@ -15,7 +15,8 @@ enum RelayErrorCode {
   expired('EXPIRED'),
   notAuthorized('NOT_AUTHORIZED'),
   peerReplaced('PEER_REPLACED'),
-  sessionLimitExceeded('SESSION_LIMIT_EXCEEDED');
+  sessionLimitExceeded('SESSION_LIMIT_EXCEEDED'),
+  streamLimitExceeded('STREAM_LIMIT_EXCEEDED');
 
   final String wireValue;
   const RelayErrorCode(this.wireValue);

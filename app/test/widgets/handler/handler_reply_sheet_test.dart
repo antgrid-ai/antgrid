@@ -8,7 +8,7 @@ const _esc = HandlerEscalation(
   escalationId: 'e1', terminalId: 't1',
   question: 'bun or vitest for the new package?',
   reasoning: 'Affects CI wiring and the lockfile.',
-  draftReply: 'use bun', urgency: 'high',
+  draftReply: 'use bun', urgency: 'high', at: 1,
 );
 
 Future<String?> _open(WidgetTester tester) async {
@@ -77,7 +77,7 @@ void main() {
     debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
     const escNoDraft = HandlerEscalation(
       escalationId: 'e1', terminalId: 't1', question: 'q',
-      reasoning: 'r', draftReply: '', urgency: 'normal');
+      reasoning: 'r', draftReply: '', urgency: 'normal', at: 1);
     String? captured = 'sentinel';
     await tester.pumpWidget(
       MaterialApp(

@@ -187,9 +187,12 @@ export function createCodexUpdateChecker(
 
 // ---- real-environment adapters (thin glue; the logic above is unit-tested) ----
 
-// Resolve `~/.codex` (or $CODEX_HOME) — where codex keeps version.json.
+// Resolve `~/.codex` (or $CODEX_HOME) — where codex keeps version.json and
+// sessions/. Blank or whitespace-padded CODEX_HOME (a trailing \r from an .env
+// file is enough) would build paths that never exist, so it falls back instead.
 export function codexHomeDir(env: Record<string, string | undefined> = process.env): string {
-  return env.CODEX_HOME ?? join(homedir(), ".codex");
+  const home = env.CODEX_HOME?.trim();
+  return home ? home : join(homedir(), ".codex");
 }
 
 // Read codex's updater state file. Fail-soft: missing/garbage -> null.

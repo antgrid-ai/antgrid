@@ -1,11 +1,16 @@
 import { existsSync, statSync } from "node:fs";
 import { join, delimiter } from "node:path";
 import { platform } from "node:os";
-import { KNOWN_AGENTS } from "./known-agents";
+import { AGENTS } from "./agents/registry";
 
 export interface DetectedTool {
   tool: string;
   path: string;
+  /** Carried from the registry so the app renders a name it never had to know.
+   *  Sourced here, where the spec entry is already in hand, rather than looked
+   *  up from the key later — a later lookup would need a fallback for a miss
+   *  that cannot happen, since every key here comes from AGENTS. */
+  label: string;
 }
 
 const WINDOWS_EXTS = [".exe", ".cmd", ".bat", ".ps1"];
@@ -43,7 +48,7 @@ export interface DetectOptions {
 
 /** Memoized result of the production (no-override) probe. Installed tools don't
  *  change within a process, yet detection runs on every control-plane handshake,
- *  re-advertise, and `tools:list` — each call walks the whole PATH × KNOWN_AGENTS
+ *  re-advertise, and `tools:list` — each call walks the whole PATH × AGENTS
  *  matrix (hundreds of `statSync`s). Cache the no-override result; an explicit
  *  `pathOverride` (tests) always re-probes and never reads or writes this cache. */
 let cachedTools: DetectedTool[] | null = null;
@@ -53,9 +58,9 @@ export function detectInstalledTools(opts: DetectOptions = {}): DetectedTool[] {
   const pathStr = opts.pathOverride ?? process.env.PATH ?? "";
   const dirs = pathStr.split(delimiter).filter((d) => d.length > 0);
   const out: DetectedTool[] = [];
-  for (const [tool, entry] of Object.entries(KNOWN_AGENTS)) {
+  for (const [tool, entry] of Object.entries(AGENTS)) {
     const found = findOnPath(entry.bin, dirs);
-    if (found) out.push({ tool, path: found });
+    if (found) out.push({ tool, path: found, label: entry.label });
   }
   if (opts.pathOverride === undefined) cachedTools = out;
   return out;

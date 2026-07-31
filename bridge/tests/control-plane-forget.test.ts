@@ -89,22 +89,20 @@ test("forget() stops a warm core, deletes its session store, and drops the seen-
   expect(seen.projects.projA).toBeUndefined();
 });
 
-test("forget() revokes the project from every paired phone's allowlist", async () => {
+test("forget() leaves the machine-level mobile-access switch alone", async () => {
   const h = host!;
-  await h.open("projA", tempFolder(), "remote");
+  await h.open("projA", tempFolder(), "local");
+  await h.open("projB", tempFolder(), "local");
   seedSessionStore("projA");
-  h.pairedPhones.upsert({
-    phonePubkey: "pk1",
-    phoneDeviceId: "d1",
-    pairedAt: "x",
-    lastSeenAt: "x",
-    allowedProjects: ["projA", "projB"],
-  });
+  await h.handleMobileAccessVerb({ id: "t", type: "mobile-access:set", enabled: true });
 
   await h.forget("projA");
 
-  expect(h.pairedPhones.isAllowed("pk1", "projA")).toBe(false);
-  expect(h.pairedPhones.isAllowed("pk1", "projB")).toBe(true); // unrelated grant untouched
+  // Deleting ONE project must never turn the machine off (or on) for every
+  // other: the switch is machine-wide policy, forget() only edits the catalog.
+  const get = (await h.handleMobileAccessVerb({ id: "g", type: "mobile-access:get" })) as any;
+  expect(get.enabled).toBe(true);
+  expect(h.buildProjectsAdvertisement().map((p) => p.projectId)).toEqual(["projB"]);
 });
 
 test("forget() is idempotent for an unknown/already-forgotten id", async () => {

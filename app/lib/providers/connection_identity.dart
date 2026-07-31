@@ -38,7 +38,7 @@ final connectionDeviceRecordProvider = FutureProvider<DeviceRecord>((
   // user-scoped. Switching accounts without a hard sign-out leaves the previous
   // user's controller in the slot, and its clientId/clientSecret mint OAuth
   // tokens under THAT account: the relay would stamp this socket's userId with
-  // the wrong account and evaluate sessionLimit and peer visibility against it.
+  // the wrong account and evaluate entitlement and peer visibility against it.
   // Remote control needs the network anyway, so requiring the session lookup
   // costs nothing an offline fallback could buy back.
   final store = ref.read(keychainDeviceStoreProvider);

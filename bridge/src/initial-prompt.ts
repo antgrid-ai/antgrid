@@ -1,6 +1,8 @@
+import { agentSpec } from "./agents/registry";
+
 /**
  * Argv appended LAST to a tool's launch argv so its interactive TUI opens with
- * an initial user prompt already submitted. Keyed by the KNOWN_AGENTS registry
+ * an initial user prompt already submitted. Keyed by the AGENTS registry
  * key, mirroring resumeArgv in agent-resume.ts. Tools without a VERIFIED
  * interactive initial-prompt form return [] — the session starts blank rather
  * than risking a flag misparse (github-copilot's CLI has no verified form).
@@ -27,16 +29,9 @@
  *     flag regardless of a leading dash, so no `--` is needed (or wanted).
  */
 export function initialPromptArgv(tool: string, prompt: string): string[] {
+  // Trimming is shared, not per-agent: an all-whitespace prompt means "start
+  // blank" for every tool, and no spec should have to re-derive that.
   const p = prompt.trim();
   if (!p) return [];
-  switch (tool) {
-    case "claude-code":
-    case "codex":
-    case "cursor-agent":
-      return ["--", p];
-    case "opencode":
-      return ["--prompt", p];
-    default:
-      return [];
-  }
+  return agentSpec(tool)?.initialPrompt(p) ?? [];
 }

@@ -443,9 +443,10 @@ class _AppHome extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // Device provisioning runs fire-and-forget at sign-in; surface its
-    // fair-use-cap rejection here (the one always-mounted authed root) as an
-    // actionable "remove a device" dialog rather than failing silently.
+    // Device provisioning runs fire-and-forget at sign-in; surface its cap
+    // rejections here (the one always-mounted authed root) as an actionable
+    // free-a-slot dialog rather than failing silently. The cap kind travels on
+    // DeviceCapInfo, so the dialog picks device-cap vs worker-cap copy itself.
     // Edge-trigger (null → non-null) so it shows once per rejection.
     ref.listen<DeviceCapInfo?>(deviceCapProvider, (prev, next) {
       if (prev == null && next != null) {

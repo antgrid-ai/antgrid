@@ -42,8 +42,6 @@ interface SignArgs {
   pk?: string | undefined;
   expSecondsFromNow?: number;
   extra?: Record<string, unknown>;
-  /** Set true to exercise the (no-fallback) missing-sessionLimit rejection. */
-  omitSessionLimit?: boolean;
 }
 
 const DEFAULT_PK = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -58,11 +56,6 @@ async function sign(args: SignArgs): Promise<string> {
   if (args.pk !== undefined) payload.pk = args.pk;
   if (args.deviceUuid !== undefined) payload.deviceUuid = args.deviceUuid;
   if (args.azp !== undefined) payload.azp = args.azp;
-  // sessionLimit is required (no tier fallback, R1) — default it unless a
-  // test explicitly supplies its own (via `extra`) or asks to omit it.
-  if (!args.omitSessionLimit && payload.sessionLimit === undefined) {
-    payload.sessionLimit = 10;
-  }
 
   const builder = new SignJWT(payload).setProtectedHeader({
     alg: "EdDSA",
@@ -104,50 +97,14 @@ describe("verifyDeviceToken", () => {
     }
   });
 
-  test("sessionLimit claim is surfaced when present", async () => {
+  // The deploy-order guarantee behind retiring the worker-limit rename: web may
+  // stop minting `sessionLimit` at will, and a garbage value from a token minted
+  // mid-rollout must not be read as a verdict either. The relay ignores the claim
+  // entirely (docs/plans/2026-07-30-worker-limit-pricing.md).
+  test("no entitlement claim is required — tokens with or without sessionLimit verify", async () => {
     const kp = await makeKeyPair("k1");
     const provider = makeProvider([kp.publicJwk]);
-    const token = await sign({
-      privateKey: kp.privateKey,
-      kid: "k1",
-      deviceUuid: "device-1",
-      uid: "user-1",
-      tier: "pro",
-      azp: "client-1",
-      pk: DEFAULT_PK,
-      extra: { sessionLimit: 5 },
-    });
-
-    const result = await verifyDeviceToken(token, provider, ISSUER);
-    expect(result.ok).toBe(true);
-    if (result.ok) expect(result.claims.sessionLimit).toBe(5);
-  });
-
-  // Pre-release there are no tokens predating the `sessionLimit` claim (R1
-  // deletes `defaultSessionLimitForTier`) — a missing claim fails closed
-  // rather than guessing a cap from `tier`.
-  test("missing sessionLimit claim -> LICENSE_INVALID (no tier fallback)", async () => {
-    const kp = await makeKeyPair("k1");
-    const provider = makeProvider([kp.publicJwk]);
-    const token = await sign({
-      privateKey: kp.privateKey,
-      kid: "k1",
-      deviceUuid: "d",
-      uid: "u",
-      tier: "pro",
-      azp: "a",
-      pk: DEFAULT_PK,
-      omitSessionLimit: true,
-    });
-
-    const result = await verifyDeviceToken(token, provider, ISSUER);
-    expect(result).toEqual({ ok: false, code: "LICENSE_INVALID" });
-  });
-
-  test("non-numeric or negative sessionLimit -> LICENSE_INVALID", async () => {
-    const kp = await makeKeyPair("k1");
-    const provider = makeProvider([kp.publicJwk]);
-    const mint = (sessionLimit: unknown) =>
+    const mint = (extra?: Record<string, unknown>) =>
       sign({
         privateKey: kp.privateKey,
         kid: "k1",
@@ -156,11 +113,13 @@ describe("verifyDeviceToken", () => {
         tier: "pro",
         azp: "a",
         pk: DEFAULT_PK,
-        extra: { sessionLimit },
+        extra,
       });
 
-    expect(await verifyDeviceToken(await mint("ten"), provider, ISSUER)).toEqual({ ok: false, code: "LICENSE_INVALID" });
-    expect(await verifyDeviceToken(await mint(-1), provider, ISSUER)).toEqual({ ok: false, code: "LICENSE_INVALID" });
+    for (const extra of [undefined, { sessionLimit: 0 }, { sessionLimit: "ten" }, { sessionLimit: -1 }]) {
+      const result = await verifyDeviceToken(await mint(extra), provider, ISSUER);
+      expect(result.ok).toBe(true);
+    }
   });
 
   // Regression for hardening item 1: an unreachable JWKS with no cached keys

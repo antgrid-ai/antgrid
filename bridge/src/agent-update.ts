@@ -5,7 +5,7 @@
 // the single seam ALL tools flow through — codex included: the orchestration and
 // version math live in ./codex/codex-version and are reused verbatim; only the
 // binary, npm package, updater subcommand, and optional state file differ per
-// tool, captured in TOOL_UPDATE_SPECS below.
+// tool, captured in each agent's `update` field in agents/registry.ts.
 //
 // Fail-soft is the contract everywhere: a CLI installed by a package manager may
 // refuse to self-update (exit non-zero, or no-op). We surface that output as a
@@ -15,10 +15,9 @@ import {
   createCodexUpdateChecker,
   resolveToolLaunchPath,
   fetchNpmLatest,
-  readCodexVersionJson,
-  codexHomeDir,
   type CodexHomeState,
 } from "./codex/codex-version";
+import { AGENTS } from "./agents/registry";
 
 // The generic quiesce→update→restart orchestrator is not codex-specific despite
 // its name; re-export it under a tool-neutral alias for call sites that update
@@ -45,17 +44,16 @@ export interface ToolUpdateSpec {
 }
 
 // Only tools that ship a real self-updater, keyed by canonical session.tool id.
-// github-copilot has none (IDE-bound) and is intentionally absent — a request
+// github-copilot has none (IDE-bound) and so declares no `update` — a request
 // for it fails soft via updateSpecFor → null.
-export const TOOL_UPDATE_SPECS: Record<string, ToolUpdateSpec> = {
-  codex: {
-    tool: "codex", npmPackage: "@openai/codex", command: "codex", updateArgs: ["update"],
-    // Codex is the one tool with an updater-state file; the rest are npm-only.
-    readState: () => readCodexVersionJson(codexHomeDir()),
-  },
-  opencode: { tool: "opencode", npmPackage: "opencode-ai", command: "opencode", updateArgs: ["upgrade"] },
-  "claude-code": { tool: "claude-code", npmPackage: "@anthropic-ai/claude-code", command: "claude", updateArgs: ["update"] },
-};
+//
+// Derived from the registry, never hand-maintained: `tool` IS the registry key,
+// so re-attaching it here is the only way the two can't drift.
+export const TOOL_UPDATE_SPECS: Record<string, ToolUpdateSpec> = Object.fromEntries(
+  Object.entries(AGENTS)
+    .filter(([, spec]) => spec.update !== undefined)
+    .map(([tool, spec]) => [tool, { tool, ...spec.update! }]),
+);
 
 export function updateSpecFor(tool: string): ToolUpdateSpec | null {
   return TOOL_UPDATE_SPECS[tool] ?? null;

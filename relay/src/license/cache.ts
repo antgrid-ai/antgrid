@@ -3,8 +3,6 @@ export interface LicenseCacheEntry {
   deviceId: string;
   userId: string;
   tier: "free" | "trial" | "pro";
-  /** Account's concurrent remote-agent cap (paid axis), from the JWT claim. */
-  sessionLimit: number;
   pk: string;
   revoked?: boolean;
 }

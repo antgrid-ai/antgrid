@@ -1,9 +1,10 @@
 import { describe, it, expect, spyOn } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPairedPhones } from "../src/paired-phones";
-import { phonesList, phonesAllow, phonesDeny, phonesRemove } from "../src/cli/phones";
+import { loadMobileAccessPolicy } from "../src/mobile-access-policy";
+import { phonesList, phonesRemove } from "../src/cli/phones";
 
 function seeded() {
   const dir = mkdtempSync(join(tmpdir(), "antgrid-cli-"));
@@ -11,74 +12,23 @@ function seeded() {
   store.upsert({
     phonePubkey: "pk1", phoneDeviceId: "d1", label: "Pixel",
     pairedAt: "2026-01-01T00:00:00Z", lastSeenAt: "2026-01-01T00:00:00Z",
-    allowedProjects: [],
   });
   return { dir, store };
 }
 
-const catalog = {
-  resolve(pathOrLabel: string): string | null {
-    if (pathOrLabel === "projA" || pathOrLabel === "/work/a" || pathOrLabel === "a") return "projA";
-    return null;
-  },
-};
+/** `phonesRemove` prints an advisory note on stderr; capture it so the suite
+ *  output stays readable and the note itself stays assertable. */
+function captureStderr<T>(fn: () => T): { result: T; lines: string[] } {
+  const lines: string[] = [];
+  const err = spyOn(console, "error").mockImplementation((...args: unknown[]) => { lines.push(args.join(" ")); });
+  try {
+    return { result: fn(), lines };
+  } finally {
+    err.mockRestore();
+  }
+}
 
 describe("antgrid phones CLI", () => {
-  it("allow resolves a label to projectId and writes the allowlist", async () => {
-    const { dir, store } = seeded();
-    const code = await phonesAllow(store, catalog, "a", "pk1");
-    expect(code).toBe(0);
-    expect(store.isAllowed("pk1", "projA")).toBe(true);
-    rmSync(dir, { recursive: true });
-  });
-
-  it("allow fails closed on an unknown project (no write, non-zero exit)", async () => {
-    const { dir, store } = seeded();
-    const code = await phonesAllow(store, catalog, "ghost", "pk1");
-    expect(code).not.toBe(0);
-    expect(store.get("pk1")?.allowedProjects).toEqual([]);
-    rmSync(dir, { recursive: true });
-  });
-
-  it("deny removes a previously-allowed project", async () => {
-    const { dir, store } = seeded();
-    await phonesAllow(store, catalog, "a", "pk1");
-    const code = await phonesDeny(store, catalog, "projA", "pk1");
-    expect(code).toBe(0);
-    expect(store.isAllowed("pk1", "projA")).toBe(false);
-    rmSync(dir, { recursive: true });
-  });
-
-  it("deny resolves a path/label the same way allow did", async () => {
-    const { dir, store } = seeded();
-    // Grant by label, revoke by a DIFFERENT alias for the same project.
-    await phonesAllow(store, catalog, "a", "pk1");
-    expect(store.isAllowed("pk1", "projA")).toBe(true);
-    const code = await phonesDeny(store, catalog, "/work/a", "pk1");
-    expect(code).toBe(0);
-    expect(store.isAllowed("pk1", "projA")).toBe(false);
-    rmSync(dir, { recursive: true });
-  });
-
-  it("deny reports no-change (non-zero exit) when the project was not allowed", async () => {
-    const { dir, store } = seeded();
-    // Nothing granted → deny must NOT report success.
-    const code = await phonesDeny(store, catalog, "projA", "pk1");
-    expect(code).not.toBe(0);
-    expect(store.isAllowed("pk1", "projA")).toBe(false);
-    rmSync(dir, { recursive: true });
-  });
-
-  it("deny fails closed on an unknown project ref (nothing revoked)", async () => {
-    const { dir, store } = seeded();
-    await phonesAllow(store, catalog, "a", "pk1");
-    const code = await phonesDeny(store, catalog, "ghost", "pk1");
-    expect(code).not.toBe(0);
-    // The real grant is untouched — a typo'd ref must never appear to revoke.
-    expect(store.isAllowed("pk1", "projA")).toBe(true);
-    rmSync(dir, { recursive: true });
-  });
-
   it("list surfaces each phone's last seen (the value the touch refresh keeps current)", () => {
     const { dir, store } = seeded();
     store.touchLastSeen("pk1", "2026-07-27T09:30:00.000Z");
@@ -86,7 +36,7 @@ describe("antgrid phones CLI", () => {
     const log = spyOn(console, "log").mockImplementation((...args: unknown[]) => { lines.push(args.join(" ")); });
     expect(phonesList(store)).toBe(0);
     log.mockRestore();
-    expect(lines).toEqual(["Pixel  [d1]  last seen: 2026-07-27T09:30:00.000Z  allowed: (none)"]);
+    expect(lines).toEqual(["Pixel  [d1]  last seen: 2026-07-27T09:30:00.000Z"]);
     store.close();
     rmSync(dir, { recursive: true });
   });
@@ -97,7 +47,7 @@ describe("antgrid phones CLI", () => {
     // A hand-edited file: readFile applies no per-field validation.
     writeFileSync(
       join(dir, "agents", "paired-phones.json"),
-      JSON.stringify({ version: 1, phones: [{ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", allowedProjects: [] }] }),
+      JSON.stringify({ version: 1, phones: [{ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x" }] }),
     );
     const lines: string[] = [];
     const log = spyOn(console, "log").mockImplementation((...args: unknown[]) => { lines.push(args.join(" ")); });
@@ -107,17 +57,18 @@ describe("antgrid phones CLI", () => {
     rmSync(dir, { recursive: true });
   });
 
-  it("remove drops the phone entirely", () => {
+  it("remove drops the phone entirely and says it is not a revocation", () => {
     const { dir, store } = seeded();
-    const code = phonesRemove(store, "pk1");
+    const { result: code, lines } = captureStderr(() => phonesRemove(store, "pk1", dir));
     expect(code).toBe(0);
     expect(store.has("pk1")).toBe(false);
+    expect(lines.join(" ")).toContain("does not revoke");
     rmSync(dir, { recursive: true });
   });
 
   it("remove fails (exit 2) on an unknown phoneRef, store unchanged", () => {
     const { dir, store } = seeded();
-    const code = phonesRemove(store, "nope");
+    const { result: code } = captureStderr(() => phonesRemove(store, "nope", dir));
     expect(code).toBe(2);
     expect(store.has("pk1")).toBe(true);
     rmSync(dir, { recursive: true });
@@ -130,17 +81,55 @@ describe("antgrid phones CLI", () => {
     store.upsert({
       phonePubkey: "pkA", phoneDeviceId: "dA", label: "Pixel",
       pairedAt: "2026-01-01T00:00:00Z", lastSeenAt: "2026-01-01T00:00:00Z",
-      allowedProjects: [],
     });
     store.upsert({
       phonePubkey: "pkB", phoneDeviceId: "dB", label: "Pixel",
       pairedAt: "2026-01-01T00:00:00Z", lastSeenAt: "2026-01-01T00:00:00Z",
-      allowedProjects: [],
     });
-    const code = phonesRemove(store, "Pixel");
+    const { result: code } = captureStderr(() => phonesRemove(store, "Pixel", dir));
     expect(code).toBe(2);
     expect(store.has("pkA")).toBe(true);
     expect(store.has("pkB")).toBe(true);
+    rmSync(dir, { recursive: true });
+  });
+
+  // The CLI can be the FIRST new-build process to touch a v1 abDir, and its
+  // flush sheds the `allowedProjects` the mobile-access migration derives the
+  // machine switch from. Running the migration first is what keeps a user who
+  // only ever granted through `antgrid phones allow` mobile-reachable.
+  it("remove runs the mobile-access migration before its flush strips the v1 grants", () => {
+    const dir = mkdtempSync(join(tmpdir(), "antgrid-cli-"));
+    mkdirSync(join(dir, "agents"), { recursive: true });
+    writeFileSync(
+      join(dir, "agents", "paired-phones.json"),
+      JSON.stringify({
+        version: 1,
+        phones: [
+          { phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projA"] },
+          { phonePubkey: "pk2", phoneDeviceId: "d2", pairedAt: "x", lastSeenAt: "x", allowedProjects: [] },
+        ],
+      }, null, 2),
+    );
+
+    const store = loadPairedPhones(dir);
+    const { result: code } = captureStderr(() => phonesRemove(store, "pk2", dir));
+    expect(code).toBe(0);
+
+    // The grants are gone from disk now...
+    const raw = JSON.parse(
+      readFileSync(join(dir, "agents", "paired-phones.json"), "utf8"),
+    ) as { phones: { allowedProjects?: string[] }[] };
+    expect(raw.phones.every((p) => p.allowedProjects === undefined)).toBe(true);
+    // ...but the migration already saw them, so the machine stays reachable.
+    expect(loadMobileAccessPolicy(dir).isEnabled()).toBe(true);
+
+    rmSync(dir, { recursive: true });
+  });
+
+  it("remove leaves the switch off when there was nothing to migrate", () => {
+    const { dir, store } = seeded();
+    captureStderr(() => phonesRemove(store, "pk1", dir));
+    expect(loadMobileAccessPolicy(dir).isEnabled()).toBe(false);
     rmSync(dir, { recursive: true });
   });
 });

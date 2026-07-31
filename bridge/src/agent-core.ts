@@ -19,9 +19,9 @@ import { loadConfig, findConfigFile, projectName, type AbConfig } from "./config
 import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from "./bootstrap";
 import { resolveAgent, listKnownTools } from "./known-agents";
 import { augmentAgentLaunch } from "./agent-launch-augmenter";
-import { createMessage, type AbMessage, type RpcRequest, type SessionEntry } from "./protocol";
+import { createMessage, HandlerConfigureWire, type AbMessage, type RpcRequest, type SessionEntry } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
-import { startApiServer, type ApiServerHandle } from "./api-server";
+import { startApiServer, type ApiServerHandle, type SessionTitleBody } from "./api-server";
 import { MessageBus } from "./message-bus";
 import { resolveAbDir } from "./antgrid-dir";
 import { computeProjectId } from "./project-id";
@@ -30,18 +30,16 @@ import { ConfigController } from "./config-controller";
 import { detectInstalledTools } from "./tool-detector";
 import { SessionManager } from "./session-manager";
 import { SessionNamer } from "./session-namer";
-import { resolveStructuredTitle } from "./title-resolver";
+import { resolveStructuredTitle } from "./agents/title-dispatch";
+import { generateSessionTitle } from "./agents/title-generate";
+import { agentSpec, BY_HOOK_NAME } from "./agents/registry";
 import { HandlerEngine } from "./handler/engine";
+import { createDispatchAdapter, createPtyAdapter } from "./handler/session-adapter";
+import { createStructuredAdapter } from "./handler/structured-adapter";
 import { dispatchRpc } from "./rpc/methods";
 import { StructuredAgentManager } from "./structured/structured-manager";
-import { CodexDriver } from "./codex/codex-driver";
-import { spawnCodex } from "./codex/spawn-codex";
 import { parseCodexVersion } from "./codex/codex-version";
 import { TOOL_UPDATE_SPECS, createToolUpdateChecker, execToolUpdate, execToolVersion, runToolUpdate, updateSpecFor } from "./agent-update";
-import { OpencodeDriver, type OpencodeClientLike } from "./opencode/opencode-driver";
-import { spawnOpencode } from "./opencode/spawn-opencode";
-import { ClaudeDriver } from "./claude/claude-driver";
-import { spawnClaude } from "./claude/spawn-claude";
 import { getGitStatus, gitCommit, gitDiscard, type GitFileEntry } from "./git";
 
 // Tracks terminal ids that have pinged /hook-alive (codex SessionStart probe).
@@ -78,15 +76,8 @@ export function buildChatSpawnAugment(
   };
 }
 
-// codex app-server rejects the -c hooks.* args that augmentAgentLaunch emits for
-// the interactive TUI (its -c parser errors on hooks.state={...} — "expected a
-// map"). Titles only need the top-level notify=[...] program, which app-server
-// DOES honor, so slice out just that -c pair. See the chat-mode title spike.
-export function codexNotifyOnlyArgs(augArgs: string[]): string[] {
-  const i = augArgs.findIndex((a) => a.startsWith("notify="));
-  if (i < 1) return [];
-  return [augArgs[i - 1], augArgs[i]]; // ["-c", "notify=[...]"]
-}
+// Lives with codex's driver (it is codex's app-server quirk, not a core one).
+export { codexNotifyOnlyArgs } from "./agents/codex/driver";
 
 export interface AgentCore {
   /** Wire up an outbound transport. The bus's inbound handler is set so the
@@ -102,7 +93,8 @@ export interface AgentCore {
   readonly projectId: string;
   readonly abDir: string;
   readonly nextKeypair: () => EphemeralKeypair;
-  /** Persistent trust list for paired phones (machine-level, shared across projects). */
+  /** Machine-level phone registry (identity, label, push routing), shared across
+   *  projects. Not an authorization store — see mobile-access-policy.ts. */
   readonly pairedPhones: PairedPhonesStore;
   /** Lifecycle hooks the transport invokes. */
   handleTunnelMessage(raw: unknown): void;
@@ -115,11 +107,11 @@ export interface AgentCore {
   setPlainHook(fn: ((data: object) => void) | null): void;
   /** Wire a provider that returns the Ed25519 pubkey (standard base64) of the
    *  phone currently paired on the transport, or null when there is no relay
-   *  peer (e.g. local/loopback transport, or pre-handshake). The allowlist gate
-   *  consults this on every inbound message to authorize project verbs per
-   *  phone. The remote transport wires it to `RelayClient.currentPeerPubkey()`;
-   *  local mode never sets it (so it stays null and the gate is skipped). Pass
-   *  `null` to clear it. */
+   *  peer (e.g. local/loopback transport, or pre-handshake). The mobile-access
+   *  gate consults this only to tell a remote peer from the local owner — it
+   *  authorizes nothing per phone. The remote transport wires it to
+   *  `RelayClient.currentPeerPubkey()`; local mode never sets it (so it stays
+   *  null and the gate is skipped). Pass `null` to clear it. */
   setPeerPubkeyProvider(fn: (() => string | null) | null): void;
   /** Stream-gating state. The transport's peer-online/offline callbacks flip
    *  `peerOnline` to suppress the heavy stream while the paired phone is gone. */
@@ -152,8 +144,14 @@ export interface BuildAgentCoreOptions {
    */
   identity: DeviceIdentity;
   /** Shared machine-level paired-phones store. When omitted, a machine-level
-   *  store is loaded from abDir (single shared file, not per-project). */
+   *  store is loaded from abDir (single shared file, not per-project). Identity,
+   *  labels and push routing only — it carries no authorization. */
   pairedPhones?: PairedPhonesStore;
+  /** Whether this machine is reachable from mobile — the sole authorization gate
+   *  for a remote phone (see mobile-access-policy.ts). Host-supplied; a bare
+   *  agent with no host omits it and the gate reads FAIL-CLOSED, so an
+   *  unwired core can never be driven by a phone. */
+  mobileAccessEnabled?: () => boolean;
   /** Fired when a turn-start hook pings the api-server (`POST /turn-start`), so
    *  the owning ProjectCore can reset its control-plane work status to "working"
    *  on a fresh turn. Bridge-internal — never surfaces to the app.
@@ -227,9 +225,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     needsFirstRun = true;
   }
 
-  // Paired-phone trust list, constructed eagerly so it exists whether the
-  // agent runs in local or remote mode.
+  // Paired-phone identity/push registry, constructed eagerly so it exists
+  // whether the agent runs in local or remote mode.
   const pairedPhones = opts.pairedPhones ?? loadPairedPhones(abDir);
+  const mobileAccessEnabled = opts.mobileAccessEnabled ?? (() => false);
 
   // Resolve synthetic agent terminal (if any)
   interface AgentTerminalSpec {
@@ -300,6 +299,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   let manager: TerminalManager | null = null;
   let sessions: SessionManager | null = null;
   let namer: SessionNamer | null = null;
+  // Slots we've already spent a title-generation spawn on, keyed
+  // `<terminalId>:<agentSessionId>`. The /session-title post repeats every turn,
+  // so without this a session whose agent never names itself would pay a model
+  // call per turn, forever. Keyed by agent session, not slot, so a resume or a
+  // fresh thread in the same slot gets one more attempt.
+  const titleGenAttempted = new Set<string>();
   let structured: StructuredAgentManager | null = null;
   // Holds this core's api-server handle. Declared before `manager` so the
   // TerminalManager's late-bound getApiPort getter can read `apiServer.port`
@@ -318,35 +323,35 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     return generateEphemeralKeypair();
   }
 
-  // Connected-phone pubkey provider for the allowlist gate (Phase B). Wired by
-  // the remote/promotion transports to RelayClient.currentPeerPubkey(); unset
-  // (null) in local mode, where there is no relay peer and the gate is skipped.
+  // "Is this a REMOTE peer?" signal, not an authorization input. Wired by the
+  // remote/promotion transports to RelayClient.currentPeerPubkey(); unset (null)
+  // in local mode, where there is no relay peer.
   let peerPubkeyProvider: (() => string | null) | null = null;
   function setPeerPubkeyProvider(fn: (() => string | null) | null) {
     peerPubkeyProvider = fn;
   }
 
-  // Allowlist gate (Phase B), shared by every inbound path (bus verbs AND the
-  // tunnel/HTTP-proxy path, which bypasses the bus). A trusted phone may drive a
-  // project only if that project is on its explicit allowlist — trust alone is
-  // not enough. Fail-closed: drop when a phone pubkey IS present but not allowed.
-  // When no phone pubkey is present (local/loopback transport has no relay peer,
-  // or pre-pair) the gate is skipped — local control's trust boundary is the
-  // loopback socket + token, and there is no admitted phone to scope yet.
+  // Mobile-access gate, shared by every inbound path (bus verbs AND the
+  // tunnel/HTTP-proxy path, which bypasses the bus). An account-trusted phone
+  // may drive this project only while the machine is mobile-reachable. When no
+  // phone pubkey is present (local/loopback transport has no relay peer) the
+  // gate is skipped — local control's trust boundary is the loopback socket +
+  // token, and the desktop must keep driving its own machine with mobile access
+  // off. Fail-closed otherwise: an unwired provider defaults to disabled.
   function currentPhoneAllowed(): boolean {
     const phonePubkey = peerPubkeyProvider?.() ?? null;
     if (!phonePubkey) return true;
-    return pairedPhones.isAllowed(phonePubkey, project.id);
+    return mobileAccessEnabled();
   }
 
   function handleTunnelMessage(raw: unknown) {
     const msg = parseTunnelMessage(raw as string | object);
     if (!msg) { log.warn("Invalid tunnel message, dropping"); return; }
     // Tunnel verbs proxy arbitrary HTTP to localhost:<port> and return the body,
-    // so a not-allowed phone could otherwise read a project's dev-server/preview
-    // data without ever touching the bus dispatch gate. Gate here too.
+    // so a phone could otherwise read a project's dev-server/preview data
+    // without ever touching the bus dispatch gate. Gate here too.
     if (!currentPhoneAllowed()) {
-      log.warn("Dropping tunnel %s from not-allowed phone for project %s", msg.type, project.id);
+      log.warn("Dropping tunnel %s: mobile access is disabled (project %s)", msg.type, project.id);
       return;
     }
     if (msg.type === "tunnel:http-request" && tunnelManager) {
@@ -359,11 +364,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   function handleAbMessage(msg: AbMessage) {
     switch (msg.type) {
       case "agent:prompt":
+      case "agent:permission-resolve":
+      case "agent:question-resolve":
+        // A human answer from the app — reset the runaway guard and clear
+        // pending escalations, mirroring what terminal:input does for PTY
+        // slots. The "\r" sentinel exists because onUserReply's CR gate is
+        // built for per-keystroke PTY input; an app-routed prompt/resolve IS
+        // a submitted answer by definition. The engine's own auto-reply calls
+        // structured.handleAgentMessage directly and never passes through
+        // here (it must not reset the guard that counts it).
+        handlerEngine.onUserReply(msg.sessionId, "\r");
+        void structured?.handleAgentMessage(msg);
+        return;
       case "agent:cancel":
       case "agent:set-config":
       case "agent:session-action":
-      case "agent:permission-resolve":
-      case "agent:question-resolve":
         void structured?.handleAgentMessage(msg);
         return;
     }
@@ -374,11 +389,43 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // Typing into a session counts as activity — float it up the drawer.
         // No-ops for non-session terminals (service PTYs).
         sessions?.touch(msg.terminalId);
-        // A user reply resets the handler's runaway guard and clears the pending count.
-        handlerEngine.onUserReply(msg.terminalId);
+        // A user reply resets the handler's runaway guard; a submitted line
+        // (data carrying CR/LF) also clears the pending escalations.
+        handlerEngine.onUserReply(msg.terminalId, msg.data);
         break;
-      case "handler:configure":
-        handlerEngine.configure({ enabled: msg.enabled, template: msg.template, model: msg.model });
+      case "handler:configure": {
+        // parseMessageFast (the encrypted/local hot path) validates only the
+        // message type — every field below is still untrusted, and validating
+        // just the brief is not enough: a `notifyOnly` that arrives absent or
+        // non-bool reads as falsy and would arm an auto-injecting session the
+        // user asked to be notify-only.
+        const parsed = HandlerConfigureWire.safeParse(msg);
+        if (parsed.success && parsed.data.armed && parsed.data.brief) {
+          const { terminalId, brief, notifyOnly, judgeTool, judgeModel } = parsed.data;
+          handlerEngine.arm({ terminalId, brief, notifyOnly, judgeTool, judgeModel });
+        } else if (parsed.success) {
+          handlerEngine.disarm(parsed.data.terminalId);
+        } else {
+          // Reject WITHOUT disarming: a malformed arm/edit must not tear down
+          // the live armed session it failed to replace, and refusing to arm
+          // already closes the notifyOnly hole. Re-emit status so the sender's
+          // UI resyncs to the state that actually holds.
+          logger.warn("handler:configure rejected: malformed payload");
+          handlerEngine.emitStatus();
+        }
+        break;
+      }
+      case "handler:planRequest":
+        // Same untrusted-payload rule: a non-string terminalId would spend a full
+        // judge spawn planning against an empty context for a slot that can't exist.
+        if (typeof msg.terminalId !== "string") {
+          logger.warn("handler:planRequest ignored: malformed payload");
+          break;
+        }
+        handlerEngine.plan(msg.terminalId, {
+          judgeTool: typeof msg.judgeTool === "string" ? msg.judgeTool : undefined,
+          judgeModel: typeof msg.judgeModel === "string" ? msg.judgeModel : undefined,
+        }).catch((err) => logger.error("Handler plan failed: %s", err));
         break;
       case "terminal:start": {
         const savedService = getServices().find((s) => s.name === msg.terminalId);
@@ -573,7 +620,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "agent:update": {
-        // In-app self-update. Reaches here only through the allowlist gate, so no
+        // In-app self-update. Reaches here only through the mobile-access gate, so no
         // extra authz. Dispatch by canonical tool id; a tool with no known self-
         // updater fails soft with a message (never touches an install).
         const spec = updateSpecFor(msg.tool);
@@ -807,16 +854,42 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   // Eager, factory-scoped (NOT in setupServices): handleAbMessage and startApiServer
   // are wired synchronously and can fire before setupServices resolves. The arrow
-  // deps defer their reads, so a later-assigned sendAb/manager is picked up correctly.
-  // No SessionManager dependency. Recent output comes from the existing scrollback buffer.
+  // deps defer their reads, so a later-assigned sendAb/manager/sessions is picked
+  // up correctly, same pattern as the existing manager? deps.
   const handlerEngine = new HandlerEngine({
     projectId: project.id,
     projectPath: project.path,
-    tool: () => config.agent?.tool ?? "claude-code",
+    tool: (terminalId) =>
+      (terminalId ? sessions?.get(terminalId)?.tool : undefined) ?? config.agent?.tool ?? "claude-code",
+    agentSessionId: (terminalId) => sessions?.get(terminalId)?.agentSessionId,
     abDir,
-    write: (terminalId, data) => manager?.write(terminalId, data),
+    adapter: createDispatchAdapter({
+      isChat: (id) => sessions?.get(id)?.mode === "chat",
+      pty: createPtyAdapter({
+        write: (terminalId, data) => manager?.write(terminalId, data),
+        getRecentOutput: (terminalId) => manager?.getScrollback(terminalId)?.text ?? "",
+        getTranscriptPath: (terminalId) => sessions?.getAgentTranscriptPath(terminalId),
+      }),
+      chat: createStructuredAdapter({
+        // Through handleAgentMessage, not driver.prompt directly: a dead or
+        // missing driver then surfaces as agent:error instead of a silent
+        // throw. This path never re-enters handleAbMessage, so an auto-reply
+        // cannot reset the runaway guard that counts it.
+        prompt: (id, text) => {
+          // requestId is required by AgentPromptMessage; drivers use it only
+          // for send-correlation, so a fresh UUID is sufficient.
+          void structured?.handleAgentMessage(createMessage("agent:prompt", {
+            sessionId: id, requestId: crypto.randomUUID(), text,
+          }));
+        },
+        getTranscriptPath: (id) => sessions?.getAgentTranscriptPath(id),
+        getSnapshot: (id) => structured?.getTranscriptSnapshot(id) ?? Promise.resolve([]),
+      }),
+    }),
     sendAb: (msg) => sendAb(msg),
-    getRecentOutput: (terminalId) => manager?.getScrollback(terminalId)?.text ?? "",
+    sendPush: (message) => sendAb(createMessage("notification:push", {
+      notificationType: "task_complete", message, projectId: project.id,
+    })),
   });
 
   let cachedGitBranch: string | null = null;
@@ -1174,8 +1247,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }, connState, () => apiServer?.port ?? null);
 
     // One update-checker per tool for this project, built straight from the spec
-    // table so a new tool needs only a TOOL_UPDATE_SPECS entry — not a bespoke
-    // checker wired here. Each shares a latest-version cache across the project's
+    // table so a new tool needs only an `update` field in agents/registry.ts —
+    // not a bespoke checker wired here. Each shares a latest-version cache across the project's
     // sessions of that tool (concurrent starts collapse onto one npm fetch).
     // Advisory-only signal; every checker swallows its own errors.
     const updateCheckers = new Map(
@@ -1196,107 +1269,59 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // project/config/spawnCodex/spawnOpencode, not on `sessions`; the one back-
     // reference (onAgentSession → sessions) is a closure that resolves at call
     // time, after `sessions` is assigned. Both stay hoisted `let` bindings.
+    //
+    // Chat-mode Handler event source: structured drivers emit turn/permission/
+    // question frames in-process, so tap the outbound funnel instead of relying
+    // on injected hooks. The PTY path keeps its hook POSTs; onHandlerEvent
+    // drops hook events for chat slots so claude/codex chat spawns (which reuse
+    // the terminal-mode plugin) don't fire every turn_end twice.
+    const observeChatFrameForHandler = (msg: AbMessage) => {
+      let evt:
+        | { terminalId: string; event: "turn_end" | "permission_request" | "question"; detail?: string }
+        | null = null;
+      // "error" counts as a turn boundary, not just "end_turn": a turn that died
+      // leaves the agent idle and blocked, which is precisely when a supervising
+      // handler must act. Skipping it let an armed session go silent forever on
+      // the one outcome the user most wants to be woken for. "cancelled" stays
+      // ignored — the user cancelled it, so they are already present.
+      if (msg.type === "agent:turn-end" && (msg.stopReason === "end_turn" || msg.stopReason === "error")) {
+        evt = { terminalId: msg.sessionId, event: "turn_end" };
+      } else if (msg.type === "agent:permission-request") {
+        evt = { terminalId: msg.sessionId, event: "permission_request", detail: msg.title };
+      } else if (msg.type === "agent:question") {
+        evt = { terminalId: msg.sessionId, event: "question", detail: msg.prompt };
+      } else if (msg.type === "agent:request-retracted") {
+        // The blocking prompt is gone — clear its forced escalation instead of
+        // leaving a "needs you" row pointing at a prompt that no longer exists.
+        handlerEngine.onPromptRetracted(msg.sessionId);
+      }
+      if (evt) {
+        handlerEngine.handleEvent(evt).catch((err) => logger.error("Handler chat event failed: %s", err));
+      }
+    };
     structured = new StructuredAgentManager({
-      sendMessage: (msg) => sendAb(msg),
+      sendMessage: (msg) => {
+        observeChatFrameForHandler(msg);
+        sendAb(msg);
+      },
       dropSessionReplay: (sessionId) => dropSessionReplay(sessionId),
       onAgentSession: (sessionId, agentSessionId) => sessions?.setAgentSession(sessionId, agentSessionId),
       onSetConfig: (sessionId, key, value) => sessions?.setSessionConfig(sessionId, key, value),
-      driverFactory: (sessionId, tool, send, resumeId) => {
-        if (tool === "opencode") {
-          // spawnOpencode is async (it awaits server startup); the driver's start()
-          // performs the await via a thunked client. Build a lazy OpencodeClientLike
-          // that resolves the spawn on first use so the factory stays synchronous.
-          let spawned: Promise<Awaited<ReturnType<typeof spawnOpencode>>> | null = null;
-          const ensure = () => (spawned ??= spawnOpencode({ cwd: project.path }));
-          const lazy: OpencodeClientLike = {
-            createSession: async (o) => (await ensure()).client.createSession(o),
-            messages: async (s) => (await ensure()).client.messages(s),
-            deleteMessage: async (s, m) => (await ensure()).client.deleteMessage(s, m),
-            prompt: async (s, t, o) => (await ensure()).client.prompt(s, t, o),
-            abort: async (s) => (await ensure()).client.abort(s),
-            summarize: async (s, m) => (await ensure()).client.summarize(s, m),
-            replyPermission: async (s, id, r) => (await ensure()).client.replyPermission(s, id, r),
-            replyQuestion: async (id, a) => (await ensure()).client.replyQuestion(id, a),
-            listCommands: async () => (await ensure()).client.listCommands(),
-            listAgents: async () => (await ensure()).client.listAgents(),
-            listProviders: async () => (await ensure()).client.listProviders(),
-            command: async (s, o) => (await ensure()).client.command(s, o),
-            events: async function* () { yield* (await ensure()).client.events(); },
-            // Await the real teardown (server exit) so an in-app `opencode
-            // upgrade` never runs while the SDK server still holds the binary.
-            // Nothing spawned yet → nothing to wait for.
-            dispose: async () => { await spawned?.then((s) => s.client.dispose()); },
-          };
-          emitUpdateCheck("opencode", sessionId, send);
-          return new OpencodeDriver({ sessionId, client: lazy, sendMessage: send, title: project.id,
-            onTitle: (title) => namer?.onStructuredTitle(sessionId, title) });
-        }
-        if (tool === "claude-code") {
-          // Bounded tail of the subprocess's stderr: startup failures (bad auth,
-          // corrupted install) otherwise vanish silently — the SDK only invokes
-          // this callback, it never surfaces stderr any other way.
-          const stderrLines: string[] = [];
-          let stderrBytes = 0;
-          const pushStderr = (chunk: string) => {
-            for (const line of chunk.split("\n")) {
-              if (!line) continue;
-              stderrLines.push(line);
-              stderrBytes += line.length;
-            }
-            while (stderrLines.length > 40 || stderrBytes > 8_192) {
-              stderrBytes -= stderrLines.shift()?.length ?? 0;
-            }
-          };
-          // Reuse the terminal-mode title plugin in chat mode so /session-title
-          // auto-names the session from the conversation. chatAug.args is
-          // ["--plugin-dir", <dir>]; map it to the SDK's extraArgs shape.
-          const chatAug = buildChatSpawnAugment("claude-code", sessionId, apiServer?.port ?? null, abDir);
-          const pluginDir = chatAug.args[chatAug.args.indexOf("--plugin-dir") + 1];
-          // `claude update` is install-method-sensitive, but this is detection
-          // only; the run itself is fail-soft (see the agent:update handler).
-          emitUpdateCheck("claude-code", sessionId, send);
-          return new ClaudeDriver({
-            sessionId,
-            sendMessage: send,
-            cwd: project.path,
-            spawn: ({ canUseTool, abort, resume }) =>
-              spawnClaude({ cwd: project.path, canUseTool, resume,
-                onStderr: pushStderr, abortController: abort,
-                ...(pluginDir ? { extraArgs: { "plugin-dir": pluginDir } } : {}),
-                extraEnv: chatAug.env }),
-            onSessionId: (agentSessionId) => sessions?.setAgentSession(sessionId, agentSessionId),
-            stderrTail: () => stderrLines.join("\n"),
-          });
-        }
-        // default: codex
-        const chatAug = buildChatSpawnAugment("codex", sessionId, apiServer?.port ?? null, abDir);
-        const spawned = spawnCodex({
-          cwd: project.path,
-          args: ["app-server", ...codexNotifyOnlyArgs(chatAug.args)],
-          env: chatAug.env,
-        });
-        const driver = new CodexDriver({
+      driverFactory: (sessionId, tool, send) => {
+        // Chat mode is gated on isChatCapableTool, which IS "the spec has a
+        // driver" — so an unreachable tool here means the two disagreed.
+        const driver = agentSpec(tool)?.driver;
+        if (!driver) throw new Error(`tool "${tool}" has no chat driver`);
+        return driver({
           sessionId,
-          endpoint: spawned.endpoint,
-          sendMessage: send,
-          cwd: project.path,
-          // failureDiagnosis settles only when the codex process is gone; if
-          // start failed while the process somehow lives on, give up quickly
-          // and let the original error surface instead of hanging startChat.
-          diagnoseStartFailure: () =>
-            Promise.race([spawned.failureDiagnosis, Bun.sleep(1_500).then(() => null)]),
+          send,
+          projectPath: project.path,
+          projectId: project.id,
+          chatAugment: () => buildChatSpawnAugment(tool, sessionId, apiServer?.port ?? null, abDir),
+          onAgentSession: (agentSessionId) => sessions?.setAgentSession(sessionId, agentSessionId),
+          onTitle: (title) => namer?.onStructuredTitle(sessionId, title),
+          emitUpdateCheck: () => emitUpdateCheck(tool, sessionId, send),
         });
-        // Tie the spawned process lifetime to the driver's dispose. dispose
-        // resolves only once codex has fully exited (spawned.kill awaits
-        // proc.exited) so the manager can serialize a stop→start handoff — codex's
-        // global ~/.codex sqlite lock must be released before a restart spawns.
-        const origDispose = driver.dispose.bind(driver);
-        driver.dispose = async () => { origDispose(); await spawned.kill(); };
-        // Proactive version check: if the spawned codex is behind npm's latest
-        // (and not dismissed via ~/.codex/version.json), nudge the app with a
-        // dismissible chip. Same seam as every other tool.
-        emitUpdateCheck("codex", sessionId, send);
-        return driver;
       },
     });
 
@@ -1327,7 +1352,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           }));
         });
       },
-      onStopChat: (id) => { void structured?.stopChat(id); },
+      onStopChat: (id) => {
+        // Mirrors onTerminalExited for PTYs: reclaim guard + pending state and
+        // auto-disarm — a stopped driver can't be supervised.
+        handlerEngine.onTerminalExit(id);
+        void structured?.stopChat(id);
+      },
     });
 
     // Policy unit that turns title signals (OSC-2 + injected hook/plugin POSTs)
@@ -1548,10 +1578,45 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sendAb(buildAgentHello(config, VERSION));
     // Re-sync the config-error dot on every connect (see emitConfigState).
     emitConfigState();
+    // Seed the app's Handler defaults (judge overrides, notify-only) even when
+    // nothing is armed — the briefing sheet arms with what it was seeded with.
+    handlerEngine.emitStatus();
     // Sessions are no longer auto-created on connect; the app routes the user
     // to the New Session page when the list is empty so they pick an agent.
     // Existing sessions are still restored + listed by session:list.
     void setupServices().catch((err) => log.error("setupServices failed: %s", err));
+  }
+
+  /**
+   * Last resort for a session no agent will name: ask the agent's own headless
+   * CLI. Gated hard, because it costs a model spawn — only when the native read
+   * gave us nothing better than the user's opening prompt (see ResolvedTitle),
+   * once per agent session, and never for a session the user already renamed.
+   *
+   * Fire-and-forget by design: /session-title is posted from a hook the agent is
+   * blocking on, so the reply must not wait on a judge spawn.
+   */
+  async function maybeGenerateTitle(body: SessionTitleBody, fallback?: string): Promise<void> {
+    const tool = body.agent ? BY_HOOK_NAME[body.agent] : undefined;
+    if (!tool || !body.sessionId) return;
+    if (sessions && !sessions.isAutoNameable(body.terminalId)) return;
+    const key = `${body.terminalId}:${body.sessionId}`;
+    // Claim the slot BEFORE awaiting: two turns can end while the first spawn is
+    // still running, and both would otherwise pass the check.
+    if (titleGenAttempted.has(key)) return;
+    titleGenAttempted.add(key);
+    const title = await generateSessionTitle({
+      tool,
+      cwd: project.path,
+      transcriptPath: body.transcriptPath,
+      agentSessionId: body.sessionId,
+      fallbackContext: fallback,
+    });
+    // Re-check: the spawn takes tens of seconds, and the user may have renamed
+    // the session (or Claude may have written its own title) in that window.
+    if (!title || (sessions && !sessions.isAutoNameable(body.terminalId))) return;
+    log.info("generated a session title for %s (%s)", body.terminalId, tool);
+    namer?.onStructuredTitle(body.terminalId, title);
   }
 
   // Start local API server for MCP/hook integration (works in both modes)
@@ -1562,6 +1627,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sendAb: (msg) => sendAb(msg),
     sessionName: (terminalId) => sessions?.get(terminalId)?.name,
     onHandlerEvent: (body) => {
+      // Chat slots are fed by the in-process driver tap (observeChatFrameForHandler);
+      // the reused title plugin's hooks still POST here for claude/codex chat
+      // spawns — drop those or every turn_end fires twice.
+      if (sessions?.get(body.terminalId)?.mode === "chat") return;
       handlerEngine.handleEvent({
         terminalId: body.terminalId, event: body.event,
         transcriptPath: body.transcriptPath, sessionId: body.sessionId,
@@ -1582,16 +1651,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         namer?.onStructuredTitle(body.terminalId, body.title);
         return;
       }
-        if (
-          body.agent === "claude" ||
-          body.agent === "codex" ||
-          body.agent === "github-copilot"
-        ) {
-        const title = await resolveStructuredTitle(body.agent, {
-          sessionId: body.sessionId,
-          transcriptPath: body.transcriptPath,
-        });
-        if (title) namer?.onStructuredTitle(body.terminalId, title);
+      const resolved = await resolveStructuredTitle(body.agent, {
+        sessionId: body.sessionId,
+        transcriptPath: body.transcriptPath,
+      });
+      // Apply the native read first either way: even a first-message title beats
+      // "Session 3" while generation is in flight, and it's what we keep if
+      // generation fails.
+      if (resolved) namer?.onStructuredTitle(body.terminalId, resolved.title);
+      if (!resolved || resolved.kind === "first-message") {
+        void maybeGenerateTitle(body, resolved?.title);
       }
     },
     onHookAlive: (terminalId) => { codexHookAlive.add(terminalId); },
@@ -1603,8 +1672,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // Intercepted before the generic dispatchRpc registry — like sessions.list/
   // sessions.delete's own special-casing — because it needs `structured`
   // (StructuredAgentManager) in closure scope, which rpc/methods.ts's registry
-  // doesn't have access to. Runs through the SAME allowlist gate as every other
-  // inbound verb (see the currentPhoneAllowed() check in attachTransport below);
+  // doesn't have access to. Runs through the SAME mobile-access gate as every
+  // other inbound verb (see the currentPhoneAllowed() check in attachTransport);
   // no separate authz here.
   async function handleTranscriptSnapshotRequest(msg: RpcRequest): Promise<AbMessage> {
     const parsed = TranscriptSnapshotParams.safeParse(msg.params ?? {});
@@ -1628,24 +1697,24 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Plaintext (tunnel) sender bypasses the bus — see setPlainHook.
     sendPlain = (data) => busPlainHook?.(data);
     bus.setInboundHandler((msg, channel, source) => {
-      // Allowlist gate (Phase B): the single chokepoint through which both RPC
+      // Mobile-access gate: the single chokepoint through which both RPC
       // requests and plain Ab messages enter the core dispatch. Drops EVERY
-      // inbound verb when the connected phone is not allowed for this project,
-      // so a trusted-but-not-allowed phone sees nothing. This sits at the VERB
-      // layer by design (not the pairing/handshake layer): the phone connects
-      // and completes the handshake, but the data plane is inert until an
-      // explicit `allow`. See currentPhoneAllowed() for the local-mode / no-peer
+      // inbound verb while the machine is not mobile-reachable, so an
+      // account-trusted phone sees nothing. This sits at the VERB layer by
+      // design (not the pairing/handshake layer): the phone connects and
+      // completes the handshake, but the data plane is inert until the machine
+      // switch is on. See currentPhoneAllowed() for the local-mode / no-peer
       // skip rationale. The tunnel/HTTP-proxy path is gated separately in
       // handleTunnelMessage (it bypasses this bus).
       //
       // Only RELAY-origin frames are gated. Loopback frames are the desktop
       // owner (trusted by the loopback socket + token); after promotion the
       // loopback session and the relay slot share this one handler, so without
-      // the source check a promoted core would gate the desktop's own input by
-      // the phone's allowlist and silently drop the user's local typing.
+      // the source check a promoted core would gate the desktop's own input on
+      // the machine switch and silently drop the user's local typing.
       if (source !== "loopback" && !currentPhoneAllowed()) {
         log.warn(
-          "Dropping inbound %s from not-allowed phone for project %s",
+          "Dropping inbound %s: mobile access is disabled (project %s)",
           msg.type,
           project.id,
         );

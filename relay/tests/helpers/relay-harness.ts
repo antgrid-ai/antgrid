@@ -14,18 +14,14 @@ export function rawSeedToPkcs8(seed: Uint8Array): Buffer {
 const fakeJtiByDevice = new Map<string, string>();
 
 export interface FakeLicenseGateOptions {
-  /** Fixed sessionLimit, or derive it per agent deviceId (streams/sessionLimit tests). */
-  sessionLimit?: number | ((deviceId: string) => number);
   /** Derive the account uid an agent's token carries — lets tests put two agent
-   *  connections under one account for cross-connection sessionLimit counting. */
+   *  connections under one account (same-account routing, cross-connection
+   *  stream counting). */
   agentUid?: (deviceId: string) => string;
 }
 
 /** Parameterized fake gate. `fakeLicenseGate` below is the opts-less default. */
 export function makeFakeLicenseGate(opts: FakeLicenseGateOptions = {}): LicenseGate {
-  const fixedSessionLimit = typeof opts.sessionLimit === "number" ? opts.sessionLimit : 10;
-  const sessionLimitFor: (deviceId: string) => number =
-    typeof opts.sessionLimit === "function" ? opts.sessionLimit : () => fixedSessionLimit;
   const uidFor = opts.agentUid ?? ((deviceId: string) => `user-${deviceId}`);
   return {
     async verify(_token, deviceId, publicKeyBase64) {
@@ -41,7 +37,6 @@ export function makeFakeLicenseGate(opts: FakeLicenseGateOptions = {}): LicenseG
           deviceId,
           userId: uidFor(deviceId),
           tier: "pro",
-          sessionLimit: sessionLimitFor(deviceId),
           pk: publicKeyBase64,
           revoked: false,
         },
@@ -57,7 +52,6 @@ export function makeFakeLicenseGate(opts: FakeLicenseGateOptions = {}): LicenseG
           deviceId: `app-${token}`,
           userId: `user-app-${token}`,
           tier: "pro",
-          sessionLimit: 10,
           pk: "",
           revoked: false,
         },
@@ -79,6 +73,7 @@ export const defaultConfig: RelayConfig = {
   rateLimitMsgPerSec: 100,
   jsonRateLimitPerSec: 10,
   jsonRateLimitBurst: 30,
+  maxStreamsPerConnection: 1024,
   clockSkewMs: 120000,
   replayTtlMs: 300000,
   pingIntervalMs: 0, // disabled in tests

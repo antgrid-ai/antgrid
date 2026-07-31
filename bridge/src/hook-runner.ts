@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { z } from "zod";
-import { MAX_NOTIFICATION_BODY_LEN } from "./transcript-tail";
+import { AGENTS, BY_HOOK_NAME } from "./agents/registry";
+import type { HookInvocation, HookPath, HookPost } from "./agents/hook-posts";
+
+export type { HookInvocation, HookPath, HookPost };
 
 export const MAX_HOOK_STDIN_BYTES = 64 * 1024;
 // Fallback drain deadline for agents that emit hook JSON then hold stdin open
@@ -15,95 +17,11 @@ const HOOK_STDIN_TIMEOUT_MS = 4500;
 // transcript). Loopback normally completes in milliseconds.
 const HOOK_POST_TIMEOUT_MS = 4000;
 
-// Per-agent event allowlist — the single source of truth for which events the
-// runner acts on. Rust/serde agents serialize an absent field as JSON `null`,
-// so every optional field is `.nullish()`; `.optional()` alone rejects `null`,
-// which fails the whole parse and silently drops every post for that event.
-// "user-prompt" (→ /turn-start) is Claude-specific: Claude exposes a
-// UserPromptSubmit hook that fires before each new turn, and it is the ONLY
-// turn-start signal a terminal-mode session has (chat sessions get precise
-// `agent:turn-start` frames from their driver instead). Codex/Cursor/Copilot
-// expose no pre-turn hook, so a terminal-mode session of those agents reads
-// "done" while it works — the work-status reduction only calls a project
-// working while a turn is open, and theirs never opens. Their turn-END hooks
-// still deliver attention/error/done.
-const HOOK_EVENTS: Record<string, readonly string[]> = {
-  claude: ["session-start", "stop", "notification", "user-prompt"],
-  codex: ["after-agent", "permission-request", "stop", "session-start"],
-  cursor: ["session-start", "stop"],
-  "github-copilot": ["session-start", "agent-stop"],
-};
-
-const ClaudePayloadSchema = z.object({
-  session_id: z.string().nullish(),
-  transcript_path: z.string().nullish(),
-  message: z.string().nullish(),
-});
-
-const SessionPayloadSchema = z.object({
-  session_id: z.string().nullish(),
-  transcript_path: z.string().nullish(),
-});
-
-const CursorStopPayloadSchema = z.object({ status: z.string().nullish() });
-
-const CodexPayloadSchema = z.object({
-  "thread-id": z.string().nullish(),
-  thread_id: z.string().nullish(),
-});
-
-// Codex's Stop hook stdin (StopCommandInput). last_assistant_message is a Rust
-// NullableString — it arrives as null, not absent, so .nullish() is load-bearing:
-// .optional() would reject null.
-const CodexStopPayloadSchema = z.object({
-  last_assistant_message: z.string().nullish(),
-});
-
-const CopilotPayloadSchema = z.object({
-  sessionId: z.string().nullish(),
-  session_id: z.string().nullish(),
-  conversationId: z.string().nullish(),
-  conversation_id: z.string().nullish(),
-  session: z
-    .object({
-      id: z.string().nullish(),
-      sessionId: z.string().nullish(),
-    })
-    .nullish(),
-});
-
-export type HookPath =
-  | "/session-title"
-  | "/notify"
-  | "/handler-event"
-  | "/turn-start"
-  | "/hook-alive";
-
-export interface HookPost {
-  port: number;
-  path: HookPath;
-  body: Record<string, unknown>;
-}
-
-export interface HookInvocation {
-  agent: string;
-  event: string;
-  payload?: string;
-}
-
 export interface HookRunnerDeps {
   env: Record<string, string | undefined>;
   readStdin: () => Promise<string>;
   readFile: (path: string) => string;
   post: (post: HookPost) => Promise<void>;
-}
-
-function parseJson(raw: string): unknown {
-  try {
-    return JSON.parse(raw.replace(/^\uFEFF/, ""));
-  } catch {
-    return {};
-  }
 }
 
 function parsePort(raw: string | undefined): number | null {
@@ -127,176 +45,25 @@ function resolvePort(
   }
 }
 
-function titlePost(
-  port: number,
-  terminalId: string | undefined,
-  sessionId: string | null | undefined,
-  agent: string,
-  extra: Record<string, unknown> = {},
-): HookPost | null {
-  if (!terminalId || !sessionId) return null;
-  return {
-    port,
-    path: "/session-title",
-    body: { terminalId, sessionId, agent, ...extra },
-  };
-}
-
-function parseOrEmpty<T>(schema: z.ZodType<T>, raw: string): T | null {
-  const parsed = schema.safeParse(parseJson(raw));
-  return parsed.success ? parsed.data : null;
-}
-
+/**
+ * The hook dispatch boundary: hook name → registry key → the agent's own hook
+ * profile. An unknown name, an agent with no hook profile, or an event outside
+ * that profile's allowlist all drop the invocation before any payload is read.
+ */
 async function buildPosts(
   invocation: HookInvocation,
   deps: HookRunnerDeps,
 ): Promise<HookPost[]> {
-  if (!HOOK_EVENTS[invocation.agent]?.includes(invocation.event)) return [];
+  const key = BY_HOOK_NAME[invocation.agent];
+  const hooks = key === undefined ? undefined : AGENTS[key].hooks;
+  if (!hooks?.events.includes(invocation.event)) return [];
   const port = resolvePort(invocation.agent, deps);
   if (port === null) return [];
-  const terminalId = deps.env.ANTGRID_TERMINAL_ID;
-  const posts: Array<HookPost | null> = [];
-
-  if (invocation.agent === "claude") {
-    const input = parseOrEmpty(ClaudePayloadSchema, await deps.readStdin());
-    if (!input) return [];
-    if (invocation.event === "session-start" || invocation.event === "stop") {
-      posts.push(
-        titlePost(port, terminalId, input.session_id, "claude", {
-          transcriptPath: input.transcript_path ?? "",
-        }),
-      );
-    }
-    if (invocation.event === "user-prompt") {
-      // A fresh turn began — reset control-plane work status to "working" so a
-      // re-prompt of an existing session (or one resumed after a granted
-      // permission) stops showing the previous turn's done/attention. No
-      // notification: this is state, not a user-facing alert.
-      posts.push({
-        port,
-        path: "/turn-start",
-        body: { ...(terminalId ? { terminalId } : {}) },
-      });
-    }
-    if (invocation.event === "stop") {
-      posts.push({
-        port,
-        path: "/notify",
-        body: {
-          type: "task_complete",
-          agent: "claude",
-          ...(terminalId ? { terminalId } : {}),
-          ...(input.transcript_path ? { transcriptPath: input.transcript_path } : {}),
-        },
-      });
-      if (terminalId) {
-        posts.push({
-          port,
-          path: "/handler-event",
-          body: {
-            terminalId,
-            agent: "claude",
-            event: "turn_end",
-            transcriptPath: input.transcript_path ?? "",
-            sessionId: input.session_id ?? "",
-          },
-        });
-      }
-    }
-    if (invocation.event === "notification") {
-      if (terminalId) {
-        posts.push({
-          port,
-          path: "/handler-event",
-          body: {
-            terminalId,
-            agent: "claude",
-            event: "awaiting_input",
-            transcriptPath: input.transcript_path ?? "",
-            sessionId: input.session_id ?? "",
-          },
-        });
-      }
-      // Claude Code fires this same "notification" hook, with the identical
-      // "Claude is waiting for your input" message, both for a genuine mid-turn
-      // block (e.g. a question tool with no stop event yet) and for its generic
-      // post-completion idle nudge. We can't tell those apart from the message
-      // alone, so tag it "awaiting_input" rather than "permission_request" and
-      // let work-status.ts's turn-state-aware reduction decide whether it's a
-      // live call-to-action or a stale nudge to ignore.
-      const isWaitingNudge = !!input.message && /waiting/i.test(input.message);
-      posts.push({
-        port,
-        path: "/notify",
-        body: {
-          type: isWaitingNudge ? "awaiting_input" : "permission_request",
-          ...(terminalId ? { terminalId } : {}),
-          ...(input.message ? { message: input.message } : {}),
-        },
-      });
-    }
-  } else if (invocation.agent === "codex") {
-    if (invocation.event === "after-agent") {
-      const input = parseOrEmpty(CodexPayloadSchema, invocation.payload ?? "");
-      if (!input || !terminalId) return [];
-      const sessionId = input["thread-id"] ?? input.thread_id;
-      posts.push(titlePost(port, terminalId, sessionId, "codex"));
-      posts.push({
-        port,
-        path: "/handler-event",
-        body: { terminalId, agent: "codex", event: "turn_end" },
-      });
-    } else {
-      const raw = await deps.readStdin();
-      if (invocation.event === "permission-request") {
-        posts.push({ port, path: "/notify", body: { type: "permission_request", ...(terminalId ? { terminalId } : {}) } });
-      } else if (invocation.event === "stop") {
-        // Parse failures fall through to a bare notify rather than returning:
-        // a turn-end notification must survive a payload we can't read.
-        const message = parseOrEmpty(CodexStopPayloadSchema, raw)?.last_assistant_message?.trim();
-        posts.push({
-          port,
-          path: "/notify",
-          body: {
-            type: "task_complete",
-            ...(terminalId ? { terminalId } : {}),
-            ...(message ? { message: message.slice(0, MAX_NOTIFICATION_BODY_LEN) } : {}),
-          },
-        });
-      } else if (terminalId) {
-        posts.push({ port, path: "/hook-alive", body: { terminalId } });
-      }
-    }
-  } else if (invocation.agent === "cursor") {
-    const raw = await deps.readStdin();
-    if (invocation.event === "session-start") {
-      const input = parseOrEmpty(SessionPayloadSchema, raw);
-      if (!input) return [];
-      posts.push(titlePost(port, terminalId, input.session_id, "cursor"));
-    } else {
-      const input = parseOrEmpty(CursorStopPayloadSchema, raw);
-      if (input?.status === "completed" && terminalId) {
-        posts.push({ port, path: "/notify", body: { type: "task_complete", terminalId } });
-      }
-    }
-  } else if (invocation.agent === "github-copilot") {
-    const input = parseOrEmpty(CopilotPayloadSchema, await deps.readStdin());
-    if (!input) return [];
-    const sessionId =
-      input.sessionId ??
-      input.session_id ??
-      input.session?.id ??
-      input.session?.sessionId ??
-      input.conversationId ??
-      input.conversation_id;
-    posts.push(
-      titlePost(port, terminalId, sessionId, "github-copilot", {
-        ...(invocation.event === "agent-stop" ? { titleOnly: true } : {}),
-      }),
-    );
-  }
-
-  return posts.filter((post): post is HookPost => post !== null);
+  return hooks.toPosts(invocation, {
+    port,
+    terminalId: deps.env.ANTGRID_TERMINAL_ID,
+    readStdin: deps.readStdin,
+  });
 }
 
 async function defaultPost(post: HookPost): Promise<void> {

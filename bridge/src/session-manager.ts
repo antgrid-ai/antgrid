@@ -4,7 +4,12 @@ import { join } from "node:path";
 import { z } from "zod";
 import { logger } from "./logger";
 const log = logger.child({ component: "session-manager" });
-import { resolveAgent, resolveAgentEnv, notificationSourceFor, titleSourceFor } from "./known-agents";
+import {
+  resolveAgent,
+  resolveAgentEnv,
+  suppressesOscNotifications,
+  suppressesOscTitle,
+} from "./known-agents";
 import { augmentAgentLaunch, injectsHookAliveProbe } from "./agent-launch-augmenter";
 import { resumeArgv, sessionResumable } from "./agent-resume";
 import { initialPromptArgv } from "./initial-prompt";
@@ -388,6 +393,17 @@ export class SessionManager {
    * No-ops for non-session ids (service PTYs) and unchanged names so callers
    * can fire it freely without spamming session:updated.
    */
+  /**
+   * Whether an auto-name would still land on this id. Same predicate
+   * applyAutoName enforces, exposed so a caller can skip EXPENSIVE work whose
+   * only output is an auto-name — generating a title costs a model spawn, and
+   * a user who renamed the session would never see it.
+   */
+  isAutoNameable(id: string): boolean {
+    const entry = this.entries.get(id);
+    return !!entry && !entry.manuallyRenamed;
+  }
+
   applyAutoName(id: string, name: string): void {
     const entry = this.entries.get(id);
     if (!entry || entry.manuallyRenamed) return;
@@ -419,6 +435,13 @@ export class SessionManager {
     entry.agentSessionId = agentSessionId;
     entry.agentTranscriptPath = nextPath;
     this.changed();
+  }
+
+  /** Handler-judge lookup. agentTranscriptPath is deliberately ABSENT from
+   *  toWire()/SessionEntry (persisted-only, never on the wire) — do NOT expose
+   *  it by adding it to toWire; this getter is the sanctioned read path. */
+  getAgentTranscriptPath(id: string): string | undefined {
+    return this.entries.get(id)?.agentTranscriptPath;
   }
 
   /**
@@ -669,20 +692,18 @@ export class SessionManager {
       rows: 24,
       type: "agent",
       env: Object.keys(launchEnv).length ? launchEnv : undefined,
-      // notificationsInjected===false means the plugin channel this spawn
-      // depends on (e.g. cursor-agent's hooks.json) failed to write — keep the
-      // OSC scanner live rather than silently muting the session.
-      suppressOscNotifications:
-        notificationSourceFor(entry.tool ?? this.agentSpec.name) === "plugin" &&
-        notificationsInjected !== false,
-      // Same fail-open guard, for the title signal. notificationsInjected is
-      // reused here (not a separate flag) because for every "structured"
-      // titleSource agent, the title-correlation hook ships in the SAME
-      // materialized plugin/hooks file as the notification hook (see
-      // agent-launch-augmenter.ts) — one write, one success/failure signal.
-      suppressOscTitle:
-        titleSourceFor(entry.tool ?? this.agentSpec.name) === "structured" &&
-        notificationsInjected !== false,
+      // Spec intent AND this spawn's injection outcome, both decided in
+      // known-agents.ts: notificationsInjected===false means the plugin channel
+      // this spawn depends on (e.g. cursor-agent's hooks.json) failed to write,
+      // so the OSC scanner stays live rather than silently muting the session.
+      suppressOscNotifications: suppressesOscNotifications(
+        entry.tool ?? this.agentSpec.name,
+        notificationsInjected,
+      ),
+      suppressOscTitle: suppressesOscTitle(
+        entry.tool ?? this.agentSpec.name,
+        notificationsInjected,
+      ),
       expectsHookAliveProbe:
         injectsHookAliveProbe(entry.tool ?? this.agentSpec.name),
     });

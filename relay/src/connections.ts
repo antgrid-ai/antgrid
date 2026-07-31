@@ -24,11 +24,9 @@ export interface WsData {
 
 /** Verified identity carried by a live connection past hello. */
 export interface ConnectionClaims {
-  /** Account id (`claims.uid`) — the sessionLimit + grant.userId key. */
+  /** Account id (`claims.uid`) — the routing-authorization key (`mayRoute`). */
   uid: string;
   tier?: string;
-  /** Agents only: the account's concurrent-remote-agent cap (paid axis). */
-  sessionLimit?: number;
   /** License credential id (`azp`) for revocation lookup. */
   jti?: string;
 }
@@ -47,16 +45,25 @@ export interface Connection {
   /** Transport diagnostics only — NEVER consulted for arbitration (design §6.3). */
   lastSeen: number;
   claims?: ConnectionClaims;
-  /** Agents only: opaque stream ids for sessionLimit accounting (design §7.3). */
+  /** Agents only: opaque stream ids, released wholesale when the entry drops. */
   openStreams: Set<string>;
 }
 
-/** Identity-free row for the internal connections view (web enriches the rest). */
+/**
+ * Identity-free row for the internal connections view (web enriches the rest).
+ * Keep in lockstep with web's `src/relay/push.ts` ConnectionSummary.
+ *
+ * `openStreamCount` is liveness telemetry, not a billable quantity — an agent
+ * registers under a bare `deviceUuid` and multiplexes every project as a sealed
+ * stream. The COUNT is all that crosses: stream ids are opaque and the relay
+ * cannot see the projectIds behind them.
+ */
 export interface ConnectionSummary {
   deviceId: string;
   deviceType: "agent" | "app";
   connectedAt: number;
   lastSeen: number;
+  openStreamCount: number;
 }
 
 /**
@@ -142,9 +149,14 @@ export class Connections {
   }
 
   /**
-   * Count open streams across ALL live agent connections owned by [userId] —
-   * the sessionLimit denominator. Callers MUST invoke this in the same
-   * synchronous, await-free window as the admit that follows (design §7.3).
+   * Count open streams across ALL live agent connections owned by [userId].
+   *
+   * No production caller: stream admission is uncapped and `/internal/connections`
+   * builds each row from `c.openStreams.size` directly. It survives as the
+   * assertion helper `tests/epochs.test.ts` uses to prove a superseded epoch
+   * releases its streams. Do NOT delete it as dead, and do NOT re-introduce a
+   * per-account stream cap against it — metering open streams taxes the fleet
+   * view and warm-project LRU (see docs/plans/2026-07-30-worker-limit-pricing.md).
    */
   countOpenStreamsForUser(userId: string): number {
     let count = 0;
@@ -187,6 +199,7 @@ export class Connections {
       deviceType: c.deviceType,
       connectedAt: c.connectedAt,
       lastSeen: c.lastSeen,
+      openStreamCount: c.openStreams.size,
     };
   }
 

@@ -24,7 +24,7 @@ test("composePush mirrors the app strings", () => {
   expect(composePush(createMessage("notification:push", { notificationType: "task_complete", message: "built", projectId: "p1" })))
     .toEqual({ title: "Task complete", body: "built", kind: "agent" });
   expect(composePush(createMessage("handler:escalation", {
-    projectId: "p1", escalationId: "e1", terminalId: "t", question: "Deploy?", reasoning: "", draftReply: "", urgency: "high",
+    projectId: "p1", escalationId: "e1", terminalId: "t", question: "Deploy?", reasoning: "", draftReply: "", urgency: "high", at: 1,
   }))).toEqual({ title: "Handler — urgent", body: "Deploy?", kind: "handler" });
 });
 
@@ -69,7 +69,7 @@ test("composePush: sessionTitle titles a permission request too", () => {
 test("suppressed peer → seals payload and delivers", () => {
   const { d, delivered, sealed } = harness();
   d.onOutbound(createMessage("handler:escalation", {
-    projectId: "p1", escalationId: "e1", terminalId: "t", question: "Deploy?", reasoning: "", draftReply: "", urgency: "normal",
+    projectId: "p1", escalationId: "e1", terminalId: "t", question: "Deploy?", reasoning: "", draftReply: "", urgency: "normal", at: 1,
   }));
   expect(delivered).toHaveLength(1);
   expect(delivered[0].t).toBe("tok");

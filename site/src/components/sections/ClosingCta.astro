@@ -3,6 +3,7 @@ import { Icon } from "astro-icon/components";
 import Eyebrow from "../ui/Eyebrow.astro";
 import Button from "../ui/Button.astro";
 import { links } from "../../config";
+import { FREE_WORKERS } from "../../data/pricing";
 
 const stores = [
   { icon: "tabler:brand-apple", label: "App Store" },
@@ -17,13 +18,13 @@ const stores = [
       Let your agents run.<br />Check in when it matters.
     </h2>
     <p class="mx-auto mb-7 max-w-md text-[15px] leading-relaxed text-muted">
-      Set up antgrid in a couple of minutes. <span class="text-ink2">Local sessions are free</span> — you pay only to control more agents remotely at once.
+      Set up antgrid in a couple of minutes. <span class="text-ink2">Free on {FREE_WORKERS} machines</span>, remote control included — you pay only to add machines and the AI supervisor.
     </p>
     <div class="mb-3.5 flex flex-wrap items-center justify-center gap-3">
       <Button href={links.startFree} variant="primary">Start free<Icon name="tabler:arrow-right" width="16" height="16" /></Button>
       <Button href={links.pricing} variant="outline">See pricing</Button>
     </div>
-    <p class="mb-7 text-[12.5px] text-muted2">No card required · local stays free</p>
+    <p class="mb-7 text-[12.5px] text-muted2">No card required · remote control on the free plan</p>
 
     <div class="mx-auto mb-5 h-px max-w-sm bg-edge"></div>
     <p class="mb-4 font-mono text-[10.5px] uppercase tracking-[0.16em] text-faint">Download the desktop app</p>

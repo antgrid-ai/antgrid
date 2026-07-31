@@ -19,13 +19,13 @@ export async function provisionProductAccountForUser(
 
 export function resolveEntitlement(sub: SubscriptionRow): {
   tier: string;
-  sessionLimit: number;
+  workerLimit: number;
   deviceLimit: number;
   promotional: boolean;
 } {
   return {
     tier: sub.tier,
-    sessionLimit: sub.sessionLimit,
+    workerLimit: sub.workerLimit,
     deviceLimit: sub.deviceLimit,
     promotional: sub.promotional,
   };
@@ -132,7 +132,7 @@ export async function ensureFreeSubscription(db: Tx, accountId: string): Promise
       planId: freePlan.id,
       tier: FREE_TIER,
       status: "active",
-      sessionLimit: freePlan.sessionLimit,
+      workerLimit: freePlan.workerLimit,
       deviceLimit: freePlan.deviceLimit,
     },
   });
@@ -265,7 +265,7 @@ export async function applyPlanToAccountSubscription(
     accountId,
     planId: plan.id,
     tier: plan.tier,
-    sessionLimit: plan.sessionLimit,
+    workerLimit: plan.workerLimit,
     deviceLimit: plan.deviceLimit,
     provider: fields.provider,
     providerSubscriptionId: fields.providerSubscriptionId ?? null,
@@ -305,7 +305,7 @@ export async function grantDevSubscription(
   opts: Partial<{
     tier: string;
     planSlug: string;
-    sessionLimit: number;
+    workerLimit: number;
     status: string;
     currentPeriodEnd: Date;
   }> = {}

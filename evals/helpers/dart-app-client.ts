@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createMessage, type AbMessage } from "../../bridge/src/protocol";
+import { CONTROL_STREAM_ID } from "antgrid-wire";
 
 // `URL.pathname` yields a leading-slash `/C:/…` form that is an invalid cwd on
 // Windows (uv_spawn rejects it with ENOENT). `fileURLToPath` gives a native path.
@@ -231,81 +232,145 @@ export class DartAppClient {
     );
   }
 
+  /** Await an AbMessage of `type` on the machine CONTROL PLANE (adverts, host
+   *  verbs). Project verbs answer on a project stream — see
+   *  {@link waitForStreamAbMessage}. */
   waitForAbMessage(type: string, timeoutMs = 10_000): Promise<DartEvent> {
+    return this.waitForStreamAbMessage(CONTROL_STREAM_ID, type, timeoutMs);
+  }
+
+  /** Await an AbMessage of `type` arriving on a specific project stream. */
+  waitForStreamAbMessage(streamId: string, type: string, timeoutMs = 10_000): Promise<DartEvent> {
     return this.waitForEvent(
-      (e) => e.event === "antgrid-message" && e.data?.type === type,
+      (e) => e.event === "antgrid-message" && e.streamId === streamId && e.data?.type === type,
       timeoutMs,
     );
   }
 
-  async connect(relayUrl: string, licenseToken?: string): Promise<void> {
-    // App/phone clients no longer send a licenseToken by default — admission
-    // is account trust (the bridge's device inventory), not a license claim.
-    // Only forward a token if a caller explicitly opts in (e.g. legacy /
-    // agent-shaped tests).
-    const cmd: Record<string, unknown> = { action: "connect", relayUrl };
-    if (licenseToken !== undefined) cmd.licenseToken = licenseToken;
-    this.sendCommand(cmd);
+  async connect(relayUrl: string, licenseToken: string): Promise<void> {
+    // Mandatory in v3: the app hello carries the account's own license token
+    // (design §4.2). Omitting it makes the Dart CLI reject the command outright
+    // rather than dial token-free, so this stays required here.
+    this.sendCommand({ action: "connect", relayUrl, licenseToken });
     await this.waitForState("authenticated");
   }
 
   /**
-   * Drive the pull-model E2E handshake. The eval-client (phone) signs its
-   * client-hello and verifies the agent's signed agent-hello against the agent's
-   * pinned Ed25519 pubkey before deriving — mirroring the production app. The
-   * caller supplies `agentEd25519Pub` (raw 32 bytes, base64) from the agent's
-   * bootstrap keypair; without it the Dart client refuses to derive.
+   * Drive the pull-model E2E handshake to `established`. The eval-client
+   * (phone) signs its client-hello and verifies the agent's signed agent-hello
+   * against the agent's pinned Ed25519 pubkey before deriving — mirroring the
+   * production app. `agentEd25519Pub` (raw 32 bytes, base64) comes from the
+   * agent's bootstrap keypair; without it the Dart client refuses to derive.
+   * `machineDeviceId` is the agent's bare deviceUuid: with pairing gone the
+   * relay hands out no peer id, so the phone addresses coordinates it already
+   * holds — exactly as the app dials from its account inventory.
+   *
+   * Runs ONE attempt: the Dart driver leaves give-up to the caller's
+   * supervisor, which no eval has, so callers racing agent startup must retry.
+   * `attemptTimeoutMs` caps that attempt (default 10s) — shorten it when
+   * looping so the loop's worst case stays bounded.
    */
-  async performHandshake(agentEd25519Pub: string): Promise<void> {
-    this.sendCommand({ action: "handshake", agentEd25519Pub });
-    await this.waitForEvent((e) => e.event === "handshake-complete");
+  async performHandshake(
+    agentEd25519Pub: string,
+    machineDeviceId: string,
+    attemptTimeoutMs?: number,
+  ): Promise<void> {
+    const done = this.waitForEvent(
+      (e) =>
+        e.event === "handshake-complete" ||
+        (e.event === "error" && String(e.message).startsWith("Handshake failed")),
+      30_000,
+    );
+    this.sendCommand({ action: "handshake", agentEd25519Pub, machineDeviceId, attemptTimeoutMs });
+    const result = await done;
+    if (result.event !== "handshake-complete") throw new Error(String(result.message));
   }
 
+  /**
+   * Drill into a project: control-plane `project:start`, then the agent's
+   * `stream-ready { projectId, streamId }` (design §7.4) — resolved at 0 RTT
+   * when the `agent:projects` advert already carried the stream. No new socket.
+   */
+  async openProjectStream(projectId: string, timeoutMs = 25_000): Promise<string> {
+    const done = this.waitForEvent(
+      (e) =>
+        (e.event === "project-started" && e.projectId === projectId) ||
+        (e.event === "error" && String(e.message).startsWith("project-start failed")),
+      timeoutMs,
+    );
+    this.sendCommand({ action: "project-start", projectId });
+    const result = await done;
+    if (result.event !== "project-started") throw new Error(String(result.message));
+    return result.streamId as string;
+  }
+
+  /** Send an AbMessage on the machine CONTROL PLANE (`s` omitted), sealed. */
   sendEncrypted(msg: AbMessage): void {
     this.sendCommand({ action: "send-encrypted", data: msg });
   }
 
+  /** Send an AbMessage tagged with a project stream (`{ s: streamId, m }`). */
+  sendOnStream(streamId: string, msg: AbMessage): void {
+    this.sendCommand({ action: "send-encrypted", streamId, data: msg });
+  }
+
   /**
-   * Pull-then-replay welcome state, mirroring the production `RelayTransport.connect()`.
-   * Issues the `state.snapshot` RPC; the client fans the cached frames
-   * (agent:status/tree:full/git:status) out as `antgrid-message` events, then
-   * emits `snapshot-complete`. Without this the welcome-state waiters race the
-   * agent's de-duped live burst and time out non-deterministically.
+   * Pull-then-replay durable state for a stream, mirroring what a
+   * `ProjectSession` does on bind. Issues the `state.snapshot` RPC; the client
+   * fans the cached frames (agent:status/tree:full/git:status on a project
+   * stream, `agent:projects` on the control plane) out as `antgrid-message`
+   * events, then emits `snapshot-complete`. Without this the welcome-state
+   * waiters race the agent's de-duped live burst and time out
+   * non-deterministically.
    */
-  async pullStateSnapshot(timeoutMs = 10_000): Promise<void> {
-    const done = this.waitForEvent((e) => e.event === "snapshot-complete", timeoutMs).catch(
-      () => {},
-    );
-    this.sendCommand({ action: "snapshot" });
+  async pullStateSnapshot(streamId = CONTROL_STREAM_ID, timeoutMs = 15_000): Promise<void> {
+    const done = this.waitForEvent(
+      (e) => e.event === "snapshot-complete" && e.streamId === streamId,
+      timeoutMs,
+    ).catch(() => {});
+    this.sendCommand({ action: "snapshot", streamId });
     await done;
   }
 
+  /** Drop queued `antgrid-message` events of `type` so a later wait sees only
+   *  frames produced AFTER this call (mirrors `RelayClient.drainQueued`). */
+  drainQueued(type: string): void {
+    this.eventQueue = this.eventQueue.filter(
+      (e) => !(e.event === "antgrid-message" && e.data?.type === type),
+    );
+  }
+
   // ---- High-level helpers ----
+  //
+  // v3: every project verb rides the project's STREAM, so these all take the
+  // streamId `openProjectStream` returned. The control plane carries only host
+  // verbs and the catalog adverts (see `evals/support/stream.ts`).
 
-  waitForAgentStatus(timeoutMs = 10_000): Promise<DartEvent> {
-    return this.waitForAbMessage("agent:status", timeoutMs);
+  waitForAgentStatus(streamId: string, timeoutMs = 10_000): Promise<DartEvent> {
+    return this.waitForStreamAbMessage(streamId, "agent:status", timeoutMs);
   }
 
-  sendTerminalInput(terminalId: string, data: string): void {
-    this.sendEncrypted(createMessage("terminal:input", { terminalId, data }));
+  sendTerminalInput(streamId: string, terminalId: string, data: string): void {
+    this.sendOnStream(streamId, createMessage("terminal:input", { terminalId, data }));
   }
 
-  sendTerminalResize(terminalId: string, cols: number, rows: number): void {
+  sendTerminalResize(streamId: string, terminalId: string, cols: number, rows: number): void {
     // clientId is the driver discriminator (bridge arbitration). It's opaque to
     // the bridge — this client's stable deviceId stands in for the app's
     // per-install clientId.
-    this.sendEncrypted(
+    this.sendOnStream(
+      streamId,
       createMessage("terminal:resize", { terminalId, cols, rows, clientId: this.deviceId }),
     );
   }
 
-  sendTerminalStart(opts: {
+  sendTerminalStart(streamId: string, opts: {
     terminalId: string;
     name?: string;
     command: string;
     args?: string[];
   }): void {
-    this.sendEncrypted(createMessage("terminal:start", {
+    this.sendOnStream(streamId, createMessage("terminal:start", {
       terminalId: opts.terminalId,
       name: opts.name ?? opts.terminalId,
       command: opts.command,
@@ -313,42 +378,61 @@ export class DartAppClient {
     }));
   }
 
-  async requestFileContent(projectId: string, path: string, timeoutMs = 10_000): Promise<DartEvent> {
-    this.sendEncrypted(createMessage("file:read", { projectId, path }));
-    return this.waitForEvent(
-      (e) => e.event === "antgrid-message" && e.data?.type === "file:content" && e.data?.path === path,
+  async requestFileContent(
+    streamId: string,
+    projectId: string,
+    path: string,
+    timeoutMs = 10_000,
+  ): Promise<DartEvent> {
+    const done = this.waitForEvent(
+      (e) =>
+        e.event === "antgrid-message" &&
+        e.streamId === streamId &&
+        e.data?.type === "file:content" &&
+        e.data?.path === path,
       timeoutMs,
     );
+    this.sendOnStream(streamId, createMessage("file:read", { projectId, path }));
+    return done;
   }
 
-  waitForFileTree(timeoutMs = 10_000): Promise<DartEvent> {
-    return this.waitForAbMessage("tree:full", timeoutMs);
+  waitForFileTree(streamId: string, timeoutMs = 10_000): Promise<DartEvent> {
+    return this.waitForStreamAbMessage(streamId, "tree:full", timeoutMs);
   }
 
-  waitForTreeUpdate(timeoutMs = 10_000): Promise<DartEvent> {
-    return this.waitForAbMessage("tree:update", timeoutMs);
+  waitForTreeUpdate(streamId: string, timeoutMs = 10_000): Promise<DartEvent> {
+    return this.waitForStreamAbMessage(streamId, "tree:update", timeoutMs);
   }
 
-  waitForTerminalOutput(terminalId: string, timeoutMs = 10_000): Promise<DartEvent> {
-    return this.waitForEvent(
-      (e) => e.event === "antgrid-message" && e.data?.type === "terminal:output" && e.data?.terminalId === terminalId,
-      timeoutMs,
-    );
-  }
-
-  waitForTerminalStarted(terminalId?: string, timeoutMs = 10_000): Promise<DartEvent> {
+  waitForTerminalOutput(streamId: string, terminalId: string, timeoutMs = 10_000): Promise<DartEvent> {
     return this.waitForEvent(
       (e) =>
         e.event === "antgrid-message" &&
+        e.streamId === streamId &&
+        e.data?.type === "terminal:output" &&
+        e.data?.terminalId === terminalId,
+      timeoutMs,
+    );
+  }
+
+  waitForTerminalStarted(streamId: string, terminalId?: string, timeoutMs = 10_000): Promise<DartEvent> {
+    return this.waitForEvent(
+      (e) =>
+        e.event === "antgrid-message" &&
+        e.streamId === streamId &&
         e.data?.type === "terminal:started" &&
         (terminalId === undefined || e.data?.terminalId === terminalId),
       timeoutMs,
     );
   }
 
-  waitForTerminalExited(terminalId: string, timeoutMs = 10_000): Promise<DartEvent> {
+  waitForTerminalExited(streamId: string, terminalId: string, timeoutMs = 10_000): Promise<DartEvent> {
     return this.waitForEvent(
-      (e) => e.event === "antgrid-message" && e.data?.type === "terminal:exited" && e.data?.terminalId === terminalId,
+      (e) =>
+        e.event === "antgrid-message" &&
+        e.streamId === streamId &&
+        e.data?.type === "terminal:exited" &&
+        e.data?.terminalId === terminalId,
       timeoutMs,
     );
   }
@@ -356,9 +440,11 @@ export class DartAppClient {
   /**
    * Wait for terminal output containing a marker string. Uses a single
    * predicate-based waiter so the full timeout applies to finding the marker
-   * (not just the first output frame).
+   * (not just the first output frame) — but a marker split across two PTY
+   * chunks still needs the accumulating loop the TS scenarios use.
    */
   waitForTerminalOutputContaining(
+    streamId: string,
     terminalId: string,
     marker: string,
     timeoutMs = 10_000,
@@ -366,6 +452,7 @@ export class DartAppClient {
     return this.waitForEvent(
       (e) =>
         e.event === "antgrid-message" &&
+        e.streamId === streamId &&
         e.data?.type === "terminal:output" &&
         e.data?.terminalId === terminalId &&
         typeof e.data?.data === "string" &&

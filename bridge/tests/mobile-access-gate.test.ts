@@ -23,7 +23,7 @@ const folders: string[] = [];
 
 beforeEach(() => {
   prevAbDir = process.env.ANTGRID_DIR;
-  abDir = mkdtempSync(join(tmpdir(), "antgrid-allowlist-"));
+  abDir = mkdtempSync(join(tmpdir(), "antgrid-mobile-gate-"));
   process.env.ANTGRID_DIR = abDir;
 });
 
@@ -74,9 +74,9 @@ afterAll(async () => {
 });
 
 function tempFolder(): string {
-  const f = mkdtempSync(join(tmpdir(), "antgrid-allowlist-proj-"));
+  const f = mkdtempSync(join(tmpdir(), "antgrid-mobile-gate-proj-"));
   // Minimal config so buildAgentCore loads non-interactively.
-  writeFileSync(join(f, "antgrid.yaml"), "name: test-allowlist\nagent:\n  tool: claude-code\n");
+  writeFileSync(join(f, "antgrid.yaml"), "name: test-mobile-gate\nagent:\n  tool: claude-code\n");
   folders.push(f);
   return f;
 }
@@ -115,46 +115,29 @@ async function waitForServices(frames: AbMessage[], timeoutMs = 2000): Promise<v
   }
 }
 
-test("drops project verbs from a trusted-but-not-allowed phone, honors them after allow", async () => {
+test("drops project verbs from an account-trusted phone while mobile access is off, honors them once on", async () => {
   const folder = tempFolder();
-  const store = loadPairedPhones(abDir);
-
-  // A phone that is trusted machine-wide (present in the store) but NOT allowed
-  // for this project (empty allowedProjects).
-  const pk1 = "phone-pubkey-1-base64";
-  store.upsert({
-    phonePubkey: pk1,
-    phoneDeviceId: "phone-dev-1",
-    pairedAt: new Date().toISOString(),
-    lastSeenAt: new Date().toISOString(),
-    allowedProjects: [],
-  });
-
-  // The connection's current phone pubkey, controllable by the test. This is
-  // exactly what the relay path threads in via RelayClient.currentPeerPubkey().
-  let connectedPhonePubkey: string | null = pk1;
+  let mobileAccess = false;
 
   core = await buildAgentCore({
     folder,
     mode: "remote",
     identity: { deviceId: "agent-dev", deviceName: "agent-dev", createdAt: new Date().toISOString() },
-    pairedPhones: store,
+    mobileAccessEnabled: () => mobileAccess,
   });
-  const projectId = core.projectId;
-  expect(store.isAllowed(pk1, projectId)).toBe(false);
 
   const bus = new MessageBus();
   const sent: AbMessage[] = [];
   bus.subscribe({ deliver: (m) => sent.push(m) });
   core.attachTransport(bus);
   // Wire the connected-phone identity exactly as the remote transport does.
-  core.setPeerPubkeyProvider(() => connectedPhonePubkey);
+  core.setPeerPubkeyProvider(() => "phone-pubkey-1-base64");
 
   // Spin up managers (the relay does this after the E2E handshake confirms).
   core.onHandshakeComplete();
   await waitForServices(sent);
 
-  // --- Not allowed: terminal:start must be dropped (no terminal spawned). ---
+  // --- Mobile access off: terminal:start must be dropped (no terminal spawned). ---
   const t1 = `t-${randomUUID()}`;
   sent.length = 0;
   bus.dispatchInbound(
@@ -165,9 +148,8 @@ test("drops project verbs from a trusted-but-not-allowed phone, honors them afte
   await new Promise((r) => setTimeout(r, 200));
   expect(statusListsTerminal(sent, t1)).toBe(false);
 
-  // --- Allow this project, then the same verb must be honored. ---
-  store.allowProject(pk1, projectId);
-  expect(store.isAllowed(pk1, projectId)).toBe(true);
+  // --- Turn the machine on, and the same verb must be honored. ---
+  mobileAccess = true;
 
   const t2 = `t-${randomUUID()}`;
   sent.length = 0;
@@ -178,20 +160,45 @@ test("drops project verbs from a trusted-but-not-allowed phone, honors them afte
   expect(await waitForTerminal(sent, t2)).toBe(true);
 });
 
+test("a core with no host-supplied switch fails closed for a remote phone", async () => {
+  // A bare agent (no HostServer) omits `mobileAccessEnabled`; the default must
+  // be "disabled", never "unset means allow".
+  const folder = tempFolder();
+  core = await buildAgentCore({
+    folder,
+    mode: "remote",
+    identity: { deviceId: "agent-dev", deviceName: "agent-dev", createdAt: new Date().toISOString() },
+  });
+
+  const bus = new MessageBus();
+  const sent: AbMessage[] = [];
+  bus.subscribe({ deliver: (m) => sent.push(m) });
+  core.attachTransport(bus);
+  core.setPeerPubkeyProvider(() => "phone-pubkey-unwired");
+
+  core.onHandshakeComplete();
+  await waitForServices(sent);
+
+  const t1 = `t-${randomUUID()}`;
+  sent.length = 0;
+  bus.dispatchInbound(
+    createMessage("terminal:start", { terminalId: t1, command: "node", args: ["-e", "0"] }),
+    "control",
+  );
+  await new Promise((r) => setTimeout(r, 200));
+  expect(statusListsTerminal(sent, t1)).toBe(false);
+});
+
 test("does NOT gate when no phone pubkey is present (local/loopback transport)", async () => {
   const folder = tempFolder();
-  const store = loadPairedPhones(abDir);
 
   core = await buildAgentCore({
     folder,
     mode: "local",
     identity: { deviceId: "agent-dev", deviceName: "agent-dev", createdAt: new Date().toISOString() },
-    pairedPhones: store,
+    // Mobile access is OFF for the machine; the desktop must still drive it.
+    mobileAccessEnabled: () => false,
   });
-  const projectId = core.projectId;
-  // No phone is allowed for this project; local control must still go through
-  // because there is no connected phone pubkey to gate on.
-  expect(store.isAllowed("anything", projectId)).toBe(false);
 
   const bus = new MessageBus();
   const sent: AbMessage[] = [];
@@ -213,45 +220,31 @@ test("does NOT gate when no phone pubkey is present (local/loopback transport)",
 
 // REGRESSION: after a local core is promoted onto the relay, the loopback
 // session and the relay slot share ONE bus + inbound handler. The desktop's own
-// loopback frames (source "loopback") must NEVER be gated by the connected
-// phone's allowlist — even when that phone is NOT allowed for the project — or
-// the user's local typing would be silently dropped. Relay-origin frames from
-// the same not-allowed phone must still be gated.
-test("loopback frames bypass the allowlist gate even when the relay peer is not allowed", async () => {
+// loopback frames (source "loopback") must NEVER be gated by the machine switch
+// — even with mobile access off — or the user's local typing would be silently
+// dropped. Relay-origin frames must still be gated.
+test("loopback frames bypass the gate even when mobile access is off", async () => {
   const folder = tempFolder();
-  const store = loadPairedPhones(abDir);
-
-  // A phone present in the trust store but NOT allowed for this project.
-  const pk1 = "phone-pubkey-loopback-base64";
-  store.upsert({
-    phonePubkey: pk1,
-    phoneDeviceId: "phone-dev-loopback",
-    pairedAt: new Date().toISOString(),
-    lastSeenAt: new Date().toISOString(),
-    allowedProjects: [],
-  });
 
   core = await buildAgentCore({
     folder,
     mode: "local",
     identity: { deviceId: "agent-dev", deviceName: "agent-dev", createdAt: new Date().toISOString() },
-    pairedPhones: store,
+    mobileAccessEnabled: () => false,
   });
-  const projectId = core.projectId;
-  expect(store.isAllowed(pk1, projectId)).toBe(false);
 
   const bus = new MessageBus();
   const sent: AbMessage[] = [];
   bus.subscribe({ deliver: (m) => sent.push(m) });
   core.attachTransport(bus);
   // Simulate promotion: a relay slot wired the gate's peer provider to the
-  // connected (not-allowed) phone.
-  core.setPeerPubkeyProvider(() => pk1);
+  // connected phone.
+  core.setPeerPubkeyProvider(() => "phone-pubkey-loopback-base64");
 
   core.onHandshakeComplete();
   await waitForServices(sent);
 
-  // A relay-origin verb from the not-allowed phone must be DROPPED.
+  // A relay-origin verb must be DROPPED.
   const tRelay = `t-${randomUUID()}`;
   sent.length = 0;
   bus.dispatchInbound(
@@ -274,36 +267,25 @@ test("loopback frames bypass the allowlist gate even when the relay peer is not 
 });
 
 // CRITICAL #1: tunnel:* frames bypass the bus (they route via onTunnelMessage →
-// core.handleTunnelMessage → TunnelManager's localhost HTTP proxy). A not-allowed
-// phone must NOT be able to read a project's dev-server data through them.
-test("drops tunnel:http-request from a trusted-but-not-allowed phone, honors it after allow", async () => {
+// core.handleTunnelMessage → TunnelManager's localhost HTTP proxy). A phone must
+// NOT be able to read a project's dev-server data through them with the machine
+// switch off.
+test("drops tunnel:http-request while mobile access is off, honors it once on", async () => {
   const folder = tempFolder();
-  const store = loadPairedPhones(abDir);
-
-  const pk1 = "phone-pubkey-tunnel-base64";
-  store.upsert({
-    phonePubkey: pk1,
-    phoneDeviceId: "phone-dev-tunnel",
-    pairedAt: new Date().toISOString(),
-    lastSeenAt: new Date().toISOString(),
-    allowedProjects: [],
-  });
-
-  let connectedPhonePubkey: string | null = pk1;
+  let mobileAccess = false;
 
   core = await buildAgentCore({
     folder,
     mode: "remote",
     identity: { deviceId: "agent-dev", deviceName: "agent-dev", createdAt: new Date().toISOString() },
-    pairedPhones: store,
+    mobileAccessEnabled: () => mobileAccess,
   });
-  const projectId = core.projectId;
 
   const bus = new MessageBus();
   const sent: AbMessage[] = [];
   bus.subscribe({ deliver: (m) => sent.push(m) });
   core.attachTransport(bus);
-  core.setPeerPubkeyProvider(() => connectedPhonePubkey);
+  core.setPeerPubkeyProvider(() => "phone-pubkey-tunnel-base64");
 
   // The tunnel HTTP-response is emitted via the plaintext hook (it bypasses the
   // bus); capture it to detect whether the proxy actually ran.
@@ -313,21 +295,21 @@ test("drops tunnel:http-request from a trusted-but-not-allowed phone, honors it 
   core.onHandshakeComplete();
   await waitForServices(sent);
 
-  // --- Not allowed: the proxy must NOT run → no tunnel:http-response. ---
+  // --- Off: the proxy must NOT run → no tunnel:http-response. ---
   plain.length = 0;
   core.handleTunnelMessage({
     type: "tunnel:http-request",
     requestId: "req-1",
-    port: 65500, // nothing listening; an allowed request would still emit a 502
+    port: 65500, // nothing listening; an admitted request would still emit a 502
     method: "GET",
     path: "/secret",
   });
   await new Promise((r) => setTimeout(r, 300));
   expect(tunnelResponses(plain).length).toBe(0);
 
-  // --- Allow this project: the same request now reaches the proxy (a 502 from
-  //     the dead port is still proof the gate let it through). ---
-  store.allowProject(pk1, projectId);
+  // --- On: the same request now reaches the proxy (a 502 from the dead port is
+  //     still proof the gate let it through). ---
+  mobileAccess = true;
   plain.length = 0;
   core.handleTunnelMessage({
     type: "tunnel:http-request",
@@ -348,9 +330,10 @@ test("drops tunnel:http-request from a trusted-but-not-allowed phone, honors it 
 // SOFT CONCERN (real bypass): on a trusted reconnect the relay sends peer-online
 // (NOT a fresh pair-request), so onApproved never repopulates the pubkey map.
 // After an agent RESTART the map starts empty, so currentPeerPubkey() would
-// return null and the gate would skip = bypass. The peer-online handler must
-// backfill the pubkey from the persistent pairedPhones store.
-test("currentPeerPubkey backfills from the trust list on trusted reconnect (empty map)", async () => {
+// return null — and a null peer reads as "local", which skips the gate. The
+// peer-online handler must backfill the pubkey from the persistent pairedPhones
+// store so a remote phone is still recognised as remote.
+test("currentPeerPubkey backfills from the phone store on trusted reconnect (empty map)", async () => {
   const store = loadPairedPhones(abDir);
   const pk1 = "phone-pubkey-reconnect-base64";
   const phoneDeviceId = "phone-dev-reconnect";
@@ -359,7 +342,6 @@ test("currentPeerPubkey backfills from the trust list on trusted reconnect (empt
     phoneDeviceId,
     pairedAt: new Date().toISOString(),
     lastSeenAt: new Date().toISOString(),
-    allowedProjects: ["projX"],
   });
 
   // A fresh RelayClient simulates the post-restart state: phoneEd25519ByDeviceId
@@ -395,7 +377,7 @@ test("currentPeerPubkey backfills from the trust list on trusted reconnect (empt
 // way ProjectCore really implements it, so the load-bearing assertion —
 // enabling relay wires the gate to the promoted session's connected phone, and
 // disabling clears it — still holds under the new dependency split.
-test("promotion wires (and clears) the allowlist-gate peer provider", async () => {
+test("promotion wires (and clears) the gate's peer provider", async () => {
   const bus = new MessageBus();
   bus.setInboundHandler(() => {});
 

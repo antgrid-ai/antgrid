@@ -8,7 +8,7 @@ export type CheckoutPlan = {
   label: string;
   recurring: boolean;
   trial: boolean;
-  sessionLimit: number;
+  workerLimit: number;
   displayPrice: number;
   chargePrice: number;
   discountLabel?: string;
@@ -114,8 +114,8 @@ function SubscriptionShell(props: CheckoutPageProps) {
       <section class="flex-1 min-w-0">
         <h2 class="font-mono text-xl font-semibold">Subscription</h2>
         <p class="text-sm text-base-content/60 mt-1 max-w-xl">
-          Upgrade to {plan.label} for up to {plan.sessionLimit} paired devices and full remote
-          agent access.
+          Upgrade to {plan.label} to run agents on up to {plan.workerLimit} machines, with full
+          remote access from anywhere.
         </p>
         <div class="card bg-base-100 border border-base-300 mt-6">
           <div class="card-body">
@@ -126,8 +126,8 @@ function SubscriptionShell(props: CheckoutPageProps) {
             <p class="text-sm text-base-content/60 mt-1">{billingCadence(plan)}</p>
             <div class="stats stats-horizontal mt-4 border border-base-300">
               <div class="stat py-3">
-                <div class="stat-title font-mono text-xs">Devices</div>
-                <div class="stat-value text-xl font-mono">up to {plan.sessionLimit}</div>
+                <div class="stat-title font-mono text-xs">Workers</div>
+                <div class="stat-value text-xl font-mono">up to {plan.workerLimit}</div>
               </div>
               <div class="stat py-3">
                 <div class="stat-title font-mono text-xs">Due today</div>
@@ -217,8 +217,8 @@ export function CheckoutPage(props: CheckoutPageProps) {
                 </div>
                 <div class="space-y-1.5 text-sm font-mono border-t border-base-300 pt-3">
                   <div class="flex justify-between">
-                    <span class="text-base-content/60">Devices</span>
-                    <span id="summary-devices">up to {plan.sessionLimit}</span>
+                    <span class="text-base-content/60">Workers</span>
+                    <span id="summary-workers">up to {plan.workerLimit}</span>
                   </div>
                   <div class="flex justify-between">
                     <span class="text-base-content/60">Due today</span>

@@ -165,7 +165,8 @@ export function billingRoutes(deps: {
             slug: p.slug,
             label: p.label,
             tier: p.tier,
-            session_limit: p.sessionLimit,
+            worker_limit: p.workerLimit,
+            session_limit: p.workerLimit,
             device_limit: p.deviceLimit,
             recurring: p.recurring,
             trial: p.trial,
@@ -184,7 +185,12 @@ export function billingRoutes(deps: {
           slug: p.slug,
           label: p.label,
           tier: p.tier,
-          session_limit: p.sessionLimit,
+          worker_limit: p.workerLimit,
+          // Compatibility mirror for app builds already in the field, which
+          // parse `session_limit` as non-null. Drop once the worker_limit app
+          // release ships — see "Deploy order" in
+          // docs/plans/2026-07-30-worker-limit-pricing.md.
+          session_limit: p.workerLimit,
           device_limit: p.deviceLimit,
           recurring: p.recurring,
           trial: p.trial,

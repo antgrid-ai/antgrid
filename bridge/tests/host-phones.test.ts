@@ -3,35 +3,38 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostServer } from "../src/host-server";
+import { loadMobileAccessPolicy } from "../src/mobile-access-policy";
 
 let prevAbDir: string | undefined;
 let abDir: string;
 
-beforeEach(() => {
-  prevAbDir = process.env.ANTGRID_DIR;
-  abDir = mkdtempSync(join(tmpdir(), "antgrid-phones-"));
-  process.env.ANTGRID_DIR = abDir;
-  // Seed a paired phone with one allowed project.
+/** Write a v1 paired-phones.json. `allowedProjects` is the pre-machine-switch
+ *  key: still accepted on disk, no longer authorization, and the input the
+ *  mobile-access migration reads once. */
+function seedPhones(rows: Array<{ pk: string; id: string; label: string; allowedProjects?: string[] }>) {
   const agents = join(abDir, "agents");
   mkdirSync(agents, { recursive: true });
   writeFileSync(
     join(agents, "paired-phones.json"),
     JSON.stringify({
       version: 1,
-      phones: [
-        {
-          phonePubkey: "pk-1", phoneDeviceId: "ph-1", label: "iPhone",
-          pairedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-02T00:00:00.000Z",
-          allowedProjects: ["proj-allowed"],
-        },
-        {
-          phonePubkey: "pk-2", phoneDeviceId: "ph-2", label: "Android",
-          pairedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-02T00:00:00.000Z",
-          allowedProjects: ["proj-allowed"],
-        },
-      ],
+      phones: rows.map((r) => ({
+        phonePubkey: r.pk, phoneDeviceId: r.id, label: r.label,
+        pairedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-02T00:00:00.000Z",
+        ...(r.allowedProjects ? { allowedProjects: r.allowedProjects } : {}),
+      })),
     }, null, 2),
   );
+}
+
+beforeEach(() => {
+  prevAbDir = process.env.ANTGRID_DIR;
+  abDir = mkdtempSync(join(tmpdir(), "antgrid-phones-"));
+  process.env.ANTGRID_DIR = abDir;
+  seedPhones([
+    { pk: "pk-1", id: "ph-1", label: "iPhone" },
+    { pk: "pk-2", id: "ph-2", label: "Android" },
+  ]);
 });
 
 afterEach(() => {
@@ -39,36 +42,19 @@ afterEach(() => {
   rmSync(abDir, { recursive: true, force: true });
 });
 
-test("listPairedPhones returns the seeded phones with their allowlists", () => {
+test("listPairedPhones returns the seeded identity rows", () => {
   const host = new HostServer({});
   const phones = host.listPairedPhones();
   expect(phones.length).toBe(2);
-  expect(phones[0].phonePubkey).toBe("pk-1");
-  expect(phones[0].allowedProjects).toEqual(["proj-allowed"]);
-  expect(phones[1].phonePubkey).toBe("pk-2");
-  expect(phones[1].allowedProjects).toEqual(["proj-allowed"]);
+  expect(phones.map((p) => p.phonePubkey)).toEqual(["pk-1", "pk-2"]);
+  expect(phones[0].label).toBe("iPhone");
+  expect(phones[0].lastSeenAt).toBe("2026-01-02T00:00:00.000Z");
 });
 
 test("knownProjectsForHub unions seen catalog with warm cores", async () => {
   const host = new HostServer({});
   // No cores opened, no seen catalog yet → empty.
   expect(host.knownProjectsForHub()).toEqual([]);
-});
-
-test("phones:allow adds the project to the phone's allowlist", async () => {
-  const host = new HostServer({});
-  const res = await host.handlePhonesVerb({ id: "1", type: "phones:allow", phonePubkey: "pk-1", projectId: "proj-new" });
-  expect(res.ok).toBe(true);
-  const pk1 = host.listPairedPhones().find((p) => p.phonePubkey === "pk-1")!;
-  expect(pk1.allowedProjects.sort()).toEqual(["proj-allowed", "proj-new"]);
-});
-
-test("phones:deny removes a project; unknown grant still returns ok", async () => {
-  const host = new HostServer({});
-  const res = await host.handlePhonesVerb({ id: "1", type: "phones:deny", phonePubkey: "pk-1", projectId: "proj-allowed" });
-  expect(res.ok).toBe(true);
-  const pk1 = host.listPairedPhones().find((p) => p.phonePubkey === "pk-1")!;
-  expect(pk1.allowedProjects).toEqual([]);
 });
 
 test("phones:unpair removes the phone entirely", async () => {
@@ -79,87 +65,69 @@ test("phones:unpair removes the phone entirely", async () => {
   expect(host.listPairedPhones()[0].phonePubkey).toBe("pk-2");
 });
 
+test("phones:unpair does not touch the machine switch (it is not a revocation)", async () => {
+  const host = new HostServer({});
+  await host.handleMobileAccessVerb({ id: "m1", type: "mobile-access:set", enabled: true });
+  await host.handlePhonesVerb({ id: "1", type: "phones:unpair", phonePubkey: "pk-1" });
+
+  const get = await host.handleMobileAccessVerb({ id: "m2", type: "mobile-access:get" });
+  expect(get).toMatchObject({ ok: true, enabled: true });
+});
+
 test("phones:list returns phones + knownProjects", async () => {
   const host = new HostServer({});
-  const res: any = await host.handlePhonesVerb({ id: "9", type: "phones:list" });
+  const res = await host.handlePhonesVerb({ id: "9", type: "phones:list" });
   expect(res.ok).toBe(true);
-  expect(res.type).toBe("phones:list");
-  expect(res.phones.length).toBe(2);
-  expect(res.phones.some((p: any) => p.phonePubkey === "pk-1")).toBe(true);
-  expect(Array.isArray(res.knownProjects)).toBe(true);
+  expect(res).toMatchObject({ type: "phones:list" });
+  const listed = res as Extract<typeof res, { type: "phones:list" }>;
+  expect(listed.phones.length).toBe(2);
+  expect(listed.phones.some((p) => p.phonePubkey === "pk-1")).toBe(true);
+  expect(Array.isArray(listed.knownProjects)).toBe(true);
 });
 
-test("mobile-access:enable-project stores default and grants every known phone", async () => {
+test("mobile-access:get is off on a machine that never granted anything", async () => {
   const host = new HostServer({});
-  const res = await host.handleMobileAccessVerb({
-    id: "m1",
-    type: "mobile-access:enable-project",
-    projectId: "proj-new",
-  });
-  expect(res.ok).toBe(true);
-
-  const get: any = await host.handleMobileAccessVerb({ id: "m2", type: "mobile-access:get" });
-  expect(get.projectIds).toEqual(["proj-new"]);
-
-  const phones = host.listPairedPhones();
-  const pk1 = phones.find((p) => p.phonePubkey === "pk-1")!;
-  const pk2 = phones.find((p) => p.phonePubkey === "pk-2")!;
-  // every phone in the store receives the new grant immediately — there is no
-  // longer a second admitted-but-excluded phone class
-  expect(pk1.allowedProjects.sort()).toEqual(["proj-allowed", "proj-new"]);
-  expect(pk2.allowedProjects.sort()).toEqual(["proj-allowed", "proj-new"]);
+  const get = await host.handleMobileAccessVerb({ id: "m1", type: "mobile-access:get" });
+  expect(get).toMatchObject({ ok: true, enabled: false });
 });
 
-test("mobile-access:disable-project clears default and revokes it from every phone", async () => {
+test("mobile-access:set flips the machine switch and persists it", async () => {
   const host = new HostServer({});
-  await host.handleMobileAccessVerb({
-    id: "m1",
-    type: "mobile-access:enable-project",
-    projectId: "proj-allowed",
-  });
+  const on = await host.handleMobileAccessVerb({ id: "m1", type: "mobile-access:set", enabled: true });
+  expect(on).toMatchObject({ ok: true, type: "mobile-access:set", enabled: true });
+  expect(await host.handleMobileAccessVerb({ id: "m2", type: "mobile-access:get" })).toMatchObject({ enabled: true });
+  // A fresh load — i.e. the next host start — sees the same answer.
+  expect(loadMobileAccessPolicy(abDir).isEnabled()).toBe(true);
 
-  const res = await host.handleMobileAccessVerb({
-    id: "m2",
-    type: "mobile-access:disable-project",
-    projectId: "proj-allowed",
-  });
-  expect(res.ok).toBe(true);
-
-  const get: any = await host.handleMobileAccessVerb({ id: "m3", type: "mobile-access:get" });
-  expect(get.projectIds).toEqual([]);
-
-  const phones = host.listPairedPhones();
-  const pk1 = phones.find((p) => p.phonePubkey === "pk-1")!;
-  const pk2 = phones.find((p) => p.phonePubkey === "pk-2")!;
-  expect(pk1.allowedProjects).toEqual([]);
-  expect(pk2.allowedProjects).toEqual([]);
+  const off = await host.handleMobileAccessVerb({ id: "m3", type: "mobile-access:set", enabled: false });
+  expect(off).toMatchObject({ ok: true, enabled: false });
+  expect(loadMobileAccessPolicy(abDir).isEnabled()).toBe(false);
 });
 
-test("mobile-access:disable-project does not touch an unrelated explicit grant", async () => {
+test("mobile-access:set is idempotent — re-setting the same value still answers the state", async () => {
   const host = new HostServer({});
-  await host.handlePhonesVerb({ id: "p1", type: "phones:allow", phonePubkey: "pk-2", projectId: "proj-other" });
-  await host.handleMobileAccessVerb({ id: "m1", type: "mobile-access:enable-project", projectId: "proj-allowed" });
-
-  await host.handleMobileAccessVerb({ id: "m2", type: "mobile-access:disable-project", projectId: "proj-allowed" });
-
-  const pk2 = host.listPairedPhones().find((p) => p.phonePubkey === "pk-2")!;
-  // disabling proj-allowed's default must not sweep a grant for a different project
-  expect(pk2.allowedProjects).toEqual(["proj-other"]);
+  await host.handleMobileAccessVerb({ id: "m1", type: "mobile-access:set", enabled: true });
+  const again = await host.handleMobileAccessVerb({ id: "m2", type: "mobile-access:set", enabled: true });
+  expect(again).toMatchObject({ ok: true, enabled: true });
 });
 
-test("project:forget clears same-account default grant", async () => {
+test("a v1 allowlist grant on disk migrates the machine switch on", async () => {
+  // The `antgrid phones allow` user must not silently lose mobile access on the
+  // first start of a build that no longer has an allowlist.
+  seedPhones([
+    { pk: "pk-1", id: "ph-1", label: "iPhone", allowedProjects: ["proj-granted"] },
+    { pk: "pk-2", id: "ph-2", label: "Android", allowedProjects: [] },
+  ]);
   const host = new HostServer({});
-  await host.handleMobileAccessVerb({
-    id: "m1",
-    type: "mobile-access:enable-project",
-    projectId: "proj-allowed",
-  });
+  expect(await host.handleMobileAccessVerb({ id: "m1", type: "mobile-access:get" })).toMatchObject({ enabled: true });
+});
 
-  await host.forget("proj-allowed");
+test("project:forget does not change the machine switch", async () => {
+  const host = new HostServer({});
+  await host.handleMobileAccessVerb({ id: "m1", type: "mobile-access:set", enabled: true });
 
-  const get: any = await host.handleMobileAccessVerb({ id: "m2", type: "mobile-access:get" });
-  expect(get.projectIds).toEqual([]);
-  for (const phone of host.listPairedPhones()) {
-    expect(phone.allowedProjects).toEqual([]);
-  }
+  await host.forget("proj-gone");
+
+  // Forgetting one project is a catalog edit; mobile access is machine-level.
+  expect(await host.handleMobileAccessVerb({ id: "m2", type: "mobile-access:get" })).toMatchObject({ enabled: true });
 });

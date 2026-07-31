@@ -55,14 +55,13 @@ async function mintToken(signer: SignerCtx["signer"], opts: MintOpts): Promise<s
   const now = Math.floor(Date.now() / 1000);
   const exp = now + (opts.expSecondsFromNow ?? 3600);
   // Mirror the real oauth-provider payload: deviceUuid + azp custom claims,
-  // no `sub`, no `jti`; sessionLimit is required (no tier fallback).
+  // no `sub`, no `jti`.
   return new SignJWT({
     uid: opts.uid ?? "user-1",
     tier: opts.tier ?? "pro",
     pk: opts.pk,
     deviceUuid: opts.deviceUuid,
     azp: opts.azp ?? `client-${Math.random().toString(36).slice(2)}`,
-    sessionLimit: 10,
   })
     .setProtectedHeader({ alg: "EdDSA", kid: signer.kid })
     .setIssuer(TOKEN_ISS)
@@ -233,7 +232,7 @@ test("revoke: closes the agent ws 4002 with a typed LICENSE_REVOKED error first,
 
 test("revoke: device not connected -> still 200, cache marked", async () => {
   const cache = new LicenseCache({ maxEntries: 100 });
-  cache.set({ jti: "jti-orphan", deviceId: "dev-orphan", userId: "user-1", tier: "pro", sessionLimit: 10, pk: "pk-orphan", revoked: false });
+  cache.set({ jti: "jti-orphan", deviceId: "dev-orphan", userId: "user-1", tier: "pro", pk: "pk-orphan", revoked: false });
   const r = startServerReal(baseConfig, { licenseCache: cache });
 
   const res = await postInternal(r.server.port!, "/internal/revoke", { deviceId: "dev-orphan" });
@@ -339,7 +338,7 @@ test("expire: closes only the target user's connections; a different uid stays o
 
 test("expire: bad signature -> 401", async () => {
   const cache = new LicenseCache({ maxEntries: 100 });
-  cache.set({ jti: "jti-x", deviceId: "dev-x", userId: "user-x", tier: "pro", sessionLimit: 10, pk: "pk-x", revoked: false });
+  cache.set({ jti: "jti-x", deviceId: "dev-x", userId: "user-x", tier: "pro", pk: "pk-x", revoked: false });
   const r = startServerReal(baseConfig, { licenseCache: cache });
 
   const res = await postInternal(r.server.port!, "/internal/expire", { userId: "user-x" }, "bad");
@@ -382,7 +381,7 @@ test("connections: returns identity-free liveness rows for live devices", async 
   const body = (await res.json()) as { connections: Array<Record<string, unknown>> };
   const row = body.connections.find((c) => c.deviceId === "conn-1");
   expect(row).toBeDefined();
-  expect(row).toMatchObject({ deviceId: "conn-1", deviceType: "agent" });
+  expect(row).toMatchObject({ deviceId: "conn-1", deviceType: "agent", openStreamCount: 0 });
   for (const leak of ["ip", "publicKey", "jti", "userId", "tier"]) {
     expect(row).not.toHaveProperty(leak);
   }
@@ -441,6 +440,40 @@ test("connections: userId scopes to that user's connections (identity-free)", as
     expect(row).not.toHaveProperty(leak);
   }
 
+  r.stop();
+});
+
+// The connections dashboard reads this projection as liveness telemetry — it
+// gates nothing, so the count owes no agreement with any admission decision.
+test("connections: openStreamCount tracks live streams without exposing stream ids", async () => {
+  const { signer, jwks } = await makeSigner();
+  const cache = new LicenseCache({ maxEntries: 100 });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
+  const r = startWith({ licenseGate: gate, licenseCache: cache });
+
+  const { ws } = await helloAgent({ relay: r, signer, deviceId: "streamer", uid: "user-S", azp: "client-S" });
+
+  for (const streamId of ["stream-alpha", "stream-beta"]) {
+    const opened = waitForType(ws, "stream-opened");
+    ws.send(JSON.stringify({ type: "stream-open", streamId }));
+    expect(await opened).toMatchObject({ streamId });
+  }
+
+  const res = await postInternal(r.server.port!, "/internal/connections", { issuedAt: Date.now(), userId: "user-S" });
+  const raw = await res.text();
+  const body = JSON.parse(raw) as { connections: Array<Record<string, unknown>> };
+  expect(body.connections.find((c) => c.deviceId === "streamer")).toMatchObject({ openStreamCount: 2 });
+  expect(raw).not.toContain("stream-alpha");
+
+  const closed = waitForType(ws, "stream-closed");
+  ws.send(JSON.stringify({ type: "stream-close", streamId: "stream-alpha" }));
+  await closed;
+
+  const after = await postInternal(r.server.port!, "/internal/connections", { issuedAt: Date.now(), userId: "user-S" });
+  const afterBody = (await after.json()) as { connections: Array<Record<string, unknown>> };
+  expect(afterBody.connections.find((c) => c.deviceId === "streamer")).toMatchObject({ openStreamCount: 1 });
+
+  ws.close();
   r.stop();
 });
 

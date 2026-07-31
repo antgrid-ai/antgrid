@@ -311,7 +311,7 @@ void main() {
 
     await conn.dispose();
 
-    // An orphaned socket keeps counting against the relay's sessionLimit, so
+    // An orphaned socket keeps holding the machine's relay slot, so
     // dispose must go through the mechanisms' release, not just drop the
     // supervisor (which deliberately does not release).
     await _waitUntil(

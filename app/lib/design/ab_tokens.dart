@@ -193,13 +193,20 @@ abstract final class AbTokens {
   static const double fontDisplayLg = 40.0;
 
   // ── Sizes ──
+  /// Max content width for the agent transcript (body + composer). ~66ch at
+  /// [fontMd] — the readability sweet spot; wider degrades line-scanning. On
+  /// narrower panels the centering constraint is a no-op. Code/diff cards opt
+  /// out by scrolling internally rather than widening this measure.
+  static const transcriptMaxWidth = 680.0;
+
   static const sidebarWidth = 48.0;
   static const commandTrayHeight = 44.0;
   static const bottomNavHeight = 56.0;
   static const collapsedStripWidth = 36.0;
 
   // Standard row heights — all toolbars/headers must use one of these.
-  static const rowHeightXs = 28.0; // compact filter fields (floor: 24px clear btn)
+  static const rowHeightXs =
+      28.0; // compact filter fields (floor: 24px clear btn)
   static const rowHeightSm = 32.0; // dense action bars, tab strips
   static const rowHeightMd =
       38.0; // panel headers (formerly statusHeaderHeight)

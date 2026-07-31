@@ -4,13 +4,18 @@ import { HostServer } from "../src/host-server";
 
 test("agent:tools round-trips through the schema", () => {
   const msg = createMessage("agent:tools", {
-    tools: [{ tool: "claude-code", path: "/usr/bin/claude", chatCapable: true }],
+    tools: [
+      { tool: "claude-code", path: "/usr/bin/claude", chatCapable: true, label: "Claude Code" },
+    ],
   });
   expect(msg.type).toBe("agent:tools");
   const parsed = parseMessage(JSON.stringify(msg));
   expect(parsed).not.toBeNull();
   expect((parsed as any).tools[0].tool).toBe("claude-code");
   expect((parsed as any).tools[0].chatCapable).toBe(true);
+  // The schema is what parseMessage keeps: an unlisted field is stripped here
+  // and the app's picker silently loses the name it renders.
+  expect((parsed as any).tools[0].label).toBe("Claude Code");
 });
 
 test("agent:tools accepts entries without chatCapable (back-compat)", () => {

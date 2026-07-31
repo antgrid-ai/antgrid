@@ -576,10 +576,11 @@ Future<bool> _openColdRemoteProject(
     recordProjectFocus(ref);
     return true;
   } on SessionLimitExceededException catch (e) {
-    // Paid-axis cap, not a transient connect failure — route to the upgrade flow.
+    // A legacy relay's retired cap, not a transient connect failure — retrying
+    // won't clear it, so say what will and show the plan the account is on.
     ref.read(selectedTargetProvider.notifier).set(priorTarget);
     if (context.mounted) {
-      showAbSnackBar(context, e.message);
+      showAbSnackBar(context, e.userMessage);
       await openUpgrade(context, ref);
     }
     return false;

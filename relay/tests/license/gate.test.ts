@@ -49,17 +49,12 @@ interface SignArgs {
   azp?: string;
   pk?: string;
   expSecondsFromNow?: number;
-  sessionLimit?: number;
-  /** Set true to exercise the (no-fallback) missing-sessionLimit rejection. */
-  omitSessionLimit?: boolean;
 }
 
 async function sign(args: SignArgs): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   // Mirror the real oauth-provider payload: deviceUuid + azp custom claims,
-  // no `sub`, no `jti`. sessionLimit is required — pre-release there are no
-  // tokens predating the claim, so tests always mint it unless explicitly
-  // testing its absence.
+  // no `sub`, no `jti`.
   const payload: Record<string, unknown> = {
     uid: args.uid ?? USER_ID,
     tier: args.tier ?? "pro",
@@ -67,9 +62,6 @@ async function sign(args: SignArgs): Promise<string> {
     deviceUuid: args.deviceUuid ?? DEVICE_ID,
     azp: args.azp ?? CLIENT_ID,
   };
-  if (!args.omitSessionLimit) {
-    payload.sessionLimit = args.sessionLimit ?? 10;
-  }
   return new SignJWT(payload)
     .setProtectedHeader({ alg: "EdDSA", kid: args.kid, typ: "JWT" })
     .setIssuer(TOKEN_ISS)
@@ -146,7 +138,6 @@ describe("createLicenseGate", () => {
       deviceId: DEVICE_ID,
       userId: USER_ID,
       tier: "pro",
-      sessionLimit: 10,
       pk: PK,
       revoked: true,
     });
@@ -195,7 +186,6 @@ describe("createLicenseGate", () => {
       deviceId: DEVICE_ID,
       userId: USER_ID,
       tier: "pro",
-      sessionLimit: 10,
       pk: PK,
       revoked: true,
     });
@@ -221,17 +211,23 @@ describe("createLicenseGate", () => {
     expect(result).toEqual({ ok: false, code: "LICENSE_EXPIRED" });
   });
 
-  // Pre-release there are no tokens predating the `sessionLimit` claim (R1
-  // deletes `defaultSessionLimitForTier`) — a missing claim is a verification
-  // failure, not a tier-based guess.
-  test("missing sessionLimit claim → LICENSE_INVALID", async () => {
+  // The gate carries no entitlement quantity: `sign` mints no `sessionLimit`
+  // claim at all, and every passing test above proves admission survives that.
+  // Deploying a relay that still required it would have dropped the whole fleet
+  // the moment web stopped minting it.
+  test("the cached entry carries identity only — no entitlement quantity", async () => {
     const kp = await makeKeyPair("k1");
     const provider = makeProvider([kp.publicJwk]);
     const gate = makeGate(provider);
-    const token = await sign({ privateKey: kp.privateKey, kid: "k1", omitSessionLimit: true });
+    const token = await sign({ privateKey: kp.privateKey, kid: "k1" });
 
     const result = await gate.verify(token, DEVICE_ID, PK);
-    expect(result).toEqual({ ok: false, code: "LICENSE_INVALID" });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(Object.keys(result.entry).sort()).toEqual(
+        ["deviceId", "jti", "pk", "revoked", "tier", "userId"],
+      );
+    }
   });
 
   // Regression for hardening item 1: a JWKS outage must surface as the
@@ -303,7 +299,6 @@ describe("createLicenseGate", () => {
         deviceId: DEVICE_ID,
         userId: USER_ID,
         tier: "pro",
-        sessionLimit: 10,
         pk: PK,
         revoked: true,
       });

@@ -40,9 +40,12 @@ test("phones:list parses with only id+type", () => {
   expect(r.success).toBe(true);
 });
 
-test("phones:allow requires phonePubkey + projectId", () => {
-  expect(ControlRequestSchema.safeParse({ id: "1", type: "phones:allow", phonePubkey: "pk", projectId: "p1" }).success).toBe(true);
-  expect(ControlRequestSchema.safeParse({ id: "1", type: "phones:allow", phonePubkey: "pk" }).success).toBe(false);
+// Mobile authorization is one machine-wide switch, so there is no per-phone
+// grant verb any more. An old app still sending one must fail the parse rather
+// than fall through to some other branch.
+test("the retired per-phone allowlist verbs no longer parse", () => {
+  expect(ControlRequestSchema.safeParse({ id: "1", type: "phones:allow", phonePubkey: "pk", projectId: "p1" }).success).toBe(false);
+  expect(ControlRequestSchema.safeParse({ id: "2", type: "phones:deny", phonePubkey: "pk", projectId: "p1" }).success).toBe(false);
 });
 
 test("phones:unpair requires phonePubkey", () => {
@@ -50,9 +53,12 @@ test("phones:unpair requires phonePubkey", () => {
   expect(ControlRequestSchema.safeParse({ id: "1", type: "phones:unpair" }).success).toBe(false);
 });
 
-test("mobile-access verbs validate project defaults requests", () => {
+test("mobile-access:set carries the machine-wide boolean", () => {
   expect(ControlRequestSchema.safeParse({ id: "1", type: "mobile-access:get" }).success).toBe(true);
-  expect(ControlRequestSchema.safeParse({ id: "2", type: "mobile-access:enable-project", projectId: "projA" }).success).toBe(true);
-  expect(ControlRequestSchema.safeParse({ id: "3", type: "mobile-access:disable-project", projectId: "projA" }).success).toBe(true);
-  expect(ControlRequestSchema.safeParse({ id: "4", type: "mobile-access:enable-project" }).success).toBe(false);
+  expect(ControlRequestSchema.safeParse({ id: "2", type: "mobile-access:set", enabled: true }).success).toBe(true);
+  expect(ControlRequestSchema.safeParse({ id: "3", type: "mobile-access:set", enabled: false }).success).toBe(true);
+  expect(ControlRequestSchema.safeParse({ id: "4", type: "mobile-access:set" }).success).toBe(false);
+  // The per-project verbs it replaced are gone, not aliased.
+  expect(ControlRequestSchema.safeParse({ id: "5", type: "mobile-access:enable-project", projectId: "projA" }).success).toBe(false);
+  expect(ControlRequestSchema.safeParse({ id: "6", type: "mobile-access:disable-project", projectId: "projA" }).success).toBe(false);
 });

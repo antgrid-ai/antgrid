@@ -18,74 +18,132 @@ Future<ProjectSession> _newSession(FakeAgentTransport t) async {
   );
 }
 
+const _brief = HandlerBrief(
+  taskSummary: 'ship the feature',
+  willHandle: ['fix lint', 'rerun tests'],
+  wakeFor: ['schema change'],
+  doneWhen: 'tests green',
+  thenItems: ['open PR'],
+);
+
 void main() {
-  test('configure sends handler:configure with wire template + model', () async {
+  test('requestPlan sends handler:planRequest', () async {
     final t = FakeAgentTransport();
     final session = await _newSession(t);
     final svc = HandlerService.fromSession(session);
 
-    svc.configure(
-      enabled: true,
-      template: HandlerTemplate.autopilot,
-      model: 'claude-sonnet-4-6',
-    );
+    svc.requestPlan('t1');
+
+    final sent = t.sent.firstWhere((m) => m['type'] == 'handler:planRequest');
+    expect(sent['projectId'], 'p');
+    expect(sent['terminalId'], 't1');
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('requestPlan carries the judge pick when given', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+
+    svc.requestPlan('t1', judgeTool: 'codex', judgeModel: 'm');
+
+    final sent = t.sent.lastWhere((m) => m['type'] == 'handler:planRequest');
+    expect(sent['judgeTool'], 'codex');
+    expect(sent['judgeModel'], 'm');
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('requestPlan omits judge keys when not given', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+
+    svc.requestPlan('t1');
+
+    final sent = t.sent.lastWhere((m) => m['type'] == 'handler:planRequest');
+    expect(sent.containsKey('judgeTool'), isFalse);
+    expect(sent.containsKey('judgeModel'), isFalse);
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test(
+    'arm sends handler:configure with armed:true and the brief wire shape',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+
+      svc.arm(terminalId: 't1', brief: _brief, notifyOnly: true);
+
+      final sent = t.sent.firstWhere((m) => m['type'] == 'handler:configure');
+      expect(sent['projectId'], 'p');
+      expect(sent['terminalId'], 't1');
+      expect(sent['armed'], true);
+      expect(sent['notifyOnly'], true);
+      expect(sent['brief'], _brief.toWire());
+      // Cached immediately, without waiting for the next status round-trip.
+      expect(svc.lastKnownBrief('t1'), _brief);
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
+  test('disarm sends armed:false without a brief', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+
+    svc.disarm('t1');
 
     final sent = t.sent.firstWhere((m) => m['type'] == 'handler:configure');
     expect(sent['projectId'], 'p');
-    expect(sent['enabled'], true);
-    expect(sent['template'], 'autopilot');
-    expect(sent['model'], 'claude-sonnet-4-6');
+    expect(sent['terminalId'], 't1');
+    expect(sent['armed'], false);
+    expect(sent.containsKey('brief'), false);
 
     await svc.dispose();
     await session.close();
   });
 
-  test('configure omits model when null', () async {
-    final t = FakeAgentTransport();
-    final session = await _newSession(t);
-    final svc = HandlerService.fromSession(session);
+  test(
+    'reply still sends terminal:input with trailing CR and drops the row',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
 
-    svc.configure(enabled: false, template: HandlerTemplate.watchdog);
+      t.emit('handler:escalation', {
+        'projectId': 'p',
+        'escalationId': 'e1',
+        'terminalId': 't9',
+        'question': 'q',
+        'reasoning': 'r',
+        'draftReply': 'use bun',
+        'urgency': 'normal',
+      });
+      await Future<void>.delayed(Duration.zero);
+      final esc = svc.currentState.escalations.single;
 
-    final sent = t.sent.firstWhere((m) => m['type'] == 'handler:configure');
-    expect(sent.containsKey('model'), false);
+      svc.reply(esc, 'use bun');
 
-    await svc.dispose();
-    await session.close();
-  });
+      final sent = t.sent.firstWhere((m) => m['type'] == 'terminal:input');
+      expect(sent['terminalId'], 't9');
+      expect(sent['data'], 'use bun\r');
+      expect(svc.currentState.escalations, isEmpty);
 
-  test('reply sends terminal:input with CR, drops the escalation, '
-      'and decrements the pending count', () async {
-    final t = FakeAgentTransport();
-    final session = await _newSession(t);
-    final svc = HandlerService.fromSession(session);
-    final sub = session.heavyStream.listen((_) {});
-
-    // Authoritative count comes from handler:status, not the escalation list.
-    t.emit('handler:status', {
-      'projectId': 'p', 'enabled': true, 'template': 'closer',
-      'state': 'needs_you', 'pendingEscalations': 1,
-    });
-    t.emit('handler:escalation', {
-      'projectId': 'p', 'escalationId': 'e1', 'terminalId': 't9',
-      'question': 'q', 'reasoning': 'r', 'draftReply': 'use bun', 'urgency': 'normal',
-    });
-    await Future<void>.delayed(Duration.zero);
-    expect(svc.currentState.pendingEscalations, 1);
-    final esc = svc.currentState.escalations.single;
-
-    svc.reply(esc, 'use bun');
-
-    final sent = t.sent.firstWhere((m) => m['type'] == 'terminal:input');
-    expect(sent['terminalId'], 't9');
-    expect(sent['data'], 'use bun\r');
-    expect(svc.currentState.escalations, isEmpty);
-    expect(svc.currentState.pendingEscalations, 0); // decremented optimistically
-
-    await sub.cancel();
-    await svc.dispose();
-    await session.close();
-  });
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    },
+  );
 
   test('reply with blank text is a no-op (never sends a bare CR)', () async {
     final t = FakeAgentTransport();
@@ -93,13 +151,14 @@ void main() {
     final svc = HandlerService.fromSession(session);
     final sub = session.heavyStream.listen((_) {});
 
-    t.emit('handler:status', {
-      'projectId': 'p', 'enabled': true, 'template': 'closer',
-      'state': 'needs_you', 'pendingEscalations': 1,
-    });
     t.emit('handler:escalation', {
-      'projectId': 'p', 'escalationId': 'e1', 'terminalId': 't9',
-      'question': 'q', 'reasoning': 'r', 'draftReply': '', 'urgency': 'normal',
+      'projectId': 'p',
+      'escalationId': 'e1',
+      'terminalId': 't9',
+      'question': 'q',
+      'reasoning': 'r',
+      'draftReply': '',
+      'urgency': 'normal',
     });
     await Future<void>.delayed(Duration.zero);
     final esc = svc.currentState.escalations.single;
@@ -109,7 +168,6 @@ void main() {
     expect(t.sent.any((m) => m['type'] == 'terminal:input'), false);
     // Escalation is untouched — nothing was answered.
     expect(svc.currentState.escalations, isNotEmpty);
-    expect(svc.currentState.pendingEscalations, 1);
 
     await sub.cancel();
     await svc.dispose();

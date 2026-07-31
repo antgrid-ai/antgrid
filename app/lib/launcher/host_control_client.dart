@@ -42,14 +42,12 @@ class PairedPhoneSummary {
   final String? label;
   final String pairedAt;
   final String lastSeenAt;
-  final List<String> allowedProjects;
   const PairedPhoneSummary({
     required this.phonePubkey,
     required this.phoneDeviceId,
     this.label,
     required this.pairedAt,
     required this.lastSeenAt,
-    required this.allowedProjects,
   });
 
   factory PairedPhoneSummary.fromJson(Map<String, dynamic> json) {
@@ -69,7 +67,6 @@ class PairedPhoneSummary {
       label: json['label'] as String?,
       pairedAt: pairedAt,
       lastSeenAt: lastSeenAt,
-      allowedProjects: ((json['allowedProjects'] as List?) ?? const []).cast<String>(),
     );
   }
 }
@@ -124,25 +121,30 @@ class PhonesList {
 }
 
 /// One installed tool from the loopback `tools:list`. Mirror of control-protocol.ts
-/// ToolSummary. `chatCapable` is null against an older bridge that predates the
-/// field; callers fall back to the app's static capability list in that case.
+/// ToolSummary. `chatCapable` and `label` are null against an older bridge that
+/// predates each field; callers fall back to the app's static tables in that case.
 class ToolSummary {
   final String tool;
   final String path;
   final bool? chatCapable;
-  const ToolSummary({required this.tool, required this.path, this.chatCapable});
+  final String? label;
+  const ToolSummary({
+    required this.tool,
+    required this.path,
+    this.chatCapable,
+    this.label,
+  });
 }
 
-/// The current machine-level mobile access policy: which projects are enabled
-/// for remote phone access. Mirror of control-protocol.ts MobileAccessPolicy.
+/// The machine-level mobile access policy: one boolean for the whole machine —
+/// is it reachable from mobile at all. Mirror of control-protocol.ts
+/// MobileAccessPolicy.
 class MobileAccessPolicy {
-  final List<String> projectIds;
-  const MobileAccessPolicy({required this.projectIds});
+  final bool enabled;
+  const MobileAccessPolicy({required this.enabled});
 
-  factory MobileAccessPolicy.fromJson(Map<String, dynamic> json) {
-    final raw = (json['projectIds'] as List?) ?? const [];
-    return MobileAccessPolicy(projectIds: raw.cast<String>());
-  }
+  factory MobileAccessPolicy.fromJson(Map<String, dynamic> json) =>
+      MobileAccessPolicy(enabled: json['enabled'] == true);
 }
 
 /// Thrown on a transport error, a non-200 status, or an `ok:false` body.
@@ -306,6 +308,7 @@ class HostControlClient {
         tool: tool,
         path: path,
         chatCapable: e['chatCapable'] as bool?,
+        label: e['label'] as String?,
       );
     }).toList(growable: false);
   }
@@ -314,8 +317,8 @@ class HostControlClient {
     await _post({'type': 'project:stop', 'projectId': projectId});
   }
 
-  /// Erase every machine-side trace of [projectId] (its persisted session store,
-  /// the seen-catalog hint, and any phone allowlist grant). Called on project
+  /// Erase every machine-side trace of [projectId] (its persisted session store
+  /// and the seen-catalog hint). Called on project
   /// delete so reopening the same folder doesn't reload the old sessions —
   /// `sessions.json` on the bridge is authoritative; the app only caches it.
   Future<void> projectForget(String projectId) async {
@@ -335,12 +338,6 @@ class HostControlClient {
     return PhonesList.fromJson(m);
   }
 
-  Future<void> phonesAllow({required String phonePubkey, required String projectId}) =>
-      _post({'type': 'phones:allow', 'phonePubkey': phonePubkey, 'projectId': projectId});
-
-  Future<void> phonesDeny({required String phonePubkey, required String projectId}) =>
-      _post({'type': 'phones:deny', 'phonePubkey': phonePubkey, 'projectId': projectId});
-
   Future<void> phonesUnpair({required String phonePubkey}) =>
       _post({'type': 'phones:unpair', 'phonePubkey': phonePubkey});
 
@@ -351,19 +348,11 @@ class HostControlClient {
     return MobileAccessPolicy.fromJson(m);
   }
 
-  Future<MobileAccessPolicy> mobileAccessEnableProject(String projectId) async {
-    final m = await _post({
-      'type': 'mobile-access:enable-project',
-      'projectId': projectId,
-    });
-    return MobileAccessPolicy.fromJson(m);
-  }
-
-  Future<MobileAccessPolicy> mobileAccessDisableProject(String projectId) async {
-    final m = await _post({
-      'type': 'mobile-access:disable-project',
-      'projectId': projectId,
-    });
+  /// Turn mobile access on or off for the whole machine. Returns the resulting
+  /// state as the bridge sees it, so the caller never has to assume the write
+  /// landed as requested.
+  Future<MobileAccessPolicy> mobileAccessSet(bool enabled) async {
+    final m = await _post({'type': 'mobile-access:set', 'enabled': enabled});
     return MobileAccessPolicy.fromJson(m);
   }
 

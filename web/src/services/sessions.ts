@@ -1,22 +1,24 @@
 import { fetchUserConnections, type RelayPushConfig } from "../relay/push.js";
 import type { DeviceRow } from "../models/device.js";
 
-/** A running remote agent owned by the signed-in user (the paid axis). */
+/** A live agent machine owned by the signed-in user, with its running-session count. */
 export type UserSession = {
   deviceUuid: string;
-  projectId: string;
   displayName: string;
   connectedAt: number;
+  /** Open project streams on this machine. Liveness only — nothing is billed
+   *  against it; the paid axis is the worker (agent machine) count. */
+  openStreamCount: number;
 };
 
 /**
  * The relay feed is already scoped to this user (filtered relay-side by the
- * userId it stores), so attribution is done. Here we keep only running project
- * agents — compound (`deviceUuid.projectId`) `agent` registrations, excluding
- * the bare control plane and `app` devices — and join display names from the
- * user's web device rows. Returns null when the relay is unreachable so the
- * caller can render an explicit "couldn't reach" state rather than a misleading
- * empty list.
+ * userId it stores), so attribution is done. Here we keep the live `agent`
+ * connections — one per machine, since v3 agents register under a bare account
+ * `deviceUuid` and multiplex projects as sealed streams — and join display
+ * names from the user's web device rows. Returns null when the relay is
+ * unreachable so the caller can render an explicit "couldn't reach" state
+ * rather than a misleading empty list.
  */
 export async function listUserSessions(
   relay: RelayPushConfig,
@@ -36,15 +38,20 @@ export async function listUserSessions(
   const sessions: UserSession[] = [];
   for (const c of connections) {
     if (c.deviceType !== "agent") continue;
-    const dot = c.deviceId.indexOf(".");
-    if (dot < 0) continue; // bare control plane — not a billable session
-    const deviceUuid = c.deviceId.slice(0, dot);
     sessions.push({
-      deviceUuid,
-      projectId: c.deviceId.slice(dot + 1),
-      displayName: uuidToName.get(deviceUuid) ?? deviceUuid,
+      deviceUuid: c.deviceId,
+      displayName: uuidToName.get(c.deviceId) ?? c.deviceId,
       connectedAt: c.connectedAt,
+      openStreamCount: c.openStreamCount,
     });
   }
   return sessions;
+}
+
+/**
+ * Streams summed across every live agent connection, NOT the machine count.
+ * Display-only: no cap is enforced against it anywhere.
+ */
+export function runningSessionCount(sessions: UserSession[]): number {
+  return sessions.reduce((n, s) => n + s.openStreamCount, 0);
 }

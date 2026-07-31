@@ -10,16 +10,14 @@ import '../providers/mobile_devices_hub.dart';
 /// placeholder stays a `const` widget).
 void _noop() {}
 
-/// Per-project mobile-access toggle for the agent-panel header (local projects
-/// only — remote projects show a [RemoteHostChip] instead).
+/// Machine-wide mobile-access switch for the desktop title bar: is THIS machine
+/// reachable from mobile at all. Not scoped to a project or to a phone — every
+/// account-trusted phone is admitted or none is.
 ///
-/// Reads the machine-level [MobileAccessPolicy] to determine whether this
-/// project is enabled, and calls the policy notifier's `enableProject`/
-/// `disableProject` verbs directly — so the toggle works even before any phone
-/// has paired (same-account default, gated server-side by the bridge).
+/// Reads and writes the machine-level [MobileAccessPolicy] over the loopback
+/// control plane, so the switch works before any phone has ever connected.
 class MobileAccessToggle extends ConsumerWidget {
-  final String projectId;
-  const MobileAccessToggle({super.key, required this.projectId});
+  const MobileAccessToggle({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -50,7 +48,7 @@ class MobileAccessToggle extends ConsumerWidget {
       );
     }
 
-    final enabled = policy.projectIds.contains(projectId);
+    final enabled = policy.enabled;
     // A mutation/refresh is in flight — ignore taps so a double-click can't
     // spawn a second concurrent verb racing the first.
     final busy = async.isLoading;
@@ -62,12 +60,7 @@ class MobileAccessToggle extends ConsumerWidget {
       inactiveLabel: 'Enable mobile access',
       onTap: () {
         if (busy) return;
-        final notifier = ref.read(mobileAccessPolicyProvider.notifier);
-        if (enabled) {
-          notifier.disableProject(projectId);
-        } else {
-          notifier.enableProject(projectId);
-        }
+        ref.read(mobileAccessPolicyProvider.notifier).setEnabled(!enabled);
       },
     );
   }

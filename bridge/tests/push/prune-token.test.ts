@@ -31,12 +31,11 @@ test("prunePushToken is a no-op when no phone has that token", () => {
   expect(store.get("PK")?.pushToken).toBe("live-token");
 });
 
-test("prunePushToken preserves allowedProjects and other fields", () => {
+test("prunePushToken preserves the rest of the identity row", () => {
   const store = seed("dead-token");
-  store.allowProject("PK", "proj-a");
   prunePushToken(store, "dead-token");
   const phone = store.get("PK");
-  expect(phone?.allowedProjects).toContain("proj-a");
   expect(phone?.phoneDeviceId).toBe("d1");
   expect(phone?.pairedAt).toBe("2026-07-01T00:00:00.000Z");
+  expect(phone?.lastSeenAt).toBe("2026-07-01T00:00:00.000Z");
 });

@@ -6,7 +6,6 @@ const sample = (over: Partial<LicenseCacheEntry> = {}): LicenseCacheEntry => ({
   deviceId: "d1",
   userId: "u1",
   tier: "pro",
-  sessionLimit: 10,
   pk: "pk1",
   ...over,
 });

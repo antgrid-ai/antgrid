@@ -74,7 +74,7 @@ async function mintToken(
 }
 
 describe("customAccessTokenClaims", () => {
-  test("injects {uid, deviceUuid, tier, sessionLimit, email, pk} on minted client_credentials JWT", async () => {
+  test("injects {uid, deviceUuid, tier, email, pk} on minted client_credentials JWT", async () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const user = await createTestUser(pg.db, "alice@example.com");
     const { cookie } = await createTestSession(pg.db, user.id);
@@ -92,10 +92,10 @@ describe("customAccessTokenClaims", () => {
     expect(claims.uid).toBe(user.id);
     expect(claims.deviceUuid).toBe(creds.deviceUuid);
     expect(claims.tier).toBe("pro");
-    // The paid axis: the relay reads this claim and enforces the concurrent
-    // remote-agent cap at register. If web ever stops minting it, the relay
-    // silently falls back to its tier table — so assert it lands here.
-    expect(claims.sessionLimit).toBe(10);
+    // No cap claim: the paid axis is the worker count, settled in web at device
+    // registration, so the token must carry no limit for the relay to enforce.
+    expect(claims.sessionLimit).toBeUndefined();
+    expect(claims.workerLimit).toBeUndefined();
     expect(claims.email).toBe("alice@example.com");
     expect(claims.pk).toBe(pub);
   });
@@ -174,7 +174,6 @@ describe("customAccessTokenClaims", () => {
     const body = (await res.json()) as { access_token: string };
     const claims = decodeJwt(body.access_token) as Record<string, unknown>;
     expect(claims.tier).toBe("pro");
-    expect(claims.sessionLimit).toBe(10);
     expect(claims.uid).toBe(user.id);
   });
 });

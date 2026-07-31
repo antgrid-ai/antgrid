@@ -19,7 +19,7 @@ import '../providers/subscription.dart';
 import '../dialogs/mobile_upgrade_dialog.dart';
 
 const _proYearlyFeatures = [
-  'Up to {devices} paired devices',
+  'Up to {workers} workers',
   'Unlimited terminal sessions',
   'File explorer & git viewer',
   'Browser preview tunneling',
@@ -31,7 +31,7 @@ const _proLifetimeFeatures = [
   'Everything in Pro Yearly',
   'Lifetime updates',
   'No renewal fees',
-  'Up to {devices} paired devices',
+  'Up to {workers} workers',
   'E2E encrypted — zero-knowledge relay',
   'Community support',
 ];
@@ -312,7 +312,7 @@ class _FreeTrialBanner extends StatelessWidget {
             ),
             const SizedBox(height: AbTokens.space6),
             Text(
-              'Add your card to start. Up to ${trialPlan.sessionLimit} paired devices '
+              'Add your card to start. Up to ${trialPlan.workerLimit} workers '
               'during the trial. Your card won\'t be charged until ${_firstChargeDate()} '
               '— cancel anytime before then to avoid the $yearlyDisplay/year charge. '
               'Subscription renews automatically unless canceled.',
@@ -374,7 +374,7 @@ class _ProYearlyCard extends StatelessWidget {
       priceSuffix: '/ year',
       priceNote: 'Renews annually.',
       features: _proYearlyFeatures,
-      devices: plan.sessionLimit,
+      workers: plan.workerLimit,
     );
   }
 }
@@ -393,7 +393,7 @@ class _ProLifetimeCard extends StatelessWidget {
       priceSuffix: 'one-time',
       priceNote: 'Pay once, use forever.',
       features: _proLifetimeFeatures,
-      devices: plan.sessionLimit,
+      workers: plan.workerLimit,
     );
   }
 }
@@ -405,7 +405,7 @@ class _PlanCard extends StatelessWidget {
     required this.priceSuffix,
     required this.priceNote,
     required this.features,
-    required this.devices,
+    required this.workers,
   });
 
   final String title;
@@ -413,7 +413,7 @@ class _PlanCard extends StatelessWidget {
   final String priceSuffix;
   final String priceNote;
   final List<String> features;
-  final int devices;
+  final int workers;
 
   @override
   Widget build(BuildContext context) {
@@ -470,7 +470,7 @@ class _PlanCard extends StatelessWidget {
                 color: antgrid.textMuted,
               ),
             ),
-            _FeatureList(items: features, devices: devices),
+            _FeatureList(items: features, workers: workers),
             const SizedBox(height: AbTokens.space24),
             const _PricingCta(label: 'Coming soon'),
           ],
@@ -481,10 +481,10 @@ class _PlanCard extends StatelessWidget {
 }
 
 class _FeatureList extends StatelessWidget {
-  const _FeatureList({required this.items, required this.devices});
+  const _FeatureList({required this.items, required this.workers});
 
   final List<String> items;
-  final int devices;
+  final int workers;
 
   @override
   Widget build(BuildContext context) {
@@ -504,7 +504,7 @@ class _FeatureList extends StatelessWidget {
                 const SizedBox(width: AbTokens.space10),
                 Expanded(
                   child: Text(
-                    item.replaceAll('{devices}', devices.toString()),
+                    item.replaceAll('{workers}', workers.toString()),
                     style: AbTokens.sansStyle(
                       fontSize: AbTokens.fontSm,
                       color: antgrid.textSecondary,
@@ -639,7 +639,7 @@ Future<void> openUpgrade(
 // import '../dialogs/mobile_upgrade_dialog.dart';
 //
 // const _proYearlyFeatures = [
-//   'Up to {devices} paired devices',
+//   'Up to {workers} workers',
 //   'Unlimited terminal sessions',
 //   'File explorer & git viewer',
 //   'Browser preview tunneling',
@@ -651,7 +651,7 @@ Future<void> openUpgrade(
 //   'Everything in Pro Yearly',
 //   'Lifetime updates',
 //   'No renewal fees',
-//   'Up to {devices} paired devices',
+//   'Up to {workers} workers',
 //   'E2E encrypted — zero-knowledge relay',
 //   'Community support',
 // ];
@@ -1140,8 +1140,8 @@ Future<void> openUpgrade(
 //             const SizedBox(height: AbTokens.space6),
 //             Text(
 //               isCurrent
-//                   ? 'Your trial is active with up to ${trialPlan.sessionLimit} paired devices.'
-//                   : 'Add your card to start. Up to ${trialPlan.sessionLimit} paired devices '
+//                   ? 'Your trial is active with up to ${trialPlan.workerLimit} workers.'
+//                   : 'Add your card to start. Up to ${trialPlan.workerLimit} workers '
 //                       'during the trial. Your card won\'t be charged until ${_firstChargeDate()} '
 //                       '— cancel anytime before then to avoid the $yearlyDisplay/year charge. '
 //                       'Subscription renews automatically unless canceled.',
@@ -1208,7 +1208,7 @@ Future<void> openUpgrade(
 //       priceSuffix: '/ year',
 //       priceNote: 'Renews annually.',
 //       features: _proYearlyFeatures,
-//       devices: plan.sessionLimit,
+//       workers: plan.workerLimit,
 //       isCurrent: isCurrent,
 //       isDisabled: isDisabled,
 //       recommended: false,
@@ -1242,7 +1242,7 @@ Future<void> openUpgrade(
 //       priceSuffix: 'one-time',
 //       priceNote: 'Pay once, use forever.',
 //       features: _proLifetimeFeatures,
-//       devices: plan.sessionLimit,
+//       workers: plan.workerLimit,
 //       isCurrent: isCurrent,
 //       isDisabled: isDisabled,
 //       recommended: !isCurrent && !isDisabled,
@@ -1260,7 +1260,7 @@ Future<void> openUpgrade(
 //     required this.priceSuffix,
 //     required this.priceNote,
 //     required this.features,
-//     required this.devices,
+//     required this.workers,
 //     required this.isCurrent,
 //     required this.isDisabled,
 //     required this.recommended,
@@ -1274,7 +1274,7 @@ Future<void> openUpgrade(
 //   final String priceSuffix;
 //   final String priceNote;
 //   final List<String> features;
-//   final int devices;
+//   final int workers;
 //   final bool isCurrent;
 //   final bool isDisabled;
 //   final bool recommended;
@@ -1354,7 +1354,7 @@ Future<void> openUpgrade(
 //                 color: antgrid.textMuted,
 //               ),
 //             ),
-//             _FeatureList(items: features, devices: devices),
+//             _FeatureList(items: features, workers: workers),
 //             const SizedBox(height: AbTokens.space24),
 //             if (isCurrent)
 //               const _PricingCta(label: 'Current plan', onTap: null)
@@ -1380,10 +1380,10 @@ Future<void> openUpgrade(
 // }
 //
 // class _FeatureList extends StatelessWidget {
-//   const _FeatureList({required this.items, required this.devices});
+//   const _FeatureList({required this.items, required this.workers});
 //
 //   final List<String> items;
-//   final int devices;
+//   final int workers;
 //
 //   @override
 //   Widget build(BuildContext context) {
@@ -1407,7 +1407,7 @@ Future<void> openUpgrade(
 //                 const SizedBox(width: AbTokens.space10),
 //                 Expanded(
 //                   child: Text(
-//                     item.replaceAll('{devices}', devices.toString()),
+//                     item.replaceAll('{workers}', workers.toString()),
 //                     style: AbTokens.sansStyle(
 //                       fontSize: AbTokens.fontSm,
 //                       color: antgrid.textSecondary,

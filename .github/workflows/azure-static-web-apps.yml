@@ -13,6 +13,17 @@ permissions:
   contents: read
   pull-requests: write
 
+# A merge fires `closed` while that PR's last `synchronize` build is often still
+# running. If its Deploy lands after the close job, it re-creates the staging
+# environment the close just deleted and nothing ever reaps it again. The Free
+# SKU allows 3, so three such leaks wedge every later PR on "maximum number of
+# staging environments". Cancelling the older run of the same PR closes the
+# window; push-to-main groups separately so a production deploy is never
+# cancelled by PR traffic.
+concurrency:
+  group: swa-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build_and_deploy:
     if: github.event_name == 'push' || github.event.action != 'closed'

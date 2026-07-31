@@ -14,9 +14,10 @@ import '../models/session_target.dart';
 import '../providers/agent_transport.dart';
 import '../services/control_plane_client.dart';
 
-/// Post-pair project picker. Lists the projects the agent advertises to this
-/// phone over the control plane (its allowlist ∩ the host catalog) and lets the
-/// user open a running one or remotely start a stopped one.
+/// Project picker. Lists the projects the agent advertises over the control
+/// plane — its whole catalog when mobile access is on for that machine, nothing
+/// at all when it is off — and lets the user open a running one or remotely
+/// start a stopped one.
 ///
 /// The [ControlPlaneClient] is injected (not read from a provider) so this
 /// screen is drivable in a widget test with a [FakeAgentTransport]-backed
@@ -44,8 +45,8 @@ class ProjectPickerScreen extends ConsumerWidget {
                     ? const AbEmptyState(
                         title: 'No projects available',
                         subtitle:
-                            'Allow a project from the desktop app to '
-                            'see it here.',
+                            'Enable mobile access from the desktop app to '
+                            'see this machine\'s projects here.',
                         showBrand: true,
                       )
                     : ListView.separated(
@@ -84,7 +85,7 @@ class ProjectPickerScreen extends ConsumerWidget {
 
 /// Inline failure notice for a rejected control-plane verb (the agent's
 /// `control:result` with `ok:false`, e.g. NOT_ALLOWED when a phone taps Start
-/// for a project that was de-allowlisted). A notice is chrome → sans.
+/// after the machine's mobile access was switched off). A notice is chrome → sans.
 class _ErrorBanner extends StatelessWidget {
   const _ErrorBanner({required this.error});
 

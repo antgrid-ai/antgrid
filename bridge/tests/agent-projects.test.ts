@@ -41,18 +41,23 @@ function tempFolder(): string {
   return f;
 }
 
-test("advertises allowed ∩ catalog, excludes non-allowed; running = relay-admitted", async () => {
+/** Flip the machine switch through the loopback verb — its only mutation path
+ *  (the policy store has no watcher, so writing the file behind a live host is
+ *  never observed). */
+async function setMobileAccess(h: HostServer, enabled: boolean): Promise<void> {
+  await h.handleMobileAccessVerb({ id: "t", type: "mobile-access:set", enabled });
+}
+
+test("advertises the machine's whole catalog; running = relay-admitted", async () => {
   host = new HostServer({});
   await host.open("projA", tempFolder(), "local");   // warm + seen
   await host.open("projB", tempFolder(), "local");
-  await host.open("projC", tempFolder(), "local");   // warm + seen, but NOT allowed
+  await host.open("projC", tempFolder(), "local");
   await host.stop("projB");                            // now known-but-stopped (in seenProjects, not in cores)
+  await setMobileAccess(host, true);
 
-  host.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1",
-    pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projA", "projB"] });
-
-  const adv = host.buildProjectsAdvertisement("pk1");
-  expect(adv.map((p) => p.projectId).sort()).toEqual(["projA", "projB"]);
+  const adv = host.buildProjectsAdvertisement();
+  expect(adv.map((p) => p.projectId).sort()).toEqual(["projA", "projB", "projC"]);
   // running now means DIALABLE (relay-admitted), not merely warm. projA is warm
   // on the host but was never promoted → no relay slot → running:false; projB is
   // stopped → also false. (A promoted+registered core reading running:true is
@@ -60,8 +65,6 @@ test("advertises allowed ∩ catalog, excludes non-allowed; running = relay-admi
   // filter includes warm cores; only the dialable flag differs.
   expect(adv.find((p) => p.projectId === "projA")?.running).toBe(false);
   expect(adv.find((p) => p.projectId === "projB")?.running).toBe(false);
-  // projC is warm+seen but NOT allowed → excluded
-  expect(adv.find((p) => p.projectId === "projC")).toBeUndefined();
 });
 
 test("known-but-stopped project carries its catalog label + path", async () => {
@@ -69,11 +72,9 @@ test("known-but-stopped project carries its catalog label + path", async () => {
   const folderB = tempFolder();
   await host.open("projB", folderB, "local");
   await host.stop("projB");
+  await setMobileAccess(host, true);
 
-  host.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1",
-    pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projB"] });
-
-  const adv = host.buildProjectsAdvertisement("pk1");
+  const adv = host.buildProjectsAdvertisement();
   const b = adv.find((p) => p.projectId === "projB");
   expect(b).toBeDefined();
   expect(b?.running).toBe(false);
@@ -85,11 +86,9 @@ test("advertised projects carry lastActiveAt when known", async () => {
   host = new HostServer({});
   const before = new Date().toISOString();
   await host.open("projA", tempFolder(), "local");   // stamps lastActiveAt on startCore
+  await setMobileAccess(host, true);
 
-  host.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1",
-    pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projA"] });
-
-  const adv = host.buildProjectsAdvertisement("pk1");
+  const adv = host.buildProjectsAdvertisement();
   const a = adv.find((p) => p.projectId === "projA");
   expect(a?.lastActiveAt).toBeDefined();
   // ISO string at or after the moment we captured before opening.
@@ -101,11 +100,9 @@ test("warm core advertises runningSessions; a stopped project omits it (like sta
   await host.open("projA", tempFolder(), "local");
   await host.open("projB", tempFolder(), "local");
   await host.stop("projB");
+  await setMobileAccess(host, true);
 
-  host.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1",
-    pairedAt: "x", lastSeenAt: "x", allowedProjects: ["projA", "projB"] });
-
-  const adv = host.buildProjectsAdvertisement("pk1");
+  const adv = host.buildProjectsAdvertisement();
   // Warm, no sessions started yet → an explicit 0 (the app's re-peek trigger
   // needs the baseline to detect the first session starting on the desktop).
   expect(adv.find((p) => p.projectId === "projA")?.runningSessions).toBe(0);
@@ -113,40 +110,37 @@ test("warm core advertises runningSessions; a stopped project omits it (like sta
   expect(adv.find((p) => p.projectId === "projB")?.runningSessions).toBeUndefined();
 });
 
-test("phone with empty allowlist gets an empty advertisement", async () => {
+test("the advert is the full catalog when enabled and empty when disabled", async () => {
   host = new HostServer({});
   await host.open("projA", tempFolder(), "local");
-  host.pairedPhones.upsert({ phonePubkey: "pk2", phoneDeviceId: "d2",
-    pairedAt: "x", lastSeenAt: "x", allowedProjects: [] });
-  expect(host.buildProjectsAdvertisement("pk2")).toEqual([]);
+  await host.open("projB", tempFolder(), "local");
+
+  // Default for a fresh machine is off — a new install must not be reachable.
+  expect(host.buildProjectsAdvertisement()).toEqual([]);
+
+  await setMobileAccess(host, true);
+  expect(host.buildProjectsAdvertisement().map((p) => p.projectId).sort()).toEqual(["projA", "projB"]);
+
+  await setMobileAccess(host, false);
+  expect(host.buildProjectsAdvertisement()).toEqual([]);
 });
 
-test("unknown phone gets an empty advertisement", async () => {
+test("mobile-access:set re-advertises to the connected control-plane phone", async () => {
   host = new HostServer({});
   await host.open("projA", tempFolder(), "local");
-  expect(host.buildProjectsAdvertisement("nope")).toEqual([]);
-});
-
-test("allowlist change re-advertises to the connected control-plane phone", async () => {
-  host = new HostServer({});
-  await host.open("projA", tempFolder(), "local");
-  host.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1",
-    pairedAt: "x", lastSeenAt: "x", allowedProjects: [] }); // connected, nothing allowed yet
 
   const bus = new MessageBus();
   const seen: AbMessage[] = [];
   bus.subscribe({ deliver: (m) => seen.push(m) });
 
-  // Before allowing, a re-advertise yields an empty project list.
+  // With the machine switch off, a re-advertise yields an empty project list.
   host.readvertiseForTest(bus, "pk1");
   const first = seen.filter((m) => m.type === "agent:projects").at(-1) as any;
   expect(first?.projects).toEqual([]);
 
-  // Operator allows projA (as `antgrid phones allow` would). The watch callback
-  // fires readvertiseToControlPlane; the connected phone must now see projA
-  // WITHOUT reconnecting.
-  host.pairedPhones.allowProject("pk1", "projA");
-  host.readvertiseForTest(bus, "pk1");
+  // The desktop turns mobile access on. handleMobileAccessVerb re-advertises
+  // itself, so the connected phone must see projA WITHOUT reconnecting.
+  await setMobileAccess(host, true);
 
   const last = seen.filter((m) => m.type === "agent:projects").at(-1) as any;
   expect(last.projects.map((p: any) => p.projectId)).toEqual(["projA"]);

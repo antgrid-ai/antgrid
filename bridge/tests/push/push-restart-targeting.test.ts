@@ -34,7 +34,7 @@ interface Delivered {
 
 /** A relay slot whose phone has NEVER connected during this agent lifetime —
  *  `currentPeerPubkey()` is null exactly as after a host restart. */
-async function startRestartedAgent(opts: { allowedProjects: (projectId: string) => string[] }) {
+async function startRestartedAgent(opts: { mobileAccess: boolean }) {
   const folder = mkdtempSync(join(tmpdir(), "antgrid-push-proj-"));
   cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
   writeFileSync(join(folder, "antgrid.yaml"), "");
@@ -47,7 +47,6 @@ async function startRestartedAgent(opts: { allowedProjects: (projectId: string) 
     phoneDeviceId: "phone-1",
     pairedAt: new Date().toISOString(),
     lastSeenAt: new Date().toISOString(),
-    allowedProjects: opts.allowedProjects(projectId),
     pushPubkey: phonePush.publicKey.toString("base64"),
     pushToken: "TOKEN",
     pushProvider: "fcm",
@@ -63,6 +62,7 @@ async function startRestartedAgent(opts: { allowedProjects: (projectId: string) 
       ed25519PublicKey: "PK", ed25519PrivateKey: "SK",
     },
     pairedPhones: store,
+    mobileAccessEnabled: () => opts.mobileAccess,
     remote: {
       // Never fires onPeerOnline: no phone has dialled this stream, which is
       // exactly the post-restart state the regression below is about.
@@ -91,7 +91,7 @@ test("push targets the persisted phone when no peer has connected this agent lif
   // state — `connState.peerOnline` defaults TRUE, so the fallback gate read
   // "phone can receive in-band" with no phone at all, and `currentPeerPubkey()`
   // was null so no target resolved. Result: zero pushes, forever.
-  const { notify, delivered } = await startRestartedAgent({ allowedProjects: (id) => [id] });
+  const { notify, delivered } = await startRestartedAgent({ mobileAccess: true });
 
   notify();
 
@@ -100,10 +100,11 @@ test("push targets the persisted phone when no peer has connected this agent lif
   expect(delivered[0].provider).toBe("fcm");
 });
 
-test("persisted-store fallback still refuses a phone the project isn't allowlisted for", async () => {
-  // The trust boundary is unchanged by the fallback: a paired phone with a valid
-  // push token must NOT receive notifications for a project it was never granted.
-  const { notify, delivered } = await startRestartedAgent({ allowedProjects: () => ["some-other-project"] });
+test("persisted-store fallback still refuses to push from a machine with mobile access off", async () => {
+  // The trust boundary is unchanged by the fallback: push carries project
+  // activity OFF this machine, so a registered phone with a valid token must
+  // receive nothing while the machine switch is off.
+  const { notify, delivered } = await startRestartedAgent({ mobileAccess: false });
 
   notify();
 

@@ -6,8 +6,10 @@ export const TRIAL_DAYS = 7;
 
 /** Signed-in users without a paid subscription. */
 export const FREE_TIER = "free";
-/** Free plan session limit — mobile/relay requires Pro. */
-export const FREE_SESSION_LIMIT = 0;
+/** Machines a free account may run an agent on. Drops to 1 on the day billing
+ *  goes live — this is a pre-launch value, not the final one. Keep in lockstep
+ *  with the `free` entry in CATALOG_PLANS. */
+export const FREE_WORKER_LIMIT = 2;
 
 export interface PlanPricing {
   listPriceCents: number;

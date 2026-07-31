@@ -1,5 +1,5 @@
 // bridge/tests/handler/runaway-guard.test.ts
-import { test, expect } from "bun:test";
+import { test, expect, describe, it } from "bun:test";
 import { RunawayGuard } from "../../src/handler/runaway-guard";
 
 test("allows replies under the cap", () => {
@@ -32,4 +32,16 @@ test("state is per-terminal", () => {
   g.recordAutoReply("t1", "a");
   expect(g.check("t1", "b")).toContain("runaway");
   expect(g.check("t2", "b")).toBeNull();
+});
+
+describe("progress-based reset", () => {
+  it("a satisfied item resets the consecutive cap but keeps circular detection", () => {
+    const g = new RunawayGuard(2, 4);
+    g.recordAutoReply("t", "reply-a");
+    g.recordAutoReply("t", "reply-b");
+    expect(g.check("t", "reply-c")).toContain("runaway cap");
+    g.recordProgress("t");
+    expect(g.check("t", "reply-c")).toBeNull();      // cap reset
+    expect(g.check("t", "reply-a")).toContain("circular"); // hashes kept
+  });
 });

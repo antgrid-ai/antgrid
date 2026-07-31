@@ -253,7 +253,6 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       claims = {
         uid: gateResult.entry.userId,
         tier: gateResult.entry.tier,
-        sessionLimit: gateResult.entry.sessionLimit,
         jti: gateResult.entry.jti,
       };
     } else {
@@ -285,8 +284,8 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       }
       if (hello.epoch > existing.epoch) {
         // Release the superseded connection (dropping its openStreams) BEFORE
-        // inserting the successor, so sessionLimit counting never double-counts
-        // one device across a restart (design §7.3).
+        // inserting the successor, so one device is never counted twice across
+        // a restart (design §7.3).
         connections.remove(existing);
         sendErrorAndClose(existing.ws, "SUPERSEDED", "replaced by a newer connection", false, 1008);
       } else {
@@ -376,18 +375,26 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
           sendError(ws, "WRONG_DEVICE_TYPE", "Only agents can open streams", false);
           return;
         }
-        // Count → admit MUST stay await-free. The event loop is single-threaded,
-        // so with no yield between counting and adding, two concurrent opens
-        // cannot both pass the cap. Inserting an `await` here reopens a
-        // count→admit TOCTOU — don't.
-        const uid = conn.claims?.uid ?? "";
-        const sessionLimit = conn.claims?.sessionLimit ?? 0;
-        const open = connections.countOpenStreamsForUser(uid);
-        if (open >= sessionLimit) {
+        // Structural ceiling, NOT a return of the retired per-account quota:
+        // streams stay unmetered, but the set is attacker-growable (ids are
+        // client-chosen and nothing expires them until the socket dies), so it
+        // needs a bound that no real client can reach. Re-opening an id already
+        // held is exempt — it cannot grow the set, and the mux re-opens every
+        // attached stream on each `welcome`.
+        //
+        // Admission MUST stay await-free. The event loop is single-threaded, so
+        // with no yield between the checks and the add, concurrent opens cannot
+        // interleave past the ceiling or into an inconsistent stream table. Any
+        // future check added here must observe the same discipline — inserting
+        // an `await` reopens a check→admit TOCTOU.
+        if (
+          !conn.openStreams.has(msg.streamId) &&
+          conn.openStreams.size >= config.maxStreamsPerConnection
+        ) {
           sendError(
             ws,
-            "SESSION_LIMIT_EXCEEDED",
-            `Concurrent remote agent limit reached (${sessionLimit})`,
+            "STREAM_LIMIT_EXCEEDED",
+            `Too many open streams on this connection (${config.maxStreamsPerConnection})`,
             false,
             { ref: msg.streamId },
           );

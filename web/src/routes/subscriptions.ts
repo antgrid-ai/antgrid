@@ -23,7 +23,7 @@ export function subscriptionRoutes(deps: { db: DB; auth: Auth }) {
       countActiveDevices(deps.db, userId),
     ]);
     if (!sub) return c.json({ error: "NO_SUBSCRIPTION" }, 500);
-    const { tier, sessionLimit, deviceLimit, promotional } = resolveEntitlement(sub);
+    const { tier, workerLimit, deviceLimit, promotional } = resolveEntitlement(sub);
     return c.json({
       account_id: account?.id ?? null,
       subscription: {
@@ -33,7 +33,8 @@ export function subscriptionRoutes(deps: { db: DB; auth: Auth }) {
         plan_id: sub.planId,
         provider: sub.provider,
         status: sub.status,
-        session_limit: sub.sessionLimit,
+        worker_limit: sub.workerLimit,
+        session_limit: sub.workerLimit,
         device_limit: sub.deviceLimit,
         promotional: sub.promotional,
         trial_started_at: sub.trialStartedAt,
@@ -42,7 +43,12 @@ export function subscriptionRoutes(deps: { db: DB; auth: Auth }) {
         cancelled_at: sub.cancelledAt,
       },
       tier,
-      session_limit: sessionLimit,
+      worker_limit: workerLimit,
+      // `session_limit` is a compatibility mirror for app builds already in the
+      // field, which parse it as non-null. Drop once the worker_limit app
+      // release ships — see "Deploy order" in
+      // docs/plans/2026-07-30-worker-limit-pricing.md.
+      session_limit: workerLimit,
       device_limit: deviceLimit,
       promotional,
       active_devices: count,

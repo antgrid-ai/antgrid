@@ -29,7 +29,6 @@ HostControlClient _fakeClient(Map<String, int> calls, {String? failVerb}) {
               'label': 'iPhone',
               'pairedAt': 'x',
               'lastSeenAt': 'y',
-              'allowedProjects': ['p1'],
             },
           ],
           'knownProjects': [
@@ -48,7 +47,7 @@ HostControlClient _fakeClient(Map<String, int> calls, {String? failVerb}) {
 }
 
 void main() {
-  test('loads phones, and allow() re-issues the verb then refreshes', () async {
+  test('loads phones, and unpair() re-issues the verb then refreshes', () async {
     final calls = <String, int>{};
     final container = ProviderContainer(
       overrides: [
@@ -65,8 +64,8 @@ void main() {
 
     await container
         .read(mobileDevicesHubProvider.notifier)
-        .allow(phonePubkey: 'pk-1', projectId: 'p2');
-    expect(calls['phones:allow'], 1);
+        .unpair(phonePubkey: 'pk-1');
+    expect(calls['phones:unpair'], 1);
     expect(calls['phones:list'], 2); // refreshed after mutation
   });
 
@@ -75,7 +74,7 @@ void main() {
     final container = ProviderContainer(
       overrides: [
         hostControlClientProvider.overrideWith(
-          (ref) async => _fakeClient(calls, failVerb: 'phones:deny'),
+          (ref) async => _fakeClient(calls, failVerb: 'phones:unpair'),
         ),
       ],
     );
@@ -86,9 +85,9 @@ void main() {
 
     await container
         .read(mobileDevicesHubProvider.notifier)
-        .deny(phonePubkey: 'pk-1', projectId: 'p1');
+        .unpair(phonePubkey: 'pk-1');
 
-    expect(calls['phones:deny'], 1);
+    expect(calls['phones:unpair'], 1);
     final state = container.read(mobileDevicesHubProvider);
     expect(state.hasError, isTrue);
   });
@@ -115,7 +114,7 @@ void main() {
       // instead of flashing a full-screen spinner.
       final fut = container
           .read(mobileDevicesHubProvider.notifier)
-          .allow(phonePubkey: 'pk-1', projectId: 'p2');
+          .unpair(phonePubkey: 'pk-1');
       final mid = container.read(mobileDevicesHubProvider);
       expect(mid.isLoading, isTrue);
       expect(mid.hasValue, isTrue);
@@ -125,83 +124,13 @@ void main() {
     },
   );
 
-  test('deny() and unpair() issue their own verbs', () async {
-    final calls = <String, int>{};
-    final container = ProviderContainer(
-      overrides: [
-        hostControlClientProvider.overrideWith(
-          (ref) async => _fakeClient(calls),
-        ),
-      ],
-    );
-    addTearDown(container.dispose);
-
-    await container.read(mobileDevicesHubProvider.future);
-    final notifier = container.read(mobileDevicesHubProvider.notifier);
-
-    await notifier.deny(phonePubkey: 'pk-1', projectId: 'p1');
-    expect(calls['phones:deny'], 1);
-
-    await notifier.unpair(phonePubkey: 'pk-1');
-    expect(calls['phones:unpair'], 1);
-  });
-
-  test('setMobileAccessForAll(enabled:true) grants only to phones missing it, '
-      'then refreshes once', () async {
-    final calls = <String, int>{};
-    final container = ProviderContainer(
-      overrides: [
-        hostControlClientProvider.overrideWith(
-          (ref) async => _fakeClient(calls),
-        ),
-      ],
-    );
-    addTearDown(container.dispose);
-
-    await container.read(mobileDevicesHubProvider.future);
-    expect(calls['phones:list'], 1);
-
-    // pk-1 allows p1 but not p2 → only a grant for p2 should be issued.
-    await container
-        .read(mobileDevicesHubProvider.notifier)
-        .setMobileAccessForAll(projectId: 'p2', enabled: true);
-
-    expect(calls['phones:allow'], 1);
-    expect(calls['phones:deny'], isNull);
-    expect(calls['phones:list'], 2); // single _mutate refresh, not per-phone
-  });
-
-  test('setMobileAccessForAll skips phones already in the target state but '
-      'still refreshes', () async {
-    final calls = <String, int>{};
-    final container = ProviderContainer(
-      overrides: [
-        hostControlClientProvider.overrideWith(
-          (ref) async => _fakeClient(calls),
-        ),
-      ],
-    );
-    addTearDown(container.dispose);
-
-    await container.read(mobileDevicesHubProvider.future);
-
-    // pk-1 already allows p1 → enabling p1 issues no allow/deny.
-    await container
-        .read(mobileDevicesHubProvider.notifier)
-        .setMobileAccessForAll(projectId: 'p1', enabled: true);
-
-    expect(calls['phones:allow'], isNull);
-    expect(calls['phones:deny'], isNull);
-    expect(calls['phones:list'], 2);
-  });
-
   test('a failed mutation retains the last-known list under the error '
-      '(toggle does not vanish)', () async {
+      '(the roster does not vanish)', () async {
     final calls = <String, int>{};
     final container = ProviderContainer(
       overrides: [
         hostControlClientProvider.overrideWith(
-          (ref) async => _fakeClient(calls, failVerb: 'phones:deny'),
+          (ref) async => _fakeClient(calls, failVerb: 'phones:unpair'),
         ),
       ],
     );
@@ -212,12 +141,12 @@ void main() {
 
     await container
         .read(mobileDevicesHubProvider.notifier)
-        .deny(phonePubkey: 'pk-1', projectId: 'p1');
+        .unpair(phonePubkey: 'pk-1');
 
     final state = container.read(mobileDevicesHubProvider);
     expect(state.hasError, isTrue);
-    // copyWithPrevious keeps the value readable so value-based consumers
-    // (the agent-panel toggle) keep showing the last state instead of vanishing.
+    // copyWithPrevious keeps the value readable so value-based consumers keep
+    // showing the last state instead of vanishing.
     expect(state.hasValue, isTrue);
     expect(state.value!.phones.single.phonePubkey, 'pk-1');
   });

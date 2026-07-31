@@ -1,11 +1,5 @@
+import { loadMobileAccessPolicy } from "../mobile-access-policy";
 import type { PairedPhonesStore, PairedPhone } from "../paired-phones";
-
-/** Resolves a path/label/projectId against the host's known catalog.
- *  Returns the exact projectId, or null on any miss (fail-closed). May be
- *  async (the index.ts resolver hits the loopback control plane). */
-export interface CatalogResolver {
-  resolve(pathOrLabel: string): string | null | Promise<string | null>;
-}
 
 /** Find a phone by pubkey, deviceId, or label. Returns null if 0 or >1 match. */
 function findPhone(store: PairedPhonesStore, ref: string): PairedPhone | null {
@@ -18,62 +12,47 @@ function findPhone(store: PairedPhonesStore, ref: string): PairedPhone | null {
 
 export function phonesList(store: PairedPhonesStore): number {
   for (const p of store.list()) {
-    const allowed = p.allowedProjects.length ? p.allowedProjects.join(", ") : "(none)";
     // Rows are read back without field validation, so a hand-edited file can
     // omit lastSeenAt — print "unknown", never the string "undefined".
     const lastSeen = p.lastSeenAt || "unknown";
-    console.log(`${p.label ?? p.phoneDeviceId}  [${p.phoneDeviceId}]  last seen: ${lastSeen}  allowed: ${allowed}`);
+    console.log(`${p.label ?? p.phoneDeviceId}  [${p.phoneDeviceId}]  last seen: ${lastSeen}`);
   }
   return 0;
 }
 
-export async function phonesAllow(
+/**
+ * Drop a phone's local record.
+ *
+ * This is NOT a revocation. Admission is decided in `relay-client.ts`
+ * (`handleClientHello`) by `verifyTranscriptSig` against the account inventory,
+ * and that path re-creates the row on the phone's very next hello. What removal
+ * actually clears is the local bookkeeping — label, `lastSeenAt`, and the push
+ * pubkey/token, so push delivery stops until the phone re-registers. Cutting a
+ * phone off means turning this machine's mobile-access switch off (machine-wide,
+ * every phone) or signing the device out of the account.
+ */
+export function phonesRemove(
   store: PairedPhonesStore,
-  catalog: CatalogResolver,
-  pathOrLabel: string,
   phoneRef: string,
-): Promise<number> {
-  const phone = findPhone(store, phoneRef);
-  if (!phone) { console.error(`phone not found (or ambiguous): ${phoneRef}`); return 2; }
-  const projectId = await catalog.resolve(pathOrLabel);
-  if (!projectId) {
-    console.error(`no known project matches "${pathOrLabel}". Open it once, then retry. Nothing was granted.`);
-    return 3;
-  }
-  store.allowProject(phone.phonePubkey, projectId);
-  console.log(`allowed ${phone.label ?? phone.phoneDeviceId} → ${projectId}`);
-  return 0;
-}
+  abDir: string,
+): number {
+  // Run the mobile-access v1→v2 migration before the flush below, not after:
+  // that migration derives the machine switch partly from the `allowedProjects`
+  // still sitting in paired-phones.json, and every flush sheds them. Running
+  // this CLI once on a new build before the first new-host start would
+  // otherwise have the migration see no grants → switch off, silently revoking
+  // mobile access for anyone who granted through `antgrid phones allow`.
+  // Loading the phones store is safe ahead of this (it never writes at load).
+  loadMobileAccessPolicy(abDir);
 
-export async function phonesDeny(
-  store: PairedPhonesStore,
-  catalog: CatalogResolver,
-  pathOrLabel: string,
-  phoneRef: string,
-): Promise<number> {
-  const phone = findPhone(store, phoneRef);
-  if (!phone) { console.error(`phone not found (or ambiguous): ${phoneRef}`); return 2; }
-  // Resolve the same way `allow` does, so denying by the path/label that was
-  // granted maps to the same projectId. Without this, deny takes the ref
-  // verbatim and silently no-ops when allow had stored a resolved id.
-  const projectId = await catalog.resolve(pathOrLabel);
-  if (!projectId) {
-    console.error(`no known project matches "${pathOrLabel}". Nothing was revoked.`);
-    return 3;
-  }
-  const removed = store.denyProject(phone.phonePubkey, projectId);
-  if (!removed) {
-    console.error(`${phone.label ?? phone.phoneDeviceId} was not allowed → ${projectId} (no change)`);
-    return 4;
-  }
-  console.log(`denied ${phone.label ?? phone.phoneDeviceId} → ${projectId}`);
-  return 0;
-}
-
-export function phonesRemove(store: PairedPhonesStore, phoneRef: string): number {
   const phone = findPhone(store, phoneRef);
   if (!phone) { console.error(`phone not found (or ambiguous): ${phoneRef}`); return 2; }
   store.remove(phone.phonePubkey);
   console.log(`removed ${phone.label ?? phone.phoneDeviceId}`);
+  console.error(
+    "note: this clears the local record only (label, last seen, push token) — it does not revoke " +
+      "access. An account-trusted phone re-registers on its next connection. To cut mobile access " +
+      "off, disable mobile access for this machine (all phones) or sign the device out of the account.",
+  );
   return 0;
 }

@@ -11,15 +11,16 @@ import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_panel_header.dart';
-import '../design/widgets/ab_toolbar.dart';
 import '../launcher/host_control_client.dart';
 import '../connect/remote_connect_actions.dart';
 import '../providers/mobile_devices_hub.dart';
+import '../widgets/mobile_access_toggle.dart';
 
-/// Desktop hub: one card per paired phone, each with a per-project allowlist
-/// checklist. The column set is the union of machine-known projects ∪ every
-/// project already allowed on the phone, so CLI-granted-but-unopened projects
-/// are never hidden.
+/// Desktop hub: the machine-wide mobile-access switch plus a plain roster of the
+/// phones that have connected to this machine. Access is not differentiated per
+/// phone or per project — the switch admits every account-trusted phone or none
+/// — so a row is identity and housekeeping only (label, device id, last seen,
+/// unpair).
 class MobileDevicesHub extends ConsumerWidget {
   const MobileDevicesHub({super.key, this.onClose});
 
@@ -42,6 +43,7 @@ class MobileDevicesHub extends ConsumerWidget {
               ),
             ],
           ),
+          const _MachineSwitch(),
           Expanded(
             child: async.when(
               // A mutation/refresh keeps the prior data (copyWithPrevious in the
@@ -52,9 +54,64 @@ class MobileDevicesHub extends ConsumerWidget {
               error: (e, _) => _ErrorState(message: '$e'),
               data: (state) => state.phones.isEmpty
                   ? const _EmptyState()
-                  : _PhoneList(state: state),
+                  : _PhoneList(phones: state.phones),
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Machine-wide switch
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// The one control that actually grants access. Kept above the roster so the
+/// list below reads as "who has connected", not "who is authorized" — the phone
+/// rows carry no authorization of their own.
+class _MachineSwitch extends StatelessWidget {
+  const _MachineSwitch();
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AbTokens.space12,
+        vertical: AbTokens.space10,
+      ),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: p.borderSubtle)),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Mobile access',
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontSm,
+                    color: p.textPrimary,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(height: AbTokens.space2),
+                Text(
+                  'When on, any phone signed in to your account can drive every '
+                  'project on this machine.',
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXxs,
+                    color: p.textMuted,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: AbTokens.space12),
+          const MobileAccessToggle(),
         ],
       ),
     );
@@ -65,140 +122,59 @@ class MobileDevicesHub extends ConsumerWidget {
 // Phone list
 // ──────────────────────────────────────────────────────────────────────────────
 
-class _PhoneList extends ConsumerWidget {
-  const _PhoneList({required this.state});
-  final PhonesList state;
+class _PhoneList extends StatelessWidget {
+  const _PhoneList({required this.phones});
+  final List<PairedPhoneSummary> phones;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    // Built once here, not per card: knownProjects is the same for every phone,
-    // so rebuilding this index inside each _PhoneCard.build wasted O(phones×N).
-    final projectsById = {for (final k in state.knownProjects) k.projectId: k};
+  Widget build(BuildContext context) {
     return ListView.builder(
-      itemCount: state.phones.length,
-      itemBuilder: (context, i) =>
-          _PhoneCard(phone: state.phones[i], projectsById: projectsById),
+      itemCount: phones.length,
+      itemBuilder: (context, i) => _PhoneRow(phone: phones[i]),
     );
   }
 }
 
-class _PhoneCard extends ConsumerWidget {
-  const _PhoneCard({required this.phone, required this.projectsById});
+class _PhoneRow extends ConsumerWidget {
+  const _PhoneRow({required this.phone});
   final PairedPhoneSummary phone;
-  final Map<String, KnownProject> projectsById;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final columns = _columnsFor(phone, projectsById);
     final p = context.antgrid;
-    return Container(
-      margin: const EdgeInsets.symmetric(
-        horizontal: AbTokens.space12,
-        vertical: AbTokens.space8,
-      ),
-      decoration: BoxDecoration(
-        color: p.bgSurface,
-        border: Border.all(color: p.borderDefault),
-        borderRadius: AbTokens.borderRadius8,
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          // AbToolbar.custom preserves the label casing — AbPanelHeader
-          // uppercases via .toUpperCase() which breaks text-based finders.
-          AbToolbar.custom(
-            children: [
-              AbIcon(AbIcons.deviceMobile, size: 14, color: p.textMuted),
-              const SizedBox(width: AbTokens.space8),
-              Text(
-                phone.label ?? phone.phoneDeviceId,
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontSm,
-                  color: p.textPrimary,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-              const Spacer(),
-              AbButton(
-                key: ValueKey('unpair-${phone.phonePubkey}'),
-                label: 'Unpair',
-                compact: true,
-                onTap: () => ref
-                    .read(mobileDevicesHubProvider.notifier)
-                    .unpair(phonePubkey: phone.phonePubkey),
-              ),
-            ],
-          ),
-          for (final project in columns)
-            _ProjectToggleRow(phone: phone, project: project),
-          if (columns.isEmpty)
-            const AbEmptyState.compact(title: 'No projects on this machine'),
-        ],
-      ),
-    );
-  }
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Per-project toggle row
-// ──────────────────────────────────────────────────────────────────────────────
-
-class _ProjectToggleRow extends ConsumerWidget {
-  const _ProjectToggleRow({required this.phone, required this.project});
-  final PairedPhoneSummary phone;
-  final KnownProject project;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final allowed = phone.allowedProjects.contains(project.projectId);
-    final p = context.antgrid;
-
     return AbListRow(
-      key: ValueKey('toggle-${phone.phonePubkey}-${project.projectId}'),
-      hoverable: true,
-      leading: AbIcon(
-        allowed ? AbIcons.check : AbIcons.circle,
-        size: 14,
-        color: allowed ? p.accent : p.textMuted,
-      ),
+      key: ValueKey('phone-${phone.phonePubkey}'),
+      leading: AbIcon(AbIcons.deviceMobile, size: 14, color: p.textMuted),
       title: Text(
-        project.label ?? project.projectId,
-        // A human label is chrome (sans); a raw project id is data (mono).
-        style: project.label != null
-            ? AbTokens.sansStyle(fontSize: AbTokens.fontSm)
-            : AbTokens.monoStyle(fontSize: AbTokens.fontSm),
+        phone.label ?? phone.phoneDeviceId,
+        // A human label is chrome (sans); a raw device id is data (mono).
+        style: phone.label != null
+            ? AbTokens.sansStyle(
+                fontSize: AbTokens.fontSm,
+                color: p.textPrimary,
+                fontWeight: FontWeight.w500,
+              )
+            : AbTokens.monoStyle(
+                fontSize: AbTokens.fontSm,
+                color: p.textPrimary,
+              ),
       ),
-      subtitle: project.path != null
-          ? Text(
-              project.path!,
-              // Paths are data — mono font required.
-              style: AbTokens.monoStyle(
-                fontSize: AbTokens.fontXxs,
-                color: p.textMuted,
-              ),
-            )
-          : Text(
-              project.projectId,
-              // Raw project id is data.
-              style: AbTokens.monoStyle(
-                fontSize: AbTokens.fontXxs,
-                color: p.textMuted,
-              ),
-            ),
-      onTap: () {
-        final notifier = ref.read(mobileDevicesHubProvider.notifier);
-        if (allowed) {
-          notifier.deny(
-            phonePubkey: phone.phonePubkey,
-            projectId: project.projectId,
-          );
-        } else {
-          notifier.allow(
-            phonePubkey: phone.phonePubkey,
-            projectId: project.projectId,
-          );
-        }
-      },
+      subtitle: Text(
+        // Device id and timestamp are data — mono.
+        '${phone.phoneDeviceId} · last seen ${phone.lastSeenAt}',
+        style: AbTokens.monoStyle(
+          fontSize: AbTokens.fontXxs,
+          color: p.textMuted,
+        ),
+      ),
+      trailing: AbButton(
+        key: ValueKey('unpair-${phone.phonePubkey}'),
+        label: 'Unpair',
+        compact: true,
+        onTap: () => ref
+            .read(mobileDevicesHubProvider.notifier)
+            .unpair(phonePubkey: phone.phonePubkey),
+      ),
     );
   }
 }
@@ -260,34 +236,4 @@ class _ErrorState extends StatelessWidget {
       subtitle: message,
     );
   }
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Column union helper
-// ──────────────────────────────────────────────────────────────────────────────
-
-/// Returns the union of the machine-known projects ([byId]) and
-/// [phone.allowedProjects]. An allowed id absent from known projects renders as
-/// a stub KnownProject (label: null, path: null) so CLI-granted-but-unopened
-/// entries are visible.
-List<KnownProject> _columnsFor(
-  PairedPhoneSummary phone,
-  Map<String, KnownProject> byId,
-) {
-  final ids = <String>{...byId.keys, ...phone.allowedProjects};
-  return ids
-      .map(
-        (id) =>
-            byId[id] ??
-            KnownProject(
-              projectId: id,
-              label: null,
-              path: null,
-              running: false,
-            ),
-      )
-      .toList()
-    ..sort(
-      (a, b) => (a.label ?? a.projectId).compareTo(b.label ?? b.projectId),
-    );
 }

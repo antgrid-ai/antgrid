@@ -430,7 +430,7 @@ export function uiRoutes(deps: {
       label: planRow.label,
       recurring: planRow.recurring,
       trial: planRow.trial,
-      sessionLimit: planRow.sessionLimit,
+      workerLimit: planRow.workerLimit,
       displayPrice: chargePrice,
       chargePrice,
     };
@@ -466,12 +466,12 @@ export function uiRoutes(deps: {
     ]);
     if (!sub) return c.redirect("/login");
     // resolveEntitlement only needs sub; compute tier now so we can prefetch sessions.
-    const { tier, deviceLimit, sessionLimit } = resolveEntitlement(sub);
+    const { tier, deviceLimit, workerLimit } = resolveEntitlement(sub);
     // Run plan lookup and sessions fetch concurrently — they're independent.
     const [plan, sessions] = await Promise.all([
       deps.db.plan.findUnique({ where: { id: sub.planId } }),
-      // Free tier shows an upsell — skip the relay round-trip; null means relay unreachable.
-      tier === FREE_TIER ? Promise.resolve([] as UserSession[]) : listUserSessions(deps.relay, userId, devices),
+      // Fetched on every tier: Free has remote control too. null = relay unreachable.
+      listUserSessions(deps.relay, userId, devices),
     ]);
     if (!plan) return c.redirect("/login");
     const purchaseSuccess = c.req.query("purchase") === "success";
@@ -485,8 +485,11 @@ export function uiRoutes(deps: {
         tier={tier}
         deviceLimit={deviceLimit}
         activeDevices={devices.length}
+        workerLimit={workerLimit}
+        // The worker cap counts agent rows only; the desktop app also registers
+        // an `app` controller row for itself, which must not be metered here.
+        activeWorkers={devices.filter((d) => d.kind === "agent").length}
         sessions={sessions}
-        sessionLimit={sessionLimit}
         now={Date.now()}
         purchaseSuccess={purchaseSuccess}
         cancelNotice={

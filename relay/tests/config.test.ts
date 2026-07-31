@@ -95,6 +95,18 @@ describe("loadConfig", () => {
     expect(cfg.replayTtlMs).toBe(300_000);
     expect(cfg.jsonRateLimitPerSec).toBe(10);
     expect(cfg.jsonRateLimitBurst).toBe(30);
+    expect(cfg.maxStreamsPerConnection).toBe(1024);
+  });
+
+  test("maxStreamsPerConnection respects its env override", () => {
+    process.env.LICENSE_API_URL = "http://localhost:8787";
+    process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;
+    process.env.MAX_STREAMS_PER_CONNECTION = "64";
+    try {
+      expect(loadConfig().maxStreamsPerConnection).toBe(64);
+    } finally {
+      delete process.env.MAX_STREAMS_PER_CONNECTION;
+    }
   });
 
   test("v3 keys respect env overrides", () => {

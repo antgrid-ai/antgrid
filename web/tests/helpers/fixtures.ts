@@ -32,7 +32,7 @@ export type TestSubscription = {
   id: string;
   userId: string;
   tier: "trial" | "pro";
-  sessionLimit: number;
+  workerLimit: number;
 };
 
 export async function createTestSubscription(
@@ -40,7 +40,7 @@ export async function createTestSubscription(
   userId: string,
   opts: Partial<{
     tier: "trial" | "pro";
-    sessionLimit: number;
+    workerLimit: number;
     deviceLimit: number;
     planId: string;
     planSlug: "pro_yearly" | "pro_lifetime";
@@ -49,7 +49,9 @@ export async function createTestSubscription(
   }> = {}
 ): Promise<TestSubscription> {
   const tier = opts.tier ?? "pro";
-  const sessionLimit = opts.sessionLimit ?? (tier === "trial" ? 2 : 10);
+  // Deliberately above every real plan value so unrelated suites never trip the
+  // worker cap incidentally; cap tests pass an explicit limit.
+  const workerLimit = opts.workerLimit ?? (tier === "trial" ? 2 : 10);
   const deviceLimit = opts.deviceLimit ?? 10;
   const status = opts.status ?? "active";
   const trialEndsAt = opts.trialEndsAt ?? null;
@@ -67,13 +69,13 @@ export async function createTestSubscription(
       planId,
       tier,
       status,
-      sessionLimit,
+      workerLimit,
       deviceLimit,
       trialEndsAt,
     },
     select: { id: true },
   });
-  return { id: row.id, userId, tier, sessionLimit };
+  return { id: row.id, userId, tier, workerLimit };
 }
 
 export async function createTestSession(

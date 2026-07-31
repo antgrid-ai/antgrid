@@ -2,7 +2,7 @@ import { Layout } from "./layout.js";
 import {
   displayPriceCents,
   formatUsd,
-  PRICING,
+  FREE_WORKER_LIMIT,
   TRIAL_DAYS,
   type BillingEnv,
 } from "../billing/plans.js";
@@ -16,22 +16,25 @@ export type PricingPageProps = {
 
 const COMING_SOON_LABEL = "Coming soon";
 
+// Pro Lifetime is deliberately absent from this page: it stays in the catalog
+// and in checkout so existing holders keep entitlement, but it is no longer
+// marketed.
+
+const FREE_FEATURES = [
+  "Run agents on up to {workers} machines",
+  "Remote control from your phone",
+  "Unlimited terminal sessions",
+  "File explorer & git viewer",
+  "E2E encrypted — zero-knowledge relay",
+] as const;
+
 const PRO_YEARLY_FEATURES = [
-  "Up to {sessions} concurrent remote sessions",
+  "Run agents on up to {workers} machines",
   "Unlimited terminal sessions",
   "File explorer & git viewer",
   "Browser preview tunneling",
   "E2E encrypted — zero-knowledge relay",
   "Priority support",
-] as const;
-
-const PRO_LIFETIME_FEATURES = [
-  "Everything in Pro Yearly",
-  "Lifetime updates",
-  "No renewal fees",
-  "Up to {sessions} concurrent remote sessions",
-  "E2E encrypted — zero-knowledge relay",
-  "Community support",
 ] as const;
 
 function CheckIcon() {
@@ -53,13 +56,13 @@ function CheckIcon() {
   );
 }
 
-function FeatureList({ items, sessions }: { items: readonly string[]; sessions: number }) {
+function FeatureList({ items, workers }: { items: readonly string[]; workers: number }) {
   return (
     <ul class="mt-5 space-y-2.5">
       {items.map((item) => (
         <li class="flex items-start gap-2.5 text-sm text-base-content/70">
           <CheckIcon />
-          <span>{item.replace("{sessions}", String(sessions))}</span>
+          <span>{item.replace("{workers}", String(workers))}</span>
         </li>
       ))}
     </ul>
@@ -83,7 +86,6 @@ export function PricingPage(props: PricingPageProps) {
   const yearlyPrice = displayPriceCents("pro_yearly", props.env);
   const trialPlan = props.plans.find((p) => p.slug === "trial");
   const yearlyPlan = props.plans.find((p) => p.slug === "pro_yearly");
-  const lifetimePlan = props.plans.find((p) => p.slug === "pro_lifetime");
 
   return (
     <Layout title="Pricing" user={props.user}>
@@ -96,12 +98,14 @@ export function PricingPage(props: PricingPageProps) {
       </div>
 
       {trialPlan && (
-        <FreeTrialBanner yearlyPrice={yearlyPrice} trialSessions={trialPlan.sessionLimit} />
+        <FreeTrialBanner yearlyPrice={yearlyPrice} trialWorkers={trialPlan.workerLimit} />
       )}
 
       <div class="grid gap-6 md:grid-cols-2 mt-6">
+        {/* The free plan row is excluded from listActivePlans, so its worker
+            count comes from the same constant that seeds it. */}
+        <FreeCard workers={FREE_WORKER_LIMIT} />
         {yearlyPlan && <ProYearlyCard plan={yearlyPlan} price={yearlyPrice} />}
-        {lifetimePlan && <ProLifetimeCard plan={lifetimePlan} />}
       </div>
     </Layout>
   );
@@ -115,10 +119,10 @@ function trialFirstChargeDate(): string {
 
 function FreeTrialBanner({
   yearlyPrice,
-  trialSessions,
+  trialWorkers,
 }: {
   yearlyPrice: number;
-  trialSessions: number;
+  trialWorkers: number;
 }) {
   const firstCharge = trialFirstChargeDate();
   return (
@@ -132,11 +136,9 @@ function FreeTrialBanner({
           {TRIAL_DAYS}-day free trial, then {formatUsd(yearlyPrice)}/year
         </h2>
         <p class="text-sm text-base-content/60 mt-1.5 max-w-2xl">
-          Add your card to start. Up to{" "}
-          <strong class="text-base-content/80">
-            {trialSessions} concurrent remote sessions
-          </strong>{" "}
-          during the trial. Your card won't be charged until{" "}
+          Add your card to start. Run agents on up to{" "}
+          <strong class="text-base-content/80">{trialWorkers} machines</strong> during the
+          trial. Your card won't be charged until{" "}
           <strong class="text-base-content/80">{firstCharge}</strong> — cancel anytime before then
           to avoid the {formatUsd(yearlyPrice)}/year charge. Subscription renews automatically
           unless canceled.
@@ -145,6 +147,32 @@ function FreeTrialBanner({
       <button type="button" class="btn btn-disabled font-mono shrink-0" disabled>
         {COMING_SOON_LABEL}
       </button>
+    </div>
+  );
+}
+
+function FreeCard({ workers }: { workers: number }) {
+  return (
+    <div class="card bg-base-100 h-full border border-base-300">
+      <div class="card-body flex flex-col h-full">
+        <h2 class="font-mono text-xl font-bold">Free</h2>
+
+        <div class="mt-3 font-mono min-h-[4.75rem]">
+          <span class="text-4xl font-bold">$0</span>
+          <p class="text-xs text-base-content/50 font-mono mt-1.5">No card required.</p>
+        </div>
+
+        <FeatureList items={FREE_FEATURES} workers={workers} />
+
+        <div class="mt-auto pt-6">
+          <button type="button" class="btn btn-disabled font-mono w-full" disabled>
+            Your plan
+          </button>
+          <p class="text-xs text-base-content/40 font-mono text-center mt-3 min-h-[2.5rem]">
+            Included with every account.
+          </p>
+        </div>
+      </div>
     </div>
   );
 }
@@ -161,31 +189,9 @@ function ProYearlyCard({ plan, price }: { plan: PlanRow; price: number }) {
           <p class="text-xs text-base-content/50 font-mono mt-1.5">Renews annually.</p>
         </div>
 
-        <FeatureList items={PRO_YEARLY_FEATURES} sessions={plan.sessionLimit} />
+        <FeatureList items={PRO_YEARLY_FEATURES} workers={plan.workerLimit} />
 
         <ComingSoonCta footer={`${formatUsd(price)}/year · Renews automatically · Cancel anytime`} />
-      </div>
-    </div>
-  );
-}
-
-function ProLifetimeCard({ plan }: { plan: PlanRow }) {
-  const price = PRICING.pro_lifetime.listPriceCents;
-
-  return (
-    <div class="card bg-base-100 h-full border border-base-300 opacity-60">
-      <div class="card-body flex flex-col h-full">
-        <h2 class="font-mono text-xl font-bold">{plan.label}</h2>
-
-        <div class="mt-3 font-mono min-h-[4.75rem]">
-          <span class="text-4xl font-bold">{formatUsd(price)}</span>
-          <span class="text-sm text-base-content/50 ml-1">one-time</span>
-          <p class="text-xs text-base-content/50 font-mono mt-1.5">Pay once, use forever.</p>
-        </div>
-
-        <FeatureList items={PRO_LIFETIME_FEATURES} sessions={plan.sessionLimit} />
-
-        <ComingSoonCta footer="One-time payment · No subscription" />
       </div>
     </div>
   );
@@ -204,9 +210,11 @@ function ProLifetimeCard({ plan }: { plan: PlanRow }) {
 //
 // TO RESTORE ONCE PAYMENT INTEGRATION SHIPS:
 //   1. Delete the static replacement above this marker: PricingPageProps,
-//      COMING_SOON_LABEL, ComingSoonCta, PricingPage, FreeTrialBanner,
-//      ProYearlyCard, ProLifetimeCard (everything from `export type
-//      PricingPageProps` down to just above this marker).
+//      COMING_SOON_LABEL, FREE_FEATURES, ComingSoonCta, PricingPage,
+//      FreeTrialBanner, FreeCard, ProYearlyCard (everything from `export type
+//      PricingPageProps` down to just above this marker). Re-add a Free card
+//      and decide whether Lifetime returns to the grid — it is intentionally
+//      unmarketed, not removed from the catalog.
 //   2. Select everything below this marker and strip the leading "// " from
 //      each line (most editors: select + "toggle line comment").
 //   3. In web/src/routes/ui.tsx's `/pricing` handler, do the matching restore
@@ -247,7 +255,7 @@ function ProLifetimeCard({ plan }: { plan: PlanRow }) {
 // }
 // 
 // const PRO_YEARLY_FEATURES = [
-//   "Up to {sessions} concurrent remote sessions",
+//   "Run agents on up to {workers} machines",
 //   "Unlimited terminal sessions",
 //   "File explorer & git viewer",
 //   "Browser preview tunneling",
@@ -259,7 +267,7 @@ function ProLifetimeCard({ plan }: { plan: PlanRow }) {
 //   "Everything in Pro Yearly",
 //   "Lifetime updates",
 //   "No renewal fees",
-//   "Up to {sessions} concurrent remote sessions",
+//   "Run agents on up to {workers} machines",
 //   "E2E encrypted — zero-knowledge relay",
 //   "Community support",
 // ] as const;
@@ -283,13 +291,13 @@ function ProLifetimeCard({ plan }: { plan: PlanRow }) {
 //   );
 // }
 // 
-// function FeatureList({ items, sessions }: { items: readonly string[]; sessions: number }) {
+// function FeatureList({ items, workers }: { items: readonly string[]; workers: number }) {
 //   return (
 //     <ul class="mt-5 space-y-2.5">
 //       {items.map((item) => (
 //         <li class="flex items-start gap-2.5 text-sm text-base-content/70">
 //           <CheckIcon />
-//           <span>{item.replace("{sessions}", String(sessions))}</span>
+//           <span>{item.replace("{workers}", String(workers))}</span>
 //         </li>
 //       ))}
 //     </ul>
@@ -368,7 +376,7 @@ function ProLifetimeCard({ plan }: { plan: PlanRow }) {
 //       {trialPlan && showTrialBanner && (
 //         <FreeTrialBanner
 //           yearlyPrice={yearlyPrice}
-//           trialSessions={trialPlan.sessionLimit}
+//           trialWorkers={trialPlan.workerLimit}
 //           isCurrent={current === "trial"}
 //           isDisabled={hasActivePlan}
 //         />
@@ -403,12 +411,12 @@ function ProLifetimeCard({ plan }: { plan: PlanRow }) {
 // 
 // function FreeTrialBanner({
 //   yearlyPrice,
-//   trialSessions,
+//   trialWorkers,
 //   isCurrent,
 //   isDisabled = false,
 // }: {
 //   yearlyPrice: number;
-//   trialSessions: number;
+//   trialWorkers: number;
 //   isCurrent: boolean;
 //   isDisabled?: boolean;
 // }) {
@@ -434,7 +442,7 @@ function ProLifetimeCard({ plan }: { plan: PlanRow }) {
 //         <p class="text-sm text-base-content/60 mt-1.5 max-w-2xl">
 //           Add your card to start. Up to{" "}
 //           <strong class="text-base-content/80">
-//             {trialSessions} concurrent remote sessions
+//             {trialWorkers} worker machines
 //           </strong>{" "}
 //           during the trial. Your card won't be charged until{" "}
 //           <strong class="text-base-content/80">{firstCharge}</strong> — cancel anytime before then
@@ -494,7 +502,7 @@ function ProLifetimeCard({ plan }: { plan: PlanRow }) {
 //           <p class="text-xs text-base-content/50 font-mono mt-1.5">Renews annually.</p>
 //         </div>
 // 
-//         <FeatureList items={PRO_YEARLY_FEATURES} sessions={plan.sessionLimit} />
+//         <FeatureList items={PRO_YEARLY_FEATURES} workers={plan.workerLimit} />
 // 
 //         <PlanCta
 //           planId="pro_yearly"
@@ -543,7 +551,7 @@ function ProLifetimeCard({ plan }: { plan: PlanRow }) {
 //           <p class="text-xs text-base-content/50 font-mono mt-1.5">Pay once, use forever.</p>
 //         </div>
 // 
-//         <FeatureList items={PRO_LIFETIME_FEATURES} sessions={plan.sessionLimit} />
+//         <FeatureList items={PRO_LIFETIME_FEATURES} workers={plan.workerLimit} />
 // 
 //         <PlanCta
 //           planId="pro_lifetime"

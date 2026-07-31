@@ -126,7 +126,7 @@ test("session.transcriptSnapshot with missing sessionId param returns E_BAD_PARA
   }
 });
 
-test("drops session.transcriptSnapshot from a trusted-but-not-allowed phone", async () => {
+test("drops session.transcriptSnapshot from a remote phone while mobile access is off", async () => {
   const folder = tempFolder();
   const store = loadPairedPhones(abDir);
   const pk1 = "phone-pubkey-transcript-snap";
@@ -135,16 +135,18 @@ test("drops session.transcriptSnapshot from a trusted-but-not-allowed phone", as
     phoneDeviceId: "phone-dev-transcript-snap",
     pairedAt: new Date().toISOString(),
     lastSeenAt: new Date().toISOString(),
-    allowedProjects: [],
   });
+  // Read live by the gate, so flipping it mid-test is exactly what the desktop's
+  // mobile-access:set does to an already-warm core.
+  let mobileAccess = false;
 
   core = await buildAgentCore({
     folder,
     mode: "remote",
     identity: { deviceId: "agent-dev", deviceName: "agent-dev", createdAt: new Date().toISOString() },
     pairedPhones: store,
+    mobileAccessEnabled: () => mobileAccess,
   });
-  const projectId = core.projectId;
 
   const bus = new MessageBus();
   const sent: AbMessage[] = [];
@@ -163,10 +165,10 @@ test("drops session.transcriptSnapshot from a trusted-but-not-allowed phone", as
   await new Promise((r) => setTimeout(r, 200));
   expect(findResponse(sent, "r3")).toBeUndefined();
 
-  // Positive control: prove the silence above was specifically the allowlist
-  // gate (not a wrong channel/source or the method never reaching the
-  // handler) by granting the project and re-sending the same verb.
-  store.allowProject(pk1, projectId);
+  // Positive control: prove the silence above was specifically the machine
+  // switch (not a wrong channel/source or the method never reaching the
+  // handler) by turning mobile access on and re-sending the same verb.
+  mobileAccess = true;
   sent.length = 0;
   bus.dispatchInbound(
     createMessage("request", { requestId: "r3b", method: "session.transcriptSnapshot", params: { sessionId: "ghost" } }),

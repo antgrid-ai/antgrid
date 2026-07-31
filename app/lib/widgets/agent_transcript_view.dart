@@ -768,65 +768,73 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
         effectiveState.updateResult != null ||
         availableUpdate != null;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Expanded(child: body),
-        if (showUpdateBanner)
-          _UpdateBanner(
-            updating: effectiveState.updating,
-            result: effectiveState.updateResult,
-            available: availableUpdate,
-            onUpdate: availableUpdate == null
-                ? null
-                : () => _showUpdateDialog(context, availableUpdate),
-            onRetry: () => _service()?.requestUpdate(
-              widget.sessionId,
-              effectiveState.updateResult?.tool ?? 'codex',
-            ),
-            onDismissResult: () =>
-                _service()?.dismissUpdateResult(widget.sessionId),
-            onDismissAvailable: availableUpdate == null
-                ? null
-                : () => setState(
-                    () => _dismissedUpdateVersion = availableUpdate.latest,
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(
+          maxWidth: AbTokens.transcriptMaxWidth,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(child: body),
+            if (showUpdateBanner)
+              _UpdateBanner(
+                updating: effectiveState.updating,
+                result: effectiveState.updateResult,
+                available: availableUpdate,
+                onUpdate: availableUpdate == null
+                    ? null
+                    : () => _showUpdateDialog(context, availableUpdate),
+                onRetry: () => _service()?.requestUpdate(
+                  widget.sessionId,
+                  effectiveState.updateResult?.tool ?? 'codex',
+                ),
+                onDismissResult: () =>
+                    _service()?.dismissUpdateResult(widget.sessionId),
+                onDismissAvailable: availableUpdate == null
+                    ? null
+                    : () => setState(
+                        () => _dismissedUpdateVersion = availableUpdate.latest,
+                      ),
+              ),
+            PendingPromptPanel(
+              permissions: effectiveState.pendingPermissions,
+              questions: effectiveState.pendingQuestions,
+              inputFocusNode: _panelFocus,
+              onPermission: (request, optionId) =>
+                  _service()?.resolvePermission(
+                    request.sessionId,
+                    request.permissionId,
+                    optionId,
                   ),
-          ),
-        PendingPromptPanel(
-          permissions: effectiveState.pendingPermissions,
-          questions: effectiveState.pendingQuestions,
-          inputFocusNode: _panelFocus,
-          onPermission: (request, optionId) => _service()?.resolvePermission(
-            request.sessionId,
-            request.permissionId,
-            optionId,
-          ),
-          onQuestion: (question, answer) => _service()?.resolveQuestion(
-            question.sessionId,
-            question.questionId,
-            answer,
-          ),
+              onQuestion: (question, answer) => _service()?.resolveQuestion(
+                question.sessionId,
+                question.questionId,
+                answer,
+              ),
+            ),
+            SlashSuggestions(
+              commands: _suggestions,
+              selectedIndex: _suggestionIndex,
+              onPick: _acceptSuggestion,
+            ),
+            FileMentionSuggestions(
+              entries: _mentionSuggestions,
+              selectedIndex: _mentionIndex,
+              onPick: _acceptMention,
+            ),
+            Padding(
+              padding: const EdgeInsets.all(AbTokens.space8),
+              child: _composerSurface(
+                context,
+                isRunning: isRunning,
+                capabilities: displayCaps,
+                usage: effectiveState.usage,
+              ),
+            ),
+          ],
         ),
-        SlashSuggestions(
-          commands: _suggestions,
-          selectedIndex: _suggestionIndex,
-          onPick: _acceptSuggestion,
-        ),
-        FileMentionSuggestions(
-          entries: _mentionSuggestions,
-          selectedIndex: _mentionIndex,
-          onPick: _acceptMention,
-        ),
-        Padding(
-          padding: const EdgeInsets.all(AbTokens.space8),
-          child: _composerSurface(
-            context,
-            isRunning: isRunning,
-            capabilities: displayCaps,
-            usage: effectiveState.usage,
-          ),
-        ),
-      ],
+      ),
     );
   }
 

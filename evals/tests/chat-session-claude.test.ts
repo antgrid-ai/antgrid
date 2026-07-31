@@ -2,6 +2,7 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { setupTestEnv, type TestEnv } from "../helpers/harness";
 import { createMessage } from "../../bridge/src/protocol";
 import { promptUntilTurnStart } from "../helpers/chat";
+import { bindFirstProject } from "../support/stream";
 
 // End-to-end chat-session turn over the REAL relay + the REAL installed
 // `claude` binary via the claude-code structured driver
@@ -13,31 +14,30 @@ import { promptUntilTurnStart } from "../helpers/chat";
 // without it (most CI) skip cleanly rather than fail — the same
 // availability-gate style as chat-session.test.ts and
 // plugin-notifications.test.ts's real-agent chain.
-// TODO(evals,v3): chat verbs run on the firstProject STREAM in v3, but the frozen
-// helpers/chat.ts `promptUntilTurnStart` sends agent:prompt on the machine CONTROL
-// plane (s omitted), which v3 does not route to a project — and this suite's own
-// session:* verbs are likewise control-plane. Un-skipping requires migrating
-// chat.ts (a frozen shared helper) + these verbs onto sendOnStream. Skipped until
-// the harness grows a stream-scoped chat driver; the claude binary being present
-// here is not enough. (Env-gated separately on a logged-in `claude`.)
-const claudeAvailable = !!Bun.which("claude");
-const d = describe.skip;
-void claudeAvailable;
+const HAVE_CLAUDE = Bun.which("claude") !== null;
 
 const DEFAULT_NAME = /^Session \d+$/;
 
-d("claude-code chat session (E2E, installed binary)", () => {
+describe.skipIf(!HAVE_CLAUDE)("claude-code chat session (E2E, installed binary)", () => {
   let env: TestEnv;
+  // The project stream every chat verb rides — session:* and agent:* are
+  // agent-core verbs, which the machine control plane does not dispatch.
+  let streamId: string;
   let sessionId: string;
 
   beforeAll(async () => {
     // `claude-code-chat` fixture declares `agent.tool: claude-code` and no
     // autoStart service, so nothing spawns until the eval creates a chat
-    // session. setupTestEnv pairs the app, allowlists the project for the
-    // paired phone (the Phase-B gate would otherwise silently drop every
-    // session verb), and pulls the welcome snapshot.
+    // session. setupTestEnv admits the app, turns the machine's mobile-access
+    // switch on (the gate would otherwise silently drop every session verb),
+    // and pulls the welcome snapshot.
     env = await setupTestEnv({ fixtureName: "claude-code-chat" });
-    await env.app.waitForAbType("agent:hello", 10_000);
+    // Read core readiness out of the project snapshot rather than awaiting a
+    // live `agent:hello`: it is a REPLAY_TYPE, and v3 dedups the welcome-replayed
+    // burst, so a live wait races a push that may never be re-sent.
+    const bound = await bindFirstProject(env.app, env.projectId, 10_000);
+    streamId = bound.streamId;
+    expect(bound.frames.some((f) => f.type === "agent:hello")).toBe(true);
   }, 60_000);
 
   afterAll(async () => {
@@ -47,13 +47,13 @@ d("claude-code chat session (E2E, installed binary)", () => {
   test("runs a text turn: prompt -> turn-start -> message item -> turn-end", async () => {
     // session:create (mode:'chat', tool:'claude-code') → session:result with the row.
     const createReq = `create-${Date.now()}`;
-    env.app.sendEncrypted(createMessage("session:create", {
+    env.app.sendOnStream(streamId, createMessage("session:create", {
       requestId: createReq,
       name: "chat-eval-claude",
       tool: "claude-code",
       mode: "chat",
     }));
-    const created = await env.app.waitForAbType("session:result", 10_000);
+    const created = await env.app.waitForStreamAbType(streamId, "session:result", 10_000);
     expect(created.requestId).toBe(createReq);
     expect(created.ok).toBe(true);
     expect(created.session?.mode).toBe("chat");
@@ -62,11 +62,11 @@ d("claude-code chat session (E2E, installed binary)", () => {
     // session:start → StructuredAgentManager spawns the claude-code driver,
     // which spawns the real `claude` binary via pathToClaudeCodeExecutable.
     const startReq = `start-${Date.now()}`;
-    env.app.sendEncrypted(createMessage("session:start", {
+    env.app.sendOnStream(streamId, createMessage("session:start", {
       requestId: startReq,
       sessionId,
     }));
-    const startRes = await env.app.waitForAbType("session:result", 15_000);
+    const startRes = await env.app.waitForStreamAbType(streamId, "session:result", 15_000);
     expect(startRes.ok).toBe(true);
 
     // session:result for a chat start returns synchronously, BEFORE the async
@@ -74,7 +74,7 @@ d("claude-code chat session (E2E, installed binary)", () => {
     // too early answers `agent:error {message:"chat session not started"}`.
     // There is no distinct "driver ready" frame, so retry the prompt (ignoring
     // that transient) until the first turn opens.
-    const turnStart = await promptUntilTurnStart(env, sessionId);
+    const turnStart = await promptUntilTurnStart(env.app, streamId, sessionId);
     expect(turnStart.sessionId).toBe(sessionId);
     expect(turnStart.turnId).toBeTruthy();
 
@@ -88,6 +88,7 @@ d("claude-code chat session (E2E, installed binary)", () => {
       const msg = await env.app
         .waitFor(
           (m: any) =>
+            m._streamId === streamId &&
             m.sessionId === sessionId &&
             (m.type === "agent:item-added" || m.type === "agent:turn-end"),
           10_000,
@@ -117,29 +118,30 @@ d("claude-code chat session (E2E, installed binary)", () => {
     // fires with an empty transcript and chat mode has no OSC-2 fallback, so the
     // title can only resolve on a populated transcript at turn end.
     const createReq = `create-${Date.now()}`;
-    env.app.sendEncrypted(createMessage("session:create", {
+    env.app.sendOnStream(streamId, createMessage("session:create", {
       requestId: createReq,
       tool: "claude-code",
       mode: "chat",
     }));
-    const created = await env.app.waitForAbType("session:result", 10_000);
+    const created = await env.app.waitForStreamAbType(streamId, "session:result", 10_000);
     expect(created.ok).toBe(true);
     const nameSessionId = created.session!.id;
     expect(created.session!.name).toMatch(DEFAULT_NAME);
 
     const startReq = `start-${Date.now()}`;
-    env.app.sendEncrypted(createMessage("session:start", {
+    env.app.sendOnStream(streamId, createMessage("session:start", {
       requestId: startReq,
       sessionId: nameSessionId,
     }));
-    const startRes = await env.app.waitForAbType("session:result", 15_000);
+    const startRes = await env.app.waitForStreamAbType(streamId, "session:result", 15_000);
     expect(startRes.ok).toBe(true);
 
     // Warm-up race: session:result returns before startChat has spawned claude,
     // so a too-early prompt answers agent:error. promptUntilTurnStart retries.
     // The first user message becomes the resolved title.
     const turnStart = await promptUntilTurnStart(
-      env,
+      env.app,
+      streamId,
       nameSessionId,
       "Say the single word PONG and nothing else.",
     );
@@ -151,7 +153,10 @@ d("claude-code chat session (E2E, installed binary)", () => {
     while (Date.now() < turnDeadline && !turnEnded) {
       const msg = await env.app
         .waitFor(
-          (m: any) => m.sessionId === nameSessionId && m.type === "agent:turn-end",
+          (m: any) =>
+            m._streamId === streamId &&
+            m.sessionId === nameSessionId &&
+            m.type === "agent:turn-end",
           10_000,
         )
         .catch(() => null);
@@ -166,7 +171,10 @@ d("claude-code chat session (E2E, installed binary)", () => {
     const nameDeadline = Date.now() + 45_000;
     while (Date.now() < nameDeadline && !renamed) {
       const msg = await env.app
-        .waitFor((m: any) => m.type === "session:updated", 10_000)
+        .waitFor(
+          (m: any) => m._streamId === streamId && m.type === "session:updated",
+          10_000,
+        )
         .catch(() => null);
       if (!msg) continue;
       const row = (msg.sessions as any[])?.find((s) => s.id === nameSessionId);

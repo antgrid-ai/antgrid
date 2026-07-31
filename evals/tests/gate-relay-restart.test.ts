@@ -59,6 +59,7 @@ const RELAY_CONFIG = {
   rateLimitMsgPerSec: 100,
   jsonRateLimitPerSec: 100,
   jsonRateLimitBurst: 200,
+  maxStreamsPerConnection: 1024,
   clockSkewMs: 120_000,
   replayTtlMs: 300_000,
   pingIntervalMs: 30_000,
@@ -75,14 +76,14 @@ const RELAY_DEPS = {
       if (!token) return { ok: false as const, code: "LICENSE_INVALID" as const };
       return {
         ok: true as const,
-        entry: { jti: `eval-jti-${deviceId}`, deviceId, userId: "eval-user", tier: "pro" as const, sessionLimit: 100, pk: _publicKeyBase64, revoked: false },
+        entry: { jti: `eval-jti-${deviceId}`, deviceId, userId: "eval-user", tier: "pro" as const, pk: _publicKeyBase64, revoked: false },
       };
     },
     async verifyAppToken(token: string) {
       if (!token) return { ok: false as const, code: "LICENSE_INVALID" as const };
       return {
         ok: true as const,
-        entry: { jti: "eval-jti-app", deviceId: "app-eval-user", userId: "eval-user", tier: "pro" as const, sessionLimit: 100, pk: "eval-fake-app-pk", revoked: false },
+        entry: { jti: "eval-jti-app", deviceId: "app-eval-user", userId: "eval-user", tier: "pro" as const, pk: "eval-fake-app-pk", revoked: false },
       };
     },
   },

@@ -73,17 +73,19 @@ class AdvertisedProject {
 }
 
 /// An installed tool advertised by the agent over the control plane. Mirrors the
-/// bridge `agent:tools` entry (`{ tool, path, chatCapable? }`). `chatCapable` is
-/// null when talking to an older bridge that predates the field — callers fall
-/// back to the app's static capability list in that case.
+/// bridge `agent:tools` entry (`{ tool, path, chatCapable?, label? }`). Both
+/// optional fields are null when talking to an older bridge that predates them —
+/// callers fall back to the app's static tables in that case.
 class AdvertisedTool {
   final String tool;
   final String path;
   final bool? chatCapable;
+  final String? label;
   const AdvertisedTool({
     required this.tool,
     required this.path,
     this.chatCapable,
+    this.label,
   });
 
   static AdvertisedTool? fromJson(Map<String, dynamic> json) {
@@ -94,13 +96,15 @@ class AdvertisedTool {
       tool: tool,
       path: path,
       chatCapable: json['chatCapable'] as bool?,
+      label: json['label'] as String?,
     );
   }
 }
 
 /// A structured error reported by the agent in response to a control-plane
 /// verb (e.g. `project:start`). Mirrors the agent's `{ ok:false, error:{ code,
-/// message } }` shape — `NOT_ALLOWED` is the per-phone allowlist rejection.
+/// message } }` shape — `NOT_ALLOWED` means mobile access is switched off on
+/// that machine.
 class ControlPlaneError {
   final String code;
   final String message;

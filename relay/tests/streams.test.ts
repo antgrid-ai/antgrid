@@ -51,10 +51,61 @@ test("stream-open from an app is WRONG_DEVICE_TYPE", async () => {
   expect(await err).toMatchObject({ type: "error", code: "WRONG_DEVICE_TYPE", retryable: false });
 });
 
-test("sessionLimit N then N+1 -> SESSION_LIMIT_EXCEEDED with ref=streamId; socket and other streams intact", async () => {
-  const gate = makeFakeLicenseGate({ sessionLimit: 2 });
-  relay = startServer(defaultConfig, { licenseGate: gate });
-  const { ws } = await connectHello(relay, { deviceId: "stream-cap" });
+// Stream admission is uncapped: the paid axis is a worker (agent-device) cap
+// web enforces at registration, so a fleet view or warm-project LRU may fan out
+// as many streams as it likes without paying for them.
+test("many streams are admitted on one connection", async () => {
+  relay = startServer(defaultConfig);
+  const { ws } = await connectHello(relay, { deviceId: "stream-many" });
+
+  const ids = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"];
+  for (const id of ids) {
+    const opened = waitForMessage(ws);
+    ws.send(JSON.stringify({ type: "stream-open", streamId: id }));
+    expect(await opened).toEqual({ type: "stream-opened", streamId: id });
+  }
+
+  expect(relay.connections.getByDeviceId("stream-many")?.openStreams.size).toBe(ids.length);
+  const closed = waitForMessage(ws);
+  ws.send(JSON.stringify({ type: "stream-close", streamId: "s1" }));
+  expect(await closed).toEqual({ type: "stream-closed", streamId: "s1" });
+});
+
+test("the per-connection ceiling rejects the overflowing stream and keeps the socket", async () => {
+  relay = startServer({ ...defaultConfig, maxStreamsPerConnection: 3 });
+  const { ws } = await connectHello(relay, { deviceId: "stream-ceiling" });
+
+  for (const id of ["s1", "s2", "s3"]) {
+    const opened = waitForMessage(ws);
+    ws.send(JSON.stringify({ type: "stream-open", streamId: id }));
+    expect(await opened).toEqual({ type: "stream-opened", streamId: id });
+  }
+
+  const rejected = waitForMessage(ws);
+  ws.send(JSON.stringify({ type: "stream-open", streamId: "s4" }));
+  expect(await rejected).toMatchObject({
+    type: "error",
+    code: "STREAM_LIMIT_EXCEEDED",
+    retryable: false,
+    ref: "s4",
+  });
+  expect(relay.connections.getByDeviceId("stream-ceiling")?.openStreams.size).toBe(3);
+
+  // Stream errors never close the socket (error contract), and freeing a slot
+  // makes the connection usable again rather than needing a reconnect.
+  const closed = waitForMessage(ws);
+  ws.send(JSON.stringify({ type: "stream-close", streamId: "s1" }));
+  expect(await closed).toEqual({ type: "stream-closed", streamId: "s1" });
+  const reopened = waitForMessage(ws);
+  ws.send(JSON.stringify({ type: "stream-open", streamId: "s4" }));
+  expect(await reopened).toEqual({ type: "stream-opened", streamId: "s4" });
+});
+
+test("re-opening a held stream at the ceiling is admitted, not rejected", async () => {
+  // The mux re-opens every attached stream on each `welcome`; a re-open cannot
+  // grow the set, so the ceiling must not reject it.
+  relay = startServer({ ...defaultConfig, maxStreamsPerConnection: 2 });
+  const { ws } = await connectHello(relay, { deviceId: "stream-reopen" });
 
   for (const id of ["s1", "s2"]) {
     const opened = waitForMessage(ws);
@@ -62,49 +113,31 @@ test("sessionLimit N then N+1 -> SESSION_LIMIT_EXCEEDED with ref=streamId; socke
     expect(await opened).toEqual({ type: "stream-opened", streamId: id });
   }
 
-  const err = waitForMessage(ws);
-  ws.send(JSON.stringify({ type: "stream-open", streamId: "s3" }));
-  expect(await err).toMatchObject({
-    type: "error",
-    code: "SESSION_LIMIT_EXCEEDED",
-    retryable: false,
-    ref: "s3",
-  });
-
-  // Socket stays open; the two admitted streams are untouched.
-  expect(relay.connections.getByDeviceId("stream-cap")?.openStreams.size).toBe(2);
-  const closed = waitForMessage(ws);
-  ws.send(JSON.stringify({ type: "stream-close", streamId: "s1" }));
-  expect(await closed).toEqual({ type: "stream-closed", streamId: "s1" });
+  const reopened = waitForMessage(ws);
+  ws.send(JSON.stringify({ type: "stream-open", streamId: "s2" }));
+  expect(await reopened).toEqual({ type: "stream-opened", streamId: "s2" });
+  expect(relay.connections.getByDeviceId("stream-reopen")?.openStreams.size).toBe(2);
 });
 
-test("sessionLimit counts open streams across two connections sharing one license userId", async () => {
-  const gate = makeFakeLicenseGate({ sessionLimit: 2, agentUid: () => "shared-account" });
+test("streams on two connections sharing one license userId are all admitted", async () => {
+  const gate = makeFakeLicenseGate({ agentUid: () => "shared-account" });
   relay = startServer(defaultConfig, { licenseGate: gate });
   const a = await connectHello(relay, { deviceId: "stream-multi-a" });
   const b = await connectHello(relay, { deviceId: "stream-multi-b" });
 
-  const openedA = waitForMessage(a.ws);
-  a.ws.send(JSON.stringify({ type: "stream-open", streamId: "sa" }));
-  await openedA;
+  for (const [side, ids] of [[a, ["sa", "sc"]], [b, ["sb", "sd"]]] as const) {
+    for (const id of ids) {
+      const opened = waitForMessage(side.ws);
+      side.ws.send(JSON.stringify({ type: "stream-open", streamId: id }));
+      expect(await opened).toEqual({ type: "stream-opened", streamId: id });
+    }
+  }
 
-  const openedB = waitForMessage(b.ws);
-  b.ws.send(JSON.stringify({ type: "stream-open", streamId: "sb" }));
-  await openedB;
-
-  // The account's cap (2) is now exhausted across BOTH connections; a third
-  // open on either one is rejected.
-  const errA = waitForMessage(a.ws);
-  a.ws.send(JSON.stringify({ type: "stream-open", streamId: "sc" }));
-  expect(await errA).toMatchObject({ type: "error", code: "SESSION_LIMIT_EXCEEDED" });
-
-  const errB = waitForMessage(b.ws);
-  b.ws.send(JSON.stringify({ type: "stream-open", streamId: "sd" }));
-  expect(await errB).toMatchObject({ type: "error", code: "SESSION_LIMIT_EXCEEDED" });
+  expect(relay.connections.countOpenStreamsForUser("shared-account")).toBe(4);
 });
 
 test("epoch supersession releases the superseded connection's stream count", async () => {
-  const gate = makeFakeLicenseGate({ sessionLimit: 1 });
+  const gate = makeFakeLicenseGate({ agentUid: () => "supersede-account" });
   relay = startServer(defaultConfig, { licenseGate: gate });
   const deviceId = "stream-supersede";
 
@@ -122,9 +155,10 @@ test("epoch supersession releases the superseded connection's stream count", asy
   });
   await oldErr;
 
-  // With sessionLimit 1, opening on the fresh connection only succeeds if the
-  // old connection's single stream was actually released.
+  // The superseded connection's entry is gone, taking its openStreams with it,
+  // so the account's total reflects only the successor's re-opened stream.
   const reopened = waitForMessage(fresh.ws);
   fresh.ws.send(JSON.stringify({ type: "stream-open", streamId: "s2" }));
   expect(await reopened).toEqual({ type: "stream-opened", streamId: "s2" });
+  expect(relay.connections.countOpenStreamsForUser("supersede-account")).toBe(1);
 });

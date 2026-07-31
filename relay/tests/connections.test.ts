@@ -60,6 +60,10 @@ describe("Connections indexing", () => {
   });
 });
 
+// `countOpenStreamsForUser` has no production caller — stream admission is
+// uncapped. It survives as the assertion helper epochs.test.ts uses to prove a
+// superseded connection releases its streams, so these cases pin the helper's
+// own semantics, not an admission rule.
 describe("Connections.countOpenStreamsForUser", () => {
   it("sums openStreams across agent connections for one uid, ignoring apps and other users", () => {
     const c = new Connections();
@@ -128,13 +132,33 @@ describe("Connections user-scoped views", () => {
     const a = makeConn({ deviceId: "a", claims: { uid: "u1" }, publicKey: "secret-pk" });
     c.insert(a);
     const [summary] = c.listConnections();
-    expect(summary).toMatchObject({ deviceId: "a", deviceType: "agent" });
+    expect(summary).toMatchObject({ deviceId: "a", deviceType: "agent", openStreamCount: 0 });
     expect(summary).not.toHaveProperty("publicKey");
     expect(summary).not.toHaveProperty("claims");
 
     const [scoped] = c.listConnectionsForUser("u1");
     expect(scoped.deviceId).toBe("a");
     expect(c.listConnectionsForUser("nobody")).toEqual([]);
+  });
+
+  // Web bills on this number — an agent's bare deviceId says nothing about how
+  // many projects it is multiplexing, so the summary must carry the count.
+  it("projects the open-stream count without leaking the stream ids", () => {
+    const c = new Connections();
+    c.insert(makeConn({ deviceId: "a", claims: { uid: "u1" }, openStreams: new Set(["s1", "s2"]) }));
+    const [summary] = c.listConnectionsForUser("u1");
+    expect(summary.openStreamCount).toBe(2);
+    expect(JSON.stringify(summary)).not.toContain("s1");
+  });
+
+  it("tracks stream open/close through the summary", () => {
+    const c = new Connections();
+    const conn = makeConn({ deviceId: "a", claims: { uid: "u1" } });
+    c.insert(conn);
+    conn.openStreams.add("s1");
+    expect(c.listConnectionsForUser("u1")[0]!.openStreamCount).toBe(1);
+    conn.openStreams.delete("s1");
+    expect(c.listConnectionsForUser("u1")[0]!.openStreamCount).toBe(0);
   });
 });
 

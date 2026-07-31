@@ -2,19 +2,6 @@ import { Layout } from "./layout.js";
 import type { ConnectionSummary } from "../relay/push.js";
 import { fmtAge } from "./format.js";
 
-function stateClass(state: ConnectionSummary["state"]): string {
-  switch (state) {
-    case "PAIRED":
-      return "text-success";
-    case "AUTHENTICATED":
-      return "text-info";
-    case "CHALLENGED":
-      return "text-warning";
-    default:
-      return "text-base-content/40";
-  }
-}
-
 export function ConnectionsPage(props: {
   user: { email: string | null };
   connections: ConnectionSummary[] | null;
@@ -53,11 +40,9 @@ export function ConnectionsPage(props: {
               <tr class="text-base-content/50">
                 <th>Device ID</th>
                 <th>Type</th>
-                <th>State</th>
+                <th>Streams</th>
                 <th>Connected</th>
                 <th>Last seen</th>
-                <th>Paired with</th>
-                <th>Parent agent</th>
               </tr>
             </thead>
             <tbody>
@@ -65,11 +50,14 @@ export function ConnectionsPage(props: {
                 <tr>
                   <td class="break-all">{c.deviceId}</td>
                   <td>{c.deviceType}</td>
-                  <td class={stateClass(c.state)}>{c.state}</td>
+                  {/* Apps cannot hold streams at all (the relay answers an app's
+                      stream-open with WRONG_DEVICE_TYPE), so a zero there is
+                      "not applicable", not "dropped". */}
+                  <td class={c.openStreamCount === 0 ? "text-base-content/40" : "text-success"}>
+                    {c.deviceType === "app" ? "—" : c.openStreamCount}
+                  </td>
                   <td class="text-base-content/60">{fmtAge(c.connectedAt, now)} ago</td>
                   <td class="text-base-content/60">{fmtAge(c.lastSeen, now)} ago</td>
-                  <td class="break-all text-base-content/60">{c.pairedWith ?? "—"}</td>
-                  <td class="break-all text-base-content/60">{c.parentAgentDeviceId ?? "—"}</td>
                 </tr>
               ))}
             </tbody>

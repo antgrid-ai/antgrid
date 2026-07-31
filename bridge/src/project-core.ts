@@ -19,7 +19,8 @@ export interface ProjectCoreRemoteDeps {
   /** Attach this core's bus as a stream on the machine socket, allocating a
    *  streamId and driving stream-open admission. */
   attachStream(bus: MessageBus, opts: AttachStreamOpts): StreamHandle;
-  /** The machine's currently-paired phone pubkey (for the allowlist gate). */
+  /** The machine's currently-connected phone pubkey (the mobile-access gate's
+   *  remote-vs-local signal, and the push dispatcher's live-device hint). */
   currentPeerPubkey(): string | null;
   /** Blind FCM push forward over the machine socket (fallback delivery). */
   sendPushDeliver(msg: { pushToken: string; provider: "fcm" | "apns"; blob: { epk: string; box: string } }): void;
@@ -27,10 +28,6 @@ export interface ProjectCoreRemoteDeps {
 
 export interface ProjectCoreDeps extends BuildAgentCoreOptions {
   remote?: ProjectCoreRemoteDeps; // Required when mode === "remote".
-  /** Same-account default projects to seed when a phone pairs via the local
-   *  wizard promotion path. Host-supplied; absent for a standalone agent (then
-   *  no defaults are seeded). */
-  sameAccountDefaultProjects?: () => string[];
   /** Host hook that lets the local wizard promotion path bring the machine relay
    *  socket up from the app-supplied credentials and attach this core as a
    *  stream. Absent for a bare agent (enabling relay is then unsupported). */
@@ -43,16 +40,18 @@ export interface ProjectCoreDeps extends BuildAgentCoreOptions {
 export interface PromotionHandle {
   stop(): void;
   /** Resolves with the FIRST register outcome of the added relay slot: `ok`
-   *  once the relay authenticates it, or a terminal rejection (e.g.
-   *  `SESSION_LIMIT_EXCEEDED`) the gate closed it with. Lets the host gate the
-   *  phone-facing `running:true` advert on a real slot and surface a paid-axis
-   *  rejection instead of letting the phone dial an empty data-plane slot. */
+   *  once the relay authenticates it, or a terminal rejection the gate closed it
+   *  with (only the retired `SESSION_LIMIT_EXCEEDED`, from a relay predating the
+   *  worker-limit change, reaches this today). Lets the host gate the
+   *  phone-facing `running:true` advert on a real slot and surface the rejection
+   *  instead of letting the phone dial an empty data-plane slot. */
   firstRegister: Promise<RegisterOutcome>;
 }
 
 /** Outcome of a relay stream's FIRST admission — `ok` once the relay acks the
- *  stream-open, otherwise the typed rejection (notably `SESSION_LIMIT_EXCEEDED`)
- *  the relay answered with. Stream admission is its own signal now (design §7.3):
+ *  stream-open, otherwise the typed rejection the relay answered with (current
+ *  relays admit unconditionally; the retired `SESSION_LIMIT_EXCEEDED` still
+ *  arrives from older ones). Stream admission is its own signal (design §7.3):
  *  a rejection leaves the socket and every other stream live. */
 export type RegisterOutcome =
   | { ok: true }
@@ -155,7 +154,8 @@ export class ProjectCore {
   /** First register outcome of a REMOTE-mode core's primary relay slot (null in
    *  local mode, or before start()). Lets the host gate the phone-facing
    *  `running:true` advert on a real register and surface a terminal rejection
-   *  (e.g. `SESSION_LIMIT_EXCEEDED`). Promotion's slot exposes the same via its
+   *  (today only the retired `SESSION_LIMIT_EXCEEDED`, from an older relay).
+   *  Promotion's slot exposes the same via its
    *  {@link PromotionHandle.firstRegister}. */
   whenRelayRegistered(): Promise<RegisterOutcome> | null { return this.relayFirstRegister; }
 
@@ -195,6 +195,7 @@ export class ProjectCore {
       mode: this.deps.mode,
       identity: this.deps.identity,
       pairedPhones: this.deps.pairedPhones,
+      mobileAccessEnabled: this.deps.mobileAccessEnabled,
       onTurnStart: (sessionId) => this.noteTurnStart(sessionId),
       relayUrl: this.deps.relayUrl,
     });
@@ -287,8 +288,8 @@ export class ProjectCore {
   }
 
   /** Attach an already-built core+bus as a stream on the machine socket and wire
-   *  its plaintext (tunnel) sender, allowlist-gate peer provider, and fallback
-   *  push path. The stream is an ADDITIVE bus subscriber, so the live loopback
+   *  its plaintext (tunnel) sender, remote-peer provider, and fallback push
+   *  path. The stream is an ADDITIVE bus subscriber, so the live loopback
    *  session is undisturbed. Shared by {@link startRemote} (fresh remote core)
    *  and {@link promote} (already-open local core); the caller owns the returned
    *  handle's lifetime. Encryption is NEVER optional — the machine socket owns
@@ -316,6 +317,13 @@ export class ProjectCore {
     let peerConnected = false;
 
     const handle = remote.attachStream(bus, {
+      // Outbound half of the mobile-access gate. The inbound half (agent-core's
+      // currentPhoneAllowed) only stops the phone DRIVING this project; without
+      // this one a core the phone cold-started keeps streaming its terminal, file
+      // tree and git status to that phone after the machine switch is turned off,
+      // because a remote-mode core holds no PromotionHandle for demoteAllPromoted
+      // to tear down. Fail-closed, same as the inbound side.
+      mayDeliver: () => this.deps.mobileAccessEnabled?.() ?? false,
       onAdmitted: () => { this.relayRegistered = true; settleOnce({ ok: true }); },
       onRejected: (code, message) => { this.relayRegistered = false; settleOnce({ ok: false, code, message }); },
       // Suppress the heavy stream while the phone is gone; it rebuilds from
@@ -335,8 +343,9 @@ export class ProjectCore {
     });
 
     core.setPlainHook((d) => handle.sendTunnel(d));
-    // Identify the phone on this connection for the per-project allowlist gate.
-    // Local mode never wires this, so loopback control stays ungated.
+    // Mark this connection as REMOTE for the core's mobile-access gate (and name
+    // the live device for push). Local mode never wires this, so loopback
+    // control stays ungated.
     core.setPeerPubkeyProvider(() => remote.currentPeerPubkey());
 
     // Fallback push path: while the paired phone can't receive in-band (no live
@@ -353,32 +362,33 @@ export class ProjectCore {
       // for a phone that has never connected and mutes push after a host restart.
       shouldFallback: () => !peerConnected || core.connState.appFocusPaused,
       // A live peer names the exact device in session, so target only it. With no
-      // live peer, fall back to the persisted trust store: delivery never needs the
-      // socket (the relay forwards to FCM/APNs blindly), and `currentPeerPubkey()`
+      // live peer, fall back to the persisted phone registry: delivery never needs
+      // the socket (the relay forwards to FCM/APNs blindly), and `currentPeerPubkey()`
       // stays null after a host restart until the phone dials in — which it may
-      // never do while the user is away. Every allowed phone is targeted then;
+      // never do while the user is away. Every registered phone is targeted then;
       // picking one by `lastSeenAt` would guess which device the user holds and
       // drop the notification when wrong, and `lastSeenAt` is stale in exactly
       // this window.
       resolveTargets: () => {
+        // Push carries project activity off this machine, so it rides the same
+        // machine switch as every inbound verb — a token+pubkey alone must not
+        // leak notifications from a machine that isn't mobile-reachable.
+        // Fail-closed: an unwired host provider means no push.
+        if (!(this.deps.mobileAccessEnabled?.() ?? false)) return [];
         const peerPubkey = remote.currentPeerPubkey();
         const paired = core.pairedPhones.list();
         const candidates = peerPubkey ? paired.filter((p) => p.phonePubkey === peerPubkey) : paired;
-        // Never push to a project the phone isn't allowed — the allowlist gate is
-        // the trust boundary; a token+pubkey alone must not leak notifications.
-        // The store fallback widens WHICH phones are eligible, never what they're
-        // entitled to.
         const targets = candidates.flatMap((p) =>
-          core.pairedPhones.isAllowed(p.phonePubkey, core.projectId) && p.pushToken && p.pushPubkey
+          p.pushToken && p.pushPubkey
             ? [{ pushToken: p.pushToken, provider: p.pushProvider ?? "fcm", pushPubkey: p.pushPubkey }]
             : [],
         );
         if (targets.length === 0) {
           // The dispatcher can only report THAT it dropped the notification. A
-          // pruned token, a never-allowlisted phone and no phone at all are
-          // indistinguishable in host.log without this.
+          // pruned token and no phone at all are indistinguishable in host.log
+          // without this.
           log.warn(
-            "push: no eligible phone for project %s (live peer: %s, paired: %d) — need pairing + allowlist + a push token",
+            "push: no eligible phone for project %s (live peer: %s, paired: %d) — need a registered phone with a push token",
             core.projectId,
             peerPubkey ? "yes" : "none since agent start",
             paired.length,
@@ -435,8 +445,8 @@ export class ProjectCore {
 
   /** Promote an already-open (typically LOCAL) core onto the relay by adding a
    *  relay slot to its EXISTING bus — the live loopback session keeps running
-   *  untouched. The phone here is machine-trusted (admitted via the host control
-   *  plane + per-phone allowlist), NOT QR-paired per project, so this does NOT
+   *  untouched. The phone here is machine-trusted (account inventory + the
+   *  machine's mobile-access switch), NOT QR-paired per project, so this does NOT
    *  open a pairing window. `remoteDeps` MUST come from the host's ONE shared
    *  runtime (remoteDepsFor) — promote constructs no OAuthClient / token timer. */
   promote(remoteDeps: ProjectCoreRemoteDeps): PromotionHandle {

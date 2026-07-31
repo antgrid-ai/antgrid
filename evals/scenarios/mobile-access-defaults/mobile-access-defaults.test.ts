@@ -1,27 +1,21 @@
-// E2E eval: same-account mobile access defaults (Task 6).
+// E2E eval: the machine-level mobile-access switch, observed from a phone.
 //
-// Proves that if `mobile-access:enable-project` is sent for projA BEFORE any
-// phone connects, then a same-account phone connecting via account-trust
-// (no pairing ceremony) sees projA in its FIRST `agent:projects` advertisement.
+// Authorization is one boolean per machine — "this machine is reachable from
+// mobile, yes or no" — so both halves of this file are about the state of that
+// switch AT THE MOMENT the phone connects. Neither can use `setupTestEnv`
+// (which connects, handshakes AND turns the switch on in one call); each drives
+// its own relay + agent + phone sequence, mirroring the harness internals but
+// controlling the ordering.
 //
-// Because the ordering under test ("enable BEFORE the phone connects") is the
-// whole point of this eval, it can't use `setupTestEnv` (which connects+
-// handshakes its app as part of the same call) — it drives its own relay +
-// agent + phone sequence, mirroring `setupTestEnv`'s internals but delaying
-// the phone's connection until after the enable-project call.
-//
-// Pair-code / manual negative assertion:
-//   There is no test-only pairing-window hook left to admit a genuine
-//   pair-code phone (that mechanism, and pairing itself, is gone). Instead we
-//   assert the scoped negative that IS cleanly expressible: a SECOND project
-//   that is genuinely opened on the host (via the loopback `project:open`
-//   verb — mirrors multi-stream-coexistence.test.ts) but never passed to
-//   `mobile-access:enable-project` must be absent from the same-account
-//   phone's advert. `buildProjectsAdvertisement` (host-server.ts) filters
-//   from `phone.allowedProjects` first, so a warm-but-unenabled project is
-//   excluded regardless of catalog visibility — a made-up project id could
-//   never appear either way (agent:projects only carries real opened
-//   projects), so it wouldn't exercise that filter.
+//   1. ON before the phone connects → the phone's FIRST advert carries the
+//      machine's whole catalog, including a project it was never told about
+//      individually. This is the disclosure consequence of the collapse: there
+//      is no per-project opt-in left to hold anything back.
+//   2. OFF (the fresh-install default, asserted rather than assumed) → the
+//      phone still connects and handshakes — off is authorization, not
+//      presence — but the advert is empty and `project:start` is refused
+//      NOT_ALLOWED, for a project that is genuinely open and running on the
+//      host.
 //
 // Known Windows test noise (NOT failures): fs.watch EPERM/EBUSY on teardown,
 // temp-dir cleanup races. Judge by pass/fail counts.
@@ -34,28 +28,25 @@ import {
   generateAppIdentity,
   generateEvalAuth,
   handshakeWithoutPairing,
+  setMobileAccess,
   spawnAgent,
   startFakeLicenseApi,
   startRelay,
+  waitForHostFile,
   type AgentHandle,
   type FakeLicenseApi,
   type RelayHandle,
 } from "../../helpers/harness";
 import { createTestProject, type TestProject } from "../../helpers/fixtures";
 import { computeProjectId } from "../../../bridge/src/project-id";
+import { createMessage } from "../../../bridge/src/protocol";
 import { RelayClient } from "../../helpers/relay-client";
 
 /** POST a control-plane verb over the loopback control port (see host.json's
- *  `controlPort`/`token`) — used here to open a second project remotely
- *  without going through mobile-access:enable-project, mirroring
- *  multi-stream-coexistence.test.ts's `loopbackControl`. */
-async function loopbackControl(
-  abDir: string,
-  body: object,
-): Promise<{ ok: boolean; [k: string]: unknown }> {
-  const { readHostFile } = await import("@bridge/host-discovery");
-  const hf = readHostFile(join(abDir, "host.json"));
-  if (!hf) throw new Error("no host.json for loopback control");
+ *  `controlPort`/`token`) — the desktop's channel, used here to open a second
+ *  project and to read the machine switch back. */
+async function loopbackControl(abDir: string, body: object): Promise<any> {
+  const hf = await waitForHostFile(abDir);
   const res = await fetch(`http://127.0.0.1:${hf.controlPort}/control`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${hf.token}` },
@@ -64,150 +55,139 @@ async function loopbackControl(
   return res.json();
 }
 
-/** Poll readHostFile until host.json appears (agent writes it during startup).
- *  The test sends `mobile-access:enable-project` BEFORE connecting any phone,
- *  so host.json must exist first. Cap: 5 s. */
-async function waitForHostFile(
-  abDir: string,
-  timeoutMs = 5_000,
-): Promise<import("@bridge/host-discovery").HostFile> {
-  const { readHostFile } = await import("@bridge/host-discovery");
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const hf = readHostFile(join(abDir, "host.json"));
-    if (hf) return hf;
-    await Bun.sleep(100);
+interface Machine {
+  abDir: string;
+  relay: RelayHandle;
+  projectId: string;
+  /** Connect a same-account phone and complete the pair-free E2E handshake. */
+  connectPhone(name: string): Promise<RelayClient>;
+}
+
+/**
+ * Stand up relay + fake account API + a real agent with one remote firstProject,
+ * run `body`, and tear everything down. Handles are declared outside the try but
+ * CREATED inside it so a throw mid-construction still reaches the cleanup —
+ * otherwise a failure after the relay is up leaks its port for the whole run.
+ */
+async function withMachine(label: string, body: (m: Machine) => Promise<void>): Promise<void> {
+  let abDir: string | undefined;
+  let relay: RelayHandle | undefined;
+  let licenseApi: FakeLicenseApi | undefined;
+  let project: TestProject | undefined;
+  let agent: AgentHandle | undefined;
+  const phones: RelayClient[] = [];
+  try {
+    const relayPort = allocatePort();
+    abDir = mkdtempSync(join(tmpdir(), `antgrid-${label}-`));
+    const appIdentity = await generateAppIdentity();
+
+    relay = await startRelay({ port: relayPort });
+    licenseApi = startFakeLicenseApi({
+      accountDevices: [{ deviceId: appIdentity.deviceId, ed25519Pub: appIdentity.publicKeyBase64 }],
+    });
+    const auth = generateEvalAuth();
+    project = createTestProject("basic", { "__RELAY_URL__": `ws://localhost:${relayPort}` });
+
+    agent = await spawnAgent({
+      relayUrl: relay.url,
+      licenseApiUrl: licenseApi.url,
+      abDir,
+      projectDir: project.dir,
+      auth,
+      env: { ANTGRID_EVAL_TEST: "1" },
+    });
+
+    const relayUrl = relay.url;
+    await body({
+      abDir,
+      relay,
+      projectId: computeProjectId(project.dir),
+      async connectPhone(name) {
+        const phone = await RelayClient.connectAndAuth(relayUrl, {
+          deviceType: "app",
+          name,
+          identity: appIdentity,
+          deviceId: appIdentity.deviceId,
+        });
+        phones.push(phone);
+        await handshakeWithoutPairing(phone, auth.deviceUuid, auth.ed25519Pub);
+        return phone;
+      },
+    });
+  } finally {
+    for (const phone of phones) await phone.disconnect();
+    await agent?.kill();
+    relay?.stop();
+    licenseApi?.stop();
+    project?.cleanup();
+    if (abDir) {
+      try { rmSync(abDir, { recursive: true, force: true }); } catch {}
+    }
   }
-  throw new Error("host.json did not appear within timeout");
 }
 
 test(
-  "same-account phone receives enabled project in first agent:projects advertisement",
+  "switch on before the phone connects: the first advert carries the machine's whole catalog",
   async () => {
-    // relay/licenseApi/project are constructed INSIDE the try (not hoisted
-    // above it): a throw from either of the latter two after the relay is up
-    // would otherwise skip the finally block entirely and leak the relay
-    // (port + process) for the life of the test run — declare the handles
-    // above the try so finally can reach them, but create them inside it.
-    let abDir: string | undefined;
-    let relay: RelayHandle | undefined;
-    let licenseApi: FakeLicenseApi | undefined;
-    let project: TestProject | undefined;
-    let neverEnabledProject: TestProject | undefined;
-    let agent: AgentHandle | undefined;
-    let cp: RelayClient | null = null;
-    try {
-      const relayPort = allocatePort();
-      abDir = mkdtempSync(join(tmpdir(), "antgrid-mobile-defaults-"));
-      const appIdentity = await generateAppIdentity();
+    await withMachine("mobile-access-on", async (m) => {
+      // ── Step 1: turn the machine on BEFORE any phone exists ────────────────
+      await setMobileAccess(m.abDir, true);
+      expect((await loopbackControl(m.abDir, { id: "get", type: "mobile-access:get" })).enabled).toBe(true);
 
-      relay = await startRelay({ port: relayPort });
-      licenseApi = startFakeLicenseApi({
-        accountDevices: [{ deviceId: appIdentity.deviceId, ed25519Pub: appIdentity.publicKeyBase64 }],
-      });
-      const auth = generateEvalAuth();
-      project = createTestProject("basic", {
-        "__RELAY_URL__": `ws://localhost:${relayPort}`,
-      });
-      const projectId = computeProjectId(project.dir);
-      const deviceUuid = auth.deviceUuid;
+      // ── Step 2: open a SECOND project the phone is never told about ────────
+      // Under the old model this project would have needed its own opt-in. It
+      // gets none here, and must still appear: one switch, whole catalog.
+      const second = createTestProject("basic", { "__RELAY_URL__": m.relay.url.replace(/\/ws$/, "") });
+      try {
+        const secondId = computeProjectId(second.dir);
+        expect((await loopbackControl(m.abDir, {
+          id: "open-second", type: "project:open", projectId: secondId, projectPath: second.dir, mode: "remote",
+        })).ok).toBe(true);
 
-      agent = await spawnAgent({
-        relayUrl: relay.url,
-        licenseApiUrl: licenseApi.url,
-        abDir,
-        projectDir: project.dir,
-        auth,
-        env: { ANTGRID_EVAL_TEST: "1" },
-      });
+        // ── Step 3: connect a same-account phone (no pairing ceremony) ────────
+        const phone = await m.connectPhone("eval-phone-defaults-on");
 
-      // ── Step 1: enable projA BEFORE any phone connects ────────────────────
-      const hf = await waitForHostFile(abDir);
-
-      const enableRes = await fetch(`http://127.0.0.1:${hf.controlPort}/control`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${hf.token}`,
-        },
-        body: JSON.stringify({
-          id: "eval-enable",
-          type: "mobile-access:enable-project",
-          projectId,
-        }),
-      });
-      const enableBody = (await enableRes.json()) as {
-        ok: boolean;
-        projectIds?: string[];
-      };
-
-      // Confirm the policy verb succeeded and stored projA.
-      expect(enableBody.ok).toBe(true);
-      expect(enableBody.projectIds).toContain(projectId);
-
-      // ── Step 1b: open a SECOND project remotely, but never enable it ───────
-      neverEnabledProject = createTestProject("basic", {
-        "__RELAY_URL__": `ws://localhost:${relayPort}`,
-      });
-      const neverEnabledId = computeProjectId(neverEnabledProject.dir);
-      const openRes = await loopbackControl(abDir, {
-        id: "open-never-enabled",
-        type: "project:open",
-        projectId: neverEnabledId,
-        projectPath: neverEnabledProject.dir,
-        mode: "remote",
-      });
-      expect(openRes.ok).toBe(true);
-
-      // ── Step 2: connect a same-account phone on the control plane ─────────
-      //
-      // Control-plane registration is under the bare deviceUuid (no projectId).
-      // Account-trust (inventory) admission is the QR-less path — no pairing.
-      cp = await RelayClient.connectAndAuth(relay.url, {
-        deviceType: "app",
-        name: "eval-phone-defaults",
-        identity: appIdentity,
-        deviceId: appIdentity.deviceId,
-      });
-      await handshakeWithoutPairing(cp, deviceUuid, auth.ed25519Pub);
-
-      // ── Step 3: assert first agent:projects advert contains projA ──────────
-      //
-      // On handshake-complete the control plane sends `agent:projects` with the
-      // phone's allowedProjects. Since enable-project ran before connecting, the
-      // same-account admission seeds the phone's allowlist from the policy store
-      // (relay-client.ts's inbound admission → sameAccountDefaultProjects).
-      // `agent:projects` shape: { type: "agent:projects", projects: ProjectAdvertEntry[] }
-      // where each entry has a `projectId` field (host-server.ts buildProjectsAdvertisement).
-      // Pull the control-plane snapshot (re-emits agent:projects) rather than
-      // racing the de-duped live handshake push (v3 payload-equality dedup).
-      await cp.pullStateSnapshot();
-      const projectsAdvert = await cp.waitForAbType("agent:projects", 10_000);
-
-      expect(projectsAdvert.type).toBe("agent:projects");
-      const projects = (projectsAdvert as any).projects as Array<{ projectId: string }>;
-      expect(Array.isArray(projects)).toBe(true);
-
-      // Primary positive: projA appears in the very first advert.
-      expect(projects.map((p) => p.projectId)).toContain(projectId);
-
-      // Scoped negative: a project that is genuinely open on the host but
-      // was NEVER enable-project'd must NOT appear. This proves defaults are
-      // per-project (not blanket same-account access) — buildProjectsAdvertisement
-      // filters from the phone's allowedProjects first, so warmth/catalog
-      // visibility alone isn't enough.
-      expect(projects.map((p) => p.projectId)).not.toContain(neverEnabledId);
-    } finally {
-      await cp?.disconnect();
-      await agent?.kill();
-      relay?.stop();
-      licenseApi?.stop();
-      project?.cleanup();
-      try { neverEnabledProject?.cleanup(); } catch { /* Windows EBUSY teardown race */ }
-      if (abDir) {
-        try { rmSync(abDir, { recursive: true, force: true }); } catch {}
+        // Pull the control-plane snapshot (which re-emits agent:projects) rather
+        // than racing the de-duped live handshake push.
+        await phone.pullStateSnapshot();
+        const advert = await phone.waitForAbType("agent:projects", 10_000);
+        const ids = advert.projects.map((p: any) => p.projectId);
+        expect(ids).toContain(m.projectId);
+        expect(ids).toContain(secondId);
+      } finally {
+        try { second.cleanup(); } catch { /* Windows EBUSY teardown race */ }
       }
-    }
+    });
+  },
+  120_000,
+);
+
+test(
+  "switch off (the fresh-install default): the phone still connects, but the catalog is empty and project:start is refused",
+  async () => {
+    await withMachine("mobile-access-off", async (m) => {
+      // A machine nobody has enabled must not be mobile-reachable. Read it back
+      // rather than assuming: this is the default the whole product leans on.
+      expect((await loopbackControl(m.abDir, { id: "get", type: "mobile-access:get" })).enabled).toBe(false);
+
+      // Off is authorization, not presence — the handshake still completes.
+      const phone = await m.connectPhone("eval-phone-defaults-off");
+
+      await phone.pullStateSnapshot();
+      const advert = await phone.waitForAbType("agent:projects", 10_000);
+      expect(advert.projects).toEqual([]);
+
+      // firstProject is genuinely open and running on the host, so an empty
+      // advert is the switch talking, not an empty machine — and naming the
+      // project directly gets refused all the same.
+      expect((await loopbackControl(m.abDir, { id: "list", type: "project:list" })).projects
+        .map((p: any) => p.projectId)).toContain(m.projectId);
+
+      phone.sendEncrypted(createMessage("project:start", { projectId: m.projectId }));
+      const denied = await phone.waitForAbType("control:result", 10_000);
+      expect(denied.ok).toBe(false);
+      expect((denied as any).error.code).toBe("NOT_ALLOWED");
+    });
   },
   120_000,
 );

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { augmentAgentLaunch } from "../src/agent-launch-augmenter";
 import { type HookCommand } from "../src/hook-command";
-import { cursorHookCommand } from "../src/cursor-hooks";
+import { cursorHookCommand } from "../src/agents/cursor-agent/global-hooks";
 
 const dirs: string[] = [];
 function abdir() { const d = mkdtempSync(join(tmpdir(), "ab-aug-")); dirs.push(d); return d; }

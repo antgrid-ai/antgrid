@@ -453,7 +453,7 @@ describe("OpencodeDriver", () => {
         return [{ info: { id: "m1", role: "assistant" }, parts: [{ id: "p1", type: "text", text: "prior" }] }];
       },
     });
-    const driver = new OpencodeDriver({ sessionId: "s1", client, sendMessage: (m) => sent.push(m), title: "proj" });
+    const driver = new OpencodeDriver({ sessionId: "s1", client, sendMessage: (m) => sent.push(m) });
     const id = await driver.start("sess-abc");
     expect(id).toBe("sess-abc");
     expect(created).toBe(0); // resume must NOT create a new session

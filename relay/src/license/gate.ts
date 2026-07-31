@@ -65,7 +65,6 @@ export function createLicenseGate(deps: LicenseGateDeps): LicenseGate {
         deviceId: claims.deviceUuid,
         userId: claims.uid,
         tier: claims.tier,
-        sessionLimit: claims.sessionLimit,
         pk: claims.pk,
         revoked: false,
       };
@@ -99,7 +98,6 @@ export function createLicenseGate(deps: LicenseGateDeps): LicenseGate {
         deviceId: claims.deviceUuid,
         userId: claims.uid,
         tier: claims.tier,
-        sessionLimit: claims.sessionLimit,
         pk: claims.pk,
         revoked: false,
       };

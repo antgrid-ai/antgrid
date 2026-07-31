@@ -270,21 +270,26 @@ bool pickerMatchesFocus(PickerProject p, String? focusId) {
   return p.id == focusId;
 }
 
-/// Tool registry keys (matching `bridge/src/known-agents.ts`) installed on the
-/// selected target's MACHINE, driving the agent dropdown.
+/// Tools installed on the selected target's MACHINE, as registry key -> display
+/// label, driving the agent dropdown. Iteration order is the bridge's advert
+/// order (registry declaration order) and is relied on by [firstInstalledAgent].
+///
+/// The label is null against a bridge predating the `label` field; callers fall
+/// back to [kFallbackAgentLabels]. Keys are carried verbatim, so an agent this
+/// app has never heard of still appears and is still named.
 ///
 /// Control-plane sourced — no per-project data-plane session is opened to detect:
 ///   - remote target → the bare-deviceUuid control plane's `agent:tools`
 ///     ([controlPlaneStateProvider]);
 ///   - local target  → the loopback host's `tools:list` ([HostControlClient]).
 /// While the control-plane connection is in flight (or on any error / offline
-/// target / no host yet) this resolves to an empty set and the dropdown shows the
-/// full known-agent list as a loading fallback.
-final newSessionDetectedToolsProvider = FutureProvider<Set<String>>((
+/// target / no host yet) this resolves to an empty map and the dropdown shows
+/// [kFallbackSessionAgents] as a loading fallback.
+final newSessionDetectedToolsProvider = FutureProvider<Map<String, String?>>((
   ref,
 ) async {
   final target = ref.watch(selectedTargetProjectProvider);
-  if (target == null) return const <String>{};
+  if (target == null) return const <String, String?>{};
 
   if (target.isLocal) {
     try {
@@ -295,12 +300,12 @@ final newSessionDetectedToolsProvider = FutureProvider<Set<String>>((
       );
       try {
         final tools = await client.toolsList();
-        return tools.map((t) => t.tool).toSet();
+        return {for (final t in tools) t.tool: t.label};
       } finally {
         client.close();
       }
     } catch (_) {
-      return const <String>{};
+      return const <String, String?>{};
     }
   }
 
@@ -309,7 +314,9 @@ final newSessionDetectedToolsProvider = FutureProvider<Set<String>>((
   // the split machineUuid when present; fall back to deriving it from the id.
   final machineUuid = target.machineUuid ?? baseDeviceUuid(target.id);
   final state = ref.watch(controlPlaneStateProvider(machineUuid)).value;
-  return state?.tools.map((t) => t.tool).toSet() ?? const <String>{};
+  final tools = state?.tools;
+  if (tools == null) return const <String, String?>{};
+  return {for (final t in tools) t.tool: t.label};
 });
 
 /// Wire-advertised chat-capable tool keys for the selected target's MACHINE, or
@@ -387,65 +394,108 @@ Set<String>? _chatCapableSetOrNull(Iterable<(String, bool?)> entries) {
 // then reset to defaults on every exit via [resetNewSessionForm] /
 // [leaveNewSession] so a stale value never carries into the next session.
 
-/// The agent flavor chosen for the new session. `custom` reveals a free-form
-/// command field ([newSessionCustomCmdProvider]). Non-custom values map to a
-/// known-agents registry key via [newSessionAgentToolKey].
-enum NewSessionAgent {
-  claudeCode,
-  codex,
-  copilot,
-  opencode,
-  cursorAgent,
-  custom,
+/// The agent chosen for the new session: either a bridge registry key, or
+/// `custom`, which reveals a free-form command field
+/// ([newSessionCustomCmdProvider]).
+///
+/// Deliberately not an enum. The set of agents lives in the bridge registry, and
+/// an app-side enum could only ever be a stale copy of it: every key the enum
+/// did not list collapsed onto Claude Code, so a newly-shipped agent was both
+/// absent from the picker and mislabelled wherever a session already ran it.
+/// Carrying the key itself makes the bridge authoritative — the same reason
+/// [agentSupportsChatResolved] prefers the wire over [newSessionAgentSupportsChat].
+sealed class NewSessionAgent {
+  const NewSessionAgent();
 }
 
-/// Registry key (matching bridge/src/known-agents.ts) for a non-custom agent,
-/// or null for `custom`.
+/// An agent identified by its bridge registry key (`claude-code`, `kilo`, ...).
+final class KnownAgent extends NewSessionAgent {
+  final String toolKey;
+  const KnownAgent(this.toolKey);
+
+  // Value equality is load-bearing: these flow through Riverpod state and
+  // `options.contains(selected)`, both of which compare by `==`.
+  @override
+  bool operator ==(Object other) =>
+      other is KnownAgent && other.toolKey == toolKey;
+
+  @override
+  int get hashCode => toolKey.hashCode;
+}
+
+/// The free-form-command flavor.
+final class CustomAgent extends NewSessionAgent {
+  const CustomAgent();
+
+  @override
+  bool operator ==(Object other) => other is CustomAgent;
+
+  @override
+  int get hashCode => (CustomAgent).hashCode;
+}
+
+/// The agent the form starts on before detection reports anything.
+const NewSessionAgent kDefaultSessionAgent = KnownAgent('claude-code');
+
+/// Registry key for a known agent, or null for `custom`.
 String? newSessionAgentToolKey(NewSessionAgent a) => switch (a) {
-  NewSessionAgent.claudeCode => 'claude-code',
-  NewSessionAgent.codex => 'codex',
-  NewSessionAgent.copilot => 'github-copilot',
-  NewSessionAgent.opencode => 'opencode',
-  NewSessionAgent.cursorAgent => 'cursor-agent',
-  NewSessionAgent.custom => null,
+  KnownAgent(:final toolKey) => toolKey,
+  CustomAgent() => null,
 };
 
-/// Inverse of [newSessionAgentToolKey]: registry key -> enum, defaulting to
-/// claudeCode for an unknown/absent key.
-NewSessionAgent newSessionAgentFromToolKey(String? key) => switch (key) {
-  'claude-code' => NewSessionAgent.claudeCode,
-  'codex' => NewSessionAgent.codex,
-  'github-copilot' => NewSessionAgent.copilot,
-  'opencode' => NewSessionAgent.opencode,
-  'cursor-agent' => NewSessionAgent.cursorAgent,
-  _ => NewSessionAgent.claudeCode,
+/// Inverse of [newSessionAgentToolKey]. Any non-empty key is taken at face
+/// value — an unrecognised one is a newer bridge's agent, not an error, and
+/// must not be folded onto some default.
+NewSessionAgent newSessionAgentFromToolKey(String? key) =>
+    (key == null || key.isEmpty) ? kDefaultSessionAgent : KnownAgent(key);
+
+/// Display names for the agents this app shipped knowing about.
+///
+/// Fallback ONLY: the bridge advertises `label` per tool and that always wins.
+/// This exists so the picker still reads correctly against a bridge predating
+/// the field, and is not a list of the agents that exist.
+const Map<String, String> kFallbackAgentLabels = {
+  'claude-code': 'Claude Code',
+  'codex': 'Codex',
+  'opencode': 'opencode',
+  'cursor-agent': 'Cursor',
+  'github-copilot': 'Copilot',
 };
 
-/// Pretty label for each [NewSessionAgent] value.
-String newSessionAgentLabel(NewSessionAgent a) => switch (a) {
-  NewSessionAgent.claudeCode => 'Claude Code',
-  NewSessionAgent.codex => 'Codex',
-  NewSessionAgent.copilot => 'Copilot',
-  NewSessionAgent.opencode => 'opencode',
-  NewSessionAgent.cursorAgent => 'Cursor',
-  NewSessionAgent.custom => 'Custom',
+/// Pretty label for [a], preferring the bridge-advertised [wireLabels].
+/// Falls back to the raw registry key: showing `kilo` is honest, whereas the
+/// old enum showed such an agent as "Claude Code".
+String newSessionAgentLabel(
+  NewSessionAgent a, [
+  Map<String, String?>? wireLabels,
+]) => switch (a) {
+  CustomAgent() => 'Custom',
+  KnownAgent(:final toolKey) =>
+    wireLabels?[toolKey] ?? kFallbackAgentLabels[toolKey] ?? toolKey,
 };
 
 /// Display label for a cached session's agent (registry tool key or custom cmd).
+///
+/// Static labels only, deliberately: a cached row belongs to its own origin
+/// machine, and [newSessionDetectedToolsProvider] is scoped to whatever target
+/// the New Session picker currently points at. Passing that in would name a row
+/// from an unrelated machine's tool list.
 String sessionAgentDisplayLabel(SessionEntry session) {
   final tool = session.tool;
   if (tool != null && tool.isNotEmpty) {
-    return newSessionAgentLabel(newSessionAgentFromToolKey(tool));
+    return newSessionAgentLabel(KnownAgent(tool));
   }
   final command = session.command?.trim();
   if (command != null && command.isNotEmpty) return command;
-  return newSessionAgentLabel(NewSessionAgent.claudeCode);
+  return newSessionAgentLabel(kDefaultSessionAgent);
 }
 
-/// The selectable known agents (everything except `custom`) in declaration
-/// order. The dropdown appends `custom` separately.
-final List<NewSessionAgent> kKnownSessionAgents = NewSessionAgent.values
-    .where((a) => a != NewSessionAgent.custom)
+/// The agents offered when the bridge has advertised nothing yet (loading, an
+/// offline target, or a bridge with no tools handler). Fallback only — when a
+/// live advert exists the picker is built from it, so a newer bridge's agents
+/// appear without an app release.
+final List<NewSessionAgent> kFallbackSessionAgents = kFallbackAgentLabels.keys
+    .map<NewSessionAgent>(KnownAgent.new)
     .toList(growable: false);
 
 /// The agent the form should default to once detection reveals what is
@@ -453,21 +503,23 @@ final List<NewSessionAgent> kKnownSessionAgents = NewSessionAgent.values
 /// otherwise snaps to the first installed known agent so the default is
 /// actually runnable (or keeps [current] if nothing is detected installed).
 NewSessionAgent firstInstalledAgent(
-  Set<String> detected,
+  Map<String, String?> detected,
   NewSessionAgent current,
 ) {
-  if (current == NewSessionAgent.custom) return current;
-  if (detected.contains(newSessionAgentToolKey(current))) return current;
-  return kKnownSessionAgents.firstWhere(
-    (a) => detected.contains(newSessionAgentToolKey(a)),
-    orElse: () => current,
-  );
+  if (current is CustomAgent) return current;
+  final key = newSessionAgentToolKey(current);
+  if (key != null && detected.containsKey(key)) return current;
+  // Key order is the bridge's advert order (registry declaration order), so the
+  // "first installed" preference is the bridge's to define rather than a copy
+  // of it held here.
+  if (detected.isEmpty) return current;
+  return KnownAgent(detected.keys.first);
 }
 
 /// Selected agent flavor. Defaults to Claude Code.
 final newSessionAgentProvider =
     NotifierProvider<ValueController<NewSessionAgent>, NewSessionAgent>(
-      () => ValueController(NewSessionAgent.claudeCode),
+      () => ValueController(kDefaultSessionAgent),
     );
 
 /// Free-form launch command, used when [newSessionAgentProvider] is `custom`.
@@ -498,12 +550,20 @@ final newSessionModeProvider =
 
 /// Fallback whether [a] supports Chat mode, used only when no wire
 /// `chatCapable` data is available (older bridge, or offline/loading target).
-/// Mirrors bridge `isChatCapableTool`: codex, opencode, claude-code. Prefer
-/// [agentSupportsChatResolved], which consults the wire advert first.
-bool newSessionAgentSupportsChat(NewSessionAgent a) =>
-    a == NewSessionAgent.codex ||
-    a == NewSessionAgent.opencode ||
-    a == NewSessionAgent.claudeCode;
+/// Prefer [agentSupportsChatResolved], which consults the wire advert first.
+bool newSessionAgentSupportsChat(NewSessionAgent a) {
+  final key = newSessionAgentToolKey(a);
+  return key != null && kFallbackChatCapableTools.contains(key);
+}
+
+/// Static mirror of the entries carrying a `driver` in
+/// bridge/src/agents/registry.ts, used only by [newSessionAgentSupportsChat].
+/// Fallback only — see [agentSupportsChatResolved].
+const Set<String> kFallbackChatCapableTools = {
+  'claude-code',
+  'codex',
+  'opencode',
+};
 
 /// Resolve whether [a] supports Chat mode: wire-first, static fallback.
 ///
@@ -581,7 +641,7 @@ final newSessionHasValidTargetProvider = Provider<bool>((ref) {
 /// Takes the container, not a `WidgetRef`: the session-activation callers reach
 /// here after an await, by which point the row that started it may be gone.
 void resetNewSessionForm(ProviderContainer ref) {
-  ref.read(newSessionAgentProvider.notifier).set(NewSessionAgent.claudeCode);
+  ref.read(newSessionAgentProvider.notifier).set(kDefaultSessionAgent);
   ref.read(newSessionCustomCmdProvider.notifier).set('');
   ref.read(newSessionCliArgsProvider.notifier).set('');
   ref.read(newSessionNameProvider.notifier).set('');
@@ -646,10 +706,10 @@ void seedNewSessionAgentForTarget(
         .set(newSessionAgentFromToolKey(tool));
     ref.read(newSessionCustomCmdProvider.notifier).set('');
   } else if (command != null && command.isNotEmpty) {
-    ref.read(newSessionAgentProvider.notifier).set(NewSessionAgent.custom);
+    ref.read(newSessionAgentProvider.notifier).set(const CustomAgent());
     ref.read(newSessionCustomCmdProvider.notifier).set(command);
   } else {
-    ref.read(newSessionAgentProvider.notifier).set(NewSessionAgent.claudeCode);
+    ref.read(newSessionAgentProvider.notifier).set(kDefaultSessionAgent);
     ref.read(newSessionCustomCmdProvider.notifier).set('');
   }
   ref
@@ -678,10 +738,10 @@ void seedNewSessionAgentFromSession(
         .set(newSessionAgentFromToolKey(tool));
     ref.read(newSessionCustomCmdProvider.notifier).set('');
   } else if (command != null && command.isNotEmpty) {
-    ref.read(newSessionAgentProvider.notifier).set(NewSessionAgent.custom);
+    ref.read(newSessionAgentProvider.notifier).set(const CustomAgent());
     ref.read(newSessionCustomCmdProvider.notifier).set(command);
   } else {
-    ref.read(newSessionAgentProvider.notifier).set(NewSessionAgent.claudeCode);
+    ref.read(newSessionAgentProvider.notifier).set(kDefaultSessionAgent);
     ref.read(newSessionCustomCmdProvider.notifier).set('');
   }
   ref.read(newSessionCliArgsProvider.notifier).set(session.args ?? '');

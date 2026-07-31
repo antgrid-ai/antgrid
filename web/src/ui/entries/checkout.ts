@@ -9,7 +9,7 @@ type CheckoutPlan = {
   label: string;
   recurring: boolean;
   trial: boolean;
-  sessionLimit: number;
+  workerLimit: number;
   displayPrice: number;
   chargePrice: number;
   discountLabel?: string;
