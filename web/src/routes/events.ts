@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import type { DB } from "../db/index.js";
+import type { ClientIpResolver } from "../util/client-ip.js";
 import { tokenBucket } from "../util/rate-limit.js";
 
 // Keep in lockstep with the app's AnalyticsEvents allowlist (app/lib/analytics/events.dart).
@@ -27,14 +28,14 @@ const Batch = z.object({ events: z.array(EventInput).min(1).max(50) });
 // Public ingest: burst 60, refill 1/sec per IP. IP is used only for rate-limiting and is never stored.
 const ingestLimiter = tokenBucket(60, 1);
 
-export function eventsRoutes(deps: { db: DB }) {
+export function eventsRoutes(deps: { db: DB; clientIp: ClientIpResolver }) {
   const r = new Hono();
 
   r.post("/events", async (c) => {
-    // `||` not `??`: a present-but-empty x-forwarded-for ('') must fall through
-    // to the shared "unknown" bucket, not collapse every empty-header client
-    // onto a single '' key. Best-effort only — the key is proxy-supplied.
-    const ip = c.req.header("x-forwarded-for")?.split(",")[0].trim() || "unknown";
+    // Spoof-safe resolution (peer + trusted-proxy XFF walk) — a forged
+    // leftmost hop must not mint a fresh rate-limit bucket. Null (peer
+    // address unavailable) shares one "unknown" bucket.
+    const ip = deps.clientIp(c) ?? "unknown";
     if (!ingestLimiter(ip)) return c.json({ error: "RATE_LIMITED" }, 429);
 
     const parsed = Batch.safeParse(await c.req.json().catch(() => null));

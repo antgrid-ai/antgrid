@@ -8,6 +8,7 @@ export {
   type FrameErrorReason,
 } from "./frame";
 
+export * from "./client-ip";
 export * from "./relay-protocol";
 export * from "./relay-auth";
 export * from "./relay-slot";

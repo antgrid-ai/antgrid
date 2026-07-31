@@ -39,6 +39,14 @@ export interface Connection {
   name: string;
   publicKey: string;
   epoch: number;
+  /**
+   * The `hello.nonce` that admitted this connection. Equal-epoch arbitration
+   * compares it so a REPLAYED hello (byte-identical, hence same nonce) cannot
+   * evict the live holder it originally admitted; a genuine redial mints a
+   * fresh nonce. Defence in depth behind the replay cache, which is
+   * capacity-bounded and does not survive a restart (design §6.3).
+   */
+  helloNonce: string;
   ws: ServerWebSocket<WsData>;
   ip: string;
   connectedAt: number;

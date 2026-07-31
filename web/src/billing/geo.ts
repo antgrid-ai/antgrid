@@ -4,18 +4,6 @@ const cache = new Map<string, GeoCacheEntry>();
 const TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_CACHE_KEYS = 10_000;
 
-export function clientIpFromHeaders(headers: {
-  get(name: string): string | null | undefined;
-}): string | null {
-  const forwarded = headers.get("x-forwarded-for");
-  if (forwarded) {
-    const first = forwarded.split(",")[0]?.trim();
-    if (first) return first;
-  }
-  const realIp = headers.get("x-real-ip");
-  return realIp?.trim() || null;
-}
-
 function isPrivateIp(ip: string): boolean {
   if (ip === "::1" || ip === "127.0.0.1") return true;
   if (ip.startsWith("10.") || ip.startsWith("192.168.")) return true;

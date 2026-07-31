@@ -78,16 +78,50 @@ describe("POST /events", () => {
     expect(rows[0].platform).toBe("unknown");
   });
 
-  test("an empty x-forwarded-for is rate-limited as 'unknown', not its own '' bucket", async () => {
+  test("no peer address (and whatever XFF) still ingests via the 'unknown' bucket", async () => {
     const { app } = buildTestApp(pg.db, pg.url);
-    // A present-but-empty header must not silently collapse to a distinct ''
-    // key; it still ingests via the shared "unknown" bucket.
+    // Without a socket peer the resolver yields null — the request must fall
+    // through to the shared "unknown" bucket, never trust the header.
     const res = await app.request("/events", {
       method: "POST",
       headers: { "content-type": "application/json", "x-forwarded-for": "" },
       body: JSON.stringify({ events: [validEvent] }),
     });
     expect(res.status).toBe(202);
+  });
+
+  test("forged leftmost XFF hops cannot mint fresh rate-limit buckets", async () => {
+    const { app } = buildTestApp(pg.db, pg.url, {
+      envOverrides: { TRUSTED_PROXY_IPS: ["172.28.0.0/16"] },
+    });
+    // Fake Bun server env (what Bun.serve passes in production): the peer is
+    // a trusted proxy, so resolution walks XFF right-to-left.
+    const proxyPeer = { requestIP: () => ({ address: "172.28.0.9" }) };
+    const post = (xff: string) =>
+      app.request(
+        "/events",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-forwarded-for": xff },
+          body: JSON.stringify({ events: [validEvent] }),
+        },
+        proxyPeer,
+      );
+
+    // One real client (rightmost, proxy-appended) cycling forged leftmost
+    // entries: every request lands in the SAME bucket, so the burst (60)
+    // exhausts. 70 requests absorbs the 1/sec refill without flaking.
+    let limited = false;
+    for (let i = 0; i < 70 && !limited; i++) {
+      const res = await post(`10.0.0.${i}, 203.0.113.99`);
+      limited = res.status === 429;
+    }
+    expect(limited).toBe(true);
+
+    // A different REAL client (different rightmost hop) has its own bucket
+    // and is unaffected by the exhausted one.
+    const other = await post("203.0.113.100");
+    expect(other.status).toBe(202);
   });
 
   test("does not store the client IP anywhere on the row", async () => {

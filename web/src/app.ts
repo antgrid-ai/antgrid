@@ -19,6 +19,7 @@ import type { DB } from "./db/index.js";
 import type { Auth } from "./auth/better-auth.js";
 import type { Env } from "./env.js";
 import type { RelayPushConfig } from "./relay/push.js";
+import { makeClientIpResolver } from "./util/client-ip.js";
 
 export type AppDeps = {
   db: DB;
@@ -30,6 +31,8 @@ export type AppDeps = {
 
 export function buildApp(deps: AppDeps) {
   const app = new Hono();
+  // `?? []` because tests build Env via a cast that may omit the field.
+  const clientIp = makeClientIpResolver(deps.env.TRUSTED_PROXY_IPS ?? []);
 
   // The ZeptoMail webhook authenticates via a secret in its URL path
   // (/webhooks/zeptomail/:key). Hono's logger prints the full path, so redact
@@ -81,11 +84,11 @@ export function buildApp(deps: AppDeps) {
 
   app.all("/api/auth/*", (c) => deps.auth.handler(c.req.raw));
   app.route("/", health);
-  app.route("/", eventsRoutes({ db: deps.db }));
+  app.route("/", eventsRoutes({ db: deps.db, clientIp }));
   app.route("/", deviceRoutes({ db: deps.db, auth: deps.auth, relay: deps.relay }));
   app.route("/", agentRoutes({ db: deps.db, auth: deps.auth, env: deps.env }));
   app.route("/", subscriptionRoutes({ db: deps.db, auth: deps.auth }));
-  app.route("/", billingRoutes({ db: deps.db, auth: deps.auth, env: deps.env, relay: deps.relay }));
+  app.route("/", billingRoutes({ db: deps.db, auth: deps.auth, env: deps.env, relay: deps.relay, clientIp }));
   app.route(
     "/",
     webhookRoutes({
@@ -113,6 +116,7 @@ export function buildApp(deps: AppDeps) {
     auth: deps.auth,
     env: deps.env,
     relay: deps.relay,
+    clientIp,
   }));
 
   // Last-resort logger for anything thrown past a route handler — without this,

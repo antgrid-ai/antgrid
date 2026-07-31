@@ -64,10 +64,20 @@ export const crossDeviceMagicLink = (opts: CrossDevicePluginOptions) => {
           const hdr = ctx.headers ?? ctx.request?.headers ?? null;
           const rawUa = hdr?.get("user-agent")?.trim() || null;
           const ua = rawUa ? rawUa.slice(0, 512) : null;
-          const ip =
-            hdr?.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-            hdr?.get("x-real-ip")?.trim() ||
-            null;
+          // Rightmost XFF hop, never leftmost: the rightmost entry is the one
+          // appended by our own edge proxy (or the resolved single-hop value
+          // /ui/login/start forwards after its trusted-proxy walk); leftmost
+          // arrived in the request and is client-forgeable. This endpoint has
+          // no socket access, so it cannot run the trusted-proxy walk itself.
+          // Informational only (shown in the approval email) — never used for
+          // authorization.
+          const xffClient = hdr
+            ?.get("x-forwarded-for")
+            ?.split(",")
+            .map((h) => h.trim())
+            .filter(Boolean)
+            .at(-1);
+          const ip = xffClient || hdr?.get("x-real-ip")?.trim() || null;
 
           const row = await createPending(opts.db, {
             email,

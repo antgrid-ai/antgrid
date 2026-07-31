@@ -26,7 +26,8 @@ import {
   type PlanId,
   type ProviderId,
 } from "../billing/plans.js";
-import { clientIpFromHeaders, detectCountryFromIp } from "../billing/geo.js";
+import { detectCountryFromIp } from "../billing/geo.js";
+import type { ClientIpResolver } from "../util/client-ip.js";
 import {
   createCheckoutSession,
   isCheckoutConfigError,
@@ -94,6 +95,7 @@ export function billingRoutes(deps: {
   auth: Auth;
   env: Env;
   relay: RelayPushConfig;
+  clientIp: ClientIpResolver;
 }) {
   const r = new Hono<{ Variables: AuthVars }>();
 
@@ -137,7 +139,7 @@ export function billingRoutes(deps: {
     let account = await ensureProductAccount(deps.db, userId);
     const detected =
       account.country ??
-      (await detectCountryFromIp(clientIpFromHeaders(c.req.raw.headers), deps.env.IPINFO_TOKEN));
+      (await detectCountryFromIp(deps.clientIp(c), deps.env.IPINFO_TOKEN));
     if (!account.country && detected) {
       account = await ensureProductAccountCountry(deps.db, accountId, detected, "ipinfo");
     }
@@ -252,7 +254,7 @@ export function billingRoutes(deps: {
     let account = await ensureProductAccount(deps.db, userId);
     const detected =
       account.country ??
-      (await detectCountryFromIp(clientIpFromHeaders(c.req.raw.headers), deps.env.IPINFO_TOKEN));
+      (await detectCountryFromIp(deps.clientIp(c), deps.env.IPINFO_TOKEN));
     if (!account.country && detected) {
       account = await ensureProductAccountCountry(deps.db, accountId, detected, "ipinfo");
     }

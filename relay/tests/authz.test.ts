@@ -10,6 +10,7 @@ function conn(uid: string | undefined, deviceType: "agent" | "app"): Connection 
     name: "t",
     publicKey: "pk",
     epoch: 1,
+    helloNonce: crypto.randomUUID(),
     ws: { readyState: 1 } as Connection["ws"],
     ip: "127.0.0.1",
     connectedAt: Date.now(),

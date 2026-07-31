@@ -18,12 +18,13 @@ function appWithSignOutCookies(cookies: string[]) {
       },
     },
   } as unknown as Auth;
-  // db/env/relay are unused by the /logout handler.
+  // db/env/relay/clientIp are unused by the /logout handler.
   return uiRoutes({
     db: {} as never,
     auth,
     env: {} as never,
     relay: {} as never,
+    clientIp: () => null,
   });
 }
 

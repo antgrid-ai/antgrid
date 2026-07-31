@@ -25,7 +25,7 @@ import { LicenseCache } from "./license/cache.js";
 import { createLicenseGate, type LicenseGate } from "./license/gate.js";
 import { deviceTokenIssuer } from "./license/verify.js";
 import { handleRevoke, handleExpire, handleListConnections } from "./license/internal-routes.js";
-import { parseCidr, resolveClientIp } from "./client-ip.js";
+import { resolveClientIp, type ClientIpDegradation } from "antgrid-wire";
 
 const VERSION = "0.1.0";
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
@@ -95,8 +95,22 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
   });
   const startTime = Date.now();
   const lastPong = new Map<string, number>();
-  // Validated at config load; parsed once here so the upgrade path stays cheap.
-  const trustedProxies = config.trustedProxyIps.map(parseCidr);
+  // Throttled per kind: either degradation drops every connection back into
+  // the proxy's shared per-IP bucket and must be visible, but the detail is
+  // proxy/client-supplied, so a hostile chain must not turn this into a flood.
+  const lastDegradedWarnAt = new Map<ClientIpDegradation["kind"], number>();
+  const warnIpDegraded = (event: ClientIpDegradation): void => {
+    const now = Date.now();
+    if (now - (lastDegradedWarnAt.get(event.kind) ?? 0) < 60_000) return;
+    lastDegradedWarnAt.set(event.kind, now);
+    const why = event.kind === "untrusted-peer"
+      ? "X-Forwarded-For present but the direct peer is not in TRUSTED_PROXY_IPS — check it matches the network the proxy is on"
+      : "unparseable X-Forwarded-For hop from a trusted proxy";
+    logger.warn(`Client-IP resolution degraded: ${why} (per-IP limits share one bucket)`, {
+      kind: event.kind,
+      detail: event.detail.slice(0, 64),
+    });
+  };
 
   /** Server-side "hello or die" timers, so a silent socket never holds a slot. */
   const helloTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -285,14 +299,26 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
         );
         return;
       }
+      // A hello carrying the SAME nonce as the one that admitted the live
+      // holder is that holder's own admitting frame played back, never a
+      // redial (a redial mints a fresh nonce). Equal-epoch admission would
+      // otherwise let one captured frame evict a live device — permanently,
+      // since SUPERSEDED is retryable:false — whenever the replay cache has
+      // dropped the record, which it does on capacity eviction and on every
+      // restart. The cache stays the primary defence; this is the arbitration
+      // half of it, and unlike the cache it cannot be flooded away.
+      if (hello.nonce === existing.helloNonce) {
+        sendErrorAndClose(ws, "AUTH_FAILED", "hello replay: nonce already admitted this device", false, 1008);
+        return;
+      }
       if (hello.epoch >= existing.epoch) {
-        // Equal epoch admits too (pubkey equality is guaranteed above): epoch
-        // is minted once per process, a client instance holds one socket at a
-        // time, and the replay cache excludes replayed hellos — so an
-        // equal-epoch hello can only be the same instance redialing after its
-        // watchdog closed a half-open socket the relay hasn't reaped yet.
-        // Rejecting it strands the device: SUPERSEDED is retryable:false, and
-        // clients rightly stop reconnecting on it (design §6.3).
+        // Equal epoch admits (pubkey equality is guaranteed above): epoch is
+        // minted once per process and a client instance holds one socket at a
+        // time, so an equal-epoch hello with a fresh nonce is that instance
+        // redialing after its watchdog closed a half-open socket the relay
+        // hasn't reaped yet. Rejecting it strands the device: SUPERSEDED is
+        // retryable:false, and clients rightly stop reconnecting on it
+        // (design §6.3).
         //
         // Release the superseded connection (dropping its openStreams) BEFORE
         // inserting the successor, so one device is never counted twice across
@@ -312,6 +338,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       name: hello.name,
       publicKey: hello.publicKey,
       epoch: hello.epoch,
+      helloNonce: hello.nonce,
       ws,
       ip: ws.data.ip,
       connectedAt: now,
@@ -578,7 +605,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
 
       if (url.pathname === "/ws") {
         const peerIp = srv.requestIP(req)?.address || "unknown";
-        const ip = resolveClientIp(peerIp, req.headers.get("x-forwarded-for"), trustedProxies);
+        const ip = resolveClientIp(peerIp, req.headers.get("x-forwarded-for"), config.trustedProxyIps, warnIpDegraded);
         if (connections.getConnectionCountByIp(ip) >= config.rateLimitConnPerIp) {
           return Response.json({ type: "error", code: "RATE_LIMITED", message: "Too many connections from this IP" }, { status: 429 });
         }

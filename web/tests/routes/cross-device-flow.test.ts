@@ -31,7 +31,12 @@ describe("cross-device sign-in end-to-end", () => {
     const { app } = buildTestApp(pg.db, pg.url, {
       sendEmail: cap.sendEmail,
       usePrismaAdapter: true,
+      envOverrides: { TRUSTED_PROXY_IPS: ["172.28.0.0/16"] },
     });
+    // The client IP only reaches the email via the trusted-proxy XFF walk,
+    // which needs the socket peer — inject a fake Bun server as Hono's env
+    // (what Bun.serve passes in production) reporting a trusted proxy peer.
+    const proxyPeer = { requestIP: () => ({ address: "172.28.0.9" }) };
 
     // 1. Browser A submits the email form.
     const startRes = await app.fetch(
@@ -40,10 +45,13 @@ describe("cross-device sign-in end-to-end", () => {
         headers: {
           "content-type": "application/x-www-form-urlencoded",
           "user-agent": "browserA/1",
-          "x-forwarded-for": "1.1.1.1",
+          // Forged leftmost hop + the proxy-appended real client: only the
+          // rightmost may reach the email.
+          "x-forwarded-for": "6.6.6.6, 1.1.1.1",
         },
         body: "email=alice@example.com",
-      })
+      }),
+      proxyPeer
     );
     expect(startRes.status).toBe(302);
     const browserACookieHeader = startRes.headers.get("set-cookie") ?? "";
@@ -51,9 +59,11 @@ describe("cross-device sign-in end-to-end", () => {
     expect(cap.captured.length).toBe(1);
     expect(cap.captured[0].to).toBe("alice@example.com");
     // The requester UA + IP must survive the api.* hop (regression: they were
-    // read from ctx.request, which is undefined on programmatic calls).
+    // read from ctx.request, which is undefined on programmatic calls) — and
+    // the IP must be the spoof-safe resolved client, not the forged hop.
     expect(cap.captured[0].text).toContain("browserA/1");
     expect(cap.captured[0].text).toContain("1.1.1.1");
+    expect(cap.captured[0].text).not.toContain("6.6.6.6");
 
     // 2. Extract id + token from the email body.
     const url = cap.captured[0].text.match(/https?:\/\/[^\s]+/)![0];

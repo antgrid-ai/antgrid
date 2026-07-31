@@ -23,6 +23,10 @@ services:
       # Intra-color service discovery (same color only — colors are isolated
       # except for the shared antgrid_edge network, where names are unique).
       RELAY_INTERNAL_URL: http://relay-${COLOR}:8080
+      # Same trust set as the relay below: web keys /events rate-limit buckets
+      # and geo/country detection on the client IP recovered from
+      # X-Forwarded-For (web/src/util/client-ip.ts).
+      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-172.28.0.0/16}
       PORT: "8787"
     networks:
       - antgrid_edge
@@ -44,6 +48,16 @@ services:
       # issuer check needs LICENSE_ISSUER_URL below instead — see deploy/README.md.
       LICENSE_API_URL: http://web-${COLOR}:8787
       LICENSE_ISSUER_URL: ${BETTER_AUTH_URL}
+      # Caddy is the only path clients reach the relay through; trusting the
+      # edge network lets the relay recover real client IPs from
+      # X-Forwarded-For (packages/antgrid-wire/src/client-ip.ts) instead of
+      # counting every client against Caddy's one per-IP bucket. Must match the
+      # actual antgrid_edge subnet — deploy.sh pins 172.28.0.0/16 on fresh
+      # networks; for a pre-existing network check
+      # `docker network inspect antgrid_edge` and override in .env.
+      # `-` not `:-`, so setting TRUSTED_PROXY_IPS= empty in .env really does
+      # disable XFF handling (fails safe) instead of re-applying the default.
+      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS-172.28.0.0/16}
       PORT: "8080"
     networks:
       - antgrid_edge

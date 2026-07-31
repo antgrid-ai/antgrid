@@ -124,6 +124,45 @@ test("equal epoch under the same key admits: a redial evicts its own zombie", as
   await opened;
 });
 
+test("a replayed hello cannot evict the connection it admitted", async () => {
+  relay = startServer(defaultConfig);
+  const deviceId = "epoch-replay";
+  const identity = await generateKeyPair();
+  const nonce = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64");
+
+  const live = await connectHello(relay, {
+    deviceId,
+    epoch: 400,
+    nonce,
+    publicKeyBase64: identity.publicKeyBase64,
+    privateSeed: identity.privateSeed,
+  });
+
+  // Byte-identical replay of the admitting frame — what an attacker who
+  // captured it holds. The replay cache normally catches this, but it is
+  // capacity-bounded and empty after a restart, so arbitration must not be the
+  // only thing standing between a captured frame and a live device's socket.
+  const { hello } = await makeHello(relay, {
+    deviceId,
+    epoch: 400,
+    nonce,
+    publicKeyBase64: identity.publicKeyBase64,
+    privateSeed: identity.privateSeed,
+  });
+  const ws2 = await connect(relay);
+  const err2 = waitForMessage(ws2);
+  const closed2 = new Promise<number>((resolve) => { ws2.onclose = (e) => resolve(e.code); });
+  ws2.send(JSON.stringify(hello));
+  expect(await err2).toMatchObject({ type: "error", retryable: false });
+  expect(await closed2).toBe(1008);
+
+  // The live connection is untouched and still usable.
+  expect(relay.connections.getByDeviceId(deviceId)).toBeDefined();
+  const stillOpened = waitForType(live.ws, "stream-opened");
+  live.ws.send(JSON.stringify({ type: "stream-open", streamId: "survived-replay" }));
+  await stillOpened;
+});
+
 test("pubkey mismatch against a live holder is rejected regardless of epoch", async () => {
   relay = startServer(defaultConfig);
   const deviceId = "epoch-pubkey-conflict";

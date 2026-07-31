@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseDotenv } from "dotenv";
+import { parseCidr } from "antgrid-wire";
 import { z } from "zod";
 import { billingToEnvFields, resolveBillingConfig } from "./config/billing.js";
 
@@ -49,6 +50,27 @@ const EnvSchema = z
       .transform((s) =>
         s ? s.split(",").map((a) => a.trim()).filter(Boolean) : [],
       ),
+    // Reverse proxies whose X-Forwarded-For the server may believe (comma-
+    // separated IPs/CIDRs — the antgrid_edge subnet in deploy). Empty means
+    // the header is ignored, so a directly exposed server fails safe. Same
+    // contract as the relay's TRUSTED_PROXY_IPS; resolution lives in
+    // antgrid-wire's client-ip.ts.
+    TRUSTED_PROXY_IPS: z
+      .string()
+      .optional()
+      .transform((s, ctx) => {
+        const entries = s ? s.split(",").map((e) => e.trim()).filter(Boolean) : [];
+        try {
+          for (const entry of entries) parseCidr(entry);
+        } catch (err) {
+          ctx.addIssue({
+            code: "custom",
+            message: `TRUSTED_PROXY_IPS entry invalid: ${err instanceof Error ? err.message : String(err)}`,
+          });
+          return z.NEVER;
+        }
+        return entries;
+      }),
     PORT: z.coerce.number().int().default(8787),
   })
   .transform((raw, ctx) => {

@@ -1,4 +1,4 @@
-import { parseCidr } from "./client-ip.js";
+import { parseCidr, type Cidr } from "antgrid-wire";
 
 export interface RelayConfig {
   port: number;
@@ -31,7 +31,7 @@ export interface RelayConfig {
    * Empty (the default) disables XFF entirely: a directly exposed relay must
    * never honour a client-forgeable header.
    */
-  trustedProxyIps: string[];
+  trustedProxyIps: Cidr[];
   logLevel: "debug" | "info" | "warn" | "error";
   /** Base URL the relay fetches JWKS from — may be an internal address (e.g.
    *  docker-internal DNS) for network efficiency; NOT necessarily the token
@@ -111,17 +111,14 @@ function loadFcmConfig(): Pick<RelayConfig, "fcmProjectId" | "fcmClientEmail" | 
   return { fcmProjectId, fcmClientEmail, fcmPrivateKey };
 }
 
-function loadTrustedProxyIps(): string[] {
+function loadTrustedProxyIps(): Cidr[] {
   const raw = process.env.TRUSTED_PROXY_IPS || "";
   const entries = raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
-  for (const entry of entries) {
-    try {
-      parseCidr(entry);
-    } catch (e) {
-      throw new Error(`TRUSTED_PROXY_IPS entry invalid: ${e instanceof Error ? e.message : e}`);
-    }
+  try {
+    return entries.map(parseCidr);
+  } catch (e) {
+    throw new Error(`TRUSTED_PROXY_IPS entry invalid: ${e instanceof Error ? e.message : e}`);
   }
-  return entries;
 }
 
 export function loadConfig(): RelayConfig {

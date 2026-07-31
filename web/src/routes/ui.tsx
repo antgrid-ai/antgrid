@@ -42,7 +42,8 @@ import {
   lockBillingProvider,
   previewBillingProvider,
 } from "../models/product-account.js";
-import { clientIpFromHeaders, detectCountryFromIp } from "../billing/geo.js";
+import { detectCountryFromIp } from "../billing/geo.js";
+import type { ClientIpResolver } from "../util/client-ip.js";
 import {
   cancelRecurringSubscription,
   resumeRecurringSubscription,
@@ -65,17 +66,14 @@ export function uiRoutes(deps: {
   auth: Auth;
   env: Env;
   relay: RelayPushConfig;
+  clientIp: ClientIpResolver;
 }) {
   const r = new Hono<{ Variables: AuthVars }>();
   const startLimiter = tokenBucket(5, 0.2); // 5 burst, 1 per 5s, per IP
   const approveSignInLimiter = tokenBucket(10, 0.5); // 10 burst, 1 per 2s, per IP
 
   function ipKey(c: import("hono").Context): string {
-    return (
-      c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ??
-      c.req.header("x-real-ip") ??
-      "unknown"
-    );
+    return deps.clientIp(c) ?? "unknown";
   }
 
   r.get("/", (c) => c.redirect("/dashboard"));
@@ -119,8 +117,10 @@ export function uiRoutes(deps: {
       headers: {
         "content-type": "application/json",
         "user-agent": c.req.header("user-agent") ?? "",
-        "x-forwarded-for": c.req.header("x-forwarded-for") ?? "",
-        "x-real-ip": c.req.header("x-real-ip") ?? "",
+        // The plugin has no socket access, so hand it the ALREADY-resolved
+        // client IP as a single-hop header instead of the raw (forgeable)
+        // chain — it reads the rightmost hop (see cross-device-plugin.ts).
+        "x-forwarded-for": deps.clientIp(c) ?? "",
         cookie: c.req.header("cookie") ?? "",
       },
       body: { email },
@@ -410,7 +410,7 @@ export function uiRoutes(deps: {
 
     const detected =
       account.country ??
-      (await detectCountryFromIp(clientIpFromHeaders(c.req.raw.headers), deps.env.IPINFO_TOKEN));
+      (await detectCountryFromIp(deps.clientIp(c), deps.env.IPINFO_TOKEN));
     if (!account.country && detected) {
       account = await ensureProductAccountCountry(deps.db, accountId, detected, "ipinfo");
     }

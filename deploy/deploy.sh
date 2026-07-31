@@ -59,10 +59,20 @@ reload_caddy() {
 
 [ -f .env ] || die ".env not found in $(pwd) — copy .env.example and fill it in (chmod 600)."
 
-# Shared edge network (idempotent).
+# Shared edge network (idempotent). The subnet is pinned so TRUSTED_PROXY_IPS
+# (relay client-IP recovery — see packages/antgrid-wire/src/client-ip.ts) has a
+# stable value that survives host rebuilds; an unpinned network lands on
+# whatever subnet docker picks next and silently un-trusts the proxy. Existing
+# networks keep their subnet — check `docker network inspect antgrid_edge` and
+# set TRUSTED_PROXY_IPS to match (or recreate the network).
 docker network inspect "$NETWORK" >/dev/null 2>&1 || {
 	log "creating network $NETWORK"
-	docker network create "$NETWORK" >/dev/null
+	# Pinning trades docker's free-pool search for a fixed range, so an
+	# unrelated network or route already holding it fails the create. Name the
+	# remedy here: the raw docker error ("Pool overlaps") does not say that
+	# TRUSTED_PROXY_IPS has to move with the subnet.
+	docker network create --subnet 172.28.0.0/16 "$NETWORK" >/dev/null || die \
+		"could not create $NETWORK with subnet 172.28.0.0/16 (already in use by another network or route?). Pick a free range: 'docker network create --subnet <free>/16 $NETWORK', then set TRUSTED_PROXY_IPS=<free>/16 in .env."
 }
 
 # Rollback: re-point Caddy at the previous color (left running by the last flip)

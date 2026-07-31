@@ -1,10 +1,11 @@
 /// The app's relay slot id: the `hello.deviceId` one app socket presents.
 ///
-/// The relay arbitrates per `hello.deviceId` and rejects an epoch that is lower
-/// OR EQUAL with `SUPERSEDED`, so every socket the app holds at once needs its
-/// own slot. Scoping by the machine each socket serves gives exactly that: one
-/// slot per (app device, machine) pair, and the app's own sockets never
-/// arbitrate against each other.
+/// The relay arbitrates per `hello.deviceId`, and an epoch equal to the live
+/// holder's supersedes it (the app mints one epoch per launch, so every socket
+/// it holds carries the same one) — a shared slot would have each new dial
+/// evict the last. Scoping by the machine each socket serves gives every
+/// socket its own slot: one per (app device, machine) pair, and the app's own
+/// sockets never arbitrate against each other.
 ///
 /// The scope is the AGENT's deviceUuid, so a bridge receiving a slot can tell
 /// whether it was addressed at itself — see the presence guard in

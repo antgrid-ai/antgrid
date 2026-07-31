@@ -168,7 +168,13 @@ describe("loadConfig", () => {
     process.env.LICENSE_API_URL = "http://localhost:8787";
     process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;
     process.env.TRUSTED_PROXY_IPS = "172.18.0.0/16, 10.0.0.1 ,::1";
-    expect(loadConfig().trustedProxyIps).toEqual(["172.18.0.0/16", "10.0.0.1", "::1"]);
+    // Parsed at load, so the server never re-parses (and no unvalidated string
+    // can reach it): CIDRs collapse to bytes + prefix, bare IPs to a full mask.
+    expect(loadConfig().trustedProxyIps).toEqual([
+      { bytes: new Uint8Array([172, 18, 0, 0]), prefixBits: 16 },
+      { bytes: new Uint8Array([10, 0, 0, 1]), prefixBits: 32 },
+      { bytes: new Uint8Array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]), prefixBits: 128 },
+    ]);
   });
 
   test("rejects a malformed TRUSTED_PROXY_IPS entry at load", () => {
