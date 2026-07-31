@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../constants/breakpoints.dart';
+import '../design/ab_colors.dart';
 import '../project/limits.dart';
 import '../project/mobile_lifecycle.dart';
 import '../project/project_session_registry.dart';
@@ -159,11 +160,34 @@ class _AppShellState extends ConsumerState<AppShell> {
     // traffic lights in window coordinates and they do not move with Flutter
     // layout.
     if (MediaQuery.sizeOf(context).width < kCompactBreakpoint) return routed;
-    return Column(
-      children: [
-        const WindowTitleBar(child: WindowTitleBarContents()),
-        Expanded(child: routed),
-      ],
+    // Touch devices take this branch too — an iPad is >=600px wide, and so is
+    // any phone in landscape — and there the bar is the topmost, widest thing
+    // on screen: uninset it renders under the status bar in portrait and under
+    // the side cutout in landscape, where the system also swallows taps on the
+    // brand mark and the back/forward buttons.
+    //
+    // Consuming those insets here also strips them from the MediaQuery the
+    // routes below inherit, which is load-bearing: WorkspaceShell and
+    // NewSessionScreen each wrap themselves in SafeArea, and left to see the
+    // full padding they would inset a second time and leave a dead gap under
+    // the bar. Their content lands in the same place either way — this only
+    // moves the same inset up one level so the bar is covered too.
+    //
+    // Bottom is theirs: it is the gesture inset, and nothing here sits on it.
+    // No-op on desktop, where every system inset is zero.
+    return ColoredBox(
+      // The inset strips fall outside the bar's own Container, so without this
+      // the bare route background shows through them.
+      color: context.antgrid.bgDeepest,
+      child: SafeArea(
+        bottom: false,
+        child: Column(
+          children: [
+            const WindowTitleBar(child: WindowTitleBarContents()),
+            Expanded(child: routed),
+          ],
+        ),
+      ),
     );
   }
 
