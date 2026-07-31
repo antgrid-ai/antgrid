@@ -275,7 +275,11 @@ export class RelayClient {
 
   constructor(private opts: RelayClientOptions) {
     // Computed once per process and reused across every (re)connect (design
-    // §6.3): a reconnect must NOT out-epoch itself and lose to its own zombie.
+    // §6.3): epoch identifies this process INSTANCE, not this socket. A redial
+    // presenting the same epoch relies on the relay's equal-epoch rule
+    // (same key + equal epoch ⇒ newest socket wins) to evict its own
+    // half-open zombie; minting per dial instead would let a stale process
+    // out-epoch and displace a legitimately newer one via the shared counter.
     this.epoch = opts.abDir ? nextEpoch(opts.abDir) : Math.floor(Date.now() / 1000);
     this.mux = new StreamMux({
       openStream: (id) => this.sendJson({ type: "stream-open", streamId: id }),

@@ -285,14 +285,22 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
         );
         return;
       }
-      if (hello.epoch > existing.epoch) {
+      if (hello.epoch >= existing.epoch) {
+        // Equal epoch admits too (pubkey equality is guaranteed above): epoch
+        // is minted once per process, a client instance holds one socket at a
+        // time, and the replay cache excludes replayed hellos — so an
+        // equal-epoch hello can only be the same instance redialing after its
+        // watchdog closed a half-open socket the relay hasn't reaped yet.
+        // Rejecting it strands the device: SUPERSEDED is retryable:false, and
+        // clients rightly stop reconnecting on it (design §6.3).
+        //
         // Release the superseded connection (dropping its openStreams) BEFORE
         // inserting the successor, so one device is never counted twice across
         // a restart (design §7.3).
         connections.remove(existing);
         sendErrorAndClose(existing.ws, "SUPERSEDED", "replaced by a newer connection", false, 1008);
       } else {
-        sendErrorAndClose(ws, "SUPERSEDED", "a newer or equal connection already holds this deviceId", false, 1008);
+        sendErrorAndClose(ws, "SUPERSEDED", "a newer connection already holds this deviceId", false, 1008);
         return;
       }
     }

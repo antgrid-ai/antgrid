@@ -91,30 +91,37 @@ test("lower epoch is rejected: new socket gets SUPERSEDED, old connection is unt
   await stillOpened;
 });
 
-test("equal epoch is rejected", async () => {
+test("equal epoch under the same key admits: a redial evicts its own zombie", async () => {
   relay = startServer(defaultConfig);
   const deviceId = "epoch-equal";
   const identity = await generateKeyPair();
 
-  await connectHello(relay, {
+  // The half-open scenario: the client's watchdog closed this socket and
+  // redialed, but the relay hasn't reaped it yet. Same process ⇒ same epoch.
+  const zombie = await connectHello(relay, {
     deviceId,
     epoch: 300,
     publicKeyBase64: identity.publicKeyBase64,
     privateSeed: identity.privateSeed,
   });
+  const zombieErr = waitForType(zombie.ws, "error");
+  const zombieClosed = new Promise<number>((resolve) => { zombie.ws.onclose = (e) => resolve(e.code); });
 
-  const { hello } = await makeHello(relay, {
+  const redial = await connectHello(relay, {
     deviceId,
     epoch: 300,
     publicKeyBase64: identity.publicKeyBase64,
     privateSeed: identity.privateSeed,
   });
-  const ws2 = await connect(relay);
-  const err2 = waitForMessage(ws2);
-  const closed2 = new Promise<number>((resolve) => { ws2.onclose = (e) => resolve(e.code); });
-  ws2.send(JSON.stringify(hello));
-  expect(await err2).toMatchObject({ type: "error", code: "SUPERSEDED", retryable: false });
-  expect(await closed2).toBe(1008);
+  expect(redial.welcome).toMatchObject({ type: "welcome", deviceId, epoch: 300 });
+
+  expect(await zombieErr).toMatchObject({ type: "error", code: "SUPERSEDED", retryable: false });
+  expect(await zombieClosed).toBe(1008);
+
+  // The redial is the live holder and fully functional.
+  const opened = waitForType(redial.ws, "stream-opened");
+  redial.ws.send(JSON.stringify({ type: "stream-open", streamId: "post-redial" }));
+  await opened;
 });
 
 test("pubkey mismatch against a live holder is rejected regardless of epoch", async () => {

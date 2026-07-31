@@ -119,7 +119,39 @@ describe("gate: epoch supersession — relay arbitration", () => {
     await newer.disconnect();
   }, 15_000);
 
-  test("lower/equal epoch is rejected: a stale process cannot displace a newer one", async () => {
+  test("equal epoch under the same identity admits: a redial evicts its own zombie", async () => {
+    const deviceId = crypto.randomUUID();
+    // The half-open scenario: the client's watchdog closed this socket and
+    // redialed with the SAME per-process epoch, but the relay hasn't reaped
+    // the old connection yet (design §6.3, equal-epoch rule).
+    const zombie = await RelayClient.connectAndAuth(relay.url, {
+      deviceType: "agent",
+      name: "epoch-zombie",
+      deviceId,
+      epoch: 300,
+    });
+    const identity = zombie.exportIdentity();
+    const zombieCloseP = zombie.waitForClose(5_000);
+    const zombieErrP = zombie.waitFor((m: any) => m.type === "error", 5_000);
+
+    const redial = await RelayClient.connectAndAuth(relay.url, {
+      deviceType: "agent",
+      name: "epoch-redial",
+      deviceId,
+      identity,
+      epoch: 300,
+    });
+
+    const errFrame = await zombieErrP;
+    expect(errFrame.code).toBe("SUPERSEDED");
+    expect(await zombieCloseP).toBe(true);
+
+    // The redial is the live holder and stays usable.
+    expect(await redial.waitForClose(1_000)).toBe(false);
+    await redial.disconnect();
+  }, 15_000);
+
+  test("lower epoch is rejected: a stale process cannot displace a newer one", async () => {
     const deviceId = crypto.randomUUID();
     const current = await RelayClient.connectAndAuth(relay.url, {
       deviceType: "agent",

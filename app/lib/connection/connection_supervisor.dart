@@ -84,13 +84,16 @@ const int _kMaxRoutableStalls = 3;
 /// Consecutive `SUPERSEDED` rejections tolerated before the connection is
 /// declared lost to another holder.
 ///
-/// The relay rejects a hello whose epoch is lower OR EQUAL to the one a live
-/// connection already holds, and the app mints its epoch once per launch — so
-/// a phone whose socket died without the relay noticing (Wi-Fi→cellular, no
-/// FIN) rejects its own redial until the relay's liveness sweep drops the
-/// stale entry. That sweep runs on `pingIntervalMs` (30s) and closes a socket
-/// silent for `pingIntervalMs + pongTimeoutMs` (40s), so the stale entry can
-/// survive ~70s.
+/// On current relays (design §6.3 equal-epoch rule) a redial presenting this
+/// launch's own epoch under the same key evicts its zombie and admits, so
+/// consecutive rejections can only come from a genuinely newer holder — a
+/// later launch of this install. The tolerance is kept for relays predating
+/// that rule, which reject a hello whose epoch is lower OR EQUAL to the live
+/// holder's: there, a phone whose socket died without the relay noticing
+/// (Wi-Fi→cellular, no FIN) rejects its own redial until the relay's
+/// liveness sweep drops the stale entry. That sweep runs on `pingIntervalMs`
+/// (30s) and closes a socket silent for `pingIntervalMs + pongTimeoutMs`
+/// (40s), so the stale entry can survive ~70s.
 ///
 /// Sized off the FLOOR of the socket rung's backoff, not its mean: the N-th
 /// rejection is preceded by N-1 delays, and equal jitter makes every delay at

@@ -108,8 +108,10 @@ final relayEpochProvider = FutureProvider<int>((ref) async {
     await prefs.setInt(key, epoch);
   } catch (_) {
     // Persist failure only risks a non-monotonic epoch after a same-second
-    // relaunch; the relay rejects an equal/lower epoch, so worst case is one
-    // reconnect retry — not a correctness hazard.
+    // relaunch. The relay treats an equal epoch under the same key as a redial
+    // and lets the newest socket win, so the relaunch still admits; only a
+    // lower epoch is rejected — not a correctness hazard (keep in lockstep
+    // with bridge/src/relay-epoch.ts).
   }
   return epoch;
 });

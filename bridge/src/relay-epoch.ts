@@ -33,8 +33,9 @@ export function nextEpoch(abDir: string): number {
     writeFileSync(path, String(epoch));
   } catch (err) {
     // Persist failure only risks a non-monotonic epoch after a same-second
-    // restart; the relay rejects an equal/lower epoch, so worst case is one
-    // reconnect retry — not a correctness hazard.
+    // restart. The relay treats an equal epoch under the same key as a redial
+    // and lets the newest socket win, so the restarted process still admits;
+    // only a lower epoch is rejected — not a correctness hazard.
     log.warn("relay-epoch: failed to persist %s: %s", path, err instanceof Error ? err.message : String(err));
   }
   return epoch;
