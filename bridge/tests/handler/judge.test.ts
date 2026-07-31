@@ -1,6 +1,6 @@
 // bridge/tests/handler/judge.test.ts
 import { describe, it, expect } from "bun:test";
-import { runDecision, runPlan } from "../../src/handler/judge";
+import { runDecision, runPlan, PLAN_TIMEOUT_MS } from "../../src/handler/judge";
 
 const BRIEF = {
   taskSummary: "t", willHandle: ["a"], wakeFor: ["b"], thenItems: [] as string[],
@@ -80,5 +80,14 @@ describe("runPlan", () => {
     const bad = fakeSpawn(["nope", "nope"]);
     expect(await runPlan({ tool: "claude-code", context: "C", cwd: ".", spawn: bad.spawn })).toBeNull();
     expect(bad.calls.length).toBe(2);
+  });
+
+  // A real claude plan call measures ~25s and codex ~17s, on a short context.
+  // The budget has to clear that with room, and the app's _kPlanTimeout backstop
+  // (handler_briefing_sheet.dart) has to stay above it or the sheet gives up
+  // before the bridge's own fallback lands.
+  it("budgets a plan call well past a real judge's measured latency", () => {
+    expect(PLAN_TIMEOUT_MS).toBeGreaterThanOrEqual(40_000);
+    expect(PLAN_TIMEOUT_MS).toBeLessThan(50_000); // app backstop is 50s
   });
 });

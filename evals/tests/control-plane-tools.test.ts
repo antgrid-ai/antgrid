@@ -12,7 +12,7 @@
 // `agent:tools` describes the MACHINE, not any project, so it carries no
 // project id to resolve and needs no project stream — which is exactly why it
 // is the right frame to prove control-plane delivery timing on its own. The
-// agent-under-test may or may not have a real KNOWN_AGENTS bin on PATH, so we
+// agent-under-test may or may not have a real AGENTS bin on PATH, so we
 // assert the frame ARRIVES with an array payload rather than a specific tool
 // being present.
 //

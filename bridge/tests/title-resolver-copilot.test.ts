@@ -6,8 +6,8 @@ import { join } from "node:path";
 import {
   resolveCopilotSessionTitle,
   copilotSessionExistsSync,
-  resolveStructuredTitle,
 } from "../src/title-resolver";
+import { resolveStructuredTitle } from "../src/agents/title-dispatch";
 
 const dirs: string[] = [];
 
@@ -45,7 +45,7 @@ describe("resolveCopilotSessionTitle", () => {
   test("returns summary when present", async () => {
     const home = tmp();
     seed(home, [{ id: "sess-1", summary: "Fix the parser" }]);
-    expect(await resolveCopilotSessionTitle("sess-1", home)).toBe("Fix the parser");
+    expect(await resolveCopilotSessionTitle("sess-1", home)).toEqual({ title: "Fix the parser", kind: "generated" });
   });
 
   test("falls back to first-turn user_message when summary is null", async () => {
@@ -54,7 +54,7 @@ describe("resolveCopilotSessionTitle", () => {
       { session_id: "sess-2", turn_index: 1, user_message: "second" },
       { session_id: "sess-2", turn_index: 0, user_message: "first message" },
     ]);
-    expect(await resolveCopilotSessionTitle("sess-2", home)).toBe("first message");
+    expect(await resolveCopilotSessionTitle("sess-2", home)).toEqual({ title: "first message", kind: "first-message" });
   });
 
   test("falls back to the first non-empty trimmed user_message", async () => {
@@ -65,7 +65,7 @@ describe("resolveCopilotSessionTitle", () => {
       { session_id: "sess-blank", turn_index: 2, user_message: "   " },
       { session_id: "sess-blank", turn_index: 3, user_message: "  real prompt  " },
     ]);
-    expect(await resolveCopilotSessionTitle("sess-blank", home)).toBe("real prompt");
+    expect(await resolveCopilotSessionTitle("sess-blank", home)).toEqual({ title: "real prompt", kind: "first-message" });
   });
 
   test("returns null for a missing session id", async () => {
@@ -97,6 +97,6 @@ describe("resolveStructuredTitle -> github-copilot", () => {
     const home = tmp();
     seed(home, [{ id: "sess-9", summary: "Routed title" }]);
     const title = await resolveStructuredTitle("github-copilot", { sessionId: "sess-9" }, { copilotHome: home });
-    expect(title).toBe("Routed title");
+    expect(title).toEqual({ title: "Routed title", kind: "generated" });
   });
 });

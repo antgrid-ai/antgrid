@@ -18,18 +18,19 @@ import '../../models/ab_message.dart';
 import '../../models/handler_state.dart';
 import '../../services/handler_service.dart';
 
-// Local backstop only — deliberately longer than the bridge's own 25s plan
-// timeout so the bridge's fallback result always wins the race and the sheet
-// never gives up before the bridge does.
-const _kPlanTimeout = Duration(seconds: 30);
+// Local backstop only — deliberately longer than the bridge's own plan timeout
+// (PLAN_TIMEOUT_MS in bridge/src/handler/judge.ts, 45s) so the bridge's fallback
+// result always wins the race and the sheet never gives up before the bridge
+// does. Raise both together or the race inverts.
+const _kPlanTimeout = Duration(seconds: 50);
 
 const _kSkeletalWakeFor = [
   'Anything destructive or irreversible',
   'Repeated failures',
 ];
 
-// The tools the bridge's judge can drive headlessly (mirror of
-// JUDGE_CAPABLE_TOOLS in bridge/src/handler/decision.ts).
+// The tools the bridge's judge can drive headlessly (mirror of the entries
+// carrying a `judge` in bridge/src/agents/registry.ts).
 const _kJudgeTools = ['claude-code', 'codex', 'opencode'];
 
 /// The user's choice from [showHandlerBriefingSheet]: arm with [brief]

@@ -317,9 +317,10 @@ void main() {
     await _openSheet(tester);
     expect(find.text('Reading session…'), findsOneWidget);
 
-    // No planResult ever arrives; the sheet's 30s backstop fires and lands on
-    // the skeletal editor with a blank Default picker.
-    await tester.pump(const Duration(seconds: 31));
+    // No planResult ever arrives; the sheet's backstop fires and lands on the
+    // skeletal editor with a blank Default picker. Must stay past _kPlanTimeout,
+    // which tracks the bridge's PLAN_TIMEOUT_MS.
+    await tester.pump(const Duration(seconds: 51));
     expect(
       find.text("Couldn't read the session — write your own brief."),
       findsOneWidget,

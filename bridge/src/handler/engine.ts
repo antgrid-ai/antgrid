@@ -14,7 +14,8 @@ import {
 } from "./brief";
 import { stripAnsi } from "./context";
 import type { SessionAdapter } from "./session-adapter";
-import { JUDGE_CAPABLE_TOOLS, type HandlerDecision } from "./decision";
+import { judgeCapable } from "../agents/registry";
+import { type HandlerDecision } from "./decision";
 
 export interface HandlerEvent {
   terminalId: string;
@@ -112,7 +113,7 @@ export class HandlerEngine {
     s: { judgeTool?: string; judgeModel?: string },
     p: { judgeTool?: string; judgeModel?: string },
   ): void {
-    if (p.judgeTool !== undefined && (p.judgeTool === "" || JUDGE_CAPABLE_TOOLS.has(p.judgeTool))) {
+    if (p.judgeTool !== undefined && (p.judgeTool === "" || judgeCapable(p.judgeTool))) {
       s.judgeTool = p.judgeTool || undefined;
     }
     if (p.judgeModel !== undefined) s.judgeModel = p.judgeModel.trim() || undefined;
@@ -157,7 +158,7 @@ export class HandlerEngine {
     // persisted — arming is what persists a judge choice.
     const tool =
       judge?.judgeTool === "" ? this.deps.tool(terminalId)
-      : judge?.judgeTool !== undefined && JUDGE_CAPABLE_TOOLS.has(judge.judgeTool) ? judge.judgeTool
+      : judge?.judgeTool !== undefined && judgeCapable(judge.judgeTool) ? judge.judgeTool
       : stored.tool ?? this.deps.tool(terminalId);
     const model = judge?.judgeModel !== undefined
       ? (judge.judgeModel.trim() || undefined)

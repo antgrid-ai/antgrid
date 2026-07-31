@@ -52,7 +52,7 @@ final _composerVisible = NotifierProvider<ValueController<bool>, bool>(
 /// controller. Callers append target/agent overrides on top.
 List<Override> _baseOverrides({
   PickerProject? target,
-  Set<String> detected = const <String>{},
+  Map<String, String?> detected = const <String, String?>{},
   Set<String>? chatCapable,
 }) {
   return [
@@ -172,7 +172,7 @@ void main() {
         overrides: [
           ..._baseOverrides(target: _project),
           newSessionAgentProvider.overrideWith(
-            () => ValueController(NewSessionAgent.custom),
+            () => ValueController(const CustomAgent()),
           ),
         ],
       ),
@@ -240,7 +240,7 @@ void main() {
             ),
           ]),
           newSessionDetectedToolsProvider.overrideWith(
-            (ref) async => const <String>{},
+            (ref) async => const <String, String?>{},
           ),
           newSessionChatCapableToolsProvider.overrideWith((ref) async => null),
         ],
@@ -347,7 +347,7 @@ void main() {
     final container = ProviderScope.containerOf(
       tester.element(find.byType(NewSessionComposer)),
     );
-    expect(container.read(newSessionAgentProvider), NewSessionAgent.codex);
+    expect(container.read(newSessionAgentProvider), const KnownAgent('codex'));
     expect(container.read(newSessionAgentTouchedProvider), isTrue);
   });
 
@@ -364,7 +364,7 @@ void main() {
         overrides: [
           pickerSourcesProvider.overrideWithValue(const [_localSource]),
           newSessionDetectedToolsProvider.overrideWith(
-            (ref) async => const {'claude-code'},
+            (ref) async => const {'claude-code': 'Claude Code'},
           ),
           newSessionChatCapableToolsProvider.overrideWith(
             (ref) async => ref.watch(_chatCapDriver),
@@ -424,7 +424,7 @@ void main() {
           overrides: [
             pickerSourcesProvider.overrideWithValue(const [_localSource]),
             newSessionDetectedToolsProvider.overrideWith(
-              (ref) async => const {'claude-code'},
+              (ref) async => const {'claude-code': 'Claude Code'},
             ),
             newSessionChatCapableToolsProvider.overrideWith(
               (ref) async => ref.watch(_chatCapDriver),
@@ -493,7 +493,7 @@ void main() {
           overrides: [
             ..._baseOverrides(),
             newSessionAgentProvider.overrideWith(
-              () => ValueController(NewSessionAgent.codex),
+              () => ValueController(const KnownAgent('codex')),
             ),
           ],
         ),
@@ -515,7 +515,7 @@ void main() {
           overrides: [
             ..._baseOverrides(),
             newSessionAgentProvider.overrideWith(
-              () => ValueController(NewSessionAgent.claudeCode),
+              () => ValueController(kDefaultSessionAgent),
             ),
           ],
         ),
@@ -537,7 +537,7 @@ void main() {
             overrides: [
               ..._baseOverrides(),
               newSessionAgentProvider.overrideWith(
-                () => ValueController(NewSessionAgent.cursorAgent),
+                () => ValueController(const KnownAgent('cursor-agent')),
               ),
             ],
           ),

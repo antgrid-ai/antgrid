@@ -1,26 +1,9 @@
 // bridge/src/handler/context.ts
-import { messageText, readTranscriptTail } from "../transcript-tail";
-import { findCodexRolloutPath, readLastCodexMessages } from "../codex/codex-rollout-read";
-import { readLastOpencodeMessages } from "../opencode/opencode-db-read";
+import { agentSpec } from "../agents/registry";
 
-// Mirrors title-resolver.ts JSONL iteration, but collects a rolling window of the
-// last N message texts instead of title-specific fields. Every role is included:
-// the handler needs conversation context, not just the agent's turn.
-export async function readLastClaudeMessages(transcriptPath: string, n: number): Promise<string[]> {
-  if (n <= 0) return []; // slice(-0) === slice(0) — the whole array, not none
-  const raw = await readTranscriptTail(transcriptPath);
-  if (!raw) return [];
-  const out: string[] = [];
-  for (const line of raw.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const obj = JSON.parse(line);
-      const text = messageText(obj?.message?.content);
-      if (text) out.push(text);
-    } catch { /* skip malformed line */ }
-  }
-  return out.slice(-n);
-}
+// Lives with claude-code's spec (the registry cannot import this module without
+// a cycle); re-exported here because it is the handler's transcript reader.
+export { readLastClaudeMessages } from "../agents/claude-code/transcript";
 
 // eslint-disable-next-line no-control-regex
 const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
@@ -50,21 +33,23 @@ export async function assembleContext(opts: {
   const maxChars = opts.maxChars ?? (plan ? PLAN_MAX_CHARS : DECIDE_MAX_CHARS);
   const maxMsgs = plan ? PLAN_MAX_MSGS : DECIDE_MAX_MSGS;
   const capped = (msgs: string[]) => msgs.join("\n---\n").slice(-maxChars);
-  if (opts.tool === "claude-code" && opts.transcriptPath) {
-    const msgs = await readLastClaudeMessages(opts.transcriptPath, maxMsgs);
-    if (msgs.length) return { text: capped(msgs), source: "transcript", transcriptPath: opts.transcriptPath };
-  }
-  if (opts.tool === "codex" && opts.agentSessionId) {
-    const path = await findCodexRolloutPath(opts.agentSessionId, opts.codexHome);
-    if (path) {
-      const msgs = await readLastCodexMessages(path, maxMsgs);
-      if (msgs.length) return { text: capped(msgs), source: "transcript", transcriptPath: path };
+  const read = agentSpec(opts.tool)?.transcript;
+  if (read) {
+    const t = await read({
+      maxMsgs,
+      transcriptPath: opts.transcriptPath,
+      agentSessionId: opts.agentSessionId,
+      codexHome: opts.codexHome,
+      opencodeDbPath: opts.opencodeDbPath,
+    });
+    // A path is only a hint if it is what the context actually came from: a
+    // rollout that resolved but yielded nothing must not leak one to a judge.
+    if (t.msgs.length) {
+      return {
+        text: capped(t.msgs), source: "transcript",
+        ...(t.transcriptPath ? { transcriptPath: t.transcriptPath } : {}),
+      };
     }
-  }
-  if (opts.tool === "opencode" && opts.agentSessionId) {
-    // No transcriptPath out: a SQLite DB is not a followable file hint for a judge.
-    const msgs = readLastOpencodeMessages(opts.agentSessionId, maxMsgs, opts.opencodeDbPath);
-    if (msgs.length) return { text: capped(msgs), source: "transcript" };
   }
   const fallbackMax = opts.maxChars ?? (opts.recentKind === "rendered" ? maxChars : PTY_MAX_CHARS);
   return { text: stripAnsi(opts.recentPty).slice(-fallbackMax), source: "pty" };

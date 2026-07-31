@@ -7,13 +7,11 @@ import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
 
 void main() {
-  test('remote target tools come from the control-plane state', () async {
+  Future<Map<String, String?>> readTools(List<AdvertisedTool> advertised) async {
     const uuid = 'dev-uuid';
     final container = ProviderContainer(overrides: [
       controlPlaneStateProvider(uuid).overrideWith(
-        (ref) => Stream.value(const ControlPlaneState(tools: [
-          AdvertisedTool(tool: 'codex', path: '/usr/bin/codex'),
-        ])),
+        (ref) => Stream.value(ControlPlaneState(tools: advertised)),
       ),
     ]);
     addTearDown(container.dispose);
@@ -27,7 +25,33 @@ void main() {
     container.listen(controlPlaneStateProvider(uuid), (_, _) {});
     await container.read(controlPlaneStateProvider(uuid).future);
 
-    final tools = await container.read(newSessionDetectedToolsProvider.future);
-    expect(tools, {'codex'});
+    return container.read(newSessionDetectedToolsProvider.future);
+  }
+
+  test('remote target tools come from the control-plane state', () async {
+    expect(
+      await readTools(const [
+        AdvertisedTool(tool: 'codex', path: '/usr/bin/codex', label: 'Codex'),
+      ]),
+      {'codex': 'Codex'},
+    );
+  });
+
+  test('a bridge predating `label` leaves it null rather than dropping the tool',
+      () async {
+    expect(
+      await readTools(const [
+        AdvertisedTool(tool: 'codex', path: '/usr/bin/codex'),
+      ]),
+      {'codex': null},
+    );
+  });
+
+  test('an agent this app predates still surfaces, named by the wire', () async {
+    final tools = await readTools(const [
+      AdvertisedTool(tool: 'kilo', path: '/usr/bin/kilo', label: 'Kilo'),
+    ]);
+    expect(tools, {'kilo': 'Kilo'});
+    expect(newSessionAgentLabel(const KnownAgent('kilo'), tools), 'Kilo');
   });
 }

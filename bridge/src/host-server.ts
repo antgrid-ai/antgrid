@@ -531,7 +531,7 @@ export class HostServer {
    *  — tools are a property of the machine, not of any project.
    *  `chatCapable` is stamped here so the wire is authoritative over which
    *  tools support Chat mode; the app's static list is a fallback only. */
-  buildToolsAdvertisement(opts: DetectOptions = {}): Array<{ tool: string; path: string; chatCapable: boolean }> {
+  buildToolsAdvertisement(opts: DetectOptions = {}): Array<{ tool: string; path: string; chatCapable: boolean; label: string }> {
     return detectInstalledTools(opts).map((t) => ({ ...t, chatCapable: isChatCapableTool(t.tool) }));
   }
 
@@ -942,7 +942,10 @@ export class HostServer {
           id: req.id,
           ok: true,
           type: "tools:list",
-          tools: detectInstalledTools().map((t) => ({ ...t, chatCapable: isChatCapableTool(t.tool) })),
+          // Same builder as the remote `agent:tools` advert: the loopback and
+          // relay pickers must describe a tool identically, and a second copy
+          // of the entry shape is how they drift.
+          tools: this.buildToolsAdvertisement(),
         };
       case "project:open": {
         const r = await this.open(req.projectId, req.projectPath, req.mode);

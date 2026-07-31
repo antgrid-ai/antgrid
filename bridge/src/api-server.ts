@@ -6,6 +6,7 @@ import { z } from "zod";
 import { logger } from "./logger";
 const log = logger.child({ component: "api-server" });
 import { createMessage, type AbMessage } from "./protocol";
+import { BY_HOOK_NAME } from "./agents/registry";
 import type { TerminalManager } from "./terminal-manager";
 import type { AbConfig } from "./config";
 import type { ProjectInfo } from "./file-watcher";
@@ -36,6 +37,18 @@ export interface AgentContext {
 const VERSION = "0.1.0";
 const PORT_FILE = join(process.env.ANTGRID_DIR ?? join(homedir(), ".antgrid"), "api.port");
 
+/**
+ * The hook-name vocabulary a loopback post may identify itself by (`claude`,
+ * `cursor`, … — NOT registry keys), derived from the registry rather than
+ * listed.
+ *
+ * Hand-listing it is a silent break: an agent whose `hookName` is missing here
+ * has its posts rejected 400, and `runHookInvocation` swallows the failure — so
+ * the new agent launches, runs, and simply never names its sessions, with no
+ * compile error and no log line to find.
+ */
+const HOOK_AGENT_NAMES = Object.keys(BY_HOOK_NAME) as [string, ...string[]];
+
 export const NotifyBodySchema = z.object({
   // Mirrors the notificationType enum in protocol.ts — validated here so the
   // bridge never emits a schema-invalid message onto the E2E channel.
@@ -45,7 +58,7 @@ export const NotifyBodySchema = z.object({
   terminalId: z.string().optional(),
   // Hooks post pointers and the bridge reads.
   transcriptPath: z.string().optional(),
-  agent: z.enum(["claude", "codex", "opencode", "github-copilot", "cursor"]).optional(),
+  agent: z.enum(HOOK_AGENT_NAMES).optional(),
 });
 
 export const SessionTitleSchema = z.object({
@@ -53,7 +66,7 @@ export const SessionTitleSchema = z.object({
   sessionId: z.string().min(1),
   title: z.string().optional(),
   transcriptPath: z.string().optional(),
-  agent: z.enum(["claude", "codex", "opencode", "github-copilot", "cursor"]).optional(),
+  agent: z.enum(HOOK_AGENT_NAMES).optional(),
   titleOnly: z.boolean().optional(),
 });
 export type SessionTitleBody = z.infer<typeof SessionTitleSchema>;

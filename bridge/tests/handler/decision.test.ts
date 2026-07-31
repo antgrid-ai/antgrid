@@ -29,9 +29,24 @@ describe("buildJudgeCommand tiers", () => {
     expect(r.tier).toBe("readonly");
     expect(r.cmd).toContain("--allowedTools");
   });
+  // --allowedTools is variadic: a prompt after it is eaten as another tool name
+  // and claude exits 1, failing every judge call closed. Position, not presence,
+  // is what makes the argv work.
+  it("claude-code puts the prompt ahead of the variadic --allowedTools", () => {
+    const r = buildJudgeCommand("claude-code", undefined, "P")!;
+    expect(r.cmd.indexOf("P")).toBeGreaterThan(-1);
+    expect(r.cmd.indexOf("P")).toBeLessThan(r.cmd.indexOf("--allowedTools"));
+  });
   it("codex is readonly via sandbox", () => {
     const r = buildJudgeCommand("codex", undefined, "P")!;
     expect(r.tier).toBe("readonly");
+    expect(r.cmd).toContain("read-only");
+  });
+  // A project need not be a git repo; without this codex refuses to run at all.
+  it("codex skips the git-repo check without weakening the sandbox", () => {
+    const r = buildJudgeCommand("codex", undefined, "P")!;
+    expect(r.cmd).toContain("--skip-git-repo-check");
+    expect(r.cmd).toContain("--sandbox");
     expect(r.cmd).toContain("read-only");
   });
   it("opencode is transcript tier; unknown is null", () => {

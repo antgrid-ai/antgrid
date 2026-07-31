@@ -21,7 +21,7 @@ import { resolveAgent, listKnownTools } from "./known-agents";
 import { augmentAgentLaunch } from "./agent-launch-augmenter";
 import { createMessage, HandlerConfigureWire, type AbMessage, type RpcRequest, type SessionEntry } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
-import { startApiServer, type ApiServerHandle } from "./api-server";
+import { startApiServer, type ApiServerHandle, type SessionTitleBody } from "./api-server";
 import { MessageBus } from "./message-bus";
 import { resolveAbDir } from "./antgrid-dir";
 import { computeProjectId } from "./project-id";
@@ -30,20 +30,16 @@ import { ConfigController } from "./config-controller";
 import { detectInstalledTools } from "./tool-detector";
 import { SessionManager } from "./session-manager";
 import { SessionNamer } from "./session-namer";
-import { resolveStructuredTitle } from "./title-resolver";
+import { resolveStructuredTitle } from "./agents/title-dispatch";
+import { generateSessionTitle } from "./agents/title-generate";
+import { agentSpec, BY_HOOK_NAME } from "./agents/registry";
 import { HandlerEngine } from "./handler/engine";
 import { createDispatchAdapter, createPtyAdapter } from "./handler/session-adapter";
 import { createStructuredAdapter } from "./handler/structured-adapter";
 import { dispatchRpc } from "./rpc/methods";
 import { StructuredAgentManager } from "./structured/structured-manager";
-import { CodexDriver } from "./codex/codex-driver";
-import { spawnCodex } from "./codex/spawn-codex";
 import { parseCodexVersion } from "./codex/codex-version";
 import { TOOL_UPDATE_SPECS, createToolUpdateChecker, execToolUpdate, execToolVersion, runToolUpdate, updateSpecFor } from "./agent-update";
-import { OpencodeDriver, type OpencodeClientLike } from "./opencode/opencode-driver";
-import { spawnOpencode } from "./opencode/spawn-opencode";
-import { ClaudeDriver } from "./claude/claude-driver";
-import { spawnClaude } from "./claude/spawn-claude";
 import { getGitStatus, gitCommit, gitDiscard, type GitFileEntry } from "./git";
 
 // Tracks terminal ids that have pinged /hook-alive (codex SessionStart probe).
@@ -80,15 +76,8 @@ export function buildChatSpawnAugment(
   };
 }
 
-// codex app-server rejects the -c hooks.* args that augmentAgentLaunch emits for
-// the interactive TUI (its -c parser errors on hooks.state={...} — "expected a
-// map"). Titles only need the top-level notify=[...] program, which app-server
-// DOES honor, so slice out just that -c pair. See the chat-mode title spike.
-export function codexNotifyOnlyArgs(augArgs: string[]): string[] {
-  const i = augArgs.findIndex((a) => a.startsWith("notify="));
-  if (i < 1) return [];
-  return [augArgs[i - 1], augArgs[i]]; // ["-c", "notify=[...]"]
-}
+// Lives with codex's driver (it is codex's app-server quirk, not a core one).
+export { codexNotifyOnlyArgs } from "./agents/codex/driver";
 
 export interface AgentCore {
   /** Wire up an outbound transport. The bus's inbound handler is set so the
@@ -309,6 +298,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   let manager: TerminalManager | null = null;
   let sessions: SessionManager | null = null;
   let namer: SessionNamer | null = null;
+  // Slots we've already spent a title-generation spawn on, keyed
+  // `<terminalId>:<agentSessionId>`. The /session-title post repeats every turn,
+  // so without this a session whose agent never names itself would pay a model
+  // call per turn, forever. Keyed by agent session, not slot, so a resume or a
+  // fresh thread in the same slot gets one more attempt.
+  const titleGenAttempted = new Set<string>();
   let structured: StructuredAgentManager | null = null;
   // Holds this core's api-server handle. Declared before `manager` so the
   // TerminalManager's late-bound getApiPort getter can read `apiServer.port`
@@ -1251,8 +1246,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }, connState, () => apiServer?.port ?? null);
 
     // One update-checker per tool for this project, built straight from the spec
-    // table so a new tool needs only a TOOL_UPDATE_SPECS entry — not a bespoke
-    // checker wired here. Each shares a latest-version cache across the project's
+    // table so a new tool needs only an `update` field in agents/registry.ts —
+    // not a bespoke checker wired here. Each shares a latest-version cache across the project's
     // sessions of that tool (concurrent starts collapse onto one npm fetch).
     // Advisory-only signal; every checker swallows its own errors.
     const updateCheckers = new Map(
@@ -1311,102 +1306,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       dropSessionReplay: (sessionId) => dropSessionReplay(sessionId),
       onAgentSession: (sessionId, agentSessionId) => sessions?.setAgentSession(sessionId, agentSessionId),
       onSetConfig: (sessionId, key, value) => sessions?.setSessionConfig(sessionId, key, value),
-      driverFactory: (sessionId, tool, send, resumeId) => {
-        if (tool === "opencode") {
-          // spawnOpencode is async (it awaits server startup); the driver's start()
-          // performs the await via a thunked client. Build a lazy OpencodeClientLike
-          // that resolves the spawn on first use so the factory stays synchronous.
-          let spawned: Promise<Awaited<ReturnType<typeof spawnOpencode>>> | null = null;
-          const ensure = () => (spawned ??= spawnOpencode({ cwd: project.path }));
-          const lazy: OpencodeClientLike = {
-            createSession: async (o) => (await ensure()).client.createSession(o),
-            messages: async (s) => (await ensure()).client.messages(s),
-            deleteMessage: async (s, m) => (await ensure()).client.deleteMessage(s, m),
-            prompt: async (s, t, o) => (await ensure()).client.prompt(s, t, o),
-            abort: async (s) => (await ensure()).client.abort(s),
-            summarize: async (s, m) => (await ensure()).client.summarize(s, m),
-            replyPermission: async (s, id, r) => (await ensure()).client.replyPermission(s, id, r),
-            replyQuestion: async (id, a) => (await ensure()).client.replyQuestion(id, a),
-            listCommands: async () => (await ensure()).client.listCommands(),
-            listAgents: async () => (await ensure()).client.listAgents(),
-            listProviders: async () => (await ensure()).client.listProviders(),
-            command: async (s, o) => (await ensure()).client.command(s, o),
-            events: async function* () { yield* (await ensure()).client.events(); },
-            // Await the real teardown (server exit) so an in-app `opencode
-            // upgrade` never runs while the SDK server still holds the binary.
-            // Nothing spawned yet → nothing to wait for.
-            dispose: async () => { await spawned?.then((s) => s.client.dispose()); },
-          };
-          emitUpdateCheck("opencode", sessionId, send);
-          return new OpencodeDriver({ sessionId, client: lazy, sendMessage: send, title: project.id,
-            onTitle: (title) => namer?.onStructuredTitle(sessionId, title) });
-        }
-        if (tool === "claude-code") {
-          // Bounded tail of the subprocess's stderr: startup failures (bad auth,
-          // corrupted install) otherwise vanish silently — the SDK only invokes
-          // this callback, it never surfaces stderr any other way.
-          const stderrLines: string[] = [];
-          let stderrBytes = 0;
-          const pushStderr = (chunk: string) => {
-            for (const line of chunk.split("\n")) {
-              if (!line) continue;
-              stderrLines.push(line);
-              stderrBytes += line.length;
-            }
-            while (stderrLines.length > 40 || stderrBytes > 8_192) {
-              stderrBytes -= stderrLines.shift()?.length ?? 0;
-            }
-          };
-          // Reuse the terminal-mode title plugin in chat mode so /session-title
-          // auto-names the session from the conversation. chatAug.args is
-          // ["--plugin-dir", <dir>]; map it to the SDK's extraArgs shape.
-          const chatAug = buildChatSpawnAugment("claude-code", sessionId, apiServer?.port ?? null, abDir);
-          const pluginDir = chatAug.args[chatAug.args.indexOf("--plugin-dir") + 1];
-          // `claude update` is install-method-sensitive, but this is detection
-          // only; the run itself is fail-soft (see the agent:update handler).
-          emitUpdateCheck("claude-code", sessionId, send);
-          return new ClaudeDriver({
-            sessionId,
-            sendMessage: send,
-            cwd: project.path,
-            spawn: ({ canUseTool, abort, resume }) =>
-              spawnClaude({ cwd: project.path, canUseTool, resume,
-                onStderr: pushStderr, abortController: abort,
-                ...(pluginDir ? { extraArgs: { "plugin-dir": pluginDir } } : {}),
-                extraEnv: chatAug.env }),
-            onSessionId: (agentSessionId) => sessions?.setAgentSession(sessionId, agentSessionId),
-            stderrTail: () => stderrLines.join("\n"),
-          });
-        }
-        // default: codex
-        const chatAug = buildChatSpawnAugment("codex", sessionId, apiServer?.port ?? null, abDir);
-        const spawned = spawnCodex({
-          cwd: project.path,
-          args: ["app-server", ...codexNotifyOnlyArgs(chatAug.args)],
-          env: chatAug.env,
-        });
-        const driver = new CodexDriver({
+      driverFactory: (sessionId, tool, send) => {
+        // Chat mode is gated on isChatCapableTool, which IS "the spec has a
+        // driver" — so an unreachable tool here means the two disagreed.
+        const driver = agentSpec(tool)?.driver;
+        if (!driver) throw new Error(`tool "${tool}" has no chat driver`);
+        return driver({
           sessionId,
-          endpoint: spawned.endpoint,
-          sendMessage: send,
-          cwd: project.path,
-          // failureDiagnosis settles only when the codex process is gone; if
-          // start failed while the process somehow lives on, give up quickly
-          // and let the original error surface instead of hanging startChat.
-          diagnoseStartFailure: () =>
-            Promise.race([spawned.failureDiagnosis, Bun.sleep(1_500).then(() => null)]),
+          send,
+          projectPath: project.path,
+          projectId: project.id,
+          chatAugment: () => buildChatSpawnAugment(tool, sessionId, apiServer?.port ?? null, abDir),
+          onAgentSession: (agentSessionId) => sessions?.setAgentSession(sessionId, agentSessionId),
+          onTitle: (title) => namer?.onStructuredTitle(sessionId, title),
+          emitUpdateCheck: () => emitUpdateCheck(tool, sessionId, send),
         });
-        // Tie the spawned process lifetime to the driver's dispose. dispose
-        // resolves only once codex has fully exited (spawned.kill awaits
-        // proc.exited) so the manager can serialize a stop→start handoff — codex's
-        // global ~/.codex sqlite lock must be released before a restart spawns.
-        const origDispose = driver.dispose.bind(driver);
-        driver.dispose = async () => { origDispose(); await spawned.kill(); };
-        // Proactive version check: if the spawned codex is behind npm's latest
-        // (and not dismissed via ~/.codex/version.json), nudge the app with a
-        // dismissible chip. Same seam as every other tool.
-        emitUpdateCheck("codex", sessionId, send);
-        return driver;
       },
     });
 
@@ -1672,6 +1586,38 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     void setupServices().catch((err) => log.error("setupServices failed: %s", err));
   }
 
+  /**
+   * Last resort for a session no agent will name: ask the agent's own headless
+   * CLI. Gated hard, because it costs a model spawn — only when the native read
+   * gave us nothing better than the user's opening prompt (see ResolvedTitle),
+   * once per agent session, and never for a session the user already renamed.
+   *
+   * Fire-and-forget by design: /session-title is posted from a hook the agent is
+   * blocking on, so the reply must not wait on a judge spawn.
+   */
+  async function maybeGenerateTitle(body: SessionTitleBody, fallback?: string): Promise<void> {
+    const tool = body.agent ? BY_HOOK_NAME[body.agent] : undefined;
+    if (!tool || !body.sessionId) return;
+    if (sessions && !sessions.isAutoNameable(body.terminalId)) return;
+    const key = `${body.terminalId}:${body.sessionId}`;
+    // Claim the slot BEFORE awaiting: two turns can end while the first spawn is
+    // still running, and both would otherwise pass the check.
+    if (titleGenAttempted.has(key)) return;
+    titleGenAttempted.add(key);
+    const title = await generateSessionTitle({
+      tool,
+      cwd: project.path,
+      transcriptPath: body.transcriptPath,
+      agentSessionId: body.sessionId,
+      fallbackContext: fallback,
+    });
+    // Re-check: the spawn takes tens of seconds, and the user may have renamed
+    // the session (or Claude may have written its own title) in that window.
+    if (!title || (sessions && !sessions.isAutoNameable(body.terminalId))) return;
+    log.info("generated a session title for %s (%s)", body.terminalId, tool);
+    namer?.onStructuredTitle(body.terminalId, title);
+  }
+
   // Start local API server for MCP/hook integration (works in both modes)
   apiServer = startApiServer({
     manager: () => manager,
@@ -1704,16 +1650,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         namer?.onStructuredTitle(body.terminalId, body.title);
         return;
       }
-        if (
-          body.agent === "claude" ||
-          body.agent === "codex" ||
-          body.agent === "github-copilot"
-        ) {
-        const title = await resolveStructuredTitle(body.agent, {
-          sessionId: body.sessionId,
-          transcriptPath: body.transcriptPath,
-        });
-        if (title) namer?.onStructuredTitle(body.terminalId, title);
+      const resolved = await resolveStructuredTitle(body.agent, {
+        sessionId: body.sessionId,
+        transcriptPath: body.transcriptPath,
+      });
+      // Apply the native read first either way: even a first-message title beats
+      // "Session 3" while generation is in flight, and it's what we keep if
+      // generation fails.
+      if (resolved) namer?.onStructuredTitle(body.terminalId, resolved.title);
+      if (!resolved || resolved.kind === "first-message") {
+        void maybeGenerateTitle(body, resolved?.title);
       }
     },
     onHookAlive: (terminalId) => { codexHookAlive.add(terminalId); },

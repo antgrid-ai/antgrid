@@ -13,7 +13,7 @@ import {
   managedCursorCommands,
   removeManagedCursorHookEntries,
   replaceManagedCursorHookEntries,
-} from "../src/cursor-hooks";
+} from "../src/agents/cursor-agent/global-hooks";
 import { resolveHookCommand } from "../src/hook-command";
 
 const PLUGIN_DIR = resolve(import.meta.dirname);
@@ -65,7 +65,7 @@ function buildHooks(stopEvent: string, notifMatcher: string) {
 }
 
 // Cursor's hooks.json has a flatter shape than Claude/Codex's (no matcher/
-// hooks-array wrapper — see cursor.com/docs/hooks). agent-launch-augmenter.ts
+// hooks-array wrapper — see cursor.com/docs/hooks). agents/cursor-agent/hooks.ts
 // (ensureGlobalCursorHooks) wires these same entries into the USER tier
 // (~/.cursor/hooks.json) on every bridge-managed spawn; this installer writes
 // the PROJECT tier for runs started outside the bridge. hooks.json files are
@@ -74,7 +74,7 @@ function buildHooks(stopEvent: string, notifMatcher: string) {
 // hook executor). Cursor MERGES tiers, so with both installed a bridge spawn
 // fires both entries — collapsed by the /notify dedup window in api-server.ts,
 // so the phone still gets one notification. The merge/dedupe logic itself is
-// shared via cursor-hooks.ts so a fix only has to happen once.
+// shared via agents/cursor-agent/global-hooks.ts so a fix only has to happen once.
 
 
 function removeAbEntries(path: string, hookKeys: string[]) {

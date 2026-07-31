@@ -175,7 +175,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
   bool get _canStart => newSessionCanStart(
     starting: _starting,
     hasValidTarget: ref.read(newSessionHasValidTargetProvider),
-    isCustom: ref.read(newSessionAgentProvider) == NewSessionAgent.custom,
+    isCustom: ref.read(newSessionAgentProvider) == const CustomAgent(),
     customCmd: ref.read(newSessionCustomCmdProvider),
   );
 
@@ -260,7 +260,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     final agent = ref.watch(newSessionAgentProvider);
     final customCmd = ref.watch(newSessionCustomCmdProvider);
     final hasValidTarget = ref.watch(newSessionHasValidTargetProvider);
-    final isCustom = agent == NewSessionAgent.custom;
+    final isCustom = agent == const CustomAgent();
     // Derived bool, not the raw chat-capable future: that future re-emits a
     // fresh Set on every control-plane heartbeat, and watching it here would
     // rebuild the whole composer subtree each time. The provider only notifies
@@ -597,13 +597,14 @@ class _AgentSelector extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final agent = ref.watch(newSessionAgentProvider);
     final detected =
-        ref.watch(newSessionDetectedToolsProvider).value ?? const <String>{};
+        ref.watch(newSessionDetectedToolsProvider).value ??
+        const <String, String?>{};
     final options = _buildAgentOptions(detected, agent);
 
     return ComposerChip(
       key: const Key('new-session-agent-selector'),
       icon: AbIcons.terminal,
-      label: newSessionAgentLabel(agent),
+      label: newSessionAgentLabel(agent, detected),
       onTap: (ctx) async {
         final anchor = abMenuAnchorRect(ctx);
         if (anchor == null) return;
@@ -615,7 +616,7 @@ class _AgentSelector extends ConsumerWidget {
           entries: [
             for (final a in options)
               AbMenuItem(
-                label: newSessionAgentLabel(a),
+                label: newSessionAgentLabel(a, detected),
                 value: a,
                 icon: a == agent ? AbIcons.check : null,
               ),
@@ -631,22 +632,24 @@ class _AgentSelector extends ConsumerWidget {
 }
 
 /// Build the agent menu's options from the tools detected on the target.
-/// Ported verbatim from `session_config.dart._buildAgentOptions`.
 ///
 /// When [detected] is empty (detection still in flight, target not focused,
-/// or an older agent without the handler) the full known-agent list is shown
-/// so the picker always works. Otherwise only installed agents appear, in
-/// their canonical declaration order. `Custom` is always last. The current
+/// or an older agent without the handler) [kFallbackSessionAgents] is shown
+/// so the picker always works. Otherwise the options ARE the advertised tools,
+/// in the bridge's order — an agent this app predates still appears, which the
+/// previous app-side enum could not do. `Custom` is always last. The current
 /// [selected] agent is always included so the trigger never renders a hidden
 /// option.
 List<NewSessionAgent> _buildAgentOptions(
-  Set<String> detected,
+  Map<String, String?> detected,
   NewSessionAgent selected,
 ) {
-  final options = [
-    for (final a in kKnownSessionAgents)
-      if (detected.isEmpty || detected.contains(newSessionAgentToolKey(a))) a,
-    NewSessionAgent.custom,
+  final options = <NewSessionAgent>[
+    if (detected.isEmpty)
+      ...kFallbackSessionAgents
+    else
+      for (final key in detected.keys) KnownAgent(key),
+    const CustomAgent(),
   ];
   if (!options.contains(selected)) return [selected, ...options];
   return options;
@@ -731,7 +734,7 @@ class _GearPopoverContentState extends ConsumerState<_GearPopoverContent> {
             onChanged: (v) =>
                 ref.read(newSessionCliArgsProvider.notifier).set(v),
           ),
-          if (agent == NewSessionAgent.custom) ...[
+          if (agent == const CustomAgent()) ...[
             const SizedBox(height: AbTokens.space12),
             const _GearFieldLabel('Custom command'),
             const SizedBox(height: AbTokens.space6),

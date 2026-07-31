@@ -56,6 +56,9 @@ export interface ToolSummary {
   tool: string;
   path: string;
   chatCapable: boolean;
+  /** Display name from the registry. The app prefers this over its own table,
+   *  so adding an agent names it everywhere without an app release. */
+  label: string;
 }
 
 /** Loopback data-plane connect info (port + token). Non-null for all cores —

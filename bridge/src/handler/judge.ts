@@ -1,6 +1,7 @@
 // bridge/src/handler/judge.ts
+import { agentSpec } from "../agents/registry";
 import {
-  buildJudgeCommand, buildDecidePrompt, buildRetryPrompt, parseDecisionFromOutput, judgeTier,
+  buildDecidePrompt, buildRetryPrompt, parseDecisionFromOutput,
   type HandlerDecision,
 } from "./decision";
 import { buildPlanPrompt, parseBriefFromOutput, type Brief } from "./brief";
@@ -60,16 +61,15 @@ async function runWithRetry<T>(opts: {
 }): Promise<T | null> {
   const spawn = opts.spawn ?? Bun.spawn;
   // Tier first: transcript-tier judges have no Read tool, so a transcript-path
-  // hint would be an instruction they cannot follow. A null tier means no
-  // verified headless judge for this tool — Handler stays escalate-only.
-  const tier = judgeTier(opts.tool);
-  if (!tier) return null;
-  const path = tier === "readonly" ? opts.transcriptPath : undefined;
+  // hint would be an instruction they cannot follow. No judge on the spec means
+  // no verified headless judge for this tool — Handler stays escalate-only.
+  const judge = agentSpec(opts.tool)?.judge;
+  if (!judge) return null;
+  const path = judge.tier === "readonly" ? opts.transcriptPath : undefined;
 
   const prompt = opts.makePrompt(path);
-  const first = buildJudgeCommand(opts.tool, opts.model, prompt)!;
   const started = Date.now();
-  const out1 = await spawnJudge(resolveCmd(first.cmd, prompt), opts.cwd, opts.timeoutMs, spawn);
+  const out1 = await spawnJudge(resolveCmd(judge.cmd(prompt, opts.model), prompt), opts.cwd, opts.timeoutMs, spawn);
   if (out1 === null) return null;
   const r1 = opts.parse(out1.stdout);
   if (r1.value) return r1.value;
@@ -80,8 +80,7 @@ async function runWithRetry<T>(opts: {
   const remaining = opts.timeoutMs - (Date.now() - started);
   if (remaining <= 0) return null;
   const retryPrompt = buildRetryPrompt(prompt, r1.error ?? "invalid output");
-  const retry = buildJudgeCommand(opts.tool, opts.model, retryPrompt)!;
-  const out2 = await spawnJudge(resolveCmd(retry.cmd, retryPrompt), opts.cwd, remaining, spawn);
+  const out2 = await spawnJudge(resolveCmd(judge.cmd(retryPrompt, opts.model), retryPrompt), opts.cwd, remaining, spawn);
   if (out2 === null) return null;
   return opts.parse(out2.stdout).value;
 }
@@ -103,13 +102,24 @@ export async function runDecision(opts: {
   });
 }
 
+/**
+ * Budget for a plan call. Measured, not guessed: a real `claude -p` plan over a
+ * short context takes ~25s and codex ~17s, and a full PLAN_MAX_CHARS transcript
+ * is slower still — the old 25s default put Claude on a coin flip.
+ *
+ * Keep in lockstep with `_kPlanTimeout` in the app's handler_briefing_sheet.dart,
+ * which must stay ABOVE this so the bridge's own fallback result always wins the
+ * race and the sheet never gives up first.
+ */
+export const PLAN_TIMEOUT_MS = 45_000;
+
 export async function runPlan(opts: {
   tool: string; model?: string; context: string; transcriptPath?: string;
   cwd: string; timeoutMs?: number; spawn?: typeof Bun.spawn;
 }): Promise<Brief | null> {
   return runWithRetry<Brief>({
     tool: opts.tool, model: opts.model, cwd: opts.cwd,
-    timeoutMs: opts.timeoutMs ?? 25_000, spawn: opts.spawn, transcriptPath: opts.transcriptPath,
+    timeoutMs: opts.timeoutMs ?? PLAN_TIMEOUT_MS, spawn: opts.spawn, transcriptPath: opts.transcriptPath,
     makePrompt: (path) => buildPlanPrompt(opts.context, path),
     parse: (stdout) => {
       const brief = parseBriefFromOutput(stdout);

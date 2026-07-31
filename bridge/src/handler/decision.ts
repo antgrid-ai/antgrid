@@ -1,5 +1,6 @@
 // bridge/src/handler/decision.ts
 import { z } from "zod";
+import { agentSpec } from "../agents/registry";
 import type { Brief } from "./brief";
 import { extractJsonObject } from "./json-extract";
 
@@ -25,49 +26,15 @@ export type HandlerDecision = z.infer<typeof HandlerDecisionSchema>;
 
 export type JudgeTier = "readonly" | "transcript";
 
-// The tools buildJudgeCommand can drive headlessly — the only legal values for
-// the config's judge-tool override. Keep in lockstep with judgeTier below.
-export const JUDGE_CAPABLE_TOOLS = new Set(["claude-code", "codex", "opencode"]);
-
-// Tier without building a command. Callers that only need the tier (to decide
-// whether a transcript-path hint is followable) must not have to synthesize a
-// throwaway prompt just to read it back off a command array.
-export function judgeTier(tool: string): JudgeTier | null {
-  switch (tool) {
-    case "claude-code":
-    case "codex":     return "readonly";
-    case "opencode":  return "transcript";
-    default:          return null;
-  }
-}
-
-// claude/codex/opencode each accept a one-shot prompt in non-interactive mode.
-// tier "readonly" = tool access is provably restricted to reads; "transcript" =
-// restriction unenforced, so the judge gets no tool hints (spec: degrade, don't trust).
-// Returning null gates Handler off for tools without a verified headless judge.
+// Judge argv for an arbitrary tool string, read off the one place a tool is
+// described. Tier and argv come back together because they are one field on the
+// spec — a "readonly" claim and the flags that enforce it can no longer drift.
+// Null = no VERIFIED headless judge for this tool, which gates Handler off.
 export function buildJudgeCommand(
   tool: string, model: string | undefined, prompt: string,
 ): { cmd: string[]; tier: JudgeTier } | null {
-  switch (tool) {
-    case "claude-code":
-      return {
-        cmd: ["claude", "-p", "--allowedTools",
-          "Read,Grep,Glob,Bash(git status:*),Bash(git diff:*),Bash(git log:*)",
-          ...(model ? ["--model", model] : []), prompt],
-        tier: "readonly",
-      };
-    case "codex":
-      return { cmd: ["codex", "exec", "--sandbox", "read-only", ...(model ? ["-m", model] : []), prompt], tier: "readonly" };
-    case "opencode":
-      // --agent plan selects opencode's built-in restricted Plan agent
-      // (edits denied by default; non-interactive `run` without --auto fails
-      // permission asks closed). Config-level, not flag-proven like claude's
-      // --allowedTools, so the tier stays "transcript": no tool hints, and no
-      // transcript-path handed to a judge whose restriction we can't verify.
-      return { cmd: ["opencode", "run", "--agent", "plan", ...(model ? ["--model", model] : []), prompt], tier: "transcript" };
-    default:
-      return null;
-  }
+  const judge = agentSpec(tool)?.judge;
+  return judge ? { cmd: judge.cmd(prompt, model), tier: judge.tier } : null;
 }
 
 export function buildDecidePrompt(opts: {

@@ -3,7 +3,7 @@ import { Icon } from "astro-icon/components";
 import Eyebrow from "../ui/Eyebrow.astro";
 import Chip from "../ui/Chip.astro";
 
-// Keep in lockstep with KNOWN_AGENTS in bridge/src/known-agents.ts — these are the
+// Keep in lockstep with AGENTS in bridge/src/agents/registry.ts — these are the
 // agents wired for notifications and session naming. Anything else still runs (the
 // "any terminal agent" chip), it just gets no integration, so it must not be named here.
 const agents = ["Claude Code", "Codex", "opencode", "Cursor", "GitHub Copilot", "Kilo", "Kimi", "Mistral Vibe"];

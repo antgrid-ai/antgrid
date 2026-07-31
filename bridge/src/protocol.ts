@@ -338,13 +338,22 @@ const AgentProjectsMessage = BaseMessage.extend({
 });
 
 // Outbound agent→app, control plane only: the machine's installed coding-agent
-// tools (KNOWN_AGENTS ∩ PATH). Machine-level, NOT project-scoped — so it is not
+// tools (AGENTS ∩ PATH). Machine-level, NOT project-scoped — so it is not
 // gated by the per-phone allowlist (which scopes projects, not tools). E2E-opaque
 // to the relay. No inbound switch case.
 const AgentToolsMessage = BaseMessage.extend({
   type: z.literal("agent:tools"),
+  // `chatCapable`/`label` are optional for back-compat only — a current bridge
+  // always sends both. Both must stay listed: this schema is what parseMessage
+  // keeps, so a field missing here is silently stripped off the frame the app
+  // reads it from.
   tools: z.array(
-    z.object({ tool: z.string(), path: z.string(), chatCapable: z.boolean().optional() }),
+    z.object({
+      tool: z.string(),
+      path: z.string(),
+      chatCapable: z.boolean().optional(),
+      label: z.string().optional(),
+    }),
   ),
 });
 
@@ -1188,7 +1197,7 @@ const AgentUpdateAvailableMessage = BaseMessage.extend({
 });
 
 // App -> agent: run the agent CLI's in-app self-update (codex/claude `update`,
-// opencode `upgrade` — see TOOL_UPDATE_SPECS in agent-update.ts). A project verb
+// opencode `upgrade` — see each agent's `update` in agents/registry.ts). A project verb
 // — gated by the same pairing + allowlist chokepoint as every other inbound
 // message (see currentPhoneAllowed() in agent-core). The update is machine-
 // global, so the bridge quiesces every live chat session of that tool, updates

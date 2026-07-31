@@ -60,7 +60,7 @@ void main() {
       ),
     ]),
     newSessionDetectedToolsProvider.overrideWith(
-      (ref) async => const <String>{},
+      (ref) async => const <String, String?>{},
     ),
     newSessionChatCapableToolsProvider.overrideWith((ref) async => null),
     if (surface != null)

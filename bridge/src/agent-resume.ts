@@ -2,10 +2,11 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { codexThreadExistsSync, copilotSessionExistsSync } from "./title-resolver";
+import { agentSpec } from "./agents/registry";
 
 /**
  * Argv appended to a tool's base launch args to resume a specific agent-native
- * conversation. Keyed by the KNOWN_AGENTS registry key. Tools without verified
+ * conversation. Keyed by the AGENTS registry key. Tools without verified
  * resume-by-id support return [] (fresh start). See the per-agent resume table
  * in docs/superpowers/plans/2026-06-23-agent-session-resume.md.
  *
@@ -14,21 +15,7 @@ import { codexThreadExistsSync, copilotSessionExistsSync } from "./title-resolve
  * ordering (globals → subcommand) is preserved.
  */
 export function resumeArgv(tool: string, agentSessionId: string): string[] {
-  switch (tool) {
-    case "claude-code":
-      return ["--resume", agentSessionId];
-    case "opencode":
-      return ["--session", agentSessionId];
-    case "codex":
-      return ["resume", agentSessionId];
-    case "github-copilot":
-      // Copilot's optional-value --resume drops a space-separated value.
-      return [`--resume=${agentSessionId}`];
-    case "cursor-agent":
-      return ["--resume", agentSessionId];
-    default:
-      return [];
-  }
+  return agentSpec(tool)?.resume(agentSessionId) ?? [];
 }
 
 /**

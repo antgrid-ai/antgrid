@@ -121,13 +121,19 @@ class PhonesList {
 }
 
 /// One installed tool from the loopback `tools:list`. Mirror of control-protocol.ts
-/// ToolSummary. `chatCapable` is null against an older bridge that predates the
-/// field; callers fall back to the app's static capability list in that case.
+/// ToolSummary. `chatCapable` and `label` are null against an older bridge that
+/// predates each field; callers fall back to the app's static tables in that case.
 class ToolSummary {
   final String tool;
   final String path;
   final bool? chatCapable;
-  const ToolSummary({required this.tool, required this.path, this.chatCapable});
+  final String? label;
+  const ToolSummary({
+    required this.tool,
+    required this.path,
+    this.chatCapable,
+    this.label,
+  });
 }
 
 /// The machine-level mobile access policy: one boolean for the whole machine —
@@ -302,6 +308,7 @@ class HostControlClient {
         tool: tool,
         path: path,
         chatCapable: e['chatCapable'] as bool?,
+        label: e['label'] as String?,
       );
     }).toList(growable: false);
   }

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { augmentAgentLaunch, buildCodexNotifyInjection } from "../src/agent-launch-augmenter";
+import { augmentAgentLaunch } from "../src/agent-launch-augmenter";
+import { buildCodexNotifyInjection } from "../src/agents/codex/hooks";
 import { computeCommandHookHash, hookStateKey, EVENT_LABELS } from "../src/codex-hook-fingerprint";
 
 const HOOK_COMMAND = { binary: "/Applications/O'Brien/Antgrid App/antgrid-bridge", preargs: ["hook"] };

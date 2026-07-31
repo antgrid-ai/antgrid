@@ -2,11 +2,12 @@ import { describe, it, test, expect } from "bun:test";
 import { mkdtempSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { KNOWN_AGENTS, resolveAgent, resolveAgentEnv, listKnownTools, titleSourceFor } from "../src/known-agents";
+import { resolveAgent, resolveAgentEnv, listKnownTools, titleSourceFor } from "../src/known-agents";
+import { AGENTS } from "../src/agents/registry";
 
 describe("known-agents registry", () => {
   it("exposes entries for the known coding agents", () => {
-    expect(Object.keys(KNOWN_AGENTS).sort()).toEqual(
+    expect(Object.keys(AGENTS).sort()).toEqual(
       [
         "claude-code",
         "codex",
@@ -56,7 +57,7 @@ describe("known-agents registry", () => {
     const r = resolveAgent("codex");
     expect(r.args).toEqual([]);
     expect(r.args).not.toContain("tui.notification_method=osc9");
-    expect(KNOWN_AGENTS["codex"].notificationSource).toBe("plugin");
+    expect(AGENTS["codex"].notificationSource).toBe("plugin");
   });
 
   it("agents without default flags resolve to empty args", () => {
