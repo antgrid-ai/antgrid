@@ -24,7 +24,11 @@ export interface ActivityRecord {
   recordId: string;
   at: number;
   terminalId: string;
-  decision: "continue" | "handle" | "escalate" | "brief_armed" | "brief_edited" | "item_satisfied" | "wrapped_up";
+  // "parked"/"resumed" are lifecycle EVENTS, not verdicts about the supervised
+  // work — they sit here beside the other non-decision kinds so the activity
+  // feed can show why a session went quiet.
+  decision: "continue" | "handle" | "escalate" | "brief_armed" | "brief_edited"
+    | "item_satisfied" | "wrapped_up" | "parked" | "resumed";
   reason: string;
   detail?: string;
 }

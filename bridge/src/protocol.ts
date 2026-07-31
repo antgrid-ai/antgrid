@@ -673,13 +673,17 @@ const OpenEscalationWire = z.object({
 const HandlerSessionSnapshot = z.object({
   terminalId: z.string(),
   notifyOnly: z.boolean(),
-  state: z.enum(["watching", "handling", "needs_you"]),
+  state: z.enum(["watching", "handling", "needs_you", "parked"]),
   pendingEscalations: z.number().int().nonnegative(),
   armedAt: z.number(),
   doneWhenMet: z.boolean(),
   brief: HandlerBriefWire,
   ledger: z.array(z.object({ item: z.string(), evidence: z.string(), at: z.number() })),
   escalations: z.array(OpenEscalationWire),
+  // Why the session is parked and when it wakes (epoch ms), for the countdown
+  // chip. Present only while state is "parked".
+  parkKind: z.enum(["limit", "outage"]).optional(),
+  parkedUntil: z.number().optional(),
   // Per-session judge choice (absent = session default tool / CLI default model).
   judgeTool: z.string().optional(),
   judgeModel: z.string().optional(),
@@ -712,6 +716,7 @@ const HandlerActivityMessage = BaseMessage.extend({
   decision: z.enum([
     "continue", "handle", "escalate",
     "brief_armed", "brief_edited", "item_satisfied", "wrapped_up",
+    "parked", "resumed",
   ]),
   reason: z.string(),
   detail: z.string().optional(),

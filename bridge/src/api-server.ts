@@ -76,9 +76,13 @@ export type SessionTitleBody = z.infer<typeof SessionTitleSchema>;
 const HandlerEventSchema = z.object({
   terminalId: z.string().min(1),
   agent: z.string().optional(),
-  event: z.enum(["turn_end", "awaiting_input"]),
+  event: z.enum(["turn_end", "awaiting_input", "limit_hit", "limit_cleared", "turn_failed"]),
   transcriptPath: z.string().optional(),
   sessionId: z.string().optional(),
+  // Lifecycle detail: when the provider's limit window ends (epoch ms; absent →
+  // the engine's fallback wait) and what the driver called the failure.
+  resetsAt: z.number().optional(),
+  errorClass: z.string().optional(),
 });
 export type HandlerEventBody = z.infer<typeof HandlerEventSchema>;
 

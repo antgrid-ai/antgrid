@@ -91,6 +91,29 @@ describe("handler wire v2", () => {
     expect(parseMessage(JSON.stringify(msg))).toBeTruthy();
   });
 
+  test("status carries a parked session with its park fields", () => {
+    const msg = createMessage("handler:status", {
+      projectId: "p", defaultNotifyOnly: false, sessions: [{
+        terminalId: "t1", notifyOnly: false, state: "parked", pendingEscalations: 0,
+        armedAt: 1, doneWhenMet: false, brief, ledger: [], escalations: [],
+        parkKind: "limit", parkedUntil: 1770000000000,
+      }],
+    });
+    const parsed = parseMessage(JSON.stringify(msg)) as any;
+    expect(parsed.sessions[0].state).toBe("parked");
+    expect(parsed.sessions[0].parkKind).toBe("limit");
+    expect(parsed.sessions[0].parkedUntil).toBe(1770000000000);
+  });
+
+  test("activity accepts the lifecycle kinds", () => {
+    for (const decision of ["parked", "resumed"] as const) {
+      const act = createMessage("handler:activity", {
+        projectId: "p", recordId: "r", at: 1, terminalId: "t1", decision, reason: "usage limit",
+      });
+      expect(parseMessage(JSON.stringify(act))).toBeTruthy();
+    }
+  });
+
   test("handler:planRequest accepts optional judge overrides", () => {
     const msg = createMessage("handler:planRequest", {
       projectId: "p", terminalId: "t", judgeTool: "codex", judgeModel: "gpt-5.3-codex",

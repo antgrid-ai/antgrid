@@ -16,16 +16,28 @@ import { stripAnsi } from "./context";
 import type { SessionAdapter } from "./session-adapter";
 import { judgeCapable } from "../agents/registry";
 import { type HandlerDecision } from "./decision";
+import {
+  LIMIT_FALLBACK_MS, TRANSIENT_CEILING, transientBackoffMs, defaultSchedule,
+  TimerRegistry, type LifecycleDeps,
+} from "./lifecycle";
 
 export interface HandlerEvent {
   terminalId: string;
-  event: "turn_end" | "awaiting_input" | "permission_request" | "question";
+  event: "turn_end" | "awaiting_input" | "permission_request" | "question"
+       | "limit_hit" | "limit_cleared" | "turn_failed";
   transcriptPath?: string;
   sessionId?: string;
   // Human-readable subject of a blocking prompt (permission title / question
   // text) — carried into the escalation body so the notification says WHAT
   // the agent is asking, not just that it asked.
   detail?: string;
+  // When the provider's limit window ends (epoch ms). Detectors capture it from
+  // a side channel; absent means fall back to a fixed wait.
+  resetsAt?: number;
+  // The driver's own name for the failure, used as the activity reason.
+  errorClass?: string;
+  // limit_hit only: the driver retries by itself, so a nudge would be noise.
+  selfResuming?: boolean;
 }
 
 // The two events a structured driver raises by BLOCKING on the user: the agent
@@ -33,6 +45,18 @@ export interface HandlerEvent {
 // a pause the judge may handle on its own.
 function isBlockingPrompt(evt: HandlerEvent | undefined): boolean {
   return evt?.event === "permission_request" || evt?.event === "question";
+}
+
+// Session-lifecycle signals (the provider stopped serving us), as opposed to
+// the agent pausing for input. They report a fact rather than requesting a
+// decision, so they never reach the judge.
+function isLifecycle(evt: HandlerEvent): boolean {
+  return evt.event === "limit_hit" || evt.event === "limit_cleared" || evt.event === "turn_failed";
+}
+
+function wakeClock(at: number): string {
+  const d = new Date(at);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 export interface HandlerEngineDeps {
@@ -61,6 +85,7 @@ export interface HandlerEngineDeps {
   loadSessionFn?: (terminalId: string) => HandlerSessionRecord | null;
   saveSessionFn?: (rec: HandlerSessionRecord) => void;
   now?: () => number;
+  schedule?: LifecycleDeps["schedule"];
   guard?: RunawayGuard;
 }
 
@@ -70,12 +95,22 @@ interface ArmedSession {
   armedAt: number;
   doneWhenMet: boolean;
   ledger: LedgerEntry[];
-  state: "watching" | "handling" | "needs_you";
+  state: "watching" | "handling" | "needs_you" | "parked";
   // Full payloads, not a count: status snapshots replay these so the app can
   // always render an answerable row for every pending escalation.
   escalations: OpenEscalation[];
   judgeTool?: string;
   judgeModel?: string;
+  parkKind?: "limit" | "outage";
+  parkedUntil?: number;
+  selfResuming?: boolean;
+  // Consecutive terminal transient failures. A judged decision clears it.
+  transientFailures: number;
+  // One push per park episode: a re-park is the same wait, not a new one.
+  parkPushSent?: boolean;
+  // Outage park born of a judge failure: the pause was never judged, so the
+  // wake re-runs this event instead of nudging past supervision.
+  retryEvent?: HandlerEvent;
 }
 
 export class HandlerEngine {
@@ -94,9 +129,14 @@ export class HandlerEngine {
   // would run one full judge spawn (up to 45s) per queued event, composing
   // replies against context the agent left minutes ago.
   private latest = new Map<string, HandlerEvent>();
+  private timers: TimerRegistry;
 
   constructor(private deps: HandlerEngineDeps) {
     this.guard = deps.guard ?? new RunawayGuard();
+    this.timers = new TimerRegistry({
+      now: () => this.now(),
+      schedule: deps.schedule ?? defaultSchedule,
+    });
   }
 
   private cfg(): HandlerConfig {
@@ -149,6 +189,7 @@ export class HandlerEngine {
       version: 1, terminalId, armed, brief: s.brief, notifyOnly: s.notifyOnly,
       armedAt: s.armedAt, doneWhenMet: s.doneWhenMet, ledger: s.ledger,
       escalations: s.escalations, judgeTool: s.judgeTool, judgeModel: s.judgeModel,
+      parkKind: s.parkKind, parkedUntil: s.parkedUntil, transientFailures: s.transientFailures,
     });
   }
 
@@ -232,11 +273,29 @@ export class HandlerEngine {
       // pick), then let an explicit choice on this arm override it.
       judgeTool: stored.tool,
       judgeModel: stored.model,
+      transientFailures: resumed?.transientFailures ?? 0,
     };
     this.applyJudgeChoice(s, p);
     this.sessions.set(p.terminalId, s);
     this.persist(p.terminalId, s, true);
     this.record(p.terminalId, resumed ? "brief_edited" : "brief_armed", s.brief.taskSummary);
+    this.emitStatus();
+    // Rehydrated last, so the arm record still reads as the session's opening
+    // line and a deadline already past can resume straight into the new process.
+    if (resumed?.parkKind && resumed.parkedUntil !== undefined) {
+      this.rehydratePark(p.terminalId, s, resumed.parkKind, resumed.parkedUntil);
+    }
+  }
+
+  // selfResuming and retryEvent are deliberately not persisted: a restart drops
+  // the stale pause event, and a driver that parks itself re-announces.
+  private rehydratePark(terminalId: string, s: ArmedSession, kind: "limit" | "outage", until: number): void {
+    s.state = "parked";
+    s.parkKind = kind;
+    s.parkedUntil = until;
+    if (until <= this.now()) return this.onParkTimer(terminalId);
+    this.timers.arm(terminalId, until - this.now(), () => this.onParkTimer(terminalId));
+    this.persist(terminalId, s, true);
     this.emitStatus();
   }
 
@@ -245,6 +304,7 @@ export class HandlerEngine {
     if (!s) return;
     this.sessions.delete(terminalId);
     this.latest.delete(terminalId);
+    this.unparkIfParked(terminalId, s);
     this.persist(terminalId, s, false);
     this.guard.reset(terminalId);
     this.emitStatus();
@@ -254,15 +314,18 @@ export class HandlerEngine {
     this.guard.reset(terminalId);
     const s = this.sessions.get(terminalId);
     if (!s) return;
-    // Called per terminal:input (every keystroke). Pending escalations clear
-    // only on a SUBMITTED line — a stray keypress must not silently swallow an
-    // unanswered question — and a submit clears ALL of them: once a human line
-    // reaches the agent, every earlier pause-question for this terminal is
-    // stale (each pause supersedes the last). The `pending === 0` early-return
-    // also keeps typing into an armed terminal from costing one disk write +
+    // Called per terminal:input (every keystroke), so the submitted-line test
+    // comes first: typing into an armed terminal must not cost one disk write +
     // one encrypted status broadcast per character.
-    if (s.escalations.length === 0) return;
     if (!/[\r\n]/.test(data)) return;
+    // A human at the keyboard ends a park — before the escalations-empty
+    // early-return below, which a parked session normally satisfies.
+    const unparked = this.unparkIfParked(terminalId, s);
+    // Pending escalations clear only on a SUBMITTED line — a stray keypress must
+    // not silently swallow an unanswered question — and a submit clears ALL of
+    // them: once a human line reaches the agent, every earlier pause-question
+    // for this terminal is stale (each pause supersedes the last).
+    if (!unparked && s.escalations.length === 0) return;
     s.escalations = [];
     s.state = "watching";
     this.persist(terminalId, s, true);
@@ -291,11 +354,29 @@ export class HandlerEngine {
     // while a prompt was outstanding" case turn_end-on-error exists to catch.
     if (isBlockingPrompt(this.latest.get(terminalId))) this.latest.delete(terminalId);
     const s = this.sessions.get(terminalId);
-    if (!s || s.escalations.length === 0) return;
+    if (!s) return;
+    // Also before the escalations-empty return: a parked session normally has
+    // none, so an unpark placed after it would be dead code.
+    const unparked = this.unparkIfParked(terminalId, s);
+    if (!unparked && s.escalations.length === 0) return;
     s.escalations = [];
     s.state = "watching";
     this.persist(terminalId, s, true);
     this.emitStatus();
+  }
+
+  // Ends a park without recording anything: the caller (human input, a blocking
+  // prompt, disarm) is itself the reason the wait is over.
+  private unparkIfParked(terminalId: string, s: ArmedSession): boolean {
+    if (s.state !== "parked") return false;
+    this.timers.cancel(terminalId);
+    s.state = "watching";
+    s.parkKind = undefined;
+    s.parkedUntil = undefined;
+    s.selfResuming = undefined;
+    s.parkPushSent = undefined;
+    s.retryEvent = undefined;
+    return true;
   }
 
   /**
@@ -322,10 +403,15 @@ export class HandlerEngine {
     // not block later events, so swallow it before running ours. At dequeue
     // time, run only if this is still the newest event for the terminal —
     // anything superseded while waiting is dropped, not judged.
-    this.latest.set(evt.terminalId, evt);
+    //
+    // Lifecycle events sit outside that rule entirely: a limit_hit and a later
+    // turn_end mean different things, so neither may supersede the other. They
+    // still ride the chain, so they cannot race a judge call already in flight.
+    const lifecycle = isLifecycle(evt);
+    if (!lifecycle) this.latest.set(evt.terminalId, evt);
     const prev = this.chains.get(evt.terminalId) ?? Promise.resolve();
     const next = prev.catch(() => {}).then(() =>
-      this.latest.get(evt.terminalId) === evt ? this.handleEventInner(evt) : undefined);
+      lifecycle || this.latest.get(evt.terminalId) === evt ? this.handleEventInner(evt) : undefined);
     this.chains.set(evt.terminalId, next);
     const done = () => { if (this.chains.get(evt.terminalId) === next) this.chains.delete(evt.terminalId); };
     next.then(done, done);
@@ -335,6 +421,23 @@ export class HandlerEngine {
   private async handleEventInner(evt: HandlerEvent): Promise<void> {
     const s = this.sessions.get(evt.terminalId);
     if (!s) return; // unarmed session: Handler is per-session now
+
+    if (isLifecycle(evt)) return this.handleLifecycle(evt, s);
+
+    if (s.state === "parked") {
+      // A parked session spends no judge call: during a limit window the judge
+      // usually shares the provider account and would fail anyway. Blocking
+      // prompts are the exception — an agent asking a question is demonstrably
+      // past its limit, and wake rules trump a park.
+      const blocking = isBlockingPrompt(evt);
+      if (!blocking && !s.selfResuming) return;
+      this.unparkIfParked(evt.terminalId, s);
+      if (!blocking) {
+        this.persist(evt.terminalId, s, true);
+        this.record(evt.terminalId, "resumed", "agent resumed on its own");
+        this.emitStatus();
+      }
+    }
 
     // Structured blocking prompts (permission / AskUserQuestion) are option-
     // based: the judge only emits free text, and auto-approving a tool call
@@ -372,8 +475,11 @@ export class HandlerEngine {
     s.state = "handling";
     this.emitStatus();
 
-    // A rejection must not strand state in "handling" — reset before rethrowing so
-    // the next event isn't ignored and the app's status pill reflects reality.
+    // Scoped to the judge itself: a judge that could not run is a transient
+    // outage, not a verdict, so it parks and re-judges this same event later.
+    // The act-on-decision body below keeps its own catch — parking there would
+    // re-judge a decision that was already made and acted on.
+    let decision: HandlerDecision | null;
     try {
       const tool = this.deps.tool(evt.terminalId);
       const transcriptPath = evt.transcriptPath ?? this.deps.adapter.transcriptPath(evt.terminalId);
@@ -385,25 +491,29 @@ export class HandlerEngine {
         purpose: "decide",
       });
       const runDecisionFn = this.deps.runDecisionFn ?? defaultRunDecision;
-      const decision = await runDecisionFn({
+      decision = await runDecisionFn({
         tool: s.judgeTool ?? tool, model: s.judgeModel, brief: s.brief,
         ledgerText: renderLedger(s.brief, s.ledger),
         context: ctx.text, transcriptPath: ctx.transcriptPath ?? transcriptPath, cwd: this.deps.projectPath,
       });
+    } catch {
+      if (this.sessions.get(evt.terminalId) === s) this.onJudgeUnavailable(evt, s);
+      return;
+    }
 
-      // The judge await yields the event loop; a concurrent disarm/terminal-exit may
-      // have dropped or replaced this session. Never inject into a session the user
-      // stopped mid-judge — supervise-safely boundary.
-      if (this.sessions.get(evt.terminalId) !== s) return;
+    // The judge await yields the event loop; a concurrent disarm/terminal-exit may
+    // have dropped or replaced this session. Never inject into a session the user
+    // stopped mid-judge — supervise-safely boundary.
+    if (this.sessions.get(evt.terminalId) !== s) return;
 
-      if (!decision) {
-        this.escalate(evt.terminalId, s, {
-          decision: "escalate", confidence: 0, reason: "judge unavailable",
-          notify: { title: "Handler", body: "Agent needs you (judge unavailable)", draftReply: "", urgency: "normal" },
-        });
-        return;
-      }
+    if (!decision) return this.onJudgeUnavailable(evt, s);
 
+    // A judge that answered proves the provider is serving us again.
+    s.transientFailures = 0;
+
+    // A rejection must not strand state in "handling" — reset before rethrowing so
+    // the next event isn't ignored and the app's status pill reflects reality.
+    try {
       this.absorbLedger(evt.terminalId, s, decision);
       // Wrap-up is checked AFTER acting on the decision (see each branch below):
       // a final `handle` reply must reach the agent before disarm, and an
@@ -470,14 +580,118 @@ export class HandlerEngine {
       // stays pending for the human; auto-disarming would bury the question.
       this.escalate(evt.terminalId, s, decision);
     } catch (err) {
-      // Same TOCTOU as above: only touch `s` if it's still the live session for
-      // this terminal, so a disarm/exit during the judge call isn't clobbered.
+      // A wrap-up (or a concurrent disarm) may already have dropped this
+      // session; resetting its state here would re-persist it as armed.
       if (this.sessions.get(evt.terminalId) === s) {
         s.state = s.escalations.length > 0 ? "needs_you" : "watching";
         this.emitStatus();
       }
       throw err;
     }
+  }
+
+  // Lifecycle events state a fact about the provider, never a verdict about the
+  // supervised work: they park or resume. Only the transient ceiling escalates.
+  private handleLifecycle(evt: HandlerEvent, s: ArmedSession): void {
+    if (evt.event === "limit_cleared") {
+      if (!this.unparkIfParked(evt.terminalId, s)) return;
+      this.persist(evt.terminalId, s, true);
+      this.record(evt.terminalId, "resumed", "provider limit cleared");
+      this.emitStatus();
+      return;
+    }
+
+    if (evt.event === "limit_hit") {
+      const until = evt.resetsAt ?? this.now() + LIMIT_FALLBACK_MS;
+      // A repeat limit_hit is the same wait with a fresher deadline: refresh it,
+      // but don't re-announce a park the user was already told about.
+      const refresh = s.state === "parked" && s.parkKind === "limit";
+      this.enterPark(evt.terminalId, s, {
+        kind: "limit", until, selfResuming: evt.selfResuming, retryEvent: s.retryEvent,
+      });
+      if (!refresh) {
+        this.record(evt.terminalId, "parked", evt.errorClass ?? "usage limit", new Date(until).toISOString());
+        if (!s.parkPushSent) {
+          s.parkPushSent = true;
+          this.deps.sendPush?.(`Handler: paused until ${wakeClock(until)} — resuming automatically`, evt.terminalId);
+        }
+      }
+      this.emitStatus();
+      return;
+    }
+
+    // turn_failed. A park already represents waiting, so a failure arriving
+    // mid-park is dropped: counting it would shorten a limit window into an
+    // outage backoff and spend the ceiling on a wait we chose. The counter
+    // measures post-resume failures.
+    if (s.state === "parked") return;
+    this.registerTransientFailure(evt, s);
+  }
+
+  private registerTransientFailure(evt: HandlerEvent, s: ArmedSession, retryEvent?: HandlerEvent): void {
+    s.transientFailures += 1;
+    if (s.transientFailures >= TRANSIENT_CEILING) {
+      // The one lifecycle outcome that IS a decision, so it goes through the
+      // normal escalation path and the phone gets an answerable row. Every
+      // driver burns its own retry budget first, so three of these in a row
+      // means the blip was not a blip. The counter stays at the ceiling until a
+      // judged turn clears it.
+      this.escalate(evt.terminalId, s, {
+        decision: "escalate", confidence: 0, reason: "repeated transient failures",
+        notify: {
+          title: "Handler", body: "Agent needs you (repeated transient failures)",
+          draftReply: "", urgency: "normal",
+        },
+      });
+      return;
+    }
+    const until = this.now() + transientBackoffMs(s.transientFailures);
+    this.enterPark(evt.terminalId, s, { kind: "outage", until, retryEvent });
+    this.record(evt.terminalId, "parked", evt.errorClass ?? "transient failure", new Date(until).toISOString());
+    this.emitStatus();
+  }
+
+  // A judge that could not run says nothing about the agent, so the pause it was
+  // asked about is stashed and re-judged after the backoff. Nudging "continue"
+  // here would let the agent proceed with no supervision at all.
+  private onJudgeUnavailable(evt: HandlerEvent, s: ArmedSession): void {
+    this.registerTransientFailure({ ...evt, errorClass: evt.errorClass ?? "judge unavailable" }, s, evt);
+  }
+
+  private enterPark(terminalId: string, s: ArmedSession, p: {
+    kind: "limit" | "outage"; until: number; selfResuming?: boolean; retryEvent?: HandlerEvent;
+  }): void {
+    s.state = "parked";
+    s.parkKind = p.kind;
+    s.parkedUntil = p.until;
+    s.selfResuming = p.selfResuming;
+    s.retryEvent = p.retryEvent;
+    // A driver that resumes itself needs no timer: our nudge would land in a
+    // session that never stopped retrying.
+    if (p.selfResuming) this.timers.cancel(terminalId);
+    else this.timers.arm(terminalId, Math.max(0, p.until - this.now()), () => this.onParkTimer(terminalId));
+    this.persist(terminalId, s, true);
+  }
+
+  private onParkTimer(terminalId: string): void {
+    const s = this.sessions.get(terminalId);
+    if (!s || s.state !== "parked") return;
+    const retry = s.retryEvent;
+    this.unparkIfParked(terminalId, s);
+    this.persist(terminalId, s, true);
+    this.record(terminalId, "resumed", "park timer elapsed");
+    this.emitStatus();
+    if (retry) {
+      // Nothing awaits a timer callback, so the re-judge carries its own sink;
+      // a judge that fails again simply re-parks through the same path.
+      void this.handleEvent(retry).catch(() => {});
+      return;
+    }
+    // Straight to the adapter, never through the auto-reply path: the nudge is
+    // the supervisor's own recovery action, so it must neither advance the
+    // runaway counter nor enter the circular-exchange window — a second park
+    // would otherwise write an identical "continue" and false-escalate.
+    this.deps.adapter.injectReply(terminalId, "continue");
   }
 
   // Record judge-declared satisfied items (dedup by exact item string) and count
@@ -591,6 +805,8 @@ export class HandlerEngine {
       escalations: s.escalations,
       judgeTool: s.judgeTool,
       judgeModel: s.judgeModel,
+      parkKind: s.parkKind,
+      parkedUntil: s.parkedUntil,
     }));
     this.deps.sendAb(createMessage("handler:status", {
       projectId: this.deps.projectId,

@@ -1660,6 +1660,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       handlerEngine.handleEvent({
         terminalId: body.terminalId, event: body.event,
         transcriptPath: body.transcriptPath, sessionId: body.sessionId,
+        resetsAt: body.resetsAt, errorClass: body.errorClass,
       }).catch((err) => log.error("Handler event failed: %s", err));
     },
     onSessionTitle: async (body) => {

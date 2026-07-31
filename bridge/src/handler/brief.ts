@@ -48,6 +48,11 @@ export const HandlerSessionRecordSchema = z.object({
   // across a bridge restart.
   judgeTool: z.string().optional(),
   judgeModel: z.string().optional(),
+  // Park state, so a bridge restart mid-park strands nothing. Optional for the
+  // same reason as judgeTool above.
+  parkKind: z.enum(["limit", "outage"]).optional(),
+  parkedUntil: z.number().optional(),
+  transientFailures: z.number().optional(),
 });
 export type HandlerSessionRecord = z.infer<typeof HandlerSessionRecordSchema>;
 

@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { HandlerEngine } from "../../src/handler/engine";
+import { RunawayGuard } from "../../src/handler/runaway-guard";
+import { LIMIT_FALLBACK_MS } from "../../src/handler/lifecycle";
 import type { AbMessage } from "../../src/protocol";
 import type { HandlerDecision } from "../../src/handler/decision";
 import type { HandlerSessionRecord } from "../../src/handler/brief";
@@ -14,11 +16,16 @@ const BRIEF = {
   wakeFor: ["schema changes"], doneWhen: "tests pass", thenItems: ["/compact"],
 };
 
+interface FakeTimer { ms: number; fn: () => void; cancelled: boolean; fired: boolean }
+
 function makeEngine(overrides: Record<string, unknown> = {}) {
   const sent: AbMessage[] = [];
   const injected: Array<[string, string]> = [];
   const saved: unknown[] = [];
   const activity: unknown[] = [];
+  const pushes: string[] = [];
+  const timers: FakeTimer[] = [];
+  const clock = { t: 1000 };
   const engine = new HandlerEngine({
     projectId: "proj", projectPath: "/proj", tool: () => "claude-code", abDir: "/tmp/unused",
     adapter: {
@@ -29,14 +36,36 @@ function makeEngine(overrides: Record<string, unknown> = {}) {
       supportsSlashCommands: () => true,
     },
     sendAb: (m: AbMessage) => sent.push(m),
+    sendPush: (m: string) => pushes.push(m),
     loadConfigFn: () => ({ version: 2, defaultNotifyOnly: false }),
     appendActivityFn: (r: unknown) => activity.push(r),
     loadSessionFn: () => null,
     saveSessionFn: (r: unknown) => saved.push(r),
-    now: () => 1000,
+    now: () => clock.t,
+    schedule: (ms: number, fn: () => void) => {
+      const t: FakeTimer = { ms, fn: () => { t.fired = true; fn(); }, cancelled: false, fired: false };
+      timers.push(t);
+      return () => { t.cancelled = true; };
+    },
     ...overrides,
   } as never);
-  return { engine, sent, injected, saved, activity };
+  // Timers still waiting to fire — a re-arm cancels its predecessor, so this is
+  // how "exactly one timer armed" is asserted.
+  const armed = () => timers.filter((t) => !t.cancelled && !t.fired);
+  return { engine, sent, injected, saved, activity, pushes, timers, armed, clock };
+}
+
+interface SessionSnapshot {
+  state: string; parkKind?: string; parkedUntil?: number; pendingEscalations: number;
+}
+function statusOf(sent: AbMessage[]): SessionSnapshot {
+  const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
+    sessions: SessionSnapshot[];
+  };
+  return status.sessions[0];
+}
+function records(activity: unknown[], kind: string): unknown[] {
+  return activity.filter((a) => (a as { decision: string }).decision === kind);
 }
 
 describe("arm/disarm", () => {
@@ -207,7 +236,7 @@ describe("escalation accounting", () => {
   });
 
   it("a submitted line clears ALL pending escalations; bare keystrokes clear none", async () => {
-    const { engine, sent } = makeEngine({ runDecisionFn: async () => null });
+    const { engine, sent } = makeEngine({ runDecisionFn: async () => decide({ decision: "escalate" }) });
     engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
@@ -224,7 +253,7 @@ describe("escalation accounting", () => {
   });
 
   it("status snapshots replay full escalation payloads (reconnect can rebuild rows)", async () => {
-    const { engine, sent } = makeEngine({ runDecisionFn: async () => null });
+    const { engine, sent } = makeEngine({ runDecisionFn: async () => decide({ decision: "escalate" }) });
     engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
     const esc = sent.find((m) => m.type === "handler:escalation") as never as { escalationId: string };
@@ -366,11 +395,12 @@ describe("handleEvent decision loop", () => {
     expect(status.sessions).toHaveLength(1);
   });
 
-  it("judge unavailable escalates (fail closed)", async () => {
+  it("judge unavailable parks instead of escalating on the first failure", async () => {
     const { engine, sent } = makeEngine({ runDecisionFn: async () => null });
     engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
     await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
-    expect(sent.some((m) => m.type === "handler:escalation")).toBe(true);
+    expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
+    expect(statusOf(sent).state).toBe("parked");
   });
 
   it("does not inject when the session is disarmed while the judge is still deciding", async () => {
@@ -725,4 +755,318 @@ test("opencode decide context reads the db but hands the judge no path", async (
   } finally {
     if (prevDb === undefined) delete process.env.OPENCODE_DB; else process.env.OPENCODE_DB = prevDb;
   }
+});
+
+// Lets a re-enqueued event (the timer's re-judge) drain without real timers.
+async function drain(): Promise<void> {
+  for (let i = 0; i < 30; i++) await Promise.resolve();
+}
+
+function parkedRecord(over: Partial<HandlerSessionRecord> = {}): HandlerSessionRecord {
+  return {
+    version: 1, terminalId: "t1", armed: true, brief: BRIEF, notifyOnly: false,
+    armedAt: 1, doneWhenMet: false, ledger: [], escalations: [], ...over,
+  } as HandlerSessionRecord;
+}
+
+describe("lifecycle park / resume", () => {
+  it("limit_hit parks until the detector's reset time with exactly one timer armed", async () => {
+    const { engine, sent, activity, armed, clock } = makeEngine();
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({
+      terminalId: "t1", event: "limit_hit", resetsAt: clock.t + 60_000, errorClass: "rate_limit",
+    });
+    const s = statusOf(sent);
+    expect(s.state).toBe("parked");
+    expect(s.parkKind).toBe("limit");
+    expect(s.parkedUntil).toBe(clock.t + 60_000);
+    expect(armed()).toHaveLength(1);
+    expect(armed()[0].ms).toBe(60_000);
+    expect(records(activity, "parked")).toHaveLength(1);
+  });
+
+  it("a limit_hit without a reset time falls back to 30 minutes", async () => {
+    const { engine, sent, armed, clock } = makeEngine();
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    expect(statusOf(sent).parkedUntil).toBe(clock.t + LIMIT_FALLBACK_MS);
+    expect(armed()[0].ms).toBe(LIMIT_FALLBACK_MS);
+  });
+
+  it("the park timer nudges exactly once and records resumed", async () => {
+    const { engine, sent, injected, activity, timers } = makeEngine();
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    timers.at(-1)!.fn();
+    expect(injected).toEqual([["t1", "continue"]]);
+    expect(records(activity, "resumed")).toHaveLength(1);
+    expect(statusOf(sent).state).toBe("watching");
+    expect(statusOf(sent).parkKind).toBeUndefined();
+  });
+
+  it("the first park of an episode pushes once; a re-park refreshes the deadline silently", async () => {
+    const { engine, sent, activity, pushes, armed, clock } = makeEngine();
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit", resetsAt: clock.t + 60_000 });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit", resetsAt: clock.t + 90_000 });
+    expect(statusOf(sent).parkedUntil).toBe(clock.t + 90_000);
+    expect(armed()).toHaveLength(1);
+    expect(armed()[0].ms).toBe(90_000);
+    expect(records(activity, "parked")).toHaveLength(1);
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0]).toContain("resuming automatically");
+  });
+
+  it("a selfResuming park never arms a timer and unparks on the next normal event", async () => {
+    let judged = 0;
+    const { engine, sent, injected, armed, clock } = makeEngine({
+      runDecisionFn: async () => { judged++; return decide({}); },
+    });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({
+      terminalId: "t1", event: "limit_hit", selfResuming: true, resetsAt: clock.t + 60_000,
+    });
+    expect(statusOf(sent).state).toBe("parked");
+    expect(armed()).toHaveLength(0);
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(judged).toBe(1);
+    expect(injected).toHaveLength(0);
+    expect(statusOf(sent).state).toBe("watching");
+  });
+
+  it("limit_cleared unparks and records resumed; on an unparked session it is dropped", async () => {
+    const { engine, sent, activity, timers } = makeEngine();
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_cleared" });
+    expect(records(activity, "resumed")).toHaveLength(0);
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_cleared" });
+    expect(timers.at(-1)!.cancelled).toBe(true);
+    expect(records(activity, "resumed")).toHaveLength(1);
+    expect(statusOf(sent).state).toBe("watching");
+    expect(statusOf(sent).parkKind).toBeUndefined();
+  });
+
+  it("turn_end mid-park is dropped without a judge call", async () => {
+    let judged = 0;
+    const { engine, sent } = makeEngine({ runDecisionFn: async () => { judged++; return decide({}); } });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(judged).toBe(0);
+    expect(statusOf(sent).state).toBe("parked");
+  });
+
+  it("a blocking prompt mid-park unparks, cancels the timer, and escalates with no judge call", async () => {
+    let judged = 0;
+    const { engine, sent, timers } = makeEngine({ runDecisionFn: async () => { judged++; return decide({}); } });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    await engine.handleEvent({ terminalId: "t1", event: "permission_request", detail: "Bash: rm -rf build" });
+    expect(judged).toBe(0);
+    expect(timers.at(-1)!.cancelled).toBe(true);
+    expect(sent.some((m) => m.type === "handler:escalation")).toBe(true);
+    expect(statusOf(sent).state).toBe("needs_you");
+    expect(statusOf(sent).parkKind).toBeUndefined();
+  });
+
+  it("a submitted line unparks a session with zero pending escalations", async () => {
+    const { engine, sent, timers } = makeEngine();
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    engine.onUserReply("t1", "k");
+    expect(statusOf(sent).state).toBe("parked"); // a bare keystroke is not a resume
+    engine.onUserReply("t1", "go on\r");
+    expect(timers.at(-1)!.cancelled).toBe(true);
+    expect(statusOf(sent).state).toBe("watching");
+    expect(statusOf(sent).parkKind).toBeUndefined();
+  });
+
+  it("a prompt retraction unparks a session with zero pending escalations", async () => {
+    const { engine, sent, timers } = makeEngine();
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    engine.onPromptRetracted("t1");
+    expect(timers.at(-1)!.cancelled).toBe(true);
+    expect(statusOf(sent).state).toBe("watching");
+  });
+
+  it("disarm and terminal exit cancel the park timer", async () => {
+    const a = makeEngine();
+    a.engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await a.engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    a.engine.disarm("t1");
+    expect(a.timers.at(-1)!.cancelled).toBe(true);
+
+    const b = makeEngine();
+    b.engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await b.engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    b.engine.onTerminalExit("t1");
+    expect(b.timers.at(-1)!.cancelled).toBe(true);
+  });
+});
+
+describe("lifecycle transient ceiling", () => {
+  it("backs off 30s then 2m and escalates on the third consecutive failure", async () => {
+    const { engine, sent, timers, armed } = makeEngine({ runDecisionFn: async () => decide({}) });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+
+    await engine.handleEvent({ terminalId: "t1", event: "turn_failed", errorClass: "overloaded" });
+    expect(statusOf(sent).parkKind).toBe("outage");
+    expect(armed()[0].ms).toBe(30_000);
+    timers.at(-1)!.fn();
+
+    await engine.handleEvent({ terminalId: "t1", event: "turn_failed", errorClass: "overloaded" });
+    expect(armed()[0].ms).toBe(120_000);
+    timers.at(-1)!.fn();
+
+    await engine.handleEvent({ terminalId: "t1", event: "turn_failed", errorClass: "overloaded" });
+    const esc = sent.filter((m) => m.type === "handler:escalation") as never as Array<{ reasoning: string }>;
+    expect(esc).toHaveLength(1);
+    expect(esc[0].reasoning).toBe("repeated transient failures");
+    expect(statusOf(sent).state).toBe("needs_you");
+    expect(armed()).toHaveLength(0);
+  });
+
+  it("a judged turn between failures resets the counter", async () => {
+    const { engine, timers, armed } = makeEngine({ runDecisionFn: async () => decide({}) });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_failed" });
+    timers.at(-1)!.fn();
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_failed" });
+    expect(armed()[0].ms).toBe(30_000);
+  });
+
+  it("limit parks never contribute to the ceiling", async () => {
+    const { engine, sent, timers, armed } = makeEngine();
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    timers.at(-1)!.fn();
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    timers.at(-1)!.fn();
+    await engine.handleEvent({ terminalId: "t1", event: "turn_failed" });
+    expect(armed()[0].ms).toBe(30_000);
+    expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
+  });
+
+  it("turn_failed mid-park is dropped: no counter change, no overwritten limit park", async () => {
+    const { engine, sent, activity, timers, armed, clock } = makeEngine();
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit", resetsAt: clock.t + 60_000 });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_failed" });
+    expect(statusOf(sent).parkKind).toBe("limit");
+    expect(statusOf(sent).parkedUntil).toBe(clock.t + 60_000);
+    expect(records(activity, "parked")).toHaveLength(1);
+    expect(armed()).toHaveLength(1);
+    // The dropped failure must not shorten the NEXT backoff either.
+    timers.at(-1)!.fn();
+    await engine.handleEvent({ terminalId: "t1", event: "turn_failed" });
+    expect(armed()[0].ms).toBe(30_000);
+  });
+
+  it("a judge failure parks with the original event and re-judges it on resume", async () => {
+    const calls: Array<string | undefined> = [];
+    let sawSecond!: () => void;
+    const second = new Promise<void>((r) => { sawSecond = r; });
+    const { engine, sent, injected, timers } = makeEngine({
+      runDecisionFn: async (o: { transcriptPath?: string }) => {
+        calls.push(o.transcriptPath);
+        if (calls.length === 2) sawSecond();
+        return null;
+      },
+    });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end", transcriptPath: "/orig.jsonl" });
+    expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
+    expect(statusOf(sent).parkKind).toBe("outage");
+    expect(timers.at(-1)!.ms).toBe(30_000);
+
+    timers.at(-1)!.fn();
+    await second;
+    await drain();
+    expect(calls[1]).toBe("/orig.jsonl");
+    expect(injected).toHaveLength(0);
+  });
+
+  it("a judge that throws parks instead of rejecting", async () => {
+    const { engine, sent } = makeEngine({
+      runDecisionFn: async () => { throw new Error("judge spawn failed"); },
+    });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(statusOf(sent).state).toBe("parked");
+    expect(statusOf(sent).parkKind).toBe("outage");
+    expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
+  });
+});
+
+describe("lifecycle guard invariant", () => {
+  it("a park/resume cycle never resets the consecutive counter", async () => {
+    let reply = "first";
+    const { engine, sent, injected, timers } = makeEngine({
+      guard: new RunawayGuard(1, 4),
+      runDecisionFn: async () => decide({ decision: "handle", reply }),
+    });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    timers.at(-1)!.fn();
+    reply = "second";
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    // "second" is still capped: the park neither reset nor advanced the counter.
+    expect(injected.map((i) => i[1])).toEqual(["first", "continue"]);
+    expect(sent.some((m) => m.type === "handler:escalation")).toBe(true);
+  });
+
+  it("resume nudges never enter the circular-exchange window", async () => {
+    let reply = "first";
+    const { engine, sent, injected, timers } = makeEngine({
+      guard: new RunawayGuard(5, 4),
+      runDecisionFn: async () => decide({ decision: "handle", reply }),
+    });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    timers.at(-1)!.fn();
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    timers.at(-1)!.fn();
+    reply = "continue";
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(injected.map((i) => i[1])).toEqual(["first", "continue", "continue", "continue"]);
+    expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
+  });
+});
+
+describe("lifecycle persistence", () => {
+  it("persists the park fields on the session record", async () => {
+    const { engine, saved, clock } = makeEngine();
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit", resetsAt: clock.t + 60_000 });
+    const rec = saved.at(-1) as { parkKind?: string; parkedUntil?: number; transientFailures?: number };
+    expect(rec.parkKind).toBe("limit");
+    expect(rec.parkedUntil).toBe(clock.t + 60_000);
+    expect(rec.transientFailures).toBe(0);
+  });
+
+  it("rehydrates a future park and re-arms the remainder", () => {
+    const { engine, sent, armed, clock } = makeEngine({
+      loadSessionFn: () => parkedRecord({ parkKind: "limit", parkedUntil: 1000 + 90_000, transientFailures: 2 }),
+    });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    expect(statusOf(sent).state).toBe("parked");
+    expect(statusOf(sent).parkedUntil).toBe(clock.t + 90_000);
+    expect(armed()).toHaveLength(1);
+    expect(armed()[0].ms).toBe(90_000);
+  });
+
+  it("rehydrates a park whose deadline has passed by resuming immediately", () => {
+    const { engine, sent, injected, activity } = makeEngine({
+      loadSessionFn: () => parkedRecord({ parkKind: "outage", parkedUntil: 900 }),
+    });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    expect(injected).toEqual([["t1", "continue"]]);
+    expect(records(activity, "resumed")).toHaveLength(1);
+    expect(statusOf(sent).state).toBe("watching");
+  });
 });
