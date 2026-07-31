@@ -19,7 +19,11 @@ describe("paired-phones live reload", () => {
     const cli = loadPairedPhones(dir);
     cli.remove("pk1");
 
-    await new Promise((r) => setTimeout(r, 150));
+    // Poll, don't sleep a fixed window: the notify chain is an OS watch event
+    // plus a 50ms debounce, and delivery is delayed 1:1 by anything stalling the
+    // loop, so a neighbouring suite can push it past a fixed deadline.
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    for (let i = 0; i < 300 && fired === 0; i++) await sleep(10);
     expect(fired).toBeGreaterThan(0);
     // The running host must drop the row from ITS memory too — push targeting
     // and phones:list read that in-memory view live.

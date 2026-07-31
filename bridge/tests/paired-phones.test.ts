@@ -136,6 +136,17 @@ describe("paired-phones store (machine-level)", () => {
 describe("paired-phones lastSeen touch", () => {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+  /** Poll for a notification instead of sleeping a fixed window. The chain is an
+   *  OS watch event plus a 50ms debounce, and event delivery is delayed 1:1 by
+   *  anything stalling the loop — a neighbouring suite blocking ~170ms is enough
+   *  to push the debounce past a 200ms deadline and fail with `changes` at 0.
+   *  Only positive assertions can poll; a "stayed 0" check still has to sit out
+   *  a real window, but a late event there can only weaken it, never fail it. */
+  async function waitForChanges(read: () => number, want: number): Promise<number> {
+    for (let i = 0; i < 300 && read() < want; i++) await sleep(10);
+    return read();
+  }
+
   /** Simulate a separate `antgrid phones` process rewriting the row. */
   function externalEdit(dir: string, label: string) {
     writeFileSync(
@@ -190,8 +201,7 @@ describe("paired-phones lastSeen touch", () => {
 
     // ...but a real external edit still notifies.
     externalEdit(dir, "Pixel");
-    await sleep(200);
-    expect(changes).toBe(1);
+    expect(await waitForChanges(() => changes, 1)).toBe(1);
 
     stop();
     store.close();
@@ -207,8 +217,7 @@ describe("paired-phones lastSeen touch", () => {
     store.touchLastSeen("pk1", "2026-07-27T13:00:00.000Z");
     store.flushLastSeen();
     store.upsert({ phonePubkey: "pk2", phoneDeviceId: "d2", pairedAt: "x", lastSeenAt: "x" });
-    await sleep(200);
-    expect(changes).toBe(1);
+    expect(await waitForChanges(() => changes, 1)).toBe(1);
 
     stop();
     store.close();
