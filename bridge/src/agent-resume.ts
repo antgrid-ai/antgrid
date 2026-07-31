@@ -1,8 +1,6 @@
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { codexThreadExistsSync, copilotSessionExistsSync } from "./title-resolver";
 import { agentSpec } from "./agents/registry";
+import type { ResumableArgs } from "./agents/types";
 
 /**
  * Argv appended to a tool's base launch args to resume a specific agent-native
@@ -20,15 +18,20 @@ export function resumeArgv(tool: string, agentSessionId: string): string[] {
 
 /**
  * Best-effort, SYNCHRONOUS pre-flight: would resuming this stored id land in a
- * real conversation? Returns true unless it can POSITIVELY confirm the session
- * is gone — false negatives would silently break resume, so we only refuse when
- * sure. Keeps SessionManager.start() synchronous (existsSync / bun:sqlite are
- * sync).
- *   - transcript path present (claude) → exact existsSync check.
- *   - codex (no path posted) → query the threads table; optimistic if the DB is
- *     undeterminable.
- *   - opencode and everything else → optimistic (the agent's own bad-id handling
- *     is the backstop).
+ * real conversation? Returns true unless the agent can POSITIVELY confirm the
+ * session is gone — a false negative silently starts a fresh conversation, so we
+ * only refuse when sure. Kept sync (existsSync / bun:sqlite are) so
+ * SessionManager.start() can stay sync.
+ *
+ * The transcript-path check sits AHEAD of the per-agent dispatch because it is
+ * keyed on the shape of the args, not on the tool: whichever agent posted a
+ * path is answered by that path. Only claude-code's hooks post one today, but
+ * folding it into claude's spec would answer the next agent that starts posting
+ * one optimistically and silently.
+ *
+ * The wire field is `agentTranscriptPath` and the spec field is
+ * `transcriptPath` (mirroring TitleArgs) — drop the mapping below and every
+ * claude session reads as resumable.
  */
 export function sessionResumable(args: {
   tool: string;
@@ -37,16 +40,12 @@ export function sessionResumable(args: {
   codexHome?: string;
   copilotHome?: string;
 }): boolean {
-  if (args.agentTranscriptPath) return existsSync(args.agentTranscriptPath);
-  if (args.tool === "codex") {
-    const home = args.codexHome ?? join(homedir(), ".codex");
-    const exists = codexThreadExistsSync(args.agentSessionId, home);
-    return exists === null ? true : exists; // null = undeterminable → optimistic
-  }
-  if (args.tool === "github-copilot") {
-    const home = args.copilotHome ?? process.env.COPILOT_HOME ?? join(homedir(), ".copilot");
-    const exists = copilotSessionExistsSync(args.agentSessionId, home);
-    return exists === null ? true : exists;
-  }
-  return true;
+  const forSpec: ResumableArgs = {
+    agentSessionId: args.agentSessionId,
+    transcriptPath: args.agentTranscriptPath,
+    codexHome: args.codexHome,
+    copilotHome: args.copilotHome,
+  };
+  if (forSpec.transcriptPath) return existsSync(forSpec.transcriptPath);
+  return agentSpec(args.tool)?.resumable?.(forSpec) ?? true;
 }

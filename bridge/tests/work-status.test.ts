@@ -1,5 +1,11 @@
 import { test, expect } from "bun:test";
-import { initialWorkStatus, reduceWorkStatus, turnStart, type WorkStatusState } from "../src/work-status";
+import {
+  initialWorkStatus,
+  reduceWorkStatus,
+  sessionRunningChanged,
+  turnStart,
+  type WorkStatusState,
+} from "../src/work-status";
 import type { AbMessage } from "../src/protocol";
 
 function push(notificationType: string): AbMessage {
@@ -167,6 +173,29 @@ test("a count change with an unchanged status yields a NEW state (advert re-push
   expect(two).not.toBe(one);
   expect(two.status).toBe("working");
   expect(two.runningCount).toBe(2);
+});
+
+test("a session that starts reads working, and starting clears the previous turn's outcome", () => {
+  const blocked = fold([sessions(1), push("permission_request")]);
+  const restarted = sessionRunningChanged(sessionRunningChanged(blocked, false), true);
+  // Unlike the project-level fold, there is no sibling the prompt could still
+  // belong to — this IS the session that was blocked, and it just restarted.
+  expect(restarted.status).toBe("working");
+  expect(restarted.lastNotification).toBeNull();
+});
+
+test("a stopped session reads done even while blocked on a permission request", () => {
+  const blocked = fold([sessions(1), push("permission_request")]);
+  expect(blocked.status).toBe("attention");
+  // Nothing left to attend to once the runtime is gone — the same masking the
+  // project-level reduction applies at a running count of zero.
+  expect(sessionRunningChanged(blocked, false).status).toBe("done");
+});
+
+test("an unchanged running flag returns the SAME object (identity)", () => {
+  const working = sessionRunningChanged(initialWorkStatus, true);
+  expect(sessionRunningChanged(working, true)).toBe(working);
+  expect(sessionRunningChanged(initialWorkStatus, false)).toBe(initialWorkStatus);
 });
 
 test("an irrelevant frame and a no-op change return the SAME object (identity)", () => {

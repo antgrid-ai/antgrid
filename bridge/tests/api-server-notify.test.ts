@@ -64,6 +64,27 @@ describe("POST /notify", () => {
     } finally { srv.stop(); }
   });
 
+  test("carries the terminalId as sessionId — identity, not the renameable title", async () => {
+    const sent: AbMessage[] = [];
+    const srv = startApiServer(ctx({
+      sendAb: (m) => sent.push(m),
+      sessionName: () => "Fix auth bug",
+    }));
+    try {
+      await post(srv.port, { type: "task_complete", terminalId: "t1" });
+      expect((sent[0] as any).sessionId).toBe("t1");
+    } finally { srv.stop(); }
+  });
+
+  test("a notification with no terminalId names no session", async () => {
+    const sent: AbMessage[] = [];
+    const srv = startApiServer(ctx({ sendAb: (m) => sent.push(m) }));
+    try {
+      await post(srv.port, { type: "task_complete" });
+      expect((sent[0] as any).sessionId).toBeUndefined();
+    } finally { srv.stop(); }
+  });
+
   test("an unknown terminalId leaves sessionTitle undefined", async () => {
     const sent: AbMessage[] = [];
     const srv = startApiServer(ctx({ sendAb: (m) => sent.push(m), sessionName: () => undefined }));
@@ -129,12 +150,13 @@ describe("POST /notify", () => {
 });
 
 describe("POST /turn-start", () => {
-  test("fires onTurnStart and emits NO app-facing frame", async () => {
+  test("fires onTurnStart with the posted slot and emits NO app-facing frame", async () => {
     const sent: AbMessage[] = [];
     let turns = 0;
+    const slots: Array<string | undefined> = [];
     const srv = startApiServer(ctx({
       sendAb: (m) => sent.push(m),
-      onTurnStart: () => { turns++; },
+      onTurnStart: (id) => { turns++; slots.push(id); },
     }));
     try {
       const res = await fetch(`http://127.0.0.1:${srv.port}/turn-start`, {
@@ -144,18 +166,21 @@ describe("POST /turn-start", () => {
       });
       expect(res.status).toBe(200);
       expect(turns).toBe(1);
+      expect(slots).toEqual(["t1"]);
       // A turn-start is state, not a notification — nothing goes on the bus.
       expect(sent).toHaveLength(0);
     } finally { srv.stop(); }
   });
 
-  test("tolerates an empty body", async () => {
+  test("tolerates an empty body, naming no session", async () => {
     let turns = 0;
-    const srv = startApiServer(ctx({ onTurnStart: () => { turns++; } }));
+    const slots: Array<string | undefined> = [];
+    const srv = startApiServer(ctx({ onTurnStart: (id) => { turns++; slots.push(id); } }));
     try {
       const res = await fetch(`http://127.0.0.1:${srv.port}/turn-start`, { method: "POST" });
       expect(res.status).toBe(200);
       expect(turns).toBe(1);
+      expect(slots).toEqual([undefined]);
     } finally { srv.stop(); }
   });
 });

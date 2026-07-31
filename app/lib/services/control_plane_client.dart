@@ -3,26 +3,10 @@ import 'dart:async';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
 import '../models/ab_message.dart';
+import '../models/agent_work_status.dart';
 import '../models/session_entry.dart';
 
-/// Reduced per-project agent work status carried on the control plane. Mirrors
-/// the bridge `WorkStatus` enum (protocol.ts). `attention` = the agent is
-/// blocked on a permission/prompt (the call-to-action); distinct from
-/// `running`, which is "dialable / holds a relay slot", not activity.
-enum AgentWorkStatus {
-  working,
-  attention,
-  done,
-  error;
-
-  static AgentWorkStatus? fromWire(Object? raw) => switch (raw) {
-    'working' => AgentWorkStatus.working,
-    'attention' => AgentWorkStatus.attention,
-    'done' => AgentWorkStatus.done,
-    'error' => AgentWorkStatus.error,
-    _ => null,
-  };
-}
+export '../models/agent_work_status.dart' show AgentWorkStatus;
 
 /// A project advertised by the agent over the control-plane connection.
 ///

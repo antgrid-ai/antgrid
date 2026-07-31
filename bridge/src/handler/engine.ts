@@ -50,7 +50,10 @@ export interface HandlerEngineDeps {
   abDir: string;
   adapter: SessionAdapter;
   sendAb: (msg: AbMessage) => void;
-  sendPush?: (message: string) => void;
+  /** `terminalId` names the supervised slot so the notification carries the
+   *  same session identity the hook-sourced ones do; without it the per-session
+   *  work reduction would miss the one turn end the handler resolves itself. */
+  sendPush?: (message: string, terminalId: string) => void;
   runPlanFn?: typeof defaultRunPlan;
   runDecisionFn?: typeof defaultRunDecision;
   loadConfigFn?: () => HandlerConfig;
@@ -295,9 +298,22 @@ export class HandlerEngine {
     this.emitStatus();
   }
 
-  onTerminalExit(terminalId: string): void {
+  /**
+   * A terminal died. Reclaim its guard and pending state, and disarm — a
+   * runtime that is gone cannot be supervised.
+   *
+   * `keepArmed` is for a session:set-mode flip, where the runtime is being
+   * swapped underneath a session that itself survives. The supervisor is keyed
+   * by session id, so disarming there would answer "I changed how I'm viewing
+   * this" with "your supervision is off". It must SUPPRESS the disarm rather
+   * than re-arm afterwards: disarm() persists the record as unarmed, and a
+   * later arm() rehydrates only from an armed record — so the round trip would
+   * quietly reset the ledger, armedAt and any open escalations.
+   */
+  onTerminalExit(terminalId: string, opts?: { keepArmed?: boolean }): void {
     this.guard.reset(terminalId);
     if (!this.sessions.has(terminalId)) return;
+    if (opts?.keepArmed) return;
     this.disarm(terminalId);
   }
 
@@ -510,7 +526,7 @@ export class HandlerEngine {
     const shown = items.slice(0, 3).join(", ");
     const more = items.length > 3 ? ` +${items.length - 3} more` : "";
     const summary = items.length > 0 ? `. Done: ${shown}${more}` : "";
-    this.deps.sendPush?.(`Handler: done — ${s.brief.taskSummary}${summary}`);
+    this.deps.sendPush?.(`Handler: done — ${s.brief.taskSummary}${summary}`, terminalId);
     this.disarm(terminalId);
     return true;
   }

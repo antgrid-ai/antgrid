@@ -26,6 +26,18 @@ function makeFakeTerm() {
   };
 }
 
+// Terminal manager whose kill() leaves `has()` true until the exit is noted —
+// the real one removes the session in its exit handler, not in kill().
+function makeLingeringTerm() {
+  const live = new Set<string>();
+  return {
+    spawn: (cfg: { terminalId?: string }) => { live.add(cfg.terminalId!); return cfg.terminalId!; },
+    kill: (_id: string) => {},
+    has: (id: string) => live.has(id),
+    exit: (id: string) => { live.delete(id); },
+  };
+}
+
 function seedCopilotSessions(home: string, ids: string[]) {
   const db = new Database(join(home, "session-store.db"));
   db.run("CREATE TABLE sessions (id TEXT PRIMARY KEY)");
@@ -895,7 +907,7 @@ describe("SessionManager start/stop", () => {
       projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeFakeTerm() as any,
       agentSpec: { command: "claude", name: "claude-code" },
       sendMessage: () => {},
-      onStopChat: (id) => stops.push(id),
+      onStopChat: (id) => { stops.push(id); },
     });
     const s = sm.create("c", { tool: "codex", mode: "chat" });
     sm.start(s.id);
@@ -904,6 +916,295 @@ describe("SessionManager start/stop", () => {
     expect(stops).toEqual([s.id]);
     expect(sm.get(s.id)?.running).toBe(false);
     sm.flushNow();
+  });
+
+  it("stop() does not wait on an async onStopChat", () => {
+    let released!: () => void;
+    const sm = new SessionManager({
+      projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeFakeTerm() as any,
+      agentSpec: { command: "claude", name: "claude-code" },
+      sendMessage: () => {},
+      onStopChat: () => new Promise<void>((resolve) => { released = resolve; }),
+    });
+    const s = sm.create("c", { tool: "codex", mode: "chat" });
+    sm.start(s.id);
+    sm.stop(s.id);
+    expect(sm.get(s.id)?.running).toBe(false);
+    released();
+    sm.flushNow();
+  });
+
+  it("awaitTerminalExit resolves true once the PTY's exit is noted", async () => {
+    const term = makeLingeringTerm();
+    const sm = new SessionManager({
+      projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
+      agentSpec: { command: "claude", name: "claude-code" },
+      sendMessage: () => {},
+    });
+    const s = sm.create("t");
+    sm.start(s.id);
+    sm.stop(s.id);
+    const waited = sm.awaitTerminalExit(s.id, 5000);
+    expect(term.has(s.id)).toBe(true); // kill() alone doesn't end the PTY
+    term.exit(s.id);
+    sm.noteExited(s.id);
+    expect(await waited).toBe(true);
+    sm.flushNow();
+  });
+
+  it("awaitTerminalExit resolves false on timeout and leaves no waiter behind", async () => {
+    const term = makeLingeringTerm();
+    const sm = new SessionManager({
+      projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
+      agentSpec: { command: "claude", name: "claude-code" },
+      sendMessage: () => {},
+    });
+    const s = sm.create("t");
+    sm.start(s.id);
+    sm.stop(s.id);
+    expect(await sm.awaitTerminalExit(s.id, 10)).toBe(false);
+    expect((sm as any).terminalExitWaiters.size).toBe(0);
+    sm.flushNow();
+  });
+
+  it("awaitTerminalExit resolves immediately for a session with no live PTY", async () => {
+    const sm = new SessionManager({
+      projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeLingeringTerm() as any,
+      agentSpec: { command: "claude", name: "claude-code" },
+      sendMessage: () => {},
+    });
+    const s = sm.create("t");
+    // A long timeout that must never be armed: an exit that already happened has
+    // no later noteExited to wait for.
+    expect(await sm.awaitTerminalExit(s.id, 60_000)).toBe(true);
+    sm.flushNow();
+  });
+
+  it("noteExited resolves every waiter once and clears the map", async () => {
+    const term = makeLingeringTerm();
+    const sm = new SessionManager({
+      projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
+      agentSpec: { command: "claude", name: "claude-code" },
+      sendMessage: () => {},
+    });
+    const s = sm.create("t");
+    sm.start(s.id);
+    sm.stop(s.id);
+    const first = sm.awaitTerminalExit(s.id, 5000);
+    const second = sm.awaitTerminalExit(s.id, 5000);
+    term.exit(s.id);
+    sm.noteExited(s.id);
+    expect(await Promise.all([first, second])).toEqual([true, true]);
+    expect((sm as any).terminalExitWaiters.size).toBe(0);
+    sm.noteExited(s.id); // a second exit report must not re-fire a settled waiter
+    sm.flushNow();
+  });
+
+  it("setMode flips a stopped session without starting anything", async () => {
+    const term = makeFakeTerm();
+    const starts: any[] = [];
+    const sm = new SessionManager({
+      projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
+      agentSpec: { command: "claude", name: "claude-code" },
+      sendMessage: () => {},
+      onStartChat: (o) => starts.push(o),
+    });
+    const s = sm.create("t", { tool: "codex" });
+    await sm.setMode(s.id, "chat");
+    expect(sm.get(s.id)?.mode).toBe("chat");
+    expect(starts).toEqual([]);
+    expect(term.spawns.length).toBe(0);
+    sm.flushNow();
+  });
+
+  it("setMode starts the chat driver only after the PTY's exit has landed", async () => {
+    const term = makeLingeringTerm();
+    const order: string[] = [];
+    const sm = new SessionManager({
+      projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
+      agentSpec: { command: "claude", name: "claude-code" },
+      sendMessage: () => {},
+      onStartChat: () => order.push("chat-start"),
+    });
+    const s = sm.create("t", { tool: "codex" });
+    sm.start(s.id);
+    const flip = sm.setMode(s.id, "chat");
+    await new Promise((r) => setTimeout(r, 0));
+    // The exit-driven teardown (handler disarm, namer forget) has not run yet;
+    // starting the driver here would land it on the session that just started.
+    expect(order).toEqual([]);
+    expect(sm.get(s.id)?.mode).toBe("terminal");
+    order.push("pty-exit");
+    term.exit(s.id);
+    sm.noteExited(s.id);
+    await flip;
+    expect(order).toEqual(["pty-exit", "chat-start"]);
+    expect(sm.get(s.id)?.mode).toBe("chat");
+    expect(term.has(s.id)).toBe(false); // no orphaned PTY
+    sm.flushNow();
+  });
+
+  it("setMode spawns the PTY only after the chat driver's teardown settles", async () => {
+    const term = makeFakeTerm();
+    let release!: () => void;
+    const sm = new SessionManager({
+      projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
+      agentSpec: { command: "claude", name: "claude-code" },
+      sendMessage: () => {},
+      onStartChat: () => {},
+      onStopChat: () => new Promise<void>((resolve) => { release = resolve; }),
+    });
+    const s = sm.create("c", { tool: "codex", mode: "chat" });
+    sm.start(s.id);
+    const flip = sm.setMode(s.id, "terminal");
+    await new Promise((r) => setTimeout(r, 0));
+    // Spawning here would race codex's ~/.codex sqlite lock, which the old
+    // driver only releases when its dispose settles.
+    expect(term.spawns.length).toBe(0);
+    expect(sm.get(s.id)?.mode).toBe("chat");
+    release();
+    await flip;
+    expect(sm.get(s.id)?.mode).toBe("terminal");
+    expect(term.spawns.length).toBe(1);
+    sm.flushNow();
+  });
+
+  it("setMode leaves mode unchanged when the teardown never lands", async () => {
+    const term = makeLingeringTerm();
+    const starts: any[] = [];
+    const sm = new SessionManager({
+      projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
+      agentSpec: { command: "claude", name: "claude-code" },
+      sendMessage: () => {},
+      onStartChat: (o) => starts.push(o),
+      teardownTimeoutMs: 10,
+    });
+    const s = sm.create("t", { tool: "codex" });
+    sm.start(s.id);
+    await expect(sm.setMode(s.id, "chat")).rejects.toThrow(/timed out tearing down/);
+    expect(sm.get(s.id)?.mode).toBe("terminal");
+    expect(starts).toEqual([]);
+    sm.flushNow();
+  });
+
+  it("setMode carries the agent conversation across the flip", async () => {
+    const starts: any[] = [];
+    const sm = new SessionManager({
+      projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeFakeTerm() as any,
+      agentSpec: { command: "claude", name: "claude-code" },
+      sendMessage: () => {},
+      onStartChat: (o) => starts.push(o),
+    });
+    const s = sm.create("t", { tool: "codex" });
+    sm.setAgentSession(s.id, "thread-xyz");
+    await sm.setMode(s.id, "chat");
+    sm.start(s.id);
+    expect(starts[0].resumeId).toBe("thread-xyz");
+    expect(sm.get(s.id)?.agentSessionId).toBe("thread-xyz");
+    sm.flushNow();
+  });
+
+  it("setMode refuses chat for a tool with no driver, and refuses archived sessions", async () => {
+    const sm = new SessionManager({
+      projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeFakeTerm() as any,
+      agentSpec: { command: "claude", name: "claude-code" },
+      sendMessage: () => {},
+    });
+    const noDriver = sm.create("t", { tool: "cursor-agent" });
+    await expect(sm.setMode(noDriver.id, "chat")).rejects.toThrow(/no chat driver/);
+    expect(sm.get(noDriver.id)?.mode).toBe("terminal");
+
+    const archived = sm.create("a", { tool: "codex" });
+    sm.archive(archived.id);
+    await expect(sm.setMode(archived.id, "chat")).rejects.toThrow(/archived/);
+
+    await expect(sm.setMode("nope", "chat")).rejects.toThrow(/not found/);
+    sm.flushNow();
+  });
+
+  it("setMode to the current mode is a no-op", async () => {
+    const term = makeFakeTerm();
+    const sm = new SessionManager({
+      projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
+      agentSpec: { command: "claude", name: "claude-code" },
+      sendMessage: () => {},
+      onStopChat: () => { throw new Error("must not tear down"); },
+    });
+    const s = sm.create("t", { tool: "codex" });
+    sm.start(s.id);
+    await sm.setMode(s.id, "terminal");
+    expect(sm.get(s.id)?.running).toBe(true);
+    expect(term.spawns.length).toBe(1);
+    sm.flushNow();
+  });
+
+  it("agentSessionResumable is true before any agent conversation is captured", () => {
+    const sm = new SessionManager({
+      projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeFakeTerm() as any,
+      agentSpec: { command: "claude", name: "claude-code" },
+      sendMessage: () => {},
+    });
+    const s = sm.create("t", { tool: "codex" });
+    expect(sm.get(s.id)?.agentSessionResumable).toBe(true);
+    sm.flushNow();
+  });
+
+  it("agentSessionResumable is false once the agent's transcript is gone", () => {
+    const sm = new SessionManager({
+      projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeFakeTerm() as any,
+      agentSpec: { command: "claude", name: "claude-code" },
+      sendMessage: () => {},
+    });
+    const s = sm.create("t", { tool: "claude-code" });
+    const transcript = join(dir, "transcript.jsonl");
+    writeFileSync(transcript, "{}\n");
+    sm.setAgentSession(s.id, "sess-1", transcript);
+    expect(sm.get(s.id)?.agentSessionResumable).toBe(true);
+
+    rmSync(transcript);
+    sm.setAgentSession(s.id, "sess-2", join(dir, "missing.jsonl"));
+    expect(sm.get(s.id)?.agentSessionResumable).toBe(false);
+    sm.flushNow();
+  });
+
+  it("agentSessionResumable is false for a session that never resumes", () => {
+    const sm = new SessionManager({
+      projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeFakeTerm() as any,
+      agentSpec: { command: "claude", name: "claude-code" },
+      sendMessage: () => {},
+    });
+    const custom = sm.create("c", { command: "my-agent --serve" });
+    expect(sm.get(custom.id)?.agentSessionResumable).toBe(false);
+    sm.flushNow();
+  });
+
+  it("agentSessionResumable is cached until setAgentSession writes a new id", () => {
+    const copilotHome = tempDir();
+    seedCopilotSessions(copilotHome, ["cop-1"]);
+    try {
+      const sm = new SessionManager({
+        projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeFakeTerm() as any,
+        agentSpec: { command: "claude", name: "claude-code" },
+        sendMessage: () => {},
+        copilotHome,
+      });
+      const s = sm.create("t", { tool: "github-copilot" });
+      sm.setAgentSession(s.id, "cop-1");
+      expect(sm.get(s.id)?.agentSessionResumable).toBe(true);
+
+      const db = new Database(join(copilotHome, "session-store.db"));
+      db.run("DELETE FROM sessions");
+      db.close();
+      // Same id → the memoized answer stands; toWire must not re-query the store
+      // on every emit.
+      expect(sm.get(s.id)?.agentSessionResumable).toBe(true);
+
+      sm.setAgentSession(s.id, "cop-2");
+      expect(sm.get(s.id)?.agentSessionResumable).toBe(false);
+      sm.flushNow();
+    } finally {
+      rmSync(copilotHome, { recursive: true, force: true });
+    }
   });
 
   it("chat start defaults tool to codex when the entry has none", () => {

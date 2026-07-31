@@ -235,16 +235,22 @@ class CachedSessionsStore {
   Future<void> _flush() async {
     if (_entriesDirty) {
       _entriesDirty = false;
-      // Strip `running` before persisting: it's process-lifetime state owned
-      // by SessionsService, not durable metadata. Persisting it means an app
-      // restart can render sessions as "running" before the agent reports.
+      // Strip `running` and `workStatus` before persisting: both are
+      // process-lifetime state owned by SessionsService, not durable metadata.
+      // A restored `running` renders sessions as live before the agent reports;
+      // a restored `attention` claims an agent is blocked on a prompt that died
+      // with the process.
       final encoded = jsonEncode({
         'version': 1,
         'entries': _mem.map(
           (k, v) => MapEntry(
             k,
-            // Non-mutating spread: don't assume `toJson()` returns a fresh map.
-            v.map((s) => {...s.toJson(), 'running': false}).toList(),
+            v.map((s) {
+              // Non-mutating copy: don't assume `toJson()` returns a fresh map.
+              final j = {...s.toJson(), 'running': false};
+              j.remove('workStatus');
+              return j;
+            }).toList(),
           ),
         ),
       });

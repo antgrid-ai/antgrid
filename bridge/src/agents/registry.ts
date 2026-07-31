@@ -6,10 +6,13 @@
 // Adding an agent: add the key to AgentKey in ./types, then fill the record the
 // compiler now demands.
 
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readCodexVersionJson, codexHomeDir } from "../codex/codex-version";
 import {
+  codexThreadExistsSync,
+  copilotSessionExistsSync,
   resolveClaudeTranscriptTitle,
   resolveCodexThreadName,
   resolveCodexThreadTitle,
@@ -55,6 +58,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
       ],
     },
     transcript: readClaudeTranscript,
+    resumable: ({ transcriptPath }) => !transcriptPath || existsSync(transcriptPath),
     resolveTitle: async ({ transcriptPath }) =>
       transcriptPath ? await resolveClaudeTranscriptTitle(transcriptPath) : null,
     update: {
@@ -87,6 +91,10 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
       ],
     },
     transcript: readCodexTranscript,
+    // null = the DB is undeterminable (missing/locked/schema drift), which is
+    // not a confirmation that the thread is gone.
+    resumable: ({ agentSessionId, codexHome }) =>
+      codexThreadExistsSync(agentSessionId, codexHome ?? join(homedir(), ".codex")) ?? true,
     resolveTitle: async ({ sessionId, codexHome }) => {
       const home = codexHome ?? join(homedir(), ".codex");
       // Prefer the desktop app's richer generated title (session_index.jsonl) when
@@ -158,6 +166,11 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     resume: (id) => [`--resume=${id}`],
     initialPrompt: () => [],
     hooks: copilotHooks,
+    resumable: ({ agentSessionId, copilotHome }) =>
+      copilotSessionExistsSync(
+        agentSessionId,
+        copilotHome ?? process.env.COPILOT_HOME ?? join(homedir(), ".copilot"),
+      ) ?? true,
     resolveTitle: async ({ sessionId, copilotHome }) =>
       await resolveCopilotSessionTitle(
         sessionId,

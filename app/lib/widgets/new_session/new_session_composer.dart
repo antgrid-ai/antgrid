@@ -9,7 +9,6 @@ import '../../design/widgets/ab_composer_send_button.dart';
 import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_kbd.dart';
 import '../../design/widgets/ab_menu.dart';
-import '../../design/widgets/ab_segmented.dart';
 import '../../design/widgets/ab_snack_bar.dart';
 import '../../design/widgets/ab_text_field.dart';
 
@@ -21,6 +20,7 @@ import '../../providers/new_session_action.dart';
 import '../../providers/new_session_picker.dart';
 import '../../screens/upgrade_screen.dart';
 import '../../utils/platform_utils.dart';
+import '../mode_segmented.dart';
 import 'environment_menu.dart';
 import 'project_menu.dart';
 
@@ -224,7 +224,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     // The guard is load-bearing: newSessionChatCapableToolsProvider re-emits
     // on EVERY control-plane push (controlPlaneStateProvider rebuilds a fresh
     // ControlPlaneState — no `==` — on each agent:projects/agent:tools, and
-    // _chatCapableSetOrNull allocates a new Set each time), so a project on
+    // chatCapableSetOrNull allocates a new Set each time), so a project on
     // the machine starting/stopping or a heartbeat would re-fire this. Firing
     // on every emission would silently rewrite the mode back to the agent
     // default, discarding a user's manual toggle. The has-value transition
@@ -538,10 +538,7 @@ class _PromptField extends StatelessWidget {
   }
 }
 
-/// Mode segmented control ([ CHAT | TERMINAL ]): both options always visible,
-/// the selected cell accented. When the agent can't chat, the Chat cell
-/// disables and carries the reason (tooltip on hover, snack bar on tap —
-/// AbSegmented's default disabled feedback).
+/// Create-time binding of the shared [ModeSegmented] to the New Session form.
 class _ModeSegmented extends ConsumerWidget {
   const _ModeSegmented({required this.supportsChat, this.showIcons = true});
 
@@ -560,28 +557,16 @@ class _ModeSegmented extends ConsumerWidget {
     // agent-default heuristic runs, so `mode` briefly lags the true support
     // state. The provider itself still gets corrected by the agent listener.
     final displayMode = supportsChat ? mode : 'terminal';
-    return AbSegmented<String>(
-      key: const Key('new-session-mode-chip'),
-      segments: [
-        AbSegment(
-          key: const Key('new-session-mode-chat'),
-          value: 'chat',
-          label: 'Chat',
-          icon: showIcons ? AbIcons.comment : null,
-          enabled: supportsChat,
-          disabledReason: supportsChat
-              ? null
-              : "${newSessionAgentLabel(agent)} doesn't support chat sessions",
-        ),
-        AbSegment(
-          key: const Key('new-session-mode-terminal'),
-          value: 'terminal',
-          label: 'Terminal',
-          icon: showIcons ? AbIcons.terminal : null,
-        ),
-      ],
-      selected: displayMode,
-      onSelect: (m) => ref.read(newSessionModeProvider.notifier).set(m),
+    return ModeSegmented(
+      keyPrefix: 'new-session-mode',
+      mode: displayMode,
+      chatEnabled: supportsChat,
+      // Longer than the mid-session toggle's "Not supported": at create time
+      // the agent is still being chosen, so the string has to name it.
+      chatDisabledReason:
+          "${newSessionAgentLabel(agent)} doesn't support chat sessions",
+      showIcons: showIcons,
+      onChanged: (m) => ref.read(newSessionModeProvider.notifier).set(m),
     );
   }
 }

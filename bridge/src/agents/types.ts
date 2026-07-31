@@ -112,6 +112,14 @@ export interface TitleArgs {
   copilotHome?: string;
 }
 
+/** Inputs to a spec's `resumable`. The `*Home` fields are test seams. */
+export interface ResumableArgs {
+  agentSessionId: string;
+  transcriptPath?: string;
+  codexHome?: string;
+  copilotHome?: string;
+}
+
 /**
  * A title read from an agent's own store, tagged with how good it actually is.
  *
@@ -228,6 +236,12 @@ export interface AgentSpec {
    *  Never synthesize a path: a "transcript"-tier judge has no verified
    *  read-only restriction, so it gets no file hint it could not follow. */
   transcript?: (opts: TranscriptOpts) => Promise<{ msgs: string[]; transcriptPath?: string }>;
+  /** Can this stored id still be resumed? False ONLY when the agent can
+   *  POSITIVELY confirm the conversation is gone — a false negative silently
+   *  starts a fresh session, so uncertainty must answer true. Absent = this
+   *  agent has no store-existence check (the honest answer, not a default);
+   *  callers treat absence as resumable. */
+  resumable?: (args: ResumableArgs) => boolean;
   /** Reads this agent's own session name, tagged `generated` vs `first-message`
    *  (see ResolvedTitle — the tag drives whether we spend a model call). Absent
    *  = the agent has no on-disk name to read: opencode pushes its title inline

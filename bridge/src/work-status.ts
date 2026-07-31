@@ -51,6 +51,20 @@ export function turnStart(prev: WorkStatusState): WorkStatusState {
   return { lastNotification: null, runningCount: prev.runningCount, status };
 }
 
+/** The single-session projection of the same reduction: fold one session's own
+ *  running flag, which no frame reports per session (the project-level fold
+ *  reads a COUNT off `session:updated`). A session that starts is a fresh turn,
+ *  so it clears the prior turn-end notification for the same reason a
+ *  running-count increase does; the sibling carve-out there — which protects a
+ *  live call-to-action belonging to ANOTHER session — has nothing to protect in
+ *  a scope of one. Pure; returns the SAME object when the flag is unchanged. */
+export function sessionRunningChanged(prev: WorkStatusState, running: boolean): WorkStatusState {
+  const runningCount = running ? 1 : 0;
+  if (runningCount === prev.runningCount) return prev;
+  const lastNotification = running ? null : prev.lastNotification;
+  return { lastNotification, runningCount, status: derive(lastNotification, runningCount) };
+}
+
 /** Fold one outbound bus frame into the reduction. Pure and total; returns the
  *  SAME object when the frame is irrelevant or changes no input, so callers can
  *  detect a real transition by `next !== prev` (and re-advertise only then). */

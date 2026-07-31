@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Database } from "bun:sqlite";
 
-import { resumeArgv } from "../src/agent-resume";
+import { resumeArgv, sessionResumable } from "../src/agent-resume";
 import { initialPromptArgv } from "../src/initial-prompt";
 import { updateSpecFor } from "../src/agent-update";
 import { augmentAgentLaunch } from "../src/agent-launch-augmenter";
@@ -88,6 +88,151 @@ describe("resume argv", () => {
 
   test("an unregistered tool starts fresh rather than throwing", () => {
     expect(resumeArgv("some-future-agent", "ID")).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Concern: resume pre-flight
+//
+// Every probe redirects BOTH agent stores into temp dirs: the real check
+// defaults to ~/.codex and ~/.copilot, so a developer with live sessions there
+// would otherwise decide these results.
+//
+// The check answers false ONLY where an agent can positively confirm the
+// conversation is gone; everything else is optimistic, and the optimistic
+// answer is the one a refactor loses silently. Hence a row per agent, not a
+// row per branch.
+// ---------------------------------------------------------------------------
+
+const RESUME_ID = "resume-id";
+
+/** A codex home whose newest `state_<N>.sqlite` holds exactly `ids`. */
+function codexStore(ids: string[]): string {
+  const home = tmp("ab-spec-cxdb-");
+  const db = new Database(join(home, "state_1.sqlite"));
+  db.run("CREATE TABLE threads (id TEXT PRIMARY KEY)");
+  for (const id of ids) db.query("INSERT INTO threads (id) VALUES (?)").run(id);
+  db.close();
+  return home;
+}
+
+/** A copilot home whose `session-store.db` holds exactly `ids`. */
+function copilotStore(ids: string[]): string {
+  const home = tmp("ab-spec-cpdb-");
+  const db = new Database(join(home, "session-store.db"));
+  db.run("CREATE TABLE sessions (id TEXT PRIMARY KEY)");
+  for (const id of ids) db.query("INSERT INTO sessions (id) VALUES (?)").run(id);
+  db.close();
+  return home;
+}
+
+const gonePath = () => join(tmp("ab-spec-gone-"), "t.jsonl");
+
+function livePath(): string {
+  const path = join(tmp("ab-spec-live-"), "t.jsonl");
+  writeFileSync(path, "{}");
+  return path;
+}
+
+describe("resume pre-flight", () => {
+  // The one discriminating table: both stores exist and neither holds the id,
+  // so codex and copilot can say "gone" and nobody else can.
+  const storesLackTheId: PerAgent<boolean> = {
+    "claude-code": true,
+    codex: false,
+    opencode: true,
+    "cursor-agent": true,
+    "github-copilot": false,
+    kilo: true,
+    kimi: true,
+    "mistral-vibe": true,
+  };
+
+  for (const key of AGENT_KEYS) {
+    test(`${key}: stores queryable, id absent`, () => {
+      expect(
+        sessionResumable({
+          tool: key,
+          agentSessionId: RESUME_ID,
+          codexHome: codexStore(["other"]),
+          copilotHome: copilotStore(["other"]),
+        }),
+      ).toBe(storesLackTheId[key]);
+    });
+
+    test(`${key}: stores queryable, id present`, () => {
+      expect(
+        sessionResumable({
+          tool: key,
+          agentSessionId: RESUME_ID,
+          codexHome: codexStore([RESUME_ID]),
+          copilotHome: copilotStore([RESUME_ID]),
+        }),
+      ).toBe(true);
+    });
+
+    test(`${key}: undeterminable stores are optimistic`, () => {
+      expect(
+        sessionResumable({
+          tool: key,
+          agentSessionId: RESUME_ID,
+          codexHome: join(tmp("ab-spec-nohome-"), "missing"),
+          copilotHome: join(tmp("ab-spec-nohome-"), "missing"),
+        }),
+      ).toBe(true);
+    });
+  }
+
+  // SHAPE-keyed, not tool-keyed: the transcript branch is the FIRST line of the
+  // check, so it decides for ANY agent that posted a path — including one whose
+  // own store answers the other way. Only claude's hooks post one today, which
+  // is what makes folding this onto claude's spec behavior-preserving; these two
+  // loops are what prove it, and they must fail if another agent starts posting.
+  for (const key of AGENT_KEYS) {
+    test(`${key}: a transcript path that is gone wins over a store holding the id`, () => {
+      expect(
+        sessionResumable({
+          tool: key,
+          agentSessionId: RESUME_ID,
+          agentTranscriptPath: gonePath(),
+          codexHome: codexStore([RESUME_ID]),
+          copilotHome: copilotStore([RESUME_ID]),
+        }),
+      ).toBe(false);
+    });
+
+    test(`${key}: a transcript path that exists wins over a store lacking the id`, () => {
+      expect(
+        sessionResumable({
+          tool: key,
+          agentSessionId: RESUME_ID,
+          agentTranscriptPath: livePath(),
+          codexHome: codexStore(["other"]),
+          copilotHome: copilotStore(["other"]),
+        }),
+      ).toBe(true);
+    });
+  }
+
+  // Claude's stop hook posts transcriptPath: "" for a null transcript (see the
+  // hook-posts concern), and "" is not a path — it falls through to the tool
+  // branch rather than being stat-ed.
+  test("an empty transcript path is not a path", () => {
+    expect(
+      sessionResumable({ tool: "claude-code", agentSessionId: RESUME_ID, agentTranscriptPath: "" }),
+    ).toBe(true);
+    expect(
+      sessionResumable({
+        tool: "codex",
+        agentSessionId: RESUME_ID,
+        agentTranscriptPath: "",
+        codexHome: codexStore(["other"]),
+      }),
+    ).toBe(false);
+  });
+
+  test("an unregistered tool is optimistically resumable", () => {
+    expect(sessionResumable({ tool: "some-future-agent", agentSessionId: RESUME_ID })).toBe(true);
   });
 });
 

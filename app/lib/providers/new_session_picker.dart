@@ -356,7 +356,7 @@ final newSessionChatCapableToolsProvider =
           );
           try {
             final tools = await client.toolsList();
-            return _chatCapableSetOrNull(
+            return chatCapableSetOrNull(
               tools.map((t) => (t.tool, t.chatCapable)),
             );
           } finally {
@@ -370,7 +370,7 @@ final newSessionChatCapableToolsProvider =
       final machineUuid = target.machineUuid ?? baseDeviceUuid(target.id);
       final state = ref.watch(controlPlaneStateProvider(machineUuid)).value;
       if (state == null) return null;
-      return _chatCapableSetOrNull(
+      return chatCapableSetOrNull(
         state.tools.map((t) => (t.tool, t.chatCapable)),
       );
     });
@@ -378,7 +378,7 @@ final newSessionChatCapableToolsProvider =
 /// Reduce (tool, chatCapable?) pairs to the set of chat-capable tool keys, or
 /// `null` when every entry's `chatCapable` was absent (no wire signal at all —
 /// an older bridge, or an empty advert).
-Set<String>? _chatCapableSetOrNull(Iterable<(String, bool?)> entries) {
+Set<String>? chatCapableSetOrNull(Iterable<(String, bool?)> entries) {
   final list = entries.toList(growable: false);
   if (list.isEmpty || list.every((e) => e.$2 == null)) return null;
   return {

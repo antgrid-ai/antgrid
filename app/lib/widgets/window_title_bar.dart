@@ -22,6 +22,7 @@ import '../window/window_capabilities.dart';
 import '../window/window_chrome.dart';
 import 'agent_panel.dart';
 import 'agent_work_status_dot.dart';
+import 'session_mode_control.dart';
 
 /// The app-drawn window title bar.
 ///
@@ -147,6 +148,9 @@ class WindowTitleBarContents extends ConsumerWidget {
   const WindowTitleBarContents({super.key});
 
   @visibleForTesting
+  static const modeSlotKey = Key('window-title-bar-mode');
+
+  @visibleForTesting
   static const handlerSlotKey = Key('window-title-bar-handler');
 
   @visibleForTesting
@@ -185,6 +189,11 @@ class WindowTitleBarContents extends ConsumerWidget {
         // items to the right edge.
         const Spacer(),
         if (showTrailing) ...[
+          const KeyedSubtree(
+            key: modeSlotKey,
+            child: SessionModeControl(),
+          ),
+          const SizedBox(width: AbTokens.space8),
           const KeyedSubtree(
             key: handlerSlotKey,
             child: HandlerHeaderControl(),

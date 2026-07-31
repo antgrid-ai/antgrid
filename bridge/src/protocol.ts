@@ -548,6 +548,12 @@ const NotificationPushMessage = BaseMessage.extend({
   // Names the session that fired this (SessionEntry.name). Hand-mirrored in the
   // app's NotificationPushMessage — keep the two in lockstep.
   sessionTitle: z.string().optional(),
+  // IDENTIFIES the session that fired this (SessionEntry.id == the hook's
+  // terminalId), which `sessionTitle` cannot: a title is renameable and two
+  // sessions may carry the same one. Optional because a notification need not
+  // name a slot at all (a service PTY, an older sender) — the per-session work
+  // reduction simply gets no signal, and the project-level one is unaffected.
+  sessionId: z.string().optional(),
   projectId: z.string().optional(),
 });
 
@@ -873,6 +879,24 @@ const SessionEntrySchema = z.object({
   // Raw, shell-interpreted CLI-args string passed verbatim (not an argv array).
   args: z.string().optional(),
   mode: z.enum(["terminal", "chat"]).default("terminal"),
+  // False when this session's agent-native conversation can no longer be
+  // resumed, so a mode switch would silently start a fresh one. Deliberately
+  // NOT "can this session switch mode" — that also depends on the tool having a
+  // chat driver, which the app already knows from `chatCapable` on agent:tools
+  // and which it must keep separable: missing history HIDES the control, an
+  // agent without a driver DISABLES the Chat cell. Collapsing the two here
+  // would make both look like one silent absence.
+  // See docs/plans/2026-07-31-session-mode-toggle.md.
+  agentSessionResumable: z.boolean().default(true),
+  // This session's own work status, folded by the same reducer the per-project
+  // advert uses (work-status.ts) from the notifications this slot fired plus its
+  // own running flag. `attention` and `working` stay distinct on purpose:
+  // killing an agent blocked on a permission request abandons the pending tool
+  // call and a resume does not re-ask it, whereas a churning agent only loses
+  // the current turn. Advisory only — `awaiting_input` cannot tell a genuine
+  // mid-turn block from a post-turn idle nudge, so nothing may GATE on this.
+  // Absent from the disk-only peek, which has no runtime to reduce.
+  workStatus: WorkStatusSchema.optional(),
   agentSessionId: z.string().optional(),
   agentTranscriptPath: z.string().optional(),
 });
@@ -939,6 +963,13 @@ const SessionDeleteMessage = BaseMessage.extend({
   type: z.literal("session:delete"),
   requestId: z.string(),
   sessionId: z.string(),
+});
+
+const SessionSetModeMessage = BaseMessage.extend({
+  type: z.literal("session:set-mode"),
+  requestId: z.string(),
+  sessionId: z.string(),
+  mode: z.enum(["terminal", "chat"]),
 });
 
 const SessionFocusMessage = BaseMessage.extend({
@@ -1421,6 +1452,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   SessionArchiveMessage,
   SessionUnarchiveMessage,
   SessionDeleteMessage,
+  SessionSetModeMessage,
   SessionFocusMessage,
   SessionResultMessage,
   SessionUpdatedMessage,
@@ -1553,6 +1585,7 @@ export type SessionRename = z.infer<typeof SessionRenameMessage>;
 export type SessionArchive = z.infer<typeof SessionArchiveMessage>;
 export type SessionUnarchive = z.infer<typeof SessionUnarchiveMessage>;
 export type SessionDelete = z.infer<typeof SessionDeleteMessage>;
+export type SessionSetMode = z.infer<typeof SessionSetModeMessage>;
 export type SessionFocus = z.infer<typeof SessionFocusMessage>;
 export type SessionResult = z.infer<typeof SessionResultMessage>;
 export type SessionUpdated = z.infer<typeof SessionUpdatedMessage>;
@@ -1668,7 +1701,7 @@ const KNOWN_TYPES = new Set<string>([
   "session:list", "session:list:result",
   "session:create", "session:start", "session:stop",
   "session:rename", "session:archive", "session:unarchive",
-  "session:delete", "session:focus",
+  "session:delete", "session:set-mode", "session:focus",
   "session:result", "session:updated",
   "client:focus-state",
   "terminal:snapshot:request", "terminal:snapshot",

@@ -110,6 +110,53 @@ void main() {
     await session.close();
   });
 
+  test('setMode surfaces ok:false and the error text to the caller', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final cache = await CachedSessionsStore.open();
+    final svc = SessionsService.fromSession(session, cache: cache);
+
+    final future = svc.setMode('sess-1', 'chat');
+    await Future<void>.delayed(Duration.zero);
+
+    final sent = t.sent.firstWhere((m) => m['type'] == 'session:set-mode');
+    expect(sent['sessionId'], 'sess-1');
+    expect(sent['mode'], 'chat');
+
+    t.emit('session:result', {
+      'requestId': sent['requestId'],
+      'ok': false,
+      'error': 'timed out tearing down session: sess-1',
+    });
+
+    final result = await future;
+    expect(result.ok, isFalse);
+    expect(result.error, 'timed out tearing down session: sess-1');
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('setMode completes ok on success', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final cache = await CachedSessionsStore.open();
+    final svc = SessionsService.fromSession(session, cache: cache);
+
+    final future = svc.setMode('sess-1', 'terminal');
+    await Future<void>.delayed(Duration.zero);
+
+    final sent = t.sent.firstWhere((m) => m['type'] == 'session:set-mode');
+    t.emit('session:result', {'requestId': sent['requestId'], 'ok': true});
+
+    final result = await future;
+    expect(result.ok, isTrue);
+    expect(result.error, isNull);
+
+    await svc.dispose();
+    await session.close();
+  });
+
   test('start includes initialPrompt when provided, omits when null', () async {
     final t = FakeAgentTransport();
     final session = await makeSession(t);

@@ -12,9 +12,17 @@ import {
 } from "./known-agents";
 import { augmentAgentLaunch, injectsHookAliveProbe } from "./agent-launch-augmenter";
 import { resumeArgv, sessionResumable } from "./agent-resume";
+import { isChatCapableTool } from "./structured/chat-capable";
 import { initialPromptArgv } from "./initial-prompt";
+import {
+  initialWorkStatus,
+  reduceWorkStatus,
+  sessionRunningChanged,
+  turnStart,
+  type WorkStatusState,
+} from "./work-status";
 import type { TerminalManager } from "./terminal-manager";
-import type { SessionEntry } from "./protocol";
+import type { AbMessage, SessionEntry } from "./protocol";
 
 interface AgentSpec {
   command: string;
@@ -60,6 +68,10 @@ interface SessionManagerOpts {
   codexHome?: string;
   /** Override for the Copilot session store dir (resume pre-flight). */
   copilotHome?: string;
+  /** Override for how long setMode waits on the old runtime's teardown. Unset in
+   *  production → TEARDOWN_TIMEOUT_MS; tests inject a short one to exercise the
+   *  timeout path without stalling. */
+  teardownTimeoutMs?: number;
   /** Override for the cursor-agent hooks dir (~/.cursor). Unset in production.
    *  Tests exercising the hooks write MUST inject an isolated dir; one that
    *  forgets gets a no-op rather than junk in the developer's real config —
@@ -69,7 +81,11 @@ interface SessionManagerOpts {
   /** Called by start()/stop() for a mode:'chat' session instead of the PTY path.
    *  Injected by agent-core to drive the StructuredAgentManager. */
   onStartChat?: (opts: { sessionId: string; tool: string; resumeId?: string; config?: Record<string, string>; initialPrompt?: string }) => void;
-  onStopChat?: (sessionId: string) => void;
+  /** May return the teardown promise. The structured driver's dispose is what
+   *  releases the agent's own process lock (codex's ~/.codex sqlite), so a
+   *  caller that restarts this slot on another runtime must be able to await
+   *  it — a void-returning implementation stays valid. */
+  onStopChat?: (sessionId: string) => void | Promise<void>;
 }
 
 interface PersistedEntry {
@@ -202,6 +218,17 @@ async function writePersistedAtomic(
 }
 
 const FLUSH_DEBOUNCE_MS = 200;
+// Upper bound on how long a mode flip waits for the OLD runtime to be really
+// gone. A wedged PTY or a driver whose dispose never settles must fail the flip
+// rather than hang it forever.
+const TEARDOWN_TIMEOUT_MS = 15_000;
+
+/** Leading text of `session:result.error` when a mode flip aborted because the
+ *  old runtime never tore down. This is the ONLY setMode failure that leaves
+ *  the session stopped, so the app branches its copy on it rather than telling
+ *  every failure to go restart something — keep in lockstep with
+ *  `kTeardownTimeoutError` in app/lib/widgets/session_mode_control.dart. */
+export const TEARDOWN_TIMEOUT_ERROR = "timed out tearing down session";
 // Live activity (keystrokes, notification bursts) fires many times a second;
 // coalesce the session:updated emit so the drawer re-sort doesn't thrash.
 const ACTIVITY_EMIT_DEBOUNCE_MS = 750;
@@ -220,6 +247,23 @@ export class SessionManager {
   // Set in start()'s chat branch, cleared in stop()'s — the PTY-less analogue of
   // `tm.has(id)`, and best-effort (a crashed driver surfaces via agent:error).
   private runningChat = new Set<string>();
+  // Callbacks waiting for a session's PTY to actually be gone, keyed by session
+  // id and fired from noteExited(). See awaitTerminalExit().
+  private terminalExitWaiters = new Map<string, Set<(exited: boolean) => void>>();
+  /** Sessions mid-`setMode`. The exit-driven teardown reads this to tell a
+   *  runtime swap apart from a session that is actually going away. */
+  private flipping = new Set<string>();
+  // Memoized sessionResumable() answers, keyed by session id and tagged with the
+  // agentSessionId they were computed for. toWire() runs per entry on every
+  // changed() emit and the real check does existsSync + a bun:sqlite query, so
+  // it must never reach that path. Invalidated whenever setAgentSession writes
+  // something new; a stale `true` is harmless because start() re-runs the real
+  // pre-flight and falls back to a fresh start.
+  private resumableCache = new Map<string, { agentSessionId: string; resumable: boolean }>();
+  // Per-session work reduction (work-status.ts), keyed by session id. Runtime
+  // state, never persisted: it describes the live turn, and a bridge restart
+  // leaves nothing running to describe.
+  private sessionWork = new Map<string, WorkStatusState>();
 
   constructor(private opts: SessionManagerOpts) {
     this.dir = join(opts.storeDir, "agents", opts.projectId);
@@ -283,6 +327,11 @@ export class SessionManager {
         id: e.id, name: e.name, createdAt: e.createdAt, lastUsedAt: e.lastUsedAt,
         archived: e.archived, running: false,
         tool: e.tool, command: e.command, args: e.args, mode: e.mode,
+        // Optimistic, like `running: false` above: the peek has no live core,
+        // and the real check needs the agent-store overrides only an instance
+        // holds. A wrong `true` shows a control the live list then hides; a
+        // wrong `false` hides one that should be there.
+        agentSessionResumable: true,
         agentSessionId: e.agentSessionId,
       });
     }
@@ -434,6 +483,7 @@ export class SessionManager {
     }
     entry.agentSessionId = agentSessionId;
     entry.agentTranscriptPath = nextPath;
+    this.resumableCache.delete(id);
     this.changed();
   }
 
@@ -483,6 +533,8 @@ export class SessionManager {
     if (!entry) return false;
     if (this.tm.has(id)) this.tm.kill(id);
     this.entries.delete(id);
+    this.resumableCache.delete(id);
+    this.sessionWork.delete(id);
     this.changed();
     return true;
   }
@@ -511,6 +563,42 @@ export class SessionManager {
   }
 
   /**
+   * Fold an outbound `notification:push` into the work reduction of the session
+   * it named. Callers hand over every frame they emit — a message of another
+   * type, one that names no slot, or one naming a service PTY is ignored, so
+   * there is no second place deciding what counts as session activity.
+   *
+   * Emits without persisting: the reduction is runtime state, so it re-advertises
+   * the list but must not dirty sessions.json.
+   */
+  observeNotification(msg: AbMessage): void {
+    if (msg.type !== "notification:push" || !msg.sessionId) return;
+    const entry = this.entries.get(msg.sessionId);
+    if (!entry) return;
+    const prev = this.workFor(entry);
+    const next = reduceWorkStatus(prev, msg);
+    if (next === prev) return;
+    this.sessionWork.set(entry.id, next);
+    this.notifyObservers();
+  }
+
+  /**
+   * A turn-start hook named this session (the user submitted a prompt): clear
+   * the previous turn's outcome so a re-prompt reads as working again. The
+   * project-level counterpart is ProjectCore.noteTurnStart. No-ops for unknown
+   * ids, so a hook that reports a service PTY costs nothing.
+   */
+  noteTurnStart(id: string): void {
+    const entry = this.entries.get(id);
+    if (!entry) return;
+    const prev = this.workFor(entry);
+    const next = turnStart(prev);
+    if (next === prev) return;
+    this.sessionWork.set(id, next);
+    this.notifyObservers();
+  }
+
+  /**
    * Resume tokens for the slot's last-active agent conversation, or [] when none
    * was captured or it no longer exists on disk. A stale id (conversation deleted
    * via the agent's own tools) is cleared in place so the next start spawns fresh
@@ -529,6 +617,7 @@ export class SessionManager {
     if (resumable) return resumeArgv(tool, entry.agentSessionId);
     entry.agentSessionId = undefined;
     entry.agentTranscriptPath = undefined;
+    this.resumableCache.delete(entry.id);
     this.changed();
     return [];
   }
@@ -711,21 +800,157 @@ export class SessionManager {
     this.changed();
   }
 
-  stop(id: string): void {
+  /** Initiates teardown; it is NOT complete when this returns. The chat branch
+   *  hands back the driver's teardown promise so a caller that restarts this
+   *  slot on another runtime can wait it out (see stopAndAwait); every existing
+   *  caller ignores it, exactly as before. */
+  stop(id: string): void | Promise<void> {
     const entry = this.entries.get(id);
     if (entry?.mode === "chat") {
       this.runningChat.delete(id);
-      this.opts.onStopChat?.(id);
+      const torndown = this.opts.onStopChat?.(id);
       this.changed();
-      return;
+      return torndown;
     }
     if (!this.tm.has(id)) return;
     this.tm.kill(id);
     this.changed();
   }
 
+  /**
+   * Switch a session between the PTY and the structured-driver runtime,
+   * restarting it in place when it was running. The agent-native conversation
+   * carries over: both runtimes read and write the same `agentSessionId`.
+   *
+   * Async because `stop()` only INITIATES teardown, and the old runtime's
+   * completion callbacks are keyed by session id — start the new runtime inline
+   * and the dead one's teardown lands on it (the handler disarm on the PTY side,
+   * the agent's own process lock on the driver side).
+   */
+  async setMode(id: string, mode: "terminal" | "chat"): Promise<void> {
+    const entry = this.entries.get(id);
+    if (!entry) throw new Error(`session not found: ${id}`);
+    if (entry.archived) throw new Error(`cannot switch archived session: ${id}`);
+    if (entry.mode === mode) return;
+    if (mode === "chat" && !isChatCapableTool(entry.tool)) {
+      throw new Error(`tool has no chat driver: ${entry.tool}`);
+    }
+    // Read with the OLD mode — the same expression toWire uses.
+    const wasRunning = entry.mode === "chat" ? this.runningChat.has(id) : this.tm.has(id);
+    // Held across the teardown only: the exit-driven handler teardown fires
+    // inside the await below, and this is what tells it the session outlives
+    // the runtime it is losing.
+    this.flipping.add(id);
+    try {
+      return await this.setModeInner(id, mode, entry, wasRunning);
+    } finally {
+      this.flipping.delete(id);
+    }
+  }
+
+  /** True while this session is swapping runtimes, i.e. the teardown now in
+   *  flight is a mode flip and not the session going away. */
+  isFlipping(id: string): boolean {
+    return this.flipping.has(id);
+  }
+
+  private async setModeInner(
+    id: string,
+    mode: "terminal" | "chat",
+    entry: PersistedEntry,
+    wasRunning: boolean,
+  ): Promise<void> {
+    if (wasRunning && !(await this.stopAndAwait(id))) {
+      // Teardown never landed. Leave `mode` untouched: the session is now
+      // stopped in its original mode, which is exactly the post-session:stop
+      // state, and the caller can retry.
+      throw new Error(`${TEARDOWN_TIMEOUT_ERROR}: ${id}`);
+    }
+    // Strictly between the stop and the start: both branch on entry.mode, so a
+    // flip before the stop tears down the wrong runtime (orphaning a live PTY)
+    // and a flip after the start would have started the wrong one.
+    const previous = entry.mode;
+    entry.mode = mode;
+    this.changed();
+    if (!wasRunning) return;
+    try {
+      this.start(id); // never an initialPrompt — this is a restart
+    } catch (err) {
+      // A spawn that threw leaves no runtime, so an entry left describing the
+      // target mode would contradict the ok:false the caller is about to get.
+      entry.mode = previous;
+      this.changed();
+      throw err;
+    }
+  }
+
+  /** Stop the session and resolve once the runtime it was on is really gone.
+   *  The completion signal differs per runtime: a PTY reports through its exit
+   *  handler, a driver through the promise its dispose returns. */
+  private stopAndAwait(id: string): Promise<boolean> {
+    const timeoutMs = this.opts.teardownTimeoutMs ?? TEARDOWN_TIMEOUT_MS;
+    const wasChat = this.entries.get(id)?.mode === "chat";
+    const torndown = this.stop(id);
+    if (!wasChat) return this.awaitTerminalExit(id, timeoutMs);
+    // No chat bridge wired (or nothing to dispose): there is no later signal.
+    if (!torndown) return Promise.resolve(true);
+    return new Promise<boolean>((resolve, reject) => {
+      const timer = setTimeout(() => resolve(false), timeoutMs);
+      torndown.then(
+        () => { clearTimeout(timer); resolve(true); },
+        (err) => { clearTimeout(timer); reject(err); },
+      );
+    });
+  }
+
+  /**
+   * Resolve once this session's PTY is really gone, or false if it hasn't gone
+   * within `timeoutMs`.
+   *
+   * `TerminalManager.kill()` is fire-and-forget — it signals the process and
+   * leaves removal to the exit handler, which lands on `noteExited()` some time
+   * later along with the exit-driven teardown in agent-core (handler disarm,
+   * namer forget). A caller that starts another runtime on this slot must let
+   * that teardown land first, or it arrives on the runtime that just started.
+   *
+   * The wait is bounded because a wedged PTY must not hang its caller forever;
+   * false means the caller's own state is still whatever a plain stop() left.
+   */
+  awaitTerminalExit(id: string, timeoutMs: number): Promise<boolean> {
+    // No live PTY: the exit that would resolve a waiter has already happened
+    // (terminal-manager drops the session in the same handler that calls
+    // noteExited), so there is nothing left to wait for.
+    if (!this.tm.has(id)) return Promise.resolve(true);
+    return new Promise<boolean>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const settle = (exited: boolean): void => {
+        clearTimeout(timer);
+        const waiters = this.terminalExitWaiters.get(id);
+        if (waiters) {
+          waiters.delete(settle);
+          if (waiters.size === 0) this.terminalExitWaiters.delete(id);
+        }
+        resolve(exited);
+      };
+      let waiters = this.terminalExitWaiters.get(id);
+      if (!waiters) {
+        waiters = new Set();
+        this.terminalExitWaiters.set(id, waiters);
+      }
+      waiters.add(settle);
+      timer = setTimeout(() => settle(false), timeoutMs);
+    });
+  }
+
   /** Called when the underlying PTY exits (regardless of stop() vs crash). */
   noteExited(id: string): void {
+    const waiters = this.terminalExitWaiters.get(id);
+    if (waiters) {
+      // Drop the set before firing so a waiter's own cleanup can't mutate what
+      // we're iterating, and a re-registration lands in a fresh set.
+      this.terminalExitWaiters.delete(id);
+      for (const settle of waiters) settle(true);
+    }
     if (!this.entries.has(id)) return;
     this.changed();
   }
@@ -766,13 +991,78 @@ export class SessionManager {
       createdAt: e.createdAt,
       lastUsedAt: e.lastUsedAt,
       archived: e.archived,
-      running: e.mode === "chat" ? this.runningChat.has(e.id) : this.tm.has(e.id),
+      running: this.isRunning(e),
       tool: e.tool,
       command: e.command,
       args: e.args,
       mode: e.mode,
+      agentSessionResumable: this.agentSessionResumable(e),
+      workStatus: this.workFor(e).status,
       agentSessionId: e.agentSessionId,
     };
+  }
+
+  /** Whether this slot's runtime is live — a PTY for terminal mode, the driver
+   *  bookkeeping for chat, since a chat session has no PTY to ask. */
+  private isRunning(e: PersistedEntry): boolean {
+    return e.mode === "chat" ? this.runningChat.has(e.id) : this.tm.has(e.id);
+  }
+
+  /**
+   * This session's work reduction with its running input brought up to date.
+   * Folding the running flag on read rather than at each start/stop/exit keeps
+   * it derived from the SAME expression toWire publishes as `running`, so the
+   * status can never contradict the flag beside it, and covers the transitions
+   * that no call site owns — a PTY that died on its own, a driver reclaimed by
+   * a flip. Every one of those already lands on changed(), which re-runs toWire.
+   */
+  private workFor(e: PersistedEntry): WorkStatusState {
+    const prev = this.sessionWork.get(e.id) ?? initialWorkStatus;
+    const next = sessionRunningChanged(prev, this.isRunning(e));
+    if (next !== prev) this.sessionWork.set(e.id, next);
+    return next;
+  }
+
+  /**
+   * The tool whose resume argv a start() of this entry would actually use, or
+   * undefined when this entry never resumes. Mirrors start()'s three branches:
+   * a per-session tool resumes, a custom command line never does (the user owns
+   * the whole line), and the antgrid.yaml default spec only gets resume wiring
+   * for the agents whose augmenter needs it.
+   */
+  private resumeToolFor(e: PersistedEntry): string | undefined {
+    if (e.tool) return e.tool;
+    if (e.command) return undefined;
+    const name = this.agentSpec.name;
+    return name === "github-copilot" || name === "cursor-agent" ? name : undefined;
+  }
+
+  /**
+   * Whether this session's agent-native conversation could still be resumed —
+   * the ONLY question this answers. Chat capability is deliberately excluded so
+   * "this agent has no chat driver" and "this conversation is gone" reach the
+   * app as two separable facts; see the field's comment in protocol.ts.
+   *
+   * An unset agentSessionId is true: nothing has been captured yet, so nothing
+   * can be lost. The resume-argv clause is unreachable today (every chat-capable
+   * agent resumes) and is kept as a fail-closed assertion for the first driver
+   * added to an agent that cannot resume by id.
+   */
+  private agentSessionResumable(e: PersistedEntry): boolean {
+    const tool = this.resumeToolFor(e);
+    if (!tool || resumeArgv(tool, "x").length === 0) return false;
+    if (e.agentSessionId === undefined) return true;
+    const cached = this.resumableCache.get(e.id);
+    if (cached && cached.agentSessionId === e.agentSessionId) return cached.resumable;
+    const resumable = sessionResumable({
+      tool,
+      agentSessionId: e.agentSessionId,
+      agentTranscriptPath: e.agentTranscriptPath,
+      codexHome: this.opts.codexHome,
+      copilotHome: this.opts.copilotHome,
+    });
+    this.resumableCache.set(e.id, { agentSessionId: e.agentSessionId, resumable });
+    return resumable;
   }
 
   private nextDefaultName(): string {

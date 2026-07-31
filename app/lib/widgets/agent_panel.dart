@@ -15,6 +15,7 @@ import '../providers/agent_transport.dart';
 import '../providers/device_provisioning.dart';
 import '../providers/projects.dart';
 import '../providers/providers.dart';
+import '../providers/session_mode.dart';
 import '../providers/sessions.dart';
 import '../screens/terminal_screen.dart';
 import '../utils/platform_utils.dart';
@@ -24,6 +25,7 @@ import 'command_output_overlay.dart';
 import 'handler/handler_briefing_sheet.dart';
 import 'mobile_access_toggle.dart';
 import 'remote_host_chip.dart';
+import 'session_mode_control.dart';
 import 'session_rename_dialog.dart';
 import 'window_title_bar.dart';
 
@@ -45,7 +47,10 @@ class AgentPanel extends ConsumerWidget {
     });
 
     final active = ref.watch(activeSessionProvider);
-    final isChat = active?.mode == 'chat';
+    // The in-flight target while a mode flip is pending, so the panel swaps to
+    // the view the user asked for on tap rather than when the bridge acks —
+    // holding the old view up for the whole teardown reads as an ignored tap.
+    final isChat = ref.watch(activeSessionModeProvider) == 'chat';
 
     return Column(
       children: [
@@ -64,6 +69,10 @@ class AgentPanel extends ConsumerWidget {
               ),
               const SizedBox(width: AbTokens.space6),
               const Expanded(child: TitleBarBreadcrumb()),
+              const SizedBox(width: AbTokens.space8),
+              // Icons dropped: the phone header has to fit the drawer button,
+              // breadcrumb and shield beside this.
+              const SessionModeControl(showIcons: false),
               const SizedBox(width: AbTokens.space8),
               const HandlerHeaderControl(),
             ],

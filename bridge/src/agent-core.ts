@@ -721,29 +721,41 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       case "session:rename":
       case "session:archive":
       case "session:unarchive":
-      case "session:delete": {
-        if (!sessions) {
+      case "session:delete":
+      case "session:set-mode": {
+        // Bound to consts so the switch's narrowing and the not-null check below
+        // survive into the async closure.
+        const verb = msg;
+        const s = sessions;
+        if (!s) {
           sendAb(createMessage("session:result", {
-            requestId: msg.requestId, ok: false, error: "agent not ready",
+            requestId: verb.requestId, ok: false, error: "agent not ready",
           }));
           break;
         }
-        try {
-          if (msg.type === "session:start") sessions.start(msg.sessionId, msg.initialPrompt);
-          else if (msg.type === "session:stop") sessions.stop(msg.sessionId);
-          else if (msg.type === "session:rename") sessions.rename(msg.sessionId, msg.name);
-          else if (msg.type === "session:archive") sessions.archive(msg.sessionId);
-          else if (msg.type === "session:unarchive") sessions.unarchive(msg.sessionId);
-          else if (msg.type === "session:delete") sessions.delete(msg.sessionId);
-          const entry = sessions.get(msg.sessionId);
-          sendAb(createMessage("session:result", {
-            requestId: msg.requestId, ok: true, session: entry,
-          }));
-        } catch (err) {
-          sendAb(createMessage("session:result", {
-            requestId: msg.requestId, ok: false, error: String(err),
-          }));
-        }
+        // Only set-mode awaits (it waits out the old runtime's teardown before
+        // restarting on the new one). Every other verb still runs straight
+        // through to its reply without yielding, since an async body runs
+        // synchronously until its first await.
+        void (async () => {
+          try {
+            if (verb.type === "session:start") s.start(verb.sessionId, verb.initialPrompt);
+            else if (verb.type === "session:stop") s.stop(verb.sessionId);
+            else if (verb.type === "session:rename") s.rename(verb.sessionId, verb.name);
+            else if (verb.type === "session:archive") s.archive(verb.sessionId);
+            else if (verb.type === "session:unarchive") s.unarchive(verb.sessionId);
+            else if (verb.type === "session:delete") s.delete(verb.sessionId);
+            else if (verb.type === "session:set-mode") await s.setMode(verb.sessionId, verb.mode);
+            const entry = s.get(verb.sessionId);
+            sendAb(createMessage("session:result", {
+              requestId: verb.requestId, ok: true, session: entry,
+            }));
+          } catch (err) {
+            sendAb(createMessage("session:result", {
+              requestId: verb.requestId, ok: false, error: String(err),
+            }));
+          }
+        })();
         break;
       }
       case "session:focus": {
@@ -851,6 +863,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   let dropSessionReplay: (sessionId: string) => void = (_s) => {};
   let isShuttingDown = false;
 
+  // Every producer of notification:push sends through here, so the per-session
+  // work reduction sees exactly the frames the project-level one folds off the
+  // bus (ProjectCore.observeWorkStatus) and the two can't diverge. Folded after
+  // the send: the fold re-advertises the session list, which must not nest
+  // inside the notification's own publish.
+  function sendNotifying(msg: AbMessage): void {
+    sendAb(msg);
+    sessions?.observeNotification(msg);
+  }
+
   // Eager, factory-scoped (NOT in setupServices): handleAbMessage and startApiServer
   // are wired synchronously and can fire before setupServices resolves. The arrow
   // deps defer their reads, so a later-assigned sendAb/manager/sessions is picked
@@ -886,8 +908,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       }),
     }),
     sendAb: (msg) => sendAb(msg),
-    sendPush: (message) => sendAb(createMessage("notification:push", {
-      notificationType: "task_complete", message, projectId: project.id,
+    sendPush: (message, terminalId) => sendNotifying(createMessage("notification:push", {
+      notificationType: "task_complete", message, sessionId: terminalId, projectId: project.id,
     })),
   });
 
@@ -1235,8 +1257,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // Drop buffered title state so a stale title from this run can't leak
         // into a restarted same-id session (start() reuses the entry id).
         namer?.forget(id);
-        // Reclaim the handler's per-terminal guard + pending state for the dead terminal.
-        handlerEngine.onTerminalExit(id);
+        // Reclaim the handler's per-terminal guard + pending state for the dead
+        // terminal. A mode flip keeps the arming: the session outlives the PTY.
+        handlerEngine.onTerminalExit(id, { keepArmed: sessions?.isFlipping(id) });
       },
       // A notification (osc9/osc777) means the session did something worth
       // surfacing — float it up the drawer. No-ops for non-session terminals.
@@ -1353,9 +1376,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       },
       onStopChat: (id) => {
         // Mirrors onTerminalExited for PTYs: reclaim guard + pending state and
-        // auto-disarm — a stopped driver can't be supervised.
-        handlerEngine.onTerminalExit(id);
-        void structured?.stopChat(id);
+        // auto-disarm — a stopped driver can't be supervised. Same flip
+        // exemption: swapping runtimes is not the session ending.
+        handlerEngine.onTerminalExit(id, { keepArmed: sessions?.isFlipping(id) });
+        // Returned, not discarded: it settles only once the driver's backend is
+        // gone and has released the agent's process lock (codex's ~/.codex
+        // sqlite), which anything restarting this slot has to wait out.
+        return structured?.stopChat(id);
       },
     });
 
@@ -1623,7 +1650,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     manager: () => manager,
     config: () => config,
     project: () => project,
-    sendAb: (msg) => sendAb(msg),
+    sendAb: (msg) => sendNotifying(msg),
     sessionName: (terminalId) => sessions?.get(terminalId)?.name,
     onHandlerEvent: (body) => {
       // Chat slots are fed by the in-process driver tap (observeChatFrameForHandler);
@@ -1663,7 +1690,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       }
     },
     onHookAlive: (terminalId) => { codexHookAlive.add(terminalId); },
-    onTurnStart: () => opts.onTurnStart?.(),
+    onTurnStart: (terminalId) => {
+      if (terminalId) sessions?.noteTurnStart(terminalId);
+      opts.onTurnStart?.();
+    },
   });
 
   const TranscriptSnapshotParams = z.object({ sessionId: z.string() });

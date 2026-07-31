@@ -99,6 +99,7 @@ describe("session:* messages", () => {
       sessions: [{
         id: "s1", name: "Session 1",
         createdAt: 1, lastUsedAt: 2, archived: false, running: true, mode: "terminal" as const,
+        agentSessionResumable: true,
       }],
     });
     const parsed = AbMessageSchema.safeParse(JSON.parse(JSON.stringify(msg)));
@@ -114,6 +115,7 @@ describe("session:* messages", () => {
       ["session:archive", { requestId: "r", sessionId: "s" }],
       ["session:unarchive", { requestId: "r", sessionId: "s" }],
       ["session:delete", { requestId: "r", sessionId: "s" }],
+      ["session:set-mode", { requestId: "r", sessionId: "s", mode: "chat" }],
       ["session:focus", { sessionId: "s" }],
     ] as const;
     for (const [type, payload] of types) {
@@ -126,10 +128,10 @@ describe("session:* messages", () => {
   it("session:result and session:updated roundtrip", () => {
     const result = createMessage("session:result", {
       requestId: "r", ok: true,
-      session: { id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, mode: "terminal" as const },
+      session: { id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, mode: "terminal" as const, agentSessionResumable: true },
     });
     const updated = createMessage("session:updated", {
-      sessions: [{ id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, mode: "terminal" as const }],
+      sessions: [{ id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, mode: "terminal" as const, agentSessionResumable: true }],
     });
     expect(AbMessageSchema.safeParse(JSON.parse(JSON.stringify(result))).success).toBe(true);
     expect(AbMessageSchema.safeParse(JSON.parse(JSON.stringify(updated))).success).toBe(true);
@@ -161,6 +163,7 @@ describe("session:* messages", () => {
     const entry = {
       id: "s1", name: "n", createdAt: 1, lastUsedAt: 1,
       archived: false, running: false, command: "my-agent --serve", mode: "terminal" as const,
+      agentSessionResumable: true,
     };
     const msg = createMessage("session:list:result", { requestId: "r", sessions: [entry] });
     const parsed = parseMessage(JSON.stringify(msg));
@@ -174,6 +177,7 @@ describe("session:* messages", () => {
     const entry = {
       id: "s1", name: "n", createdAt: 1, lastUsedAt: 1,
       archived: false, running: false, mode: "terminal" as const,
+      agentSessionResumable: true,
       agentSessionId: "cop-1",
       agentTranscriptPath: "/tmp/copilot-transcript.json",
     };
@@ -183,6 +187,42 @@ describe("session:* messages", () => {
     if (parsed?.type === "session:list:result") {
       expect(parsed.sessions[0]?.agentSessionId).toBe("cop-1");
       expect(parsed.sessions[0]?.agentTranscriptPath).toBe("/tmp/copilot-transcript.json");
+    }
+  });
+
+  it("session:set-mode carries the target mode", () => {
+    const msg = createMessage("session:set-mode", {
+      requestId: "r1", sessionId: "s1", mode: "chat",
+    });
+    const parsed = parseMessage(JSON.stringify(msg));
+    expect(parsed?.type).toBe("session:set-mode");
+    if (parsed?.type === "session:set-mode") {
+      expect(parsed.sessionId).toBe("s1");
+      expect(parsed.mode).toBe("chat");
+    }
+    expect(parseMessageFast(JSON.stringify(msg))?.type).toBe("session:set-mode");
+  });
+
+  it("session:set-mode rejects a mode outside the enum", () => {
+    const msg = { ...createMessage("session:set-mode", { requestId: "r", sessionId: "s", mode: "chat" }), mode: "voice" };
+    expect(parseMessage(JSON.stringify(msg))).toBeNull();
+  });
+
+  // Older bridges omit the field; a peer must read those rows as resumable
+  // rather than silently hiding the mode control on every one of them.
+  it("agentSessionResumable defaults to true when absent", () => {
+    const entry = {
+      id: "s1", name: "n", createdAt: 1, lastUsedAt: 1,
+      archived: false, running: false, mode: "terminal" as const,
+    };
+    const raw = {
+      id: "b5d1ef96-81da-4862-a058-86b7fad995c7", timestamp: Date.now(),
+      type: "session:list:result", requestId: "r", sessions: [entry],
+    };
+    const parsed = parseMessage(JSON.stringify(raw));
+    expect(parsed?.type).toBe("session:list:result");
+    if (parsed?.type === "session:list:result") {
+      expect(parsed.sessions[0]?.agentSessionResumable).toBe(true);
     }
   });
 });

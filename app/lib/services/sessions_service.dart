@@ -13,6 +13,20 @@ import 'pending_reply.dart';
 /// past either case while still bounding the UI hang if a frame is dropped.
 const _kPendingReplyTimeout = Duration(seconds: 15);
 
+/// `session:set-mode` waits out the old runtime's teardown before it can answer,
+/// so it must outlast the bridge's own bound (`TEARDOWN_TIMEOUT_MS`, 15s, in
+/// `bridge/src/session-manager.ts`) — keep this strictly greater than that, or
+/// the client gives up first and the bridge's `ok:false` (and the reason with
+/// it) is never observed, while a teardown landing just under the bound reports
+/// a failure that did not happen.
+const _kModeReplyTimeout = Duration(seconds: 25);
+
+/// Outcome of a `session:set-mode`. The other session verbs collapse a failure
+/// to `null` because their callers have nothing to say about it; a mode flip
+/// has to snap the toggle back and name the reason, so it carries the reply's
+/// `ok` and `error` through instead.
+typedef SessionModeResult = ({bool ok, String? error});
+
 class SessionsState {
   final String projectId;
   final List<SessionEntry> sessions;
@@ -68,6 +82,7 @@ class SessionsService {
   final Map<String, PendingReply<List<SessionEntry>>> _pendingList = {};
   final Map<String, PendingReply<SessionEntry?>> _pendingMutations = {};
   final Map<String, PendingReply<bool>> _pendingDeletes = {};
+  final Map<String, PendingReply<SessionModeResult>> _pendingModeChanges = {};
 
   Stream<SessionsState> get stateStream => _stateController.stream;
   SessionsState get currentState => _state;
@@ -153,10 +168,17 @@ class SessionsService {
       _setState(_state.copyWith(error: error));
     }
 
-    // Delete uses a bool completer; everything else uses a session-entry completer.
+    // Delete uses a bool completer and set-mode an ok/error one; everything
+    // else uses a session-entry completer.
     final deletePending = _pendingDeletes.remove(requestId);
     if (deletePending != null) {
       deletePending.complete(ok);
+      return;
+    }
+
+    final modePending = _pendingModeChanges.remove(requestId);
+    if (modePending != null) {
+      modePending.complete((ok: ok, error: error));
       return;
     }
 
@@ -188,8 +210,11 @@ class SessionsService {
 
   String _newRequestId() => const Uuid().v4();
 
-  PendingReply<T> _newPending<T>(void Function() onTimeout) => PendingReply<T>(
-    timeout: _kPendingReplyTimeout,
+  PendingReply<T> _newPending<T>(
+    void Function() onTimeout, {
+    Duration timeout = _kPendingReplyTimeout,
+  }) => PendingReply<T>(
+    timeout: timeout,
     onTimeout: onTimeout,
     timeoutError: () => TimeoutException('session reply timed out'),
   );
@@ -257,6 +282,25 @@ class SessionsService {
     return _mutate('session:unarchive', {'sessionId': id});
   }
 
+  Future<SessionModeResult> setMode(String id, String mode) {
+    final requestId = _newRequestId();
+    final pending = _newPending<SessionModeResult>(
+      () => _pendingModeChanges.remove(requestId),
+      timeout: _kModeReplyTimeout,
+    );
+    _pendingModeChanges[requestId] = pending;
+    unawaited(
+      _send(
+        createAbMessage('session:set-mode', {
+          'requestId': requestId,
+          'sessionId': id,
+          'mode': mode,
+        }),
+      ),
+    );
+    return pending.future;
+  }
+
   Future<bool> delete(String id) {
     final requestId = _newRequestId();
     final pending = _newPending<bool>(() => _pendingDeletes.remove(requestId));
@@ -312,5 +356,9 @@ class SessionsService {
       p.fail(error);
     }
     _pendingDeletes.clear();
+    for (final p in _pendingModeChanges.values) {
+      p.fail(error);
+    }
+    _pendingModeChanges.clear();
   }
 }
