@@ -5,6 +5,7 @@
 // throw-by-default providers.
 //
 // Caller is responsible for calling useInMemoryPrefs() (test/helpers/prefs_test_mock.dart) before invocation (the stores read prefs eagerly on open).
+import 'dart:async';
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
@@ -43,14 +44,25 @@ class TestStoreOverrides {
     required this.recentPortsStore,
   });
 
+  /// Releases the stores, but deliberately does not AWAIT them.
+  ///
+  /// Each close() runs synchronously up to its first suspension — the stream
+  /// controllers are marked closed and CachedSessionsStore cancels its pending
+  /// flush timer — so nothing leaks into the next test. What is skipped is only
+  /// the confirmation: CachedSessionsStore.close() flushes through
+  /// SharedPreferencesAsync, and awaiting that real I/O inside testWidgets'
+  /// fake-async zone wedges the tearDown whenever a test FAILS, because the
+  /// binding only drains real async on the passing path. That hung the runner
+  /// forever (never a timeout — you have to kill it), and a green run can't show
+  /// it, so it only ever bites while debugging a failure. Nothing reads these
+  /// per-test temp stores afterwards, so the write itself is pointless work.
+  ///
+  /// Same reasoning as the status-cache temp dir, which is left for the OS to
+  /// reap. ProjectStore and DrawerOrderStore have no close() at all.
   Future<void> close() async {
-    await recentAgentsStore.close();
-    await cachedSessionsStore.close();
-    await recentPortsStore.close();
-    // ProjectStore and DrawerOrderStore have no close(); the status-cache temp
-    // dir is created lazily only if a test writes status and is left for the OS
-    // to reap — deleting it here would be real teardown I/O that stalls inside
-    // testWidgets' fake-async zone.
+    unawaited(recentAgentsStore.close());
+    unawaited(cachedSessionsStore.close());
+    unawaited(recentPortsStore.close());
   }
 }
 
