@@ -469,6 +469,7 @@ describe("materialized files", () => {
         hooks: {
           SessionStart: [{ hooks: [hook("session-start")] }],
           Stop: [{ hooks: [hook("stop")] }],
+          StopFailure: [{ hooks: [hook("stop-failure")] }],
           Notification: [{ hooks: [hook("notification")] }],
           UserPromptSubmit: [{ hooks: [hook("user-prompt")] }],
         },

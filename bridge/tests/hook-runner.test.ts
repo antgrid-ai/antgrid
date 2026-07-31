@@ -143,6 +143,103 @@ describe("Claude hooks", () => {
     expect(notify?.body).toEqual({ type: "task_complete", agent: "claude", transcriptPath: "/tmp/t.jsonl" });
   });
 
+  test("stop-failure maps a rate limit to limit_hit and nothing else", async () => {
+    const h = harness({
+      agent: "claude",
+      event: "stop-failure",
+      stdin: JSON.stringify({
+        session_id: "s6",
+        transcript_path: "/tmp/fail.jsonl",
+        hook_event_name: "StopFailure",
+        error: "rate_limit",
+      }),
+    });
+    await h.run();
+    expect(h.posts).toEqual([
+      {
+        port: 43123,
+        path: "/handler-event",
+        body: {
+          terminalId: "term-1",
+          agent: "claude",
+          event: "limit_hit",
+          transcriptPath: "/tmp/fail.jsonl",
+          sessionId: "s6",
+          errorClass: "rate_limit",
+        },
+      },
+    ]);
+  });
+
+  test("stop-failure maps every non-limit error to turn_failed", async () => {
+    for (const error of ["overloaded", "server_error", "unknown", "model_not_found"]) {
+      const h = harness({
+        agent: "claude",
+        event: "stop-failure",
+        stdin: JSON.stringify({ session_id: "s7", transcript_path: "/t", error }),
+      });
+      await h.run();
+      expect(h.posts).toEqual([
+        {
+          port: 43123,
+          path: "/handler-event",
+          body: {
+            terminalId: "term-1",
+            agent: "claude",
+            event: "turn_failed",
+            transcriptPath: "/t",
+            sessionId: "s7",
+            errorClass: error,
+          },
+        },
+      ]);
+    }
+  });
+
+  test("stop-failure without an error field still reports a transient failure", async () => {
+    const h = harness({
+      agent: "claude",
+      event: "stop-failure",
+      stdin: JSON.stringify({ session_id: "s8", transcript_path: null, error: null }),
+    });
+    await h.run();
+    expect(h.posts).toEqual([
+      {
+        port: 43123,
+        path: "/handler-event",
+        body: {
+          terminalId: "term-1",
+          agent: "claude",
+          event: "turn_failed",
+          transcriptPath: "",
+          sessionId: "s8",
+          errorClass: "unknown",
+        },
+      },
+    ]);
+  });
+
+  test("stop-failure without a terminal id posts nothing", async () => {
+    const h = harness({
+      agent: "claude",
+      event: "stop-failure",
+      stdin: JSON.stringify({ session_id: "s9", error: "rate_limit" }),
+      env: { ANTGRID_TERMINAL_ID: undefined },
+    });
+    await h.run();
+    expect(h.posts).toEqual([]);
+  });
+
+  test("stop-failure stays claude-only — another agent's allowlist drops it", async () => {
+    const h = harness({
+      agent: "codex",
+      event: "stop-failure",
+      stdin: JSON.stringify({ error: "rate_limit" }),
+    });
+    await h.run();
+    expect(h.posts).toEqual([]);
+  });
+
   test("waiting notification posts awaiting_input, not permission_request, plus the handler event", async () => {
     const h = harness({
       agent: "claude",

@@ -34,6 +34,9 @@ function materializeClaudePlugin(
     hooks: {
       SessionStart: [{ hooks: [claudeHook(command, "session-start")] }],
       Stop: [{ hooks: [claudeHook(command, "stop")] }],
+      // A turn that died on a provider fault fires StopFailure INSTEAD of Stop,
+      // so without this an armed Handler sees nothing for the whole limit window.
+      StopFailure: [{ hooks: [claudeHook(command, "stop-failure")] }],
       Notification: [{ hooks: [claudeHook(command, "notification")] }],
       // A fresh turn: resets control-plane work status to "working" so a
       // re-prompt of an existing session (the Stop hook already fired
@@ -62,6 +65,10 @@ const ClaudePayloadSchema = z.object({
   session_id: z.string().nullish(),
   transcript_path: z.string().nullish(),
   message: z.string().nullish(),
+  // StopFailure only. Left a bare string rather than the CLI's enum so a value
+  // added upstream still classifies (as a transient) instead of failing the
+  // parse and dropping the event.
+  error: z.string().nullish(),
 });
 
 // "user-prompt" (→ /turn-start) is Claude-specific: Claude exposes a
@@ -71,7 +78,7 @@ const ClaudePayloadSchema = z.object({
 // only a new session (count increase) resets the status; re-prompting an
 // existing session leaves status at "done" or "attention" until the next
 // turn-end notification arrives (after-agent / stop).
-export const events = ["session-start", "stop", "notification", "user-prompt"] as const;
+export const events = ["session-start", "stop", "stop-failure", "notification", "user-prompt"] as const;
 
 export async function toPosts(
   invocation: HookInvocation,
@@ -122,6 +129,23 @@ export async function toPosts(
         },
       });
     }
+  }
+  if (invocation.event === "stop-failure" && terminalId) {
+    // No /notify: a park is not a user-facing alert — the engine sends its own
+    // push once, on the first park of an episode.
+    const errorClass = input.error || "unknown";
+    posts.push({
+      port,
+      path: "/handler-event",
+      body: {
+        terminalId,
+        agent: "claude",
+        event: errorClass === "rate_limit" ? "limit_hit" : "turn_failed",
+        transcriptPath: input.transcript_path ?? "",
+        sessionId: input.session_id ?? "",
+        errorClass,
+      },
+    });
   }
   if (invocation.event === "notification") {
     if (terminalId) {
