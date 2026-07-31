@@ -370,7 +370,10 @@ export class HandlerEngine {
   private unparkIfParked(terminalId: string, s: ArmedSession): boolean {
     if (s.state !== "parked") return false;
     this.timers.cancel(terminalId);
-    s.state = "watching";
+    // An escalation the user never answered outlives the park it was parked
+    // through, so the pill must go back to needs_you — "watching" with a
+    // pending row is a state the rest of the engine never produces.
+    s.state = s.escalations.length > 0 ? "needs_you" : "watching";
     s.parkKind = undefined;
     s.parkedUntil = undefined;
     s.selfResuming = undefined;
@@ -687,6 +690,11 @@ export class HandlerEngine {
       void this.handleEvent(retry).catch(() => {});
       return;
     }
+    // The nudge is an unsupervised submitted line (injectReply appends CR), so
+    // it must never land while a question is waiting on the human: it would
+    // answer a pending permission prompt on their behalf. The park is over
+    // either way — the human is the resume path now.
+    if (s.escalations.length > 0) return;
     // Straight to the adapter, never through the auto-reply path: the nudge is
     // the supervisor's own recovery action, so it must neither advance the
     // runaway counter nor enter the circular-exchange window — a second park

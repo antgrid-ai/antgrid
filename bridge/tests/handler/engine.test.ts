@@ -904,6 +904,59 @@ describe("lifecycle park / resume", () => {
     b.engine.onTerminalExit("t1");
     expect(b.timers.at(-1)!.cancelled).toBe(true);
   });
+
+  it("a lifecycle event queued behind a judge call is never coalesced away", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let judged = 0;
+    const { engine, sent, activity } = makeEngine({
+      runDecisionFn: async () => { judged++; await gate; return decide({}); },
+    });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    const first = engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await drain(); // the first event is now inside the judge call
+    // A later turn_end makes itself the newest event. A limit_hit riding the
+    // same map would be superseded by it and silently dropped.
+    const limit = engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    const third = engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    release();
+    await Promise.all([first, limit, third]);
+    expect(records(activity, "parked")).toHaveLength(1);
+    expect(statusOf(sent).state).toBe("parked");
+    // …and the limit_hit did not supersede the pause events either: the first
+    // was judged, the third dropped only because the session was by then parked.
+    expect(judged).toBe(1);
+  });
+
+  it("a resume with a question still outstanding stays needs_you and never nudges", async () => {
+    const { engine, sent, injected, activity, timers } = makeEngine({
+      runDecisionFn: async () => decide({ decision: "escalate" }),
+    });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(statusOf(sent).state).toBe("needs_you");
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    expect(statusOf(sent).state).toBe("parked");
+
+    timers.at(-1)!.fn();
+    // injectReply submits a line, so nudging here would answer the human's
+    // pending question with "continue".
+    expect(injected).toHaveLength(0);
+    expect(records(activity, "resumed")).toHaveLength(1);
+    expect(statusOf(sent).state).toBe("needs_you");
+    expect(statusOf(sent).pendingEscalations).toBe(1);
+    expect(statusOf(sent).parkKind).toBeUndefined();
+  });
+
+  it("limit_cleared with a question outstanding leaves the session needs_you", async () => {
+    const { engine, sent } = makeEngine({ runDecisionFn: async () => decide({ decision: "escalate" }) });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_cleared" });
+    expect(statusOf(sent).state).toBe("needs_you");
+    expect(statusOf(sent).pendingEscalations).toBe(1);
+  });
 });
 
 describe("lifecycle transient ceiling", () => {
@@ -1035,6 +1088,33 @@ describe("lifecycle guard invariant", () => {
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     expect(injected.map((i) => i[1])).toEqual(["first", "continue", "continue", "continue"]);
     expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
+  });
+
+  it("park and resume call no guard mutator at all", async () => {
+    // Reply text alone cannot prove this: a nudge fed through recordAutoReply
+    // hashes as "continue", a judged one as the probe "continue\n", so the two
+    // never collide and a behavioral assertion slips past the bug. Watch the
+    // mutators themselves instead.
+    const guard = new RunawayGuard(5, 4);
+    const calls: string[] = [];
+    for (const m of ["reset", "recordAutoReply", "recordProgress"] as const) {
+      const orig = guard[m].bind(guard) as (...a: never[]) => unknown;
+      (guard as unknown as Record<string, unknown>)[m] =
+        (...a: never[]) => { calls.push(m); return orig(...a); };
+    }
+    const { engine, timers } = makeEngine({
+      guard, runDecisionFn: async () => decide({ decision: "handle", reply: "go" }),
+    });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const beforePark = [...calls];
+    expect(beforePark).toEqual(["recordAutoReply"]);
+
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    timers.at(-1)!.fn();
+    await engine.handleEvent({ terminalId: "t1", event: "turn_failed" });
+    timers.at(-1)!.fn();
+    expect(calls).toEqual(beforePark);
   });
 });
 
