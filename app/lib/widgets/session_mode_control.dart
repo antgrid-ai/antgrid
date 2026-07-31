@@ -57,10 +57,22 @@ class SessionModeControl extends ConsumerWidget {
   }
 }
 
-/// Leading text of the one `session:set-mode` failure that actually stops the
-/// session; every other refusal leaves it running. Kept in lockstep with
-/// `TEARDOWN_TIMEOUT_ERROR` in bridge/src/session-manager.ts.
+/// Marker text of the `session:set-mode` failure where the old runtime never
+/// shut down. Kept in lockstep with `TEARDOWN_TIMEOUT_ERROR` in
+/// bridge/src/session-manager.ts.
+///
+/// Matched with `contains`, never `startsWith`: the bridge reports the reason as
+/// `String(err)` on a thrown `Error`, so the wire text is prefixed with
+/// `"Error: "` and an anchored match silently never fires.
 const kTeardownTimeoutError = 'timed out tearing down session';
+
+/// Marker text of the `session:set-mode` failure where the old runtime shut down
+/// but the new one wouldn't start. Kept in lockstep with `RESTART_FAILED_ERROR`
+/// in bridge/src/session-manager.ts. Same `contains` matching as above.
+///
+/// These two are the only refusals that leave the session STOPPED; every other
+/// one leaves it running in its original mode.
+const kRestartFailedError = 'failed to restart session after mode switch';
 
 /// What this session stands to lose by restarting right now, or null when it
 /// has nothing in flight and the plain idle copy applies.
@@ -103,9 +115,14 @@ Future<void> _switchMode(
   final confirmed = await AbConfirmDialog.show(
     context: context,
     title: 'Switch to $target?',
+    // A stopped session is not restarted by the flip (setMode only re-launches
+    // what was running), so promising a restart there would be wrong. Every
+    // `warning` implies a live runtime, so only the idle copy has to branch.
     body:
         warning ??
-        'Switching restarts $agent. Your conversation carries over.',
+        (session.running
+            ? 'Switching restarts $agent. Your conversation carries over.'
+            : 'Your conversation carries over the next time you start it.'),
     // "Switch anyway" only over a warning — the label has to read as
     // overriding something, or it stops meaning anything when it matters.
     confirmLabel: warning == null ? 'Switch to $target' : 'Switch anyway',
@@ -114,36 +131,59 @@ Future<void> _switchMode(
 
   // Nullable read, not `sessionsServiceProvider`: that façade throws while the
   // project session re-resolves. Same shape the rename paths use.
+  //
+  // Answered, not swallowed: unlike the rename paths this is reached AFTER a
+  // confirmation the user already gave, and a confirmed action that does
+  // nothing and says nothing is indistinguishable from a dropped tap.
   final projectId = container.read(selectedRegistrationIdProvider);
-  if (projectId == null) return;
-  final service = container
-      .read(projectSessionProvider(projectId))
-      .value
-      ?.sessionsService;
-  if (service == null) return;
+  final service = projectId == null
+      ? null
+      : container.read(projectSessionProvider(projectId)).value?.sessionsService;
+  if (service == null) {
+    if (context.mounted) {
+      showAbSnackBar(
+        context,
+        "Couldn't switch to $target — this project isn't connected yet. Try "
+        'again in a moment.',
+      );
+    }
+    return;
+  }
 
   final pending = container.read(pendingSessionModeProvider.notifier);
-  pending.set(PendingSessionMode(sessionId: session.id, mode: target));
+  final ours = PendingSessionMode(sessionId: session.id, mode: target);
+  pending.set(ours);
   SessionModeResult result;
   try {
     result = await service.setMode(session.id, target);
   } catch (e) {
     result = (ok: false, error: '$e');
   } finally {
-    pending.set(null);
+    // Retract only our own. The slot is app-wide, so a flip started on ANOTHER
+    // session while this one was in flight now owns it — clearing that would
+    // drop its panel back to the old view and re-enable its toggle mid-flight.
+    if (container.read(pendingSessionModeProvider) == ours) pending.set(null);
   }
   if (result.ok || !context.mounted) return;
+  final error = result.error ?? '';
+  final String body;
+  if (error.contains(kTeardownTimeoutError)) {
+    body =
+        "Couldn't switch to $target — $agent didn't shut down. The session is "
+        'stopped; try starting it again.';
+  } else if (error.contains(kRestartFailedError)) {
+    body =
+        "Couldn't switch to $target — $agent shut down but wouldn't start "
+        'again. The session is stopped in ${session.mode} mode; try starting '
+        'it again.';
+  } else {
+    // Every other refusal (archived, gone, no driver) leaves the runtime
+    // untouched, so telling the user to restart it would be a lie.
+    body =
+        "Couldn't switch to $target. The session is still in "
+        '${session.mode} mode.';
+  }
   // A snack bar, not a second modal: the user already confirmed once, and the
   // session is no worse off than before the tap.
-  showAbSnackBar(
-    context,
-    (result.error?.startsWith(kTeardownTimeoutError) ?? false)
-        ? "Couldn't switch to $target — $agent didn't shut down. The session "
-              'is stopped; try starting it again.'
-        // Every other refusal (archived, gone, no driver) leaves the runtime
-        // untouched, so telling the user to restart it would be a lie.
-        : "Couldn't switch to $target. The session is still in "
-              '${session.mode} mode.',
-    duration: const Duration(seconds: 8),
-  );
+  showAbSnackBar(context, body, duration: const Duration(seconds: 8));
 }

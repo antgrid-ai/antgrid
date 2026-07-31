@@ -229,6 +229,14 @@ const TEARDOWN_TIMEOUT_MS = 15_000;
  *  every failure to go restart something — keep in lockstep with
  *  `kTeardownTimeoutError` in app/lib/widgets/session_mode_control.dart. */
 export const TEARDOWN_TIMEOUT_ERROR = "timed out tearing down session";
+
+/** Leading text of `session:result.error` when a mode flip tore the old runtime
+ *  down but could not bring the new one up. Like {@link TEARDOWN_TIMEOUT_ERROR}
+ *  it leaves the session STOPPED — the app must not tell the user it is
+ *  untouched — but the shutdown itself worked, so it gets its own copy. Keep in
+ *  lockstep with `kRestartFailedError` in
+ *  app/lib/widgets/session_mode_control.dart. */
+export const RESTART_FAILED_ERROR = "failed to restart session after mode switch";
 // Live activity (keystrokes, notification bursts) fires many times a second;
 // coalesce the session:updated emit so the drawer re-sort doesn't thrash.
 const ACTIVITY_EMIT_DEBOUNCE_MS = 750;
@@ -250,9 +258,12 @@ export class SessionManager {
   // Callbacks waiting for a session's PTY to actually be gone, keyed by session
   // id and fired from noteExited(). See awaitTerminalExit().
   private terminalExitWaiters = new Map<string, Set<(exited: boolean) => void>>();
-  /** Sessions mid-`setMode`. The exit-driven teardown reads this to tell a
-   *  runtime swap apart from a session that is actually going away. */
-  private flipping = new Set<string>();
+  /** Sessions mid-`setMode`, counted rather than flagged. The exit-driven
+   *  teardown reads this to tell a runtime swap apart from a session that is
+   *  actually going away, and nothing serializes the verb — two clients can have
+   *  flips in flight on one session at once, so the first one to finish must not
+   *  clear the protection the second is still relying on. */
+  private flipping = new Map<string, number>();
   // Memoized sessionResumable() answers, keyed by session id and tagged with the
   // agentSessionId they were computed for. toWire() runs per entry on every
   // changed() emit and the real check does existsSync + a bun:sqlite query, so
@@ -840,11 +851,13 @@ export class SessionManager {
     // Held across the teardown only: the exit-driven handler teardown fires
     // inside the await below, and this is what tells it the session outlives
     // the runtime it is losing.
-    this.flipping.add(id);
+    this.flipping.set(id, (this.flipping.get(id) ?? 0) + 1);
     try {
       return await this.setModeInner(id, mode, entry, wasRunning);
     } finally {
-      this.flipping.delete(id);
+      const left = (this.flipping.get(id) ?? 1) - 1;
+      if (left > 0) this.flipping.set(id, left);
+      else this.flipping.delete(id);
     }
   }
 
@@ -880,7 +893,11 @@ export class SessionManager {
       // target mode would contradict the ok:false the caller is about to get.
       entry.mode = previous;
       this.changed();
-      throw err;
+      // Tagged, not rethrown bare: the old runtime is already gone, so this is
+      // one of the two refusals that leaves the session STOPPED. Untagged it
+      // reads to the app as an ordinary refusal ("nothing changed"), which
+      // would leave the user with a dead session and no reason to restart it.
+      throw new Error(`${RESTART_FAILED_ERROR}: ${id}: ${err}`);
     }
   }
 
