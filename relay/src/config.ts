@@ -1,3 +1,5 @@
+import { parseCidr } from "./client-ip.js";
+
 export interface RelayConfig {
   port: number;
   maxConnections: number;
@@ -21,6 +23,15 @@ export interface RelayConfig {
   replayTtlMs: number;
   pingIntervalMs: number;
   pongTimeoutMs: number;
+  /**
+   * IPs/CIDRs of reverse proxies the relay sits behind (comma-separated env).
+   * When the direct peer is one of these, the client IP is recovered from
+   * `X-Forwarded-For` (see client-ip.ts) — otherwise the per-IP connection
+   * limit collapses into one bucket shared by every client behind the proxy.
+   * Empty (the default) disables XFF entirely: a directly exposed relay must
+   * never honour a client-forgeable header.
+   */
+  trustedProxyIps: string[];
   logLevel: "debug" | "info" | "warn" | "error";
   /** Base URL the relay fetches JWKS from — may be an internal address (e.g.
    *  docker-internal DNS) for network efficiency; NOT necessarily the token
@@ -100,6 +111,19 @@ function loadFcmConfig(): Pick<RelayConfig, "fcmProjectId" | "fcmClientEmail" | 
   return { fcmProjectId, fcmClientEmail, fcmPrivateKey };
 }
 
+function loadTrustedProxyIps(): string[] {
+  const raw = process.env.TRUSTED_PROXY_IPS || "";
+  const entries = raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+  for (const entry of entries) {
+    try {
+      parseCidr(entry);
+    } catch (e) {
+      throw new Error(`TRUSTED_PROXY_IPS entry invalid: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+  return entries;
+}
+
 export function loadConfig(): RelayConfig {
   const clockSkewMs = parseInt(process.env.CLOCK_SKEW_MS || "120000", 10);
   const replayTtlMs = parseInt(process.env.REPLAY_TTL_MS || "300000", 10);
@@ -125,6 +149,7 @@ export function loadConfig(): RelayConfig {
     replayTtlMs,
     pingIntervalMs: parseInt(process.env.PING_INTERVAL_MS || "30000", 10),
     pongTimeoutMs: parseInt(process.env.PONG_TIMEOUT_MS || "10000", 10),
+    trustedProxyIps: loadTrustedProxyIps(),
     logLevel: (process.env.LOG_LEVEL as RelayConfig["logLevel"]) || "info",
     licenseApiUrl: requireEnv("LICENSE_API_URL"),
     licenseApiJwksPath: process.env.LICENSE_API_JWKS_PATH || undefined,

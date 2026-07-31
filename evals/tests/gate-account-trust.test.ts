@@ -78,6 +78,7 @@ const RELAY_CONFIG = {
   replayTtlMs: 300_000,
   pingIntervalMs: 30_000,
   pongTimeoutMs: 10_000,
+  trustedProxyIps: [],
   logLevel: "error" as const,
   licenseApiUrl: "http://license-api.eval",
   relayInternalSecret: RELAY_INTERNAL_SECRET,

@@ -372,6 +372,7 @@ export async function startRelay(opts: {
     replayTtlMs: opts.replayTtlMs ?? 300_000,
     pingIntervalMs: 30_000,
     pongTimeoutMs: 10_000,
+    trustedProxyIps: [],
     logLevel: "error",
     licenseApiUrl: "http://license-api.eval",
     relayInternalSecret: RELAY_INTERNAL_SECRET,

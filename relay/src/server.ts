@@ -25,6 +25,7 @@ import { LicenseCache } from "./license/cache.js";
 import { createLicenseGate, type LicenseGate } from "./license/gate.js";
 import { deviceTokenIssuer } from "./license/verify.js";
 import { handleRevoke, handleExpire, handleListConnections } from "./license/internal-routes.js";
+import { parseCidr, resolveClientIp } from "./client-ip.js";
 
 const VERSION = "0.1.0";
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
@@ -94,6 +95,8 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
   });
   const startTime = Date.now();
   const lastPong = new Map<string, number>();
+  // Validated at config load; parsed once here so the upgrade path stays cheap.
+  const trustedProxies = config.trustedProxyIps.map(parseCidr);
 
   /** Server-side "hello or die" timers, so a silent socket never holds a slot. */
   const helloTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -566,7 +569,8 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       }
 
       if (url.pathname === "/ws") {
-        const ip = srv.requestIP(req)?.address || "unknown";
+        const peerIp = srv.requestIP(req)?.address || "unknown";
+        const ip = resolveClientIp(peerIp, req.headers.get("x-forwarded-for"), trustedProxies);
         if (connections.getConnectionCountByIp(ip) >= config.rateLimitConnPerIp) {
           return Response.json({ type: "error", code: "RATE_LIMITED", message: "Too many connections from this IP" }, { status: 429 });
         }

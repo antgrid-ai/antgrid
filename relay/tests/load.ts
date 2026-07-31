@@ -38,6 +38,7 @@ const config: RelayConfig = {
   replayTtlMs: 300000,
   pingIntervalMs: 0,
   pongTimeoutMs: 10000,
+  trustedProxyIps: [],
   logLevel: "error" as const,
   licenseApiUrl: "http://localhost:8787",
   relayInternalSecret: "x".repeat(16),

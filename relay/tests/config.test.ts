@@ -7,6 +7,7 @@ const TOUCHED_KEYS = [
   "LICENSE_ISSUER_URL",
   "RELAY_INTERNAL_SECRET",
   "LICENSE_CACHE_MAX_ENTRIES",
+  "TRUSTED_PROXY_IPS",
 ] as const;
 
 describe("loadConfig", () => {
@@ -155,6 +156,26 @@ describe("loadConfig", () => {
       delete process.env.CLOCK_SKEW_MS;
       delete process.env.REPLAY_TTL_MS;
     }
+  });
+
+  test("trustedProxyIps defaults empty (XFF disabled)", () => {
+    process.env.LICENSE_API_URL = "http://localhost:8787";
+    process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;
+    expect(loadConfig().trustedProxyIps).toEqual([]);
+  });
+
+  test("trustedProxyIps parses a comma-separated list of IPs and CIDRs", () => {
+    process.env.LICENSE_API_URL = "http://localhost:8787";
+    process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;
+    process.env.TRUSTED_PROXY_IPS = "172.18.0.0/16, 10.0.0.1 ,::1";
+    expect(loadConfig().trustedProxyIps).toEqual(["172.18.0.0/16", "10.0.0.1", "::1"]);
+  });
+
+  test("rejects a malformed TRUSTED_PROXY_IPS entry at load", () => {
+    process.env.LICENSE_API_URL = "http://localhost:8787";
+    process.env.RELAY_INTERNAL_SECRET = VALID_SECRET;
+    process.env.TRUSTED_PROXY_IPS = "172.18.0.0/16,not-an-ip";
+    expect(() => loadConfig()).toThrow(/TRUSTED_PROXY_IPS/);
   });
 
   // R1 deletes the v2 offline-queue and stale-pair-timeout knobs outright —
