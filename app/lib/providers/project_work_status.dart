@@ -28,19 +28,46 @@ final projectWorkStatusProvider = Provider.family<AgentWorkStatus, String>((
       AgentWorkStatus.done;
 });
 
-/// Effective status for a single Recent row: the project-level [advert] applies
-/// to this row only while the session itself is [running] — a stopped session
-/// can neither be working nor be the one blocked on a permission. [advert] is
-/// null when no live advert is available (older bridge, cold project, closed
-/// socket), which reads as done.
+/// Effective status for ONE session.
 ///
-/// The advert is project-level, so with two live sessions on one project both
-/// rows show the busy/blocked state. That's the honest resolution available:
-/// the wire carries no per-session turn flag.
-AgentWorkStatus recentRowStatus(AgentWorkStatus? advert, bool running) {
+/// [perSession] is that project's live per-session map — the authoritative
+/// source, and the reason a session blocked on a question no longer paints its
+/// working sibling amber. Null means the advert carried no per-session data
+/// (older bridge, cold project, closed socket): fall back to the project-level
+/// [advert], which is what every row used to show.
+///
+/// A stopped session is always done: it can neither be working nor be the one
+/// blocked on a permission.
+AgentWorkStatus sessionRowStatus({
+  required AgentWorkStatus? advert,
+  required Map<String, AgentWorkStatus>? perSession,
+  required String sessionId,
+  required bool running,
+}) {
   if (!running) return AgentWorkStatus.done;
+  if (perSession != null) return perSession[sessionId] ?? AgentWorkStatus.done;
   return advert ?? AgentWorkStatus.done;
 }
+
+/// Live status for one session of one project, for the drawer's session rows.
+/// Reads the two advert maps directly — like [projectWorkStatusProvider], this
+/// never dials anything.
+final sessionWorkStatusProvider =
+    Provider.family<AgentWorkStatus, ({String entryId, String sessionId, bool running})>((
+  ref,
+  args,
+) {
+  return sessionRowStatus(
+    advert: ref.watch(
+      remoteProjectStatusProvider.select((m) => m[args.entryId]),
+    ),
+    perSession: ref.watch(
+      remoteSessionStatusProvider.select((m) => m[args.entryId]),
+    ),
+    sessionId: args.sessionId,
+    running: args.running,
+  );
+});
 
 /// Aggregate work status for a machine: the most severe status across ALL of
 /// its projects in the live advert map (attention > error > working > done).

@@ -11,6 +11,7 @@ import 'package:antgrid/providers/control_plane.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/eager_control_planes.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
+import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/providers/relay_connection.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/providers/value_controller.dart';
@@ -31,6 +32,7 @@ class _RecordingManager extends RelayConnectionManager {
 
   final List<String> _openIds;
   final List<String> released = [];
+  final _changes = StreamController<int>.broadcast();
 
   @override
   List<String> openControlPlaneIds() => List.of(_openIds);
@@ -39,6 +41,18 @@ class _RecordingManager extends RelayConnectionManager {
   void release(String registrationId) {
     released.add(registrationId);
     _openIds.remove(registrationId);
+  }
+
+  /// Base class's real controller is private to it; this stand-in lets a test
+  /// announce a socket coming or going, which is what drives the reaper's
+  /// label/status subscription sync.
+  @override
+  Stream<int> get connectionChanges => _changes.stream;
+
+  /// Drop [uuid]'s socket and announce it, as a real disconnect would.
+  void closeSocket(String uuid) {
+    _openIds.remove(uuid);
+    _changes.add(_openIds.length);
   }
 }
 
@@ -467,6 +481,98 @@ void main() {
 
       // Drain the store's debounced flush timer so it doesn't outlive the
       // widget tree teardown (flutter_test asserts no pending timers).
+      await stores.cachedSessionsStore.flushNow();
+    },
+  );
+
+  testWidgets(
+    'a closed socket retires the machine\'s PER-SESSION statuses, not just the project ones',
+    (tester) async {
+      // The per-session map wins over the project one in sessionRowStatus, so
+      // clearing only the project status left every session row of a machine we
+      // are no longer connected to pulsing its last "working" — with nothing
+      // able to clear it until the socket came back.
+      useInMemoryPrefs();
+      final stores = await buildTestStoreOverrides();
+      addTearDown(stores.close);
+
+      final registry = ProjectSessionRegistry(
+        localCap: 10,
+        relayCap: 30,
+        onEvict: (_) async {},
+      );
+      final mgr = _RecordingManager(['M']);
+      final transport = FakeAgentTransport();
+      transport.requestHandler = (method, params) => {'sessions': []};
+      final client = ControlPlaneClient(transport: transport);
+      addTearDown(client.dispose);
+
+      final container = ProviderContainer(
+        overrides: [
+          ...stores.overrides,
+          projectSessionRegistryProvider.overrideWith(
+            () => ProjectSessionRegistryController(registry),
+          ),
+          pickerSourcesProvider.overrideWithValue(const [
+            PickerSource(
+              id: 'machine:M',
+              label: 'Machine',
+              isLocal: false,
+              projects: <PickerProject>[],
+              machineUuid: 'M',
+            ),
+          ]),
+          selectedSourceIdProvider.overrideWith(
+            () => ValueController('machine:M'),
+          ),
+          relayConnectionManagerProvider.overrideWithValue(mgr),
+          controlPlaneClientForProvider.overrideWith(
+            (ref, uuid) async => uuid == 'M' ? client : null,
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const ControlPlaneReaper(child: SizedBox()),
+        ),
+      );
+      await tester.pump();
+
+      transport.emit('agent:projects', {
+        'projects': [
+          {
+            'projectId': 'p',
+            'running': true,
+            'status': 'working',
+            'sessionStatuses': {'s1': 'working'},
+          },
+        ],
+      });
+      await tester.pump();
+      expect(
+        container.read(remoteProjectStatusProvider)['M.p'],
+        AgentWorkStatus.working,
+      );
+      expect(container.read(remoteSessionStatusProvider)['M.p'], {
+        's1': AgentWorkStatus.working,
+      });
+
+      mgr.closeSocket('M');
+      await tester.pump();
+      await tester.pump();
+
+      expect(container.read(remoteProjectStatusProvider), isEmpty);
+      expect(
+        container.read(remoteSessionStatusProvider),
+        isEmpty,
+        reason:
+            'a per-session status outliving its socket is unclearable — it beats '
+            'the project status the close DOES retire',
+      );
+
       await stores.cachedSessionsStore.flushNow();
     },
   );

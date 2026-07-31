@@ -339,9 +339,18 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
         // state. Labels intentionally persist; status is cleared from both
         // the live provider and the on-disk cache so a cold boot after a
         // disconnect doesn't re-seed stale badges for an offline machine.
+        //
+        // BOTH maps, always: the per-session map takes priority over the
+        // project one (see sessionRowStatus), so clearing only the project
+        // status would leave every session row pulsing its last "working" on a
+        // machine we're no longer connected to — the very badge the project
+        // clear exists to retire, now unclearable.
         ref
             .read(remoteProjectStatusProvider.notifier)
             .setMachineStatuses(uuid, const {});
+        ref
+            .read(remoteSessionStatusProvider.notifier)
+            .setMachineSessionStatuses(uuid, const {});
         ref.read(cachedSessionsStoreProvider).clearStatusesForMachine('$uuid.');
         // Clear stale advert-delta tracking so a reconnect triggers a fresh
         // re-peek regardless of whether the new advert matches the pre-disconnect
@@ -378,6 +387,16 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
     ref
         .read(remoteProjectStatusProvider.notifier)
         .setMachineStatuses(uuid, statuses);
+    // Same fold for the per-session map the session rows dot themselves from.
+    // Absent (older bridge / cold project) stays absent — that's what tells the
+    // rows to fall back to the project status above.
+    ref
+        .read(remoteSessionStatusProvider.notifier)
+        .setMachineSessionStatuses(uuid, {
+          for (final ap in state.projects)
+            if (ap.sessionStatuses != null)
+              '$uuid.${ap.projectId}': ap.sessionStatuses!,
+        });
     // Persist the new statuses so a cold boot can seed the status map before
     // the first advert arrives. Only projects in the current advert are written;
     // projects dropped from the advert are cleared via clearStatusesForMachine
@@ -509,8 +528,17 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
     try {
       final host = ref.read(hostControllerProvider);
       final hostFile = await host.peekHost();
-      if (hostFile == null) return;
       if (!mounted) return;
+      // No host → no local project is running anything, so the same rule as a
+      // closed relay socket applies: retire the live status rather than leave a
+      // crashed host's last "working" pulsing until it comes back.
+      if (hostFile == null) {
+        ref.read(remoteProjectStatusProvider.notifier).setLocalStatuses(const {});
+        ref
+            .read(remoteSessionStatusProvider.notifier)
+            .setLocalSessionStatuses(const {});
+        return;
+      }
       final client = HostControlClient(
         port: hostFile.controlPort,
         token: hostFile.token,
@@ -519,13 +547,19 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
         final projects = await client.projectList();
         if (!mounted) return;
         final statuses = <String, AgentWorkStatus>{};
+        final sessionStatuses = <String, Map<String, AgentWorkStatus>>{};
         for (final p in projects) {
           final s = AgentWorkStatus.fromWire(p.workStatus);
           if (s != null) statuses[p.projectId] = s;
+          final perSession = p.sessionStatuses;
+          if (perSession != null) sessionStatuses[p.projectId] = perSession;
         }
         ref
             .read(remoteProjectStatusProvider.notifier)
             .setLocalStatuses(statuses);
+        ref
+            .read(remoteSessionStatusProvider.notifier)
+            .setLocalSessionStatuses(sessionStatuses);
       } catch (_) {
         // Host went away between peek and list — ignore; next tick will retry.
       } finally {

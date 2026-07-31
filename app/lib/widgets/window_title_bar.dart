@@ -248,11 +248,21 @@ class TitleBarBreadcrumb extends ConsumerWidget {
     // Leaf slot must exist for the '/' separator + leafOverride to render; the
     // string is a fallback only — the editable leaf renders the live name.
     final segments = [agentName, if (active != null) active.name];
-    // Live work status for the focused project — working/attention/error next
-    // to the breadcrumb. Omitted when done to keep an idle bar clean.
-    final workStatus = activeId != null
+    // Live work status next to the breadcrumb — of the focused SESSION, since
+    // that's what the breadcrumb's leaf names; only with no session focused does
+    // it fall back to the project rollup. Omitted when done to keep an idle bar
+    // clean.
+    final workStatus = activeId == null
+        ? null
+        : active == null
         ? ref.watch(projectWorkStatusProvider(activeId))
-        : null;
+        : ref.watch(
+            sessionWorkStatusProvider((
+              entryId: activeId,
+              sessionId: active.id,
+              running: active.running,
+            )),
+          );
 
     return Row(
       children: [

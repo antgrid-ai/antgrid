@@ -517,7 +517,16 @@ class _AdvertisedProjectRow extends ConsumerWidget {
       projectId: project.projectId,
     ).registrationId;
     final expanded = ref.watch(expandedDrawerIdsProvider).contains(regId);
-    final workStatus = ref.watch(projectWorkStatusProvider(regId));
+    // Rollup dot only while no session row is on screen to carry it — expanded
+    // WITH sessions, each row shows its own (see SessionRow's leading slot);
+    // expanded while `_ProjectSessions` is still fetching, the rollup stays so
+    // the row isn't left blank through the peek.
+    final sessionsShown =
+        expanded &&
+        ref.watch(sessionsForEntryProvider(regId)).any((s) => !s.archived);
+    final workStatus = sessionsShown
+        ? AgentWorkStatus.done
+        : ref.watch(projectWorkStatusProvider(regId));
     final t = context.antgrid;
     final name = (project.label != null && project.label!.isNotEmpty)
         ? project.label!

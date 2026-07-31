@@ -29,6 +29,10 @@ export interface ProjectSummary {
   mode: "local" | "remote";
   /** Live work status for warm cores. Absent until the first bus frame arrives. */
   workStatus?: string;
+  /** Per-running-session status keyed by session id — the same per-session view
+   *  the relay advert carries, so a LOCAL project's session rows dot themselves
+   *  instead of inheriting the project rollup. Absent for a cold core. */
+  sessionStatuses?: Record<string, string>;
 }
 
 /** One paired phone as surfaced to the desktop mobile-devices hub. Mirror of the

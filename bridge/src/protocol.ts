@@ -332,6 +332,13 @@ const AgentProjectsMessage = BaseMessage.extend({
       // ambiguous between new-session and re-prompt (see app_shell's
       // _onControlPlaneState).
       runningSessions: z.number().int().nonnegative().optional(),
+      // Per-running-session status, keyed by session id — what the app dots each
+      // SESSION row with, since `status` above is only their rollup and would
+      // otherwise paint a working session with its blocked sibling's amber.
+      // PRESENCE is the capability signal: `{}` means "warm core, nothing
+      // running", absent means an older bridge and the app falls back to
+      // `status` for every session.
+      sessionStatuses: z.record(z.string(), WorkStatusSchema).optional(),
       lastActiveAt: z.string().optional(),
       // Present when the project has an admitted relay data-plane stream: the
       // phone binds its ProjectSession services to this streamId without a fresh

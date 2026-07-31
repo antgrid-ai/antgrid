@@ -21,10 +21,13 @@ import '../project/limits.dart';
 import '../project/project_session_registry.dart';
 import '../providers/agent_transport.dart';
 import '../providers/new_session_picker.dart';
+import '../providers/project_work_status.dart';
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
+import '../services/control_plane_client.dart';
 import '../services/sessions_service.dart';
+import 'agent_work_status_dot.dart';
 import 'drawer_entry_row.dart' show activateDrawerEntryById, ensureRemoteOnline;
 import 'session_rename_dialog.dart';
 
@@ -129,6 +132,26 @@ class _SessionRowState extends ConsumerState<SessionRow> {
     return AbStatusTone.muted;
   }
 
+  /// The leading indicator. Work status owns the slot whenever the agent has
+  /// something to say about THIS session (working / needs you / error) — it is
+  /// the same dot the Recent list and the collapsed project row show, so one
+  /// session's state reads identically wherever it surfaces. Otherwise the slot
+  /// falls back to plain liveness: filled = running, hollow ring = idle. The
+  /// fill/outline contrast reads "on vs off" faster than a colour shift between
+  /// two filled dots, so only a running session gets a solid dot.
+  Widget _leadingDot(AgentWorkStatus work) {
+    final key = ValueKey('session-status-dot-${session.id}');
+    if (work != AgentWorkStatus.done) {
+      return AgentWorkStatusDot(key: key, status: work);
+    }
+    return AbStatusDot(
+      key: key,
+      tone: _tone(),
+      size: AbDotSize.sm,
+      style: session.running ? AbDotStyle.filled : AbDotStyle.hollow,
+    );
+  }
+
   void _onEnter(PointerEnterEvent _) {
     if (isMobilePlatform) return;
     if (!_hovered && mounted) setState(() => _hovered = true);
@@ -143,6 +166,13 @@ class _SessionRowState extends ConsumerState<SessionRow> {
   Widget build(BuildContext context) {
     final activeId = ref.watch(activeSessionIdProvider);
     final selected = activeId == session.id;
+    final work = ref.watch(
+      sessionWorkStatusProvider((
+        entryId: widget.entryId,
+        sessionId: session.id,
+        running: session.running,
+      )),
+    );
 
     // Inline rename is offered only for running sessions whose project is
     // warm (live transport in the registry). Warm => `_commitEdit`'s
@@ -176,14 +206,7 @@ class _SessionRowState extends ConsumerState<SessionRow> {
             // centre of the text.
             child: Align(
               alignment: const Alignment(0, _dotOpticalYBias),
-              // Filled dot = live, hollow ring = idle. The fill/outline
-              // contrast reads "on vs off" faster than a colour shift between
-              // two filled dots, so only a running session gets a solid dot.
-              child: AbStatusDot(
-                tone: _tone(),
-                size: AbDotSize.sm,
-                style: session.running ? AbDotStyle.filled : AbDotStyle.hollow,
-              ),
+              child: _leadingDot(work),
             ),
           ),
           // Row height is anchored by the always-reserved kebab slot (taller

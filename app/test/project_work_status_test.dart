@@ -20,29 +20,158 @@ ProviderContainer _seeded(
 }
 
 void main() {
-  group('recentRowStatus', () {
-    test('a running session with no advert is done, not working', () {
+  group('sessionRowStatus', () {
+    AgentWorkStatus call({
+      AgentWorkStatus? advert,
+      Map<String, AgentWorkStatus>? perSession,
+      String sessionId = 's1',
+      bool running = true,
+    }) => sessionRowStatus(
+      advert: advert,
+      perSession: perSession,
+      sessionId: sessionId,
+      running: running,
+    );
+
+    test('a running session with no advert at all is done, not working', () {
       // The regression this guards: a merely-open session used to read
       // "Working" forever. Only the bridge's advert (a prompt in flight) can
       // say working now.
-      expect(recentRowStatus(null, true), AgentWorkStatus.done);
+      expect(call(), AgentWorkStatus.done);
     });
 
     test('a stopped session is done even while the project is busy', () {
       expect(
-        recentRowStatus(AgentWorkStatus.working, false),
+        call(advert: AgentWorkStatus.working, running: false),
         AgentWorkStatus.done,
       );
       expect(
-        recentRowStatus(AgentWorkStatus.attention, false),
+        call(
+          perSession: const {'s1': AgentWorkStatus.attention},
+          running: false,
+        ),
         AgentWorkStatus.done,
       );
     });
 
-    test('a running session takes the project advert', () {
+    test('the session\'s own status wins over the project rollup', () {
+      // The point of the per-session view: a sibling being blocked must not
+      // paint this row amber.
+      expect(
+        call(
+          advert: AgentWorkStatus.attention,
+          perSession: const {
+            's1': AgentWorkStatus.working,
+            's2': AgentWorkStatus.attention,
+          },
+        ),
+        AgentWorkStatus.working,
+      );
+    });
+
+    test('a per-session map present but silent about this row reads done', () {
+      // Present-but-missing means the bridge knows this project's sessions and
+      // this one isn't among the running ones — NOT "fall back to the project".
+      expect(
+        call(advert: AgentWorkStatus.working, perSession: const {}),
+        AgentWorkStatus.done,
+      );
+    });
+
+    test('no per-session map falls back to the project advert', () {
+      // Older bridge / cold project: the rollup is all we have.
       for (final s in AgentWorkStatus.values) {
-        expect(recentRowStatus(s, true), s);
+        expect(call(advert: s), s);
       }
+    });
+  });
+
+  group('sessionWorkStatusProvider', () {
+    test('reads the per-session map, falling back to the project', () {
+      final container = _seeded('m1', const {
+        'm1.p': AgentWorkStatus.attention,
+      });
+      // No per-session data yet → the rollup.
+      expect(
+        container.read(
+          sessionWorkStatusProvider((
+            entryId: 'm1.p',
+            sessionId: 's1',
+            running: true,
+          )),
+        ),
+        AgentWorkStatus.attention,
+      );
+      container
+          .read(remoteSessionStatusProvider.notifier)
+          .setMachineSessionStatuses('m1', const {
+            'm1.p': {'s1': AgentWorkStatus.working, 's2': AgentWorkStatus.attention},
+          });
+      expect(
+        container.read(
+          sessionWorkStatusProvider((
+            entryId: 'm1.p',
+            sessionId: 's1',
+            running: true,
+          )),
+        ),
+        AgentWorkStatus.working,
+      );
+      expect(
+        container.read(
+          sessionWorkStatusProvider((
+            entryId: 'm1.p',
+            sessionId: 's2',
+            running: true,
+          )),
+        ),
+        AgentWorkStatus.attention,
+      );
+    });
+
+    test('a closed socket clears the machine\'s per-session entries', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      final notifier = container.read(remoteSessionStatusProvider.notifier);
+      notifier.setMachineSessionStatuses('m1', const {
+        'm1.p': {'s1': AgentWorkStatus.working},
+      });
+      notifier.setMachineSessionStatuses('m1', const {});
+      expect(container.read(remoteSessionStatusProvider), isEmpty);
+    });
+
+    test('an unchanged re-delivery keeps the SAME inner map instance', () {
+      // Widgets select the inner map; a fresh-but-equal instance would rebuild
+      // every session row on every advert re-push.
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      final notifier = container.read(remoteSessionStatusProvider.notifier);
+      notifier.setMachineSessionStatuses('m1', {
+        'm1.p': {'s1': AgentWorkStatus.working},
+      });
+      final first = container.read(remoteSessionStatusProvider)['m1.p'];
+      notifier.setMachineSessionStatuses('m1', {
+        'm1.p': {'s1': AgentWorkStatus.working},
+      });
+      expect(
+        identical(container.read(remoteSessionStatusProvider)['m1.p'], first),
+        isTrue,
+      );
+    });
+
+    test('local (bare-key) writes do not disturb a machine\'s entries', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      final notifier = container.read(remoteSessionStatusProvider.notifier);
+      notifier.setMachineSessionStatuses('m1', const {
+        'm1.p': {'s1': AgentWorkStatus.working},
+      });
+      notifier.setLocalSessionStatuses(const {
+        'antgrid': {'s9': AgentWorkStatus.attention},
+      });
+      final state = container.read(remoteSessionStatusProvider);
+      expect(state['m1.p'], const {'s1': AgentWorkStatus.working});
+      expect(state['antgrid'], const {'s9': AgentWorkStatus.attention});
     });
   });
 

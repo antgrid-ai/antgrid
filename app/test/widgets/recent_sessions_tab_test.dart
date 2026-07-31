@@ -162,7 +162,65 @@ void main() {
     await tester.pump();
 
     // The header summarizes it as attention despite the session's running flag.
-    expect(find.textContaining('needs attention'), findsOneWidget);
+    expect(find.textContaining('1 needs you'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('counts only the session that is actually blocked', (
+    tester,
+  ) async {
+    // Two sessions on ONE project, one blocked: the summary must read "1 needs
+    // you · 1 working", not paint both with the project rollup.
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    const origin = RecentOrigin(
+      isLocal: false,
+      registrationId: 'uuidA.projA',
+      projectId: 'projA',
+      machineUuid: 'uuidA',
+      projectName: 'proj',
+      deviceName: 'Mac',
+    );
+    RecentSessionRow row(String id, String name) => RecentSessionRow(
+      session: SessionEntry(
+        id: id,
+        name: name,
+        createdAt: 0,
+        lastUsedAt: 1,
+        archived: false,
+        running: true,
+      ),
+      origin: origin,
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          recentSessionsProvider.overrideWithValue([
+            row('s1', 'Blocked'),
+            row('s2', 'Busy'),
+          ]),
+        ],
+        child: _wrap(const RecentSessionsTab()),
+      ),
+    );
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(RecentSessionsTab)),
+    );
+    container.read(remoteProjectStatusProvider.notifier).setMachineStatuses(
+      'uuidA',
+      {'uuidA.projA': AgentWorkStatus.attention}, // the rollup
+    );
+    container
+        .read(remoteSessionStatusProvider.notifier)
+        .setMachineSessionStatuses('uuidA', {
+          'uuidA.projA': {
+            's1': AgentWorkStatus.attention,
+            's2': AgentWorkStatus.working,
+          },
+        });
+    await tester.pump();
+
+    expect(find.textContaining('1 needs you'), findsOneWidget);
+    expect(find.textContaining('1 working'), findsOneWidget);
     debugDefaultTargetPlatformOverride = null;
   });
 }

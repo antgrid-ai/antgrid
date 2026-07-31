@@ -44,6 +44,15 @@ class AdvertisedProject {
   /// project's session list actually changed — the trigger for re-peeking it
   /// (see app_shell's _onControlPlaneState), which `status` alone can't signal.
   final int? runningSessions;
+
+  /// Per-running-session work status, keyed by session id. [status] above is
+  /// only the rollup of these, so a session row must dot itself from here or it
+  /// wears its noisiest sibling's state.
+  ///
+  /// PRESENCE is the capability signal, which is why this is a nullable map and
+  /// not an empty-by-default one: `{}` means "warm core, nothing running", null
+  /// means an older bridge and callers fall back to [status] for every session.
+  final Map<String, AgentWorkStatus>? sessionStatuses;
   final String? lastActiveAt;
 
   const AdvertisedProject({
@@ -53,6 +62,7 @@ class AdvertisedProject {
     required this.running,
     this.status,
     this.runningSessions,
+    this.sessionStatuses,
     this.lastActiveAt,
   });
 
@@ -67,9 +77,26 @@ class AdvertisedProject {
       running: running,
       status: AgentWorkStatus.fromWire(json['status']),
       runningSessions: (json['runningSessions'] as num?)?.toInt(),
+      sessionStatuses: parseSessionStatuses(json['sessionStatuses']),
       lastActiveAt: json['lastActiveAt'] as String?,
     );
   }
+}
+
+/// Decode a wire `sessionStatuses` object (`{sessionId: status}`) shared by the
+/// relay advert and the loopback host control plane. Null in, null out — the
+/// caller distinguishes "no per-session data" from "no running sessions".
+/// Unrecognised status strings are dropped rather than failing the whole map, so
+/// a newer bridge adding a state degrades one row instead of all of them.
+Map<String, AgentWorkStatus>? parseSessionStatuses(Object? raw) {
+  if (raw is! Map) return null;
+  final out = <String, AgentWorkStatus>{};
+  for (final e in raw.entries) {
+    final id = e.key;
+    final status = AgentWorkStatus.fromWire(e.value);
+    if (id is String && status != null) out[id] = status;
+  }
+  return out;
 }
 
 /// An installed tool advertised by the agent over the control plane. Mirrors the

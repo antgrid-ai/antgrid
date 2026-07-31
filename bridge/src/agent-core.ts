@@ -79,6 +79,21 @@ export function buildChatSpawnAugment(
 // Lives with codex's driver (it is codex's app-server quirk, not a core one).
 export { codexNotifyOnlyArgs } from "./agents/codex/driver";
 
+/**
+ * Whether a `terminal:input` payload submitted a prompt, for the work-status
+ * turn inference agents without a pre-turn hook depend on (see work-status.ts).
+ *
+ * A TUI submits on CR, so that's the signal — but only as the FINAL byte, and
+ * never behind ESC: `\x1b\r` is alt+enter, which inserts a newline into a
+ * multi-line prompt rather than sending it. Treating that as a submit would open
+ * a turn nothing is going to close, which is exactly the stale "working" dot the
+ * turn model exists to avoid. Shift+enter under the kitty protocol
+ * (`\x1b[13;2u`) carries no CR at all and needs no special case.
+ */
+export function isSubmitKeystroke(data: string): boolean {
+  return data.endsWith("\r") && !data.endsWith("\x1b\r");
+}
+
 export interface AgentCore {
   /** Wire up an outbound transport. The bus's inbound handler is set so the
    *  transport can dispatch incoming messages back into core. */
@@ -157,6 +172,16 @@ export interface BuildAgentCoreOptions {
    *  on a fresh turn. Bridge-internal — never surfaces to the app.
    *  [sessionId] is the session the hook fired for, when it carried one. */
   onTurnStart?: (sessionId?: string) => void;
+  /** Fired when the user types into [sessionId]'s PTY, so the owning ProjectCore
+   *  can clear a block the hook reported. Bridge-internal, and NOT a turn-start
+   *  on its own: typing in an idle session is not work. `submitted` (the input
+   *  carried a CR) is a turn-start only for agents that have no pre-turn hook. */
+  onUserReply?: (sessionId: string, opts: { submitted: boolean }) => void;
+  /** Fired when the user resolves a permission/question on [sessionId], so the
+   *  owning ProjectCore can clear the block and resume the turn. Distinct from
+   *  {@link onTurnStart}: it opens a turn only if something was actually
+   *  pending. Bridge-internal — never surfaces to the app. */
+  onAnswer?: (sessionId: string) => void;
   /** Relay base URL of the machine socket this core attaches to. Host-supplied
    *  in remote mode: only a standalone agent with an explicit `relayUrl:` in its
    *  antgrid.yaml can learn it from config, so without this a host-spawned
@@ -374,6 +399,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // structured.handleAgentMessage directly and never passes through
         // here (it must not reset the guard that counts it).
         handlerEngine.onUserReply(msg.sessionId, "\r");
+        // A RESOLVE additionally unblocks the session: the block is gone and the
+        // agent resumes on THIS session, so report it now rather than waiting for
+        // the driver's next outbound frame — that is what flips the session's dot
+        // from "needs you" back to "working" the instant the user replies. A bare
+        // prompt is excluded; its driver emits a real `agent:turn-start`. Not
+        // onTurnStart either: a resolve that raced a retraction has nothing to
+        // resume, and must not open a turn nothing will close.
+        if (msg.type !== "agent:prompt") opts.onAnswer?.(msg.sessionId);
         void structured?.handleAgentMessage(msg);
         return;
       case "agent:cancel":
@@ -392,6 +425,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // A user reply resets the handler's runaway guard; a submitted line
         // (data carrying CR/LF) also clears the pending escalations.
         handlerEngine.onUserReply(msg.terminalId, msg.data);
+        // ...and answers whatever the hook reported this session as blocked on.
+        // A terminal-mode session has no resolve frame — the keystroke IS the
+        // answer — so without this its "needs you" dot outlives the block. A
+        // SUBMIT additionally means "prompt started", the only turn-start an
+        // agent without a pre-turn hook can give us (see work-status.ts).
+        opts.onUserReply?.(msg.terminalId, {
+          submitted: isSubmitKeystroke(msg.data),
+        });
         break;
       case "handler:configure": {
         // parseMessageFast (the encrypted/local hot path) validates only the

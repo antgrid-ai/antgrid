@@ -493,7 +493,7 @@ export class HostServer {
         // Live work status + running-session count for warm cores only. Cold
         // projects omit both (their agent PTY isn't alive → nothing "working");
         // the app falls back to `running` for those, reading them as done/offline.
-        return { projectId: id, label: seen?.label, path: seen?.path, running: dialable, status: entry?.core.workStatus, runningSessions: entry?.core.workRunningCount, lastActiveAt: seen?.lastActiveAt, streamId };
+        return { projectId: id, label: seen?.label, path: seen?.path, running: dialable, status: entry?.core.workStatus, runningSessions: entry?.core.workRunningCount, sessionStatuses: entry?.core.sessionWorkStatuses, lastActiveAt: seen?.lastActiveAt, streamId };
       });
   }
 
@@ -1152,6 +1152,7 @@ export class HostServer {
     return [...this.cores.entries()].map(([projectId, e]) => ({
       projectId, path: e.path, running: true, mode: e.mode,
       workStatus: e.core.workStatus,
+      sessionStatuses: e.core.sessionWorkStatuses,
     }));
   }
 

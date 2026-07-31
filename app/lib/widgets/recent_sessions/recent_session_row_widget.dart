@@ -62,15 +62,15 @@ class _RecentSessionRowWidgetState
     final t = context.antgrid;
     final agentLabel = sessionAgentDisplayLabel(row.session);
     final relTime = relativeTime(when, now: now);
-    // Project-level status (from the live advert), masked to done for a stopped
-    // session — so a blocked/errored agent is unmistakable in the list while a
-    // dead row never claims to be busy. Reads the advert map directly (not
-    // projectWorkStatusProvider) since the row already owns its running flag.
-    final status = recentRowStatus(
-      ref.watch(
-        remoteProjectStatusProvider.select((m) => m[row.origin.registrationId]),
-      ),
-      row.session.running,
+    // This SESSION's own status from the live advert, masked to done for a
+    // stopped session — so a blocked/errored agent is unmistakable in the list
+    // while a dead row never claims to be busy.
+    final status = ref.watch(
+      sessionWorkStatusProvider((
+        entryId: row.origin.registrationId,
+        sessionId: row.session.id,
+        running: row.session.running,
+      )),
     );
     void onTap() => openRecentSession(context, ref.container, row);
 
