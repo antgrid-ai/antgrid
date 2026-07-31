@@ -140,10 +140,17 @@ describe("paired-phones lastSeen touch", () => {
    *  OS watch event plus a 50ms debounce, and event delivery is delayed 1:1 by
    *  anything stalling the loop — a neighbouring suite blocking ~170ms is enough
    *  to push the debounce past a 200ms deadline and fail with `changes` at 0.
-   *  Only positive assertions can poll; a "stayed 0" check still has to sit out
-   *  a real window, but a late event there can only weaken it, never fail it. */
+   *  A "stayed 0" check can't use this at all: it has to sit out a real window,
+   *  where a late event can only weaken it, never fail it. */
   async function waitForChanges(read: () => number, want: number): Promise<number> {
     for (let i = 0; i < 300 && read() < want; i++) await sleep(10);
+    // Callers assert an EXACT count, so returning the instant `want` lands would
+    // only prove "at least want" — a spurious extra notification arrives one
+    // debounce later and would never be seen. Settling past the debounce keeps
+    // that half of the assertion. Unlike a fixed deadline this cannot flake: the
+    // window opens only once the awaited event has actually arrived, so a stall
+    // delays both halves together instead of eating the budget for the first.
+    await sleep(100);
     return read();
   }
 
