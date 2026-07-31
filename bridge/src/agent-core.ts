@@ -33,7 +33,8 @@ import { SessionNamer } from "./session-namer";
 import { resolveStructuredTitle } from "./agents/title-dispatch";
 import { generateSessionTitle } from "./agents/title-generate";
 import { agentSpec, BY_HOOK_NAME } from "./agents/registry";
-import { HandlerEngine } from "./handler/engine";
+import { HandlerEngine, type HandlerEvent } from "./handler/engine";
+import { classifyTurnEndError } from "./handler/lifecycle-classify";
 import { createDispatchAdapter, createPtyAdapter } from "./handler/session-adapter";
 import { createStructuredAdapter } from "./handler/structured-adapter";
 import { dispatchRpc } from "./rpc/methods";
@@ -1298,16 +1299,22 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // drops hook events for chat slots so claude/codex chat spawns (which reuse
     // the terminal-mode plugin) don't fire every turn_end twice.
     const observeChatFrameForHandler = (msg: AbMessage) => {
-      let evt:
-        | { terminalId: string; event: "turn_end" | "permission_request" | "question"; detail?: string }
-        | null = null;
+      let evt: HandlerEvent | null = null;
       // "error" counts as a turn boundary, not just "end_turn": a turn that died
       // leaves the agent idle and blocked, which is precisely when a supervising
       // handler must act. Skipping it let an armed session go silent forever on
       // the one outcome the user most wants to be woken for. "cancelled" stays
       // ignored — the user cancelled it, so they are already present.
       if (msg.type === "agent:turn-end" && (msg.stopReason === "end_turn" || msg.stopReason === "error")) {
-        evt = { terminalId: msg.sessionId, event: "turn_end" };
+        // A limit or outage REPLACES the turn boundary: parking is the answer,
+        // and judging the failed turn on top would spend a judge call the
+        // provider is refusing anyway.
+        const lifecycle = msg.stopReason === "error" && msg.error
+          ? classifyTurnEndError(msg.error, Date.now())
+          : null;
+        evt = lifecycle
+          ? { terminalId: msg.sessionId, ...lifecycle }
+          : { terminalId: msg.sessionId, event: "turn_end" };
       } else if (msg.type === "agent:permission-request") {
         evt = { terminalId: msg.sessionId, event: "permission_request", detail: msg.title };
       } else if (msg.type === "agent:question") {

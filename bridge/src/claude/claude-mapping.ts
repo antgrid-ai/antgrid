@@ -61,19 +61,40 @@ export function addUsage(total: ClaudeUsageTotals, delta: ClaudeUsageTotals): vo
 }
 
 export interface ClaudeTurnError {
-  category: "unknown";
+  category: "unknown" | "rate_limited";
   message: string;
-  retryable: false;
+  retryable: boolean;
+  retryAfterMs?: number;
 }
 
-export function mapResultError(chunk: any): ClaudeTurnError {
+/** A rejecting `rate_limit_event` the driver saw before the failure. */
+export interface ClaudeRateLimit {
+  /** Epoch SECONDS, the unit the CLI emits (it renders `new Date(resetsAt * 1000)`). */
+  resetsAt?: number;
+  now: number;
+}
+
+// The result chunk itself never names the cause, so the caller supplies the
+// rate-limit snapshot that arrived on the side channel; without one a failure
+// stays deliberately coarse.
+export function mapFailureError(message: string, limited?: ClaudeRateLimit): ClaudeTurnError {
+  if (!limited) return { category: "unknown", message, retryable: false };
+  const retryAfterMs = limited.resetsAt !== undefined
+    ? Math.max(0, limited.resetsAt * 1000 - limited.now)
+    : undefined;
+  return {
+    category: "rate_limited",
+    message,
+    retryable: true,
+    ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+  };
+}
+
+export function mapResultError(chunk: any, limited?: ClaudeRateLimit): ClaudeTurnError {
   // SDKResultError carries `errors: string[]` (no `result` field — that's
   // SDKResultSuccess only). Joining errors gives the actual failure reason
   // instead of the generic subtype fallback.
   const errors: string[] = Array.isArray(chunk?.errors) ? chunk.errors.filter(Boolean) : [];
   const msg = errors.length ? errors.join("; ") : `turn failed (${chunk?.subtype ?? "error"})`;
-  // The SDK result subtype is coarse (error_max_turns, error_during_execution);
-  // there's no fine-grained category on the result chunk, so classify as unknown
-  // and non-retryable. Auth/rate-limit surface earlier via assistant.error.
-  return { category: "unknown", message: msg, retryable: false };
+  return mapFailureError(msg, limited);
 }

@@ -1326,3 +1326,102 @@ describe("ClaudeDriver pick rollback", () => {
     expect(last?.type === "agent:capabilities" && last.currentModeId).toBe("plan");
   });
 });
+
+describe("ClaudeDriver rate-limit snapshot", () => {
+  // The CLI emits rate_limit_event with `rate_limit_info.resetsAt` in epoch
+  // SECONDS (verified in the 2.1.220 binary: `new Date(e*1000)`), separately
+  // from the failing result chunk — hence the cache.
+  async function started() {
+    const h = makeDriver();
+    const p = h.driver.start();
+    h.fake.emit({ type: "system", subtype: "init", session_id: "sess-1", model: "claude-opus-4-8", slash_commands: [], skills: [] });
+    await p;
+    return h;
+  }
+
+  function failedResult() {
+    return { type: "result", subtype: "error_during_execution", is_error: true, session_id: "sess-1",
+      errors: ["Claude usage limit reached"], duration_ms: 10, num_turns: 1 };
+  }
+
+  function lastTurnEnd(sent: AbMessage[]) {
+    const end = sent.findLast((m) => m.type === "agent:turn-end");
+    return end?.type === "agent:turn-end" ? end : undefined;
+  }
+
+  it("classifies a failed turn as rate_limited with a positive retryAfterMs", async () => {
+    const { driver, sent, fake } = await started();
+    await driver.prompt("hi");
+    const resetsAtSec = Math.floor(Date.now() / 1000) + 600;
+    fake.emit({ type: "rate_limit_event", session_id: "sess-1", uuid: "u1",
+      rate_limit_info: { status: "rejected", resetsAt: resetsAtSec, rateLimitType: "five_hour" } });
+    await flush();
+    fake.emit(failedResult());
+    await flush();
+    const end = lastTurnEnd(sent);
+    expect(end?.stopReason).toBe("error");
+    expect(end?.error?.category).toBe("rate_limited");
+    expect(end?.error?.retryable).toBe(true);
+    expect(end?.error?.retryAfterMs).toBeGreaterThan(0);
+    expect(end?.error?.retryAfterMs).toBeLessThanOrEqual(600_000);
+  });
+
+  it("reports the limit with no retryAfterMs when the event carried no reset time", async () => {
+    const { driver, sent, fake } = await started();
+    await driver.prompt("hi");
+    fake.emit({ type: "rate_limit_event", session_id: "sess-1", uuid: "u1",
+      rate_limit_info: { status: "rejected" } });
+    await flush();
+    fake.emit(failedResult());
+    await flush();
+    const end = lastTurnEnd(sent);
+    expect(end?.error?.category).toBe("rate_limited");
+    expect(end?.error?.retryAfterMs).toBeUndefined();
+  });
+
+  it("leaves a failure unclassified when no limit was reported", async () => {
+    const { driver, sent, fake } = await started();
+    await driver.prompt("hi");
+    fake.emit(failedResult());
+    await flush();
+    expect(lastTurnEnd(sent)?.error?.category).toBe("unknown");
+  });
+
+  it("ignores a status that is not a rejection", async () => {
+    const { driver, sent, fake } = await started();
+    await driver.prompt("hi");
+    fake.emit({ type: "rate_limit_event", session_id: "sess-1", uuid: "u1",
+      rate_limit_info: { status: "allowed_warning", resetsAt: Math.floor(Date.now() / 1000) + 600 } });
+    await flush();
+    fake.emit(failedResult());
+    await flush();
+    expect(lastTurnEnd(sent)?.error?.category).toBe("unknown");
+  });
+
+  it("forgets the limit once a turn succeeds", async () => {
+    const { driver, sent, fake } = await started();
+    await driver.prompt("hi");
+    fake.emit({ type: "rate_limit_event", session_id: "sess-1", uuid: "u1",
+      rate_limit_info: { status: "rejected", resetsAt: Math.floor(Date.now() / 1000) + 600 } });
+    await flush();
+    fake.emit({ type: "result", subtype: "success", is_error: false, session_id: "sess-1", duration_ms: 5, num_turns: 1 });
+    await flush();
+    await driver.prompt("again");
+    fake.emit(failedResult());
+    await flush();
+    expect(lastTurnEnd(sent)?.error?.category).toBe("unknown");
+  });
+
+  it("classifies a mid-turn stream death during a limit window as rate_limited", async () => {
+    const { driver, sent, fake } = await started();
+    await driver.prompt("hi");
+    fake.emit({ type: "rate_limit_event", session_id: "sess-1", uuid: "u1",
+      rate_limit_info: { status: "rejected", resetsAt: Math.floor(Date.now() / 1000) + 600 } });
+    await flush();
+    fake.fail(new Error("boom"));
+    await flush();
+    const end = lastTurnEnd(sent);
+    expect(end?.stopReason).toBe("error");
+    expect(end?.error?.category).toBe("rate_limited");
+  });
+});

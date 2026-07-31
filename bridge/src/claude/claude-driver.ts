@@ -3,7 +3,10 @@ import { createMessage, createTranscriptReplay, type AbMessage } from "../protoc
 import type { StructuredDriver } from "../structured/structured-manager";
 import type { ClaudeQueryLike, PromptStreamController } from "./spawn-claude";
 import { resolveConfigPick } from "../structured/set-config";
-import { mapAssistantContent, mapToolKind, mapUsage, addUsage, mapResultError, type ClaudeUsageTotals } from "./claude-mapping";
+import {
+  mapAssistantContent, mapToolKind, mapUsage, addUsage, mapResultError, mapFailureError,
+  type ClaudeUsageTotals, type ClaudeRateLimit,
+} from "./claude-mapping";
 import { claudeResumeReplay } from "./claude-resume-replay";
 import { readClaudeTranscript } from "./claude-transcript-read";
 import { logger } from "../logger";
@@ -155,6 +158,11 @@ export class ClaudeDriver implements StructuredDriver {
   // partial updates (e.g. tool completion) merge over the cached item.
   private itemCache = new Map<string, Record<string, unknown>>();
   private cancelRequested = false;
+  // The CLI announces a usage limit on its own `rate_limit_event` channel,
+  // BEFORE the turn dies, and the failing result chunk names no cause. Holding
+  // the last rejection lets a failure be classified as a limit (which the
+  // handler lifecycle parks on) instead of a generic error.
+  private rateLimited: { resetsAt?: number } | null = null;
   // agent:usage `total` is cumulative for the session (see protocol.ts); the
   // SDK result chunk reports per-turn usage, so accumulate here.
   private usageTotal: ClaudeUsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0 };
@@ -316,7 +324,7 @@ export class ClaudeDriver implements StructuredDriver {
         : `claude session ended unexpectedly: ${err instanceof Error ? err.message : String(err)}`;
       this.send(createMessage("agent:error", {
         sessionId: this.sessionId,
-        error: { category: "unknown", message, retryable: false },
+        error: mapFailureError(message, this.limitSnapshot()),
       }));
       // The stream died mid-turn: no `result` chunk is coming, so onResult never
       // fires and the app's active turn would spin forever. Close it out here.
@@ -335,7 +343,7 @@ export class ClaudeDriver implements StructuredDriver {
       sessionId: this.sessionId,
       turnId,
       stopReason: "error",
-      error: { category: "unknown", message, retryable: false },
+      error: mapFailureError(message, this.limitSnapshot()),
     }));
     this.retractAllPending();
     this.activeTurnId = null;
@@ -366,11 +374,27 @@ export class ClaudeDriver implements StructuredDriver {
       // No "stream_event" case: those only arrive with includePartialMessages,
       // which v1 doesn't enable (no live token streaming; text lands per
       // assistant message).
+      case "rate_limit_event": return this.onRateLimit(c);
       case "assistant": return this.onAssistant(c);
       case "user": return this.onToolResult(c);
       case "result": return this.onResult(c);
       default: return;
     }
+  }
+
+  // Only a "rejected" status means the account is actually being refused;
+  // "allowed_warning" is a pre-limit heads-up we deliberately do not park on.
+  private onRateLimit(c: any): void {
+    const info = c?.rate_limit_info;
+    if (!info) return;
+    this.rateLimited = info.status === "rejected"
+      ? (typeof info.resetsAt === "number" ? { resetsAt: info.resetsAt } : {})
+      : null;
+  }
+
+  private limitSnapshot(): ClaudeRateLimit | undefined {
+    if (!this.rateLimited) return undefined;
+    return { ...this.rateLimited, now: Date.now() };
   }
 
   // The CLI re-broadcasts permissionMode on a live mode change (shift+tab, an
@@ -757,6 +781,10 @@ export class ClaudeDriver implements StructuredDriver {
     if (!turnId) return;
     const stopReason = this.cancelRequested ? "cancelled" : c?.is_error ? "error" : "end_turn";
     this.cancelRequested = false;
+    const limited = stopReason === "error" ? this.limitSnapshot() : undefined;
+    // A turn that ran to completion proves the window is over, whether or not
+    // the CLI bothered to emit a clearing rate_limit_event.
+    if (stopReason === "end_turn") this.rateLimited = null;
     if (c?.usage) {
       const last = mapUsage(c.usage);
       addUsage(this.usageTotal, last);
@@ -773,7 +801,7 @@ export class ClaudeDriver implements StructuredDriver {
     }
     this.send(createMessage("agent:turn-end", {
       sessionId: this.sessionId, turnId, stopReason,
-      ...(stopReason === "error" ? { error: mapResultError(c) } : {}),
+      ...(stopReason === "error" ? { error: mapResultError(c, limited) } : {}),
     }));
     this.retractAllPending();
     this.activeTurnId = null;
