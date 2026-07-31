@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { OpencodeDriver, type OpencodeClientLike, type OpencodeEvent } from "../src/opencode/opencode-driver";
+import type { DriverLifecycleEvent } from "../src/agents/types";
 import type { AbMessage } from "../src/protocol";
 
 // Fake client: a manual event queue + recorded calls. events() yields whatever
@@ -788,5 +789,127 @@ describe("OpencodeDriver capability discovery", () => {
       process.off("unhandledRejection", onUnhandled);
     }
     expect(unhandled).toEqual([]);
+  });
+});
+
+describe("OpencodeDriver lifecycle detection", () => {
+  async function lifecycleDriver() {
+    const fake = makeFakeClient();
+    const lifecycle: DriverLifecycleEvent[] = [];
+    // One ordered log so a test can assert a park is reported BEFORE the
+    // turn-end frame it accompanies.
+    const log: string[] = [];
+    const driver = new OpencodeDriver({
+      sessionId: "s1",
+      client: fake.client,
+      sendMessage: (m) => log.push(`send:${m.type}`),
+      onLifecycle: (evt) => { lifecycle.push(evt); log.push(`lifecycle:${evt.event}`); },
+    });
+    await driver.start();
+    return { driver, lifecycle, log, ...fake };
+  }
+
+  const retry = (over: Record<string, unknown> = {}) => ({
+    type: "session.status",
+    properties: { sessionID: "ses_root", status: { type: "retry", attempt: 1, message: "rate limited", next: 5_000, ...over } },
+  });
+
+  it("a retry status parks as a self-resuming limit with the wake time", async () => {
+    const { lifecycle, push } = await lifecycleDriver();
+    push(retry());
+    await tick();
+    expect(lifecycle).toEqual([
+      { event: "limit_hit", resetsAt: 5_000, selfResuming: true, errorClass: "rate_limit" },
+    ]);
+  });
+
+  it("a retry status with no wake time omits resetsAt", async () => {
+    const { lifecycle, push } = await lifecycleDriver();
+    push(retry({ next: undefined }));
+    await tick();
+    expect(lifecycle).toEqual([{ event: "limit_hit", selfResuming: true, errorClass: "rate_limit" }]);
+  });
+
+  it("every retry tick reports again (re-park is the engine's job)", async () => {
+    const { lifecycle, push } = await lifecycleDriver();
+    push(retry());
+    push(retry({ attempt: 2, next: 9_000 }));
+    await tick();
+    expect(lifecycle.map((e) => e.resetsAt)).toEqual([5_000, 9_000]);
+  });
+
+  it("leaving retry clears the limit exactly once", async () => {
+    const { lifecycle, push } = await lifecycleDriver();
+    push(retry());
+    push({ type: "session.status", properties: { sessionID: "ses_root", status: { type: "busy" } } });
+    push({ type: "session.status", properties: { sessionID: "ses_root", status: { type: "idle" } } });
+    await tick();
+    expect(lifecycle.map((e) => e.event)).toEqual(["limit_hit", "limit_cleared"]);
+  });
+
+  it("a busy/idle status with no preceding retry reports nothing", async () => {
+    const { lifecycle, push } = await lifecycleDriver();
+    push({ type: "session.status", properties: { sessionID: "ses_root", status: { type: "busy" } } });
+    push({ type: "session.status", properties: { sessionID: "ses_root", status: { type: "idle" } } });
+    await tick();
+    expect(lifecycle).toEqual([]);
+  });
+
+  it("ignores a status for a session outside the root", async () => {
+    const { lifecycle, push } = await lifecycleDriver();
+    push({ type: "session.status", properties: { sessionID: "ses_child", status: { type: "retry", attempt: 1, message: "x", next: 5_000 } } });
+    await tick();
+    expect(lifecycle).toEqual([]);
+  });
+
+  it("a terminal 429 parks as a limit before the turn-end frame", async () => {
+    const { driver, lifecycle, log, push } = await lifecycleDriver();
+    await driver.prompt("x");
+    push({ type: "session.error", properties: { sessionID: "ses_root", error: { name: "APIError", data: { message: "429", statusCode: 429 } } } });
+    await tick();
+    expect(lifecycle).toEqual([{ event: "limit_hit", errorClass: "rate_limit" }]);
+    expect(log.indexOf("lifecycle:limit_hit")).toBeLessThan(log.indexOf("send:agent:turn-end"));
+  });
+
+  it("a terminal non-429 error reports a transient failure", async () => {
+    const { driver, lifecycle, push } = await lifecycleDriver();
+    await driver.prompt("x");
+    push({ type: "session.error", properties: { sessionID: "ses_root", error: { name: "APIError", data: { message: "502", statusCode: 502 } } } });
+    await tick();
+    expect(lifecycle).toEqual([{ event: "turn_failed", errorClass: "unknown" }]);
+  });
+
+  it("does not treat auth or context-overflow failures as transient", async () => {
+    for (const name of ["ProviderAuthError", "MessageOutputLengthError"]) {
+      const { driver, lifecycle, push } = await lifecycleDriver();
+      await driver.prompt("x");
+      push({ type: "session.error", properties: { sessionID: "ses_root", error: { name, data: { message: "no" } } } });
+      await tick();
+      expect(lifecycle).toEqual([]);
+    }
+  });
+
+  it("does not report a cancelled turn as a failure", async () => {
+    const { driver, lifecycle, push } = await lifecycleDriver();
+    await driver.prompt("x");
+    push({ type: "session.error", properties: { sessionID: "ses_root", error: { name: "MessageAbortedError", data: { message: "aborted" } } } });
+    await tick();
+    expect(lifecycle).toEqual([]);
+  });
+
+  it("does not report a session error that ends no turn", async () => {
+    const { lifecycle, push } = await lifecycleDriver();
+    push({ type: "session.error", properties: { sessionID: "ses_root", error: { name: "APIError", data: { message: "502", statusCode: 502 } } } });
+    await tick();
+    expect(lifecycle).toEqual([]);
+  });
+
+  it("a driver with no onLifecycle handles the same events", async () => {
+    const { driver, sent, push } = await startedDriver();
+    await driver.prompt("x");
+    push(retry());
+    push({ type: "session.error", properties: { sessionID: "ses_root", error: { name: "APIError", data: { message: "429", statusCode: 429 } } } });
+    await tick();
+    expect(sent.find((m) => m.type === "agent:turn-end")).toBeDefined();
   });
 });

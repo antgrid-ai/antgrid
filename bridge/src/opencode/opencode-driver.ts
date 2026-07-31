@@ -1,4 +1,5 @@
 import { createMessage, createTranscriptReplay, type AbMessage } from "../protocol";
+import type { DriverLifecycleEvent } from "../agents/types";
 import { mapPart, mapPlanEntries, mapTokens, mapOpencodeError } from "./opencode-mapping";
 import { opencodeResumeReplay } from "./opencode-resume-replay";
 import { resolveConfigPick } from "../structured/set-config";
@@ -49,6 +50,7 @@ export interface OpencodeDriverOpts {
   client: OpencodeClientLike;
   sendMessage: (msg: AbMessage) => void;
   onTitle?: (title: string) => void;
+  onLifecycle?: (evt: DriverLifecycleEvent) => void;
 }
 
 export class OpencodeDriver {
@@ -56,6 +58,7 @@ export class OpencodeDriver {
   private readonly client: OpencodeClientLike;
   private readonly send: (msg: AbMessage) => void;
   private readonly onTitle?: (title: string) => void;
+  private readonly onLifecycle?: (evt: DriverLifecycleEvent) => void;
 
   private rootSessionId = "";
   private turnCounter = 0;
@@ -65,6 +68,9 @@ export class OpencodeDriver {
   // can't tell a normal completion from a post-abort one without this flag. The
   // next root idle/error closes the turn as 'cancelled' instead of end_turn/error.
   private cancelRequested = false;
+  // Whether the last session.status was a retry, so only the transition back to
+  // busy/idle clears the park — busy fires constantly during a normal turn.
+  private retrying = false;
 
   // messageID -> role, so a TextPart inherits its owning message's role.
   private messageRole = new Map<string, "assistant" | "user">();
@@ -111,6 +117,7 @@ export class OpencodeDriver {
     this.client = opts.client;
     this.send = opts.sendMessage;
     this.onTitle = opts.onTitle;
+    this.onLifecycle = opts.onLifecycle;
   }
 
   async start(resumeId?: string): Promise<string> {
@@ -533,6 +540,7 @@ export class OpencodeDriver {
       case "session.created": return this.onSessionCreated(p);
       case "session.updated": return this.onSessionUpdated(p);
       case "session.idle": return this.onSessionIdle(p);
+      case "session.status": return this.onSessionStatus(p);
       case "session.error": return this.onSessionError(p);
       case "permission.asked": return this.onPermissionAsked(p);
       case "question.asked": return this.onQuestionAsked(p);
@@ -660,6 +668,29 @@ export class OpencodeDriver {
     }
   }
 
+  // opencode is the one driver that parks AND wakes itself: it retries a
+  // rate-limited request unboundedly, honoring retry-after, so `next` is a wake
+  // time we mirror rather than a deadline we act on. Root only — a subtask's
+  // status would flap the park against the root's own busy/idle stream.
+  private onSessionStatus(p: any): void {
+    if ((p?.sessionID ?? "") !== this.rootSessionId) return;
+    const status = p?.status ?? {};
+    if (status.type === "retry") {
+      this.retrying = true;
+      const next = typeof status.next === "number" ? status.next : undefined;
+      this.onLifecycle?.({
+        event: "limit_hit",
+        ...(next !== undefined ? { resetsAt: next } : {}),
+        selfResuming: true,
+        errorClass: "rate_limit",
+      });
+      return;
+    }
+    if (!this.retrying) return;
+    this.retrying = false;
+    this.onLifecycle?.({ event: "limit_cleared" });
+  }
+
   // Per-turn part/role state is only meaningful within a turn; clearing it at the
   // turn boundary keeps these maps from growing unbounded across a long session
   // (and lets a part id reused next turn re-emit item-added as a first sighting).
@@ -692,6 +723,11 @@ export class OpencodeDriver {
       // not a turn error (and omit the error payload in that case).
       const cancelled = this.cancelRequested || error.category === "aborted";
       this.cancelRequested = false;
+      // Reported BEFORE the turn-end frame: both reach the handler engine on the
+      // same serialized chain, and only a park that is already in place swallows
+      // the turn boundary instead of spending a judge call on a failure the
+      // provider is refusing anyway.
+      if (!cancelled) this.reportTerminalFailure(p?.error, error.category);
       this.send(createMessage("agent:turn-end", {
         sessionId: this.sessionId,
         turnId,
@@ -705,6 +741,20 @@ export class OpencodeDriver {
     } else {
       this.send(createMessage("agent:error", { sessionId: this.sessionId, error }));
     }
+  }
+
+  // A terminal error means opencode's own unbounded retry loop gave up, so this
+  // park is NOT self-resuming — the engine's timer has to nudge. mapOpencodeError
+  // recognizes only three names, so everything outside them is the transient
+  // bucket: auth and context_overflow are the failures a wait cannot fix, and
+  // they keep the ordinary judge-and-escalate path.
+  private reportTerminalFailure(raw: any, category: string): void {
+    if (raw?.data?.statusCode === 429) {
+      this.onLifecycle?.({ event: "limit_hit", errorClass: "rate_limit" });
+      return;
+    }
+    if (category === "auth" || category === "context_overflow") return;
+    this.onLifecycle?.({ event: "turn_failed", errorClass: category });
   }
 
   private onPermissionAsked(p: any): void {

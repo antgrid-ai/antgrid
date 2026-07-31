@@ -4,6 +4,21 @@ import type { HookInvocation, HookPost } from "./hook-posts";
 import type { AbMessage } from "../protocol";
 import type { StructuredDriver } from "../structured/structured-manager";
 import type { JudgeTier } from "../handler/decision";
+import type { HandlerEvent } from "../handler/engine";
+
+/**
+ * The provider-lifecycle subset of `HandlerEvent` a chat driver can raise: the
+ * terminal is already bound by the factory, and a driver never reports a
+ * blocking prompt this way. Derived from `HandlerEvent` so the two cannot drift.
+ *
+ * Deliberately a driver dep rather than a wire frame: opencode re-reports its
+ * limit on every retry attempt, and one `agent:error` per attempt would flood
+ * the app transcript with noise about a wait it is already handling.
+ */
+export type DriverLifecycleEvent =
+  Pick<HandlerEvent, "resetsAt" | "errorClass" | "selfResuming"> & {
+    event: Extract<HandlerEvent["event"], "limit_hit" | "limit_cleared" | "turn_failed">;
+  };
 
 /**
  * Every coding agent the bridge can launch by registry key.
@@ -82,6 +97,10 @@ export interface DriverCtx {
   onAgentSession: (agentSessionId: string) => void;
   /** Hand a driver-supplied session title to the namer. */
   onTitle: (title: string) => void;
+  /** Report that the provider stopped serving this session (limit or outage) so
+   *  an armed Handler parks instead of going silent. Optional: a driver with no
+   *  structured signal for it changes nothing by leaving it unused. */
+  onLifecycle?: (evt: DriverLifecycleEvent) => void;
   /** Fire the advisory "a newer <tool> exists" nudge for this start. */
   emitUpdateCheck: () => void;
 }

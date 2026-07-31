@@ -1349,6 +1349,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           chatAugment: () => buildChatSpawnAugment(tool, sessionId, apiServer?.port ?? null, abDir),
           onAgentSession: (agentSessionId) => sessions?.setAgentSession(sessionId, agentSessionId),
           onTitle: (title) => namer?.onStructuredTitle(sessionId, title),
+          onLifecycle: (evt) => {
+            handlerEngine.handleEvent({ terminalId: sessionId, ...evt })
+              .catch((err) => logger.error("Handler lifecycle event failed: %s", err));
+          },
           emitUpdateCheck: () => emitUpdateCheck(tool, sessionId, send),
         });
       },
