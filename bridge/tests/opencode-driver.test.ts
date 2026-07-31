@@ -904,6 +904,19 @@ describe("OpencodeDriver lifecycle detection", () => {
     expect(lifecycle).toEqual([]);
   });
 
+  it("a terminal error ends the retry episode, so the next turn clears nothing", async () => {
+    const { lifecycle, driver, push } = await lifecycleDriver();
+    await driver.prompt("x");
+    push(retry());
+    // opencode gave up: this park belongs to the failure, and the next turn's
+    // first busy status must not cancel it with a stale limit_cleared.
+    push({ type: "session.error", properties: { sessionID: "ses_root", error: { name: "APIError", data: { message: "502", statusCode: 502 } } } });
+    await tick();
+    push({ type: "session.status", properties: { sessionID: "ses_root", status: { type: "busy" } } });
+    await tick();
+    expect(lifecycle.map((e) => e.event)).toEqual(["limit_hit", "turn_failed"]);
+  });
+
   it("a driver with no onLifecycle handles the same events", async () => {
     const { driver, sent, push } = await startedDriver();
     await driver.prompt("x");

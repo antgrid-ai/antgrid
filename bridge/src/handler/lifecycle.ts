@@ -12,6 +12,12 @@ export const LIMIT_FALLBACK_MS = 30 * 60_000;
 // failure reaching us already means retries were exhausted.
 export const TRANSIENT_CEILING = 3;
 
+// A park that wakes instantly is not a park. The resume nudge deliberately
+// bypasses the runaway guard, so a detector reporting a reset time already past
+// (a stale limit snapshot, a skewed clock) must not become a nudge-fail-nudge
+// loop running at full speed with nothing to stop it.
+export const MIN_PARK_MS = 30_000;
+
 // Geometric (30s, 2m, 8m …) so raising TRANSIENT_CEILING extends the series
 // instead of needing a new table.
 export function transientBackoffMs(failureCount: number): number {

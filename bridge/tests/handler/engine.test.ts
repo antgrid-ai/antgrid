@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { HandlerEngine } from "../../src/handler/engine";
 import { RunawayGuard } from "../../src/handler/runaway-guard";
-import { LIMIT_FALLBACK_MS } from "../../src/handler/lifecycle";
+import { LIMIT_FALLBACK_MS, MIN_PARK_MS } from "../../src/handler/lifecycle";
 import type { AbMessage } from "../../src/protocol";
 import type { HandlerDecision } from "../../src/handler/decision";
 import type { HandlerSessionRecord } from "../../src/handler/brief";
@@ -793,6 +793,21 @@ describe("lifecycle park / resume", () => {
     expect(armed()[0].ms).toBe(LIMIT_FALLBACK_MS);
   });
 
+  it("floors a reset time already in the past so the park cannot wake on arrival", async () => {
+    const { engine, sent, injected, armed, clock, timers } = makeEngine();
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    // A stale limit snapshot: the window it describes closed a minute ago.
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit", resetsAt: clock.t - 60_000 });
+    // The invariant is that a park cannot expire on arrival — without the floor
+    // this arms a 0ms timer that nudges straight back into the failure.
+    expect(statusOf(sent).parkedUntil).toBeGreaterThan(clock.t);
+    expect(statusOf(sent).parkedUntil).toBe(clock.t + MIN_PARK_MS);
+    expect(armed()[0].ms).toBeGreaterThan(0);
+    expect(armed()[0].ms).toBe(MIN_PARK_MS);
+    expect(injected).toEqual([]);
+    expect(timers).toHaveLength(1);
+  });
+
   it("the park timer nudges exactly once and records resumed", async () => {
     const { engine, sent, injected, activity, timers } = makeEngine();
     engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
@@ -1138,6 +1153,27 @@ describe("lifecycle persistence", () => {
     expect(statusOf(sent).parkedUntil).toBe(clock.t + 90_000);
     expect(armed()).toHaveLength(1);
     expect(armed()[0].ms).toBe(90_000);
+  });
+
+  it("persists that a park still owes a judge a verdict", async () => {
+    const { engine, saved } = makeEngine({ runDecisionFn: async () => null });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect((saved.at(-1) as { parkAwaitingJudge?: boolean }).parkAwaitingJudge).toBe(true);
+  });
+
+  it("resumes a rehydrated judge-failure park WITHOUT nudging", () => {
+    const { engine, sent, injected, activity } = makeEngine({
+      loadSessionFn: () => parkedRecord({
+        parkKind: "outage", parkedUntil: 900, parkAwaitingJudge: true,
+      }),
+    });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    // The stashed event did not survive the restart, so "continue" here would
+    // let the agent proceed from a pause no judge ever saw.
+    expect(injected).toEqual([]);
+    expect(records(activity, "resumed")).toHaveLength(1);
+    expect(statusOf(sent).state).toBe("watching");
   });
 
   it("rehydrates a park whose deadline has passed by resuming immediately", () => {

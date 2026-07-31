@@ -1398,6 +1398,20 @@ describe("ClaudeDriver rate-limit snapshot", () => {
     expect(lastTurnEnd(sent)?.error?.category).toBe("unknown");
   });
 
+  it("forgets a limit whose window has already closed", async () => {
+    const { driver, sent, fake } = await started();
+    await driver.prompt("hi");
+    // A rejection whose reset time is in the past: the window it describes is
+    // over, so a later failure is some other problem. Classifying it as a limit
+    // would hand the handler a wake time already gone.
+    fake.emit({ type: "rate_limit_event", session_id: "sess-1", uuid: "u1",
+      rate_limit_info: { status: "rejected", resetsAt: Math.floor(Date.now() / 1000) - 60 } });
+    await flush();
+    fake.emit(failedResult());
+    await flush();
+    expect(lastTurnEnd(sent)?.error?.category).toBe("unknown");
+  });
+
   it("forgets the limit once a turn succeeds", async () => {
     const { driver, sent, fake } = await started();
     await driver.prompt("hi");

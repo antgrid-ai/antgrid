@@ -53,6 +53,10 @@ export const HandlerSessionRecordSchema = z.object({
   parkKind: z.enum(["limit", "outage"]).optional(),
   parkedUntil: z.number().optional(),
   transientFailures: z.number().optional(),
+  // Whether the parked pause still owes a judge a verdict. The stashed event
+  // itself is too stale to persist, but nudging without this would let a
+  // restart resume an unsupervised turn.
+  parkAwaitingJudge: z.boolean().optional(),
 });
 export type HandlerSessionRecord = z.infer<typeof HandlerSessionRecordSchema>;
 

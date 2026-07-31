@@ -17,7 +17,7 @@ import type { SessionAdapter } from "./session-adapter";
 import { judgeCapable } from "../agents/registry";
 import { type HandlerDecision } from "./decision";
 import {
-  LIMIT_FALLBACK_MS, TRANSIENT_CEILING, transientBackoffMs, defaultSchedule,
+  LIMIT_FALLBACK_MS, MIN_PARK_MS, TRANSIENT_CEILING, transientBackoffMs, defaultSchedule,
   TimerRegistry, type LifecycleDeps,
 } from "./lifecycle";
 
@@ -111,6 +111,11 @@ interface ArmedSession {
   // Outage park born of a judge failure: the pause was never judged, so the
   // wake re-runs this event instead of nudging past supervision.
   retryEvent?: HandlerEvent;
+  // The persisted shadow of retryEvent. The event itself is too stale to keep
+  // across a restart, but the fact that a judge still owes this pause a verdict
+  // is not — without it the rehydrated park would wake and nudge, letting the
+  // agent carry on from a pause nobody ever assessed.
+  parkAwaitingJudge?: boolean;
 }
 
 export class HandlerEngine {
@@ -190,6 +195,7 @@ export class HandlerEngine {
       armedAt: s.armedAt, doneWhenMet: s.doneWhenMet, ledger: s.ledger,
       escalations: s.escalations, judgeTool: s.judgeTool, judgeModel: s.judgeModel,
       parkKind: s.parkKind, parkedUntil: s.parkedUntil, transientFailures: s.transientFailures,
+      parkAwaitingJudge: s.parkAwaitingJudge,
     });
   }
 
@@ -283,16 +289,19 @@ export class HandlerEngine {
     // Rehydrated last, so the arm record still reads as the session's opening
     // line and a deadline already past can resume straight into the new process.
     if (resumed?.parkKind && resumed.parkedUntil !== undefined) {
-      this.rehydratePark(p.terminalId, s, resumed.parkKind, resumed.parkedUntil);
+      this.rehydratePark(p.terminalId, s, resumed.parkKind, resumed.parkedUntil, resumed.parkAwaitingJudge);
     }
   }
 
   // selfResuming and retryEvent are deliberately not persisted: a restart drops
   // the stale pause event, and a driver that parks itself re-announces.
-  private rehydratePark(terminalId: string, s: ArmedSession, kind: "limit" | "outage", until: number): void {
+  private rehydratePark(
+    terminalId: string, s: ArmedSession, kind: "limit" | "outage", until: number, awaitingJudge?: boolean,
+  ): void {
     s.state = "parked";
     s.parkKind = kind;
     s.parkedUntil = until;
+    s.parkAwaitingJudge = awaitingJudge;
     if (until <= this.now()) return this.onParkTimer(terminalId);
     this.timers.arm(terminalId, until - this.now(), () => this.onParkTimer(terminalId));
     this.persist(terminalId, s, true);
@@ -379,6 +388,7 @@ export class HandlerEngine {
     s.selfResuming = undefined;
     s.parkPushSent = undefined;
     s.retryEvent = undefined;
+    s.parkAwaitingJudge = undefined;
     return true;
   }
 
@@ -605,7 +615,13 @@ export class HandlerEngine {
     }
 
     if (evt.event === "limit_hit") {
-      const until = evt.resetsAt ?? this.now() + LIMIT_FALLBACK_MS;
+      // Floored: a detector can hand us a reset time already in the past (a
+      // stale snapshot, clock skew), and a park expiring on arrival would nudge
+      // straight back into the failure that caused it.
+      const until = Math.max(
+        evt.resetsAt ?? this.now() + LIMIT_FALLBACK_MS,
+        this.now() + MIN_PARK_MS,
+      );
       // A repeat limit_hit is the same wait with a fresher deadline: refresh it,
       // but don't re-announce a park the user was already told about.
       const refresh = s.state === "parked" && s.parkKind === "limit";
@@ -669,6 +685,7 @@ export class HandlerEngine {
     s.parkedUntil = p.until;
     s.selfResuming = p.selfResuming;
     s.retryEvent = p.retryEvent;
+    s.parkAwaitingJudge = p.retryEvent ? true : undefined;
     // A driver that resumes itself needs no timer: our nudge would land in a
     // session that never stopped retrying.
     if (p.selfResuming) this.timers.cancel(terminalId);
@@ -680,6 +697,7 @@ export class HandlerEngine {
     const s = this.sessions.get(terminalId);
     if (!s || s.state !== "parked") return;
     const retry = s.retryEvent;
+    const owedJudge = s.parkAwaitingJudge;
     this.unparkIfParked(terminalId, s);
     this.persist(terminalId, s, true);
     this.record(terminalId, "resumed", "park timer elapsed");
@@ -690,6 +708,11 @@ export class HandlerEngine {
       void this.handleEvent(retry).catch(() => {});
       return;
     }
+    // Same park, rehydrated after a restart that dropped the stashed event: the
+    // pause it was waiting on is still unjudged, so resume quietly and let the
+    // next real event reach the judge. Nudging would be the supervision bypass
+    // the stash exists to prevent.
+    if (owedJudge) return;
     // The nudge is an unsupervised submitted line (injectReply appends CR), so
     // it must never land while a question is waiting on the human: it would
     // answer a pending permission prompt on their behalf. The park is over

@@ -394,7 +394,16 @@ export class ClaudeDriver implements StructuredDriver {
 
   private limitSnapshot(): ClaudeRateLimit | undefined {
     if (!this.rateLimited) return undefined;
-    return { ...this.rateLimited, now: Date.now() };
+    const now = Date.now();
+    // A window whose reset time has passed says nothing about THIS failure: the
+    // CLI announces each rejection on its own event. Keeping it would classify
+    // an unrelated error as a limit and hand the handler a wake time already
+    // gone, which parks and resumes in the same tick.
+    if (this.rateLimited.resetsAt !== undefined && this.rateLimited.resetsAt * 1000 <= now) {
+      this.rateLimited = null;
+      return undefined;
+    }
+    return { ...this.rateLimited, now };
   }
 
   // The CLI re-broadcasts permissionMode on a live mode change (shift+tab, an

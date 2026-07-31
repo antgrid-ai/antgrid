@@ -80,6 +80,22 @@ const ClaudePayloadSchema = z.object({
 // turn-end notification arrives (after-agent / stop).
 export const events = ["session-start", "stop", "stop-failure", "notification", "user-prompt"] as const;
 
+// StopFailure reasons no amount of waiting fixes. They take the ordinary
+// turn_end path so the judge escalates at once, matching what the chat-side
+// classifier does with the same categories — parking them instead would burn
+// the transient ceiling on two useless "continue" nudges first.
+const CLAUDE_FATAL_STOP_ERRORS = new Set([
+  "authentication_failed", "oauth_org_not_allowed", "billing_error",
+  "invalid_request", "model_not_found", "max_output_tokens",
+]);
+
+// Anything unrecognized is treated as transient: a value added upstream should
+// cost a backoff, not an immediate page.
+function claudeStopFailureEvent(errorClass: string): "limit_hit" | "turn_failed" | "turn_end" {
+  if (errorClass === "rate_limit") return "limit_hit";
+  return CLAUDE_FATAL_STOP_ERRORS.has(errorClass) ? "turn_end" : "turn_failed";
+}
+
 export async function toPosts(
   invocation: HookInvocation,
   { port, terminalId, readStdin }: HookPostCtx,
@@ -140,7 +156,7 @@ export async function toPosts(
       body: {
         terminalId,
         agent: "claude",
-        event: errorClass === "rate_limit" ? "limit_hit" : "turn_failed",
+        event: claudeStopFailureEvent(errorClass),
         transcriptPath: input.transcript_path ?? "",
         sessionId: input.session_id ?? "",
         errorClass,

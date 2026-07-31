@@ -172,7 +172,7 @@ describe("Claude hooks", () => {
   });
 
   test("stop-failure maps every non-limit error to turn_failed", async () => {
-    for (const error of ["overloaded", "server_error", "unknown", "model_not_found"]) {
+    for (const error of ["overloaded", "server_error", "unknown", "something_new_upstream"]) {
       const h = harness({
         agent: "claude",
         event: "stop-failure",
@@ -193,6 +193,24 @@ describe("Claude hooks", () => {
           },
         },
       ]);
+    }
+  });
+
+  test("stop-failure reports a fatal error as a plain turn_end, not a transient", async () => {
+    // No wait fixes a bad key or a billing hold, so these must reach the judge
+    // immediately instead of spending the ceiling on two "continue" nudges.
+    for (const error of [
+      "authentication_failed", "oauth_org_not_allowed", "billing_error",
+      "invalid_request", "model_not_found", "max_output_tokens",
+    ]) {
+      const h = harness({
+        agent: "claude",
+        event: "stop-failure",
+        stdin: JSON.stringify({ session_id: "s7", transcript_path: "/t", error }),
+      });
+      await h.run();
+      expect(h.posts).toHaveLength(1);
+      expect(h.posts[0]!.body).toMatchObject({ event: "turn_end", errorClass: error });
     }
   });
 

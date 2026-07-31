@@ -723,6 +723,10 @@ export class OpencodeDriver {
       // not a turn error (and omit the error payload in that case).
       const cancelled = this.cancelRequested || error.category === "aborted";
       this.cancelRequested = false;
+      // The retry episode ended here, whichever way the turn went. Leaving the
+      // flag set would make the next turn's first busy status report a
+      // limit_cleared that cancels this failure's own park before it can wake.
+      this.retrying = false;
       // Reported BEFORE the turn-end frame: both reach the handler engine on the
       // same serialized chain, and only a park that is already in place swallows
       // the turn boundary instead of spending a judge call on a failure the
