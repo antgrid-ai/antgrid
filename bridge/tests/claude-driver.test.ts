@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, setSystemTime } from "bun:test";
 import { ClaudeDriver, prettyModelName } from "../src/claude/claude-driver";
 import type { ClaudeQueryLike, PromptStreamController } from "../src/claude/spawn-claude";
 import type { AbMessage } from "../src/protocol";
@@ -1409,6 +1409,26 @@ describe("ClaudeDriver rate-limit snapshot", () => {
     await flush();
     fake.emit(failedResult());
     await flush();
+    expect(lastTurnEnd(sent)?.error?.category).toBe("unknown");
+  });
+
+  it("forgets an undated limit once its assumed window has passed", async () => {
+    const { driver, sent, fake } = await started();
+    await driver.prompt("hi");
+    fake.emit({ type: "rate_limit_event", session_id: "sess-1", uuid: "u1",
+      rate_limit_info: { status: "rejected" } });
+    await flush();
+    // A rejection naming no reset time has no window of its own to expire, and
+    // the only other reset — a turn that ends cleanly — never comes to a session
+    // stuck failing. Without an assumed window every later failure, including a
+    // dead backend, would report as a retryable limit forever.
+    setSystemTime(new Date(Date.now() + 31 * 60_000));
+    try {
+      fake.emit(failedResult());
+      await flush();
+    } finally {
+      setSystemTime();
+    }
     expect(lastTurnEnd(sent)?.error?.category).toBe("unknown");
   });
 

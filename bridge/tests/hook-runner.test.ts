@@ -209,8 +209,14 @@ describe("Claude hooks", () => {
         stdin: JSON.stringify({ session_id: "s7", transcript_path: "/t", error }),
       });
       await h.run();
-      expect(h.posts).toHaveLength(1);
+      expect(h.posts).toHaveLength(2);
       expect(h.posts[0]!.body).toMatchObject({ event: "turn_end", errorClass: error });
+      // StopFailure fires INSTEAD of Stop, so this is the only thing that ever
+      // answers the "working" UserPromptSubmit set — without it the session
+      // reads as actively working while the agent sits dead at its prompt.
+      // Fatal only: a park is already covered by the engine's own push.
+      expect(h.posts[1]!.path).toBe("/notify");
+      expect(h.posts[1]!.body).toMatchObject({ type: "error", terminalId: "term-1" });
     }
   });
 

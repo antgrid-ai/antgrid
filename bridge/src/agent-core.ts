@@ -377,6 +377,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         void structured?.handleAgentMessage(msg);
         return;
       case "agent:cancel":
+        // Not onUserReply: a cancel is not an answer, so pending escalations
+        // stand. It does end a self-resuming park, whose only wake path was the
+        // driver's retry loop — the very loop this cancel stops.
+        handlerEngine.onTurnCancelled(msg.sessionId);
+        void structured?.handleAgentMessage(msg);
+        return;
       case "agent:set-config":
       case "agent:session-action":
         void structured?.handleAgentMessage(msg);

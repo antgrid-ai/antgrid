@@ -17,9 +17,12 @@ import type { SessionAdapter } from "./session-adapter";
 import { judgeCapable } from "../agents/registry";
 import { type HandlerDecision } from "./decision";
 import {
-  LIMIT_FALLBACK_MS, MIN_PARK_MS, TRANSIENT_CEILING, transientBackoffMs, defaultSchedule,
-  TimerRegistry, type LifecycleDeps,
+  LIMIT_FALLBACK_MS, LIMIT_PARK_CEILING, MIN_PARK_MS, TRANSIENT_CEILING, transientBackoffMs,
+  defaultSchedule, TimerRegistry, type LifecycleDeps,
 } from "./lifecycle";
+import { logger } from "../logger";
+
+const log = logger.child({ component: "handler-engine" });
 
 export interface HandlerEvent {
   terminalId: string;
@@ -106,6 +109,10 @@ interface ArmedSession {
   selfResuming?: boolean;
   // Consecutive terminal transient failures. A judged decision clears it.
   transientFailures: number;
+  // Consecutive limit parks that ended with the limit still in force. Not
+  // persisted, unlike transientFailures: it bounds one in-process park→nudge
+  // cycle, and a restart is itself a break in that cycle.
+  limitParks: number;
   // One push per park episode: a re-park is the same wait, not a new one.
   parkPushSent?: boolean;
   // Outage park born of a judge failure: the pause was never judged, so the
@@ -280,6 +287,7 @@ export class HandlerEngine {
       judgeTool: stored.tool,
       judgeModel: stored.model,
       transientFailures: resumed?.transientFailures ?? 0,
+      limitParks: 0,
     };
     this.applyJudgeChoice(s, p);
     this.sessions.set(p.terminalId, s);
@@ -302,8 +310,19 @@ export class HandlerEngine {
     s.parkKind = kind;
     s.parkedUntil = until;
     s.parkAwaitingJudge = awaitingJudge;
-    if (until <= this.now()) return this.onParkTimer(terminalId);
-    this.timers.arm(terminalId, until - this.now(), () => this.onParkTimer(terminalId));
+    // A deadline that expired while we were down wakes into a runtime this
+    // process never armed: the PTY may have been respawned empty, so a nudge
+    // would submit "continue" to a shell prompt the instant the user re-arms.
+    // Resume quietly and let the next real event reach the judge — the same
+    // answer the judge-owed park below gives, for the same reason.
+    if (until <= this.now()) {
+      this.unparkIfParked(terminalId, s);
+      this.persist(terminalId, s, true);
+      this.record(terminalId, "resumed", "park expired while the bridge was down");
+      this.emitStatus();
+      return;
+    }
+    this.timers.arm(terminalId, until - this.now(), () => this.runParkTimer(terminalId));
     this.persist(terminalId, s, true);
     this.emitStatus();
   }
@@ -336,8 +355,30 @@ export class HandlerEngine {
     // for this terminal is stale (each pause supersedes the last).
     if (!unparked && s.escalations.length === 0) return;
     s.escalations = [];
+    // A human line is a fresh attempt, so the failure series that led here is
+    // over. Without this the counters stay at their ceiling — only a judged turn
+    // clears transientFailures — and the very next failure would page again
+    // instead of backing off.
+    s.transientFailures = 0;
+    s.limitParks = 0;
     s.state = "watching";
     this.persist(terminalId, s, true);
+    this.emitStatus();
+  }
+
+  /**
+   * The user cancelled the turn from the app. A self-resuming park deliberately
+   * arms no timer — the driver's own retry loop is the wake path — but a cancel
+   * ends that loop without a `limit_cleared`, so nothing else would ever end the
+   * park and the session would sit "PARKED · UNTIL 14:05" long past 14:05.
+   * Unparks only: a cancel is not an answer, so pending escalations stand.
+   */
+  onTurnCancelled(terminalId: string): void {
+    const s = this.sessions.get(terminalId);
+    if (!s) return;
+    if (!this.unparkIfParked(terminalId, s)) return;
+    this.persist(terminalId, s, true);
+    this.record(terminalId, "resumed", "turn cancelled");
     this.emitStatus();
   }
 
@@ -523,6 +564,7 @@ export class HandlerEngine {
 
     // A judge that answered proves the provider is serving us again.
     s.transientFailures = 0;
+    s.limitParks = 0;
 
     // A rejection must not strand state in "handling" — reset before rethrowing so
     // the next event isn't ignored and the app's status pill reflects reality.
@@ -607,10 +649,17 @@ export class HandlerEngine {
   // supervised work: they park or resume. Only the transient ceiling escalates.
   private handleLifecycle(evt: HandlerEvent, s: ArmedSession): void {
     if (evt.event === "limit_cleared") {
+      // Read before the unpark clears them: the provider coming back says
+      // nothing about a pause a judge still owes a verdict on.
+      const retry = s.retryEvent;
       if (!this.unparkIfParked(evt.terminalId, s)) return;
       this.persist(evt.terminalId, s, true);
       this.record(evt.terminalId, "resumed", "provider limit cleared");
       this.emitStatus();
+      // Re-judge rather than resume unsupervised — otherwise a limit that
+      // clears mid-backoff silently forgets the pause nobody ever assessed.
+      // Nothing awaits a lifecycle event, so the re-judge carries its own sink.
+      if (retry) void this.handleEvent(retry).catch(() => {});
       return;
     }
 
@@ -625,6 +674,27 @@ export class HandlerEngine {
       // A repeat limit_hit is the same wait with a fresher deadline: refresh it,
       // but don't re-announce a park the user was already told about.
       const refresh = s.state === "parked" && s.parkKind === "limit";
+      // Each NEW limit episode is a wait that did not work — the last one ended
+      // and the limit came straight back. A refresh is the same wait, so it does
+      // not count. Past the ceiling, waiting is no longer the answer.
+      if (!refresh && ++s.limitParks >= LIMIT_PARK_CEILING) {
+        const unparked = this.unparkIfParked(evt.terminalId, s);
+        // One unanswered escalation is enough: until the user responds, every
+        // further limit says the same thing.
+        if (s.escalations.length === 0) {
+          this.escalate(evt.terminalId, s, {
+            decision: "escalate", confidence: 0, reason: "provider limit outlasted repeated waits",
+            notify: {
+              title: "Handler", body: "Agent needs you (the provider limit keeps returning)",
+              draftReply: "", urgency: "normal",
+            },
+          });
+        } else if (unparked) {
+          this.persist(evt.terminalId, s, true);
+          this.emitStatus();
+        }
+        return;
+      }
       this.enterPark(evt.terminalId, s, {
         kind: "limit", until, selfResuming: evt.selfResuming, retryEvent: s.retryEvent,
       });
@@ -654,14 +724,18 @@ export class HandlerEngine {
       // normal escalation path and the phone gets an answerable row. Every
       // driver burns its own retry budget first, so three of these in a row
       // means the blip was not a blip. The counter stays at the ceiling until a
-      // judged turn clears it.
-      this.escalate(evt.terminalId, s, {
-        decision: "escalate", confidence: 0, reason: "repeated transient failures",
-        notify: {
-          title: "Handler", body: "Agent needs you (repeated transient failures)",
-          draftReply: "", urgency: "normal",
-        },
-      });
+      // judged turn or a human line clears it — so escalate only while nothing
+      // is already pending, or a stuck judge would append an identical row (and
+      // a push) on every single failure from here on.
+      if (s.escalations.length === 0) {
+        this.escalate(evt.terminalId, s, {
+          decision: "escalate", confidence: 0, reason: "repeated transient failures",
+          notify: {
+            title: "Handler", body: "Agent needs you (repeated transient failures)",
+            draftReply: "", urgency: "normal",
+          },
+        });
+      }
       return;
     }
     const until = this.now() + transientBackoffMs(s.transientFailures);
@@ -689,8 +763,21 @@ export class HandlerEngine {
     // A driver that resumes itself needs no timer: our nudge would land in a
     // session that never stopped retrying.
     if (p.selfResuming) this.timers.cancel(terminalId);
-    else this.timers.arm(terminalId, Math.max(0, p.until - this.now()), () => this.onParkTimer(terminalId));
+    else this.timers.arm(terminalId, Math.max(0, p.until - this.now()), () => this.runParkTimer(terminalId));
     this.persist(terminalId, s, true);
+  }
+
+  // Nothing awaits a timer callback, and the wake path writes to disk (the
+  // session record, the activity log): an EPERM from an AV scanner holding the
+  // .tmp rename, or an ENOSPC, would escape to the event loop as an
+  // uncaughtException and take the whole bridge — every project, every PTY, the
+  // relay socket — down with one session's expired park.
+  private runParkTimer(terminalId: string): void {
+    try {
+      this.onParkTimer(terminalId);
+    } catch (err) {
+      log.error("handler park timer failed for %s: %s", terminalId, err);
+    }
   }
 
   private onParkTimer(terminalId: string): void {
@@ -718,6 +805,21 @@ export class HandlerEngine {
     // answer a pending permission prompt on their behalf. The park is over
     // either way — the human is the resume path now.
     if (s.escalations.length > 0) return;
+    // Notify-only means "tell me, never act" — so the wake is a notification,
+    // not a nudge. Lifecycle events route ahead of the notify-only branch in
+    // handleEventInner (a park is a fact, not a verdict), which is what lets a
+    // notify-only session reach this timer at all; without this the wait would
+    // end by typing into a terminal the user opted out of auto-driving.
+    if (s.notifyOnly) {
+      this.escalate(terminalId, s, {
+        decision: "escalate", confidence: 0, reason: "notify-only: the wait is over",
+        notify: {
+          title: "Handler", body: "Agent is ready to resume — it is waiting on you",
+          draftReply: "", urgency: "normal",
+        },
+      });
+      return;
+    }
     // Straight to the adapter, never through the auto-reply path: the nudge is
     // the supervisor's own recovery action, so it must neither advance the
     // runaway counter nor enter the circular-exchange window — a second park

@@ -12,6 +12,14 @@ export const LIMIT_FALLBACK_MS = 30 * 60_000;
 // failure reaching us already means retries were exhausted.
 export const TRANSIENT_CEILING = 3;
 
+// Consecutive limit parks — waits that ended with the SAME limit still in force
+// — before the wait itself is declared the wrong answer. Counted separately from
+// TRANSIENT_CEILING because a limit park is a chosen wait, not a failure: the
+// two must not shorten each other's backoff. Without a ceiling here a limit no
+// wait can fix (an exhausted weekly quota) loops park→nudge→re-hit forever,
+// re-pushing every window and never telling anyone the agent is stuck.
+export const LIMIT_PARK_CEILING = 3;
+
 // A park that wakes instantly is not a park. The resume nudge deliberately
 // bypasses the runaway guard, so a detector reporting a reset time already past
 // (a stale limit snapshot, a skewed clock) must not become a nudge-fail-nudge

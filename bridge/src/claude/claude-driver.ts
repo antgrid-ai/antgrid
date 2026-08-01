@@ -37,6 +37,12 @@ export function prettyModelName(displayName: unknown, resolvedModel: unknown): s
   return version ? `${name} ${version}` : name;
 }
 
+// How long a rejection that named no reset time stays attributable to the
+// failure that follows it. Mirrors the handler's LIMIT_FALLBACK_MS — the same
+// "we were not told how long, assume this" answer on the other side of the same
+// event. Kept local so the driver layer does not import the supervisor.
+const UNDATED_LIMIT_TTL_MS = 30 * 60_000;
+
 type CatalogModel = { id: string; name: string; efforts?: string[]; defaultEffort?: string };
 
 // ModelInfo = { value, displayName, resolvedModel, supportsEffort, supportedEffortLevels, ... }
@@ -162,7 +168,9 @@ export class ClaudeDriver implements StructuredDriver {
   // BEFORE the turn dies, and the failing result chunk names no cause. Holding
   // the last rejection lets a failure be classified as a limit (which the
   // handler lifecycle parks on) instead of a generic error.
-  private rateLimited: { resetsAt?: number } | null = null;
+  // `at` is when WE saw it, not the CLI's clock: it is the only expiry a
+  // rejection carrying no resetsAt has (see limitSnapshot).
+  private rateLimited: { resetsAt?: number; at: number } | null = null;
   // agent:usage `total` is cumulative for the session (see protocol.ts); the
   // SDK result chunk reports per-turn usage, so accumulate here.
   private usageTotal: ClaudeUsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0 };
@@ -388,7 +396,7 @@ export class ClaudeDriver implements StructuredDriver {
     const info = c?.rate_limit_info;
     if (!info) return;
     this.rateLimited = info.status === "rejected"
-      ? (typeof info.resetsAt === "number" ? { resetsAt: info.resetsAt } : {})
+      ? { ...(typeof info.resetsAt === "number" ? { resetsAt: info.resetsAt } : {}), at: Date.now() }
       : null;
   }
 
@@ -399,11 +407,21 @@ export class ClaudeDriver implements StructuredDriver {
     // CLI announces each rejection on its own event. Keeping it would classify
     // an unrelated error as a limit and hand the handler a wake time already
     // gone, which parks and resumes in the same tick.
-    if (this.rateLimited.resetsAt !== undefined && this.rateLimited.resetsAt * 1000 <= now) {
+    //
+    // A rejection with NO reset time needs the same expiry or it never gets one:
+    // the only other reset is a turn that ends cleanly, which a session stuck
+    // failing never reaches — so every later failure, including a dead backend,
+    // would report as a retryable rate limit forever. Assume the same window the
+    // handler assumes for an undated limit (keep in step with LIMIT_FALLBACK_MS).
+    const expired = this.rateLimited.resetsAt !== undefined
+      ? this.rateLimited.resetsAt * 1000 <= now
+      : now - this.rateLimited.at >= UNDATED_LIMIT_TTL_MS;
+    if (expired) {
       this.rateLimited = null;
       return undefined;
     }
-    return { ...this.rateLimited, now };
+    const { resetsAt } = this.rateLimited;
+    return resetsAt !== undefined ? { resetsAt, now } : { now };
   }
 
   // The CLI re-broadcasts permissionMode on a live mode change (shift+tab, an

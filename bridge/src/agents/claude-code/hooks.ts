@@ -147,21 +147,37 @@ export async function toPosts(
     }
   }
   if (invocation.event === "stop-failure" && terminalId) {
-    // No /notify: a park is not a user-facing alert — the engine sends its own
-    // push once, on the first park of an episode.
     const errorClass = input.error || "unknown";
+    const event = claudeStopFailureEvent(errorClass);
     posts.push({
       port,
       path: "/handler-event",
       body: {
         terminalId,
         agent: "claude",
-        event: claudeStopFailureEvent(errorClass),
+        event,
         transcriptPath: input.transcript_path ?? "",
         sessionId: input.session_id ?? "",
         errorClass,
       },
     });
+    // StopFailure fires INSTEAD of Stop, so nothing else ever answers the
+    // "working" that UserPromptSubmit set — the session would read as actively
+    // working while the agent sits dead at its prompt. Only the fatal classes:
+    // they never park, so the engine sends no push of its own, whereas a park IS
+    // covered (once, on the first park of an episode) and must not be re-alerted
+    // here.
+    if (event === "turn_end") {
+      posts.push({
+        port,
+        path: "/notify",
+        body: {
+          type: "error",
+          ...(terminalId ? { terminalId } : {}),
+          ...(input.message ? { message: input.message } : {}),
+        },
+      });
+    }
   }
   if (invocation.event === "notification") {
     if (terminalId) {

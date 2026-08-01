@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { HandlerEngine } from "../../src/handler/engine";
 import { RunawayGuard } from "../../src/handler/runaway-guard";
-import { LIMIT_FALLBACK_MS, MIN_PARK_MS } from "../../src/handler/lifecycle";
+import { LIMIT_FALLBACK_MS, LIMIT_PARK_CEILING, MIN_PARK_MS } from "../../src/handler/lifecycle";
 import type { AbMessage } from "../../src/protocol";
 import type { HandlerDecision } from "../../src/handler/decision";
 import type { HandlerSessionRecord } from "../../src/handler/brief";
@@ -963,6 +963,110 @@ describe("lifecycle park / resume", () => {
     expect(statusOf(sent).parkKind).toBeUndefined();
   });
 
+  it("a limit that outlasts repeated waits escalates instead of parking again", async () => {
+    const { engine, sent, injected, activity, pushes, timers, armed } = makeEngine();
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    for (let i = 0; i < LIMIT_PARK_CEILING - 1; i++) {
+      await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+      timers.at(-1)!.fn();
+    }
+    expect(injected).toHaveLength(LIMIT_PARK_CEILING - 1);
+    // The wait keeps ending with the same limit still in force, so waiting is
+    // not the answer: without a ceiling this cycles forever, re-pushing and
+    // re-nudging every window and never telling anyone the agent is stuck.
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    expect(statusOf(sent).state).toBe("needs_you");
+    expect(statusOf(sent).parkKind).toBeUndefined();
+    expect(armed()).toHaveLength(0);
+    expect(injected).toHaveLength(LIMIT_PARK_CEILING - 1);
+    expect(records(activity, "parked")).toHaveLength(LIMIT_PARK_CEILING - 1);
+
+    // …and one unanswered escalation is enough for every further limit.
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    expect(sent.filter((m) => m.type === "handler:escalation")).toHaveLength(1);
+    expect(pushes).toHaveLength(LIMIT_PARK_CEILING - 1);
+  });
+
+  it("a judged turn between limit parks clears the limit ceiling", async () => {
+    const { engine, sent, timers } = makeEngine({ runDecisionFn: async () => decide({}) });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    for (let i = 0; i < LIMIT_PARK_CEILING + 2; i++) {
+      await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+      timers.at(-1)!.fn();
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    }
+    expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
+  });
+
+  it("a notify-only park ends in a notification, never a nudge", async () => {
+    const { engine, sent, injected, timers } = makeEngine();
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: true });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    expect(statusOf(sent).state).toBe("parked");
+    timers.at(-1)!.fn();
+    // "tell me, never act" — the wake must not type into the user's terminal.
+    expect(injected).toEqual([]);
+    expect(statusOf(sent).state).toBe("needs_you");
+    expect(sent.filter((m) => m.type === "handler:escalation")).toHaveLength(1);
+  });
+
+  it("a cancel ends a selfResuming park, whose only wake path it also ended", async () => {
+    const { engine, sent, activity, clock } = makeEngine();
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({
+      terminalId: "t1", event: "limit_hit", selfResuming: true, resetsAt: clock.t + 60_000,
+    });
+    expect(statusOf(sent).state).toBe("parked");
+    engine.onTurnCancelled("t1");
+    expect(statusOf(sent).state).toBe("watching");
+    expect(statusOf(sent).parkKind).toBeUndefined();
+    expect(records(activity, "resumed")).toHaveLength(1);
+  });
+
+  it("a cancel is not an answer: pending escalations survive it", async () => {
+    const { engine, sent } = makeEngine({ runDecisionFn: async () => decide({ decision: "escalate" }) });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    engine.onTurnCancelled("t1");
+    expect(statusOf(sent).state).toBe("needs_you");
+    expect(statusOf(sent).pendingEscalations).toBe(1);
+  });
+
+  it("a park timer that throws never escapes to the event loop", async () => {
+    // The wake path writes to disk (activity log, session record); a failed
+    // write there would otherwise become an uncaughtException and shut the whole
+    // bridge — every project, every PTY — down.
+    const { engine, timers } = makeEngine({
+      appendActivityFn: (r: { decision: string }) => {
+        if (r.decision === "resumed") throw new Error("ENOSPC");
+      },
+    });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    expect(() => timers.at(-1)!.fn()).not.toThrow();
+  });
+
+  it("limit_cleared re-judges a pause the judge still owed a verdict on", async () => {
+    const calls: Array<string | undefined> = [];
+    let sawSecond!: () => void;
+    const second = new Promise<void>((r) => { sawSecond = r; });
+    const { engine, injected } = makeEngine({
+      runDecisionFn: async (o: { transcriptPath?: string }) => {
+        calls.push(o.transcriptPath);
+        if (calls.length === 2) sawSecond();
+        return null;
+      },
+    });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end", transcriptPath: "/orig.jsonl" });
+    expect(calls).toHaveLength(1);
+    // The provider coming back does not answer the pause nobody assessed.
+    await engine.handleEvent({ terminalId: "t1", event: "limit_cleared" });
+    await second;
+    expect(calls[1]).toBe("/orig.jsonl");
+    expect(injected).toHaveLength(0);
+  });
+
   it("limit_cleared with a question outstanding leaves the session needs_you", async () => {
     const { engine, sent } = makeEngine({ runDecisionFn: async () => decide({ decision: "escalate" }) });
     engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
@@ -996,6 +1100,32 @@ describe("lifecycle transient ceiling", () => {
     expect(armed()).toHaveLength(0);
   });
 
+  it("past the ceiling, further failures do not re-escalate until a human replies", async () => {
+    const { engine, sent, pushes, timers } = makeEngine({ runDecisionFn: async () => decide({}) });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    for (let i = 0; i < 3; i++) {
+      await engine.handleEvent({ terminalId: "t1", event: "turn_failed" });
+      if (timers.at(-1)!.fired === false && !timers.at(-1)!.cancelled) timers.at(-1)!.fn();
+    }
+    const escalations = () => sent.filter((m) => m.type === "handler:escalation").length;
+    expect(escalations()).toBe(1);
+    const pushedOnce = pushes.length;
+
+    // The counter only a judged turn clears is now pinned at the ceiling, so
+    // without a dedup every later failure appends an identical row and pushes.
+    await engine.handleEvent({ terminalId: "t1", event: "turn_failed" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_failed" });
+    expect(escalations()).toBe(1);
+    expect(pushes).toHaveLength(pushedOnce);
+
+    // A human line answers it and restarts the series at the first backoff.
+    engine.onUserReply("t1", "try again\r");
+    await engine.handleEvent({ terminalId: "t1", event: "turn_failed" });
+    expect(escalations()).toBe(1);
+    expect(statusOf(sent).parkKind).toBe("outage");
+    expect(timers.at(-1)!.ms).toBe(30_000);
+  });
+
   it("a judged turn between failures resets the counter", async () => {
     const { engine, timers, armed } = makeEngine({ runDecisionFn: async () => decide({}) });
     engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
@@ -1006,7 +1136,7 @@ describe("lifecycle transient ceiling", () => {
     expect(armed()[0].ms).toBe(30_000);
   });
 
-  it("limit parks never contribute to the ceiling", async () => {
+  it("limit parks never contribute to the transient ceiling", async () => {
     const { engine, sent, timers, armed } = makeEngine();
     engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
     await engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
@@ -1176,12 +1306,16 @@ describe("lifecycle persistence", () => {
     expect(statusOf(sent).state).toBe("watching");
   });
 
-  it("rehydrates a park whose deadline has passed by resuming immediately", () => {
-    const { engine, sent, injected, activity } = makeEngine({
+  it("rehydrates a park whose deadline has passed by resuming WITHOUT nudging", () => {
+    const { engine, sent, injected, activity, armed } = makeEngine({
       loadSessionFn: () => parkedRecord({ parkKind: "outage", parkedUntil: 900 }),
     });
     engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
-    expect(injected).toEqual([["t1", "continue"]]);
+    // The wake lands in a runtime this process never armed — a restart may have
+    // respawned the PTY empty — so "continue" would run as a shell command the
+    // instant the user re-arms.
+    expect(injected).toEqual([]);
+    expect(armed()).toHaveLength(0);
     expect(records(activity, "resumed")).toHaveLength(1);
     expect(statusOf(sent).state).toBe("watching");
   });
