@@ -36,9 +36,8 @@ Widget _wrap(Widget child, {required List<Override> overrides}) {
   );
 }
 
-/// Collapse [id] so the row shows its rollup dot regardless of its session list.
-/// A local project row defaults to EXPANDED, and an expanded row hands the dot
-/// to its session rows whenever there are any to carry it.
+/// Collapse [id]. Collapsing used to be what made a project row show a rollup
+/// dot, so the no-dot assertions below sweep both states.
 Future<void> _collapse(WidgetTester tester, String id) async {
   ProviderScope.containerOf(tester.element(find.byType(DrawerEntryRow)))
       .read(collapsedDrawerIdsProvider.notifier)
@@ -86,143 +85,11 @@ void main() {
       running: running,
     );
 
-    testWidgets('renders the rollup dot when collapsed and advert is working', (
-      tester,
-    ) async {
-      final entry = _entry('p1');
-      await tester.pumpWidget(
-        _wrap(
-          DrawerEntryRow(entry),
-          overrides: [
-            ...stores.overrides,
-            projectWorkStatusProvider(
-              'p1',
-            ).overrideWithValue(AgentWorkStatus.working),
-          ],
-        ),
-      );
-      await tester.pump();
-      await _collapse(tester, 'p1');
-
-      expect(
-        find.byKey(const ValueKey('drawer-status-dot-p1')),
-        findsOneWidget,
-      );
-    });
-
-    testWidgets('hides the rollup dot while expanded with sessions on screen', (
-      tester,
-    ) async {
-      // The dot belongs to the session, not the project: with the session rows
-      // on screen, a project dot beside them only restates the loudest one.
-      final entry = _entry('p1');
-      await tester.pumpWidget(
-        _wrap(
-          DrawerEntryRow(entry),
-          overrides: [
-            ...stores.overrides,
-            projectWorkStatusProvider(
-              'p1',
-            ).overrideWithValue(AgentWorkStatus.attention),
-            sessionsForEntryProvider(
-              'p1',
-            ).overrideWith((ref) => [session(running: true)]),
-          ],
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byKey(const ValueKey('drawer-status-dot-p1')), findsNothing);
-    });
-
-    testWidgets('keeps the rollup dot while expanded with no session rows yet', (
-      tester,
-    ) async {
-      // A local row is expanded by DEFAULT and renders nothing while its session
-      // list is still loading. Yielding the dot to rows that don't exist left
-      // the row with no work indication at all.
-      final entry = _entry('p1');
-      await tester.pumpWidget(
-        _wrap(
-          DrawerEntryRow(entry),
-          overrides: [
-            ...stores.overrides,
-            projectWorkStatusProvider(
-              'p1',
-            ).overrideWithValue(AgentWorkStatus.attention),
-            sessionsForEntryProvider('p1').overrideWith((ref) => const []),
-          ],
-        ),
-      );
-      await tester.pump();
-
-      expect(
-        find.byKey(const ValueKey('drawer-status-dot-p1')),
-        findsOneWidget,
-      );
-    });
-
-    testWidgets('an archived-only session list does not count as rows', (
-      tester,
-    ) async {
-      // The drawer filters archived sessions out, so they carry no dot — the
-      // rollup must stay.
-      final entry = _entry('p1');
-      await tester.pumpWidget(
-        _wrap(
-          DrawerEntryRow(entry),
-          overrides: [
-            ...stores.overrides,
-            projectWorkStatusProvider(
-              'p1',
-            ).overrideWithValue(AgentWorkStatus.error),
-            sessionsForEntryProvider('p1').overrideWith(
-              (ref) => [
-                SessionEntry(
-                  id: 'a1',
-                  name: 'A',
-                  createdAt: 1,
-                  lastUsedAt: 2,
-                  archived: true,
-                  running: false,
-                ),
-              ],
-            ),
-          ],
-        ),
-      );
-      await tester.pump();
-
-      expect(
-        find.byKey(const ValueKey('drawer-status-dot-p1')),
-        findsOneWidget,
-      );
-    });
-
-    testWidgets('a merely-running session is NOT working (no dot)', (
-      tester,
-    ) async {
-      // Sessions alive but no advert: an open chat with nothing running in it
-      // must stay clean — only a prompt in flight lights the dot.
-      final entry = _entry('p1');
-      await tester.pumpWidget(
-        _wrap(
-          DrawerEntryRow(entry),
-          overrides: [
-            ...stores.overrides,
-            sessionsForEntryProvider(
-              'p1',
-            ).overrideWith((ref) => [session(running: true)]),
-          ],
-        ),
-      );
-      await tester.pump();
-
-      expect(find.byKey(const ValueKey('drawer-status-dot-p1')), findsNothing);
-    });
-
-    for (final status in [AgentWorkStatus.attention, AgentWorkStatus.error]) {
-      testWidgets('renders status dot for ${status.name}', (tester) async {
+    // Work status is a SESSION-level signal: the session rows carry the dot and
+    // a project-level rollup beside them only restated the loudest one. No
+    // advert status puts a dot on a project row, expanded or collapsed.
+    for (final status in AgentWorkStatus.values) {
+      testWidgets('renders no project dot for ${status.name}', (tester) async {
         final entry = _entry('p1');
         await tester.pumpWidget(
           _wrap(
@@ -230,16 +97,17 @@ void main() {
             overrides: [
               ...stores.overrides,
               projectWorkStatusProvider('p1').overrideWithValue(status),
+              sessionsForEntryProvider(
+                'p1',
+              ).overrideWith((ref) => [session(running: true)]),
             ],
           ),
         );
         await tester.pump();
-        await _collapse(tester, 'p1');
+        expect(find.byKey(const ValueKey('drawer-status-dot-p1')), findsNothing);
 
-        expect(
-          find.byKey(const ValueKey('drawer-status-dot-p1')),
-          findsOneWidget,
-        );
+        await _collapse(tester, 'p1');
+        expect(find.byKey(const ValueKey('drawer-status-dot-p1')), findsNothing);
       });
     }
 

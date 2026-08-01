@@ -223,4 +223,55 @@ void main() {
     expect(find.textContaining('1 working'), findsOneWidget);
     debugDefaultTargetPlatformOverride = null;
   });
+
+  testWidgets('a cached row still shows the live status it is blocked on', (
+    tester,
+  ) async {
+    // The shipped regression: rows restored from the on-disk cache always carry
+    // running:false (the store strips it on load), which masked every dot — the
+    // whole list read "done" after a restart while an agent sat blocked.
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    final row = RecentSessionRow(
+      session: const SessionEntry(
+        id: 's1',
+        name: 'Task',
+        createdAt: 0,
+        lastUsedAt: 1,
+        archived: false,
+        running: false,
+      ),
+      origin: const RecentOrigin(
+        isLocal: true,
+        registrationId: 'projLocal',
+        projectId: 'projLocal',
+        machineUuid: null,
+        projectName: 'antgrid',
+        deviceName: 'This device',
+      ),
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          recentSessionsProvider.overrideWithValue([row]),
+        ],
+        child: _wrap(const RecentSessionsTab()),
+      ),
+    );
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(RecentSessionsTab)),
+    );
+    // Feed it the way the desktop host poll does, from `project:list`.
+    container.read(remoteProjectStatusProvider.notifier).setLocalStatuses({
+      'projLocal': AgentWorkStatus.attention,
+    });
+    container
+        .read(remoteSessionStatusProvider.notifier)
+        .setLocalSessionStatuses({
+          'projLocal': {'s1': AgentWorkStatus.attention},
+        });
+    await tester.pump();
+
+    expect(find.textContaining('1 needs you'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
 }

@@ -39,7 +39,6 @@ import '../providers/project_work_status.dart';
 import '../providers/projects.dart';
 import '../providers/providers.dart';
 import '../providers/recent_agents.dart';
-import '../providers/sessions.dart';
 import '../providers/supervisor_status.dart';
 import '../screens/upgrade_screen.dart';
 import '../services/control_plane_client.dart';
@@ -93,11 +92,7 @@ class MachineDrawerHeaderRow extends ConsumerWidget {
             ),
           ],
         ),
-        trailing: _DrawerEntryTrailing(
-          entry: entry,
-          hovered: hovered,
-          expanded: expanded,
-        ),
+        trailing: _DrawerEntryTrailing(entry: entry, hovered: hovered),
         density: AbRowDensity.sm,
         horizontalPadding: 0,
         margin: const EdgeInsets.symmetric(vertical: AbTokens.space2),
@@ -232,11 +227,7 @@ class _DrawerEntryRowState extends ConsumerState<DrawerEntryRow> {
             color: context.antgrid.textSecondary,
           ),
         ),
-        trailing: _DrawerEntryTrailing(
-          entry: entry,
-          hovered: hovered,
-          expanded: expanded,
-        ),
+        trailing: _DrawerEntryTrailing(entry: entry, hovered: hovered),
         density: AbRowDensity.sm,
         horizontalPadding: 0, // gutter lives on the outer Padding
         margin: const EdgeInsets.symmetric(vertical: AbTokens.space2),
@@ -248,50 +239,29 @@ class _DrawerEntryRowState extends ConsumerState<DrawerEntryRow> {
   }
 }
 
+/// Right-hand affordances of a drawer row: config error, running command,
+/// REMOTE chip, and the hover actions.
+///
+/// Deliberately carries NO work-status dot. Work status belongs to the SESSION
+/// rows nested under the row, and a project-level rollup beside them only
+/// restated whichever session was loudest. A collapsed machine HEADER still
+/// shows its aggregate dot ([_MachineAggregateDot]) — it has no session rows on
+/// screen to carry one.
 class _DrawerEntryTrailing extends ConsumerWidget {
-  const _DrawerEntryTrailing({
-    required this.entry,
-    required this.hovered,
-    required this.expanded,
-  });
+  const _DrawerEntryTrailing({required this.entry, required this.hovered});
 
   final DrawerEntry entry;
   final bool hovered;
-
-  /// Whether this row's subtree is open below it. The work-status dot belongs to
-  /// the SESSION, so an expanded row hands the dot to its session rows rather
-  /// than restating whichever of them is loudest.
-  final bool expanded;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final statusAsync = ref.watch(projectStatusProvider(entry.id));
     final status = statusAsync.value ?? const ProjectStatus.empty();
-    // Rollup work status from the live control-plane advert, yielded only to
-    // session rows that are actually on screen to carry it — the same
-    // collapsed-only rule the machine row's aggregate dot follows, but keyed on
-    // the rows existing rather than on `expanded` alone. A local project row is
-    // expanded by DEFAULT and renders nothing while its session list is still
-    // loading, so the weaker rule left those rows with no work indication at
-    // all. "done" renders nothing either way, keeping idle rows clean.
-    final sessionsShown =
-        expanded &&
-        ref
-            .watch(sessionsForEntryProvider(entry.id))
-            .any((s) => !s.archived);
-    final workStatus = sessionsShown
-        ? AgentWorkStatus.done
-        : ref.watch(projectWorkStatusProvider(entry.id));
 
     return Row(
       mainAxisSize: MainAxisSize.min,
       spacing: AbTokens.space4,
       children: [
-        if (workStatus != AgentWorkStatus.done)
-          AgentWorkStatusDot(
-            key: ValueKey('drawer-status-dot-${entry.id}'),
-            status: workStatus,
-          ),
         if (status.configError)
           _ErrorDot(
             key: ValueKey('drawer-error-dot-${entry.id}'),
@@ -743,8 +713,9 @@ class _MachineOnlineDot extends ConsumerWidget {
 
 /// Aggregate work-status dot for a collapsed machine header: shows only the
 /// call-to-action states (attention/error) across ALL projects on [machineUuid].
-/// Hidden when expanded — individual project rows carry their own dots — and
-/// hidden when status is working/done, keeping idle machine headers clean.
+/// Hidden when expanded — the machine's projects are on screen then, and their
+/// session rows carry the dots — and hidden when status is working/done, keeping
+/// idle machine headers clean.
 class _MachineAggregateDot extends ConsumerWidget {
   const _MachineAggregateDot({required this.machineUuid});
 

@@ -3,7 +3,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../services/control_plane_client.dart';
 import 'recent_sessions.dart';
 
-/// Effective per-project work status for the Recent list and the sidebar dot.
+/// Effective per-project work status, for the surfaces that speak for a whole
+/// project: the title bar's focused-project pill. Session-level surfaces (Recent
+/// rows, drawer session rows) read [sessionWorkStatusProvider] instead, and
+/// drawer PROJECT rows show no dot at all.
 ///
 /// The live control-plane advert — which carries working/attention/error/done
 /// for a project WITHOUT warming (opening) it — is the ONLY source, read from
@@ -36,16 +39,24 @@ final projectWorkStatusProvider = Provider.family<AgentWorkStatus, String>((
 /// (older bridge, cold project, closed socket): fall back to the project-level
 /// [advert], which is what every row used to show.
 ///
-/// A stopped session is always done: it can neither be working nor be the one
-/// blocked on a permission.
+/// An entry in [perSession] outranks [running], deliberately. The bridge only
+/// ever files a status for a session it lists as RUNNING (see `build()` in
+/// work-status.ts), so the entry itself proves liveness — whereas [running]
+/// comes from the row's cached copy, which is forced false for every session on
+/// disk load and is only refreshed while that project is warm. Masking on it
+/// made every Recent row read "done" after a restart, including the one the
+/// agent was actively blocked on.
+///
+/// Without per-session data a stopped session is still always done: it can
+/// neither be working nor be the one blocked on a permission.
 AgentWorkStatus sessionRowStatus({
   required AgentWorkStatus? advert,
   required Map<String, AgentWorkStatus>? perSession,
   required String sessionId,
   required bool running,
 }) {
-  if (!running) return AgentWorkStatus.done;
   if (perSession != null) return perSession[sessionId] ?? AgentWorkStatus.done;
+  if (!running) return AgentWorkStatus.done;
   return advert ?? AgentWorkStatus.done;
 }
 

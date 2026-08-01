@@ -134,8 +134,8 @@ class _SessionRowState extends ConsumerState<SessionRow> {
 
   /// The leading indicator. Work status owns the slot whenever the agent has
   /// something to say about THIS session (working / needs you / error) — it is
-  /// the same dot the Recent list and the collapsed project row show, so one
-  /// session's state reads identically wherever it surfaces. Otherwise the slot
+  /// the same dot the Recent list shows, so one session's state reads
+  /// identically wherever it surfaces. Otherwise the slot
   /// falls back to plain liveness: filled = running, hollow ring = idle. The
   /// fill/outline contrast reads "on vs off" faster than a colour shift between
   /// two filled dots, so only a running session gets a solid dot.

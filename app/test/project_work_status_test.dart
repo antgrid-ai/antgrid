@@ -45,12 +45,19 @@ void main() {
         call(advert: AgentWorkStatus.working, running: false),
         AgentWorkStatus.done,
       );
+    });
+
+    test('a per-session entry outranks a stale cached running:false', () {
+      // The bridge files a status only for sessions it lists as RUNNING, so the
+      // entry proves liveness. `running` comes from the cached row, which loads
+      // false from disk — masking on it blanked every Recent row after a
+      // restart, including the session the agent was blocked on.
       expect(
         call(
           perSession: const {'s1': AgentWorkStatus.attention},
           running: false,
         ),
-        AgentWorkStatus.done,
+        AgentWorkStatus.attention,
       );
     });
 
