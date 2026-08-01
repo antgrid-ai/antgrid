@@ -139,9 +139,8 @@ test("a replayed hello cannot evict the connection it admitted", async () => {
   });
 
   // Byte-identical replay of the admitting frame — what an attacker who
-  // captured it holds. The replay cache normally catches this, but it is
-  // capacity-bounded and empty after a restart, so arbitration must not be the
-  // only thing standing between a captured frame and a live device's socket.
+  // captured it holds. The replay cache catches this one first (same nonce,
+  // record still live), which is the primary defence.
   const { hello } = await makeHello(relay, {
     deviceId,
     epoch: 400,
@@ -153,13 +152,56 @@ test("a replayed hello cannot evict the connection it admitted", async () => {
   const err2 = waitForMessage(ws2);
   const closed2 = new Promise<number>((resolve) => { ws2.onclose = (e) => resolve(e.code); });
   ws2.send(JSON.stringify(hello));
-  expect(await err2).toMatchObject({ type: "error", retryable: false });
+  expect(await err2).toMatchObject({ type: "error", code: "AUTH_FAILED", retryable: false });
   expect(await closed2).toBe(1008);
 
   // The live connection is untouched and still usable.
   expect(relay.connections.getByDeviceId(deviceId)).toBeDefined();
   const stillOpened = waitForType(live.ws, "stream-opened");
   live.ws.send(JSON.stringify({ type: "stream-open", streamId: "survived-replay" }));
+  await stillOpened;
+});
+
+test("an older captured hello cannot evict the live holder on a replay-cache miss", async () => {
+  relay = startServer(defaultConfig);
+  const deviceId = "epoch-stale-replay";
+  const identity = await generateKeyPair();
+
+  const live = await connectHello(relay, {
+    deviceId,
+    epoch: 500,
+    publicKeyBase64: identity.publicKeyBase64,
+    privateSeed: identity.privateSeed,
+  });
+
+  // An EARLIER frame from the same process: same epoch (minted once per
+  // process), its own nonce, an older `ts`. The distinct nonce is a replay-cache
+  // miss — exactly the state after a relay restart or a capacity eviction — so
+  // arbitration is the only thing left, and equal-epoch admission would hand a
+  // captured frame a permanent SUPERSEDED against a live device.
+  const { hello } = await makeHello(relay, {
+    deviceId,
+    epoch: 500,
+    ts: new Date(Date.now() - 5_000).toISOString(),
+    publicKeyBase64: identity.publicKeyBase64,
+    privateSeed: identity.privateSeed,
+  });
+  const ws2 = await connect(relay);
+  const err2 = waitForMessage(ws2);
+  const closed2 = new Promise<number>((resolve) => { ws2.onclose = (e) => resolve(e.code); });
+  ws2.send(JSON.stringify(hello));
+  // The message pins WHICH guard fired: the replay cache never saw this nonce.
+  expect(await err2).toMatchObject({
+    type: "error",
+    code: "AUTH_FAILED",
+    message: "hello replay: not newer than the frame holding this deviceId",
+    retryable: false,
+  });
+  expect(await closed2).toBe(1008);
+
+  expect(relay.connections.getByDeviceId(deviceId)).toBeDefined();
+  const stillOpened = waitForType(live.ws, "stream-opened");
+  live.ws.send(JSON.stringify({ type: "stream-open", streamId: "survived-stale-replay" }));
   await stillOpened;
 });
 

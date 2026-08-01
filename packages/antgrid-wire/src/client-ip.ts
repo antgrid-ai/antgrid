@@ -172,6 +172,23 @@ export function parseCidr(input: string): Cidr {
   return { bytes, prefixBits };
 }
 
+/**
+ * Parse a comma-separated `TRUSTED_PROXY_IPS` value. Empty (or whitespace) is
+ * valid and means "no trusted proxies" — the header is then ignored entirely.
+ * Both the relay and web load the var through this so the two services cannot
+ * drift on syntax, error wording, or the parsed shape they hold at runtime.
+ * Throws on a malformed entry — a trust set that quietly loses an entry is
+ * worse than a startup failure.
+ */
+export function parseTrustedProxies(raw: string | undefined): Cidr[] {
+  const entries = (raw ?? "").split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+  try {
+    return entries.map(parseCidr);
+  } catch (e) {
+    throw new Error(`TRUSTED_PROXY_IPS entry invalid: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
 /** `a.b.c.d` as the 16 bytes of `::ffff:a.b.c.d`. */
 function toMappedV6(ip: Uint8Array): Uint8Array {
   const out = new Uint8Array(16);
@@ -181,7 +198,8 @@ function toMappedV6(ip: Uint8Array): Uint8Array {
   return out;
 }
 
-function inCidr(ip: Uint8Array, cidr: Cidr): boolean {
+/** Does [ip] (as returned by `parseIp`) fall inside [cidr]? */
+export function inCidr(ip: Uint8Array, cidr: Cidr): boolean {
   // An IPv6 range covers the mapped-IPv4 space, so a v4 peer (parseIp collapses
   // mapped form to 4 bytes) must be re-expanded before comparing rather than
   // missing on length. Without this a legal entry like `::/0` validates at
@@ -266,15 +284,22 @@ export function resolveClientIp(
     return canonical(peerIp);
   }
   const hops = xff.split(",").map((h) => h.trim()).filter((h) => h.length > 0);
+  // A header that is truthy but holds no usable hop (`,` or all-whitespace) is
+  // as much a proxy misconfiguration as an unparseable one, and would otherwise
+  // fall through the loop to the peer without a word.
+  if (hops.length === 0) {
+    onDegraded?.({ kind: "unparseable-hop", detail: xff });
+    return formatIp(peer);
+  }
   for (let i = hops.length - 1; i >= 0; i--) {
     const ip = parseIp(stripHopPort(hops[i]));
     if (!ip) {
       onDegraded?.({ kind: "unparseable-hop", detail: hops[i] });
-      return canonical(peerIp);
+      return formatIp(peer);
     }
     // The leftmost hop stands even if it is itself trusted — a proxy of ours
     // originated the request, and there is nothing further left to prefer.
     if (i === 0 || !trusted.some((c) => inCidr(ip, c))) return formatIp(ip);
   }
-  return canonical(peerIp);
+  return formatIp(peer);
 }

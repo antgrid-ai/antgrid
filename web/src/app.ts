@@ -31,8 +31,7 @@ export type AppDeps = {
 
 export function buildApp(deps: AppDeps) {
   const app = new Hono();
-  // `?? []` because tests build Env via a cast that may omit the field.
-  const clientIp = makeClientIpResolver(deps.env.TRUSTED_PROXY_IPS ?? []);
+  const clientIp = makeClientIpResolver(deps.env.TRUSTED_PROXY_IPS);
 
   // The ZeptoMail webhook authenticates via a secret in its URL path
   // (/webhooks/zeptomail/:key). Hono's logger prints the full path, so redact
@@ -82,7 +81,19 @@ export function buildApp(deps: AppDeps) {
   // /logo/* path — referenced by the favicon <link> tags in ui/layout.tsx.
   app.use("/logo/*", serveStatic({ root: "./public" }));
 
-  app.all("/api/auth/*", (c) => deps.auth.handler(c.req.raw));
+  // Better-Auth gets the request with X-Forwarded-For already collapsed to the
+  // resolved client, so its handlers (the cross-device plugin's requester IP,
+  // its own IP-keyed rate buckets) see the same spoof-safe value the /ui routes
+  // do. These endpoints are reachable over HTTP as well as via `auth.api.*`, so
+  // without this the raw client-supplied chain would reach them untouched. No
+  // peer address (no socket) means nothing here is trustworthy — drop it.
+  app.all("/api/auth/*", (c) => {
+    const headers = new Headers(c.req.raw.headers);
+    const ip = clientIp(c);
+    if (ip) headers.set("x-forwarded-for", ip);
+    else headers.delete("x-forwarded-for");
+    return deps.auth.handler(new Request(c.req.raw, { headers }));
+  });
   app.route("/", health);
   app.route("/", eventsRoutes({ db: deps.db, clientIp }));
   app.route("/", deviceRoutes({ db: deps.db, auth: deps.auth, relay: deps.relay }));

@@ -15,6 +15,7 @@ function makeConn(overrides: Partial<Connection> = {}): Connection {
     publicKey: overrides.publicKey ?? "pk",
     epoch: overrides.epoch ?? 1,
     helloNonce: overrides.helloNonce ?? `nonce-${seq}`,
+    helloTs: overrides.helloTs ?? Date.now(),
     ws: overrides.ws ?? ws,
     ip: overrides.ip ?? "127.0.0.1",
     connectedAt: overrides.connectedAt ?? Date.now(),

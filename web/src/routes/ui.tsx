@@ -105,7 +105,8 @@ export function uiRoutes(deps: {
   });
 
   r.post("/ui/login/start", async (c) => {
-    if (!startLimiter(ipKey(c))) {
+    const ip = deps.clientIp(c);
+    if (!startLimiter(ip ?? "unknown")) {
       return c.redirect("/login?error=Too%20many%20requests");
     }
     const form = await c.req.formData();
@@ -120,7 +121,7 @@ export function uiRoutes(deps: {
         // The plugin has no socket access, so hand it the ALREADY-resolved
         // client IP as a single-hop header instead of the raw (forgeable)
         // chain — it reads the rightmost hop (see cross-device-plugin.ts).
-        "x-forwarded-for": deps.clientIp(c) ?? "",
+        "x-forwarded-for": ip ?? "",
         cookie: c.req.header("cookie") ?? "",
       },
       body: { email },

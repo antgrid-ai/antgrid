@@ -42,6 +42,9 @@ export function buildTestApp(
     GOOGLE_CLIENT_SECRET: "gls",
     EMAIL_FROM: "Antgrid <no-reply@radhaai.org>",
     CORS_ORIGINS: ["http://localhost:4321"],
+    // Explicit: buildApp reads it unconditionally, and the `as Env` cast below
+    // would let an omission through as undefined.
+    TRUSTED_PROXY_IPS: [] as Env["TRUSTED_PROXY_IPS"],
     PORT: 0,
   } as Env;
   const env: Env = { ...baseEnv, ...(opts.envOverrides ?? {}) };

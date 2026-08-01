@@ -11,6 +11,7 @@ function conn(uid: string | undefined, deviceType: "agent" | "app"): Connection 
     publicKey: "pk",
     epoch: 1,
     helloNonce: crypto.randomUUID(),
+    helloTs: Date.now(),
     ws: { readyState: 1 } as Connection["ws"],
     ip: "127.0.0.1",
     connectedAt: Date.now(),

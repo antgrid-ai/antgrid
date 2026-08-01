@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseDotenv } from "dotenv";
-import { parseCidr } from "antgrid-wire";
+import { parseTrustedProxies } from "antgrid-wire";
 import { z } from "zod";
 import { billingToEnvFields, resolveBillingConfig } from "./config/billing.js";
 
@@ -59,17 +59,15 @@ const EnvSchema = z
       .string()
       .optional()
       .transform((s, ctx) => {
-        const entries = s ? s.split(",").map((e) => e.trim()).filter(Boolean) : [];
         try {
-          for (const entry of entries) parseCidr(entry);
+          return parseTrustedProxies(s);
         } catch (err) {
           ctx.addIssue({
             code: "custom",
-            message: `TRUSTED_PROXY_IPS entry invalid: ${err instanceof Error ? err.message : String(err)}`,
+            message: err instanceof Error ? err.message : String(err),
           });
           return z.NEVER;
         }
-        return entries;
       }),
     PORT: z.coerce.number().int().default(8787),
   })

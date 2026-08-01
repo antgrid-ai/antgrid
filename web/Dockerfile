@@ -29,6 +29,12 @@ COPY web/src ./web/src
 COPY web/tsconfig.json ./web/
 COPY web/vite.config.ts ./web/
 
+# antgrid-wire ships TypeScript source (its package.json exports point straight
+# at src/index.ts, there is no build output), so the manifest copied above is
+# not enough — src/env.ts imports it on the startup path and the container
+# would build green and then fail to resolve the module at boot.
+COPY packages/antgrid-wire/src ./packages/antgrid-wire/src
+
 # Static assets served by app.ts.
 # public/build is excluded by .dockerignore (**/build)
 COPY web/public ./web/public

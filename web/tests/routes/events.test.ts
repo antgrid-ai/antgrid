@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
 import { buildTestApp } from "../helpers/app.js";
+import { parseTrustedProxies } from "antgrid-wire";
 
 let pg: PgHandle;
 beforeAll(async () => { pg = await startTestPg(); });
@@ -92,7 +93,7 @@ describe("POST /events", () => {
 
   test("forged leftmost XFF hops cannot mint fresh rate-limit buckets", async () => {
     const { app } = buildTestApp(pg.db, pg.url, {
-      envOverrides: { TRUSTED_PROXY_IPS: ["172.28.0.0/16"] },
+      envOverrides: { TRUSTED_PROXY_IPS: parseTrustedProxies("172.28.0.0/16") },
     });
     // Fake Bun server env (what Bun.serve passes in production): the peer is
     // a trusted proxy, so resolution walks XFF right-to-left.

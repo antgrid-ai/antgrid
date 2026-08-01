@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
 import { buildTestApp } from "../helpers/app.js";
+import { parseTrustedProxies } from "antgrid-wire";
 
 let pg: PgHandle;
 beforeAll(async () => {
@@ -26,12 +27,41 @@ function makeCapture(): { captured: CapturedEmail[]; sendEmail: (a: CapturedEmai
 }
 
 describe("cross-device sign-in end-to-end", () => {
+  test("the HTTP start endpoint resolves the client IP too, not just /ui/login/start", async () => {
+    const cap = makeCapture();
+    const { app } = buildTestApp(pg.db, pg.url, {
+      sendEmail: cap.sendEmail,
+      usePrismaAdapter: true,
+      envOverrides: { TRUSTED_PROXY_IPS: parseTrustedProxies("172.28.0.0/16") },
+    });
+    const proxyPeer = { requestIP: () => ({ address: "172.28.0.9" }) };
+
+    // /api/auth/* is reachable directly (the app client uses it), so the raw
+    // chain must be collapsed before Better-Auth sees it — otherwise the
+    // spoof-safe walk would only guard the /ui path.
+    const res = await app.fetch(
+      new Request("http://localhost/api/auth/sign-in/cross-device/start", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "6.6.6.6, 1.1.1.1",
+        },
+        body: JSON.stringify({ email: "carol@example.com" }),
+      }),
+      proxyPeer
+    );
+    expect(res.status).toBe(200);
+    expect(cap.captured[0].text).toContain("1.1.1.1");
+    expect(cap.captured[0].text).not.toContain("6.6.6.6");
+  });
+
+
   test("start → approve in second client → poll returns ready + session cookie", async () => {
     const cap = makeCapture();
     const { app } = buildTestApp(pg.db, pg.url, {
       sendEmail: cap.sendEmail,
       usePrismaAdapter: true,
-      envOverrides: { TRUSTED_PROXY_IPS: ["172.28.0.0/16"] },
+      envOverrides: { TRUSTED_PROXY_IPS: parseTrustedProxies("172.28.0.0/16") },
     });
     // The client IP only reaches the email via the trusted-proxy XFF walk,
     // which needs the socket peer — inject a fake Bun server as Hono's env

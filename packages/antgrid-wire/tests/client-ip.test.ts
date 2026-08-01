@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatIp, parseCidr, parseIp, resolveClientIp, type Cidr, type ClientIpDegradation } from "../src/client-ip";
+import { formatIp, parseCidr, parseIp, parseTrustedProxies, resolveClientIp, type Cidr, type ClientIpDegradation } from "../src/client-ip";
 
 function cidrs(...specs: string[]): Cidr[] {
   return specs.map(parseCidr);
@@ -196,5 +196,28 @@ describe("resolveClientIp", () => {
     expect(resolveClientIp("172.18.0.4", "203.0.113.7", [parseCidr("::/0")])).toBe("203.0.113.7");
     // A v6 peer against a v4 range stays a genuine non-match.
     expect(resolveClientIp("2001:db8::1", "203.0.113.7", [parseCidr("172.18.0.0/16")])).toBe("2001:db8::1");
+  });
+});
+
+describe("parseTrustedProxies", () => {
+  test("splits, trims and drops blanks; empty means no trusted proxies", () => {
+    expect(parseTrustedProxies(undefined)).toEqual([]);
+    expect(parseTrustedProxies("")).toEqual([]);
+    expect(parseTrustedProxies("  ,  ")).toEqual([]);
+    expect(parseTrustedProxies(" 172.28.0.0/16 , 10.0.0.1 ")).toHaveLength(2);
+  });
+
+  test("a malformed entry fails loudly rather than silently shrinking the set", () => {
+    expect(() => parseTrustedProxies("172.28.0.0/16,nope")).toThrow(/TRUSTED_PROXY_IPS entry invalid/);
+  });
+});
+
+describe("resolveClientIp — header present but empty", () => {
+  const trusted = [parseCidr("192.168.0.0/16")];
+
+  test("a hop-less header falls back to the peer AND reports the degradation", () => {
+    const seen: ClientIpDegradation[] = [];
+    expect(resolveClientIp("192.168.5.5", " , ", trusted, (e) => seen.push(e))).toBe("192.168.5.5");
+    expect(seen).toEqual([{ kind: "unparseable-hop", detail: " , " }]);
   });
 });

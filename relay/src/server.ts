@@ -299,16 +299,16 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
         );
         return;
       }
-      // A hello carrying the SAME nonce as the one that admitted the live
-      // holder is that holder's own admitting frame played back, never a
-      // redial (a redial mints a fresh nonce). Equal-epoch admission would
-      // otherwise let one captured frame evict a live device — permanently,
-      // since SUPERSEDED is retryable:false — whenever the replay cache has
-      // dropped the record, which it does on capacity eviction and on every
-      // restart. The cache stays the primary defence; this is the arbitration
-      // half of it, and unlike the cache it cannot be flooded away.
-      if (hello.nonce === existing.helloNonce) {
-        sendErrorAndClose(ws, "AUTH_FAILED", "hello replay: nonce already admitted this device", false, 1008);
+      // Equal-epoch admission would otherwise let ANY frame the device has
+      // already sent evict its own live socket — permanently, since SUPERSEDED
+      // is retryable:false — whenever the replay cache has dropped the record,
+      // which it does on capacity eviction and on every restart. Reject a hello
+      // that is older than the admitting one (a captured frame always is; a
+      // genuine redial never is, both timestamps coming from the same client
+      // clock) or that repeats its nonce (the admitting frame itself played
+      // back). A same-millisecond redial still gets through on its fresh nonce.
+      if (tsMs < existing.helloTs || hello.nonce === existing.helloNonce) {
+        sendErrorAndClose(ws, "AUTH_FAILED", "hello replay: not newer than the frame holding this deviceId", false, 1008);
         return;
       }
       if (hello.epoch >= existing.epoch) {
@@ -339,6 +339,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       publicKey: hello.publicKey,
       epoch: hello.epoch,
       helloNonce: hello.nonce,
+      helloTs: tsMs,
       ws,
       ip: ws.data.ip,
       connectedAt: now,

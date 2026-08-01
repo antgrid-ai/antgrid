@@ -1,4 +1,4 @@
-import { parseCidr, type Cidr } from "antgrid-wire";
+import { parseTrustedProxies, type Cidr } from "antgrid-wire";
 
 export interface RelayConfig {
   port: number;
@@ -111,16 +111,6 @@ function loadFcmConfig(): Pick<RelayConfig, "fcmProjectId" | "fcmClientEmail" | 
   return { fcmProjectId, fcmClientEmail, fcmPrivateKey };
 }
 
-function loadTrustedProxyIps(): Cidr[] {
-  const raw = process.env.TRUSTED_PROXY_IPS || "";
-  const entries = raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
-  try {
-    return entries.map(parseCidr);
-  } catch (e) {
-    throw new Error(`TRUSTED_PROXY_IPS entry invalid: ${e instanceof Error ? e.message : e}`);
-  }
-}
-
 export function loadConfig(): RelayConfig {
   const clockSkewMs = parseInt(process.env.CLOCK_SKEW_MS || "120000", 10);
   const replayTtlMs = parseInt(process.env.REPLAY_TTL_MS || "300000", 10);
@@ -146,7 +136,7 @@ export function loadConfig(): RelayConfig {
     replayTtlMs,
     pingIntervalMs: parseInt(process.env.PING_INTERVAL_MS || "30000", 10),
     pongTimeoutMs: parseInt(process.env.PONG_TIMEOUT_MS || "10000", 10),
-    trustedProxyIps: loadTrustedProxyIps(),
+    trustedProxyIps: parseTrustedProxies(process.env.TRUSTED_PROXY_IPS),
     logLevel: (process.env.LOG_LEVEL as RelayConfig["logLevel"]) || "info",
     licenseApiUrl: requireEnv("LICENSE_API_URL"),
     licenseApiJwksPath: process.env.LICENSE_API_JWKS_PATH || undefined,

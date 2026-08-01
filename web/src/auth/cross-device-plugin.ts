@@ -64,13 +64,14 @@ export const crossDeviceMagicLink = (opts: CrossDevicePluginOptions) => {
           const hdr = ctx.headers ?? ctx.request?.headers ?? null;
           const rawUa = hdr?.get("user-agent")?.trim() || null;
           const ua = rawUa ? rawUa.slice(0, 512) : null;
-          // Rightmost XFF hop, never leftmost: the rightmost entry is the one
-          // appended by our own edge proxy (or the resolved single-hop value
-          // /ui/login/start forwards after its trusted-proxy walk); leftmost
-          // arrived in the request and is client-forgeable. This endpoint has
-          // no socket access, so it cannot run the trusted-proxy walk itself.
-          // Informational only (shown in the approval email) — never used for
-          // authorization.
+          // X-Forwarded-For is already resolved to a single spoof-safe hop by
+          // the time it gets here — /ui/login/start forwards its trusted-proxy
+          // walk result, and app.ts rewrites the header on the HTTP route. Take
+          // the rightmost hop anyway, never the leftmost, so a future caller
+          // that forwards a raw chain still gets the proxy-appended entry
+          // rather than a client-forgeable one. This endpoint has no socket
+          // access, so it cannot run the walk itself. Informational only (shown
+          // in the approval email) — never used for authorization.
           const xffClient = hdr
             ?.get("x-forwarded-for")
             ?.split(",")
