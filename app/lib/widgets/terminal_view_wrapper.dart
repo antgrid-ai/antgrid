@@ -12,6 +12,7 @@ import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 import '../design/ab_status_tone.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
+import '../design/ansi_palette.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../models/terminal_models.dart';
@@ -29,12 +30,12 @@ import 'terminal_upload_button.dart';
 final bool _hasPhysicalKeyboard =
     !kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
 
-// Windows Terminal's **Campbell** palette and foreground are the single source
-// of truth for ANSI color resolution. Defined in `ghostty_vte_flutter` as
-// `campbellPalette` / `campbellForeground` so the app and the color-parity
-// test both resolve against an identical definition. The vendored Ghostty
-// package ships a Tokyo Night default (misleadingly named `xterm`) whose pastel
-// red/yellow/blue read as washed-out next to Campbell — hence this override.
+// ANSI color resolution uses `app/lib/design/ansi_palette.dart` — Windows
+// Terminal's Campbell, re-solved per-lightness against Antgrid's backgrounds so
+// the renderer's contrast floor does not have to collapse normal/bright pairs
+// to make it readable. The vendored Ghostty package's own default (misleadingly
+// named `xterm`, actually Tokyo Night) has pastel red/yellow/blue that read as
+// washed-out, and `campbellPalette` there is untuned — hence this override.
 
 class TerminalViewWrapper extends ConsumerStatefulWidget {
   final TerminalTab tab;
@@ -308,11 +309,16 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     );
   }
 
-  /// WCAG AA floor for terminal text. Campbell's dark ANSI colors (blue
-  /// #0037DA at 2.24:1, magenta at 2.30:1, black at 1.06:1 on bgDeepest) are
-  /// unreadable without it. Render-time only — the painted foreground is
-  /// nudged per-cell against that cell's background; the palette itself (and
-  /// what the PTY/agent sees) is untouched.
+  /// WCAG AA floor for terminal text. Render-time only — the painted
+  /// foreground is nudged per-cell against that cell's background; the palette
+  /// itself (and what the PTY/agent sees) is untouched.
+  ///
+  /// `ansi_palette.dart` already clears this against every shipped preset
+  /// background, so on the default background the floor is nearly inert. It
+  /// stays because a static palette cannot cover what remains: cells whose
+  /// background the TUI painted itself, 256-color and truecolor output that
+  /// bypasses the 16 entries entirely, ANSI 0 used as a foreground, and custom
+  /// presets with a mid-tone background.
   static const double _minContrastRatio = 4.5;
 
   /// Must equal GhosttyTerminalView's own default padding total per axis
@@ -380,14 +386,14 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       cellAlignment: Alignment.center,
       cursorColor: context.antgrid.textPrimary,
       backgroundColor: context.antgrid.bgDeepest,
-      // Campbell palette + foreground from the package (single source
-      // of truth). The view pushes them into the Ghostty engine so
-      // the native `renderState` path resolves ANSI/256 colors
-      // against Campbell, AND the formatter path (scrollback fallback)
+      // Palette + foreground picked for the preset's background (see
+      // ansi_palette.dart for the tuning). The view pushes them into the
+      // Ghostty engine so the native `renderState` path resolves ANSI/256
+      // colors against them, AND the formatter path (scrollback fallback)
       // reads the same palette — keeping both paths in sync.
       renderer: GhosttyTerminalRendererMode.renderState,
-      foregroundColor: campbellForeground,
-      palette: campbellPalette,
+      foregroundColor: ansiForegroundFor(context.antgrid.bgDeepest),
+      palette: ansiPaletteFor(context.antgrid.bgDeepest),
       // Override Ghostty's hardcoded blues with Antgrid's accent so
       // terminal selection/hyperlinks match the rest of the system.
       selectionColor: context.antgrid.accent.withValues(alpha: 0.3),
