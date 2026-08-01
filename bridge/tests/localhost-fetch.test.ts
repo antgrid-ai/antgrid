@@ -69,6 +69,16 @@ function startTestServer() {
           headers: { "Content-Type": "application/octet-stream" },
         });
       }
+      if (url.pathname === "/clip.mp4") {
+        return new Response(COMPRESSIBLE_MEDIA, {
+          headers: { "Content-Type": "video/mp4" },
+        });
+      }
+      if (url.pathname === "/favicon.ico") {
+        return new Response(COMPRESSIBLE_MEDIA, {
+          headers: { "Content-Type": "image/x-icon" },
+        });
+      }
       return new Response("Hello");
     },
   });
@@ -77,10 +87,19 @@ function startTestServer() {
 
 // Well past GZIP_MIN_BYTES and compressible, like a real dev-server chunk.
 const BUNDLE_JS = "export function hello(name) { return `hi ${name}`; }\n".repeat(400);
-// Random bytes: gzip cannot shrink these. Served under image/* to exercise the
-// content-type shortcut and under a type that shortcut misses to exercise the
-// size check behind it.
+// Random bytes: gzip cannot shrink these, so they exercise the size check that
+// backs the content-type list. NOT usable to pin the list itself — a fixture
+// this incompressible is rejected by the size check whichever type it wears.
 const INCOMPRESSIBLE_RANDOM = crypto.getRandomValues(new Uint8Array(16 * 1024));
+// Served under two media content-types that differ ONLY in whether
+// isPrecompressedContentType claims them, so the pair pins that function rather
+// than the size check behind it. Flat runs stand in for the large single-colour
+// fields of an app icon, which is what makes a raw-bitmap .ico compressible.
+const COMPRESSIBLE_MEDIA = Buffer.concat([
+  Buffer.alloc(6 * 1024, 0x00),
+  Buffer.alloc(6 * 1024, 0xf8),
+  Buffer.alloc(4 * 1024, 0x81),
+]);
 
 afterAll(() => {
   testServer?.stop(true);
@@ -222,6 +241,38 @@ describe("fetchLocalhost body compression", () => {
     expect(Buffer.from(result.body, "base64").equals(Buffer.from(INCOMPRESSIBLE_RANDOM))).toBe(
       true,
     );
+  });
+
+  // Half of the A/B that pins the image//video//audio prefix rule: the bytes DO
+  // compress, so only the content-type can be rejecting them. Skipping the
+  // attempt is the point — Bun.gzipSync is synchronous and runs ~16ms/MiB on
+  // incompressible input, so at real video sizes the wasted gzip stalls the
+  // bridge's event loop for longer than any plausible win.
+  it("skips the gzip on a media type even when the bytes would have compressed", async () => {
+    const server = startTestServer();
+    const result = await fetchLocalhost({
+      url: `http://localhost:${server.port}/clip.mp4`,
+      acceptEncodings: ["gzip-base64"],
+    });
+
+    expect(result.bodyEncoding).toBe("base64");
+    expect(Buffer.from(result.body, "base64").equals(COMPRESSIBLE_MEDIA)).toBe(true);
+  });
+
+  // The other half, same bytes: raw-bitmap and PCM containers live under a media
+  // type but store their samples uncompressed, so the prefix rule has to exempt
+  // them. A favicon.ico is the one that recurs — a WebView requests it on every
+  // page load, and the classic multi-size BMP form clears GZIP_MIN_BYTES.
+  it("compresses a raw-bitmap media type the prefix rule would otherwise claim", async () => {
+    const server = startTestServer();
+    const result = await fetchLocalhost({
+      url: `http://localhost:${server.port}/favicon.ico`,
+      acceptEncodings: ["gzip-base64"],
+    });
+
+    expect(result.bodyEncoding).toBe("gzip-base64");
+    const inflated = Buffer.from(Bun.gunzipSync(Buffer.from(result.body, "base64")));
+    expect(inflated.equals(COMPRESSIBLE_MEDIA)).toBe(true);
   });
 
   // The content-type list can't know every incompressible format, so the size

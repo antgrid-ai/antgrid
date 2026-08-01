@@ -32,7 +32,7 @@ function isTextContentType(ct: string): boolean {
 }
 
 // Formats that are already compressed — gzipping them burns CPU on both ends to
-// grow the payload. SVG is the exception in image/*: it is markup.
+// grow the payload.
 const PRECOMPRESSED_CONTENT_TYPES = new Set([
   "application/zip",
   "application/gzip",
@@ -47,9 +47,31 @@ const PRECOMPRESSED_CONTENT_TYPES = new Set([
   "application/font-woff2",
 ]);
 
+// Media types the prefix rule below would wrongly claim: SVG is markup, and the
+// rest are containers that store their samples raw. They need naming because the
+// prefix rule is one-way — a body it lets through that turns out incompressible
+// is caught by the size check in `encodeBody`, but one it BLOCKS is never
+// reconsidered, and base64 is unconditionally ~33% over the raw bytes. Cheap to
+// exempt: these are small (a multi-size favicon.ico gzips in ~0.05ms), unlike
+// the megabyte media the prefix rule exists to keep off a synchronous gzip.
+const UNCOMPRESSED_MEDIA_CONTENT_TYPES = new Set([
+  "image/svg+xml",
+  "image/x-icon",
+  "image/vnd.microsoft.icon",
+  "image/bmp",
+  "image/x-ms-bmp",
+  "image/tiff",
+  "audio/wav",
+  "audio/x-wav",
+  "audio/wave",
+  "audio/vnd.wave",
+  "audio/aiff",
+  "audio/x-aiff",
+]);
+
 function isPrecompressedContentType(ct: string): boolean {
   const lower = ct.toLowerCase().split(";")[0].trim();
-  if (lower === "image/svg+xml") return false;
+  if (UNCOMPRESSED_MEDIA_CONTENT_TYPES.has(lower)) return false;
   if (lower.startsWith("image/") || lower.startsWith("video/") || lower.startsWith("audio/")) {
     return true;
   }
