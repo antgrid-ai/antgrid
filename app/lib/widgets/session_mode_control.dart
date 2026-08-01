@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/pulsing_opacity.dart';
 import '../models/agent_work_status.dart';
 import '../models/session_entry.dart';
 import '../project/project_session_registry.dart';
@@ -13,25 +14,31 @@ import '../providers/session_mode.dart';
 import '../providers/sessions.dart';
 import '../services/sessions_service.dart';
 import 'mode_segmented.dart';
+import 'session_agent_mark.dart';
 
 /// Switches the focused session between terminal and chat.
+///
+/// The same [ModeSegmented] the create-time picker uses, at header density:
+/// both options visible, the live one accented, labels demoted to tooltips. A
+/// single destination glyph would be narrower still, but a header that also
+/// carries a [SessionAgentMark] can't afford a second unlabelled glyph whose
+/// meaning is "the thing you are NOT looking at" — and the box, divider and
+/// accent fill are what make a two-state choice legible without a caption.
 ///
 /// The two ways this can be unavailable are answered differently on purpose.
 /// A conversation that can no longer be resumed
 /// ([SessionEntry.agentSessionResumable]) hides the whole control — it is
 /// transient, per-session, and there is no honest short copy for "the
 /// conversation this would carry over is gone". An agent with no chat driver is
-/// permanent and knowable, so the control stays visible with the Chat cell
-/// greyed and its reason reachable.
+/// permanent and knowable, so the Chat cell stays visible and greyed, carrying
+/// the reason; `AbSegmented` keeps disabled cells hit-testing precisely so that
+/// reason survives on phones, which have no hover.
 ///
 /// Mounted in BOTH the mobile agent-panel header and the desktop window title
 /// bar (which replaced that header) — either one alone ships the feature to
 /// half the platforms.
 class SessionModeControl extends ConsumerWidget {
-  const SessionModeControl({super.key, this.showIcons = true});
-
-  /// Icons are garnish; the phone header drops them for room.
-  final bool showIcons;
+  const SessionModeControl({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -41,19 +48,30 @@ class SessionModeControl extends ConsumerWidget {
     }
     final pending = ref.watch(pendingSessionModeProvider);
     final inFlight = pending?.sessionId == active.id;
+    // Anything that isn't chat is a terminal: the selected value has to match a
+    // cell exactly, and an unknown mode string must not leave both unlit.
+    final mode = (ref.watch(activeSessionModeProvider) ?? active.mode) == 'chat'
+        ? 'chat'
+        : 'terminal';
+    final chatCapable = ref.watch(focusedToolChatCapableProvider(active.tool));
+    final agent =
+        ref.watch(focusedMachineToolsProvider).value?.labels[active.tool] ??
+        sessionAgentDisplayLabel(active);
 
-    return ModeSegmented(
+    final control = ModeSegmented(
       keyPrefix: 'session-mode',
-      mode: ref.watch(activeSessionModeProvider) ?? active.mode,
-      chatEnabled: ref.watch(focusedToolChatCapableProvider(active.tool)),
-      // Shorter than the create-time picker's "<Agent> doesn't support chat
-      // sessions": mid-session the agent is established context, and the
-      // string renders inches from a greyed Chat cell.
-      chatDisabledReason: 'Not supported',
+      mode: mode,
+      iconOnly: true,
+      chatEnabled: chatCapable,
+      chatDisabledReason: "$agent doesn't support chat sessions.",
+      // Both cells inert while a flip is in flight, so a second tap can't queue
+      // a second one. No reason attached: the user just tapped.
       enabled: !inFlight,
-      showIcons: showIcons,
-      onChanged: (next) => _switchMode(context, ref, active, next),
+      onChanged: (target) => _switchMode(context, ref, active, target),
     );
+    // Dimming a control whose whole job is to look chooseable reads as broken,
+    // so the pending state pulses instead.
+    return inFlight ? PulsingOpacity(child: control) : control;
   }
 }
 

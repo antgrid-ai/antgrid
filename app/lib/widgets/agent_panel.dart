@@ -25,6 +25,7 @@ import 'command_output_overlay.dart';
 import 'handler/handler_briefing_sheet.dart';
 import 'mobile_access_toggle.dart';
 import 'remote_host_chip.dart';
+import 'session_agent_mark.dart';
 import 'session_mode_control.dart';
 import 'session_rename_dialog.dart';
 import 'window_title_bar.dart';
@@ -70,9 +71,9 @@ class AgentPanel extends ConsumerWidget {
               const SizedBox(width: AbTokens.space6),
               const Expanded(child: TitleBarBreadcrumb()),
               const SizedBox(width: AbTokens.space8),
-              // Icons dropped: the phone header has to fit the drawer button,
-              // breadcrumb and shield beside this.
-              const SessionModeControl(showIcons: false),
+              const SessionAgentMark(),
+              const SizedBox(width: AbTokens.space6),
+              const SessionModeControl(),
               const SizedBox(width: AbTokens.space8),
               const HandlerHeaderControl(),
             ],

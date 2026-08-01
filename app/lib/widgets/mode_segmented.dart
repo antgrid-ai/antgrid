@@ -6,10 +6,14 @@ import '../design/widgets/ab_segmented.dart';
 /// Session-mode segmented control ([ CHAT | TERMINAL ]): both options always
 /// visible, the selected cell accented.
 ///
-/// One widget for two surfaces — the New Session composer picks the mode a
-/// session starts in, `SessionModeControl` switches an open one — so a user who
-/// picked "Chat" at create time meets the same control when switching rather
-/// than learning the same concept twice.
+/// Shared by the create-time picker and the in-session switch, deliberately as
+/// ONE widget: picking the mode for a session about to exist and changing it on
+/// one that already does are the same decision, and two idioms for it would mean
+/// learning the control twice. The surfaces differ only in density — create-time
+/// has a form's width for labels, the header has [iconOnly].
+///
+/// A greyed cell is how "this agent can't do chat" gets said, in both places;
+/// that reason has nowhere to live in a control that shows only one option.
 class ModeSegmented extends StatelessWidget {
   const ModeSegmented({
     super.key,
@@ -20,7 +24,11 @@ class ModeSegmented extends StatelessWidget {
     this.chatDisabledReason,
     this.enabled = true,
     this.showIcons = true,
-  });
+    this.iconOnly = false,
+  }) : assert(
+         !iconOnly || showIcons,
+         'iconOnly with showIcons:false would paint nothing',
+       );
 
   /// Prefix for the cell keys (`<prefix>-chip` / `-chat` / `-terminal`) so the
   /// two mount points stay separately addressable.
@@ -45,10 +53,15 @@ class ModeSegmented extends StatelessWidget {
   /// Icons are garnish (labels always render); tight rows drop them first.
   final bool showIcons;
 
+  /// Header density: glyphs only, the labels demoted to tooltips. See
+  /// [AbSegmented.iconOnly].
+  final bool iconOnly;
+
   @override
   Widget build(BuildContext context) {
     return AbSegmented<String>(
       key: Key('$keyPrefix-chip'),
+      iconOnly: iconOnly,
       segments: [
         AbSegment(
           key: Key('$keyPrefix-chat'),

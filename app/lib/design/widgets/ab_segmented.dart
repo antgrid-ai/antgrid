@@ -19,10 +19,14 @@ class AbSegment<T> {
   });
 
   final T value;
+
+  /// Always required, even under [AbSegmented.iconOnly] — there it becomes the
+  /// tooltip and the accessible name rather than painted text, so a cell is
+  /// never nameless.
   final String label;
 
-  /// Optional leading Iconify SVG (see `AbIcons`). Garnish for faster
-  /// recognition — the label is always rendered, never icon-only.
+  /// Optional leading Iconify SVG (see `AbIcons`). Garnish beside the label;
+  /// required, and the only thing drawn, under [AbSegmented.iconOnly].
   final String? icon;
 
   final bool enabled;
@@ -52,11 +56,21 @@ class AbSegmented<T> extends StatelessWidget {
     required this.selected,
     required this.onSelect,
     this.onDisabledTap,
+    this.iconOnly = false,
   });
 
   final List<AbSegment<T>> segments;
   final T selected;
   final ValueChanged<T> onSelect;
+
+  /// Drops the labels and paints only [AbSegment.icon], for chrome too tight
+  /// to spell both options out (a title bar, a phone toolbar).
+  ///
+  /// The label is not lost, only unpainted: it becomes the tooltip and the
+  /// accessible name. Reach for this only where the glyphs are already common
+  /// vocabulary — the box, the divider and the accent fill still say "two
+  /// options, one chosen", which is the part a lone icon button cannot say.
+  final bool iconOnly;
 
   /// Tap on a disabled cell. Defaults to surfacing [AbSegment.disabledReason]
   /// as a snack bar — hover can't be relied on for the reason (touch
@@ -66,6 +80,12 @@ class AbSegmented<T> extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = context.antgrid;
+    // Not a constructor assert: a const constructor's initializer list can't
+    // reach a parameter's fields.
+    assert(
+      !iconOnly || segments.every((s) => s.icon != null),
+      'an icon-only segment has nothing to paint without an icon',
+    );
     return Container(
       decoration: BoxDecoration(
         border: Border.all(color: p.borderDefault),
@@ -88,6 +108,7 @@ class AbSegmented<T> extends StatelessWidget {
                   selected: segments[i].value == selected,
                   onSelect: onSelect,
                   onDisabledTap: onDisabledTap,
+                  iconOnly: iconOnly,
                 ),
               ],
             ],
@@ -105,12 +126,14 @@ class _SegmentCell<T> extends StatefulWidget {
     required this.selected,
     required this.onSelect,
     required this.onDisabledTap,
+    required this.iconOnly,
   });
 
   final AbSegment<T> segment;
   final bool selected;
   final ValueChanged<T> onSelect;
   final ValueChanged<AbSegment<T>>? onDisabledTap;
+  final bool iconOnly;
 
   @override
   State<_SegmentCell<T>> createState() => _SegmentCellState<T>();
@@ -150,39 +173,48 @@ class _SegmentCellState<T> extends State<_SegmentCell<T>> {
     Widget cell = AnimatedContainer(
       duration: AbTokens.motionDefault,
       curve: Curves.easeOut,
-      padding: const EdgeInsets.symmetric(
+      padding: EdgeInsets.symmetric(
         horizontal: AbTokens.space8,
-        vertical: AbTokens.space4,
+        // Icon-only cells lose the label's width, so they buy the tap area back
+        // in height rather than shipping a 29x18 target to phones.
+        vertical: widget.iconOnly ? AbTokens.space6 : AbTokens.space4,
       ),
       color: widget.selected ? p.accent.withAlpha(40) : null,
       alignment: Alignment.center,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (s.icon != null) ...[
-            AbIcon(s.icon!, size: 11, color: fg),
-            const SizedBox(width: AbTokens.space6),
-          ],
-          Text(
-            s.label.toUpperCase(),
-            style: AbTokens.sansStyle(
-              fontSize: AbTokens.fontXxs,
-              fontWeight: FontWeight.w600,
-              color: fg,
-            ).copyWith(letterSpacing: 0.8),
-          ),
-        ],
-      ),
+      child: widget.iconOnly
+          ? AbIcon(s.icon!, size: 13, color: fg)
+          : Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (s.icon != null) ...[
+                  AbIcon(s.icon!, size: 11, color: fg),
+                  const SizedBox(width: AbTokens.space6),
+                ],
+                Text(
+                  s.label.toUpperCase(),
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXxs,
+                    fontWeight: FontWeight.w600,
+                    color: fg,
+                  ).copyWith(letterSpacing: 0.8),
+                ),
+              ],
+            ),
     );
 
-    if (!s.enabled && s.disabledReason != null) {
-      cell = AbTooltip(message: s.disabledReason!, child: cell);
-    }
+    // Why disabled beats what it is: a greyed cell raises the more urgent
+    // question. Icon-only cells always carry one, since nothing else names them.
+    final tooltip =
+        (s.enabled ? null : s.disabledReason) ??
+        (widget.iconOnly ? s.label : null);
+    if (tooltip != null) cell = AbTooltip(message: tooltip, child: cell);
 
     return Semantics(
       button: true,
       enabled: s.enabled,
       selected: widget.selected,
+      // Only when unpainted — with the label on screen this would double it up.
+      label: widget.iconOnly ? s.label : null,
       child: FocusableActionDetector(
         // enabled:false drops the tab stop and keyboard actions but keeps the
         // detector mounted: its didUpdateWidget fires the highlight callbacks

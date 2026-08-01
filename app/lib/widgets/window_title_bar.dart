@@ -22,6 +22,7 @@ import '../window/window_capabilities.dart';
 import '../window/window_chrome.dart';
 import 'agent_panel.dart';
 import 'agent_work_status_dot.dart';
+import 'session_agent_mark.dart';
 import 'session_mode_control.dart';
 
 /// The app-drawn window title bar.
@@ -147,6 +148,13 @@ class _DragRegion extends ConsumerWidget {
 class WindowTitleBarContents extends ConsumerWidget {
   const WindowTitleBarContents({super.key});
 
+  /// Sits immediately before [modeSlotKey], on a tighter gap than the rest of
+  /// the trailing row: the mark and the mode control describe the same session,
+  /// and spacing them like siblings is what stops the mark reading as one more
+  /// unrelated header chip.
+  @visibleForTesting
+  static const agentSlotKey = Key('window-title-bar-agent');
+
   @visibleForTesting
   static const modeSlotKey = Key('window-title-bar-mode');
 
@@ -189,6 +197,11 @@ class WindowTitleBarContents extends ConsumerWidget {
         // items to the right edge.
         const Spacer(),
         if (showTrailing) ...[
+          const KeyedSubtree(
+            key: agentSlotKey,
+            child: SessionAgentMark(),
+          ),
+          const SizedBox(width: AbTokens.space6),
           const KeyedSubtree(
             key: modeSlotKey,
             child: SessionModeControl(),
