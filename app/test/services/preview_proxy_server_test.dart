@@ -117,19 +117,7 @@ void main() {
     addTearDown(() async => proxy.stop());
     expect(bound, isNot(targetPort));
 
-    final socket = await Socket.connect('localhost', bound);
-    socket.write(
-      'GET / HTTP/1.1\r\n'
-      'Host: localhost:$bound\r\n'
-      'Connection: close\r\n'
-      '\r\n',
-    );
-    await socket.flush();
-    final raw = await socket
-        .cast<List<int>>()
-        .transform(const Utf8Decoder(allowMalformed: true))
-        .join();
-    await socket.close();
+    final raw = await _get(bound);
 
     // The redirect must point at the proxy's bind port, not the target port.
     expect(raw, contains('location: http://localhost:$bound/landed'));
@@ -157,19 +145,7 @@ void main() {
     addTearDown(() async => proxy.stop());
     expect(bound, port);
 
-    final socket = await Socket.connect('localhost', bound);
-    socket.write(
-      'GET / HTTP/1.1\r\n'
-      'Host: localhost:$bound\r\n'
-      'Connection: close\r\n'
-      '\r\n',
-    );
-    await socket.flush();
-    final raw = await socket
-        .cast<List<int>>()
-        .transform(const Utf8Decoder(allowMalformed: true))
-        .join();
-    await socket.close();
+    final raw = await _get(bound);
 
     expect(raw, contains('location: http://localhost:$port/login'));
     expect(raw, isNot(contains('https://localhost')));
@@ -193,19 +169,7 @@ void main() {
     final bound = await proxy.start();
     addTearDown(() async => proxy.stop());
 
-    final socket = await Socket.connect('localhost', bound);
-    socket.write(
-      'GET / HTTP/1.1\r\n'
-      'Host: localhost:$bound\r\n'
-      'Connection: close\r\n'
-      '\r\n',
-    );
-    await socket.flush();
-    final raw = await socket
-        .cast<List<int>>()
-        .transform(const Utf8Decoder(allowMalformed: true))
-        .join();
-    await socket.close();
+    final raw = await _get(bound);
 
     final cookieLines = raw
         .split('\r\n')
@@ -215,4 +179,133 @@ void main() {
     expect(raw, contains('session=xyz'));
     expect(raw, contains('csrf=123'));
   });
+
+  test('advertises the gzip body encoding on every tunneled request', () async {
+    final port = await freePort();
+    TunnelHttpRequest? captured;
+    final proxy = PreviewProxyServer(
+      targetPort: port,
+      onRequest: (req) async {
+        captured = req;
+        return _ok();
+      },
+    );
+    final bound = await proxy.start();
+    addTearDown(() async => proxy.stop());
+
+    await _get(bound);
+
+    // The bridge only compresses when asked, so dropping this silently reverts
+    // every preview to the uncompressed path.
+    expect(captured!.acceptEncodings, contains(kTunnelGzipEncoding));
+    expect(captured!.toJson()['acceptEncodings'], contains(kTunnelGzipEncoding));
+  });
+
+  test('inflates a gzip-base64 body before serving it to the WebView', () async {
+    final port = await freePort();
+    const source = 'body { color: red; }\n';
+    final proxy = PreviewProxyServer(
+      targetPort: port,
+      onRequest: (_) async => TunnelHttpResponse(
+        requestId: 'x',
+        status: 200,
+        headers: const {'content-type': 'text/css'},
+        body: base64Encode(gzip.encode(utf8.encode(source))),
+        bodyEncoding: kTunnelGzipEncoding,
+      ),
+    );
+    final bound = await proxy.start();
+    addTearDown(() async => proxy.stop());
+
+    final raw = await _get(bound);
+
+    expect(raw, contains(source));
+    // The WebView is handed plain bytes, so no encoding header may claim
+    // otherwise — a stale content-encoding makes WebKit gunzip twice.
+    expect(raw.toLowerCase(), isNot(contains('content-encoding')));
+  });
+
+  test('keeps the utf-8 charset shelf only stamps for a String body', () async {
+    final port = await freePort();
+    // Non-ASCII under a charset-less text type: the case where the byte body
+    // the gzip path serves would otherwise reach the WebView as latin-1.
+    const source = '<p>héllo wörld ☃</p>';
+    final proxy = PreviewProxyServer(
+      targetPort: port,
+      onRequest: (_) async => TunnelHttpResponse(
+        requestId: 'x',
+        status: 200,
+        headers: const {'content-type': 'text/html'},
+        body: base64Encode(gzip.encode(utf8.encode(source))),
+        bodyEncoding: kTunnelGzipEncoding,
+      ),
+    );
+    final bound = await proxy.start();
+    addTearDown(() async => proxy.stop());
+
+    final raw = await _get(bound);
+
+    expect(raw.toLowerCase(), contains('content-type: text/html; charset=utf-8'));
+    expect(raw, contains(source));
+  });
+
+  test('does not restate a charset the dev server already pinned', () async {
+    final port = await freePort();
+    final proxy = PreviewProxyServer(
+      targetPort: port,
+      // A charset we cannot silently rewrite to utf-8 — and binary types must
+      // not gain a charset parameter at all.
+      onRequest: (_) async => TunnelHttpResponse(
+        requestId: 'x',
+        status: 200,
+        headers: const {'content-type': 'text/html; charset=iso-8859-1'},
+        body: base64Encode(gzip.encode(utf8.encode('<p>plain</p>'))),
+        bodyEncoding: kTunnelGzipEncoding,
+      ),
+    );
+    final bound = await proxy.start();
+    addTearDown(() async => proxy.stop());
+
+    final raw = await _get(bound);
+
+    expect(raw.toLowerCase(), contains('content-type: text/html; charset=iso-8859-1'));
+  });
+
+  test('leaves a binary content-type without a charset', () async {
+    final port = await freePort();
+    final proxy = PreviewProxyServer(
+      targetPort: port,
+      onRequest: (_) async => TunnelHttpResponse(
+        requestId: 'x',
+        status: 200,
+        headers: const {'content-type': 'application/wasm'},
+        body: base64Encode(gzip.encode(utf8.encode(' asm binary'))),
+        bodyEncoding: kTunnelGzipEncoding,
+      ),
+    );
+    final bound = await proxy.start();
+    addTearDown(() async => proxy.stop());
+
+    final raw = await _get(bound);
+
+    expect(raw.toLowerCase(), contains('content-type: application/wasm'));
+    expect(raw.toLowerCase(), isNot(contains('charset')));
+  });
+}
+
+Future<String> _get(int port) async {
+  final socket = await Socket.connect('localhost', port);
+  socket.write(
+    'GET / HTTP/1.1\r\n'
+    'Host: localhost:$port\r\n'
+    'Connection: close\r\n'
+    '\r\n',
+  );
+  await socket.flush();
+  final raw = await socket
+      .cast<List<int>>()
+      .transform(const Utf8Decoder(allowMalformed: true))
+      .join();
+  await socket.close();
+  return raw;
 }

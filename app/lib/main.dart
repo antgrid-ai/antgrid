@@ -14,6 +14,7 @@ import 'analytics/events.dart';
 import 'analytics/install_id.dart';
 import 'config/build_info.dart';
 import 'config/environment.dart';
+import 'config/native_crypto.dart';
 import 'design/ab_colors.dart';
 import 'design/ab_text_density.dart';
 import 'design/ab_theme.dart';
@@ -91,6 +92,9 @@ Future<void> main() async {
     defaultDebugPrint(message, wrapWidth: wrapWidth);
   };
   WidgetsFlutterBinding.ensureInitialized();
+  // Before any socket can seal a frame: the default cipher is pure Dart and
+  // blocks the UI isolate for the whole of a tunneled preview response.
+  installNativeE2eCipher();
   // Draw behind transparent system bars on mobile so the app's own dark
   // surfaces reach the screen edges (no opaque OS bar bands). Bar icon
   // brightness is applied per-palette via the AnnotatedRegion in AbApp.

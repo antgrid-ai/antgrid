@@ -80,6 +80,14 @@ class PreviewState {
   }
 }
 
+/// `bodyEncoding` for a base64-of-gzip response body. Mirrors
+/// `TUNNEL_GZIP_ENCODING` in the bridge's `tunnel-protocol.ts`.
+///
+/// Compressing inside the tunnel message is the only compression available
+/// here: the relay carries AES-GCM ciphertext, which WebSocket
+/// permessage-deflate cannot squeeze.
+const String kTunnelGzipEncoding = 'gzip-base64';
+
 class TunnelHttpRequest {
   final String requestId;
   final int port;
@@ -93,6 +101,11 @@ class TunnelHttpRequest {
   final Map<String, String> headers;
   final String? body;
 
+  /// Body encodings we can decode beyond the mandatory utf8/base64. A bridge
+  /// that predates this field ignores it and answers uncompressed, which is
+  /// why an unknown `bodyEncoding` can never reach us unrequested.
+  final List<String> acceptEncodings;
+
   const TunnelHttpRequest({
     required this.requestId,
     required this.port,
@@ -101,6 +114,7 @@ class TunnelHttpRequest {
     required this.path,
     required this.headers,
     this.body,
+    this.acceptEncodings = const [kTunnelGzipEncoding],
   });
 
   Map<String, dynamic> toJson() {
@@ -113,6 +127,7 @@ class TunnelHttpRequest {
       'path': path,
       'headers': headers,
       if (body != null) 'body': body,
+      if (acceptEncodings.isNotEmpty) 'acceptEncodings': acceptEncodings,
     };
   }
 }

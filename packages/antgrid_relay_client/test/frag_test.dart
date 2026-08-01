@@ -92,6 +92,44 @@ void main() {
       });
       expect(parsed.map((p) => p['data'] as String).join(), json);
     });
+
+    // The reassembly budget is charged with this instead of
+    // `utf8.encode(data).length`, and the bridge charges the same transfer via
+    // Buffer.byteLength — so agreeing with the encoder is the whole contract.
+    group('utf8ByteLength matches utf8.encode', () {
+      for (final sample in {
+        'empty': '',
+        'ascii': 'export const a = 1;',
+        'two-byte': 'héllo wörld — ünïcode',
+        'three-byte': '日本語のテキスト ☃',
+        'astral': '𝄞 𝕳𝖊𝖑𝖑𝖔 👨‍👩‍👧‍👦 🇯🇵',
+        'mixed': 'a é 日 𝄞 z',
+        'json payload': '{"body":"const x = \\"quoted\\";\\n\\t"}',
+      }.entries) {
+        test(sample.key, () {
+          expect(
+            utf8ByteLength(sample.value),
+            utf8.encode(sample.value).length,
+            reason: sample.key,
+          );
+        });
+      }
+
+      // Dart's encoder substitutes U+FFFD (3 bytes) for a surrogate it cannot
+      // pair. Undercounting these would let a hostile peer sit above the global
+      // reassembly budget without ever tripping it.
+      test('unpaired surrogates', () {
+        for (final s in [
+          '\ud800', // lone high, at end of string
+          '\udc00', // lone low
+          'a\ud800b', // lone high, followed by a non-surrogate
+          '\ud800\ud800', // high followed by another high
+          '😀', // a REAL pair — must stay 4 bytes, not 6
+        ]) {
+          expect(utf8ByteLength(s), utf8.encode(s).length, reason: s.codeUnits.toString());
+        }
+      });
+    });
   });
 
   group('FragReassembler', () {

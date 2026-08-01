@@ -164,6 +164,22 @@ class PreviewProxyServer {
         if (rewritten != null) responseHeaders['location'] = rewritten;
       }
 
+      // A String body makes shelf re-encode to UTF-8 on the way out, so decoding
+      // to bytes here is not an extra pass — it replaces one.
+      if (response.bodyEncoding == kTunnelGzipEncoding) {
+        return shelf.Response(
+          response.status,
+          headers: responseHeaders,
+          body: gzip.decode(base64Decode(response.body)),
+          // shelf stamps `charset=utf-8` on a charset-less content-type only for
+          // a String body, and gzip is the first encoding that puts TEXT on the
+          // byte path. Restate it here or a charset-less `text/*` page decodes
+          // as latin-1 in the WebView — `nosniff` denies it a second guess.
+          encoding: _charsetlessTextType(responseHeaders['content-type'])
+              ? utf8
+              : null,
+        );
+      }
       if (response.bodyEncoding == 'base64') {
         final bodyBytes = base64Decode(response.body);
         return shelf.Response(
@@ -181,6 +197,27 @@ class PreviewProxyServer {
     } catch (e) {
       return shelf.Response.internalServerError(body: 'Tunnel error: $e');
     }
+  }
+
+  /// Text formats the bridge decoded as UTF-8, named without a charset. Passing
+  /// an encoding for anything else would either mislabel binary bytes or
+  /// overwrite a charset the dev server set deliberately.
+  static bool _charsetlessTextType(Object? contentType) {
+    if (contentType is! String) return false;
+    final lower = contentType.toLowerCase();
+    if (lower.contains('charset=')) return false;
+    final mime = lower.split(';').first.trim();
+    return mime.startsWith('text/') ||
+        mime.endsWith('+json') ||
+        mime.endsWith('+xml') ||
+        const {
+          'application/json',
+          'application/javascript',
+          'application/x-javascript',
+          'application/ecmascript',
+          'application/xml',
+          'application/graphql',
+        }.contains(mime);
   }
 
   /// Returns [location] repointed at the proxy origin if it's an absolute

@@ -47,6 +47,10 @@ dependencies:
   qr_flutter: ^4.1.0
   flutter_secure_storage: ^10.3.1
   cryptography: ^2.7.0
+  # Native AES-GCM for the E2E transport cipher (see config/native_crypto.dart).
+  # No Dart symbol outside that file references it, but removing it drops every
+  # relay frame back onto the pure-Dart cipher on the UI isolate.
+  cryptography_flutter: ^2.3.4
   uuid: ^4.5.1
   # Ghostty's VT engine in Flutter — production terminal renderer.
   # Wins decisively on TUI block-element rendering (▀ ▄ █ etc) over the

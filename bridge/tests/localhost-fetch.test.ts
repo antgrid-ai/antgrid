@@ -49,11 +49,38 @@ function startTestServer() {
           },
         });
       }
+      if (url.pathname === "/bundle.js") {
+        return new Response(BUNDLE_JS, {
+          headers: { "Content-Type": "application/javascript" },
+        });
+      }
+      if (url.pathname === "/tiny.js") {
+        return new Response("export const a = 1;", {
+          headers: { "Content-Type": "application/javascript" },
+        });
+      }
+      if (url.pathname === "/big.png") {
+        return new Response(INCOMPRESSIBLE_RANDOM, {
+          headers: { "Content-Type": "image/png" },
+        });
+      }
+      if (url.pathname === "/blob.bin") {
+        return new Response(INCOMPRESSIBLE_RANDOM, {
+          headers: { "Content-Type": "application/octet-stream" },
+        });
+      }
       return new Response("Hello");
     },
   });
   return testServer;
 }
+
+// Well past GZIP_MIN_BYTES and compressible, like a real dev-server chunk.
+const BUNDLE_JS = "export function hello(name) { return `hi ${name}`; }\n".repeat(400);
+// Random bytes: gzip cannot shrink these. Served under image/* to exercise the
+// content-type shortcut and under a type that shortcut misses to exercise the
+// size check behind it.
+const INCOMPRESSIBLE_RANDOM = crypto.getRandomValues(new Uint8Array(16 * 1024));
 
 afterAll(() => {
   testServer?.stop(true);
@@ -134,5 +161,83 @@ describe("fetchLocalhost", () => {
     // The flattened map must not also carry it, or the proxy would emit a
     // duplicate (last-only) copy alongside the out-of-band list.
     expect(result.headers["set-cookie"]).toBeUndefined();
+  });
+});
+
+describe("fetchLocalhost body compression", () => {
+  it("gzips a compressible body when the caller advertises the encoding", async () => {
+    const server = startTestServer();
+    const result = await fetchLocalhost({
+      url: `http://localhost:${server.port}/bundle.js`,
+      acceptEncodings: ["gzip-base64"],
+    });
+
+    expect(result.bodyEncoding).toBe("gzip-base64");
+    const inflated = Buffer.from(Bun.gunzipSync(Buffer.from(result.body, "base64")));
+    expect(inflated.toString("utf8")).toBe(BUNDLE_JS);
+    // The point of the exercise: fewer bytes for the phone to decode than the
+    // raw text would have been.
+    expect(result.body.length).toBeLessThan(BUNDLE_JS.length / 2);
+  });
+
+  it("stays uncompressed for a caller that never advertised the encoding", async () => {
+    const server = startTestServer();
+    // An app predating acceptEncodings would render gzip bytes as text, so
+    // silence must mean "send it plain".
+    const result = await fetchLocalhost({ url: `http://localhost:${server.port}/bundle.js` });
+
+    expect(result.bodyEncoding).toBe("utf8");
+    expect(result.body).toBe(BUNDLE_JS);
+  });
+
+  it("ignores an advertisement it does not implement", async () => {
+    const server = startTestServer();
+    const result = await fetchLocalhost({
+      url: `http://localhost:${server.port}/bundle.js`,
+      acceptEncodings: ["br-base64"],
+    });
+
+    expect(result.bodyEncoding).toBe("utf8");
+  });
+
+  it("leaves a small body alone", async () => {
+    const server = startTestServer();
+    const result = await fetchLocalhost({
+      url: `http://localhost:${server.port}/tiny.js`,
+      acceptEncodings: ["gzip-base64"],
+    });
+
+    expect(result.bodyEncoding).toBe("utf8");
+    expect(result.body).toBe("export const a = 1;");
+  });
+
+  it("leaves an already-compressed format alone", async () => {
+    const server = startTestServer();
+    const result = await fetchLocalhost({
+      url: `http://localhost:${server.port}/big.png`,
+      acceptEncodings: ["gzip-base64"],
+    });
+
+    expect(result.bodyEncoding).toBe("base64");
+    expect(Buffer.from(result.body, "base64").equals(Buffer.from(INCOMPRESSIBLE_RANDOM))).toBe(
+      true,
+    );
+  });
+
+  // The content-type list can't know every incompressible format, so the size
+  // check behind it is the real guard — and only a type that list MISSES
+  // reaches it. Without this, inverting the comparison passes every test while
+  // making incompressible bodies ~33% larger on the wire.
+  it("discards a gzip that came out bigger than the plain encoding", async () => {
+    const server = startTestServer();
+    const result = await fetchLocalhost({
+      url: `http://localhost:${server.port}/blob.bin`,
+      acceptEncodings: ["gzip-base64"],
+    });
+
+    expect(result.bodyEncoding).toBe("base64");
+    expect(Buffer.from(result.body, "base64").equals(Buffer.from(INCOMPRESSIBLE_RANDOM))).toBe(
+      true,
+    );
   });
 });

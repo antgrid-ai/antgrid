@@ -98,6 +98,18 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   final _drawerSearchFocus = FocusNode();
   final _mobileScaffoldKey = GlobalKey<ScaffoldState>();
 
+  /// Identity for the two desktop panels ACROSS [_PanelMode] changes. Each mode
+  /// builds a structurally different Row (see [_buildPanels]), so without these
+  /// Flutter reconciles by position, fails to match the panel, and unmounts it —
+  /// taking the preview's platform WebView and the agent terminal with it. The
+  /// rebuilt PreviewScreen then re-anchors from a null origin and reloads the
+  /// page through the relay tunnel, which is why toggling the panel used to cost
+  /// a full page load rather than a relayout. A GlobalKey makes the mode switch
+  /// reparent the live element instead. Not used on the mobile PageView, whose
+  /// panels never move between slots.
+  final _agentPanelKey = GlobalKey();
+  final _contextPanelKey = GlobalKey();
+
   /// OS-level notifications, used only while the app is backgrounded. Self
   /// degrading: `init`/`show` swallow platform errors.
   final LocalNotificationService _osNotifications = LocalNotificationService();
@@ -965,8 +977,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
                 _splitRatio = r;
                 _updatePrefs();
               },
-              left: const AgentPanel(),
+              left: AgentPanel(key: _agentPanelKey),
               right: WorkspacePanel(
+                key: _contextPanelKey,
                 selectedView: _selectedView,
                 onViewSelected: _onSidebarSelected,
                 viewBadges: _workspaceBadges(),
@@ -985,7 +998,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       // so a vertical stub would be dead chrome eating horizontal space the
       // user just asked to reclaim.
       case _PanelMode.contextHidden:
-        return [const Expanded(child: AgentPanel())];
+        return [Expanded(child: AgentPanel(key: _agentPanelKey))];
 
       case _PanelMode.contextExpanded:
         return [
@@ -997,6 +1010,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           ),
           Expanded(
             child: WorkspacePanel(
+              key: _contextPanelKey,
               selectedView: _selectedView,
               onViewSelected: _onSidebarSelected,
               viewBadges: _workspaceBadges(),

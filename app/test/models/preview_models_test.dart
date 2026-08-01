@@ -123,6 +123,25 @@ void main() {
       final json = request.toJson();
       expect(json['body'], '{"key":"value"}');
     });
+
+    // The bridge matches this string literally (TUNNEL_GZIP_ENCODING in
+    // tunnel-protocol.ts) and answers uncompressed when it doesn't recognise
+    // what we advertised, so a rename on either side degrades silently.
+    test('the advertised gzip encoding is the name the bridge matches', () {
+      expect(kTunnelGzipEncoding, 'gzip-base64');
+    });
+
+    test('an explicitly empty acceptEncodings omits the key', () {
+      final json = TunnelHttpRequest(
+        requestId: 'req-3',
+        port: 3000,
+        method: 'GET',
+        path: '/',
+        headers: const {},
+        acceptEncodings: const [],
+      ).toJson();
+      expect(json.containsKey('acceptEncodings'), false);
+    });
   });
 
   group('TunnelHttpResponse', () {

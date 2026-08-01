@@ -50,6 +50,37 @@ bool isFragEnvelope(Object? v) {
   return frag['id'] is String && frag['i'] is int && frag['n'] is int;
 }
 
+/// UTF-8 byte length of [s] without encoding it. The reassembly budget wants a
+/// count, and `utf8.encode(s).length` allocates a full copy of a multi-MB
+/// fragment to produce one — ~25x the cost of this scan on ASCII, once per
+/// fragment. Mirrors the bridge's `Buffer.byteLength(data, "utf8")`
+/// (frag-reassembler.ts), including Dart's substitution of U+FFFD (3 bytes) for
+/// an unpaired surrogate, so both ends charge a transfer the same size.
+int utf8ByteLength(String s) {
+  // Every code unit is worth at least one byte; the loop adds only the excess.
+  var bytes = s.length;
+  for (var i = 0; i < s.length; i++) {
+    final u = s.codeUnitAt(i);
+    if (u < 0x80) continue;
+    if (u < 0x800) {
+      bytes += 1;
+      continue;
+    }
+    if (u >= 0xd800 && u < 0xdc00 && i + 1 < s.length) {
+      final low = s.codeUnitAt(i + 1);
+      if (low >= 0xdc00 && low < 0xe000) {
+        bytes += 2; // surrogate PAIR: 2 code units -> 4 bytes
+        i++;
+        continue;
+      }
+    }
+    // BMP char, or an unpaired surrogate the encoder replaces with U+FFFD —
+    // 3 bytes either way.
+    bytes += 2;
+  }
+  return bytes;
+}
+
 // JSON-escaped byte cost of a single Unicode rune. Runes iterate whole code
 // points (astral chars as one rune, unpaired surrogates as their raw value), so
 // the UTF-8 length is pure arithmetic — no per-character allocation.
@@ -186,7 +217,7 @@ class FragReassembler {
     if (t.parts[i] == null) {
       t.parts[i] = data;
       t.count++;
-      final b = utf8.encode(data).length;
+      final b = utf8ByteLength(data);
       t.bytes += b;
       _totalBytes += b;
     }

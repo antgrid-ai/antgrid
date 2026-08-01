@@ -313,7 +313,7 @@ class MachineSession {
     };
     final plaintext = jsonEncode(envelope);
     final t = E2eTransportDart(sendKey: keys.p2a, recvKey: keys.a2p);
-    final bytes = utf8.encode(plaintext).length;
+    final bytes = utf8ByteLength(plaintext);
     try {
       if (bytes <= kFragThreshold) {
         relay.sendMessage(machineDeviceId, channel, await t.seal(plaintext));

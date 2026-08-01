@@ -91,6 +91,7 @@ export class TunnelManager {
         method: msg.method,
         headers: msg.headers,
         body: msg.body,
+        acceptEncodings: msg.acceptEncodings,
       });
 
       this.sendTunnel({
