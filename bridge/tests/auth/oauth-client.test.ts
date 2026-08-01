@@ -145,9 +145,25 @@ describe("startTokenMaintenance", () => {
     // unit test — so capture the scheduled callback and drive re-mints by hand.
     // A microtask flush after each invocation lets the async mint + re-schedule
     // settle before the next drive.
+    //
+    // Unlike `captureSchedule` in relay-client-backoff.test.ts, this patch has
+    // to stay installed across those awaits — and `bun test` runs every file in
+    // ONE process, so an unrelated file's ambient timer would otherwise land in
+    // `pending` and be driven in place of the maintenance callback. Discriminate
+    // by delay: maintenance asks for minutes (0.8×ttl, floored at 60s, or the
+    // 30s retry), ambient work asks for milliseconds. Foreign timers are handed
+    // to the real implementation rather than swallowed, so nothing else in the
+    // process silently loses its timer for the duration of this test.
     const realSetTimeout = globalThis.setTimeout;
+    const MIN_MAINTENANCE_DELAY_MS = 30_000;
     let pending: (() => void) | null = null;
-    (globalThis as any).setTimeout = ((fn: () => void) => { pending = fn; return 0; });
+    (globalThis as any).setTimeout = ((fn: () => void, ms?: number, ...rest: unknown[]) => {
+      if ((ms ?? 0) >= MIN_MAINTENANCE_DELAY_MS) {
+        pending = fn;
+        return 0;
+      }
+      return (realSetTimeout as any)(fn, ms, ...rest);
+    });
     const flush = () => new Promise((r) => realSetTimeout(r, 0));
 
     let mintCalls = 0;
