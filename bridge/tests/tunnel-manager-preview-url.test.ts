@@ -95,6 +95,36 @@ test("a suppressed stream still records the entry for the welcome snapshot", () 
   expect(mgr.getPreviewSnapshot()).toHaveLength(1);
 });
 
+test("an entry recorded while suppressed is pushed once the peer is back", () => {
+  // Reconnect re-enters onPortsUpdate via resyncState's emitCurrent() with the
+  // SAME ports, so the unchanged-entry short-circuit would otherwise swallow it
+  // forever — nothing else re-pushes (the app never asks for preview:snapshot).
+  const { mgr, sent, connState } = makeManager();
+  connState.peerOnline = false;
+  mgr.onPortsUpdate([port(3000, "https")]);
+  expect(sent).toHaveLength(0);
+
+  connState.peerOnline = true;
+  mgr.onPortsUpdate([port(3000, "https")]);
+  expect(sent).toHaveLength(1);
+  expect(sent[0]).toMatchObject({ type: "preview:url", port: 3000, scheme: "https" });
+
+  // ...and exactly once: the redelivery clears the marker.
+  mgr.onPortsUpdate([port(3000, "https")]);
+  expect(sent).toHaveLength(1);
+});
+
+test("a port that departs while suppressed does not resurrect on reconnect", () => {
+  const { mgr, sent, connState } = makeManager();
+  connState.peerOnline = false;
+  mgr.onPortsUpdate([port(3000, "https")]);
+  mgr.onPortsUpdate([]);
+  connState.peerOnline = true;
+  mgr.onPortsUpdate([]);
+  expect(sent).toHaveLength(0);
+  expect(mgr.getPreviewSnapshot()).toEqual([]);
+});
+
 test("local mode (no relay host) sends nothing but still drops departed ports", () => {
   const { mgr, sent } = makeManager({ relayHost: "" });
   mgr.onPortsUpdate([port(3000, "https")]);

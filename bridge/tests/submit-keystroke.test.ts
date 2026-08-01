@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { isSubmitKeystroke } from "../src/agent-core";
+import { hasTypedContent, isSubmitKeystroke } from "../src/agent-core";
 
 // Gates the work-status turn inference for agents with no pre-turn hook. A false
 // positive opens a turn nothing will close, so the negatives matter more than the
@@ -29,4 +29,21 @@ test("a CR that is not the final byte is not a submit", () => {
   // The agent echoes/redraws after a submit; only the keystroke that ENDS the
   // payload committed the prompt.
   expect(isSubmitKeystroke("\rmore typing")).toBe(false);
+});
+
+// The other half of the gate: isSubmitKeystroke("\r") is true, and on its own it
+// cannot tell a prompt from enter on an empty line. See work-status.ts.
+
+test("a bare CR carries no typed content", () => {
+  expect(hasTypedContent("\r")).toBe(false);
+  expect(hasTypedContent("")).toBe(false);
+});
+
+test("anything before the CR is content, including escape sequences", () => {
+  // Arrow-key history recall then enter IS a submit; dropping it would lose a
+  // real turn, which is worse than the odd menu keypress being counted.
+  expect(hasTypedContent("run the tests\r")).toBe(true);
+  expect(hasTypedContent("a")).toBe(true);
+  expect(hasTypedContent("\x1b[A")).toBe(true);
+  expect(hasTypedContent("\x1b\r")).toBe(true);
 });

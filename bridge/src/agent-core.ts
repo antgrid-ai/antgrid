@@ -94,6 +94,23 @@ export function isSubmitKeystroke(data: string): boolean {
   return data.endsWith("\r") && !data.endsWith("\x1b\r");
 }
 
+/**
+ * Whether a `terminal:input` payload carried anything BESIDES the submitting CR.
+ *
+ * A PTY delivers one keystroke per frame, so the CR that submits a prompt almost
+ * always arrives alone — which makes {@link isSubmitKeystroke} on its own unable
+ * to tell "the user sent a prompt" from "the user pressed enter on an empty
+ * prompt, or to dismiss a TUI menu". The latter starts no turn, so nothing will
+ * ever close the one it opens. work-status.ts pairs the two: a keystroke-inferred
+ * turn needs typed content since the last one (see `typedSessions`).
+ *
+ * Escape sequences count as content on purpose — arrow-key history recall then
+ * enter IS a submit, and the alternative (dropping it) loses a real turn.
+ */
+export function hasTypedContent(data: string): boolean {
+  return data.replace(/\r$/, "").length > 0;
+}
+
 export interface AgentCore {
   /** Wire up an outbound transport. The bus's inbound handler is set so the
    *  transport can dispatch incoming messages back into core. */
@@ -175,8 +192,13 @@ export interface BuildAgentCoreOptions {
   /** Fired when the user types into [sessionId]'s PTY, so the owning ProjectCore
    *  can clear a block the hook reported. Bridge-internal, and NOT a turn-start
    *  on its own: typing in an idle session is not work. `submitted` (the input
-   *  carried a CR) is a turn-start only for agents that have no pre-turn hook. */
-  onUserReply?: (sessionId: string, opts: { submitted: boolean }) => void;
+   *  carried a CR) is a turn-start only for agents that have no pre-turn hook,
+   *  and only once `typed` has reported content for that session — a bare enter
+   *  submits nothing (see {@link hasTypedContent}). */
+  onUserReply?: (
+    sessionId: string,
+    opts: { submitted: boolean; typed: boolean },
+  ) => void;
   /** Fired when the user resolves a permission/question on [sessionId], so the
    *  owning ProjectCore can clear the block and resume the turn. Distinct from
    *  {@link onTurnStart}: it opens a turn only if something was actually
@@ -432,6 +454,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // agent without a pre-turn hook can give us (see work-status.ts).
         opts.onUserReply?.(msg.terminalId, {
           submitted: isSubmitKeystroke(msg.data),
+          typed: hasTypedContent(msg.data),
         });
         break;
       case "handler:configure": {

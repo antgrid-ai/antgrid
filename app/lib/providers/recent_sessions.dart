@@ -75,9 +75,13 @@ class RemoteProjectStatusController
     extends Notifier<Map<String, AgentWorkStatus>> {
   @override
   Map<String, AgentWorkStatus> build() {
-    // Seed from the persisted status cache so a cold-boot row can show the
-    // last-known CALL-TO-ACTION (attention/error) before the first advert
-    // arrives. Only those two are seeded: "working" means a prompt is in flight
+    // Seed from the persisted status cache so the two PROJECT-level surfaces —
+    // the collapsed machine header's aggregate and the title bar's pill — can
+    // show the last-known CALL-TO-ACTION (attention/error) before the first
+    // advert arrives. Session ROWS deliberately get nothing from this:
+    // [remoteSessionStatusProvider] is never seeded, and with no per-session
+    // entry `sessionRowStatus` masks on `running`, which the cache loads false.
+    // Only those two are seeded: "working" means a prompt is in flight
     // RIGHT NOW, which a cached value from a previous launch cannot possibly
     // know — seeding it would paint a live-activity pulse on a machine we
     // aren't even connected to. attention/error are durable ("this project

@@ -63,8 +63,13 @@ AgentWorkStatus sessionRowStatus({
 /// Live status for one session of one project, for the drawer's session rows.
 /// Reads the two advert maps directly — like [projectWorkStatusProvider], this
 /// never dials anything.
-final sessionWorkStatusProvider =
-    Provider.family<AgentWorkStatus, ({String entryId, String sessionId, bool running})>((
+///
+/// `autoDispose` is load-bearing, not an optimization: [running] is part of the
+/// family key and flips over a session's life, so a plain family would mint a
+/// second permanent instance — each holding two `select` subscriptions — every
+/// time a session starts or stops, for as long as the app runs.
+final sessionWorkStatusProvider = Provider.autoDispose
+    .family<AgentWorkStatus, ({String entryId, String sessionId, bool running})>((
   ref,
   args,
 ) {

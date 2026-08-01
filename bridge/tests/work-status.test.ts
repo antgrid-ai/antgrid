@@ -474,10 +474,36 @@ test("a submitted prompt opens the turn for an agent that has no turn-start hook
   // "done" for the whole turn.
   const idle = fold([sessions(1, { tool: "codex" })]);
   expect(idle.status).toBe("done");
-  const working = userReply(idle, "r0", { submitted: true });
+  // A PTY sends one keystroke per frame: the prompt text, then the CR.
+  const typed = userReply(idle, "r0", { typed: true });
+  const working = userReply(typed, "r0", { submitted: true });
   expect(working.status).toBe("working");
   // Their stop hook is what closes it — the inferred turn can never wedge.
   expect(reduceWorkStatus(working, push("task_complete", "r0")).status).toBe("done");
+});
+
+test("a submit that arrives as one chunk (paste / send-to-agent) opens the turn", () => {
+  const idle = fold([sessions(1, { tool: "codex" })]);
+  expect(userReply(idle, "r0", { typed: true, submitted: true }).status).toBe("working");
+});
+
+test("a bare enter with nothing typed does NOT open a turn", () => {
+  // Enter on an empty prompt, or to dismiss a TUI menu, starts no turn — so no
+  // stop hook is coming and an inferred turn would hang the session on
+  // "working" until some unrelated later turn ended.
+  const idle = fold([sessions(1, { tool: "codex" })]);
+  expect(userReply(idle, "r0", { submitted: true })).toBe(idle);
+  expect(userReply(idle, "r0", { submitted: true }).status).toBe("done");
+});
+
+test("the typed marker is consumed by the turn it opens", () => {
+  // The next bare enter has to earn its own content, or one prompt would license
+  // every subsequent stray CR.
+  const idle = fold([sessions(1, { tool: "codex" })]);
+  const working = userReply(idle, "r0", { typed: true, submitted: true });
+  const done = reduceWorkStatus(working, push("task_complete", "r0"));
+  expect(done.status).toBe("done");
+  expect(userReply(done, "r0", { submitted: true })).toBe(done);
 });
 
 test("a bare keystroke (no CR) is not a submitted prompt", () => {
@@ -489,20 +515,29 @@ test("a bare keystroke (no CR) is not a submitted prompt", () => {
 test("a submitted prompt is NOT inferred for an agent that reports its own turns", () => {
   // Claude has a real /turn-start hook and chat sessions have turn frames —
   // guessing from keystrokes there could only be wrong.
+  // Typed content is present in every case below, so the tool gate is the only
+  // thing keeping these sessions out of an inferred turn.
+  const submit = (s: WorkStatusState) =>
+    userReply(userReply(s, "r0", { typed: true }), "r0", { submitted: true });
+
   const claude = fold([sessions(1, { tool: "claude-code" })]);
-  expect(userReply(claude, "r0", { submitted: true })).toBe(claude);
+  expect(submit(claude).status).toBe("done");
   const chat = fold([sessions(1, { tool: "codex", mode: "chat" })]);
-  expect(userReply(chat, "r0", { submitted: true })).toBe(chat);
+  expect(submit(chat).status).toBe("done");
 });
 
 test("a submitted prompt is NOT inferred for a hookless agent (nothing would close it)", () => {
   // opencode/kilo/kimi/mistral-vibe install no lifecycle hooks, so an inferred
   // turn would run until the session stopped.
+  const submit = (s: WorkStatusState) =>
+    userReply(userReply(s, "r0", { typed: true }), "r0", { submitted: true });
+
   const hookless = fold([sessions(1, { tool: "opencode" })]);
-  expect(userReply(hookless, "r0", { submitted: true })).toBe(hookless);
-  // ...and an entry with no `tool` at all (custom command) is treated the same.
+  expect(submit(hookless).status).toBe("done");
+  // ...and an entry with no `tool` and no project default (custom `agent.command`)
+  // is treated the same.
   const untooled = fold([sessions(1)]);
-  expect(userReply(untooled, "r0", { submitted: true })).toBe(untooled);
+  expect(submit(untooled).status).toBe("done");
 });
 
 test("a submitted prompt clears the previous turn's end before opening the new one", () => {
@@ -510,12 +545,38 @@ test("a submitted prompt clears the previous turn's end before opening the new o
   // task_complete would keep the re-prompted session on "done".
   const done = fold([sessions(1, { tool: "codex" }), push("task_complete", "r0")]);
   expect(done.status).toBe("done");
-  expect(userReply(done, "r0", { submitted: true }).status).toBe("working");
+  expect(userReply(done, "r0", { typed: true, submitted: true }).status).toBe("working");
 });
 
 test("a submitted prompt on an already-working session is a no-op (SAME object)", () => {
-  const working = userReply(fold([sessions(1, { tool: "codex" })]), "r0", { submitted: true });
+  const working = userReply(
+    fold([sessions(1, { tool: "codex" })]),
+    "r0",
+    { typed: true, submitted: true },
+  );
   expect(userReply(working, "r0", { submitted: true })).toBe(working);
+  // Typing DURING an open turn is recorded (TUIs let you queue the next prompt)
+  // but opens nothing — the turn already running is the one that will close.
+  const queued = userReply(working, "r0", { typed: true, submitted: true });
+  expect(queued.status).toBe("working");
+  expect(queued.activeTurns).toEqual(working.activeTurns);
+});
+
+test("the project's agent.tool is what a session with no tool of its own inherits", () => {
+  // A SessionEntry only carries `tool` when it OVERRODE the project default, so
+  // reading it alone opted every default-spec session out of the inference.
+  const hello = { id: "m", timestamp: 0, type: "agent:hello", tool: "codex", version: "0" } as any;
+  const s = fold([hello, sessions(1)]);
+  expect(s.keystrokeTurnSessions.has("r0")).toBe(true);
+  expect(userReply(s, "r0", { typed: true, submitted: true }).status).toBe("working");
+});
+
+test("a session's own tool still overrides the project default", () => {
+  const hello = { id: "m", timestamp: 0, type: "agent:hello", tool: "codex", version: "0" } as any;
+  // claude-code has a real /turn-start hook, so it must stay out of the set even
+  // though the project default would have put it in.
+  const s = fold([hello, sessions(1, { tool: "claude-code" })]);
+  expect(s.keystrokeTurnSessions.has("r0")).toBe(false);
 });
 
 // ── Notification attribution ────────────────────────────────────────────────

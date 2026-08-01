@@ -14,6 +14,9 @@ export class TunnelManager {
   private relayHost: string;
   private connState: ConnState;
   private sentUrlDetails = new Map<number, PreviewUrlEntry>();
+  /** Ports whose current entry was recorded while the stream was suppressed and
+   *  so never reached the phone. Cleared on the send that delivers them. */
+  private undelivered = new Set<number>();
 
   constructor(opts: {
     projectId: string;
@@ -40,6 +43,7 @@ export class TunnelManager {
     for (const port of [...this.sentUrlDetails.keys()]) {
       if (!currentPorts.has(port)) {
         this.sentUrlDetails.delete(port);
+        this.undelivered.delete(port);
       }
     }
 
@@ -65,13 +69,22 @@ export class TunnelManager {
       // the URL sighting lands later than the line-based detection — so re-push
       // rather than only re-caching, keeping the live push and the
       // welcome-replayed snapshot describing the same entry.
-      if (existing && existing.label === entry.label && existing.scheme === entry.scheme) continue;
+      const unchanged = existing
+        && existing.label === entry.label
+        && existing.scheme === entry.scheme;
+      if (unchanged && !this.undelivered.has(p.port)) continue;
 
-      // Recorded even while suppressed: getPreviewSnapshot() is what the
-      // welcome replay serves, so a port detected offline must still show up
-      // when the phone reconnects.
+      // Recorded even while suppressed, so getPreviewSnapshot() stays complete —
+      // but the entry is ALSO remembered as undelivered, because nothing else
+      // will re-push it: reconnect re-enters here via resyncState's
+      // emitCurrent(), where the unchanged-entry check above would otherwise
+      // short-circuit and the phone would never learn the port exists.
       this.sentUrlDetails.set(p.port, entry);
-      if (this.connState.suppressed) continue;
+      if (this.connState.suppressed) {
+        this.undelivered.add(p.port);
+        continue;
+      }
+      this.undelivered.delete(p.port);
       this.sendEncrypted(
         createMessage("preview:url", {
           projectId: this.projectId,

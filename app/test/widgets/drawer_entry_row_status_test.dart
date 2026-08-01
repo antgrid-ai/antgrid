@@ -10,7 +10,7 @@ import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/project/project_status.dart';
 import 'package:antgrid/providers/collapsed_drawer.dart';
-import 'package:antgrid/providers/project_work_status.dart';
+import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/widgets/drawer_entry_row.dart';
@@ -88,6 +88,11 @@ void main() {
     // Work status is a SESSION-level signal: the session rows carry the dot and
     // a project-level rollup beside them only restated the loudest one. No
     // advert status puts a dot on a project row, expanded or collapsed.
+    //
+    // Seeded through the live advert maps the reaper writes, NOT by overriding
+    // projectWorkStatusProvider: DrawerEntryRow stopped reading that provider
+    // when the project dot was removed, so an override of it asserts nothing —
+    // this has to drive the same inputs a real advert would.
     for (final status in AgentWorkStatus.values) {
       testWidgets('renders no project dot for ${status.name}', (tester) async {
         final entry = _entry('p1');
@@ -96,7 +101,6 @@ void main() {
             DrawerEntryRow(entry),
             overrides: [
               ...stores.overrides,
-              projectWorkStatusProvider('p1').overrideWithValue(status),
               sessionsForEntryProvider(
                 'p1',
               ).overrideWith((ref) => [session(running: true)]),
@@ -104,6 +108,18 @@ void main() {
           ),
         );
         await tester.pump();
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(DrawerEntryRow)),
+        );
+        container
+            .read(remoteProjectStatusProvider.notifier)
+            .setLocalStatuses({'p1': status});
+        container.read(remoteSessionStatusProvider.notifier).setLocalSessionStatuses({
+          'p1': {'s1': status},
+        });
+        await tester.pump();
+
         expect(find.byKey(const ValueKey('drawer-status-dot-p1')), findsNothing);
 
         await _collapse(tester, 'p1');

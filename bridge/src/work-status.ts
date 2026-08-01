@@ -32,6 +32,17 @@ export interface WorkStatusState {
    *  submitted keystroke is the only thing that can open their turn — see
    *  {@link needsKeystrokeTurnStart} and {@link userReply}. */
   readonly keystrokeTurnSessions: ReadonlySet<string>;
+  /** Sessions that have received PTY input carrying more than the submitting CR
+   *  since their last inferred turn. The evidence half of the keystroke
+   *  inference: without it a bare enter — on an empty prompt, or to dismiss a
+   *  TUI menu — opened a turn no stop hook was ever going to close. */
+  readonly typedSessions: ReadonlySet<string>;
+  /** `agent.tool` from the project's antgrid.yaml, learned from `agent:hello`.
+   *  A `SessionEntry` only carries `tool` when the session overrode the project
+   *  default, so this is what the rest of the bridge spells `entry.tool ??
+   *  agentSpec.name` — without it every default-spec session looked toolless and
+   *  silently opted out of the keystroke inference. */
+  readonly defaultTool: string | undefined;
   /** Rollup of {@link sessionStatuses} — what the project row shows. */
   readonly status: WorkStatus;
   readonly sessionStatuses: ReadonlyMap<string, WorkStatus>;
@@ -43,7 +54,9 @@ export interface WorkStatusState {
  *  turn-end closes. Never collides with a real session id (a uuid). */
 export const UNATTRIBUTED_TURN = "";
 
-const EMPTY_TURNS: ReadonlySet<string> = new Set();
+/** Shared empty set for every session-id set on the state — turns, running
+ *  sessions, keystroke/typed markers. */
+const EMPTY_IDS: ReadonlySet<string> = new Set();
 const EMPTY_NOTIFICATIONS: ReadonlyMap<string, NotificationType> = new Map();
 const EMPTY_REQUESTS: ReadonlyMap<string, ReadonlySet<string>> = new Map();
 
@@ -56,6 +69,8 @@ interface WorkInputs {
   activeTurns: ReadonlySet<string>;
   pendingTurns: ReadonlySet<string>;
   keystrokeTurnSessions: ReadonlySet<string>;
+  typedSessions: ReadonlySet<string>;
+  defaultTool: string | undefined;
 }
 
 /** Notification types that mean "the turn is over" (as opposed to the two
@@ -125,6 +140,8 @@ function build(i: WorkInputs): WorkStatusState {
     activeTurns: i.activeTurns,
     pendingTurns: i.pendingTurns,
     keystrokeTurnSessions: i.keystrokeTurnSessions,
+    typedSessions: i.typedSessions,
+    defaultTool: i.defaultTool,
     status,
     sessionStatuses,
   };
@@ -138,21 +155,32 @@ function inputsOf(s: WorkStatusState): WorkInputs {
     activeTurns: s.activeTurns,
     pendingTurns: s.pendingTurns,
     keystrokeTurnSessions: s.keystrokeTurnSessions,
+    typedSessions: s.typedSessions,
+    defaultTool: s.defaultTool,
   };
 }
 
 export const initialWorkStatus: WorkStatusState = build({
-  runningSessions: EMPTY_TURNS,
+  runningSessions: EMPTY_IDS,
   notifications: EMPTY_NOTIFICATIONS,
   pendingRequests: EMPTY_REQUESTS,
-  activeTurns: EMPTY_TURNS,
-  pendingTurns: EMPTY_TURNS,
-  keystrokeTurnSessions: EMPTY_TURNS,
+  activeTurns: EMPTY_IDS,
+  pendingTurns: EMPTY_IDS,
+  keystrokeTurnSessions: EMPTY_IDS,
+  typedSessions: EMPTY_IDS,
+  defaultTool: undefined,
 });
 
 /** Drop [id]'s notification AND the unattributed one. The latter has no id to
  *  tell whose block it was, and leaving it would strand the project on a
- *  call-to-action nobody can clear. Returns the SAME map when neither exists. */
+ *  call-to-action nobody can clear.
+ *
+ *  The cost is real and accepted: prompting session A discards an unattributed
+ *  block — a config-`terminals:` slot's error, or a hook that fired without a
+ *  terminal id — that may have had nothing to do with A. Stranding is the worse
+ *  failure (a dot the user cannot clear by any action) so it wins, but a block
+ *  that IS attributed is never touched. Returns the SAME map when neither
+ *  exists. */
 function clearNotifications(
   map: ReadonlyMap<string, NotificationType>,
   id: string,
@@ -269,6 +297,15 @@ export function answerRequest(prev: WorkStatusState, sessionId: string): WorkSta
  *  will close it. Agents with a real turn-start signal are left to it: guessing
  *  from keystrokes there could only be wrong.
  *
+ *  ...and only once [typed] has reported content for this session. A PTY sends
+ *  one keystroke per frame, so the submitting CR normally arrives alone and
+ *  `submitted` alone cannot distinguish a prompt from enter on an empty prompt or
+ *  on a TUI menu. Those start no turn, so the stop hook the inference relies on
+ *  never fires and the session hangs on "working" until some LATER turn ends.
+ *  Requiring typed content since the last inferred turn is the evidence that a
+ *  prompt existed at all; the marker is consumed when the turn opens, so the next
+ *  bare enter has to earn its own.
+ *
  *  Otherwise deliberately narrower than {@link turnStart}: a bare keystroke is
  *  weaker evidence than a submitted prompt, so it never clears the UNATTRIBUTED
  *  notification (it may belong to a different session) nor a turn-end state
@@ -276,15 +313,20 @@ export function answerRequest(prev: WorkStatusState, sessionId: string): WorkSta
 export function userReply(
   prev: WorkStatusState,
   sessionId: string,
-  opts: { submitted?: boolean } = {},
+  opts: { submitted?: boolean; typed?: boolean } = {},
 ): WorkStatusState {
   const own = prev.notifications.get(sessionId);
   const blocked = own !== undefined && isCallToAction(own);
   const pending = prev.pendingRequests.has(sessionId);
+  // Content in THIS frame counts toward this same submit: a paste (or the app's
+  // send-to-agent composer) delivers "prompt text\r" as one chunk.
+  const typed = opts.typed === true || prev.typedSessions.has(sessionId);
   const opens = opts.submitted === true
+    && typed
     && prev.keystrokeTurnSessions.has(sessionId)
     && !prev.activeTurns.has(sessionId);
-  if (!blocked && !pending && !opens) return prev;
+  const recordTyped = opts.typed === true && !prev.typedSessions.has(sessionId);
+  if (!blocked && !pending && !opens && !recordTyped) return prev;
   let notifications = prev.notifications;
   // Opening the turn means clearing the session's turn-end notification too:
   // statusFor reads notifications BEFORE activeTurns, so a leftover
@@ -294,11 +336,18 @@ export function userReply(
     next.delete(sessionId);
     notifications = next;
   }
+  let typedSessions = prev.typedSessions;
+  if (opens) {
+    typedSessions = withoutTurn(typedSessions, sessionId);
+  } else if (recordTyped) {
+    typedSessions = new Set(typedSessions).add(sessionId);
+  }
   return build({
     ...inputsOf(prev),
     notifications,
     pendingRequests: clearRequests(prev.pendingRequests, sessionId),
     activeTurns: opens ? new Set(prev.activeTurns).add(sessionId) : prev.activeTurns,
+    typedSessions,
   });
 }
 
@@ -355,6 +404,11 @@ function foldNotification(
   // session list — filed under their own key the notification would be invisible
   // (statusFor only reads running sessions) and then pruned, silently losing an
   // error or a permission prompt the project-wide fallback would have shown.
+  //
+  // It FANS OUT, and that is the accepted cost: statusFor reads the unattributed
+  // entry for every running session, so one config-terminal error dots them all.
+  // Losing the signal entirely is worse than over-reporting it, and the only fix
+  // that doesn't trade one for the other is attribution the hook can't give us.
   const key = raw === UNATTRIBUTED_TURN || prev.runningSessions.has(raw)
     ? raw
     : UNATTRIBUTED_TURN;
@@ -421,7 +475,7 @@ function foldSessions(
   const grew = live.size > prev.runningSessions.size;
   const keystrokeTurnSessions = new Set(
     running
-      .filter((s) => s.mode !== "chat" && needsKeystrokeTurnStart(s.tool))
+      .filter((s) => s.mode !== "chat" && needsKeystrokeTurnStart(s.tool ?? prev.defaultTool))
       .map((s) => s.id),
   );
 
@@ -448,6 +502,8 @@ function foldSessions(
   for (const [id, n] of prev.notifications) {
     if (id === UNATTRIBUTED_TURN ? live.size > 0 : live.has(id)) notifications.set(id, n);
   }
+  const typedSessions = new Set<string>();
+  for (const id of prev.typedSessions) if (live.has(id)) typedSessions.add(id);
   // A newly-started session is a fresh turn of work — clear a stale done-type
   // UNATTRIBUTED notification so a turn-start on the new session isn't masked by
   // a fallback that predates it. permission_request, awaiting_input and error
@@ -465,15 +521,17 @@ function foldSessions(
     && sameIds(keystrokeTurnSessions, prev.keystrokeTurnSessions)
     && prev.pendingTurns.size === 0
     && pendingRequests.size === prev.pendingRequests.size
-    && notifications.size === prev.notifications.size) {
+    && notifications.size === prev.notifications.size
+    && typedSessions.size === prev.typedSessions.size) {
     return prev;
   }
   return build({
     ...inputsOf(prev),
     runningSessions: live,
     activeTurns,
-    pendingTurns: EMPTY_TURNS,
+    pendingTurns: EMPTY_IDS,
     keystrokeTurnSessions,
+    typedSessions,
     pendingRequests,
     notifications,
   });
@@ -495,6 +553,16 @@ export function reduceWorkStatus(prev: WorkStatusState, msg: AbMessage): WorkSta
       return closeRequest(prev, msg.sessionId, msg.permissionId ?? msg.questionId);
     case "notification:push": return foldNotification(prev, msg);
     case "session:updated": return foldSessions(prev, msg.sessions);
+    // The project's `agent.tool`, which a SessionEntry only carries when it
+    // overrode it. Emitted on every handshake and always ahead of the first
+    // session list (see onHandshakeComplete in agent-core.ts), so `foldSessions`
+    // has it by the time it needs it; a later change is picked up by the next
+    // session list rather than recomputed here, since the fold keeps no
+    // per-session tool to recompute from.
+    case "agent:hello":
+      return msg.tool === prev.defaultTool
+        ? prev
+        : build({ ...inputsOf(prev), defaultTool: msg.tool });
     default: return prev;
   }
 }
