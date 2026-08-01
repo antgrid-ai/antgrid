@@ -1,7 +1,9 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../launcher/host_control_client.dart';
+import '../services/devices_api.dart';
 import 'control_plane.dart';
+import 'device_provisioning.dart';
 
 /// A loopback [HostControlClient] bound to the live machine host (port+token
 /// from `ensureHost`). Overridden in tests with a fake-backed client. Disposed
@@ -54,6 +56,23 @@ class RemoteDevicesNotifier extends AsyncNotifier<PhonesList> {
   Future<void> unpair({required String phonePubkey}) =>
       _mutate((c) => c.phonesUnpair(phonePubkey: phonePubkey));
 }
+
+/// The account's devices keyed by the id the BRIDGE knows them by
+/// (`PairedPhone.phoneDeviceId` == the account device's `device_id`, which is
+/// what `/account/devices/me/peers` hands the bridge at admission).
+///
+/// This join is what lets a roster row offer a real remedy. Clearing the local
+/// record is not one: admission is account trust, so the device re-creates its
+/// row on the next connect. Only revoking the account device — which deletes
+/// its OAuth client and kicks it off the relay — actually cuts it off.
+///
+/// Empty while signed out or unreachable; a row with no match is a device the
+/// account no longer has, so there is nothing left to revoke.
+final accountDevicesByBridgeIdProvider =
+    FutureProvider<Map<String, DeviceSummary>>((ref) async {
+      final devices = await ref.watch(devicesApiProvider).list();
+      return {for (final d in devices) d.deviceId: d};
+    });
 
 final remoteAccessPolicyProvider =
     AsyncNotifierProvider<RemoteAccessPolicyNotifier, RemoteAccessPolicy>(

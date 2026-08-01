@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../connect/remote_connect_actions.dart';
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
@@ -10,10 +9,13 @@ import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_segmented.dart';
+import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../launcher/host_control_client.dart';
+import '../providers/device_provisioning.dart';
 import '../providers/remote_access.dart';
+import '../services/devices_api.dart';
 
 /// The machine-wide remote-access switch, what it grants, and the roster of
 /// devices that have connected — the panel behind the title-bar chip.
@@ -27,17 +29,16 @@ import '../providers/remote_access.dart';
 /// two directions carry opposite risk. Granting every account device the whole
 /// machine is worth one sentence of friction; withdrawing that grant should
 /// never be slower than the fear that prompted it.
-class RemoteAccessPanel extends ConsumerStatefulWidget {
+///
+/// The two levers here cut at different scopes, and neither substitutes for the
+/// other: the switch is THIS machine for ALL devices and reverses in a tap;
+/// signing a device out is THAT device across EVERY machine and holds until it
+/// signs in again.
+class RemoteAccessPanel extends ConsumerWidget {
   const RemoteAccessPanel({super.key});
 
   @override
-  ConsumerState<RemoteAccessPanel> createState() => _RemoteAccessPanelState();
-}
-
-class _RemoteAccessPanelState extends ConsumerState<RemoteAccessPanel>
-    with RemoteConnectActions {
-  @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final p = context.antgrid;
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -45,7 +46,7 @@ class _RemoteAccessPanelState extends ConsumerState<RemoteAccessPanel>
       children: [
         const _AccessSection(),
         Container(height: 1, color: p.borderSubtle),
-        _DevicesSection(onPair: scanAndConnect),
+        const _DevicesSection(),
       ],
     );
   }
@@ -140,9 +141,7 @@ class _AccessSection extends ConsumerWidget {
 // ──────────────────────────────────────────────────────────────────────────────
 
 class _DevicesSection extends ConsumerWidget {
-  const _DevicesSection({required this.onPair});
-
-  final VoidCallback onPair;
+  const _DevicesSection();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -183,22 +182,14 @@ class _DevicesSection extends ConsumerWidget {
               ),
             )
           else if (phones.isEmpty)
+            // No CTA: there is nothing to do here. A device signed in to this
+            // account admits itself on first connect, so the only instruction
+            // is where to go and sign in.
             _Note(
               text:
-                  'None yet. A device signed in as you connects on its own — '
-                  'scan only to add one that is not on your account.',
+                  'None yet. Sign in to Antgrid on your phone or another '
+                  'desktop and it shows up here.',
               color: p.textMuted,
-              action: AbButton(
-                key: const ValueKey('remote-panel-pair-cta'),
-                label: 'Scan a device',
-                compact: true,
-                leading: AbIcon(
-                  AbIcons.scan,
-                  size: 11,
-                  color: context.antgrid.textSecondary,
-                ),
-                onTap: onPair,
-              ),
             )
           else
             // Bounded so a machine with many devices scrolls the roster instead
@@ -218,13 +209,72 @@ class _DevicesSection extends ConsumerWidget {
   }
 }
 
-class _DeviceRow extends ConsumerWidget {
+class _DeviceRow extends ConsumerStatefulWidget {
   const _DeviceRow({required this.phone});
   final PairedPhoneSummary phone;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_DeviceRow> createState() => _DeviceRowState();
+}
+
+class _DeviceRowState extends ConsumerState<_DeviceRow> {
+  bool _busy = false;
+
+  PairedPhoneSummary get phone => widget.phone;
+
+  String get _name => phone.label ?? phone.phoneDeviceId;
+
+  /// Revoke the ACCOUNT device, then drop the local record.
+  ///
+  /// Order matters and so does the pairing. Revoking alone leaves a row for a
+  /// device that can no longer connect; clearing alone is theatre, because
+  /// admission is account trust and the row rebuilds itself on the next hello.
+  /// The local clear is best-effort — a failed one leaves a stale row, which is
+  /// cosmetic, while a failed revoke means access is still live and must be
+  /// said out loud.
+  Future<void> _signOut(DeviceSummary account) async {
+    final devices = ref.read(devicesApiProvider);
+    final roster = ref.read(remoteDevicesProvider.notifier);
+    final ok = await AbConfirmDialog.show(
+      context: context,
+      title: 'Sign out $_name?',
+      body:
+          'It loses access to every machine on your account, not just this '
+          'one, until you sign in on it again.',
+      confirmLabel: 'Sign out',
+      destructive: true,
+    );
+    if (!ok || !mounted) return;
+
+    setState(() => _busy = true);
+    final revoked = await devices.revoke(account.id);
+    if (revoked) await roster.unpair(phonePubkey: phone.phonePubkey);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    if (!revoked) {
+      showAbSnackBar(context, "Couldn't sign $_name out. It still has access.");
+    }
+  }
+
+  /// Drop a local record with no account device behind it. Honest here and
+  /// only here: there is nothing left to revoke, so clearing IS the whole
+  /// remedy rather than a stand-in for one.
+  Future<void> _forget() async {
+    final roster = ref.read(remoteDevicesProvider.notifier);
+    setState(() => _busy = true);
+    await roster.unpair(phonePubkey: phone.phonePubkey);
+    if (mounted) setState(() => _busy = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final p = context.antgrid;
+    // Three states, not two. Until the account inventory resolves we cannot
+    // tell "still signed in" from "already gone", and the two take opposite
+    // actions — so the row waits rather than guessing a label.
+    final accounts = ref.watch(accountDevicesByBridgeIdProvider).value;
+    final account = accounts?[phone.phoneDeviceId];
+
     return AbListRow(
       key: ValueKey('device-${phone.phonePubkey}'),
       density: AbRowDensity.sm,
@@ -252,33 +302,55 @@ class _DeviceRow extends ConsumerWidget {
           color: p.textMuted,
         ),
       ),
-      // "Forget", not "Revoke": this clears the local record only. An
-      // account-trusted device rewrites its row on the next connect — the
-      // switch above is the only thing that actually withdraws access.
-      trailing: AbTooltip(
-        message: 'Clears this machine\'s record of the device. It can '
-            'reconnect while remote access is on.',
-        child: AbButton(
-          key: ValueKey('forget-${phone.phonePubkey}'),
-          label: 'Forget',
-          compact: true,
-          onTap: () => ref
-              .read(remoteDevicesProvider.notifier)
-              .unpair(phonePubkey: phone.phonePubkey),
+      trailing: switch ((accounts, account)) {
+        (null, _) => AbTooltip(
+          message: 'Checking which devices are still on your account…',
+          child: AbButton(
+            key: ValueKey('signout-${phone.phonePubkey}'),
+            label: 'Sign out',
+            compact: true,
+            onTap: null,
+          ),
         ),
-      ),
+        (_, final DeviceSummary a) => AbTooltip(
+          message:
+              'Revokes the device on your account and drops it from this '
+              'machine. Account-wide, not just here.',
+          child: AbButton(
+            key: ValueKey('signout-${phone.phonePubkey}'),
+            label: 'Sign out',
+            compact: true,
+            color: p.error,
+            onTap: _busy ? null : () => _signOut(a),
+          ),
+        ),
+        _ => AbTooltip(
+          message:
+              'This device is no longer on your account. Clears the record '
+              'it left behind.',
+          child: AbButton(
+            key: ValueKey('forget-${phone.phonePubkey}'),
+            label: 'Forget',
+            compact: true,
+            onTap: _busy ? null : _forget,
+          ),
+        ),
+      },
     );
   }
 }
 
-/// One-line explanation plus its single action — the empty and error bodies,
-/// kept compact so the popup doesn't grow a full-screen empty state.
+/// One-line explanation and, where there is one, its single action — the empty
+/// and error bodies, kept compact so the popup doesn't grow a full-screen
+/// empty state.
 class _Note extends StatelessWidget {
-  const _Note({required this.text, required this.color, required this.action});
+  const _Note({required this.text, required this.color, this.action});
 
   final String text;
   final Color color;
-  final Widget action;
+
+  /// Omitted when the state has no remedy the user can act on here.
+  final Widget? action;
 
   @override
   Widget build(BuildContext context) {
@@ -290,8 +362,10 @@ class _Note extends StatelessWidget {
           text,
           style: AbTokens.sansStyle(fontSize: AbTokens.fontXxs, color: color),
         ),
-        const SizedBox(height: AbTokens.space6),
-        Align(alignment: Alignment.centerLeft, child: action),
+        if (action != null) ...[
+          const SizedBox(height: AbTokens.space6),
+          Align(alignment: Alignment.centerLeft, child: action!),
+        ],
       ],
     );
   }

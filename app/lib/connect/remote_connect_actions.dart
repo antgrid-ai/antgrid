@@ -14,12 +14,15 @@ import '../screens/scanner_screen.dart';
 import '../screens/upgrade_screen.dart';
 import '../services/app_settings_service.dart';
 
-/// Shared remote scan + connect-by-URI flow, consumed by both
-/// [ConnectDialog] and `remote_access_panel.dart`'s empty roster.
+/// Shared remote scan + connect-by-URI flow, consumed by [ConnectDialog].
+///
+/// The remote-access panel deliberately has no scan entry: QR pairing is hidden
+/// for the initial release, and an account device admits itself on first
+/// connect without one.
 ///
 /// This is the single source of truth for the coordinate-import handoff so
-/// the two entry points cannot drift: ScannerScreen push → [QrPayload.parse]
-/// with the default relay URL → `pairedAgentProvider.notifier.importCoordinates`.
+/// consumers cannot drift: ScannerScreen push → [QrPayload.parse] with the
+/// default relay URL → `pairedAgentProvider.notifier.importCoordinates`.
 /// On success the current route is popped; failures surface as a snackbar.
 ///
 /// Mix into a [ConsumerState]. UI (copy, layout, which widgets host the scan

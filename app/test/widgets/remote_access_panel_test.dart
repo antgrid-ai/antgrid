@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_segmented.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/providers/remote_access.dart';
+import 'package:antgrid/services/devices_api.dart';
 import 'package:antgrid/widgets/remote_access_panel.dart';
 
 class _FakeNotifier extends RemoteDevicesNotifier {
@@ -39,20 +41,37 @@ class _FakePolicyNotifier extends RemoteAccessPolicyNotifier {
   Future<void> setEnabled(bool enabled) async => writes.add(enabled);
 }
 
-/// Pumps the panel with both providers faked. The real
+/// The account inventory the roster joins against. `ph-1` is the bridge-side
+/// id of the one device [_FakeNotifier] lists.
+final _accountDevices = <String, DeviceSummary>{
+  'ph-1': DeviceSummary(
+    id: 'acct-uuid-1',
+    deviceId: 'ph-1',
+    kind: 'app',
+    platform: 'ios',
+    displayName: 'iPhone',
+  ),
+};
+
+/// Pumps the panel with every provider faked. The real
 /// [remoteAccessPolicyProvider] would reach for the loopback host through
-/// `ensureHost()`, so it must be overridden even in tests that only care about
-/// the device roster.
+/// `ensureHost()`, and [accountDevicesByBridgeIdProvider] would hit the account
+/// API, so both must be overridden even in tests that only care about the
+/// roster.
 Future<void> _pumpPanel(
   WidgetTester tester, {
   required RemoteDevicesNotifier Function() devices,
   RemoteAccessPolicyNotifier Function()? policy,
+  Map<String, DeviceSummary>? accounts,
 }) async {
   await tester.pumpWidget(ProviderScope(
     overrides: [
       remoteDevicesProvider.overrideWith(devices),
       remoteAccessPolicyProvider.overrideWith(
         policy ?? () => _FakePolicyNotifier(false),
+      ),
+      accountDevicesByBridgeIdProvider.overrideWith(
+        (ref) async => accounts ?? _accountDevices,
       ),
     ],
     child: const MaterialApp(home: Scaffold(body: RemoteAccessPanel())),
@@ -62,7 +81,7 @@ Future<void> _pumpPanel(
 }
 
 void main() {
-  testWidgets('lists a connected device as identity only; Forget is its one action',
+  testWidgets('a device still on the account offers sign-out, not forget',
       (tester) async {
     final fake = _FakeNotifier();
     await _pumpPanel(tester, devices: () => fake);
@@ -71,6 +90,20 @@ void main() {
     // Access is machine-wide, so no project ever appears against a device.
     expect(find.text('Proj One'), findsNothing);
 
+    // Clearing the local record is not a remedy for an account device: it
+    // re-creates its row on the next connect. The row must not offer it.
+    expect(find.byKey(const ValueKey('forget-pk-1')), findsNothing);
+    expect(find.byKey(const ValueKey('signout-pk-1')), findsOneWidget);
+  });
+
+  testWidgets('a device the account no longer has offers forget instead',
+      (tester) async {
+    final fake = _FakeNotifier();
+    await _pumpPanel(tester, devices: () => fake, accounts: const {});
+
+    // Nothing left to revoke, so clearing the leftover row IS the whole
+    // remedy — the one case where Forget is honest.
+    expect(find.byKey(const ValueKey('signout-pk-1')), findsNothing);
     await tester.tap(find.byKey(const ValueKey('forget-pk-1')));
     await tester.pump();
     expect(fake.unpaired, ['pk-1']);
@@ -114,6 +147,8 @@ void main() {
     await _pumpPanel(tester, devices: _EmptyNotifier.new);
 
     expect(find.byKey(const Key('remote-access-switch')), findsOneWidget);
-    expect(find.byKey(const ValueKey('remote-panel-pair-cta')), findsOneWidget);
+    // QR pairing is hidden for the initial release; an account device admits
+    // itself, so the empty roster has no action to offer.
+    expect(find.byType(AbButton), findsNothing);
   });
 }
