@@ -1,20 +1,7 @@
 {
-  "extraKnownMarketplaces": {
-    "claude-plugins-official": {
-      "source": {
-        "source": "github",
-        "repo": "anthropics/claude-plugins-official"
-      }
-    }
-  },
-  "enabledPlugins": {
-    "superpowers@claude-plugins-official": true,
-    "code-simplifier@claude-plugins-official": true
-  },
-  "worktree": {
-    "bgIsolation": "none"
-  },
-  "enabledMcpjsonServers": ["dart"],
+  "enabledMcpjsonServers": [
+    "dart"
+  ],
   "hooks": {
     "PreToolUse": [
       {
@@ -27,5 +14,25 @@
         ]
       }
     ]
+  },
+  "worktree": {
+    "bgIsolation": "none"
+  },
+  "enabledPlugins": {
+    "dart-flutter@dart-flutter": true
+  },
+  "extraKnownMarketplaces": {
+    "claude-plugins-official": {
+      "source": {
+        "source": "github",
+        "repo": "anthropics/claude-plugins-official"
+      }
+    },
+    "dart-flutter": {
+      "source": {
+        "source": "github",
+        "repo": "flutter/agent-plugins"
+      }
+    }
   }
 }
