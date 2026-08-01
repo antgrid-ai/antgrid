@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:antgrid/design/widgets/ab_button.dart';
-import 'package:antgrid/design/widgets/ab_segmented.dart';
+import 'package:antgrid/design/widgets/ab_switch.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/providers/remote_access.dart';
 import 'package:antgrid/services/devices_api.dart';
@@ -12,8 +12,10 @@ class _FakeNotifier extends RemoteDevicesNotifier {
   final List<String> unpaired = [];
   @override
   Future<PhonesList> build() async => const PhonesList(
+        // No label, matching the bridge: nothing writes `PairedPhone.label`,
+        // so a readable name can only come from the account join.
         phones: [PairedPhoneSummary(
-          phonePubkey: 'pk-1', phoneDeviceId: 'ph-1', label: 'iPhone',
+          phonePubkey: 'pk-1', phoneDeviceId: 'ph-1',
           pairedAt: 'x', lastSeenAt: 'y')],
         knownProjects: [
           KnownProject(projectId: 'p1', label: 'Proj One', path: '/p1', running: true),
@@ -86,6 +88,8 @@ void main() {
     final fake = _FakeNotifier();
     await _pumpPanel(tester, devices: () => fake);
 
+    // The name is the ACCOUNT device's, joined on the bridge id — the bridge
+    // itself only knows 'ph-1'.
     expect(find.text('iPhone'), findsOneWidget);
     // Access is machine-wide, so no project ever appears against a device.
     expect(find.text('Proj One'), findsNothing);
@@ -101,6 +105,9 @@ void main() {
     final fake = _FakeNotifier();
     await _pumpPanel(tester, devices: () => fake, accounts: const {});
 
+    // With no account record there is no name either; the row falls back to
+    // the bridge id rather than going nameless.
+    expect(find.text('ph-1'), findsOneWidget);
     // Nothing left to revoke, so clearing the leftover row IS the whole
     // remedy — the one case where Forget is honest.
     expect(find.byKey(const ValueKey('signout-pk-1')), findsNothing);
@@ -109,18 +116,14 @@ void main() {
     expect(fake.unpaired, ['pk-1']);
   });
 
-  testWidgets('the switch shows both options and turning OFF needs no confirm',
-      (tester) async {
+  testWidgets('turning OFF needs no confirm', (tester) async {
     final policy = _FakePolicyNotifier(true);
     await _pumpPanel(tester, devices: _FakeNotifier.new, policy: () => policy);
 
     expect(find.text('REMOTE ACCESS'), findsOneWidget);
-    expect(find.byType(AbSegmented<bool>), findsOneWidget);
-    // Both states visible: the switch is a decision, not a status.
-    expect(find.text('OFF'), findsOneWidget);
-    expect(find.text('ON'), findsOneWidget);
+    expect(tester.widget<AbSwitch>(find.byType(AbSwitch)).value, isTrue);
 
-    await tester.tap(find.text('OFF'));
+    await tester.tap(find.byType(AbSwitch));
     await tester.pump();
     // Withdrawing access must never be slower than the fear that prompted it.
     expect(policy.writes, [false]);
@@ -131,7 +134,7 @@ void main() {
     final policy = _FakePolicyNotifier(false);
     await _pumpPanel(tester, devices: _FakeNotifier.new, policy: () => policy);
 
-    await tester.tap(find.text('ON'));
+    await tester.tap(find.byType(AbSwitch));
     await tester.pumpAndSettle();
     expect(policy.writes, isEmpty, reason: 'the dialog must gate the write');
 

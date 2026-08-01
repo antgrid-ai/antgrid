@@ -7,15 +7,17 @@ import '../design/ab_tokens.dart';
 import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_icon.dart';
+import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
-import '../design/widgets/ab_segmented.dart';
 import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/ab_switch.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../launcher/host_control_client.dart';
 import '../providers/device_provisioning.dart';
 import '../providers/remote_access.dart';
 import '../services/devices_api.dart';
+import '../util/relative_time.dart';
 
 /// The machine-wide remote-access switch, what it grants, and the roster of
 /// devices that have connected — the panel behind the title-bar chip.
@@ -23,7 +25,7 @@ import '../services/devices_api.dart';
 /// One surface for all three because they are one question. The switch alone
 /// can't say what it admits; the roster alone reads as an access list, which it
 /// is not — access is machine-wide, so a row is identity and housekeeping only
-/// (label, device id, last seen, forget).
+/// (who it is, when it last connected, and the one way to cut it off).
 ///
 /// Turning access ON is confirmed and turning it OFF is not, on purpose: the
 /// two directions carry opposite risk. Granting every account device the whole
@@ -83,19 +85,19 @@ class _AccessSection extends ConsumerWidget {
     final async = ref.watch(remoteAccessPolicyProvider);
     final policy = async.value;
     final enabled = policy?.enabled == true;
-    // Inert until the machine's real state is known: an OFF|ON control with
-    // nothing behind it would invite a tap that writes a value the user never
-    // saw. Same reason a flip in flight locks it — one flip at a time.
+    // Inert until the machine's real state is known: a switch with nothing
+    // behind it would invite a tap that writes a value the user never saw.
+    // Same reason a flip in flight locks it — one flip at a time.
     final live = policy != null && !async.isLoading;
 
-    final control = AbSegmented<bool>(
+    final control = AbSwitch(
       key: const Key('remote-access-switch'),
-      selected: enabled,
-      onSelect: (next) => _set(context, ref, next),
-      segments: [
-        AbSegment(value: false, label: 'Off', enabled: live),
-        AbSegment(value: true, label: 'On', enabled: live),
-      ],
+      value: enabled,
+      semanticLabel: 'Remote access',
+      // Green, not accent: this reports a machine that is on the air, and it
+      // has to agree with the title-bar chip that reports the same fact.
+      tone: p.statusRunning,
+      onChanged: live ? (next) => _set(context, ref, next) : null,
     );
 
     return Padding(
@@ -222,7 +224,14 @@ class _DeviceRowState extends ConsumerState<_DeviceRow> {
 
   PairedPhoneSummary get phone => widget.phone;
 
-  String get _name => phone.label ?? phone.phoneDeviceId;
+  /// The bridge never learns a device's name — nothing writes `PairedPhone.label`,
+  /// because admission carries an identity, not a profile. The name the user
+  /// actually chose lives on the ACCOUNT device record, which is why the join
+  /// through [accountDevicesByBridgeIdProvider] is what makes this row readable
+  /// at all. Falling back to a truncated id keeps the row scannable when the
+  /// account is unreachable; the full id stays one line down.
+  String _nameFor(DeviceSummary? account) =>
+      account?.displayName ?? phone.label ?? _shortId(phone.phoneDeviceId);
 
   /// Revoke the ACCOUNT device, then drop the local record.
   ///
@@ -235,9 +244,10 @@ class _DeviceRowState extends ConsumerState<_DeviceRow> {
   Future<void> _signOut(DeviceSummary account) async {
     final devices = ref.read(devicesApiProvider);
     final roster = ref.read(remoteDevicesProvider.notifier);
+    final name = _nameFor(account);
     final ok = await AbConfirmDialog.show(
       context: context,
-      title: 'Sign out $_name?',
+      title: 'Sign out $name?',
       body:
           'It loses access to every machine on your account, not just this '
           'one, until you sign in on it again.',
@@ -252,7 +262,7 @@ class _DeviceRowState extends ConsumerState<_DeviceRow> {
     if (!mounted) return;
     setState(() => _busy = false);
     if (!revoked) {
-      showAbSnackBar(context, "Couldn't sign $_name out. It still has access.");
+      showAbSnackBar(context, "Couldn't sign $name out. It still has access.");
     }
   }
 
@@ -274,16 +284,22 @@ class _DeviceRowState extends ConsumerState<_DeviceRow> {
     // actions — so the row waits rather than guessing a label.
     final accounts = ref.watch(accountDevicesByBridgeIdProvider).value;
     final account = accounts?[phone.phoneDeviceId];
+    final named = account?.displayName ?? phone.label;
 
     return AbListRow(
       key: ValueKey('device-${phone.phonePubkey}'),
       density: AbRowDensity.sm,
       horizontalPadding: 0,
-      leading: AbIcon(AbIcons.deviceMobile, size: 13, color: p.textMuted),
+      leading: AbIcon(
+        _glyphFor(account?.platform),
+        size: 13,
+        color: p.textMuted,
+      ),
       title: Text(
-        phone.label ?? phone.phoneDeviceId,
-        // A human label is chrome (sans); a raw device id is data (mono).
-        style: phone.label != null
+        _nameFor(account),
+        overflow: TextOverflow.ellipsis,
+        // A human name is chrome (sans); the id we fall back to is data (mono).
+        style: named != null
             ? AbTokens.sansStyle(
                 fontSize: AbTokens.fontSm,
                 color: p.textPrimary,
@@ -295,50 +311,71 @@ class _DeviceRowState extends ConsumerState<_DeviceRow> {
               ),
       ),
       subtitle: Text(
-        // Device id and timestamp are data — mono.
-        '${phone.phoneDeviceId} · last seen ${phone.lastSeenAt}',
+        _lastSeen(),
+        overflow: TextOverflow.ellipsis,
         style: AbTokens.monoStyle(
           fontSize: AbTokens.fontXxs,
           color: p.textMuted,
         ),
       ),
+      // Icon, not a labelled button: the row's job is to name a device, and a
+      // word-wide action next to a name that can run long is the first thing to
+      // squeeze it. What the glyph costs in explicitness the tooltip and the
+      // confirm both repay — and neither action lands without a confirm.
       trailing: switch ((accounts, account)) {
+        // Until the account inventory resolves we cannot tell "still signed in"
+        // from "already gone", and the two do different things — so the row
+        // waits rather than firing whichever we guessed.
         (null, _) => AbTooltip(
           message: 'Checking which devices are still on your account…',
-          child: AbButton(
+          child: AbIconButton(
             key: ValueKey('signout-${phone.phonePubkey}'),
-            label: 'Sign out',
-            compact: true,
+            icon: AbIcons.trash,
+            tone: AbIconButtonTone.muted,
             onTap: null,
           ),
         ),
-        (_, final DeviceSummary a) => AbTooltip(
-          message:
-              'Revokes the device on your account and drops it from this '
-              'machine. Account-wide, not just here.',
-          child: AbButton(
-            key: ValueKey('signout-${phone.phonePubkey}'),
-            label: 'Sign out',
-            compact: true,
-            color: p.error,
-            onTap: _busy ? null : () => _signOut(a),
-          ),
+        (_, final DeviceSummary a) => AbIconButton(
+          key: ValueKey('signout-${phone.phonePubkey}'),
+          icon: AbIcons.trash,
+          tone: AbIconButtonTone.danger,
+          tooltip:
+              'Sign out — revokes this device on your account, on every '
+              'machine, not just here',
+          onTap: _busy ? null : () => _signOut(a),
         ),
-        _ => AbTooltip(
-          message:
-              'This device is no longer on your account. Clears the record '
-              'it left behind.',
-          child: AbButton(
-            key: ValueKey('forget-${phone.phonePubkey}'),
-            label: 'Forget',
-            compact: true,
-            onTap: _busy ? null : _forget,
-          ),
+        _ => AbIconButton(
+          key: ValueKey('forget-${phone.phonePubkey}'),
+          icon: AbIcons.trash,
+          tone: AbIconButtonTone.muted,
+          tooltip:
+              'Forget — this device is no longer on your account; clears the '
+              'record it left behind',
+          onTap: _busy ? null : _forget,
         ),
       },
     );
   }
+
+  /// `last seen 2 mins ago`, or the raw stamp if the bridge sent something we
+  /// can't parse — an unreadable timestamp is still more use than dropping the
+  /// line, which is the only thing distinguishing two same-model devices.
+  String _lastSeen() {
+    final at = DateTime.tryParse(phone.lastSeenAt);
+    return 'last seen ${at == null ? phone.lastSeenAt : relativeTime(at.toLocal())}';
+  }
 }
+
+/// Platform strings come from the account record (`DeviceSummary.platform`),
+/// written at provisioning by each client. Unknown falls to the phone glyph:
+/// the roster's overwhelming case is a phone, and a wrong guess here is
+/// cosmetic — the name below it is what identifies the device.
+String _glyphFor(String? platform) => switch (platform?.toLowerCase()) {
+  'macos' || 'windows' || 'linux' => AbIcons.deviceDesktop,
+  _ => AbIcons.deviceMobile,
+};
+
+String _shortId(String id) => id.length > 8 ? id.substring(0, 8) : id;
 
 /// One-line explanation and, where there is one, its single action — the empty
 /// and error bodies, kept compact so the popup doesn't grow a full-screen
