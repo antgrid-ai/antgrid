@@ -10,7 +10,7 @@ import type { ControlRequest, ControlResponse } from "./control-protocol";
 import { hostFilePath, writeHostFile, removeHostFile } from "./host-discovery";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
 import { TrustedPeersProvider } from "./trusted-peers";
-import { loadMobileAccessPolicy, type MobileAccessPolicyStore } from "./mobile-access-policy";
+import { loadRemoteAccessPolicy, type RemoteAccessPolicyStore } from "./remote-access-policy";
 import { resolveAbDir } from "./antgrid-dir";
 import { VERSION } from "./version";
 import type { DeviceIdentity } from "./device";
@@ -144,11 +144,11 @@ export class HostServer {
   private readonly pairedPhonesStore: PairedPhonesStore = loadPairedPhones(resolveAbDir());
   // The one authorization gate for remote phones: is this machine reachable
   // from mobile at all. Every project verb from a phone is checked against it.
-  private readonly mobileAccessPolicy: MobileAccessPolicyStore = loadMobileAccessPolicy(resolveAbDir());
+  private readonly remoteAccessPolicy: RemoteAccessPolicyStore = loadRemoteAccessPolicy(resolveAbDir());
   private stopPhonesWatch: (() => void) | null = null;
   // projectId → {path, label} for every project this machine has opened. Since
   // the per-phone allowlist went away this is the ONLY per-project bound on what
-  // a phone may name: `mobileAccessPolicy` says whether ANY project is
+  // a phone may name: `remoteAccessPolicy` says whether ANY project is
   // reachable, and membership here says WHICH ids exist — so every phone-facing
   // verb that takes a projectId must look it up (project:start, sessions.list,
   // sessions.delete) and the advert is derived from it. It still holds no trust
@@ -480,7 +480,7 @@ export class HostServer {
    *  just flagged not-yet-dialable. (The desktop hub advertises plain warmth via
    *  `knownProjectsForHub`, which is a different question; keep them distinct.) */
   buildProjectsAdvertisement(): ProjectAdvertEntry[] {
-    if (!this.mobileAccessPolicy.isEnabled()) return [];
+    if (!this.remoteAccessPolicy.isEnabled()) return [];
     const warm = new Set(this.cores.keys());
     return [...new Set([...this.seenProjects.keys(), ...warm])]
       .map((id) => {
@@ -639,12 +639,12 @@ export class HostServer {
    *  torn down, so no project is left dialable. The socket itself stays
    *  registered — this switch is authorization, not presence — but the catalog
    *  goes empty and every project verb is rejected. */
-  async handleMobileAccessVerb(req: ControlRequest): Promise<ControlResponse> {
+  async handleRemoteAccessVerb(req: ControlRequest): Promise<ControlResponse> {
     switch (req.type) {
       case "mobile-access:get":
-        return { id: req.id, ok: true, type: "mobile-access:get", enabled: this.mobileAccessPolicy.isEnabled() };
+        return { id: req.id, ok: true, type: "mobile-access:get", enabled: this.remoteAccessPolicy.isEnabled() };
       case "mobile-access:set": {
-        const changed = this.mobileAccessPolicy.setEnabled(req.enabled);
+        const changed = this.remoteAccessPolicy.setEnabled(req.enabled);
         if (changed && !req.enabled) this.demoteAllPromoted();
         if (changed) {
           // The advert derives from the switch, and `Device.mobileAccessEnabled`
@@ -652,7 +652,7 @@ export class HostServer {
           this.readvertiseToControlPlane();
           this.pushHeartbeat();
         }
-        return { id: req.id, ok: true, type: "mobile-access:set", enabled: this.mobileAccessPolicy.isEnabled() };
+        return { id: req.id, ok: true, type: "mobile-access:set", enabled: this.remoteAccessPolicy.isEnabled() };
       }
       default:
         return { id: req.id, ok: false, error: { code: "UNKNOWN_VERB", message: `not a mobile-access verb: ${(req as ControlRequest).type}` } };
@@ -684,7 +684,7 @@ export class HostServer {
     }
     // SECURITY: same gate as project:start — with mobile access off a phone
     // sees nothing of this machine.
-    if (!this.mobileAccessPolicy.isEnabled()) {
+    if (!this.remoteAccessPolicy.isEnabled()) {
       return createMessage("response", {
         requestId: req.requestId, ok: false,
         error: { code: "NOT_ALLOWED", message: "mobile access is disabled on this machine" },
@@ -734,7 +734,7 @@ export class HostServer {
         error: { code: "E_BAD_PARAMS", message: "invalid projectId" },
       });
     }
-    if (!this.mobileAccessPolicy.isEnabled()) {
+    if (!this.remoteAccessPolicy.isEnabled()) {
       return createMessage("response", {
         requestId: req.requestId, ok: false,
         error: { code: "NOT_ALLOWED", message: "mobile access is disabled on this machine" },
@@ -772,7 +772,7 @@ export class HostServer {
     if (verb.type === "project:start") {
       // SECURITY: checked BEFORE open() — open() runs the project's `terminals:`
       // startup commands, so a rejected start must create NO core.
-      if (!this.mobileAccessPolicy.isEnabled()) {
+      if (!this.remoteAccessPolicy.isEnabled()) {
         return { ok: false, error: { code: "NOT_ALLOWED", message: "mobile access is disabled on this machine" } };
       }
       // SECURITY: the path comes from the host's OWN catalog, never from the
@@ -980,7 +980,7 @@ export class HostServer {
         return this.handlePhonesVerb(req);
       case "mobile-access:get":
       case "mobile-access:set":
-        return this.handleMobileAccessVerb(req);
+        return this.handleRemoteAccessVerb(req);
     }
   }
 
@@ -1031,7 +1031,7 @@ export class HostServer {
       pairedPhones: this.pairedPhonesStore,
       // Read live, not captured: a `mobile-access:set` must take effect on every
       // already-warm core's gate without restarting it.
-      mobileAccessEnabled: () => this.mobileAccessPolicy.isEnabled(),
+      remoteAccessEnabled: () => this.remoteAccessPolicy.isEnabled(),
       ensureMachineRelay: (msg) => this.ensureMachineRelay(msg),
       ...(mode === "remote" ? { remote } : {}),
     });
@@ -1135,7 +1135,7 @@ export class HostServer {
       licenseApiUrl: r.licenseApiUrl,
       getToken: rt.maint.getToken,
       deviceUuid: r.auth.deviceUuid,
-      mobileAccessEnabled: this.mobileAccessPolicy.isEnabled(),
+      mobileAccessEnabled: this.remoteAccessPolicy.isEnabled(),
       relayUrl: r.relayUrl,
       machineName: process.env.ANTGRID_HOST_NAME ?? hostname(),
     }).then((ok) => {

@@ -94,7 +94,7 @@ export interface AgentCore {
   readonly abDir: string;
   readonly nextKeypair: () => EphemeralKeypair;
   /** Machine-level phone registry (identity, label, push routing), shared across
-   *  projects. Not an authorization store — see mobile-access-policy.ts. */
+   *  projects. Not an authorization store — see remote-access-policy.ts. */
   readonly pairedPhones: PairedPhonesStore;
   /** Lifecycle hooks the transport invokes. */
   handleTunnelMessage(raw: unknown): void;
@@ -148,10 +148,10 @@ export interface BuildAgentCoreOptions {
    *  labels and push routing only — it carries no authorization. */
   pairedPhones?: PairedPhonesStore;
   /** Whether this machine is reachable from mobile — the sole authorization gate
-   *  for a remote phone (see mobile-access-policy.ts). Host-supplied; a bare
+   *  for a remote phone (see remote-access-policy.ts). Host-supplied; a bare
    *  agent with no host omits it and the gate reads FAIL-CLOSED, so an
    *  unwired core can never be driven by a phone. */
-  mobileAccessEnabled?: () => boolean;
+  remoteAccessEnabled?: () => boolean;
   /** Fired when a turn-start hook pings the api-server (`POST /turn-start`), so
    *  the owning ProjectCore can reset its control-plane work status to "working"
    *  on a fresh turn. Bridge-internal — never surfaces to the app. */
@@ -227,7 +227,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // Paired-phone identity/push registry, constructed eagerly so it exists
   // whether the agent runs in local or remote mode.
   const pairedPhones = opts.pairedPhones ?? loadPairedPhones(abDir);
-  const mobileAccessEnabled = opts.mobileAccessEnabled ?? (() => false);
+  const remoteAccessEnabled = opts.remoteAccessEnabled ?? (() => false);
 
   // Resolve synthetic agent terminal (if any)
   interface AgentTerminalSpec {
@@ -340,7 +340,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   function currentPhoneAllowed(): boolean {
     const phonePubkey = peerPubkeyProvider?.() ?? null;
     if (!phonePubkey) return true;
-    return mobileAccessEnabled();
+    return remoteAccessEnabled();
   }
 
   function handleTunnelMessage(raw: unknown) {

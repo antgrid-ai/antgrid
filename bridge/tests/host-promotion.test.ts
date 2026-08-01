@@ -89,7 +89,7 @@ function tempFolder(): string {
 
 /** Flip the machine switch through its only mutation path, the loopback verb. */
 async function setMobileAccess(h: HostServer, enabled: boolean): Promise<void> {
-  await h.handleMobileAccessVerb({ id: "t", type: "mobile-access:set", enabled });
+  await h.handleRemoteAccessVerb({ id: "t", type: "mobile-access:set", enabled });
 }
 
 beforeEach(() => {
@@ -230,7 +230,7 @@ test("turning mobile access OFF tears down EVERY promoted slot, leaving loopback
   expect(h.isPromoted("projX")).toBe(true);
   expect(h.isPromoted("projY")).toBe(true);
 
-  const off = (await h.handleMobileAccessVerb({ id: "off", type: "mobile-access:set", enabled: false })) as any;
+  const off = (await h.handleRemoteAccessVerb({ id: "off", type: "mobile-access:set", enabled: false })) as any;
   expect(off.ok).toBe(true);
   expect(off.enabled).toBe(false);
 

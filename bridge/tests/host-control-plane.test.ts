@@ -115,7 +115,7 @@ test("mobile-access:set immediately pushes a heartbeat reflecting the new state"
     await host.startControlPlane();
     calls.length = 0; // drop the connect-time heartbeat; only the toggle-driven one matters
 
-    const res = await host.handleMobileAccessVerb({
+    const res = await host.handleRemoteAccessVerb({
       id: "req-1",
       type: "mobile-access:set",
       enabled: true,
@@ -188,7 +188,7 @@ function standaloneForSnapshot(opts: {
   (standalone as any).seenProjects = new Map(opts.seen ?? []);
   (standalone as any).cores = new Map();
   (standalone as any).streamIds = new Map();
-  (standalone as any).mobileAccessPolicy = { isEnabled: () => opts.mobileAccess ?? false };
+  (standalone as any).remoteAccessPolicy = { isEnabled: () => opts.mobileAccess ?? false };
   return standalone;
 }
 

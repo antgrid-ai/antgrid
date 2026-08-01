@@ -45,7 +45,7 @@ function tempFolder(): string {
 
 /** Flip the machine switch through its only mutation path, the loopback verb. */
 async function setMobileAccess(h: HostServer, enabled: boolean): Promise<void> {
-  await h.handleMobileAccessVerb({ id: "t", type: "mobile-access:set", enabled });
+  await h.handleRemoteAccessVerb({ id: "t", type: "mobile-access:set", enabled });
 }
 
 // Regression (Phase C smoke, 2026-07-27): after a bridge restart the host

@@ -1,12 +1,17 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-/** Whether this machine is reachable from mobile at all — one boolean for the
- *  whole machine, the sole authorization gate for a remote (account-trusted)
- *  phone. There is deliberately NO watcher on the backing file: the bridge is
- *  its only writer and every mutation arrives through the loopback
- *  `mobile-access:set` verb, so an out-of-band edit is not a supported input. */
-export interface MobileAccessPolicyStore {
+/** Whether this machine is reachable from your other devices at all — one
+ *  boolean for the whole machine, the sole authorization gate for a remote
+ *  (account-trusted) device. There is deliberately NO watcher on the backing
+ *  file: the bridge is its only writer and every mutation arrives through the
+ *  loopback `mobile-access:set` verb, so an out-of-band edit is not a supported
+ *  input.
+ *
+ *  The `mobile-access` spelling survives in the verb and the filename on
+ *  purpose: both cross a version boundary this rename cannot reach — an app
+ *  build that predates it, and the file already on every existing install. */
+export interface RemoteAccessPolicyStore {
   isEnabled(): boolean;
   /** Returns true if the value changed — callers use it to skip the re-advertise
    *  and heartbeat that a no-op set doesn't warrant. */
@@ -18,7 +23,7 @@ interface FileShape {
   enabled: boolean;
 }
 
-export function loadMobileAccessPolicy(abDir: string): MobileAccessPolicyStore {
+export function loadRemoteAccessPolicy(abDir: string): RemoteAccessPolicyStore {
   const dir = join(abDir, "agents");
   const path = join(dir, "mobile-access-policy.json");
 
@@ -57,7 +62,7 @@ export function loadMobileAccessPolicy(abDir: string): MobileAccessPolicyStore {
 
 /** What the backing file holds. `migrate` and `unreadable` both derive the value
  *  from the v1 stores; they differ only in whether that derivation may be
- *  written back (see the flush in {@link loadMobileAccessPolicy}). */
+ *  written back (see the flush in {@link loadRemoteAccessPolicy}). */
 type StoredPolicy =
   | { kind: "v2"; enabled: boolean }
   /** Absent, or well-formed but on an older version — a real state to upgrade. */
@@ -88,7 +93,7 @@ function readStored(path: string): StoredPolicy {
  * Derive the machine switch from the two v1 stores that used to hold
  * authorization: the per-project opt-in list here, and the per-phone
  * allowlists in paired-phones.json. Either being non-empty means the user had
- * already granted mobile access to something, so the machine switch starts on.
+ * already granted remote access to something, so the machine switch starts on.
  *
  * The paired-phones half is load-bearing, not belt-and-braces: a user who
  * granted only through `antgrid phones allow` never wrote a project into this

@@ -62,7 +62,7 @@ async function startRestartedAgent(opts: { mobileAccess: boolean }) {
       ed25519PublicKey: "PK", ed25519PrivateKey: "SK",
     },
     pairedPhones: store,
-    mobileAccessEnabled: () => opts.mobileAccess,
+    remoteAccessEnabled: () => opts.mobileAccess,
     remote: {
       // Never fires onPeerOnline: no phone has dialled this stream, which is
       // exactly the post-restart state the regression below is about.

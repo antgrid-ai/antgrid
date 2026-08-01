@@ -187,7 +187,7 @@ export class ProjectCore {
       mode: this.deps.mode,
       identity: this.deps.identity,
       pairedPhones: this.deps.pairedPhones,
-      mobileAccessEnabled: this.deps.mobileAccessEnabled,
+      remoteAccessEnabled: this.deps.remoteAccessEnabled,
       onTurnStart: () => this.noteTurnStart(),
       relayUrl: this.deps.relayUrl,
     });
@@ -315,7 +315,7 @@ export class ProjectCore {
       // tree and git status to that phone after the machine switch is turned off,
       // because a remote-mode core holds no PromotionHandle for demoteAllPromoted
       // to tear down. Fail-closed, same as the inbound side.
-      mayDeliver: () => this.deps.mobileAccessEnabled?.() ?? false,
+      mayDeliver: () => this.deps.remoteAccessEnabled?.() ?? false,
       onAdmitted: () => { this.relayRegistered = true; settleOnce({ ok: true }); },
       onRejected: (code, message) => { this.relayRegistered = false; settleOnce({ ok: false, code, message }); },
       // Suppress the heavy stream while the phone is gone; it rebuilds from
@@ -366,7 +366,7 @@ export class ProjectCore {
         // machine switch as every inbound verb — a token+pubkey alone must not
         // leak notifications from a machine that isn't mobile-reachable.
         // Fail-closed: an unwired host provider means no push.
-        if (!(this.deps.mobileAccessEnabled?.() ?? false)) return [];
+        if (!(this.deps.remoteAccessEnabled?.() ?? false)) return [];
         const peerPubkey = remote.currentPeerPubkey();
         const paired = core.pairedPhones.list();
         const candidates = peerPubkey ? paired.filter((p) => p.phonePubkey === peerPubkey) : paired;

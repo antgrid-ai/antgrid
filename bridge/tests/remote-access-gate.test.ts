@@ -123,7 +123,7 @@ test("drops project verbs from an account-trusted phone while mobile access is o
     folder,
     mode: "remote",
     identity: { deviceId: "agent-dev", deviceName: "agent-dev", createdAt: new Date().toISOString() },
-    mobileAccessEnabled: () => mobileAccess,
+    remoteAccessEnabled: () => mobileAccess,
   });
 
   const bus = new MessageBus();
@@ -161,7 +161,7 @@ test("drops project verbs from an account-trusted phone while mobile access is o
 });
 
 test("a core with no host-supplied switch fails closed for a remote phone", async () => {
-  // A bare agent (no HostServer) omits `mobileAccessEnabled`; the default must
+  // A bare agent (no HostServer) omits `remoteAccessEnabled`; the default must
   // be "disabled", never "unset means allow".
   const folder = tempFolder();
   core = await buildAgentCore({
@@ -197,7 +197,7 @@ test("does NOT gate when no phone pubkey is present (local/loopback transport)",
     mode: "local",
     identity: { deviceId: "agent-dev", deviceName: "agent-dev", createdAt: new Date().toISOString() },
     // Mobile access is OFF for the machine; the desktop must still drive it.
-    mobileAccessEnabled: () => false,
+    remoteAccessEnabled: () => false,
   });
 
   const bus = new MessageBus();
@@ -230,7 +230,7 @@ test("loopback frames bypass the gate even when mobile access is off", async () 
     folder,
     mode: "local",
     identity: { deviceId: "agent-dev", deviceName: "agent-dev", createdAt: new Date().toISOString() },
-    mobileAccessEnabled: () => false,
+    remoteAccessEnabled: () => false,
   });
 
   const bus = new MessageBus();
@@ -278,7 +278,7 @@ test("drops tunnel:http-request while mobile access is off, honors it once on", 
     folder,
     mode: "remote",
     identity: { deviceId: "agent-dev", deviceName: "agent-dev", createdAt: new Date().toISOString() },
-    mobileAccessEnabled: () => mobileAccess,
+    remoteAccessEnabled: () => mobileAccess,
   });
 
   const bus = new MessageBus();

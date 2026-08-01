@@ -94,13 +94,13 @@ test("forget() leaves the machine-level mobile-access switch alone", async () =>
   await h.open("projA", tempFolder(), "local");
   await h.open("projB", tempFolder(), "local");
   seedSessionStore("projA");
-  await h.handleMobileAccessVerb({ id: "t", type: "mobile-access:set", enabled: true });
+  await h.handleRemoteAccessVerb({ id: "t", type: "mobile-access:set", enabled: true });
 
   await h.forget("projA");
 
   // Deleting ONE project must never turn the machine off (or on) for every
   // other: the switch is machine-wide policy, forget() only edits the catalog.
-  const get = (await h.handleMobileAccessVerb({ id: "g", type: "mobile-access:get" })) as any;
+  const get = (await h.handleRemoteAccessVerb({ id: "g", type: "mobile-access:get" })) as any;
   expect(get.enabled).toBe(true);
   expect(h.buildProjectsAdvertisement().map((p) => p.projectId)).toEqual(["projB"]);
 });

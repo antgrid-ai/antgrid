@@ -6,7 +6,7 @@ const log = logger.child({ component: "paired-phones" });
 /** A phone's identity/bookkeeping row: label, last-seen, push routing. NOT an
  *  authorization record — admission is the account inventory (see
  *  `relay-client.ts` `handleClientHello`) and authorization is the machine-level
- *  switch in `mobile-access-policy.ts`. */
+ *  switch in `remote-access-policy.ts`. */
 export interface PairedPhone {
   phonePubkey: string;
   phoneDeviceId: string;

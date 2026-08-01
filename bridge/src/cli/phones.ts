@@ -1,4 +1,4 @@
-import { loadMobileAccessPolicy } from "../mobile-access-policy";
+import { loadRemoteAccessPolicy } from "../remote-access-policy";
 import type { PairedPhonesStore, PairedPhone } from "../paired-phones";
 
 /** Find a phone by pubkey, deviceId, or label. Returns null if 0 or >1 match. */
@@ -43,7 +43,7 @@ export function phonesRemove(
   // otherwise have the migration see no grants → switch off, silently revoking
   // mobile access for anyone who granted through `antgrid phones allow`.
   // Loading the phones store is safe ahead of this (it never writes at load).
-  loadMobileAccessPolicy(abDir);
+  loadRemoteAccessPolicy(abDir);
 
   const phone = findPhone(store, phoneRef);
   if (!phone) { console.error(`phone not found (or ambiguous): ${phoneRef}`); return 2; }

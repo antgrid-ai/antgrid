@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostServer } from "../src/host-server";
-import { loadMobileAccessPolicy } from "../src/mobile-access-policy";
+import { loadRemoteAccessPolicy } from "../src/remote-access-policy";
 
 let prevAbDir: string | undefined;
 let abDir: string;
@@ -67,10 +67,10 @@ test("phones:unpair removes the phone entirely", async () => {
 
 test("phones:unpair does not touch the machine switch (it is not a revocation)", async () => {
   const host = new HostServer({});
-  await host.handleMobileAccessVerb({ id: "m1", type: "mobile-access:set", enabled: true });
+  await host.handleRemoteAccessVerb({ id: "m1", type: "mobile-access:set", enabled: true });
   await host.handlePhonesVerb({ id: "1", type: "phones:unpair", phonePubkey: "pk-1" });
 
-  const get = await host.handleMobileAccessVerb({ id: "m2", type: "mobile-access:get" });
+  const get = await host.handleRemoteAccessVerb({ id: "m2", type: "mobile-access:get" });
   expect(get).toMatchObject({ ok: true, enabled: true });
 });
 
@@ -87,27 +87,27 @@ test("phones:list returns phones + knownProjects", async () => {
 
 test("mobile-access:get is off on a machine that never granted anything", async () => {
   const host = new HostServer({});
-  const get = await host.handleMobileAccessVerb({ id: "m1", type: "mobile-access:get" });
+  const get = await host.handleRemoteAccessVerb({ id: "m1", type: "mobile-access:get" });
   expect(get).toMatchObject({ ok: true, enabled: false });
 });
 
 test("mobile-access:set flips the machine switch and persists it", async () => {
   const host = new HostServer({});
-  const on = await host.handleMobileAccessVerb({ id: "m1", type: "mobile-access:set", enabled: true });
+  const on = await host.handleRemoteAccessVerb({ id: "m1", type: "mobile-access:set", enabled: true });
   expect(on).toMatchObject({ ok: true, type: "mobile-access:set", enabled: true });
-  expect(await host.handleMobileAccessVerb({ id: "m2", type: "mobile-access:get" })).toMatchObject({ enabled: true });
+  expect(await host.handleRemoteAccessVerb({ id: "m2", type: "mobile-access:get" })).toMatchObject({ enabled: true });
   // A fresh load — i.e. the next host start — sees the same answer.
-  expect(loadMobileAccessPolicy(abDir).isEnabled()).toBe(true);
+  expect(loadRemoteAccessPolicy(abDir).isEnabled()).toBe(true);
 
-  const off = await host.handleMobileAccessVerb({ id: "m3", type: "mobile-access:set", enabled: false });
+  const off = await host.handleRemoteAccessVerb({ id: "m3", type: "mobile-access:set", enabled: false });
   expect(off).toMatchObject({ ok: true, enabled: false });
-  expect(loadMobileAccessPolicy(abDir).isEnabled()).toBe(false);
+  expect(loadRemoteAccessPolicy(abDir).isEnabled()).toBe(false);
 });
 
 test("mobile-access:set is idempotent — re-setting the same value still answers the state", async () => {
   const host = new HostServer({});
-  await host.handleMobileAccessVerb({ id: "m1", type: "mobile-access:set", enabled: true });
-  const again = await host.handleMobileAccessVerb({ id: "m2", type: "mobile-access:set", enabled: true });
+  await host.handleRemoteAccessVerb({ id: "m1", type: "mobile-access:set", enabled: true });
+  const again = await host.handleRemoteAccessVerb({ id: "m2", type: "mobile-access:set", enabled: true });
   expect(again).toMatchObject({ ok: true, enabled: true });
 });
 
@@ -119,15 +119,15 @@ test("a v1 allowlist grant on disk migrates the machine switch on", async () => 
     { pk: "pk-2", id: "ph-2", label: "Android", allowedProjects: [] },
   ]);
   const host = new HostServer({});
-  expect(await host.handleMobileAccessVerb({ id: "m1", type: "mobile-access:get" })).toMatchObject({ enabled: true });
+  expect(await host.handleRemoteAccessVerb({ id: "m1", type: "mobile-access:get" })).toMatchObject({ enabled: true });
 });
 
 test("project:forget does not change the machine switch", async () => {
   const host = new HostServer({});
-  await host.handleMobileAccessVerb({ id: "m1", type: "mobile-access:set", enabled: true });
+  await host.handleRemoteAccessVerb({ id: "m1", type: "mobile-access:set", enabled: true });
 
   await host.forget("proj-gone");
 
   // Forgetting one project is a catalog edit; mobile access is machine-level.
-  expect(await host.handleMobileAccessVerb({ id: "m2", type: "mobile-access:get" })).toMatchObject({ enabled: true });
+  expect(await host.handleRemoteAccessVerb({ id: "m2", type: "mobile-access:get" })).toMatchObject({ enabled: true });
 });

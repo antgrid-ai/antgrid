@@ -145,7 +145,7 @@ test("drops session.transcriptSnapshot from a remote phone while mobile access i
     mode: "remote",
     identity: { deviceId: "agent-dev", deviceName: "agent-dev", createdAt: new Date().toISOString() },
     pairedPhones: store,
-    mobileAccessEnabled: () => mobileAccess,
+    remoteAccessEnabled: () => mobileAccess,
   });
 
   const bus = new MessageBus();

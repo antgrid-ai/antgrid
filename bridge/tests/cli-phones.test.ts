@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPairedPhones } from "../src/paired-phones";
-import { loadMobileAccessPolicy } from "../src/mobile-access-policy";
+import { loadRemoteAccessPolicy } from "../src/remote-access-policy";
 import { phonesList, phonesRemove } from "../src/cli/phones";
 
 function seeded() {
@@ -121,7 +121,7 @@ describe("antgrid phones CLI", () => {
     ) as { phones: { allowedProjects?: string[] }[] };
     expect(raw.phones.every((p) => p.allowedProjects === undefined)).toBe(true);
     // ...but the migration already saw them, so the machine stays reachable.
-    expect(loadMobileAccessPolicy(dir).isEnabled()).toBe(true);
+    expect(loadRemoteAccessPolicy(dir).isEnabled()).toBe(true);
 
     rmSync(dir, { recursive: true });
   });
@@ -129,7 +129,7 @@ describe("antgrid phones CLI", () => {
   it("remove leaves the switch off when there was nothing to migrate", () => {
     const { dir, store } = seeded();
     captureStderr(() => phonesRemove(store, "pk1", dir));
-    expect(loadMobileAccessPolicy(dir).isEnabled()).toBe(false);
+    expect(loadRemoteAccessPolicy(dir).isEnabled()).toBe(false);
     rmSync(dir, { recursive: true });
   });
 });

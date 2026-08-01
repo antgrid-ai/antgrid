@@ -34,7 +34,7 @@ function seedCatalog(h: HostServer, projectId: string): void {
 }
 /** Flip the machine switch through its only mutation path, the loopback verb. */
 async function setMobileAccess(h: HostServer, enabled: boolean): Promise<void> {
-  await h.handleMobileAccessVerb({ id: "t", type: "mobile-access:set", enabled });
+  await h.handleRemoteAccessVerb({ id: "t", type: "mobile-access:set", enabled });
 }
 function delReq(projectId: unknown, sessionId: unknown) {
   return { id: "x", timestamp: 0, type: "request", requestId: "rq1", method: "sessions.delete", params: { projectId, sessionId } } as any;

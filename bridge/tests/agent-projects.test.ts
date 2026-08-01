@@ -45,7 +45,7 @@ function tempFolder(): string {
  *  (the policy store has no watcher, so writing the file behind a live host is
  *  never observed). */
 async function setMobileAccess(h: HostServer, enabled: boolean): Promise<void> {
-  await h.handleMobileAccessVerb({ id: "t", type: "mobile-access:set", enabled });
+  await h.handleRemoteAccessVerb({ id: "t", type: "mobile-access:set", enabled });
 }
 
 test("advertises the machine's whole catalog; running = relay-admitted", async () => {
@@ -138,7 +138,7 @@ test("mobile-access:set re-advertises to the connected control-plane phone", asy
   const first = seen.filter((m) => m.type === "agent:projects").at(-1) as any;
   expect(first?.projects).toEqual([]);
 
-  // The desktop turns mobile access on. handleMobileAccessVerb re-advertises
+  // The desktop turns mobile access on. handleRemoteAccessVerb re-advertises
   // itself, so the connected phone must see projA WITHOUT reconnecting.
   await setMobileAccess(host, true);
 
