@@ -61,6 +61,32 @@ void main() {
       });
     }
 
+    // AA is a floor; these presets also have a ceiling. Past roughly 15:1 on a
+    // dark background, high-luminance glyphs bloom into the surround and long
+    // reading sessions fatigue — a near-white-on-near-black ramp passes every
+    // check above and is still uncomfortable to read. Onyx is deliberately
+    // exempt: it is the maximum-contrast escape hatch. Light is exempt because
+    // the halation effect is specific to light-on-dark.
+    for (final preset in [AbThemePreset.antgrid, AbThemePreset.zinc]) {
+      test('$preset body text stays under the halation ceiling', () {
+        final p = kPresets[preset]!;
+        for (final s in [
+          ('bgDeepest', p.bgDeepest),
+          ('bgSurface', p.bgSurface),
+        ]) {
+          final ratio = _contrast(p.textPrimary, s.$2);
+          expect(
+            ratio,
+            lessThanOrEqualTo(15.0),
+            reason:
+                '$preset textPrimary on ${s.$1}: ${_hex(p.textPrimary)} on '
+                '${_hex(s.$2)} is ${ratio.toStringAsFixed(2)}:1, above the '
+                '15:1 comfort ceiling',
+          );
+        }
+      });
+    }
+
     test('light preset semantic colors >= 4.5:1 on its surface', () {
       final p = kPresets[AbThemePreset.light]!;
       for (final (name, color) in [

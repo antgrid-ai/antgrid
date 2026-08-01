@@ -6,23 +6,35 @@ enum AbThemePreset { antgrid, light, zinc, slate, onyx, midnight, custom }
 
 /// Antgrid — refined dark IDE palette (Vercel/Linear class).
 /// Six-step surface ramp, off-white accent, muted agent-state palette.
+///
+/// The ramp floor sits at #16181A, not near-black, and textPrimary lands at
+/// ~13:1 rather than the ~18:1 a near-white-on-near-black pairing gives. Both
+/// clear AA comfortably; the ceiling is the point. Past roughly 15:1 on a dark
+/// background, high-luminance glyphs bloom into the surround and long reading
+/// sessions fatigue — the palette is tuned for the 10-13:1 band that terminal
+/// UIs converge on, not for the top of the range. Raising textPrimary or
+/// dropping the ramp floor back toward black will pass every test and still
+/// undo this. Surface steps preserve the original per-channel deltas, so the
+/// layer separation is unchanged.
 const _antgrid = AbColors(
-  bgDeepest: Color(0xFF08090A),
-  bgDeep: Color(0xFF0E0F11),
-  bgSurface: Color(0xFF131517),
-  bgElevated: Color(0xFF181A1D),
+  bgDeepest: Color(0xFF16181A),
+  bgDeep: Color(0xFF1C1E21),
+  bgSurface: Color(0xFF212427),
+  bgElevated: Color(0xFF26292D),
   // Antgrid aliases bg-3 (raised) to bgElevated — they're the same surface.
-  bgRaised: Color(0xFF181A1D),
-  bgHover: Color(0xFF1F2226),
-  bgPressed: Color(0xFF272A2F),
-  bgSelected: Color(0xFF24272B),
+  bgRaised: Color(0xFF26292D),
+  bgHover: Color(0xFF2D3136),
+  bgPressed: Color(0xFF35393F),
+  bgSelected: Color(0xFF32363B),
   borderSubtle: Color(0x12FFFFFF),
   borderDefault: Color(0x16FFFFFF),
   borderStrong: Color(0x29FFFFFF),
-  textPrimary: Color(0xFFF5F6F7),
-  textSecondary: Color(0xFFD7D9DC),
-  textMuted: Color(0xFF9498A0),
-  textDisabled: Color(0xFF61656D),
+  // accent stays at the old textPrimary (#F5F6F7); now that body text sits
+  // below it, the off-white accent has headroom to read as emphasis.
+  textPrimary: Color(0xFFDEDFE1),
+  textSecondary: Color(0xFFB6B8BC),
+  textMuted: Color(0xFF8B8F96),
+  textDisabled: Color(0xFF6A6E76),
   accent: Color(0xFFF5F6F7),
   accentHighlight: Color(0xFFFFFFFF),
   accentMuted: Color(0xFFD7D9DC),
@@ -38,24 +50,30 @@ const _antgrid = AbColors(
 );
 
 /// Default: neutral grayscale terminal palette.
-/// bg #141414, text #d8d8d8, primary/accent #c6c6c6.
+/// bg #1b1b1b, text #cfcfcf, primary/accent #c6c6c6.
+///
+/// Same contrast-ceiling reasoning as [_antgrid]: body text lands at ~10:1,
+/// the band VS Code and other terminal UIs sit in, rather than the top of the
+/// AA range. Surface steps preserve the original per-channel deltas.
 const _zinc = AbColors(
-  bgDeepest: Color(0xFF141414),
-  bgDeep: Color(0xFF141414),
-  bgSurface: Color(0xFF1A1A1A),
-  bgElevated: Color(0xFF242424),
-  bgRaised: Color(0xFF242424),
-  bgHover: Color(0xFF2A2A2A),
-  bgPressed: Color(0xFF333333),
-  bgSelected: Color(0xFF2F2F2F),
-  borderSubtle: Color(0xFF202020),
-  borderDefault: Color(0xFF242424),
-  borderStrong: Color(0xFF383838),
-  textPrimary: Color(0xFFD8D8D8),
+  bgDeepest: Color(0xFF1B1B1B),
+  bgDeep: Color(0xFF1B1B1B),
+  bgSurface: Color(0xFF212121),
+  bgElevated: Color(0xFF2B2B2B),
+  bgRaised: Color(0xFF2B2B2B),
+  bgHover: Color(0xFF313131),
+  bgPressed: Color(0xFF3A3A3A),
+  bgSelected: Color(0xFF363636),
+  borderSubtle: Color(0xFF272727),
+  borderDefault: Color(0xFF2B2B2B),
+  borderStrong: Color(0xFF3F3F3F),
+  textPrimary: Color(0xFFCFCFCF),
   textSecondary: Color(0xFFA6A6A6),
   // Floor for WCAG AA (>= 4.5:1) on bgSurface — see palette_contrast_test.
-  textMuted: Color(0xFF858585),
-  textDisabled: Color(0xFF4D4D4D),
+  // Tracks bgSurface: the old #858585 was the floor against #1A1A1A and falls
+  // under AA now that the surface is lighter.
+  textMuted: Color(0xFF8B8B8B),
+  textDisabled: Color(0xFF545454),
   accent: Color(0xFFC6C6C6),
   accentHighlight: Color(0xFFE0E0E0),
   accentMuted: Color(0xFF8F8F8F),

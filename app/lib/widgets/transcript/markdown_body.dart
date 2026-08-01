@@ -24,25 +24,44 @@ class TranscriptMarkdown extends StatelessWidget {
       config: MarkdownConfig(
         configs: [
           PConfig(
+            // Prose leading, not the font's default (~1.2). Body copy is the
+            // one run in a transcript that gets read rather than scanned, and
+            // tight leading is what makes a wall of agent output feel dense.
             textStyle: AbTokens.sansStyle(
               fontSize: AbTokens.fontMd,
               color: c.textPrimary,
+              height: 1.55,
             ),
+          ),
+          // Underline is the whole affordance — links take body color, no tint.
+          // The package default is GitHub blue (#0969DA), a light-theme link
+          // color that lands near 3:1 on our dark surfaces.
+          LinkConfig(
+            style: AbTokens.sansStyle(
+              fontSize: AbTokens.fontMd,
+              color: c.textPrimary,
+              height: 1.55,
+            ).copyWith(decoration: TextDecoration.underline),
           ),
           CodeConfig(
             // Match body (fontMd), not the smaller fontSm, so an inline-code run
             // and surrounding prose highlight at the same height under selection
             // (BoxHeightStyle.tight sizes each rect to raw glyph metrics — a
             // smaller font paints a shorter selection box on the same line).
+            // height tracks PConfig for the same reason fontSize does: an
+            // inline-code run shares a line box with the prose around it, and a
+            // shorter line box paints a misaligned selection rect.
             style: AbTokens.monoStyle(
               fontSize: AbTokens.fontMd,
               color: c.textPrimary,
+              height: 1.55,
             ),
           ),
           PreConfig(
             textStyle: AbTokens.monoStyle(
               fontSize: AbTokens.fontSm,
               color: c.textPrimary,
+              height: 1.5,
             ),
             // Package default is a11yLightTheme — light-bg token colors on our
             // dark UI, and the spec says no syntax coloring (v1). Empty theme +
@@ -51,6 +70,7 @@ class TranscriptMarkdown extends StatelessWidget {
             styleNotMatched: AbTokens.monoStyle(
               fontSize: AbTokens.fontSm,
               color: c.textPrimary,
+              height: 1.5,
             ),
             decoration: BoxDecoration(
               color: c.bgElevated,
