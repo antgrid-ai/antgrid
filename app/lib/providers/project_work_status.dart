@@ -2,44 +2,88 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../services/control_plane_client.dart';
 import 'recent_sessions.dart';
-import 'sessions.dart';
 
-/// Effective per-project work status for the Recent list and the sidebar dot.
+/// Effective per-project work status, for the surfaces that speak for a whole
+/// project: the title bar's focused-project pill. Session-level surfaces (Recent
+/// rows, drawer session rows) read [sessionWorkStatusProvider] instead, and
+/// drawer PROJECT rows show no dot at all.
 ///
-/// Prefers the live control-plane advert — which carries working/attention/
-/// error/done for a project WITHOUT warming (opening) it — read from
+/// The live control-plane advert — which carries working/attention/error/done
+/// for a project WITHOUT warming (opening) it — is the ONLY source, read from
 /// [remoteProjectStatusProvider], a plain map the app_shell reaper fills from
 /// ALREADY-open machine sockets. Reading that map never dials a socket (the
 /// heavy control-plane graph is the reaper's job, not this hot per-row
-/// provider). Falls back to session-running (working vs done) from the
-/// live/cached session list when no advert status applies: an older bridge, a
-/// cold project, a local project (bare id, no advert), or a closed socket.
+/// provider).
+///
+/// No advert (older bridge, cold project, closed socket) ⇒ "done". A running
+/// session is deliberately NOT a fallback for "working": the bridge only calls
+/// a project working while a prompt is actually in flight (see the bridge's
+/// work-status.ts), and an open-but-idle chat reading "working" was exactly the
+/// bug that rule fixes — re-deriving it here from the session list would put it
+/// straight back for every project whose advert hasn't arrived.
 final projectWorkStatusProvider = Provider.family<AgentWorkStatus, String>((
   ref,
   entryId,
 ) {
-  final advertised = ref.watch(
-    remoteProjectStatusProvider.select((m) => m[entryId]),
-  );
-  if (advertised != null) return advertised;
-  final running = ref.watch(
-    sessionsForEntryProvider(
-      entryId,
-    ).select((list) => list.any((s) => !s.archived && s.running)),
-  );
-  return running ? AgentWorkStatus.working : AgentWorkStatus.done;
+  return ref.watch(
+        remoteProjectStatusProvider.select((m) => m[entryId]),
+      ) ??
+      AgentWorkStatus.done;
 });
 
-/// Effective status for a single Recent row: the project-level [advert]
-/// attention/error (which concern the whole project) win; otherwise fall to
-/// this session's own [running] flag. [advert] is null when no live advert is
-/// available (older bridge, cold project, closed socket).
-AgentWorkStatus recentRowStatus(AgentWorkStatus? advert, bool running) {
-  if (advert == AgentWorkStatus.attention || advert == AgentWorkStatus.error) {
-    return advert!;
-  }
-  return running ? AgentWorkStatus.working : AgentWorkStatus.done;
+/// Effective status for ONE session.
+///
+/// [perSession] is that project's live per-session map — the authoritative
+/// source, and the reason a session blocked on a question no longer paints its
+/// working sibling amber. Null means the advert carried no per-session data
+/// (older bridge, cold project, closed socket): fall back to the project-level
+/// [advert], which is what every row used to show.
+///
+/// An entry in [perSession] outranks [running], deliberately. The bridge only
+/// ever files a status for a session it lists as RUNNING (see `build()` in
+/// work-status.ts), so the entry itself proves liveness — whereas [running]
+/// comes from the row's cached copy, which is forced false for every session on
+/// disk load and is only refreshed while that project is warm. Masking on it
+/// made every Recent row read "done" after a restart, including the one the
+/// agent was actively blocked on.
+///
+/// Without per-session data a stopped session is still always done: it can
+/// neither be working nor be the one blocked on a permission.
+AgentWorkStatus sessionRowStatus({
+  required AgentWorkStatus? advert,
+  required Map<String, AgentWorkStatus>? perSession,
+  required String sessionId,
+  required bool running,
+}) {
+  if (perSession != null) return perSession[sessionId] ?? AgentWorkStatus.done;
+  if (!running) return AgentWorkStatus.done;
+  return advert ?? AgentWorkStatus.done;
 }
+
+/// Live status for one session of one project, for the drawer's session rows.
+/// Reads the two advert maps directly — like [projectWorkStatusProvider], this
+/// never dials anything.
+///
+/// `autoDispose` is load-bearing, not an optimization: [running] is part of the
+/// family key and flips over a session's life, so a plain family would mint a
+/// second permanent instance — each holding two `select` subscriptions — every
+/// time a session starts or stops, for as long as the app runs.
+final sessionWorkStatusProvider = Provider.autoDispose
+    .family<AgentWorkStatus, ({String entryId, String sessionId, bool running})>((
+  ref,
+  args,
+) {
+  return sessionRowStatus(
+    advert: ref.watch(
+      remoteProjectStatusProvider.select((m) => m[args.entryId]),
+    ),
+    perSession: ref.watch(
+      remoteSessionStatusProvider.select((m) => m[args.entryId]),
+    ),
+    sessionId: args.sessionId,
+    running: args.running,
+  );
+});
 
 /// Aggregate work status for a machine: the most severe status across ALL of
 /// its projects in the live advert map (attention > error > working > done).

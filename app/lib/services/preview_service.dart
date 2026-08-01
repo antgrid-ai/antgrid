@@ -86,7 +86,9 @@ class PreviewService {
     if (message is PortsUpdateMessage) {
       _handlePortsUpdate(message);
     } else if (message is PreviewSnapshotMessage) {
-      _handlePreviewSnapshot(message);
+      _mergePreviewEntries(message.urls);
+    } else if (message is PreviewUrlMessage) {
+      _mergePreviewEntries([message.entry]);
     } else if (message is TunnelHttpResponse) {
       _handleTunnelResponse(message);
     }
@@ -98,13 +100,16 @@ class PreviewService {
     _setState(_state.copyWith(ports: msg.ports));
   }
 
-  void _handlePreviewSnapshot(PreviewSnapshotMessage msg) {
-    // MERGE with the current list, never replace: the snapshot only covers
-    // config-declared preview ports, while ports:update carries every
-    // detected port. On rebind both arrive in arbitrary order — a replace
-    // here would wipe detected ports whenever the snapshot lands last.
+  /// Folds preview entries — a welcome-replayed `preview:snapshot` or a live
+  /// `preview:url` push — into the port list.
+  ///
+  /// MERGE with the current list, never replace: preview entries only cover
+  /// config-declared preview ports, while ports:update carries every detected
+  /// port. On rebind both arrive in arbitrary order — a replace here would
+  /// wipe detected ports whenever the preview entries land last.
+  void _mergePreviewEntries(List<PreviewUrlEntry> entries) {
     final byPort = {for (final p in _state.ports) p.port: p};
-    for (final e in msg.urls) {
+    for (final e in entries) {
       final existing = byPort[e.port];
       byPort[e.port] = PortInfo(
         port: e.port,

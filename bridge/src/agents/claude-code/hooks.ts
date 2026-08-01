@@ -72,12 +72,13 @@ const ClaudePayloadSchema = z.object({
 });
 
 // "user-prompt" (→ /turn-start) is Claude-specific: Claude exposes a
-// UserPromptSubmit hook that fires before each new turn, which the bridge uses
-// to reset work status to "working" when a user re-prompts an existing session.
-// Codex/Cursor have no equivalent pre-turn hook — for those agents
-// only a new session (count increase) resets the status; re-prompting an
-// existing session leaves status at "done" or "attention" until the next
-// turn-end notification arrives (after-agent / stop).
+// UserPromptSubmit hook that fires before each new turn, and it is the ONLY
+// turn-start signal a terminal-mode Claude session has (chat sessions get
+// precise `agent:turn-start` frames from their driver instead).
+// Codex/Cursor/Copilot expose no pre-turn hook, so their terminal-mode sessions
+// infer the start from a submitted keystroke — see `needsKeystrokeTurnStart` in
+// ../registry.ts, which keys off the absence of "user-prompt" in this very
+// list. Their turn-END hooks still deliver attention/error/done.
 export const events = ["session-start", "stop", "stop-failure", "notification", "user-prompt"] as const;
 
 // StopFailure reasons no amount of waiting fixes. They take the ordinary

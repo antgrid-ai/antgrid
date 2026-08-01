@@ -75,14 +75,18 @@ class RemoteProjectStatusController
     extends Notifier<Map<String, AgentWorkStatus>> {
   @override
   Map<String, AgentWorkStatus> build() {
-    // Seed from the persisted status cache so a cold-boot row can show the
-    // last-known CALL-TO-ACTION (attention/error) before the first advert
-    // arrives. Only those two are seeded: working/done are re-derived from
-    // cached session-running by projectWorkStatusProvider, so seeding a stale
-    // "working" here would paint a live-activity pulse on an offline machine
-    // whose cached sessions are idle — a visible contradiction. attention/error
-    // add real information the fallback can't express and self-heal the moment
-    // the socket dials (the advert overwrites the whole machine).
+    // Seed from the persisted status cache so the two PROJECT-level surfaces —
+    // the collapsed machine header's aggregate and the title bar's pill — can
+    // show the last-known CALL-TO-ACTION (attention/error) before the first
+    // advert arrives. Session ROWS deliberately get nothing from this:
+    // [remoteSessionStatusProvider] is never seeded, and with no per-session
+    // entry `sessionRowStatus` masks on `running`, which the cache loads false.
+    // Only those two are seeded: "working" means a prompt is in flight
+    // RIGHT NOW, which a cached value from a previous launch cannot possibly
+    // know — seeding it would paint a live-activity pulse on a machine we
+    // aren't even connected to. attention/error are durable ("this project
+    // needs you") and self-heal the moment the socket dials (the advert
+    // overwrites the whole machine).
     //
     // Guarded: a widget/provider test that never touches cached sessions won't
     // override cachedSessionsStoreProvider (which throws by contract when
@@ -106,7 +110,7 @@ class RemoteProjectStatusController
   /// Replace every entry for [machineUuid] with [statuses] in one write:
   /// handles additions, transitions, and removals (a project dropped from the
   /// advert — or the whole socket closing → empty map — clears its status so the
-  /// row falls back to session-running). No-op when nothing changed for this
+  /// row reads "done"). No-op when nothing changed for this
   /// machine, so an unchanged advert re-delivery triggers no rebuild.
   void setMachineStatuses(
     String machineUuid,
@@ -137,6 +141,75 @@ class RemoteProjectStatusController
   }
 }
 
+
+/// Live PER-SESSION work status from the same adverts that fill
+/// [remoteProjectStatusProvider], keyed by drawer entryId → (sessionId →
+/// status). Same single-writer discipline, and for the same reason.
+///
+/// A project's status is only the ROLLUP of its sessions, so without this every
+/// session row on a project wore its noisiest sibling's dot — one chat blocked
+/// on a question made all of them read "needs you". An entryId present with an
+/// empty map means "the bridge speaks per-session and nothing is running"; an
+/// entryId ABSENT means no per-session data at all (older bridge, cold project,
+/// closed socket) and callers fall back to the project status.
+final remoteSessionStatusProvider =
+    NotifierProvider<
+      RemoteSessionStatusController,
+      Map<String, Map<String, AgentWorkStatus>>
+    >(RemoteSessionStatusController.new);
+
+class RemoteSessionStatusController
+    extends Notifier<Map<String, Map<String, AgentWorkStatus>>> {
+  @override
+  Map<String, Map<String, AgentWorkStatus>> build() => const {};
+
+  /// Replace every entry for [machineUuid] in one write (same full-replace
+  /// semantics as [RemoteProjectStatusController.setMachineStatuses], so a
+  /// project dropped from the advert — or the whole socket closing — clears).
+  /// Never seeded from the persisted cache: "working"/"needs you" are claims
+  /// about what an agent is doing RIGHT NOW, and a project-level cached value
+  /// can't be attributed to a session anyway.
+  void setMachineSessionStatuses(
+    String machineUuid,
+    Map<String, Map<String, AgentWorkStatus>> statuses,
+  ) => _replace((key) => !key.startsWith('$machineUuid.'), statuses);
+
+  /// Update the LOCAL (bare-key) projects from the host control plane's
+  /// `project:list` poll. Compound `uuid.projectId` keys are left untouched.
+  void setLocalSessionStatuses(
+    Map<String, Map<String, AgentWorkStatus>> statuses,
+  ) => _replace((key) => key.contains('.'), statuses);
+
+  void _replace(
+    bool Function(String key) keep,
+    Map<String, Map<String, AgentWorkStatus>> incoming,
+  ) {
+    final next = <String, Map<String, AgentWorkStatus>>{
+      for (final e in state.entries)
+        if (keep(e.key)) e.key: e.value,
+    };
+    for (final e in incoming.entries) {
+      // Reuse the previous inner map when the contents match: the widgets read
+      // this through `select((m) => m[entryId])`, whose equality guard is `==`
+      // on the inner Map — a fresh-but-identical instance would rebuild every
+      // session row on every advert re-delivery.
+      final prev = state[e.key];
+      next[e.key] = prev != null && _sameStatuses(prev, e.value) ? prev : e.value;
+    }
+    if (const MapEquality<String, Map<String, AgentWorkStatus>>().equals(
+      state,
+      next,
+    )) {
+      return;
+    }
+    state = next;
+  }
+}
+
+bool _sameStatuses(
+  Map<String, AgentWorkStatus> a,
+  Map<String, AgentWorkStatus> b,
+) => const MapEquality<String, AgentWorkStatus>().equals(a, b);
 
 /// Flat, recency-sorted list of every cached session across all projects and
 /// devices. Rebuilds when the cache changes (via [cacheChangesProvider]) or any

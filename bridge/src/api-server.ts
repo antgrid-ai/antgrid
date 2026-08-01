@@ -29,10 +29,10 @@ export interface AgentContext {
   onHookAlive?: (terminalId: string) => void;
   /** Called when a turn-start hook pings /turn-start (a fresh turn began), so
    *  the control-plane work status resets to "working". `terminalId` is the slot
-   *  the hook was stamped with, when it posted one — absent for a hook that
-   *  can't name its session, which still resets the project-level status.
-   *  Bridge-internal: this never emits an app-facing frame — unlike /notify, a
-   *  turn-start is not a user-facing notification. */
+   *  the hook was stamped with, when it posted one — absent when the hook had no
+   *  ANTGRID_TERMINAL_ID in its env, which still resets the project-level
+   *  status. Bridge-internal: this never emits an app-facing frame — unlike
+   *  /notify, a turn-start is not a user-facing notification. */
   onTurnStart?: (terminalId?: string) => void;
 }
 
@@ -278,9 +278,10 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
 
       if (req.method === "POST" && path === "/turn-start") {
         // terminalId is accepted but not required — the api-server is per-core,
-        // so the owning project is unambiguous without one; naming a slot also
-        // resets that session's own work status. Drained either way so the
-        // hook's POST doesn't block on an unread body.
+        // so the owning project is unambiguous without one. The id, when the
+        // hook had one, scopes the open turn to that session so a sibling's
+        // turn-end can't close it. Drained either way so the hook's POST doesn't
+        // block on an unread body.
         let terminalId: string | undefined;
         try {
           const body = await req.json() as { terminalId?: unknown } | null;

@@ -27,13 +27,11 @@ import '../providers/drawer_order.dart';
 import '../providers/collapsed_drawer.dart';
 import '../providers/new_session_action.dart';
 import '../providers/new_session_picker.dart';
-import '../providers/project_work_status.dart';
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
 import '../services/control_plane_client.dart';
 import '../utils/platform_utils.dart';
 import 'account_footer.dart';
-import 'agent_work_status_dot.dart';
 import 'drawer_entry_row.dart' show DrawerEntryRow, MachineDrawerHeaderRow;
 import 'session_row.dart';
 import 'update_row.dart';
@@ -517,7 +515,6 @@ class _AdvertisedProjectRow extends ConsumerWidget {
       projectId: project.projectId,
     ).registrationId;
     final expanded = ref.watch(expandedDrawerIdsProvider).contains(regId);
-    final workStatus = ref.watch(projectWorkStatusProvider(regId));
     final t = context.antgrid;
     final name = (project.label != null && project.label!.isNotEmpty)
         ? project.label!
@@ -556,15 +553,13 @@ class _AdvertisedProjectRow extends ConsumerWidget {
                 color: t.textSecondary,
               ),
             ),
+            // No work-status dot: work status belongs to the SESSION rows
+            // nested below, and a project-level rollup only restated whichever
+            // of them was loudest.
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
               spacing: AbTokens.space4,
               children: [
-                if (workStatus != AgentWorkStatus.done)
-                  AgentWorkStatusDot(
-                    key: ValueKey('project-status-dot-$regId'),
-                    status: workStatus,
-                  ),
                 // Create a session in THIS project (not the machine): lands on
                 // New Session already targeting it — the user only picks the
                 // agent and hits Start.

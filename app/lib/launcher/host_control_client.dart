@@ -2,6 +2,9 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 
+import '../services/control_plane_client.dart'
+    show AgentWorkStatus, parseSessionStatuses;
+
 /// Loopback data-plane connect info from a `project:open` response.
 /// Non-null for all modes — every core binds a loopback listener. Mirror of
 /// `control-protocol.ts` ConnectInfo.
@@ -26,12 +29,17 @@ class ProjectSummary {
   final String mode; // "local" | "remote"
   /// Live work status for warm cores. Null until the first bus frame arrives.
   final String? workStatus;
+
+  /// Per-running-session status keyed by session id — [workStatus] is only their
+  /// rollup. Null for a cold core (or an older host); `{}` when nothing runs.
+  final Map<String, AgentWorkStatus>? sessionStatuses;
   const ProjectSummary({
     required this.projectId,
     required this.path,
     required this.running,
     required this.mode,
     this.workStatus,
+    this.sessionStatuses,
   });
 }
 
@@ -286,6 +294,7 @@ class HostControlClient {
         running: e['running'] == true,
         mode: mode,
         workStatus: e['workStatus'] as String?,
+        sessionStatuses: parseSessionStatuses(e['sessionStatuses']),
       );
     }).toList(growable: false);
   }

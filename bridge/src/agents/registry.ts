@@ -254,3 +254,29 @@ export function agentSpec(tool: string): AgentSpec | undefined {
 export function judgeCapable(tool: string): boolean {
   return agentSpec(tool)?.judge !== undefined;
 }
+
+// Events that POST a turn-END notification (task_complete / error / idle).
+const TURN_END_EVENTS: ReadonlySet<string> = new Set(["stop", "after-agent", "agent-stop"]);
+
+/**
+ * True when a terminal-mode session of [tool] reports turn ENDS but no turn
+ * START. Those are the only sessions whose "working" may be inferred from a
+ * submitted keystroke: the inferred turn is guaranteed a closer, so it cannot
+ * wedge the session on "working" (see work-status.ts's userReply).
+ *
+ * Excludes both ends of the spectrum. Claude declares "user-prompt" (a real
+ * UserPromptSubmit turn-start hook), so guessing there could only be wrong. An
+ * agent with no turn-end event — opencode, whose in-runtime plugin declares no
+ * `bridge hook` events, and the hookless kilo/kimi/mistral-vibe — has nothing to
+ * close an inferred turn, so theirs would run until the session stopped, which
+ * is worse than reading "done".
+ *
+ * Lives here, off each agent's own hook profile, rather than in a table of its
+ * own: this file is the single source of truth for what a tool actually fires,
+ * so an agent whose events change can't silently disagree with the gate.
+ */
+export function needsKeystrokeTurnStart(tool: string | undefined): boolean {
+  const events = tool === undefined ? undefined : agentSpec(tool)?.hooks?.events;
+  if (events === undefined) return false;
+  return !events.includes("user-prompt") && events.some((e) => TURN_END_EVENTS.has(e));
+}

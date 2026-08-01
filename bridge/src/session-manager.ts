@@ -14,13 +14,7 @@ import { augmentAgentLaunch, injectsHookAliveProbe } from "./agent-launch-augmen
 import { resumeArgv, sessionResumable } from "./agent-resume";
 import { isChatCapableTool } from "./structured/chat-capable";
 import { initialPromptArgv } from "./initial-prompt";
-import {
-  initialWorkStatus,
-  reduceWorkStatus,
-  sessionRunningChanged,
-  turnStart,
-  type WorkStatusState,
-} from "./work-status";
+import type { WorkStatus } from "./protocol";
 import type { TerminalManager } from "./terminal-manager";
 import type { AbMessage, SessionEntry } from "./protocol";
 
@@ -63,6 +57,11 @@ interface SessionManagerOpts {
   terminalManager: TerminalManager;
   agentSpec: AgentSpec;
   sendMessage: (msg: unknown) => void;
+  /** This session's status in the owning core's work reduction, stamped onto
+   *  each `session:updated` entry. Injected rather than folded here so there is
+   *  exactly one per-session reduction; absent for a bare core with no owner,
+   *  which then advertises no status at all. */
+  sessionWorkStatusFor?: (sessionId: string) => WorkStatus | undefined;
   /** Override for the codex thread store dir (resume pre-flight). Unset in
    *  production → defaults to ~/.codex; tests inject an isolated dir. */
   codexHome?: string;
@@ -271,10 +270,6 @@ export class SessionManager {
   // something new; a stale `true` is harmless because start() re-runs the real
   // pre-flight and falls back to a fresh start.
   private resumableCache = new Map<string, { agentSessionId: string; resumable: boolean }>();
-  // Per-session work reduction (work-status.ts), keyed by session id. Runtime
-  // state, never persisted: it describes the live turn, and a bridge restart
-  // leaves nothing running to describe.
-  private sessionWork = new Map<string, WorkStatusState>();
 
   constructor(private opts: SessionManagerOpts) {
     this.dir = join(opts.storeDir, "agents", opts.projectId);
@@ -545,7 +540,6 @@ export class SessionManager {
     if (this.tm.has(id)) this.tm.kill(id);
     this.entries.delete(id);
     this.resumableCache.delete(id);
-    this.sessionWork.delete(id);
     this.changed();
     return true;
   }
@@ -574,39 +568,23 @@ export class SessionManager {
   }
 
   /**
-   * Fold an outbound `notification:push` into the work reduction of the session
-   * it named. Callers hand over every frame they emit — a message of another
-   * type, one that names no slot, or one naming a service PTY is ignored, so
-   * there is no second place deciding what counts as session activity.
+   * The owning core's work reduction moved a session — re-emit the list so the
+   * `workStatus` stamped on each entry stays current. Work status changes far
+   * more often than the list does, and nothing else would re-advertise it.
    *
    * Emits without persisting: the reduction is runtime state, so it re-advertises
    * the list but must not dirty sessions.json.
+   *
+   * Terminates because the reduction is same-object-on-no-change: the
+   * `session:updated` this emits folds back through `foldSessions`, which
+   * returns the SAME state when the session set is unchanged, so `commitWork`
+   * never fires this again. Keep that discipline or this becomes a loop.
    */
-  observeNotification(msg: AbMessage): void {
-    if (msg.type !== "notification:push" || !msg.sessionId) return;
-    const entry = this.entries.get(msg.sessionId);
-    if (!entry) return;
-    const prev = this.workFor(entry);
-    const next = reduceWorkStatus(prev, msg);
-    if (next === prev) return;
-    this.sessionWork.set(entry.id, next);
-    this.notifyObservers();
-  }
-
-  /**
-   * A turn-start hook named this session (the user submitted a prompt): clear
-   * the previous turn's outcome so a re-prompt reads as working again. The
-   * project-level counterpart is ProjectCore.noteTurnStart. No-ops for unknown
-   * ids, so a hook that reports a service PTY costs nothing.
-   */
-  noteTurnStart(id: string): void {
-    const entry = this.entries.get(id);
-    if (!entry) return;
-    const prev = this.workFor(entry);
-    const next = turnStart(prev);
-    if (next === prev) return;
-    this.sessionWork.set(id, next);
-    this.notifyObservers();
+  refreshWorkStatus(): void {
+    // Deferred: the caller is the owning core's bus subscriber, and emitting a
+    // session:updated from inside the publish that triggered it would nest one
+    // frame's fan-out in another's.
+    queueMicrotask(() => this.notifyObservers());
   }
 
   /**
@@ -1014,7 +992,13 @@ export class SessionManager {
       args: e.args,
       mode: e.mode,
       agentSessionResumable: this.agentSessionResumable(e),
-      workStatus: this.workFor(e).status,
+      // Read from the owning core's reduction (work-status.ts), never folded
+      // here: one per-session reduction, not two that can disagree. Undefined
+      // for a session that isn't running — the reduction only files a status for
+      // live sessions — which reaches the app as "the bridge didn't say", and is
+      // right: a mode flip does not restart a stopped session, so there is
+      // nothing to warn about.
+      workStatus: this.opts.sessionWorkStatusFor?.(e.id),
       agentSessionId: e.agentSessionId,
     };
   }
@@ -1023,21 +1007,6 @@ export class SessionManager {
    *  bookkeeping for chat, since a chat session has no PTY to ask. */
   private isRunning(e: PersistedEntry): boolean {
     return e.mode === "chat" ? this.runningChat.has(e.id) : this.tm.has(e.id);
-  }
-
-  /**
-   * This session's work reduction with its running input brought up to date.
-   * Folding the running flag on read rather than at each start/stop/exit keeps
-   * it derived from the SAME expression toWire publishes as `running`, so the
-   * status can never contradict the flag beside it, and covers the transitions
-   * that no call site owns — a PTY that died on its own, a driver reclaimed by
-   * a flip. Every one of those already lands on changed(), which re-runs toWire.
-   */
-  private workFor(e: PersistedEntry): WorkStatusState {
-    const prev = this.sessionWork.get(e.id) ?? initialWorkStatus;
-    const next = sessionRunningChanged(prev, this.isRunning(e));
-    if (next !== prev) this.sessionWork.set(e.id, next);
-    return next;
   }
 
   /**

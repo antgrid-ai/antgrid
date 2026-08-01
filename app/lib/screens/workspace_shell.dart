@@ -255,6 +255,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   // ── Terminal notifications ───────────────────────────────────────────
 
   void _onNotification(TerminalNotificationMessage msg) {
+    // A session terminal's id IS the session id (service PTYs use their own,
+    // which never matches an active session).
+    if (_isViewingSession(msg.terminalId)) return;
     final body = (msg.body != null && msg.body!.isNotEmpty)
         ? msg.body!
         : 'Notification';
@@ -264,7 +267,21 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     _onAgentNotification(title: title, body: body);
   }
 
+  /// Reads the live focus state into [isViewingSession] — every surfacer below
+  /// checks it first, so nothing is announced about the chat already on screen.
+  bool _isViewingSession(String? sessionId) => isViewingSession(
+    sessionId: sessionId,
+    activeSessionId: ref.read(activeSessionIdProvider),
+    onWorkspaceSurface:
+        ref.read(workbenchSurfaceProvider) == WorkbenchSurface.workspace,
+    // On mobile the workspace surface is a PageView, so being on it does not
+    // mean the transcript is showing — a user reading files must still be told.
+    agentSurfaceVisible: ref.read(agentSurfaceVisibleProvider),
+    lifecycle: _lifecycle,
+  );
+
   void _onAgentNotificationPush(NotificationPushMessage msg) {
+    if (_isViewingSession(msg.sessionId)) return;
     const labels = {
       'permission_request': 'Permission needed',
       'awaiting_input': 'Needs your input',
@@ -286,6 +303,8 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   }
 
   void _onHandlerEscalation(HandlerEscalation esc) {
+    // Handler escalations name their session in `terminalId`.
+    if (_isViewingSession(esc.terminalId)) return;
     // Route through the shared surfacer (foreground toast / background OS
     // notification), identical to the agent-notification paths, so an
     // escalation from ANY warm project is surfaced — not just the focused one.

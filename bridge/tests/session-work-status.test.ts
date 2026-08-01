@@ -3,12 +3,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "../src/session-manager";
-import { createMessage, type AbMessage } from "../src/protocol";
+import type { WorkStatus } from "../src/protocol";
 
-// Per-session work status: the same reduction the project-level advert uses,
-// scoped to one slot. What these assert is that a notification lands on the
-// session that FIRED it and on no other — the project-level status can't answer
-// "is THIS session mid-turn", which is the whole reason the field exists.
+// SessionManager does not fold work status — the owning core's reduction
+// (work-status.ts) is the only one, and this stamps its answer onto each
+// session:updated entry. What the REDUCTION decides is covered by
+// work-status.test.ts; these cover the seam, which is where a second source of
+// truth would creep back in.
 
 function makeTerm() {
   const live = new Set<string>();
@@ -20,26 +21,21 @@ function makeTerm() {
   };
 }
 
-function notify(sessionId: string | undefined, notificationType: string): AbMessage {
-  return createMessage("notification:push", {
-    notificationType: notificationType as never,
-    sessionId,
-    projectId: "p1",
-  });
-}
-
-describe("per-session work status", () => {
+describe("per-session work status on the wire", () => {
   let dir: string;
   let term: ReturnType<typeof makeTerm>;
+  let statuses: Map<string, WorkStatus>;
   let sm: SessionManager;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "antgrid-swork-"));
     term = makeTerm();
+    statuses = new Map();
     sm = new SessionManager({
       projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
       agentSpec: { command: "codex", name: "codex" },
       sendMessage: () => {},
+      sessionWorkStatusFor: (id) => statuses.get(id),
     });
   });
   afterEach(() => {
@@ -47,73 +43,52 @@ describe("per-session work status", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("a stopped session is done, a started one is working", () => {
+  it("stamps the reduction's answer onto the entry", () => {
     const s = sm.create("a", { tool: "codex" });
-    expect(s.workStatus).toBe("done");
-    sm.start(s.id);
-    expect(sm.get(s.id)?.workStatus).toBe("working");
-  });
-
-  it("separates attention from working so the two can be worded differently", () => {
-    const s = sm.create("a", { tool: "codex" });
-    sm.start(s.id);
-    sm.observeNotification(notify(s.id, "permission_request"));
-    // Not merely "busy": killing an agent blocked here abandons the pending
-    // tool call, and a resume does not re-ask it.
+    statuses.set(s.id, "attention");
     expect(sm.get(s.id)?.workStatus).toBe("attention");
-
-    sm.observeNotification(notify(s.id, "task_complete"));
-    expect(sm.get(s.id)?.workStatus).toBe("done");
   });
 
-  it("lands the notification only on the session that fired it", () => {
+  it("lands on the session the reduction named and no other", () => {
     const a = sm.create("a", { tool: "codex" });
     const b = sm.create("b", { tool: "codex" });
-    sm.start(a.id);
-    sm.start(b.id);
-    sm.observeNotification(notify(a.id, "permission_request"));
-
+    statuses.set(a.id, "attention");
     expect(sm.get(a.id)?.workStatus).toBe("attention");
-    expect(sm.get(b.id)?.workStatus).toBe("working");
+    expect(sm.get(b.id)?.workStatus).toBeUndefined();
   });
 
-  it("ignores a notification that names no session or an unknown one", () => {
+  it("carries no status for a session the reduction has no entry for", () => {
+    // The reduction files a status only for RUNNING sessions, so this is the
+    // stopped case — it reaches the app as null, "the bridge didn't say", and a
+    // mode flip does not restart a stopped session anyway.
     const s = sm.create("a", { tool: "codex" });
     sm.start(s.id);
-    sm.observeNotification(notify(undefined, "permission_request"));
-    sm.observeNotification(notify("service-pty", "permission_request"));
-    expect(sm.get(s.id)?.workStatus).toBe("working");
+    expect(sm.get(s.id)?.workStatus).toBeUndefined();
   });
 
-  it("a turn-start clears the previous turn's outcome", () => {
-    const s = sm.create("a", { tool: "codex" });
-    sm.start(s.id);
-    sm.observeNotification(notify(s.id, "task_complete"));
-    expect(sm.get(s.id)?.workStatus).toBe("done");
-
-    sm.noteTurnStart(s.id);
-    expect(sm.get(s.id)?.workStatus).toBe("working");
+  it("advertises no status at all when nothing injected a provider", () => {
+    // A bare core with no owning ProjectCore. Absent is the honest answer; a
+    // default would be this file inventing a second source of truth.
+    const bare = new SessionManager({
+      projectId: "p2", storeDir: dir, projectPath: dir, terminalManager: term as any,
+      agentSpec: { command: "codex", name: "codex" },
+      sendMessage: () => {},
+    });
+    const s = bare.create("a", { tool: "codex" });
+    expect(bare.get(s.id)?.workStatus).toBeUndefined();
+    bare.flushNow();
   });
 
-  it("clears to done when the PTY exits while the agent was still blocked", () => {
-    const s = sm.create("a", { tool: "codex" });
-    sm.start(s.id);
-    sm.observeNotification(notify(s.id, "permission_request"));
-    term.exit(s.id);
-    sm.noteExited(s.id);
-    // A call-to-action for a session with no runtime is a lie.
-    expect(sm.get(s.id)?.workStatus).toBe("done");
-  });
-
-  it("re-emits the session list when a notification moves a session's status", () => {
-    const s = sm.create("a", { tool: "codex" });
-    sm.start(s.id);
+  it("re-emits the session list when the owner reports the reduction moved", async () => {
+    // Work status changes far more often than the list does, so without this the
+    // stamped value would sit stale until an unrelated session change.
+    sm.create("a", { tool: "codex" });
     let emits = 0;
     sm.onChange(() => { emits++; });
-    sm.observeNotification(notify(s.id, "permission_request"));
-    expect(emits).toBe(1);
-    // Same notification again changes nothing, so nothing is re-advertised.
-    sm.observeNotification(notify(s.id, "permission_request"));
+    sm.refreshWorkStatus();
+    // Deferred so the emit doesn't nest inside the publish that triggered it.
+    expect(emits).toBe(0);
+    await Promise.resolve();
     expect(emits).toBe(1);
   });
 });

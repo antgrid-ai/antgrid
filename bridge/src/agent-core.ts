@@ -19,7 +19,7 @@ import { loadConfig, findConfigFile, projectName, type AbConfig } from "./config
 import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from "./bootstrap";
 import { resolveAgent, listKnownTools } from "./known-agents";
 import { augmentAgentLaunch } from "./agent-launch-augmenter";
-import { createMessage, HandlerConfigureWire, type AbMessage, type RpcRequest, type SessionEntry } from "./protocol";
+import { createMessage, HandlerConfigureWire, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle, type SessionTitleBody } from "./api-server";
 import { MessageBus } from "./message-bus";
@@ -80,6 +80,38 @@ export function buildChatSpawnAugment(
 // Lives with codex's driver (it is codex's app-server quirk, not a core one).
 export { codexNotifyOnlyArgs } from "./agents/codex/driver";
 
+/**
+ * Whether a `terminal:input` payload submitted a prompt, for the work-status
+ * turn inference agents without a pre-turn hook depend on (see work-status.ts).
+ *
+ * A TUI submits on CR, so that's the signal — but only as the FINAL byte, and
+ * never behind ESC: `\x1b\r` is alt+enter, which inserts a newline into a
+ * multi-line prompt rather than sending it. Treating that as a submit would open
+ * a turn nothing is going to close, which is exactly the stale "working" dot the
+ * turn model exists to avoid. Shift+enter under the kitty protocol
+ * (`\x1b[13;2u`) carries no CR at all and needs no special case.
+ */
+export function isSubmitKeystroke(data: string): boolean {
+  return data.endsWith("\r") && !data.endsWith("\x1b\r");
+}
+
+/**
+ * Whether a `terminal:input` payload carried anything BESIDES the submitting CR.
+ *
+ * A PTY delivers one keystroke per frame, so the CR that submits a prompt almost
+ * always arrives alone — which makes {@link isSubmitKeystroke} on its own unable
+ * to tell "the user sent a prompt" from "the user pressed enter on an empty
+ * prompt, or to dismiss a TUI menu". The latter starts no turn, so nothing will
+ * ever close the one it opens. work-status.ts pairs the two: a keystroke-inferred
+ * turn needs typed content since the last one (see `typedSessions`).
+ *
+ * Escape sequences count as content on purpose — arrow-key history recall then
+ * enter IS a submit, and the alternative (dropping it) loses a real turn.
+ */
+export function hasTypedContent(data: string): boolean {
+  return data.replace(/\r$/, "").length > 0;
+}
+
 export interface AgentCore {
   /** Wire up an outbound transport. The bus's inbound handler is set so the
    *  transport can dispatch incoming messages back into core. */
@@ -97,6 +129,11 @@ export interface AgentCore {
   /** Machine-level phone registry (identity, label, push routing), shared across
    *  projects. Not an authorization store — see remote-access-policy.ts. */
   readonly pairedPhones: PairedPhonesStore;
+  /** The owner's work reduction moved: re-emit `session:updated` so the
+   *  `workStatus` stamped on each entry (from
+   *  {@link BuildAgentCoreOptions.sessionWorkStatusFor}) is current. No-op
+   *  before setupServices. */
+  refreshSessionWork(): void;
   /** Lifecycle hooks the transport invokes. */
   handleTunnelMessage(raw: unknown): void;
   onHandshakeComplete(): void;
@@ -155,8 +192,30 @@ export interface BuildAgentCoreOptions {
   remoteAccessEnabled?: () => boolean;
   /** Fired when a turn-start hook pings the api-server (`POST /turn-start`), so
    *  the owning ProjectCore can reset its control-plane work status to "working"
-   *  on a fresh turn. Bridge-internal — never surfaces to the app. */
-  onTurnStart?: () => void;
+   *  on a fresh turn. Bridge-internal — never surfaces to the app.
+   *  [sessionId] is the session the hook fired for, when it carried one. */
+  onTurnStart?: (sessionId?: string) => void;
+  /** Fired when the user types into [sessionId]'s PTY, so the owning ProjectCore
+   *  can clear a block the hook reported. Bridge-internal, and NOT a turn-start
+   *  on its own: typing in an idle session is not work. `submitted` (the input
+   *  carried a CR) is a turn-start only for agents that have no pre-turn hook,
+   *  and only once `typed` has reported content for that session — a bare enter
+   *  submits nothing (see {@link hasTypedContent}). */
+  onUserReply?: (
+    sessionId: string,
+    opts: { submitted: boolean; typed: boolean },
+  ) => void;
+  /** Fired when the user resolves a permission/question on [sessionId], so the
+   *  owning ProjectCore can clear the block and resume the turn. Distinct from
+   *  {@link onTurnStart}: it opens a turn only if something was actually
+   *  pending. Bridge-internal — never surfaces to the app. */
+  onAnswer?: (sessionId: string) => void;
+  /** This session's status in the owner's work reduction, stamped onto each
+   *  `session:updated` entry so the app has a per-session status on the LIVE
+   *  session stream rather than only on the advert. The owner must call
+   *  {@link AgentCore.refreshSessionWork} when the reduction moves — the list
+   *  is otherwise only re-emitted when the sessions themselves change. */
+  sessionWorkStatusFor?: (sessionId: string) => WorkStatus | undefined;
   /** Relay base URL of the machine socket this core attaches to. Host-supplied
    *  in remote mode: only a standalone agent with an explicit `relayUrl:` in its
    *  antgrid.yaml can learn it from config, so without this a host-spawned
@@ -374,6 +433,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // structured.handleAgentMessage directly and never passes through
         // here (it must not reset the guard that counts it).
         handlerEngine.onUserReply(msg.sessionId, "\r");
+        // A RESOLVE additionally unblocks the session: the block is gone and the
+        // agent resumes on THIS session, so report it now rather than waiting for
+        // the driver's next outbound frame — that is what flips the session's dot
+        // from "needs you" back to "working" the instant the user replies. A bare
+        // prompt is excluded; its driver emits a real `agent:turn-start`. Not
+        // onTurnStart either: a resolve that raced a retraction has nothing to
+        // resume, and must not open a turn nothing will close.
+        if (msg.type !== "agent:prompt") opts.onAnswer?.(msg.sessionId);
         void structured?.handleAgentMessage(msg);
         return;
       case "agent:cancel":
@@ -398,6 +465,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // A user reply resets the handler's runaway guard; a submitted line
         // (data carrying CR/LF) also clears the pending escalations.
         handlerEngine.onUserReply(msg.terminalId, msg.data);
+        // ...and answers whatever the hook reported this session as blocked on.
+        // A terminal-mode session has no resolve frame — the keystroke IS the
+        // answer — so without this its "needs you" dot outlives the block. A
+        // SUBMIT additionally means "prompt started", the only turn-start an
+        // agent without a pre-turn hook can give us (see work-status.ts).
+        opts.onUserReply?.(msg.terminalId, {
+          submitted: isSubmitKeystroke(msg.data),
+          typed: hasTypedContent(msg.data),
+        });
         break;
       case "handler:configure": {
         // parseMessageFast (the encrypted/local hot path) validates only the
@@ -870,14 +946,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   let dropSessionReplay: (sessionId: string) => void = (_s) => {};
   let isShuttingDown = false;
 
-  // Every producer of notification:push sends through here, so the per-session
-  // work reduction sees exactly the frames the project-level one folds off the
-  // bus (ProjectCore.observeWorkStatus) and the two can't diverge. Folded after
-  // the send: the fold re-advertises the session list, which must not nest
-  // inside the notification's own publish.
+  // Kept as the single funnel for notification:push producers even though it now
+  // only forwards: the work reduction folds these off the bus
+  // (ProjectCore.observeWorkStatus), so a producer that bypassed sendAb entirely
+  // is the one mistake that would still lose the signal.
   function sendNotifying(msg: AbMessage): void {
     sendAb(msg);
-    sessions?.observeNotification(msg);
   }
 
   // Eager, factory-scoped (NOT in setupServices): handleAbMessage and startApiServer
@@ -1375,6 +1449,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       terminalManager: manager,
       agentSpec: agentSpecFromConfig(),
       sendMessage: (msg) => sendAb(msg as AbMessage),
+      sessionWorkStatusFor: opts.sessionWorkStatusFor,
       onStartChat: (opts) => {
         // startChat rejects on a non-chat-capable tool or a driver spawn/start
         // failure. Catch it — otherwise it's a silent unhandled rejection and the
@@ -1708,10 +1783,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       }
     },
     onHookAlive: (terminalId) => { codexHookAlive.add(terminalId); },
-    onTurnStart: (terminalId) => {
-      if (terminalId) sessions?.noteTurnStart(terminalId);
-      opts.onTurnStart?.();
-    },
+    onTurnStart: (terminalId) => opts.onTurnStart?.(terminalId),
   });
 
   const TranscriptSnapshotParams = z.object({ sessionId: z.string() });
@@ -1804,6 +1876,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     abDir,
     nextKeypair,
     pairedPhones,
+    refreshSessionWork(): void {
+      sessions?.refreshWorkStatus();
+    },
     handleTunnelMessage,
     onHandshakeComplete,
     setPlainHook,

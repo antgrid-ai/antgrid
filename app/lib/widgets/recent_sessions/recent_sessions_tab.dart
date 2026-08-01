@@ -80,14 +80,21 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
       );
     }
 
-    // Effective per-row status (project-level attention/error overlaid on the
-    // session's own running flag), computed once here and reused for grouping
-    // and the header counts. Watches the live advert map ONCE (not per row) —
+    // Effective per-row status (this session's own advert entry, masked to done
+    // for a stopped session), computed once here and reused for grouping and the
+    // header counts — so "1 needs you" counts the ONE blocked session, not every
+    // session sharing its project. Watches both advert maps ONCE (not per row);
     // keyed by row identity, distinct instances per build.
     final advert = ref.watch(remoteProjectStatusProvider);
+    final perSession = ref.watch(remoteSessionStatusProvider);
     final statusFor = <RecentSessionRow, AgentWorkStatus>{
       for (final r in rows)
-        r: recentRowStatus(advert[r.origin.registrationId], r.session.running),
+        r: sessionRowStatus(
+          advert: advert[r.origin.registrationId],
+          perSession: perSession[r.origin.registrationId],
+          sessionId: r.session.id,
+          running: r.session.running,
+        ),
     };
     final counts = <AgentWorkStatus, int>{};
     for (final s in statusFor.values) {
@@ -143,7 +150,9 @@ const _statusOrder = [
 ];
 
 String workStatusLabel(AgentWorkStatus s) => switch (s) {
-  AgentWorkStatus.attention => 'Needs attention',
+  // "Needs you", not "Needs attention": it reads as the summary badge
+  // ("1 needs you") and matches the Handler pill's wording for the same idea.
+  AgentWorkStatus.attention => 'Needs you',
   AgentWorkStatus.error => 'Error',
   AgentWorkStatus.working => 'Working',
   AgentWorkStatus.done => 'Done',

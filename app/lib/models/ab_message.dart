@@ -216,6 +216,11 @@ class NotificationPushMessage {
   notificationType; // task_complete | permission_request | awaiting_input | idle | error
   final String? message;
   final String? sessionTitle;
+
+  /// Which session fired this, when the hook carried a terminal id. Absent for
+  /// an unattributed hook. Lets the surfacer stay quiet about the chat the user
+  /// is already reading — see workspace_shell's _onAgentNotificationPush.
+  final String? sessionId;
   final String? projectId;
 
   const NotificationPushMessage({
@@ -224,6 +229,7 @@ class NotificationPushMessage {
     required this.notificationType,
     this.message,
     this.sessionTitle,
+    this.sessionId,
     this.projectId,
   });
 }
@@ -685,6 +691,21 @@ class PreviewUrlEntry {
   };
 }
 
+/// A single preview entry pushed live, as opposed to the full
+/// [PreviewSnapshotMessage] replayed on welcome. Same payload shape as one
+/// [PreviewUrlEntry], so it merges through the identical path.
+class PreviewUrlMessage {
+  final String id;
+  final int timestamp;
+  final PreviewUrlEntry entry;
+
+  const PreviewUrlMessage({
+    required this.id,
+    required this.timestamp,
+    required this.entry,
+  });
+}
+
 class PreviewSnapshotMessage {
   final String id;
   final int timestamp;
@@ -858,6 +879,7 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         notificationType: notificationType,
         message: json['message'] as String?,
         sessionTitle: json['sessionTitle'] as String?,
+        sessionId: json['sessionId'] as String?,
         projectId: json['projectId'] as String?,
       );
 
@@ -1184,6 +1206,13 @@ Object? parseAbMessage(Map<String, dynamic> json) {
 
     case 'preview:snapshot:request':
       return PreviewSnapshotRequestMessage(id: id, timestamp: timestamp);
+
+    case 'preview:url':
+      {
+        final entry = PreviewUrlEntry.fromJson(json);
+        if (entry == null) return null;
+        return PreviewUrlMessage(id: id, timestamp: timestamp, entry: entry);
+      }
 
     case 'preview:snapshot':
       final urlsJson = json['urls'];

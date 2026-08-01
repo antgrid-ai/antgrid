@@ -292,6 +292,10 @@ const PreviewUrlMessage = BaseMessage.extend({
   port: z.number(),
   url: z.string(),
   label: z.string().optional(),
+  // Keep in lockstep with PreviewUrlEntrySchema.scheme: the live push and the
+  // welcome-replayed snapshot carry the same entry, so a consumer must not need
+  // to know which one it got (absent = no URL sighting yet, treat as http).
+  scheme: z.enum(["http", "https"]).optional(),
 });
 
 const AgentDisconnectingMessage = BaseMessage.extend({
@@ -328,6 +332,13 @@ const AgentProjectsMessage = BaseMessage.extend({
       // ambiguous between new-session and re-prompt (see app_shell's
       // _onControlPlaneState).
       runningSessions: z.number().int().nonnegative().optional(),
+      // Per-running-session status, keyed by session id — what the app dots each
+      // SESSION row with, since `status` above is only their rollup and would
+      // otherwise paint a working session with its blocked sibling's amber.
+      // PRESENCE is the capability signal: `{}` means "warm core, nothing
+      // running", absent means an older bridge and the app falls back to
+      // `status` for every session.
+      sessionStatuses: z.record(z.string(), WorkStatusSchema).optional(),
       lastActiveAt: z.string().optional(),
       // Present when the project has an admitted relay data-plane stream: the
       // phone binds its ProjectSession services to this streamId without a fresh
@@ -550,9 +561,12 @@ const NotificationPushMessage = BaseMessage.extend({
   sessionTitle: z.string().optional(),
   // IDENTIFIES the session that fired this (SessionEntry.id == the hook's
   // terminalId), which `sessionTitle` cannot: a title is renameable and two
-  // sessions may carry the same one. Optional because a notification need not
-  // name a slot at all (a service PTY, an older sender) — the per-session work
-  // reduction simply gets no signal, and the project-level one is unaffected.
+  // sessions may carry the same one. Hand-mirrored in the app's
+  // NotificationPushMessage — keep the two in lockstep. Optional because a
+  // notification need not name a slot at all (a service PTY, an older sender):
+  // the reduction then falls back to its project-wide key (work-status.ts), and
+  // the app cannot suppress the toast for a session you are already reading
+  // (notification_routing.dart).
   sessionId: z.string().optional(),
   projectId: z.string().optional(),
 });

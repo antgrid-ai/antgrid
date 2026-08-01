@@ -5,7 +5,7 @@ import { LocalListener } from "./local-listener";
 import { createRelayPromotion, type RelayPromotionController, type RelayPromotionDeps } from "./relay-promotion";
 import type { AttachStreamOpts, StreamHandle } from "./stream-mux";
 import { createMessage, type AbMessage, type SessionEntry, type WorkStatus } from "./protocol";
-import { initialWorkStatus, reduceWorkStatus, turnStart, type WorkStatusState } from "./work-status";
+import { answerRequest, initialWorkStatus, reduceWorkStatus, turnStart, userReply, type WorkStatusState } from "./work-status";
 import { logger } from "./logger";
 const log = logger.child({ component: "project-core" });
 import { createPushDispatcher } from "./push/push-dispatcher";
@@ -57,6 +57,12 @@ export type RegisterOutcome =
   | { ok: true }
   | { ok: false; code: string; message: string };
 
+function sameStatuses(a: ReadonlyMap<string, WorkStatus>, b: ReadonlyMap<string, WorkStatus>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [id, s] of a) if (b.get(id) !== s) return false;
+  return true;
+}
+
 /**
  * Per-project runtime aggregate. Owns the {@link AgentCore}, its outbound
  * {@link MessageBus}, and the mode-specific transport (loopback listener for
@@ -84,8 +90,9 @@ export class ProjectCore {
   private _work: WorkStatusState = initialWorkStatus;
   private _onWorkStatusChange: (() => void) | null = null;
   /** Set by {@link observeWorkStatus} for the message it just folded: true when
-   *  the reduction was a no-op (exact-repeat or the awaiting_input-after-
-   *  task_complete stale nudge). The push subscriber (attached later, so its
+   *  the notification carried nothing new (exact-repeat or the
+   *  awaiting_input-after-task_complete stale nudge). The push subscriber
+   *  (attached later, so its
    *  bus callback always runs after this one for the same publish()) reads
    *  this to skip pushing a notification that carries no new information —
    *  see attachRelayStream. */
@@ -105,24 +112,41 @@ export class ProjectCore {
    *  session list exactly when it actually changed — see protocol.ts. */
   get workRunningCount(): number { return this._work.runningCount; }
 
-  /** Register a callback fired whenever {@link workStatus} or
-   *  {@link workRunningCount} CHANGES (deduped), so the host can re-advertise
-   *  the control plane on a real transition rather than polling. Pass null to
-   *  clear. */
+  /** Per-running-session work status for the control-plane advert, so the app
+   *  dots each SESSION row rather than painting every session on the project
+   *  with its noisiest sibling's state. Empty (not absent) when nothing runs —
+   *  presence is how the app tells a per-session bridge from an older one. */
+  get sessionWorkStatuses(): Record<string, WorkStatus> {
+    return Object.fromEntries(this._work.sessionStatuses);
+  }
+
+  /** Register a callback fired whenever {@link workStatus},
+   *  {@link workRunningCount} or {@link sessionWorkStatuses} CHANGES (deduped),
+   *  so the host can re-advertise the control plane on a real transition rather
+   *  than polling. Pass null to clear. */
   onWorkStatusChange(cb: (() => void) | null): void { this._onWorkStatusChange = cb; }
 
   /** Commit a new work-status reduction, firing {@link onWorkStatusChange} only
-   *  on a real transition of status OR running-session count (a fresh object
-   *  with both unchanged — e.g. a turn-start while already working —
-   *  re-advertises nothing). Count changes with an unchanged status (a 2nd
-   *  session starting while one is working) must still re-advertise, or the
-   *  phone's Recent list misses the new session until an unrelated flip. */
+   *  on a real transition of the advertised values (a fresh object with all of
+   *  them unchanged — e.g. a turn-start while already working — re-advertises
+   *  nothing). Count changes with an unchanged status (a 2nd session starting
+   *  while one is working) must still re-advertise, or the phone's Recent list
+   *  misses the new session until an unrelated flip; likewise a per-session flip
+   *  that leaves the ROLLUP unchanged (one session unblocks while a sibling is
+   *  still working) is exactly the transition the session dots exist to show. */
   private commitWork(next: WorkStatusState): void {
     if (next === this._work) return;
+    const perSessionChanged = !sameStatuses(next.sessionStatuses, this._work.sessionStatuses);
     const changed = next.status !== this._work.status
-      || next.runningCount !== this._work.runningCount;
+      || next.runningCount !== this._work.runningCount
+      || perSessionChanged;
     this._work = next;
     if (changed) this._onWorkStatusChange?.();
+    // The advert is not the only consumer: `session:updated` stamps each entry's
+    // status from this same reduction, and the session list is otherwise only
+    // re-emitted when the sessions themselves change. Gated on the per-session
+    // map so a rollup-only move doesn't churn the list.
+    if (perSessionChanged) this.core?.refreshSessionWork();
   }
 
   /** Fold one outbound bus frame into the work-status reduction. Must never
@@ -130,17 +154,41 @@ export class ProjectCore {
    *  publish() as the live relay subscriber (reduceWorkStatus is pure/total). */
   private observeWorkStatus(msg: AbMessage): void {
     const next = reduceWorkStatus(this._work, msg);
-    this._lastNotificationRedundant = msg.type === "notification:push" && next === this._work;
+    // Redundant = the notification told us nothing new (exact repeat on the same
+    // session, or the awaiting_input-after-task_complete stale nudge). Keyed on
+    // the notification MAP's identity, not on the state object's: a repeat
+    // notification still closes its session's turn, so it yields a new state
+    // while recording no notification worth pushing to the phone. A sibling
+    // session raising the same type IS new information — it lands on a different
+    // key, so the map is replaced and the push goes out.
+    this._lastNotificationRedundant = msg.type === "notification:push"
+      && next.notifications === this._work.notifications;
     this.commitWork(next);
   }
 
-  /** A turn-start hook fired (user submitted a prompt): clear a stale turn-end
-   *  notification so re-prompting an existing session returns to "working"
-   *  rather than showing the previous turn's done/attention. Routed here from
-   *  the per-core api-server (never a bus frame — the app must not see it as a
-   *  notification), via {@link AgentContext.onTurnStart}. */
-  noteTurnStart(): void {
-    this.commitWork(turnStart(this._work));
+  /** A turn-start hook fired (user submitted a prompt), or the user answered
+   *  what was blocking [sessionId]: open its turn and clear its stale
+   *  notification/pending request, so the session reads "working" for as long as
+   *  the prompt actually runs. Routed here from the per-core api-server (never a
+   *  bus frame — the app must not see it as a notification) and from the inbound
+   *  permission/question resolves, via {@link AgentContext.onTurnStart}. */
+  noteTurnStart(sessionId?: string): void {
+    this.commitWork(turnStart(this._work, sessionId));
+  }
+
+  /** The user typed into [sessionId]'s PTY — the only "I answered" signal a
+   *  terminal-mode session has. Clears its block; claims a turn only for an
+   *  agent that can't report its own turn starts, and only when the session has
+   *  typed content to submit. See {@link userReply}. */
+  noteUserReply(sessionId: string, opts: { submitted: boolean; typed: boolean }): void {
+    this.commitWork(userReply(this._work, sessionId, opts));
+  }
+
+  /** The user answered a permission/question on [sessionId]. Clears the block and
+   *  resumes the turn, but only if something was pending; see
+   *  {@link answerRequest}. */
+  noteAnswer(sessionId: string): void {
+    this.commitWork(answerRequest(this._work, sessionId));
   }
 
   /** First register outcome of a REMOTE-mode core's primary relay slot (null in
@@ -188,7 +236,14 @@ export class ProjectCore {
       identity: this.deps.identity,
       pairedPhones: this.deps.pairedPhones,
       remoteAccessEnabled: this.deps.remoteAccessEnabled,
-      onTurnStart: () => this.noteTurnStart(),
+      onTurnStart: (sessionId) => this.noteTurnStart(sessionId),
+      onUserReply: (sessionId, replyOpts) => this.noteUserReply(sessionId, replyOpts),
+      onAnswer: (sessionId) => this.noteAnswer(sessionId),
+      // The single source of per-session work status: SessionManager stamps it
+      // onto `session:updated` from THIS reduction rather than keeping a second
+      // one of its own. Read lazily — the fold that answers it runs after the
+      // frame this feeds, so `refreshSessionWork` below is what re-emits.
+      sessionWorkStatusFor: (id) => this._work.sessionStatuses.get(id),
       relayUrl: this.deps.relayUrl,
     });
     this.core = core;
