@@ -7,7 +7,6 @@ import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
 import '../models/command_models.dart';
 import '../models/ab_message.dart' show CommandInfo;
-import '../providers/agent_transport.dart';
 import '../providers/providers.dart';
 import '../design/widgets/ab_loading.dart';
 
@@ -157,7 +156,10 @@ class _CommandButtonState extends ConsumerState<_CommandButton> {
   }
 
   void _runCommand(BuildContext context) {
-    final ref = this.ref;
+    // The container, not `ref`: the confirm dialog's Run button fires after
+    // this bar may have been rebuilt away, and a `WidgetRef` touched past that
+    // point throws.
+    final container = ref.container;
 
     if (widget.command.confirm) {
       final colorScheme = Theme.of(context).colorScheme;
@@ -188,7 +190,7 @@ class _CommandButtonState extends ConsumerState<_CommandButton> {
             FilledButton(
               onPressed: () {
                 Navigator.pop(ctx);
-                _sendCommandRun(ref, confirmed: true);
+                _sendCommandRun(container, confirmed: true);
               },
               child: const Text('Run'),
             ),
@@ -196,17 +198,17 @@ class _CommandButtonState extends ConsumerState<_CommandButton> {
         ),
       );
     } else {
-      _sendCommandRun(ref);
+      _sendCommandRun(container);
     }
   }
 
-  void _sendCommandRun(WidgetRef ref, {bool confirmed = false}) {
-    // Presence guard only — CommandService derives the (bare) projectId from
-    // its own session, so the compound registrationId must not be passed in.
-    if (ref.read(selectedRegistrationIdProvider) == null) return;
-
-    ref
-        .read(commandServiceProvider)
-        .runCommand(widget.command.name, confirmed: confirmed);
+  void _sendCommandRun(ProviderContainer ref, {bool confirmed = false}) {
+    // A focused project id was NOT a sufficient guard: it is exactly the state
+    // in which the façade throws while the session resolves, and the confirmed
+    // path fires after a dialog that can outlive the session entirely. Resolve
+    // the service off the session instead — no id is passed in either way,
+    // since CommandService derives the (bare) projectId from its own session.
+    final svc = focusedServiceOrNull(ref, (s) => s.commandService);
+    svc?.runCommand(widget.command.name, confirmed: confirmed);
   }
 }

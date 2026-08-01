@@ -138,7 +138,11 @@ class _FileExplorerBody extends ConsumerWidget {
 
   Widget _buildSearchContent(BuildContext context, WidgetRef ref) {
     final stateAsync = ref.watch(searchStateProvider);
-    final searchService = ref.read(searchServiceProvider);
+    // Gate on readiness here too, not just in the parent's build: this body is
+    // its own consumer, so Riverpod may rebuild it against a session the parent
+    // hasn't yet re-gated on — and the façade throws once that session is gone.
+    final searchService = serviceWhenReady(ref, searchServiceProvider);
+    if (searchService == null) return const AbLoading();
 
     return stateAsync.when(
       loading: () => const AbLoading(),

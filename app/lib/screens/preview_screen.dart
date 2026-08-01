@@ -204,9 +204,9 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     // re-check it before the fallback rather than acting on a stale service.
     final projectId = ref.read(selectedRegistrationIdProvider);
     try {
-      final result = await ref
-          .read(previewServiceProvider)
-          .selectPort(port, scheme: scheme);
+      final svc = focusedServiceOrNull(ref.container, (s) => s.previewService);
+      if (svc == null) return;
+      final result = await svc.selectPort(port, scheme: scheme);
       if (result != SelectPortResult.portInUse) {
         ref
             .read(analyticsServiceProvider)
@@ -230,9 +230,15 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       // possibly LRU-evicted/disposed — service would leak its socket, so bail
       // if the focus changed.
       if (ref.read(selectedRegistrationIdProvider) != projectId) return;
-      await ref
-          .read(previewServiceProvider)
-          .selectPortWithFallback(port, scheme: scheme);
+      // Re-resolve rather than reusing `svc`: the session can have been
+      // invalidated (and its service disposed) while the dialog was open even
+      // though focus never moved.
+      final fallbackSvc = focusedServiceOrNull(
+        ref.container,
+        (s) => s.previewService,
+      );
+      if (fallbackSvc == null) return;
+      await fallbackSvc.selectPortWithFallback(port, scheme: scheme);
       // The fallback path opens a preview too — count it like the direct path.
       ref.read(analyticsServiceProvider)?.track(AnalyticsEvents.previewOpened);
     } on Object catch (e) {
@@ -315,6 +321,14 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   }
 
   Widget _buildPreviewView() {
+    // [previewStateProvider] keeps its last value while it re-runs, so this
+    // view can render one frame past a session that was invalidated (host
+    // restart, LRU evict) — long enough for a raw façade read to throw during
+    // build. Resolve nullably and disable the actions that need the service.
+    final preview = focusedServiceOrNull(
+      ref.container,
+      (s) => s.previewService,
+    );
     return Column(
       children: [
         AbToolbar.actions(
@@ -322,15 +336,17 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
             AbIconButton(
               icon: AbIcons.list,
               tooltip: 'Show port list',
-              onTap: () {
-                ref.read(previewServiceProvider).deselectPort();
-                setState(() {
-                  _webViewController = null;
-                  _origin = '';
-                  _canGoBack = false;
-                  _canGoForward = false;
-                });
-              },
+              onTap: preview == null
+                  ? null
+                  : () {
+                      preview.deselectPort();
+                      setState(() {
+                        _webViewController = null;
+                        _origin = '';
+                        _canGoBack = false;
+                        _canGoForward = false;
+                      });
+                    },
             ),
             AbIconButton(
               icon: AbIcons.chevronLeft,
@@ -354,11 +370,14 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
             AbIconButton(
               icon: AbIcons.add,
               tooltip: 'Open a port',
-              onTap: () => showPortEntryDialog(
-                context,
-                projectId: ref.read(previewServiceProvider).projectId,
-                onSubmit: (port, scheme) => unawaited(_openPort(port, scheme)),
-              ),
+              onTap: preview == null
+                  ? null
+                  : () => showPortEntryDialog(
+                      context,
+                      projectId: preview.projectId,
+                      onSubmit: (port, scheme) =>
+                          unawaited(_openPort(port, scheme)),
+                    ),
             ),
             AbIconButton(
               icon: AbIcons.refresh,

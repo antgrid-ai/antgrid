@@ -40,7 +40,16 @@ class _ProjectSettingsScreenState extends ConsumerState<ProjectSettingsScreen> {
   }
 
   Future<void> _load() async {
-    final svc = ref.read(configServiceProvider);
+    // Nullable rather than through the throwing façade: the focused project's
+    // session can be unresolved when this screen mounts (deep-linked focus) or
+    // be invalidated mid-load (host restart, LRU evict). This runs
+    // fire-and-forget from initState, so a throw here lands as an unhandled
+    // error instead of the inline failure below.
+    final svc = focusedServiceOrNull(ref.container, (s) => s.configService);
+    if (svc == null) {
+      _failLoad('This project is not connected.');
+      return;
+    }
     try {
       final results = await Future.wait([svc.read(), svc.detectTools()]);
       if (!mounted) return;
@@ -51,16 +60,20 @@ class _ProjectSettingsScreenState extends ConsumerState<ProjectSettingsScreen> {
         _detected = results[1] as List<DetectedTool>;
       });
     } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        // Render the form so the error is visible instead of an endless
-        // spinner, but keep Save locked: this draft is a placeholder, not the
-        // project's config, and writing it would clobber the real antgrid.yaml.
-        _draft ??= const AbConfig();
-        _loadFailed = true;
-        _saveError = 'Failed to load settings: $e';
-      });
+      _failLoad('Failed to load settings: $e');
     }
+  }
+
+  /// Render the form so the failure is visible instead of an endless spinner,
+  /// but keep Save locked: this draft is a placeholder, not the project's
+  /// config, and writing it would clobber the real antgrid.yaml.
+  void _failLoad(String message) {
+    if (!mounted) return;
+    setState(() {
+      _draft ??= const AbConfig();
+      _loadFailed = true;
+      _saveError = message;
+    });
   }
 
   Future<void> _save() async {
@@ -74,7 +87,12 @@ class _ProjectSettingsScreenState extends ConsumerState<ProjectSettingsScreen> {
     // value. The finally guarantees `_saving` resets so the Save button can't
     // strand on a disabled "Saving…" state.
     try {
-      final errors = await ref.read(configServiceProvider).save(_draft!);
+      final svc = focusedServiceOrNull(ref.container, (s) => s.configService);
+      if (svc == null) {
+        setState(() => _saveError = 'This project is not connected.');
+        return;
+      }
+      final errors = await svc.save(_draft!);
       if (!mounted) return;
       setState(() => _saveError = errors?.join('\n'));
       if (errors == null && mounted) Navigator.of(context).pop();

@@ -252,8 +252,20 @@ class _SessionRowState extends ConsumerState<SessionRow> {
       if (ref.read(focusedIsRelayProvider)) {
         if (!await ensureRemoteOnline(context, ref, liveId!)) return;
       }
+      // Await the session rather than reading the (throwing) façade: the drawer
+      // renders THIS row from cached sessions, so a project can be focused —
+      // deep link, nav back/forward, or a session invalidated by a host restart
+      // or LRU evict — with no ProjectSession behind it yet. Warms it if cold.
+      // 30s, not the 10s default: this is the one path that may be waiting on a
+      // cold remote open rather than an already-warm project.
+      final svc = await sessionsServiceFor(
+        ref,
+        liveId!,
+        timeout: const Duration(seconds: 30),
+      );
+      if (svc == null) return;
+      if (ref.read(selectedRegistrationIdProvider) != liveId) return;
       ref.read(activeSessionIdProvider.notifier).set(session.id);
-      final svc = ref.read(sessionsServiceProvider);
       if (!session.running) {
         await svc.start(session.id);
         // A different project can be activated while start() is in flight. The

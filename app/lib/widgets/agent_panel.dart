@@ -11,7 +11,6 @@ import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../models/handler_state.dart';
 import '../models/session_entry.dart';
-import '../project/project_session_registry.dart';
 import '../providers/agent_transport.dart';
 import '../providers/device_provisioning.dart';
 import '../providers/projects.dart';
@@ -264,18 +263,17 @@ class EditableSessionLeaf extends ConsumerWidget {
 
   Future<void> _rename(BuildContext context, WidgetRef ref) async {
     final id = session.id;
+    // Container captured BEFORE the dialog: the breadcrumb can be rebuilt away
+    // while it is open, and a `WidgetRef` touched past that point throws.
+    final container = ref.container;
     final name = await promptSessionRename(context, session.name);
     if (name == null || name == session.name) return;
     // Resolve the service AFTER the dialog without throwing: the focused
     // project can transiently re-resolve while the dialog is open (transport
     // reconnect, auth cascade), which makes `sessionsServiceProvider` throw
-    // (_ProjectSessionLoading / StateError). Read the session façade nullably
-    // instead — mirroring the kebab/inline rename paths — and await so a slow
-    // or failed rename surfaces rather than being swallowed fire-and-forget.
-    final projectId = ref.read(selectedRegistrationIdProvider);
-    final svc = projectId == null
-        ? null
-        : ref.read(projectSessionProvider(projectId)).value?.sessionsService;
+    // (_ProjectSessionLoading / StateError). Await so a slow or failed rename
+    // surfaces rather than being swallowed fire-and-forget.
+    final svc = focusedServiceOrNull(container, (s) => s.sessionsService);
     await svc?.rename(id, name);
   }
 

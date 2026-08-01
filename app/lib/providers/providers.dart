@@ -344,6 +344,33 @@ T? serviceWhenReady<T>(WidgetRef ref, ProviderListenable<T> provider) {
   return ref.read(provider);
 }
 
+/// Picks a per-project service off the focused project's [ProjectSession] for
+/// use OUTSIDE `build()` — a gesture handler, a timer, or anything resuming
+/// after an `await` — returning null when the session isn't resolved.
+///
+/// A focused project is NOT proof its services exist: focus is written before
+/// any session is built (deep link, nav back/forward), and a live session is
+/// invalidated out from under a steady focus by host restarts, LRU eviction and
+/// the connection-retry action. The façades ([sessionsServiceProvider], …)
+/// throw in exactly those windows, and a throw from a handler or timer lands
+/// outside any `build()` as an unhandled error — it shipped as a fatal in
+/// 1.20664.138. Callers no-op on null rather than acting on the wrong project.
+///
+/// Registers no listeners, so it stays valid past the widget that scheduled the
+/// callback. Build-time readers want [serviceWhenReady] instead, which rebuilds
+/// the widget once the session lands; an explicit user action on a possibly
+/// COLD project wants an awaited `projectSessionProvider(id).future`, which
+/// warms it.
+T? focusedServiceOrNull<T>(
+  ProviderContainer ref,
+  T Function(ProjectSession) pick,
+) {
+  final id = ref.read(selectedRegistrationIdProvider);
+  if (id == null) return null;
+  final session = ref.read(projectSessionProvider(id)).value;
+  return session == null ? null : pick(session);
+}
+
 final commandStateProvider = StreamProvider<CommandState>((ref) {
   final service = focusedSessionOrNull(ref)?.commandService;
   if (service == null) return const Stream<CommandState>.empty();

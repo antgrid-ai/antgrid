@@ -118,11 +118,15 @@ class _StoppedSessionEmptyState extends ConsumerWidget {
         action: AbButton(
           label: buttonLabel,
           onTap: () async {
-            // ref.read (not watch) in an onTap handler, and this widget only
-            // renders after the top-level `session == null` guard above has
-            // resolved the project session — so the throwing façade is
-            // always ready by the time this fires.
-            await ref.read(sessionsServiceProvider).start(sessionId);
+            // Resolved off the session, not through the throwing façade: the
+            // guard above proves the session was resolved when this widget was
+            // BUILT, which a tap arriving after a reconnect or LRU evict no
+            // longer implies — and the throw would be unhandled from here.
+            final svc = focusedServiceOrNull(
+              ref.container,
+              (s) => s.sessionsService,
+            );
+            await svc?.start(sessionId);
           },
         ),
       ),

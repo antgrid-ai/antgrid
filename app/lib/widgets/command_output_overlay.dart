@@ -9,6 +9,7 @@ import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_loading.dart';
 import '../models/command_models.dart';
 import '../providers/providers.dart';
+import '../services/command_service.dart';
 import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
 
@@ -26,6 +27,12 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
   final ScrollController _scrollController = ScrollController();
   bool _scrollPending = false;
   bool _hasOutputSelection = false;
+
+  /// The focused project's [CommandService], or null while its session is
+  /// (re-)resolving. Every use below fires from a timer or a tap, where the
+  /// throwing façade would land outside any `build()` as an unhandled error.
+  CommandService? get _commandService =>
+      focusedServiceOrNull(ref.container, (s) => s.commandService);
 
   @override
   void dispose() {
@@ -53,9 +60,7 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
       _autoHideTimer?.cancel();
       setState(() => _expanded = false);
       _autoHideTimer = Timer(const Duration(seconds: 3), () {
-        if (mounted) {
-          ref.read(commandServiceProvider).dismiss();
-        }
+        if (mounted) _commandService?.dismiss();
       });
     }
 
@@ -73,14 +78,14 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
 
   void _dismiss() {
     _autoHideTimer?.cancel();
-    ref.read(commandServiceProvider).dismiss();
+    _commandService?.dismiss();
   }
 
   void _rerun() {
     final current = ref.read(commandStateProvider).value?.current;
     if (current == null) return;
     _autoHideTimer?.cancel();
-    ref.read(commandServiceProvider).runCommand(current.commandName);
+    _commandService?.runCommand(current.commandName);
   }
 
   Future<void> _sendTextToAgent(String text) async {
@@ -94,11 +99,14 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
       sourceLabel: sourceLabel,
     );
 
-    if (message != null && mounted) {
-      ref.read(terminalServiceProvider).sendToAgentTerminal(message);
-      ref.read(switchToAgentProvider)?.call();
-      showSentToAgentSnackBar(context);
-    }
+    if (message == null || !mounted) return;
+    // The comment dialog holds this open indefinitely, so `mounted` alone
+    // doesn't mean the focused project still has a resolved session.
+    final svc = focusedServiceOrNull(ref.container, (s) => s.terminalService);
+    if (svc == null) return;
+    svc.sendToAgentTerminal(message);
+    ref.read(switchToAgentProvider)?.call();
+    showSentToAgentSnackBar(context);
   }
 
   void _sendFullOutputToAgent() {

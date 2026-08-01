@@ -276,12 +276,17 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       sourceLabel: sourceLabel,
     );
 
-    if (message != null && mounted) {
-      ref.read(terminalServiceProvider).sendToAgentTerminal(message);
-      ref.read(switchToAgentProvider)?.call();
-      setState(() => _selectedText = null);
-      showSentToAgentSnackBar(context);
-    }
+    if (message == null || !mounted) return;
+    // `mounted` doesn't imply the focused project still has a resolved session:
+    // the comment dialog holds this open indefinitely, and a reconnect or LRU
+    // evict in that window makes the façade throw — into a fire-and-forget
+    // button callback, so unhandled.
+    final svc = focusedServiceOrNull(ref.container, (s) => s.terminalService);
+    if (svc == null) return;
+    svc.sendToAgentTerminal(message);
+    ref.read(switchToAgentProvider)?.call();
+    setState(() => _selectedText = null);
+    showSentToAgentSnackBar(context);
   }
 
   @override
