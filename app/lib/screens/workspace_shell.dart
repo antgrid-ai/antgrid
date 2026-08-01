@@ -925,11 +925,10 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
     return switch (surface) {
       WorkbenchSurface.appSettings => AppSettingsScreen(onClose: close),
-      // Unreachable from any UI affordance (the account-menu entry that drove
-      // it was removed); kept only so a lingering `mobileDevices` deep link
-      // no-ops the same way here as on new_session_screen.dart, instead of
-      // resurfacing the hub on desktop.
-      WorkbenchSurface.mobileDevices ||
+      // No longer a surface of its own: the device roster lives in the title
+      // bar's RemoteAccessPanel. Kept only so a lingering `devices` deep link
+      // no-ops the same way here as on new_session_screen.dart.
+      WorkbenchSurface.remoteDevices ||
       WorkbenchSurface.workspace ||
       WorkbenchSurface.newSession => null,
     };

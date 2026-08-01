@@ -79,7 +79,7 @@ void main() {
     expect(res.phones.single.phonePubkey, 'pk-1');
   });
 
-  test('mobileAccessGet parses the machine-wide boolean', () async {
+  test('remoteAccessGet parses the machine-wide boolean', () async {
     final client = HostControlClient(
       port: 1,
       token: 't',
@@ -95,11 +95,11 @@ void main() {
       }),
     );
 
-    final policy = await client.mobileAccessGet();
+    final policy = await client.remoteAccessGet();
     expect(policy.enabled, isTrue);
   });
 
-  test('mobileAccessSet sends the requested value and parses what landed', () async {
+  test('remoteAccessSet sends the requested value and parses what landed', () async {
     var seen = <String, dynamic>{};
     final client = HostControlClient(
       port: 1,
@@ -115,12 +115,12 @@ void main() {
       }),
     );
 
-    final on = await client.mobileAccessSet(true);
+    final on = await client.remoteAccessSet(true);
     expect(seen['type'], 'mobile-access:set');
     expect(seen['enabled'], true);
     expect(on.enabled, isTrue);
 
-    final off = await client.mobileAccessSet(false);
+    final off = await client.remoteAccessSet(false);
     expect(seen['enabled'], false);
     expect(off.enabled, isFalse);
   });
@@ -142,6 +142,6 @@ void main() {
       }),
     );
 
-    expect((await client.mobileAccessGet()).enabled, isFalse);
+    expect((await client.remoteAccessGet()).enabled, isFalse);
   });
 }

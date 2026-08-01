@@ -45,7 +45,7 @@ void main() {
       const NavLocation(target: null, surface: WorkbenchSurface.appSettings),
     );
     roundTrips(
-      const NavLocation(target: null, surface: WorkbenchSurface.mobileDevices),
+      const NavLocation(target: null, surface: WorkbenchSurface.remoteDevices),
     );
   });
 

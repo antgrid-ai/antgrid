@@ -16,7 +16,7 @@ import '../models/subscription_info.dart';
 import '../providers/analytics.dart';
 import '../providers/auth.dart';
 import '../providers/subscription.dart';
-import '../dialogs/mobile_upgrade_dialog.dart';
+import '../dialogs/remote_upgrade_dialog.dart';
 
 const _proYearlyFeatures = [
   'Up to {workers} workers',
@@ -636,7 +636,7 @@ Future<void> openUpgrade(
 // import '../providers/analytics.dart';
 // import '../providers/auth.dart';
 // import '../providers/subscription.dart';
-// import '../dialogs/mobile_upgrade_dialog.dart';
+// import '../dialogs/remote_upgrade_dialog.dart';
 //
 // const _proYearlyFeatures = [
 //   'Up to {workers} workers',

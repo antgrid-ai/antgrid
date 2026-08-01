@@ -5,7 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../analytics/events.dart';
 import '../design/widgets/ab_snack_bar.dart';
-import '../dialogs/mobile_upgrade_dialog.dart';
+import '../dialogs/remote_upgrade_dialog.dart';
 import '../models/qr_payload.dart';
 import '../providers/analytics.dart';
 import '../providers/auth.dart';
@@ -15,7 +15,7 @@ import '../screens/upgrade_screen.dart';
 import '../services/app_settings_service.dart';
 
 /// Shared remote scan + connect-by-URI flow, consumed by both
-/// [ConnectDialog] and `mobile_devices_hub.dart`'s `_EmptyState`.
+/// [ConnectDialog] and `remote_access_panel.dart`'s empty roster.
 ///
 /// This is the single source of truth for the coordinate-import handoff so
 /// the two entry points cannot drift: ScannerScreen push → [QrPayload.parse]
@@ -31,10 +31,10 @@ mixin RemoteConnectActions<T extends ConsumerStatefulWidget>
   Future<void> runConnect(QrPayload qr) async {
     try {
       final user = await ref.read(currentUserProvider.future);
-      if (requiresProForMobile(user?.tier)) {
+      if (requiresProForRemote(user?.tier)) {
         if (!mounted) return;
         ref.read(analyticsServiceProvider)?.track(AnalyticsEvents.upgradeDialogShown, props: {'context': 'mobile_gate'});
-        final upgrade = await showMobileUpgradeDialog(context);
+        final upgrade = await showRemoteUpgradeDialog(context);
         if (upgrade && mounted) {
           await openUpgrade(context, ref.container);
         }

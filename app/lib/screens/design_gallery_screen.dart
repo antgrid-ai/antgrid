@@ -8,7 +8,7 @@ import '../design/widgets/ab_cmd_bar.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_kbd.dart';
 import '../design/widgets/ab_menu.dart';
-import '../design/widgets/ab_mobile_cta.dart';
+import '../design/widgets/ab_state_chip.dart';
 import '../design/widgets/ab_status_pill.dart';
 import '../design/widgets/ab_toast.dart';
 
@@ -67,9 +67,9 @@ class DesignGalleryScreen extends StatelessWidget {
                         child: _StatusPillsDemo(),
                       ),
                       _Card(
-                        name: 'Enable Mobile CTA',
-                        sub: 'Pill, active state',
-                        child: _MobileCtaDemo(),
+                        name: 'State chips',
+                        sub: 'Neutral, active tone',
+                        child: _StateChipDemo(),
                       ),
                       _Card(
                         name: 'Keyboard chips',
@@ -679,16 +679,26 @@ class _StatusPillsDemo extends StatelessWidget {
   }
 }
 
-class _MobileCtaDemo extends StatelessWidget {
-  const _MobileCtaDemo();
+class _StateChipDemo extends StatelessWidget {
+  const _StateChipDemo();
   @override
   Widget build(BuildContext context) {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        AbMobileCta(active: false, onTap: () {}),
+        AbStateChip(
+          icon: AbIcons.radioTower,
+          label: 'Remote off',
+          onTap: (_) {},
+        ),
         const SizedBox(width: 14),
-        AbMobileCta(active: true, onTap: () {}),
+        AbStateChip(
+          icon: AbIcons.radioTower,
+          label: 'Remote on',
+          tone: context.antgrid.statusRunning,
+          active: true,
+          onTap: (_) {},
+        ),
       ],
     );
   }

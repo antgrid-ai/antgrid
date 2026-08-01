@@ -700,7 +700,7 @@ class PairedAgentNotifier extends AsyncNotifier<List<PairedAgent>> {
   /// drives the E2E handshake as this app's own DeviceRecord.
   Future<void> importCoordinates(QrPayload qr) async {
     final user = await ref.read(currentUserProvider.future);
-    if (requiresProForMobile(user?.tier)) {
+    if (requiresProForRemote(user?.tier)) {
       throw PairException(
         'Pro subscription required — upgrade to connect mobile',
       );

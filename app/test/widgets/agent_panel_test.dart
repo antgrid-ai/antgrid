@@ -2,15 +2,15 @@
 //
 // These exercise the real `titleBarProjectActions` seam (the production
 // `WindowTitleBarContents` delegates to it), covering the two independent
-// derivations: the machine-wide mobile-access switch (AbMobileCta), which hangs
+// derivations: the machine-wide remote-access chip (AbStateChip), which hangs
 // off `localDeviceUuidProvider` alone, and the focus-derived RemoteHostChip,
 // which comes from the selectedRegistrationIdProvider → projectsProvider lookup.
-import 'package:antgrid/design/widgets/ab_mobile_cta.dart';
+import 'package:antgrid/design/widgets/ab_state_chip.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
-import 'package:antgrid/providers/mobile_devices_hub.dart';
+import 'package:antgrid/providers/remote_access.dart';
 import 'package:antgrid/widgets/agent_panel.dart';
 import 'package:antgrid/widgets/remote_host_chip.dart';
 import 'package:antgrid/widgets/window_title_bar.dart';
@@ -22,11 +22,11 @@ import 'package:flutter_test/flutter_test.dart';
 import '../helpers/prefs_test_mock.dart';
 import '../helpers/test_store_overrides.dart';
 
-class _FakePolicyNotifier extends MobileAccessPolicyNotifier {
+class _FakePolicyNotifier extends RemoteAccessPolicyNotifier {
   _FakePolicyNotifier(this._policy);
-  final MobileAccessPolicy _policy;
+  final RemoteAccessPolicy _policy;
   @override
-  Future<MobileAccessPolicy> build() async => _policy;
+  Future<RemoteAccessPolicy> build() async => _policy;
 }
 
 const _localUuid = 'local-device-uuid';
@@ -82,9 +82,9 @@ Future<void> _pump(
         ...stores.overrides,
         localDeviceUuidProvider.overrideWith((ref) async => localUuid),
         selectedRegistrationIdProvider.overrideWith((_) => selectedId),
-        mobileAccessPolicyProvider.overrideWith(
+        remoteAccessPolicyProvider.overrideWith(
           () => _FakePolicyNotifier(
-            MobileAccessPolicy(enabled: mobileAccessEnabled),
+            RemoteAccessPolicy(enabled: mobileAccessEnabled),
           ),
         ),
       ],
@@ -93,8 +93,8 @@ Future<void> _pump(
       ),
     ),
   );
-  // Let the localDeviceUuidProvider future resolve. Not pumpAndSettle: an
-  // enabled AbMobileCta pulses forever and would time out.
+  // Let the localDeviceUuidProvider future resolve. Not pumpAndSettle: a
+  // pending policy flip pulses forever and would time out.
   await tester.pump();
   await tester.pump();
   debugDefaultTargetPlatformOverride = null;
@@ -106,7 +106,7 @@ void main() {
   setUp(useInMemoryPrefs);
 
   testWidgets(
-    'mobile access off shows "Enable mobile access"',
+    'remote access off reads "Remote off"',
     (tester) async {
       final stores = await buildTestStoreOverrides();
       addTearDown(stores.close);
@@ -120,14 +120,14 @@ void main() {
         mobileAccessEnabled: false,
       );
 
-      expect(find.byType(AbMobileCta), findsOneWidget);
-      expect(find.text('Enable mobile access'), findsOneWidget);
+      expect(find.byType(AbStateChip), findsOneWidget);
+      expect(find.text('Remote off'), findsOneWidget);
       expect(find.byType(RemoteHostChip), findsNothing);
     },
   );
 
   testWidgets(
-    'mobile access on shows "Disable mobile access"',
+    'remote access on reads "Remote on"',
     (tester) async {
       final stores = await buildTestStoreOverrides();
       addTearDown(stores.close);
@@ -141,8 +141,8 @@ void main() {
         mobileAccessEnabled: true,
       );
 
-      expect(find.byType(AbMobileCta), findsOneWidget);
-      expect(find.text('Disable mobile access'), findsOneWidget);
+      expect(find.byType(AbStateChip), findsOneWidget);
+      expect(find.text('Remote on'), findsOneWidget);
       expect(find.byType(RemoteHostChip), findsNothing);
     },
   );
@@ -164,7 +164,7 @@ void main() {
       );
 
       expect(find.byType(RemoteHostChip), findsOneWidget);
-      expect(find.byType(AbMobileCta), findsOneWidget);
+      expect(find.byType(AbStateChip), findsOneWidget);
     },
   );
 
@@ -183,7 +183,7 @@ void main() {
       );
 
       expect(find.byType(RemoteHostChip), findsNothing);
-      expect(find.byType(AbMobileCta), findsOneWidget);
+      expect(find.byType(AbStateChip), findsOneWidget);
     },
   );
 
@@ -203,7 +203,7 @@ void main() {
         localUuid: null,
       );
 
-      expect(find.byType(AbMobileCta), findsNothing);
+      expect(find.byType(AbStateChip), findsNothing);
     },
   );
 
@@ -225,7 +225,7 @@ void main() {
       );
 
       expect(find.byType(RemoteHostChip), findsNothing);
-      expect(find.byType(AbMobileCta), findsNothing);
+      expect(find.byType(AbStateChip), findsNothing);
     },
   );
 

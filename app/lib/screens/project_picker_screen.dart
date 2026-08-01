@@ -45,7 +45,7 @@ class ProjectPickerScreen extends ConsumerWidget {
                     ? const AbEmptyState(
                         title: 'No projects available',
                         subtitle:
-                            'Enable mobile access from the desktop app to '
+                            'Turn on remote access from the desktop app to '
                             'see this machine\'s projects here.',
                         showBrand: true,
                       )
@@ -84,8 +84,9 @@ class ProjectPickerScreen extends ConsumerWidget {
 }
 
 /// Inline failure notice for a rejected control-plane verb (the agent's
-/// `control:result` with `ok:false`, e.g. NOT_ALLOWED when a phone taps Start
-/// after the machine's mobile access was switched off). A notice is chrome → sans.
+/// `control:result` with `ok:false`, e.g. NOT_ALLOWED when a remote device taps
+/// Start after the machine's remote access was switched off). A notice is
+/// chrome → sans.
 class _ErrorBanner extends StatelessWidget {
   const _ErrorBanner({required this.error});
 

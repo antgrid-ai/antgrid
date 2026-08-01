@@ -23,7 +23,7 @@ import 'agent_transcript_view.dart';
 import 'command_bar.dart';
 import 'command_output_overlay.dart';
 import 'handler/handler_briefing_sheet.dart';
-import 'mobile_access_toggle.dart';
+import 'remote_access_control.dart';
 import 'remote_host_chip.dart';
 import 'session_agent_mark.dart';
 import 'session_mode_control.dart';
@@ -100,11 +100,11 @@ class AgentPanel extends ConsumerWidget {
 
 /// Trailing actions for the desktop window title bar. The two have DIFFERENT
 /// scopes and are therefore derived independently:
-///  - [MobileAccessToggle] is machine-wide ("is this machine reachable from
-///    mobile"), so it hangs off `localDeviceUuidProvider` alone and renders
-///    regardless of which project is focused. That provider mints an anonymous
-///    host uuid on desktop precisely so this affordance can show, and is null on
-///    mobile/web where there is no local host.
+///  - [RemoteAccessControl] is machine-wide ("is this machine reachable from
+///    your other devices"), so it hangs off `localDeviceUuidProvider` alone and
+///    renders regardless of which project is focused. That provider mints an
+///    anonymous host uuid on desktop precisely so this affordance can show, and
+///    is null on mobile/web where there is no local host.
 ///  - [RemoteHostChip] is focus-derived: it names the machine hosting the
 ///    FOCUSED project. It may render next to the switch — a remote project in
 ///    focus plus your own machine's switch is a coherent pair, since the switch
@@ -133,9 +133,9 @@ List<Widget> titleBarProjectActions(WidgetRef ref) {
       : null;
 
   return [
-    // Rendered even while the policy is unloaded — MobileAccessToggle shows an
-    // inert CTA rather than vanishing, deliberately (see its build()).
-    if (localUuid != null) const MobileAccessToggle(),
+    // Rendered even while the policy is unloaded — RemoteAccessControl reports
+    // "not known yet" rather than vanishing, deliberately (see its build()).
+    if (localUuid != null) const RemoteAccessControl(),
     if (localUuid != null && remoteHost != null)
       const SizedBox(width: AbTokens.space8),
     if (remoteHost != null)

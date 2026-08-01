@@ -136,15 +136,15 @@ class ToolSummary {
   });
 }
 
-/// The machine-level mobile access policy: one boolean for the whole machine —
-/// is it reachable from mobile at all. Mirror of control-protocol.ts
-/// MobileAccessPolicy.
-class MobileAccessPolicy {
+/// The machine-level remote-access policy: one boolean for the whole machine —
+/// is it reachable from your other devices at all. Mirror of
+/// control-protocol.ts RemoteAccessPolicy.
+class RemoteAccessPolicy {
   final bool enabled;
-  const MobileAccessPolicy({required this.enabled});
+  const RemoteAccessPolicy({required this.enabled});
 
-  factory MobileAccessPolicy.fromJson(Map<String, dynamic> json) =>
-      MobileAccessPolicy(enabled: json['enabled'] == true);
+  factory RemoteAccessPolicy.fromJson(Map<String, dynamic> json) =>
+      RemoteAccessPolicy(enabled: json['enabled'] == true);
 }
 
 /// Thrown on a transport error, a non-200 status, or an `ok:false` body.
@@ -341,19 +341,22 @@ class HostControlClient {
   Future<void> phonesUnpair({required String phonePubkey}) =>
       _post({'type': 'phones:unpair', 'phonePubkey': phonePubkey});
 
-  Future<MobileAccessPolicy> mobileAccessGet({
+  /// The `mobile-access:` verb spelling is the wire contract, deliberately left
+  /// behind the Dart rename: the app talks to whatever bridge binary is
+  /// installed on the machine, which may predate this app build.
+  Future<RemoteAccessPolicy> remoteAccessGet({
     Duration timeout = const Duration(seconds: 3),
   }) async {
     final m = await _post({'type': 'mobile-access:get'}, timeout: timeout);
-    return MobileAccessPolicy.fromJson(m);
+    return RemoteAccessPolicy.fromJson(m);
   }
 
-  /// Turn mobile access on or off for the whole machine. Returns the resulting
+  /// Turn remote access on or off for the whole machine. Returns the resulting
   /// state as the bridge sees it, so the caller never has to assume the write
   /// landed as requested.
-  Future<MobileAccessPolicy> mobileAccessSet(bool enabled) async {
+  Future<RemoteAccessPolicy> remoteAccessSet(bool enabled) async {
     final m = await _post({'type': 'mobile-access:set', 'enabled': enabled});
-    return MobileAccessPolicy.fromJson(m);
+    return RemoteAccessPolicy.fromJson(m);
   }
 
   void close() => _http.close();

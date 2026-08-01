@@ -4,7 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/testing.dart';
 import 'package:http/http.dart' as http;
 import 'package:antgrid/launcher/host_control_client.dart';
-import 'package:antgrid/providers/mobile_devices_hub.dart';
+import 'package:antgrid/providers/remote_access.dart';
 
 /// [failVerb], when set, makes that verb's POST return a 500 so the notifier's
 /// catch path is exercised (the bridge would surface a control error this way).
@@ -58,12 +58,12 @@ void main() {
     );
     addTearDown(container.dispose);
 
-    final state = await container.read(mobileDevicesHubProvider.future);
+    final state = await container.read(remoteDevicesProvider.future);
     expect(state.phones.single.phonePubkey, 'pk-1');
     expect(calls['phones:list'], 1);
 
     await container
-        .read(mobileDevicesHubProvider.notifier)
+        .read(remoteDevicesProvider.notifier)
         .unpair(phonePubkey: 'pk-1');
     expect(calls['phones:unpair'], 1);
     expect(calls['phones:list'], 2); // refreshed after mutation
@@ -80,15 +80,15 @@ void main() {
     );
     addTearDown(container.dispose);
 
-    await container.read(mobileDevicesHubProvider.future);
+    await container.read(remoteDevicesProvider.future);
     expect(calls['phones:list'], 1);
 
     await container
-        .read(mobileDevicesHubProvider.notifier)
+        .read(remoteDevicesProvider.notifier)
         .unpair(phonePubkey: 'pk-1');
 
     expect(calls['phones:unpair'], 1);
-    final state = container.read(mobileDevicesHubProvider);
+    final state = container.read(remoteDevicesProvider);
     expect(state.hasError, isTrue);
   });
 
@@ -105,7 +105,7 @@ void main() {
       );
       addTearDown(container.dispose);
 
-      final loaded = await container.read(mobileDevicesHubProvider.future);
+      final loaded = await container.read(remoteDevicesProvider.future);
       expect(loaded.phones.single.phonePubkey, 'pk-1');
 
       // Fire the mutation but DON'T await — the notifier synchronously flips to
@@ -113,9 +113,9 @@ void main() {
       // must remain readable so the screen (skipLoadingOnReload) keeps it visible
       // instead of flashing a full-screen spinner.
       final fut = container
-          .read(mobileDevicesHubProvider.notifier)
+          .read(remoteDevicesProvider.notifier)
           .unpair(phonePubkey: 'pk-1');
-      final mid = container.read(mobileDevicesHubProvider);
+      final mid = container.read(remoteDevicesProvider);
       expect(mid.isLoading, isTrue);
       expect(mid.hasValue, isTrue);
       expect(mid.value!.phones.single.phonePubkey, 'pk-1');
@@ -136,14 +136,14 @@ void main() {
     );
     addTearDown(container.dispose);
 
-    final loaded = await container.read(mobileDevicesHubProvider.future);
+    final loaded = await container.read(remoteDevicesProvider.future);
     expect(loaded.phones.single.phonePubkey, 'pk-1');
 
     await container
-        .read(mobileDevicesHubProvider.notifier)
+        .read(remoteDevicesProvider.notifier)
         .unpair(phonePubkey: 'pk-1');
 
-    final state = container.read(mobileDevicesHubProvider);
+    final state = container.read(remoteDevicesProvider);
     expect(state.hasError, isTrue);
     // copyWithPrevious keeps the value readable so value-based consumers keep
     // showing the last state instead of vanishing.

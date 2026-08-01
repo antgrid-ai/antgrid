@@ -14,13 +14,13 @@ String subscriptionManageUrl(String licenseApiUrl) {
   return '$base/dashboard';
 }
 
-/// Prompts the user to upgrade before enabling mobile access.
+/// Prompts the user to upgrade before enabling remote access.
 ///
 /// Returns `true` when the user chooses to open pricing in the browser.
-Future<bool> showMobileUpgradeDialog(BuildContext context) async {
+Future<bool> showRemoteUpgradeDialog(BuildContext context) async {
   final result = await showDialog<bool>(
     context: context,
-    builder: (_) => const _MobileUpgradeDialog(),
+    builder: (_) => const _RemoteUpgradeDialog(),
   );
   return result == true;
 }
@@ -104,8 +104,8 @@ class _CrossPlatformBillingDialog extends StatelessWidget {
   }
 }
 
-class _MobileUpgradeDialog extends StatelessWidget {
-  const _MobileUpgradeDialog();
+class _RemoteUpgradeDialog extends StatelessWidget {
+  const _RemoteUpgradeDialog();
 
   @override
   Widget build(BuildContext context) {
@@ -119,7 +119,7 @@ class _MobileUpgradeDialog extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               abDialogTitle(
-                'Mobile access requires Pro',
+                'Remote access requires Pro',
                 onClose: () => Navigator.of(context).pop(false),
               ),
               const SizedBox(height: AbTokens.space16),
@@ -134,9 +134,9 @@ class _MobileUpgradeDialog extends StatelessWidget {
                   const SizedBox(width: AbTokens.space12),
                   Expanded(
                     child: Text(
-                      'Pair your phone and control agents remotely with '
-                      'end-to-end encrypted relay access. Mobile access is '
-                      'included with Antgrid Pro.',
+                      'Drive your agents from any device you are signed in '
+                      'on, over an end-to-end encrypted relay. Remote access '
+                      'is included with Antgrid Pro.',
                       style: TextStyle(
                         fontSize: AbTokens.fontSm,
                         color: context.antgrid.textSecondary,

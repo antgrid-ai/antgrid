@@ -70,7 +70,7 @@ final signedInProvider = Provider<bool?>((ref) {
 });
 
 /// True when the signed-in user needs Pro for mobile/relay features.
-bool requiresProForMobile(String? tier) => tier == null || tier == 'free';
+bool requiresProForRemote(String? tier) => tier == null || tier == 'free';
 
 Future<void> openUpgradeInBrowser(
   ProviderContainer ref, {

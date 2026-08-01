@@ -209,13 +209,13 @@ class _AppShellState extends ConsumerState<AppShell> {
       // appSettings is exempt: it's an overlay the user opened deliberately.
       if (id == null &&
           (surface == WorkbenchSurface.workspace ||
-              surface == WorkbenchSurface.mobileDevices)) {
+              surface == WorkbenchSurface.remoteDevices)) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted) return;
           final s = ref.read(workbenchSurfaceProvider);
           if (ref.read(selectedRegistrationIdProvider) == null &&
               (s == WorkbenchSurface.workspace ||
-                  s == WorkbenchSurface.mobileDevices)) {
+                  s == WorkbenchSurface.remoteDevices)) {
             ref
                 .read(workbenchSurfaceProvider.notifier)
                 .set(WorkbenchSurface.newSession);

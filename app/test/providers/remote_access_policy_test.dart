@@ -1,7 +1,7 @@
 import 'dart:convert';
 
 import 'package:antgrid/launcher/host_control_client.dart';
-import 'package:antgrid/providers/mobile_devices_hub.dart';
+import 'package:antgrid/providers/remote_access.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -45,12 +45,12 @@ void main() {
     ]);
     addTearDown(container.dispose);
 
-    final initial = await container.read(mobileAccessPolicyProvider.future);
+    final initial = await container.read(remoteAccessPolicyProvider.future);
     expect(initial.enabled, isFalse);
     expect(calls['mobile-access:get'], 1);
 
-    await container.read(mobileAccessPolicyProvider.notifier).setEnabled(true);
-    expect(container.read(mobileAccessPolicyProvider).value!.enabled, isTrue);
+    await container.read(remoteAccessPolicyProvider.notifier).setEnabled(true);
+    expect(container.read(remoteAccessPolicyProvider).value!.enabled, isTrue);
     expect(calls['mobile-access:set'], 1);
     // The set response IS the new state, so no follow-up read is needed.
     expect(calls['mobile-access:get'], 1);
@@ -64,11 +64,11 @@ void main() {
     ]);
     addTearDown(container.dispose);
 
-    expect((await container.read(mobileAccessPolicyProvider.future)).enabled, isTrue);
+    expect((await container.read(remoteAccessPolicyProvider.future)).enabled, isTrue);
 
-    await container.read(mobileAccessPolicyProvider.notifier).setEnabled(false);
+    await container.read(remoteAccessPolicyProvider.notifier).setEnabled(false);
 
-    expect(container.read(mobileAccessPolicyProvider).value!.enabled, isFalse);
+    expect(container.read(remoteAccessPolicyProvider).value!.enabled, isFalse);
     expect(calls['mobile-access:set'], 1);
   });
 
@@ -82,11 +82,11 @@ void main() {
     ]);
     addTearDown(container.dispose);
 
-    await container.read(mobileAccessPolicyProvider.future);
+    await container.read(remoteAccessPolicyProvider.future);
 
-    await container.read(mobileAccessPolicyProvider.notifier).setEnabled(false);
+    await container.read(remoteAccessPolicyProvider.notifier).setEnabled(false);
 
-    final state = container.read(mobileAccessPolicyProvider);
+    final state = container.read(remoteAccessPolicyProvider);
     expect(state.hasError, isTrue);
     // copyWithPrevious keeps the value readable so MobileAccessToggle keeps
     // rendering the prior state instead of collapsing to its inert CTA.

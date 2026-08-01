@@ -15,15 +15,16 @@ final hostControlClientProvider = FutureProvider<HostControlClient>((
   return client;
 });
 
-/// Loads the paired-phone roster for the desktop hub and mutates it over the
-/// loopback control plane (the bridge is the single writer). Every mutation
-/// refreshes from the bridge so the UI reflects the authoritative state.
-final mobileDevicesHubProvider =
-    AsyncNotifierProvider<MobileDevicesHubNotifier, PhonesList>(
-      MobileDevicesHubNotifier.new,
+/// Loads the roster of devices that have connected to this machine and mutates
+/// it over the loopback control plane (the bridge is the single writer). Every
+/// mutation refreshes from the bridge so the UI reflects the authoritative
+/// state.
+final remoteDevicesProvider =
+    AsyncNotifierProvider<RemoteDevicesNotifier, PhonesList>(
+      RemoteDevicesNotifier.new,
     );
 
-class MobileDevicesHubNotifier extends AsyncNotifier<PhonesList> {
+class RemoteDevicesNotifier extends AsyncNotifier<PhonesList> {
   Future<HostControlClient> get _client =>
       ref.read(hostControlClientProvider.future);
 
@@ -54,34 +55,34 @@ class MobileDevicesHubNotifier extends AsyncNotifier<PhonesList> {
       _mutate((c) => c.phonesUnpair(phonePubkey: phonePubkey));
 }
 
-final mobileAccessPolicyProvider =
-    AsyncNotifierProvider<MobileAccessPolicyNotifier, MobileAccessPolicy>(
-      MobileAccessPolicyNotifier.new,
+final remoteAccessPolicyProvider =
+    AsyncNotifierProvider<RemoteAccessPolicyNotifier, RemoteAccessPolicy>(
+      RemoteAccessPolicyNotifier.new,
     );
 
-class MobileAccessPolicyNotifier extends AsyncNotifier<MobileAccessPolicy> {
+class RemoteAccessPolicyNotifier extends AsyncNotifier<RemoteAccessPolicy> {
   Future<HostControlClient> get _client =>
       ref.read(hostControlClientProvider.future);
 
   @override
-  Future<MobileAccessPolicy> build() async => (await _client).mobileAccessGet();
+  Future<RemoteAccessPolicy> build() async => (await _client).remoteAccessGet();
 
   Future<void> _mutate(
-    Future<MobileAccessPolicy> Function(HostControlClient c) op,
+    Future<RemoteAccessPolicy> Function(HostControlClient c) op,
   ) async {
     // ignore: invalid_use_of_internal_member — retain prior AsyncValue during imperative mutation; v3 auto-retention only covers build() reloads, not manual state sets. Rewrite deferred (final-review triage).
-    state = const AsyncLoading<MobileAccessPolicy>().copyWithPrevious(state);
+    state = const AsyncLoading<RemoteAccessPolicy>().copyWithPrevious(state);
     try {
       final c = await _client;
       state = AsyncData(await op(c));
     } catch (e, st) {
       // ignore: invalid_use_of_internal_member — retain prior AsyncValue during imperative mutation; v3 auto-retention only covers build() reloads, not manual state sets. Rewrite deferred (final-review triage).
-      state = AsyncError<MobileAccessPolicy>(e, st).copyWithPrevious(state);
+      state = AsyncError<RemoteAccessPolicy>(e, st).copyWithPrevious(state);
     }
   }
 
   /// Flip the machine-wide switch. The bridge's response is the resulting
   /// state, so the notifier never has to guess what landed.
   Future<void> setEnabled(bool enabled) =>
-      _mutate((c) => c.mobileAccessSet(enabled));
+      _mutate((c) => c.remoteAccessSet(enabled));
 }

@@ -81,7 +81,7 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
 
     return switch (surface) {
       WorkbenchSurface.appSettings => AppSettingsScreen(onClose: close),
-      WorkbenchSurface.mobileDevices ||
+      WorkbenchSurface.remoteDevices ||
       WorkbenchSurface.workspace ||
       WorkbenchSurface.newSession => null,
     };
