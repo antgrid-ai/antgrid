@@ -372,14 +372,19 @@ function foldNotification(
     pendingRequests = clearRequests(pendingRequests, raw);
   }
   const own = prev.notifications.get(key);
-  const effective = own ?? prev.notifications.get(UNATTRIBUTED_TURN);
   // "awaiting_input" fires from the same idle-timeout signal whether the agent
   // is genuinely blocked mid-turn (no prior task_complete this turn) or just
   // idling after the turn already ended — the hook can't tell those apart. Once
   // a turn has resolved to task_complete, a later awaiting_input ping is the
   // stale post-completion nudge: ignore it so a finished session doesn't flip
   // back to "attention" just because the user hasn't looked yet.
-  const stale = msg.notificationType === "awaiting_input" && effective === "task_complete";
+  //
+  // Compared against THIS key's own prior state only — never the unattributed
+  // fallback `statusFor` displays. A project that mixes attributed and
+  // unattributed hooks would otherwise have one session's task_complete swallow
+  // a different session's genuine first block, and the drop is permanent
+  // (nothing is recorded, so the dot never lights up).
+  const stale = msg.notificationType === "awaiting_input" && own === "task_complete";
   if (msg.notificationType === own || stale) {
     if (activeTurns === prev.activeTurns
       && pendingTurns === prev.pendingTurns

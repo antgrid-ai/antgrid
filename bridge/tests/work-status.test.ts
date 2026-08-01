@@ -531,6 +531,20 @@ test("a notification for an id that is not a running session falls back to proje
   expect(s.status).toBe("error");
 });
 
+test("a sibling's task_complete does not swallow a session's first awaiting_input", () => {
+  // The stale-nudge check reads this session's OWN prior turn-end, not the
+  // unattributed fallback: a config-`terminals:` slot finishing must not make
+  // r1's genuine mid-turn block look like a post-completion nudge — the drop
+  // would be permanent (nothing recorded ⇒ the dot never lights up).
+  const done = fold([sessions(2), push("task_complete", "service-terminal-1")]);
+  expect(done.notifications.get("")).toBe("task_complete");
+  const blocked = reduceWorkStatus(done, push("awaiting_input", "r1"));
+  expect(blocked.notifications.get("r1")).toBe("awaiting_input");
+  expect(blocked.sessionStatuses.get("r1")).toBe("attention");
+  // r0 has no signal of its own, so it still inherits the project-wide one.
+  expect(blocked.sessionStatuses.get("r0")).toBe("done");
+});
+
 test("a session's own notification still wins over that fallback", () => {
   const s = fold([
     sessions(2), push("error", "service-terminal-1"), push("task_complete", "r1"),
