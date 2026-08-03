@@ -75,14 +75,14 @@ void main() {
 
   group('Zinc preset', () {
     test('is the default palette', () {
-      expect(kDefaultPalette.bgDeepest, const Color(0xFF141414));
+      expect(kDefaultPalette.bgDeepest, const Color(0xFF1B1B1B));
       expect(kDefaultPalette.accent, const Color(0xFFC6C6C6));
     });
 
     test('exposes new role tokens', () {
-      expect(kDefaultPalette.bgRaised, const Color(0xFF242424));
-      expect(kDefaultPalette.bgHover, const Color(0xFF2A2A2A));
-      expect(kDefaultPalette.bgPressed, const Color(0xFF333333));
+      expect(kDefaultPalette.bgRaised, const Color(0xFF2B2B2B));
+      expect(kDefaultPalette.bgHover, const Color(0xFF313131));
+      expect(kDefaultPalette.bgPressed, const Color(0xFF3A3A3A));
       expect(kDefaultPalette.accentForeground, const Color(0xFF09090B));
       expect(kDefaultPalette.statusIdle, const Color(0xFF61656D));
       expect(kDefaultPalette.statusThinking, const Color(0xFFE2C792));

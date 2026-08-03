@@ -25,6 +25,7 @@ class AbColors extends ThemeExtension<AbColors> {
     required this.textPrimary,
     required this.textSecondary,
     required this.textMuted,
+    required this.iconMuted,
     required this.textDisabled,
     required this.accent,
     required this.accentHighlight,
@@ -60,6 +61,15 @@ class AbColors extends ThemeExtension<AbColors> {
   final Color textPrimary;
   final Color textSecondary;
   final Color textMuted;
+
+  /// Non-text tier for icons/glyphs that carry state (unstaged-file marker,
+  /// collapse triangle, status dot) but aren't body text — held to SC 1.4.11's
+  /// 3:1 floor rather than 1.4.3's 4.5:1, since 4.5:1 has no headroom left
+  /// between it and [textMuted] on any preset (see palette_contrast_test.dart).
+  /// [textDisabled] looks adjacent but is the wrong token: it's WCAG-exempt,
+  /// reserved for genuinely inactive controls.
+  final Color iconMuted;
+
   final Color textDisabled;
 
   final Color accent;
@@ -93,6 +103,7 @@ class AbColors extends ThemeExtension<AbColors> {
     Color? textPrimary,
     Color? textSecondary,
     Color? textMuted,
+    Color? iconMuted,
     Color? textDisabled,
     Color? accent,
     Color? accentHighlight,
@@ -122,6 +133,7 @@ class AbColors extends ThemeExtension<AbColors> {
       textPrimary: textPrimary ?? this.textPrimary,
       textSecondary: textSecondary ?? this.textSecondary,
       textMuted: textMuted ?? this.textMuted,
+      iconMuted: iconMuted ?? this.iconMuted,
       textDisabled: textDisabled ?? this.textDisabled,
       accent: accent ?? this.accent,
       accentHighlight: accentHighlight ?? this.accentHighlight,
@@ -156,6 +168,7 @@ class AbColors extends ThemeExtension<AbColors> {
       textPrimary: Color.lerp(textPrimary, other.textPrimary, t)!,
       textSecondary: Color.lerp(textSecondary, other.textSecondary, t)!,
       textMuted: Color.lerp(textMuted, other.textMuted, t)!,
+      iconMuted: Color.lerp(iconMuted, other.iconMuted, t)!,
       textDisabled: Color.lerp(textDisabled, other.textDisabled, t)!,
       accent: Color.lerp(accent, other.accent, t)!,
       accentHighlight: Color.lerp(accentHighlight, other.accentHighlight, t)!,
@@ -200,6 +213,7 @@ const _zincFallback = AbColors(
   textPrimary: Color(0xFFE4E4E7),
   textSecondary: Color(0xFFA1A1AA),
   textMuted: Color(0xFF71717A),
+  iconMuted: Color(0xFF696972),
   textDisabled: Color(0xFF52525B),
   accent: Color(0xFF818CF8),
   accentHighlight: Color(0xFFA78BFA),

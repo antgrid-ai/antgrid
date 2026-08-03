@@ -44,13 +44,32 @@ class MarkdownPreview extends StatelessWidget {
             data: content.content ?? '',
             padding: const EdgeInsets.all(AbTokens.space4),
             config: MarkdownConfig(configs: [
-              PConfig(textStyle: AbTokens.sansStyle(color: c.textPrimary)),
+              // Prose leading, not the font's default (~1.2) — matches the
+              // transcript's PConfig. Inline code tracks it so a code run
+              // shares the surrounding paragraph's line box.
+              PConfig(
+                textStyle: AbTokens.sansStyle(
+                  color: c.textPrimary,
+                  height: 1.55,
+                ),
+              ),
+              // Underline-only links, matching the transcript — see
+              // markdown_body.dart for why the package default is unusable.
+              LinkConfig(
+                style: AbTokens.sansStyle(
+                  color: c.textPrimary,
+                  height: 1.55,
+                ).copyWith(decoration: TextDecoration.underline),
+              ),
               CodeConfig(
-                style: AbTokens.monoStyle(color: c.textPrimary),
+                style: AbTokens.monoStyle(color: c.textPrimary, height: 1.55),
               ),
               PreConfig(
                 // textStyle controls the inline code font; decoration supplies the block bg.
-                textStyle: AbTokens.monoStyle(color: c.textPrimary),
+                textStyle: AbTokens.monoStyle(
+                  color: c.textPrimary,
+                  height: 1.5,
+                ),
                 decoration: BoxDecoration(color: c.bgElevated),
                 padding: const EdgeInsets.all(AbTokens.space4),
               ),

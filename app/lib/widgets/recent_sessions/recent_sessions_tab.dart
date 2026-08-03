@@ -495,7 +495,12 @@ class _ConnectingIndicator extends ConsumerWidget {
           inProgress ? '$label…' : label,
           style: AbTokens.sansStyle(
             fontSize: AbTokens.fontXxs,
-            color: tone.color(context),
+            // AbStatusTone.disabled resolves to iconMuted (3:1, dot-tier) —
+            // too dim for this label, which is body text. Every other tone
+            // here is already a text-safe semantic color.
+            color: tone == AbStatusTone.disabled
+                ? context.antgrid.textMuted
+                : tone.color(context),
           ),
         ),
       ],

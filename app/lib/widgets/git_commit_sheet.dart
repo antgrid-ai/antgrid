@@ -108,7 +108,7 @@ class _GitCommitSheetState extends State<GitCommitSheet> {
                         size: AbTokens.iconButtonGlyph,
                         color: selected
                             ? context.antgrid.accent
-                            : context.antgrid.textDisabled,
+                            : context.antgrid.iconMuted,
                       ),
                       title: Text(
                         path,

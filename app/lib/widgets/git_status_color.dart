@@ -11,6 +11,6 @@ Color gitStatusColor(BuildContext context, String status) {
     'A' => context.antgrid.success,
     'D' => context.antgrid.error,
     '?' => context.antgrid.success,
-    _ => context.antgrid.textDisabled,
+    _ => context.antgrid.iconMuted,
   };
 }

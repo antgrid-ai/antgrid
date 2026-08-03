@@ -155,7 +155,7 @@ class _Chip extends StatelessWidget {
           const SizedBox(width: 5),
           GestureDetector(
             onTap: onRemove,
-            child: AbIcon(AbIcons.close, size: 10, color: p.textDisabled),
+            child: AbIcon(AbIcons.close, size: 10, color: p.iconMuted),
           ),
         ],
       ),
