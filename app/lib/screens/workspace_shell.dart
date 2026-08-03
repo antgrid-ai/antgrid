@@ -1416,8 +1416,8 @@ Map<_PhaseStatus, _PhaseStyle> _phaseStyles(BuildContext context) {
   return <_PhaseStatus, _PhaseStyle>{
     _PhaseStatus.pending: _PhaseStyle(
       '·',
-      palette.textDisabled,
-      palette.textDisabled,
+      palette.iconMuted,
+      palette.textMuted,
       palette.textMuted,
     ),
     _PhaseStatus.running: _PhaseStyle(

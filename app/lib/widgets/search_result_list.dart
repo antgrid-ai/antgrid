@@ -63,7 +63,7 @@ class _SearchResultListState extends State<SearchResultList> {
                         isCollapsed ? '\u25B6' : '\u25BC',
                         style: TextStyle(
                           fontSize: AbTokens.fontXxs,
-                          color: context.antgrid.textDisabled,
+                          color: context.antgrid.iconMuted,
                         ),
                       ),
                       const SizedBox(width: AbTokens.space6),

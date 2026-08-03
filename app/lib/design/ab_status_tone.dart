@@ -17,7 +17,11 @@ extension AbStatusToneColor on AbStatusTone {
       AbStatusTone.warning => palette.warning,
       AbStatusTone.danger => palette.error,
       AbStatusTone.muted => palette.textMuted,
-      AbStatusTone.disabled => palette.textDisabled,
+      // Every current consumer is a dot/glyph (AbStatusDot or a leading
+      // icon), never body text — iconMuted's 3:1 floor is the right bar, not
+      // textDisabled's WCAG-exempt one. If a future consumer renders this
+      // tone as readable text, it needs textMuted explicitly, not this tone.
+      AbStatusTone.disabled => palette.iconMuted,
     };
   }
 }

@@ -199,7 +199,7 @@ class _Section extends StatelessWidget {
                   count,
                   style: AbTokens.sansStyle(
                     fontSize: AbTokens.fontXs,
-                    color: p.textDisabled,
+                    color: p.textMuted,
                   ),
                 ),
                 const SizedBox(width: 14),
@@ -444,7 +444,8 @@ class _ForegroundCard extends StatelessWidget {
           ('fg-0 primary', p.textPrimary),
           ('fg-1 body', p.textSecondary),
           ('fg-2 muted', p.textMuted),
-          ('fg-3 faint', p.textDisabled),
+          ('fg-2.5 icon (3:1, non-text)', p.iconMuted),
+          ('fg-3 disabled (exempt)', p.textDisabled),
         ],
       ),
     );
