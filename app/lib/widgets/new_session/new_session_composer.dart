@@ -190,26 +190,40 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     if (!_canStart) return;
     setState(() => _starting = true);
     try {
-      await widget.submit(ref.container);
-    } on ActiveSessionsBranchSwitchException catch (e) {
-      if (!mounted) return;
-      final confirm = await AbConfirmDialog.show(
-        context: context,
-        title: 'Switch branch?',
-        body:
-            'One or more sessions in this folder are working or need you. Switching to "${e.branch}" changes the working tree for all of them.',
-        cancelLabel: 'Cancel',
-        confirmLabel: 'Switch & start',
-        destructive: false,
-      );
-      if (confirm == true && mounted) {
-        final target = ref.read(selectedTargetProjectProvider);
-        final selection = ref.read(newSessionBranchSelectionProvider);
-        if (target != null &&
-            target.id == e.targetId &&
-            selection != null &&
-            selection.branch == e.branch) {
-          await widget.submit(ref.container, allowActiveSessions: true);
+      var allowActiveSessions = false;
+      while (true) {
+        try {
+          await widget.submit(
+            ref.container,
+            allowActiveSessions: allowActiveSessions,
+          );
+          break;
+        } on ActiveSessionsBranchSwitchException catch (e) {
+          if (allowActiveSessions) {
+            rethrow;
+          }
+          if (!mounted) return;
+          final confirm = await AbConfirmDialog.show(
+            context: context,
+            title: 'Switch branch?',
+            body:
+                'One or more sessions in this folder are working or need you. Switching to "${e.branch}" changes the working tree for all of them.',
+            cancelLabel: 'Cancel',
+            confirmLabel: 'Switch & start',
+            destructive: false,
+          );
+          if (confirm != true || !mounted) return;
+
+          final target = ref.read(selectedTargetProjectProvider);
+          final selection = ref.read(newSessionBranchSelectionProvider);
+          if (target == null ||
+              target.id != e.targetId ||
+              selection == null ||
+              selection.targetId != e.targetId ||
+              selection.branch != e.branch) {
+            return;
+          }
+          allowActiveSessions = true;
         }
       }
     } on SessionLimitExceededException catch (e) {

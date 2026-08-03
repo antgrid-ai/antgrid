@@ -135,6 +135,9 @@ export interface AgentCore {
    *  {@link BuildAgentCoreOptions.sessionWorkStatusFor}) is current. No-op
    *  before setupServices. */
   refreshSessionWork(): void;
+  /** Host-level checkouts bypass the inbound Git handler, so callers use this
+   *  to keep the core's branch and file snapshots coherent immediately. */
+  refreshGitState(): Promise<void>;
   /** Lifecycle hooks the transport invokes. */
   handleTunnelMessage(raw: unknown): void;
   onHandshakeComplete(): void;
@@ -1843,6 +1846,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     pairedPhones,
     refreshSessionWork(): void {
       sessions?.refreshWorkStatus();
+    },
+    async refreshGitState(): Promise<void> {
+      await Promise.all([refreshGitBranch(), refreshGitStatus()]);
+      sendStatus();
+      sendGitStatus();
     },
     handleTunnelMessage,
     onHandshakeComplete,

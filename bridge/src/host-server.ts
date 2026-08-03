@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { hostname } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { ProjectCore, type ProjectCoreDeps, type ProjectCoreRemoteDeps, type PromotionHandle, type RegisterOutcome } from "./project-core";
 import { OAuthClient, startTokenMaintenance } from "./auth/oauth-client";
 import { sendHeartbeat } from "./heartbeat";
@@ -31,7 +31,7 @@ import type { AbMessage, ProjectAdvertEntry, RpcRequest } from "./protocol";
 import { z } from "zod";
 import { SessionManager } from "./session-manager";
 import { isSafeProjectId } from "./project-id";
-import { listLocalBranches, checkoutLocalBranch, GitHelperError } from "./git-branches";
+import { listLocalBranches, checkoutLocalBranch } from "./git-branches";
 
 const SessionsListParams = z.object({
   projectId: z.string(),
@@ -905,6 +905,7 @@ export class HostServer {
       }
 
       const res = await checkoutLocalBranch(seen.path, branch);
+      await this.refreshWarmGitState(projectId, seen.path);
       return createMessage("response", {
         requestId: req.requestId,
         ok: true,
@@ -1186,6 +1187,7 @@ export class HostServer {
           }
 
           const res = await checkoutLocalBranch(req.projectPath, req.branch);
+          await this.refreshWarmGitState(req.projectId, req.projectPath);
           return { id: req.id, ok: true, type: "git:checkout", current: res.current };
         } catch (err: any) {
           return {
@@ -1195,6 +1197,28 @@ export class HostServer {
           };
         }
       }
+    }
+  }
+
+  private async refreshWarmGitState(projectId: string, projectPath: string): Promise<void> {
+    const entry = this.cores.get(projectId);
+    if (!entry) return;
+    const entryPath = resolve(entry.path);
+    const checkoutPath = resolve(projectPath);
+    const samePath = process.platform === "win32"
+      ? entryPath.toLowerCase() === checkoutPath.toLowerCase()
+      : entryPath === checkoutPath;
+    if (!samePath) return;
+    try {
+      await entry.core.refreshGitState();
+    } catch (err) {
+      // Checkout already succeeded; a failed UI refresh must not report the
+      // branch operation itself as failed. The core's poll will retry later.
+      log.warn(
+        "Failed to refresh Git state for %s after checkout: %s",
+        projectId,
+        err instanceof Error ? err.message : String(err),
+      );
     }
   }
 

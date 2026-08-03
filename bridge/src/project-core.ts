@@ -222,6 +222,11 @@ export class ProjectCore {
     return this.core?.listSessions(includeArchived) ?? null;
   }
 
+  /** Host-level checkouts bypass the core's inbound bus handler. */
+  async refreshGitState(): Promise<void> {
+    await this.core?.refreshGitState();
+  }
+
   async start(): Promise<void> {
     // Validate host-injected deps before building the core so a misconfigured
     // remote launch fails fast (and predictably) rather than spinning up

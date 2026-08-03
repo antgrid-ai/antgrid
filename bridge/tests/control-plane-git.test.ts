@@ -87,6 +87,34 @@ test("loopback git:branches and git:checkout work without creating a core", asyn
   expect(resCheckout.current).toBe("dev");
 });
 
+test("loopback checkout refreshes a matching warm core", async () => {
+  const h = host!;
+  let refreshes = 0;
+  (h as any).cores.set("p1", {
+    core: {
+      sessionWorkStatuses: {},
+      refreshGitState: async () => {
+        refreshes++;
+      },
+      shutdown: async () => {},
+    },
+    path: gitDir,
+    mode: "local",
+    lastFocusedMs: 0,
+  });
+
+  const res = (await (h as any).handleControl({
+    id: "req1",
+    type: "git:checkout",
+    projectId: "p1",
+    projectPath: gitDir,
+    branch: "dev",
+  })) as any;
+
+  expect(res.ok).toBe(true);
+  expect(refreshes).toBe(1);
+});
+
 test("remote RPC git.branches returns NOT_ALLOWED when mobile access is off", async () => {
   const h = host!;
   seedCatalog(h, "p1", gitDir);
@@ -150,6 +178,7 @@ test("active session guard returns ACTIVE_SESSIONS for working or attention sess
   (h as any).cores.set("p1", {
     core: {
       sessionWorkStatuses: { s1: "working" },
+      refreshGitState: async () => {},
       shutdown: async () => {},
     },
     path: gitDir,
@@ -175,9 +204,13 @@ test("active session guard allows checkout with allowActiveSessions: true", asyn
   seedCatalog(h, "p1", gitDir);
   await setMobileAccess(h, true);
 
+  let refreshes = 0;
   (h as any).cores.set("p1", {
     core: {
       sessionWorkStatuses: { s1: "working" },
+      refreshGitState: async () => {
+        refreshes++;
+      },
       shutdown: async () => {},
     },
     path: gitDir,
@@ -196,6 +229,7 @@ test("active session guard allows checkout with allowActiveSessions: true", asyn
 
   expect(res.ok).toBe(true);
   expect(res.result.current).toBe("dev");
+  expect(refreshes).toBe(1);
 });
 
 test("active session guard does not warn if checking out same current branch", async () => {
@@ -211,6 +245,7 @@ test("active session guard does not warn if checking out same current branch", a
   (h as any).cores.set("p1", {
     core: {
       sessionWorkStatuses: { s1: "working" },
+      refreshGitState: async () => {},
       shutdown: async () => {},
     },
     path: gitDir,

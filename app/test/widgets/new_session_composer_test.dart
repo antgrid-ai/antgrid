@@ -61,6 +61,15 @@ List<Override> _baseOverrides({
     pickerSourcesProvider.overrideWithValue(const [_localSource]),
     newSessionDetectedToolsProvider.overrideWith((ref) async => detected),
     newSessionChatCapableToolsProvider.overrideWith((ref) async => chatCapable),
+    newSessionBranchCatalogProvider.overrideWith(
+      (ref) async => target == null
+          ? null
+          : const GitBranchCatalog(
+              isRepository: true,
+              current: 'main',
+              branches: ['main', 'dev'],
+            ),
+    ),
     if (target != null)
       selectedTargetProjectProvider.overrideWith(() => ValueController(target)),
   ];
@@ -610,6 +619,55 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
 
       expect(submitCalls, [false, true]);
+    });
+
+    testWidgets('surfaces an error when the confirmed retry fails', (
+      tester,
+    ) async {
+      var submitCalls = <bool>[];
+      await tester.pumpWidget(
+        _host(
+          overrides: [
+            ..._baseOverrides(target: _project),
+            newSessionBranchSelectionProvider.overrideWith(
+              () => ValueController(
+                const NewSessionBranchSelection(
+                  targetId: 'p-my-repo',
+                  branch: 'dev',
+                ),
+              ),
+            ),
+          ],
+          submit: (ref, {allowActiveSessions = false}) async {
+            submitCalls.add(allowActiveSessions);
+            if (!allowActiveSessions) {
+              throw ActiveSessionsBranchSwitchException(
+                targetId: _project.id,
+                branch: 'dev',
+              );
+            }
+            throw StateError('checkout failed');
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.byKey(const Key('new-session-prompt-field')),
+        'start session',
+      );
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(find.text('Switch & start'));
+      await tester.pump();
+
+      expect(submitCalls, [false, true]);
+      expect(find.textContaining('Failed to start session'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+
+      await tester.pump(const Duration(seconds: 8));
+      await tester.pump(const Duration(milliseconds: 300));
     });
   });
 }

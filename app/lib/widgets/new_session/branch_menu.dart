@@ -3,9 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
-import '../../design/ab_theme.dart';
 import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_chip.dart';
+import '../../design/widgets/ab_button.dart';
 import '../../design/widgets/ab_menu.dart';
 import '../../design/widgets/ab_text_field.dart';
 import '../../models/git_branch.dart';
@@ -248,11 +247,12 @@ class _BranchPanelState extends ConsumerState<BranchPanel> {
                 const SizedBox(height: AbTokens.space8),
                 Align(
                   alignment: Alignment.centerRight,
-                  child: TextButton(
-                    onPressed: () {
+                  child: AbButton(
+                    label: 'Retry',
+                    compact: true,
+                    onTap: () {
                       ref.invalidate(newSessionBranchCatalogProvider);
                     },
-                    child: const Text('Retry'),
                   ),
                 ),
               ],

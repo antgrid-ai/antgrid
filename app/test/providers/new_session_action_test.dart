@@ -1,8 +1,11 @@
+import 'package:antgrid/models/git_branch.dart';
 import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/control_plane.dart';
 import 'package:antgrid/providers/new_session_action.dart';
+import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/recent_agents.dart';
+import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
@@ -54,6 +57,52 @@ class _AutoStartTransport extends FakeAgentTransport {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test(
+    'selected remote branch fails when the control plane is unavailable',
+    () async {
+      final container = ProviderContainer(
+        overrides: [
+          selectedTargetProjectProvider.overrideWith(
+            () => ValueController(
+              const PickerProject(
+                id: _compoundId,
+                name: 'p1',
+                detail: '',
+                isLocal: false,
+                machineUuid: _machineUuid,
+                projectId: _projectId,
+              ),
+            ),
+          ),
+          newSessionBranchSelectionProvider.overrideWith(
+            () => ValueController(
+              const NewSessionBranchSelection(
+                targetId: _compoundId,
+                branch: 'dev',
+              ),
+            ),
+          ),
+          controlPlaneClientForProvider(
+            _machineUuid,
+          ).overrideWith((ref) async => null),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await expectLater(
+        startNewSession(container),
+        throwsA(
+          isA<StateError>().having(
+            (e) => e.message,
+            'message',
+            contains('cannot switch branch'),
+          ),
+        ),
+      );
+      expect(container.read(newSessionStartInFlightProvider), isFalse);
+    },
+  );
 
   testWidgets(
     'drill-in activation always promotes (project:start) even when running:true, '

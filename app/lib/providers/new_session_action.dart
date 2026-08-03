@@ -131,14 +131,19 @@ Future<void> startNewSession(
           }
         } else {
           final machineUuid = target.machineUuid ?? baseDeviceUuid(target.id);
-          final client = await ref.read(controlPlaneClientForProvider(machineUuid).future);
-          if (client != null) {
-            await client.gitCheckout(
-              projectId: target.projectId ?? target.id,
-              branch: explicitBranch,
-              allowActiveSessions: allowActiveSessions,
+          final client = await ref.read(
+            controlPlaneClientForProvider(machineUuid).future,
+          );
+          if (client == null) {
+            throw StateError(
+              'Machine $machineUuid is offline; cannot switch branch',
             );
           }
+          await client.gitCheckout(
+            projectId: target.projectId ?? target.id,
+            branch: explicitBranch,
+            allowActiveSessions: allowActiveSessions,
+          );
         }
       } on HostControlException catch (e) {
         if (e.code == 'ACTIVE_SESSIONS') {
