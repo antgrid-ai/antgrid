@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 
 import '../services/control_plane_client.dart'
     show AgentWorkStatus, parseSessionStatuses;
+import '../models/git_branch.dart';
 
 /// Loopback data-plane connect info from a `project:open` response.
 /// Non-null for all modes — every core binds a loopback listener. Mirror of
@@ -366,6 +367,44 @@ class HostControlClient {
   Future<RemoteAccessPolicy> remoteAccessSet(bool enabled) async {
     final m = await _post({'type': 'mobile-access:set', 'enabled': enabled});
     return RemoteAccessPolicy.fromJson(m);
+  }
+
+  Future<GitBranchCatalog> gitBranches({
+    required String projectId,
+    required String projectPath,
+    Duration timeout = const Duration(seconds: 5),
+  }) async {
+    final m = await _post({
+      'type': 'git:branches',
+      'projectId': projectId,
+      'projectPath': projectPath,
+    }, timeout: timeout);
+    try {
+      return GitBranchCatalog.fromJson(m);
+    } catch (e) {
+      throw HostControlException('BAD_RESPONSE', 'malformed git:branches response: $e');
+    }
+  }
+
+  Future<String> gitCheckout({
+    required String projectId,
+    required String projectPath,
+    required String branch,
+    bool allowActiveSessions = false,
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
+    final m = await _post({
+      'type': 'git:checkout',
+      'projectId': projectId,
+      'projectPath': projectPath,
+      'branch': branch,
+      'allowActiveSessions': allowActiveSessions,
+    }, timeout: timeout);
+    final current = m['current'];
+    if (current is! String) {
+      throw HostControlException('BAD_RESPONSE', 'malformed git:checkout current: $m');
+    }
+    return current;
   }
 
   void close() => _http.close();

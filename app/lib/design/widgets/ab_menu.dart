@@ -60,11 +60,13 @@ class AbMenu extends StatelessWidget {
     // rather than overflowing the viewport. Item labels are inside an
     // Expanded → ellipsify on extreme squeeze instead of clipping the
     // whole surface off-screen.
-    return Container(
-      constraints: BoxConstraints(maxWidth: width, minWidth: 0),
-      padding: const EdgeInsets.all(5),
-      decoration: _popupDecoration(p),
-      child: Column(
+    return Material(
+      type: MaterialType.transparency,
+      child: Container(
+        constraints: BoxConstraints(maxWidth: width, minWidth: 0),
+        padding: const EdgeInsets.all(5),
+        decoration: _popupDecoration(p),
+        child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -114,8 +116,9 @@ class AbMenu extends StatelessWidget {
           ),
         ],
       ),
-    );
-  }
+    ),
+  );
+}
 }
 
 /// Shared popup chrome for [AbMenu] and [showAbPanel]: raised surface,
@@ -274,11 +277,14 @@ class _AbPanelRoute<T> extends PopupRoute<T> {
     final panel = Builder(
       builder: (ctx) {
         final p = ctx.antgrid;
-        return Container(
-          constraints: BoxConstraints(maxWidth: width, minWidth: 0),
-          padding: const EdgeInsets.all(5),
-          decoration: _popupDecoration(p),
-          child: builder(ctx),
+        return Material(
+          type: MaterialType.transparency,
+          child: Container(
+            constraints: BoxConstraints(maxWidth: width, minWidth: 0),
+            padding: const EdgeInsets.all(5),
+            decoration: _popupDecoration(p),
+            child: builder(ctx),
+          ),
         );
       },
     );

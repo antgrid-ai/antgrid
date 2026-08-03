@@ -391,4 +391,46 @@ void main() {
       );
     });
   });
+
+  group('gitBranches & gitCheckout', () {
+    test('gitBranches sends git.branches RPC and returns catalog', () async {
+      final t = FakeAgentTransport();
+      final client = ControlPlaneClient(transport: t);
+      addTearDown(client.dispose);
+
+      t.requestHandler = (method, params) => {
+            'isRepository': true,
+            'current': 'main',
+            'branches': ['main', 'dev'],
+          };
+
+      final catalog = await client.gitBranches(projectId: 'p1');
+      expect(catalog.isRepository, isTrue);
+      expect(catalog.current, 'main');
+      expect(catalog.branches, ['main', 'dev']);
+      expect(t.requests.single.method, 'git.branches');
+      expect(t.requests.single.params, {'projectId': 'p1'});
+    });
+
+    test('gitCheckout sends git.checkout RPC with allowActiveSessions', () async {
+      final t = FakeAgentTransport();
+      final client = ControlPlaneClient(transport: t);
+      addTearDown(client.dispose);
+
+      t.requestHandler = (method, params) => {'current': 'dev'};
+
+      final current = await client.gitCheckout(
+        projectId: 'p1',
+        branch: 'dev',
+        allowActiveSessions: true,
+      );
+      expect(current, 'dev');
+      expect(t.requests.single.method, 'git.checkout');
+      expect(t.requests.single.params, {
+        'projectId': 'p1',
+        'branch': 'dev',
+        'allowActiveSessions': true,
+      });
+    });
+  });
 }

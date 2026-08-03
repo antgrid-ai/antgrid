@@ -42,6 +42,7 @@ import { StructuredAgentManager } from "./structured/structured-manager";
 import { parseCodexVersion } from "./codex/codex-version";
 import { TOOL_UPDATE_SPECS, createToolUpdateChecker, execToolUpdate, execToolVersion, runToolUpdate, updateSpecFor } from "./agent-update";
 import { getGitStatus, gitCommit, gitDiscard, type GitFileEntry } from "./git";
+import { listLocalBranches, checkoutLocalBranch } from "./git-branches";
 
 // Tracks terminal ids that have pinged /hook-alive (codex SessionStart probe).
 // Module-level so it lives as long as the process — terminals cleared from this
@@ -1028,33 +1029,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   async function handleGitListBranches(projectId: string) {
     try {
-      const proc = Bun.spawn(["git", "branch", "--no-color"], {
-        cwd: project.path,
-        stdout: "pipe",
-        stderr: "ignore",
-      });
-      const output = await new Response(proc.stdout).text();
-      const exitCode = await proc.exited;
-      if (exitCode !== 0) return;
-
-      let current = cachedGitBranch ?? "";
-      const branches: string[] = [];
-      for (const line of output.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        if (trimmed.startsWith("* ")) {
-          const name = trimmed.slice(2);
-          current = name;
-          branches.push(name);
-        } else {
-          branches.push(trimmed);
-        }
-      }
+      const catalog = await listLocalBranches(project.path);
+      if (!catalog.isRepository) return;
 
       sendAb(createMessage("git:branches", {
         projectId,
-        current,
-        branches,
+        current: catalog.current ?? cachedGitBranch ?? "",
+        branches: catalog.branches,
       }));
     } catch {
       // ignore
@@ -1063,40 +1044,24 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   async function handleGitCheckout(projectId: string, branch: string) {
     try {
-      const proc = Bun.spawn(["git", "switch", branch], {
-        cwd: project.path,
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const stderr = await new Response(proc.stderr).text();
-      const exitCode = await proc.exited;
+      const res = await checkoutLocalBranch(project.path, branch);
+      sendAb(createMessage("git:checkout-result", {
+        projectId,
+        branch,
+        success: true,
+      }));
 
-      if (exitCode === 0) {
-        sendAb(createMessage("git:checkout-result", {
-          projectId,
-          branch,
-          success: true,
-        }));
-
-        // Refresh cached state and notify app
-        cachedGitBranch = branch;
-        sendStatus();
-        await refreshGitStatus();
-        sendGitStatus();
-      } else {
-        sendAb(createMessage("git:checkout-result", {
-          projectId,
-          branch,
-          success: false,
-          error: stderr.trim() || "Checkout failed",
-        }));
-      }
-    } catch (err) {
+      // Refresh cached state and notify app
+      cachedGitBranch = res.current;
+      sendStatus();
+      await refreshGitStatus();
+      sendGitStatus();
+    } catch (err: any) {
       sendAb(createMessage("git:checkout-result", {
         projectId,
         branch,
         success: false,
-        error: String(err),
+        error: err?.message || String(err),
       }));
     }
   }

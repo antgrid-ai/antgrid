@@ -62,3 +62,15 @@ test("mobile-access:set carries the machine-wide boolean", () => {
   expect(ControlRequestSchema.safeParse({ id: "5", type: "mobile-access:enable-project", projectId: "projA" }).success).toBe(false);
   expect(ControlRequestSchema.safeParse({ id: "6", type: "mobile-access:disable-project", projectId: "projA" }).success).toBe(false);
 });
+
+test("git:branches accepts valid request", () => {
+  expect(ControlRequestSchema.safeParse({ id: "1", type: "git:branches", projectId: "p1", projectPath: "/path" }).success).toBe(true);
+  expect(ControlRequestSchema.safeParse({ id: "2", type: "git:branches", projectId: "p1" }).success).toBe(false);
+});
+
+test("git:checkout accepts valid request with optional allowActiveSessions", () => {
+  expect(ControlRequestSchema.safeParse({ id: "1", type: "git:checkout", projectId: "p1", projectPath: "/path", branch: "dev" }).success).toBe(true);
+  expect(ControlRequestSchema.safeParse({ id: "2", type: "git:checkout", projectId: "p1", projectPath: "/path", branch: "dev", allowActiveSessions: true }).success).toBe(true);
+  expect(ControlRequestSchema.safeParse({ id: "3", type: "git:checkout", projectId: "p1", projectPath: "/path", branch: "dev", allowActiveSessions: false }).success).toBe(true);
+  expect(ControlRequestSchema.safeParse({ id: "4", type: "git:checkout", projectId: "p1", projectPath: "/path" }).success).toBe(false);
+});

@@ -18,6 +18,20 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1), type: z.literal("phones:unpair"), phonePubkey: z.string().min(1) }),
   z.object({ id: z.string().min(1), type: z.literal("mobile-access:get") }),
   z.object({ id: z.string().min(1), type: z.literal("mobile-access:set"), enabled: z.boolean() }),
+  z.object({
+    id: z.string().min(1),
+    type: z.literal("git:branches"),
+    projectId: z.string().min(1),
+    projectPath: z.string().min(1),
+  }),
+  z.object({
+    id: z.string().min(1),
+    type: z.literal("git:checkout"),
+    projectId: z.string().min(1),
+    projectPath: z.string().min(1),
+    branch: z.string().min(1),
+    allowActiveSessions: z.boolean().optional(),
+  }),
 ]);
 export type ControlRequest = z.infer<typeof ControlRequestSchema>;
 
@@ -85,4 +99,6 @@ export type ControlResponse =
   | { id: string; ok: true; type: "phones:unpair" }
   | { id: string; ok: true; type: "mobile-access:get"; enabled: boolean }
   | { id: string; ok: true; type: "mobile-access:set"; enabled: boolean }
+  | { id: string; ok: true; type: "git:branches"; isRepository: boolean; current: string | null; branches: string[] }
+  | { id: string; ok: true; type: "git:checkout"; current: string }
   | { id: string; ok: false; error: { code: string; message: string } };

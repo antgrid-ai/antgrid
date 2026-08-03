@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/ab_project.dart';
+import '../models/git_branch.dart';
 import '../models/session_entry.dart';
 import '../models/session_target.dart';
 import '../navigation/nav_controller.dart';
@@ -634,6 +635,41 @@ final newSessionHasValidTargetProvider = Provider<bool>((ref) {
       ref.watch(pickerMachineUuidsProvider).contains(target.machineUuid);
 });
 
+final newSessionBranchCatalogProvider =
+    FutureProvider.autoDispose<GitBranchCatalog?>((ref) async {
+  final target = ref.watch(selectedTargetProjectProvider);
+  if (target == null) return null;
+
+  if (target.isLocal) {
+    final host = await ref.watch(hostControllerProvider).ensureHost();
+    final client = HostControlClient(
+      port: host.controlPort,
+      token: host.token,
+    );
+    try {
+      return await client.gitBranches(
+        projectId: target.id,
+        projectPath: target.detail,
+      );
+    } finally {
+      client.close();
+    }
+  }
+
+  final machineUuid = target.machineUuid ?? baseDeviceUuid(target.id);
+  final client = await ref.watch(controlPlaneClientForProvider(machineUuid).future);
+  if (client == null) {
+    throw StateError('Machine control plane unavailable');
+  }
+  return await client.gitBranches(projectId: target.projectId ?? target.id);
+});
+
+final newSessionBranchSelectionProvider = NotifierProvider<
+    ValueController<NewSessionBranchSelection?>,
+    NewSessionBranchSelection?>(
+  () => ValueController<NewSessionBranchSelection?>(null),
+);
+
 /// Reset the ephemeral New Session form + selection to defaults. Called on every
 /// exit (Start success / Cancel / Esc) so reopening the page starts clean and a
 /// stale name never attaches to the next session.
@@ -651,6 +687,7 @@ void resetNewSessionForm(ProviderContainer ref) {
   ref.read(newSessionAgentTouchedProvider.notifier).set(false);
   ref.read(newSessionStartInFlightProvider.notifier).set(false);
   ref.read(newSessionPromptProvider.notifier).set('');
+  ref.read(newSessionBranchSelectionProvider.notifier).set(null);
 }
 
 /// Leave the New Session page: reset the form, clear new-session mode, and

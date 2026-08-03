@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../analytics/events.dart';
+import '../launcher/host_control_client.dart';
 import '../models/session_target.dart';
 import '../project/project_session.dart';
 import '../project/project_session_registry.dart';
@@ -67,6 +68,18 @@ Never throwProjectStartFailure(
   throw StateError('Could not start project $projectId on $machineUuid');
 }
 
+class ActiveSessionsBranchSwitchException implements Exception {
+  final String targetId;
+  final String branch;
+  const ActiveSessionsBranchSwitchException({
+    required this.targetId,
+    required this.branch,
+  });
+
+  @override
+  String toString() => 'ActiveSessionsBranchSwitchException($targetId, $branch)';
+}
+
 /// Start action for the New Session page.
 ///
 /// Activates the picker-selected target project so `selectedRegistrationIdProvider`
@@ -84,11 +97,77 @@ Never throwProjectStartFailure(
 /// and lets the connection supervisor bring that machine's socket up.
 ///
 /// Throws on activation/create failure; callers surface the error.
-Future<void> startNewSession(ProviderContainer ref) async {
+Future<void> startNewSession(
+  ProviderContainer ref, {
+  bool allowActiveSessions = false,
+}) async {
   final target = ref.read(selectedTargetProjectProvider);
   if (target == null) return;
+  final selection = ref.read(newSessionBranchSelectionProvider);
+  final explicitBranch = (selection != null && selection.targetId == target.id)
+      ? selection.branch
+      : null;
+
   ref.read(newSessionStartInFlightProvider.notifier).set(true);
   try {
+    // 0. If an explicit branch was selected, perform git checkout BEFORE target activation
+    if (explicitBranch != null) {
+      try {
+        if (target.isLocal) {
+          final host = await ref.read(hostControllerProvider).ensureHost();
+          final client = HostControlClient(
+            port: host.controlPort,
+            token: host.token,
+          );
+          try {
+            await client.gitCheckout(
+              projectId: target.id,
+              projectPath: target.detail,
+              branch: explicitBranch,
+              allowActiveSessions: allowActiveSessions,
+            );
+          } finally {
+            client.close();
+          }
+        } else {
+          final machineUuid = target.machineUuid ?? baseDeviceUuid(target.id);
+          final client = await ref.read(controlPlaneClientForProvider(machineUuid).future);
+          if (client != null) {
+            await client.gitCheckout(
+              projectId: target.projectId ?? target.id,
+              branch: explicitBranch,
+              allowActiveSessions: allowActiveSessions,
+            );
+          }
+        }
+      } on HostControlException catch (e) {
+        if (e.code == 'ACTIVE_SESSIONS') {
+          throw ActiveSessionsBranchSwitchException(
+            targetId: target.id,
+            branch: explicitBranch,
+          );
+        }
+        rethrow;
+      } on RpcException catch (e) {
+        if (e.code == 'ACTIVE_SESSIONS') {
+          throw ActiveSessionsBranchSwitchException(
+            targetId: target.id,
+            branch: explicitBranch,
+          );
+        }
+        rethrow;
+      }
+
+      // Re-verify selected target and branch selection after await
+      final currentTarget = ref.read(selectedTargetProjectProvider);
+      final currentSelection = ref.read(newSessionBranchSelectionProvider);
+      if (currentTarget?.id != target.id ||
+          currentSelection?.targetId != target.id ||
+          currentSelection?.branch != explicitBranch) {
+        return;
+      }
+    }
+
     final name = ref.read(newSessionNameProvider).trim();
 
     // 1. Activate the target so `selectedRegistrationIdProvider` points at it.

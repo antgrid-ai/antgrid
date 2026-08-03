@@ -31,6 +31,7 @@ import type { AbMessage, ProjectAdvertEntry, RpcRequest } from "./protocol";
 import { z } from "zod";
 import { SessionManager } from "./session-manager";
 import { isSafeProjectId } from "./project-id";
+import { listLocalBranches, checkoutLocalBranch, GitHelperError } from "./git-branches";
 
 const SessionsListParams = z.object({
   projectId: z.string(),
@@ -40,6 +41,16 @@ const SessionsListParams = z.object({
 const SessionsDeleteParams = z.object({
   projectId: z.string(),
   sessionId: z.string().min(1),
+});
+
+const GitBranchesParams = z.object({
+  projectId: z.string(),
+});
+
+const GitCheckoutParams = z.object({
+  projectId: z.string(),
+  branch: z.string().min(1),
+  allowActiveSessions: z.boolean().optional(),
 });
 
 /** Desktop warm-core cap (mirrors the app's kWarmCapLocal). The host runs on a
@@ -586,6 +597,18 @@ export class HostServer {
           .catch((err) => log.warn("sessions.delete handler threw: %s", err));
         return;
       }
+      if (msg.method === "git.branches") {
+        void this.handleGitBranchesRpc(msg)
+          .then((res) => bus.publish(res, channel))
+          .catch((err) => log.warn("git.branches handler threw: %s", err));
+        return;
+      }
+      if (msg.method === "git.checkout") {
+        void this.handleGitCheckoutRpc(msg)
+          .then((res) => bus.publish(res, channel))
+          .catch((err) => log.warn("git.checkout handler threw: %s", err));
+        return;
+      }
       void dispatchRpc(bus, msg).then((res) => bus.publish(res, channel));
       return;
     }
@@ -760,6 +783,140 @@ export class HostServer {
       deleted = await SessionManager.deletePersisted(resolveAbDir(), projectId, sessionId);
     }
     return createMessage("response", { requestId: req.requestId, ok: true, result: { deleted } });
+  }
+
+  async handleGitBranchesRpc(req: RpcRequest): Promise<AbMessage> {
+    const parsed = GitBranchesParams.safeParse(req.params ?? {});
+    if (!parsed.success) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: "E_BAD_PARAMS", message: parsed.error.issues.map((i) => i.message).join("; ") },
+      });
+    }
+    const { projectId } = parsed.data;
+    if (!isSafeProjectId(projectId)) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: "E_BAD_PARAMS", message: "invalid projectId" },
+      });
+    }
+    if (!this.remoteAccessPolicy.isEnabled()) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: "NOT_ALLOWED", message: "mobile access is disabled on this machine" },
+      });
+    }
+    const seen = this.seenProjects.get(projectId);
+    if (!seen || !seen.path) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: "UNKNOWN_PROJECT", message: "no such project on this machine" },
+      });
+    }
+    try {
+      const catalog = await listLocalBranches(seen.path);
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: true,
+        result: {
+          isRepository: catalog.isRepository,
+          current: catalog.current,
+          branches: catalog.branches,
+        },
+      });
+    } catch (err: any) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: err.code || "UNKNOWN_ERROR", message: err.message || String(err) },
+      });
+    }
+  }
+
+  async handleGitCheckoutRpc(req: RpcRequest): Promise<AbMessage> {
+    const parsed = GitCheckoutParams.safeParse(req.params ?? {});
+    if (!parsed.success) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: "E_BAD_PARAMS", message: parsed.error.issues.map((i) => i.message).join("; ") },
+      });
+    }
+    const { projectId, branch, allowActiveSessions } = parsed.data;
+    if (!isSafeProjectId(projectId)) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: "E_BAD_PARAMS", message: "invalid projectId" },
+      });
+    }
+    if (!this.remoteAccessPolicy.isEnabled()) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: "NOT_ALLOWED", message: "mobile access is disabled on this machine" },
+      });
+    }
+    const seen = this.seenProjects.get(projectId);
+    if (!seen || !seen.path) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: "UNKNOWN_PROJECT", message: "no such project on this machine" },
+      });
+    }
+    try {
+      const catalog = await listLocalBranches(seen.path);
+      if (!catalog.isRepository) {
+        return createMessage("response", {
+          requestId: req.requestId,
+          ok: false,
+          error: { code: "NOT_GIT_REPOSITORY", message: "Not a Git repository" },
+        });
+      }
+      if (!catalog.branches.includes(branch)) {
+        return createMessage("response", {
+          requestId: req.requestId,
+          ok: false,
+          error: { code: "UNKNOWN_BRANCH", message: `Branch '${branch}' does not exist` },
+        });
+      }
+
+      if (catalog.current !== branch) {
+        const entry = this.cores.get(projectId);
+        const statuses = entry?.core.sessionWorkStatuses ?? {};
+        const hasActive = Object.values(statuses).some(
+          (status) => status === "working" || status === "attention",
+        );
+        if (hasActive && allowActiveSessions !== true) {
+          return createMessage("response", {
+            requestId: req.requestId,
+            ok: false,
+            error: {
+              code: "ACTIVE_SESSIONS",
+              message: `One or more sessions in this folder are working or need you. Switching to "${branch}" changes the working tree for all of them.`,
+            },
+          });
+        }
+      }
+
+      const res = await checkoutLocalBranch(seen.path, branch);
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: true,
+        result: { current: res.current },
+      });
+    } catch (err: any) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: err.code || "CHECKOUT_FAILED", message: err.message || String(err) },
+      });
+    }
   }
 
   /** Dispatch an E2E control-plane verb from the connected account-trusted
@@ -981,6 +1138,63 @@ export class HostServer {
       case "mobile-access:get":
       case "mobile-access:set":
         return this.handleRemoteAccessVerb(req);
+      case "git:branches": {
+        try {
+          const catalog = await listLocalBranches(req.projectPath);
+          return {
+            id: req.id,
+            ok: true,
+            type: "git:branches",
+            isRepository: catalog.isRepository,
+            current: catalog.current,
+            branches: catalog.branches,
+          };
+        } catch (err: any) {
+          return {
+            id: req.id,
+            ok: false,
+            error: { code: err.code || "UNKNOWN_ERROR", message: err.message || String(err) },
+          };
+        }
+      }
+      case "git:checkout": {
+        try {
+          const catalog = await listLocalBranches(req.projectPath);
+          if (!catalog.isRepository) {
+            return { id: req.id, ok: false, error: { code: "NOT_GIT_REPOSITORY", message: "Not a Git repository" } };
+          }
+          if (!catalog.branches.includes(req.branch)) {
+            return { id: req.id, ok: false, error: { code: "UNKNOWN_BRANCH", message: `Branch '${req.branch}' does not exist` } };
+          }
+
+          if (catalog.current !== req.branch) {
+            const entry = this.cores.get(req.projectId);
+            const statuses = entry?.core.sessionWorkStatuses ?? {};
+            const hasActive = Object.values(statuses).some(
+              (status) => status === "working" || status === "attention",
+            );
+            if (hasActive && req.allowActiveSessions !== true) {
+              return {
+                id: req.id,
+                ok: false,
+                error: {
+                  code: "ACTIVE_SESSIONS",
+                  message: `One or more sessions in this folder are working or need you. Switching to "${req.branch}" changes the working tree for all of them.`,
+                },
+              };
+            }
+          }
+
+          const res = await checkoutLocalBranch(req.projectPath, req.branch);
+          return { id: req.id, ok: true, type: "git:checkout", current: res.current };
+        } catch (err: any) {
+          return {
+            id: req.id,
+            ok: false,
+            error: { code: err.code || "CHECKOUT_FAILED", message: err.message || String(err) },
+          };
+        }
+      }
     }
   }
 

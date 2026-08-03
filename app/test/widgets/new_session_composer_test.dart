@@ -7,6 +7,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/design/widgets/ab_segmented.dart';
+import 'package:antgrid/models/git_branch.dart';
+import 'package:antgrid/providers/new_session_action.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/widgets/new_session/new_session_composer.dart';
@@ -75,13 +77,13 @@ String _selectedMode(WidgetTester tester) => tester
 
 Widget _host({
   required List<Override> overrides,
-  Future<void> Function(ProviderContainer ref)? submit,
+  StartNewSessionCallback? submit,
   VoidCallback? onOpenFolder,
   Widget Function(Widget composer)? wrap,
 }) {
   final composer = NewSessionComposer(
     onOpenFolder: onOpenFolder ?? () {},
-    submit: submit ?? (_) async {},
+    submit: submit ?? (_, {allowActiveSessions = false}) async {},
   );
   return ProviderScope(
     overrides: overrides,
@@ -105,7 +107,7 @@ void main() {
       await tester.pumpWidget(
         _host(
           overrides: _baseOverrides(target: _project),
-          submit: (ref) async {
+          submit: (ref, {allowActiveSessions = false}) async {
             submitCount++;
           },
         ),
@@ -138,7 +140,7 @@ void main() {
     await tester.pumpWidget(
       _host(
         overrides: _baseOverrides(target: _project),
-        submit: (ref) async {
+        submit: (ref, {allowActiveSessions = false}) async {
           submitCount++;
         },
       ),
@@ -442,7 +444,7 @@ void main() {
                   builder: (context, ref, _) => ref.watch(_composerVisible)
                       ? NewSessionComposer(
                           onOpenFolder: () {},
-                          submit: (_) async {},
+                          submit: (_, {allowActiveSessions = false}) async {},
                         )
                       : const SizedBox.shrink(),
                 ),
@@ -561,5 +563,53 @@ void main() {
         await tester.pumpAndSettle();
       },
     );
+  });
+
+  group('Branch switch confirmation dialog', () {
+    testWidgets('shows AbConfirmDialog on ActiveSessionsBranchSwitchException and retries when confirmed', (tester) async {
+      var submitCalls = <bool>[];
+      await tester.pumpWidget(
+        _host(
+          overrides: [
+            ..._baseOverrides(target: _project),
+            newSessionBranchSelectionProvider.overrideWith(
+              () => ValueController(const NewSessionBranchSelection(
+                targetId: 'p-my-repo',
+                branch: 'dev',
+              )),
+            ),
+          ],
+          submit: (ref, {allowActiveSessions = false}) async {
+            submitCalls.add(allowActiveSessions);
+            if (!allowActiveSessions) {
+              throw ActiveSessionsBranchSwitchException(
+                targetId: _project.id,
+                branch: 'dev',
+              );
+            }
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.byKey(const Key('new-session-prompt-field')),
+        'start session',
+      );
+      await tester.pump();
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(submitCalls, [false]);
+      expect(find.text('Switch branch?'), findsOneWidget);
+
+      await tester.tap(find.text('Switch & start'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(submitCalls, [false, true]);
+    });
   });
 }

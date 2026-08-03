@@ -4,6 +4,7 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
 import '../models/ab_message.dart';
 import '../models/agent_work_status.dart';
+import '../models/git_branch.dart';
 import '../models/session_entry.dart';
 
 export '../models/agent_work_status.dart' show AgentWorkStatus;
@@ -359,6 +360,40 @@ class ControlPlaneClient {
       params: {'projectId': projectId, 'sessionId': sessionId},
     );
     return res['deleted'] == true;
+  }
+
+  Future<GitBranchCatalog> gitBranches({
+    required String projectId,
+  }) async {
+    final res = await transport.request(
+      'git.branches',
+      params: {'projectId': projectId},
+    );
+    try {
+      return GitBranchCatalog.fromJson(res);
+    } catch (e) {
+      throw RpcException('BAD_RESPONSE', 'malformed git.branches response: $e');
+    }
+  }
+
+  Future<String> gitCheckout({
+    required String projectId,
+    required String branch,
+    bool allowActiveSessions = false,
+  }) async {
+    final res = await transport.request(
+      'git.checkout',
+      params: {
+        'projectId': projectId,
+        'branch': branch,
+        'allowActiveSessions': allowActiveSessions,
+      },
+    );
+    final current = res['current'];
+    if (current is! String) {
+      throw RpcException('BAD_RESPONSE', 'malformed git.checkout response: $res');
+    }
+    return current;
   }
 
   Future<void> dispose() async {

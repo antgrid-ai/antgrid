@@ -152,4 +152,43 @@ void main() {
       throwsA(isA<HostControlException>()),
     );
   });
+
+  test('gitBranches parses branch catalog', () async {
+    final stub = _StubControlServer();
+    await stub.start(handler: (req) => {
+          'id': req['id'],
+          'ok': true,
+          'type': 'git:branches',
+          'isRepository': true,
+          'current': 'main',
+          'branches': ['main', 'dev'],
+        });
+    addTearDown(stub.close);
+
+    final client = HostControlClient(port: stub.port, token: 't');
+    final catalog = await client.gitBranches(projectId: 'p1', projectPath: '/path');
+    expect(catalog.isRepository, isTrue);
+    expect(catalog.current, 'main');
+    expect(catalog.branches, ['main', 'dev']);
+  });
+
+  test('gitCheckout returns checked out current branch', () async {
+    final stub = _StubControlServer();
+    await stub.start(handler: (req) => {
+          'id': req['id'],
+          'ok': true,
+          'type': 'git:checkout',
+          'current': 'dev',
+        });
+    addTearDown(stub.close);
+
+    final client = HostControlClient(port: stub.port, token: 't');
+    final current = await client.gitCheckout(
+      projectId: 'p1',
+      projectPath: '/path',
+      branch: 'dev',
+      allowActiveSessions: true,
+    );
+    expect(current, 'dev');
+  });
 }

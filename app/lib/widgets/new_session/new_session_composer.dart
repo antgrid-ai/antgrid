@@ -6,6 +6,7 @@ import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_composer_send_button.dart';
+import '../../design/widgets/ab_confirm_dialog.dart';
 import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_kbd.dart';
 import '../../design/widgets/ab_menu.dart';
@@ -21,8 +22,14 @@ import '../../providers/new_session_picker.dart';
 import '../../screens/upgrade_screen.dart';
 import '../../utils/platform_utils.dart';
 import '../mode_segmented.dart';
+import 'branch_menu.dart';
 import 'environment_menu.dart';
 import 'project_menu.dart';
+
+typedef StartNewSessionCallback = Future<void> Function(
+  ProviderContainer ref, {
+  bool allowActiveSessions,
+});
 
 /// Whether the Start/Send affordance is enabled. Single source of truth for
 /// both the reactive `canSend` (built from watched values in `build`) and the
@@ -43,8 +50,7 @@ bool newSessionCanStart({
 /// `SessionConfig` (target -> seed agent, agent -> mode default, detection ->
 /// installed-agent snap) and the submit handler that used to live in
 /// `NewSessionContent`'s `_SessionFooter` — both source files are deleted in
-/// a follow-up task once this widget is wired in, so nothing here should
-/// diverge from their behavior.
+/// Phase B.
 /// Minimum row slack (hint intrinsic width + trailing gap, with margin)
 /// before the Enter-to-start hint is worth rendering at all.
 const double _enterHintMinWidth = 96;
@@ -66,7 +72,7 @@ class NewSessionComposer extends ConsumerStatefulWidget {
 
   /// Injectable seam for tests; production callers never pass this — it
   /// defaults to the real [startNewSession].
-  final Future<void> Function(ProviderContainer ref) submit;
+  final StartNewSessionCallback submit;
 
   @override
   ConsumerState<NewSessionComposer> createState() => _NewSessionComposerState();
@@ -185,6 +191,27 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     setState(() => _starting = true);
     try {
       await widget.submit(ref.container);
+    } on ActiveSessionsBranchSwitchException catch (e) {
+      if (!mounted) return;
+      final confirm = await AbConfirmDialog.show(
+        context: context,
+        title: 'Switch branch?',
+        body:
+            'One or more sessions in this folder are working or need you. Switching to "${e.branch}" changes the working tree for all of them.',
+        cancelLabel: 'Cancel',
+        confirmLabel: 'Switch & start',
+        destructive: false,
+      );
+      if (confirm == true && mounted) {
+        final target = ref.read(selectedTargetProjectProvider);
+        final selection = ref.read(newSessionBranchSelectionProvider);
+        if (target != null &&
+            target.id == e.targetId &&
+            selection != null &&
+            selection.branch == e.branch) {
+          await widget.submit(ref.container, allowActiveSessions: true);
+        }
+      }
     } on SessionLimitExceededException catch (e) {
       // A legacy relay's retired cap, not a transient failure — retrying won't
       // clear it, so say what will and show the plan the account is on.
@@ -316,13 +343,14 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
               // phone-width screen — the labels are data (a machine name can
               // carry a device-uuid suffix), so their intrinsic widths are
               // unbounded in practice.
-              child: Row(
+              child: Wrap(
+                spacing: AbTokens.space6,
+                runSpacing: AbTokens.space6,
+                crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
-                  const Flexible(child: EnvironmentChip()),
-                  const SizedBox(width: AbTokens.space6),
-                  Flexible(
-                    child: ProjectChip(onOpenFolder: widget.onOpenFolder),
-                  ),
+                  const EnvironmentChip(),
+                  ProjectChip(onOpenFolder: widget.onOpenFolder),
+                  const BranchChip(),
                 ],
               ),
             ),
