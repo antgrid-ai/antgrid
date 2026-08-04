@@ -231,6 +231,32 @@ flutter:
 
   assets:
     - assets/logo/
+    # OFL 1.1 requires the licence travel with the font; bundling it as an
+    # asset satisfies that, and main.dart feeds it to LicenseRegistry.
+    - assets/fonts/OFL.txt
+
+  # JetBrains Mono NL ("NL" = no ligatures — the ligature build would form
+  # combined glyphs across terminal cells, see AbTokens.fontMono). Medium is
+  # bundled purely so the low-DPI weight bump has a real master to step to;
+  # see AbTokens.bumpStrength.
+  fonts:
+    - family: JetBrains Mono NL
+      fonts:
+        - asset: assets/fonts/JetBrainsMonoNL-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/JetBrainsMonoNL-Italic.ttf
+          weight: 400
+          style: italic
+        - asset: assets/fonts/JetBrainsMonoNL-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/JetBrainsMonoNL-MediumItalic.ttf
+          weight: 500
+          style: italic
+        - asset: assets/fonts/JetBrainsMonoNL-Bold.ttf
+          weight: 700
+        - asset: assets/fonts/JetBrainsMonoNL-BoldItalic.ttf
+          weight: 700
+          style: italic
 
   # To add assets to your application, add an assets section, like this:
   # assets:

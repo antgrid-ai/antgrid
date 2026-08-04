@@ -356,6 +356,14 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       AppSettingsService.maxTerminalZoom,
     );
 
+    // Scale with the app's UI Size setting (injected as a MediaQuery
+    // textScaler): the view lays out its own TextPainters, so the ambient
+    // scaler never reaches them — pre-scale the size instead. `_hPad` is
+    // deliberately font-independent and must not scale with this.
+    final terminalFontSize =
+        MediaQuery.textScalerOf(context).scale(AbTokens.fontBody) *
+        effectiveZoom;
+
     final terminalView = GhosttyTerminalView(
       controller: tab.ghostty,
       autofocus: true,
@@ -363,18 +371,19 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       // quick-action. Desktop has no IME bridge, so `true` is a no-op there.
       showKeyboardOnInteraction: _hasPhysicalKeyboard,
       softKeyboardController: _softKeyboardController,
-      // Scale with the app's UI Size setting (injected as a MediaQuery
-      // textScaler): the view lays out its own TextPainters, so the ambient
-      // scaler never reaches them — pre-scale the size instead. `_hPad` is
-      // deliberately font-independent and must not scale with this.
-      fontSize:
-          MediaQuery.textScalerOf(context).scale(AbTokens.fontBody) *
-          effectiveZoom,
-      // Use the design-system mono face per platform (Cascadia Mono on
-      // Windows, Menlo on Apple). Hardcoding 'Cascadia Mono' silently fell
-      // back on macOS — where it isn't installed — to a non-mono face.
+      fontSize: terminalFontSize,
+      // The bundled mono face, so the cell grid measures identically on every
+      // platform. Never hardcode a family here: an earlier 'Cascadia Mono'
+      // literal silently fell back on macOS — where it isn't installed — to a
+      // non-mono face, and the grid measured against the wrong advance.
       fontFamily: AbTokens.fontMono,
       fontFamilyFallback: AbTokens.fontMonoFallbacks,
+      // The low-DPI weight bump reaches chrome through monoStyle/sansStyle,
+      // but the view paints via its own TextPainters — so it has to be handed
+      // in explicitly or the terminal, the surface that matters most here,
+      // stays thin on exactly the displays the bump exists for.
+      fontWeight: AbTokens.bumpedWeight(FontWeight.w400, terminalFontSize),
+      boldFontWeight: AbTokens.bumpedWeight(FontWeight.w700, terminalFontSize),
       // Center the sub-cell remainder on all four sides so the
       // leftover-padding strip doesn't accumulate asymmetrically
       // (otherwise a TUI whose bg differs from chrome — e.g.

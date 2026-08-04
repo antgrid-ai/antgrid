@@ -138,16 +138,31 @@ abstract final class AbTokens {
   static final borderRadiusFull = BorderRadius.circular(radiusFull);
 
   // ── Typography ──
-  /// System monospace family per platform. Resolves to the OS default
-  /// (Menlo on Apple, Consolas on Windows, generic 'monospace' elsewhere)
-  /// so the app inherits the user's terminal font rather than a bundled one.
-  static String get fontMono {
-    if (kIsWeb) return 'monospace';
-    if (Platform.isMacOS || Platform.isIOS) return 'Menlo';
-    if (Platform.isWindows) return 'Cascadia Mono';
-    return 'monospace';
-  }
+  /// Bundled monospace family — the same face on every platform.
+  ///
+  /// This used to resolve to the OS default per platform, on the stated
+  /// rationale that the app should inherit "the user's terminal font". It
+  /// never did: nothing here reads the user's terminal config, so that only
+  /// bought four uncontrolled render targets (Menlo, Cascadia Mono, and
+  /// whatever fontconfig or the browser picks for generic `monospace`).
+  ///
+  /// Bundling matters most on low-DPI Windows and Linux. Flutter rasterizes
+  /// text with grayscale AA and no stem darkening — unlike DirectWrite's
+  /// ClearType, which native apps get — so at DPR 1 the stems come out thin.
+  /// [bumpStrength] compensates by stepping to a heavier master, which only
+  /// works if a heavier master is guaranteed to exist. A system `monospace`
+  /// gave no such guarantee.
+  ///
+  /// "NL" is the no-ligature build, and that is load-bearing: the terminal
+  /// painter has a single-run fast path whose only width guard compares total
+  /// advance, and JetBrains Mono's coding ligatures are width-preserving — so
+  /// the ligature build would silently fuse `=>`/`!=`/`->` across cells.
+  static const fontMono = 'JetBrains Mono NL';
 
+  /// Coverage fallbacks only — the bundled face is Latin/Greek/Cyrillic, so
+  /// CJK, emoji and powerline glyphs in agent output still resolve here.
+  /// Box-drawing does NOT rely on this: the terminal renders those itself as
+  /// sprite glyphs (`_terminalBoxDrawingSpec` in ghostty_vte_flutter).
   static const fontMonoFallbacks = [
     'Cascadia Mono',
     'Cascadia Code',
@@ -265,7 +280,14 @@ abstract final class AbTokens {
   /// displays (grayscale AA leaves stems thin), 0 on hi-DPI (render as designed).
   static int activeWeightOffset = 0;
 
-  /// Below this DPR, bump one weight step. Tune on a low-DPI external monitor.
+  /// Below this DPR, bump one weight step.
+  ///
+  /// DPR is a proxy, and an imperfect one: on Windows it reports the display
+  /// *scale factor*, not physical density, so a 4K panel at 150% (genuinely
+  /// dense) and a 1080p panel at 150% (not) both arrive as 1.5 and are
+  /// treated identically. There is no cheap way to tell them apart from
+  /// Flutter, so this cut deliberately errs toward not bumping. Retune on a
+  /// low-DPI external monitor, not from first principles.
   static const double lowDprThreshold = 1.5;
 
   /// Text at or below this size is never bumped — heavier strokes merge at
@@ -273,10 +295,24 @@ abstract final class AbTokens {
   static const double minBumpFontSize = fontXxs;
 
   /// Fraction of a full 100-unit weight step applied when the low-DPI bump is
-  /// active. 1.0 = full step (w400→w500); lower softens it. Variable fonts
-  /// (e.g. Cascadia Mono) honor the fractional weight via the `wght` axis;
-  /// static fonts fall back to the rounded [FontWeight] in [_bump].
-  static const double bumpStrength = 0.45;
+  /// active. 1.0 = full step (w400→w500); lower softens it.
+  ///
+  /// Must stay at 1.0 while the mono family is a set of static masters. A
+  /// fractional value only means anything on a variable font, where
+  /// [_bumpVariations] can ask for `wght: 445`; against static faces [_bump]
+  /// rounds it, and anything under 0.5 rounds to zero — which is what the
+  /// previous 0.45 did on every platform, bumping nothing at all. Softening
+  /// the step again requires shipping a variable face, not lowering this.
+  static const double bumpStrength = 1.0;
+
+  /// [_bump] for callers that build their own [TextStyle] instead of going
+  /// through [monoStyle]/[sansStyle].
+  ///
+  /// The terminal is the reason this is public: it paints through its own
+  /// TextPainters inside ghostty_vte_flutter, so the ambient offset cannot
+  /// reach it the way it reaches chrome. Without this the primary surface is
+  /// the one place the low-DPI compensation silently does not apply.
+  static FontWeight bumpedWeight(FontWeight w, double size) => _bump(w, size);
 
   static FontWeight _bump(FontWeight w, double size) {
     if (activeWeightOffset == 0 || size <= minBumpFontSize) return w;
@@ -287,9 +323,11 @@ abstract final class AbTokens {
     return FontWeight.values[i];
   }
 
-  /// Continuous `wght` variation mirroring [_bump], so the low-DPI bump can be
-  /// a fraction of a full weight step on variable fonts. Returns null when no
-  /// bump applies, leaving the font at its default weight.
+  /// Continuous `wght` variation mirroring [_bump]. A static face ignores it
+  /// and takes [_bump]'s rounded weight instead, so the two must agree — they
+  /// do only while [bumpStrength] is a whole step. This still earns its place
+  /// for [sansStyle], which resolves to system faces that may be variable.
+  /// Returns null when no bump applies, leaving the font at its own default.
   static List<FontVariation>? _bumpVariations(FontWeight w, double size) {
     if (activeWeightOffset == 0 || size <= minBumpFontSize) return null;
     if (!FontWeight.values.contains(w)) return null;

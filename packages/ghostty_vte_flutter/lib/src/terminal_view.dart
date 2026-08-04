@@ -176,6 +176,8 @@ class GhosttyTerminalView extends StatefulWidget {
     this.fontFamily,
     this.fontFamilyFallback,
     this.fontPackage,
+    this.fontWeight = FontWeight.w400,
+    this.boldFontWeight = FontWeight.w700,
     this.letterSpacing = 0,
     this.cellWidthScale = 1,
     this.renderer = GhosttyTerminalRendererMode.renderState,
@@ -286,6 +288,22 @@ class GhosttyTerminalView extends StatefulWidget {
 
   /// Optional package that provides [fontFamily].
   final String? fontPackage;
+
+  /// Weight for ordinary (non-SGR-bold) cells.
+  ///
+  /// Exists so a host can compensate for thin rasterization — Flutter draws
+  /// text with grayscale AA and no stem darkening, so on a low-DPI display
+  /// stems come out lighter than a DirectWrite/ClearType app's. Raising this
+  /// one step is the fix; it must be a weight the font family actually ships
+  /// a master for, or the engine synthesizes and the cell advance can shift.
+  final FontWeight fontWeight;
+
+  /// Weight for cells carrying SGR bold (ESC[1m).
+  ///
+  /// Kept separate rather than derived from [fontWeight] so raising the base
+  /// weight cannot silently collapse the bold/normal distinction — the whole
+  /// point of bold is that it reads as different from its neighbours.
+  final FontWeight boldFontWeight;
 
   /// Extra tracking applied to terminal glyph layout.
   final double letterSpacing;
@@ -1520,9 +1538,14 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     final painter = TextPainter(
       text: TextSpan(
         text: 'W',
+        // Measure at the weight ordinary cells actually paint at. A monospace
+        // family should advance identically across weights, but a synthesized
+        // or badly-mastered one need not — measuring at a weight we never draw
+        // would size every cell against a glyph that is never rendered.
         style: _terminalTextStyle(
           fontSize: widget.fontSize,
           lineHeight: widget.lineHeight,
+          fontWeight: widget.fontWeight,
         ),
       ),
       textDirection: TextDirection.ltr,
@@ -3276,6 +3299,8 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
                             fontFamily: widget.fontFamily ?? 'monospace',
                             fontFamilyFallback: widget.fontFamilyFallback,
                             fontPackage: widget.fontPackage,
+                            fontWeight: widget.fontWeight,
+                            boldFontWeight: widget.boldFontWeight,
                             letterSpacing: metrics.letterSpacing,
                             padding: _effectivePadding(size, metrics),
                             headerHeight: _headerHeight,
@@ -3729,6 +3754,8 @@ class _GhosttyTerminalPainter extends CustomPainter {
     required this.fontFamily,
     required this.fontFamilyFallback,
     required this.fontPackage,
+    required this.fontWeight,
+    required this.boldFontWeight,
     required this.letterSpacing,
     required this.padding,
     required this.headerHeight,
@@ -3766,6 +3793,8 @@ class _GhosttyTerminalPainter extends CustomPainter {
   final String fontFamily;
   final List<String>? fontFamilyFallback;
   final String? fontPackage;
+  final FontWeight fontWeight;
+  final FontWeight boldFontWeight;
   final double letterSpacing;
   final EdgeInsets padding;
   final double headerHeight;
@@ -3925,6 +3954,8 @@ class _GhosttyTerminalPainter extends CustomPainter {
         charWidth != oldDelegate.charWidth ||
         linePixels != oldDelegate.linePixels ||
         fontSize != oldDelegate.fontSize ||
+        fontWeight != oldDelegate.fontWeight ||
+        boldFontWeight != oldDelegate.boldFontWeight ||
         fontFamily != oldDelegate.fontFamily ||
         !listEquals(fontFamilyFallback, oldDelegate.fontFamilyFallback) ||
         fontPackage != oldDelegate.fontPackage ||
@@ -4028,6 +4059,11 @@ class _GhosttyTerminalPainter extends CustomPainter {
           final decorationColor = run.style.hasExplicitUnderlineColor
               ? run.style.underlineColor
               : textForeground;
+          // One source for the run's weight: the painted style, the single-run
+          // width probe and the painter cache key must all agree, or the cache
+          // returns a painter laid out at a different weight than the probe
+          // measured.
+          final runWeight = run.style.bold ? boldFontWeight : fontWeight;
           final textStyle = TextStyle(
             color: textForeground,
             fontFamily: fontFamily,
@@ -4036,7 +4072,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
             fontSize: fontSize,
             height: linePixels / fontSize,
             letterSpacing: letterSpacing,
-            fontWeight: run.style.bold ? FontWeight.w700 : FontWeight.w400,
+            fontWeight: runWeight,
             fontStyle: run.style.italic ? FontStyle.italic : FontStyle.normal,
             decoration: _nativeTextDecoration(
               style: run.style,
@@ -4063,9 +4099,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
                 _shouldPaintTerminalRunAsSingleRun(
                   text: run.text,
                   width: run.width * charWidth,
-                  fontWeight: run.style.bold
-                      ? FontWeight.w700
-                      : FontWeight.w400,
+                  fontWeight: runWeight,
                   fontStyle: run.style.italic
                       ? FontStyle.italic
                       : FontStyle.normal,
@@ -4082,9 +4116,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
                   fontPackage: fontPackage,
                   letterSpacing: letterSpacing,
                   color: textForeground,
-                  fontWeight: run.style.bold
-                      ? FontWeight.w700
-                      : FontWeight.w400,
+                  fontWeight: runWeight,
                   fontStyle: run.style.italic
                       ? FontStyle.italic
                       : FontStyle.normal,
