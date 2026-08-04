@@ -199,7 +199,7 @@ void main() {
     (name: 'phone', size: const Size(390, 844)),
     (name: 'desktop', size: const Size(1200, 800)),
   ]) {
-    testWidgets('${layout.name} keeps managed sessions flat and shows branch metadata', (
+    testWidgets('${layout.name} keeps managed sessions flat and one line each', (
       tester,
     ) async {
       tester.view.devicePixelRatio = 1;
@@ -219,8 +219,11 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byType(SessionRow), findsNWidgets(2));
-      expect(find.text('antgrid/session-1'), findsOneWidget);
-      expect(find.text('antgrid/session-2'), findsOneWidget);
+      // The branch is deliberately not on the row: it is a generated name that
+      // says nothing the session name doesn't, and a second line doubles the
+      // height of every isolated session in a list built for scanning.
+      expect(find.text('antgrid/session-1'), findsNothing);
+      expect(find.text('antgrid/session-2'), findsNothing);
     });
   }
 }

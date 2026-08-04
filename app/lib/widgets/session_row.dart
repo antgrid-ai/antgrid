@@ -220,16 +220,6 @@ class _SessionRowState extends ConsumerState<SessionRow> {
                   style: AbTokens.sansStyle(),
                   overflow: TextOverflow.ellipsis,
                 ),
-          subtitle:
-              session.checkoutKind == 'managed-worktree' &&
-                  (session.checkoutBranch?.isNotEmpty ?? false)
-              ? Text(
-                  session.checkoutBranch!,
-                  key: ValueKey('session-checkout-branch-${session.id}'),
-                  style: AbTokens.monoStyle(fontSize: AbTokens.fontXxs),
-                  overflow: TextOverflow.ellipsis,
-                )
-              : null,
           // Hover-only kebab kept in the tree (and its size reserved) so the
           // row height never jitters — including while editing, when it's
           // hidden but its slot still anchors the row's height.
