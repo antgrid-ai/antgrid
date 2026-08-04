@@ -10,6 +10,7 @@ import 'reply_latch.dart';
 
 class TerminalService {
   final ProjectSession session;
+  final String checkoutId;
 
   StreamSubscription<Map<String, dynamic>>? _heavySub;
   StreamSubscription<Map<String, dynamic>>? _statusSub;
@@ -56,16 +57,17 @@ class TerminalService {
 
   TerminalService.fromSession(
     this.session, {
+    this.checkoutId = 'main',
     this.gitActionTimeout = const Duration(seconds: 15),
     this.terminalStartTimeout = const Duration(seconds: 15),
   }) {
     // Heavy tier — terminal:output + terminal:snapshot (HEAVY tier messages).
-    _heavySub = session.heavyStream.listen(_onHeavyJson);
+    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
 
     // Status tier — terminal:started, terminal:exited, agent:status,
     // git:branches, git:checkout-result. Routed through the focus-gated
     // router status stream so all dispatch goes through one path.
-    _statusSub = session.statusStream.listen(_onStatusJson);
+    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
   }
 
   void _setState(TerminalState state) {
@@ -113,7 +115,7 @@ class TerminalService {
   }
 
   void _requestTerminalSnapshot(String terminalId) {
-    session.send(
+    session.sendForCheckout(checkoutId,
       createAbMessage('terminal:snapshot:request', {'terminalId': terminalId}),
     );
   }
@@ -151,7 +153,7 @@ class TerminalService {
   }
 
   Future<void> _send(Map<String, dynamic> message) async {
-    await session.send(message);
+    await session.sendForCheckout(checkoutId, message);
   }
 
   // --- Message handlers ---
@@ -505,8 +507,9 @@ class TerminalService {
     _pendingTerminalTimers.remove(terminalId);
     if (!_pendingTerminalIds.remove(terminalId)) return;
     final tab = _state.tabs[terminalId];
-    if (tab == null || tab.sessionState != TerminalSessionState.starting)
+    if (tab == null || tab.sessionState != TerminalSessionState.starting) {
       return;
+    }
     tab.ghostty.setSessionRunning(false);
     final tabs = Map<String, TerminalTab>.from(_state.tabs);
     tabs[terminalId] = tab.copyWith(sessionState: TerminalSessionState.exited);

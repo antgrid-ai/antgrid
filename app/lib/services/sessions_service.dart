@@ -27,6 +27,18 @@ const _kModeReplyTimeout = Duration(seconds: 25);
 /// `ok` and `error` through instead.
 typedef SessionModeResult = ({bool ok, String? error});
 
+/// Typed bridge refusal. UI code can make a safe choice (for example, a dirty
+/// worktree confirmation) without parsing a translated/display error string.
+class SessionOperationException implements Exception {
+  const SessionOperationException(this.errorCode, this.message);
+
+  final String? errorCode;
+  final String? message;
+
+  @override
+  String toString() => message ?? errorCode ?? 'Session operation failed';
+}
+
 class SessionsState {
   final String projectId;
   final List<SessionEntry> sessions;
@@ -81,6 +93,7 @@ class SessionsService {
 
   final Map<String, PendingReply<List<SessionEntry>>> _pendingList = {};
   final Map<String, PendingReply<SessionEntry?>> _pendingMutations = {};
+  final Map<String, PendingReply<SessionEntry?>> _pendingCreates = {};
   final Map<String, PendingReply<bool>> _pendingDeletes = {};
   final Map<String, PendingReply<SessionModeResult>> _pendingModeChanges = {};
 
@@ -159,6 +172,7 @@ class SessionsService {
 
     final ok = j['ok'] as bool? ?? false;
     final error = j['error'] as String?;
+    final errorCode = j['errorCode'] as String?;
     final sessionJson = j['session'];
     final entry = sessionJson is Map<String, dynamic>
         ? SessionEntry.fromJson(sessionJson)
@@ -168,11 +182,25 @@ class SessionsService {
       _setState(_state.copyWith(error: error));
     }
 
+    final createPending = _pendingCreates.remove(requestId);
+    if (createPending != null) {
+      if (ok) {
+        createPending.complete(entry);
+      } else {
+        createPending.fail(SessionOperationException(errorCode, error));
+      }
+      return;
+    }
+
     // Delete uses a bool completer and set-mode an ok/error one; everything
     // else uses a session-entry completer.
     final deletePending = _pendingDeletes.remove(requestId);
     if (deletePending != null) {
-      deletePending.complete(ok);
+      if (ok) {
+        deletePending.complete(true);
+      } else {
+        deletePending.fail(SessionOperationException(errorCode, error));
+      }
       return;
     }
 
@@ -249,14 +277,25 @@ class SessionsService {
     String? command,
     String? args,
     String? mode,
+    String isolation = 'shared',
+    String? baseBranch,
   }) {
-    return _mutate('session:create', {
+    final requestId = _newRequestId();
+    final pending = _newPending<SessionEntry?>(
+      () => _pendingCreates.remove(requestId),
+    );
+    _pendingCreates[requestId] = pending;
+    unawaited(_send(createAbMessage('session:create', {
+      'requestId': requestId,
       'name': ?name,
       'tool': ?tool,
       'command': ?command,
       'args': ?args,
       'mode': ?mode,
-    });
+      'isolation': isolation,
+      'baseBranch': ?baseBranch,
+    })));
+    return pending.future;
   }
 
   Future<SessionEntry?> start(String id, {String? initialPrompt}) {
@@ -301,7 +340,12 @@ class SessionsService {
     return pending.future;
   }
 
-  Future<bool> delete(String id) {
+  Future<bool> delete(
+    String id, {
+    bool? force,
+    bool? removeCheckout,
+    bool? deleteBranch,
+  }) {
     final requestId = _newRequestId();
     final pending = _newPending<bool>(() => _pendingDeletes.remove(requestId));
     _pendingDeletes[requestId] = pending;
@@ -310,6 +354,9 @@ class SessionsService {
         createAbMessage('session:delete', {
           'requestId': requestId,
           'sessionId': id,
+          'force': ?force,
+          'removeCheckout': ?removeCheckout,
+          'deleteBranch': ?deleteBranch,
         }),
       ),
     );
@@ -352,6 +399,10 @@ class SessionsService {
       p.fail(error);
     }
     _pendingMutations.clear();
+    for (final p in _pendingCreates.values) {
+      p.fail(error);
+    }
+    _pendingCreates.clear();
     for (final p in _pendingDeletes.values) {
       p.fail(error);
     }

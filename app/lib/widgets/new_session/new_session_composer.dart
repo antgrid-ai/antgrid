@@ -40,7 +40,12 @@ bool newSessionCanStart({
   required bool hasValidTarget,
   required bool isCustom,
   required String customCmd,
-}) => !starting && hasValidTarget && (!isCustom || customCmd.trim().isNotEmpty);
+  bool isolated = false,
+  bool isolationReady = false,
+}) => !starting &&
+    hasValidTarget &&
+    (!isCustom || customCmd.trim().isNotEmpty) &&
+    (!isolated || isolationReady);
 
 /// Bottom-anchored composer for the New Session canvas.
 ///
@@ -60,6 +65,13 @@ const double _enterHintMinWidth = 96;
 /// row slack (ellipsizing its label) instead of the desktop Enter-hint slot.
 /// Degradation order is icons → hint → label; the labels never drop.
 const double _composerRowRoomyMinWidth = 460;
+
+/// Share of the context row a single picker label may claim before it starts
+/// ellipsizing. Two of them cap out together at well under the full row, which
+/// is what keeps the fixed-width worktree chip and a readable stub of the
+/// branch on the line no matter how pathological the machine and project names
+/// get.
+const double _chipLabelCapFraction = 0.3;
 
 class NewSessionComposer extends ConsumerStatefulWidget {
   const NewSessionComposer({
@@ -183,6 +195,8 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     hasValidTarget: ref.read(newSessionHasValidTargetProvider),
     isCustom: ref.read(newSessionAgentProvider) == const CustomAgent(),
     customCmd: ref.read(newSessionCustomCmdProvider),
+    isolated: ref.read(newSessionIsolatedProvider),
+    isolationReady: ref.read(newSessionIsolationReadyProvider),
   );
 
   /// Ported verbatim from `_SessionFooterState.build`'s Start button `onTap`.
@@ -251,7 +265,11 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     // Picking a project (local folder or remote) hands focus straight to the
     // prompt field so the next keystroke describes the task — the
     // composer's analogue of the old SessionConfig's name-field grab.
-    ref.listen(selectedTargetProjectProvider, (_, next) {
+    ref.listen(selectedTargetProjectProvider, (previous, next) {
+      if (previous?.id != next?.id) {
+        ref.read(newSessionIsolatedProvider.notifier).set(false);
+        ref.read(newSessionBranchSelectionProvider.notifier).set(null);
+      }
       seedNewSessionAgentForTarget(ref.container, next);
       if (next != null) _promptFocus.requestFocus();
     });
@@ -307,6 +325,8 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     // rebuild the whole composer subtree each time. The provider only notifies
     // when the resolved value flips.
     final supportsChat = ref.watch(newSessionSupportsChatProvider);
+    final isolated = ref.watch(newSessionIsolatedProvider);
+    final isolationReady = ref.watch(newSessionIsolationReadyProvider);
     // Reactive form of `_canStart`, built from the values already watched
     // above so the button reacts to every one of them; both go through
     // [newSessionCanStart] so the watch and read paths stay in lockstep.
@@ -315,6 +335,8 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
       hasValidTarget: hasValidTarget,
       isCustom: isCustom,
       customCmd: customCmd,
+      isolated: isolated,
+      isolationReady: isolationReady,
     );
 
     final p = context.antgrid;
@@ -352,20 +374,45 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                 AbTokens.space10,
                 0,
               ),
-              // Both chips are flexible so a long machine or project label
-              // ellipsizes inside its chip instead of overflowing the row on a
-              // phone-width screen — the labels are data (a machine name can
-              // carry a device-uuid suffix), so their intrinsic widths are
-              // unbounded in practice.
-              child: Wrap(
-                spacing: AbTokens.space6,
-                runSpacing: AbTokens.space6,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  const EnvironmentChip(),
-                  ProjectChip(onOpenFolder: widget.onOpenFolder),
-                  const BranchChip(),
-                ],
+              // One line, always. The row is the session's target stated as a
+              // sentence, and a sentence that folds reads as two unrelated
+              // fragments. Every label here is data with an unbounded
+              // intrinsic width (a machine name carries a device-uuid suffix,
+              // a branch carries `Base: ` plus a generated name), so the row
+              // has to decide what gives:
+              //   - the branch takes the slack and ellipsizes, because it is
+              //     the one that is long in practice and the one that stays
+              //     legible truncated;
+              //   - machine and project are capped at a fraction of the row so
+              //     a pathological label cannot crowd the branch out, but stay
+              //     intrinsic below that cap so the branch keeps the TRUE
+              //     remainder — flexing all three instead would strand each
+              //     one's unused share and truncate the branch early;
+              //   - the worktree chip never shrinks: its label is a constant,
+              //     and it is the only word the chip has.
+              child: LayoutBuilder(
+                builder: (context, rowConstraints) {
+                  final cap = BoxConstraints(
+                    maxWidth: rowConstraints.maxWidth * _chipLabelCapFraction,
+                  );
+                  return Row(
+                    children: [
+                      ConstrainedBox(
+                        constraints: cap,
+                        child: const EnvironmentChip(),
+                      ),
+                      const SizedBox(width: AbTokens.space6),
+                      ConstrainedBox(
+                        constraints: cap,
+                        child: ProjectChip(onOpenFolder: widget.onOpenFolder),
+                      ),
+                      const SizedBox(width: AbTokens.space6),
+                      const Flexible(child: BranchChip()),
+                      const SizedBox(width: AbTokens.space6),
+                      const _WorktreeChip(),
+                    ],
+                  );
+                },
               ),
             ),
             Padding(
@@ -580,7 +627,45 @@ class _PromptField extends StatelessWidget {
   }
 }
 
-/// Create-time binding of the shared [ModeSegmented] to the New Session form.
+/// Worktree opt-in, as the last term of the context row's sentence:
+/// `Local · my-repo · main · worktree`.
+///
+/// Last on purpose — it modifies the chip before it. Switching it on re-labels
+/// the branch chip to `Base: main`, which is the entire explanation of what
+/// isolation does to the current selection, delivered by the row itself.
+class _WorktreeChip extends ConsumerWidget {
+  const _WorktreeChip();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Same gate as [BranchChip]: with no project chosen the Git-shaped chips
+    // have nothing to describe, and a dead one beside "Select project…" is
+    // noise rather than discovery.
+    if (ref.watch(selectedTargetProjectProvider) == null) {
+      return const SizedBox.shrink();
+    }
+
+    final catalog = ref.watch(newSessionBranchCatalogProvider);
+    final ready = ref.watch(newSessionIsolationReadyProvider);
+
+    return ComposerToggleChip(
+      key: const Key('new-session-worktree-chip'),
+      label: 'worktree',
+      value: ref.watch(newSessionIsolatedProvider),
+      tooltip: ready
+          ? 'Give this session its own branch and working directory'
+          : catalog.isLoading
+          ? 'Checking this project…'
+          : catalog.value?.isRepository == false
+          ? 'Requires a Git repository'
+          : 'Update the bridge to isolate sessions',
+      onChanged: ready
+          ? (next) => ref.read(newSessionIsolatedProvider.notifier).set(next)
+          : null,
+    );
+  }
+}
+
 class _ModeSegmented extends ConsumerWidget {
   const _ModeSegmented({required this.supportsChat, this.showIcons = true});
 

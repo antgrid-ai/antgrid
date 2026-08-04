@@ -72,6 +72,7 @@ test("loopback git:branches and git:checkout work without creating a core", asyn
 
   expect(resBranches.ok).toBe(true);
   expect(resBranches.isRepository).toBe(true);
+  expect(resBranches.worktreeSessionsSupported).toBe(true);
   expect(resBranches.branches).toContain("dev");
   expect(h.get("p1")).toBeNull();
 
@@ -92,7 +93,7 @@ test("loopback checkout refreshes a matching warm core", async () => {
   let refreshes = 0;
   (h as any).cores.set("p1", {
     core: {
-      sessionWorkStatuses: {},
+      mainSessionWorkStatuses: {},
       refreshGitState: async () => {
         refreshes++;
       },
@@ -166,6 +167,7 @@ test("remote RPC git.branches succeeds for seeded project", async () => {
 
   expect(res.ok).toBe(true);
   expect(res.result.isRepository).toBe(true);
+  expect(res.result.worktreeSessionsSupported).toBe(true);
   expect(res.result.branches).toContain("dev");
 });
 
@@ -177,7 +179,7 @@ test("active session guard returns ACTIVE_SESSIONS for working or attention sess
   // Inject a warm core with working session
   (h as any).cores.set("p1", {
     core: {
-      sessionWorkStatuses: { s1: "working" },
+      mainSessionWorkStatuses: { s1: "working" },
       refreshGitState: async () => {},
       shutdown: async () => {},
     },
@@ -199,6 +201,38 @@ test("active session guard returns ACTIVE_SESSIONS for working or attention sess
   expect(res.error.code).toBe("ACTIVE_SESSIONS");
 });
 
+test("active session guard ignores a working isolated session", async () => {
+  const h = host!;
+  seedCatalog(h, "p1", gitDir);
+  await setMobileAccess(h, true);
+
+  // A managed-worktree session works in its own checkout, so a main-checkout
+  // branch switch cannot disturb it — it must not block the switch.
+  (h as any).cores.set("p1", {
+    core: {
+      sessionWorkStatuses: { main1: "done", iso1: "working" },
+      mainSessionWorkStatuses: { main1: "done" },
+      refreshGitState: async () => {},
+      shutdown: async () => {},
+    },
+    path: gitDir,
+    mode: "local",
+    lastFocusedMs: 0,
+  });
+
+  const res = (await h.handleGitCheckoutRpc({
+    id: "msg1",
+    timestamp: 0,
+    type: "request",
+    requestId: "r1",
+    method: "git.checkout",
+    params: { projectId: "p1", branch: "dev" },
+  } as any)) as any;
+
+  expect(res.ok).toBe(true);
+  expect(res.result.current).toBe("dev");
+});
+
 test("active session guard allows checkout with allowActiveSessions: true", async () => {
   const h = host!;
   seedCatalog(h, "p1", gitDir);
@@ -207,7 +241,7 @@ test("active session guard allows checkout with allowActiveSessions: true", asyn
   let refreshes = 0;
   (h as any).cores.set("p1", {
     core: {
-      sessionWorkStatuses: { s1: "working" },
+      mainSessionWorkStatuses: { s1: "working" },
       refreshGitState: async () => {
         refreshes++;
       },
@@ -244,7 +278,7 @@ test("active session guard does not warn if checking out same current branch", a
 
   (h as any).cores.set("p1", {
     core: {
-      sessionWorkStatuses: { s1: "working" },
+      mainSessionWorkStatuses: { s1: "working" },
       refreshGitState: async () => {},
       shutdown: async () => {},
     },

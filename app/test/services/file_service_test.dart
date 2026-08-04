@@ -367,6 +367,68 @@ void main() {
     await session.close();
   });
 
+  group('tree hydration', () {
+    // A managed checkout's tree:full is pushed while its runtime is prepared —
+    // before the session list that makes the app build the bundle — so a bundle
+    // that waited for the push showed an empty tree for the whole session.
+    test('a bundle built after the push pulls its own tree', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      t.emit('tree:full', {
+        'projectId': 'p',
+        'checkoutId': 'wt-1',
+        'root': _rootNode(children: [_file('a.txt', 'a.txt')]),
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      final svc = FileService.fromSession(session, checkoutId: 'wt-1');
+      await Future<void>.delayed(Duration.zero);
+      final request = t.sent.lastWhere(
+        (m) => m['type'] == 'file:tree:snapshot:request',
+      );
+      expect(request['checkoutId'], 'wt-1');
+
+      t.emit('file:tree:snapshot', {
+        'checkoutId': 'wt-1',
+        'seq': 1,
+        'tree': _rootNode(children: [_file('a.txt', 'a.txt')]),
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.root!.children, hasLength(1));
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('re-pulls on reconnect and stops after dispose', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session, checkoutId: 'wt-1');
+      await Future<void>.delayed(Duration.zero);
+
+      t.redriveHydrators();
+      await Future<void>.delayed(Duration.zero);
+      var requests = t.sent.where(
+        (m) =>
+            m['type'] == 'file:tree:snapshot:request' &&
+            m['checkoutId'] == 'wt-1',
+      );
+      expect(requests, hasLength(2));
+
+      await svc.dispose();
+      t.redriveHydrators();
+      await Future<void>.delayed(Duration.zero);
+      requests = t.sent.where(
+        (m) =>
+            m['type'] == 'file:tree:snapshot:request' &&
+            m['checkoutId'] == 'wt-1',
+      );
+      expect(requests, hasLength(2));
+
+      await session.close();
+    });
+  });
+
   group('git:diff bounded by tier-2 action', () {
     test('requestDiff whose content never arrives clears diffLoading after '
         'the timeout', () async {

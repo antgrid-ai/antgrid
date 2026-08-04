@@ -2,6 +2,7 @@ export interface GitBranchCatalog {
   isRepository: boolean;
   current: string | null;
   branches: string[];
+  worktreeSessionsSupported: boolean;
 }
 
 export class GitHelperError extends Error {
@@ -27,6 +28,7 @@ export async function listLocalBranches(projectPath: string): Promise<GitBranchC
       isRepository: false,
       current: null,
       branches: [],
+      worktreeSessionsSupported: false,
     };
   }
 
@@ -82,6 +84,7 @@ export async function listLocalBranches(projectPath: string): Promise<GitBranchC
     isRepository: true,
     current,
     branches: finalBranches,
+    worktreeSessionsSupported: false,
   };
 }
 

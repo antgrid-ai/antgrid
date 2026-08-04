@@ -678,7 +678,14 @@ export class RelayClient {
     }
 
     // Step 7: sealed app:ready with retransmit until established.
-    const appReady = { type: "app:ready", attemptId, confirm: phoneConfirmTag(sessionKeys.confirm).toString("base64") };
+    // `capabilities` mirrors the production Dart client (connection_handshake.dart):
+    // without checkoutRouting the bridge treats this app as pre-worktree and
+    // refuses to stream any project holding a managed session.
+    const appReady = {
+      type: "app:ready", attemptId,
+      confirm: phoneConfirmTag(sessionKeys.confirm).toString("base64"),
+      capabilities: { checkoutRouting: true },
+    };
     if (opts.dropEstablished) this.dropEstablishedAttemptId = attemptId;
     const establishedP = this.waitFor((m: any) => m.type === "established" && m.attemptId === attemptId, timeoutMs);
     if (!opts.dropFirstAppReady) this.sendSealedFrame(appReady, transport, "control");
@@ -766,7 +773,11 @@ export class RelayClient {
         this.pending = null;
         throw new Error("rekey agent-ready confirm invalid");
       }
-      const appReady = { type: "app:ready", attemptId, confirm: phoneConfirmTag(sessionKeys.confirm).toString("base64") };
+      const appReady = {
+        type: "app:ready", attemptId,
+        confirm: phoneConfirmTag(sessionKeys.confirm).toString("base64"),
+        capabilities: { checkoutRouting: true },
+      };
       const establishedP = this.waitFor((m: any) => m.type === "established" && m.attemptId === attemptId, timeoutMs);
       this.sendSealedFrame(appReady, transport, "control");
       const retransmit = setInterval(() => this.sendSealedFrame(appReady, transport, "control"), 2_000);

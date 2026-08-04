@@ -93,6 +93,20 @@ describe("LocalListener handshake", () => {
     expect(msg).toEqual({ type: "ready" });
     ws2.close();
   });
+
+  test("old owner is closed before managed-checkout frames can be delivered", async () => {
+    const ws = await openWs(); // legacy hello omits capabilities.checkoutRouting
+    await nextMessage(ws);
+    const closed = nextClose(ws);
+
+    expect(listener.requireCheckoutRouting()).toBe(false);
+    expect(await closed).toEqual({
+      code: 4410,
+      reason: 'checkout routing update required',
+    });
+
+    bus.publish(createMessage('terminal:output', { terminalId: 's', data: 'must not arrive' }), 'control');
+  });
 });
 
 describe("LocalListener routing", () => {

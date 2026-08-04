@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
+import { computeProjectId } from "../src/project-id";
 import { MessageBus } from "../src/message-bus";
 import { ProjectStartMessage, parseMessage } from "../src/protocol";
 import type { RelayClient, RelayClientOptions } from "../src/relay-client";
@@ -55,6 +56,23 @@ function tempFolder(): string {
   return f;
 }
 
+// Project ids are host-resolved: `open` rejects any id that is not
+// computeProjectId(folder) (PROJECT_ID_MISMATCH). These helpers keep the
+// readable "projX" aliases while using the real id on the wire.
+const projectIds = new Map<string, string>();
+function proj(alias: string): string {
+  const id = projectIds.get(alias);
+  if (!id) throw new Error(`project alias not opened: ${alias}`);
+  return id;
+}
+async function openAs(h: HostServer, alias: string, mode: "local" | "remote"): Promise<OpenResultLike> {
+  const folder = tempFolder();
+  const projectId = computeProjectId(folder);
+  projectIds.set(alias, projectId);
+  return h.open(projectId, folder, mode);
+}
+type OpenResultLike = Awaited<ReturnType<HostServer["open"]>>;
+
 /** Flip the machine switch through its only mutation path, the loopback verb. */
 async function setMobileAccess(h: HostServer, enabled: boolean): Promise<void> {
   await h.handleRemoteAccessVerb({ id: "t", type: "mobile-access:set", enabled });
@@ -80,30 +98,30 @@ afterEach(async () => {
 test("starts a known stopped project when mobile access is on", async () => {
   const h = host!;
   // Seed projA known-but-stopped: open then stop (now in seenProjects, not warm).
-  await h.open("projA", tempFolder(), "remote");
-  await h.stop("projA");
-  expect(h.get("projA")).toBeNull(); // stopped, not warm
+  await openAs(h, "projA", "remote");
+  await h.stop(proj("projA"));
+  expect(h.get(proj("projA"))).toBeNull(); // stopped, not warm
   await setMobileAccess(h, true);
   const bus = new MessageBus();
 
-  const ok = await h.handleControlPlaneVerb({ type: "project:start", projectId: "projA" } as any, bus);
+  const ok = await h.handleControlPlaneVerb({ type: "project:start", projectId: proj("projA") } as any, bus);
   expect(ok.ok).toBe(true);
-  expect(h.get("projA")?.running).toBe(true);
+  expect(h.get(proj("projA"))?.running).toBe(true);
 });
 
 test("rejects project:start while mobile access is off (NOT_ALLOWED, no core)", async () => {
   const h = host!;
-  await h.open("projA", tempFolder(), "remote");
-  await h.stop("projA");
+  await openAs(h, "projA", "remote");
+  await h.stop(proj("projA"));
   // Machine switch left at its default (off) — a fresh install is unreachable.
   const bus = new MessageBus();
 
   // SECURITY: checked before open(), which would run the project's startup
   // terminals — a rejected start must leave NO core.
-  const denied = await h.handleControlPlaneVerb({ type: "project:start", projectId: "projA" } as any, bus);
+  const denied = await h.handleControlPlaneVerb({ type: "project:start", projectId: proj("projA") } as any, bus);
   expect(denied.ok).toBe(false);
   if (!denied.ok) expect(denied.error.code).toBe("NOT_ALLOWED");
-  expect(h.get("projA")).toBeNull();
+  expect(h.get(proj("projA"))).toBeNull();
 });
 
 test("rejects a projectId with no path on record (UNKNOWN_PROJECT, no core)", async () => {
@@ -162,7 +180,7 @@ test("idempotent project:start on an already-promoted, relay-registered core re-
   });
   const h = host;
 
-  await h.open("projX", tempFolder(), "local");
+  await openAs(h, "projX", "local");
   await setMobileAccess(h, true);
 
   const bus = new MessageBus();
@@ -171,18 +189,18 @@ test("idempotent project:start on an already-promoted, relay-registered core re-
   bus.subscribe({ deliver: (m) => out.push(m) });
 
   // First start: promote + register (instant-admit stub).
-  const first = await h.handleControlPlaneVerb({ type: "project:start", projectId: "projX" } as any, bus);
+  const first = await h.handleControlPlaneVerb({ type: "project:start", projectId: proj("projX") } as any, bus);
   expect(first.ok).toBe(true);
   await new Promise((r) => setTimeout(r, 20));
-  expect(out.some((m) => m.type === "stream-ready" && m.projectId === "projX" && m.streamId === "s1")).toBe(true);
+  expect(out.some((m) => m.type === "stream-ready" && m.projectId === proj("projX") && m.streamId === "s1")).toBe(true);
 
   // Reconnect scenario: a SECOND project:start hits the idempotent branch.
   out.length = 0;
-  const again = await h.handleControlPlaneVerb({ type: "project:start", projectId: "projX" } as any, bus);
+  const again = await h.handleControlPlaneVerb({ type: "project:start", projectId: proj("projX") } as any, bus);
   expect(again.ok).toBe(true);
   const ready = out.find((m) => m.type === "stream-ready");
   expect(ready).toBeDefined();
-  expect(ready.projectId).toBe("projX");
+  expect(ready.projectId).toBe(proj("projX"));
   expect(ready.streamId).toBe("s1");
 });
 
@@ -196,7 +214,7 @@ test("a rejected verb's control:result carries projectId so the phone can correl
   // Mobile access is off → NOT_ALLOWED via the async dispatch path (the one the
   // phone actually exercises).
   h.dispatchControlPlaneInbound(
-    { type: "project:start", projectId: "projB" } as any,
+    { type: "project:start", projectId: "never-opened" } as any,
     "control",
     bus,
   );
@@ -207,7 +225,7 @@ test("a rejected verb's control:result carries projectId so the phone can correl
   expect(res.verb).toBe("project:start");
   expect(res.error.code).toBe("NOT_ALLOWED");
   // Without projectId the phone can only guess which pending bind failed.
-  expect(res.projectId).toBe("projB");
+  expect(res.projectId).toBe("never-opened");
 });
 
 test("an unknown verb type is rejected without effect", async () => {

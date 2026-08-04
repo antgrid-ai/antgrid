@@ -8,6 +8,7 @@ const log = logger.child({ component: "local-listener" });
 interface ConnState {
   state: "awaiting-hello" | "connected" | "rejected";
   appPid?: number;
+  checkoutRouting?: boolean;
 }
 
 export interface LocalListenerOptions {
@@ -24,6 +25,7 @@ export interface LocalListenerOptions {
 
 const CLOSE_UNAUTHORIZED = 4401;
 const CLOSE_CONFLICT = 4409;
+export const CLOSE_CHECKOUT_ROUTING_REQUIRED = 4410;
 
 export class LocalListener implements TransportSubscriber {
   private server: ReturnType<typeof Bun.serve> | null = null;
@@ -38,6 +40,25 @@ export class LocalListener implements TransportSubscriber {
    *  suppresses the bus a live loopback owner is still streaming from. */
   get hasOwner(): boolean {
     return this.ownerSocket !== null;
+  }
+
+  /** Compatibility signal supplied by the loopback app hello. It is deliberately
+   * not an authorization signal; routing gates still run after socket/token
+   * authentication. */
+  get ownerSupportsCheckoutRouting(): boolean {
+    return this.ownerSocket?.data.checkoutRouting === true;
+  }
+
+  /** Fail closed before a managed-checkout frame can reach an older desktop. */
+  requireCheckoutRouting(): boolean {
+    if (!this.ownerSocket || this.ownerSupportsCheckoutRouting) return true;
+    const stale = this.ownerSocket;
+    this.ownerSocket = null;
+    this.busUnsubscribe?.();
+    this.busUnsubscribe = null;
+    stale.data.state = "rejected";
+    stale.close(CLOSE_CHECKOUT_ROUTING_REQUIRED, "checkout routing update required");
+    return false;
   }
 
   get port(): number {
@@ -124,6 +145,7 @@ export class LocalListener implements TransportSubscriber {
     }
 
     const newPid = typeof envelope.appPid === "number" ? envelope.appPid : undefined;
+    const checkoutRouting = envelope?.capabilities?.checkoutRouting === true;
 
     // A second hello carrying the VALID token is the same trusted app
     // reconnecting (a provider rebuild, retry, or eviction+reopen on the app
@@ -152,6 +174,7 @@ export class LocalListener implements TransportSubscriber {
 
     ws.data.state = "connected";
     ws.data.appPid = newPid;
+    ws.data.checkoutRouting = checkoutRouting;
     this.ownerSocket = ws;
     ws.send(JSON.stringify({ type: "ready" }));
     this.busUnsubscribe = this.opts.bus.subscribe(this);

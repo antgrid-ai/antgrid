@@ -51,6 +51,7 @@ class ConfigState {
 /// `config:changed`) are all routed through the status tier.
 class ConfigService {
   final ProjectSession session;
+  final String checkoutId;
 
   /// Hard ceiling on every request/reply pair. A reply can be lost (silent
   /// transport drop pre-establish, agent gone mid-request), and without a
@@ -72,15 +73,16 @@ class ConfigService {
 
   ConfigService.fromSession(
     this.session, {
+    this.checkoutId = 'main',
     this.requestTimeout = const Duration(seconds: 15),
   }) {
-    _statusSub = session.statusStream.listen(_onStatusJson);
+    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
     // Tier-3: re-read the config on every (re)establishment so a reconnect
     // refreshes it (the reconciliation checkpoint). Deliberately a plain send,
     // NOT read(): config:read-result updates state via _handleReadResult with
     // or without a tracked _read, so the re-drive neither arms (and leaks) the
     // caller-timeout timer nor supersedes a settings-screen read() in flight.
-    session.hydrate('config:read', _redriveRead);
+    session.hydrateCheckout(checkoutId, 'config:read', _redriveRead);
   }
 
   Future<void> _redriveRead() async {
@@ -105,7 +107,7 @@ class ConfigService {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
-    session.unhydrate('config:read');
+    session.unhydrateCheckout(checkoutId, 'config:read');
     _failPending(StateError('ConfigService disposed'));
     await _statusSub?.cancel();
     _statusSub = null;
@@ -114,7 +116,7 @@ class ConfigService {
 
   Future<void> _send(Map<String, dynamic> msg) async {
     if (_disposed) return;
-    await session.send(msg);
+    await session.sendForCheckout(checkoutId, msg);
   }
 
   /// Generic request helper. Builds a [PendingReply] bounded by

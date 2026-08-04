@@ -66,6 +66,41 @@ void main() {
     expect(res.connect!.token, 'loop-tok');
   });
 
+  test('projectResolve validates and parses host-owned repository identity', () async {
+    final stub = _StubControlServer();
+    await stub.start(handler: (req) => {
+          'id': req['id'],
+          'ok': true,
+          'type': 'project:resolve',
+          'projectId': 'primary-id',
+          'repoPath': '/repo',
+          'selectedPath': '/repo/linked',
+          'label': 'repo',
+          'isGitRepository': true,
+        });
+    addTearDown(stub.close);
+
+    final result = await HostControlClient(port: stub.port, token: 't')
+        .projectResolve('/repo/linked');
+    expect(stub.lastBody!['type'], 'project:resolve');
+    expect(result.projectId, 'primary-id');
+    expect(result.repoPath, '/repo');
+    expect(result.isGitRepository, isTrue);
+  });
+
+  test('projectResolve rejects malformed responses', () async {
+    final stub = _StubControlServer();
+    await stub.start(handler: (req) => {
+          'id': req['id'], 'ok': true, 'type': 'project:resolve', 'projectId': 12,
+        });
+    addTearDown(stub.close);
+
+    await expectLater(
+      () => HostControlClient(port: stub.port, token: 't').projectResolve('/repo'),
+      throwsA(isA<HostControlException>().having((e) => e.code, 'code', 'BAD_RESPONSE')),
+    );
+  });
+
   test('projectList parses summaries', () async {
     final stub = _StubControlServer();
     await stub.start(handler: (req) => {
@@ -162,6 +197,7 @@ void main() {
           'isRepository': true,
           'current': 'main',
           'branches': ['main', 'dev'],
+          'worktreeSessionsSupported': true,
         });
     addTearDown(stub.close);
 
@@ -170,6 +206,7 @@ void main() {
     expect(catalog.isRepository, isTrue);
     expect(catalog.current, 'main');
     expect(catalog.branches, ['main', 'dev']);
+    expect(catalog.worktreeSessionsSupported, isTrue);
   });
 
   test('gitCheckout returns checked out current branch', () async {

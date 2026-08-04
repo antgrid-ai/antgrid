@@ -102,6 +102,52 @@ test("HostServer.open starts a local core, list reflects it, get returns connect
   expect(again.connect?.port).toBe(opened.connect?.port);
 });
 
+test("HostServer.open rejects an id that is not the folder's resolved project id", async () => {
+  host = new HostServer({});
+  const folder = tempFolder();
+  // The linked-worktree case in miniature: a caller naming a folder under some
+  // other id would otherwise get a second core over the same repository.
+  await expect(host.open("legacy-project-id", folder, "local"))
+    .rejects.toMatchObject({ code: "PROJECT_ID_MISMATCH" });
+  expect(host.list()).toHaveLength(0);
+});
+
+test("HostServer.open accepts the resolved id and canonicalizes the path", async () => {
+  host = new HostServer({});
+  const folder = tempFolder();
+  const projectId = computeProjectId(folder);
+  const opened = await host.open(projectId, folder, "local");
+  expect(opened.connect?.port).toBeGreaterThan(0);
+  expect(host.list().map((entry) => entry.projectId)).toContain(projectId);
+});
+
+test("HostServer.open never creates a core under a linked worktree's own hash", async () => {
+  const runGit = async (cwd: string, args: string[]) => {
+    const proc = Bun.spawn(["git", ...args], { cwd, stdout: "ignore", stderr: "pipe" });
+    if (await proc.exited !== 0) throw new Error(await new Response(proc.stderr).text());
+  };
+  host = new HostServer({});
+  const repo = tempFolder();
+  await runGit(repo, ["init"]);
+  await runGit(repo, ["config", "user.email", "test@antgrid.local"]);
+  await runGit(repo, ["config", "user.name", "Test"]);
+  writeFileSync(join(repo, "initial.txt"), "v1\n");
+  await runGit(repo, ["add", "."]);
+  await runGit(repo, ["commit", "-m", "initial"]);
+  const linked = join(repo, "linked");
+  await runGit(repo, ["worktree", "add", "-b", "linked", linked]);
+
+  await expect(host.open(computeProjectId(linked), linked, "local"))
+    .rejects.toMatchObject({ code: "PROJECT_ID_MISMATCH" });
+
+  // Named by the repository's id, the same folder opens — onto the primary
+  // checkout, which is what "main" means for every checkout-scoped surface.
+  const opened = await host.open(computeProjectId(repo), linked, "local");
+  expect(opened.connect?.port).toBeGreaterThan(0);
+  expect(host.list()).toHaveLength(1);
+  expect(host.list()[0].path?.toLowerCase()).not.toContain("linked");
+});
+
 test("concurrent open() of the same project coalesces into one core (no orphan)", async () => {
   host = new HostServer({});
   const folder = tempFolder();
@@ -263,17 +309,21 @@ test("control plane: project:open then project:list round-trip over HTTP", async
 
 test("shares one paired-phones store across cores", async () => {
   host = new HostServer({});
-  await host.open("projA", tempFolder(), "local");
-  await host.open("projB", tempFolder(), "local");
+  const folderA = tempFolder();
+  const folderB = tempFolder();
+  const idA = computeProjectId(folderA);
+  const idB = computeProjectId(folderB);
+  await host.open(idA, folderA, "local");
+  await host.open(idB, folderB, "local");
   // Identity, not contents: every core must read the SAME in-memory view, so a
   // concurrent `antgrid phones remove` reloaded by the watcher reaches all of
   // them at once (push targeting and phones:list read it live).
   const cores = (host as any).cores;
-  expect(cores.get("projA").core.deps.pairedPhones).toBe(host.pairedPhones);
-  expect(cores.get("projB").core.deps.pairedPhones).toBe(host.pairedPhones);
+  expect(cores.get(idA).core.deps.pairedPhones).toBe(host.pairedPhones);
+  expect(cores.get(idB).core.deps.pairedPhones).toBe(host.pairedPhones);
   host.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1",
     pairedAt: "x", lastSeenAt: "x", label: "pixel" });
-  expect(cores.get("projB").core.deps.pairedPhones.get("pk1")?.label).toBe("pixel");
+  expect(cores.get(idB).core.deps.pairedPhones.get("pk1")?.label).toBe("pixel");
   // afterEach calls host.shutdown()
 });
 

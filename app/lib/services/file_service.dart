@@ -20,6 +20,7 @@ import 'reply_latch.dart';
 /// subscriptions and closes the state controller.
 class FileService {
   final ProjectSession session;
+  final String checkoutId;
 
   StreamSubscription<Map<String, dynamic>>? _heavySub;
   StreamSubscription<Map<String, dynamic>>? _statusSub;
@@ -49,11 +50,26 @@ class FileService {
 
   FileService.fromSession(
     this.session, {
+    this.checkoutId = 'main',
     this.gitActionTimeout = const Duration(seconds: 15),
   }) : _state = FileTreeState(projectId: session.projectId) {
-    _heavySub = session.heavyStream.listen(_onHeavyJson);
-    _statusSub = session.statusStream.listen(_onStatusJson);
+    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
+    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
+    // Pull the tree rather than wait for the bridge's push. A managed
+    // checkout's `tree:full` goes out while its runtime is being prepared —
+    // which is BEFORE the session list that makes the app build this bundle —
+    // so a bundle created for an isolated session would never see one and its
+    // file tree stayed empty for the life of the session. As a hydrator it also
+    // re-pulls on every reconnect.
+    session.hydrateCheckout(checkoutId, _treeHydratorKey, _hydrateTree);
   }
+
+  static const _treeHydratorKey = 'file:tree';
+
+  Future<void> _hydrateTree() => session.sendForCheckout(
+    checkoutId,
+    createAbMessage('file:tree:snapshot:request', {}),
+  );
 
   void _setState(FileTreeState state) {
     if (_disposed) return;
@@ -370,9 +386,9 @@ class FileService {
       ),
     );
     if (selected != null) {
-      session.hydrate('file:selected', _hydrateSelectedFile);
+      session.hydrateCheckout(checkoutId, 'file:selected', _hydrateSelectedFile);
     } else {
-      session.unhydrate('file:selected');
+      session.unhydrateCheckout(checkoutId, 'file:selected');
     }
   }
 
@@ -407,11 +423,11 @@ class FileService {
     // Register (fires now if established) rather than sending inline — see
     // [_hydrateSelectedFile]. Re-registering under the same key supersedes, so
     // opening a new file replaces the prior file's hydrator.
-    session.hydrate('file:selected', _hydrateSelectedFile);
+    session.hydrateCheckout(checkoutId, 'file:selected', _hydrateSelectedFile);
   }
 
   void requestFileContent(String path) {
-    session.send(
+    session.sendForCheckout(checkoutId,
       createAbMessage('file:read', {'projectId': projectId, 'path': path}),
     );
   }
@@ -432,7 +448,7 @@ class FileService {
 
   void requestFullTree() {
     _setState(_state.copyWith(expandedPaths: {}));
-    session.send(createAbMessage('tree:request', {'projectId': projectId}));
+    unawaited(_hydrateTree());
   }
 
   void setFilterQuery(String? query) {
@@ -456,14 +472,14 @@ class FileService {
     );
     // Nothing open — drop the re-drive so a reconnect doesn't re-pull a closed
     // file.
-    session.unhydrate('file:selected');
+    session.unhydrateCheckout(checkoutId, 'file:selected');
   }
 
   /// Stage [files] and commit them with [message]. Result (success or error)
   /// arrives as git:commit-result and is surfaced via [gitOpFeedback]; the
   /// changed-file list refreshes automatically from the bridge's git:status.
   void commit(String message, List<String> files) {
-    session.send(
+    session.sendForCheckout(checkoutId,
       createAbMessage('git:commit', {
         'projectId': projectId,
         'message': message,
@@ -475,7 +491,7 @@ class FileService {
   /// Discard working-tree changes for [files] (tracked -> restore, untracked ->
   /// clean). Unrecoverable -- callers must confirm first.
   void discard(List<String> files) {
-    session.send(
+    session.sendForCheckout(checkoutId,
       createAbMessage('git:discard', {'projectId': projectId, 'files': files}),
     );
   }
@@ -496,7 +512,7 @@ class FileService {
     // timeout. The frag-abort backstop still handles mid-transfer aborts.
     _diffLatch?.settle();
     final latch = _diffLatch = ReplyLatch();
-    session.send(
+    session.sendForCheckout(checkoutId,
       createAbMessage('git:diff', {'projectId': projectId, 'path': path}),
     );
     unawaited(
@@ -553,7 +569,8 @@ class FileService {
     // Resolve any in-flight git:diff action so its timeout timer is cancelled.
     _diffLatch?.settle();
     _diffLatch = null;
-    session.unhydrate('file:selected');
+    session.unhydrateCheckout(checkoutId, 'file:selected');
+    session.unhydrateCheckout(checkoutId, _treeHydratorKey);
     await _heavySub?.cancel();
     _heavySub = null;
     await _statusSub?.cancel();

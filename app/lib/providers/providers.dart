@@ -30,6 +30,7 @@ import 'relay_connection.dart';
 import 'seeded_stream.dart';
 import 'supervisor_status.dart';
 import 'recent_agents.dart';
+import 'sessions.dart' show focusedCheckoutIdProvider;
 import '../storage/recent_agents_store.dart';
 import '../models/file_tree_models.dart';
 import '../models/preview_models.dart';
@@ -117,13 +118,13 @@ final relayEpochProvider = FutureProvider<int>((ref) async {
 });
 
 /// Per-project TerminalService façade.
-final terminalServiceProvider = _focusedService<TerminalService>(
+final terminalServiceProvider = _focusedCheckoutService<TerminalService>(
   (s) => s.terminalService,
   name: 'terminalService',
 );
 
 final terminalStateProvider = StreamProvider<TerminalState>((ref) {
-  final service = focusedSessionOrNull(ref)?.terminalService;
+  final service = focusedCheckoutServicesOrNull(ref)?.terminalService;
   if (service == null) return const Stream<TerminalState>.empty();
   // Push the stable per-install client id into the service so sendResize can
   // stamp it. The setter is idempotent; the id resolves at startup well before
@@ -148,13 +149,16 @@ final terminalNotificationsProvider =
     StreamProvider<TerminalNotificationMessage>((ref) {
       final openProjects = ref.watch(projectSessionRegistryProvider);
       final controller = StreamController<TerminalNotificationMessage>();
-      final subs = <StreamSubscription<TerminalNotificationMessage>>[];
+      final subs = <StreamSubscription<dynamic>>[];
       for (final id in openProjects) {
         final session = ref.watch(projectSessionProvider(id)).value;
         if (session == null) continue;
-        subs.add(
-          session.terminalService.notificationStream.listen(controller.add),
-        );
+        for (final bundle in session.checkoutServiceBundles) {
+          subs.add(bundle.terminalService.notificationStream.listen(controller.add));
+        }
+        subs.add(session.checkoutServiceBundleStream.listen((bundle) {
+          subs.add(bundle.terminalService.notificationStream.listen(controller.add));
+        }));
       }
       ref.onDispose(() {
         for (final s in subs) {
@@ -173,13 +177,16 @@ final agentPushNotificationsProvider = StreamProvider<NotificationPushMessage>((
 ) {
   final openProjects = ref.watch(projectSessionRegistryProvider);
   final controller = StreamController<NotificationPushMessage>();
-  final subs = <StreamSubscription<NotificationPushMessage>>[];
+  final subs = <StreamSubscription<dynamic>>[];
   for (final id in openProjects) {
     final session = ref.watch(projectSessionProvider(id)).value;
     if (session == null) continue;
-    subs.add(
-      session.terminalService.pushNotificationStream.listen(controller.add),
-    );
+    for (final bundle in session.checkoutServiceBundles) {
+      subs.add(bundle.terminalService.pushNotificationStream.listen(controller.add));
+    }
+    subs.add(session.checkoutServiceBundleStream.listen((bundle) {
+      subs.add(bundle.terminalService.pushNotificationStream.listen(controller.add));
+    }));
   }
   ref.onDispose(() {
     for (final s in subs) {
@@ -236,13 +243,13 @@ final agentTerminalProvider = Provider<TerminalTab?>((ref) {
 });
 
 /// Per-project CommandService façade.
-final commandServiceProvider = _focusedService<CommandService>(
+final commandServiceProvider = _focusedCheckoutService<CommandService>(
   (s) => s.commandService,
   name: 'commandService',
 );
 
 /// Per-project ConfigService façade.
-final configServiceProvider = _focusedService<ConfigService>(
+final configServiceProvider = _focusedCheckoutService<ConfigService>(
   (s) => s.configService,
   name: 'configService',
 );
@@ -306,6 +313,24 @@ Provider<T> _focusedService<T>(
   if (session == null) throw _ProjectSessionLoading(id);
   return pick(session);
 }, name: name);
+
+Provider<T> _focusedCheckoutService<T>(
+  T Function(CheckoutServices) pick, {
+  required String name,
+}) => Provider<T>((ref) {
+  final id = ref.watch(selectedRegistrationIdProvider);
+  if (id == null) throw StateError('No project focused.');
+  final session = ref.watch(projectSessionProvider(id)).value;
+  if (session == null) throw _ProjectSessionLoading(id);
+  final checkoutId = ref.watch(focusedCheckoutIdProvider);
+  return pick(session.servicesForCheckout(checkoutId));
+}, name: name);
+
+CheckoutServices? focusedCheckoutServicesOrNull(Ref ref) {
+  final session = focusedSessionOrNull(ref);
+  if (session == null) return null;
+  return session.servicesForCheckout(ref.watch(focusedCheckoutIdProvider));
+}
 
 /// The focused project's [ProjectSession] once it has finished constructing,
 /// else null (no project focused, or the session is still resolving after a
@@ -371,8 +396,20 @@ T? focusedServiceOrNull<T>(
   return session == null ? null : pick(session);
 }
 
+T? focusedCheckoutServiceOrNull<T>(
+  ProviderContainer ref,
+  T Function(CheckoutServices) pick,
+) {
+  final id = ref.read(selectedRegistrationIdProvider);
+  if (id == null) return null;
+  final session = ref.read(projectSessionProvider(id)).value;
+  if (session == null) return null;
+  final checkoutId = ref.read(focusedCheckoutIdProvider);
+  return pick(session.servicesForCheckout(checkoutId));
+}
+
 final commandStateProvider = StreamProvider<CommandState>((ref) {
-  final service = focusedSessionOrNull(ref)?.commandService;
+  final service = focusedCheckoutServicesOrNull(ref)?.commandService;
   if (service == null) return const Stream<CommandState>.empty();
   return seededStream(() => service.currentState, service.stateStream);
 });
@@ -399,7 +436,7 @@ final projectPreferencesProvider = StreamProvider<ProjectPreferences>((ref) {
   // Source the FileService from the (non-throwing) session, not the façade:
   // re-evaluates once the async ProjectSession resolves, and never registers a
   // listener on the throwing façade (see [focusedSessionOrNull]).
-  final fileService = focusedSessionOrNull(ref)?.fileService;
+  final fileService = focusedCheckoutServicesOrNull(ref)?.fileService;
   if (fileService == null) {
     return const Stream<ProjectPreferences>.empty();
   }
@@ -421,13 +458,13 @@ final projectPreferencesProvider = StreamProvider<ProjectPreferences>((ref) {
 });
 
 /// Per-project FileService façade.
-final fileServiceProvider = _focusedService<FileService>(
+final fileServiceProvider = _focusedCheckoutService<FileService>(
   (s) => s.fileService,
   name: 'fileService',
 );
 
 /// Per-project UploadService façade.
-final uploadServiceProvider = _focusedService<UploadService>(
+final uploadServiceProvider = _focusedCheckoutService<UploadService>(
   (s) => s.uploadService,
   name: 'uploadService',
 );
@@ -486,7 +523,7 @@ final _prefsBindingProvider = Provider<_PrefsBinding>((ref) {
 }, name: 'prefsBinding');
 
 final fileTreeStateProvider = StreamProvider<FileTreeState>((ref) {
-  final service = focusedSessionOrNull(ref)?.fileService;
+  final service = focusedCheckoutServicesOrNull(ref)?.fileService;
   if (service == null) return const Stream<FileTreeState>.empty();
   // Anchor the prefs⇄file-tree binding here: this provider is the stable
   // long-lived watcher of the focused FileService (kept alive by the workspace
@@ -502,25 +539,25 @@ final fileTreeStateProvider = StreamProvider<FileTreeState>((ref) {
 }, retry: noProviderRetry);
 
 /// Per-project SearchService façade.
-final searchServiceProvider = _focusedService<SearchService>(
+final searchServiceProvider = _focusedCheckoutService<SearchService>(
   (s) => s.searchService,
   name: 'searchService',
 );
 
 final searchStateProvider = StreamProvider<SearchState>((ref) {
-  final service = focusedSessionOrNull(ref)?.searchService;
+  final service = focusedCheckoutServicesOrNull(ref)?.searchService;
   if (service == null) return const Stream<SearchState>.empty();
   return seededStream(() => service.currentState, service.stateStream);
 });
 
 /// Per-project PreviewService façade.
-final previewServiceProvider = _focusedService<PreviewService>(
+final previewServiceProvider = _focusedCheckoutService<PreviewService>(
   (s) => s.previewService,
   name: 'previewService',
 );
 
 final previewStateProvider = StreamProvider<PreviewState>((ref) {
-  final service = focusedSessionOrNull(ref)?.previewService;
+  final service = focusedCheckoutServicesOrNull(ref)?.previewService;
   if (service == null) return const Stream<PreviewState>.empty();
   return seededStream(() => service.currentState, service.stateStream);
 });

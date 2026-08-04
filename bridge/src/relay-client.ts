@@ -54,7 +54,7 @@ export interface RelayClientOptions {
   onPeerOnline?: (peerId: string) => void;
   onPeerOffline?: (peerId: string) => void;
   /** The E2E session established (phone's app:ready confirm verified). */
-  onHandshakeComplete?: () => void;
+  onHandshakeComplete?: (capabilities: { checkoutRouting: boolean }) => void;
   onMessage?: (msg: AbMessage) => void;
   onTunnelMessage?: (msg: unknown) => void;
   onDisconnected?: () => void;
@@ -201,6 +201,9 @@ export class RelayClient {
   // for receiving only, until its app:ready confirm verifies (make-before-break).
   private established: E2eAttempt | null = null;
   private pending: E2eAttempt | null = null;
+  /** Capability is session-scoped: a reconnect/rekey must not inherit the
+   * previous app's routing guarantee. */
+  private peerCheckoutRouting = false;
   private halfOpenTimer: ReturnType<typeof setTimeout> | null = null;
   // Sealed-liveness bookkeeping.
   private lastSealedRecvAt = 0;
@@ -224,6 +227,11 @@ export class RelayClient {
 
   get peerId(): string | null {
     return this._peerId;
+  }
+
+  /** Whether the currently established app can route checkout-scoped frames. */
+  get peerSupportsCheckoutRouting(): boolean {
+    return this.established !== null && this.peerCheckoutRouting;
   }
 
   /** The bare device id this client authenticates as (machine deviceUuid). */
@@ -739,7 +747,7 @@ export class RelayClient {
 
   // --- E2E session frames (design §6.1) ---
 
-  private handleSessionFrame(obj: { type: string; attemptId?: string; confirm?: string }): void {
+  private handleSessionFrame(obj: { type: string; attemptId?: string; confirm?: string; capabilities?: { checkoutRouting?: boolean } }): void {
     switch (obj.type) {
       case "app:ready":
         this.handleAppReady(obj);
@@ -919,7 +927,7 @@ export class RelayClient {
     log.info("E2E handshake keys derived (attempt %s), waiting for app:ready", attemptId);
   }
 
-  private handleAppReady(obj: { attemptId?: string; confirm?: string }): void {
+  private handleAppReady(obj: { attemptId?: string; confirm?: string; capabilities?: { checkoutRouting?: boolean } }): void {
     const attemptId = obj.attemptId;
     if (!attemptId) return;
     const tag = Buffer.from(obj.confirm ?? "", "base64");
@@ -941,6 +949,7 @@ export class RelayClient {
       // Make-before-break swap: promote the candidate, then zeroize the old set.
       const old = this.established;
       this.established = this.pending;
+      this.peerCheckoutRouting = obj.capabilities?.checkoutRouting === true;
       // Self-correct the address to the promoted session's peer (already equal
       // to it for same-device rekey; makes a presence flap during the pending
       // window harmless — spec 2026-07-24 §4.3).
@@ -954,7 +963,7 @@ export class RelayClient {
       this.startLiveness();
       this.sendSessionFrame({ type: "established", attemptId }, this.established.transport);
       log.info("E2E session established (attempt %s)", attemptId);
-      this.opts.onHandshakeComplete?.();
+      this.opts.onHandshakeComplete?.({ checkoutRouting: this.peerCheckoutRouting });
       this.mux.notifyPeerOnline();
       return;
     }
@@ -1262,6 +1271,7 @@ export class RelayClient {
   // --- E2E state teardown + timers ---
 
   private tearDownEstablished(): void {
+    this.peerCheckoutRouting = false;
     if (!this.established) return;
     zeroizeSessionKeys(this.established.sessionKeys);
     this.established.transport.zeroize();

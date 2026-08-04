@@ -50,6 +50,18 @@ SessionEntry _session() => SessionEntry(
   running: false,
 );
 
+SessionEntry _managedSession(String id, String branch) => SessionEntry(
+  id: id,
+  name: 'Session $id',
+  createdAt: 0,
+  lastUsedAt: id == '2' ? 2 : 1,
+  archived: false,
+  running: false,
+  checkoutId: 'checkout-$id',
+  checkoutKind: 'managed-worktree',
+  checkoutBranch: branch,
+);
+
 RecentAgent _remoteMachine() => RecentAgent(
   agentDeviceId: _machineUuid,
   agentLabel: 'Remote pair',
@@ -182,4 +194,33 @@ void main() {
 
     expect(find.text('Alpha'), findsOneWidget);
   });
+
+  for (final layout in <({String name, Size size})>[
+    (name: 'phone', size: const Size(390, 844)),
+    (name: 'desktop', size: const Size(1200, 800)),
+  ]) {
+    testWidgets('${layout.name} keeps managed sessions flat and shows branch metadata', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = layout.size;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await stores.projectStore.upsert(_project());
+      await stores.cachedSessionsStore.put(_projectId, [
+        _managedSession('1', 'antgrid/session-1'),
+        _managedSession('2', 'antgrid/session-2'),
+      ]);
+      await stores.cachedSessionsStore.flushNow();
+
+      await tester.pumpWidget(buildDrawer());
+      await tester.pumpAndSettle();
+
+      expect(find.byType(SessionRow), findsNWidgets(2));
+      expect(find.text('antgrid/session-1'), findsOneWidget);
+      expect(find.text('antgrid/session-2'), findsOneWidget);
+    });
+  }
 }

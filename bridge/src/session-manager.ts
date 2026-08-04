@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, chmodSync } from "node:fs";
-import { readFile, writeFile, rename, chmod } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile, writeFile, rename, chmod, mkdir } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { logger } from "./logger";
 const log = logger.child({ component: "session-manager" });
@@ -17,8 +17,11 @@ import { initialPromptArgv } from "./initial-prompt";
 import type { WorkStatus } from "./protocol";
 import type { TerminalManager } from "./terminal-manager";
 import type { AbMessage, SessionEntry } from "./protocol";
+import type { CheckoutRecord } from "./worktrees/checkout-types";
+import { WorktreeError, type WorktreeManager } from "./worktrees/worktree-manager";
+import { logWorktreeEvent, worktreeErrorCode } from "./worktrees/worktree-log";
 
-interface AgentSpec {
+export interface AgentSpec {
   command: string;
   name: string;
   args?: string[];
@@ -31,6 +34,19 @@ export interface SessionLaunchSpec {
   args?: string;
   // 'chat' routes session:start to the structured driver instead of a PTY.
   mode?: "terminal" | "chat";
+  /** Shared is the historical default. Worktree is host-gated and never accepts
+   * a path from the caller. */
+  isolation?: "shared" | "worktree";
+  /** An explicitly selected local branch to use as a base for a worktree. */
+  baseBranch?: string;
+}
+
+export interface DeleteSessionOptions {
+  force?: boolean;
+  /** Managed sessions own their checkout, so retaining it is forbidden. */
+  removeCheckout?: boolean;
+  /** Explicit opt-in; managed branches are preserved by default. */
+  deleteBranch?: boolean;
 }
 
 /// Quote a single token (executable path or flag) for the shell that
@@ -44,7 +60,7 @@ function shellQuoteArg(s: string): string {
     : `'${s.replace(/'/g, `'\\''`)}'`; // POSIX sh: single-quote, escape embedded '
 }
 
-interface SessionManagerOpts {
+export interface SessionManagerOpts {
   projectId: string;
   storeDir: string;                  // ~/.antgrid root
   /**
@@ -85,6 +101,20 @@ interface SessionManagerOpts {
    *  caller that restarts this slot on another runtime must be able to await
    *  it — a void-returning implementation stays valid. */
   onStopChat?: (sessionId: string) => void | Promise<void>;
+  /** False until every checkout-variable workspace service is routed. */
+  worktreeSessionsSupported?: boolean;
+  /** Resolved lazily, never at construction: answering it costs a `git` spawn,
+   *  and it is only ever consulted when an isolated session is created. Absent
+   *  means "not a repository", so a caller that cannot answer fails closed. */
+  isGitRepository?: () => Promise<boolean>;
+  worktreeManager?: WorktreeManager;
+  /** Construct the checkout-scoped runtime before a session can commit. */
+  prepareCheckoutRuntime?: (checkout: CheckoutRecord) => Promise<void>;
+  teardownCheckoutRuntime?: (checkoutId: string) => Promise<void>;
+  /** Resolves persisted IDs on every start; explicit unknown IDs never main-fallback. */
+  resolveCheckout?: (checkoutId: string) => Promise<CheckoutRecord | undefined>;
+  /** Reads checkout-local configuration after runtime preparation. */
+  resolveAgentSpec?: (checkoutId: string) => Promise<AgentSpec>;
 }
 
 interface PersistedEntry {
@@ -118,6 +148,10 @@ interface PersistedEntry {
   // driver.setConfig() on start so a restart restores the last-picked
   // model/mode/effort instead of reverting to the backend default.
   config?: Record<string, string>;
+  checkoutId: string;
+  checkoutKind: "main" | "managed-worktree" | "external-worktree";
+  checkoutBranch?: string | null;
+  checkoutState: "ready" | "missing" | "failed";
 }
 
 /** On-disk shape written by `flush()`; validated on read by PersistedFileSchema. */
@@ -146,6 +180,10 @@ const PersistedEntrySchema = z
     agentSessionId: z.string().optional().catch(undefined),
     agentTranscriptPath: z.string().optional().catch(undefined),
     config: z.record(z.string(), z.string()).optional().catch(undefined),
+    checkoutId: z.string().optional().catch(undefined),
+    checkoutKind: z.enum(["main", "managed-worktree", "external-worktree"]).optional().catch(undefined),
+    checkoutBranch: z.string().nullable().optional().catch(undefined),
+    checkoutState: z.enum(["ready", "missing", "failed"]).optional().catch(undefined),
   })
   .transform((s): PersistedEntry => {
     const createdAt = s.createdAt ?? Date.now();
@@ -168,6 +206,10 @@ const PersistedEntrySchema = z
       agentSessionId: s.agentSessionId,
       agentTranscriptPath: s.agentTranscriptPath,
       config: s.config,
+      checkoutId: s.checkoutId ?? "main",
+      checkoutKind: s.checkoutKind ?? "main",
+      checkoutBranch: s.checkoutBranch,
+      checkoutState: s.checkoutState ?? "ready",
     };
   });
 
@@ -303,6 +345,23 @@ export class SessionManager {
     return out;
   }
 
+  /** Whether any persisted session requires checkout-scoped workspace routing. */
+  hasManagedSessions(): boolean {
+    for (const entry of this.entries.values()) {
+      if (entry.checkoutKind === "managed-worktree") return true;
+    }
+    return false;
+  }
+
+  /** Whether a work-status key belongs to the main checkout — i.e. whether a
+   *  main-checkout branch switch can disturb it. An unknown key is main: the
+   *  work reduction also files config `terminals:` slots and a project-wide
+   *  fallback key, both of which live in the primary working tree. */
+  isMainCheckoutSession(id: string): boolean {
+    const entry = this.entries.get(id);
+    return !entry || entry.checkoutId === "main";
+  }
+
   /** Read a project's persisted session list from disk WITHOUT a live core —
    *  the drawer's control-plane peek. Async (`fs/promises`) because the only
    *  caller is the control-plane RPC handler on the WS event loop; a sync read
@@ -339,6 +398,10 @@ export class SessionManager {
         // wrong `false` hides one that should be there.
         agentSessionResumable: true,
         agentSessionId: e.agentSessionId,
+        checkoutId: e.checkoutId,
+        checkoutKind: e.checkoutKind,
+        checkoutBranch: e.checkoutBranch,
+        checkoutState: e.checkoutState,
       });
     }
     out.sort((a, b) => b.lastUsedAt - a.lastUsedAt);
@@ -391,7 +454,21 @@ export class SessionManager {
     return best?.config ? { ...best.config } : undefined;
   }
 
-  create(name?: string, spec?: SessionLaunchSpec): SessionEntry {
+  create(name?: string, spec?: SessionLaunchSpec & { isolation?: "shared" }): SessionEntry;
+  create(name: string | undefined, spec: SessionLaunchSpec & { isolation: "worktree" }): Promise<SessionEntry>;
+  create(name?: string, spec?: SessionLaunchSpec): SessionEntry | Promise<SessionEntry>;
+  create(name?: string, spec?: SessionLaunchSpec): SessionEntry | Promise<SessionEntry> {
+    if (spec?.baseBranch && spec.isolation !== "worktree") {
+      throw new Error("baseBranch is only valid for an isolated worktree session");
+    }
+    if (spec?.isolation === "worktree") return this.createWorktree(name, spec);
+    const entry = this.buildEntry(name, spec);
+    this.entries.set(entry.id, entry);
+    this.changed();
+    return this.toWire(entry);
+  }
+
+  private buildEntry(name: string | undefined, spec: SessionLaunchSpec | undefined): PersistedEntry {
     let finalName: string;
     if (name === undefined) {
       finalName = this.nextDefaultName();
@@ -418,6 +495,9 @@ export class SessionManager {
       args: spec?.args,
       mode: spec?.mode ?? "terminal",
       manuallyRenamed: name !== undefined,
+      checkoutId: "main",
+      checkoutKind: "main",
+      checkoutState: "ready",
     };
     // A new chat session inherits the last-used selection for its tool so it
     // opens on the model/mode/effort the user actually works with, not the
@@ -426,9 +506,55 @@ export class SessionManager {
       const inherited = this.lastUsedConfigForTool(entry.tool);
       if (inherited) entry.config = inherited;
     }
-    this.entries.set(id, entry);
-    this.changed();
-    return this.toWire(entry);
+    return entry;
+  }
+
+  /**
+   * Isolated creation deliberately has no visible session until all host-owned
+   * state is usable and durable. The old synchronous shared API remains intact
+   * for compatibility with pre-worktree callers; the wire handler always awaits
+   * either result.
+   */
+  private async createWorktree(name: string | undefined, spec: SessionLaunchSpec): Promise<SessionEntry> {
+    if (!this.opts.worktreeSessionsSupported || !this.opts.worktreeManager) {
+      throw new WorktreeError("WORKTREE_UNSUPPORTED", "This bridge cannot isolate sessions yet.");
+    }
+    if (!await this.opts.isGitRepository?.()) {
+      throw new WorktreeError("NOT_GIT_REPOSITORY", "This project is not a Git repository.");
+    }
+    const entry = this.buildEntry(name, spec);
+    let checkout: CheckoutRecord | undefined;
+    let runtimePrepared = false;
+    try {
+      checkout = await this.opts.worktreeManager.prepareForSession({
+        projectId: this.opts.projectId,
+        repoPath: this.projectPath,
+        sessionId: entry.id,
+        sessionName: entry.name,
+        baseBranch: spec.baseBranch,
+      });
+      await this.opts.prepareCheckoutRuntime?.(checkout);
+      runtimePrepared = true;
+      const checkoutSpec = await this.opts.resolveAgentSpec?.(checkout.id) ?? this.agentSpec;
+      this.assertSafeWorkingDir(checkout.path, checkoutSpec.workingDir);
+      entry.checkoutId = checkout.id;
+      entry.checkoutKind = checkout.kind;
+      entry.checkoutBranch = checkout.branch;
+      entry.checkoutState = "ready";
+      this.entries.set(entry.id, entry);
+      await this.flushNowOrThrow();
+      this.notifyObservers();
+      return this.toWire(entry);
+    } catch (error) {
+      this.entries.delete(entry.id);
+      if (runtimePrepared && checkout) {
+        try { await this.opts.teardownCheckoutRuntime?.(checkout.id); } catch { /* rollback continues */ }
+      }
+      if (checkout) {
+        try { await this.opts.worktreeManager.rollbackPrepared(checkout); } catch { /* preserve original error */ }
+      }
+      throw error;
+    }
   }
 
   rename(id: string, name: string): void {
@@ -531,16 +657,66 @@ export class SessionManager {
     this.changed();
   }
 
-  /** Remove a session. Returns whether a row was actually present, so the
-   *  control-plane delete reports the same `deleted` truthiness as the
-   *  stopped-core path (deletePersisted) — a missing id is false either way. */
-  delete(id: string): boolean {
+  /** Remove a session. Managed checkout removal is asynchronous because Git
+   * must verify the worktree disappeared before the durable session binding can
+   * be forgotten. Shared deletion preserves its historical synchronous API. */
+  delete(id: string, options: DeleteSessionOptions = {}): boolean | Promise<boolean> {
     const entry = this.entries.get(id);
     if (!entry) return false;
+    if (entry.checkoutKind === "managed-worktree") {
+      return this.deleteManaged(entry, options);
+    }
     if (this.tm.has(id)) this.tm.kill(id);
     this.entries.delete(id);
     this.resumableCache.delete(id);
     this.changed();
+    return true;
+  }
+
+  private async deleteManaged(entry: PersistedEntry, options: DeleteSessionOptions): Promise<boolean> {
+    if (options.removeCheckout === false) {
+      throw new WorktreeError("WORKTREE_CONFLICT", "An isolated session cannot be deleted without its managed worktree.");
+    }
+    const manager = this.opts.worktreeManager;
+    if (!manager) throw new WorktreeError("WORKTREE_MISSING", "The isolated worktree manager is unavailable.");
+    // First preflight gives the UI a non-destructive refusal. Kept in lockstep
+    // with WorktreeManager.removeNow's own guard, which repeats it under the
+    // project lock — the split codes must match or the dialog copy is wrong.
+    const state = await manager.inspect(entry.checkoutId);
+    if (state.dirty && !options.force) {
+      throw new WorktreeError("WORKTREE_DIRTY", "The isolated worktree has uncommitted changes.");
+    }
+    if (state.unpushedCommits && !options.force) {
+      throw new WorktreeError("WORKTREE_UNPUSHED", "The isolated worktree's branch has unpushed commits.");
+    }
+    if (!await this.stopAndAwait(entry.id)) {
+      throw new WorktreeError("WORKTREE_DELETE_FAILED", "The session did not stop before its worktree could be removed.");
+    }
+    // BEFORE the removal, not after: the checkout's runtime holds the very
+    // directory Git is about to delete — auto-started `services:` PTYs run with
+    // their cwd inside it, and the file watcher keeps handles open. On Windows
+    // that turns `git worktree remove` into a sharing violation and the session
+    // becomes permanently undeletable. The runtime is rebuilt if Git refuses.
+    await this.opts.teardownCheckoutRuntime?.(entry.checkoutId);
+    try {
+      // WorktreeManager repeats its Git-backed dirty/lock and registration checks
+      // immediately before removal, closing the race after the preflight.
+      await manager.remove({
+        checkoutId: entry.checkoutId,
+        force: options.force ?? false,
+        deleteBranch: options.deleteBranch ?? false,
+      });
+    } catch (error) {
+      const checkout = await this.opts.resolveCheckout?.(entry.checkoutId).catch(() => undefined);
+      if (checkout) {
+        try { await this.opts.prepareCheckoutRuntime?.(checkout); } catch { /* preserve original error */ }
+      }
+      throw error;
+    }
+    this.entries.delete(entry.id);
+    this.resumableCache.delete(entry.id);
+    await this.flushNowOrThrow();
+    this.notifyObservers();
     return true;
   }
 
@@ -611,7 +787,46 @@ export class SessionManager {
     return [];
   }
 
-  start(id: string, initialPrompt?: string): void {
+  start(id: string, initialPrompt?: string): void | Promise<void> {
+    const entry = this.entries.get(id);
+    if (!entry || entry.checkoutId === "main") return this.startNow(id, initialPrompt);
+    return this.startCheckout(id, initialPrompt, entry.checkoutId);
+  }
+
+  private async startCheckout(id: string, initialPrompt: string | undefined, checkoutId: string): Promise<void> {
+    const checkout = await this.opts.resolveCheckout?.(checkoutId);
+    if (!checkout || checkout.id !== checkoutId || !checkout.path) {
+      const entry = this.entries.get(id);
+      if (entry) {
+        entry.checkoutState = "missing";
+        this.changed();
+      }
+      logWorktreeEvent("worktree_resume_missing", {
+        projectId: this.opts.projectId, checkoutId, sessionId: id,
+      });
+      throw new WorktreeError("WORKTREE_MISSING", "The isolated worktree is no longer available.");
+    }
+    const spec = await this.opts.resolveAgentSpec?.(checkoutId) ?? this.agentSpec;
+    try {
+      this.assertSafeWorkingDir(checkout.path, spec.workingDir);
+    } catch (error) {
+      // The checkout is there but unusable — antgrid.yaml moved agent.workingDir
+      // outside it since creation. Distinct from "missing" for triage.
+      logWorktreeEvent("worktree_resume_conflict", {
+        projectId: this.opts.projectId, checkoutId, sessionId: id,
+        errorCode: worktreeErrorCode(error),
+      });
+      throw error;
+    }
+    const entry = this.entries.get(id);
+    if (entry && entry.checkoutState !== "ready") {
+      entry.checkoutState = "ready";
+      this.changed();
+    }
+    this.startNow(id, initialPrompt, checkout.path, spec);
+  }
+
+  private startNow(id: string, initialPrompt?: string, checkoutPath = this.projectPath, sessionAgentSpec = this.agentSpec): void {
     const entry = this.entries.get(id);
     if (!entry) throw new Error(`session not found: ${id}`);
     if (entry.archived) throw new Error(`cannot start archived session: ${id}`);
@@ -689,16 +904,16 @@ export class SessionManager {
       base = entry.command;
       isCustomLine = true;
     } else {
-      base = this.agentSpec.command;
-      baseArgs = this.agentSpec.args ?? [];
+      base = sessionAgentSpec.command;
+      baseArgs = sessionAgentSpec.args ?? [];
       // The antgrid.yaml default spec gets per-spawn hooks + resume only for
       // agents whose augmenter needs it; other default agents launch bare.
-      if (this.agentSpec.name === "github-copilot" || this.agentSpec.name === "cursor-agent") {
-        const aug = augmentAgentLaunch(this.agentSpec.name, this.opts.storeDir, this.opts.cursorDir);
+      if (sessionAgentSpec.name === "github-copilot" || sessionAgentSpec.name === "cursor-agent") {
+        const aug = augmentAgentLaunch(sessionAgentSpec.name, this.opts.storeDir, this.opts.cursorDir);
         baseArgs = [...baseArgs, ...aug.args];
         launchEnv = { ...launchEnv, ...aug.env, ANTGRID_TERMINAL_ID: id };
         notificationsInjected = aug.notificationsInjected;
-        resumeArgs = this.resumeArgsFor(this.agentSpec.name, entry);
+        resumeArgs = this.resumeArgsFor(sessionAgentSpec.name, entry);
       }
     }
     if (!base) {
@@ -712,7 +927,7 @@ export class SessionManager {
     // `resume <uuid>` is a subcommand and the positional prompt must follow it).
     const promptArgs = isCustomLine
       ? []
-      : initialPromptArgv(entry.tool ?? this.agentSpec.name, initialPrompt ?? "");
+      : initialPromptArgv(entry.tool ?? sessionAgentSpec.name, initialPrompt ?? "");
 
     // No per-session args: spawn `base` with its default argv (the antgrid.yaml
     // flags on the fallback path, empty otherwise) — preserves no-shell direct
@@ -738,7 +953,7 @@ export class SessionManager {
       // Codex's `resume <uuid>` is a subcommand and must follow user/global
       // flags. Other agents' resume switches go before raw args so a user `--`
       // boundary cannot swallow them.
-      const resumeAfterRaw = (entry.tool ?? this.agentSpec.name) === "codex";
+      const resumeAfterRaw = (entry.tool ?? sessionAgentSpec.name) === "codex";
       const beforeRaw = resumeAfterRaw ? [] : resumeArgs.map(shellQuoteArg);
       const afterRaw = resumeAfterRaw ? resumeArgs.map(shellQuoteArg) : [];
       const foldedPrompt = foldPromptIntoLine ? promptArgs.map(shellQuoteArg) : [];
@@ -765,7 +980,7 @@ export class SessionManager {
       name: entry.name,
       command,
       args: spawnArgs, // [] when args were folded into `command`; default flags otherwise
-      cwd: this.agentSpec.workingDir ?? this.projectPath,
+      cwd: sessionAgentSpec.workingDir ? resolve(checkoutPath, sessionAgentSpec.workingDir) : checkoutPath,
       cols: 80,
       rows: 24,
       type: "agent",
@@ -775,15 +990,15 @@ export class SessionManager {
       // this spawn depends on (e.g. cursor-agent's hooks.json) failed to write,
       // so the OSC scanner stays live rather than silently muting the session.
       suppressOscNotifications: suppressesOscNotifications(
-        entry.tool ?? this.agentSpec.name,
+        entry.tool ?? sessionAgentSpec.name,
         notificationsInjected,
       ),
       suppressOscTitle: suppressesOscTitle(
-        entry.tool ?? this.agentSpec.name,
+        entry.tool ?? sessionAgentSpec.name,
         notificationsInjected,
       ),
       expectsHookAliveProbe:
-        injectsHookAliveProbe(entry.tool ?? this.agentSpec.name),
+        injectsHookAliveProbe(entry.tool ?? sessionAgentSpec.name),
     });
     entry.lastUsedAt = Date.now();
     this.changed();
@@ -865,7 +1080,7 @@ export class SessionManager {
     this.changed();
     if (!wasRunning) return;
     try {
-      this.start(id); // never an initialPrompt — this is a restart
+      await this.start(id); // never an initialPrompt — this is a restart
     } catch (err) {
       // A spawn that threw leaves no runtime, so an entry left describing the
       // target mode would contradict the ok:false the caller is about to get.
@@ -973,6 +1188,35 @@ export class SessionManager {
     if (dirty) this.flush();
   }
 
+  /** Transaction commit for an isolated creation. Unlike flushNow(), this never
+   * swallows an I/O error and it writes even when no debounce timer was armed. */
+  private async flushNowOrThrow(): Promise<void> {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    if (this.activityEmitTimer) {
+      clearTimeout(this.activityEmitTimer);
+      this.activityEmitTimer = null;
+    }
+    await mkdir(this.dir, { recursive: true });
+    await writePersistedAtomic(this.path, Array.from(this.entries.values()));
+  }
+
+  /** Absolute paths, and relative paths that escape the checkout, would make a
+   * session advertised as isolated execute in the shared repository. */
+  private assertSafeWorkingDir(checkoutPath: string, workingDir?: string): void {
+    if (!workingDir) return;
+    if (isAbsolute(workingDir)) {
+      throw new WorktreeError("WORKTREE_WORKING_DIR_UNSAFE", "agent.workingDir must be relative to the isolated checkout.");
+    }
+    const target = resolve(checkoutPath, workingDir);
+    const rel = relative(checkoutPath, target);
+    if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+      throw new WorktreeError("WORKTREE_WORKING_DIR_UNSAFE", "agent.workingDir escapes the isolated checkout.");
+    }
+  }
+
   // --- internals ---
 
   // `agentTranscriptPath` is deliberately withheld: it's a local filesystem path
@@ -1000,6 +1244,10 @@ export class SessionManager {
       // nothing to warn about.
       workStatus: this.opts.sessionWorkStatusFor?.(e.id),
       agentSessionId: e.agentSessionId,
+      checkoutId: e.checkoutId,
+      checkoutKind: e.checkoutKind,
+      checkoutBranch: e.checkoutBranch,
+      checkoutState: e.checkoutState,
     };
   }
 

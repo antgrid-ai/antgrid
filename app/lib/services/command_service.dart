@@ -16,6 +16,7 @@ import '../project/project_session.dart';
 /// subscriptions and closes the state controller.
 class CommandService {
   final ProjectSession session;
+  final String checkoutId;
 
   StreamSubscription<Map<String, dynamic>>? _heavySub;
   StreamSubscription<Map<String, dynamic>>? _statusSub;
@@ -33,9 +34,9 @@ class CommandService {
 
   String get projectId => session.projectId;
 
-  CommandService.fromSession(this.session) {
-    _heavySub = session.heavyStream.listen(_onHeavyJson);
-    _statusSub = session.statusStream.listen(_onStatusJson);
+  CommandService.fromSession(this.session, {this.checkoutId = 'main'}) {
+    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
+    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
   }
 
   void _setState(CommandState newState) {
@@ -135,7 +136,7 @@ class CommandService {
       ),
     );
 
-    session.send(
+    session.sendForCheckout(checkoutId,
       createAbMessage('command:run', {
         'projectId': projectId,
         'commandName': commandName,

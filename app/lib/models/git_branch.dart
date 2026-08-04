@@ -5,11 +5,13 @@ class GitBranchCatalog {
   final bool isRepository;
   final String? current;
   final List<String> branches;
+  final bool worktreeSessionsSupported;
 
   const GitBranchCatalog({
     required this.isRepository,
     required this.current,
     required this.branches,
+    this.worktreeSessionsSupported = false,
   });
 
   factory GitBranchCatalog.fromJson(Map<String, dynamic> json) {
@@ -40,6 +42,7 @@ class GitBranchCatalog {
       isRepository: isRepo,
       current: currentVal as String?,
       branches: List.unmodifiable(branchesList),
+      worktreeSessionsSupported: json['worktreeSessionsSupported'] == true,
     );
   }
 
@@ -50,10 +53,11 @@ class GitBranchCatalog {
           runtimeType == other.runtimeType &&
           isRepository == other.isRepository &&
           current == other.current &&
+          worktreeSessionsSupported == other.worktreeSessionsSupported &&
           listEquals(branches, other.branches);
 
   @override
-  int get hashCode => Object.hash(isRepository, current, Object.hashAll(branches));
+  int get hashCode => Object.hash(isRepository, current, worktreeSessionsSupported, Object.hashAll(branches));
 }
 
 @immutable

@@ -26,6 +26,7 @@ describe("git-branches helper", () => {
       isRepository: false,
       current: null,
       branches: [],
+      worktreeSessionsSupported: false,
     });
   });
 

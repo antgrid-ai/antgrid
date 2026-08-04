@@ -301,7 +301,7 @@ test("sealed app envelope on the preview channel is routed to onTunnelMessage af
   const tunnelReq = { type: "tunnel:http-request", requestId: "req-1", port: 3000, method: "GET", path: "/" };
   injectFrame(client, FrameKind.sealed, phoneTransport.seal(JSON.stringify({ m: tunnelReq })), "preview");
 
-  expect(tunnelMsgs).toEqual([tunnelReq]);
+  expect(tunnelMsgs).toEqual([{ ...tunnelReq, checkoutId: "main" }]);
 });
 
 test("sealed ping is answered with a sealed pong", () => {

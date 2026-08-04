@@ -8,6 +8,7 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
 import '../models/preview_models.dart';
 import '../models/ab_message.dart';
+import '../project/project_message_classification.dart';
 import '../project/project_session.dart';
 import 'pending_reply.dart';
 import 'preview_proxy_server.dart';
@@ -28,6 +29,7 @@ enum SelectPortResult { opened, portInUse }
 /// state controller.
 class PreviewService {
   final ProjectSession session;
+  final String checkoutId;
 
   StreamSubscription<Map<String, dynamic>>? _heavySub;
   StreamSubscription<Map<String, dynamic>>? _statusSub;
@@ -47,9 +49,9 @@ class PreviewService {
 
   String get projectId => session.projectId;
 
-  PreviewService.fromSession(this.session) {
-    _heavySub = session.heavyStream.listen(_onHeavyJson);
-    _statusSub = session.statusStream.listen(_onStatusJson);
+  PreviewService.fromSession(this.session, {this.checkoutId = 'main'}) {
+    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
+    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
     _txSub = session.transport.messages.listen(_onTransportMessage);
   }
 
@@ -77,6 +79,7 @@ class PreviewService {
   /// caught here.
   void _onTransportMessage(InboundMessage msg) {
     if (msg.channel != 'preview') return;
+    if (checkoutIdForEnvelope(msg.json) != checkoutId) return;
     final parsed = parseAbMessage(msg.json);
     if (parsed == null) return;
     _handle(parsed);
@@ -144,7 +147,12 @@ class PreviewService {
     );
     _pendingRequests[request.requestId] = pending;
 
-    unawaited(session.transport.send(request.toJson(), channel: 'preview'));
+    unawaited(
+      session.transport.send(
+        {...request.toJson(), 'checkoutId': checkoutId},
+        channel: 'preview',
+      ),
+    );
 
     return pending.future;
   }
@@ -274,6 +282,7 @@ class PreviewService {
         'port': _state.selectedPort,
         'scheme': _state.scheme,
         'path': path,
+        'checkoutId': checkoutId,
       }),
       channel: 'preview',
     );
@@ -284,6 +293,7 @@ class PreviewService {
           createAbMessage('tunnel:ws-data', {
             'tunnelId': tunnelId,
             'data': data is String ? data : base64Encode(data as List<int>),
+            'checkoutId': checkoutId,
           }),
           channel: 'preview',
         );
@@ -291,7 +301,10 @@ class PreviewService {
       onDone: () {
         _activeWsTunnels.remove(tunnelId);
         session.transport.send(
-          createAbMessage('tunnel:ws-close', {'tunnelId': tunnelId}),
+          createAbMessage('tunnel:ws-close', {
+            'tunnelId': tunnelId,
+            'checkoutId': checkoutId,
+          }),
           channel: 'preview',
         );
       },

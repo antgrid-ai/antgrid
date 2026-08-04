@@ -32,6 +32,10 @@ import { z } from "zod";
 import { SessionManager } from "./session-manager";
 import { isSafeProjectId } from "./project-id";
 import { listLocalBranches, checkoutLocalBranch } from "./git-branches";
+import { resolveProject } from "./worktrees/project-resolver";
+import { WorktreeError, WorktreeManager } from "./worktrees/worktree-manager";
+export { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
+import { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
 
 const SessionsListParams = z.object({
   projectId: z.string(),
@@ -41,6 +45,9 @@ const SessionsListParams = z.object({
 const SessionsDeleteParams = z.object({
   projectId: z.string(),
   sessionId: z.string().min(1),
+  force: z.boolean().optional(),
+  removeCheckout: z.boolean().optional(),
+  deleteBranch: z.boolean().optional(),
 });
 
 const GitBranchesParams = z.object({
@@ -497,7 +504,10 @@ export class HostServer {
       .map((id) => {
         const seen = this.seenProjects.get(id);
         const entry = this.cores.get(id);
-        const dialable = entry?.core.isRelayRegistered() ?? false;
+        const needsCheckoutRouting = entry?.core.hasManagedSessions() ?? false;
+        const peerCanRoute = this.controlPlaneRelay?.peerSupportsCheckoutRouting === true;
+        const dialable = (entry?.core.isRelayRegistered() ?? false)
+          && (!needsCheckoutRouting || peerCanRoute);
         // A reconnecting phone binds its ProjectSession to this streamId without a
         // fresh project:start (design §7.4). Only surfaced for a dialable stream.
         const streamId = dialable ? this.streamIds.get(id) : undefined;
@@ -748,7 +758,7 @@ export class HostServer {
         error: { code: "E_BAD_PARAMS", message: parsed.error.issues.map((i) => i.message).join("; ") },
       });
     }
-    const { projectId, sessionId } = parsed.data;
+    const { projectId, sessionId, force, removeCheckout, deleteBranch } = parsed.data;
     // SECURITY: shape check only (no separators / dot dirs / hidden names) —
     // the catalog lookup below is what confines it to a real project.
     if (!isSafeProjectId(projectId)) {
@@ -778,9 +788,15 @@ export class HostServer {
     if (entry) {
       // Warm core owns sessions.json — delegate so the live state + disk + any
       // connected peers stay in sync (kills the PTY, emits session:updated).
-      deleted = entry.core.deleteSession(sessionId);
+      deleted = await entry.core.deleteSession(sessionId, { force, removeCheckout, deleteBranch });
     } else {
-      deleted = await SessionManager.deletePersisted(resolveAbDir(), projectId, sessionId);
+      try {
+        deleted = await this.deleteColdSession(projectId, sessionId, { force, removeCheckout, deleteBranch });
+      } catch (error) {
+        const code = error instanceof WorktreeError ? error.code : "DELETE_FAILED";
+        const message = error instanceof WorktreeError ? error.message : "Could not delete this session.";
+        return createMessage("response", { requestId: req.requestId, ok: false, error: { code, message } });
+      }
     }
     return createMessage("response", { requestId: req.requestId, ok: true, result: { deleted } });
   }
@@ -826,6 +842,7 @@ export class HostServer {
           isRepository: catalog.isRepository,
           current: catalog.current,
           branches: catalog.branches,
+          worktreeSessionsSupported: catalog.isRepository && WORKTREE_SESSIONS_SUPPORTED,
         },
       });
     } catch (err: any) {
@@ -888,7 +905,7 @@ export class HostServer {
 
       if (catalog.current !== branch) {
         const entry = this.cores.get(projectId);
-        const statuses = entry?.core.sessionWorkStatuses ?? {};
+        const statuses = entry?.core.mainSessionWorkStatuses ?? {};
         const hasActive = Object.values(statuses).some(
           (status) => status === "working" || status === "attention",
         );
@@ -939,6 +956,13 @@ export class HostServer {
       // record is rejected, never opened with a guessed path.
       const seen = this.seenProjects.get(verb.projectId);
       if (!seen) return { ok: false, error: { code: "UNKNOWN_PROJECT", message: "no path on record; open from desktop first" } };
+      if (await this.projectRequiresCheckoutRouting(verb.projectId)
+        && this.controlPlaneRelay?.peerSupportsCheckoutRouting !== true) {
+        return {
+          ok: false,
+          error: { code: "UPDATE_REQUIRED", message: "update the app to use this project's isolated sessions" },
+        };
+      }
       const entry = this.cores.get(verb.projectId);
       // An already-open LOCAL core (desktop attached over loopback) gets PROMOTED:
       // an additive relay slot is wired onto its EXISTING bus — no close+reopen,
@@ -1095,6 +1119,16 @@ export class HostServer {
     switch (req.type) {
       case "project:list":
         return { id: req.id, ok: true, type: "project:list", projects: this.list() };
+      case "project:resolve": {
+        const project = await resolveProject(req.folder);
+        return {
+          id: req.id,
+          ok: true,
+          type: "project:resolve",
+          ...project,
+          label: basename(project.repoPath),
+        };
+      }
       case "tools:list":
         return {
           id: req.id,
@@ -1106,8 +1140,16 @@ export class HostServer {
           tools: this.buildToolsAdvertisement(),
         };
       case "project:open": {
-        const r = await this.open(req.projectId, req.projectPath, req.mode);
-        return { id: req.id, ok: true, type: "project:open", running: r.running, connect: r.connect };
+        try {
+          const r = await this.open(req.projectId, req.projectPath, req.mode);
+          return { id: req.id, ok: true, type: "project:open", running: r.running, connect: r.connect };
+        } catch (err) {
+          const e = err as Error & { code?: string };
+          if (e.code === "PROJECT_ID_MISMATCH") {
+            return { id: req.id, ok: false, error: { code: e.code, message: e.message } };
+          }
+          throw err;
+        }
       }
       case "project:start": {
         // Re-advertises an already-open core. `connect` is the loopback
@@ -1149,6 +1191,7 @@ export class HostServer {
             isRepository: catalog.isRepository,
             current: catalog.current,
             branches: catalog.branches,
+            worktreeSessionsSupported: catalog.isRepository && WORKTREE_SESSIONS_SUPPORTED,
           };
         } catch (err: any) {
           return {
@@ -1170,7 +1213,7 @@ export class HostServer {
 
           if (catalog.current !== req.branch) {
             const entry = this.cores.get(req.projectId);
-            const statuses = entry?.core.sessionWorkStatuses ?? {};
+            const statuses = entry?.core.mainSessionWorkStatuses ?? {};
             const hasActive = Object.values(statuses).some(
               (status) => status === "working" || status === "attention",
             );
@@ -1225,12 +1268,30 @@ export class HostServer {
   /** Idempotent: returns the existing running core if already open, and
    *  coalesces concurrent opens of the same not-yet-open project. */
   async open(projectId: string, projectPath: string, mode: "local" | "remote"): Promise<OpenResult> {
+    const resolved = await resolveProject(projectPath);
+    // AFTER the resolve, not before: the resolve is a git spawn, and a caller
+    // that started before this one may have finished its whole core startup
+    // (and cleared `opening`) while we were suspended here. Checking `cores`
+    // only on the way in would send that late caller on to start a second core.
     const existing = this.cores.get(projectId);
     if (existing) {
       existing.lastFocusedMs = this.tick();
       this.touchSeenProject(projectId);
       return this.resultFor(existing);
     }
+    // The host is authoritative for project identity: a linked worktree and its
+    // primary checkout are ONE project. A caller naming a folder under its own
+    // path hash would otherwise get a second core over the same repository,
+    // with its own session store and its own idea of which checkout is main.
+    // Checked below the warm-core branch so an already-running legacy alias
+    // (validated when it was created) keeps working until migration imports it.
+    if (resolved.projectId !== projectId) {
+      throw Object.assign(
+        new Error(`project ${projectPath} resolves to ${resolved.projectId}, not ${projectId}`),
+        { code: "PROJECT_ID_MISMATCH", resolvedProjectId: resolved.projectId },
+      );
+    }
+    projectPath = resolved.repoPath;
     // A core isn't in `cores` until startCore() finishes, so two concurrent
     // opens would both miss the check above and each start a core — the second
     // cores.set would overwrite (and orphan) the first. Share the in-flight
@@ -1508,8 +1569,48 @@ export class HostServer {
         };
       },
       currentPeerPubkey: () => client.currentPeerPubkey(),
+      currentPeerSupportsCheckoutRouting: () => client.peerSupportsCheckoutRouting,
       sendPushDeliver: (m) => client.sendPushDeliver(m),
     };
+  }
+
+  /** Cold projects have no core to inspect, so compatibility derives only from
+   * the host-owned session store. A remote request never supplies a path. */
+  private async projectRequiresCheckoutRouting(projectId: string): Promise<boolean> {
+    const warm = this.cores.get(projectId)?.core;
+    if (warm) return warm.hasManagedSessions();
+    const sessions = await SessionManager.readPersisted(resolveAbDir(), projectId, true);
+    return sessions.some((session) => session.checkoutKind === "managed-worktree");
+  }
+
+  /** Cold deletion still owns the same safe worktree lifecycle as a warm core.
+   * The repository path is resolved exclusively from this host's seen catalog. */
+  private async deleteColdSession(
+    projectId: string,
+    sessionId: string,
+    options: { force?: boolean; removeCheckout?: boolean; deleteBranch?: boolean },
+  ): Promise<boolean> {
+    const persisted = await SessionManager.readPersisted(resolveAbDir(), projectId, true);
+    const session = persisted.find((entry) => entry.id === sessionId);
+    if (!session) return false;
+    if (session.checkoutKind !== "managed-worktree") {
+      return SessionManager.deletePersisted(resolveAbDir(), projectId, sessionId);
+    }
+    if (options.removeCheckout === false) {
+      throw new WorktreeError("WORKTREE_CONFLICT", "An isolated session must remove its managed worktree when deleted.");
+    }
+    const manager = new WorktreeManager({
+      abDir: resolveAbDir(),
+      resolveRepoPath: async (id) => this.seenProjects.get(id)?.path,
+    });
+    // The manager repeats the dirty/unpushed preflight and only removes metadata
+    // after Git confirms removal. Persist the session row last.
+    await manager.remove({
+      checkoutId: session.checkoutId,
+      force: options.force === true,
+      deleteBranch: options.deleteBranch === true,
+    });
+    return SessionManager.deletePersisted(resolveAbDir(), projectId, sessionId);
   }
 
   private async evictIfNeeded(justOpened: string): Promise<void> {

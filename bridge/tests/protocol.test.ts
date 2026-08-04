@@ -100,6 +100,7 @@ describe("session:* messages", () => {
         id: "s1", name: "Session 1",
         createdAt: 1, lastUsedAt: 2, archived: false, running: true, mode: "terminal" as const,
         agentSessionResumable: true,
+        checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const,
       }],
     });
     const parsed = AbMessageSchema.safeParse(JSON.parse(JSON.stringify(msg)));
@@ -128,10 +129,10 @@ describe("session:* messages", () => {
   it("session:result and session:updated roundtrip", () => {
     const result = createMessage("session:result", {
       requestId: "r", ok: true,
-      session: { id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, mode: "terminal" as const, agentSessionResumable: true },
+      session: { id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, mode: "terminal" as const, agentSessionResumable: true, checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const },
     });
     const updated = createMessage("session:updated", {
-      sessions: [{ id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, mode: "terminal" as const, agentSessionResumable: true }],
+      sessions: [{ id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, mode: "terminal" as const, agentSessionResumable: true, checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const }],
     });
     expect(AbMessageSchema.safeParse(JSON.parse(JSON.stringify(result))).success).toBe(true);
     expect(AbMessageSchema.safeParse(JSON.parse(JSON.stringify(updated))).success).toBe(true);
@@ -164,6 +165,7 @@ describe("session:* messages", () => {
       id: "s1", name: "n", createdAt: 1, lastUsedAt: 1,
       archived: false, running: false, command: "my-agent --serve", mode: "terminal" as const,
       agentSessionResumable: true,
+      checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const,
     };
     const msg = createMessage("session:list:result", { requestId: "r", sessions: [entry] });
     const parsed = parseMessage(JSON.stringify(msg));
@@ -180,6 +182,7 @@ describe("session:* messages", () => {
       agentSessionResumable: true,
       agentSessionId: "cop-1",
       agentTranscriptPath: "/tmp/copilot-transcript.json",
+      checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const,
     };
     const msg = createMessage("session:list:result", { requestId: "r", sessions: [entry] });
     const parsed = parseMessage(JSON.stringify(msg));
@@ -388,5 +391,23 @@ describe("terminal:output carries optional seq", () => {
       data: "hi",
     };
     expect(parseMessage(JSON.stringify(msg))?.type).toBe("terminal:output");
+  });
+
+  it("defaults legacy checkout-variable frames to main", () => {
+    const msg = {
+      id: "01d5e166-6d4e-4e0d-a9e9-d4a6d57496b4",
+      timestamp: Date.now(),
+      type: "file:search",
+      projectId: "p1",
+      query: "needle",
+      caseSensitive: false,
+      regex: false,
+      wholeWord: false,
+      requestId: "r1",
+    };
+    const parsed = parseMessage(JSON.stringify(msg));
+    expect(parsed?.type).toBe("file:search");
+    if (parsed?.type !== "file:search") throw new Error("unreachable");
+    expect(parsed.checkoutId).toBe("main");
   });
 });

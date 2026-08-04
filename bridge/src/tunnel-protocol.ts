@@ -20,6 +20,7 @@ export const TunnelHttpRequest = z.object({
    *  safe for the mirror-image reason: `z.object` strips unknown keys, so this
    *  field just vanishes and the response comes back uncompressed. */
   acceptEncodings: z.array(z.string()).optional(),
+  checkoutId: z.string().default("main"),
 });
 
 export const TunnelHttpResponse = z.object({
@@ -30,6 +31,7 @@ export const TunnelHttpResponse = z.object({
   setCookies: z.array(z.string()).optional(),
   body: z.string(),
   bodyEncoding: z.enum(["utf8", "base64", TUNNEL_GZIP_ENCODING]),
+  checkoutId: z.string().default("main"),
 });
 
 export type TunnelHttpRequest = z.infer<typeof TunnelHttpRequest>;

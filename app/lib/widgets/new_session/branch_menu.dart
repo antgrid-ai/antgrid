@@ -21,6 +21,7 @@ class BranchChip extends ConsumerWidget {
 
     final catalogAsync = ref.watch(newSessionBranchCatalogProvider);
     final selection = ref.watch(newSessionBranchSelectionProvider);
+    final isolated = ref.watch(newSessionIsolatedProvider);
 
     String label = 'Loading branches...';
     bool disabled = false;
@@ -38,9 +39,9 @@ class BranchChip extends ConsumerWidget {
               selection.targetId == target.id &&
               catalog.branches.contains(selection.branch);
           if (isExplicitValid) {
-            label = selection.branch;
+            label = isolated ? 'Base: ${selection.branch}' : selection.branch;
           } else if (catalog.current != null) {
-            label = catalog.current!;
+            label = isolated ? 'Base: ${catalog.current!}' : catalog.current!;
           } else {
             label = 'Detached HEAD';
           }

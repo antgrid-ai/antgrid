@@ -278,7 +278,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     // the comment dialog holds this open indefinitely, and a reconnect or LRU
     // evict in that window makes the façade throw — into a fire-and-forget
     // button callback, so unhandled.
-    final svc = focusedServiceOrNull(ref.container, (s) => s.terminalService);
+    final svc = focusedCheckoutServiceOrNull(ref.container, (s) => s.terminalService);
     if (svc == null) return;
     svc.sendToAgentTerminal(message);
     ref.read(switchToAgentProvider)?.call();

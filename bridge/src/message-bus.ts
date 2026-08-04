@@ -93,7 +93,24 @@ export class MessageBus {
       const sessionId = (msg as { sessionId?: string }).sessionId ?? "";
       return `${msg.type} ${sessionId}`;
     }
-    return REPLAY_TYPES.has(msg.type) ? msg.type : null;
+    if (!REPLAY_TYPES.has(msg.type)) return null;
+    // Checkout-scoped for the same reason the types above are session-scoped:
+    // every checkout runtime publishes its own tree:full / git:status /
+    // agent:status, so one frame per TYPE let an isolated session's worktree
+    // evict the primary checkout's — and the app, which filters replayed frames
+    // by checkoutId, then had nothing left to draw the main file tree from.
+    const checkoutId = (msg as { checkoutId?: string }).checkoutId ?? "main";
+    return `${msg.type} ${checkoutId}`;
+  }
+
+  /** Drop a checkout's replay entries at teardown, so a deleted worktree's tree
+   *  and git status stop being replayed to every app that reconnects. */
+  dropCheckoutReplay(checkoutId: string): void {
+    for (const [key, cached] of this.replayCache) {
+      if ((cached.msg as { checkoutId?: string }).checkoutId === checkoutId) {
+        this.replayCache.delete(key);
+      }
+    }
   }
 
   setInboundHandler(fn: InboundHandler): void {

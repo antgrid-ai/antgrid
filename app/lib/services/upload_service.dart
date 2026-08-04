@@ -57,6 +57,7 @@ class UploadService {
   static const Duration _kStepTimeout = Duration(seconds: 30);
 
   final ProjectSession session;
+  final String checkoutId;
   StreamSubscription<Map<String, dynamic>>? _statusSub;
   final Map<String, PendingReply<Map<String, dynamic>>> _pending = {};
   // uploadId → the requestId its done-waiter is keyed by. Lets a failure result
@@ -65,8 +66,8 @@ class UploadService {
   final Map<String, String> _requestIdByUpload = {};
   bool _disposed = false;
 
-  UploadService.fromSession(this.session) {
-    _statusSub = session.statusStream.listen(_onStatusJson);
+  UploadService.fromSession(this.session, {this.checkoutId = 'main'}) {
+    _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
   }
 
   void _onStatusJson(Map<String, dynamic> j) {
@@ -137,7 +138,7 @@ class UploadService {
 
     final requestId = const Uuid().v4();
     final startReplyF = _await('start:$requestId');
-    await session.send(
+    await session.sendForCheckout(checkoutId,
       createAbMessage('file:upload-start', {
         'projectId': session.projectId,
         'requestId': requestId,
@@ -172,7 +173,7 @@ class UploadService {
     for (var off = 0; off < bytes.length; off += kChunkBytes) {
       final end = math.min(off + kChunkBytes, bytes.length);
       final ackF = _await('ack:$uploadId:$seq');
-      await session.send(
+      await session.sendForCheckout(checkoutId,
         createAbMessage('file:upload-chunk', {
           'uploadId': uploadId,
           'seq': seq,
@@ -185,7 +186,7 @@ class UploadService {
     }
 
     final resultF = _await('done:$requestId');
-    await session.send(
+    await session.sendForCheckout(checkoutId,
       createAbMessage('file:upload-done', {'uploadId': uploadId}),
     );
     final result = await resultF;

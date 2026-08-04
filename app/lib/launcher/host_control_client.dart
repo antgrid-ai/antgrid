@@ -22,6 +22,41 @@ class OpenResult {
   const OpenResult({required this.running, required this.connect});
 }
 
+/// Host-owned identity for a local folder. A linked worktree intentionally
+/// resolves to its repository's primary checkout, so app-side path hashing can
+/// never create a second project row for the same repository.
+class ResolvedLocalProject {
+  final String projectId;
+  final String repoPath;
+  final String selectedPath;
+  final String label;
+  final bool isGitRepository;
+  const ResolvedLocalProject({
+    required this.projectId,
+    required this.repoPath,
+    required this.selectedPath,
+    required this.label,
+    required this.isGitRepository,
+  });
+
+  factory ResolvedLocalProject.fromJson(Map<String, dynamic> json) {
+    final projectId = json['projectId'];
+    final repoPath = json['repoPath'];
+    final selectedPath = json['selectedPath'];
+    final label = json['label'];
+    if (projectId is! String || repoPath is! String || selectedPath is! String || label is! String) {
+      throw HostControlException('BAD_RESPONSE', 'malformed project:resolve response: $json');
+    }
+    return ResolvedLocalProject(
+      projectId: projectId,
+      repoPath: repoPath,
+      selectedPath: selectedPath,
+      label: label,
+      isGitRepository: json['isGitRepository'] == true,
+    );
+  }
+}
+
 /// One catalog entry. Mirror of `control-protocol.ts` ProjectSummary.
 class ProjectSummary {
   final String projectId;
@@ -214,12 +249,6 @@ class HostControlClient {
     } catch (_) {
       decoded = const {};
     }
-    if (res.statusCode != 200) {
-      throw HostControlException(
-        'HTTP_${res.statusCode}',
-        'control returned ${res.statusCode}',
-      );
-    }
     if (decoded['ok'] != true) {
       final err = decoded['error'];
       if (err is Map) {
@@ -228,7 +257,19 @@ class HostControlClient {
           (err['message'] as String?) ?? '',
         );
       }
+      if (res.statusCode != 200) {
+        throw HostControlException(
+          'HTTP_${res.statusCode}',
+          'control returned ${res.statusCode}',
+        );
+      }
       throw HostControlException('UNKNOWN', 'control returned ok:false');
+    }
+    if (res.statusCode != 200) {
+      throw HostControlException(
+        'HTTP_${res.statusCode}',
+        'control returned ${res.statusCode}',
+      );
     }
     return decoded;
   }
@@ -268,6 +309,14 @@ class HostControlClient {
       }
     }
     return OpenResult(running: m['running'] == true, connect: connect);
+  }
+
+  Future<ResolvedLocalProject> projectResolve(
+    String folder, {
+    Duration timeout = const Duration(seconds: 5),
+  }) async {
+    final m = await _post({'type': 'project:resolve', 'folder': folder}, timeout: timeout);
+    return ResolvedLocalProject.fromJson(m);
   }
 
   /// The [HostController] liveness ping. Short timeout so a wedged host is

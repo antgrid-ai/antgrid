@@ -13,6 +13,7 @@ import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_menu.dart';
+import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../models/session_entry.dart';
 import '../navigation/nav_controller.dart';
@@ -219,6 +220,16 @@ class _SessionRowState extends ConsumerState<SessionRow> {
                   style: AbTokens.sansStyle(),
                   overflow: TextOverflow.ellipsis,
                 ),
+          subtitle:
+              session.checkoutKind == 'managed-worktree' &&
+                  (session.checkoutBranch?.isNotEmpty ?? false)
+              ? Text(
+                  session.checkoutBranch!,
+                  key: ValueKey('session-checkout-branch-${session.id}'),
+                  style: AbTokens.monoStyle(fontSize: AbTokens.fontXxs),
+                  overflow: TextOverflow.ellipsis,
+                )
+              : null,
           // Hover-only kebab kept in the tree (and its size reserved) so the
           // row height never jitters — including while editing, when it's
           // hidden but its slot still anchors the row's height.
@@ -419,7 +430,15 @@ class _SessionMenu extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     return Builder(
       builder: (anchor) {
-        void open() => _openMenu(anchor, ref.container);
+        // Explicit destiny: the menu chain awaits dialogs and bridge RPCs, and
+        // an unhandled rejection from a fire-and-forget `void` call would land
+        // outside any build() as a fatal.
+        void open() => unawaited(
+          _openMenu(anchor, ref.container).catchError(
+            (Object error, StackTrace stack) =>
+                debugPrint('session menu failed: $error\n$stack'),
+          ),
+        );
         // The parent row drives single/double tap through a
         // [SerialTapGestureRecognizer] that eagerly claims the gesture arena on
         // pointer-up (to keep single-tap selection instant). A plain button
@@ -494,18 +513,108 @@ class _SessionMenu extends ConsumerWidget {
         await svc.archive(session.id);
         _disconnectIfEmpty(ref);
       case _SessionAction.delete:
-        final confirmed = await AbConfirmDialog.show(
-          context: anchor,
-          title: 'Delete session?',
-          body:
-              'This permanently deletes "${session.name}" and terminates its agent process. This cannot be undone.',
-          confirmLabel: 'Delete',
-          destructive: true,
-        );
-        if (confirmed) {
-          await svc.delete(session.id);
-          _disconnectIfEmpty(ref);
-        }
+        await _deleteSession(anchor, ref, svc);
+    }
+  }
+
+  Future<void> _deleteSession(
+    BuildContext context,
+    ProviderContainer ref,
+    SessionsService service,
+  ) async {
+    final capturedId = session.id;
+    if (session.checkoutKind != 'managed-worktree') {
+      final confirmed = await AbConfirmDialog.show(
+        context: context,
+        title: 'Delete session?',
+        body:
+            'This permanently deletes "${session.name}" and terminates its agent process. This cannot be undone.',
+        confirmLabel: 'Delete',
+        destructive: true,
+      );
+      if (!confirmed || !context.mounted || session.id != capturedId) return;
+      // A shared delete has no second chance to offer, so a refusal is simply
+      // reported. Before checkout-scoped deletion this returned false and the
+      // failure was silent.
+      final deleted = await _tryDelete(context, service, capturedId);
+      if (deleted == true) _disconnectIfEmpty(ref);
+      return;
+    }
+    final confirmed = await AbConfirmDialog.show(
+      context: context,
+      title: 'Delete isolated session?',
+      body:
+          'This permanently deletes "${session.name}", terminates its agent process and removes its isolated working directory. Its branch is kept. This cannot be undone.',
+      confirmLabel: 'Delete',
+      destructive: true,
+    );
+    if (!confirmed || !context.mounted || session.id != capturedId) return;
+    // Managed checkouts are always attempted non-destructively first. The
+    // bridge checks both uncommitted and unpushed work before removing anything.
+    final String blockedBy;
+    try {
+      final deleted = await service.delete(capturedId);
+      if (!context.mounted || session.id != capturedId) return;
+      if (deleted) _disconnectIfEmpty(ref);
+      return;
+    } on SessionOperationException catch (error) {
+      if (!context.mounted || session.id != capturedId) return;
+      final code = error.errorCode;
+      if (code != 'WORKTREE_DIRTY' && code != 'WORKTREE_UNPUSHED') {
+        showAbSnackBar(context, error.message ?? 'Could not delete the session');
+        return;
+      }
+      blockedBy = code!;
+    }
+
+    final unpushed = blockedBy == 'WORKTREE_UNPUSHED';
+    // Branch deletion is offered only for unpushed commits, because that is the
+    // only case where keeping the branch actually preserves something. It is
+    // always a separate, unchecked choice — never folded into "force".
+    final choice = await AbConfirmDialog.showWithOption(
+      context: context,
+      title: unpushed
+          ? 'Delete worktree with unpushed commits?'
+          : 'Delete worktree with uncommitted changes?',
+      body: unpushed
+          ? 'This isolated session\'s branch has commits that exist nowhere else. Deleting removes its working directory; the branch is kept unless you also delete it.'
+          : 'This isolated session has uncommitted changes in its working directory. Force deletion discards them. Its branch is preserved.',
+      confirmLabel: 'Force delete',
+      destructive: true,
+      optionLabel: unpushed ? 'Also delete the branch and its commits' : null,
+    );
+    if (!choice.confirmed || !context.mounted || session.id != capturedId) {
+      return;
+    }
+
+    // Exactly one retry, with the captured id.
+    final deleted = await _tryDelete(
+      context,
+      service,
+      capturedId,
+      force: true,
+      deleteBranch: choice.optionSelected,
+    );
+    if (!context.mounted || session.id != capturedId) return;
+    if (deleted == true) _disconnectIfEmpty(ref);
+  }
+
+  /// Deletes and reports a typed refusal in the UI. Returns null when the
+  /// request failed — the caller must not treat that as a deletion.
+  Future<bool?> _tryDelete(
+    BuildContext context,
+    SessionsService service,
+    String id, {
+    bool? force,
+    bool? deleteBranch,
+  }) async {
+    try {
+      return await service.delete(id, force: force, deleteBranch: deleteBranch);
+    } on SessionOperationException catch (error) {
+      if (context.mounted) {
+        showAbSnackBar(context, error.message ?? 'Could not delete the session');
+      }
+      return null;
     }
   }
 

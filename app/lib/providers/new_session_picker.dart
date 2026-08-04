@@ -670,6 +670,23 @@ final newSessionBranchSelectionProvider = NotifierProvider<
   () => ValueController<NewSessionBranchSelection?>(null),
 );
 
+/// Ephemeral opt-in for a new managed worktree. It is intentionally not a
+/// preference: the capability belongs to the selected host/project and the
+/// choice must never leak to a later New Session visit or target.
+final newSessionIsolatedProvider =
+    NotifierProvider<ValueController<bool>, bool>(() => ValueController(false));
+
+/// True only after the catalog for the current target explicitly advertises the
+/// completed checkout-routing capability. An absent/old field is false.
+final newSessionIsolationReadyProvider = Provider<bool>((ref) {
+  final target = ref.watch(selectedTargetProjectProvider);
+  final catalog = ref.watch(newSessionBranchCatalogProvider).value;
+  return target != null &&
+      catalog != null &&
+      catalog.isRepository &&
+      catalog.worktreeSessionsSupported;
+});
+
 /// Reset the ephemeral New Session form + selection to defaults. Called on every
 /// exit (Start success / Cancel / Esc) so reopening the page starts clean and a
 /// stale name never attaches to the next session.
@@ -688,6 +705,7 @@ void resetNewSessionForm(ProviderContainer ref) {
   ref.read(newSessionStartInFlightProvider.notifier).set(false);
   ref.read(newSessionPromptProvider.notifier).set('');
   ref.read(newSessionBranchSelectionProvider.notifier).set(null);
+  ref.read(newSessionIsolatedProvider.notifier).set(false);
 }
 
 /// Leave the New Session page: reset the form, clear new-session mode, and

@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export const ControlRequestSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1), type: z.literal("project:list") }),
+  z.object({ id: z.string().min(1), type: z.literal("project:resolve"), folder: z.string().min(1) }),
   z.object({ id: z.string().min(1), type: z.literal("tools:list") }),
   z.object({
     id: z.string().min(1),
@@ -89,6 +90,7 @@ export interface ConnectInfo {
 
 export type ControlResponse =
   | { id: string; ok: true; type: "project:list"; projects: ProjectSummary[] }
+  | { id: string; ok: true; type: "project:resolve"; projectId: string; repoPath: string; selectedPath: string; label: string; isGitRepository: boolean }
   | { id: string; ok: true; type: "tools:list"; tools: ToolSummary[] }
   | { id: string; ok: true; type: "project:open"; running: boolean; connect: ConnectInfo | null }
   | { id: string; ok: true; type: "project:start"; running: boolean; connect: ConnectInfo | null }
@@ -99,6 +101,6 @@ export type ControlResponse =
   | { id: string; ok: true; type: "phones:unpair" }
   | { id: string; ok: true; type: "mobile-access:get"; enabled: boolean }
   | { id: string; ok: true; type: "mobile-access:set"; enabled: boolean }
-  | { id: string; ok: true; type: "git:branches"; isRepository: boolean; current: string | null; branches: string[] }
+  | { id: string; ok: true; type: "git:branches"; isRepository: boolean; current: string | null; branches: string[]; worktreeSessionsSupported: boolean }
   | { id: string; ok: true; type: "git:checkout"; current: string }
   | { id: string; ok: false; error: { code: string; message: string } };

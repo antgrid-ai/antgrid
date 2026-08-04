@@ -176,4 +176,73 @@ void main() {
     await svc.dispose();
     await session.close();
   });
+
+  test('delete completes true on success', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final cache = await CachedSessionsStore.open();
+    final svc = SessionsService.fromSession(session, cache: cache);
+
+    final future = svc.delete('sess-1');
+    await Future<void>.delayed(Duration.zero);
+    final sent = t.sent.firstWhere((m) => m['type'] == 'session:delete');
+    t.emit('session:result', {'requestId': sent['requestId'], 'ok': true});
+
+    expect(await future, isTrue);
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('delete surfaces the typed refusal code rather than a bare false',
+      () async {
+    // The managed-worktree delete flow branches on this code to decide which
+    // confirmation to show, so a plain `false` would be unactionable.
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final cache = await CachedSessionsStore.open();
+    final svc = SessionsService.fromSession(session, cache: cache);
+
+    final future = svc.delete('sess-1');
+    await Future<void>.delayed(Duration.zero);
+    final sent = t.sent.firstWhere((m) => m['type'] == 'session:delete');
+    t.emit('session:result', {
+      'requestId': sent['requestId'],
+      'ok': false,
+      'errorCode': 'WORKTREE_UNPUSHED',
+      'error': "The isolated worktree's branch has unpushed commits.",
+    });
+
+    await expectLater(
+      future,
+      throwsA(
+        isA<SessionOperationException>()
+            .having((e) => e.errorCode, 'errorCode', 'WORKTREE_UNPUSHED')
+            .having((e) => e.message, 'message', contains('unpushed')),
+      ),
+    );
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('delete forwards force and deleteBranch only when set', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final cache = await CachedSessionsStore.open();
+    final svc = SessionsService.fromSession(session, cache: cache);
+
+    svc.delete('sess-1').ignore();
+    svc.delete('sess-2', force: true, deleteBranch: true).ignore();
+    await Future<void>.delayed(Duration.zero);
+
+    final deletes = t.sent.where((m) => m['type'] == 'session:delete').toList();
+    expect(deletes[0].containsKey('force'), isFalse);
+    expect(deletes[0].containsKey('deleteBranch'), isFalse);
+    expect(deletes[1]['force'], isTrue);
+    expect(deletes[1]['deleteBranch'], isTrue);
+
+    await svc.dispose();
+    await session.close();
+  });
 }

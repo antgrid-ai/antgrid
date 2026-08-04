@@ -213,4 +213,34 @@ describe("session-scoped replay (agent:capabilities)", () => {
     bus.dropSessionReplay("s2");
     expect(bus.getSnapshot(["*"]).map((m) => m.type)).toEqual(["agent:status"]);
   });
+
+  const tree = (checkoutId: string, name: string) => ({
+    ...createMessage("tree:full", {
+      projectId: "p",
+      root: { name, path: "", type: "directory" as const, children: [] },
+    }),
+    checkoutId,
+  });
+
+  it("keeps one replayed snapshot per checkout", () => {
+    // An isolated session's worktree publishes its own tree:full. Keyed by type
+    // alone it evicted main's, and the app — which filters replayed frames by
+    // checkoutId — was left with nothing to draw the main file tree from.
+    const bus = new MessageBus();
+    bus.publish(tree("main", "primary"), "control");
+    bus.publish(tree("wt-1", "isolated"), "control");
+    const frames = bus.getSnapshot(["tree:full"]) as any[];
+    expect(frames.map((f) => f.checkoutId).sort()).toEqual(["main", "wt-1"]);
+    expect(frames.find((f) => f.checkoutId === "main").root.name).toBe("primary");
+  });
+
+  it("dropCheckoutReplay evicts one checkout's entries and leaves the rest", () => {
+    const bus = new MessageBus();
+    bus.publish(tree("main", "primary"), "control");
+    bus.publish(tree("wt-1", "isolated"), "control");
+    bus.dropCheckoutReplay("wt-1");
+    const frames = bus.getSnapshot(["tree:full"]) as any[];
+    expect(frames).toHaveLength(1);
+    expect(frames[0].checkoutId).toBe("main");
+  });
 });

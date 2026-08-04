@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
+import { computeProjectId } from "../src/project-id";
 
 // --- shared fakes (mirror control-plane-start.test.ts) ---------------------
 
@@ -29,6 +30,23 @@ function tempFolder(): string {
   writeFileSync(join(f, "antgrid.yaml"), "name: test-remote\nagent:\n  tool: claude-code\n");
   return f;
 }
+
+// Project ids are host-resolved: `open` rejects any id that is not
+// computeProjectId(folder) (PROJECT_ID_MISMATCH). These helpers keep the
+// readable "projX" aliases while using the real id on the wire.
+const projectIds = new Map<string, string>();
+function proj(alias: string): string {
+  const id = projectIds.get(alias);
+  if (!id) throw new Error(`project alias not opened: ${alias}`);
+  return id;
+}
+async function openAs(h: HostServer, alias: string, mode: "local" | "remote"): Promise<OpenResultLike> {
+  const folder = tempFolder();
+  const projectId = computeProjectId(folder);
+  projectIds.set(alias, projectId);
+  return h.open(projectId, folder, mode);
+}
+type OpenResultLike = Awaited<ReturnType<HostServer["open"]>>;
 
 /** Seed a project's persisted session store, as SessionManager would. The path
  *  mirrors `join(storeDir, "agents", projectId)`. */
@@ -71,38 +89,38 @@ afterEach(async () => {
 
 test("forget() stops a warm core, deletes its session store, and drops the seen-catalog hint", async () => {
   const h = host!;
-  await h.open("projA", tempFolder(), "remote");
-  const storeDir = seedSessionStore("projA");
-  const legacyDir = seedLegacyProjectDir("projA");
+  await openAs(h, "projA", "remote");
+  const storeDir = seedSessionStore(proj("projA"));
+  const legacyDir = seedLegacyProjectDir(proj("projA"));
   expect(existsSync(storeDir)).toBe(true);
   expect(existsSync(legacyDir)).toBe(true);
-  expect(h.get("projA")?.running).toBe(true);
+  expect(h.get(proj("projA"))?.running).toBe(true);
 
-  await h.forget("projA");
+  await h.forget(proj("projA"));
 
-  expect(h.get("projA")).toBeNull(); // core stopped
+  expect(h.get(proj("projA"))).toBeNull(); // core stopped
   expect(existsSync(storeDir)).toBe(false); // sessions.json + dir gone
   expect(existsSync(legacyDir)).toBe(false); // legacy projects/<id>/ gone
   // The seen-catalog hint (projects.json) no longer lists the project.
   const projectsJson = join(abDir!, "agents", "projects.json");
   const seen = JSON.parse(readFileSync(projectsJson, "utf8"));
-  expect(seen.projects.projA).toBeUndefined();
+  expect(seen.projects[proj("projA")]).toBeUndefined();
 });
 
 test("forget() leaves the machine-level mobile-access switch alone", async () => {
   const h = host!;
-  await h.open("projA", tempFolder(), "local");
-  await h.open("projB", tempFolder(), "local");
-  seedSessionStore("projA");
+  await openAs(h, "projA", "local");
+  await openAs(h, "projB", "local");
+  seedSessionStore(proj("projA"));
   await h.handleRemoteAccessVerb({ id: "t", type: "mobile-access:set", enabled: true });
 
-  await h.forget("projA");
+  await h.forget(proj("projA"));
 
   // Deleting ONE project must never turn the machine off (or on) for every
   // other: the switch is machine-wide policy, forget() only edits the catalog.
   const get = (await h.handleRemoteAccessVerb({ id: "g", type: "mobile-access:get" })) as any;
   expect(get.enabled).toBe(true);
-  expect(h.buildProjectsAdvertisement().map((p) => p.projectId)).toEqual(["projB"]);
+  expect(h.buildProjectsAdvertisement().map((p) => p.projectId)).toEqual([proj("projB")]);
 });
 
 test("forget() is idempotent for an unknown/already-forgotten id", async () => {

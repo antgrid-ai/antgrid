@@ -107,11 +107,27 @@ Future<void> startNewSession(
   final explicitBranch = (selection != null && selection.targetId == target.id)
       ? selection.branch
       : null;
+  final isolated = ref.read(newSessionIsolatedProvider);
+  bool intentIsCurrent() {
+    final currentTarget = ref.read(selectedTargetProjectProvider);
+    final currentSelection = ref.read(newSessionBranchSelectionProvider);
+    final currentBranch =
+        currentSelection != null && currentSelection.targetId == target.id
+        ? currentSelection.branch
+        : null;
+    return currentTarget?.id == target.id &&
+        ref.read(newSessionIsolatedProvider) == isolated &&
+        currentBranch == explicitBranch;
+  }
+  // This gate is deliberately checked before doing a shared checkout. An old
+  // bridge strips unknown fields, so sending worktree intent without this
+  // catalog capability would silently create a shared session.
+  if (isolated && !ref.read(newSessionIsolationReadyProvider)) return;
 
   ref.read(newSessionStartInFlightProvider.notifier).set(true);
   try {
     // 0. If an explicit branch was selected, perform git checkout BEFORE target activation
-    if (explicitBranch != null) {
+    if (!isolated && explicitBranch != null) {
       try {
         if (target.isLocal) {
           final host = await ref.read(hostControllerProvider).ensureHost();
@@ -164,13 +180,7 @@ Future<void> startNewSession(
       }
 
       // Re-verify selected target and branch selection after await
-      final currentTarget = ref.read(selectedTargetProjectProvider);
-      final currentSelection = ref.read(newSessionBranchSelectionProvider);
-      if (currentTarget?.id != target.id ||
-          currentSelection?.targetId != target.id ||
-          currentSelection?.branch != explicitBranch) {
-        return;
-      }
+      if (!intentIsCurrent()) return;
     }
 
     final name = ref.read(newSessionNameProvider).trim();
@@ -178,11 +188,16 @@ Future<void> startNewSession(
     // 1. Activate the target so `selectedRegistrationIdProvider` points at it.
     final pid = await _activateTargetProject(ref, target);
 
+    if (!intentIsCurrent()) return;
+
     // 2. Wait for the per-project ProjectSession (transport + services) to finish
     // constructing before reading any per-project service façade — otherwise the
     // sync `ref.read(sessionsServiceProvider)` below races the async factory.
     await ref.read(projectSessionProvider(pid).future);
-    if (ref.read(selectedRegistrationIdProvider) != pid) return;
+    if (ref.read(selectedRegistrationIdProvider) != pid ||
+        !intentIsCurrent()) {
+      return;
+    }
 
     // 3. Create + start the session, then mark it active.
     final svc = ref.read(sessionsServiceProvider);
@@ -214,6 +229,8 @@ Future<void> startNewSession(
         command: command,
         args: cliArgs.isEmpty ? null : cliArgs,
         mode: mode,
+        isolation: isolated ? 'worktree' : 'shared',
+        baseBranch: isolated ? explicitBranch : null,
       );
       // create failed (e.g. session cap reached); stay on the New Session page
       // so the user can retry.
@@ -241,10 +258,9 @@ Future<void> startNewSession(
       // 4. Leave new-session mode (and reset the form) so the workspace renders
       // the new session.
       leaveNewSession(ref);
-    } catch (_) {
-      // create/start timed out or the reply was dropped. Stay on the New
-      // Session page so the user can retry; the in-flight flag clears in
-      // `finally`.
+    } on TimeoutException {
+      // A dropped/late reply is retryable. Typed bridge failures intentionally
+      // reach the composer so it can show their safe display message.
     }
   } finally {
     ref.read(newSessionStartInFlightProvider.notifier).set(false);

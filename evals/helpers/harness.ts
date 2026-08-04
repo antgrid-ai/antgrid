@@ -648,6 +648,10 @@ export async function setupTestEnv(opts: {
   relay?: RelayHandle;
   /** Extra agent env (e.g. the judge-script override for Task 16's Handler eval). */
   env?: Record<string, string>;
+  /** Runs against the project dir BEFORE the agent boots. The agent resolves
+   *  repository identity and Git-ness once at startup, so a row that needs a
+   *  real repository (isolated sessions) has to create it here, not after. */
+  prepareProject?: (dir: string) => void | Promise<void>;
 }): Promise<TestEnv> {
   const abDir = mkdtempSync(join(tmpdir(), "antgrid-eval-home-"));
 
@@ -667,6 +671,7 @@ export async function setupTestEnv(opts: {
     "__RELAY_URL__": relay.url.replace(/\/ws$/, ""),
     ...opts.replacements,
   });
+  await opts.prepareProject?.(project.dir);
 
   const agent = await spawnAgent({
     relayUrl: relay.url,

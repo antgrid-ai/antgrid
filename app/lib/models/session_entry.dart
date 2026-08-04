@@ -30,6 +30,10 @@ class SessionEntry {
   /// gate one.
   final AgentWorkStatus? workStatus;
   final String? agentSessionId;
+  final String checkoutId;
+  final String checkoutKind;
+  final String? checkoutBranch;
+  final String checkoutState;
 
   const SessionEntry({
     required this.id,
@@ -45,6 +49,10 @@ class SessionEntry {
     this.agentSessionResumable = true,
     this.workStatus,
     this.agentSessionId,
+    this.checkoutId = 'main',
+    this.checkoutKind = 'main',
+    this.checkoutBranch,
+    this.checkoutState = 'ready',
   });
 
   Map<String, dynamic> toJson() => {
@@ -61,6 +69,10 @@ class SessionEntry {
     'agentSessionResumable': agentSessionResumable,
     if (workStatus != null) 'workStatus': workStatus!.name,
     if (agentSessionId != null) 'agentSessionId': agentSessionId,
+    'checkoutId': checkoutId,
+    'checkoutKind': checkoutKind,
+    if (checkoutBranch != null) 'checkoutBranch': checkoutBranch,
+    'checkoutState': checkoutState,
   };
 
   factory SessionEntry.fromJson(Map<String, dynamic> j) => SessionEntry(
@@ -85,6 +97,10 @@ class SessionEntry {
     // app can't name is not a status it should act on.
     workStatus: AgentWorkStatus.fromWire(j['workStatus']),
     agentSessionId: j['agentSessionId'] as String?,
+    checkoutId: j['checkoutId'] as String? ?? 'main',
+    checkoutKind: j['checkoutKind'] as String? ?? 'main',
+    checkoutBranch: j['checkoutBranch'] as String?,
+    checkoutState: j['checkoutState'] as String? ?? 'ready',
   );
 
   /// Parse a JSON array of session maps, skipping any non-map element. Shared by
@@ -114,6 +130,10 @@ class SessionEntry {
     agentSessionResumable: agentSessionResumable,
     workStatus: workStatus,
     agentSessionId: agentSessionId,
+    checkoutId: checkoutId,
+    checkoutKind: checkoutKind,
+    checkoutBranch: checkoutBranch,
+    checkoutState: checkoutState,
   );
 
   @override
@@ -132,7 +152,11 @@ class SessionEntry {
           other.mode == mode &&
           other.agentSessionResumable == agentSessionResumable &&
           other.workStatus == workStatus &&
-          other.agentSessionId == agentSessionId;
+          other.agentSessionId == agentSessionId &&
+          other.checkoutId == checkoutId &&
+          other.checkoutKind == checkoutKind &&
+          other.checkoutBranch == checkoutBranch &&
+          other.checkoutState == checkoutState;
 
   @override
   int get hashCode => Object.hash(
@@ -149,5 +173,9 @@ class SessionEntry {
     agentSessionResumable,
     workStatus,
     agentSessionId,
+    checkoutId,
+    checkoutKind,
+    checkoutBranch,
+    checkoutState,
   );
 }

@@ -103,7 +103,12 @@ test("buildProjectsAdvertisement carries a warm core's work status", async () =>
   // Inject a fake warm core exposing the reduced work status the advert folds in
   // (mirrors the warm-core injection pattern above; no real core spawned).
   (h as any).cores.set("projWarm", {
-    core: { workStatus: "attention", isRelayRegistered: () => true, shutdown: async () => {} },
+    core: {
+      workStatus: "attention",
+      isRelayRegistered: () => true,
+      hasManagedSessions: () => false,
+      shutdown: async () => {},
+    },
     path: "/p", mode: "local", lastFocusedMs: 0,
   });
 

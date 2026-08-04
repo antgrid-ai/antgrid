@@ -5,6 +5,7 @@ import { LocalListener } from "./local-listener";
 import { createRelayPromotion, type RelayPromotionController, type RelayPromotionDeps } from "./relay-promotion";
 import type { AttachStreamOpts, StreamHandle } from "./stream-mux";
 import { createMessage, type AbMessage, type SessionEntry, type WorkStatus } from "./protocol";
+import type { DeleteSessionOptions } from "./session-manager";
 import { answerRequest, initialWorkStatus, reduceWorkStatus, turnStart, userReply, type WorkStatusState } from "./work-status";
 import { logger } from "./logger";
 const log = logger.child({ component: "project-core" });
@@ -22,6 +23,8 @@ export interface ProjectCoreRemoteDeps {
   /** The machine's currently-connected phone pubkey (the mobile-access gate's
    *  remote-vs-local signal, and the push dispatcher's live-device hint). */
   currentPeerPubkey(): string | null;
+  /** E2E app capability, established only after authenticated app:ready. */
+  currentPeerSupportsCheckoutRouting?(): boolean;
   /** Blind FCM push forward over the machine socket (fallback delivery). */
   sendPushDeliver(msg: { pushToken: string; provider: "fcm" | "apns"; blob: { epk: string; box: string } }): void;
 }
@@ -102,6 +105,7 @@ export class ProjectCore {
 
   get projectId(): string { return this.core?.projectId ?? ""; }
   get localConnectInfo(): { port: number; token: string } | null { return this._localConnectInfo; }
+  hasManagedSessions(): boolean { return this.core?.hasManagedSessions() ?? false; }
 
   /** Current reduced work status (working/attention/done/error) for the
    *  control-plane advert. Defaults to "done" before any signal. */
@@ -118,6 +122,19 @@ export class ProjectCore {
    *  presence is how the app tells a per-session bridge from an older one. */
   get sessionWorkStatuses(): Record<string, WorkStatus> {
     return Object.fromEntries(this._work.sessionStatuses);
+  }
+
+  /** {@link sessionWorkStatuses} restricted to sessions a main-checkout branch
+   *  switch would actually disturb. An isolated session works in its own
+   *  worktree, so counting it would block a switch it cannot be affected by.
+   *  Only the branch guards read this; the advert must keep dotting every
+   *  session. */
+  get mainSessionWorkStatuses(): Record<string, WorkStatus> {
+    const out: Record<string, WorkStatus> = {};
+    for (const [id, status] of this._work.sessionStatuses) {
+      if (this.core?.isMainCheckoutSession(id) ?? true) out[id] = status;
+    }
+    return out;
   }
 
   /** Register a callback fired whenever {@link workStatus},
@@ -211,8 +228,8 @@ export class ProjectCore {
   isRelayRegistered(): boolean { return this.relayRegistered; }
 
   /** Forward a session delete to the live AgentCore. False if not started. */
-  deleteSession(id: string): boolean {
-    return this.core?.deleteSession(id) ?? false;
+  deleteSession(id: string, options?: DeleteSessionOptions): boolean | Promise<boolean> {
+    return this.core?.deleteSession(id, options) ?? false;
   }
 
   /** Forward the live session list (with true per-session `running`) to the
@@ -257,7 +274,12 @@ export class ProjectCore {
     core.attachTransport(bus);
     // Fold outbound frames into the control-plane work-status reduction. Additive
     // subscriber (like the push dispatcher); lives for the bus's lifetime.
-    bus.subscribe({ deliver: (msg) => this.observeWorkStatus(msg) });
+    bus.subscribe({ deliver: (msg) => {
+      this.observeWorkStatus(msg);
+      if (msg.type === "session:updated" && core.hasManagedSessions()) {
+        this.listener?.requireCheckoutRouting();
+      }
+    } });
     if (this.deps.mode === "local") {
       await this.startLocal(core, bus);
     } else {
@@ -375,7 +397,8 @@ export class ProjectCore {
       // tree and git status to that phone after the machine switch is turned off,
       // because a remote-mode core holds no PromotionHandle for demoteAllPromoted
       // to tear down. Fail-closed, same as the inbound side.
-      mayDeliver: () => this.deps.remoteAccessEnabled?.() ?? false,
+      mayDeliver: () => (this.deps.remoteAccessEnabled?.() ?? false)
+        && (!core.hasManagedSessions() || remote.currentPeerSupportsCheckoutRouting?.() === true),
       onAdmitted: () => { this.relayRegistered = true; settleOnce({ ok: true }); },
       onRejected: (code, message) => { this.relayRegistered = false; settleOnce({ ok: false, code, message }); },
       // Suppress the heavy stream while the phone is gone; it rebuilds from
@@ -399,6 +422,7 @@ export class ProjectCore {
     // the live device for push). Local mode never wires this, so loopback
     // control stays ungated.
     core.setPeerPubkeyProvider(() => remote.currentPeerPubkey());
+    core.setPeerCheckoutRoutingProvider(() => remote.currentPeerSupportsCheckoutRouting?.() === true);
 
     // Fallback push path: while the paired phone can't receive in-band (no live
     // peer on this stream OR the app is backgrounded), seal a notification to its
@@ -491,6 +515,7 @@ export class ProjectCore {
         try { handle.detach(); } catch { /* best-effort */ }
         try { core.setPlainHook(null); } catch { /* best-effort */ }
         try { core.setPeerPubkeyProvider(null); } catch { /* best-effort */ }
+        try { core.setPeerCheckoutRoutingProvider(null); } catch { /* best-effort */ }
       },
     };
   }
@@ -530,6 +555,7 @@ export class ProjectCore {
         try { handle.detach(); } catch {}
         try { core.setPlainHook(null); } catch {}
         try { core.setPeerPubkeyProvider(null); } catch {}
+        try { core.setPeerCheckoutRoutingProvider(null); } catch {}
       },
     };
   }
@@ -543,6 +569,7 @@ export class ProjectCore {
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
     try { this.core?.setPeerPubkeyProvider(null); } catch {}
+    try { this.core?.setPeerCheckoutRoutingProvider(null); } catch {}
     // Remove the primary stream's push dispatcher (additive bus subscriber) before
     // detaching — deliver() would otherwise hand a frame to a torn-down stream.
     try { this.relayPushUnsub?.(); } catch {}

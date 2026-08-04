@@ -97,6 +97,12 @@ final activeSessionProvider = Provider<SessionEntry?>((ref) {
   return null;
 });
 
+/// Filesystem checkout currently represented by the active session. Old or
+/// not-yet-decoded sessions remain safely bound to main.
+final focusedCheckoutIdProvider = Provider<String>((ref) {
+  return ref.watch(activeSessionProvider)?.checkoutId ?? 'main';
+});
+
 /// Side-effect listener: keep `activeSessionIdProvider` valid as the session
 /// list churns. If the active session is deleted or archived, advance to the
 /// most-recently-used non-archived sibling. If the list is empty, clear the

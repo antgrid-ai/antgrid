@@ -146,13 +146,36 @@ class LocalAgentLauncher {
     String? licenseApiUrl,
     String? relayUrl,
   }) async {
-    final projectId = await computeProjectId(folder);
+    // A host computes repository identity because only it can correctly fold a
+    // linked worktree into its primary checkout. Older hosts predate this
+    // loopback verb, where the old path hash remains safe for shared sessions.
+    _host.bootstrapBuilder ??= () => BootstrapPayload.machineOnly(
+          device: device,
+          licenseApiUrl: licenseApiUrl,
+          relayUrl: relayUrl,
+          ownerPid: pid,
+        );
+    final host = await _host.ensureHost();
+    final resolveClient = HostControlClient(port: host.controlPort, token: host.token);
+    String projectId;
+    String repoPath;
+    try {
+      final resolved = await resolveClient.projectResolve(folder);
+      projectId = resolved.projectId;
+      repoPath = resolved.repoPath;
+    } on HostControlException catch (e) {
+      if (e.code != 'BAD_REQUEST' && e.code != 'UNKNOWN_VERB') rethrow;
+      projectId = await computeProjectId(folder);
+      repoPath = folder;
+    } finally {
+      resolveClient.close();
+    }
     final existing = _inFlight[projectId];
     if (existing != null) {
       _log('openProject: projectId=$projectId — coalescing with in-flight');
       return existing;
     }
-    final fut = _openInner(folder, projectId, device, licenseApiUrl, relayUrl);
+    final fut = _openInner(repoPath, projectId, device, licenseApiUrl, relayUrl);
     _inFlight[projectId] = fut;
     try {
       return await fut;

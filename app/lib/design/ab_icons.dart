@@ -70,6 +70,9 @@ abstract final class AbIcons {
   static const code = Codicon.code;
   // Unchecked-state indicator for toggle rows (outline only, no fill).
   static const circle = Codicon.circle_large_outline;
+  // Checked partner to [circle] — the same disc, filled, with the check
+  // inside, so a toggle's two states differ in weight as well as in glyph.
+  static const circleCheck = Codicon.pass_filled;
   static const upload = Codicon.cloud_upload;
   static const zoomIn = Codicon.zoom_in;
   static const zoomOut = Codicon.zoom_out;

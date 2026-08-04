@@ -6,6 +6,10 @@ const BaseMessage = z.object({
   timestamp: z.number(),
 });
 
+// Filesystem-sensitive frames are scoped explicitly. Zod supplies `main` for
+// old apps, while an explicit unknown id is rejected by the checkout registry.
+const CheckoutScoped = { checkoutId: z.string().default("main") };
+
 // Recursive FileTreeNode schema
 const FileTreeNodeSchema: z.ZodType<{
   name: string;
@@ -30,12 +34,14 @@ const TerminalOutputMessage = BaseMessage.extend({
   terminalId: z.string(),
   data: z.string(),
   seq: z.number().int().nonnegative().optional(),
+  ...CheckoutScoped,
 });
 
 const TerminalInputMessage = BaseMessage.extend({
   type: z.literal("terminal:input"),
   terminalId: z.string(),
   data: z.string(),
+  ...CheckoutScoped,
 });
 
 const TerminalStartedMessage = BaseMessage.extend({
@@ -48,12 +54,14 @@ const TerminalStartedMessage = BaseMessage.extend({
   // omitted for ad-hoc shells. Lets the app classify the tab without
   // waiting for the next agent:status frame.
   terminalType: z.enum(["agent", "service"]).optional(),
+  ...CheckoutScoped,
 });
 
 const TerminalExitedMessage = BaseMessage.extend({
   type: z.literal("terminal:exited"),
   terminalId: z.string(),
   exitCode: z.number().int().nullable(),
+  ...CheckoutScoped,
 });
 
 const TerminalNotificationMessage = BaseMessage.extend({
@@ -62,6 +70,7 @@ const TerminalNotificationMessage = BaseMessage.extend({
   kind: z.enum(["osc9", "osc777"]),
   title: z.string().optional(),
   body: z.string().optional(),
+  ...CheckoutScoped,
 });
 
 const PingMessage = BaseMessage.extend({
@@ -98,6 +107,7 @@ const HandshakeAgentReadyMessage = BaseMessage.extend({
 const AppReadyMessage = BaseMessage.extend({
   type: z.literal("app:ready"),
   confirm: z.string(),
+  capabilities: z.object({ checkoutRouting: z.literal(true).optional() }).optional(),
 });
 
 const TerminalStartCommand = BaseMessage.extend({
@@ -108,11 +118,13 @@ const TerminalStartCommand = BaseMessage.extend({
   args: z.array(z.string()).optional(),
   cwd: z.string().optional(),
   env: z.record(z.string(), z.string()).optional(),
+  ...CheckoutScoped,
 });
 
 const TerminalStopCommand = BaseMessage.extend({
   type: z.literal("terminal:stop"),
   terminalId: z.string(),
+  ...CheckoutScoped,
 });
 
 const TerminalResizeCommand = BaseMessage.extend({
@@ -122,6 +134,7 @@ const TerminalResizeCommand = BaseMessage.extend({
   rows: z.number().int().positive(),
   clientId: z.string(),
   baseDriverClientId: z.string().optional(),
+  ...CheckoutScoped,
 });
 
 const TerminalSizeMessage = BaseMessage.extend({
@@ -133,6 +146,7 @@ const TerminalSizeMessage = BaseMessage.extend({
   // natively when this equals its own id, else it renders this grid letterboxed
   // or horizontally scrolled.
   driverClientId: z.string(),
+  ...CheckoutScoped,
 });
 
 const TerminalStatusInfo = z.object({
@@ -186,6 +200,7 @@ const AgentStatusMessage = BaseMessage.extend({
     flags: z.array(z.string()).optional(),
   }),
   needsFirstRun: z.boolean().optional(),
+  ...CheckoutScoped,
 });
 
 const GitFileStatus = z.object({
@@ -197,12 +212,14 @@ const GitStatusMessage = BaseMessage.extend({
   type: z.literal("git:status"),
   projectId: z.string(),
   files: z.array(GitFileStatus),
+  ...CheckoutScoped,
 });
 
 const GitDiffRequestMessage = BaseMessage.extend({
   type: z.literal("git:diff"),
   projectId: z.string(),
   path: z.string(),
+  ...CheckoutScoped,
 });
 
 const GitDiffContentMessage = BaseMessage.extend({
@@ -212,11 +229,13 @@ const GitDiffContentMessage = BaseMessage.extend({
   diff: z.string().nullable(),
   additions: z.number().int(),
   deletions: z.number().int(),
+  ...CheckoutScoped,
 });
 
 const GitListBranchesMessage = BaseMessage.extend({
   type: z.literal("git:list-branches"),
   projectId: z.string(),
+  ...CheckoutScoped,
 });
 
 const GitBranchesMessage = BaseMessage.extend({
@@ -224,12 +243,14 @@ const GitBranchesMessage = BaseMessage.extend({
   projectId: z.string(),
   current: z.string(),
   branches: z.array(z.string()),
+  ...CheckoutScoped,
 });
 
 const GitCheckoutMessage = BaseMessage.extend({
   type: z.literal("git:checkout"),
   projectId: z.string(),
   branch: z.string(),
+  ...CheckoutScoped,
 });
 
 const GitCheckoutResultMessage = BaseMessage.extend({
@@ -238,6 +259,7 @@ const GitCheckoutResultMessage = BaseMessage.extend({
   branch: z.string(),
   success: z.boolean(),
   error: z.string().optional(),
+  ...CheckoutScoped,
 });
 
 const GitCommitMessage = BaseMessage.extend({
@@ -245,6 +267,7 @@ const GitCommitMessage = BaseMessage.extend({
   projectId: z.string(),
   message: z.string(),
   files: z.array(z.string()),
+  ...CheckoutScoped,
 });
 
 const GitCommitResultMessage = BaseMessage.extend({
@@ -253,12 +276,14 @@ const GitCommitResultMessage = BaseMessage.extend({
   success: z.boolean(),
   sha: z.string().optional(),
   error: z.string().optional(),
+  ...CheckoutScoped,
 });
 
 const GitDiscardMessage = BaseMessage.extend({
   type: z.literal("git:discard"),
   projectId: z.string(),
   files: z.array(z.string()),
+  ...CheckoutScoped,
 });
 
 const GitDiscardResultMessage = BaseMessage.extend({
@@ -267,6 +292,7 @@ const GitDiscardResultMessage = BaseMessage.extend({
   success: z.boolean(),
   files: z.array(z.string()),
   error: z.string().optional(),
+  ...CheckoutScoped,
 });
 
 // Port scanning & preview messages
@@ -284,6 +310,7 @@ const PortsUpdateMessage = BaseMessage.extend({
   type: z.literal("ports:update"),
   projectId: z.string(),
   ports: z.array(PortInfoSchema),
+  ...CheckoutScoped,
 });
 
 const PreviewUrlMessage = BaseMessage.extend({
@@ -296,6 +323,7 @@ const PreviewUrlMessage = BaseMessage.extend({
   // welcome-replayed snapshot carry the same entry, so a consumer must not need
   // to know which one it got (absent = no URL sighting yet, treat as http).
   scheme: z.enum(["http", "https"]).optional(),
+  ...CheckoutScoped,
 });
 
 const AgentDisconnectingMessage = BaseMessage.extend({
@@ -402,6 +430,7 @@ const ControlResultMessage = BaseMessage.extend({
   verb: z.string().optional(),
   projectId: z.string().optional(),
   error: z.object({ code: z.string(), message: z.string() }).optional(),
+  ...CheckoutScoped,
 });
 
 // File tree & code viewer messages
@@ -409,6 +438,7 @@ const TreeFullMessage = BaseMessage.extend({
   type: z.literal("tree:full"),
   projectId: z.string(),
   root: FileTreeNodeSchema,
+  ...CheckoutScoped,
 });
 
 const TreeUpdateMessage = BaseMessage.extend({
@@ -418,12 +448,14 @@ const TreeUpdateMessage = BaseMessage.extend({
   modified: z.array(FileTreeNodeSchema),
   removed: z.array(z.string()),
   seq: z.number().int().nonnegative().optional(),
+  ...CheckoutScoped,
 });
 
 const FileReadMessage = BaseMessage.extend({
   type: z.literal("file:read"),
   projectId: z.string(),
   path: z.string(),
+  ...CheckoutScoped,
 });
 
 const FileContentMessage = BaseMessage.extend({
@@ -435,6 +467,7 @@ const FileContentMessage = BaseMessage.extend({
   encoding: z.enum(["utf8", "base64"]).default("utf8"),
   mimeType: z.string().optional(),
   error: z.string().optional(),
+  ...CheckoutScoped,
 });
 
 const FileSearchMessage = BaseMessage.extend({
@@ -445,12 +478,14 @@ const FileSearchMessage = BaseMessage.extend({
   regex: z.boolean(),
   wholeWord: z.boolean(),
   requestId: z.string(),
+  ...CheckoutScoped,
 });
 
 const FileSearchCancelMessage = BaseMessage.extend({
   type: z.literal("file:search-cancel"),
   projectId: z.string(),
   requestId: z.string(),
+  ...CheckoutScoped,
 });
 
 const SearchMatchSchema = z.object({
@@ -467,6 +502,7 @@ const FileSearchResultMessage = BaseMessage.extend({
   projectId: z.string(),
   requestId: z.string(),
   matches: z.array(SearchMatchSchema),
+  ...CheckoutScoped,
 });
 
 const FileSearchDoneMessage = BaseMessage.extend({
@@ -478,6 +514,7 @@ const FileSearchDoneMessage = BaseMessage.extend({
   duration: z.number(),
   engine: z.enum(["ripgrep", "git-grep"]),
   error: z.string().optional(),
+  ...CheckoutScoped,
 });
 
 const FileUploadStartMessage = BaseMessage.extend({
@@ -487,12 +524,14 @@ const FileUploadStartMessage = BaseMessage.extend({
   fileName: z.string(),
   size: z.number().int().nonnegative(),
   mimeType: z.string().optional(),
+  ...CheckoutScoped,
 });
 
 const FileUploadReadyMessage = BaseMessage.extend({
   type: z.literal("file:upload-ready"),
   requestId: z.string(),
   uploadId: z.string(),
+  ...CheckoutScoped,
 });
 
 // 512 KiB payload → base64 is ~4/3 larger; 768 KiB caps a full chunk with room
@@ -505,17 +544,20 @@ const FileUploadChunkMessage = BaseMessage.extend({
   uploadId: z.string(),
   seq: z.number().int().nonnegative(),
   data: z.string().max(MAX_UPLOAD_CHUNK_DATA), // base64
+  ...CheckoutScoped,
 });
 
 const FileUploadAckMessage = BaseMessage.extend({
   type: z.literal("file:upload-ack"),
   uploadId: z.string(),
   seq: z.number().int().nonnegative(),
+  ...CheckoutScoped,
 });
 
 const FileUploadDoneMessage = BaseMessage.extend({
   type: z.literal("file:upload-done"),
   uploadId: z.string(),
+  ...CheckoutScoped,
 });
 
 const FileUploadResultMessage = BaseMessage.extend({
@@ -526,6 +568,7 @@ const FileUploadResultMessage = BaseMessage.extend({
   path: z.string().optional(), // absolute path on the bridge machine
   error: z.string().optional(), // machine code: TOO_LARGE | INVALID_NAME | WRITE_FAILED | UPLOAD_NOT_FOUND | BAD_SEQUENCE | SIZE_MISMATCH | TIMEOUT | BUSY
   message: z.string().optional(), // human-readable detail
+  ...CheckoutScoped,
 });
 
 const CommandRunMessage = BaseMessage.extend({
@@ -533,6 +576,7 @@ const CommandRunMessage = BaseMessage.extend({
   projectId: z.string(),
   commandName: z.string(),
   confirmed: z.boolean().optional(),
+  ...CheckoutScoped,
 });
 
 const CommandOutputMessage = BaseMessage.extend({
@@ -540,6 +584,7 @@ const CommandOutputMessage = BaseMessage.extend({
   projectId: z.string(),
   commandName: z.string(),
   data: z.string(),
+  ...CheckoutScoped,
 });
 
 const CommandDoneMessage = BaseMessage.extend({
@@ -547,6 +592,7 @@ const CommandDoneMessage = BaseMessage.extend({
   projectId: z.string(),
   commandName: z.string(),
   exitCode: z.number().int().nullable(),
+  ...CheckoutScoped,
 });
 
 export const NotificationTypeSchema = z.enum(["task_complete", "permission_request", "awaiting_input", "idle", "error"]);
@@ -755,6 +801,7 @@ const PortDetectedMessage = BaseMessage.extend({
     name: z.string().optional(),
     onDetect: z.enum(["notify", "openPreview", "silent", "ignore"]).default("notify"),
   }),
+  ...CheckoutScoped,
 });
 
 // ── Local-mode promotion: App↔Agent control messages ─────────────────
@@ -845,6 +892,7 @@ export const ProjectStartMessage = BaseMessage.extend({
 
 const ConfigReadMessage = BaseMessage.extend({
   type: z.literal("config:read"),
+  ...CheckoutScoped,
 });
 
 const ConfigReadResultMessage = BaseMessage.extend({
@@ -853,17 +901,20 @@ const ConfigReadResultMessage = BaseMessage.extend({
   config: AbConfigSchema.optional(),
   raw: z.string().optional(),
   error: z.string().optional(),
+  ...CheckoutScoped,
 });
 
 const ConfigWriteMessage = BaseMessage.extend({
   type: z.literal("config:write"),
   config: AbConfigSchema,
+  ...CheckoutScoped,
 });
 
 const ConfigWriteResultMessage = BaseMessage.extend({
   type: z.literal("config:write-result"),
   ok: z.boolean(),
   errors: z.array(z.string()).optional(),
+  ...CheckoutScoped,
 });
 
 const ConfigChangedMessage = BaseMessage.extend({
@@ -872,10 +923,12 @@ const ConfigChangedMessage = BaseMessage.extend({
   agentRestartRequired: z.boolean(),
   invalid: z.boolean().optional(),
   error: z.string().optional(),
+  ...CheckoutScoped,
 });
 
 const ConfigDetectToolsMessage = BaseMessage.extend({
   type: z.literal("config:detect-tools"),
+  ...CheckoutScoped,
 });
 
 const ConfigDetectToolsResultMessage = BaseMessage.extend({
@@ -884,6 +937,7 @@ const ConfigDetectToolsResultMessage = BaseMessage.extend({
     tool: z.string(),
     path: z.string(),
   })),
+  ...CheckoutScoped,
 });
 
 const SessionEntrySchema = z.object({
@@ -918,6 +972,10 @@ const SessionEntrySchema = z.object({
   workStatus: WorkStatusSchema.optional(),
   agentSessionId: z.string().optional(),
   agentTranscriptPath: z.string().optional(),
+  checkoutId: z.string().default("main"),
+  checkoutKind: z.enum(["main", "managed-worktree", "external-worktree"]).default("main"),
+  checkoutBranch: z.string().nullable().optional(),
+  checkoutState: z.enum(["ready", "missing", "failed"]).default("ready"),
 });
 
 const SessionListMessage = BaseMessage.extend({
@@ -941,6 +999,14 @@ const SessionCreateMessage = BaseMessage.extend({
   // Raw, shell-interpreted CLI-args string passed verbatim (not an argv array).
   args: z.string().optional(),
   mode: z.enum(["terminal", "chat"]).optional(),
+  // Optional on the wire for an old client; handlers normalize omission to
+  // shared before invoking SessionManager.
+  isolation: z.enum(["shared", "worktree"]).optional(),
+  baseBranch: z.string().min(1).optional(),
+}).superRefine((value, ctx) => {
+  if (value.baseBranch && value.isolation !== "worktree") {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["baseBranch"], message: "baseBranch requires worktree isolation" });
+  }
 });
 
 const SessionStartMessage = BaseMessage.extend({
@@ -982,6 +1048,9 @@ const SessionDeleteMessage = BaseMessage.extend({
   type: z.literal("session:delete"),
   requestId: z.string(),
   sessionId: z.string(),
+  force: z.boolean().optional(),
+  removeCheckout: z.boolean().optional(),
+  deleteBranch: z.boolean().optional(),
 });
 
 const SessionSetModeMessage = BaseMessage.extend({
@@ -1001,6 +1070,8 @@ const SessionResultMessage = BaseMessage.extend({
   requestId: z.string(),
   ok: z.boolean(),
   error: z.string().optional(),
+  ...CheckoutScoped,
+  errorCode: z.string().optional(),
   session: SessionEntrySchema.optional(),
 });
 
@@ -1017,6 +1088,7 @@ const ClientFocusStateMessage = BaseMessage.extend({
 const TerminalSnapshotRequestMessage = BaseMessage.extend({
   type: z.literal("terminal:snapshot:request"),
   terminalId: z.string(),
+  ...CheckoutScoped,
 });
 
 const TerminalSnapshotMessage = BaseMessage.extend({
@@ -1024,20 +1096,24 @@ const TerminalSnapshotMessage = BaseMessage.extend({
   terminalId: z.string(),
   scrollback: z.string(),
   seq: z.number().int().nonnegative(),
+  ...CheckoutScoped,
 });
 
 const FileTreeSnapshotRequestMessage = BaseMessage.extend({
   type: z.literal("file:tree:snapshot:request"),
+  ...CheckoutScoped,
 });
 
 const FileTreeSnapshotMessage = BaseMessage.extend({
   type: z.literal("file:tree:snapshot"),
   tree: FileTreeNodeSchema,
   seq: z.number().int().nonnegative(),
+  ...CheckoutScoped,
 });
 
 const PreviewSnapshotRequestMessage = BaseMessage.extend({
   type: z.literal("preview:snapshot:request"),
+  ...CheckoutScoped,
 });
 
 const PreviewUrlEntrySchema = z.object({
@@ -1052,6 +1128,7 @@ const PreviewUrlEntrySchema = z.object({
 const PreviewSnapshotMessage = BaseMessage.extend({
   type: z.literal("preview:snapshot"),
   urls: z.array(PreviewUrlEntrySchema),
+  ...CheckoutScoped,
 });
 
 const RpcErrorSchema = z.object({
@@ -1646,14 +1723,37 @@ export type AgentSessionAction = z.infer<typeof AgentSessionActionMessage>;
 export type AgentPermissionResolve = z.infer<typeof AgentPermissionResolveMessage>;
 export type AgentQuestionResolve = z.infer<typeof AgentQuestionResolveMessage>;
 
+/** The exhaustive checkout-variable protocol set. Any new filesystem-facing
+ * type belongs here (and gets an explicit schema decision + contract test). */
+export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
+  "terminal:start", "terminal:stop", "terminal:input", "terminal:resize", "terminal:output", "terminal:started", "terminal:exited", "terminal:notification", "terminal:size",
+  "terminal:snapshot:request", "terminal:snapshot",
+  "agent:status",
+  "tree:full", "tree:update", "file:read", "file:content",
+  "file:search", "file:search-cancel", "file:search-result", "file:search-done",
+  "file:upload-start", "file:upload-ready", "file:upload-chunk", "file:upload-ack", "file:upload-done", "file:upload-result",
+  "git:status", "git:diff", "git:diff-content", "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",
+  "git:commit", "git:commit-result", "git:discard", "git:discard-result",
+  "command:run", "command:output", "command:done",
+  "config:read", "config:read-result", "config:write", "config:write-result", "config:changed", "config:detect-tools", "config:detect-tools-result",
+  "ports:update", "port:detected", "preview:url", "file:tree:snapshot:request", "file:tree:snapshot", "preview:snapshot:request", "preview:snapshot",
+  "session:result", "control:result",
+]);
+
+type MessagePayload<T extends AbMessage["type"]> = Omit<
+  Extract<AbMessage, { type: T }>,
+  "id" | "timestamp" | "type" | "checkoutId"
+> & Partial<Pick<Extract<AbMessage, { type: T }>, Extract<keyof Extract<AbMessage, { type: T }>, "checkoutId">>>;
+
 export function createMessage<T extends AbMessage["type"]>(
   type: T,
-  payload: Omit<Extract<AbMessage, { type: T }>, "id" | "timestamp" | "type">
+  payload: MessagePayload<T>,
 ): Extract<AbMessage, { type: T }> {
   return {
     id: crypto.randomUUID(),
     timestamp: Date.now(),
     type,
+    ...(CHECKOUT_VARIABLE_MESSAGE_TYPES.has(type) && !("checkoutId" in payload) ? { checkoutId: "main" } : {}),
     ...payload,
   } as Extract<AbMessage, { type: T }>;
 }

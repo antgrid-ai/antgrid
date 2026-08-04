@@ -34,7 +34,9 @@ class TerminalScreen extends ConsumerWidget {
     if (session == null || !terminalAsync.hasValue) {
       return const AbLoading(message: 'waiting for agent...');
     }
-    final terminalService = session.terminalService;
+    final terminalService = session
+        .servicesForCheckout(ref.watch(focusedCheckoutIdProvider))
+        .terminalService;
     final activeSession = ref.watch(activeSessionProvider);
     final activeSessionId = activeSession?.id;
 

@@ -17,6 +17,7 @@ import 'idle_action_guard.dart';
 /// and closes the state controller.
 class SearchService {
   final ProjectSession session;
+  final String checkoutId;
 
   StreamSubscription<Map<String, dynamic>>? _heavySub;
   bool _disposed = false;
@@ -40,9 +41,10 @@ class SearchService {
 
   SearchService.fromSession(
     this.session, {
+    this.checkoutId = 'main',
     this.searchIdleTimeout = const Duration(seconds: 12),
   }) {
-    _heavySub = session.heavyStream.listen(_onHeavyJson);
+    _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
   }
 
   void _setState(SearchState state) {
@@ -91,7 +93,7 @@ class SearchService {
       ),
     );
 
-    session.send(
+    session.sendForCheckout(checkoutId,
       createAbMessage('file:search', {
         'projectId': projectId,
         'query': query,
@@ -195,7 +197,7 @@ class SearchService {
     _searchGuard = null;
     final requestId = _state.currentRequestId;
     if (requestId != null && _state.isSearching) {
-      session.send(
+      session.sendForCheckout(checkoutId,
         createAbMessage('file:search-cancel', {
           'projectId': projectId,
           'requestId': requestId,

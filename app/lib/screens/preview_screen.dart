@@ -204,7 +204,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     // re-check it before the fallback rather than acting on a stale service.
     final projectId = ref.read(selectedRegistrationIdProvider);
     try {
-      final svc = focusedServiceOrNull(ref.container, (s) => s.previewService);
+      final svc = focusedCheckoutServiceOrNull(ref.container, (s) => s.previewService);
       if (svc == null) return;
       final result = await svc.selectPort(port, scheme: scheme);
       if (result != SelectPortResult.portInUse) {
@@ -233,7 +233,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       // Re-resolve rather than reusing `svc`: the session can have been
       // invalidated (and its service disposed) while the dialog was open even
       // though focus never moved.
-      final fallbackSvc = focusedServiceOrNull(
+      final fallbackSvc = focusedCheckoutServiceOrNull(
         ref.container,
         (s) => s.previewService,
       );
@@ -325,7 +325,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     // view can render one frame past a session that was invalidated (host
     // restart, LRU evict) — long enough for a raw façade read to throw during
     // build. Resolve nullably and disable the actions that need the service.
-    final preview = focusedServiceOrNull(
+    final preview = focusedCheckoutServiceOrNull(
       ref.container,
       (s) => s.previewService,
     );

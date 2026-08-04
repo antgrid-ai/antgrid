@@ -208,7 +208,7 @@ class _CommandButtonState extends ConsumerState<_CommandButton> {
     // path fires after a dialog that can outlive the session entirely. Resolve
     // the service off the session instead — no id is passed in either way,
     // since CommandService derives the (bare) projectId from its own session.
-    final svc = focusedServiceOrNull(ref, (s) => s.commandService);
+    final svc = focusedCheckoutServiceOrNull(ref, (s) => s.commandService);
     svc?.runCommand(widget.command.name, confirmed: confirmed);
   }
 }

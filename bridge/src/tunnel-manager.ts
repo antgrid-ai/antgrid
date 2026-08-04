@@ -122,6 +122,7 @@ export class TunnelManager {
         setCookies: result.setCookies,
         body: result.body,
         bodyEncoding: result.bodyEncoding,
+        checkoutId: msg.checkoutId,
       });
     } catch (err) {
       this.sendTunnel({
@@ -131,6 +132,7 @@ export class TunnelManager {
         headers: {},
         body: `Proxy error: ${err instanceof Error ? err.message : String(err)}`,
         bodyEncoding: "utf8" as const,
+        checkoutId: msg.checkoutId,
       });
     }
   }

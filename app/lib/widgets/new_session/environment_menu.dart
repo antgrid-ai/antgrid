@@ -5,8 +5,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
+import '../../design/widgets/ab_focus_ring.dart';
 import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_menu.dart';
+import '../../design/widgets/ab_tooltip.dart';
 import '../../providers/new_session_picker.dart';
 import 'picker_sources.dart';
 
@@ -168,6 +170,139 @@ class ComposerChip extends StatelessWidget {
             ),
           );
         },
+      ),
+    );
+  }
+}
+
+/// Boolean sibling of [ComposerChip]: identical metrics and typography, but a
+/// leading state glyph replaces the trailing chevron — this chip commits a
+/// value instead of opening a picker, and the row has to say which at a glance.
+///
+/// Deliberately not [AbChip.toggle]: that pill is a 9pt uppercase filter tag
+/// and would read as a badge dropped among the pickers rather than as another
+/// term in the context row's sentence.
+class ComposerToggleChip extends StatefulWidget {
+  const ComposerToggleChip({
+    super.key,
+    required this.label,
+    required this.value,
+    required this.onChanged,
+    this.tooltip,
+  });
+
+  final String label;
+  final bool value;
+
+  /// Null disables the chip. Pair it with [tooltip] — a chip this size has no
+  /// room to spell out why it is dead.
+  final ValueChanged<bool>? onChanged;
+
+  final String? tooltip;
+
+  @override
+  State<ComposerToggleChip> createState() => _ComposerToggleChipState();
+}
+
+class _ComposerToggleChipState extends State<ComposerToggleChip> {
+  bool _focused = false;
+
+  void _toggle() => widget.onChanged?.call(!widget.value);
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    final enabled = widget.onChanged != null;
+    final fg = !enabled
+        ? p.textDisabled
+        : widget.value
+        ? p.accent
+        : p.textSecondary;
+
+    Widget chip = AnimatedContainer(
+      duration: AbTokens.motionDefault,
+      curve: Curves.easeOut,
+      padding: const EdgeInsets.symmetric(
+        horizontal: AbTokens.space8,
+        vertical: AbTokens.space4,
+      ),
+      decoration: BoxDecoration(
+        // Same accent-at-alpha-40 fill the segmented control uses for its
+        // selected cell, so "on" reads the same wherever it appears.
+        color: widget.value ? p.accent.withAlpha(40) : null,
+        border: Border.all(
+          color: !enabled
+              ? p.borderSubtle
+              : widget.value
+              ? p.accent
+              : p.borderDefault,
+        ),
+        borderRadius: AbTokens.borderRadius3,
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          AbIcon(
+            widget.value ? AbIcons.circleCheck : AbIcons.circle,
+            size: 12,
+            color: fg,
+          ),
+          const SizedBox(width: AbTokens.space6),
+          // Bounded like [ComposerChip]'s label, for the same reason: the chip
+          // lives in a Wrap that can hand it less than its intrinsic width.
+          Flexible(
+            child: Text(
+              widget.label,
+              maxLines: 1,
+              softWrap: false,
+              overflow: TextOverflow.ellipsis,
+              style: AbTokens.monoStyle(fontSize: AbTokens.fontSm, color: fg),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    final tooltip = widget.tooltip;
+    if (tooltip != null) chip = AbTooltip(message: tooltip, child: chip);
+
+    return Semantics(
+      button: true,
+      enabled: enabled,
+      selected: widget.value,
+      child: FocusableActionDetector(
+        enabled: enabled,
+        mouseCursor: enabled
+            ? SystemMouseCursors.click
+            : SystemMouseCursors.basic,
+        onShowFocusHighlight: (v) {
+          if (_focused != v) setState(() => _focused = v);
+        },
+        shortcuts: const {
+          SingleActivator(LogicalKeyboardKey.enter): ActivateIntent(),
+          SingleActivator(LogicalKeyboardKey.space): ActivateIntent(),
+          SingleActivator(LogicalKeyboardKey.numpadEnter): ActivateIntent(),
+        },
+        actions: {
+          ActivateIntent: CallbackAction<ActivateIntent>(
+            onInvoke: (_) {
+              _toggle();
+              return null;
+            },
+          ),
+        },
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          // Stays live while disabled so the chip keeps a hit area for the
+          // tooltip that carries the reason; [_toggle] no-ops without a
+          // callback.
+          onTap: _toggle,
+          child: AbFocusRing(
+            focused: _focused,
+            borderRadius: AbTokens.borderRadius3,
+            child: chip,
+          ),
+        ),
       ),
     );
   }

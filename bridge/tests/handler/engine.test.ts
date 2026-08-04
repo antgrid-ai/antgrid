@@ -27,7 +27,7 @@ function makeEngine(overrides: Record<string, unknown> = {}) {
   const timers: FakeTimer[] = [];
   const clock = { t: 1000 };
   const engine = new HandlerEngine({
-    projectId: "proj", projectPath: "/proj", tool: () => "claude-code", abDir: "/tmp/unused",
+    projectId: "proj", projectPath: () => "/proj", tool: () => "claude-code", abDir: "/tmp/unused",
     adapter: {
       injectReply: (id: string, t: string) => injected.push([id, t]),
       recentOutput: () => "pty-tail",
@@ -550,6 +550,55 @@ describe("chat blocking prompts and slash guard", () => {
     });
     engine.arm({ terminalId: "c1", brief: BRIEF, notifyOnly: false });
     await engine.handleEvent({ terminalId: "c1", event: "turn_end" });
+    expect(injected).toHaveLength(0);
+    expect(sent.some((m) => m.type === "handler:escalation")).toBe(true);
+  });
+
+  it("judges an isolated session in its own checkout, and floors paths by that checkout", async () => {
+    // An isolated session's agent runs inside a managed worktree. If the judge
+    // and the destructive floor stayed on the main checkout, the floor would
+    // wave through writes to main and block the session's own files.
+    const ISO = "/worktrees/iso";
+    const cwds: Array<string | undefined> = [];
+    const injected: Array<[string, string]> = [];
+    const { engine, sent } = makeEngine({
+      projectPath: (terminalId?: string) => (terminalId === "iso" ? ISO : "/proj"),
+      adapter: {
+        injectReply: (id: string, t: string) => injected.push([id, t]),
+        recentOutput: () => "pty-tail",
+        transcriptPath: () => undefined,
+        outputKind: () => "pty",
+        supportsSlashCommands: () => true,
+      },
+      runDecisionFn: async (args: { cwd?: string }) => {
+        cwds.push(args.cwd);
+        return decide({ decision: "handle", reply: `edit ${ISO}/src/main.ts` });
+      },
+    });
+    engine.arm({ terminalId: "iso", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "iso", event: "turn_end" });
+
+    expect(cwds).toEqual([ISO]);
+    expect(injected).toEqual([["iso", `edit ${ISO}/src/main.ts`]]);
+    expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
+  });
+
+  it("floors a main-checkout path for an isolated session as outside its project", async () => {
+    const injected: Array<[string, string]> = [];
+    const { engine, sent } = makeEngine({
+      projectPath: (terminalId?: string) => (terminalId === "iso" ? "/worktrees/iso" : "/proj"),
+      adapter: {
+        injectReply: (id: string, t: string) => injected.push([id, t]),
+        recentOutput: () => "pty-tail",
+        transcriptPath: () => undefined,
+        outputKind: () => "pty",
+        supportsSlashCommands: () => true,
+      },
+      runDecisionFn: async () => decide({ decision: "handle", reply: "rm /proj/src/main.ts" }),
+    });
+    engine.arm({ terminalId: "iso", brief: BRIEF, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "iso", event: "turn_end" });
+
     expect(injected).toHaveLength(0);
     expect(sent.some((m) => m.type === "handler:escalation")).toBe(true);
   });

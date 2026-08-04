@@ -6,6 +6,7 @@ import '../ab_tokens.dart';
 import '../ab_colors.dart';
 import 'ab_button.dart';
 import 'ab_icon_button.dart';
+import 'ab_switch.dart';
 import 'ab_text_field.dart';
 
 class AbConfirmDialog extends StatefulWidget {
@@ -20,6 +21,11 @@ class AbConfirmDialog extends StatefulWidget {
   /// irreversible actions.
   final String? confirmWord;
 
+  /// When set, an extra opt-in toggle appears above the buttons, always off on
+  /// open. For a second consequence the user may accept alongside the primary
+  /// one — never for restating the primary action.
+  final String? optionLabel;
+
   const AbConfirmDialog({
     super.key,
     required this.title,
@@ -28,6 +34,7 @@ class AbConfirmDialog extends StatefulWidget {
     this.cancelLabel = 'Cancel',
     this.destructive = false,
     this.confirmWord,
+    this.optionLabel,
   });
 
   /// Shows the dialog. Returns `true` if the user confirmed.
@@ -40,7 +47,32 @@ class AbConfirmDialog extends StatefulWidget {
     bool destructive = false,
     String? confirmWord,
   }) async {
-    final result = await showDialog<bool>(
+    final result = await showWithOption(
+      context: context,
+      title: title,
+      body: body,
+      confirmLabel: confirmLabel,
+      cancelLabel: cancelLabel,
+      destructive: destructive,
+      confirmWord: confirmWord,
+    );
+    return result.confirmed;
+  }
+
+  /// Like [show], plus the state of the optional [optionLabel] toggle.
+  /// `optionSelected` is false whenever the user cancelled or no option was
+  /// offered, so a caller can pass it through unconditionally.
+  static Future<({bool confirmed, bool optionSelected})> showWithOption({
+    required BuildContext context,
+    required String title,
+    required String body,
+    required String confirmLabel,
+    String cancelLabel = 'Cancel',
+    bool destructive = false,
+    String? confirmWord,
+    String? optionLabel,
+  }) async {
+    final result = await showDialog<({bool confirmed, bool optionSelected})>(
       context: context,
       builder: (_) => AbConfirmDialog(
         title: title,
@@ -49,9 +81,10 @@ class AbConfirmDialog extends StatefulWidget {
         cancelLabel: cancelLabel,
         destructive: destructive,
         confirmWord: confirmWord,
+        optionLabel: optionLabel,
       ),
     );
-    return result == true;
+    return result ?? (confirmed: false, optionSelected: false);
   }
 
   @override
@@ -61,6 +94,7 @@ class AbConfirmDialog extends StatefulWidget {
 class _AbConfirmDialogState extends State<AbConfirmDialog> {
   TextEditingController? _controller;
   late bool _confirmed;
+  bool _optionSelected = false;
 
   @override
   void initState() {
@@ -82,6 +116,9 @@ class _AbConfirmDialogState extends State<AbConfirmDialog> {
     super.dispose();
   }
 
+  void _cancel() =>
+      Navigator.of(context).pop((confirmed: false, optionSelected: false));
+
   @override
   Widget build(BuildContext context) {
     final controller = _controller;
@@ -102,10 +139,7 @@ class _AbConfirmDialogState extends State<AbConfirmDialog> {
                       style: AbTokens.sansStyle(fontSize: AbTokens.fontBody),
                     ),
                   ),
-                  AbIconButton(
-                    icon: AbIcons.close,
-                    onTap: () => Navigator.of(context).pop(false),
-                  ),
+                  AbIconButton(icon: AbIcons.close, onTap: _cancel),
                 ],
               ),
               const SizedBox(height: AbTokens.space12),
@@ -132,14 +166,33 @@ class _AbConfirmDialogState extends State<AbConfirmDialog> {
                   autofocus: true,
                 ),
               ],
+              if (widget.optionLabel != null) ...[
+                const SizedBox(height: AbTokens.space12),
+                Row(
+                  children: [
+                    AbSwitch(
+                      value: _optionSelected,
+                      semanticLabel: widget.optionLabel,
+                      onChanged: (v) => setState(() => _optionSelected = v),
+                    ),
+                    const SizedBox(width: AbTokens.space8),
+                    Expanded(
+                      child: Text(
+                        widget.optionLabel!,
+                        style: AbTokens.sansStyle(
+                          fontSize: AbTokens.fontXs,
+                          color: context.antgrid.textSecondary,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
               const SizedBox(height: AbTokens.space16),
               Row(
                 mainAxisAlignment: MainAxisAlignment.end,
                 children: [
-                  AbButton(
-                    label: widget.cancelLabel,
-                    onTap: () => Navigator.of(context).pop(false),
-                  ),
+                  AbButton(label: widget.cancelLabel, onTap: _cancel),
                   const SizedBox(width: AbTokens.space8),
                   AbButton(
                     label: widget.confirmLabel,
@@ -147,7 +200,10 @@ class _AbConfirmDialogState extends State<AbConfirmDialog> {
                         ? context.antgrid.error
                         : context.antgrid.accent,
                     onTap: _confirmed
-                        ? () => Navigator.of(context).pop(true)
+                        ? () => Navigator.of(context).pop((
+                            confirmed: true,
+                            optionSelected: _optionSelected,
+                          ))
                         : null,
                   ),
                 ],

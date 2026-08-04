@@ -18,6 +18,7 @@ import '../storage/cached_sessions_store.dart';
 import '../util/device_id.dart';
 import 'fragment_recovery.dart';
 import 'message_router.dart';
+import 'project_message_classification.dart';
 import 'project_status.dart';
 
 enum ProjectSessionMode { local, relay }
@@ -51,19 +52,25 @@ class ProjectSession {
 
   late final MessageRouter _router;
   late final ProjectStatusNotifier status;
-  late final FileService fileService;
+  late final CheckoutServices _mainCheckoutServices;
+  final Map<String, CheckoutServices> _checkoutServices = {};
+  Set<String> _pendingCheckoutSweep = const {};
+  final StreamController<CheckoutServices> _checkoutBundlesController =
+      StreamController<CheckoutServices>.broadcast();
+  FileService get fileService => _mainCheckoutServices.fileService;
   late final SessionsService sessionsService;
-  late final TerminalService terminalService;
-  late final ConfigService configService;
-  late final SearchService searchService;
-  late final CommandService commandService;
-  late final PreviewService previewService;
+  TerminalService get terminalService => _mainCheckoutServices.terminalService;
+  ConfigService get configService => _mainCheckoutServices.configService;
+  SearchService get searchService => _mainCheckoutServices.searchService;
+  CommandService get commandService => _mainCheckoutServices.commandService;
+  PreviewService get previewService => _mainCheckoutServices.previewService;
   late final HandlerService handlerService;
   late final AgentSessionService agentSessionService;
-  late final UploadService uploadService;
+  UploadService get uploadService => _mainCheckoutServices.uploadService;
   StreamSubscription? _fragAbortSub;
   StreamSubscription? _fragSendErrSub;
   StreamSubscription? _streamReadySub;
+  StreamSubscription? _checkoutSessionSub;
   bool _closed = false;
 
   ProjectSession({
@@ -79,19 +86,25 @@ class ProjectSession {
            : projectId {
     _router = MessageRouter(transport: transport);
     status = ProjectStatusNotifier(_router.status);
-    fileService = FileService.fromSession(this);
+    _mainCheckoutServices = CheckoutServices(this, 'main');
+    _checkoutServices['main'] = _mainCheckoutServices;
     sessionsService = SessionsService.fromSession(
       this,
       cache: cachedSessionsStore,
     );
-    terminalService = TerminalService.fromSession(this);
-    configService = ConfigService.fromSession(this);
-    searchService = SearchService.fromSession(this);
-    commandService = CommandService.fromSession(this);
-    previewService = PreviewService.fromSession(this);
+    // Eager, not lazy-on-focus: the notification aggregators in providers.dart
+    // fan in over [checkoutServiceBundles], so an isolated session that has
+    // never been focused would produce no notifications at all.
+    _checkoutSessionSub = sessionsService.stateStream.listen((state) {
+      final live = <String>{'main'};
+      for (final entry in state.sessions) {
+        live.add(entry.checkoutId);
+        if (entry.checkoutId != 'main') servicesForCheckout(entry.checkoutId);
+      }
+      _sweepCheckouts(live);
+    });
     handlerService = HandlerService.fromSession(this);
     agentSessionService = AgentSessionService.fromSession(this);
-    uploadService = UploadService.fromSession(this);
     if (transport is StreamTransport) {
       // Fragmentation is per-machine in v3, so the abort/send-error signals live
       // on the shared MachineSession (every project stream on a machine sees
@@ -134,6 +147,9 @@ class ProjectSession {
   /// to the agent's `client:focus-state`; see [setLifecyclePaused].
   Stream<Map<String, dynamic>> get heavyStream => _router.heavy;
 
+  Stream<Map<String, dynamic>> checkoutHeavyStream(String checkoutId) =>
+      heavyStream.where((json) => checkoutIdForEnvelope(json) == checkoutId);
+
   /// Declares app-level background state to the agent, gating both the heavy
   /// stream and the fallback push. See [MessageRouter.setLifecyclePaused].
   void setLifecyclePaused(bool paused) => _router.setLifecyclePaused(paused);
@@ -142,6 +158,9 @@ class ProjectSession {
   /// and config services which need to react to small state-tier messages
   /// without burdening the agent's heavy pipeline.
   Stream<Map<String, dynamic>> get statusStream => _router.status;
+
+  Stream<Map<String, dynamic>> checkoutStatusStream(String checkoutId) =>
+      statusStream.where((json) => checkoutIdForEnvelope(json) == checkoutId);
 
   /// Send an outbound message through the transport.
   ///
@@ -158,6 +177,52 @@ class ProjectSession {
     return transport.send(message);
   }
 
+  CheckoutServices servicesForCheckout(String checkoutId) {
+    final existing = _checkoutServices[checkoutId];
+    if (existing != null) return existing;
+    final bundle = CheckoutServices(this, checkoutId);
+    _checkoutServices[checkoutId] = bundle;
+    _checkoutBundlesController.add(bundle);
+    return bundle;
+  }
+
+  CheckoutServices? existingServicesForCheckout(String checkoutId) =>
+      _checkoutServices[checkoutId];
+
+  /// Releases bundles whose session is gone. Deferred by one emission: the
+  /// providers that read a bundle are driven by the SAME session list, so
+  /// disposing on the emission that drops the session would tear it down under
+  /// a focus that has not moved off it yet. A bundle absent from two successive
+  /// listings has no reader left. Every service holds transport hydrators, so
+  /// leaving them registered replays requests for a deleted checkout on every
+  /// reconnect.
+  void _sweepCheckouts(Set<String> live) {
+    for (final id in _pendingCheckoutSweep) {
+      if (live.contains(id)) continue;
+      unawaited(_checkoutServices.remove(id)?.dispose() ?? Future.value());
+    }
+    _pendingCheckoutSweep = _checkoutServices.keys
+        .where((id) => !live.contains(id))
+        .toSet();
+  }
+
+  Iterable<CheckoutServices> get checkoutServiceBundles =>
+      _checkoutServices.values;
+
+  Stream<CheckoutServices> get checkoutServiceBundleStream =>
+      _checkoutBundlesController.stream;
+
+  Future<void> sendForCheckout(
+    String checkoutId,
+    Map<String, dynamic> message,
+  ) {
+    final type = message['type'];
+    if (type is String && kCheckoutVariableMessageTypes.contains(type)) {
+      message = {...message, 'checkoutId': checkoutId};
+    }
+    return send(message);
+  }
+
   /// Tier-3 re-drive registration. Registers [run] as the hydrator for [key] on
   /// the transport: it fires now when the session is already established and
   /// re-fires on every future (re)establishment — the receive-side counterpart
@@ -167,8 +232,17 @@ class ProjectSession {
   Future<void> hydrate(String key, Future<void> Function() run) =>
       transport.hydrate(key, run);
 
+  Future<void> hydrateCheckout(
+    String checkoutId,
+    String key,
+    Future<void> Function() run,
+  ) => hydrate('checkout:$checkoutId:$key', run);
+
   /// Deregister a hydrator registered via [hydrate]. No-op if absent.
   void unhydrate(String key) => transport.unhydrate(key);
+
+  void unhydrateCheckout(String checkoutId, String key) =>
+      unhydrate('checkout:$checkoutId:$key');
 
   /// Tier-2 bounded fail-fast send: runs [run] under [timeout] so the caller's
   /// flag lifecycle always settles even if the reply never arrives. NOT
@@ -187,19 +261,42 @@ class ProjectSession {
       if (_fragAbortSub != null) _fragAbortSub!.cancel(),
       if (_fragSendErrSub != null) _fragSendErrSub!.cancel(),
       if (_streamReadySub != null) _streamReadySub!.cancel(),
-      terminalService.dispose(),
+      if (_checkoutSessionSub != null) _checkoutSessionSub!.cancel(),
       sessionsService.dispose(),
-      fileService.dispose(),
-      configService.dispose(),
-      searchService.dispose(),
-      commandService.dispose(),
-      previewService.dispose(),
       handlerService.dispose(),
       agentSessionService.dispose(),
-      uploadService.dispose(),
+      for (final bundle in _checkoutServices.values) bundle.dispose(),
     ]);
     status.dispose();
+    await _checkoutBundlesController.close();
     await _router.dispose();
     await _onClose();
   }
+}
+
+class CheckoutServices {
+  final String checkoutId;
+  late final FileService fileService;
+  late final TerminalService terminalService;
+  late final ConfigService configService;
+  late final SearchService searchService;
+  late final CommandService commandService;
+  late final PreviewService previewService;
+  late final UploadService uploadService;
+
+  CheckoutServices(ProjectSession session, this.checkoutId) {
+    fileService = FileService.fromSession(session, checkoutId: checkoutId);
+    terminalService = TerminalService.fromSession(session, checkoutId: checkoutId);
+    configService = ConfigService.fromSession(session, checkoutId: checkoutId);
+    searchService = SearchService.fromSession(session, checkoutId: checkoutId);
+    commandService = CommandService.fromSession(session, checkoutId: checkoutId);
+    previewService = PreviewService.fromSession(session, checkoutId: checkoutId);
+    uploadService = UploadService.fromSession(session, checkoutId: checkoutId);
+  }
+
+  Future<void> dispose() => Future.wait([
+    terminalService.dispose(), fileService.dispose(), configService.dispose(),
+    searchService.dispose(), commandService.dispose(), previewService.dispose(),
+    uploadService.dispose(),
+  ]);
 }

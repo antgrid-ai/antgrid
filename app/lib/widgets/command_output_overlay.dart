@@ -32,7 +32,7 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
   /// (re-)resolving. Every use below fires from a timer or a tap, where the
   /// throwing façade would land outside any `build()` as an unhandled error.
   CommandService? get _commandService =>
-      focusedServiceOrNull(ref.container, (s) => s.commandService);
+      focusedCheckoutServiceOrNull(ref.container, (s) => s.commandService);
 
   @override
   void dispose() {
@@ -102,7 +102,7 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
     if (message == null || !mounted) return;
     // The comment dialog holds this open indefinitely, so `mounted` alone
     // doesn't mean the focused project still has a resolved session.
-    final svc = focusedServiceOrNull(ref.container, (s) => s.terminalService);
+    final svc = focusedCheckoutServiceOrNull(ref.container, (s) => s.terminalService);
     if (svc == null) return;
     svc.sendToAgentTerminal(message);
     ref.read(switchToAgentProvider)?.call();

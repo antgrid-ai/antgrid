@@ -64,7 +64,10 @@ function wakeClock(at: number): string {
 
 export interface HandlerEngineDeps {
   projectId: string;
-  projectPath: string;
+  // Per terminal, not per project: an isolated session runs in its own managed
+  // worktree, and both the judge's cwd and the destructive floor's inside-project
+  // test must follow it there. Omit the id for the project-wide default.
+  projectPath: (terminalId?: string) => string;
   // A thunk, not a snapshot: resolved lazily per terminal so chat slots report
   // their own tool (session entry) and the project default can change after
   // construction (the first-run wizard sets config.agent.tool later). Omit the
@@ -236,7 +239,7 @@ export class HandlerEngine {
       // ctx.transcriptPath is the file the context actually came from (for codex,
       // a rollout path the adapter never knew); judge.ts still gates the hint by tier.
       transcriptPath: ctx.transcriptPath ?? this.deps.adapter.transcriptPath(terminalId),
-      cwd: this.deps.projectPath,
+      cwd: this.deps.projectPath(terminalId),
     });
     this.deps.sendAb(createMessage("handler:planResult", {
       projectId: this.deps.projectId,
@@ -548,7 +551,8 @@ export class HandlerEngine {
       decision = await runDecisionFn({
         tool: s.judgeTool ?? tool, model: s.judgeModel, brief: s.brief,
         ledgerText: renderLedger(s.brief, s.ledger),
-        context: ctx.text, transcriptPath: ctx.transcriptPath ?? transcriptPath, cwd: this.deps.projectPath,
+        context: ctx.text, transcriptPath: ctx.transcriptPath ?? transcriptPath,
+        cwd: this.deps.projectPath(evt.terminalId),
       });
     } catch {
       if (this.sessions.get(evt.terminalId) === s) this.onJudgeUnavailable(evt, s);
@@ -606,7 +610,7 @@ export class HandlerEngine {
           return this.escalate(evt.terminalId, s, decision, "slash commands are not supported in chat sessions");
         }
 
-        const floor = classifyDestructive(probe, this.deps.projectPath, reply);
+        const floor = classifyDestructive(probe, this.deps.projectPath(evt.terminalId), reply);
         if (floor.blocked) return this.escalate(evt.terminalId, s, decision, `floor: ${floor.reason}`, floor.reason);
 
         const guardReason = this.guard.check(evt.terminalId, probe);

@@ -19,7 +19,7 @@ import { loadConfig, findConfigFile, projectName, type AbConfig } from "./config
 import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from "./bootstrap";
 import { resolveAgent, listKnownTools } from "./known-agents";
 import { augmentAgentLaunch } from "./agent-launch-augmenter";
-import { createMessage, HandlerConfigureWire, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
+import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle, type SessionTitleBody } from "./api-server";
 import { MessageBus } from "./message-bus";
@@ -28,7 +28,13 @@ import { computeProjectId } from "./project-id";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
 import { ConfigController } from "./config-controller";
 import { detectInstalledTools } from "./tool-detector";
-import { SessionManager } from "./session-manager";
+import { SessionManager, type DeleteSessionOptions } from "./session-manager";
+import { WorktreeError } from "./worktrees/worktree-manager";
+import { WorktreeManager } from "./worktrees/worktree-manager";
+import { CheckoutStore } from "./worktrees/checkout-store";
+import { resolveProject } from "./worktrees/project-resolver";
+import { CheckoutRuntimeRegistry } from "./worktrees/checkout-runtime-registry";
+import type { CheckoutRecord } from "./worktrees/checkout-types";
 import { SessionNamer } from "./session-namer";
 import { resolveStructuredTitle } from "./agents/title-dispatch";
 import { generateSessionTitle } from "./agents/title-generate";
@@ -43,6 +49,34 @@ import { parseCodexVersion } from "./codex/codex-version";
 import { TOOL_UPDATE_SPECS, createToolUpdateChecker, execToolUpdate, execToolVersion, runToolUpdate, updateSpecFor } from "./agent-update";
 import { getGitStatus, gitCommit, gitDiscard, type GitFileEntry } from "./git";
 import { listLocalBranches, checkoutLocalBranch } from "./git-branches";
+import { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
+
+type CheckoutAgentSpec = {
+  command: string;
+  name: string;
+  args?: string[];
+  workingDir?: string;
+};
+
+/** All filesystem-sensitive state for one checkout. Repository-wide session,
+ * handler and structured-agent coordinators intentionally live outside it. */
+interface CheckoutRuntime {
+  checkout: CheckoutRecord;
+  config: AbConfig;
+  agentSpec: CheckoutAgentSpec;
+  configController: ConfigController;
+  fileWatcher: FileWatcher | null;
+  fileSearcher: FileSearcher | null;
+  uploadManager: FileUploadManager | null;
+  portDetector: PortDetector | null;
+  tunnelManager: TunnelManager | null;
+  runningCommands: Map<string, ChildProcess>;
+  cachedGitBranch: string | null;
+  cachedGitFiles: GitFileEntry[];
+  gitBranchInterval: ReturnType<typeof setInterval> | null;
+  configuredTerminalIds: Map<string, string>;
+  started: boolean;
+}
 
 // Tracks terminal ids that have pinged /hook-alive (codex SessionStart probe).
 // Module-level so it lives as long as the process — terminals cleared from this
@@ -155,6 +189,8 @@ export interface AgentCore {
    *  `RelayClient.currentPeerPubkey()`; local mode never sets it (so it stays
    *  null and the gate is skipped). Pass `null` to clear it. */
   setPeerPubkeyProvider(fn: (() => string | null) | null): void;
+  /** Current remote app capability; cleared when that transport detaches. */
+  setPeerCheckoutRoutingProvider(fn: (() => boolean) | null): void;
   /** Stream-gating state. The transport's peer-online/offline callbacks flip
    *  `peerOnline` to suppress the heavy stream while the paired phone is gone. */
   readonly connState: ConnState;
@@ -162,13 +198,19 @@ export interface AgentCore {
    *  sessions.json, emits session:updated). Returns false if sessions aren't
    *  initialized yet (pre-handshake). The control-plane delete RPC calls this
    *  for a warm core so the on-disk file and in-memory state stay consistent. */
-  deleteSession(id: string): boolean;
+  deleteSession(id: string, options?: DeleteSessionOptions): boolean | Promise<boolean>;
   /** Live session list with true per-session `running` (via SessionManager's
    *  in-memory PTY/chat sets), for the control-plane `sessions.list` peek when a
    *  warm core owns the project — the disk-only `readPersisted` reports every
    *  session not-running. Returns null before sessions are initialized
    *  (pre-handshake), signalling the caller to fall back to the on-disk list. */
   listSessions(includeArchived: boolean): SessionEntry[] | null;
+  /** True when this project has a non-main managed checkout. */
+  hasManagedSessions(): boolean;
+  /** True when a work-status key is bound to the main checkout (or is not a
+   *  session at all). Pre-handshake this answers true — nothing is isolated
+   *  yet, so no guard should be narrowed away. */
+  isMainCheckoutSession(id: string): boolean;
 }
 
 export interface BuildAgentCoreOptions {
@@ -225,6 +267,9 @@ export interface BuildAgentCoreOptions {
    *  antgrid.yaml can learn it from config, so without this a host-spawned
    *  remote core has no relay coordinate to put in its banner/connect URI. */
   relayUrl?: string;
+  /** Test-only release-gate override. Production callers omit this and use the
+   * central capability constant. */
+  worktreeSessionsSupported?: boolean;
 }
 
 export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<AgentCore> {
@@ -272,6 +317,38 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     name: agentName,
     id: computeProjectId(opts.folder),
   };
+
+  const mainCheckout: CheckoutRecord = {
+    id: "main",
+    projectId: project.id,
+    kind: "main",
+    path: project.path,
+    branch: null,
+    baseRef: null,
+    managed: false,
+    sessionId: null,
+    createdAt: 0,
+  };
+  const checkoutRuntimes = new CheckoutRuntimeRegistry<
+    AbConfig,
+    CheckoutAgentSpec,
+    CheckoutRuntime
+  >(new CheckoutStore(abDir, project.id), mainCheckout);
+  const worktreeManager = new WorktreeManager({
+    abDir,
+    resolveRepoPath: async (projectId) => projectId === project.id ? project.path : undefined,
+  });
+
+  // Lazy and memoized, NEVER resolved during setup: it costs a `git` spawn, and
+  // a spawn on the boot path delays every core's first frames past the window
+  // the app waits for its state snapshot in. Only isolated creation asks.
+  let gitRepositoryProbe: Promise<boolean> | null = null;
+  function isGitRepository(): Promise<boolean> {
+    gitRepositoryProbe ??= resolveProject(project.path)
+      .then((resolved) => resolved.isGitRepository)
+      .catch(() => false);
+    return gitRepositoryProbe;
+  }
 
   const configPath = join(project.path, "antgrid.yaml");
   const configController = new ConfigController(configPath);
@@ -335,6 +412,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     return { command: "", name: "agent" };
   }
 
+  function agentSpecForConfig(source: AbConfig): { command: string; name: string; args?: string[]; workingDir?: string } {
+    const tool = source.agent?.tool;
+    let command = source.agent?.command;
+    if (tool && new Set(listKnownTools()).has(tool)) command = resolveAgent(tool).bin;
+    if (!command && tool) command = tool;
+    return {
+      command: command ?? "",
+      name: tool ?? "agent",
+      args: source.agent?.flags,
+      workingDir: source.agent?.workingDir,
+    };
+  }
+
   function getServices(): NonNullable<AbConfig["services"]> {
     return config.services ?? [];
   }
@@ -380,7 +470,92 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   const fileSearchers = new Map<string, FileSearcher>();
   let portDetector: PortDetector | null = null;
   let tunnelManager: TunnelManager | null = null;
-  const runningCommands = new Map<string, ChildProcess>();
+  // Owner of every terminal id the runtimes have minted, keyed by the id the PTY
+  // actually runs under. A configured `terminals:` slot in a non-main checkout
+  // runs under a namespaced `<checkoutId>:<name>` id, so neither the session
+  // store nor the raw id can say which checkout it belongs to — only the site
+  // that minted it can. Session PTYs are keyed by their own id, unnamespaced.
+  const terminalOwners = new Map<string, { checkoutId: string; externalId: string }>();
+
+  function createCheckoutRuntime(
+    checkout: CheckoutRecord,
+    runtimeConfig: AbConfig,
+    agentSpec: CheckoutAgentSpec,
+  ): CheckoutRuntime {
+    return {
+      checkout,
+      config: runtimeConfig,
+      agentSpec,
+      configController: checkout.id === "main"
+        ? configController
+        : new ConfigController(join(checkout.path, "antgrid.yaml")),
+      fileWatcher: null,
+      fileSearcher: null,
+      uploadManager: null,
+      portDetector: null,
+      tunnelManager: null,
+      runningCommands: new Map(),
+      cachedGitBranch: null,
+      cachedGitFiles: [],
+      gitBranchInterval: null,
+      configuredTerminalIds: new Map(),
+      started: false,
+    };
+  }
+
+  const mainRuntime = createCheckoutRuntime(mainCheckout, config, agentSpecFromConfig());
+  checkoutRuntimes.setRuntime("main", mainRuntime);
+
+  function checkoutIdOf(msg: { checkoutId?: string }): string {
+    return msg.checkoutId ?? "main";
+  }
+
+  function runtimeFor(msg: AbMessage): CheckoutRuntime {
+    const checkoutId = "checkoutId" in msg && typeof msg.checkoutId === "string"
+      ? msg.checkoutId
+      : "main";
+    return checkoutRuntimes.runtime(checkoutId) ?? mainRuntime;
+  }
+
+  function sendFromRuntime(runtime: CheckoutRuntime, msg: AbMessage): void {
+    sendAb({ ...msg, checkoutId: runtime.checkout.id } as AbMessage);
+  }
+
+  function internalTerminalId(runtime: CheckoutRuntime, terminalId: string): string {
+    if (sessions?.get(terminalId) || runtime.checkout.id === "main") return terminalId;
+    const namespaced = runtime.configuredTerminalIds.get(terminalId)
+      ?? `${runtime.checkout.id}:${terminalId}`;
+    runtime.configuredTerminalIds.set(terminalId, namespaced);
+    // Re-recorded on every call, not just the first: terminal exit drops the
+    // owner row, and a restarted slot reuses the same namespaced id.
+    terminalOwners.set(namespaced, { checkoutId: runtime.checkout.id, externalId: terminalId });
+    return namespaced;
+  }
+
+  /** Filesystem root a supervised slot actually runs in. Falls back to the
+   *  project path for a terminal-less (project-wide) caller. */
+  function checkoutPathFor(terminalId?: string): string {
+    if (!terminalId) return project.path;
+    return terminalOwner(terminalId).runtime.checkout.path;
+  }
+
+  function terminalOwner(terminalId: string): { runtime: CheckoutRuntime; externalId: string } {
+    const owner = terminalOwners.get(terminalId);
+    const checkoutId = sessions?.get(terminalId)?.checkoutId ?? owner?.checkoutId ?? "main";
+    return {
+      runtime: checkoutRuntimes.runtime(checkoutId) ?? mainRuntime,
+      externalId: owner?.externalId ?? terminalId,
+    };
+  }
+
+  function sendTerminalFrame(msg: AbMessage): void {
+    const terminalId = "terminalId" in msg && typeof msg.terminalId === "string"
+      ? msg.terminalId
+      : null;
+    if (!terminalId) { sendAb(msg); return; }
+    const { runtime, externalId } = terminalOwner(terminalId);
+    sendFromRuntime(runtime, { ...msg, terminalId: externalId } as AbMessage);
+  }
 
   function nextKeypair(): EphemeralKeypair {
     return generateEphemeralKeypair();
@@ -390,8 +565,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // remote/promotion transports to RelayClient.currentPeerPubkey(); unset (null)
   // in local mode, where there is no relay peer.
   let peerPubkeyProvider: (() => string | null) | null = null;
+  let peerCheckoutRoutingProvider: (() => boolean) | null = null;
   function setPeerPubkeyProvider(fn: (() => string | null) | null) {
     peerPubkeyProvider = fn;
+  }
+  function setPeerCheckoutRoutingProvider(fn: (() => boolean) | null) {
+    peerCheckoutRoutingProvider = fn;
   }
 
   // Mobile-access gate, shared by every inbound path (bus verbs AND the
@@ -407,6 +586,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     return remoteAccessEnabled();
   }
 
+  function currentPeerCanRouteCheckouts(): boolean {
+    return peerCheckoutRoutingProvider?.() === true;
+  }
+
   function handleTunnelMessage(raw: unknown) {
     const msg = parseTunnelMessage(raw as string | object);
     if (!msg) { log.warn("Invalid tunnel message, dropping"); return; }
@@ -417,8 +600,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       log.warn("Dropping tunnel %s: mobile access is disabled (project %s)", msg.type, project.id);
       return;
     }
-    if (msg.type === "tunnel:http-request" && tunnelManager) {
-      tunnelManager.onHttpRequest(msg).catch((err) =>
+    const runtime = checkoutRuntimes.runtime(msg.checkoutId);
+    if (!runtime) {
+      log.warn("Dropping tunnel request for unknown checkout %s", msg.checkoutId);
+      return;
+    }
+    if (msg.type === "tunnel:http-request" && runtime.tunnelManager) {
+      runtime.tunnelManager.onHttpRequest(msg).catch((err) =>
         log.error("tunnel:http-request handler failed: %s", err)
       );
     }
@@ -460,9 +648,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         return;
     }
     if (!manager) return;
+    const runtime = runtimeFor(msg);
     switch (msg.type) {
       case "terminal:input":
-        manager.write(msg.terminalId, msg.data);
+        manager.write(internalTerminalId(runtime, msg.terminalId), msg.data);
         // Typing into a session counts as activity — float it up the drawer.
         // No-ops for non-session terminals (service PTYs).
         sessions?.touch(msg.terminalId);
@@ -514,7 +703,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         }).catch((err) => logger.error("Handler plan failed: %s", err));
         break;
       case "terminal:start": {
-        const savedService = getServices().find((s) => s.name === msg.terminalId);
+        const savedService = (runtime.config.services ?? []).find((s) => s.name === msg.terminalId);
         const isSession = !!sessions?.get(msg.terminalId);
         if (isSession) {
           // Sessions are started via session:start (which goes through pending).
@@ -527,11 +716,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         const savedEnv = savedService?.env;
         const savedName = savedService?.name;
         manager.spawn({
-          terminalId: msg.terminalId,
+          terminalId: internalTerminalId(runtime, msg.terminalId),
           name: msg.name ?? savedName,
           command: msg.command ?? savedCommand,
           args: msg.args ?? savedArgs,
-          cwd: msg.cwd ?? savedCwd ?? project.path,
+          cwd: msg.cwd ?? savedCwd ?? runtime.checkout.path,
           env: msg.env ?? savedEnv,
           type: savedService ? "service" : undefined,
         });
@@ -539,12 +728,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "terminal:stop":
-        manager.kill(msg.terminalId);
+        manager.kill(internalTerminalId(runtime, msg.terminalId));
         sendStatus();
         break;
       case "terminal:resize":
         manager.resize(
-          msg.terminalId,
+          internalTerminalId(runtime, msg.terminalId),
           msg.clientId,
           msg.cols,
           msg.rows,
@@ -552,7 +741,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         );
         break;
       case "file:read": {
-        const fw = fileWatchers.get(msg.projectId);
+        const fw = runtime.fileWatcher;
         if (fw) {
           fw.handleFileReadRequest(msg.path);
         } else {
@@ -561,16 +750,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "file:upload-start":
-        uploadManager?.handleStart(msg);
+        runtime.uploadManager?.handleStart(msg);
         break;
       case "file:upload-chunk":
-        uploadManager?.handleChunk(msg);
+        runtime.uploadManager?.handleChunk(msg);
         break;
       case "file:upload-done":
-        uploadManager?.handleDone(msg);
+        runtime.uploadManager?.handleDone(msg);
         break;
       case "file:search": {
-        const fs = fileSearchers.get(msg.projectId);
+        const fs = runtime.fileSearcher;
         if (fs) {
           fs.search({
             projectId: msg.projectId,
@@ -586,47 +775,47 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "file:search-cancel": {
-        const fs = fileSearchers.get(msg.projectId);
+        const fs = runtime.fileSearcher;
         if (fs) {
           fs.cancel(msg.requestId);
         }
         break;
       }
       case "git:diff": {
-        handleGitDiffRequest(msg.projectId, msg.path).catch((err) =>
+        handleGitDiffRequest(runtime, msg.projectId, msg.path).catch((err) =>
           log.error("git:diff handler failed: %s", err)
         );
         break;
       }
       case "git:list-branches": {
-        handleGitListBranches(msg.projectId).catch((err) =>
+        handleGitListBranches(runtime, msg.projectId).catch((err) =>
           log.error("git:list-branches handler failed: %s", err)
         );
         break;
       }
       case "git:checkout": {
-        handleGitCheckout(msg.projectId, msg.branch).catch((err) =>
+        handleGitCheckout(runtime, msg.projectId, msg.branch).catch((err) =>
           log.error("git:checkout handler failed: %s", err)
         );
         break;
       }
       case "git:commit": {
-        handleGitCommit(msg.projectId, msg.message, msg.files).catch((err) =>
+        handleGitCommit(runtime, msg.projectId, msg.message, msg.files).catch((err) =>
           log.error("git:commit handler failed: %s", err)
         );
         break;
       }
       case "git:discard": {
-        handleGitDiscard(msg.projectId, msg.files).catch((err) =>
+        handleGitDiscard(runtime, msg.projectId, msg.files).catch((err) =>
           log.error("git:discard handler failed: %s", err)
         );
         break;
       }
       case "command:run": {
-        const cmdConfig = config.commands?.find((c) => c.name === msg.commandName);
+        const cmdConfig = runtime.config.commands?.find((c) => c.name === msg.commandName);
         if (!cmdConfig) {
           log.warn("command:run for unknown command: %s", msg.commandName);
-          sendAb(createMessage("command:done", {
+          sendFromRuntime(runtime, createMessage("command:done", {
             projectId: msg.projectId,
             commandName: msg.commandName,
             exitCode: 1,
@@ -637,12 +826,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // Reject unconfirmed runs of commands marked confirm: true
         if (cmdConfig.confirm && !msg.confirmed) {
           log.warn("command:run rejected — '%s' requires confirmation", msg.commandName);
-          sendAb(createMessage("command:output", {
+          sendFromRuntime(runtime, createMessage("command:output", {
             projectId: msg.projectId,
             commandName: msg.commandName,
             data: "Error: command requires confirmation (confirmed: true)\n",
           }));
-          sendAb(createMessage("command:done", {
+          sendFromRuntime(runtime, createMessage("command:done", {
             projectId: msg.projectId,
             commandName: msg.commandName,
             exitCode: 1,
@@ -651,7 +840,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         }
 
         const args = cmdConfig.args ?? [];
-        const cwd = cmdConfig.workingDir ?? project.path;
+        const cwd = cmdConfig.workingDir ?? runtime.checkout.path;
         const env = cmdConfig.env ? { ...process.env, ...cmdConfig.env } : undefined;
 
         // Commands are defined in the local config file, not supplied by remote clients.
@@ -664,11 +853,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         });
 
         const cmdKey = `${msg.projectId}:${msg.commandName}`;
-        runningCommands.set(cmdKey, proc);
+        runtime.runningCommands.set(cmdKey, proc);
 
         const streamOutput = (stream: NodeJS.ReadableStream) => {
           stream.on("data", (chunk: Buffer) => {
-            sendAb(createMessage("command:output", {
+            sendFromRuntime(runtime, createMessage("command:output", {
               projectId: msg.projectId,
               commandName: msg.commandName,
               data: chunk.toString(),
@@ -680,8 +869,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (proc.stderr) streamOutput(proc.stderr);
 
         proc.on("close", (code) => {
-          runningCommands.delete(cmdKey);
-          sendAb(createMessage("command:done", {
+          runtime.runningCommands.delete(cmdKey);
+          sendFromRuntime(runtime, createMessage("command:done", {
             projectId: msg.projectId,
             commandName: msg.commandName,
             exitCode: code,
@@ -689,13 +878,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         });
 
         proc.on("error", (err) => {
-          runningCommands.delete(cmdKey);
-          sendAb(createMessage("command:output", {
+          runtime.runningCommands.delete(cmdKey);
+          sendFromRuntime(runtime, createMessage("command:output", {
             projectId: msg.projectId,
             commandName: msg.commandName,
             data: `Error: ${err.message}\n`,
           }));
-          sendAb(createMessage("command:done", {
+          sendFromRuntime(runtime, createMessage("command:done", {
             projectId: msg.projectId,
             commandName: msg.commandName,
             exitCode: 1,
@@ -731,7 +920,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           // proc.exited), so awaiting it releases the binary handle + any per-tool
           // lock. start() re-spawns on the fresh binary and resumes the thread.
           stop: (id) => structured?.stopChat(id) ?? Promise.resolve(),
-          start: (id) => { sessions?.start(id); },
+          // Returned, not discarded: an isolated session's start is async and
+          // rejects when its worktree has gone, and runToolUpdate's per-session
+          // try/catch is what keeps one dead restart from sinking the rest.
+          start: (id) => sessions?.start(id),
           execUpdate: () => execToolUpdate(spec),
           installedAfter: async () => parseCodexVersion(await execToolVersion(spec)),
         }).then((outcome) => {
@@ -746,19 +938,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "config:read": {
-        emitConfigState();
+        emitConfigState(runtime);
         break;
       }
       case "config:write": {
-        const w = configController.write(msg.config as import("./config").AbConfig);
-        sendAb(createMessage("config:write-result", {
+        const w = runtime.configController.write(msg.config as import("./config").AbConfig);
+        sendFromRuntime(runtime, createMessage("config:write-result", {
           ok: w.ok,
           errors: w.ok ? undefined : w.errors,
         }));
         break;
       }
       case "config:detect-tools": {
-        sendAb(createMessage("config:detect-tools-result", {
+        sendFromRuntime(runtime, createMessage("config:detect-tools-result", {
           tools: detectInstalledTools(),
         }));
         break;
@@ -786,21 +978,28 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           }));
           break;
         }
-        try {
-          const s = sessions.create(msg.name, {
-            tool: msg.tool,
-            command: msg.command,
-            args: msg.args,
-            mode: msg.mode,
-          });
-          sendAb(createMessage("session:result", {
-            requestId: msg.requestId, ok: true, session: s,
-          }));
-        } catch (err) {
-          sendAb(createMessage("session:result", {
-            requestId: msg.requestId, ok: false, error: String(err),
-          }));
-        }
+        void (async () => {
+          try {
+            const s = await sessions.create(msg.name, {
+              tool: msg.tool,
+              command: msg.command,
+              args: msg.args,
+              mode: msg.mode,
+              isolation: msg.isolation ?? "shared",
+              baseBranch: msg.baseBranch,
+            });
+            sendAb(createMessage("session:result", {
+              requestId: msg.requestId, ok: true, session: s, checkoutId: s.checkoutId,
+            }));
+          } catch (err) {
+            sendAb(createMessage("session:result", {
+              requestId: msg.requestId,
+              ok: false,
+              error: err instanceof Error ? err.message : "Could not create the session.",
+              ...(err instanceof WorktreeError ? { errorCode: err.code } : {}),
+            }));
+          }
+        })();
         break;
       }
       case "session:start":
@@ -825,21 +1024,30 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // through to its reply without yielding, since an async body runs
         // synchronously until its first await.
         void (async () => {
+          const checkoutId = s.get(verb.sessionId)?.checkoutId ?? "main";
           try {
-            if (verb.type === "session:start") s.start(verb.sessionId, verb.initialPrompt);
+            if (verb.type === "session:start") await s.start(verb.sessionId, verb.initialPrompt);
             else if (verb.type === "session:stop") s.stop(verb.sessionId);
             else if (verb.type === "session:rename") s.rename(verb.sessionId, verb.name);
             else if (verb.type === "session:archive") s.archive(verb.sessionId);
             else if (verb.type === "session:unarchive") s.unarchive(verb.sessionId);
-            else if (verb.type === "session:delete") s.delete(verb.sessionId);
+            else if (verb.type === "session:delete") await s.delete(verb.sessionId, {
+              force: verb.force,
+              removeCheckout: verb.removeCheckout,
+              deleteBranch: verb.deleteBranch,
+            });
             else if (verb.type === "session:set-mode") await s.setMode(verb.sessionId, verb.mode);
             const entry = s.get(verb.sessionId);
             sendAb(createMessage("session:result", {
-              requestId: verb.requestId, ok: true, session: entry,
+              requestId: verb.requestId, ok: true, session: entry, checkoutId,
             }));
           } catch (err) {
             sendAb(createMessage("session:result", {
-              requestId: verb.requestId, ok: false, error: String(err),
+              requestId: verb.requestId,
+              ok: false,
+              error: err instanceof Error ? err.message : "Session operation failed.",
+              ...(err instanceof WorktreeError ? { errorCode: err.code } : {}),
+              checkoutId,
             }));
           }
         })();
@@ -857,12 +1065,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "terminal:snapshot:request": {
-        const snap = manager.getScrollback(msg.terminalId);
+        const snap = manager.getScrollback(internalTerminalId(runtime, msg.terminalId));
         if (!snap) {
           log.warn("snapshot requested for unknown terminal %s", msg.terminalId);
           break;
         }
-        sendAb(createMessage("terminal:snapshot", {
+        sendFromRuntime(runtime, createMessage("terminal:snapshot", {
           terminalId: msg.terminalId,
           scrollback: snap.text,
           seq: snap.seq,
@@ -870,17 +1078,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "file:tree:snapshot:request": {
-        // Single-project agent: only one watcher in the map.
-        const fw = [...fileWatchers.values()][0];
+        const fw = runtime.fileWatcher;
         if (!fw) break;
         const { tree, seq } = fw.getTreeSnapshot();
-        sendAb(createMessage("file:tree:snapshot", { tree, seq }));
+        sendFromRuntime(runtime, createMessage("file:tree:snapshot", { tree, seq }));
         break;
       }
       case "preview:snapshot:request": {
-        if (!tunnelManager) break;
-        sendAb(createMessage("preview:snapshot", {
-          urls: tunnelManager.getPreviewSnapshot(),
+        if (!runtime.tunnelManager) break;
+        sendFromRuntime(runtime, createMessage("preview:snapshot", {
+          urls: runtime.tunnelManager.getPreviewSnapshot(),
         }));
         break;
       }
@@ -915,10 +1122,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   }
 
   function teardownServices() {
-    // Kill running command processes
-    for (const [key, proc] of runningCommands) {
-      proc.kill();
-      runningCommands.delete(key);
+    for (const runtime of checkoutRuntimes.values()) {
+      for (const proc of runtime.runningCommands.values()) proc.kill();
+      runtime.runningCommands.clear();
+      runtime.configController.stopWatch();
+      runtime.fileWatcher?.stop();
+      runtime.uploadManager?.stop();
+      runtime.portDetector?.stop();
+      runtime.tunnelManager?.stop();
+      if (runtime.gitBranchInterval) clearInterval(runtime.gitBranchInterval);
+      runtime.gitBranchInterval = null;
+      runtime.started = false;
     }
     manager?.killAll();
     manager = null;
@@ -936,10 +1150,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     namer = null;
     void structured?.disposeAll();
     structured = null;
-    if (gitBranchInterval) {
-      clearInterval(gitBranchInterval);
-      gitBranchInterval = null;
-    }
   }
 
   // Outbound senders — initially no-op until a transport is attached.
@@ -948,6 +1158,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // Replay-cache eviction for torn-down chat sessions; bound with the bus in
   // attachTransport, like sendAb.
   let dropSessionReplay: (sessionId: string) => void = (_s) => {};
+  let dropCheckoutReplay: (checkoutId: string) => void = (_c) => {};
   let isShuttingDown = false;
 
   // Kept as the single funnel for notification:push producers even though it now
@@ -964,7 +1175,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // up correctly, same pattern as the existing manager? deps.
   const handlerEngine = new HandlerEngine({
     projectId: project.id,
-    projectPath: project.path,
+    projectPath: (terminalId) => checkoutPathFor(terminalId),
     tool: (terminalId) =>
       (terminalId ? sessions?.get(terminalId)?.tool : undefined) ?? config.agent?.tool ?? "claude-code",
     agentSessionId: (terminalId) => sessions?.get(terminalId)?.agentSessionId,
@@ -998,46 +1209,42 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     })),
   });
 
-  let cachedGitBranch: string | null = null;
-
-  async function refreshGitBranch(): Promise<void> {
+  async function refreshGitBranch(runtime: CheckoutRuntime = mainRuntime): Promise<void> {
     try {
       const proc = Bun.spawn(["git", "rev-parse", "--abbrev-ref", "HEAD"], {
-        cwd: project.path,
+        cwd: runtime.checkout.path,
         stdout: "pipe",
         stderr: "ignore",
       });
       const output = await new Response(proc.stdout).text();
       const exitCode = await proc.exited;
-      cachedGitBranch = exitCode === 0 ? output.trim() || null : null;
+      runtime.cachedGitBranch = exitCode === 0 ? output.trim() || null : null;
     } catch {
-      cachedGitBranch = null;
+      runtime.cachedGitBranch = null;
     }
   }
 
-  let cachedGitFiles: GitFileEntry[] = [];
-
-  async function refreshGitStatus(): Promise<void> {
-    cachedGitFiles = await getGitStatus(project.path);
+  async function refreshGitStatus(runtime: CheckoutRuntime = mainRuntime): Promise<void> {
+    runtime.cachedGitFiles = await getGitStatus(runtime.checkout.path);
   }
 
-  function sendGitStatus() {
-    sendAb(
+  function sendGitStatus(runtime: CheckoutRuntime = mainRuntime) {
+    sendFromRuntime(runtime,
       createMessage("git:status", {
         projectId: project.id,
-        files: cachedGitFiles,
+        files: runtime.cachedGitFiles,
       })
     );
   }
 
-  async function handleGitListBranches(projectId: string) {
+  async function handleGitListBranches(runtime: CheckoutRuntime, projectId: string) {
     try {
-      const catalog = await listLocalBranches(project.path);
+      const catalog = await listLocalBranches(runtime.checkout.path);
       if (!catalog.isRepository) return;
 
-      sendAb(createMessage("git:branches", {
+      sendFromRuntime(runtime, createMessage("git:branches", {
         projectId,
-        current: catalog.current ?? cachedGitBranch ?? "",
+        current: catalog.current ?? runtime.cachedGitBranch ?? "",
         branches: catalog.branches,
       }));
     } catch {
@@ -1045,22 +1252,22 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
   }
 
-  async function handleGitCheckout(projectId: string, branch: string) {
+  async function handleGitCheckout(runtime: CheckoutRuntime, projectId: string, branch: string) {
     try {
-      const res = await checkoutLocalBranch(project.path, branch);
-      sendAb(createMessage("git:checkout-result", {
+      const res = await checkoutLocalBranch(runtime.checkout.path, branch);
+      sendFromRuntime(runtime, createMessage("git:checkout-result", {
         projectId,
         branch,
         success: true,
       }));
 
       // Refresh cached state and notify app
-      cachedGitBranch = res.current;
-      sendStatus();
-      await refreshGitStatus();
-      sendGitStatus();
+      runtime.cachedGitBranch = res.current;
+      sendStatus(runtime);
+      await refreshGitStatus(runtime);
+      sendGitStatus(runtime);
     } catch (err: any) {
-      sendAb(createMessage("git:checkout-result", {
+      sendFromRuntime(runtime, createMessage("git:checkout-result", {
         projectId,
         branch,
         success: false,
@@ -1069,60 +1276,60 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
   }
 
-  async function handleGitCommit(projectId: string, message: string, files: string[]) {
-    const result = await gitCommit(project.path, message, files);
-    sendAb(createMessage("git:commit-result", {
+  async function handleGitCommit(runtime: CheckoutRuntime, projectId: string, message: string, files: string[]) {
+    const result = await gitCommit(runtime.checkout.path, message, files);
+    sendFromRuntime(runtime, createMessage("git:commit-result", {
       projectId,
       success: result.success,
       ...(result.sha ? { sha: result.sha } : {}),
       ...(result.error ? { error: result.error } : {}),
     }));
     if (result.success) {
-      await refreshGitStatus();
-      sendGitStatus();
-      sendStatus();
+      await refreshGitStatus(runtime);
+      sendGitStatus(runtime);
+      sendStatus(runtime);
     }
   }
 
-  async function handleGitDiscard(projectId: string, files: string[]) {
+  async function handleGitDiscard(runtime: CheckoutRuntime, projectId: string, files: string[]) {
     // gitDiscard classifies tracked vs untracked from live git state itself —
     // don't thread a (possibly stale) cachedGitFiles snapshot through.
-    const result = await gitDiscard(project.path, files);
-    sendAb(createMessage("git:discard-result", {
+    const result = await gitDiscard(runtime.checkout.path, files);
+    sendFromRuntime(runtime, createMessage("git:discard-result", {
       projectId,
       success: result.success,
       files,
       ...(result.error ? { error: result.error } : {}),
     }));
     if (result.success) {
-      await refreshGitStatus();
-      sendGitStatus();
-      sendStatus();
+      await refreshGitStatus(runtime);
+      sendGitStatus(runtime);
+      sendStatus(runtime);
     }
   }
 
-  async function handleGitDiffRequest(projectId: string, path: string) {
+  async function handleGitDiffRequest(runtime: CheckoutRuntime, projectId: string, path: string) {
     try {
       // `git diff HEAD` emits nothing for untracked files (they're in neither
       // HEAD nor the index), so a tapped "?" file would render a blank diff.
       // Diff it against /dev/null via `--no-index` to show its full content as
       // additions. (`--no-index` exits 1 when files differ — normal for a new
       // file — so treat 0 and 1 as success.)
-      const isUntracked = cachedGitFiles.some(
+      const isUntracked = runtime.cachedGitFiles.some(
         (f) => f.path === path && f.status === "?",
       );
       const args = isUntracked
         ? ["diff", "--no-index", "--", "/dev/null", path]
         : ["diff", "HEAD", "--relative", "--", path];
       const proc = Bun.spawn(["git", "-c", "core.quotepath=false", ...args], {
-        cwd: project.path,
+        cwd: runtime.checkout.path,
         stdout: "pipe",
         stderr: "ignore",
       });
       const output = await new Response(proc.stdout).text();
       const exitCode = await proc.exited;
       if (isUntracked ? exitCode > 1 : exitCode !== 0) {
-        sendAb(createMessage("git:diff-content", {
+        sendFromRuntime(runtime, createMessage("git:diff-content", {
           projectId,
           path,
           diff: null,
@@ -1139,7 +1346,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (line.startsWith("-") && !line.startsWith("---")) deletions++;
       }
 
-      sendAb(createMessage("git:diff-content", {
+      sendFromRuntime(runtime, createMessage("git:diff-content", {
         projectId,
         path,
         diff: output || null,
@@ -1147,7 +1354,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         deletions,
       }));
     } catch {
-      sendAb(createMessage("git:diff-content", {
+      sendFromRuntime(runtime, createMessage("git:diff-content", {
         projectId,
         path,
         diff: null,
@@ -1157,16 +1364,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
   }
 
-  function sendStatus() {
+  function sendStatus(runtime: CheckoutRuntime = mainRuntime) {
     if (!manager) return;
     // All terminals (agent + services + ad-hoc) flow through `terminals`;
     // the app filters by `type` to route them to the right UI surface.
     // Sessions advertise themselves through `session:updated`; the terminals
     // list now only reflects actually-spawned PTYs (agent or service).
-    const terminalsForApp = manager.getStatus();
+    const terminalsForApp = manager.getStatus().flatMap((terminal) => {
+      const owner = terminalOwner(terminal.terminalId);
+      return owner.runtime === runtime
+        ? [{ ...terminal, terminalId: owner.externalId }]
+        : [];
+    });
 
     // Service status: merge declared services with runtime session info
-    const serviceStatus = getServices().map((s) => {
+    const serviceStatus = (runtime.config.services ?? []).map((s) => {
       const live = terminalsForApp.find((t) => t.terminalId === s.name);
       return {
         id: s.name,
@@ -1177,8 +1389,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     });
 
     // Ports: derive from config.ports, attaching detected URL when available
-    const detected = portDetector?.getLastDetections() ?? new Map<number, { url: string; scheme: "http" | "https"; source: "process" | "output" }>();
-    const portStatus = (config.ports ?? []).map((p) => {
+    const detected = runtime.portDetector?.getLastDetections() ?? new Map<number, { url: string; scheme: "http" | "https"; source: "process" | "output" }>();
+    const portStatus = (runtime.config.ports ?? []).map((p) => {
       const hit = detected.get(p.port);
       return hit
         ? {
@@ -1197,69 +1409,216 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           };
     });
 
-    sendAb(
+    sendFromRuntime(runtime,
       createMessage("agent:status", {
         projectId: project.id,
         projectName: agentName,
         hostMachineName: process.env.ANTGRID_HOST_NAME ?? hostname(),
         terminals: terminalsForApp,
         services: serviceStatus,
-        commands: config.commands?.map((c) => ({
+        commands: runtime.config.commands?.map((c) => ({
           name: c.name,
           confirm: c.confirm,
           description: c.description,
           icon: c.icon,
         })),
         ports: portStatus,
-        git: cachedGitBranch ? { branch: cachedGitBranch } : undefined,
+        git: runtime.cachedGitBranch ? { branch: runtime.cachedGitBranch } : undefined,
         agent: {
-          tool: config.agent?.tool,
+          tool: runtime.config.agent?.tool,
           name: agentName,
           version: VERSION,
-          flags: config.agent?.flags,
+          flags: runtime.config.agent?.flags,
         },
         needsFirstRun,
       })
     );
   }
 
-  let gitBranchInterval: ReturnType<typeof setInterval> | null = null;
-
   async function resyncState() {
     log.info("App reconnected, re-syncing existing state");
     // Use cached git state for the immediate resync; refresh in background.
-    sendStatus();
-    sendGitStatus();
-    void Promise.all([refreshGitBranch(), refreshGitStatus()])
-      .then(() => {
-        sendStatus();
-        sendGitStatus();
-      })
+    for (const runtime of checkoutRuntimes.values()) {
+      sendStatus(runtime);
+      sendGitStatus(runtime);
+      void Promise.all([refreshGitBranch(runtime), refreshGitStatus(runtime)])
+        .then(() => {
+          sendStatus(runtime);
+          sendGitStatus(runtime);
+        })
       // refreshGit* swallow internally today, but guard against a future
       // edit that lets an exception escape silently breaking the re-emit.
-      .catch(() => {});
+        .catch(() => {});
+    }
 
     // Re-send file tree
-    for (const fw of fileWatchers.values()) fw.sendFullTree();
+    for (const runtime of checkoutRuntimes.values()) runtime.fileWatcher?.sendFullTree();
 
     // Re-emit the detected-port list. ports:update is only pushed on change,
     // so a phone that binds after detection would otherwise never see ports
     // found before it connected (preview:snapshot only covers config-declared
     // preview ports, not ad-hoc detections).
-    portDetector?.emitCurrent();
+    for (const runtime of checkoutRuntimes.values()) runtime.portDetector?.emitCurrent();
 
     // Re-send terminal scrollback so the app has current output
     if (manager) {
       for (const t of manager.getStatus()) {
         const snap = manager.getScrollback(t.terminalId);
         if (snap && snap.text) {
-          sendAb(createMessage("terminal:output", {
-            terminalId: t.terminalId,
+          sendTerminalFrame(createMessage("terminal:output", {
+            terminalId: terminalOwner(t.terminalId).externalId,
             data: snap.text,
           }));
         }
       }
     }
+  }
+
+  async function startCheckoutRuntime(runtime: CheckoutRuntime): Promise<void> {
+    if (runtime.started || !manager) return;
+    runtime.started = true;
+    const runtimeId = runtime.checkout.id;
+    const send = (msg: AbMessage) => sendFromRuntime(runtime, msg);
+    const pd = new PortDetector({
+      ports: (runtime.config.ports ?? []).map((p) => ({ port: p.port, name: p.name })),
+    });
+    runtime.portDetector = pd;
+    const previewPorts = new Set(
+      (runtime.config.ports ?? []).filter((p) => p.onDetect !== "ignore").map((p) => p.port),
+    );
+    const relayHost = relayBase ? new URL(relayBase).host : "";
+    const tm = new TunnelManager({
+      projectId: project.id,
+      portLabels: pd.getPortLabels(),
+      previewPorts,
+      sendTunnel: (data) => sendPlain({ ...data, checkoutId: runtimeId }),
+      sendEncrypted: send,
+      relayHost,
+      connState,
+    });
+    runtime.tunnelManager = tm;
+    pd.onPortsChange = (ports) => {
+      send(createMessage("ports:update", { projectId: project.id, ports }));
+      tm.onPortsUpdate(ports);
+    };
+    pd.onDetection((event) => {
+      const declared = (runtime.config.ports ?? []).find((p) => p.port === event.port);
+      if (declared?.onDetect === "ignore") return;
+      send(createMessage("port:detected", {
+        port: event.port,
+        url: event.url,
+        scheme: event.scheme,
+        source: event.source,
+        sourceSessionId: event.sourceSessionId,
+        attributes: { name: declared?.name, onDetect: declared?.onDetect ?? "notify" },
+      }));
+    });
+
+    const fw = new FileWatcher(
+      { id: project.id, path: runtime.checkout.path, name: project.name },
+      send,
+      connState,
+    );
+    runtime.fileWatcher = fw;
+    runtime.fileSearcher = new FileSearcher(runtime.checkout.path, project.id, send);
+    runtime.uploadManager = new FileUploadManager({
+      projectId: project.id,
+      projectPath: runtime.checkout.path,
+      send,
+    });
+    runtime.uploadManager.startSweeper();
+    fw.sendFullTree();
+    fw.startWatching();
+
+    runtime.configController.watch((result, diff) => {
+      if (!result.ok) {
+        if (!result.missing) send(createMessage("config:changed", {
+          agentRestartRequired: false, invalid: true, error: result.error,
+        }));
+        return;
+      }
+      for (const name of diff.servicesRemoved) {
+        manager?.kill(internalTerminalId(runtime, name));
+      }
+      for (const changed of [...diff.servicesAdded, ...diff.servicesModified]) {
+        const service = result.config.services?.find((candidate) => candidate.name === changed.name);
+        if (!service || !manager) continue;
+        const terminalId = internalTerminalId(runtime, service.name);
+        if (diff.servicesModified.some((candidate) => candidate.name === changed.name)) {
+          manager.kill(terminalId);
+        }
+        manager.spawn({
+          terminalId,
+          name: service.name,
+          command: service.command,
+          args: service.args,
+          cwd: service.workingDir ?? runtime.checkout.path,
+          env: service.env,
+          type: "service",
+        });
+      }
+      Object.assign(runtime.config, result.config);
+      runtime.agentSpec = agentSpecForConfig(result.config);
+      void checkoutRuntimes.prepare(runtime.checkout, runtime.config, runtime.agentSpec, runtime);
+      send(createMessage("config:changed", {
+        config: result.config,
+        agentRestartRequired: diff.agentRestartRequired,
+      }));
+      sendStatus(runtime);
+    });
+
+    for (const service of runtime.config.services ?? []) {
+      if (service.autoStart === false) continue;
+      manager.spawn({
+        terminalId: internalTerminalId(runtime, service.name),
+        name: service.name,
+        command: service.command,
+        args: service.args,
+        cwd: service.workingDir ?? runtime.checkout.path,
+        env: service.env,
+        type: "service",
+      });
+    }
+    await Promise.all([refreshGitBranch(runtime), refreshGitStatus(runtime)]);
+    sendStatus(runtime);
+    sendGitStatus(runtime);
+    runtime.gitBranchInterval = setInterval(async () => {
+      const branch = runtime.cachedGitBranch;
+      const files = JSON.stringify(runtime.cachedGitFiles);
+      await Promise.all([refreshGitBranch(runtime), refreshGitStatus(runtime)]);
+      if (runtime.cachedGitBranch !== branch) sendStatus(runtime);
+      if (JSON.stringify(runtime.cachedGitFiles) !== files) sendGitStatus(runtime);
+    }, 10_000);
+  }
+
+  async function prepareCheckoutRuntime(checkout: CheckoutRecord): Promise<CheckoutRuntime> {
+    const existing = checkoutRuntimes.runtime(checkout.id);
+    if (existing) {
+      await startCheckoutRuntime(existing);
+      return existing;
+    }
+    const runtimeConfig = loadConfig(undefined, checkout.path);
+    const spec = agentSpecForConfig(runtimeConfig);
+    const runtime = createCheckoutRuntime(checkout, runtimeConfig, spec);
+    await checkoutRuntimes.prepare(checkout, runtimeConfig, spec, runtime);
+    await startCheckoutRuntime(runtime);
+    return runtime;
+  }
+
+  async function teardownCheckoutRuntime(checkoutId: string): Promise<void> {
+    const runtime = checkoutRuntimes.runtime(checkoutId);
+    if (!runtime || checkoutId === "main") return;
+    for (const proc of runtime.runningCommands.values()) proc.kill();
+    runtime.runningCommands.clear();
+    for (const internalId of runtime.configuredTerminalIds.values()) manager?.kill(internalId);
+    runtime.configController.stopWatch();
+    runtime.fileWatcher?.stop();
+    runtime.uploadManager?.stop();
+    runtime.portDetector?.stop();
+    runtime.tunnelManager?.stop();
+    if (runtime.gitBranchInterval) clearInterval(runtime.gitBranchInterval);
+    dropCheckoutReplay(checkoutId);
+    await checkoutRuntimes.remove(checkoutId);
   }
 
   async function setupServices() {
@@ -1273,6 +1632,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       ports: (config.ports ?? []).map((p) => ({ port: p.port, name: p.name })),
     });
     portDetector = pd;
+    mainRuntime.portDetector = pd;
 
     const previewPorts = new Set<number>();
     for (const p of config.ports ?? []) {
@@ -1292,16 +1652,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       connState,
     });
     tunnelManager = tm;
+    mainRuntime.tunnelManager = tm;
 
     pd.onPortsChange = (ports) => {
       sendAb(createMessage("ports:update", { projectId: project.id, ports }));
       tm.onPortsUpdate(ports);
     };
 
-    manager = new TerminalManager((msg: AbMessage) => sendAb(msg), {
-      onTerminalOutput: (id, data) => pd.feed(id, data),
+    manager = new TerminalManager((msg: AbMessage) => sendTerminalFrame(msg), {
+      onTerminalOutput: (id, data) => terminalOwner(id).runtime.portDetector?.feed(id, data),
       onTerminalExited: (id) => {
-        pd.removeTerminal(id);
+        terminalOwner(id).runtime.portDetector?.removeTerminal(id);
         sessions?.noteExited(id);
         // Drop buffered title state so a stale title from this run can't leak
         // into a restarted same-id session (start() reuses the entry id).
@@ -1309,6 +1670,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // Reclaim the handler's per-terminal guard + pending state for the dead
         // terminal. A mode flip keeps the arming: the session outlives the PTY.
         handlerEngine.onTerminalExit(id, { keepArmed: sessions?.isFlipping(id) });
+        queueMicrotask(() => terminalOwners.delete(id));
       },
       // A notification (osc9/osc777) means the session did something worth
       // surfacing — float it up the drawer. No-ops for non-session terminals.
@@ -1389,10 +1751,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // driver" — so an unreachable tool here means the two disagreed.
         const driver = agentSpec(tool)?.driver;
         if (!driver) throw new Error(`tool "${tool}" has no chat driver`);
+        const sessionCheckoutId = sessions?.get(sessionId)?.checkoutId ?? "main";
+        const sessionRuntime = checkoutRuntimes.runtime(sessionCheckoutId) ?? mainRuntime;
         return driver({
           sessionId,
           send,
-          projectPath: project.path,
+          projectPath: sessionRuntime.checkout.path,
           projectId: project.id,
           chatAugment: () => buildChatSpawnAugment(tool, sessionId, apiServer?.port ?? null, abDir),
           onAgentSession: (agentSessionId) => sessions?.setAgentSession(sessionId, agentSessionId),
@@ -1410,12 +1774,35 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // project. PTY lifecycle is delegated to `manager` (TerminalManager); the
     // agent.tool config drives the spawn command for every session. A mode:'chat'
     // session bypasses the PTY and rides the chat bridges into `structured`.
+    mainRuntime.started = true;
+    await checkoutRuntimes.prepare(mainCheckout, config, agentSpecFromConfig(), mainRuntime);
     sessions = new SessionManager({
       projectId: project.id,
       storeDir: abDir,
       projectPath: project.path,
       terminalManager: manager,
       agentSpec: agentSpecFromConfig(),
+      worktreeSessionsSupported:
+        opts.worktreeSessionsSupported ?? WORKTREE_SESSIONS_SUPPORTED,
+      worktreeManager,
+      isGitRepository,
+      prepareCheckoutRuntime: async (checkout) => { await prepareCheckoutRuntime(checkout); },
+      teardownCheckoutRuntime,
+      resolveCheckout: async (checkoutId) => {
+        const checkout = await checkoutRuntimes.resolve(checkoutId);
+        if (checkout && checkoutId !== "main") await prepareCheckoutRuntime(checkout);
+        return checkout;
+      },
+      resolveAgentSpec: async (checkoutId) => {
+        const known = checkoutRuntimes.agentSpec(checkoutId);
+        if (known) return known;
+        const checkout = await checkoutRuntimes.resolve(checkoutId);
+        if (!checkout) return agentSpecFromConfig();
+        const checkoutConfig = loadConfig(undefined, checkout.path);
+        const spec = agentSpecForConfig(checkoutConfig);
+        await prepareCheckoutRuntime(checkout);
+        return spec;
+      },
       sendMessage: (msg) => sendAb(msg as AbMessage),
       sessionWorkStatusFor: opts.sessionWorkStatusFor,
       onStartChat: (opts) => {
@@ -1462,7 +1849,22 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Forward each session's raw PTY output to the port detector's URL observer.
     // The replay loop in onSessionCreated covers any sessions already in the map.
     manager.onSessionCreated((session) => {
-      session.onOutput((chunk) => pd.observeOutput(session.terminalId, chunk));
+      // Session PTYs run under their own id, so record ownership here — the
+      // session entry is gone by the time a delete's trailing frames resolve.
+      // A configured terminal is already recorded by internalTerminalId under
+      // its namespaced id; re-stamping it would lose its external id.
+      if (!terminalOwners.has(session.terminalId)) {
+        terminalOwners.set(session.terminalId, {
+          checkoutId: sessions?.get(session.terminalId)?.checkoutId ?? "main",
+          externalId: session.terminalId,
+        });
+      }
+      session.onOutput((chunk) => {
+        terminalOwner(session.terminalId).runtime.portDetector?.observeOutput(
+          session.terminalId,
+          chunk,
+        );
+      });
     });
 
     // Probe: codex injects a SessionStart hook that pings /hook-alive. If no ping
@@ -1617,26 +2019,30 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       .catch(() => {});
 
     // Refresh git branch every 10s and re-send status if it changed
-    gitBranchInterval = setInterval(async () => {
-      const prevBranch = cachedGitBranch;
-      const prevFiles = JSON.stringify(cachedGitFiles);
-      await Promise.all([refreshGitBranch(), refreshGitStatus()]);
-      if (cachedGitBranch !== prevBranch) sendStatus();
-      if (JSON.stringify(cachedGitFiles) !== prevFiles) sendGitStatus();
+    mainRuntime.gitBranchInterval = setInterval(async () => {
+      const prevBranch = mainRuntime.cachedGitBranch;
+      const prevFiles = JSON.stringify(mainRuntime.cachedGitFiles);
+      await Promise.all([refreshGitBranch(mainRuntime), refreshGitStatus(mainRuntime)]);
+      if (mainRuntime.cachedGitBranch !== prevBranch) sendStatus(mainRuntime);
+      if (JSON.stringify(mainRuntime.cachedGitFiles) !== prevFiles) sendGitStatus(mainRuntime);
     }, 10_000);
 
     const fw = new FileWatcher(project, (msg: AbMessage) => sendAb(msg), connState);
     fileWatchers.set(project.id, fw);
+    mainRuntime.fileWatcher = fw;
     uploadManager = new FileUploadManager({
       projectId: project.id,
       projectPath: project.path,
       send: (msg) => sendAb(msg),
     });
     uploadManager.startSweeper();
+    mainRuntime.uploadManager = uploadManager;
     fw.sendFullTree();
     fw.startWatching();
 
-    fileSearchers.set(project.id, new FileSearcher(project.path, project.id, sendAb));
+    const mainSearcher = new FileSearcher(project.path, project.id, (msg) => sendFromRuntime(mainRuntime, msg));
+    fileSearchers.set(project.id, mainSearcher);
+    mainRuntime.fileSearcher = mainSearcher;
   }
 
   // Emit current config validity as a config:read-result. Mirrors the
@@ -1645,14 +2051,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // connect, and the app's drawer config-error dot clears only on a config
   // frame — so without this a stale cached dot would persist after the YAML
   // was fixed while disconnected.
-  function emitConfigState() {
-    const r = configController.read();
+  function emitConfigState(runtime: CheckoutRuntime = mainRuntime) {
+    const r = runtime.configController.read();
     if (r.ok) {
-      sendAb(createMessage("config:read-result", { ok: true, config: r.config }));
+      sendFromRuntime(runtime, createMessage("config:read-result", { ok: true, config: r.config }));
     } else if (r.missing) {
-      sendAb(createMessage("config:read-result", { ok: false }));
+      sendFromRuntime(runtime, createMessage("config:read-result", { ok: false }));
     } else {
-      sendAb(createMessage("config:read-result", { ok: false, raw: r.raw, error: r.error }));
+      sendFromRuntime(runtime, createMessage("config:read-result", { ok: false, raw: r.raw, error: r.error }));
     }
   }
 
@@ -1781,6 +2187,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   function attachTransport(bus: MessageBus) {
     sendAb = (m) => bus.publish(m, "control");
     dropSessionReplay = (sessionId) => bus.dropSessionReplay(sessionId);
+    dropCheckoutReplay = (checkoutId) => bus.dropCheckoutReplay(checkoutId);
     // Plaintext (tunnel) sender bypasses the bus — see setPlainHook.
     sendPlain = (data) => busPlainHook?.(data);
     bus.setInboundHandler((msg, channel, source) => {
@@ -1807,12 +2214,35 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         );
         return;
       }
+      if (source !== "loopback" && sessions?.hasManagedSessions() && !currentPeerCanRouteCheckouts()) {
+        log.warn("Dropping inbound %s: remote app lacks checkout routing (project %s)", msg.type, project.id);
+        return;
+      }
       if (msg.type === "request") {
         if (msg.method === "session.transcriptSnapshot") {
           void handleTranscriptSnapshotRequest(msg).then((res) => bus.publish(res, channel));
           return;
         }
         void dispatchRpc(bus, msg).then((res) => bus.publish(res, channel));
+        return;
+      }
+      // Explicit checkout IDs never fall back to main. The asynchronous store
+      // lookup also covers a resumed managed session after an agent restart.
+      if (CHECKOUT_VARIABLE_MESSAGE_TYPES.has(msg.type)) {
+        const checkoutId = (msg as { checkoutId?: string }).checkoutId ?? "main";
+        void checkoutRuntimes.resolve(checkoutId).then(async (checkout) => {
+          if (!checkout) {
+            log.warn("Rejecting %s for unknown checkout %s (project %s)", msg.type, checkoutId, project.id);
+            bus.publish(createMessage("control:result", {
+              ok: false,
+              error: { code: "UNKNOWN_CHECKOUT", message: "The requested checkout is not available." },
+              checkoutId,
+            }), channel);
+            return;
+          }
+          if (checkoutId !== "main") await prepareCheckoutRuntime(checkout);
+          handleAbMessage({ ...msg, checkoutId } as AbMessage);
+        }).catch((error) => log.warn("Checkout lookup failed for %s: %s", checkoutId, error));
         return;
       }
       handleAbMessage(msg);
@@ -1856,13 +2286,20 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     onHandshakeComplete,
     setPlainHook,
     setPeerPubkeyProvider,
+    setPeerCheckoutRoutingProvider,
     connState,
-    deleteSession(id: string): boolean {
+    deleteSession(id: string, options?: DeleteSessionOptions): boolean | Promise<boolean> {
       if (!sessions) return false;
-      return sessions.delete(id);
+      return sessions.delete(id, options);
     },
     listSessions(includeArchived: boolean): SessionEntry[] | null {
       return sessions ? sessions.list(includeArchived) : null;
+    },
+    hasManagedSessions(): boolean {
+      return sessions?.hasManagedSessions() ?? false;
+    },
+    isMainCheckoutSession(id: string): boolean {
+      return sessions?.isMainCheckoutSession(id) ?? true;
     },
   };
 }

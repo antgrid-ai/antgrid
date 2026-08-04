@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
+import { computeProjectId } from "../src/project-id";
 import { MessageBus } from "../src/message-bus";
 import type { RelayClient, RelayClientOptions } from "../src/relay-client";
 import type { AttachStreamOpts } from "../src/stream-mux";
@@ -87,6 +88,23 @@ function tempFolder(): string {
   return f;
 }
 
+// Project ids are host-resolved: `open` rejects any id that is not
+// computeProjectId(folder) (PROJECT_ID_MISMATCH). These helpers keep the
+// readable "projX" aliases while using the real id on the wire.
+const projectIds = new Map<string, string>();
+function proj(alias: string): string {
+  const id = projectIds.get(alias);
+  if (!id) throw new Error(`project alias not opened: ${alias}`);
+  return id;
+}
+async function openAs(h: HostServer, alias: string, mode: "local" | "remote"): Promise<OpenResultLike> {
+  const folder = tempFolder();
+  const projectId = computeProjectId(folder);
+  projectIds.set(alias, projectId);
+  return h.open(projectId, folder, mode);
+}
+type OpenResultLike = Awaited<ReturnType<HostServer["open"]>>;
+
 /** Flip the machine switch through its only mutation path, the loopback verb. */
 async function setMobileAccess(h: HostServer, enabled: boolean): Promise<void> {
   await h.handleRemoteAccessVerb({ id: "t", type: "mobile-access:set", enabled });
@@ -112,8 +130,8 @@ test("project:start promotes an already-open LOCAL core via the ONE shared runti
   const h = host;
 
   // Open projX LOCAL — a local core never builds the machine remote runtime.
-  const opened = await h.open("projX", tempFolder(), "local");
-  expect(h.isPromoted("projX")).toBe(false);
+  const opened = await openAs(h, "projX", "local");
+  expect(h.isPromoted(proj("projX"))).toBe(false);
   expect(factoryCalls).toBe(0); // local open builds NO runtime
   // Capture the loopback endpoint BEFORE promotion. Promotion adds an ADDITIVE
   // relay slot to the existing bus — it must NOT close+reopen the core, so the
@@ -126,23 +144,23 @@ test("project:start promotes an already-open LOCAL core via the ONE shared runti
   await setMobileAccess(h, true);
   const bus = new MessageBus();
 
-  const res = await h.handleControlPlaneVerb({ type: "project:start", projectId: "projX" } as any, bus);
+  const res = await h.handleControlPlaneVerb({ type: "project:start", projectId: proj("projX") } as any, bus);
   expect(res.ok).toBe(true);
-  expect(h.isPromoted("projX")).toBe(true);
+  expect(h.isPromoted(proj("projX"))).toBe(true);
   // The promote path's only possible token source is the shared runtime
   // (remoteDepsFor → this.remoteRuntime). Exactly one runtime was built.
   expect(factoryCalls).toBe(1);
   // The live loopback session is UNDISTURBED: same port + token after promote.
-  const loopbackAfter = h.get("projX")?.connect;
+  const loopbackAfter = h.get(proj("projX"))?.connect;
   expect(loopbackAfter).not.toBeNull();
   expect(loopbackAfter?.port).toBe(loopbackBefore!.port);
   expect(loopbackAfter?.token).toBe(loopbackBefore!.token);
 
   // Idempotent: re-issuing project:start for the already-promoted project is a
   // no-op success and builds NO second runtime.
-  const again = await h.handleControlPlaneVerb({ type: "project:start", projectId: "projX" } as any, bus);
+  const again = await h.handleControlPlaneVerb({ type: "project:start", projectId: proj("projX") } as any, bus);
   expect(again.ok).toBe(true);
-  expect(h.isPromoted("projX")).toBe(true);
+  expect(h.isPromoted(proj("projX"))).toBe(true);
   expect(factoryCalls).toBe(1);
 });
 
@@ -155,7 +173,7 @@ test("project:start reports a SESSION_LIMIT_EXCEEDED register rejection to the p
   });
   const h = host;
 
-  await h.open("projX", tempFolder(), "local");
+  await openAs(h, "projX", "local");
   await setMobileAccess(h, true);
 
   const bus = new MessageBus();
@@ -165,7 +183,7 @@ test("project:start reports a SESSION_LIMIT_EXCEEDED register rejection to the p
 
   // project:start returns ok immediately — the register rejection is asynchronous
   // and pushed to the phone over the control plane once it lands.
-  const res = await h.handleControlPlaneVerb({ type: "project:start", projectId: "projX" } as any, bus);
+  const res = await h.handleControlPlaneVerb({ type: "project:start", projectId: proj("projX") } as any, bus);
   expect(res.ok).toBe(true);
 
   // Let the firstRegister rejection propagate.
@@ -179,9 +197,9 @@ test("project:start reports a SESSION_LIMIT_EXCEEDED register rejection to the p
   expect(err.error.code).toBe("SESSION_LIMIT_EXCEEDED");
   // (b) No running:true advert was emitted for the rejected slot.
   const advert = out.find((m) => m.type === "agent:projects");
-  expect(advert?.projects?.some((p: any) => p.projectId === "projX" && p.running)).not.toBe(true);
+  expect(advert?.projects?.some((p: any) => p.projectId === proj("projX") && p.running)).not.toBe(true);
   // (c) The dead slot is torn down so a later retry (after upgrade) can re-promote.
-  expect(h.isPromoted("projX")).toBe(false);
+  expect(h.isPromoted(proj("projX"))).toBe(false);
 });
 
 test("advert running=false for a warm-but-unpromoted local core; flips true after project:start registers the slot", async () => {
@@ -193,25 +211,25 @@ test("advert running=false for a warm-but-unpromoted local core; flips true afte
   });
   const h = host;
 
-  await h.open("projX", tempFolder(), "local");
+  await openAs(h, "projX", "local");
   await setMobileAccess(h, true);
 
   // Warm on the host but never promoted → no relay slot → NOT dialable. Before
   // the deeper fix this read running:true (warm), sending the phone to dial an
   // empty data-plane slot (AGENT_OFFLINE loop).
-  expect(h.buildProjectsAdvertisement().find((p) => p.projectId === "projX")?.running).toBe(false);
+  expect(h.buildProjectsAdvertisement().find((p) => p.projectId === proj("projX"))?.running).toBe(false);
 
   const bus = new MessageBus();
   bus.setInboundHandler(() => {});
-  const res = await h.handleControlPlaneVerb({ type: "project:start", projectId: "projX" } as any, bus);
+  const res = await h.handleControlPlaneVerb({ type: "project:start", projectId: proj("projX") } as any, bus);
   expect(res.ok).toBe(true);
 
   // Let the firstRegister success propagate (reportFirstRegister re-advertises).
   await new Promise((r) => setTimeout(r, 20));
 
   // The promoted slot authenticated → relay-admitted → dialable → running:true.
-  expect(h.isPromoted("projX")).toBe(true);
-  expect(h.buildProjectsAdvertisement().find((p) => p.projectId === "projX")?.running).toBe(true);
+  expect(h.isPromoted(proj("projX"))).toBe(true);
+  expect(h.buildProjectsAdvertisement().find((p) => p.projectId === proj("projX"))?.running).toBe(true);
 });
 
 test("turning mobile access OFF tears down EVERY promoted slot, leaving loopback sessions alive", async () => {
@@ -221,31 +239,31 @@ test("turning mobile access OFF tears down EVERY promoted slot, leaving loopback
 
   // Two projects open LOCAL and both promoted — the switch is machine-wide, so
   // one project's teardown is not enough.
-  const openedX = await h.open("projX", tempFolder(), "local");
-  const openedY = await h.open("projY", tempFolder(), "local");
+  const openedX = await openAs(h, "projX", "local");
+  const openedY = await openAs(h, "projY", "local");
   await setMobileAccess(h, true);
   const bus = new MessageBus();
-  expect((await h.handleControlPlaneVerb({ type: "project:start", projectId: "projX" } as any, bus)).ok).toBe(true);
-  expect((await h.handleControlPlaneVerb({ type: "project:start", projectId: "projY" } as any, bus)).ok).toBe(true);
-  expect(h.isPromoted("projX")).toBe(true);
-  expect(h.isPromoted("projY")).toBe(true);
+  expect((await h.handleControlPlaneVerb({ type: "project:start", projectId: proj("projX") } as any, bus)).ok).toBe(true);
+  expect((await h.handleControlPlaneVerb({ type: "project:start", projectId: proj("projY") } as any, bus)).ok).toBe(true);
+  expect(h.isPromoted(proj("projX"))).toBe(true);
+  expect(h.isPromoted(proj("projY"))).toBe(true);
 
   const off = (await h.handleRemoteAccessVerb({ id: "off", type: "mobile-access:set", enabled: false })) as any;
   expect(off.ok).toBe(true);
   expect(off.enabled).toBe(false);
 
   // (a) No project is left dialable — every relay slot is gone.
-  expect(h.isPromoted("projX")).toBe(false);
-  expect(h.isPromoted("projY")).toBe(false);
+  expect(h.isPromoted(proj("projX"))).toBe(false);
+  expect(h.isPromoted(proj("projY"))).toBe(false);
   expect(h.buildProjectsAdvertisement()).toEqual([]);
 
   // (b) The desktop's own loopback sessions are UNTOUCHED: same cores, same
   //     port+token. Only the additive relay slot was stopped.
-  expect(h.list().map((p) => p.projectId).sort()).toEqual(["projX", "projY"]);
-  expect(h.get("projX")?.connect?.port).toBe(openedX.connect!.port);
-  expect(h.get("projX")?.connect?.token).toBe(openedX.connect!.token);
-  expect(h.get("projY")?.connect?.port).toBe(openedY.connect!.port);
-  expect(h.get("projY")?.connect?.token).toBe(openedY.connect!.token);
+  expect(h.list().map((p) => p.projectId).sort()).toEqual([proj("projX"), proj("projY")].sort());
+  expect(h.get(proj("projX"))?.connect?.port).toBe(openedX.connect!.port);
+  expect(h.get(proj("projX"))?.connect?.token).toBe(openedX.connect!.token);
+  expect(h.get(proj("projY"))?.connect?.port).toBe(openedY.connect!.port);
+  expect(h.get(proj("projY"))?.connect?.token).toBe(openedY.connect!.token);
 });
 
 test("phones:unpair drops the row without demoting — it is not a revocation", async () => {
@@ -253,12 +271,12 @@ test("phones:unpair drops the row without demoting — it is not a revocation", 
   host = new HostServer({ remote: fakeRemoteConfig(), remoteRuntimeFactory: factory });
   const h = host;
 
-  await h.open("projX", tempFolder(), "local");
+  await openAs(h, "projX", "local");
   h.pairedPhones.upsert({ phonePubkey: "pk1", phoneDeviceId: "d1", pairedAt: "x", lastSeenAt: "x" });
   await setMobileAccess(h, true);
   const bus = new MessageBus();
-  expect((await h.handleControlPlaneVerb({ type: "project:start", projectId: "projX" } as any, bus)).ok).toBe(true);
-  expect(h.isPromoted("projX")).toBe(true);
+  expect((await h.handleControlPlaneVerb({ type: "project:start", projectId: proj("projX") } as any, bus)).ok).toBe(true);
+  expect(h.isPromoted(proj("projX"))).toBe(true);
 
   const unpairRes = await h.handlePhonesVerb({ id: "req-3", type: "phones:unpair", phonePubkey: "pk1" } as any);
   expect(unpairRes.ok).toBe(true);
@@ -267,7 +285,7 @@ test("phones:unpair drops the row without demoting — it is not a revocation", 
   expect(h.listPairedPhones().find((p) => p.phonePubkey === "pk1")).toBeUndefined();
   // ...but reachability is the machine switch, and it is still on: unpairing one
   // device must not tear down slots other account-trusted phones are using.
-  expect(h.isPromoted("projX")).toBe(true);
+  expect(h.isPromoted(proj("projX"))).toBe(true);
 });
 
 test("demoteAllPromoted tears down the relay slot and leaves the core warm/loopback-only", async () => {
@@ -276,32 +294,32 @@ test("demoteAllPromoted tears down the relay slot and leaves the core warm/loopb
   const h = host;
 
   // Open projX LOCAL and capture the loopback endpoint before promotion.
-  const opened = await h.open("projX", tempFolder(), "local");
+  const opened = await openAs(h, "projX", "local");
   const loopbackBefore = opened.connect;
   expect(loopbackBefore).not.toBeNull();
 
   // Make the machine mobile-reachable and promote.
   await setMobileAccess(h, true);
   const bus = new MessageBus();
-  const res = await h.handleControlPlaneVerb({ type: "project:start", projectId: "projX" } as any, bus);
+  const res = await h.handleControlPlaneVerb({ type: "project:start", projectId: proj("projX") } as any, bus);
   expect(res.ok).toBe(true);
-  expect(h.isPromoted("projX")).toBe(true);
+  expect(h.isPromoted(proj("projX"))).toBe(true);
 
   h.demoteAllPromoted();
 
   // (a) The relay slot is gone — isPromoted must now be false.
-  expect(h.isPromoted("projX")).toBe(false);
+  expect(h.isPromoted(proj("projX"))).toBe(false);
 
   // (b) The core is STILL warm/loopback-only: h.list() still contains projX
   //     and the loopback connect info is unchanged (the live session was NOT torn down).
   const projects = h.list();
-  expect(projects.some((p) => p.projectId === "projX")).toBe(true);
-  const loopbackAfter = h.get("projX")?.connect;
+  expect(projects.some((p) => p.projectId === proj("projX"))).toBe(true);
+  const loopbackAfter = h.get(proj("projX"))?.connect;
   expect(loopbackAfter).not.toBeNull();
   expect(loopbackAfter?.port).toBe(loopbackBefore!.port);
   expect(loopbackAfter?.token).toBe(loopbackBefore!.token);
 
   // (c) Calling demoteAllPromoted() again is a no-op (idempotent).
   expect(() => h.demoteAllPromoted()).not.toThrow();
-  expect(h.isPromoted("projX")).toBe(false);
+  expect(h.isPromoted(proj("projX"))).toBe(false);
 });

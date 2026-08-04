@@ -27,6 +27,34 @@ enum MessageTier {
   ignore,
 }
 
+/// Authoritative app-side mirror of the bridge checkout-variable contract.
+/// Every type here must carry `checkoutId`; absence decodes as `main` only for
+/// legacy frames. Services use this same set when filtering their bundles.
+const Set<String> kCheckoutVariableMessageTypes = <String>{
+  'terminal:start', 'terminal:stop', 'terminal:input', 'terminal:resize',
+  'terminal:output', 'terminal:started', 'terminal:exited',
+  'terminal:notification', 'terminal:size', 'terminal:snapshot:request',
+  'terminal:snapshot', 'agent:status', 'tree:full', 'tree:update',
+  'file:read', 'file:content', 'file:search', 'file:search-cancel',
+  'file:search-result', 'file:search-done', 'file:upload-start',
+  'file:upload-ready', 'file:upload-chunk', 'file:upload-ack',
+  'file:upload-done', 'file:upload-result', 'git:status', 'git:diff',
+  'git:diff-content', 'git:list-branches', 'git:branches', 'git:checkout',
+  'git:checkout-result', 'git:commit', 'git:commit-result', 'git:discard',
+  'git:discard-result', 'command:run', 'command:output', 'command:done',
+  'config:read', 'config:read-result', 'config:write',
+  'config:write-result', 'config:changed', 'config:detect-tools',
+  'config:detect-tools-result', 'ports:update', 'port:detected',
+  'preview:url', 'file:tree:snapshot:request', 'file:tree:snapshot',
+  'preview:snapshot:request', 'preview:snapshot',
+  'session:result', 'control:result',
+};
+
+String checkoutIdForEnvelope(Map<String, dynamic> envelope) {
+  final value = envelope['checkoutId'];
+  return value is String && value.isNotEmpty ? value : 'main';
+}
+
 /// Config frames that report config *validity* — the only frames that set or
 /// clear the drawer's structural config-error dot (see `ProjectStatusNotifier`).
 /// Excludes `config:write-result` / `config:detect-tools-result`, which carry

@@ -11,6 +11,7 @@ import 'package:antgrid/models/git_branch.dart';
 import 'package:antgrid/providers/new_session_action.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/value_controller.dart';
+import 'package:antgrid/widgets/new_session/environment_menu.dart';
 import 'package:antgrid/widgets/new_session/new_session_composer.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
 
@@ -56,6 +57,8 @@ List<Override> _baseOverrides({
   PickerProject? target,
   Map<String, String?> detected = const <String, String?>{},
   Set<String>? chatCapable,
+  bool worktreeSupported = false,
+  String currentBranch = 'main',
 }) {
   return [
     pickerSourcesProvider.overrideWithValue(const [_localSource]),
@@ -64,10 +67,11 @@ List<Override> _baseOverrides({
     newSessionBranchCatalogProvider.overrideWith(
       (ref) async => target == null
           ? null
-          : const GitBranchCatalog(
+          : GitBranchCatalog(
               isRepository: true,
-              current: 'main',
-              branches: ['main', 'dev'],
+              current: currentBranch,
+              branches: ['main', 'dev', currentBranch],
+              worktreeSessionsSupported: worktreeSupported,
             ),
     ),
     if (target != null)
@@ -572,6 +576,101 @@ void main() {
         await tester.pumpAndSettle();
       },
     );
+  });
+
+  group('worktree chip', () {
+    Finder chip() => find.byKey(const Key('new-session-worktree-chip'));
+
+    testWidgets('toggles isolation and re-labels the branch chip', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _host(
+          overrides: _baseOverrides(target: _project, worktreeSupported: true),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(NewSessionComposer)),
+      );
+      expect(container.read(newSessionIsolatedProvider), isFalse);
+      expect(find.text('main'), findsOneWidget);
+
+      await tester.tap(chip());
+      await tester.pumpAndSettle();
+
+      expect(container.read(newSessionIsolatedProvider), isTrue);
+      // The neighbouring chip is the feedback: the branch becomes a base.
+      expect(find.text('Base: main'), findsOneWidget);
+
+      await tester.tap(chip());
+      await tester.pumpAndSettle();
+
+      expect(container.read(newSessionIsolatedProvider), isFalse);
+    });
+
+    testWidgets('a bridge without worktree support renders a dead chip', (
+      tester,
+    ) async {
+      // worktreeSupported defaults to false — the capability is per-host, so
+      // the chip must stay inert rather than promise an isolation the bridge
+      // will refuse.
+      await tester.pumpWidget(
+        _host(overrides: _baseOverrides(target: _project)),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(chip());
+      await tester.pumpAndSettle();
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(NewSessionComposer)),
+      );
+      expect(container.read(newSessionIsolatedProvider), isFalse);
+    });
+
+    testWidgets('stays on the context row line when the branch is long', (
+      tester,
+    ) async {
+      // A managed session's generated branch, prefixed with "Base: " once
+      // isolation is on, is long enough to have folded the chip row onto a
+      // second line back when it was a Wrap. The branch must absorb the
+      // squeeze instead — a target stated across two lines reads as two
+      // unrelated fragments.
+      tester.view.physicalSize = const Size(1080, 2340);
+      tester.view.devicePixelRatio = 2.625;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(
+        _host(
+          overrides: _baseOverrides(
+            target: _project,
+            worktreeSupported: true,
+            currentBranch: 'antgrid/some-very-long-generated-session-e529cdaf',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(chip());
+      await tester.pumpAndSettle();
+
+      // Same vertical centre as the first chip = same run. (An overflow would
+      // already have failed the test on its own.)
+      expect(
+        tester.getCenter(chip()).dy,
+        tester.getCenter(find.byType(EnvironmentChip)).dy,
+      );
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('is absent until a project is chosen', (tester) async {
+      await tester.pumpWidget(_host(overrides: _baseOverrides()));
+      await tester.pumpAndSettle();
+
+      expect(chip(), findsNothing);
+    });
   });
 
   group('Branch switch confirmation dialog', () {
