@@ -3,6 +3,7 @@
 // TextPainters — the ambient scaler never reaches them — so the wrapper must
 // pre-scale the fontSize it passes down. These tests pin that pass-through.
 import 'package:antgrid/design/ab_tokens.dart';
+import 'package:antgrid/design/widgets/ab_status_dot.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/models/terminal_models.dart';
 import 'package:antgrid/project/project_session.dart';
@@ -13,6 +14,7 @@ import 'package:antgrid/services/terminal_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/terminal_view_wrapper.dart';
+import 'package:antgrid/widgets/terminal_detail_view.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -113,9 +115,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    return tester.widget<GhosttyTerminalView>(
-      find.byType(GhosttyTerminalView),
-    );
+    return tester.widget<GhosttyTerminalView>(find.byType(GhosttyTerminalView));
   }
 
   testWidgets('terminal fontSize follows the MediaQuery textScaler', (
@@ -168,6 +168,46 @@ void main() {
       seedPrefs: {'antgrid.terminal_zoom.v1': 1.5},
     );
     expect(view.fontSize, closeTo(AbTokens.fontBody * 1.5, 1e-9));
+
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('terminal detail keeps status and delete in the title row', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    useInMemoryPrefs();
+    final prefs = await openAppSettingsPrefs();
+    final service = await _makeService(addTearDown);
+    final tab = _tab('Terminal 1');
+    var deleted = false;
+
+    await tester.pumpWidget(
+      _wrap(
+        SizedBox(
+          width: 600,
+          height: 400,
+          child: TerminalDetailView(
+            tab: tab,
+            terminalService: service,
+            onBack: () {},
+            onDelete: () => deleted = true,
+          ),
+        ),
+        textScale: 1,
+        prefs: prefs,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byTooltip('Back'), findsOneWidget);
+    expect(find.byTooltip('Delete'), findsOneWidget);
+    expect(find.byType(AbStatusDot), findsOneWidget);
+    expect(find.text('Terminal 1'), findsOneWidget);
+    expect(find.text('Running'), findsNothing);
+
+    await tester.tap(find.byTooltip('Delete'));
+    expect(deleted, isTrue);
 
     debugDefaultTargetPlatformOverride = null;
   });

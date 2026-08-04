@@ -9,12 +9,10 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 
-import '../design/ab_status_tone.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
 import '../design/ansi_palette.dart';
 import '../design/widgets/ab_snack_bar.dart';
-import '../design/widgets/ab_status_dot.dart';
 import '../models/terminal_models.dart';
 import '../providers/client_id.dart';
 import '../providers/providers.dart';
@@ -40,13 +38,11 @@ final bool _hasPhysicalKeyboard =
 class TerminalViewWrapper extends ConsumerStatefulWidget {
   final TerminalTab tab;
   final TerminalService terminalService;
-  final VoidCallback? onDelete;
 
   const TerminalViewWrapper({
     super.key,
     required this.tab,
     required this.terminalService,
-    this.onDelete,
   });
 
   @override
@@ -293,14 +289,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   @override
   Widget build(BuildContext context) {
     final isExited = widget.tab.sessionState == TerminalSessionState.exited;
-    final showControls = !widget.tab.isAgent;
-    final showStoppedView = showControls && isExited;
+    final showStoppedView = !widget.tab.isAgent && isExited;
 
     return Column(
       children: [
-        // Status bar for non-agent terminals
-        if (showControls) _buildStatusBar(context, isExited),
-
         // Stopped state: centered start button; running: terminal view
         Expanded(
           child: showStoppedView
@@ -592,75 +584,6 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
             label: const Text('Start'),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildStatusBar(BuildContext context, bool isExited) {
-    final colorScheme = Theme.of(context).colorScheme;
-    final statusTone = isExited ? AbStatusTone.danger : AbStatusTone.success;
-    final statusLabel = isExited
-        ? (widget.tab.exitCode != null
-              ? 'Exited (code ${widget.tab.exitCode})'
-              : 'Exited')
-        : 'Running';
-
-    return Container(
-      height: AbTokens.rowHeightSm,
-      padding: const EdgeInsets.symmetric(horizontal: AbTokens.space12),
-      color: colorScheme.surfaceContainerHighest,
-      child: Row(
-        children: [
-          AbStatusDot(tone: statusTone, size: AbDotSize.md),
-          const SizedBox(width: AbTokens.space8),
-          Text(
-            statusLabel,
-            style: TextStyle(
-              fontSize: AbTokens.fontSm,
-              color: colorScheme.onSurface.withValues(alpha: 0.7),
-            ),
-          ),
-          const Spacer(),
-          if (isExited)
-            _controlButton(
-              context,
-              icon: Icons.play_arrow,
-              tooltip: 'Start',
-              onPressed: () =>
-                  widget.terminalService.requestStart(widget.tab.terminalId),
-            ),
-          if (widget.onDelete != null)
-            _controlButton(
-              context,
-              icon: Icons.delete_outline,
-              tooltip: 'Delete',
-              onPressed: widget.onDelete!,
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _controlButton(
-    BuildContext context, {
-    required IconData icon,
-    required String tooltip,
-    required VoidCallback onPressed,
-  }) {
-    final colorScheme = Theme.of(context).colorScheme;
-    return Tooltip(
-      message: tooltip,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(4),
-        onTap: onPressed,
-        child: Padding(
-          padding: const EdgeInsets.all(AbTokens.space4),
-          child: Icon(
-            icon,
-            size: 18,
-            color: colorScheme.onSurface.withValues(alpha: 0.7),
-          ),
-        ),
       ),
     );
   }

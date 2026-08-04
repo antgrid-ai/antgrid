@@ -18,7 +18,10 @@ class TerminalService {
   final Map<String, int> _snapshotSeq = {};
   final Map<String, Timer> _resizeTimers = {};
   final Map<String, String?> _resizeBaseDrivers = {};
+  final Map<String, Timer> _pendingTerminalTimers = {};
   final Set<String> _deletedTerminalIds = {};
+  final Set<String> _pendingTerminalIds = {};
+  final Set<String> _canceledPendingTerminalIds = {};
   bool _trackedUse = false;
 
   String? _clientId;
@@ -29,6 +32,10 @@ class TerminalService {
   /// [TerminalState.gitBranchesLoading] on forever. Injectable so tests drive a
   /// short window.
   final Duration gitActionTimeout;
+
+  /// Bounds optimistic terminal state when the one-shot start send is dropped.
+  /// Injectable so tests do not wait for the production recovery window.
+  final Duration terminalStartTimeout;
   ReplyLatch? _branchesLatch;
   ReplyLatch? _checkoutLatch;
 
@@ -50,6 +57,7 @@ class TerminalService {
   TerminalService.fromSession(
     this.session, {
     this.gitActionTimeout = const Duration(seconds: 15),
+    this.terminalStartTimeout = const Duration(seconds: 15),
   }) {
     // Heavy tier — terminal:output + terminal:snapshot (HEAVY tier messages).
     _heavySub = session.heavyStream.listen(_onHeavyJson);
@@ -155,13 +163,20 @@ class TerminalService {
   }
 
   void _handleTerminalStarted(TerminalStartedMessage msg) {
+    if (_canceledPendingTerminalIds.contains(msg.terminalId)) {
+      _settlePendingTerminal(msg.terminalId);
+      requestStop(msg.terminalId);
+      return;
+    }
     // Authoritative revival: agent says this id is running again, so any
     // prior local delete-suppression for it is stale.
     _deletedTerminalIds.remove(msg.terminalId);
+    _settlePendingTerminal(msg.terminalId);
     final tabs = Map<String, TerminalTab>.from(_state.tabs);
     final existing = tabs[msg.terminalId];
 
     if (existing != null) {
+      existing.ghostty.setSessionRunning(true);
       tabs[msg.terminalId] = existing.copyWith(
         sessionState: TerminalSessionState.running,
         shell: msg.shell,
@@ -213,9 +228,12 @@ class TerminalService {
   }
 
   void _handleTerminalExited(TerminalExitedMessage msg) {
+    _settlePendingTerminal(msg.terminalId);
+    _canceledPendingTerminalIds.remove(msg.terminalId);
     final tab = _state.tabs[msg.terminalId];
     if (tab == null) return;
 
+    tab.ghostty.setSessionRunning(false);
     final tabs = Map<String, TerminalTab>.from(_state.tabs);
     tabs[msg.terminalId] = tab.copyWith(
       sessionState: TerminalSessionState.exited,
@@ -230,6 +248,14 @@ class TerminalService {
     final newTabs = <String, TerminalTab>{};
 
     for (final info in msg.terminals) {
+      if (_canceledPendingTerminalIds.contains(info.terminalId)) {
+        if (info.running) {
+          requestStop(info.terminalId);
+        } else {
+          _canceledPendingTerminalIds.remove(info.terminalId);
+        }
+        continue;
+      }
       // Honor local deletes: skip stopped sessions the user removed. If the
       // agent reports the session running again (e.g. user revived via Start),
       // drop it from the deleted set and re-surface the tab.
@@ -240,8 +266,15 @@ class TerminalService {
           continue;
         }
       }
+      if (_pendingTerminalIds.contains(info.terminalId) && !info.running) {
+        final pending = _state.tabs[info.terminalId];
+        if (pending != null) newTabs[info.terminalId] = pending;
+        continue;
+      }
+      if (info.running) _settlePendingTerminal(info.terminalId);
       final existing = _state.tabs[info.terminalId];
       if (existing != null) {
+        existing.ghostty.setSessionRunning(info.running);
         final updated = existing.copyWith(
           name: info.name,
           sessionState: info.running
@@ -267,6 +300,15 @@ class TerminalService {
           driverClientId: info.driverClientId,
         );
       }
+    }
+
+    // A status snapshot can have been produced before a just-sent start was
+    // applied. Keep optimistic tabs until the terminal's own started/exited
+    // event resolves the request, otherwise the newly-opened detail view would
+    // briefly lose its tab and navigate back to the list.
+    for (final terminalId in _pendingTerminalIds) {
+      final pending = _state.tabs[terminalId];
+      if (pending != null) newTabs.putIfAbsent(terminalId, () => pending);
     }
 
     var activeId = _state.activeTerminalId;
@@ -297,13 +339,16 @@ class TerminalService {
     int? rows,
     String? type,
     String? driverClientId,
+    TerminalSessionState? sessionState,
   }) {
     final tab = TerminalTab(
       terminalId: terminalId,
       name: name,
-      sessionState: running
-          ? TerminalSessionState.running
-          : TerminalSessionState.exited,
+      sessionState:
+          sessionState ??
+          (running
+              ? TerminalSessionState.running
+              : TerminalSessionState.exited),
       shell: shell,
       cols: cols ?? 80,
       rows: rows ?? 24,
@@ -421,6 +466,53 @@ class TerminalService {
     );
   }
 
+  /// Adds a user-created shell to local state before asking the agent to start
+  /// it, allowing its detail view to open in the same interaction.
+  void createAdHocTerminal(String terminalId, {required String name}) {
+    _deletedTerminalIds.remove(terminalId);
+    _canceledPendingTerminalIds.remove(terminalId);
+    _pendingTerminalIds.add(terminalId);
+    _pendingTerminalTimers.remove(terminalId)?.cancel();
+    _pendingTerminalTimers[terminalId] = Timer(
+      terminalStartTimeout,
+      () => _expirePendingTerminal(terminalId),
+    );
+
+    final tabs = Map<String, TerminalTab>.from(_state.tabs);
+    final existing = tabs[terminalId];
+    tabs[terminalId] = existing == null
+        ? _createTab(
+            terminalId: terminalId,
+            name: name,
+            running: false,
+            sessionState: TerminalSessionState.starting,
+          )
+        : existing.copyWith(
+            name: name,
+            sessionState: TerminalSessionState.starting,
+            clearExitCode: true,
+          );
+    _setState(_state.copyWith(tabs: tabs, activeTerminalId: terminalId));
+    requestStart(terminalId, name: name);
+  }
+
+  void _settlePendingTerminal(String terminalId) {
+    _pendingTerminalIds.remove(terminalId);
+    _pendingTerminalTimers.remove(terminalId)?.cancel();
+  }
+
+  void _expirePendingTerminal(String terminalId) {
+    _pendingTerminalTimers.remove(terminalId);
+    if (!_pendingTerminalIds.remove(terminalId)) return;
+    final tab = _state.tabs[terminalId];
+    if (tab == null || tab.sessionState != TerminalSessionState.starting)
+      return;
+    tab.ghostty.setSessionRunning(false);
+    final tabs = Map<String, TerminalTab>.from(_state.tabs);
+    tabs[terminalId] = tab.copyWith(sessionState: TerminalSessionState.exited);
+    _setState(_state.copyWith(tabs: tabs));
+  }
+
   void requestStop(String terminalId) {
     _send(createAbMessage('terminal:stop', {'terminalId': terminalId}));
   }
@@ -434,6 +526,10 @@ class TerminalService {
   void deleteTerminal(String terminalId) {
     requestStop(terminalId);
     _deletedTerminalIds.add(terminalId);
+    if (_pendingTerminalIds.contains(terminalId)) {
+      _canceledPendingTerminalIds.add(terminalId);
+    }
+    _settlePendingTerminal(terminalId);
     final tab = _state.tabs[terminalId];
     if (tab == null) return;
     _resizeTimers.remove(terminalId)?.cancel();
@@ -584,10 +680,16 @@ class TerminalService {
     for (final timer in _resizeTimers.values) {
       timer.cancel();
     }
+    for (final timer in _pendingTerminalTimers.values) {
+      timer.cancel();
+    }
     _resizeTimers.clear();
+    _pendingTerminalTimers.clear();
     _resizeBaseDrivers.clear();
     _snapshotSeq.clear();
     _deletedTerminalIds.clear();
+    _pendingTerminalIds.clear();
+    _canceledPendingTerminalIds.clear();
     await _stateController.close();
     await _notificationController.close();
     await _pushController.close();

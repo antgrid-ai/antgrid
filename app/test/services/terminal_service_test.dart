@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:antgrid/models/terminal_models.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/terminal_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
@@ -82,6 +83,121 @@ void main() {
 
     final tab = svc.currentState.tabs['terminal-1'];
     expect(tab, isNotNull);
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test(
+    'createAdHocTerminal adds and focuses a starting tab before the agent reply',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = TerminalService.fromSession(session);
+
+      svc.createAdHocTerminal('terminal-1', name: 'Terminal 1');
+
+      final tab = svc.currentState.tabs['terminal-1'];
+      expect(tab, isNotNull);
+      expect(tab!.name, 'Terminal 1');
+      expect(tab.sessionState, TerminalSessionState.starting);
+      expect(tab.ghostty.isRunning, isFalse);
+      expect(svc.currentState.activeTerminalId, 'terminal-1');
+
+      // A snapshot already in flight must not remove the optimistic tab before
+      // terminal:started resolves the request.
+      t.emit('agent:status', {
+        'projectId': 'p',
+        'terminals': [
+          {
+            'id': 'terminal-1',
+            'terminalId': 'terminal-1',
+            'name': 'Terminal 1',
+            'running': false,
+          },
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.tabs, contains('terminal-1'));
+      expect(
+        svc.currentState.tabs['terminal-1']!.sessionState,
+        TerminalSessionState.starting,
+      );
+
+      final sent = t.sent.firstWhere((m) => m['type'] == 'terminal:start');
+      expect(sent['terminalId'], 'terminal-1');
+      expect(sent['name'], 'Terminal 1');
+
+      t.emit('terminal:started', {
+        'terminalId': 'terminal-1',
+        'shell': 'pwsh',
+        'cols': 80,
+        'rows': 24,
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        svc.currentState.tabs['terminal-1']!.sessionState,
+        TerminalSessionState.running,
+      );
+      expect(tab.ghostty.isRunning, isTrue);
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
+
+  test('an unacknowledged optimistic terminal settles as stopped', () async {
+    final t = FakeAgentTransport();
+    final session = await newSession(t);
+    final svc = TerminalService.fromSession(
+      session,
+      terminalStartTimeout: const Duration(milliseconds: 40),
+    );
+
+    svc.createAdHocTerminal('terminal-1', name: 'Terminal 1');
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+
+    final tab = svc.currentState.tabs['terminal-1'];
+    expect(tab, isNotNull);
+    expect(tab!.sessionState, TerminalSessionState.exited);
+    expect(tab.ghostty.isRunning, isFalse);
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('delete before start acknowledgement cannot revive the tab', () async {
+    final t = FakeAgentTransport();
+    final session = await newSession(t);
+    final svc = TerminalService.fromSession(session);
+
+    svc.createAdHocTerminal('terminal-1', name: 'Terminal 1');
+    svc.deleteTerminal('terminal-1');
+    t.clearSent();
+
+    t.emit('terminal:started', {
+      'terminalId': 'terminal-1',
+      'shell': 'pwsh',
+      'cols': 80,
+      'rows': 24,
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    t.emit('agent:status', {
+      'projectId': 'p',
+      'terminals': [
+        {
+          'id': 'terminal-1',
+          'terminalId': 'terminal-1',
+          'name': 'Terminal 1',
+          'running': true,
+        },
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.tabs, isNot(contains('terminal-1')));
+    expect(t.sent.where((m) => m['type'] == 'terminal:stop'), hasLength(2));
 
     await svc.dispose();
     await session.close();

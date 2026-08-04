@@ -4,8 +4,10 @@ import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
 import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_status_dot.dart';
 import '../models/terminal_models.dart';
 import '../services/terminal_service.dart';
+import 'ab_status_helpers.dart';
 import 'terminal_view_wrapper.dart';
 
 /// Fullscreen terminal output view with a back button header. Used by both
@@ -33,9 +35,7 @@ class TerminalDetailView extends StatelessWidget {
           SizedBox(
             height: AbTokens.statusHeaderHeight,
             child: Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: AbTokens.space8,
-              ),
+              padding: const EdgeInsets.symmetric(horizontal: AbTokens.space8),
               child: Row(
                 children: [
                   AbIconButton(
@@ -44,6 +44,8 @@ class TerminalDetailView extends StatelessWidget {
                     onTap: onBack,
                   ),
                   const SizedBox(width: AbTokens.space8),
+                  AbStatusDot(tone: sessionStateTone(tab.sessionState)),
+                  const SizedBox(width: AbTokens.space8),
                   Expanded(
                     child: Text(
                       tab.name,
@@ -51,6 +53,13 @@ class TerminalDetailView extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
+                  if (onDelete != null)
+                    AbIconButton(
+                      icon: AbIcons.trash,
+                      tooltip: 'Delete',
+                      tone: AbIconButtonTone.danger,
+                      onTap: onDelete,
+                    ),
                 ],
               ),
             ),
@@ -59,7 +68,6 @@ class TerminalDetailView extends StatelessWidget {
             child: TerminalViewWrapper(
               tab: tab,
               terminalService: terminalService,
-              onDelete: onDelete,
             ),
           ),
         ],

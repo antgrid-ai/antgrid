@@ -135,7 +135,7 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
         onTap: () {
           final id = _nextAdHocTerminalId(existingIds);
           final name = _terminalName(id);
-          service.requestStart(id, name: name);
+          service.createAdHocTerminal(id, name: name);
           setState(() => _pushedTerminalId = id);
         },
       ),
@@ -157,7 +157,7 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
               : () {
                   final id = _nextAdHocTerminalId(existingIds);
                   final name = _terminalName(id);
-                  service.requestStart(id, name: name);
+                  service.createAdHocTerminal(id, name: name);
                   setState(() => _pushedTerminalId = id);
                 },
         ),
@@ -283,6 +283,16 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
                           tooltip: 'Unpin',
                           onTap: () => setState(() => _pinnedTerminalId = null),
                         ),
+                        AbIconButton(
+                          icon: AbIcons.trash,
+                          tooltip: 'Delete',
+                          tone: AbIconButtonTone.danger,
+                          onTap: () {
+                            final id = pinnedTab.terminalId;
+                            setState(() => _pinnedTerminalId = null);
+                            service.deleteTerminal(id);
+                          },
+                        ),
                       ],
                     ),
                   ),
@@ -291,11 +301,6 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
                   child: TerminalViewWrapper(
                     tab: pinnedTab,
                     terminalService: service,
-                    onDelete: () {
-                      final id = pinnedTab.terminalId;
-                      setState(() => _pinnedTerminalId = null);
-                      service.deleteTerminal(id);
-                    },
                   ),
                 ),
               ],
