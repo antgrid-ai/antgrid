@@ -280,15 +280,21 @@ abstract final class AbTokens {
   /// displays (grayscale AA leaves stems thin), 0 on hi-DPI (render as designed).
   static int activeWeightOffset = 0;
 
-  /// Below this DPR, bump one weight step.
+  /// Below this DPR, bump one weight step. `0` disables the bump entirely,
+  /// since no display reports a DPR below it.
   ///
-  /// DPR is a proxy, and an imperfect one: on Windows it reports the display
-  /// *scale factor*, not physical density, so a 4K panel at 150% (genuinely
-  /// dense) and a 1080p panel at 150% (not) both arrive as 1.5 and are
-  /// treated identically. There is no cheap way to tell them apart from
-  /// Flutter, so this cut deliberately errs toward not bumping. Retune on a
-  /// low-DPI external monitor, not from first principles.
-  static const double lowDprThreshold = 1.5;
+  /// Currently disabled. The bump was compensating for how thin mono read on
+  /// Windows, but most of that was the bare `monospace` fallback the platform
+  /// resolved before JetBrains Mono NL was bundled. Against a face drawn for
+  /// screens a whole extra master overshoots and reads heavy, and a static
+  /// family offers no smaller step to take (see [bumpStrength]).
+  ///
+  /// Re-enabling means picking a threshold, and DPR is a poor proxy for the
+  /// thing we care about: on Windows it reports the display *scale factor*,
+  /// not physical density, so a 4K panel at 150% (genuinely dense) and a 1080p
+  /// panel at 150% (not) both arrive as 1.5. 1.5 was the previous cut. Retune
+  /// on a real low-density monitor, not from first principles.
+  static const double lowDprThreshold = 0.0;
 
   /// Text at or below this size is never bumped — heavier strokes merge at
   /// micro sizes. Default protects only fontXxs (10px).

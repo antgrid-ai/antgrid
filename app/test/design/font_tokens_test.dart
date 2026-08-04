@@ -21,6 +21,10 @@ void main() {
   // leaks into every later test in the same shard.
   tearDown(() => AbTokens.activeWeightOffset = 0);
 
+  // These drive activeWeightOffset directly, so they cover the machinery, not
+  // whether it currently fires: AbTokens.lowDprThreshold is 0, which means no
+  // display turns the bump on. They exist so re-enabling it stays a one-constant
+  // change rather than a rediscovery of why 0.45 rounded away to nothing.
   group('low-DPI weight bump', () {
     test('bumps a full master step, not a fraction that rounds away', () {
       AbTokens.activeWeightOffset = 1;
