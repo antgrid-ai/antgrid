@@ -22,12 +22,14 @@ import '../project/limits.dart';
 import '../project/project_session_registry.dart';
 import '../providers/agent_transport.dart';
 import '../providers/new_session_picker.dart';
+import '../providers/open_checkout.dart';
 import '../providers/project_work_status.dart';
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
 import '../services/control_plane_client.dart';
 import '../services/sessions_service.dart';
+import '../util/external_open_target.dart';
 import 'agent_work_status_dot.dart';
 import 'drawer_entry_row.dart' show activateDrawerEntryById, ensureRemoteOnline;
 import 'session_rename_dialog.dart';
@@ -389,6 +391,29 @@ class _SessionRowState extends ConsumerState<SessionRow> {
 
 enum _SessionAction { start, stop, rename, archive, delete }
 
+/// One kebab-menu outcome. Sealed rather than a flat enum because the
+/// working-directory rows carry which app was picked, and because the dispatch
+/// below then stays exhaustive under the compiler.
+sealed class _SessionMenuChoice {
+  const _SessionMenuChoice();
+}
+
+/// Acts on the session itself.
+final class _RowAction extends _SessionMenuChoice {
+  const _RowAction(this.action);
+  final _SessionAction action;
+}
+
+/// Hands the session's working directory to an external app.
+final class _OpenExternally extends _SessionMenuChoice {
+  const _OpenExternally(this.target);
+  final ExternalOpenTarget target;
+}
+
+final class _CopyPath extends _SessionMenuChoice {
+  const _CopyPath();
+}
+
 /// Resolve the [SessionsService] for [entryId]'s project — not the focused one.
 /// The drawer renders rows for non-focused warm projects too, so routing
 /// through `sessionsServiceProvider` (keyed on the focused project) would send
@@ -468,9 +493,19 @@ class _SessionMenu extends ConsumerWidget {
   }
 
   Future<void> _openMenu(BuildContext anchor, ProviderContainer ref) async {
+    // Working-directory rows are LOCAL-only: the checkout lives on the machine
+    // hosting it, so for a relay project the window would open somewhere the
+    // user is not sitting. A failed probe degrades to no rows rather than a
+    // menu that never opens.
+    final targets = ref.read(entryIsRelayProvider(entryId))
+        ? const <ExternalOpenTarget>[]
+        : await ref
+              .read(externalOpenTargetsProvider.future)
+              .catchError((_) => const <ExternalOpenTarget>[]);
+    if (!anchor.mounted) return;
     final anchorRect = abMenuAnchorRect(anchor);
     if (anchorRect == null) return;
-    final action = await showAbMenu<_SessionAction>(
+    final choice = await showAbMenu<_SessionMenuChoice>(
       context: anchor,
       anchorRect: anchorRect,
       width: 200,
@@ -478,15 +513,70 @@ class _SessionMenu extends ConsumerWidget {
       entries: [
         AbMenuItem(
           label: session.running ? 'Stop' : 'Start',
-          value: session.running ? _SessionAction.stop : _SessionAction.start,
+          value: _RowAction(
+            session.running ? _SessionAction.stop : _SessionAction.start,
+          ),
         ),
-        AbMenuItem(label: 'Rename', value: _SessionAction.rename),
-        AbMenuItem(label: 'Archive', value: _SessionAction.archive),
+        const AbMenuItem(
+          label: 'Rename',
+          value: _RowAction(_SessionAction.rename),
+        ),
+        const AbMenuItem(
+          label: 'Archive',
+          value: _RowAction(_SessionAction.archive),
+        ),
+        if (targets.isNotEmpty) ...[
+          const AbMenuDivider(),
+          for (final target in targets)
+            AbMenuItem(
+              label: target.label,
+              icon: target.icon,
+              value: _OpenExternally(target),
+            ),
+          const AbMenuItem(
+            label: 'Copy path',
+            icon: AbIcons.copy,
+            value: _CopyPath(),
+          ),
+        ],
         const AbMenuDivider(),
-        AbMenuItem(label: 'Delete', value: _SessionAction.delete, danger: true),
+        const AbMenuItem(
+          label: 'Delete',
+          value: _RowAction(_SessionAction.delete),
+          danger: true,
+        ),
       ],
     );
-    if (action == null || !anchor.mounted) return;
+    if (choice == null || !anchor.mounted) return;
+
+    // The working-directory rows resolve their path over the loopback control
+    // plane, so unlike every other row they must not warm the session service.
+    switch (choice) {
+      case _OpenExternally(:final target):
+        await openCheckoutIn(
+          anchor,
+          ref,
+          projectId: entryId,
+          checkoutId: session.checkoutId,
+          target: target,
+        );
+      case _CopyPath():
+        await copyCheckoutPath(
+          anchor,
+          ref,
+          projectId: entryId,
+          checkoutId: session.checkoutId,
+        );
+      case _RowAction(:final action):
+        await _runRowAction(anchor, ref, action);
+    }
+  }
+
+  Future<void> _runRowAction(
+    BuildContext anchor,
+    ProviderContainer ref,
+    _SessionAction action,
+  ) async {
     final svc = await sessionsServiceFor(ref, entryId);
     if (svc == null || !anchor.mounted) return;
     switch (action) {

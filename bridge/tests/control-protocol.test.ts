@@ -74,3 +74,15 @@ test("git:checkout accepts valid request with optional allowActiveSessions", () 
   expect(ControlRequestSchema.safeParse({ id: "3", type: "git:checkout", projectId: "p1", projectPath: "/path", branch: "dev", allowActiveSessions: false }).success).toBe(true);
   expect(ControlRequestSchema.safeParse({ id: "4", type: "git:checkout", projectId: "p1", projectPath: "/path" }).success).toBe(false);
 });
+
+test("checkout:path requires both ids and carries no caller-supplied path", () => {
+  expect(ControlRequestSchema.safeParse({ id: "1", type: "checkout:path", projectId: "p1", checkoutId: "main" }).success).toBe(true);
+  expect(ControlRequestSchema.safeParse({ id: "2", type: "checkout:path", projectId: "p1" }).success).toBe(false);
+  expect(ControlRequestSchema.safeParse({ id: "3", type: "checkout:path", checkoutId: "main" }).success).toBe(false);
+  expect(ControlRequestSchema.safeParse({ id: "4", type: "checkout:path", projectId: "", checkoutId: "main" }).success).toBe(false);
+  // The host resolves the path itself; a caller-supplied one is stripped, never
+  // honoured, so it can never reach the response.
+  const r = ControlRequestSchema.safeParse({ id: "5", type: "checkout:path", projectId: "p1", checkoutId: "main", path: "/etc" });
+  expect(r.success).toBe(true);
+  expect(r.success && "path" in r.data).toBe(false);
+});

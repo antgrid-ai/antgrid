@@ -34,6 +34,7 @@ import { isSafeProjectId } from "./project-id";
 import { listLocalBranches, checkoutLocalBranch } from "./git-branches";
 import { resolveProject } from "./worktrees/project-resolver";
 import { WorktreeError, WorktreeManager } from "./worktrees/worktree-manager";
+import { CheckoutStore } from "./worktrees/checkout-store";
 export { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
 import { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
 
@@ -1240,7 +1241,41 @@ export class HostServer {
           };
         }
       }
+      case "checkout:path":
+        return this.handleCheckoutPath(req);
     }
+  }
+
+  /** Resolve a checkout to the absolute path the desktop can hand to the OS
+   *  (file manager, editor URL scheme). The path is not derived from anything
+   *  the caller sent: `main` comes from the host's own catalog and everything
+   *  else from checkouts.json, so a caller can only ever name a checkout, never
+   *  describe one. Reads the store directly rather than a warm core, so the
+   *  action works on a project that has never been opened this run. */
+  private async handleCheckoutPath(
+    req: Extract<ControlRequest, { type: "checkout:path" }>,
+  ): Promise<ControlResponse> {
+    if (!isSafeProjectId(req.projectId)) {
+      return { id: req.id, ok: false, error: { code: "INVALID_PROJECT", message: "invalid project id" } };
+    }
+    const seen = this.seenProjects.get(req.projectId);
+    if (!seen) {
+      return { id: req.id, ok: false, error: { code: "UNKNOWN_PROJECT", message: "no path on record for this project" } };
+    }
+    let path: string;
+    if (req.checkoutId === "main") {
+      path = seen.path;
+    } else {
+      const record = await new CheckoutStore(resolveAbDir(), req.projectId).get(req.checkoutId);
+      if (!record) {
+        return { id: req.id, ok: false, error: { code: "UNKNOWN_CHECKOUT", message: "no such checkout for this project" } };
+      }
+      path = record.path;
+    }
+    if (!existsSync(path)) {
+      return { id: req.id, ok: false, error: { code: "CHECKOUT_MISSING", message: "the working directory no longer exists" } };
+    }
+    return { id: req.id, ok: true, type: "checkout:path", path };
   }
 
   private async refreshWarmGitState(projectId: string, projectPath: string): Promise<void> {

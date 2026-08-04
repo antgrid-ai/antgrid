@@ -1,0 +1,128 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+import '../design/widgets/ab_snack_bar.dart';
+import '../launcher/host_control_client.dart';
+import '../util/external_open_target.dart';
+import '../utils/platform_utils.dart';
+import 'remote_access.dart';
+
+/// Which external apps this machine can open a checkout in.
+///
+/// Probed once per run rather than per menu open: installing an editor
+/// mid-session is rare enough that a stale list costs less than a registry /
+/// `NSWorkspace` / GIO hit every time the kebab is clicked.
+final externalOpenTargetsProvider = FutureProvider<List<ExternalOpenTarget>>((
+  ref,
+) async {
+  if (isMobilePlatform) return const [];
+  return detectExternalOpenTargets();
+});
+
+/// Open a session's working directory in [target].
+///
+/// LOCAL projects only. The path is resolved over the loopback control plane —
+/// a remote machine's checkout path is neither knowable here nor useful (the
+/// window would open on a machine the user is not sitting at), so callers must
+/// not offer this for a relay-backed project.
+Future<void> openCheckoutIn(
+  BuildContext context,
+  ProviderContainer container, {
+  required String projectId,
+  required String checkoutId,
+  required ExternalOpenTarget target,
+}) async {
+  final path = await _resolveCheckoutPath(
+    context,
+    container,
+    projectId: projectId,
+    checkoutId: checkoutId,
+  );
+  if (path == null) return;
+  bool opened;
+  try {
+    opened = await launchUrl(
+      target.uriFor(path),
+      mode: LaunchMode.externalApplication,
+    );
+  } catch (_) {
+    opened = false;
+  }
+  if (!opened && context.mounted) {
+    showAbSnackBar(context, 'Could not open ${target.appName}.');
+  }
+}
+
+/// Copy a session's working directory to the clipboard. Local projects only,
+/// for the same reason as [openCheckoutIn].
+Future<void> copyCheckoutPath(
+  BuildContext context,
+  ProviderContainer container, {
+  required String projectId,
+  required String checkoutId,
+}) async {
+  final path = await _resolveCheckoutPath(
+    context,
+    container,
+    projectId: projectId,
+    checkoutId: checkoutId,
+  );
+  if (path == null) return;
+  // A clipboard the platform refuses to write (a Linux session with no
+  // clipboard owner) would otherwise throw past every caller into a debugPrint,
+  // leaving the user with no snackbar at all and a stale clipboard they believe
+  // they just replaced.
+  try {
+    await Clipboard.setData(ClipboardData(text: path));
+  } catch (_) {
+    if (context.mounted) showAbSnackBar(context, 'Could not copy the path.');
+    return;
+  }
+  if (context.mounted) showAbSnackBar(context, 'Path copied');
+}
+
+/// Ask the host where this checkout lives. Returns null after reporting the
+/// failure, so callers can treat null as "already handled".
+Future<String?> _resolveCheckoutPath(
+  BuildContext context,
+  ProviderContainer container, {
+  required String projectId,
+  required String checkoutId,
+}) async {
+  try {
+    final client = await container.read(hostControlClientProvider.future);
+    return await client.checkoutPath(
+      projectId: projectId,
+      checkoutId: checkoutId,
+    );
+  } on HostControlException catch (error) {
+    if (context.mounted) showAbSnackBar(context, _messageFor(error));
+    return null;
+  } catch (_) {
+    if (context.mounted) {
+      showAbSnackBar(context, 'Could not reach the local host.');
+    }
+    return null;
+  }
+}
+
+/// User-facing text for a refusal from the host.
+///
+/// The codes are matched exhaustively rather than falling through to
+/// `error.message`, because `HostControlClient._post` reports a dead socket or
+/// a timeout as a `HostControlException` too — a default of `error.message`
+/// puts `control POST failed: TimeoutException after 0:00:05.000000` in a
+/// snackbar and leaves the plain-language wording below unreachable.
+String _messageFor(HostControlException error) => switch (error.code) {
+  // The one failure a user can act on: the worktree was removed, or the drive
+  // holding it is gone.
+  'CHECKOUT_MISSING' => 'This session\'s working directory no longer exists.',
+  // The host has no path on record. Reached by asking about a project it never
+  // opened — which for a local project means its catalog entry was dropped.
+  'UNKNOWN_PROJECT' ||
+  'UNKNOWN_CHECKOUT' ||
+  'INVALID_PROJECT' => 'Antgrid could not locate this session\'s folder.',
+  _ => 'Could not reach the local host.',
+};

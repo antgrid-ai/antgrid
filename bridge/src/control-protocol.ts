@@ -33,6 +33,16 @@ export const ControlRequestSchema = z.discriminatedUnion("type", [
     branch: z.string().min(1),
     allowActiveSessions: z.boolean().optional(),
   }),
+  // Discloses a checkout's absolute path to the caller. Deliberately confined
+  // to THIS plane: checkout paths are host-local (checkout-types.ts) and the
+  // loopback socket + token is the only transport that can reach this schema —
+  // the relay control plane speaks AbMessage verbs, not ControlRequest.
+  z.object({
+    id: z.string().min(1),
+    type: z.literal("checkout:path"),
+    projectId: z.string().min(1),
+    checkoutId: z.string().min(1),
+  }),
 ]);
 export type ControlRequest = z.infer<typeof ControlRequestSchema>;
 
@@ -103,4 +113,5 @@ export type ControlResponse =
   | { id: string; ok: true; type: "mobile-access:set"; enabled: boolean }
   | { id: string; ok: true; type: "git:branches"; isRepository: boolean; current: string | null; branches: string[]; worktreeSessionsSupported: boolean }
   | { id: string; ok: true; type: "git:checkout"; current: string }
+  | { id: string; ok: true; type: "checkout:path"; path: string }
   | { id: string; ok: false; error: { code: string; message: string } };

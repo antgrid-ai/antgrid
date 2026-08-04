@@ -456,5 +456,27 @@ class HostControlClient {
     return current;
   }
 
+  /// Absolute working directory of one checkout — `main` for a shared session,
+  /// the managed worktree for an isolated one. Paths are host-local everywhere
+  /// else (they are deliberately absent from `SessionEntry`); this loopback verb
+  /// is the only way the desktop learns one, so it may only ever be used for a
+  /// LOCAL project.
+  Future<String> checkoutPath({
+    required String projectId,
+    required String checkoutId,
+    Duration timeout = const Duration(seconds: 5),
+  }) async {
+    final m = await _post({
+      'type': 'checkout:path',
+      'projectId': projectId,
+      'checkoutId': checkoutId,
+    }, timeout: timeout);
+    final path = m['path'];
+    if (path is! String || path.isEmpty) {
+      throw HostControlException('BAD_RESPONSE', 'malformed checkout:path response: $m');
+    }
+    return path;
+  }
+
   void close() => _http.close();
 }

@@ -648,13 +648,20 @@ final focusedAgentBlockedProvider = Provider<bool>((ref) {
   return ref.watch(supervisorStatusProvider(id)).value is Blocked;
 });
 
+/// True iff [entryId] corresponds to a relay-paired remote agent (as opposed to
+/// a locally-opened folder). Keyed by id rather than reading the focus, because
+/// drawer rows render for projects that are not the focused one.
+final entryIsRelayProvider = Provider.family<bool, String>((ref, entryId) {
+  final agents = ref.watch(pairedAgentProvider).value ?? const [];
+  return agents.any((a) => a.agentDeviceId == entryId);
+});
+
 /// True iff the currently focused id corresponds to a relay-paired remote
 /// agent (as opposed to a locally-opened folder).
 final focusedIsRelayProvider = Provider<bool>((ref) {
   final id = ref.watch(selectedRegistrationIdProvider);
   if (id == null) return false;
-  final agents = ref.watch(pairedAgentProvider).value ?? const [];
-  return agents.any((a) => a.agentDeviceId == id);
+  return ref.watch(entryIsRelayProvider(id));
 });
 
 /// Callback to switch to agent panel. Set by WorkspaceShell.
