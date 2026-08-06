@@ -18,11 +18,11 @@ const dirs: string[] = [];
 function newStore() { const d = mkdtempSync(join(tmpdir(), "ab-sm-")); dirs.push(d); return d; }
 afterEach(() => { for (const d of dirs.splice(0)) try { rmSync(d, { recursive: true, force: true }); } catch {} });
 
-function mk(storeDir: string) {
+function mk(storeDir: string, agentSpec = { command: "claude", name: "claude" }) {
   return new SessionManager({
     projectId: "p1", storeDir, projectPath: storeDir,
     terminalManager: makeTm(),
-    agentSpec: { command: "claude", name: "claude" },
+    agentSpec,
     sendMessage: () => {},
   });
 }
@@ -59,6 +59,17 @@ describe("applyAutoName / manuallyRenamed", () => {
     sm.applyAutoName("nope", "x");
     sm.applyAutoName(s.id, "Session 1");   // unchanged
     expect(emitted).toBe(0);
+  });
+
+  // A default-spec (antgrid.yaml) session carries no per-session `tool`, which is
+  // why agent-core's OSC-title policy resolves the agent through `agentKeyFor`
+  // (entry.tool ?? config.agent.tool) rather than off the entry — reading the
+  // entry alone would misread agy's exe-path OSC title as a usable name.
+  test("a default-spec session carries no per-session tool", () => {
+    const sm = mk(newStore(), { command: "agy", name: "antigravity" });
+    const s = sm.create();                         // no spec.tool → default spec
+    expect(sm.get(s.id)!.tool).toBeUndefined();
+    expect(sm.create(undefined, { tool: "claude-code" }).tool).toBe("claude-code");
   });
 
   test("migration: legacy file without manuallyRenamed backfills from name pattern", () => {

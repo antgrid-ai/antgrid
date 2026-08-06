@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, statSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, normalize } from "node:path";
-import { SessionManager } from "../src/session-manager";
+import { SessionManager, isDefaultSessionName } from "../src/session-manager";
 import { buildSpawnEnv } from "../src/terminal-session";
 
 function tempDir() {
@@ -1524,5 +1524,27 @@ describe("SessionManager initial prompt", () => {
     const s = sm.create(undefined, { tool: "codex", mode: "chat" });
     sm.start(s.id, "hello agent");
     expect(seen[0].initialPrompt).toBe("hello agent");
+  });
+
+  it("isDefaultSessionName recognizes only unedited 'Session N' names", () => {
+    expect(isDefaultSessionName("Session 1")).toBe(true);
+    expect(isDefaultSessionName("Session 42")).toBe(true);
+    expect(isDefaultSessionName("Antigravity")).toBe(false);
+    expect(isDefaultSessionName("Casual Greeting And Introduction")).toBe(false);
+    expect(isDefaultSessionName("Session")).toBe(false);
+    expect(isDefaultSessionName("Session 1 extra")).toBe(false);
+    expect(isDefaultSessionName("")).toBe(false);
+  });
+
+  it("findSlotByAgentSession maps an agent conversation id back to its slot", () => {
+    const sm = new SessionManager({
+      projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeFakeTerm() as any,
+      agentSpec: { command: "agy", name: "antigravity" },
+      sendMessage: () => {},
+    });
+    const s = sm.create(undefined, { tool: "antigravity" });
+    sm.setAgentSession(s.id, "conv-123");
+    expect(sm.findSlotByAgentSession("conv-123")).toBe(s.id);
+    expect(sm.findSlotByAgentSession("no-such-conv")).toBeUndefined();
   });
 });

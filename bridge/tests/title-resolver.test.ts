@@ -5,6 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveCodexThreadName, resolveCodexThreadTitle } from "../src/agents/codex/title";
 import { resolveClaudeTranscriptTitle } from "../src/agents/claude-code/title";
+import {
+  parseAntigravityRenames,
+  readAntigravitySummaries,
+  resolveAntigravityRename,
+  resolveAntigravityTranscriptTitle,
+} from "../src/agents/antigravity/title";
 import { resolveStructuredTitle } from "../src/agents/title-dispatch";
 
 const dirs: string[] = [];
@@ -140,7 +146,175 @@ describe("resolveClaudeTranscriptTitle", () => {
   });
 });
 
+describe("resolveAntigravityTranscriptTitle", () => {
+  test("strips the <USER_REQUEST> wrapper and trailing metadata blocks", async () => {
+    const d = tmp(); const p = join(d, "transcript_full.jsonl");
+    writeFileSync(p,
+      `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"<USER_REQUEST>\\nsay hi in one word\\n</USER_REQUEST>\\n<ADDITIONAL_METADATA>\\nirrelevant\\n</ADDITIONAL_METADATA>"}\n` +
+      `{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","content":"Hello"}\n`);
+    expect(await resolveAntigravityTranscriptTitle(p)).toBe("say hi in one word");
+  });
+  test("falls back to the raw content when there's no <USER_REQUEST> wrapper", async () => {
+    const d = tmp(); const p = join(d, "transcript_full.jsonl");
+    writeFileSync(p, `{"type":"USER_INPUT","content":"plain unwrapped text"}\n`);
+    expect(await resolveAntigravityTranscriptTitle(p)).toBe("plain unwrapped text");
+  });
+  test("uses the FIRST USER_INPUT line", async () => {
+    const d = tmp(); const p = join(d, "transcript_full.jsonl");
+    writeFileSync(p,
+      `{"type":"USER_INPUT","content":"first turn"}\n` +
+      `{"type":"USER_INPUT","content":"second turn"}\n`);
+    expect(await resolveAntigravityTranscriptTitle(p)).toBe("first turn");
+  });
+  test("missing file → null", async () => {
+    expect(await resolveAntigravityTranscriptTitle(join(tmp(), "nope.jsonl"))).toBeNull();
+  });
+  test("garbage lines are skipped, not thrown", async () => {
+    const d = tmp(); const p = join(d, "transcript_full.jsonl");
+    writeFileSync(p, `not json\n{"type":"USER_INPUT","content":"real title"}\n{partial`);
+    expect(await resolveAntigravityTranscriptTitle(p)).toBe("real title");
+  });
+});
+
+/** Mirror the shape agy's conversation_summaries.db exposes (subset of columns
+ *  we read): manual `title` and generated `preview` per conversation. */
+function writeSummariesDb(
+  home: string,
+  rows: Array<{ id: string; title?: string; preview?: string }>,
+) {
+  const db = new Database(join(home, "conversation_summaries.db"));
+  db.run("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT, preview TEXT)");
+  const stmt = db.query("INSERT INTO conversation_summaries (conversation_id, title, preview) VALUES (?, ?, ?)");
+  for (const r of rows) stmt.run(r.id, r.title ?? "", r.preview ?? "");
+  db.close();
+}
+
+describe("readAntigravitySummaries", () => {
+  test("maps a conversation to its generated preview", () => {
+    const home = tmp();
+    writeSummariesDb(home, [{ id: "c1", title: "", preview: "Casual Greeting And Introduction" }]);
+    expect(readAntigravitySummaries(home).get("c1")).toBe("Casual Greeting And Introduction");
+  });
+  test("prefers the manual title over the generated preview", () => {
+    const home = tmp();
+    writeSummariesDb(home, [{ id: "c1", title: "renamed", preview: "generated name" }]);
+    expect(readAntigravitySummaries(home).get("c1")).toBe("renamed");
+  });
+  test("omits a conversation with neither title nor preview", () => {
+    const home = tmp();
+    writeSummariesDb(home, [{ id: "c1", title: "", preview: "" }]);
+    expect(readAntigravitySummaries(home).has("c1")).toBe(false);
+  });
+  test("missing db → empty map, no throw", () => {
+    expect(readAntigravitySummaries(tmp()).size).toBe(0);
+  });
+});
+
+describe("parseAntigravityRenames", () => {
+  test("keeps the latest /rename per conversationId", () => {
+    const raw =
+      `{"display":"/rename first","conversationId":"c1","type":"slash_command"}\n` +
+      `{"display":"/rename second","conversationId":"c1","type":"slash_command"}\n` +
+      `{"display":"/rename other","conversationId":"c2","type":"slash_command"}\n`;
+    const m = parseAntigravityRenames(raw);
+    expect(m.get("c1")).toBe("second");
+    expect(m.get("c2")).toBe("other");
+  });
+  test("ignores a bare /rename (no argument)", () => {
+    const raw = `{"display":"/rename","conversationId":"c1","type":"slash_command"}\n`;
+    expect(parseAntigravityRenames(raw).has("c1")).toBe(false);
+  });
+  test("a bare /rename after a named one does not clear the name", () => {
+    const raw =
+      `{"display":"/rename keep me","conversationId":"c1","type":"slash_command"}\n` +
+      `{"display":"/rename","conversationId":"c1","type":"slash_command"}\n`;
+    expect(parseAntigravityRenames(raw).get("c1")).toBe("keep me");
+  });
+  test("ignores non-slash_command lines and other slash commands", () => {
+    const raw =
+      `{"display":"hi","conversationId":"c1"}\n` +
+      `{"display":"/logout","conversationId":"c1","type":"slash_command"}\n`;
+    expect(parseAntigravityRenames(raw).has("c1")).toBe(false);
+  });
+  test("skips garbage lines without throwing", () => {
+    const raw =
+      `not json\n` +
+      `{"display":"/rename good","conversationId":"c1","type":"slash_command"}\n` +
+      `{partial`;
+    expect(parseAntigravityRenames(raw).get("c1")).toBe("good");
+  });
+});
+
+describe("resolveAntigravityRename", () => {
+  test("returns the latest rename for the conversation from history.jsonl", async () => {
+    const home = tmp();
+    writeFileSync(join(home, "history.jsonl"),
+      `{"display":"/rename old","conversationId":"c1","type":"slash_command"}\n` +
+      `{"display":"/rename new","conversationId":"c1","type":"slash_command"}\n`);
+    expect(await resolveAntigravityRename("c1", home)).toBe("new");
+  });
+  test("null when the conversation was never renamed", async () => {
+    const home = tmp();
+    writeFileSync(join(home, "history.jsonl"),
+      `{"display":"/rename x","conversationId":"other","type":"slash_command"}\n`);
+    expect(await resolveAntigravityRename("c1", home)).toBeNull();
+  });
+  test("null when history.jsonl is missing", async () => {
+    expect(await resolveAntigravityRename("c1", tmp())).toBeNull();
+  });
+});
+
 describe("resolveStructuredTitle dispatch", () => {
+  test("antigravity prefers a live /rename over the first user message", async () => {
+    const home = tmp();
+    const p = join(home, "transcript_full.jsonl");
+    writeFileSync(p, `{"type":"USER_INPUT","content":"first turn"}\n`);
+    writeFileSync(join(home, "history.jsonl"),
+      `{"display":"/rename my chat","conversationId":"c1","type":"slash_command"}\n`);
+    expect(
+      await resolveStructuredTitle("antigravity", { sessionId: "c1", transcriptPath: p }, { antigravityHome: home }),
+    ).toEqual({ title: "my chat", kind: "generated" });
+  });
+  test("antigravity prefers agy's generated preview over the first user message", async () => {
+    const home = tmp();
+    const p = join(home, "transcript_full.jsonl");
+    writeFileSync(p, `{"type":"USER_INPUT","content":"hii"}\n`);
+    writeSummariesDb(home, [{ id: "c1", preview: "Casual Greeting And Introduction" }]);
+    expect(
+      await resolveStructuredTitle("antigravity", { sessionId: "c1", transcriptPath: p }, { antigravityHome: home }),
+    ).toEqual({ title: "Casual Greeting And Introduction", kind: "generated" });
+  });
+  test("antigravity prefers a live /rename over agy's generated preview", async () => {
+    const home = tmp();
+    const p = join(home, "transcript_full.jsonl");
+    writeFileSync(p, `{"type":"USER_INPUT","content":"hii"}\n`);
+    writeSummariesDb(home, [{ id: "c1", preview: "Casual Greeting And Introduction" }]);
+    writeFileSync(join(home, "history.jsonl"),
+      `{"display":"/rename my chat","conversationId":"c1","type":"slash_command"}\n`);
+    expect(
+      await resolveStructuredTitle("antigravity", { sessionId: "c1", transcriptPath: p }, { antigravityHome: home }),
+    ).toEqual({ title: "my chat", kind: "generated" });
+  });
+  test("antigravity falls back to the first user message with no rename or preview", async () => {
+    const home = tmp();
+    const p = join(home, "transcript_full.jsonl");
+    writeFileSync(p, `{"type":"USER_INPUT","content":"first turn"}\n`);
+    expect(
+      await resolveStructuredTitle("antigravity", { sessionId: "c1", transcriptPath: p }, { antigravityHome: home }),
+    ).toEqual({ title: "first turn", kind: "first-message" });
+  });
+  test("antigravity ignores a rename that belongs to a different conversation", async () => {
+    const home = tmp();
+    const p = join(home, "transcript_full.jsonl");
+    writeFileSync(p, `{"type":"USER_INPUT","content":"first turn"}\n`);
+    writeFileSync(join(home, "history.jsonl"),
+      `{"display":"/rename someone else","conversationId":"c2","type":"slash_command"}\n`);
+    expect(
+      await resolveStructuredTitle("antigravity", { sessionId: "c1", transcriptPath: p }, { antigravityHome: home }),
+    ).toEqual({ title: "first turn", kind: "first-message" });
+  });
+
+
   test("codex via sessionId (desktop session_index)", async () => {
     const home = tmp();
     writeFileSync(join(home, "session_index.jsonl"),
@@ -166,5 +340,15 @@ describe("resolveStructuredTitle dispatch", () => {
   });
   test("claude without transcriptPath → null", async () => {
     expect(await resolveStructuredTitle("claude", { sessionId: "x" })).toBeNull();
+  });
+  test("antigravity via transcriptPath", async () => {
+    const d = tmp(); const p = join(d, "transcript_full.jsonl");
+    writeFileSync(p, `{"type":"USER_INPUT","content":"Antigravity title"}\n`);
+    expect(
+      await resolveStructuredTitle("antigravity", { sessionId: "x", transcriptPath: p }),
+    ).toEqual({ title: "Antigravity title", kind: "first-message" });
+  });
+  test("antigravity without transcriptPath → null", async () => {
+    expect(await resolveStructuredTitle("antigravity", { sessionId: "x" })).toBeNull();
   });
 });

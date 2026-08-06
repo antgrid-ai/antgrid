@@ -17,7 +17,7 @@ import { displayStartupBanner } from "./banner";
 import { generateEphemeralKeypair, type EphemeralKeypair } from "./key-exchange";
 import { loadConfig, findConfigFile, projectName, type AbConfig } from "./config";
 import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from "./bootstrap";
-import { resolveAgent, listKnownTools } from "./known-agents";
+import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } from "./known-agents";
 import { augmentAgentLaunch } from "./agent-launch-augmenter";
 import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
@@ -28,7 +28,7 @@ import { computeProjectId } from "./project-id";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
 import { ConfigController } from "./config-controller";
 import { detectInstalledTools } from "./tool-detector";
-import { SessionManager, type DeleteSessionOptions } from "./session-manager";
+import { SessionManager, isDefaultSessionName, type DeleteSessionOptions } from "./session-manager";
 import { WorktreeError } from "./worktrees/worktree-manager";
 import { WorktreeManager } from "./worktrees/worktree-manager";
 import { CheckoutStore } from "./worktrees/checkout-store";
@@ -36,6 +36,8 @@ import { resolveProject } from "./worktrees/project-resolver";
 import { CheckoutRuntimeRegistry } from "./worktrees/checkout-runtime-registry";
 import type { CheckoutRecord } from "./worktrees/checkout-types";
 import { SessionNamer } from "./session-namer";
+import { antigravityCliHome } from "./agents/antigravity/title";
+import { AntigravityTitleWatcher } from "./agents/antigravity/title-watcher";
 import { resolveStructuredTitle } from "./agents/title-dispatch";
 import { generateSessionTitle } from "./agents/title-generate";
 import { agentSpec, BY_HOOK_NAME, handlerObservable } from "./agents/registry";
@@ -449,6 +451,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   let manager: TerminalManager | null = null;
   let sessions: SessionManager | null = null;
   let namer: SessionNamer | null = null;
+  let antigravityTitleWatcher: AntigravityTitleWatcher | null = null;
   // Slots we've already spent a title-generation spawn on, keyed
   // `<terminalId>:<agentSessionId>`. The /session-title post repeats every turn,
   // so without this a session whose agent never names itself would pay a model
@@ -1149,6 +1152,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     sessions = null;
     namer?.dispose();
     namer = null;
+    antigravityTitleWatcher?.stop();
+    antigravityTitleWatcher = null;
     void structured?.disposeAll();
     structured = null;
   }
@@ -1688,8 +1693,32 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // A notification (osc9/osc777) means the session did something worth
       // surfacing — float it up the drawer. No-ops for non-session terminals.
       onTerminalNotification: (id) => sessions?.touch(id),
-      // OSC 0/2 terminal title → auto-name policy. Self-correlated per PTY.
-      onTerminalTitle: (id, title) => namer?.onOscTitle(id, title),
+      // OSC 0/2 terminal title → auto-name policy. Translate an agent's raw OSC
+      // title to a usable session name: most agents publish a good name (claude →
+      // "Claude Code", cursor → "Cursor Agent"), but antigravity's agy publishes
+      // its executable path — we substitute the display name until the plugin hook
+      // supplies the real conversation title.
+      onTerminalTitle: (id, title) => {
+        // A non-session PTY (a config `terminals:` slot) is attributable to no
+        // agent, so its raw title passes through untouched.
+        const session = sessions?.get(id);
+        if (!session) {
+          namer?.onOscTitle(id, title);
+          return;
+        }
+        // agentKeyFor, not the wire `tool`: the latter is undefined for a
+        // default-spec (antgrid.yaml) session, which would read agy's exe-path
+        // OSC title as a usable name (undefined tool ⇒ not oscTitleUnusable) and
+        // let the terminal clobber the hook-resolved title.
+        const tool = agentKeyFor(id);
+        // oscTitleForNaming maps agy's exe-path title to the "Antigravity"
+        // placeholder. That placeholder may only label a still-default slot: on
+        // resume the good persisted name is already set, but the OSC title fires
+        // before the hook/watcher re-resolve, so applying it would clobber the
+        // name back to "Antigravity" and persist it.
+        if (isOscTitleUnusable(tool) && !isDefaultSessionName(session.name)) return;
+        namer?.onOscTitle(id, oscTitleForNaming(tool, title));
+      },
     }, connState, () => apiServer?.port ?? null);
 
     // One update-checker per tool for this project, built straight from the spec
@@ -1851,6 +1880,20 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     namer = new SessionNamer({
       applyAutoName: (id, name) => sessions?.applyAutoName(id, name),
     });
+
+    // agy fires no hook on a `/rename` or when it writes its own generated
+    // conversation name, so neither would reach the sidebar until the next turn.
+    // Watch agy's title sources and route the current best name through the namer
+    // (same debounce + manual-wins precedence as every other title signal).
+    // No-ops if agy isn't installed.
+    antigravityTitleWatcher = new AntigravityTitleWatcher(
+      antigravityCliHome(),
+      (conversationId, title) => {
+        const slot = sessions?.findSlotByAgentSession(conversationId);
+        if (slot) namer?.onStructuredTitle(slot, title);
+      },
+    );
+    antigravityTitleWatcher.start();
 
     sessions.onChange(() => {
       if (!sessions) return;
@@ -2157,10 +2200,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       if (!body.titleOnly) {
         sessions?.setAgentSession(body.terminalId, body.sessionId, body.transcriptPath);
       }
-      // opencode posts the title inline; Claude/Codex post only correlation
-      // ids, so resolve the title from their on-disk session files (async read,
-      // off the event loop). resolveStructuredTitle swallows its own errors, so
-      // the unawaited promise can't reject.
+      // opencode posts the title inline; Claude/Codex/Antigravity post only
+      // correlation ids, so resolve the title from their on-disk session files
+      // (async read, off the event loop). resolveStructuredTitle swallows its own
+      // errors, so the unawaited promise can't reject.
       if (body.title) {
         namer?.onStructuredTitle(body.terminalId, body.title);
         return;

@@ -133,4 +133,80 @@ describe("augmentAgentLaunch", () => {
       notificationsInjected: false,
     });
   });
+
+  test("antigravity → merges PreInvocation+Stop hooks into the global hooks.json, sets GODEBUG fallback-roots", () => {
+    const abDir = abdir();
+    const geminiConfigDir = abdir();
+    const a = augmentAgentLaunch("antigravity", abDir, undefined, HOOK_COMMAND, geminiConfigDir);
+    expect(a.args).toEqual([]);
+    expect(a.env).toEqual({ GODEBUG: "x509usefallbackroots=1" });
+    expect(a.notificationsInjected).toBe(true);
+
+    const hooks = JSON.parse(readFileSync(join(geminiConfigDir, "hooks.json"), "utf8"));
+    const group = hooks["antgrid-session-title"];
+    // Deliberately unquoted (see antigravityHookCommand) — no trailing `"` before the event name.
+    expect(group.PreInvocation[0].command.replace(/\\/g, "/")).toMatch(
+      /antigravity\/post-title\.js PreInvocation$/,
+    );
+    expect(group.Stop[0].command.replace(/\\/g, "/")).toMatch(/antigravity\/post-title\.js Stop$/);
+  });
+
+  test("antigravity hooks.json merge is idempotent and preserves other top-level groups", () => {
+    const abDir = abdir();
+    const geminiConfigDir = abdir();
+    writeFileSync(
+      join(geminiConfigDir, "hooks.json"),
+      JSON.stringify({ "some-other-plugin": { Stop: [{ type: "command", command: "echo mine", timeout: 5 }] } }),
+    );
+    augmentAgentLaunch("antigravity", abDir, undefined, HOOK_COMMAND, geminiConfigDir);
+    const first = JSON.parse(readFileSync(join(geminiConfigDir, "hooks.json"), "utf8"));
+    expect(first["some-other-plugin"].Stop[0].command).toBe("echo mine");
+    expect(first["antgrid-session-title"].Stop[0].command).toContain("post-title.js");
+
+    augmentAgentLaunch("antigravity", abDir, undefined, HOOK_COMMAND, geminiConfigDir);
+    const second = JSON.parse(readFileSync(join(geminiConfigDir, "hooks.json"), "utf8"));
+    expect(second).toEqual(first);
+  });
+
+  test("antigravity → notificationsInjected is false when the hooks.json write fails", () => {
+    const abDir = abdir();
+    // A file (not a directory) at the gemini-config-dir path makes the hooks.json
+    // write fail, exercising ensureAntigravityHook's fail-open catch.
+    const geminiConfigDirAsFile = join(abdir(), "not-a-dir");
+    writeFileSync(geminiConfigDirAsFile, "");
+    const a = augmentAgentLaunch("antigravity", abDir, undefined, HOOK_COMMAND, geminiConfigDirAsFile);
+    expect(a).toEqual({
+      args: [],
+      env: { GODEBUG: "x509usefallbackroots=1" },
+      notificationsInjected: false,
+    });
+  });
+
+  test("antigravity → appends to, rather than clobbers, an existing GODEBUG value", () => {
+    const abDir = abdir();
+    const geminiConfigDir = abdir();
+    const prevGodebug = process.env.GODEBUG;
+    process.env.GODEBUG = "http2client=0";
+    try {
+      const a = augmentAgentLaunch("antigravity", abDir, undefined, HOOK_COMMAND, geminiConfigDir);
+      expect(a.env.GODEBUG).toBe("http2client=0,x509usefallbackroots=1");
+    } finally {
+      if (prevGodebug === undefined) delete process.env.GODEBUG;
+      else process.env.GODEBUG = prevGodebug;
+    }
+  });
+
+  test("antigravity → does not duplicate x509usefallbackroots if the user already set it", () => {
+    const abDir = abdir();
+    const geminiConfigDir = abdir();
+    const prevGodebug = process.env.GODEBUG;
+    process.env.GODEBUG = "x509usefallbackroots=0";
+    try {
+      const a = augmentAgentLaunch("antigravity", abDir, undefined, HOOK_COMMAND, geminiConfigDir);
+      expect(a.env.GODEBUG).toBe("x509usefallbackroots=0");
+    } finally {
+      if (prevGodebug === undefined) delete process.env.GODEBUG;
+      else process.env.GODEBUG = prevGodebug;
+    }
+  });
 });

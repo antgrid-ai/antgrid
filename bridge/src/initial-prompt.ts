@@ -27,6 +27,13 @@ import { agentSpec } from "./agents/registry";
  *     optional-value `--resume <id>` flag.
  *   - opencode — flagged `--prompt <value>`; the value token is consumed by the
  *     flag regardless of a leading dash, so no `--` is needed (or wanted).
+ *   - antigravity (`agy`) — flagged `--prompt-interactive <value>` (verified via
+ *     `agy --help`: "Run an initial prompt interactively and continue the
+ *     session"). agy uses Go's stdlib `flag` package (confirmed by its exact
+ *     "flag needs an argument" error), whose value parser consumes the next
+ *     token UNCONDITIONALLY — a leading-dash prompt lands as the value, not a
+ *     flag — so, like opencode, no `--` separator is needed (nor would agy's
+ *     parser honor a positional one).
  */
 export function initialPromptArgv(tool: string, prompt: string): string[] {
   // Trimming is shared, not per-agent: an all-whitespace prompt means "start

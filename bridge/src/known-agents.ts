@@ -64,6 +64,28 @@ export function titleSourceFor(tool: string): "structured" | "osc" {
   return agentSpec(tool)?.titleSource ?? "osc";
 }
 
+/** True when the agent's OSC-2 title is NOT a usable session name (antigravity's
+ *  `agy` publishes its executable path). Callers must treat the substituted
+ *  display name as a placeholder — never let it overwrite an already-resolved
+ *  session name (see the OSC guard in agent-core). Unknown tools default false. */
+export function isOscTitleUnusable(tool: string | undefined): boolean {
+  return tool ? agentSpec(tool)?.oscTitleUnusable === true : false;
+}
+
+/**
+ * The session name to derive from an agent's OSC-2 terminal title. Most agents
+ * publish a useful name there (claude → "Claude Code", cursor → "Cursor Agent"),
+ * so the raw title flows through. But antigravity's `agy` publishes its own
+ * executable PATH — never a usable name — so we substitute the agent's label;
+ * the plugin hook later upgrades it to the real conversation title.
+ * `tool` is undefined for non-session terminals (service PTYs), whose raw title
+ * passes through unchanged.
+ */
+export function oscTitleForNaming(tool: string | undefined, rawTitle: string): string {
+  const entry = tool ? agentSpec(tool) : undefined;
+  return entry?.oscTitleUnusable ? entry.label : rawTitle;
+}
+
 /**
  * Whether to mute the terminal's OSC notification scanner for one spawn.
  *

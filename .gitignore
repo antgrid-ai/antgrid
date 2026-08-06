@@ -101,6 +101,8 @@ docs/superpowers/specs/
 # `antgrid` MCP entry), so the only local churn is its own keys appearing; if
 # that is noisy, run `git update-index --skip-worktree <file>`.
 .codex/
+# Antigravity's `agy` keeps its per-project state here (and its global config
+# under ~/.gemini) — the directory name is Gemini's, the agent is not.
 .gemini/
 
 # jscpd duplicate-detection HTML report (regenerate via `npm run dup-check`)

@@ -24,6 +24,13 @@ describe("initialPromptArgv", () => {
     expect(initialPromptArgv("opencode", "--fix the enum")).toEqual(["--prompt", "--fix the enum"]);
   });
 
+  it("--prompt-interactive flag for antigravity (Go flag consumes next token)", () => {
+    expect(initialPromptArgv("antigravity", "fix the bug")).toEqual(["--prompt-interactive", "fix the bug"]);
+    // agy's Go stdlib flag parser takes the next token as the value verbatim, so
+    // a leading-dash prompt survives without a `--` separator.
+    expect(initialPromptArgv("antigravity", "--fix the enum")).toEqual(["--prompt-interactive", "--fix the enum"]);
+  });
+
   it("empty for unverified tools (github-copilot, unknown)", () => {
     expect(initialPromptArgv("github-copilot", "fix the bug")).toEqual([]);
     expect(initialPromptArgv("some-future-agent", "fix the bug")).toEqual([]);

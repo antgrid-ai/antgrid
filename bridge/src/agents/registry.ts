@@ -10,6 +10,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readCodexVersionJson, codexHomeDir } from "./codex/home";
+import { antigravityCliHome, resolveAntigravityTitle } from "./antigravity/title";
 import { resolveClaudeTranscriptTitle } from "./claude-code/title";
 import {
   codexThreadExistsSync,
@@ -18,6 +19,7 @@ import {
 } from "./codex/title";
 import { copilotSessionExistsSync, resolveCopilotSessionTitle } from "./github-copilot/title";
 import { injectConfig } from "./config-inject";
+import * as antigravityHooks from "./antigravity/hooks";
 import * as claudeHooks from "./claude-code/hooks";
 import * as codexHooks from "./codex/hooks";
 import * as cursorHooks from "./cursor-agent/hooks";
@@ -182,6 +184,33 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     // No `update`: github-copilot ships no self-updater (IDE-bound), so a
     // request for one fails soft via updateSpecFor → null.
   },
+  // Plugin-tier, but through agy's own GLOBAL `~/.gemini/config/hooks.json`
+  // (see ./antigravity/hooks.ts) — it has no per-spawn hook channel, the same
+  // constraint cursor-agent is under. The installed CLI shim is `agy` (Google's
+  // Antigravity IDE), not `antigravity`. titleSource stays "osc": agy publishes
+  // its exe path as the OSC-2 title, handled by oscTitleUnusable rather than by
+  // suppressing the scanner.
+  antigravity: {
+    bin: "agy",
+    label: "Antigravity",
+    hookName: "antigravity",
+    hookDir: null,
+    notificationSource: "plugin",
+    titleSource: "osc",
+    oscTitleUnusable: true,
+    // `agy --conversation <uuid>` is a global flag, so it goes before any raw
+    // args. See `agy --help`.
+    resume: (id) => ["--conversation", id],
+    initialPrompt: (p) => ["--prompt-interactive", p],
+    hooks: antigravityHooks,
+    augmentsDefaultSpec: true,
+    resolveTitle: async ({ sessionId, transcriptPath, antigravityHome }) =>
+      await resolveAntigravityTitle(
+        sessionId,
+        antigravityHome ?? antigravityCliHome(),
+        transcriptPath,
+      ),
+  },
   // opencode fork: same attention gating (default-off + focus-blur). Enabled
   // via KILO_TUI_CONFIG injection (see env below); the app's default-blur
   // (DEC 1004) supplies the blur it waits on.
@@ -266,10 +295,10 @@ export function judgeCapable(tool: string): boolean {
  *
  * Excludes both ends of the spectrum. Claude declares a real UserPromptSubmit
  * turn-start hook, so guessing there could only be wrong. An agent with no
- * turn-end event — opencode, whose in-runtime plugin declares no `bridge hook`
- * events, and the hookless kilo/kimi/mistral-vibe — has nothing to close an
- * inferred turn, so theirs would run until the session stopped, which is worse
- * than reading "done".
+ * turn-end event — opencode and antigravity, whose out-of-band integrations
+ * declare no `bridge hook` events, and the hookless kilo/kimi/mistral-vibe —
+ * has nothing to close an inferred turn, so theirs would run until the session
+ * stopped, which is worse than reading "done".
  *
  * Read straight off each agent's own hook profile: this file no longer holds a
  * cross-agent table of event names that an agent's events could drift from.

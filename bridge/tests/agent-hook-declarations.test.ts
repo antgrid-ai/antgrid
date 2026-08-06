@@ -9,7 +9,7 @@ import type { AgentKey } from "../src/agents/types";
 
 const AGENT_KEYS = [
   "claude-code", "codex", "opencode", "cursor-agent",
-  "github-copilot", "kilo", "kimi", "mistral-vibe",
+  "github-copilot", "antigravity", "kilo", "kimi", "mistral-vibe",
 ] as const;
 
 /** Compile-time completeness: a table missing a key fails to typecheck. */
@@ -35,6 +35,9 @@ describe("hook profile declarations", () => {
       opencode: ["/session-title", "/notify", "/handler-event"],
       "cursor-agent": ["/session-title", "/notify"],
       "github-copilot": ["/session-title"],
+      // Posted by the bare-`node` hook script agy's global hooks.json runs, so
+      // this list is not derivable from its (empty) `events` either.
+      antigravity: ["/session-title", "/notify"],
       kilo: null,
       kimi: null,
       "mistral-vibe": null,
@@ -61,6 +64,7 @@ describe("needsKeystrokeTurnStart", () => {
       opencode: false,
       "cursor-agent": true,
       "github-copilot": true,
+      antigravity: false,
       kilo: false,
       kimi: false,
       "mistral-vibe": false,
@@ -89,6 +93,7 @@ describe("handlerObservable", () => {
       opencode: true,
       "cursor-agent": false,
       "github-copilot": false,
+      antigravity: false,
       kilo: false,
       kimi: false,
       "mistral-vibe": false,
@@ -103,6 +108,7 @@ describe("handlerObservable", () => {
       opencode: true,
       "cursor-agent": false,
       "github-copilot": false,
+      antigravity: false,
       kilo: false,
       kimi: false,
       "mistral-vibe": false,

@@ -1,6 +1,6 @@
 import { logger } from "../logger";
 import { AGENTS, BY_HOOK_NAME } from "./registry";
-import type { ResolvedTitle } from "./types";
+import type { ResolvedTitle, TitleArgs } from "./types";
 
 const log = logger.child({ component: "title-resolver" });
 
@@ -19,7 +19,9 @@ const log = logger.child({ component: "title-resolver" });
 export async function resolveStructuredTitle(
   agent: string | undefined,
   args: { sessionId: string; transcriptPath?: string },
-  opts: { codexHome?: string; copilotHome?: string } = {},
+  // The agent-home test seams, taken off TitleArgs so a spec that adds one
+  // doesn't need this signature widened by hand to stay injectable.
+  opts: Omit<TitleArgs, "sessionId" | "transcriptPath"> = {},
 ): Promise<ResolvedTitle | null> {
   const key = agent ? BY_HOOK_NAME[agent] : undefined;
   const resolve = key ? AGENTS[key].resolveTitle : undefined;

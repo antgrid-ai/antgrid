@@ -203,7 +203,7 @@ const PersistedEntrySchema = z
       // Backfill: files written before this feature lack the flag. A name that
       // isn't a default "Session N" was user-chosen → treat as manual so
       // live-follow never clobbers it. Default names start following.
-      manuallyRenamed: s.manuallyRenamed ?? !/^Session \d+$/.test(s.name),
+      manuallyRenamed: s.manuallyRenamed ?? !isDefaultSessionName(s.name),
       agentSessionId: s.agentSessionId,
       agentTranscriptPath: s.agentTranscriptPath,
       config: s.config,
@@ -257,6 +257,14 @@ async function writePersistedAtomic(
   if (process.platform !== "win32") {
     try { await chmod(path, 0o600); } catch { /* ignore */ }
   }
+}
+
+/** True for an unedited default slot name ("Session 3") — one the user never
+ *  named. Gates the auto-name backfill (a non-default name was user-chosen) and
+ *  the OSC placeholder guard (the "Antigravity" fallback may only label a
+ *  still-default slot, never overwrite a resolved name). */
+export function isDefaultSessionName(name: string): boolean {
+  return /^Session \d+$/.test(name);
 }
 
 const FLUSH_DEBOUNCE_MS = 200;
@@ -606,7 +614,8 @@ export class SessionManager {
     if (!entry) return;
     // Keep a previously captured path if this report omits one for the SAME
     // session — an agent's SessionStart can fire before the transcript path is
-    // known, then a later turn-end report supplies it. A new session id resets it.
+    // known, then a later turn-end report supplies it (antigravity's
+    // PreInvocation behaves the same way). A new session id resets it.
     const nextPath =
       agentSessionId === entry.agentSessionId
         ? (agentTranscriptPath ?? entry.agentTranscriptPath)
@@ -625,6 +634,18 @@ export class SessionManager {
    *  it by adding it to toWire; this getter is the sanctioned read path. */
   getAgentTranscriptPath(id: string): string | undefined {
     return this.entries.get(id)?.agentTranscriptPath;
+  }
+
+  /**
+   * The slot id whose last-active agent conversation is `conversationId`, or
+   * undefined. Used by the antigravity rename watcher to route a live `/rename`
+   * (keyed by agy's conversationId) back to the owning session for auto-naming.
+   */
+  findSlotByAgentSession(conversationId: string): string | undefined {
+    for (const e of this.entries.values()) {
+      if (e.agentSessionId === conversationId) return e.id;
+    }
+    return undefined;
   }
 
   /**

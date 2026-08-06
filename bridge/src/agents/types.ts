@@ -34,6 +34,7 @@ export type AgentKey =
   | "opencode"
   | "cursor-agent"
   | "github-copilot"
+  | "antigravity"
   | "kilo"
   | "kimi"
   | "mistral-vibe";
@@ -101,6 +102,9 @@ export interface LaunchAugmentation {
 export interface HookInjectCtx {
   abDir: string;
   cursorDir?: string;
+  /** Overrides the machine-global `~/.gemini/config` that only antigravity
+   *  writes into. Test seam, same role as `cursorDir`. */
+  geminiConfigDir?: string;
   hookCommand: HookCommand;
 }
 
@@ -153,6 +157,7 @@ export interface TitleArgs {
   transcriptPath?: string;
   codexHome?: string;
   copilotHome?: string;
+  antigravityHome?: string;
 }
 
 /** Inputs to a spec's `resumable`. The `*Home` fields are test seams. */
@@ -297,6 +302,13 @@ export interface AgentSpec {
    *  [[two-perspawn-injection-systems-separate]]-style split — these are
    *  independently-toggled signals, not one flag. */
   titleSource: "structured" | "osc";
+  /** True when the agent's OSC-2 terminal title is NOT a usable session name —
+   *  antigravity's `agy` publishes its own EXECUTABLE PATH as the title, which
+   *  would otherwise auto-name the session `C:\...\agy.EXE`. For these the namer
+   *  uses `label` until the plugin hook supplies the real conversation title.
+   *  Most agents (claude → "Claude Code", cursor → "Cursor Agent") publish a good
+   *  name here and leave this unset. */
+  oscTitleUnusable?: boolean;
   /** Argv appended to the base launch args to resume a specific agent-native
    *  conversation. `[]` = no verified resume-by-id support (fresh start). */
   resume: (agentSessionId: string) => string[];

@@ -2,13 +2,20 @@ import { describe, it, test, expect } from "bun:test";
 import { mkdtempSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveAgent, resolveAgentEnv, listKnownTools, titleSourceFor } from "../src/known-agents";
+import {
+  resolveAgent,
+  resolveAgentEnv,
+  listKnownTools,
+  isOscTitleUnusable,
+  titleSourceFor,
+} from "../src/known-agents";
 import { AGENTS } from "../src/agents/registry";
 
 describe("known-agents registry", () => {
   it("exposes entries for the known coding agents", () => {
     expect(Object.keys(AGENTS).sort()).toEqual(
       [
+        "antigravity",
         "claude-code",
         "codex",
         "cursor-agent",
@@ -23,6 +30,7 @@ describe("known-agents registry", () => {
 
   it("resolves the new agents to their CLI bins", () => {
     expect(resolveAgent("kilo").bin).toBe("kilo");
+    expect(resolveAgent("antigravity").bin).toBe("agy");
     expect(resolveAgent("kimi").bin).toBe("kimi");
     expect(resolveAgent("mistral-vibe").bin).toBe("vibe");
   });
@@ -48,6 +56,19 @@ describe("known-agents registry", () => {
 
   it("lists github-copilot among known tools", () => {
     expect(listKnownTools()).toContain("github-copilot");
+  });
+
+  it("resolves antigravity as a plugin-tier registry entry", () => {
+    expect(resolveAgent("antigravity").bin).toBe("agy");
+    expect(AGENTS["antigravity"].notificationSource).toBe("plugin");
+  });
+
+  it("flags antigravity's OSC title as unusable, others as usable", () => {
+    expect(isOscTitleUnusable("antigravity")).toBe(true);
+    expect(isOscTitleUnusable("claude-code")).toBe(false);
+    expect(isOscTitleUnusable("codex")).toBe(false);
+    expect(isOscTitleUnusable(undefined)).toBe(false);
+    expect(isOscTitleUnusable("not-a-real-agent")).toBe(false);
   });
 
   it("codex uses plugin hooks for notifications, not OSC9 terminal overrides", () => {
@@ -126,6 +147,7 @@ test("entry-only agents get no extra launch env", () => {
   expect(resolveAgentEnv("mistral-vibe", base)).toEqual({});
   expect(resolveAgentEnv("codex", base)).toEqual({});
   expect(resolveAgentEnv("claude-code", base)).toEqual({});
+  expect(resolveAgentEnv("antigravity", base)).toEqual({});
 });
 
 test("honors a user-set config env var instead of clobbering it", () => {

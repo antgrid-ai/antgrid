@@ -1,5 +1,6 @@
 import { spawn as ptySpawn } from "bun-pty";
 import type { IPty, IDisposable } from "bun-pty";
+import { execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { delimiter, dirname, extname } from "node:path";
 import { logger } from "./logger";
@@ -126,30 +127,110 @@ const BATCH_INTERVAL_MS = 16;
 const BATCH_MAX_BYTES = 4096;
 
 /**
- * Some dev orchestrators inject the OpenSSL cert-bundle overrides
- * SSL_CERT_DIR / SSL_CERT_FILE into every child process to point them at a
- * private dev/OTLP cert directory that holds none of the public root CAs. Any
- * spawned tool that honors those overrides (notably Codex's rustls WebSocket
- * transport, via rustls-native-certs) then stops reading the OS trust store and
- * fails public TLS with `invalid peer certificate: UnknownIssuer`, while
- * schannel-based HTTPS (which ignores these vars) still works. Spawned
- * terminals/agents talk to the public internet and the relay, never to the
- * orchestrator's services over TLS, so the override is pure downside.
+ * Some dev orchestrators inject network overrides into every child process
+ * that break a spawned tool's TLS to the public internet, depending on which
+ * env vars that tool's HTTP stack honors:
+ *  - SSL_CERT_DIR / SSL_CERT_FILE (OpenSSL-style cert-bundle override,
+ *    pointing at a private dev/OTLP cert dir with none of the public root
+ *    CAs): honored by Codex's rustls WebSocket transport (rustls-native-certs)
+ *    → `invalid peer certificate: UnknownIssuer`. Go's crypto/x509 does NOT
+ *    read these on Windows (root_unix.go-only upstream), so this half is a
+ *    no-op for a Go-built tool like antigravity's `agy`.
+ *  - HTTP_PROXY / HTTPS_PROXY: honored by net/http on every platform
+ *    (http.ProxyFromEnvironment) — including Go, unlike the cert-bundle vars
+ *    above. If the orchestrator's injected proxy TLS-intercepts with a cert
+ *    the child doesn't trust, this is the vector that actually bites a Go
+ *    binary: confirmed as agy's `tls: failed to verify certificate: x509:
+ *    certificate signed by unknown authority` calling
+ *    daily-cloudcode-pa.googleapis.com when spawned under aspire, while a
+ *    plain terminal (no inherited proxy) authenticates fine.
+ * schannel-based HTTPS (which ignores SSL_CERT_*) still works either way.
+ * Spawned terminals/agents talk to the public internet and the relay, never
+ * to the orchestrator's services over TLS, so every one of these overrides is
+ * pure downside for them.
  *
  * When the orchestrator opts in by setting ANTGRID_STRIP_INHERITED_CERT_OVERRIDES,
- * drop both vars so children fall back to the system trust store. This is a
- * generic mechanism; the dev launcher owns the decision to enable it (the
- * shipped app never sets the flag, so a user's deliberate SSL_CERT_* config is
- * always preserved).
+ * drop all of them so children fall back to the system trust store and a
+ * direct connection. This is a generic mechanism; the dev launcher owns the
+ * decision to enable it (the shipped app never sets the flag, so a user's
+ * deliberate SSL_CERT_* / *_PROXY config is always preserved).
  */
+const OVERRIDE_VARS = [
+  "SSL_CERT_DIR",
+  "SSL_CERT_FILE",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "all_proxy",
+] as const;
+
 export function stripInheritedCertOverrides(
   env: Record<string, string>,
 ): Record<string, string> {
   if (!process.env.ANTGRID_STRIP_INHERITED_CERT_OVERRIDES) return env;
   const out = { ...env };
-  delete out.SSL_CERT_DIR;
-  delete out.SSL_CERT_FILE;
+  for (const k of OVERRIDE_VARS) delete out[k];
   return out;
+}
+
+/**
+ * True for antigravity's `agy`/`agy.EXE` shim, bare or pathful. agy.EXE is a
+ * real PE binary but is deliberately routed through cmd.exe on Windows rather
+ * than direct-ConPTY-spawned like other .exe agents — see the isAgy usage in
+ * spawn() for why (confirmed A/B: agy launched directly, outside any
+ * ConPTY-attached spawn, completes its OAuth/eligibility check fine; the
+ * identical binary, same user/machine/moment, fails every outbound HTTPS call
+ * with `tls: ... certificate signed by unknown authority` only when bun-pty
+ * makes it the direct ConPTY child).
+ */
+export function isAntigravityBinary(command: string): boolean {
+  return /(^|[\\/])agy(\.exe)?$/i.test(command);
+}
+
+/**
+ * Warms Windows' CryptoAPI intermediate-certificate cache for agy's target
+ * host before spawning it. Go's crypto/x509 on Windows verifies via
+ * CertGetCertificateChain with CACHE-ONLY lookups — unlike browsers/.NET, it
+ * never fetches a missing intermediate CA over the network. If the
+ * intermediate for daily-cloudcode-pa.googleapis.com isn't already cached in
+ * this Windows profile, agy fails outright with `certificate signed by
+ * unknown authority`. Confirmed live: with SSL_CERT_* / proxy vars already
+ * stripped and the env otherwise identical, a plain PowerShell request
+ * (Invoke-WebRequest → .NET → SChannel, which DOES fetch-and-cache missing
+ * intermediates) against the same host succeeds every time — the failure is
+ * specific to Go's cache-only lookup, not the environment or network path.
+ *
+ * Synchronous and blocking (not fire-and-forget): agy can fire its own HTTPS
+ * call within ~1-2s of spawn, faster than an async priming request reliably
+ * wins the race (that's what the async version of this probe demonstrated —
+ * it usually completed just AFTER agy's own failing call). The priming has
+ * to land before the PTY exists, not concurrently with it. Bounded by a
+ * short timeout and fails open — a network hiccup here must never block
+ * opening the terminal, since agy would then just show its normal error.
+ *
+ * Windows' CryptoAPI intermediate cache is machine/profile-level, so one
+ * successful prime serves every agy spawn for this bridge's lifetime. We
+ * memoize on success to pay the (event-loop-blocking) PowerShell cost at most
+ * once per process — a failed prime is NOT recorded, so a later spawn retries.
+ */
+let antigravityCertCachePrimed = false;
+function primeAntigravityCertCache(env: Record<string, string>): void {
+  if (process.platform !== "win32" || antigravityCertCachePrimed) return;
+  const script =
+    "try { Invoke-WebRequest -UseBasicParsing -Uri https://daily-cloudcode-pa.googleapis.com -Method Head -TimeoutSec 4 | Out-Null; Write-Output 'CERT-CACHE-PRIME-OK' } catch { Write-Output ('CERT-CACHE-PRIME-DONE ' + $_.Exception.Message) }";
+  try {
+    const out = execFileSync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", script],
+      { env, timeout: 5_000, encoding: "utf8" },
+    ).trim();
+    antigravityCertCachePrimed = true;
+    logger.info(`antigravity cert-cache prime: ${out}`);
+  } catch (e) {
+    logger.warn(`antigravity cert-cache prime failed, continuing spawn anyway: ${(e as Error).message}`);
+  }
 }
 
 /**
@@ -291,8 +372,8 @@ export class TerminalSession {
       let needsShell = hasWhitespace;
       if (isWin && !hasWhitespace) {
         const pathful = this.command.includes("\\") || this.command.includes("/");
-        if (/\.(cmd|bat)$/i.test(this.command)) {
-          needsShell = true; // explicit shim
+        if (/\.(cmd|bat)$/i.test(this.command) || isAntigravityBinary(this.command)) {
+          needsShell = true; // explicit shim / ConPTY-direct-spawn workaround (see isAntigravityBinary)
         } else if (/\.(exe|com)$/i.test(this.command) || pathful) {
           // Already a concrete target (explicit .exe/.com, or a path) — leave
           // it for direct spawn below.
@@ -346,6 +427,10 @@ export class TerminalSession {
       TERM_PROGRAM_VERSION: "1.0.0",
       ...this.extraEnv,
     } as Record<string, string>);
+
+    if (isAntigravityBinary(this.command ?? "")) {
+      primeAntigravityCertCache(env);
+    }
 
     this.pty = ptySpawn(cmd, args, {
       cols: this._cols,

@@ -31,11 +31,12 @@ export function augmentAgentLaunch(
   abDir: string = resolveAbDir(),
   cursorDir?: string,
   hookCommand: HookCommand = resolveHookCommand(),
+  geminiConfigDir?: string,
 ): LaunchAugmentation {
   const inject = agentSpec(tool)?.hooks?.inject;
   if (!inject) return NO_INJECTION;
   try {
-    return inject({ abDir, cursorDir, hookCommand });
+    return inject({ abDir, cursorDir, geminiConfigDir, hookCommand });
   } catch (err) {
     log.warn("agent launch augmentation failed for %s: %s", tool, err);
     return NO_INJECTION;
