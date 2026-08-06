@@ -29,6 +29,43 @@ String handlerRunStateToWire(HandlerRunState s) {
   }
 }
 
+/// How much of the Handler an armed session can actually get. Mirrors the
+/// bridge's `HandlerObservability` (`bridge/src/handler/engine.ts`), carried on
+/// each session snapshot.
+///
+/// The three are separate user-facing facts and must never be folded together:
+/// [unsupported] means nothing this session does ever reaches the handler, so
+/// arming it stays silent, while [escalateOnly] means the handler is watching
+/// and simply has no judge to answer with.
+enum HandlerObservability {
+  /// The handler sees the session and its judge can run headless.
+  full,
+
+  /// The handler sees the session, but its judge cannot run headless — every
+  /// pause reaches the user instead of being handled.
+  escalateOnly,
+
+  /// The session's agent reports nothing the handler can act on.
+  unsupported,
+}
+
+/// Null for an unknown value — including the absence an older bridge sends.
+/// Callers must render null as "not reported", never as [unsupported]: claiming
+/// a session is unwatchable because the bridge is old is the same class of lie
+/// this field exists to remove.
+HandlerObservability? handlerObservabilityFromWire(dynamic s) {
+  switch (s) {
+    case 'full':
+      return HandlerObservability.full;
+    case 'escalate_only':
+      return HandlerObservability.escalateOnly;
+    case 'unsupported':
+      return HandlerObservability.unsupported;
+    default:
+      return null;
+  }
+}
+
 /// A handler's brief — what it will/won't do, when to wake the user, and the
 /// checklist to run once `doneWhen` is met. Mirrors the bridge's
 /// `HandlerBriefWire` (`bridge/src/protocol.ts`).
@@ -134,6 +171,16 @@ class HandlerSessionState {
   final String? parkKind;
   final int? parkedUntil;
 
+  /// What the handler can actually do with THIS armed session, as the bridge
+  /// reports it. Null = not reported (a bridge predating the field) — the UI
+  /// then claims nothing either way.
+  ///
+  /// This is the post-arm fact. The pre-arm one — "could an agent of this kind
+  /// be watched at all" — is the agent catalog's `handlerTerminal`/
+  /// `handlerChat`, and the two are not interchangeable: the catalog describes
+  /// an agent, this describes a session (its live mode and its judge pick).
+  final HandlerObservability? observability;
+
   const HandlerSessionState({
     required this.terminalId,
     required this.notifyOnly,
@@ -148,6 +195,7 @@ class HandlerSessionState {
     this.judgeModel,
     this.parkKind,
     this.parkedUntil,
+    this.observability,
   });
 
   /// Count of `brief.thenItems` this session's ledger already covers.
@@ -173,6 +221,7 @@ class HandlerSessionState {
     judgeModel: judgeModel,
     parkKind: parkKind,
     parkedUntil: parkedUntil,
+    observability: observability,
   );
 
   static HandlerSessionState? fromWire(dynamic json) {
@@ -236,6 +285,7 @@ class HandlerSessionState {
       judgeModel: judgeModel is String ? judgeModel : null,
       parkKind: parkKind is String ? parkKind : null,
       parkedUntil: parkedUntil is num ? parkedUntil.toInt() : null,
+      observability: handlerObservabilityFromWire(json['observability']),
     );
   }
 }

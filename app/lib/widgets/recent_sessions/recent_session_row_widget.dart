@@ -11,6 +11,7 @@ import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_tap_target.dart';
 import '../../design/widgets/ab_snack_bar.dart';
 import '../../models/recent_session_row.dart';
+import '../../providers/agent_catalog.dart';
 import '../../providers/new_session_picker.dart';
 import '../../providers/now_ticker.dart';
 import '../../providers/project_work_status.dart';
@@ -60,7 +61,10 @@ class _RecentSessionRowWidgetState
     final when = DateTime.fromMillisecondsSinceEpoch(row.session.lastUsedAt);
     final isMobile = MediaQuery.sizeOf(context).width < kCompactBreakpoint;
     final t = context.antgrid;
-    final agentLabel = sessionAgentDisplayLabel(row.session);
+    final agentLabel = sessionAgentDisplayLabel(
+      row.session,
+      ref.watch(agentCatalogProvider),
+    );
     final relTime = relativeTime(when, now: now);
     // This SESSION's own status from the live advert, masked to done for a
     // stopped session — so a blocked/errored agent is unmistakable in the list

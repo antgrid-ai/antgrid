@@ -2,7 +2,8 @@ import { afterAll, test, expect } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { lastAssistantText, readTranscriptTail, TAIL_BYTES } from "../src/transcript-tail";
+import { readTranscriptTail, TAIL_BYTES } from "../src/transcript-tail";
+import { lastAssistantText } from "../src/agents/claude-code/transcript";
 
 const tempDirs: string[] = [];
 

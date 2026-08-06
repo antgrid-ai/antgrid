@@ -1,6 +1,6 @@
 import { describe, it, expect, setSystemTime } from "bun:test";
-import { ClaudeDriver, prettyModelName } from "../src/claude/claude-driver";
-import type { ClaudeQueryLike, PromptStreamController } from "../src/claude/spawn-claude";
+import { ClaudeDriver, prettyModelName } from "../src/agents/claude-code/chat-backend";
+import type { ClaudeQueryLike, PromptStreamController } from "../src/agents/claude-code/spawn";
 import type { AbMessage } from "../src/protocol";
 
 describe("prettyModelName", () => {

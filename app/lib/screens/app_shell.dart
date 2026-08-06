@@ -10,6 +10,7 @@ import '../project/limits.dart';
 import '../project/mobile_lifecycle.dart';
 import '../project/project_session_registry.dart';
 import '../providers/providers.dart';
+import '../providers/agent_catalog.dart';
 import '../providers/agent_transport.dart';
 import '../providers/cached_sessions.dart';
 import '../providers/control_plane.dart';
@@ -288,6 +289,13 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
   // recentSessionsProvider). Absent key = never observed (first advert).
   final Map<String, AgentWorkStatus?> _lastAdvertStatus = {};
 
+  // controlPort of the host whose agent catalog has already been folded into
+  // agentCatalogProvider. The catalog is static per bridge BUILD, so one
+  // tools:list per host process is enough — but a host that restarted may be a
+  // newer binary with new agents, and its port is the cheapest proxy for "a
+  // different process" available on the poll path.
+  int? _catalogSyncedPort;
+
   // Last-seen per-project advert running-session count, keyed by entryId. A
   // count change is the bridge's "the session list actually changed" signal —
   // it fires when a session starts/exits on the DESKTOP (done→working there is
@@ -398,6 +406,12 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
   void _onControlPlaneState(String uuid, AsyncValue<ControlPlaneState> next) {
     final state = next.value;
     if (state == null) return;
+    // Fold this machine's agent catalog in. Single-writer, like the status maps
+    // below: a per-machine `ref.watch` fan-in is what reproduced Riverpod's
+    // "rebuilt multiple times in the same frame" crash. Merging across machines
+    // is sound because the descriptor is a projection of the bridge's static
+    // registry, not a fact about this box.
+    ref.read(agentCatalogProvider.notifier).merge(state.agents);
     final store = ref.read(cachedSessionsStoreProvider);
     final labels = ref.read(remoteProjectLabelsProvider.notifier);
     // Fold the advert's per-project work status into the live status map (one
@@ -567,25 +581,45 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
         port: hostFile.controlPort,
         token: hostFile.token,
       );
+      // One `finally` for the whole client, not one per request: both blocks
+      // below bail early on `!mounted`, and a close reachable only from the
+      // second block leaks the socket pool whenever the first one returns.
       try {
-        final projects = await client.projectList();
-        if (!mounted) return;
-        final statuses = <String, AgentWorkStatus>{};
-        final sessionStatuses = <String, Map<String, AgentWorkStatus>>{};
-        for (final p in projects) {
-          final s = AgentWorkStatus.fromWire(p.workStatus);
-          if (s != null) statuses[p.projectId] = s;
-          final perSession = p.sessionStatuses;
-          if (perSession != null) sessionStatuses[p.projectId] = perSession;
+        // The local bridge is the only machine no control-plane advert covers,
+        // so its catalog is pulled here — once per host process, since the
+        // descriptor is static per bridge build. Contained separately from the
+        // status poll below: a bridge too old to answer tools:list must cost the
+        // catalog, not every project's work status.
+        if (_catalogSyncedPort != hostFile.controlPort) {
+          try {
+            final listed = await client.toolsList();
+            if (!mounted) return;
+            _catalogSyncedPort = hostFile.controlPort;
+            ref.read(agentCatalogProvider.notifier).merge(listed.agents);
+          } catch (_) {
+            // Retried on the next tick — the port stays unrecorded.
+          }
         }
-        ref
-            .read(remoteProjectStatusProvider.notifier)
-            .setLocalStatuses(statuses);
-        ref
-            .read(remoteSessionStatusProvider.notifier)
-            .setLocalSessionStatuses(sessionStatuses);
-      } catch (_) {
-        // Host went away between peek and list — ignore; next tick will retry.
+        try {
+          final projects = await client.projectList();
+          if (!mounted) return;
+          final statuses = <String, AgentWorkStatus>{};
+          final sessionStatuses = <String, Map<String, AgentWorkStatus>>{};
+          for (final p in projects) {
+            final s = AgentWorkStatus.fromWire(p.workStatus);
+            if (s != null) statuses[p.projectId] = s;
+            final perSession = p.sessionStatuses;
+            if (perSession != null) sessionStatuses[p.projectId] = perSession;
+          }
+          ref
+              .read(remoteProjectStatusProvider.notifier)
+              .setLocalStatuses(statuses);
+          ref
+              .read(remoteSessionStatusProvider.notifier)
+              .setLocalSessionStatuses(sessionStatuses);
+        } catch (_) {
+          // Host went away between peek and list — ignore; next tick retries.
+        }
       } finally {
         client.close();
       }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { TOOL_UPDATE_SPECS, updateSpecFor, fetchNpmLatest } from "../src/agent-update";
+import { TOOL_UPDATE_SPECS, updateSpecFor, fetchNpmLatest } from "../src/update/specs";
 
 // The per-tool table is the whole point of this module: a wrong subcommand
 // (opencode `upgrade` vs `update`) or npm package silently breaks that tool's

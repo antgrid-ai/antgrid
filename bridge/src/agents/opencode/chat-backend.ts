@@ -1,9 +1,12 @@
-import { createMessage, createTranscriptReplay, type AbMessage } from "../protocol";
-import type { DriverLifecycleEvent } from "../agents/types";
-import { mapPart, mapPlanEntries, mapTokens, mapOpencodeError } from "./opencode-mapping";
-import { opencodeResumeReplay } from "./opencode-resume-replay";
-import { resolveConfigPick } from "../structured/set-config";
-import { logger } from "../logger";
+import { type AbMessage } from "../../protocol";
+import type { DriverLifecycleEvent } from "../types";
+import { mapPart, mapPlanEntries, mapTokens, mapOpencodeError } from "./mapping";
+import { opencodeResumeReplay } from "./resume-replay";
+import { agentError } from "../../structured/agent-error";
+import { subtask } from "../../structured/tool-card";
+import type { ConfigPick } from "../../structured/set-config";
+import { ChatSession, type ChatSessionProfile } from "../../structured/chat-session";
+import { logger } from "../../logger";
 const log = logger.child({ component: "opencode-driver" });
 
 // `type` is a bare string, not the @opencode-ai/sdk Event union. The binary
@@ -11,7 +14,7 @@ const log = logger.child({ component: "opencode-driver" });
 // tied to the SDK generation and grows/shrinks across opencode releases (the
 // PATH-resolved binary is unpinned). Going untyped keeps such skew from silently
 // dropping events at the type layer. Route skew (the experimental v2 routes the
-// seam calls) instead surfaces loudly at call time via unwrap() in spawn-opencode.ts.
+// seam calls) instead surfaces loudly at call time via unwrap() in spawn.ts.
 export interface OpencodeEvent {
   type: string;
   properties: any;
@@ -41,7 +44,7 @@ export interface OpencodeClientLike {
   events(): AsyncIterable<OpencodeEvent>;
   // May be async: an in-app `opencode upgrade` replaces the on-disk binary that
   // the SDK server (the same binary) is still running, so teardown must resolve
-  // only once that server has exited — see spawn-opencode's dispose.
+  // only once that server has exited — see spawn.ts's dispose.
   dispose(): void | Promise<void>;
 }
 
@@ -53,21 +56,26 @@ export interface OpencodeDriverOpts {
   onLifecycle?: (evt: DriverLifecycleEvent) => void;
 }
 
-export class OpencodeDriver {
-  private readonly sessionId: string;
+type ModelRef = { providerID: string; modelID: string };
+
+export class OpencodeDriver extends ChatSession {
+  // opencode's mappers build whole items and the driver names its own turns.
+  // Its history carries no per-turn status to filter by — a turn in flight is
+  // indistinguishable from a completed one — so a mid-turn snapshot is refused
+  // rather than risk replaying a streaming item as settled. Its interrupt is
+  // `abort(session)`, not a turn.
+  protected readonly profile: ChatSessionProfile = {
+    turnSource: "session",
+    mergeItems: false,
+    snapshotDuringTurn: false,
+    interruptScope: "session",
+  };
+
   private readonly client: OpencodeClientLike;
-  private readonly send: (msg: AbMessage) => void;
   private readonly onTitle?: (title: string) => void;
   private readonly onLifecycle?: (evt: DriverLifecycleEvent) => void;
 
   private rootSessionId = "";
-  private turnCounter = 0;
-  private activeTurnId: string | null = null;
-  private disposed = false;
-  // Set by cancel(): opencode's idle event is bare ({sessionID}), so the driver
-  // can't tell a normal completion from a post-abort one without this flag. The
-  // next root idle/error closes the turn as 'cancelled' instead of end_turn/error.
-  private cancelRequested = false;
   // Whether the last session.status was a retry, so only the transition back to
   // busy/idle clears the park — busy fires constantly during a normal turn.
   private retrying = false;
@@ -77,20 +85,9 @@ export class OpencodeDriver {
   // child sessionID -> its subtask anchor itemId; and child -> parent sessionID.
   private subtaskItem = new Map<string, string>();
   private parentSession = new Map<string, string>();
-  // partID seen -> first sighting emits item-added, later ones item-updated.
-  private seenParts = new Set<string>();
-  // permissionId -> owning opencode sessionID (the reply call needs it).
-  private permissionSession = new Map<string, string>();
-  // questionId -> option labels indexed by the synthetic id we hand the app.
-  // opencode answers by label, so an echoed-back id must be translated back.
-  private questionOptions = new Map<string, string[]>();
-  // Every pending questionId (questionOptions only tracks option-questions;
-  // free-text questions must be retractable too).
-  private pendingQuestionIds = new Set<string>();
   // last assistant model, for compact -> summarize (which requires an explicit model).
-  private model: { providerID: string; modelID: string } | null = null;
+  private model: ModelRef | null = null;
 
-  private capModels: Array<{ id: string; name: string; provider?: string; efforts?: string[] }> = [];
   // "providerID/modelID" -> context-window size, from provider.list()'s
   // per-model `limit.context`. opencode never reports this per-turn (unlike
   // codex's modelContextWindow), so it's looked up by the active message's
@@ -100,34 +97,19 @@ export class OpencodeDriver {
   // Capacity re-emits (discovery, model switch) carry it forward so a
   // capacity-only frame never wipes the meter's occupancy app-side.
   private lastTokens: ReturnType<typeof mapTokens> | null = null;
-  private capModes: Array<{ id: string; name: string; description?: string }> = [];
-  private capCommands: Array<{ id: string; name: string; description?: string; argHint?: string }> = [];
-  private selModel: { providerID: string; modelID: string } | null = null;
-  private selVariant?: string;
-  private selAgent?: string;
-  // Picks that arrived before discovery populated the lists (a resumed session
-  // replays yesterday's pickers to the app instantly, while discovery is still
-  // in flight). Queued and validated once discovery lands, instead of being
-  // silently rejected against empty lists.
-  private capsDiscovered = false;
-  private pendingConfig: Array<{ key: string; value: string }> = [];
 
   constructor(opts: OpencodeDriverOpts) {
-    this.sessionId = opts.sessionId;
+    super({ sessionId: opts.sessionId, sendMessage: opts.sendMessage });
     this.client = opts.client;
-    this.send = opts.sendMessage;
     this.onTitle = opts.onTitle;
     this.onLifecycle = opts.onLifecycle;
   }
 
-  async start(resumeId?: string): Promise<string> {
+  protected async startBackend(resumeId?: string): Promise<string> {
     // Attach the event iterator before createSession so we don't miss the
     // post-create burst. Events for the not-yet-known rootSessionId are still
     // gated out by inTree (benign — opencode emits none before create resolves).
     void this.runEventLoop();
-    // Advertise an empty, not-ready catalog immediately so the app shows a
-    // loading indicator until discoverCapabilities() emits the real one.
-    this.emitCapabilities();
     void this.discoverCapabilities();
     if (resumeId) {
       // Reuse the persisted session — creating a new one would orphan the
@@ -135,12 +117,11 @@ export class OpencodeDriver {
       this.rootSessionId = resumeId;
       try {
         const history = await this.client.messages(resumeId);
-        const replay = createTranscriptReplay(this.sessionId, opencodeResumeReplay(
+        this.emitTranscriptReplay(opencodeResumeReplay(
           this.sessionId,
           history,
           (p, m) => this.modelContextWindows.get(`${p}/${m}`),
         ));
-        if (replay) this.send(replay);
         this.syncContextFromHistory(history);
       } catch {
         // History read failed; continue with the live session anyway — the next
@@ -159,90 +140,51 @@ export class OpencodeDriver {
   // On-demand re-derivation of this session's transcript, for a client attaching
   // to an already-running session (see session.transcriptSnapshot in
   // agent-core.ts). client.messages() is the same non-mutating history read
-  // start(resumeId) already uses for cold-start resume-replay. Unlike codex,
-  // opencode's history carries no per-turn status to filter by — a turn in
-  // flight is indistinguishable from a completed one, so skip the whole snapshot
-  // while one is streaming rather than risk replaying it as settled mid-item.
-  async getTranscriptSnapshot(): Promise<AbMessage[]> {
+  // start(resumeId) already uses for cold-start resume-replay.
+  protected async transcriptSnapshot(): Promise<AbMessage[]> {
     if (!this.rootSessionId) return [];
-    if (this.activeTurnId !== null) return [];
-    try {
-      const history = await this.client.messages(this.rootSessionId);
-      return opencodeResumeReplay(
-        this.sessionId,
-        history,
-        (p, m) => this.modelContextWindows.get(`${p}/${m}`),
-      );
-    } catch (err) {
-      log.warn(
-        "opencode messages() failed for session %s (session %s); returning empty transcript snapshot: %s",
-        this.sessionId,
-        this.rootSessionId,
-        err,
-      );
-      return [];
-    }
+    const history = await this.client.messages(this.rootSessionId);
+    return opencodeResumeReplay(
+      this.sessionId,
+      history,
+      (p, m) => this.modelContextWindows.get(`${p}/${m}`),
+    );
   }
 
-  setConfig(key: string, value: unknown): void {
-    if (typeof value !== "string") return;
-    if (!this.capsDiscovered) {
-      this.pendingConfig.push({ key, value });
-      return;
-    }
-    if (this.applyConfig(key, value)) this.emitCapabilities();
+  // providerID never contains "/" but modelID may — split at the first.
+  protected validateSelection(pick: ConfigPick): boolean {
+    return pick.key !== "model" || pick.id.indexOf("/") > 0;
   }
 
-  // Validate against the advertised lists (see resolveConfigPick) and store.
-  // Rejected picks get no echo — the absent capabilities echo is the signal.
-  private applyConfig(key: string, value: string): boolean {
-    // Effort picks validate against the explicit selection, falling back to
-    // the live model captured from the last assistant message.
-    const current = this.selModel ?? this.model;
-    const pick = resolveConfigPick(key, value, {
-      models: this.capModels,
-      modes: this.capModes,
-      currentModelId: current ? `${current.providerID}/${current.modelID}` : undefined,
-      currentEffortId: this.selVariant,
-    });
-    if (!pick) return false;
-    switch (pick.key) {
-      case "model": {
-        // providerID never contains "/" but modelID may — split at the first.
-        const cut = pick.id.indexOf("/");
-        if (cut <= 0) return false;
-        this.selModel = { providerID: pick.id.slice(0, cut), modelID: pick.id.slice(cut + 1) };
-        if (pick.clearEffort) this.selVariant = undefined;
-        this.emitContextCapacity();
-        break;
-      }
-      case "effort":
-        this.selVariant = pick.id;
-        break;
-      case "mode":
-        this.selAgent = pick.id;
-        break;
-    }
-    return true;
+  protected applySelection(pick: ConfigPick): void {
+    if (pick.key === "model") this.emitContextCapacity();
   }
 
-  async prompt(text: string, commandId?: string): Promise<void> {
+  protected liveModelId(): string | undefined {
+    return this.model ? `${this.model.providerID}/${this.model.modelID}` : undefined;
+  }
+
+  /** The explicit pick as opencode's prompt API wants it (a pair, not a ref
+   *  string). validateSelection guarantees the separator is present. */
+  private get selModelRef(): ModelRef | null {
+    if (!this.selModel) return null;
+    const cut = this.selModel.indexOf("/");
+    return cut > 0 ? { providerID: this.selModel.slice(0, cut), modelID: this.selModel.slice(cut + 1) } : null;
+  }
+
+  protected async preparePrompt(): Promise<void> {
     if (!this.rootSessionId) this.rootSessionId = await this.client.createSession({});
-    // compact drives its own lifecycle (same contract as agent:session-action).
-    if (commandId === "builtin:compact") return this.compact();
-    this.activeTurnId = `turn-${this.turnCounter++}`;
-    // Each new turn starts clean: a cancel() whose idle never arrived must not
-    // bleed a stale cancelRequested into this turn.
-    this.cancelRequested = false;
-    this.send(createMessage("agent:turn-start", { sessionId: this.sessionId, turnId: this.activeTurnId }));
+  }
+
+  protected async sendPrompt(text: string, commandId?: string): Promise<void> {
     if (commandId?.startsWith("cmd:")) {
       await this.client.command(this.rootSessionId, {
         command: commandId.slice("cmd:".length),
         ...(text.trim() ? { arguments: text } : {}),
-        ...(this.selAgent ? { agent: this.selAgent } : {}),
+        ...(this.selMode ? { agent: this.selMode } : {}),
         // session.command takes the "provider/model" ref string, not the pair.
-        ...(this.selModel ? { model: `${this.selModel.providerID}/${this.selModel.modelID}` } : {}),
-        ...(this.selVariant ? { variant: this.selVariant } : {}),
+        ...(this.selModel ? { model: this.selModel } : {}),
+        ...(this.selEffort ? { variant: this.selEffort } : {}),
       });
       return;
     }
@@ -250,27 +192,20 @@ export class OpencodeDriver {
     // Reachable when the app holds capabilities from another driver/session
     // (stale replay); log it so the dropped routing is diagnosable.
     if (commandId) log.warn("opencode: unrecognized commandId %s; sending as plain prompt", commandId);
+    const model = this.selModelRef;
     await this.client.prompt(this.rootSessionId, text, {
-      ...(this.selModel ? { model: this.selModel } : {}),
-      ...(this.selAgent ? { agent: this.selAgent } : {}),
-      ...(this.selVariant ? { variant: this.selVariant } : {}),
+      ...(model ? { model } : {}),
+      ...(this.selMode ? { agent: this.selMode } : {}),
+      ...(this.selEffort ? { variant: this.selEffort } : {}),
     });
   }
 
-  async cancel(turnId?: string): Promise<boolean> {
-    if (!this.rootSessionId) return false;
-    // Stale turnId => refuse rather than abort; see the claude driver's cancel
-    // for the rationale. It matters most here: abort takes a session, not a
-    // turn, so an unaimed cancel would take down whatever is live. Gated on
-    // activeTurnId too, so a turnId arriving with nothing running still falls
-    // through to the abort-regardless path below.
-    if (turnId && this.activeTurnId && turnId !== this.activeTurnId) return false;
-    this.cancelRequested = true;
+  protected interruptReady(): boolean {
+    return !!this.rootSessionId;
+  }
+
+  protected async interrupt(_turnId: string): Promise<void> {
     await this.client.abort(this.rootSessionId);
-    // Reported from activeTurnId, not from the abort: the turn-end comes from
-    // the resulting idle event, which only arrives if a turn was actually
-    // running. Aborting regardless preserves the pre-existing behavior.
-    return this.activeTurnId !== null;
   }
 
   async compact(): Promise<void> {
@@ -290,50 +225,31 @@ export class OpencodeDriver {
       if (typeof id === "string" && id) await this.client.deleteMessage(this.rootSessionId, id);
     }
     const nextHistory = await this.client.messages(this.rootSessionId);
-    this.activeTurnId = null;
-    this.cancelRequested = false;
-    this.endTurnCleanup();
-    this.send(createMessage("agent:session-reset", { sessionId: this.sessionId }));
-    const replay = createTranscriptReplay(this.sessionId, opencodeResumeReplay(
+    this.endTurn();
+    this.emitSessionReset();
+    this.emitTranscriptReplay(opencodeResumeReplay(
       this.sessionId,
       nextHistory,
       (p, m) => this.modelContextWindows.get(`${p}/${m}`),
     ));
-    if (replay) this.send(replay);
     this.syncContextFromHistory(nextHistory);
   }
 
-  resolvePermission(permissionId: string, optionId: string): void {
-    const sid = this.permissionSession.get(permissionId);
-    if (!sid) return;
-    this.permissionSession.delete(permissionId);
-    const response = optionId === "once" || optionId === "always" ? optionId : "reject";
-    void this.client.replyPermission(sid, permissionId, response).catch(() => {});
+  // Per-turn message-role state is only meaningful within a turn; the session
+  // clears the item and prompt state alongside it.
+  protected clearTurnState(): void {
+    this.messageRole.clear();
   }
 
-  resolveQuestion(questionId: string, answer: string | string[]): void {
-    const labels = this.questionOptions.get(questionId);
-    this.questionOptions.delete(questionId);
-    this.pendingQuestionIds.delete(questionId);
-    // No stored options = free-form text question: pass the answer through.
-    // Otherwise the app echoes back synthetic option ids; translate each to its
-    // label (opencode answers by label). A value that isn't a valid index is
-    // passed through unchanged — a caller that already sent a label still works.
-    const toLabel = (v: string): string => {
-      if (!labels) return v;
-      const i = Number(v);
-      return Number.isInteger(i) && i >= 0 && i < labels.length ? labels[i]! : v;
-    };
-    const translated = Array.isArray(answer) ? answer.map(toLabel) : toLabel(answer);
-    void this.client.replyQuestion(questionId, translated).catch(() => {});
+  // opencode is the only backend whose question ids are the PROVIDER's, so an
+  // answer for a prompt the session has already withdrawn is still routable —
+  // and worth routing, because opencode is still waiting on it. Untranslated:
+  // the option labels went with the retraction.
+  protected resolveUnknownQuestion(questionId: string, answer: string | string[]): void {
+    void this.client.replyQuestion(questionId, answer).catch(() => {});
   }
 
-  dispose(): void | Promise<void> {
-    // Withdraw any permission/question still on screen so it doesn't wedge after
-    // teardown (LRU eviction, focus disposal) — same retraction contract as the
-    // codex driver's dispose(). Runs before disposed=true so send() still fires.
-    this.endTurnCleanup();
-    this.disposed = true;
+  protected disposeBackend(): void | Promise<void> {
     // Return the client teardown so StructuredManager.stopChat awaits the server
     // exit before an in-app update touches the binary (mirrors codex's
     // dispose→proc.exited). Void for a client whose dispose is synchronous.
@@ -357,27 +273,20 @@ export class OpencodeDriver {
       // via agent:error from session.error, but a mid-turn close emits no such
       // event — close out any in-flight turn so the app doesn't spin forever.
       if (this.disposed) return;
-      const turnId = this.activeTurnId;
-      if (turnId) {
-        const cancelled = this.cancelRequested;
-        this.cancelRequested = false;
-        this.send(createMessage("agent:turn-end", {
-          sessionId: this.sessionId,
-          turnId,
-          stopReason: cancelled ? "cancelled" : "error",
-          ...(cancelled
-            ? {}
-            : {
-                error: {
-                  category: "unknown",
-                  message: "opencode session ended unexpectedly",
-                  retryable: false,
-                },
+      if (!this.activeTurnId) return;
+      const cancelled = this.cancelRequested;
+      this.closeTurn({
+        stopReason: cancelled ? "cancelled" : "error",
+        ...(cancelled
+          ? {}
+          : {
+              error: agentError({
+                category: "unknown",
+                message: "opencode session ended unexpectedly",
+                retryable: false,
               }),
-        }));
-        this.activeTurnId = null;
-        this.endTurnCleanup();
-      }
+            }),
+      });
     }
   }
 
@@ -449,43 +358,19 @@ export class OpencodeDriver {
       this.capModels = models;
       this.modelContextWindows = contextWindows;
     }
-    this.capsDiscovered = true;
-    const queued = this.pendingConfig;
-    this.pendingConfig = [];
-    for (const p of queued) this.applyConfig(p.key, p.value);
-    this.emitCapabilities();
+    this.capabilitiesReady();
     this.emitContextCapacity();
-  }
-
-  private emitCapabilities(): void {
-    // Explicit selection wins; otherwise advertise the live model captured
-    // from the last assistant message.
-    const current = this.selModel ?? this.model;
-    this.send(createMessage("agent:capabilities", {
-      sessionId: this.sessionId,
-      ready: this.capsDiscovered,
-      commands: this.capCommands,
-      modes: this.capModes,
-      models: this.capModels,
-      ...(current ? { currentModelId: `${current.providerID}/${current.modelID}` } : {}),
-      ...(this.selVariant ? { currentEffortId: this.selVariant } : {}),
-      ...(this.selAgent ? { currentModeId: this.selAgent } : {}),
-    }));
   }
 
   // Capacity-first meter seed lets the app render before the first response.
   // No-op until a current model is known; a fresh session
   // with no explicit pick has none until the first assistant message.
   private emitContextCapacity(): void {
-    const current = this.selModel ?? this.model;
+    const current = this.selModel ?? this.liveModelId();
     if (!current) return;
-    const cw = this.modelContextWindows.get(`${current.providerID}/${current.modelID}`);
+    const cw = this.modelContextWindows.get(current);
     if (cw === undefined) return;
-    this.send(createMessage("agent:usage", {
-      sessionId: this.sessionId,
-      total: this.lastTokens ?? {},
-      contextWindow: cw,
-    }));
+    this.emitUsage({ total: this.lastTokens ?? {}, contextWindow: cw });
   }
 
   // A reset removes the app's live meter state, while item-anchored replay
@@ -515,11 +400,10 @@ export class OpencodeDriver {
     const contextWindow = this.model
       ? this.modelContextWindows.get(`${this.model.providerID}/${this.model.modelID}`)
       : undefined;
-    this.send(createMessage("agent:usage", {
-      sessionId: this.sessionId,
+    this.emitUsage({
       total: this.lastTokens,
       ...(contextWindow !== undefined ? { contextWindow } : {}),
-    }));
+    });
   }
 
   private inTree(sid: string): boolean {
@@ -566,12 +450,11 @@ export class OpencodeDriver {
         const contextWindow = info.providerID && info.modelID
           ? this.modelContextWindows.get(`${info.providerID}/${info.modelID}`)
           : undefined;
-        this.send(createMessage("agent:usage", {
-          sessionId: this.sessionId,
+        this.emitUsage({
           turnId: this.activeTurnId ?? undefined,
           total: this.lastTokens,
           ...(contextWindow !== undefined ? { contextWindow } : {}),
-        }));
+        });
       }
     }
   }
@@ -585,26 +468,17 @@ export class OpencodeDriver {
     if (!mapped) return;
     const parentItemId = this.parentItemIdFor(owner);
     const item = parentItemId ? { ...mapped, parentItemId } : mapped;
-    const turnId = this.activeTurnId ?? "";
-    const first = !this.seenParts.has(part.id);
-    this.seenParts.add(part.id);
-    this.send(createMessage(first ? "agent:item-added" : "agent:item-updated", {
-      sessionId: this.sessionId, turnId, itemId: item.itemId,
-      ...(first && parentItemId ? { parentItemId } : {}),
-      item,
-    }));
+    this.emitItem(item.itemId, item as unknown as Record<string, unknown>, {
+      turnId: this.activeTurnId ?? "",
+      ...(parentItemId ? { parentItemId } : {}),
+    });
   }
 
   private onPartDelta(p: any): void {
     if (p?.field !== "text") return;
     const owner: string = p?.sessionID ?? this.rootSessionId;
     if (!this.inTree(owner)) return;
-    this.send(createMessage("agent:item-delta", {
-      sessionId: this.sessionId,
-      turnId: this.activeTurnId ?? "",
-      itemId: String(p?.partID ?? ""),
-      textChunk: String(p?.delta ?? ""),
-    }));
+    this.emitDelta(String(p?.partID ?? ""), String(p?.delta ?? ""), this.activeTurnId ?? "");
   }
 
   private onSessionCreated(p: any): void {
@@ -617,16 +491,16 @@ export class OpencodeDriver {
     this.subtaskItem.set(childId, itemId);
     this.parentSession.set(childId, parentID);
     const parentItemId = this.parentItemIdFor(parentID);
-    const item: any = {
-      itemId, kind: "subtask", status: "running",
+    const item = subtask({
+      itemId, status: "running",
       title: String(info.title ?? "subagent"), agent: info.agent,
       ...(parentItemId ? { parentItemId } : {}),
-    };
-    this.send(createMessage("agent:item-added", {
-      sessionId: this.sessionId, turnId: this.activeTurnId ?? "", itemId,
+    });
+    this.emitItem(itemId, item as unknown as Record<string, unknown>, {
+      turnId: this.activeTurnId ?? "",
+      added: true,
       ...(parentItemId ? { parentItemId } : {}),
-      item,
-    }));
+    });
   }
 
   // opencode's server generates a conversation title and pushes it on
@@ -646,9 +520,15 @@ export class OpencodeDriver {
     const itemId = this.subtaskItem.get(sid);
     if (!itemId) return;
     const parentItemId = this.subtaskItem.get(this.parentSession.get(sid) ?? "");
-    const item: any = { itemId, kind: "subtask", status, ...(parentItemId ? { parentItemId } : {}) };
-    if (status === "error" && rawError) item.error = mapOpencodeError(rawError);
-    this.send(createMessage("agent:item-updated", { sessionId: this.sessionId, turnId: this.activeTurnId ?? "", itemId, item }));
+    const item = subtask({
+      itemId, status,
+      ...(parentItemId ? { parentItemId } : {}),
+      ...(status === "error" && rawError ? { error: mapOpencodeError(rawError) } : {}),
+    });
+    this.emitItem(itemId, item as unknown as Record<string, unknown>, {
+      turnId: this.activeTurnId ?? "",
+      added: false,
+    });
     // Terminal state: the child session won't emit again, so drop its tracking.
     this.subtaskItem.delete(sid);
     this.parentSession.delete(sid);
@@ -658,11 +538,7 @@ export class OpencodeDriver {
     const sid: string = p?.sessionID ?? "";
     if (sid === this.rootSessionId) {
       if (!this.activeTurnId) return;
-      const stopReason = this.cancelRequested ? "cancelled" : "end_turn";
-      this.cancelRequested = false;
-      this.send(createMessage("agent:turn-end", { sessionId: this.sessionId, turnId: this.activeTurnId, stopReason }));
-      this.activeTurnId = null;
-      this.endTurnCleanup();
+      this.closeTurn({ stopReason: this.cancelRequested ? "cancelled" : "end_turn" });
     } else if (this.subtaskItem.has(sid)) {
       this.flipSubtask(sid, "completed");
     }
@@ -691,26 +567,6 @@ export class OpencodeDriver {
     this.onLifecycle?.({ event: "limit_cleared" });
   }
 
-  // Per-turn part/role state is only meaningful within a turn; clearing it at the
-  // turn boundary keeps these maps from growing unbounded across a long session
-  // (and lets a part id reused next turn re-emit item-added as a first sighting).
-  private endTurnCleanup(): void {
-    this.seenParts.clear();
-    this.messageRole.clear();
-    // A permission/question still pending when the turn ends is unanswerable —
-    // tell the app so the prompt doesn't wedge on screen (same contract as the
-    // codex driver's retraction).
-    for (const permissionId of this.permissionSession.keys()) {
-      this.send(createMessage("agent:request-retracted", { sessionId: this.sessionId, permissionId }));
-    }
-    this.permissionSession.clear();
-    for (const questionId of this.pendingQuestionIds) {
-      this.send(createMessage("agent:request-retracted", { sessionId: this.sessionId, questionId }));
-    }
-    this.pendingQuestionIds.clear();
-    this.questionOptions.clear();
-  }
-
   private onSessionError(p: any): void {
     const sid: string = p?.sessionID ?? "";
     const error = mapOpencodeError(p?.error);
@@ -722,7 +578,6 @@ export class OpencodeDriver {
       // A user abort surfaces here as MessageAbortedError; report cancellation,
       // not a turn error (and omit the error payload in that case).
       const cancelled = this.cancelRequested || error.category === "aborted";
-      this.cancelRequested = false;
       // The retry episode ended here, whichever way the turn went. Leaving the
       // flag set would make the next turn's first busy status report a
       // limit_cleared that cancels this failure's own park before it can wake.
@@ -732,18 +587,15 @@ export class OpencodeDriver {
       // the turn boundary instead of spending a judge call on a failure the
       // provider is refusing anyway.
       if (!cancelled) this.reportTerminalFailure(p?.error, error.category);
-      this.send(createMessage("agent:turn-end", {
-        sessionId: this.sessionId,
-        turnId,
+      this.closeTurn({
         stopReason: cancelled ? "cancelled" : "error",
+        turnId,
         ...(cancelled ? {} : { error }),
-      }));
-      this.activeTurnId = null;
-      this.endTurnCleanup();
+      });
     } else if (this.subtaskItem.has(sid)) {
       this.flipSubtask(sid, "error", p?.error);
     } else {
-      this.send(createMessage("agent:error", { sessionId: this.sessionId, error }));
+      this.emitError(error);
     }
   }
 
@@ -764,9 +616,7 @@ export class OpencodeDriver {
   private onPermissionAsked(p: any): void {
     const permissionId: string = p?.id ?? "";
     const sid: string = p?.sessionID ?? this.rootSessionId;
-    this.permissionSession.set(permissionId, sid);
-    this.send(createMessage("agent:permission-request", {
-      sessionId: this.sessionId,
+    this.askPermission({
       permissionId,
       // PermissionRequest.permission is the permission key (a string); `tool` is
       // {messageID, callID} with no name. Use the key as the title.
@@ -776,7 +626,11 @@ export class OpencodeDriver {
         { optionId: "always", label: "Always allow", kind: "allow_always" },
         { optionId: "reject", label: "Deny", kind: "reject" },
       ],
-    }));
+    }, (optionId) => {
+      if (optionId === null) return;
+      const response = optionId === "once" || optionId === "always" ? optionId : "reject";
+      void this.client.replyPermission(sid, permissionId, response).catch(() => {});
+    });
   }
 
   private onQuestionAsked(p: any): void {
@@ -788,27 +642,22 @@ export class OpencodeDriver {
     // — no id/text/prompt fields. Options are answered by label, so synthesize an
     // id from the index purely for the app's option list.
     const kind = opts.length === 0 ? "text" : q.multiple ? "multi_select" : "single_select";
-    if (opts.length > 0) this.questionOptions.set(questionId, opts.map((o) => String(o?.label ?? "")));
-    this.pendingQuestionIds.add(questionId);
-    this.send(createMessage("agent:question", {
-      sessionId: this.sessionId,
+    this.askQuestion({
       questionId,
       kind,
       prompt: String(q.question ?? q.header ?? "?"),
       ...(opts.length > 0
         ? { options: opts.map((o, i) => ({ id: String(i), label: String(o?.label ?? ""), description: o?.description })) }
         : {}),
-    }));
+    }, (value) => {
+      if (value === null) return;
+      void this.client.replyQuestion(questionId, value).catch(() => {});
+    }, opts.length > 0 ? { labels: opts.map((o) => String(o?.label ?? "")) } : undefined);
   }
 
   private onTodoUpdated(p: any): void {
     const sid: string = p?.sessionID ?? "";
     if (sid !== this.rootSessionId) return; // v1: only the root session's plan
-    const turnId = this.activeTurnId ?? "";
-    const itemId = `plan:${turnId}`;
-    this.send(createMessage("agent:item-updated", {
-      sessionId: this.sessionId, turnId, itemId,
-      item: { itemId, kind: "plan", entries: mapPlanEntries(p?.todos) },
-    }));
+    this.emitPlan(this.activeTurnId ?? "", mapPlanEntries(p?.todos));
   }
 }

@@ -13,6 +13,16 @@
 /// Coverage is partial ON PURPOSE — an agent with no upstream mark gets a
 /// monogram from [AbAgentMark] rather than an approximated logo, and a key this
 /// app has never heard of takes the same path.
+///
+/// This map stays app-owned even though labels and capabilities now come off
+/// the wire (see `providers/agent_catalog.dart`), for two reasons the monogram
+/// makes safe: these are ASSETS, not machine facts — the same agent must render
+/// identically whether it was described by a new bridge, an old one, or the
+/// persisted catalog — and the fallback means a newly-registered agent is
+/// already handled with no app release. [AbIcon] renders raw SVG strings, so
+/// accepting a mark from the wire would put bridge-supplied markup into the
+/// app's icon pipeline; if a bridge must ever influence this, the only
+/// acceptable shape is an enum slug, never markup.
 abstract final class AbAgentMarks {
   /// Simple Icons `claude`.
   static const _claude =

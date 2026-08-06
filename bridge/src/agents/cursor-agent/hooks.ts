@@ -106,6 +106,13 @@ const CursorStopPayloadSchema = z.object({ status: z.string().nullish() });
 
 export const events = ["session-start", "stop"] as const;
 
+export const turnBoundaryEvents = {
+  start: [],
+  end: ["stop"],
+} as const;
+
+export const posts = ["/session-title", "/notify"] as const;
+
 export async function toPosts(
   invocation: HookInvocation,
   { port, terminalId, readStdin }: HookPostCtx,

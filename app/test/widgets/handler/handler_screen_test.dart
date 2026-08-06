@@ -10,6 +10,7 @@ HandlerSessionState sessionState(
   String terminalId, {
   String? judgeTool,
   String? judgeModel,
+  HandlerObservability? observability,
 }) => HandlerSessionState(
   terminalId: terminalId,
   notifyOnly: false,
@@ -27,6 +28,7 @@ HandlerSessionState sessionState(
   escalations: const [],
   judgeTool: judgeTool,
   judgeModel: judgeModel,
+  observability: observability,
 );
 
 HandlerState stateWith({
@@ -179,6 +181,58 @@ void main() {
       ),
     );
     expect(find.text('claude-code'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('an unwatchable armed session says so on its row', (
+    tester,
+  ) async {
+    await pumpHandlerScreen(
+      tester,
+      stateWith(
+        sessions: {
+          't1': sessionState(
+            't1',
+            observability: HandlerObservability.unsupported,
+          ),
+        },
+      ),
+    );
+    expect(find.textContaining('Not watched'), findsOneWidget);
+    expect(find.text('ESCALATE ONLY'), findsNothing);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('an escalate-only session reads differently from an unwatchable one', (
+    tester,
+  ) async {
+    // Two distinct facts: this one IS watched and merely has no judge to answer
+    // with. Rendering them the same would hide which one the user is looking at.
+    await pumpHandlerScreen(
+      tester,
+      stateWith(
+        sessions: {
+          't1': sessionState(
+            't1',
+            observability: HandlerObservability.escalateOnly,
+          ),
+        },
+      ),
+    );
+    expect(find.text('ESCALATE ONLY'), findsOneWidget);
+    expect(find.textContaining('Not watched'), findsNothing);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('a session with no reported observability is marked neither way', (
+    tester,
+  ) async {
+    await pumpHandlerScreen(
+      tester,
+      stateWith(sessions: {'t1': sessionState('t1')}),
+    );
+    expect(find.textContaining('Not watched'), findsNothing);
+    expect(find.text('ESCALATE ONLY'), findsNothing);
     debugDefaultTargetPlatformOverride = null;
   });
 }

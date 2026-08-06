@@ -1,10 +1,14 @@
 // Pure SDKMessage → agent:* mappers for the Claude Code driver. No SDK runtime
 // imports — only plain-object transforms — so these unit-test in isolation
-// (mirrors codex-mapping.ts).
+// (mirrors ../codex/mapping.ts).
+
+import type { AgentError } from "../../protocol";
+import { agentError } from "../../structured/agent-error";
+import type { ToolKind } from "../../structured/tool-card";
 
 type AbItemToolUse = { id: string; name: string; input: any };
 
-export function mapToolKind(sdkToolName: string): string {
+export function mapToolKind(sdkToolName: string): ToolKind {
   if (sdkToolName.startsWith("mcp__")) return "mcp";
   switch (sdkToolName) {
     case "Bash": return "shell";
@@ -60,13 +64,6 @@ export function addUsage(total: ClaudeUsageTotals, delta: ClaudeUsageTotals): vo
   total.totalTokens += delta.totalTokens;
 }
 
-export interface ClaudeTurnError {
-  category: "unknown" | "rate_limited";
-  message: string;
-  retryable: boolean;
-  retryAfterMs?: number;
-}
-
 /** A rejecting `rate_limit_event` the driver saw before the failure. */
 export interface ClaudeRateLimit {
   /** Epoch SECONDS, the unit the CLI emits (it renders `new Date(resetsAt * 1000)`). */
@@ -77,20 +74,20 @@ export interface ClaudeRateLimit {
 // The result chunk itself never names the cause, so the caller supplies the
 // rate-limit snapshot that arrived on the side channel; without one a failure
 // stays deliberately coarse.
-export function mapFailureError(message: string, limited?: ClaudeRateLimit): ClaudeTurnError {
-  if (!limited) return { category: "unknown", message, retryable: false };
+export function mapFailureError(message: string, limited?: ClaudeRateLimit): AgentError {
+  if (!limited) return agentError({ category: "unknown", message, retryable: false });
   const retryAfterMs = limited.resetsAt !== undefined
     ? Math.max(0, limited.resetsAt * 1000 - limited.now)
     : undefined;
-  return {
+  return agentError({
     category: "rate_limited",
     message,
     retryable: true,
     ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
-  };
+  });
 }
 
-export function mapResultError(chunk: any, limited?: ClaudeRateLimit): ClaudeTurnError {
+export function mapResultError(chunk: any, limited?: ClaudeRateLimit): AgentError {
   // SDKResultError carries `errors: string[]` (no `result` field — that's
   // SDKResultSuccess only). Joining errors gives the actual failure reason
   // instead of the generic subtype fallback.

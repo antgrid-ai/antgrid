@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { claudeResumeReplay } from "../src/claude/claude-resume-replay";
+import { claudeResumeReplay } from "../src/agents/claude-code/resume-replay";
 
 describe("claudeResumeReplay", () => {
   it("replays assistant text history as one resumed turn", () => {

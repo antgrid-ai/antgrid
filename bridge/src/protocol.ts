@@ -376,6 +376,22 @@ const AgentProjectsMessage = BaseMessage.extend({
   ),
 });
 
+/**
+ * One agent as the registry describes it, independent of whether this machine
+ * has it installed. The static half of the tools advertisement: `tools` says
+ * what is on PATH here, this says what each agent IS. Every field is required
+ * WITHIN the descriptor — a bridge that sends the array has answered all of it;
+ * the array itself is what is optional.
+ */
+const AgentDescriptorSchema = z.object({
+  tool: z.string(),
+  label: z.string(),
+  chatCapable: z.boolean(),
+  judgeCapable: z.boolean(),
+  handler: z.object({ terminal: z.boolean(), chat: z.boolean() }),
+});
+export type AgentDescriptor = z.infer<typeof AgentDescriptorSchema>;
+
 // Outbound agent→app, control plane only: the machine's installed coding-agent
 // tools (AGENTS ∩ PATH). Machine-level, NOT project-scoped — so it is not
 // gated by the per-phone allowlist (which scopes projects, not tools). E2E-opaque
@@ -394,6 +410,12 @@ const AgentToolsMessage = BaseMessage.extend({
       label: z.string().optional(),
     }),
   ),
+  // The whole registry, not just what is on PATH — see AgentDescriptorSchema.
+  // A cached session row from another machine, and a picker that must offer
+  // agents this machine lacks, both need facts the PATH probe structurally
+  // cannot carry. Optional so a bridge predating it still parses; an app with no
+  // descriptor falls back to its own last-known catalog.
+  agents: z.array(AgentDescriptorSchema).optional(),
 });
 
 // Outbound agent→app, control plane only: announces the streamId a phone binds
@@ -747,6 +769,11 @@ const HandlerSessionSnapshot = z.object({
   // Per-session judge choice (absent = session default tool / CLI default model).
   judgeTool: z.string().optional(),
   judgeModel: z.string().optional(),
+  // How much of the Handler this session can actually get, so the app can tell
+  // "cannot report at all" from "armed and quiet" (HandlerObservability in
+  // handler/engine.ts). Optional and appended LAST: an older app still parses
+  // the snapshot, and every key it reads keeps its position.
+  observability: z.enum(["full", "escalate_only", "unsupported"]).optional(),
 });
 
 const HandlerStatusMessage = BaseMessage.extend({

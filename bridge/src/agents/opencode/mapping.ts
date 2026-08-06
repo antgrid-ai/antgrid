@@ -1,10 +1,13 @@
-import type { AgentItem, AgentError } from "../protocol";
-import type { AgentUsageBreakdown } from "../structured/normalize";
-
-type ToolContent = NonNullable<AgentItem["content"]>;
+import type { AgentItem, AgentError } from "../../protocol";
+import type { AgentUsageBreakdown } from "../../structured/normalize";
+import { agentError, byName, type ErrorClass } from "../../structured/agent-error";
+import {
+  compaction, message as messageItem, reasoning, toolCall, toolOutput,
+  type PlanStatus, type ToolKind, type ToolStatus,
+} from "../../structured/tool-card";
 
 /** opencode builtin tool name -> normalized toolKind. */
-export function toolKind(name: string): string {
+export function toolKind(name: string): ToolKind {
   switch (name) {
     case "bash":
     case "shell": return "shell";
@@ -24,7 +27,7 @@ export function toolKind(name: string): string {
   }
 }
 
-function mapToolStatus(s: string | undefined): string {
+function mapToolStatus(s: string | undefined): ToolStatus {
   switch (s) {
     case "pending": return "pending";
     case "running": return "running";
@@ -35,7 +38,7 @@ function mapToolStatus(s: string | undefined): string {
 }
 
 // opencode todo status: pending | in_progress | completed | cancelled.
-function mapTodoStatus(s: string | undefined): string {
+function mapTodoStatus(s: string | undefined): PlanStatus {
   switch (s) {
     case "in_progress": return "running";
     case "completed": return "completed";
@@ -44,7 +47,7 @@ function mapTodoStatus(s: string | undefined): string {
   }
 }
 
-export function mapPlanEntries(todos: unknown): Array<{ text: string; status: string }> {
+export function mapPlanEntries(todos: unknown): Array<{ text: string; status: PlanStatus }> {
   return (Array.isArray(todos) ? todos : []).map((t: any) => ({
     text: String(t?.content ?? ""),
     status: mapTodoStatus(t?.status),
@@ -68,7 +71,7 @@ export function mapTokens(tokens: any): AgentUsageBreakdown {
 }
 
 // opencode NamedError: { name, data:{ message? } } (or a bare string).
-const ERROR_BY_NAME: Record<string, { category: AgentError["category"]; retryable: boolean }> = {
+const ERROR_BY_NAME: Record<string, ErrorClass> = {
   ProviderAuthError: { category: "auth", retryable: false },
   MessageAbortedError: { category: "aborted", retryable: false },
   MessageOutputLengthError: { category: "context_overflow", retryable: false },
@@ -79,15 +82,10 @@ export function mapOpencodeError(err: any): AgentError {
   const message: string =
     (err && typeof err === "object" ? (err.data?.message ?? err.message) : undefined) ??
     (typeof err === "string" ? err : "agent error");
-  const mapped = ERROR_BY_NAME[name] ?? { category: "unknown" as const, retryable: false };
-  return { category: mapped.category, message, retryable: mapped.retryable, provider: "opencode", raw: err };
-}
-
-function toolContent(kind: string, output: string): ToolContent {
-  if (!output) return [];
-  return kind === "shell"
-    ? [{ type: "terminal", data: output }]
-    : [{ type: "text", text: output }];
+  const mapped = byName(ERROR_BY_NAME, name);
+  return agentError({
+    category: mapped.category, message, retryable: mapped.retryable, provider: "opencode", raw: err,
+  });
 }
 
 /** Map one opencode message Part to a normalized AgentItem, or null if ignored. */
@@ -96,41 +94,39 @@ export function mapPart(part: any, role: "assistant" | "user" = "assistant"): Ag
   const itemId: string = part.id ?? "";
   switch (part.type) {
     case "text":
-      return {
+      return messageItem({
         itemId,
-        kind: "message",
         role,
         text: String(part.text ?? ""),
         ...(part.messageID ? { revertTarget: { messageId: String(part.messageID), partId: itemId } } : {}),
-      };
+      });
     case "reasoning":
-      return { itemId, kind: "reasoning", text: String(part.text ?? "") };
+      return reasoning({ itemId, text: String(part.text ?? "") });
     case "tool": {
       const kind = toolKind(String(part.tool ?? ""));
       const state = part.state ?? {};
-      const item: AgentItem = {
-        itemId, kind: "tool_call", toolKind: kind,
+      return toolCall({
+        itemId, toolKind: kind,
         status: mapToolStatus(state.status),
         title: String(state.title ?? part.tool ?? "tool"),
         rawInput: state.input,
-      };
-      if (state.status === "completed" && typeof state.output === "string") {
-        item.content = toolContent(kind, state.output);
-      }
-      if (state.status === "error") item.error = mapOpencodeError(state.error);
-      return item;
+        ...(state.status === "completed" && typeof state.output === "string"
+          ? { content: toolOutput(kind, state.output) }
+          : {}),
+        ...(state.status === "error" ? { error: mapOpencodeError(state.error) } : {}),
+      });
     }
     case "patch": {
       // PatchPart carries changed file paths, not diff text (the diff body is not
       // on the event); emit a per-file diff stub so the UI lists the touched files.
       const files: string[] = Array.isArray(part.files) ? part.files : [];
-      return {
-        itemId, kind: "tool_call", toolKind: "edit", status: "completed", title: "Edit files",
+      return toolCall({
+        itemId, toolKind: "edit", status: "completed", title: "Edit files",
         content: files.map((f) => ({ type: "diff" as const, path: String(f), newText: "" })),
-      };
+      });
     }
     case "compaction":
-      return { itemId, kind: "compaction" };
+      return compaction({ itemId });
     default:
       // file (attachment), agent, subtask, step-start/finish, snapshot, retry:
       // subtask is handled via session.created; the rest are not v1 item kinds.

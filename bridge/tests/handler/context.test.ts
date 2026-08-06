@@ -5,9 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import {
-  readLastClaudeMessages, stripAnsi, assembleContext,
+  stripAnsi, assembleContext,
   PTY_MAX_CHARS, PLAN_MAX_CHARS, DECIDE_MAX_CHARS,
 } from "../../src/handler/context";
+import { readLastClaudeMessages } from "../../src/agents/claude-code/transcript";
 
 function writeJsonl(lines: object[]): string {
   const p = join(mkdtempSync(join(tmpdir(), "ab-ctx-")), "t.jsonl");

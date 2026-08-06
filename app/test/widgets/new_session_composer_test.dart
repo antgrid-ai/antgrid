@@ -7,7 +7,9 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/design/widgets/ab_segmented.dart';
+import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/git_branch.dart';
+import 'package:antgrid/providers/agent_catalog.dart';
 import 'package:antgrid/providers/new_session_action.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/value_controller.dart';
@@ -50,13 +52,49 @@ final _composerVisible = NotifierProvider<ValueController<bool>, bool>(
   () => ValueController(true),
 );
 
+/// A catalog notifier seeded with a fixed map, bypassing the disk hydration.
+/// Stands in for "some bridge has already described these agents".
+class _SeededCatalog extends AgentCatalogNotifier {
+  _SeededCatalog(this.seed);
+
+  final Map<String, AgentDescriptor> seed;
+
+  @override
+  Map<String, AgentDescriptor> build() => seed;
+}
+
+AgentDescriptor _descriptor(
+  String tool,
+  String label, {
+  bool chatCapable = false,
+}) => AgentDescriptor(
+  tool: tool,
+  label: label,
+  chatCapable: chatCapable,
+  judgeCapable: chatCapable,
+  handlerTerminal: chatCapable,
+  handlerChat: chatCapable,
+);
+
+/// The catalog a machine running today's bridge advertises, in registry order.
+final _fullCatalog = <String, AgentDescriptor>{
+  'claude-code': _descriptor('claude-code', 'Claude Code', chatCapable: true),
+  'codex': _descriptor('codex', 'Codex', chatCapable: true),
+  'opencode': _descriptor('opencode', 'opencode', chatCapable: true),
+  'cursor-agent': _descriptor('cursor-agent', 'Cursor'),
+  'github-copilot': _descriptor('github-copilot', 'Copilot'),
+};
+
 /// Base overrides every test needs: one local source, and detection/chat-
 /// capability futures stubbed so the widget never touches a real host
-/// controller. Callers append target/agent overrides on top.
+/// controller. The agent catalog is seeded to what a current bridge advertises;
+/// pass `catalog: const {}` for the older-bridge case where nothing has
+/// described any agent. Callers append target/agent overrides on top.
 List<Override> _baseOverrides({
   PickerProject? target,
   Map<String, String?> detected = const <String, String?>{},
   Set<String>? chatCapable,
+  Map<String, AgentDescriptor>? catalog,
   bool worktreeSupported = false,
   String currentBranch = 'main',
 }) {
@@ -64,6 +102,9 @@ List<Override> _baseOverrides({
     pickerSourcesProvider.overrideWithValue(const [_localSource]),
     newSessionDetectedToolsProvider.overrideWith((ref) async => detected),
     newSessionChatCapableToolsProvider.overrideWith((ref) async => chatCapable),
+    agentCatalogProvider.overrideWith(
+      () => _SeededCatalog(catalog ?? _fullCatalog),
+    ),
     newSessionBranchCatalogProvider.overrideWith(
       (ref) async => target == null
           ? null
@@ -496,10 +537,10 @@ void main() {
   // Ported from the deleted test/widgets/new_session_mode_toggle_test.dart
   // (SessionConfig's mode toggle), retargeted onto the composer's mode
   // segmented control. No wire chatCapable data (chatCapable: null, the
-  // _baseOverrides default) → the static fallback (newSessionAgentSupportsChat)
-  // governs, which is what's under test here: chat-capable agents default to
-  // Chat, others are pinned to Terminal with a dead Chat cell.
-  group('mode control: static-fallback matrix (no wire chatCapable data)', () {
+  // _baseOverrides default) → the persisted agent catalog governs, which is
+  // what's under test here: chat-capable agents default to Chat, others are
+  // pinned to Terminal with a dead Chat cell.
+  group('mode control: catalog fallback (no wire chatCapable data)', () {
     testWidgets('codex agent: control enabled and defaults to Chat', (
       tester,
     ) async {
@@ -574,6 +615,33 @@ void main() {
         // test platform takes the mobile feedback path).
         await tester.pump(const Duration(seconds: 5));
         await tester.pumpAndSettle();
+      },
+    );
+
+    testWidgets(
+      'an agent nothing has described reads as unknown, not unsupported',
+      (tester) async {
+        // Neither the target machine nor the catalog has said. The cell is dead
+        // either way, but the reason must not blame the agent for a capability
+        // nobody asserted — the app no longer ships a table that could answer.
+        await tester.pumpWidget(
+          _host(
+            overrides: [
+              ..._baseOverrides(catalog: const {}),
+              newSessionAgentProvider.overrideWith(
+                () => ValueController(const KnownAgent('kilo')),
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(NewSessionComposer)),
+        );
+        expect(container.read(newSessionSupportsChatProvider), isNull);
+        expect(container.read(newSessionModeProvider), 'terminal');
+        expect(_selectedMode(tester), 'terminal');
       },
     );
   });

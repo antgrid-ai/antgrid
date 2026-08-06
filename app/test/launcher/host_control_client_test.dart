@@ -120,7 +120,36 @@ void main() {
     expect(list.first.mode, 'local');
   });
 
-  test('toolsList parses the tool catalog', () async {
+  test('toolsList parses the tool catalog and the agent descriptors', () async {
+    final stub = _StubControlServer();
+    await stub.start(handler: (req) => {
+          'id': req['id'],
+          'ok': true,
+          'type': 'tools:list',
+          'tools': [
+            {'tool': 'claude-code', 'path': '/usr/bin/claude'},
+          ],
+          'agents': [
+            {
+              'tool': 'kilo',
+              'label': 'Kilo',
+              'chatCapable': false,
+              'judgeCapable': false,
+              'handler': {'terminal': false, 'chat': false},
+            },
+          ],
+        });
+    addTearDown(stub.close);
+
+    final client = HostControlClient(port: stub.port, token: 't');
+    final listed = await client.toolsList();
+    expect(listed.tools.single.tool, 'claude-code');
+    // The registry descriptor covers agents this machine does NOT have on PATH.
+    expect(listed.agents.single.label, 'Kilo');
+  });
+
+  test('a bridge predating the descriptor yields no agents, not a guess',
+      () async {
     final stub = _StubControlServer();
     await stub.start(handler: (req) => {
           'id': req['id'],
@@ -133,8 +162,7 @@ void main() {
     addTearDown(stub.close);
 
     final client = HostControlClient(port: stub.port, token: 't');
-    final tools = await client.toolsList();
-    expect(tools.single.tool, 'claude-code');
+    expect((await client.toolsList()).agents, isEmpty);
   });
 
   test('ok:false throws HostControlException with code', () async {

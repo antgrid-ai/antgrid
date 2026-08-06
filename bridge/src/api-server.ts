@@ -6,11 +6,10 @@ import { z } from "zod";
 import { logger } from "./logger";
 const log = logger.child({ component: "api-server" });
 import { createMessage, type AbMessage } from "./protocol";
-import { BY_HOOK_NAME } from "./agents/registry";
+import { AGENTS, BY_HOOK_NAME } from "./agents/registry";
 import type { TerminalManager } from "./terminal-manager";
 import type { AbConfig } from "./config";
 import type { ProjectInfo } from "./file-watcher";
-import { lastAssistantText } from "./transcript-tail";
 
 export interface AgentContext {
   manager: () => TerminalManager | null;
@@ -25,7 +24,8 @@ export interface AgentContext {
   onSessionTitle?: (body: SessionTitleBody) => void;
   /** Forwarded a validated /handler-event POST from an injected agent hook. */
   onHandlerEvent?: (body: HandlerEventBody) => void;
-  /** Called when an injected hook pings /hook-alive (codex drift probe). */
+  /** Called when an injected hook pings /hook-alive, the drift probe for any
+   *  agent whose `hooks.posts` declares that path. */
   onHookAlive?: (terminalId: string) => void;
   /** Called when a turn-start hook pings /turn-start (a fresh turn began), so
    *  the control-plane work status resets to "working". `terminalId` is the slot
@@ -252,12 +252,16 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         recentNotifies.set(dedupKey, now);
         const project = ctx.project();
         const { type, terminalId, transcriptPath, agent } = parsed.data;
-        // An agent that carries its final message inline wins; only claude needs
-        // a read. Any miss leaves this undefined and compose.ts falls back to the
-        // type label, so detail is strictly additive to today's behavior.
+        // An agent that carries its final message inline wins; only an agent
+        // whose spec declares a transcript reader pays for a read. Any miss
+        // leaves this undefined and compose.ts falls back to the type label, so
+        // detail is strictly additive to today's behavior. `agent` is a hook
+        // name, hence the BY_HOOK_NAME hop.
         let message = parsed.data.message;
-        if (!message && agent === "claude" && transcriptPath) {
-          message = (await lastAssistantText(transcriptPath)) ?? undefined;
+        if (!message && transcriptPath) {
+          const key = agent ? BY_HOOK_NAME[agent] : undefined;
+          const read = key ? AGENTS[key].notifyBodyFromTranscript : undefined;
+          if (read) message = (await read(transcriptPath)) ?? undefined;
         }
         // Read, don't resolve: the namer pipeline already owns this title, and it
         // comes from the transcript's HEAD while the body comes from its TAIL.

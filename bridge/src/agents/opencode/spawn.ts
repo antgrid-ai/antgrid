@@ -1,5 +1,5 @@
 import { createOpencodeServer, createOpencodeClient } from "@opencode-ai/sdk/v2";
-import type { OpencodeClientLike, OpencodeEvent } from "./opencode-driver";
+import type { OpencodeClientLike, OpencodeEvent } from "./chat-backend";
 
 export interface SpawnedOpencode {
   client: OpencodeClientLike;

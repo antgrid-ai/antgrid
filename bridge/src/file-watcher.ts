@@ -101,7 +101,13 @@ export class FileWatcher {
   private startChokidarWatch(): void {
     const ignoredFn = (path: string): boolean => {
       const rel = relative(this.projectRoot, path).replace(/\\/g, "/");
-      if (!rel || rel === ".") return false;
+      // Chokidar also asks about the watch target's ANCESTORS while it walks up
+      // to attach, and `ignore` throws on a path that escapes the root rather
+      // than answering — an unhandled RangeError that takes the watcher down.
+      // The project's ignore rules cannot speak about anything outside it, so
+      // the honest answer for the root itself and for anything above it is "not
+      // ignored".
+      if (!rel || rel === "." || rel === ".." || rel.startsWith("../")) return false;
       return this.ig.ignores(rel);
     };
 

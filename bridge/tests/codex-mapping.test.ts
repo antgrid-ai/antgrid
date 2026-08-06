@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { mapThreadItem, mapCodexError, mapTurnStatusToStopReason, mapPlanStepStatus, mapTokenBreakdown } from "../src/codex/codex-mapping";
+import { mapThreadItem, mapCodexError, mapTurnStatusToStopReason, mapPlanStepStatus, mapTokenBreakdown } from "../src/agents/codex/mapping";
 
 describe("mapThreadItem", () => {
   it("maps agentMessage -> message item", () => {

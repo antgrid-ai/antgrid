@@ -1,15 +1,19 @@
 import type { CanUseTool } from "@anthropic-ai/claude-agent-sdk";
-import { createMessage, createTranscriptReplay, type AbMessage } from "../protocol";
-import type { StructuredDriver } from "../structured/structured-manager";
-import type { ClaudeQueryLike, PromptStreamController } from "./spawn-claude";
-import { resolveConfigPick } from "../structured/set-config";
+import { type AbMessage } from "../../protocol";
+import type { ClaudeQueryLike, PromptStreamController } from "./spawn";
+import type { ConfigPick } from "../../structured/set-config";
+import {
+  ChatSession,
+  type ChatSessionProfile,
+  type SelectionSnapshot,
+} from "../../structured/chat-session";
 import {
   mapAssistantContent, mapToolKind, mapUsage, addUsage, mapResultError, mapFailureError,
   type ClaudeUsageTotals, type ClaudeRateLimit,
-} from "./claude-mapping";
-import { claudeResumeReplay } from "./claude-resume-replay";
-import { readClaudeTranscript } from "./claude-transcript-read";
-import { logger } from "../logger";
+} from "./mapping";
+import { claudeResumeReplay } from "./resume-replay";
+import { readClaudeTranscript } from "./transcript-read";
+import { logger } from "../../logger";
 const log = logger.child({ component: "claude-driver" });
 
 // The SDK's `displayName` is a bare family name ("Sonnet"); the version lives
@@ -47,7 +51,7 @@ type CatalogModel = { id: string; name: string; efforts?: string[]; defaultEffor
 
 // ModelInfo = { value, displayName, resolvedModel, supportsEffort, supportedEffortLevels, ... }
 // — `value` is the id setModel takes; shared by initializationResult().models
-// and supportedModels() (identical shape, see spawn-claude.ts's ClaudeQueryLike).
+// and supportedModels() (identical shape, see spawn.ts's ClaudeQueryLike).
 function mapModelInfos(models: any[]): CatalogModel[] {
   return models
     .filter((m: any) => m?.value)
@@ -118,6 +122,18 @@ const STDERR_TAIL_MAX_CHARS = 2_000;
 // long-lived session's getTranscriptSnapshot() replay from growing unbounded.
 const HISTORY_MAX_ENTRIES = 500;
 
+// The SDK's fixed PermissionMode enum (setPermissionMode), NOT a discovered
+// catalog — supportedAgents() lists subagent definitions, which are not modes.
+// bypassPermissions is deliberately not offered remotely (it skips every
+// permission check — unsafe over the wire). Seeded at construction so the
+// session's first, pre-discovery capabilities frame already carries them.
+const PERMISSION_MODES = [
+  { id: "default", name: "Default", description: "Ask before each tool use" },
+  { id: "auto", name: "Auto", description: "Model classifier approves or denies tool prompts" },
+  { id: "acceptEdits", name: "Accept edits", description: "Auto-approve file edits" },
+  { id: "plan", name: "Plan", description: "Read-only planning mode" },
+];
+
 export interface ClaudeDriverOpts {
   sessionId: string;
   sendMessage: (m: AbMessage) => void;
@@ -142,28 +158,28 @@ export interface ClaudeDriverOpts {
   stderrTail?: () => string;
 }
 
-export class ClaudeDriver implements StructuredDriver {
-  private readonly sessionId: string;
-  private readonly send: (m: AbMessage) => void;
+export class ClaudeDriver extends ChatSession {
+  // The SDK never echoes the user turn and reports tool completion as a partial
+  // update over the tool_use it already sent, so the session mints the turn and
+  // merges item frames. Its transcript is a settled on-disk file, readable at
+  // any point in a turn.
+  protected readonly profile: ChatSessionProfile = {
+    turnSource: "session",
+    mergeItems: true,
+    snapshotDuringTurn: true,
+    interruptScope: "turn",
+  };
+
   private readonly spawnFn: ClaudeDriverOpts["spawn"];
 
   private q: ClaudeQueryLike | null = null;
   private controller: PromptStreamController | null = null;
   private abort = new AbortController();
-  private activeTurnId: string | null = null;
-  private turnCounter = 0;
-  private disposed = false;
   // Completion promise of the consume loop launched by start(); dispose()
   // awaits this (with a timeout) instead of returning before the SDK's
   // subprocess has actually been asked to exit.
   private consumeDone: Promise<void> = Promise.resolve();
 
-  // itemId first-sighting tracker: first → item-added, later → item-updated.
-  private seenItems = new Set<string>();
-  // The app treats each item frame as a full replacement (codex parity), so
-  // partial updates (e.g. tool completion) merge over the cached item.
-  private itemCache = new Map<string, Record<string, unknown>>();
-  private cancelRequested = false;
   // The CLI announces a usage limit on its own `rate_limit_event` channel,
   // BEFORE the turn dies, and the failing result chunk names no cause. Holding
   // the last rejection lets a failure be classified as a limit (which the
@@ -187,43 +203,11 @@ export class ClaudeDriver implements StructuredDriver {
   // assistant text, capped so a long-lived session can't grow unbounded.
   private history: any[] = [];
 
-  // Capability discovery + selection (identical contract to codex-driver).
-  private capModels: CatalogModel[] = [];
   // Last raw SDK model list, kept so resolvedModel-based mapping (default row →
   // concrete alias, system:init.model → alias) can run outside mapModelInfos,
   // which drops resolvedModel from the emitted catalog.
   private rawModelCatalog: any[] = [];
-  private capCommands: Array<{ id: string; name: string; description?: string; argHint?: string }> = [];
-  // Permission modes are the SDK's fixed PermissionMode enum (setPermissionMode),
-  // NOT a discovered catalog — supportedAgents() lists subagent definitions,
-  // which are not modes. bypassPermissions is deliberately not offered remotely
-  // (it skips every permission check — unsafe over the wire).
-  private capModes: Array<{ id: string; name: string; description?: string }> = [
-    { id: "default", name: "Default", description: "Ask before each tool use" },
-    { id: "auto", name: "Auto", description: "Model classifier approves or denies tool prompts" },
-    { id: "acceptEdits", name: "Accept edits", description: "Auto-approve file edits" },
-    { id: "plan", name: "Plan", description: "Read-only planning mode" },
-  ];
-  private selModel?: string;
   private resolvedModel?: string;
-  private selMode?: string; // permission mode: default | acceptEdits | plan
-  // Newest in-flight pick per axis ("model" | "mode" | "effort"), so a slow
-  // rejection can tell whether it still owns the selection it wants to roll back.
-  private pickSeq = new Map<string, number>();
-  private selEffort?: string;
-  // The user (constructor opts.model / setConfig) pinned this axis — blocks the
-  // eager default resolution and the system:init reconciliation from overriding it.
-  private modelExplicit = false;
-  private effortExplicit = false;
-  private capsDiscovered = false;
-  private pendingConfig: Array<{ key: string; value: string }> = [];
-
-  // canUseTool permission bridge + AskUserQuestion interception state.
-  private pendingApprovals = new Map<string, (o: string | null) => void>();
-  private pendingQuestions = new Map<string, (v: string | null) => void>();
-  private questionOptions = new Map<string, string[]>();
-  private approvalCounter = 0;
-  private questionCounter = 0;
 
   private readonly onSessionId?: (agentSessionId: string) => void;
   private readonly stderrTail?: () => string;
@@ -232,22 +216,22 @@ export class ClaudeDriver implements StructuredDriver {
   private resumeRequested?: string;
   // The Claude session id whose on-disk transcript backfills a cold resume.
   // Pinned to the resumed id (its file holds the pre-resume history); for a
-  // fresh session it captures the SDK's new id at init. See getTranscriptSnapshot.
+  // fresh session it captures the SDK's new id at init. See transcriptSnapshot.
   private agentSessionId?: string;
 
   constructor(opts: ClaudeDriverOpts) {
-    this.sessionId = opts.sessionId;
-    this.send = opts.sendMessage;
+    super({ sessionId: opts.sessionId, sendMessage: opts.sendMessage });
     this.spawnFn = opts.spawn;
     this.selModel = opts.model;
     this.modelExplicit = !!opts.model;
+    this.capModes = PERMISSION_MODES.map((m) => ({ ...m }));
     this.onSessionId = opts.onSessionId;
     this.stderrTail = opts.stderrTail;
     this.cwd = opts.cwd;
     this.readTranscript = opts.readTranscript ?? readClaudeTranscript;
   }
 
-  async start(resumeId?: string): Promise<string> {
+  protected async startBackend(resumeId?: string): Promise<string> {
     this.resumeRequested = resumeId;
     // Anchor on-disk transcript backfill to the resumed id up front (its file
     // holds the pre-resume conversation), before init reports anything.
@@ -257,29 +241,13 @@ export class ClaudeDriver implements StructuredDriver {
     this.controller = spawned.controller;
     // Stored (not fire-and-forget) so dispose() can await the loop actually
     // draining/erroring out instead of returning before the SDK subprocess has
-    // been asked to exit — see dispose().
+    // been asked to exit — see disposeBackend().
     this.consumeDone = this.consumeLoop();
-    // Do NOT await system:init: the Claude SDK boots the subprocess (and emits
-    // init) only after the first prompt-stream message, which prompt() pushes —
-    // and the manager only calls prompt() after start() resolves. Awaiting init
-    // here would deadlock. The real session id is captured in onInit and
-    // surfaced via onSessionId; the empty return makes the manager's
-    // `if (agentId)` guard skip persistence until the real id arrives.
-    //
-    // Emit a cheap capabilities frame right away (static modes, empty
-    // models/commands) so the app receives SOMETHING for this session before
-    // the user's first prompt — codex/opencode both fire discoverCapabilities()
-    // synchronously from start() for the same reason. Without this, nothing
-    // reaches the app until the user's own first message boots the subprocess,
-    // and the app's per-session loading indicator (flipped by the first
-    // inbound frame) spins forever instead of showing "Send a message to
-    // start".
-    this.emitCapabilities();
-    // Then kick off the REAL catalog eagerly (fire-and-forget): initializationResult()
+    // Kick off the REAL catalog eagerly (fire-and-forget): initializationResult()
     // forces the subprocess to boot right now instead of waiting on the user's
-    // first prompt (see discoverCapabilities()). This replaces the frame above
-    // with real models/commands within a couple seconds of session creation,
-    // whether or not the user ever types anything.
+    // first prompt (see discoverCapabilities()). This replaces the session's own
+    // early not-ready frame with real models/commands within a couple seconds of
+    // session creation, whether or not the user ever types anything.
     void this.discoverCapabilities();
     // Push the resumed conversation's on-disk history onto the stream NOW, the
     // way codex/opencode replay theirs from start(resumeId) — the desktop app
@@ -288,6 +256,12 @@ export class ClaudeDriver implements StructuredDriver {
     // before the manager lets the user prompt. The SDK exposes no transcript API,
     // so it comes straight from Claude Code's own ~/.claude/projects file.
     if (resumeId && this.cwd) await this.replayResumedTranscript(resumeId);
+    // Do NOT await system:init: the Claude SDK boots the subprocess (and emits
+    // init) only after the first prompt-stream message, which prompt() pushes —
+    // and the manager only calls prompt() after start() resolves. Awaiting init
+    // here would deadlock. The real session id is captured in onInit and
+    // surfaced via onSessionId; the empty return makes the manager's
+    // `if (agentId)` guard skip persistence until the real id arrives.
     return "";
   }
 
@@ -304,8 +278,7 @@ export class ClaudeDriver implements StructuredDriver {
       const disk = await this.readTranscript(this.cwd, resumeId);
       if (!disk.length) return;
       this.replayedResume = true;
-      const replay = createTranscriptReplay(this.sessionId, claudeResumeReplay(this.sessionId, disk));
-      if (replay) this.send(replay);
+      this.emitTranscriptReplay(claudeResumeReplay(this.sessionId, disk));
     } catch (err) {
       log.warn("claude resume-replay failed for session %s (%s): %s", this.sessionId, resumeId, err);
     }
@@ -330,37 +303,19 @@ export class ClaudeDriver implements StructuredDriver {
       const message = tail
         ? `claude session ended unexpectedly: ${err instanceof Error ? err.message : String(err)}\nstderr: ${tail.slice(-STDERR_TAIL_MAX_CHARS)}`
         : `claude session ended unexpectedly: ${err instanceof Error ? err.message : String(err)}`;
-      this.send(createMessage("agent:error", {
-        sessionId: this.sessionId,
-        error: mapFailureError(message, this.limitSnapshot()),
-      }));
+      this.emitError(mapFailureError(message, this.limitSnapshot()));
       // The stream died mid-turn: no `result` chunk is coming, so onResult never
-      // fires and the app's active turn would spin forever. Close it out here.
-      this.endActiveTurnOnFailure(message);
+      // fires and the app's active turn would spin forever. Close it out here —
+      // mirrors onResult's teardown minus the usage frame the dead stream can't
+      // supply.
+      if (this.activeTurnId) {
+        this.closeTurn({ stopReason: "error", error: mapFailureError(message, this.limitSnapshot()) });
+      }
     }
   }
 
-  // Force-close the in-flight turn when the backend dies before its `result`
-  // (consume loop error). Mirrors onResult's teardown minus the usage frame the
-  // dead stream can't supply. No-op when no turn is active.
-  private endActiveTurnOnFailure(message: string): void {
-    const turnId = this.activeTurnId;
-    if (!turnId) return;
-    this.cancelRequested = false;
-    this.send(createMessage("agent:turn-end", {
-      sessionId: this.sessionId,
-      turnId,
-      stopReason: "error",
-      error: mapFailureError(message, this.limitSnapshot()),
-    }));
-    this.retractAllPending();
-    this.activeTurnId = null;
-    this.seenItems.clear();
-    this.itemCache.clear();
-  }
-
   // Async so the init path (below) can await model discovery before flushing
-  // pendingConfig — the consume loop is sequential, so awaiting here just
+  // queued config picks — the consume loop is sequential, so awaiting here just
   // delays the NEXT chunk, never deadlocks (supportedModels() is a
   // control-channel RPC independent of the message stream).
   private async handleChunk(c: any): Promise<void> {
@@ -459,9 +414,9 @@ export class ClaudeDriver implements StructuredDriver {
     this.ingestSkills(c.skills);
     // Awaited (not fire-and-forget): a setConfig('model', ...) arriving before
     // this resolves would otherwise see an empty capModels and be silently
-    // dropped (resolveConfigPick -> null). discoverModels emits its own
-    // capabilities frame on error paths only; the single authoritative emit
-    // for the init sequence happens at the end of this function.
+    // dropped (resolveConfigPick -> null). discoverModels emits no capabilities
+    // frame of its own; the single authoritative emit for the init sequence
+    // happens at the end of this function.
     await this.discoverModels();
     // Reconcile the current model with what the session actually booted with.
     // system:init.model is the resolved wire id; map it back to the catalog
@@ -480,10 +435,7 @@ export class ClaudeDriver implements StructuredDriver {
       }
     }
     this.seedDefaultEffort();
-    this.capsDiscovered = true;
-    const queued = this.pendingConfig; this.pendingConfig = [];
-    for (const p of queued) this.applyConfig(p.key, p.value);
-    this.emitCapabilities();
+    this.capabilitiesReady();
     // Refreshes after the initial boot and the re-init emitted by compaction.
     // This must not hold up init processing if the control request is slow.
     void this.emitContextUsage();
@@ -502,7 +454,7 @@ export class ClaudeDriver implements StructuredDriver {
     const summary = typeof meta.trigger === "string"
       ? `Context compacted (${meta.trigger}): ${meta.pre_tokens ?? "?"} -> ${meta.post_tokens ?? "?"} tokens`
       : "Context compacted";
-    this.emitItem(turnId, `compaction:${c?.uuid ?? this.turnCounter}`, { kind: "compaction", summary });
+    this.emitItem(`compaction:${c?.uuid ?? this.turnCounter}`, { kind: "compaction", summary }, { turnId });
   }
 
   private ingestCommands(entries: any): void {
@@ -536,7 +488,7 @@ export class ClaudeDriver implements StructuredDriver {
   // start() fire-and-forgets this, so a rejection would escape into the void and
   // reach the host's process-level unhandledRejection hook, which tears down every
   // project on the machine (see index.ts) — not just this session. The inner try
-  // only covers the RPC; the tail past it (the pendingConfig flush and the
+  // only covers the RPC; the tail past it (the queued-pick flush and the
   // capabilities emit) writes to the transport and can throw too.
   private async discoverCapabilities(): Promise<void> {
     try {
@@ -572,15 +524,12 @@ export class ClaudeDriver implements StructuredDriver {
     } catch { /* best effort; onInit's own discovery covers this once a prompt is sent */ }
     if (this.disposed) return;
     // Only open the config gate once a real catalog arrived. If the RPC failed
-    // (empty capModels), flipping capsDiscovered would flush pendingConfig
-    // against nothing — resolveConfigPick drops every pick — and onInit's
-    // fallback discovery can't recover them (queue already drained). Leaving it
-    // false keeps early picks queued for whichever discovery populates first.
+    // (empty capModels), flipping it would flush the queued picks against
+    // nothing — resolveConfigPick drops every pick — and onInit's fallback
+    // discovery can't recover them (queue already drained). Leaving it closed
+    // keeps early picks queued for whichever discovery populates first.
     if (!gotCatalog) return;
-    this.capsDiscovered = true;
-    const queued = this.pendingConfig; this.pendingConfig = [];
-    for (const p of queued) this.applyConfig(p.key, p.value);
-    this.emitCapabilities();
+    this.capabilitiesReady();
   }
 
   // Caller (onInit) emits capabilities once, after this resolves — no emit
@@ -627,110 +576,53 @@ export class ClaudeDriver implements StructuredDriver {
       () => { this.selEffort = undefined; });
   }
 
-  private emitCapabilities(): void {
-    this.send(createMessage("agent:capabilities", {
-      sessionId: this.sessionId,
-      // The init sequence emits an early frame before the model catalog lands
-      // (capsDiscovered still false) so the app renders a loading state.
-      ready: this.capsDiscovered,
-      commands: this.capCommands,
-      modes: this.capModes,
-      models: this.capModels,
-      ...(this.selModel ? { currentModelId: this.selModel } : {}),
-      ...(this.selMode ? { currentModeId: this.selMode } : {}),
-      ...(this.selEffort ? { currentEffortId: this.selEffort } : {}),
-    }));
-  }
-
-  setConfig(key: string, value: unknown): void {
-    if (typeof value !== "string") return;
-    if (!this.capsDiscovered) { this.pendingConfig.push({ key, value }); return; }
-    if (this.applyConfig(key, value)) this.emitCapabilities();
-  }
-
-  // A selection is written optimistically and pushed to the CLI fire-and-forget,
-  // but the control call is fallible: the CLI arbitrates picks it never
-  // advertised (permission mode "auto" is gated per-model, and no discovery API
-  // reports which models allow it) and answers an unsupported one with an error
-  // verdict, which the SDK surfaces as a rejection. Unguarded, that reaches the
-  // host's process-level unhandledRejection hook and takes down every project on
-  // the machine. Roll the optimistic write back and re-emit so the app's pills
-  // report the state the session is actually in.
-  private guardPick(call: Promise<unknown> | undefined, axis: string, id: string, revert: () => void): void {
-    const seq = (this.pickSeq.get(axis) ?? 0) + 1;
-    this.pickSeq.set(axis, seq);
-    // The trailing catch keeps the handler total: emitCapabilities() writes to the
-    // transport, and a throw there would reject this .catch()'s own promise —
-    // landing right back on the hook this guard exists to keep clear.
-    void call?.catch((err) => {
-      if (this.disposed) return;
-      log.warn("claude %s pick \"%s\" rejected for session %s: %s", axis, id, this.sessionId, err);
-      // A newer pick on this axis already superseded ours and the CLI took it;
-      // rolling back now would clobber a selection that actually applied.
-      if (this.pickSeq.get(axis) !== seq) return;
-      revert();
-      this.emitCapabilities();
-    }).catch(() => {});
-  }
-
-  private applyConfig(key: string, value: string): boolean {
-    const pick = resolveConfigPick(key, value, {
-      models: this.capModels, modes: this.capModes,
-      currentModelId: this.selModel, currentEffortId: this.selEffort,
-    });
-    if (!pick) return false;
+  protected applySelection(pick: ConfigPick, prev: SelectionSnapshot): void {
+    // The only backend whose apply is fallible: the CLI arbitrates picks it
+    // never advertised and answers an unsupported one with a rejection, so each
+    // call is guarded and rolls back only the axis it owns.
     if (pick.key === "model") {
-      const prevModel = this.selModel, prevResolved = this.resolvedModel, prevExplicit = this.modelExplicit;
-      this.selModel = pick.id;
+      const prevResolved = this.resolvedModel;
       const raw = this.rawModelCatalog.find((m) => String(m?.value ?? "") === pick.id);
       this.resolvedModel = typeof raw?.resolvedModel === "string" ? raw.resolvedModel : pick.id;
-      this.modelExplicit = true;
       this.guardPick(this.q?.setModel(pick.id), "model", pick.id, () => {
-        this.selModel = prevModel; this.resolvedModel = prevResolved; this.modelExplicit = prevExplicit;
+        this.selModel = prev.model; this.resolvedModel = prevResolved; this.modelExplicit = prev.modelExplicit;
       });
       // Clearing a carried-over effort also lifts ultracode — it's a sticky
       // session flag, so a bare effortLevel:null wouldn't turn it off.
       if (pick.clearEffort) {
-        const prevEffort = this.selEffort;
-        this.selEffort = undefined;
         this.guardPick(this.q?.applyFlagSettings({ effortLevel: null, ultracode: false }), "effort", "none",
-          () => { this.selEffort = prevEffort; });
+          () => { this.selEffort = prev.effort; });
       }
     } else if (pick.key === "mode") {
-      const prevMode = this.selMode;
-      this.selMode = pick.id;
-      this.guardPick(this.q?.setPermissionMode(pick.id), "mode", pick.id, () => { this.selMode = prevMode; });
+      this.guardPick(this.q?.setPermissionMode(pick.id), "mode", pick.id, () => { this.selMode = prev.mode; });
     } else if (pick.key === "effort") {
-      const prevEffort = this.selEffort, prevExplicit = this.effortExplicit;
-      this.selEffort = pick.id; this.effortExplicit = true;
       // ultracode isn't an effortLevel value — set its own flag; any concrete
       // level must also lift a previously-set ultracode (it's sticky).
       this.guardPick(
         this.q?.applyFlagSettings(pick.id === "ultracode" ? { ultracode: true } : { effortLevel: pick.id, ultracode: false }),
         "effort", pick.id,
-        () => { this.selEffort = prevEffort; this.effortExplicit = prevExplicit; },
+        () => { this.selEffort = prev.effort; this.effortExplicit = prev.effortExplicit; },
       );
     }
-    return true;
   }
 
-  async prompt(text: string, commandId?: string): Promise<void> {
+  protected preparePrompt(): void {
     if (!this.controller) throw new Error("claude session not started");
-    if (commandId === "builtin:compact") return this.compact();
-    this.activeTurnId = `turn-${this.turnCounter++}`;
-    this.cancelRequested = false;
-    this.send(createMessage("agent:turn-start", { sessionId: this.sessionId, turnId: this.activeTurnId }));
+  }
+
+  protected async sendPrompt(text: string, commandId?: string): Promise<void> {
+    const turnId = this.activeTurnId ?? "";
     // Slash command → send the literal "/name args"; the CLI parses it.
     const body = commandId?.startsWith("cmd:") ? `/${commandId.slice(4)}${text.trim() ? " " + text : ""}` : text;
     // The Claude SDK stream never echoes the user turn back (unlike codex), so
     // emit the user message ourselves — otherwise it renders only on resume via
     // claudeResumeReplay, never live. Shape mirrors that replay path.
-    this.emitItem(this.activeTurnId, `user:${this.activeTurnId}`, { kind: "message", role: "user", text: body });
+    this.emitItem(`user:${turnId}`, { kind: "message", role: "user", text: body }, { turnId });
     this.pushHistory({ type: "user", message: { role: "user", content: body } });
-    this.controller.push({ type: "user", message: { role: "user", content: body }, parent_tool_use_id: null } as any);
+    this.controller?.push({ type: "user", message: { role: "user", content: body }, parent_tool_use_id: null } as any);
   }
 
-  // Shape matches claudeResumeReplay's expected entries so getTranscriptSnapshot
+  // Shape matches claudeResumeReplay's expected entries so transcriptSnapshot
   // can hand `history` straight through. Capped at HISTORY_MAX_ENTRIES (drop
   // oldest) — see field doc on `history`.
   private pushHistory(entry: any): void {
@@ -745,9 +637,9 @@ export class ClaudeDriver implements StructuredDriver {
   private onAssistant(c: any): void {
     const turnId = this.activeTurnId ?? "";
     const { text, thinking, toolUses } = mapAssistantContent(c?.message?.content ?? []);
-    if (thinking) this.emitItem(turnId, `reason:${c.uuid}`, { kind: "reasoning", role: "assistant", text: thinking });
+    if (thinking) this.emitItem(`reason:${c.uuid}`, { kind: "reasoning", role: "assistant", text: thinking }, { turnId });
     if (text) {
-      this.emitItem(turnId, `msg:${c.uuid}`, { kind: "message", role: "assistant", text });
+      this.emitItem(`msg:${c.uuid}`, { kind: "message", role: "assistant", text }, { turnId });
       // Same text as the emitted item — see `history` field doc.
       this.pushHistory({ type: "assistant", message: {
         role: "assistant", content: [{ type: "text", text }],
@@ -756,9 +648,9 @@ export class ClaudeDriver implements StructuredDriver {
       }, uuid: c?.uuid });
     }
     for (const t of toolUses) {
-      this.emitItem(turnId, `tool:${t.id}`, {
+      this.emitItem(`tool:${t.id}`, {
         kind: "tool_call", status: "running", toolKind: mapToolKind(t.name), title: t.name, rawInput: t.input,
-      });
+      }, { turnId });
     }
   }
 
@@ -771,12 +663,11 @@ export class ClaudeDriver implements StructuredDriver {
     const turnId = this.activeTurnId ?? "";
     for (const b of Array.isArray(c?.message?.content) ? c.message.content : []) {
       if (b?.type !== "tool_result") continue;
-      const itemId = `tool:${b.tool_use_id}`;
       const data = typeof b.content === "string" ? b.content : JSON.stringify(b.content);
-      this.emitItem(turnId, itemId, {
+      this.emitItem(`tool:${b.tool_use_id}`, {
         kind: "tool_call", status: b.is_error ? "error" : "completed",
         content: [{ type: "terminal", data }],
-      });
+      }, { turnId });
     }
   }
 
@@ -792,12 +683,7 @@ export class ClaudeDriver implements StructuredDriver {
       const totalTokens = usage?.totalTokens;
       const maxTokens = usage?.maxTokens;
       if (typeof totalTokens !== "number" || typeof maxTokens !== "number" || maxTokens <= 0) return;
-      this.send(createMessage("agent:usage", {
-        sessionId: this.sessionId,
-        total: { ...this.usageTotal },
-        last: { totalTokens },
-        contextWindow: maxTokens,
-      }));
+      this.emitUsage({ total: { ...this.usageTotal }, last: { totalTokens }, contextWindow: maxTokens });
     } catch {
       // Best effort; see method doc.
     }
@@ -807,7 +693,6 @@ export class ClaudeDriver implements StructuredDriver {
     const turnId = this.activeTurnId ?? "";
     if (!turnId) return;
     const stopReason = this.cancelRequested ? "cancelled" : c?.is_error ? "error" : "end_turn";
-    this.cancelRequested = false;
     const limited = stopReason === "error" ? this.limitSnapshot() : undefined;
     // A turn that ran to completion proves the window is over, whether or not
     // the CLI bothered to emit a clearing rate_limit_event.
@@ -817,48 +702,26 @@ export class ClaudeDriver implements StructuredDriver {
       addUsage(this.usageTotal, last);
       const modelUsage = this.resolvedModel ? c?.modelUsage?.[this.resolvedModel] : undefined;
       const contextWindow = modelUsage?.contextWindow;
-      this.send(createMessage("agent:usage", {
-        sessionId: this.sessionId, turnId,
+      this.emitUsage({
+        turnId,
         // total_cost_usd is the SDK's own cumulative-for-the-query figure, which
         // with one persistent query per session IS the session total.
         total: { ...this.usageTotal, ...(typeof c?.total_cost_usd === "number" ? { costUsd: c.total_cost_usd } : {}) },
         last,
         ...(typeof contextWindow === "number" && contextWindow > 0 ? { contextWindow } : {}),
-      }));
+      });
     }
-    this.send(createMessage("agent:turn-end", {
-      sessionId: this.sessionId, turnId, stopReason,
+    this.closeTurn({
+      stopReason,
+      turnId,
       ...(stopReason === "error" ? { error: mapResultError(c, limited) } : {}),
-    }));
-    this.retractAllPending();
-    this.activeTurnId = null;
-    this.seenItems.clear();
-    this.itemCache.clear();
+    });
     // Do NOT end the prompt stream here: one persistent query serves the whole
     // session, so stdin stays open across turns; end() happens only in dispose().
   }
 
-  private emitItem(turnId: string, itemId: string, fields: Record<string, unknown>): void {
-    const first = !this.seenItems.has(itemId);
-    this.seenItems.add(itemId);
-    const item = { ...this.itemCache.get(itemId), ...fields, itemId };
-    this.itemCache.set(itemId, item);
-    this.send(createMessage(first ? "agent:item-added" : "agent:item-updated", {
-      sessionId: this.sessionId, turnId, itemId, item: item as any,
-    }));
-  }
-
-  async cancel(turnId?: string): Promise<boolean> {
-    if (!this.activeTurnId) return false;
-    // A turnId naming anything but the live turn comes from a client whose
-    // turn-end was lost: interrupting would stop a turn the user never asked to
-    // stop. Refuse, so the manager answers that phantom with its own turn-end
-    // (returning true would suppress it and strand the turn open forever).
-    // Absent turnId = cancel whatever is live.
-    if (turnId && turnId !== this.activeTurnId) return false;
-    this.cancelRequested = true;
+  protected async interrupt(_turnId: string): Promise<void> {
     await this.q?.interrupt();
-    return true;
   }
 
   async compact(): Promise<void> {
@@ -871,11 +734,12 @@ export class ClaudeDriver implements StructuredDriver {
     // .superpowers/sdd/sdk-probe-report.md, Q1).
     this.controller.push({ type: "user", message: { role: "user", content: "/compact" }, parent_tool_use_id: null } as any);
   }
+
   // The Claude Agent SDK exposes no revert/rollback API (unlike codex's
   // thread/rollback), so this driver has nothing to call — documented no-op.
   async revert(_t: { turnId?: string; itemId?: string; messageId?: string }): Promise<void> {}
 
-  async getTranscriptSnapshot(): Promise<AbMessage[]> {
+  protected async transcriptSnapshot(): Promise<AbMessage[]> {
     // The SDK restores model context on resume but exposes no transcript-read
     // API and re-emits no history on the stream (probe-verified against SDK
     // 0.3.201 — see .superpowers/sdd/sdk-probe-report.md, Q2). So read Claude
@@ -903,13 +767,20 @@ export class ClaudeDriver implements StructuredDriver {
       // intercept and surface as agent:question / plan approval.
       if (toolName === "AskUserQuestion") return this.handleAskUserQuestion(input, options);
       return new Promise((resolve) => {
-        const permissionId = `perm-${this.approvalCounter++}`;
         // "Always" persists via the SDK's own suggestions (returned as
         // updatedPermissions per the CanUseTool doc) — without suggestions
         // there is nothing to persist, so the option isn't offered.
         const suggestions = Array.isArray(options?.suggestions) ? options.suggestions : [];
-        this.pendingApprovals.set(permissionId, (optionId) => {
-          this.pendingApprovals.delete(permissionId);
+        this.askPermission({
+          itemId: `tool:${options?.toolUseID ?? ""}`,
+          title: options?.title ?? `Allow ${toolName}?`,
+          reason: options?.description !== undefined ? String(options.description) : undefined,
+          options: [
+            { optionId: "once", label: "Allow once", kind: "allow_once" as const },
+            ...(suggestions.length ? [{ optionId: "always", label: "Always allow", kind: "allow_always" as const }] : []),
+            { optionId: "reject", label: "Deny", kind: "reject" as const },
+          ],
+        }, (optionId) => {
           if (optionId === "reject" || optionId == null) {
             resolve({ behavior: "deny", message: "denied by user", ...(optionId == null ? { interrupt: true } : {}) });
           } else {
@@ -919,16 +790,6 @@ export class ClaudeDriver implements StructuredDriver {
             });
           }
         });
-        this.send(createMessage("agent:permission-request", {
-          sessionId: this.sessionId, permissionId, itemId: `tool:${options?.toolUseID ?? ""}`,
-          title: options?.title ?? `Allow ${toolName}?`,
-          ...(options?.description ? { reason: String(options.description) } : {}),
-          options: [
-            { optionId: "once", label: "Allow once", kind: "allow_once" as const },
-            ...(suggestions.length ? [{ optionId: "always", label: "Always allow", kind: "allow_always" as const }] : []),
-            { optionId: "reject", label: "Deny", kind: "reject" as const },
-          ],
-        }));
       });
     };
   }
@@ -940,52 +801,21 @@ export class ClaudeDriver implements StructuredDriver {
     const q = (Array.isArray(input?.questions) ? input.questions[0] : undefined) ?? {};
     const opts: any[] = Array.isArray(q.options) ? q.options : [];
     return new Promise((resolve) => {
-      const questionId = `q-${this.questionCounter++}`;
-      if (opts.length) this.questionOptions.set(questionId, opts.map((o) => String(o?.label ?? "")));
-      this.pendingQuestions.set(questionId, (value) => {
-        this.pendingQuestions.delete(questionId);
-        const labels = this.questionOptions.get(questionId);
-        this.questionOptions.delete(questionId);
-        if (value == null) { resolve({ behavior: "deny", message: "question dismissed", interrupt: true }); return; }
-        const i = Number(value);
-        const answer = labels && Number.isInteger(i) && i >= 0 && i < labels.length ? labels[i] : value;
-        resolve({ behavior: "allow", updatedInput: { ...input, answers: { [String(q.question ?? "")]: answer } } });
-      });
-      this.send(createMessage("agent:question", {
-        sessionId: this.sessionId, questionId,
+      this.askQuestion({
         kind: opts.length ? "single_select" : "text",
         prompt: String(q.question ?? q.header ?? "?"),
         ...(opts.length ? { options: opts.map((o, idx) => ({ id: String(idx), label: String(o?.label ?? ""), description: o?.description })) } : {}),
-      }));
+      }, (value) => {
+        if (value == null) { resolve({ behavior: "deny", message: "question dismissed", interrupt: true }); return; }
+        const answer = Array.isArray(value) ? (value[0] ?? "") : value;
+        resolve({ behavior: "allow", updatedInput: { ...input, answers: { [String(q.question ?? "")]: answer } } });
+      }, {
+        single: true,
+        // The app answers with the synthetic index id; the SDK's answers map is
+        // keyed by question text and takes the LABEL as its value.
+        ...(opts.length ? { labels: opts.map((o) => String(o?.label ?? "")) } : {}),
+      });
     });
-  }
-
-  resolvePermission(permissionId: string, optionId: string): void {
-    this.pendingApprovals.get(permissionId)?.(optionId);
-  }
-
-  resolveQuestion(questionId: string, answer: string | string[]): void {
-    const v = Array.isArray(answer) ? answer[0] ?? "" : answer;
-    this.pendingQuestions.get(questionId)?.(v);
-  }
-
-  private retractAllPending(): void {
-    // Snapshot then clear before invoking callbacks: each cb() synchronously
-    // deletes its own entry (see pendingApprovals.set), so iterating the live
-    // map while it mutates is needlessly fragile.
-    const approvals = [...this.pendingApprovals];
-    this.pendingApprovals.clear();
-    for (const [permissionId, cb] of approvals) {
-      this.send(createMessage("agent:request-retracted", { sessionId: this.sessionId, permissionId }));
-      cb(null);
-    }
-    const questions = [...this.pendingQuestions];
-    this.pendingQuestions.clear();
-    this.questionOptions.clear();
-    for (const [questionId, cb] of questions) {
-      this.send(createMessage("agent:request-retracted", { sessionId: this.sessionId, questionId }));
-      cb(null);
-    }
   }
 
   // Async: the SDK's close() only schedules SIGTERM/SIGKILL on unref'd
@@ -994,9 +824,7 @@ export class ClaudeDriver implements StructuredDriver {
   // (which ends once the query's iterator completes); if it's still running
   // after the grace period, escalate to aborting the spawn's AbortController
   // as a hard kill and wait once more before giving up.
-  async dispose(): Promise<void> {
-    this.disposed = true;
-    this.retractAllPending();
+  protected async disposeBackend(): Promise<void> {
     this.controller?.end("dispose");
     try { this.q?.close(); } catch { /* best effort */ }
     const timedOut = Symbol("dispose-timeout");

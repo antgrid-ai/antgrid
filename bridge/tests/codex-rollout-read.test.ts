@@ -3,7 +3,7 @@ import { test, expect } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { findCodexRolloutPath, readLastCodexMessages } from "../src/codex/codex-rollout-read";
+import { findCodexRolloutPath, readLastCodexMessages } from "../src/agents/codex/rollout-read";
 
 const THREAD = "019f8e9e-acc9-78a2-8f61-803e7bbabac3";
 

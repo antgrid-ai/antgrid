@@ -1,5 +1,5 @@
 import { describe, it, expect, mock } from "bun:test";
-import { buildClaudeEnv, createPersistentPromptStream, resolveClaudeBinary } from "../src/claude/spawn-claude";
+import { buildClaudeEnv, createPersistentPromptStream, resolveClaudeBinary } from "../src/agents/claude-code/spawn";
 
 describe("buildClaudeEnv", () => {
   it("strips API keys and sets the required env", () => {
@@ -58,7 +58,7 @@ describe("spawnClaude forwarding", () => {
       query: (o: any) => { captured = o.options; return stub; },
     }));
     // Re-import so the module binds against the mocked query.
-    const { spawnClaude } = await import("../src/claude/spawn-claude");
+    const { spawnClaude } = await import("../src/agents/claude-code/spawn");
 
     spawnClaude({
       cwd: "/tmp/proj",

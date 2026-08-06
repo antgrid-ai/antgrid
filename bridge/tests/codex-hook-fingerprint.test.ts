@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { createHash } from "node:crypto";
-import { computeCommandHookHash, hookStateKey, EVENT_LABELS } from "../src/codex-hook-fingerprint";
+import { computeCommandHookHash, hookStateKey, EVENT_LABELS } from "../src/agents/codex/hook-fingerprint";
 
 // Re-derive the expected hash independently from the documented algorithm:
 // canonical compact JSON (sorted keys) of the normalized identity -> sha256.

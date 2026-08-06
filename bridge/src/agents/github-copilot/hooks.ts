@@ -66,6 +66,19 @@ const CopilotPayloadSchema = z.object({
 
 export const events = ["session-start", "agent-stop"] as const;
 
+// `agent-stop` posts a title, never a notification — but it does mark the end of
+// a turn, which is all the keystroke turn-start inference needs.
+export const turnBoundaryEvents = {
+  start: [],
+  end: ["agent-stop"],
+} as const;
+
+export const posts = ["/session-title"] as const;
+
+// Copilot's plugin host runs hooks without our environment, so the port has to
+// come off disk.
+export const portFileFallback = true;
+
 export async function toPosts(
   invocation: HookInvocation,
   { port, terminalId, readStdin }: HookPostCtx,

@@ -5,7 +5,7 @@ import { isChatCapableTool } from "./chat-capable";
 export interface StructuredDriver {
   // Resolves with the backend-native session id, or "" when the backend only
   // reports its id asynchronously (e.g. ClaudeDriver: the SDK emits it on
-  // system:init, after start() must already have returned — see claude-driver.ts).
+  // system:init, after start() must already have returned — see agents/claude-code/chat-backend.ts).
   // In the "" case the factory wires persistence out-of-band (an onSessionId
   // callback), and the manager must skip persistence for falsy ids — see the
   // `if (agentId)` guard in startChat.

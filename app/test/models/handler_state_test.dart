@@ -101,6 +101,46 @@ void main() {
     expect(s.parkedUntil, isNull);
   });
 
+  Map<String, dynamic> wire(Object? observability) => {
+    'terminalId': 't1',
+    'notifyOnly': false,
+    'state': 'watching',
+    'pendingEscalations': 0,
+    'armedAt': 1,
+    'doneWhenMet': false,
+    'brief': briefWire,
+    'ledger': [],
+    'observability': ?observability,
+  };
+
+  test('observability parses the three wire values', () {
+    expect(
+      HandlerSessionState.fromWire(wire('full'))!.observability,
+      HandlerObservability.full,
+    );
+    expect(
+      HandlerSessionState.fromWire(wire('escalate_only'))!.observability,
+      HandlerObservability.escalateOnly,
+    );
+    final unsupported = HandlerSessionState.fromWire(wire('unsupported'))!;
+    expect(unsupported.observability, HandlerObservability.unsupported);
+    expect(
+      unsupported.copyWith(pendingEscalations: 1).observability,
+      HandlerObservability.unsupported,
+    );
+  });
+
+  test('an unreported observability is unknown, never unsupported', () {
+    // A bridge predating the field sends nothing, and a future one could send a
+    // value this build has no case for. Folding either onto "unsupported" would
+    // tell the user a working session cannot be watched.
+    expect(HandlerSessionState.fromWire(wire(null))!.observability, isNull);
+    expect(HandlerSessionState.fromWire(wire('partly'))!.observability, isNull);
+    expect(HandlerSessionState.fromWire(wire(7))!.observability, isNull);
+    expect(handlerObservabilityFromWire('escalate_only'),
+        HandlerObservability.escalateOnly);
+  });
+
   test('HandlerState aggregates pending across sessions', () {
     final state = HandlerState.initial().copyWith(
       sessions: {

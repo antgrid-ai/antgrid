@@ -7,6 +7,7 @@ import '../design/widgets/pulsing_opacity.dart';
 import '../models/agent_work_status.dart';
 import '../models/session_entry.dart';
 import '../project/project_session_registry.dart';
+import '../providers/agent_catalog.dart';
 import '../providers/agent_transport.dart';
 import '../providers/focused_tools.dart';
 import '../providers/new_session_picker.dart';
@@ -29,10 +30,11 @@ import 'session_agent_mark.dart';
 /// A conversation that can no longer be resumed
 /// ([SessionEntry.agentSessionResumable]) hides the whole control — it is
 /// transient, per-session, and there is no honest short copy for "the
-/// conversation this would carry over is gone". An agent with no chat driver is
-/// permanent and knowable, so the Chat cell stays visible and greyed, carrying
-/// the reason; `AbSegmented` keeps disabled cells hit-testing precisely so that
-/// reason survives on phones, which have no hover.
+/// conversation this would carry over is gone". An agent with no chat driver —
+/// or one nothing has yet described, which carries its own copy — is permanent
+/// and knowable, so the Chat cell stays visible and greyed, carrying the reason;
+/// `AbSegmented` keeps disabled cells hit-testing precisely so that reason
+/// survives on phones, which have no hover.
 ///
 /// Mounted in BOTH the mobile agent-panel header and the desktop window title
 /// bar (which replaced that header) — either one alone ships the feature to
@@ -56,14 +58,26 @@ class SessionModeControl extends ConsumerWidget {
     final chatCapable = ref.watch(focusedToolChatCapableProvider(active.tool));
     final agent =
         ref.watch(focusedMachineToolsProvider).value?.labels[active.tool] ??
-        sessionAgentDisplayLabel(active);
+        sessionAgentDisplayLabel(active, ref.watch(agentCatalogProvider));
+    // A session RUNNING in chat mode is its own proof that its agent can, and
+    // that proof outranks every advert: greying the cell the session is
+    // currently sitting in would say the mode you are looking at is impossible.
+    final chatEnabled = mode == 'chat' || chatCapable == true;
 
     final control = ModeSegmented(
       keyPrefix: 'session-mode',
       mode: mode,
       iconOnly: true,
-      chatEnabled: chatCapable,
-      chatDisabledReason: "$agent doesn't support chat sessions.",
+      chatEnabled: chatEnabled,
+      // An unanswered capability says so rather than blaming the agent: the
+      // cell is dead either way, but only one of the two is fixable by
+      // updating the machine's bridge — and an answer that simply hasn't
+      // arrived yet must not be reported as an old bridge.
+      chatDisabledReason: chatCapable == null
+          ? "This machine hasn't said whether $agent supports chat sessions — "
+                'it may still be connecting, or its bridge may be too old to '
+                'answer.'
+          : "$agent doesn't support chat sessions.",
       // Both cells inert while a flip is in flight, so a second tap can't queue
       // a second one. No reason attached: the user just tapped.
       enabled: !inFlight,
@@ -127,7 +141,7 @@ Future<void> _switchMode(
   final container = ref.container;
   final agent =
       container.read(focusedMachineToolsProvider).value?.labels[session.tool] ??
-      sessionAgentDisplayLabel(session);
+      sessionAgentDisplayLabel(session, container.read(agentCatalogProvider));
 
   final warning = _modeSwitchWarning(session.workStatus, agent);
   final confirmed = await AbConfirmDialog.show(

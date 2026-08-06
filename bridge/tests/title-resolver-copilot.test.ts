@@ -6,7 +6,7 @@ import { join } from "node:path";
 import {
   resolveCopilotSessionTitle,
   copilotSessionExistsSync,
-} from "../src/title-resolver";
+} from "../src/agents/github-copilot/title";
 import { resolveStructuredTitle } from "../src/agents/title-dispatch";
 
 const dirs: string[] = [];

@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/handler_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
@@ -65,6 +66,10 @@ Future<void> _pumpHostApp(
   required HandlerService service,
   required String terminalId,
   required ValueSetter<HandlerArmChoice?> onResult,
+  List<String> judgeTools = const ['claude-code', 'codex', 'opencode'],
+  HandlerObservability? observability,
+  bool? agentObservable,
+  String? agentLabel,
 }) async {
   debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
   await tester.pumpWidget(
@@ -78,6 +83,10 @@ Future<void> _pumpHostApp(
                   context,
                   terminalId: terminalId,
                   service: service,
+                  judgeTools: judgeTools,
+                  observability: observability,
+                  agentObservable: agentObservable,
+                  agentLabel: agentLabel,
                 ),
               ),
               child: const Text('open'),
@@ -334,6 +343,184 @@ void main() {
     expect(result, isNotNull);
     expect(result!.judgeTool, isNull);
     expect(result!.judgeModel, isNull);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('no advertised catalog leaves the judge picker at Default only', (
+    tester,
+  ) async {
+    final (t, svc) = await _newService();
+
+    // What an app talking only to bridges that predate the agent descriptor
+    // sees. The picker must omit the tools it can no longer name rather than
+    // fall back to a list shipped in the app.
+    await _pumpHostApp(
+      tester,
+      service: svc,
+      terminalId: 't7',
+      onResult: (_) {},
+      judgeTools: const [],
+    );
+
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': [_sessionJson(terminalId: 't7')],
+    });
+    await tester.pump();
+
+    await _openSheet(tester);
+    await tester.pumpAndSettle();
+
+    // The trigger still reads Default, so the session can be armed with its own
+    // tool — the degradation costs the override, not the feature.
+    final trigger = find.textContaining('Default (');
+    await tester.ensureVisible(trigger.first);
+    await tester.pumpAndSettle();
+    await tester.tap(trigger.first);
+    await tester.pumpAndSettle();
+
+    expect(find.text('codex'), findsNothing);
+    expect(find.text('opencode'), findsNothing);
+    expect(find.textContaining('Default ('), findsWidgets);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('warns before arming an agent the catalog says is unwatchable', (
+    tester,
+  ) async {
+    final (t, svc) = await _newService();
+    addTearDown(svc.session.heavyStream.listen((_) {}).cancel);
+
+    // Nothing armed, so there is no snapshot to ask — the catalog's per-agent
+    // prediction is the only coverage answer that exists at this point.
+    await _pumpHostApp(
+      tester,
+      service: svc,
+      terminalId: 't8',
+      onResult: (_) {},
+      agentObservable: false,
+      agentLabel: 'Cursor',
+    );
+    await _openSheet(tester);
+    t.emit('handler:planResult', {
+      'projectId': 'p',
+      'terminalId': 't8',
+      'fallback': false,
+      'brief': _briefJson(),
+    });
+    await tester.pumpAndSettle();
+
+    expect(find.text(unwatchableNotice('Cursor')), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets("an armed session's own report outranks the catalog", (
+    tester,
+  ) async {
+    final (t, svc) = await _newService();
+
+    // The catalog describes an AGENT; the snapshot describes this SESSION, mode
+    // and judge included. Once one exists it is the only accurate answer, in
+    // both directions.
+    await _pumpHostApp(
+      tester,
+      service: svc,
+      terminalId: 't9',
+      onResult: (_) {},
+      observability: HandlerObservability.full,
+      agentObservable: false,
+      agentLabel: 'Cursor',
+    );
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': [_sessionJson(terminalId: 't9')],
+    });
+    await tester.pump();
+    await _openSheet(tester);
+    await tester.pumpAndSettle();
+
+    expect(find.text(unwatchableNotice('Cursor')), findsNothing);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('an unwatchable armed session warns even when its agent looks fine', (
+    tester,
+  ) async {
+    final (t, svc) = await _newService();
+
+    await _pumpHostApp(
+      tester,
+      service: svc,
+      terminalId: 't10',
+      onResult: (_) {},
+      observability: HandlerObservability.unsupported,
+      agentObservable: true,
+      agentLabel: 'Codex',
+    );
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': [_sessionJson(terminalId: 't10')],
+    });
+    await tester.pump();
+    await _openSheet(tester);
+    await tester.pumpAndSettle();
+
+    expect(find.text(unwatchableNotice('Codex')), findsOneWidget);
+    // Distinct facts, distinct copy: an unwatchable session is not merely
+    // judge-less, so the escalate-only line must not appear alongside it.
+    expect(find.text(escalateOnlyNotice), findsNothing);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('escalate_only is stated beside the judge, not as unwatchable', (
+    tester,
+  ) async {
+    final (t, svc) = await _newService();
+
+    await _pumpHostApp(
+      tester,
+      service: svc,
+      terminalId: 't11',
+      onResult: (_) {},
+      observability: HandlerObservability.escalateOnly,
+      agentLabel: 'Cursor',
+    );
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': [_sessionJson(terminalId: 't11')],
+    });
+    await tester.pump();
+    await _openSheet(tester);
+    await tester.pumpAndSettle();
+
+    expect(find.text(escalateOnlyNotice), findsOneWidget);
+    expect(find.text(unwatchableNotice('Cursor')), findsNothing);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('a bridge that reports nothing about coverage claims nothing', (
+    tester,
+  ) async {
+    final (t, svc) = await _newService();
+
+    // An older bridge sends no observability and an undescribed agent has no
+    // catalog row. Neither may be read as "unwatchable".
+    await _pumpHostApp(
+      tester,
+      service: svc,
+      terminalId: 't12',
+      onResult: (_) {},
+    );
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': [_sessionJson(terminalId: 't12')],
+    });
+    await tester.pump();
+    await _openSheet(tester);
+    await tester.pumpAndSettle();
+
+    expect(find.text(unwatchableNotice(null)), findsNothing);
+    expect(find.text(escalateOnlyNotice), findsNothing);
     debugDefaultTargetPlatformOverride = null;
   });
 }

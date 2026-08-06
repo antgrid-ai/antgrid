@@ -1,49 +1,27 @@
-// Tool-agnostic in-app self-update for the coding-agent CLIs.
-//
-// Codex proved the shape (detect a newer release; quiesce the machine-global
-// binary, run the CLI's own updater once, restart the sessions). This layer is
-// the single seam ALL tools flow through — codex included: the orchestration and
-// version math live in ./codex/codex-version and are reused verbatim; only the
-// binary, npm package, updater subcommand, and optional state file differ per
-// tool, captured in each agent's `update` field in agents/registry.ts.
+// The real-environment half of in-app self-update: what each agent's updater IS
+// (derived from the registry) and the process spawns that drive it. The
+// version math and the quiesce→update→restart orchestration are agent-agnostic
+// and live in ./version; nothing in either file belongs to one agent.
 //
 // Fail-soft is the contract everywhere: a CLI installed by a package manager may
 // refuse to self-update (exit non-zero, or no-op). We surface that output as a
 // failed result and never try to interpret or repair the install.
 
-import {
-  createCodexUpdateChecker,
-  resolveToolLaunchPath,
-  fetchNpmLatest,
-  type CodexHomeState,
-} from "./codex/codex-version";
-import { AGENTS } from "./agents/registry";
+import { resolveToolLaunchPath } from "../agents/launch-path";
+import { AGENTS } from "../agents/registry";
+import type { AgentUpdate } from "../agents/types";
+import { createUpdateChecker, fetchNpmLatest } from "./version";
 
-// The generic quiesce→update→restart orchestrator is not codex-specific despite
-// its name; re-export it under a tool-neutral alias for call sites that update
-// any tool. Same for the single npm probe (one impl for every tool).
-export { runCodexUpdate as runToolUpdate, fetchNpmLatest } from "./codex/codex-version";
+export { runAgentUpdate, parseAgentVersion, fetchNpmLatest } from "./version";
 
-export interface ToolUpdateSpec {
+export interface ToolUpdateSpec extends AgentUpdate {
   // Canonical session.tool id. The SAME string flows the whole loop: detection →
   // agent:updateAvailable → app echo → agent:update → session filter → this
   // spec. It must match what SessionManager stamps on a session.
   tool: string;
-  // npm package whose dist-tags.latest is the "latest" authority.
-  npmPackage: string;
-  // PATH binary name to resolve (realpath) for --version and the updater.
-  command: string;
-  // argv for the CLI's own self-updater (codex/claude `update`, opencode
-  // `upgrade` — the divergence this table exists to record).
-  updateArgs: string[];
-  // Optional per-tool updater-state reader (codex's ~/.codex/version.json): a
-  // free `latest_version` warm hint for offline detection and the
-  // `dismissed_version` to honor. Tools without such a file omit it, and their
-  // checker runs npm-only with app-side dismissal.
-  readState?: () => CodexHomeState | null;
 }
 
-// Only tools that ship a real self-updater, keyed by canonical session.tool id.
+// Only agents that ship a real self-updater, keyed by canonical session.tool id.
 // github-copilot has none (IDE-bound) and so declares no `update` — a request
 // for it fails soft via updateSpecFor → null.
 //
@@ -89,17 +67,17 @@ export async function execToolUpdate(
   return { exitCode, output: (out + err).trim() };
 }
 
-// Proactive "a newer <tool> exists" checker for ANY tool in the table, codex
-// included — the one seam every tool's detection flows through. A tool with a
-// `readState` (codex's ~/.codex/version.json) gets a warm offline hint + an
-// honored dismissed_version; the rest are npm-only with app-side dismissal.
-// Shares one latest cache across a project's sessions and never throws.
+// Proactive "a newer <tool> exists" checker for ANY agent in the table — the one
+// seam every agent's detection flows through. An agent with a `readState`
+// (codex's ~/.codex/version.json) gets a warm offline hint + an honored
+// dismissed_version; the rest are npm-only with app-side dismissal. Shares one
+// latest cache across a project's sessions and never throws.
 export function createToolUpdateChecker(
   spec: ToolUpdateSpec,
 ): () => Promise<{ installed: string; latest: string } | null> {
-  return createCodexUpdateChecker({
+  return createUpdateChecker({
     execVersion: () => execToolVersion(spec),
     fetchLatest: () => fetchNpmLatest(spec.npmPackage),
-    readState: spec.readState ?? (() => null),
+    readState: spec.readState,
   });
 }

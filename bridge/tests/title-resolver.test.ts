@@ -3,11 +3,8 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  resolveCodexThreadName,
-  resolveCodexThreadTitle,
-  resolveClaudeTranscriptTitle,
-} from "../src/title-resolver";
+import { resolveCodexThreadName, resolveCodexThreadTitle } from "../src/agents/codex/title";
+import { resolveClaudeTranscriptTitle } from "../src/agents/claude-code/title";
 import { resolveStructuredTitle } from "../src/agents/title-dispatch";
 
 const dirs: string[] = [];

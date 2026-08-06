@@ -1,5 +1,5 @@
-import { ClaudeDriver } from "../../claude/claude-driver";
-import { spawnClaude } from "../../claude/spawn-claude";
+import { ClaudeDriver } from "./chat-backend";
+import { spawnClaude } from "./spawn";
 import type { StructuredDriver } from "../../structured/structured-manager";
 import type { DriverCtx } from "../types";
 

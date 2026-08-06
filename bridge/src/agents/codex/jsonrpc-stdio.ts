@@ -9,7 +9,7 @@ export interface JsonRpcTransport {
   /** A stream of already-split, newline-free JSON text lines from the peer. */
   readLines: ReadableStream<string>;
   /** Write one JSON line to the peer (the endpoint appends no newline here —
-   *  see spawn-codex.ts which adds "\n" when piping to the process). */
+   *  see spawn.ts which adds "\n" when piping to the process). */
   writeLine: (line: string) => void;
 }
 

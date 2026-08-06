@@ -1,3 +1,4 @@
+import { isAbsolute, relative, sep } from "node:path";
 import { createMessage, type AbMessage } from "./protocol";
 import { logger } from "./logger";
 const log = logger.child({ component: "file-search" });
@@ -55,8 +56,34 @@ const MAX_LINE_LENGTH = 500;
 const GIT_GREP_MATCH_RE = /^(.+?):(\d+):(\d+):(.*)$/;
 const GIT_GREP_CONTEXT_RE = /^(.+?)-(\d+)-(.*)$/;
 
-function buildRipgrepArgs(opts: SearchOptions, projectPath: string): string[] {
+/**
+ * Root-relative POSIX paths for the excludes that actually sit inside `root`.
+ * An exclude elsewhere is dropped rather than passed through: a searcher rooted
+ * at a managed worktree lives UNDER the Antgrid state dir, and anchoring an
+ * exclude at an ancestor would blank its own results.
+ */
+function containedExcludes(root: string, excludeDirs: readonly string[]): string[] {
+  const rels: string[] = [];
+  for (const dir of excludeDirs) {
+    const rel = relative(root, dir);
+    if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) continue;
+    rels.push(rel.split(sep).join("/"));
+  }
+  return rels;
+}
+
+/** globset treats these as syntax, so a state dir spelled with one would
+ *  otherwise exclude a pattern instead of the directory the user named. */
+function escapeGlob(path: string): string {
+  return path.replace(/[\\*?\[\]{}]/g, (ch) => `\\${ch}`);
+}
+
+function buildRipgrepArgs(opts: SearchOptions, projectPath: string, excludes: readonly string[]): string[] {
   const args = ["rg", "--json", "-n", "--column", "-C", "2"];
+  // A leading `/` anchors the glob at ripgrep's WORKING directory, which the
+  // spawn below pins to projectPath — without the anchor `!state/` would also
+  // hide a `sub/state/` the project genuinely owns.
+  for (const rel of excludes) args.push("--glob", `!/${escapeGlob(rel)}/`);
   if (!opts.caseSensitive) args.push("-i");
   if (opts.wholeWord) args.push("-w");
   if (!opts.regex) args.push("-F");
@@ -64,13 +91,14 @@ function buildRipgrepArgs(opts: SearchOptions, projectPath: string): string[] {
   return args;
 }
 
-function buildGitGrepArgs(opts: SearchOptions, projectPath: string): string[] {
+function buildGitGrepArgs(opts: SearchOptions, projectPath: string, excludes: readonly string[]): string[] {
   const args = ["git", "-C", projectPath, "grep", "-n", "--column", "-C", "2", "--untracked"];
   if (!opts.caseSensitive) args.push("-i");
   if (opts.wholeWord) args.push("-w");
   if (opts.regex) args.push("-P");
   else args.push("-F");
   args.push("-e", opts.query, "--", ".");
+  for (const rel of excludes) args.push(`:(exclude,literal)${rel}`);
   return args;
 }
 
@@ -78,17 +106,27 @@ export class FileSearcher {
   private projectRoot: string;
   private projectId: string;
   private sendMessage: (msg: AbMessage) => void;
+  private excludes: string[];
   private activeProcess: ReturnType<typeof Bun.spawn> | null = null;
   private activeRequestId: string | null = null;
 
+  /**
+   * `excludeDirs` are absolute directories that are not project content even
+   * when they sit inside the root — the Antgrid state dir, which holds every
+   * managed worktree. Without it a main-scoped search reports hits from the
+   * isolated checkouts it is supposed to be isolated from (file-tree.ts keeps
+   * the same directory out of the tree).
+   */
   constructor(
     projectRoot: string,
     projectId: string,
     sendMessage: (msg: AbMessage) => void,
+    excludeDirs: readonly string[] = [],
   ) {
     this.projectRoot = projectRoot;
     this.projectId = projectId;
     this.sendMessage = sendMessage;
+    this.excludes = containedExcludes(projectRoot, excludeDirs);
   }
 
   cancel(requestId: string): void {
@@ -124,8 +162,8 @@ export class FileSearcher {
     }
 
     const args = engine === "ripgrep"
-      ? buildRipgrepArgs(opts, this.projectRoot)
-      : buildGitGrepArgs(opts, this.projectRoot);
+      ? buildRipgrepArgs(opts, this.projectRoot, this.excludes)
+      : buildGitGrepArgs(opts, this.projectRoot, this.excludes);
 
     const proc = Bun.spawn(args, {
       stdout: "pipe",

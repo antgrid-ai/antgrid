@@ -4,7 +4,7 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
-import { readLastOpencodeMessages, resolveOpencodeDbPath } from "../src/opencode/opencode-db-read";
+import { readLastOpencodeMessages, resolveOpencodeDbPath } from "../src/agents/opencode/db-read";
 
 const SES = "ses_test";
 

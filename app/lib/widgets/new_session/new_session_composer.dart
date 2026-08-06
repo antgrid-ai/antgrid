@@ -17,6 +17,8 @@ import '../../design/widgets/ab_text_field.dart';
 // composer); re-exported so existing importers keep resolving it from here.
 export '../../design/widgets/ab_composer_send_button.dart'
     show ComposerSendButton;
+import '../../models/agent_descriptor.dart';
+import '../../providers/agent_catalog.dart';
 import '../../providers/new_session_action.dart';
 import '../../providers/new_session_picker.dart';
 import '../../screens/upgrade_screen.dart';
@@ -131,17 +133,19 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     setState(() => _promptFocused = _promptFocus.hasFocus);
   }
 
-  /// Default mode to Chat when [agent] supports it, else force Terminal.
-  /// Ported verbatim from `_SessionConfigState._applyModeDefault`.
+  /// Default mode to Chat when [agent] is KNOWN to support it, else force
+  /// Terminal. An unanswered capability defaults to Terminal, the mode every
+  /// agent can run. Ported from `_SessionConfigState._applyModeDefault`.
   void _applyModeDefault(NewSessionAgent agent) {
-    final wireChatCapable = ref.read(newSessionChatCapableToolsProvider).value;
+    final key = newSessionAgentToolKey(agent);
+    final supports = agentSupportsChatResolved(
+      agent,
+      wireChatCapable: ref.read(newSessionChatCapableToolsProvider).value,
+      descriptor: key == null ? null : ref.read(agentCatalogProvider)[key],
+    );
     ref
         .read(newSessionModeProvider.notifier)
-        .set(
-          agentSupportsChatResolved(agent, wireChatCapable)
-              ? 'chat'
-              : 'terminal',
-        );
+        .set(supports == true ? 'chat' : 'terminal');
   }
 
   /// Enter submits; Shift+Enter inserts a newline at the caret. Esc is left
@@ -669,7 +673,9 @@ class _WorktreeChip extends ConsumerWidget {
 class _ModeSegmented extends ConsumerWidget {
   const _ModeSegmented({required this.supportsChat, this.showIcons = true});
 
-  final bool supportsChat;
+  /// Null when neither the target machine nor the persisted catalog has
+  /// described the selected agent — a third state, not a `false`.
+  final bool? supportsChat;
 
   /// Icons are garnish (labels always render); tight rows drop them first.
   final bool showIcons;
@@ -678,20 +684,33 @@ class _ModeSegmented extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final mode = ref.watch(newSessionModeProvider);
     final agent = ref.watch(newSessionAgentProvider);
+    final label = newSessionAgentLabel(
+      agent,
+      ref.watch(newSessionDetectedToolsProvider).value,
+      ref.watch(agentCatalogProvider),
+    );
+    final enabled = supportsChat == true;
     // Pin the DISPLAYED selection to Terminal whenever chat isn't supported,
     // rather than trusting `mode` to already carry 'terminal' — detection
     // (newSessionChatCapableToolsProvider) can resolve a frame after the
     // agent-default heuristic runs, so `mode` briefly lags the true support
     // state. The provider itself still gets corrected by the agent listener.
-    final displayMode = supportsChat ? mode : 'terminal';
+    final displayMode = enabled ? mode : 'terminal';
     return ModeSegmented(
       keyPrefix: 'new-session-mode',
       mode: displayMode,
-      chatEnabled: supportsChat,
+      chatEnabled: enabled,
       // Longer than the mid-session toggle's "Not supported": at create time
-      // the agent is still being chosen, so the string has to name it.
-      chatDisabledReason:
-          "${newSessionAgentLabel(agent)} doesn't support chat sessions",
+      // the agent is still being chosen, so the string has to name it. An
+      // unanswered capability says so instead of blaming the agent — and it
+      // names both ways it can be unanswered, because the same null covers the
+      // ordinary wait for a target's first advert and a bridge too old to send
+      // one, and only the second is the user's to fix.
+      chatDisabledReason: supportsChat == null
+          ? "This machine hasn't said whether $label supports chat sessions — "
+                'it may still be connecting, or its bridge may be too old to '
+                'answer'
+          : "$label doesn't support chat sessions",
       showIcons: showIcons,
       onChanged: (m) => ref.read(newSessionModeProvider.notifier).set(m),
     );
@@ -711,12 +730,13 @@ class _AgentSelector extends ConsumerWidget {
     final detected =
         ref.watch(newSessionDetectedToolsProvider).value ??
         const <String, String?>{};
-    final options = _buildAgentOptions(detected, agent);
+    final catalog = ref.watch(agentCatalogProvider);
+    final options = _buildAgentOptions(detected, catalog, agent);
 
     return ComposerChip(
       key: const Key('new-session-agent-selector'),
       icon: AbIcons.terminal,
-      label: newSessionAgentLabel(agent, detected),
+      label: newSessionAgentLabel(agent, detected, catalog),
       onTap: (ctx) async {
         final anchor = abMenuAnchorRect(ctx);
         if (anchor == null) return;
@@ -728,7 +748,7 @@ class _AgentSelector extends ConsumerWidget {
           entries: [
             for (final a in options)
               AbMenuItem(
-                label: newSessionAgentLabel(a, detected),
+                label: newSessionAgentLabel(a, detected, catalog),
                 value: a,
                 icon: a == agent ? AbIcons.check : null,
               ),
@@ -745,22 +765,23 @@ class _AgentSelector extends ConsumerWidget {
 
 /// Build the agent menu's options from the tools detected on the target.
 ///
-/// When [detected] is empty (detection still in flight, target not focused,
-/// or an older agent without the handler) [kFallbackSessionAgents] is shown
-/// so the picker always works. Otherwise the options ARE the advertised tools,
-/// in the bridge's order — an agent this app predates still appears, which the
-/// previous app-side enum could not do. `Custom` is always last. The current
+/// The options ARE the advertised tools, in the bridge's order — an agent this
+/// app predates still appears, which the app-side enum this replaced could not
+/// do. When [detected] is empty (detection still in flight, target not focused,
+/// or an older agent without the handler) the persisted [catalog] stands in, so
+/// the menu still lists the agents some bridge has described rather than a set
+/// this app shipped guessing at. `Custom` is always last, and the current
 /// [selected] agent is always included so the trigger never renders a hidden
-/// option.
+/// option — which is also what keeps the menu non-empty on a cold install with
+/// no catalog yet.
 List<NewSessionAgent> _buildAgentOptions(
   Map<String, String?> detected,
+  Map<String, AgentDescriptor> catalog,
   NewSessionAgent selected,
 ) {
+  final keys = detected.isNotEmpty ? detected.keys : catalog.keys;
   final options = <NewSessionAgent>[
-    if (detected.isEmpty)
-      ...kFallbackSessionAgents
-    else
-      for (final key in detected.keys) KnownAgent(key),
+    for (final key in keys) KnownAgent(key),
     const CustomAgent(),
   ];
   if (!options.contains(selected)) return [selected, ...options];

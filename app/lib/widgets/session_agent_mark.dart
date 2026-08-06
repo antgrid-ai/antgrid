@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../design/widgets/ab_agent_mark.dart';
 import '../design/widgets/ab_tooltip.dart';
+import '../providers/agent_catalog.dart';
 import '../providers/focused_tools.dart';
 import '../providers/new_session_picker.dart';
 import '../providers/sessions.dart';
@@ -32,11 +33,12 @@ class SessionAgentMark extends ConsumerWidget {
     if (active == null || tool == null || tool.isEmpty) {
       return const SizedBox.shrink();
     }
-    // Wire label first, static table second — the same resolution the mode
-    // control uses, so one session cannot be named two ways in one header.
+    // The focused machine's own label first, the merged catalog second — the
+    // same resolution the mode control uses, so one session cannot be named two
+    // ways in one header.
     final label =
         ref.watch(focusedMachineToolsProvider).value?.labels[tool] ??
-        sessionAgentDisplayLabel(active);
+        sessionAgentDisplayLabel(active, ref.watch(agentCatalogProvider));
 
     return AbTooltip(
       message: label,

@@ -4,12 +4,16 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, statSync, re
 import { tmpdir } from "node:os";
 import { join, normalize } from "node:path";
 import { SessionManager } from "../src/session-manager";
+import { buildSpawnEnv } from "../src/terminal-session";
 
 function tempDir() {
   return mkdtempSync(join(tmpdir(), "antgrid-sess-"));
 }
 
-// Fake terminal manager: just records spawn/kill calls
+// Fake terminal manager: records spawn/kill calls. `env` goes through the real
+// buildSpawnEnv, exactly as TerminalManager.spawn does — the caller env alone is
+// not what a PTY receives, and a fake that skipped it would let a regression in
+// the always-stamped ANTGRID_TERMINAL_ID pass unnoticed.
 function makeFakeTerm() {
   const spawned = new Set<string>();
   const spawns: Array<{ terminalId?: string; command?: string; args?: string[]; cwd?: string; env?: Record<string, string> }> = [];
@@ -18,7 +22,7 @@ function makeFakeTerm() {
     spawns,
     spawn: (cfg: { terminalId?: string; command?: string; args?: string[]; cwd?: string; env?: Record<string, string> }) => {
       spawned.add(cfg.terminalId!);
-      spawns.push(cfg);
+      spawns.push({ ...cfg, env: buildSpawnEnv(cfg.terminalId!, null, cfg.env ?? {}) });
       return cfg.terminalId!;
     },
     kill: (id: string) => { spawned.delete(id); },

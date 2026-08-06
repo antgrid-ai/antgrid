@@ -3,7 +3,8 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../services/control_plane_client.dart'
-    show AgentWorkStatus, parseSessionStatuses;
+    show AgentWorkStatus, parseAgentDescriptors, parseSessionStatuses;
+import '../models/agent_descriptor.dart';
 import '../models/git_branch.dart';
 
 /// Loopback data-plane connect info from a `project:open` response.
@@ -166,7 +167,7 @@ class PhonesList {
 
 /// One installed tool from the loopback `tools:list`. Mirror of control-protocol.ts
 /// ToolSummary. `chatCapable` and `label` are null against an older bridge that
-/// predates each field; callers fall back to the app's static tables in that case.
+/// predates each field; callers fall back to the persisted agent catalog then.
 class ToolSummary {
   final String tool;
   final String path;
@@ -178,6 +179,16 @@ class ToolSummary {
     this.chatCapable,
     this.label,
   });
+}
+
+/// `tools:list` response: what this machine has on PATH, plus the registry-wide
+/// descriptors. The two answer different questions and neither substitutes for
+/// the other — see [AgentDescriptor]. [agents] is empty against a bridge
+/// predating the descriptor, which reads as "did not say".
+class ToolsList {
+  final List<ToolSummary> tools;
+  final List<AgentDescriptor> agents;
+  const ToolsList({required this.tools, required this.agents});
 }
 
 /// The machine-level remote-access policy: one boolean for the whole machine —
@@ -349,12 +360,12 @@ class HostControlClient {
     }).toList(growable: false);
   }
 
-  Future<List<ToolSummary>> toolsList({
+  Future<ToolsList> toolsList({
     Duration timeout = const Duration(seconds: 3),
   }) async {
     final m = await _post({'type': 'tools:list'}, timeout: timeout);
     final raw = (m['tools'] as List?) ?? const [];
-    return raw.map((e) {
+    final tools = raw.map((e) {
       if (e is! Map) {
         throw HostControlException('BAD_RESPONSE', 'malformed tool entry: $e');
       }
@@ -370,6 +381,10 @@ class HostControlClient {
         label: e['label'] as String?,
       );
     }).toList(growable: false);
+    return ToolsList(
+      tools: tools,
+      agents: parseAgentDescriptors(m['agents']),
+    );
   }
 
   Future<void> projectStop(String projectId) async {

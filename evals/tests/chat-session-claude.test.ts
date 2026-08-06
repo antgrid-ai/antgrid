@@ -6,7 +6,7 @@ import { bindFirstProject } from "../support/stream";
 
 // End-to-end chat-session turn over the REAL relay + the REAL installed
 // `claude` binary via the claude-code structured driver
-// (bridge/src/claude/spawn-claude.ts, pathToClaudeCodeExecutable). This is the
+// (bridge/src/agents/claude-code/spawn.ts, pathToClaudeCodeExecutable). This is the
 // installed-binary proof for the claude-code driver, mirroring
 // chat-session.test.ts's codex coverage.
 //

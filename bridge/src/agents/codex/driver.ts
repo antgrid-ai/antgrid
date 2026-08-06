@@ -1,5 +1,5 @@
-import { CodexDriver } from "../../codex/codex-driver";
-import { spawnCodex } from "../../codex/spawn-codex";
+import { CodexDriver } from "./chat-backend";
+import { spawnCodex } from "./spawn";
 import type { StructuredDriver } from "../../structured/structured-manager";
 import type { DriverCtx } from "../types";
 

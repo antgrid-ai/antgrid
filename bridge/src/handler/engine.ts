@@ -14,7 +14,7 @@ import {
 } from "./brief";
 import { stripAnsi } from "./context";
 import type { SessionAdapter } from "./session-adapter";
-import { judgeCapable } from "../agents/registry";
+import { handlerObservable, judgeCapable } from "../agents/registry";
 import { type HandlerDecision } from "./decision";
 import {
   LIMIT_FALLBACK_MS, LIMIT_PARK_CEILING, MIN_PARK_MS, TRANSIENT_CEILING, transientBackoffMs,
@@ -57,6 +57,14 @@ function isLifecycle(evt: HandlerEvent): boolean {
   return evt.event === "limit_hit" || evt.event === "limit_cleared" || evt.event === "turn_failed";
 }
 
+/**
+ * How much of the Handler a slot can actually get. "unsupported" and "armed but
+ * quiet" are different facts, and nothing else separates them: an unobservable
+ * terminal session arms cleanly today and then never fires, which reads to the
+ * user as a broken feature rather than an absent one.
+ */
+export type HandlerObservability = "full" | "escalate_only" | "unsupported";
+
 function wakeClock(at: number): string {
   const d = new Date(at);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
@@ -73,6 +81,11 @@ export interface HandlerEngineDeps {
   // construction (the first-run wizard sets config.agent.tool later). Omit the
   // id for the project-wide default (handler:status has no terminal in scope).
   tool: (terminalId?: string) => string;
+  /** Whether the engine can observe this slot at all — its tool's integration
+   *  in its CURRENT mode. A thunk for the same reason `tool` is: a slot's mode
+   *  can flip after construction. Absent = assume observable (a bare engine in
+   *  a test, or a caller that predates the declaration). */
+  observable?: (terminalId: string) => boolean;
   // The agent's native conversation id for a slot (codex thread id / opencode
   // sessionID), used to locate its on-disk transcript. Optional: absent means
   // context falls back to PTY scrollback.
@@ -399,9 +412,9 @@ export class HandlerEngine {
     // (`this.latest.get(id) === evt`) match on dequeue and resurrect an escalation
     // for a prompt the driver already retracted.
     //
-    // Scoped to blocking prompts, NOT unconditional: drivers send agent:turn-end
-    // and then call retractAllPending() synchronously in the same stack (claude's
-    // endActiveTurnOnFailure/onResult, codex's turn-complete handler), so a
+    // Scoped to blocking prompts, NOT unconditional: a chat session sends
+    // agent:turn-end and then retracts every pending prompt synchronously in the
+    // same stack (ChatSession.closeTurn -> endTurn -> retractAllPending), so a
     // blanket delete swallows the turn_end queued microseconds earlier — leaving
     // an armed session watching a dead agent on exactly the "stream died mid-turn
     // while a prompt was outstanding" case turn_end-on-error exists to catch.
@@ -925,6 +938,22 @@ export class HandlerEngine {
     }));
   }
 
+  /**
+   * How much of the Handler this slot can actually get, in its current mode.
+   * Two independent facts collapse here: whether the engine can see the slot at
+   * all (its tool's integration), and whether the slot's effective judge tool
+   * can run headless. Only the first can make an arm futile — the second merely
+   * makes it escalate-only, which is a supported mode.
+   *
+   * The judge tool resolves the same way `plan()` resolves it: the session's
+   * stored pick, else the observed session's own tool.
+   */
+  observabilityFor(terminalId: string): HandlerObservability {
+    if (this.deps.observable && !this.deps.observable(terminalId)) return "unsupported";
+    const judge = this.storedJudge(terminalId).tool ?? this.deps.tool(terminalId);
+    return judgeCapable(judge) ? "full" : "escalate_only";
+  }
+
   // Public: agent-core also emits on every app handshake so a fresh app sees
   // defaultNotifyOnly/defaultTool before anything is armed. Judge choices are
   // per-session now, carried on each session snapshot, and are never cleared
@@ -944,6 +973,9 @@ export class HandlerEngine {
       judgeModel: s.judgeModel,
       parkKind: s.parkKind,
       parkedUntil: s.parkedUntil,
+      // Re-derived on every emit rather than frozen at arm time: a slot's mode
+      // and its judge pick both change under a live arm.
+      observability: this.observabilityFor(terminalId),
     }));
     this.deps.sendAb(createMessage("handler:status", {
       projectId: this.deps.projectId,

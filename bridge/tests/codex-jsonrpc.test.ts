@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "bun:test";
-import { JsonRpcEndpoint } from "../src/codex/jsonrpc-stdio";
+import { JsonRpcEndpoint } from "../src/agents/codex/jsonrpc-stdio";
 
 // Endpoints read from a never-closing in-memory stream; dispose them after each
 // test so their read loop stops holding the stream open (an undisposed reader

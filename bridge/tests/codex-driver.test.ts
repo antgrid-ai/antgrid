@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { CodexDriver, type CodexEndpoint } from "../src/codex/codex-driver";
+import { CodexDriver, type CodexEndpoint } from "../src/agents/codex/chat-backend";
 import type { AbMessage } from "../src/protocol";
 
 // Fake endpoint: capture outbound, let the test fire notifications/requests.

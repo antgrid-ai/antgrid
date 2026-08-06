@@ -3,7 +3,7 @@ import {
   computeCommandHookHash,
   hookStateKey,
   EVENT_LABELS,
-} from "../../codex-hook-fingerprint";
+} from "./hook-fingerprint";
 import {
   hookArgv,
   hookShellCommand,
@@ -81,6 +81,15 @@ const CodexStopPayloadSchema = z.object({
 });
 
 export const events = ["after-agent", "permission-request", "stop", "session-start"] as const;
+
+// Two closers, not one: `after-agent` is the `notify` channel and `stop` is the
+// Stop command hook, and codex fires them independently.
+export const turnBoundaryEvents = {
+  start: [],
+  end: ["after-agent", "stop"],
+} as const;
+
+export const posts = ["/session-title", "/handler-event", "/notify", "/hook-alive"] as const;
 
 export async function toPosts(
   invocation: HookInvocation,

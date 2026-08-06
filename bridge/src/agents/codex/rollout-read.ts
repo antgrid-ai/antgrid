@@ -1,9 +1,9 @@
-// bridge/src/codex/codex-rollout-read.ts
+// bridge/src/agents/codex/rollout-read.ts
 import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { readTranscriptTail } from "../transcript-tail";
-import { codexHomeDir } from "./codex-version";
+import { readTranscriptTail } from "../../transcript-tail";
+import { codexHomeDir } from "./home";
 
 // codex wraps typed input in a contextual template; everything before this
 // marker is injected scaffolding, not the user's words (codex-rs protocol.rs

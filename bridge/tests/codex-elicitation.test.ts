@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { planElicitation } from "../src/codex/codex-elicitation";
+import { planElicitation } from "../src/agents/codex/elicitation";
 
 describe("planElicitation", () => {
   it("flattens a flat form schema into typed questions", () => {

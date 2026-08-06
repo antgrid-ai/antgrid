@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { OpencodeDriver, type OpencodeClientLike, type OpencodeEvent } from "../src/opencode/opencode-driver";
+import { OpencodeDriver, type OpencodeClientLike, type OpencodeEvent } from "../src/agents/opencode/chat-backend";
 import type { DriverLifecycleEvent } from "../src/agents/types";
 import type { AbMessage } from "../src/protocol";
 
@@ -344,8 +344,8 @@ describe("OpencodeDriver", () => {
     const { driver, sent, push } = await startedDriver();
     await driver.prompt("x");
     push({ type: "permission.asked", properties: { id: "perm1", sessionID: "ses_root", permission: "Run rm?" } });
-    // Free-text question (no options) — must be retractable too, which is why
-    // pendingQuestionIds exists (questionOptions only tracks option-questions).
+    // Free-text question (no options) — retractable on the same terms as one
+    // carrying options; nothing about the withdrawal depends on the option list.
     push({ type: "question.asked", properties: { id: "q1", sessionID: "ses_root", questions: [{ question: "name?" }] } });
     push({ type: "session.idle", properties: { sessionID: "ses_root" } });
     await tick();

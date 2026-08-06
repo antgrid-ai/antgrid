@@ -2,7 +2,7 @@ import { describe, it, expect } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { diagnoseCodexStderr, spawnCodex } from "../src/codex/spawn-codex";
+import { diagnoseCodexStderr, spawnCodex } from "../src/agents/codex/spawn";
 
 const LOCK_LINE =
   "Error: failed to initialize sqlite state runtime under C:\\Users\\u\\.codex: " +

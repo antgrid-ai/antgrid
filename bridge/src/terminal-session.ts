@@ -114,10 +114,12 @@ export interface TerminalSessionOptions {
    *  suppressOscNotifications — see titleSourceFor vs notificationSourceFor in
    *  known-agents.ts. */
   suppressOscTitle?: boolean;
-  /** True only for agents whose per-spawn injection includes a SessionStart hook
-   *  that pings /hook-alive (currently codex) — drives the drift probe. Distinct
-   *  from suppressOscNotifications, which is true for every plugin-source agent. */
-  expectsHookAliveProbe?: boolean;
+  /** The agent whose per-spawn injection includes a SessionStart hook pinging
+   *  /hook-alive, or absent when this spawn's agent declares no such probe
+   *  (`injectsHookAliveProbe`). Carries the key rather than a flag so the drift
+   *  probe's warning can name the agent that actually went quiet. Distinct from
+   *  suppressOscNotifications, which is set for every plugin-source agent. */
+  hookAliveProbeAgent?: string;
 }
 
 const BATCH_INTERVAL_MS = 16;
@@ -197,7 +199,7 @@ export class TerminalSession {
   private notificationScanner = new TerminalNotificationScanner();
   private suppressOscNotifications = false;
   private suppressOscTitle = false;
-  private _expectsHookAliveProbe = false;
+  private _hookAliveProbeAgent?: string;
 
   onOutput(fn: (data: string) => void): () => void {
     this.outputObservers.add(fn);
@@ -229,7 +231,7 @@ export class TerminalSession {
     this.onTitle = opts.onTitle;
     this.suppressOscNotifications = opts.suppressOscNotifications ?? false;
     this.suppressOscTitle = opts.suppressOscTitle ?? false;
-    this._expectsHookAliveProbe = opts.expectsHookAliveProbe ?? false;
+    this._hookAliveProbeAgent = opts.hookAliveProbeAgent;
 
     this.shell = opts.shell ?? this.detectShell();
     this.name = opts.name ?? opts.command ?? this.shell;
@@ -240,9 +242,9 @@ export class TerminalSession {
   get driverClientId(): string | null { return this._driverClientId; }
   get isRunning(): boolean { return this._running; }
   get shellBinary(): string { return this.command ?? this.shell; }
-  // True only for agents whose injection includes a SessionStart /hook-alive
-  // ping (codex) — the drift probe arms for these and no others.
-  get expectsHookAliveProbe(): boolean { return this._expectsHookAliveProbe; }
+  // The agent whose injection includes a SessionStart /hook-alive ping — the
+  // drift probe arms for these and no others, and names this in its warning.
+  get hookAliveProbeAgent(): string | undefined { return this._hookAliveProbeAgent; }
 
   // Re-enable the OSC scanner after it was suppressed for a plugin-owned agent.
   // Self-healing fallback for when the plugin's hooks never check in: restores

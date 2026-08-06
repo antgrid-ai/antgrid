@@ -111,6 +111,54 @@ describe("FileSearcher", () => {
     expect(done).toBeDefined();
   });
 
+  test("an excluded dir inside the root is not searched, a same-named one elsewhere still is", async () => {
+    // The Antgrid state dir holds every managed worktree, so a main-scoped
+    // search that walks into it reports the isolated checkouts' content as
+    // main's. Only the root-level directory is off limits — a project of its
+    // own that happens to share the name is still project content.
+    mkdirSync(join(TEST_DIR, "state", "wt"), { recursive: true });
+    writeFileSync(join(TEST_DIR, "state", "wt", "isolated.txt"), "needle\n");
+    mkdirSync(join(TEST_DIR, "src", "state"), { recursive: true });
+    writeFileSync(join(TEST_DIR, "src", "state", "own.txt"), "needle\n");
+
+    const scoped = new FileSearcher(TEST_DIR, "test-project", (msg) => messages.push(msg), [
+      join(TEST_DIR, "state"),
+    ]);
+    await scoped.search({
+      projectId: "test-project",
+      query: "needle",
+      caseSensitive: false,
+      regex: false,
+      wholeWord: false,
+      requestId: "req-exclude",
+    });
+
+    const paths = messages
+      .filter((m) => m.type === "file:search-result")
+      .flatMap((m) => (m.type === "file:search-result" ? m.matches.map((x) => x.path) : []));
+    expect(paths.some((p) => p.includes("isolated.txt"))).toBe(false);
+    expect(paths.some((p) => p.includes("own.txt"))).toBe(true);
+  });
+
+  test("an exclude outside the search root leaves the search intact", async () => {
+    // A searcher rooted at a managed worktree sits UNDER the state dir it is
+    // handed; anchoring that exclude would blank its own results.
+    const nested = new FileSearcher(TEST_DIR, "test-project", (msg) => messages.push(msg), [
+      join(TEST_DIR, "..", "somewhere-else"),
+    ]);
+    await nested.search({
+      projectId: "test-project",
+      query: "Hello",
+      caseSensitive: false,
+      regex: false,
+      wholeWord: false,
+      requestId: "req-outside",
+    });
+
+    const done = messages.find((m) => m.type === "file:search-done");
+    expect(done!.type === "file:search-done" && done!.totalMatches).toBeGreaterThanOrEqual(2);
+  });
+
   test("whole word search only matches complete words", async () => {
     writeFileSync(join(TEST_DIR, "words.txt"), "cat\ncatalog\nthe cat sat\n");
 

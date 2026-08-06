@@ -1,5 +1,5 @@
-import { OpencodeDriver, type OpencodeClientLike } from "../../opencode/opencode-driver";
-import { spawnOpencode } from "../../opencode/spawn-opencode";
+import { OpencodeDriver, type OpencodeClientLike } from "./chat-backend";
+import { spawnOpencode } from "./spawn";
 import type { StructuredDriver } from "../../structured/structured-manager";
 import type { DriverCtx } from "../types";
 

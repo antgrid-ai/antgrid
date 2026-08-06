@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { buildChatSpawnAugment, codexNotifyOnlyArgs } from "../src/agent-core";
+import { buildChatSpawnAugment } from "../src/agent-core";
+import { codexNotifyOnlyArgs } from "../src/agents/codex/driver";
 
 describe("codex chat-mode augment", () => {
   it("slices out only the notify=[...] -c pair", () => {

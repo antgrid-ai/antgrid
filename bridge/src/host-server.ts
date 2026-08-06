@@ -27,6 +27,7 @@ import { joinRelayWsPath } from "./relay-url";
 import { createMessage } from "./protocol";
 import { detectInstalledTools, type DetectOptions } from "./tool-detector";
 import { isChatCapableTool } from "./structured/chat-capable";
+import { buildAgentCatalog } from "./agent-catalog";
 import type { AbMessage, ProjectAdvertEntry, RpcRequest } from "./protocol";
 import { z } from "zod";
 import { SessionManager } from "./session-manager";
@@ -552,13 +553,25 @@ export class HostServer {
   /** Machine-level installed-tool catalog for the control plane. Not per-project
    *  — tools are a property of the machine, not of any project.
    *  `chatCapable` is stamped here so the wire is authoritative over which
-   *  tools support Chat mode; the app's static list is a fallback only. */
+   *  tools support Chat mode; the app falls back to its persisted agent catalog
+   *  (fed by the sibling `agents` descriptor) only when this machine's advert
+   *  hasn't answered.
+   *  Deliberately still the PATH probe (AGENTS ∩ PATH): the registry-wide facts
+   *  ride the sibling `agents` descriptor (buildAgentCatalog), because an app
+   *  predating it would read a widened `tools[]` as "all of these are installed"
+   *  and offer agents this machine cannot run. */
   buildToolsAdvertisement(opts: DetectOptions = {}): Array<{ tool: string; path: string; chatCapable: boolean; label: string }> {
     return detectInstalledTools(opts).map((t) => ({ ...t, chatCapable: isChatCapableTool(t.tool) }));
   }
 
   private sendToolsAdvertisement(bus: MessageBus): void {
-    bus.publish(createMessage("agent:tools", { tools: this.buildToolsAdvertisement() }), "control");
+    bus.publish(
+      createMessage("agent:tools", {
+        tools: this.buildToolsAdvertisement(),
+        agents: buildAgentCatalog(),
+      }),
+      "control",
+    );
   }
 
   /** Route one inbound control-plane frame from the paired phone: either the
@@ -1135,10 +1148,11 @@ export class HostServer {
           id: req.id,
           ok: true,
           type: "tools:list",
-          // Same builder as the remote `agent:tools` advert: the loopback and
+          // Same builders as the remote `agent:tools` advert: the loopback and
           // relay pickers must describe a tool identically, and a second copy
           // of the entry shape is how they drift.
           tools: this.buildToolsAdvertisement(),
+          agents: buildAgentCatalog(),
         };
       case "project:open": {
         try {

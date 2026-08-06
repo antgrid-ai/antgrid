@@ -57,6 +57,7 @@ function makeEngine(overrides: Record<string, unknown> = {}) {
 
 interface SessionSnapshot {
   state: string; parkKind?: string; parkedUntil?: number; pendingEscalations: number;
+  observability?: string;
 }
 function statusOf(sent: AbMessage[]): SessionSnapshot {
   const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
@@ -660,9 +661,9 @@ describe("chat blocking prompts and slash guard", () => {
     expect(status.sessions[0].pendingEscalations).toBe(0);
   });
 
-  // Drivers send agent:turn-end and then call retractAllPending() synchronously in
-  // the SAME stack (claude-driver's endActiveTurnOnFailure and onResult, codex's
-  // turn-complete handler), and both frames reach the engine through agent-core's
+  // A chat session sends agent:turn-end and then retracts every pending prompt
+  // synchronously in the SAME stack (ChatSession.closeTurn -> endTurn ->
+  // retractAllPending), and both frames reach the engine through agent-core's
   // sendMessage tap. So the retraction lands after handleEvent has recorded the
   // turn_end in `latest` but before the chain's microtask dequeues it. A blanket
   // latest.delete() there failed the coalescing identity check and swallowed the
@@ -673,7 +674,7 @@ describe("chat blocking prompts and slash guard", () => {
     engine.arm({ terminalId: "c1", brief: BRIEF, notifyOnly: true });
 
     const turn = engine.handleEvent({ terminalId: "c1", event: "turn_end" });
-    engine.onPromptRetracted("c1"); // retractAllPending(), same stack
+    engine.onPromptRetracted("c1"); // the turn boundary's retraction, same stack
     await turn;
 
     expect(sent.filter((m) => m.type === "handler:escalation")).toHaveLength(1);
@@ -1367,5 +1368,60 @@ describe("lifecycle persistence", () => {
     expect(armed()).toHaveLength(0);
     expect(records(activity, "resumed")).toHaveLength(1);
     expect(statusOf(sent).state).toBe("watching");
+  });
+});
+
+describe("observabilityFor", () => {
+  it("reports unsupported for a slot the engine cannot see, whatever its judge", () => {
+    const { engine } = makeEngine({ observable: () => false });
+    expect(engine.observabilityFor("t1")).toBe("unsupported");
+  });
+
+  it("reports escalate_only when the slot is visible but its judge cannot run headless", () => {
+    const { engine } = makeEngine({ observable: () => true, tool: () => "cursor-agent" });
+    expect(engine.observabilityFor("t1")).toBe("escalate_only");
+  });
+
+  it("reports full when the slot is visible and its judge is headless-capable", () => {
+    const { engine } = makeEngine({ observable: () => true });
+    expect(engine.observabilityFor("t1")).toBe("full");
+  });
+
+  it("prefers the session's stored judge over the observed session's own tool", () => {
+    const { engine } = makeEngine({
+      observable: () => true,
+      tool: () => "cursor-agent",
+      loadSessionFn: () => ({ terminalId: "t1", armed: false, judgeTool: "claude-code" }),
+    });
+    expect(engine.observabilityFor("t1")).toBe("full");
+  });
+
+  it("assumes observable when no caller supplied the thunk", () => {
+    const { engine } = makeEngine();
+    expect(engine.observabilityFor("t1")).toBe("full");
+  });
+
+  it("stamps every session snapshot with it, so an unwatchable arm is not silent", () => {
+    const { engine, sent } = makeEngine({ observable: () => false });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    expect(statusOf(sent).observability).toBe("unsupported");
+  });
+
+  it("re-derives it on each emit rather than freezing it at arm time", () => {
+    // A slot's mode (and so its integration) can flip under a live arm; a value
+    // captured at arm time would keep reporting the mode it was armed in.
+    let visible = false;
+    const { engine, sent } = makeEngine({ observable: () => visible });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    expect(statusOf(sent).observability).toBe("unsupported");
+    visible = true;
+    engine.emitStatus();
+    expect(statusOf(sent).observability).toBe("full");
+  });
+
+  it("separates escalate_only from unsupported on the snapshot", () => {
+    const { engine, sent } = makeEngine({ observable: () => true, tool: () => "cursor-agent" });
+    engine.arm({ terminalId: "t1", brief: BRIEF, notifyOnly: false });
+    expect(statusOf(sent).observability).toBe("escalate_only");
   });
 });

@@ -4,12 +4,46 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/theme_presets.dart';
+import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/recent_session_row.dart';
 import 'package:antgrid/models/session_entry.dart';
+import 'package:antgrid/providers/agent_catalog.dart';
 import 'package:antgrid/widgets/recent_sessions/recent_session_row_widget.dart';
 
-Widget _wrap(Widget child) {
+/// A catalog notifier seeded with a fixed map, bypassing the disk hydration —
+/// stands in for "a bridge has already described these agents".
+class _SeededCatalog extends AgentCatalogNotifier {
+  _SeededCatalog(this.seed);
+
+  final Map<String, AgentDescriptor> seed;
+
+  @override
+  Map<String, AgentDescriptor> build() => seed;
+}
+
+AgentDescriptor _descriptor(String tool, String label) => AgentDescriptor(
+  tool: tool,
+  label: label,
+  chatCapable: false,
+  judgeCapable: false,
+  handlerTerminal: false,
+  handlerChat: false,
+);
+
+const _catalogSeed = <String, String>{
+  'claude-code': 'Claude Code',
+  'cursor-agent': 'Cursor',
+};
+
+Widget _wrap(Widget child, {Map<String, String> catalog = _catalogSeed}) {
   return ProviderScope(
+    overrides: [
+      agentCatalogProvider.overrideWith(
+        () => _SeededCatalog({
+          for (final e in catalog.entries) e.key: _descriptor(e.key, e.value),
+        }),
+      ),
+    ],
     child: MaterialApp(
       theme: ThemeData.dark().copyWith(
         extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
@@ -86,6 +120,43 @@ void main() {
     expect(find.text('Running session'), findsOneWidget);
     expect(find.text('Cursor'), findsOneWidget);
     expect(find.text('my-project'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('an agent no bridge has described wears its raw key', (
+    tester,
+  ) async {
+    // The row belongs to another machine, which may be offline — the catalog is
+    // all there is to name it, and a key it does not carry must read honestly
+    // rather than fold onto whatever the app happens to ship knowing.
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+
+    final row = RecentSessionRow(
+      session: const SessionEntry(
+        id: 's3',
+        name: 'Unknown agent',
+        createdAt: 0,
+        lastUsedAt: 0,
+        archived: false,
+        running: false,
+        tool: 'kilo',
+      ),
+      origin: const RecentOrigin(
+        isLocal: true,
+        registrationId: 'localProj',
+        projectId: 'localProj',
+        machineUuid: null,
+        projectName: 'my-project',
+        deviceName: 'This device',
+      ),
+    );
+
+    await tester.pumpWidget(
+      _wrap(RecentSessionRowWidget(row: row), catalog: const {}),
+    );
+    await tester.pump();
+
+    expect(find.text('kilo'), findsOneWidget);
     debugDefaultTargetPlatformOverride = null;
   });
 

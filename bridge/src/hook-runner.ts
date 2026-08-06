@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { AGENTS, BY_HOOK_NAME } from "./agents/registry";
 import type { HookInvocation, HookPath, HookPost } from "./agents/hook-posts";
+import type { HookProfile } from "./agents/types";
 
 export type { HookInvocation, HookPath, HookPost };
 
@@ -31,12 +32,12 @@ function parsePort(raw: string | undefined): number | null {
 }
 
 function resolvePort(
-  agent: string,
+  hooks: HookProfile,
   deps: Pick<HookRunnerDeps, "env" | "readFile">,
 ): number | null {
   const direct = parsePort(deps.env.ANTGRID_API_PORT);
   if (direct !== null) return direct;
-  if (agent !== "github-copilot") return null;
+  if (!hooks.portFileFallback) return null;
   const dir = deps.env.ANTGRID_DIR || `${homedir()}/.antgrid`;
   try {
     return parsePort(deps.readFile(`${dir.replace(/[\\/]$/, "")}/api.port`));
@@ -57,7 +58,7 @@ async function buildPosts(
   const key = BY_HOOK_NAME[invocation.agent];
   const hooks = key === undefined ? undefined : AGENTS[key].hooks;
   if (!hooks?.events.includes(invocation.event)) return [];
-  const port = resolvePort(invocation.agent, deps);
+  const port = resolvePort(hooks, deps);
   if (port === null) return [];
   return hooks.toPosts(invocation, {
     port,

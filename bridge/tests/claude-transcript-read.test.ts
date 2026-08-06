@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { claudeProjectSlug, readClaudeTranscript } from "../src/claude/claude-transcript-read";
+import { claudeProjectSlug, readClaudeTranscript } from "../src/agents/claude-code/transcript-read";
 
 // The reader targets ~/.claude/projects/<cwd-slug>/<session-id>.jsonl; tests
 // point `root` at a temp dir so nothing touches the real home directory.

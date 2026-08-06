@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { codexThreadExistsSync } from "../src/title-resolver";
+import { codexThreadExistsSync } from "../src/agents/codex/title";
 
 const dirs: string[] = [];
 function tmp() { const d = mkdtempSync(join(tmpdir(), "ab-codex-exist-")); dirs.push(d); return d; }

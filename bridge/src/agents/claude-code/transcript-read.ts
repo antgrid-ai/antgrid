@@ -7,7 +7,7 @@ import { join } from "node:path";
 // transcript-read API (probe-verified), so the driver reads this file directly
 // to backfill history on a cold resume — the on-disk entries are already in
 // claudeResumeReplay's expected shape ({ type, message, uuid }). See
-// claude-driver.ts's getTranscriptSnapshot.
+// chat-backend.ts's getTranscriptSnapshot.
 
 // The slug replaces every non-alphanumeric char in the absolute cwd with "-",
 // with NO collapsing of consecutive dashes ("C:\" -> "C--"). Verified against

@@ -105,6 +105,47 @@ describe("handler wire v2", () => {
     expect(parsed.sessions[0].parkedUntil).toBe(1770000000000);
   });
 
+  test("status carries per-session observability, and survives its absence", () => {
+    const session = {
+      terminalId: "t1", notifyOnly: false, state: "watching" as const, pendingEscalations: 0,
+      armedAt: 1, doneWhenMet: false, brief, ledger: [], escalations: [],
+    };
+    for (const observability of ["full", "escalate_only", "unsupported"] as const) {
+      const msg = createMessage("handler:status", {
+        projectId: "p", defaultNotifyOnly: false,
+        sessions: [{ ...session, observability }],
+      });
+      const parsed = parseMessage(JSON.stringify(msg)) as any;
+      expect(parsed.sessions[0].observability).toBe(observability);
+    }
+    // Absent is what an older bridge sends; it must parse rather than read as a
+    // capability verdict.
+    const bare = parseMessage(JSON.stringify(createMessage("handler:status", {
+      projectId: "p", defaultNotifyOnly: false, sessions: [session],
+    }))) as any;
+    expect(bare).toBeTruthy();
+    expect(bare.sessions[0].observability).toBeUndefined();
+    // A value outside the enum is a bug on the sender, not a field to widen.
+    expect(parseMessage(JSON.stringify(createMessage("handler:status", {
+      projectId: "p", defaultNotifyOnly: false,
+      sessions: [{ ...session, observability: "partly" }],
+    } as never)))).toBeNull();
+  });
+
+  test("observability is appended last, so no existing key moved", () => {
+    // The app reads by key, but the snapshot's byte layout is what an older app
+    // was tested against — a new field ahead of the others would reorder it.
+    const msg = createMessage("handler:status", {
+      projectId: "p", defaultNotifyOnly: false, sessions: [{
+        terminalId: "t1", notifyOnly: false, state: "watching", pendingEscalations: 0,
+        armedAt: 1, doneWhenMet: false, brief, ledger: [], escalations: [],
+        judgeTool: "codex", observability: "full",
+      }],
+    });
+    const keys = Object.keys((parseMessage(JSON.stringify(msg)) as any).sessions[0]);
+    expect(keys.at(-1)).toBe("observability");
+  });
+
   test("activity accepts the lifecycle kinds", () => {
     for (const decision of ["parked", "resumed"] as const) {
       const act = createMessage("handler:activity", {

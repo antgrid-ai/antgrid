@@ -8,6 +8,7 @@ import '../../design/widgets/ab_chip.dart';
 import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_list_row.dart';
 import '../../models/handler_state.dart';
+import '../../providers/agent_catalog.dart';
 import '../../providers/providers.dart';
 import '../../providers/sessions.dart';
 import '../../util/relative_time.dart';
@@ -36,11 +37,27 @@ class HandlerScreen extends ConsumerWidget {
     }
 
     final service = serviceWhenReady(ref, handlerServiceProvider);
+    // Read in build, not inside editBrief: that callback runs after an await on
+    // the sheet and the row that opened it can be gone by then.
+    final judgeTools = ref.watch(judgeCapableToolsProvider);
 
-    final sessionNames = {
-      for (final s in ref.watch(activeSessionsProvider)) s.id: s.name,
+    final entries = {
+      for (final s in ref.watch(activeSessionsProvider)) s.id: s,
     };
-    String nameOf(String terminalId) => sessionNames[terminalId] ?? terminalId;
+    String nameOf(String terminalId) =>
+        entries[terminalId]?.name ?? terminalId;
+    // The PRE-arm half of the coverage question, for a bridge too old to report
+    // per-session observability. A SessionEntry carries `tool` only when it
+    // OVERRODE the project default, so an absent one resolves to defaultTool —
+    // the same resolution the bridge's own observable() thunk does.
+    final catalog = ref.watch(agentCatalogProvider);
+    String? agentOf(String terminalId) =>
+        entries[terminalId]?.tool ?? state.defaultTool;
+    bool? agentObservableOf(String terminalId) => handlerObservableFromCatalog(
+      catalog,
+      agentOf(terminalId),
+      chat: entries[terminalId]?.mode == 'chat',
+    );
     // Show which session a row belongs to only when the screen is actually
     // mixing rows from more than one terminal — a single-session handler
     // repeating the same label on every row is noise.
@@ -76,8 +93,12 @@ class HandlerScreen extends ConsumerWidget {
         context,
         terminalId: s.terminalId,
         service: service,
+        judgeTools: judgeTools,
         initialBrief: s.brief,
         initialNotifyOnly: s.notifyOnly,
+        observability: s.observability,
+        agentObservable: agentObservableOf(s.terminalId),
+        agentLabel: catalog[agentOf(s.terminalId)]?.label,
       );
       if (choice == null) return;
       if (choice.disarm) {
@@ -267,9 +288,40 @@ class _SessionBriefHeader extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: AbTokens.space8),
+                // Sits beside the judge chip because that is what it qualifies:
+                // the named judge cannot run headless, so nothing it sees gets
+                // answered without the user.
+                if (session.observability == HandlerObservability.escalateOnly)
+                  ...[
+                    AbChip.system(label: 'ESCALATE ONLY', color: p.warning),
+                    const SizedBox(width: AbTokens.space6),
+                  ],
                 AbChip.label(label: judgeLabel, color: p.textMuted),
               ],
             ),
+            // Only ever rendered from the session's OWN report: a bridge that
+            // sends no observability leaves this silent rather than guessing
+            // from the agent it happens to run.
+            if (session.observability == HandlerObservability.unsupported) ...[
+              const SizedBox(height: AbTokens.space4),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  AbIcon(AbIcons.warning, size: 12, color: p.warning),
+                  const SizedBox(width: AbTokens.space4),
+                  Expanded(
+                    child: Text(
+                      'Not watched — this agent reports nothing the Handler '
+                      'can act on.',
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontXs,
+                        color: p.warning,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
             if (doneWhen != null && doneWhen.isNotEmpty) ...[
               const SizedBox(height: AbTokens.space4),
               Row(

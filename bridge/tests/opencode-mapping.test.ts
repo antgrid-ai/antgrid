@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { mapPart, mapPlanEntries, mapTokens, mapOpencodeError, toolKind } from "../src/opencode/opencode-mapping";
+import { mapPart, mapPlanEntries, mapTokens, mapOpencodeError, toolKind } from "../src/agents/opencode/mapping";
 
 describe("opencode-mapping", () => {
   it("maps a text part to a message item with role", () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { OpencodeDriver, type OpencodeClientLike, type OpencodeEvent } from "../src/opencode/opencode-driver";
+import { OpencodeDriver, type OpencodeClientLike, type OpencodeEvent } from "../src/agents/opencode/chat-backend";
 
 // Minimal event-queue client: createSession records its opts and resolves to a
 // fixed id, events() yields whatever the test pushes. Only the members the title

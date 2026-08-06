@@ -17,7 +17,7 @@ export interface TerminalSpawnConfig {
   type?: "agent" | "service";
   suppressOscNotifications?: boolean;
   suppressOscTitle?: boolean;
-  expectsHookAliveProbe?: boolean;
+  hookAliveProbeAgent?: string;
 }
 
 interface StoppedTerminalInfo {
@@ -103,7 +103,7 @@ export class TerminalManager {
       type: config.type,
       suppressOscNotifications: config.suppressOscNotifications,
       suppressOscTitle: config.suppressOscTitle,
-      expectsHookAliveProbe: config.expectsHookAliveProbe,
+      hookAliveProbeAgent: config.hookAliveProbeAgent,
       onTitle: (title: string) => this.callbacks.onTerminalTitle?.(terminalId, title),
       onMessage: (msg: AbMessage) => {
         if (msg.type === "terminal:output") {

@@ -29,10 +29,6 @@ const _kSkeletalWakeFor = [
   'Repeated failures',
 ];
 
-// The tools the bridge's judge can drive headlessly (mirror of the entries
-// carrying a `judge` in bridge/src/agents/registry.ts).
-const _kJudgeTools = ['claude-code', 'codex', 'opencode'];
-
 /// The user's choice from [showHandlerBriefingSheet]: arm with [brief]
 /// (respecting [notifyOnly]), or — when editing an already-armed session —
 /// disarm it instead ([disarm]; [brief]/[notifyOnly] are ignored by callers
@@ -61,12 +57,30 @@ class HandlerArmChoice {
 
 /// Opens the arm flow for [terminalId]: requests a plan, shows loading, then
 /// the editable brief. Returns the user's arming choice or null on cancel.
+///
+/// [judgeTools] are the registry keys the bridge can drive headlessly as a
+/// judge, resolved by the caller off the advertised agent catalog (through
+/// `judgeCapableToolsProvider`, which also owns the pre-descriptor floor).
+/// Empty when a described catalog holds no judge-capable agent: the picker then
+/// offers only Default, which still arms with the session's own tool — an
+/// honest omission rather than a list this sheet guessed at.
+///
+/// The two coverage inputs answer different questions and neither substitutes
+/// for the other. [observability] is what the bridge says about THIS armed
+/// session (null while nothing is armed, or from a bridge that predates the
+/// field). [agentObservable] is the catalog's prediction for the agent the slot
+/// would run, which is the only answer available before arming; null there
+/// means no bridge has described that agent, and the sheet then says nothing.
 Future<HandlerArmChoice?> showHandlerBriefingSheet(
   BuildContext context, {
   required String terminalId,
   required HandlerService service,
+  required List<String> judgeTools,
   HandlerBrief? initialBrief,
   bool? initialNotifyOnly,
+  HandlerObservability? observability,
+  bool? agentObservable,
+  String? agentLabel,
 }) {
   return showAbAdaptiveSheet<HandlerArmChoice>(
     context,
@@ -74,11 +88,30 @@ Future<HandlerArmChoice?> showHandlerBriefingSheet(
     child: _HandlerBriefingFlow(
       terminalId: terminalId,
       service: service,
+      judgeTools: judgeTools,
       initialBrief: initialBrief,
       initialNotifyOnly: initialNotifyOnly,
+      observability: observability,
+      agentObservable: agentObservable,
+      agentLabel: agentLabel,
     ),
   );
 }
+
+/// Copy for the "this session cannot be watched" warning, shared by the sheet
+/// and pinned by test. [agentLabel] is the agent's display name when the
+/// catalog named one; without it the warning stays generic rather than
+/// inventing an attribution.
+String unwatchableNotice(String? agentLabel) =>
+    '${agentLabel ?? "This agent"} reports nothing the Handler can act on — '
+    'arming it would stay silent.';
+
+/// The other half of the same fact, and deliberately a different sentence: this
+/// session IS watched, it just has no judge, so everything it pauses on reaches
+/// the user. Collapsing the two into one "limited" message would hide which of
+/// them the user is looking at.
+const escalateOnlyNotice =
+    "This judge can't run headless, so every pause comes to you.";
 
 enum _Phase { loading, editing }
 
@@ -86,14 +119,22 @@ class _HandlerBriefingFlow extends StatefulWidget {
   const _HandlerBriefingFlow({
     required this.terminalId,
     required this.service,
+    required this.judgeTools,
     required this.initialBrief,
     required this.initialNotifyOnly,
+    required this.observability,
+    required this.agentObservable,
+    required this.agentLabel,
   });
 
   final String terminalId;
   final HandlerService service;
+  final List<String> judgeTools;
   final HandlerBrief? initialBrief;
   final bool? initialNotifyOnly;
+  final HandlerObservability? observability;
+  final bool? agentObservable;
+  final String? agentLabel;
 
   @override
   State<_HandlerBriefingFlow> createState() => _HandlerBriefingFlowState();
@@ -296,6 +337,22 @@ class _HandlerBriefingFlowState extends State<_HandlerBriefingFlow> {
   bool get _canArm =>
       _willHandle.isNotEmpty || _wakeFor.isNotEmpty || _thenItems.isNotEmpty;
 
+  /// Nothing this slot does would reach the Handler.
+  ///
+  /// An armed session's own report outranks the catalog's prediction: the
+  /// catalog describes an AGENT, the snapshot describes this SESSION — its live
+  /// mode and its judge pick included — so once one exists it is the only
+  /// accurate answer. Unknown on both sides says nothing.
+  bool get _unwatchable => widget.observability != null
+      ? widget.observability == HandlerObservability.unsupported
+      : widget.agentObservable == false;
+
+  /// Watched, but with no judge to review what it sees. Only an armed session
+  /// can report this — it turns on the judge pick, which the catalog's
+  /// per-agent prediction knows nothing about.
+  bool get _escalateOnly =>
+      widget.observability == HandlerObservability.escalateOnly;
+
   HandlerBrief _buildBrief() {
     // Uncommitted add-line text is still the user's intent — commit it into
     // the lists before reading them.
@@ -365,6 +422,12 @@ class _HandlerBriefingFlowState extends State<_HandlerBriefingFlow> {
               ],
             ),
           ),
+          if (_unwatchable)
+            _Banner(
+              text: unwatchableNotice(widget.agentLabel),
+              icon: AbIcons.warning,
+              color: p.warning,
+            ),
           if (_banner != null) _Banner(text: _banner!),
           if (_freshBrief != null) _FreshPlanOffer(onUse: _useFreshPlan),
           Flexible(
@@ -492,6 +555,16 @@ class _HandlerBriefingFlowState extends State<_HandlerBriefingFlow> {
   String get _defaultToolLabel =>
       widget.service.resolvedDefaultTool(widget.terminalId) ?? 'agent tool';
 
+  /// The advertised judge tools, plus this session's own pick when no bridge
+  /// has described it. A selection the trigger displays must be reachable from
+  /// the menu that sets it — same rule the New Session agent picker follows for
+  /// its current agent. Without it an armed session's stored judge silently
+  /// becomes one-way: visible, and unrecoverable once anything else is chosen.
+  List<String> get _judgeToolOptions =>
+      _judgeTool.isEmpty || widget.judgeTools.contains(_judgeTool)
+      ? widget.judgeTools
+      : [_judgeTool, ...widget.judgeTools];
+
   Future<void> _pickJudgeTool(BuildContext anchorContext) async {
     final anchorRect = abMenuAnchorRect(anchorContext);
     if (anchorRect == null) return;
@@ -501,7 +574,7 @@ class _HandlerBriefingFlowState extends State<_HandlerBriefingFlow> {
       header: 'Judge tool',
       entries: [
         AbMenuItem(label: 'Default ($_defaultToolLabel)', value: ''),
-        for (final t in _kJudgeTools) AbMenuItem(label: t, value: t),
+        for (final t in _judgeToolOptions) AbMenuItem(label: t, value: t),
       ],
     );
     if (picked == null || !mounted) return;
@@ -534,6 +607,18 @@ class _HandlerBriefingFlowState extends State<_HandlerBriefingFlow> {
             color: p.textMuted,
           ),
         ),
+        // Beside the picker that fixes it, not up with the unwatchable warning:
+        // this session IS watched, it just has nobody to answer with.
+        if (_escalateOnly) ...[
+          const SizedBox(height: AbTokens.space4),
+          Text(
+            escalateOnlyNotice,
+            style: AbTokens.sansStyle(
+              fontSize: AbTokens.fontXs,
+              color: p.warning,
+            ),
+          ),
+        ],
         const SizedBox(height: AbTokens.space8),
         Row(
           children: [
@@ -655,12 +740,18 @@ class _SectionLabel extends StatelessWidget {
 }
 
 class _Banner extends StatelessWidget {
-  const _Banner({required this.text});
+  const _Banner({required this.text, this.icon = AbIcons.info, this.color});
   final String text;
+  final String icon;
+
+  /// Null keeps the muted informational tone; a warning tone is reserved for
+  /// something the user would otherwise act on wrongly.
+  final Color? color;
 
   @override
   Widget build(BuildContext context) {
     final p = context.antgrid;
+    final tone = color ?? p.textMuted;
     return Container(
       margin: const EdgeInsets.fromLTRB(
         AbTokens.space16,
@@ -678,14 +769,14 @@ class _Banner extends StatelessWidget {
       ),
       child: Row(
         children: [
-          AbIcon(AbIcons.info, size: 12, color: p.textMuted),
+          AbIcon(icon, size: 12, color: tone),
           const SizedBox(width: AbTokens.space6),
           Expanded(
             child: Text(
               text,
               style: AbTokens.sansStyle(
                 fontSize: AbTokens.fontXs,
-                color: p.textMuted,
+                color: tone,
               ),
             ),
           ),

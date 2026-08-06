@@ -1,4 +1,4 @@
-// bridge/src/opencode/opencode-db-read.ts
+// bridge/src/agents/opencode/db-read.ts
 import { Database } from "bun:sqlite";
 import { join, isAbsolute } from "node:path";
 import { homedir } from "node:os";
@@ -23,13 +23,13 @@ export function resolveOpencodeDbPath(): string {
 
 /**
  * Last n conversation texts for a session, chronological. Readonly open with
- * busy_timeout 0 (the title-resolver pattern): the DB is WAL so a snapshot
+ * busy_timeout 0 (the per-agent title.ts pattern): the DB is WAL so a snapshot
  * read beside a live opencode is safe, and any failure — missing DB, lock,
  * schema drift — returns [] so the caller falls back to PTY scrollback.
  * Ordered by (time_created, id), not bare id: opencode's monotonic id scheme
  * wraps every ~795 days while time_created is written once and never updated.
  * Synchronous on the event loop, but indexed and LIMIT-bounded — the same
- * trade title-resolver.ts already accepts. Never throws.
+ * trade agents/codex/title.ts already accepts. Never throws.
  */
 export function readLastOpencodeMessages(sessionId: string, n: number, dbPath?: string): string[] {
   if (n <= 0) return []; // slice(-0) === slice(0) — the whole array, not none

@@ -1,7 +1,7 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { SDKMessage, SDKUserMessage, CanUseTool } from "@anthropic-ai/claude-agent-sdk";
-import { stripInheritedCertOverrides } from "../terminal-session";
-import { resolveAgent } from "../known-agents";
+import { stripInheritedCertOverrides } from "../../terminal-session";
+import { resolveAgent } from "../../known-agents";
 
 // The slice of the SDK Query object the driver needs (injectable for tests —
 // same rationale as CodexEndpoint). The SDK does not export Query cleanly.
@@ -15,7 +15,7 @@ export interface ClaudeQueryLike extends AsyncIterable<SDKMessage> {
   // account info) — unlike supportedModels()/supportedCommands(), this
   // resolves even with nothing pushed to the prompt stream, forcing the
   // subprocess to boot eagerly instead of waiting on the first prompt
-  // (probe-verified against the real binary; see claude-driver.ts's
+  // (probe-verified against the real binary; see chat-backend.ts's
   // discoverCapabilities()).
   initializationResult(): Promise<any>;
   // Current context occupancy from the control channel. Optional because test

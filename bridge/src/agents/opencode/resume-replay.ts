@@ -1,5 +1,5 @@
-import { createMessage, type AbMessage } from "../protocol";
-import { mapPart, mapTokens } from "./opencode-mapping";
+import { createMessage, type AbMessage } from "../../protocol";
+import { mapPart, mapTokens } from "./mapping";
 
 // opencode carries a per-message time (info.time.created, epoch ms — both user
 // and assistant); parts inherit their message's time. We stamp each item's

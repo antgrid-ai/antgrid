@@ -1,6 +1,5 @@
-import type { ToolUpdateSpec } from "../agent-update";
 import type { HookCommand } from "../hook-command";
-import type { HookInvocation, HookPost } from "./hook-posts";
+import type { HookInvocation, HookPath, HookPost } from "./hook-posts";
 import type { AbMessage } from "../protocol";
 import type { StructuredDriver } from "../structured/structured-manager";
 import type { JudgeTier } from "../handler/decision";
@@ -46,6 +45,31 @@ export type AgentKey =
  */
 export interface LaunchEnvCtx {
   abDir: string;
+}
+
+/** An agent's own on-disk updater state, when it keeps one (codex's
+ *  ~/.codex/version.json). Two things we can read for free: a `latest_version`
+ *  hint that lets detection work offline, and the `dismissed_version` the user
+ *  already declined in the agent's own UI, which we honor rather than re-ask. */
+export interface AgentUpdateState {
+  latest_version?: string;
+  dismissed_version?: string | null;
+}
+
+/** How an agent updates itself in place — the whole per-agent surface of the
+ *  update path, which is otherwise agent-agnostic (see src/update/). */
+export interface AgentUpdate {
+  /** npm package whose dist-tags.latest is the "latest" authority. */
+  npmPackage: string;
+  /** PATH binary name to resolve (realpath) for --version and the updater.
+   *  Not always the registry key: claude-code's binary is `claude`. */
+  command: string;
+  /** argv for the CLI's own self-updater (codex/claude `update`, opencode
+   *  `upgrade` — the divergence this field exists to record). */
+  updateArgs: string[];
+  /** Reads this agent's updater state. Absent = no such file, and detection
+   *  runs npm-only with app-side dismissal. */
+  readState?: () => AgentUpdateState | null;
 }
 
 /** Inputs a hook profile needs to turn one invocation into loopback API posts.
@@ -175,6 +199,52 @@ export interface HookProfile {
   /** Turns one allowlisted invocation into the loopback posts it implies. Called
    *  only after the event passed `events`, so it never re-checks. */
   toPosts: (invocation: HookInvocation, ctx: HookPostCtx) => Promise<HookPost[]>;
+  /**
+   * Every loopback path this agent's INSTALLED INTEGRATION can POST — whether
+   * through `bridge hook` (this profile's `toPosts`) or from inside the agent's
+   * own runtime (opencode's in-process plugin, which posts /session-title,
+   * /notify and /handler-event and shells out to nothing).
+   *
+   * Scoped to the integration, not to `toPosts`, because the two questions
+   * nothing else can answer from outside are integration-level: does an armed
+   * Handler ever hear from this agent's TERMINAL sessions (`/handler-event`),
+   * and does the agent probe the hook channel at startup (`/hook-alive`, whose
+   * absence the terminal treats as a dead integration).
+   *
+   * Over-declaring a path only claims a capability nothing exercises; omitting
+   * one silently gates a feature off. Keep it in step with `toPosts` and with
+   * `bridge/plugin/<agent>/`.
+   */
+  posts: readonly HookPath[];
+  /**
+   * Which turn boundaries this agent's hook events actually report. The
+   * keystroke turn-start inference (work-status.ts's `userReply({submitted})`)
+   * is legal ONLY for a session that reports ENDS but no START: the inferred
+   * turn is then guaranteed a closer and cannot wedge on "working".
+   *
+   * One object, not two arrays, so a profile cannot declare an end without
+   * having considered whether it also has a start. Lives beside the `events`
+   * list it names, so an agent whose events change cannot silently disagree
+   * with the gate.
+   *
+   * "Boundary", not "notification": copilot's `agent-stop` posts only a title,
+   * and claude's `stop-failure` posts a turn-end notify on the fatal classes
+   * only. What matters is whether an inferred turn would be closed.
+   */
+  turnBoundaryEvents: { start: readonly string[]; end: readonly string[] };
+  /**
+   * True when this agent's plugin host may drop our environment, so a hook
+   * invocation that arrives with no ANTGRID_API_PORT falls back to reading
+   * `<ANTGRID_DIR>/api.port`. Copilot's plugin host does.
+   *
+   * Absent is a TRUST BOUNDARY, not an oversight. cursor-agent's hooks are
+   * machine-global (`~/.cursor/hooks.json`), so every unrelated cursor-agent run
+   * on the box invokes `bridge hook`; the missing ANTGRID_API_PORT is the only
+   * thing that makes those runs a no-op (see agents/cursor-agent/hooks.ts's
+   * note on why machine-global is safe). A universal port-file fallback would
+   * hand the loopback API to any local process that can spell `bridge hook`.
+   */
+  portFileFallback?: true;
 }
 
 /**
@@ -220,8 +290,8 @@ export interface AgentSpec {
    *  pushes the title inline) and the OSC-2 title scanner is suppressed for its
    *  terminals; "osc" = rely on the terminal's OSC-0/2 window-title escapes.
    *  Deliberately NOT the same set as notificationSource: cursor-agent has
-   *  plugin notifications but no structured title source (title-resolver.ts has
-   *  no cursor-agent case), so gating its OSC title would kill auto-naming;
+   *  plugin notifications but no structured title source (there is no
+   *  agents/cursor-agent/title.ts), so gating its OSC title would kill auto-naming;
    *  github-copilot has a structured title source (materializeCopilotPlugin's
    *  sessionStart hook) despite osc-sourced notifications. See
    *  [[two-perspawn-injection-systems-separate]]-style split — these are
@@ -230,6 +300,32 @@ export interface AgentSpec {
   /** Argv appended to the base launch args to resume a specific agent-native
    *  conversation. `[]` = no verified resume-by-id support (fresh start). */
   resume: (agentSessionId: string) => string[];
+  /**
+   * True when this agent's resume argv is a SUBCOMMAND (`codex resume <uuid>`)
+   * rather than a switch, so it must be appended AFTER the user's raw `args`
+   * string. Absent = a switch, which goes ahead of raw args so a user-supplied
+   * `--` boundary cannot swallow it.
+   *
+   * Deliberately separate from `resume` rather than folded into it: `resume`
+   * returns the tokens, this says where in the folded shell line they land, and
+   * only ONE call site (the args-folding branch of SessionManager.start) is
+   * positional at all.
+   */
+  resumeIsSubcommand?: true;
+  /**
+   * True when a launch through the antgrid.yaml DEFAULT spec (`agent.command`,
+   * no per-session `tool`) still gets this agent's hook injection AND resume
+   * argv. One field, not two, because `SessionManager.start()` and
+   * `resumeToolFor()` must answer it identically — they diverged silently once.
+   *
+   * Absent = that path launches the configured command bare. Not a degradation:
+   * no other agent's default-spec launch has ever been verified, and widening it
+   * changes the argv of every existing antgrid.yaml spawn — claude would gain
+   * `--plugin-dir`, codex a `-c hooks.state={…}` block whose trusted_hash is
+   * computed for the interactive TUI, not for whatever binary `agent.command`
+   * names.
+   */
+  augmentsDefaultSpec?: true;
   /** Argv appended LAST so the interactive TUI opens with a prompt already
    *  submitted. `[]` = no VERIFIED interactive form; see initial-prompt.ts for
    *  why an unverified `--` separator is worse than the misparse it guards. */
@@ -237,10 +333,21 @@ export interface AgentSpec {
   /** Extra launch environment, applied only on the registry-key launch path.
    *  Absent = the agent needs no generated config to notify. */
   env?: (ctx: LaunchEnvCtx) => Record<string, string>;
-  /** ToolUpdateSpec minus its `tool` field — the registry key already is it.
+  /** How this agent updates itself in place. The registry key is the `tool` id
+   *  the update path keys by, so it is not restated here.
    *  Absent = the agent ships no self-updater (github-copilot is IDE-bound). */
-  update?: Omit<ToolUpdateSpec, "tool">;
+  update?: AgentUpdate;
   hooks?: HookProfile;
+  /**
+   * Reads the notification body for this agent's `/notify` posts out of the
+   * transcript path the post carried. Absent = the agent carries its final
+   * message inline on the post (codex's Stop hook does) or carries no
+   * transcript at all, and compose.ts falls back to the type label.
+   *
+   * Takes a path, not the whole post: the caller has already decided the post
+   * carried no inline message, and the path is the only thing this can read.
+   */
+  notifyBodyFromTranscript?: (transcriptPath: string) => Promise<string | null>;
   /** Presence is what makes a tool chat-capable; there is no separate list. */
   driver?: SpecDriverFactory;
   /** Headless one-shot judge for the supervisor. Absent = no VERIFIED headless

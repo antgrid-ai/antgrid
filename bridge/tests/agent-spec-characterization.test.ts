@@ -20,7 +20,7 @@ import { Database } from "bun:sqlite";
 
 import { resumeArgv, sessionResumable } from "../src/agent-resume";
 import { initialPromptArgv } from "../src/initial-prompt";
-import { updateSpecFor } from "../src/agent-update";
+import { updateSpecFor } from "../src/update/specs";
 import { augmentAgentLaunch } from "../src/agent-launch-augmenter";
 import { runHookInvocation, type HookPost } from "../src/hook-runner";
 import { assembleContext } from "../src/handler/context";

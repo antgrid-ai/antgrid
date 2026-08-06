@@ -9,15 +9,14 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { readCodexVersionJson, codexHomeDir } from "../codex/codex-version";
+import { readCodexVersionJson, codexHomeDir } from "./codex/home";
+import { resolveClaudeTranscriptTitle } from "./claude-code/title";
 import {
   codexThreadExistsSync,
-  copilotSessionExistsSync,
-  resolveClaudeTranscriptTitle,
   resolveCodexThreadName,
   resolveCodexThreadTitle,
-  resolveCopilotSessionTitle,
-} from "../title-resolver";
+} from "./codex/title";
+import { copilotSessionExistsSync, resolveCopilotSessionTitle } from "./github-copilot/title";
 import { injectConfig } from "./config-inject";
 import * as claudeHooks from "./claude-code/hooks";
 import * as codexHooks from "./codex/hooks";
@@ -27,7 +26,7 @@ import * as opencodeHooks from "./opencode/hooks";
 import { createDriver as createClaudeDriver } from "./claude-code/driver";
 import { createDriver as createCodexDriver } from "./codex/driver";
 import { createDriver as createOpencodeDriver } from "./opencode/driver";
-import { readTranscript as readClaudeTranscript } from "./claude-code/transcript";
+import { lastAssistantText, readTranscript as readClaudeTranscript } from "./claude-code/transcript";
 import { readTranscript as readCodexTranscript } from "./codex/transcript";
 import { readTranscript as readOpencodeTranscript } from "./opencode/transcript";
 import type { AgentKey, AgentSpec } from "./types";
@@ -43,6 +42,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     resume: (id) => ["--resume", id],
     initialPrompt: (p) => ["--", p],
     hooks: claudeHooks,
+    notifyBodyFromTranscript: lastAssistantText,
     driver: createClaudeDriver,
     judge: {
       tier: "readonly",
@@ -75,6 +75,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     notificationSource: "plugin",
     titleSource: "structured",
     resume: (id) => ["resume", id],
+    resumeIsSubcommand: true,
     initialPrompt: (p) => ["--", p],
     hooks: codexHooks,
     driver: createCodexDriver,
@@ -154,6 +155,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     resume: (id) => ["--resume", id],
     initialPrompt: (p) => ["--", p],
     hooks: cursorHooks,
+    augmentsDefaultSpec: true,
   },
   "github-copilot": {
     bin: "copilot",
@@ -166,6 +168,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     resume: (id) => [`--resume=${id}`],
     initialPrompt: () => [],
     hooks: copilotHooks,
+    augmentsDefaultSpec: true,
     resumable: ({ agentSessionId, copilotHome }) =>
       copilotSessionExistsSync(
         agentSessionId,
@@ -255,28 +258,46 @@ export function judgeCapable(tool: string): boolean {
   return agentSpec(tool)?.judge !== undefined;
 }
 
-// Events that POST a turn-END notification (task_complete / error / idle).
-const TURN_END_EVENTS: ReadonlySet<string> = new Set(["stop", "after-agent", "agent-stop"]);
-
 /**
  * True when a terminal-mode session of [tool] reports turn ENDS but no turn
  * START. Those are the only sessions whose "working" may be inferred from a
  * submitted keystroke: the inferred turn is guaranteed a closer, so it cannot
  * wedge the session on "working" (see work-status.ts's userReply).
  *
- * Excludes both ends of the spectrum. Claude declares "user-prompt" (a real
- * UserPromptSubmit turn-start hook), so guessing there could only be wrong. An
- * agent with no turn-end event — opencode, whose in-runtime plugin declares no
- * `bridge hook` events, and the hookless kilo/kimi/mistral-vibe — has nothing to
- * close an inferred turn, so theirs would run until the session stopped, which
- * is worse than reading "done".
+ * Excludes both ends of the spectrum. Claude declares a real UserPromptSubmit
+ * turn-start hook, so guessing there could only be wrong. An agent with no
+ * turn-end event — opencode, whose in-runtime plugin declares no `bridge hook`
+ * events, and the hookless kilo/kimi/mistral-vibe — has nothing to close an
+ * inferred turn, so theirs would run until the session stopped, which is worse
+ * than reading "done".
  *
- * Lives here, off each agent's own hook profile, rather than in a table of its
- * own: this file is the single source of truth for what a tool actually fires,
- * so an agent whose events change can't silently disagree with the gate.
+ * Read straight off each agent's own hook profile: this file no longer holds a
+ * cross-agent table of event names that an agent's events could drift from.
  */
 export function needsKeystrokeTurnStart(tool: string | undefined): boolean {
-  const events = tool === undefined ? undefined : agentSpec(tool)?.hooks?.events;
-  if (events === undefined) return false;
-  return !events.includes("user-prompt") && events.some((e) => TURN_END_EVENTS.has(e));
+  const tb = tool === undefined ? undefined : agentSpec(tool)?.hooks?.turnBoundaryEvents;
+  return tb !== undefined && tb.start.length === 0 && tb.end.length > 0;
+}
+
+/**
+ * Whether an armed Handler can OBSERVE a session of [tool] in [mode] at all.
+ * "Unsupported" and "armed but quiet" are different facts, and this is the only
+ * thing that separates them — an unobservable terminal session arms cleanly
+ * today and then never fires, which reads to the user as a broken feature
+ * rather than an absent one.
+ *
+ * terminal: the agent's installed integration must POST /handler-event —
+ *   nothing else reaches the engine from a PTY.
+ * chat:     any chat driver qualifies; the engine taps the driver's own
+ *   outbound frames in-process (observeChatFrameForHandler in agent-core.ts).
+ *
+ * Derived rather than a fourth boolean on the spec: a standalone flag is exactly
+ * the kind of table that drifts from what the integration actually posts.
+ */
+export function handlerObservable(tool: string | undefined, mode: "terminal" | "chat"): boolean {
+  const spec = tool === undefined ? undefined : agentSpec(tool);
+  if (!spec) return false;
+  return mode === "chat"
+    ? spec.driver !== undefined
+    : spec.hooks?.posts.includes("/handler-event") === true;
 }

@@ -1,10 +1,6 @@
 // bridge/src/handler/context.ts
 import { agentSpec } from "../agents/registry";
 
-// Lives with claude-code's spec (the registry cannot import this module without
-// a cycle); re-exported here because it is the handler's transcript reader.
-export { readLastClaudeMessages } from "../agents/claude-code/transcript";
-
 // eslint-disable-next-line no-control-regex
 const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 export function stripAnsi(s: string): string { return s.replace(ANSI, ""); }

@@ -16,6 +16,7 @@ import '../util/device_id.dart';
 import '../utils/platform_utils.dart';
 import '../widgets/new_session/picker_sources.dart';
 import 'account_agents.dart';
+import 'agent_catalog.dart';
 import 'agent_transport.dart';
 import 'analytics.dart';
 import 'cached_sessions.dart';
@@ -207,12 +208,16 @@ Future<void> startNewSession(
     final tool = newSessionAgentToolKey(agent); // null when custom
     // command is only sent for a custom (non-registry) agent
     final command = tool == null && customCmd.isNotEmpty ? customCmd : null;
-    // Chat is only valid for chat-capable agents (agentSupportsChatResolved,
-    // wire-first with the static list as fallback); anything else always
+    // Chat is only valid for agents KNOWN to be chat-capable
+    // (agentSupportsChatResolved: the target's advert, then the persisted
+    // catalog). Anything else — including an agent nothing has described —
     // launches Terminal regardless of the (disabled) toggle's last-seen value.
-    final wireChatCapable = ref.read(newSessionChatCapableToolsProvider).value;
-    final mode =
-        (tool != null && agentSupportsChatResolved(agent, wireChatCapable))
+    final chatCapable = agentSupportsChatResolved(
+      agent,
+      wireChatCapable: ref.read(newSessionChatCapableToolsProvider).value,
+      descriptor: tool == null ? null : ref.read(agentCatalogProvider)[tool],
+    );
+    final mode = (tool != null && chatCapable == true)
         ? ref.read(newSessionModeProvider)
         : 'terminal';
 

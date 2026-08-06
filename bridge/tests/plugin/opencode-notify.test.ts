@@ -1,12 +1,19 @@
 import { test, expect } from "bun:test";
 import { AntgridSessionNamer } from "../../plugin/opencode/plugin";
 
-test("permission.updated posts permission_request to /notify", async () => {
+/** Port 0 lets the OS pick: a fixed port collides with whatever else the suite
+ *  is listening on, and the loser fails to bind rather than failing an assert. */
+function collector(): { hits: Array<{ path: string; body: string }>; server: ReturnType<typeof Bun.serve> } {
   const hits: Array<{ path: string; body: string }> = [];
-  const server = Bun.serve({ port: 39594, async fetch(req) {
+  const server = Bun.serve({ port: 0, async fetch(req) {
     hits.push({ path: new URL(req.url).pathname, body: await req.text() }); return new Response("{}");
   }});
-  process.env.ANTGRID_API_PORT = "39594";
+  return { hits, server };
+}
+
+test("permission.updated posts permission_request to /notify", async () => {
+  const { hits, server } = collector();
+  process.env.ANTGRID_API_PORT = String(server.port);
   process.env.ANTGRID_TERMINAL_ID = "t1";
 
   const plugin = await AntgridSessionNamer({} as any);
@@ -18,11 +25,8 @@ test("permission.updated posts permission_request to /notify", async () => {
 });
 
 test("session.idle posts idle (not task_complete) to /notify", async () => {
-  const hits: Array<{ path: string; body: string }> = [];
-  const server = Bun.serve({ port: 39596, async fetch(req) {
-    hits.push({ path: new URL(req.url).pathname, body: await req.text() }); return new Response("{}");
-  }});
-  process.env.ANTGRID_API_PORT = "39596";
+  const { hits, server } = collector();
+  process.env.ANTGRID_API_PORT = String(server.port);
   process.env.ANTGRID_TERMINAL_ID = "t1";
 
   const plugin = await AntgridSessionNamer({} as any);
@@ -35,11 +39,8 @@ test("session.idle posts idle (not task_complete) to /notify", async () => {
 });
 
 test("session.idle notify carries terminalId so the bridge can name the session", async () => {
-  const hits: Array<{ path: string; body: string }> = [];
-  const server = Bun.serve({ port: 39598, async fetch(req) {
-    hits.push({ path: new URL(req.url).pathname, body: await req.text() }); return new Response("{}");
-  }});
-  process.env.ANTGRID_API_PORT = "39598";
+  const { hits, server } = collector();
+  process.env.ANTGRID_API_PORT = String(server.port);
   process.env.ANTGRID_TERMINAL_ID = "t1";
 
   const plugin = await AntgridSessionNamer({} as any);
@@ -52,11 +53,8 @@ test("session.idle notify carries terminalId so the bridge can name the session"
 });
 
 test("a missing terminal id still notifies, without the field", async () => {
-  const hits: Array<{ path: string; body: string }> = [];
-  const server = Bun.serve({ port: 39600, async fetch(req) {
-    hits.push({ path: new URL(req.url).pathname, body: await req.text() }); return new Response("{}");
-  }});
-  process.env.ANTGRID_API_PORT = "39600";
+  const { hits, server } = collector();
+  process.env.ANTGRID_API_PORT = String(server.port);
   delete process.env.ANTGRID_TERMINAL_ID;
 
   const plugin = await AntgridSessionNamer({} as any);

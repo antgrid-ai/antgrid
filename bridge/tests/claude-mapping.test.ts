@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { mapToolKind, mapAssistantContent, mapUsage, mapResultError, addUsage } from "../src/claude/claude-mapping";
+import { mapToolKind, mapAssistantContent, mapUsage, mapResultError, addUsage } from "../src/agents/claude-code/mapping";
 
 describe("mapToolKind", () => {
   it("maps known Claude Code tools to toolKinds", () => {

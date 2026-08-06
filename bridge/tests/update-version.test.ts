@@ -1,26 +1,26 @@
 import { describe, it, expect } from "bun:test";
 import {
-  parseCodexVersion,
+  parseAgentVersion,
   coreLt,
   shouldNotify,
   fetchNpmLatest,
   resolveLatest,
-  checkCodexUpdate,
-  createCodexUpdateChecker,
-  runCodexUpdate,
-} from "../src/codex/codex-version";
+  checkAgentUpdate,
+  createUpdateChecker,
+  runAgentUpdate,
+} from "../src/update/version";
 
-describe("parseCodexVersion", () => {
+describe("parseAgentVersion", () => {
   it("extracts the semver core from `codex --version` output", () => {
-    expect(parseCodexVersion("codex-cli 0.142.2\n")).toBe("0.142.2");
-    expect(parseCodexVersion("codex-cli 0.144.3")).toBe("0.144.3");
+    expect(parseAgentVersion("codex-cli 0.142.2\n")).toBe("0.142.2");
+    expect(parseAgentVersion("codex-cli 0.144.3")).toBe("0.144.3");
   });
   it("keeps a prerelease suffix when present", () => {
-    expect(parseCodexVersion("codex-cli 0.145.0-alpha.4")).toBe("0.145.0-alpha.4");
+    expect(parseAgentVersion("codex-cli 0.145.0-alpha.4")).toBe("0.145.0-alpha.4");
   });
   it("returns null when no version is present", () => {
-    expect(parseCodexVersion("codex: command not found")).toBeNull();
-    expect(parseCodexVersion("")).toBeNull();
+    expect(parseAgentVersion("codex: command not found")).toBeNull();
+    expect(parseAgentVersion("")).toBeNull();
   });
 });
 
@@ -142,9 +142,9 @@ describe("resolveLatest (TTL cache, fail-soft)", () => {
   });
 });
 
-describe("checkCodexUpdate (orchestration)", () => {
+describe("checkAgentUpdate (orchestration)", () => {
   it("returns an update payload when the spawned binary is behind", async () => {
-    const out = await checkCodexUpdate({
+    const out = await checkAgentUpdate({
       execVersion: async () => "codex-cli 0.142.2\n",
       resolveLatest: async () => "0.144.3",
       dismissed: null,
@@ -153,7 +153,7 @@ describe("checkCodexUpdate (orchestration)", () => {
   });
 
   it("returns null when current", async () => {
-    const out = await checkCodexUpdate({
+    const out = await checkAgentUpdate({
       execVersion: async () => "codex-cli 0.144.3",
       resolveLatest: async () => "0.144.3",
       dismissed: null,
@@ -162,7 +162,7 @@ describe("checkCodexUpdate (orchestration)", () => {
   });
 
   it("returns null (never throws) when the version probe fails", async () => {
-    const out = await checkCodexUpdate({
+    const out = await checkAgentUpdate({
       execVersion: async () => { throw new Error("spawn failed"); },
       resolveLatest: async () => "0.144.3",
       dismissed: null,
@@ -171,7 +171,7 @@ describe("checkCodexUpdate (orchestration)", () => {
   });
 
   it("returns null when the installed version is unparseable", async () => {
-    const out = await checkCodexUpdate({
+    const out = await checkAgentUpdate({
       execVersion: async () => "garbage",
       resolveLatest: async () => "0.144.3",
       dismissed: null,
@@ -180,7 +180,7 @@ describe("checkCodexUpdate (orchestration)", () => {
   });
 
   it("suppresses a dismissed version", async () => {
-    const out = await checkCodexUpdate({
+    const out = await checkAgentUpdate({
       execVersion: async () => "codex-cli 0.142.2",
       resolveLatest: async () => "0.144.3",
       dismissed: "0.144.3",
@@ -189,9 +189,9 @@ describe("checkCodexUpdate (orchestration)", () => {
   });
 });
 
-describe("createCodexUpdateChecker (shared cache, single-flight, warm hint)", () => {
+describe("createUpdateChecker (shared cache, single-flight, warm hint)", () => {
   it("reads dismissed_version from codex's own version.json state", async () => {
-    const check = createCodexUpdateChecker({
+    const check = createUpdateChecker({
       execVersion: async () => "codex-cli 0.142.2",
       readState: () => ({ latest_version: "0.144.3", dismissed_version: "0.144.3" }),
       fetchLatest: async () => "0.144.3",
@@ -202,7 +202,7 @@ describe("createCodexUpdateChecker (shared cache, single-flight, warm hint)", ()
 
   it("collapses concurrent checks into a single network fetch", async () => {
     let fetches = 0;
-    const check = createCodexUpdateChecker({
+    const check = createUpdateChecker({
       execVersion: async () => "codex-cli 0.142.2",
       readState: () => null,
       fetchLatest: async () => { fetches++; await Promise.resolve(); return "0.144.3"; },
@@ -217,7 +217,7 @@ describe("createCodexUpdateChecker (shared cache, single-flight, warm hint)", ()
   it("reuses the cached latest within the TTL (no second fetch)", async () => {
     let fetches = 0;
     let clock = 1000;
-    const check = createCodexUpdateChecker({
+    const check = createUpdateChecker({
       execVersion: async () => "codex-cli 0.142.2",
       readState: () => null,
       fetchLatest: async () => { fetches++; return "0.144.3"; },
@@ -230,7 +230,7 @@ describe("createCodexUpdateChecker (shared cache, single-flight, warm hint)", ()
   });
 
   it("still surfaces offline by falling back to the version.json warm hint", async () => {
-    const check = createCodexUpdateChecker({
+    const check = createUpdateChecker({
       execVersion: async () => "codex-cli 0.142.2",
       readState: () => ({ latest_version: "0.144.2", dismissed_version: null }),
       fetchLatest: async () => null, // offline
@@ -240,7 +240,7 @@ describe("createCodexUpdateChecker (shared cache, single-flight, warm hint)", ()
   });
 });
 
-describe("runCodexUpdate", () => {
+describe("runAgentUpdate", () => {
   // Records the order of lifecycle calls so we can assert the invariant that
   // every codex session is fully stopped BEFORE the binary-replacing update runs,
   // and restarted AFTER it settles.
@@ -255,7 +255,7 @@ describe("runCodexUpdate", () => {
 
   it("quiesces all sessions, runs update once, then restarts them (happy path)", async () => {
     const t = tracer();
-    const out = await runCodexUpdate({
+    const out = await runAgentUpdate({
       sessionIds: ["a", "b"],
       stop: t.stop,
       start: t.start,
@@ -272,7 +272,7 @@ describe("runCodexUpdate", () => {
 
   it("restarts the stopped sessions even when the update fails", async () => {
     const t = tracer();
-    const out = await runCodexUpdate({
+    const out = await runAgentUpdate({
       sessionIds: ["a"],
       stop: t.stop,
       start: t.start,
@@ -287,7 +287,7 @@ describe("runCodexUpdate", () => {
 
   it("treats an execUpdate throw as failure and still restarts", async () => {
     const t = tracer();
-    const out = await runCodexUpdate({
+    const out = await runAgentUpdate({
       sessionIds: ["a"],
       stop: t.stop,
       start: t.start,
@@ -301,7 +301,7 @@ describe("runCodexUpdate", () => {
 
   it("swallows a failed stop so it neither blocks the update nor the restart", async () => {
     const events: string[] = [];
-    const out = await runCodexUpdate({
+    const out = await runAgentUpdate({
       sessionIds: ["a"],
       stop: async () => { throw new Error("stuck"); },
       start: (id) => { events.push(`start:${id}`); },
@@ -314,7 +314,7 @@ describe("runCodexUpdate", () => {
 
   it("runs the update with no stop/restart when there are no live sessions", async () => {
     const t = tracer();
-    const out = await runCodexUpdate({
+    const out = await runAgentUpdate({
       sessionIds: [],
       stop: t.stop,
       start: t.start,
@@ -327,7 +327,7 @@ describe("runCodexUpdate", () => {
 
   it("reports installed=null when the post-update version probe fails", async () => {
     const t = tracer();
-    const out = await runCodexUpdate({
+    const out = await runAgentUpdate({
       sessionIds: [],
       stop: t.stop,
       start: t.start,

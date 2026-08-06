@@ -77,9 +77,18 @@ const ClaudePayloadSchema = z.object({
 // precise `agent:turn-start` frames from their driver instead).
 // Codex/Cursor/Copilot expose no pre-turn hook, so their terminal-mode sessions
 // infer the start from a submitted keystroke — see `needsKeystrokeTurnStart` in
-// ../registry.ts, which keys off the absence of "user-prompt" in this very
-// list. Their turn-END hooks still deliver attention/error/done.
+// ../registry.ts, which reads the `turnBoundaryEvents` declared below. Their
+// turn-END hooks still deliver attention/error/done.
 export const events = ["session-start", "stop", "stop-failure", "notification", "user-prompt"] as const;
+
+// "stop-failure" is deliberately not an `end`: it posts a turn-end notify only
+// on the fatal classes, and claude never infers a turn start anyway.
+export const turnBoundaryEvents = {
+  start: ["user-prompt"],
+  end: ["stop"],
+} as const;
+
+export const posts = ["/session-title", "/turn-start", "/notify", "/handler-event"] as const;
 
 // StopFailure reasons no amount of waiting fixes. They take the ordinary
 // turn_end path so the judge escalates at once, matching what the chat-side

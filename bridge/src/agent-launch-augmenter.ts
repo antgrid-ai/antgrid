@@ -8,8 +8,12 @@ import type { LaunchAugmentation } from "./agents/types";
 
 export type { LaunchAugmentation };
 
+/**
+ * Whether this agent's injected integration pings /hook-alive at session start,
+ * so a terminal that never sees the ping can report the integration as dead.
+ */
 export function injectsHookAliveProbe(tool: string): boolean {
-  return tool === "codex";
+  return agentSpec(tool)?.hooks?.posts.includes("/hook-alive") === true;
 }
 
 /**

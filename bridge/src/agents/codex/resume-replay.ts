@@ -1,5 +1,5 @@
-import { createMessage, type AbMessage } from "../protocol";
-import { mapThreadItem } from "./codex-mapping";
+import { createMessage, type AbMessage } from "../../protocol";
+import { mapThreadItem } from "./mapping";
 
 // codex times turns, not items: Turn carries startedAt/completedAt as Unix
 // SECONDS (codex-rs v2 thread_data.rs). We stamp the user message with the

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { AgentDescriptor } from "./protocol";
 
 export const ControlRequestSchema = z.discriminatedUnion("type", [
   z.object({ id: z.string().min(1), type: z.literal("project:list") }),
@@ -80,7 +81,9 @@ export interface KnownProject {
   running: boolean;
 }
 
-/** One installed tool as reported by the loopback control plane. */
+/** One installed tool as reported by the loopback control plane. PATH-scoped:
+ *  what each agent IS, installed or not, rides the sibling `agents` descriptor
+ *  array (AgentDescriptor in protocol.ts). */
 export interface ToolSummary {
   tool: string;
   path: string;
@@ -101,7 +104,7 @@ export interface ConnectInfo {
 export type ControlResponse =
   | { id: string; ok: true; type: "project:list"; projects: ProjectSummary[] }
   | { id: string; ok: true; type: "project:resolve"; projectId: string; repoPath: string; selectedPath: string; label: string; isGitRepository: boolean }
-  | { id: string; ok: true; type: "tools:list"; tools: ToolSummary[] }
+  | { id: string; ok: true; type: "tools:list"; tools: ToolSummary[]; agents?: AgentDescriptor[] }
   | { id: string; ok: true; type: "project:open"; running: boolean; connect: ConnectInfo | null }
   | { id: string; ok: true; type: "project:start"; running: boolean; connect: ConnectInfo | null }
   | { id: string; ok: true; type: "project:stop" }

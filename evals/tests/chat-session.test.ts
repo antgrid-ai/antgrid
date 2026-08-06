@@ -10,7 +10,7 @@ import { bindFirstProject } from "../support/stream";
 // This is the local+relay parity proof for the structured (chat-mode) driver.
 //
 // Gated on a real `codex` binary being on PATH: the driver spawns
-// `codex app-server` and drives a live turn (`bridge/src/codex/spawn-codex.ts`),
+// `codex app-server` and drives a live turn (`bridge/src/agents/codex/spawn.ts`),
 // which needs both the binary and an authenticated codex. Environments without
 // it (most CI) skip cleanly rather than fail — the same availability-gate style
 // as plugin-notifications.test.ts's real-agent chain. `describe.skipIf` keeps

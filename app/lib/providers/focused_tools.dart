@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../launcher/host_control_client.dart';
 import '../util/device_id.dart';
+import 'agent_catalog.dart';
 import 'agent_transport.dart';
 import 'control_plane.dart';
 import 'new_session_picker.dart';
@@ -12,6 +13,11 @@ import 'new_session_picker.dart';
 /// target the PICKER points at; an already-open session needs the machine it is
 /// actually running on, which is a different machine as soon as the picker is
 /// touched.
+///
+/// The registry-wide `agents[]` half of the same advert is deliberately NOT
+/// here: it is machine-independent, so it belongs in the merged
+/// [agentCatalogProvider] rather than in a per-focus snapshot. The app-shell
+/// reaper is the single writer that feeds it.
 class FocusedTools {
   const FocusedTools({this.labels = const {}, this.chatCapable});
 
@@ -21,8 +27,8 @@ class FocusedTools {
 
   /// Chat-capable registry keys, or null when no entry carried `chatCapable`.
   /// Null and "advertised, capable of nothing" must stay distinguishable so
-  /// callers fall back to the static table instead of disabling Chat for every
-  /// agent on an older bridge.
+  /// callers fall back to the persisted catalog instead of disabling Chat for
+  /// every agent on an older bridge.
   final Set<String>? chatCapable;
 }
 
@@ -42,11 +48,11 @@ final focusedMachineToolsProvider = FutureProvider<FocusedTools>((ref) async {
         token: host.token,
       );
       try {
-        final tools = await client.toolsList();
+        final listed = await client.toolsList();
         return FocusedTools(
-          labels: {for (final t in tools) t.tool: t.label},
+          labels: {for (final t in listed.tools) t.tool: t.label},
           chatCapable: chatCapableSetOrNull(
-            tools.map((t) => (t.tool, t.chatCapable)),
+            listed.tools.map((t) => (t.tool, t.chatCapable)),
           ),
         );
       } finally {
@@ -69,22 +75,26 @@ final focusedMachineToolsProvider = FutureProvider<FocusedTools>((ref) async {
   );
 });
 
-/// Whether [tool] can run as a chat session on the focused project's machine —
-/// wire-first with the static fallback, the same resolution the create-time
-/// picker uses, so one agent cannot read as chat-capable in one place and not
-/// the other.
+/// Whether [tool] can run as a chat session on the focused project's machine,
+/// or null when neither that machine nor the persisted catalog has said — the
+/// same three-state resolution the create-time picker uses, so one agent cannot
+/// read as chat-capable in one place and not the other.
 ///
-/// A toolless session (a custom launch command) is never chat-capable: there is
-/// no registry entry to carry a driver.
+/// A toolless session (a custom launch command) is `false`, not unknown: there
+/// is no registry entry to carry a driver.
 ///
-/// Derived as a plain `bool` rather than read off [focusedMachineToolsProvider]
+/// Derived as a plain value rather than read off [focusedMachineToolsProvider]
 /// directly because that future re-emits a fresh [FocusedTools] on every
 /// control-plane push; watchers of this only rebuild when the answer flips.
-final focusedToolChatCapableProvider = Provider.family<bool, String?>((
+final focusedToolChatCapableProvider = Provider.family<bool?, String?>((
   ref,
   tool,
 ) {
   if (tool == null || tool.isEmpty) return false;
   final wire = ref.watch(focusedMachineToolsProvider).value?.chatCapable;
-  return agentSupportsChatResolved(KnownAgent(tool), wire);
+  return agentSupportsChatResolved(
+    KnownAgent(tool),
+    wireChatCapable: wire,
+    descriptor: ref.watch(agentCatalogProvider)[tool],
+  );
 });

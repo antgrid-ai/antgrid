@@ -11,6 +11,7 @@ import {
   suppressesOscTitle,
 } from "./known-agents";
 import { augmentAgentLaunch, injectsHookAliveProbe } from "./agent-launch-augmenter";
+import { agentSpec } from "./agents/registry";
 import { resumeArgv, sessionResumable } from "./agent-resume";
 import { isChatCapableTool } from "./structured/chat-capable";
 import { initialPromptArgv } from "./initial-prompt";
@@ -890,9 +891,6 @@ export class SessionManager {
       baseArgs = [...baseArgs, ...aug.args];
       launchEnv = { ...launchEnv, ...aug.env };
       notificationsInjected = aug.notificationsInjected;
-      if (entry.tool === "github-copilot" || entry.tool === "codex") {
-        launchEnv = { ...launchEnv, ANTGRID_TERMINAL_ID: id };
-      }
       // Resume the slot's last-active conversation (held in resumeArgs, appended
       // LAST in the spawn block so it lands after any per-session args — required
       // for codex's `resume` subcommand).
@@ -908,10 +906,10 @@ export class SessionManager {
       baseArgs = sessionAgentSpec.args ?? [];
       // The antgrid.yaml default spec gets per-spawn hooks + resume only for
       // agents whose augmenter needs it; other default agents launch bare.
-      if (sessionAgentSpec.name === "github-copilot" || sessionAgentSpec.name === "cursor-agent") {
+      if (agentSpec(sessionAgentSpec.name)?.augmentsDefaultSpec) {
         const aug = augmentAgentLaunch(sessionAgentSpec.name, this.opts.storeDir, this.opts.cursorDir);
         baseArgs = [...baseArgs, ...aug.args];
-        launchEnv = { ...launchEnv, ...aug.env, ANTGRID_TERMINAL_ID: id };
+        launchEnv = { ...launchEnv, ...aug.env };
         notificationsInjected = aug.notificationsInjected;
         resumeArgs = this.resumeArgsFor(sessionAgentSpec.name, entry);
       }
@@ -953,7 +951,8 @@ export class SessionManager {
       // Codex's `resume <uuid>` is a subcommand and must follow user/global
       // flags. Other agents' resume switches go before raw args so a user `--`
       // boundary cannot swallow them.
-      const resumeAfterRaw = (entry.tool ?? sessionAgentSpec.name) === "codex";
+      const resumeAfterRaw =
+        agentSpec(entry.tool ?? sessionAgentSpec.name)?.resumeIsSubcommand === true;
       const beforeRaw = resumeAfterRaw ? [] : resumeArgs.map(shellQuoteArg);
       const afterRaw = resumeAfterRaw ? resumeArgs.map(shellQuoteArg) : [];
       const foldedPrompt = foldPromptIntoLine ? promptArgs.map(shellQuoteArg) : [];
@@ -997,8 +996,9 @@ export class SessionManager {
         entry.tool ?? sessionAgentSpec.name,
         notificationsInjected,
       ),
-      expectsHookAliveProbe:
-        injectsHookAliveProbe(entry.tool ?? sessionAgentSpec.name),
+      hookAliveProbeAgent: injectsHookAliveProbe(entry.tool ?? sessionAgentSpec.name)
+        ? entry.tool ?? sessionAgentSpec.name
+        : undefined,
     });
     entry.lastUsedAt = Date.now();
     this.changed();
@@ -1268,7 +1268,7 @@ export class SessionManager {
     if (e.tool) return e.tool;
     if (e.command) return undefined;
     const name = this.agentSpec.name;
-    return name === "github-copilot" || name === "cursor-agent" ? name : undefined;
+    return agentSpec(name)?.augmentsDefaultSpec ? name : undefined;
   }
 
   /**

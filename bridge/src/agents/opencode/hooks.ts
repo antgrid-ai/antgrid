@@ -43,6 +43,19 @@ export function inject({ abDir }: HookInjectCtx): LaunchAugmentation {
 // `bridge hook` and has no event for the runner to allowlist.
 export const events = [] as const;
 
+// Empty for the same reason `events` is: the in-runtime plugin's turn signals
+// never pass through `bridge hook`, so nothing here could close an inferred
+// turn.
+export const turnBoundaryEvents = {
+  start: [],
+  end: [],
+} as const;
+
+// Posted by bridge/plugin/opencode/plugin.ts from inside opencode's own Bun
+// runtime, not by `toPosts` — which is why this list is not derivable from
+// `events`.
+export const posts = ["/session-title", "/notify", "/handler-event"] as const;
+
 // Unreachable while `events` is empty — hook-runner drops every invocation at
 // the allowlist check before dispatch. Present so the profile stays one shape
 // across agents, and so adding an event here is the only thing needed to make

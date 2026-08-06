@@ -1,5 +1,5 @@
-import { createMessage, type AbMessage } from "../protocol";
-import { mapAssistantContent, mapToolKind, mapUsage } from "./claude-mapping";
+import { createMessage, type AbMessage } from "../../protocol";
+import { mapAssistantContent, mapToolKind, mapUsage } from "./mapping";
 
 // Claude Code stamps each transcript entry with an ISO-8601 `timestamp`. Carry
 // it onto the emitted frame's envelope (overriding createMessage's Date.now())

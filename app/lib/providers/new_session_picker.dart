@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/ab_project.dart';
+import '../models/agent_descriptor.dart';
 import '../models/git_branch.dart';
 import '../models/session_entry.dart';
 import '../models/session_target.dart';
@@ -15,6 +16,7 @@ import '../utils/platform_utils.dart';
 import '../launcher/host_control_client.dart';
 import '../widgets/new_session/picker_sources.dart';
 import 'account_agents.dart';
+import 'agent_catalog.dart';
 import 'agent_transport.dart';
 import 'control_plane.dart';
 import 'device_provisioning.dart';
@@ -276,16 +278,16 @@ bool pickerMatchesFocus(PickerProject p, String? focusId) {
 /// order (registry declaration order) and is relied on by [firstInstalledAgent].
 ///
 /// The label is null against a bridge predating the `label` field; callers fall
-/// back to [kFallbackAgentLabels]. Keys are carried verbatim, so an agent this
-/// app has never heard of still appears and is still named.
+/// back to the persisted [agentCatalogProvider]. Keys are carried verbatim, so
+/// an agent this app has never heard of still appears and is still named.
 ///
 /// Control-plane sourced — no per-project data-plane session is opened to detect:
 ///   - remote target → the bare-deviceUuid control plane's `agent:tools`
 ///     ([controlPlaneStateProvider]);
 ///   - local target  → the loopback host's `tools:list` ([HostControlClient]).
 /// While the control-plane connection is in flight (or on any error / offline
-/// target / no host yet) this resolves to an empty map and the dropdown shows
-/// [kFallbackSessionAgents] as a loading fallback.
+/// target / no host yet) this resolves to an empty map and the dropdown falls
+/// back to the persisted catalog.
 final newSessionDetectedToolsProvider = FutureProvider<Map<String, String?>>((
   ref,
 ) async {
@@ -300,8 +302,8 @@ final newSessionDetectedToolsProvider = FutureProvider<Map<String, String?>>((
         token: host.token,
       );
       try {
-        final tools = await client.toolsList();
-        return {for (final t in tools) t.tool: t.label};
+        final listed = await client.toolsList();
+        return {for (final t in listed.tools) t.tool: t.label};
       } finally {
         client.close();
       }
@@ -332,8 +334,8 @@ final newSessionDetectedToolsProvider = FutureProvider<Map<String, String?>>((
 /// A bridge that predates `chatCapable` sends every entry with the field
 /// absent, which surfaces here as `null` (not an empty set) — [null] and
 /// "advertised, capable of nothing" must stay distinguishable so callers know
-/// to fall back to [newSessionAgentSupportsChat] rather than disabling Chat
-/// for every agent.
+/// to fall back to the persisted catalog rather than disabling Chat for every
+/// agent.
 /// `autoDispose` is load-bearing, not an optimization: a plain provider would
 /// outlive the composer, staying subscribed to [controlPlaneStateProvider]
 /// (which re-emits a non-`==` state on every control-plane push, so this stays
@@ -356,9 +358,9 @@ final newSessionChatCapableToolsProvider =
             token: host.token,
           );
           try {
-            final tools = await client.toolsList();
+            final listed = await client.toolsList();
             return chatCapableSetOrNull(
-              tools.map((t) => (t.tool, t.chatCapable)),
+              listed.tools.map((t) => (t.tool, t.chatCapable)),
             );
           } finally {
             client.close();
@@ -404,7 +406,8 @@ Set<String>? chatCapableSetOrNull(Iterable<(String, bool?)> entries) {
 /// did not list collapsed onto Claude Code, so a newly-shipped agent was both
 /// absent from the picker and mislabelled wherever a session already ran it.
 /// Carrying the key itself makes the bridge authoritative — the same reason
-/// [agentSupportsChatResolved] prefers the wire over [newSessionAgentSupportsChat].
+/// [agentSupportsChatResolved] reads the wire and the bridge-fed catalog rather
+/// than a table shipped here.
 sealed class NewSessionAgent {
   const NewSessionAgent();
 }
@@ -435,7 +438,14 @@ final class CustomAgent extends NewSessionAgent {
   int get hashCode => (CustomAgent).hashCode;
 }
 
-/// The agent the form starts on before detection reports anything.
+/// Pre-detection seed only. Superseded by [firstInstalledAgent] as soon as a
+/// target's tool list arrives; never used to interpret an agent the bridge
+/// named.
+///
+/// Deliberately app-owned rather than sourced from the wire: it is the value of
+/// a form field BEFORE a target is chosen, so there is no bridge to ask, and it
+/// is a product choice ("we open on Claude Code") rather than a fact about any
+/// machine.
 const NewSessionAgent kDefaultSessionAgent = KnownAgent('claude-code');
 
 /// Registry key for a known agent, or null for `custom`.
@@ -450,54 +460,41 @@ String? newSessionAgentToolKey(NewSessionAgent a) => switch (a) {
 NewSessionAgent newSessionAgentFromToolKey(String? key) =>
     (key == null || key.isEmpty) ? kDefaultSessionAgent : KnownAgent(key);
 
-/// Display names for the agents this app shipped knowing about.
+/// Pretty label for [a], preferring the target machine's [wireLabels] and then
+/// the persisted [catalog].
 ///
-/// Fallback ONLY: the bridge advertises `label` per tool and that always wins.
-/// This exists so the picker still reads correctly against a bridge predating
-/// the field, and is not a list of the agents that exist.
-const Map<String, String> kFallbackAgentLabels = {
-  'claude-code': 'Claude Code',
-  'codex': 'Codex',
-  'opencode': 'opencode',
-  'cursor-agent': 'Cursor',
-  'github-copilot': 'Copilot',
-};
-
-/// Pretty label for [a], preferring the bridge-advertised [wireLabels].
 /// Falls back to the raw registry key: showing `kilo` is honest, whereas the
-/// old enum showed such an agent as "Claude Code".
+/// old app-side enum showed such an agent as "Claude Code".
 String newSessionAgentLabel(
   NewSessionAgent a, [
   Map<String, String?>? wireLabels,
+  Map<String, AgentDescriptor>? catalog,
 ]) => switch (a) {
   CustomAgent() => 'Custom',
   KnownAgent(:final toolKey) =>
-    wireLabels?[toolKey] ?? kFallbackAgentLabels[toolKey] ?? toolKey,
+    wireLabels?[toolKey] ?? catalog?[toolKey]?.label ?? toolKey,
 };
 
 /// Display label for a cached session's agent (registry tool key or custom cmd).
 ///
-/// Static labels only, deliberately: a cached row belongs to its own origin
-/// machine, and [newSessionDetectedToolsProvider] is scoped to whatever target
-/// the New Session picker currently points at. Passing that in would name a row
-/// from an unrelated machine's tool list.
-String sessionAgentDisplayLabel(SessionEntry session) {
+/// Takes the merged [catalog], never a target-scoped tool list: a cached row
+/// belongs to its own origin machine, and [newSessionDetectedToolsProvider] is
+/// scoped to whatever target the New Session picker currently points at, so
+/// passing that in would name a row from an unrelated machine's tool list. The
+/// catalog is safe here precisely because it is machine-independent — a
+/// projection of the bridge's static registry, not a probe of one box.
+String sessionAgentDisplayLabel(
+  SessionEntry session,
+  Map<String, AgentDescriptor> catalog,
+) {
   final tool = session.tool;
   if (tool != null && tool.isNotEmpty) {
-    return newSessionAgentLabel(KnownAgent(tool));
+    return newSessionAgentLabel(KnownAgent(tool), null, catalog);
   }
   final command = session.command?.trim();
   if (command != null && command.isNotEmpty) return command;
-  return newSessionAgentLabel(kDefaultSessionAgent);
+  return newSessionAgentLabel(kDefaultSessionAgent, null, catalog);
 }
-
-/// The agents offered when the bridge has advertised nothing yet (loading, an
-/// offline target, or a bridge with no tools handler). Fallback only — when a
-/// live advert exists the picker is built from it, so a newer bridge's agents
-/// appear without an app release.
-final List<NewSessionAgent> kFallbackSessionAgents = kFallbackAgentLabels.keys
-    .map<NewSessionAgent>(KnownAgent.new)
-    .toList(growable: false);
 
 /// The agent the form should default to once detection reveals what is
 /// installed. Keeps [current] when it is `custom` or already installed;
@@ -542,63 +539,57 @@ final newSessionNameProvider =
     );
 
 /// Selected session mode for the new session (`'terminal'` | `'chat'`). Chat is
-/// only valid for chat-capable agents; the toggle forces `'terminal'` for
-/// other agents (see [agentSupportsChatResolved]).
+/// only valid for agents known to be chat-capable; the toggle forces
+/// `'terminal'` for every other agent, including one nothing has described yet
+/// (see [agentSupportsChatResolved]).
 final newSessionModeProvider =
     NotifierProvider<ValueController<String>, String>(
       () => ValueController('terminal'),
     );
 
-/// Fallback whether [a] supports Chat mode, used only when no wire
-/// `chatCapable` data is available (older bridge, or offline/loading target).
-/// Prefer [agentSupportsChatResolved], which consults the wire advert first.
-bool newSessionAgentSupportsChat(NewSessionAgent a) {
-  final key = newSessionAgentToolKey(a);
-  return key != null && kFallbackChatCapableTools.contains(key);
-}
-
-/// Static mirror of the entries carrying a `driver` in
-/// bridge/src/agents/registry.ts, used only by [newSessionAgentSupportsChat].
-/// Fallback only — see [agentSupportsChatResolved].
-const Set<String> kFallbackChatCapableTools = {
-  'claude-code',
-  'codex',
-  'opencode',
-};
-
-/// Resolve whether [a] supports Chat mode: wire-first, static fallback.
+/// Resolve whether [a] supports Chat mode, most specific source first:
 ///
-/// When [wireChatCapable] is non-null (the bridge advertised `chatCapable` for
-/// at least one tool on the target machine), Chat support is decided purely
-/// from whether the agent's registry key is in that set — this makes the
-/// bridge authoritative and keeps a newer bridge's driver additions/removals
-/// in sync with the app without a release. When it is null (older bridge that
-/// predates the field, or no data yet), falls back to the static
-/// [newSessionAgentSupportsChat] list so Chat still works against old bridges
-/// and during the brief loading window.
-bool agentSupportsChatResolved(
-  NewSessionAgent a,
-  Set<String>? wireChatCapable,
-) {
+/// 1. [wireChatCapable] — the TARGET machine's own advert. It alone knows what
+///    is installed there, so it wins whenever the bridge spoke;
+/// 2. [descriptor] — the merged [agentCatalogProvider] entry, i.e. what some
+///    bridge said this agent IS. Machine-independent, so it answers for a
+///    target whose bridge predates `chatCapable`;
+/// 3. `null` — nobody has said yet. Callers must render Chat disabled WITH A
+///    REASON: guessing `false` hides a working feature, and guessing `true`
+///    offers a session the bridge will refuse.
+///
+/// A custom launch command is `false`, not unknown: it has no registry entry,
+/// so there is nothing that could carry a driver.
+bool? agentSupportsChatResolved(
+  NewSessionAgent a, {
+  required Set<String>? wireChatCapable,
+  required AgentDescriptor? descriptor,
+}) {
   final key = newSessionAgentToolKey(a);
-  if (wireChatCapable != null) {
-    return key != null && wireChatCapable.contains(key);
-  }
-  return newSessionAgentSupportsChat(a);
+  if (key == null) return false;
+  if (wireChatCapable != null) return wireChatCapable.contains(key);
+  return descriptor?.chatCapable;
 }
 
-/// Whether the selected agent supports Chat mode right now (wire-first, static
-/// fallback). Derived so the composer can watch a stable `bool` instead of
+/// Whether the selected agent supports Chat mode right now, or null when
+/// neither the target nor the catalog has said (see [agentSupportsChatResolved]).
+///
+/// Derived so the composer can watch a stable value instead of
 /// [newSessionChatCapableToolsProvider] directly: that FutureProvider allocates
 /// a fresh `Set` and re-emits on EVERY control-plane push (heartbeat), which
-/// would rebuild the whole composer subtree while idle. A `Provider<bool>`
-/// notifies only when the resolved value actually flips.
+/// would rebuild the whole composer subtree while idle. A `Provider` notifies
+/// only when the resolved value actually flips.
 /// autoDispose so it never outlives the composer as a stale, still-subscribed
 /// dependent of [newSessionChatCapableToolsProvider] — see that provider's note.
-final newSessionSupportsChatProvider = Provider.autoDispose<bool>((ref) {
+final newSessionSupportsChatProvider = Provider.autoDispose<bool?>((ref) {
   final agent = ref.watch(newSessionAgentProvider);
   final wire = ref.watch(newSessionChatCapableToolsProvider).value;
-  return agentSupportsChatResolved(agent, wire);
+  final key = newSessionAgentToolKey(agent);
+  return agentSupportsChatResolved(
+    agent,
+    wireChatCapable: wire,
+    descriptor: key == null ? null : ref.watch(agentCatalogProvider)[key],
+  );
 });
 
 /// True once the user manually changed the agent dropdown during this New

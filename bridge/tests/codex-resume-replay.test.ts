@@ -1,9 +1,9 @@
 import { describe, it, expect } from "bun:test";
-import { codexResumeReplay } from "../src/codex/codex-resume-replay";
+import { codexResumeReplay } from "../src/agents/codex/resume-replay";
 
 // Minimal thread shape mirroring ThreadResumeResponse.thread. Each turn has an
 // id and an items array; item shape matches what mapThreadItem consumes (see
-// codex-mapping.ts) — an assistant message here.
+// agents/codex/mapping.ts) — an assistant message here.
 const thread = {
   id: "th-1",
   turns: [

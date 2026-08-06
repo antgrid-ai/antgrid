@@ -767,6 +767,15 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
         effectiveState.updating ||
         effectiveState.updateResult != null ||
         availableUpdate != null;
+    // Which agent a Retry would update. Everything that could name it, in
+    // descending confidence: the failed run itself, the advisory that offered
+    // the update, then the session's own tool. All three null (a custom launch
+    // command) disables the button — firing an update for an agent nobody named
+    // is worse than not offering one.
+    final retryTool =
+        effectiveState.updateResult?.tool ??
+        availableUpdate?.tool ??
+        (toolKey != null && toolKey.isNotEmpty ? toolKey : null);
 
     return Center(
       child: ConstrainedBox(
@@ -785,10 +794,10 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
                 onUpdate: availableUpdate == null
                     ? null
                     : () => _showUpdateDialog(context, availableUpdate),
-                onRetry: () => _service()?.requestUpdate(
-                  widget.sessionId,
-                  effectiveState.updateResult?.tool ?? 'codex',
-                ),
+                onRetry: retryTool == null
+                    ? null
+                    : () =>
+                          _service()?.requestUpdate(widget.sessionId, retryTool),
                 onDismissResult: () =>
                     _service()?.dismissUpdateResult(widget.sessionId),
                 onDismissAvailable: availableUpdate == null
@@ -1160,7 +1169,10 @@ class _UpdateBanner extends StatelessWidget {
 
   /// Opens the confirm for [available]; null when there is nothing to offer.
   final VoidCallback? onUpdate;
-  final VoidCallback onRetry;
+
+  /// Re-runs the failed update; null when nothing names the agent it would
+  /// update, which renders Retry disabled rather than guessing one.
+  final VoidCallback? onRetry;
   final VoidCallback onDismissResult;
 
   /// Dismisses the [available] advisory; null when there is none.

@@ -1,6 +1,6 @@
 import { JsonRpcEndpoint } from "./jsonrpc-stdio";
-import { resolveToolLaunchPath } from "./codex-version";
-import { stripInheritedCertOverrides } from "../terminal-session";
+import { resolveToolLaunchPath } from "../launch-path";
+import { stripInheritedCertOverrides } from "../../terminal-session";
 
 export interface SpawnedCodex {
   endpoint: JsonRpcEndpoint;

@@ -11,6 +11,7 @@ import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../models/handler_state.dart';
 import '../models/session_entry.dart';
+import '../providers/agent_catalog.dart';
 import '../providers/agent_transport.dart';
 import '../providers/device_provisioning.dart';
 import '../providers/projects.dart';
@@ -175,6 +176,22 @@ class HandlerHeaderControl extends ConsumerWidget {
     // focused, so no early return here even with nothing armable in focus.
     final session = activeId != null ? state.sessions[activeId] : null;
     final service = serviceWhenReady(ref, handlerServiceProvider);
+    // Read in build, not inside openSheet: that callback runs after an await on
+    // the sheet, past which a WidgetRef read can throw.
+    final judgeTools = ref.watch(judgeCapableToolsProvider);
+    // This header is the PRE-arm surface — usually nothing is armed yet, so the
+    // catalog's per-agent prediction is the only coverage answer that exists.
+    // A SessionEntry carries `tool` only when it OVERRODE the project default,
+    // so an absent one resolves to the project's, as the bridge's own thunk
+    // does.
+    final catalog = ref.watch(agentCatalogProvider);
+    final entry = ref.watch(activeSessionProvider);
+    final agent = entry?.tool ?? state.defaultTool;
+    final agentObservable = handlerObservableFromCatalog(
+      catalog,
+      agent,
+      chat: entry?.mode == 'chat',
+    );
     final p = context.antgrid;
 
     String? pillLabel;
@@ -192,8 +209,13 @@ class HandlerHeaderControl extends ConsumerWidget {
           pillColor = p.accent;
           break;
         case HandlerRunState.watching:
-          pillLabel = 'WATCHING';
-          pillColor = p.textMuted;
+          // An armed session the bridge cannot observe never leaves "watching",
+          // so WATCHING there is precisely the "armed and quiet" lie this field
+          // exists to end.
+          final unwatched =
+              session.observability == HandlerObservability.unsupported;
+          pillLabel = unwatched ? 'NOT WATCHED' : 'WATCHING';
+          pillColor = unwatched ? p.warning : p.textMuted;
           break;
         case HandlerRunState.parked:
           pillLabel = parkedPillLabel(session.parkedUntil);
@@ -242,8 +264,12 @@ class HandlerHeaderControl extends ConsumerWidget {
         context,
         terminalId: activeId,
         service: service,
+        judgeTools: judgeTools,
         initialBrief: session?.brief,
         initialNotifyOnly: session?.notifyOnly,
+        observability: session?.observability,
+        agentObservable: agentObservable,
+        agentLabel: catalog[agent]?.label,
       );
       if (choice == null) return;
       if (choice.disarm) {

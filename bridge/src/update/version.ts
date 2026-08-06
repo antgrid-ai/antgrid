@@ -1,27 +1,28 @@
-import { readFileSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-
-// Proactive "a newer codex CLI exists" detection for chat mode.
+// Proactive "a newer <agent> CLI exists" detection, for every agent that ships
+// a self-updater. Pure and dependency-injected: nothing here knows which agent
+// it is answering for — the caller supplies the version probe, the npm package
+// and the optional updater-state reader (see ./specs.ts).
 //
-// This answers only "a newer codex exists" — NOT "my selected model needs a
-// newer codex" (codex exposes no per-model minimum version; only the backend
-// knows, and only at turn time as a 400). So this is an advisory signal: surface
-// it as a dismissible chip, never a modal. The precise, actionable case is the
-// reactive turn-error path. See docs / the update-available design discussion.
+// This answers only "a newer CLI exists" — NOT "my selected model needs a newer
+// CLI" (no agent exposes a per-model minimum version; only the backend knows,
+// and only at turn time as a 400). So this is an advisory signal: surface it as
+// a dismissible chip, never a modal. The precise, actionable case is the
+// reactive turn-error path.
 //
 // Everything here is fail-soft: a failed probe or offline registry yields "no
 // update" (null), never an exception — proactive detection must not perturb
 // chat-session start.
 
+import type { AgentUpdateState } from "../agents/types";
+
 // npm dist-tags.latest is the authority for "latest". We pin to /latest so
 // prerelease tags (alpha/beta) can never be surfaced as an upgrade.
 const NPM_REGISTRY = "https://registry.npmjs.org";
 
-// Pull the semver token out of `codex --version` ("codex-cli 0.142.2"). Keeps a
-// prerelease suffix if one is present so the raw string round-trips; comparison
-// (coreLt) strips it.
-export function parseCodexVersion(stdout: string): string | null {
+// Pull the semver token out of `<agent> --version` ("codex-cli 0.142.2",
+// "2.0.31 (Claude Code)"). Keeps a prerelease suffix if one is present so the
+// raw string round-trips; comparison (coreLt) strips it.
+export function parseAgentVersion(stdout: string): string | null {
   const m = stdout.match(/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)/);
   return m ? m[1] : null;
 }
@@ -50,7 +51,7 @@ export function shouldNotify(installed: string, latest: string | null, dismissed
 }
 
 // GET <registry>/<package>/latest and read `.version` — the single npm probe
-// for every tool. Scoped names (@anthropic-ai/claude-code) keep their `/`
+// for every agent. Scoped names (@anthropic-ai/claude-code) keep their `/`
 // unencoded: the registry serves `/@scope/name/latest` literally. Fail-soft:
 // any network/parse/status error resolves to null. `fetchFn` injectable for tests.
 export async function fetchNpmLatest(
@@ -98,9 +99,9 @@ export async function resolveLatest(deps: ResolveLatestDeps): Promise<string | n
   return cached?.version ?? null;
 }
 
-export interface CheckCodexUpdateDeps {
-  // Runs `codex --version` on the exact binary the bridge will spawn and returns
-  // its stdout. May reject — checkCodexUpdate swallows it.
+export interface CheckAgentUpdateDeps {
+  // Runs `<agent> --version` on the exact binary the bridge will spawn and
+  // returns its stdout. May reject — checkAgentUpdate swallows it.
   execVersion: () => Promise<string>;
   resolveLatest: () => Promise<string | null>;
   // The version the user has already dismissed (e.g. codex's own
@@ -111,12 +112,12 @@ export interface CheckCodexUpdateDeps {
 // Orchestrates: installed (spawned binary) vs latest (cached npm) vs dismissed.
 // Returns the emit payload when an update should be surfaced, else null. Never
 // throws — a failed probe is "no update".
-export async function checkCodexUpdate(
-  deps: CheckCodexUpdateDeps,
+export async function checkAgentUpdate(
+  deps: CheckAgentUpdateDeps,
 ): Promise<{ installed: string; latest: string } | null> {
   let installed: string | null;
   try {
-    installed = parseCodexVersion(await deps.execVersion());
+    installed = parseAgentVersion(await deps.execVersion());
   } catch {
     return null;
   }
@@ -132,49 +133,43 @@ export async function checkCodexUpdate(
 // chat-session start.
 const DEFAULT_TTL_MS = 12 * 60 * 60 * 1000;
 
-export interface CodexHomeState {
-  latest_version?: string;
-  dismissed_version?: string | null;
-}
-
-export interface CodexUpdateCheckerOpts {
+export interface UpdateCheckerOpts {
   execVersion: () => Promise<string>;
-  // codex's own updater state (~/.codex/version.json): a free `latest_version`
-  // warm hint (used offline) and the `dismissed_version` to honor.
-  readState?: () => CodexHomeState | null;
-  fetchLatest?: () => Promise<string | null>;
+  // The agent's own updater state, when it keeps one. Absent (or null) is the
+  // npm-only path with app-side dismissal — the shape most agents are in.
+  readState?: () => AgentUpdateState | null;
+  fetchLatest: () => Promise<string | null>;
   now?: () => number;
   ttlMs?: number;
 }
 
-// Build a project-scoped checker that shares one latest-version cache across all
-// of that project's codex chat sessions. Concurrent session starts collapse
-// onto a single in-flight npm fetch; subsequent starts reuse the TTL cache. The
-// returned function never throws.
-export function createCodexUpdateChecker(
-  opts: CodexUpdateCheckerOpts,
+// Build a checker that shares one latest-version cache across every caller
+// holding it — in practice all of one project's sessions of one agent.
+// Concurrent session starts collapse onto a single in-flight npm fetch;
+// subsequent starts reuse the TTL cache. The returned function never throws.
+export function createUpdateChecker(
+  opts: UpdateCheckerOpts,
 ): () => Promise<{ installed: string; latest: string } | null> {
   const now = opts.now ?? Date.now;
   const ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS;
-  const fetchLatest = opts.fetchLatest ?? (() => fetchNpmLatest("@openai/codex"));
   let cache: LatestCacheEntry | null = null;
   let inflight: Promise<string | null> | null = null;
   let warmed = false;
 
   return async () => {
     const state = (opts.readState ?? (() => null))();
-    // Seed the cache from codex's own updater state exactly once, marked stale
-    // (at:0) so it acts as an offline fallback, not a substitute for the real
-    // npm check.
+    // Seed the cache from the agent's own updater state exactly once, marked
+    // stale (at:0) so it acts as an offline fallback, not a substitute for the
+    // real npm check.
     if (!warmed) {
       warmed = true;
       if (state?.latest_version) cache = { version: state.latest_version, at: 0 };
     }
-    return checkCodexUpdate({
+    return checkAgentUpdate({
       execVersion: opts.execVersion,
       resolveLatest: () =>
         resolveLatest({
-          fetchLatest: () => (inflight ??= fetchLatest().finally(() => { inflight = null; })),
+          fetchLatest: () => (inflight ??= opts.fetchLatest().finally(() => { inflight = null; })),
           readCache: () => cache,
           writeCache: (e) => { cache = e; },
           now,
@@ -185,71 +180,38 @@ export function createCodexUpdateChecker(
   };
 }
 
-// ---- real-environment adapters (thin glue; the logic above is unit-tested) ----
+// ---- in-app `<agent> update` orchestration ----
 
-// Resolve `~/.codex` (or $CODEX_HOME) — where codex keeps version.json and
-// sessions/. Blank or whitespace-padded CODEX_HOME (a trailing \r from an .env
-// file is enough) would build paths that never exist, so it falls back instead.
-export function codexHomeDir(env: Record<string, string | undefined> = process.env): string {
-  const home = env.CODEX_HOME?.trim();
-  return home ? home : join(homedir(), ".codex");
-}
-
-// Read codex's updater state file. Fail-soft: missing/garbage -> null.
-export function readCodexVersionJson(codexHome: string): CodexHomeState | null {
-  try {
-    const j = JSON.parse(readFileSync(join(codexHome, "version.json"), "utf8")) as Record<string, unknown>;
-    return {
-      latest_version: typeof j.latest_version === "string" ? j.latest_version : undefined,
-      dismissed_version: typeof j.dismissed_version === "string" ? j.dismissed_version : null,
-    };
-  } catch {
-    return null;
-  }
-}
-
-// Resolve the exact on-disk binary the bridge would spawn: PATH shim ->
-// realpath, so a multi-install PATH can't make us target the wrong one. Falls
-// back to the bare command name. The single resolver: spawn-codex spawns with
-// it and agent-update probes/updates with it, so version-probe and spawn can
-// never diverge onto different installs.
-export function resolveToolLaunchPath(command: string, path?: string): string {
-  const onPath = Bun.which(command, path ? { PATH: path } : undefined);
-  if (!onPath) return command;
-  try { return realpathSync.native(onPath); } catch { return onPath; }
-}
-
-// ---- in-app `codex update` orchestration ----
-
-export interface CodexUpdateDeps {
-  // The live codex chat sessions to quiesce before, and restart after, the
-  // update. `codex update` replaces the on-disk binary, which (on Windows) fails
-  // while any codex process still holds it — so every one of these must fully
+export interface AgentUpdateRunDeps {
+  // The live chat sessions of THIS agent to quiesce before, and restart after,
+  // the update. A self-updater replaces the on-disk binary, which (on Windows)
+  // fails while any process still holds it — so every one of these must fully
   // exit first. The update itself is machine-global; one run covers them all.
   sessionIds: string[];
-  // Tear down one session's codex process. MUST resolve only once the process
-  // has exited (releasing the exe handle + codex's ~/.codex sqlite lock).
+  // Tear down one session's agent process. MUST resolve only once the process
+  // has exited (releasing the exe handle, and any per-agent state lock such as
+  // codex's ~/.codex sqlite one).
   stop: (sessionId: string) => Promise<void>;
-  // Respawn one session's codex on the fresh binary. May throw/reject — swallowed.
+  // Respawn one session's agent on the fresh binary. May throw/reject — swallowed.
   start: (sessionId: string) => Promise<void> | void;
-  // Run `codex update`; resolves with the process exit code and combined output.
+  // Run the agent's own updater; resolves with the exit code and combined output.
   execUpdate: () => Promise<{ exitCode: number; output: string }>;
   // Re-read the installed version after the update, fail-soft to null.
   installedAfter: () => Promise<string | null>;
 }
 
-export interface CodexUpdateOutcome {
+export interface AgentUpdateOutcome {
   ok: boolean;
   exitCode: number;
   output: string;
   installed: string | null;
 }
 
-// Orchestrate an in-app `codex update`: quiesce the live codex sessions (freeing
-// the binary), run the update once, then ALWAYS restart what we stopped — even
-// when the update fails — so a user's chat is never left dead. Never throws; a
+// Orchestrate an in-app self-update: quiesce the live sessions (freeing the
+// binary), run the update once, then ALWAYS restart what we stopped — even when
+// the update fails — so a user's chat is never left dead. Never throws; a
 // failure surfaces as ok:false with the captured output.
-export async function runCodexUpdate(deps: CodexUpdateDeps): Promise<CodexUpdateOutcome> {
+export async function runAgentUpdate(deps: AgentUpdateRunDeps): Promise<AgentUpdateOutcome> {
   // Wait every process fully out before touching the binary. A failed stop is
   // swallowed: a stuck session must not block the update, and its restart below
   // still runs.
@@ -266,12 +228,13 @@ export async function runCodexUpdate(deps: CodexUpdateDeps): Promise<CodexUpdate
   } catch (err) {
     output = err instanceof Error ? err.message : String(err);
   } finally {
-    // Restart one at a time: a fresh codex spawn re-acquires the ~/.codex lock,
-    // so don't kick them all off at once. This only serializes as far as `start`
-    // resolves — a start that returns before its codex is fully up (the current
-    // SessionManager.start is fire-and-forget) can't be fully ordered here; in
-    // practice codex allows one app-server per CODEX_HOME, so there's ≤1 to
-    // restart. Each is fail-soft on its own.
+    // Restart one at a time: a fresh spawn re-acquires whatever per-agent state
+    // lock the stop released, so don't kick them all off at once. This only
+    // serializes as far as `start` resolves — a start that returns before its
+    // process is fully up (the current SessionManager.start is fire-and-forget)
+    // can't be fully ordered here; in practice an agent that holds such a lock
+    // allows one server per home dir, so there's ≤1 to restart. Each is
+    // fail-soft on its own.
     for (const id of deps.sessionIds) {
       try { await deps.start(id); } catch { /* one dead restart must not sink the rest */ }
     }

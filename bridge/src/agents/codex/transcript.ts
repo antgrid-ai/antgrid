@@ -1,4 +1,4 @@
-import { findCodexRolloutPath, readLastCodexMessages } from "../../codex/codex-rollout-read";
+import { findCodexRolloutPath, readLastCodexMessages } from "./rollout-read";
 import type { TranscriptOpts } from "../types";
 
 /** Codex posts only a thread id, so the rollout file has to be discovered first.

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
 import '../models/ab_message.dart';
+import '../models/agent_descriptor.dart';
 import '../models/agent_work_status.dart';
 import '../models/git_branch.dart';
 import '../models/session_entry.dart';
@@ -84,10 +85,28 @@ Map<String, AgentWorkStatus>? parseSessionStatuses(Object? raw) {
   return out;
 }
 
+/// Decode a wire `agents` array — the registry-wide descriptor list shared by
+/// the relay `agent:tools` advert and the loopback `tools:list` response.
+///
+/// Absent or malformed in, empty out: an empty list is what a bridge predating
+/// the descriptor produces, and callers read it as "this machine did not say"
+/// and fall back to the persisted catalog. Unparseable entries are dropped
+/// individually so one bad row degrades one agent instead of all of them.
+List<AgentDescriptor> parseAgentDescriptors(Object? raw) {
+  if (raw is! List) return const [];
+  final out = <AgentDescriptor>[];
+  for (final e in raw) {
+    if (e is! Map) continue;
+    final d = AgentDescriptor.fromJson(e.cast<String, dynamic>());
+    if (d != null) out.add(d);
+  }
+  return out;
+}
+
 /// An installed tool advertised by the agent over the control plane. Mirrors the
 /// bridge `agent:tools` entry (`{ tool, path, chatCapable?, label? }`). Both
 /// optional fields are null when talking to an older bridge that predates them —
-/// callers fall back to the app's static tables in that case.
+/// callers fall back to the persisted agent catalog in that case.
 class AdvertisedTool {
   final String tool;
   final String path;
@@ -128,22 +147,30 @@ class ControlPlaneError {
 class ControlPlaneState {
   final List<AdvertisedProject> projects;
   final List<AdvertisedTool> tools;
+
+  /// The machine's whole agent registry as descriptors — [tools] is only what
+  /// is on PATH there. Empty against a bridge predating the `agents` key, which
+  /// means "this machine did not say", never "it has no agents".
+  final List<AgentDescriptor> agents;
   final ControlPlaneError? lastError;
 
   const ControlPlaneState({
     this.projects = const [],
     this.tools = const [],
+    this.agents = const [],
     this.lastError,
   });
 
   ControlPlaneState copyWith({
     List<AdvertisedProject>? projects,
     List<AdvertisedTool>? tools,
+    List<AgentDescriptor>? agents,
     ControlPlaneError? lastError,
     bool clearError = false,
   }) => ControlPlaneState(
     projects: projects ?? this.projects,
     tools: tools ?? this.tools,
+    agents: agents ?? this.agents,
     lastError: clearError ? null : (lastError ?? this.lastError),
   );
 }
@@ -236,7 +263,13 @@ class ControlPlaneClient {
         }
       }
     }
-    _setState(_state.copyWith(tools: tools, clearError: true));
+    _setState(
+      _state.copyWith(
+        tools: tools,
+        agents: parseAgentDescriptors(json['agents']),
+        clearError: true,
+      ),
+    );
   }
 
   void _handleError(Map<String, dynamic> json) {

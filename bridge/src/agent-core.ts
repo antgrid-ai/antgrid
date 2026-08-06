@@ -38,15 +38,14 @@ import type { CheckoutRecord } from "./worktrees/checkout-types";
 import { SessionNamer } from "./session-namer";
 import { resolveStructuredTitle } from "./agents/title-dispatch";
 import { generateSessionTitle } from "./agents/title-generate";
-import { agentSpec, BY_HOOK_NAME } from "./agents/registry";
+import { agentSpec, BY_HOOK_NAME, handlerObservable } from "./agents/registry";
 import { HandlerEngine, type HandlerEvent } from "./handler/engine";
 import { classifyTurnEndError } from "./handler/lifecycle-classify";
 import { createDispatchAdapter, createPtyAdapter } from "./handler/session-adapter";
 import { createStructuredAdapter } from "./handler/structured-adapter";
 import { dispatchRpc } from "./rpc/methods";
 import { StructuredAgentManager } from "./structured/structured-manager";
-import { parseCodexVersion } from "./codex/codex-version";
-import { TOOL_UPDATE_SPECS, createToolUpdateChecker, execToolUpdate, execToolVersion, runToolUpdate, updateSpecFor } from "./agent-update";
+import { TOOL_UPDATE_SPECS, createToolUpdateChecker, execToolUpdate, execToolVersion, parseAgentVersion, runAgentUpdate, updateSpecFor } from "./update/specs";
 import { getGitStatus, gitCommit, gitDiscard, type GitFileEntry } from "./git";
 import { listLocalBranches, checkoutLocalBranch } from "./git-branches";
 import { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
@@ -78,10 +77,11 @@ interface CheckoutRuntime {
   started: boolean;
 }
 
-// Tracks terminal ids that have pinged /hook-alive (codex SessionStart probe).
-// Module-level so it lives as long as the process — terminals cleared from this
-// Set on exit aren't re-added, keeping the warning one-shot per spawn.
-const codexHookAlive = new Set<string>();
+// Tracks terminal ids that have pinged /hook-alive (a SessionStart probe an
+// agent's injection may declare). Module-level so it lives as long as the
+// process — terminals cleared from this Set on exit aren't re-added, keeping
+// the warning one-shot per spawn.
+const hookAlivePinged = new Set<string>();
 
 export function buildAgentHello(cfg: AbConfig, version: string): AbMessage {
   return createMessage("agent:hello", {
@@ -111,9 +111,6 @@ export function buildChatSpawnAugment(
     },
   };
 }
-
-// Lives with codex's driver (it is codex's app-server quirk, not a core one).
-export { codexNotifyOnlyArgs } from "./agents/codex/driver";
 
 /**
  * Whether a `terminal:input` payload submitted a prompt, for the work-status
@@ -910,22 +907,26 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // one: the update replaces one machine-global binary, and any peer left
         // running would hold it (a Windows in-use failure). Snapshot the ids now,
         // before we stop them, so we know exactly what to bring back afterward.
+        // Via agentKeyFor, not `s.tool`: a SessionEntry carries `tool` only when
+        // it OVERRODE the project's agent.tool, so every default-spec session
+        // reads as untooled. A literal default here quiesces the wrong agent's
+        // sessions, and the ones actually holding the binary keep holding it.
         const chatIds = (sessions?.list(true) ?? [])
-          .filter((s) => s.mode === "chat" && (s.tool ?? "codex") === spec.tool && s.running)
+          .filter((s) => s.mode === "chat" && agentKeyFor(s.id) === spec.tool && s.running)
           .map((s) => s.id);
         log.info("agent:update — quiescing %d %s session(s) to update", chatIds.length, spec.tool);
-        void runToolUpdate({
+        void runAgentUpdate({
           sessionIds: chatIds,
           // stopChat resolves only once the process has exited (its dispose awaits
           // proc.exited), so awaiting it releases the binary handle + any per-tool
           // lock. start() re-spawns on the fresh binary and resumes the thread.
           stop: (id) => structured?.stopChat(id) ?? Promise.resolve(),
           // Returned, not discarded: an isolated session's start is async and
-          // rejects when its worktree has gone, and runToolUpdate's per-session
+          // rejects when its worktree has gone, and runAgentUpdate's per-session
           // try/catch is what keeps one dead restart from sinking the rest.
           start: (id) => sessions?.start(id),
           execUpdate: () => execToolUpdate(spec),
-          installedAfter: async () => parseCodexVersion(await execToolVersion(spec)),
+          installedAfter: async () => parseAgentVersion(await execToolVersion(spec)),
         }).then((outcome) => {
           sendAb(createMessage("agent:updateResult", {
             tool: spec.tool, sessionId: msg.sessionId, ok: outcome.ok,
@@ -1173,11 +1174,23 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // are wired synchronously and can fire before setupServices resolves. The arrow
   // deps defer their reads, so a later-assigned sendAb/manager/sessions is picked
   // up correctly, same pattern as the existing manager? deps.
+  // Which agent this slot ACTUALLY runs, or undefined when the project names
+  // only a custom `agent.command` — an arbitrary binary attributable to no spec.
+  const agentKeyFor = (terminalId?: string): string | undefined =>
+    (terminalId ? sessions?.get(terminalId)?.tool : undefined) ?? config.agent?.tool;
+  // Judging needs *a* CLI to spawn, so an unattributable slot still resolves to
+  // one. Observability must NOT: reporting the default agent's hooks for a
+  // binary we cannot identify is the "armed and quiet" lie observability exists
+  // to end, so it answers from the real key and unknown reads as unsupported.
+  const toolFor = (terminalId?: string): string => agentKeyFor(terminalId) ?? "claude-code";
   const handlerEngine = new HandlerEngine({
     projectId: project.id,
     projectPath: (terminalId) => checkoutPathFor(terminalId),
-    tool: (terminalId) =>
-      (terminalId ? sessions?.get(terminalId)?.tool : undefined) ?? config.agent?.tool ?? "claude-code",
+    tool: toolFor,
+    observable: (terminalId) => handlerObservable(
+      agentKeyFor(terminalId),
+      sessions?.get(terminalId)?.mode === "chat" ? "chat" : "terminal",
+    ),
     agentSessionId: (terminalId) => sessions?.get(terminalId)?.agentSessionId,
     abDir,
     adapter: createDispatchAdapter({
@@ -1520,7 +1533,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       connState,
     );
     runtime.fileWatcher = fw;
-    runtime.fileSearcher = new FileSearcher(runtime.checkout.path, project.id, send);
+    runtime.fileSearcher = new FileSearcher(runtime.checkout.path, project.id, send, [abDir]);
     runtime.uploadManager = new FileUploadManager({
       projectId: project.id,
       projectPath: runtime.checkout.path,
@@ -1867,24 +1880,27 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       });
     });
 
-    // Probe: codex injects a SessionStart hook that pings /hook-alive. If no ping
-    // arrives within 10s the trust fingerprint likely drifted — codex's hooks are
+    // Probe: an agent whose injection declares /hook-alive (see the spec's
+    // hooks.posts) pings it from a SessionStart hook. If no ping arrives within
+    // 10s the trust fingerprint likely drifted — the agent's hooks are
     // Untrusted/skipped, so BOTH its plugin notifications and its structured
     // title correlation are dead (same injected hooks.state file, see
     // agent-launch-augmenter.ts). Re-enable the OSC scanner (notifications AND
     // title) as a best-effort fallback so the session isn't permanently muted or
-    // nameless, and warn. Only codex arms this (expectsHookAliveProbe);
-    // claude/opencode have no /hook-alive probe and must never trip this warning.
+    // nameless, and warn. An agent that declares no probe never arms this and
+    // must never trip the warning.
     manager.onSessionCreated((session) => {
-      if (!session.expectsHookAliveProbe) return;
+      const agent = session.hookAliveProbeAgent;
+      if (!agent) return;
       const id = session.terminalId;
       setTimeout(() => {
-        if (!codexHookAlive.has(id)) {
+        if (!hookAlivePinged.has(id)) {
           session.enableOscNotifications();
           session.enableOscTitle();
           log.warn(
-            "codex hooks did not ping /hook-alive for %s — trust fingerprint " +
+            "%s hooks did not ping /hook-alive for %s — trust fingerprint " +
             "may have drifted; re-enabled OSC scanner (notifications + title) as fallback",
+            agent,
             id,
           );
         }
@@ -2040,7 +2056,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     fw.sendFullTree();
     fw.startWatching();
 
-    const mainSearcher = new FileSearcher(project.path, project.id, (msg) => sendFromRuntime(mainRuntime, msg));
+    const mainSearcher = new FileSearcher(
+      project.path,
+      project.id,
+      (msg) => sendFromRuntime(mainRuntime, msg),
+      [abDir],
+    );
     fileSearchers.set(project.id, mainSearcher);
     mainRuntime.fileSearcher = mainSearcher;
   }
@@ -2156,7 +2177,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         void maybeGenerateTitle(body, resolved?.title);
       }
     },
-    onHookAlive: (terminalId) => { codexHookAlive.add(terminalId); },
+    onHookAlive: (terminalId) => { hookAlivePinged.add(terminalId); },
     onTurnStart: (terminalId) => opts.onTurnStart?.(terminalId),
   });
 

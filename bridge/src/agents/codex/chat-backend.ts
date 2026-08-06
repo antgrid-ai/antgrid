@@ -1,15 +1,21 @@
-import { createMessage, createTranscriptReplay, type AbMessage } from "../protocol";
+import { type AbMessage } from "../../protocol";
 import {
   mapThreadItem,
   mapCodexError,
   mapTurnStatusToStopReason,
   mapPlanStepStatus,
   mapTokenBreakdown,
-} from "./codex-mapping";
-import { codexResumeReplay } from "./codex-resume-replay";
-import { planElicitation, type FlatQuestion } from "./codex-elicitation";
-import { resolveConfigPick } from "../structured/set-config";
-import { logger } from "../logger";
+} from "./mapping";
+import { codexResumeReplay } from "./resume-replay";
+import { planElicitation, type FlatQuestion } from "./elicitation";
+import { agentError } from "../../structured/agent-error";
+import {
+  ChatSession,
+  type ChatSessionProfile,
+  type PromptGroup,
+  type QuestionRequest,
+} from "../../structured/chat-session";
+import { logger } from "../../logger";
 const log = logger.child({ component: "codex-driver" });
 
 // The slice of JsonRpcEndpoint the driver needs (injectable for tests).
@@ -39,53 +45,38 @@ export interface CodexDriverOpts {
   diagnoseStartFailure?: () => Promise<string | null>;
 }
 
-type PendingApproval = { answer: (optionId: string | null) => void };
-type PendingQuestion = { answer: (value: string) => void };
+export class CodexDriver extends ChatSession {
+  // codex names its own turns (turn/started) and its mappers build whole items,
+  // so neither is the session's to invent. thread/read filters the in-flight
+  // turn out by status, so a mid-turn snapshot is safe.
+  protected readonly profile: ChatSessionProfile = {
+    turnSource: "backend",
+    mergeItems: false,
+    snapshotDuringTurn: true,
+    interruptScope: "turn",
+  };
 
-export class CodexDriver {
-  private readonly sessionId: string;
   private readonly ep: CodexEndpoint;
-  private readonly send: (msg: AbMessage) => void;
   private readonly cwd: string;
 
-  // Capability discovery + per-session selection (agent:capabilities /
-  // agent:set-config). Selections apply on the next turn/start — codex
-  // persists per-turn overrides for subsequent turns.
-  private capModels: Array<{ id: string; name: string; efforts?: string[]; defaultEffort?: string }> = [];
-  private capModes: Array<{ id: string; name: string; description?: string }> = [];
-  private capCommands: Array<{ id: string; name: string; description?: string; argHint?: string }> = [];
   private skillPaths = new Map<string, string>(); // command id -> skill path (UserInput::Skill needs it)
-  private selModel?: string;
-  private selEffort?: string;
-  private selProfile?: string;
-  // Picks that arrived before discovery populated the lists (a resumed session
-  // replays yesterday's pickers to the app instantly, while discovery is still
-  // in flight). Queued and validated once discovery lands, instead of being
-  // silently rejected against empty lists.
-  private capsDiscovered = false;
-  private pendingConfig: Array<{ key: string; value: string }> = [];
 
   private threadId = "";
-  private activeTurnId: string | null = null;
   private turnOrder: string[] = [];
-  private pendingApprovals = new Map<string, PendingApproval>();
-  private pendingQuestions = new Map<string, PendingQuestion>();
-  private questionCounter = 0;
   // itemId -> changed file paths, cached from the fileChange item/started
   // notification so the approval prompt can name the touched files. codex
   // currently requests approval BEFORE starting the item (approval → run), so
   // this is empty at approval time and the title falls back — kept because the
   // approval params carry no paths and the ordering is codex's to change.
   private fileChangePaths = new Map<string, string[]>();
-  private approvalCounter = 0;
   // Turns for which the structured turn/plan/updated stream has arrived; once
   // set, the text-blob plan item for that turn is ignored (structured wins).
   private structuredPlanTurns = new Set<string>();
-  // String(inbound rpc id) -> retract closure. Every pending server->client
-  // request registers one so serverRequest/resolved, turn end, and dispose can
+  // String(inbound rpc id) -> the prompt group that request opened. Every
+  // pending server->client request registers one so serverRequest/resolved can
   // answer codex locally AND tell the app the prompt is gone. A synthetic key
   // is used when the endpoint supplied no id (tests, defensive).
-  private retractors = new Map<string, () => void>();
+  private retractors = new Map<string, PromptGroup>();
   private retractorSeq = 0;
   // Per reasoning item, the first channel to stream claims it for the rest of the
   // turn; deltas from the other channel are dropped so the raw-CoT and summary
@@ -96,6 +87,17 @@ export class CodexDriver {
   // from a summaryPartAdded event that codex may not emit.
   private reasoningChannel = new Map<string, "content" | "summary">();
   private reasoningSummaryIndex = new Map<string, number>();
+
+  private readonly diagnoseStartFailure?: () => Promise<string | null>;
+
+  constructor(opts: CodexDriverOpts) {
+    super({ sessionId: opts.sessionId, sendMessage: opts.sendMessage });
+    this.ep = opts.endpoint;
+    this.cwd = opts.cwd;
+    this.selModel = opts.model;
+    this.diagnoseStartFailure = opts.diagnoseStartFailure;
+    this.registerHandlers();
+  }
 
   private retractorKey(rpcId: number | string | undefined): string {
     return rpcId === undefined ? `synth-${this.retractorSeq++}` : String(rpcId);
@@ -109,22 +111,7 @@ export class CodexDriver {
     return owner === channel;
   }
 
-  private readonly diagnoseStartFailure?: () => Promise<string | null>;
-
-  constructor(opts: CodexDriverOpts) {
-    this.sessionId = opts.sessionId;
-    this.ep = opts.endpoint;
-    this.send = opts.sendMessage;
-    this.cwd = opts.cwd;
-    this.selModel = opts.model;
-    this.diagnoseStartFailure = opts.diagnoseStartFailure;
-    this.registerHandlers();
-  }
-
-  async start(resumeId?: string): Promise<string> {
-    // Advertise an empty, not-ready catalog immediately so the app shows a
-    // loading indicator until discoverCapabilities() emits the real one.
-    this.emitCapabilities();
+  protected async startBackend(resumeId?: string): Promise<string> {
     try {
       return await this.startInner(resumeId);
     } catch (err) {
@@ -144,8 +131,7 @@ export class CodexDriver {
         const res = (await this.ep.request("thread/resume", { threadId: resumeId })) as any;
         this.threadId = res?.thread?.id ?? resumeId;
         this.seedFromThreadResponse(res);
-        const replay = createTranscriptReplay(this.sessionId, codexResumeReplay(this.sessionId, res?.thread));
-        if (replay) this.send(replay);
+        this.emitTranscriptReplay(codexResumeReplay(this.sessionId, res?.thread));
         void this.discoverCapabilities();
         return this.threadId;
       } catch (err) {
@@ -174,29 +160,18 @@ export class CodexDriver {
   // without disturbing it. The in-progress turn (if any) is excluded by status,
   // not by comparing to activeTurnId, so it stays correct even if the turn
   // completes in the gap between the request and the response.
-  async getTranscriptSnapshot(): Promise<AbMessage[]> {
+  protected async transcriptSnapshot(): Promise<AbMessage[]> {
     if (!this.threadId) return [];
-    try {
-      const res = (await this.ep.request("thread/read", {
-        threadId: this.threadId,
-        includeTurns: true,
-      })) as any;
-      const turns: any[] = Array.isArray(res?.thread?.turns) ? res.thread.turns : [];
-      const completed = turns.filter((t) => t?.status === "completed");
-      return codexResumeReplay(this.sessionId, { ...res?.thread, turns: completed });
-    } catch (err) {
-      log.warn(
-        "codex thread/read failed for session %s (thread %s); returning empty transcript snapshot: %s",
-        this.sessionId,
-        this.threadId,
-        err,
-      );
-      return [];
-    }
+    const res = (await this.ep.request("thread/read", {
+      threadId: this.threadId,
+      includeTurns: true,
+    })) as any;
+    const turns: any[] = Array.isArray(res?.thread?.turns) ? res.thread.turns : [];
+    const completed = turns.filter((t) => t?.status === "completed");
+    return codexResumeReplay(this.sessionId, { ...res?.thread, turns: completed });
   }
 
-  async prompt(text: string, commandId?: string): Promise<void> {
-    if (commandId === "builtin:compact") return this.compact();
+  protected async sendPrompt(text: string, commandId?: string): Promise<void> {
     if (commandId === "builtin:review") {
       const instructions = text.trim();
       await this.ep.request("review/start", {
@@ -229,49 +204,15 @@ export class CodexDriver {
       input,
       ...(this.selModel ? { model: this.selModel } : {}),
       ...(this.selEffort ? { effort: this.selEffort } : {}),
-      ...(this.selProfile ? { permissions: this.selProfile } : {}),
+      ...(this.selMode ? { permissions: this.selMode } : {}),
     });
-  }
-
-  setConfig(key: string, value: unknown): void {
-    if (typeof value !== "string") return;
-    if (!this.capsDiscovered) {
-      this.pendingConfig.push({ key, value });
-      return;
-    }
-    if (this.applyConfig(key, value)) this.emitCapabilities();
-  }
-
-  // Validate against the advertised lists (see resolveConfigPick) and store.
-  // Rejected picks get no echo — the absent capabilities echo is the signal.
-  private applyConfig(key: string, value: string): boolean {
-    const pick = resolveConfigPick(key, value, {
-      models: this.capModels,
-      modes: this.capModes,
-      currentModelId: this.selModel,
-      currentEffortId: this.selEffort,
-    });
-    if (!pick) return false;
-    switch (pick.key) {
-      case "model":
-        this.selModel = pick.id;
-        if (pick.clearEffort) this.selEffort = undefined;
-        break;
-      case "effort":
-        this.selEffort = pick.id;
-        break;
-      case "mode":
-        this.selProfile = pick.id;
-        break;
-    }
-    return true;
   }
 
   private seedFromThreadResponse(res: any): void {
     if (!this.selModel && typeof res?.model === "string") this.selModel = res.model;
     if (!this.selEffort && typeof res?.reasoningEffort === "string") this.selEffort = res.reasoningEffort;
     const profile = res?.activePermissionProfile?.id;
-    if (!this.selProfile && typeof profile === "string") this.selProfile = profile;
+    if (!this.selMode && typeof profile === "string") this.selMode = profile;
     this.seedTurnsFromThread(res?.thread);
   }
 
@@ -348,33 +289,11 @@ export class CodexDriver {
       { id: "builtin:review", name: "review", description: "Review changes", argHint: "[instructions]" },
     );
     this.capCommands = commands;
-    this.capsDiscovered = true;
-    const queued = this.pendingConfig;
-    this.pendingConfig = [];
-    for (const p of queued) this.applyConfig(p.key, p.value);
-    this.emitCapabilities();
+    this.capabilitiesReady();
   }
 
-  private emitCapabilities(): void {
-    this.send(createMessage("agent:capabilities", {
-      sessionId: this.sessionId,
-      ready: this.capsDiscovered,
-      commands: this.capCommands,
-      modes: this.capModes,
-      models: this.capModels,
-      ...(this.selModel ? { currentModelId: this.selModel } : {}),
-      ...(this.selEffort ? { currentEffortId: this.selEffort } : {}),
-      ...(this.selProfile ? { currentModeId: this.selProfile } : {}),
-    }));
-  }
-
-  async cancel(turnId?: string): Promise<boolean> {
-    if (!this.activeTurnId) return false;
-    // Stale turnId => refuse rather than interrupt the live turn; see the
-    // claude driver's cancel for the full rationale. Absent => cancel the live one.
-    if (turnId && turnId !== this.activeTurnId) return false;
-    await this.ep.request("turn/interrupt", { threadId: this.threadId, turnId: this.activeTurnId });
-    return true;
+  protected async interrupt(turnId: string): Promise<void> {
+    await this.ep.request("turn/interrupt", { threadId: this.threadId, turnId });
   }
 
   async compact(): Promise<void> {
@@ -391,79 +310,44 @@ export class CodexDriver {
       numTurns,
     });
     this.seedTurnsFromThread((res as any)?.thread);
-    this.send(createMessage("agent:session-reset", { sessionId: this.sessionId }));
-    const replay = createTranscriptReplay(this.sessionId, codexResumeReplay(this.sessionId, (res as any)?.thread));
-    if (replay) this.send(replay);
+    this.emitSessionReset();
+    this.emitTranscriptReplay(codexResumeReplay(this.sessionId, (res as any)?.thread));
   }
 
-  resolvePermission(permissionId: string, optionId: string): void {
-    const pending = this.pendingApprovals.get(permissionId);
-    if (!pending) return;
-    this.pendingApprovals.delete(permissionId);
-    pending.answer(optionId);
-  }
-
-  resolveQuestion(questionId: string, answer: string | string[]): void {
-    const pending = this.pendingQuestions.get(questionId);
-    if (!pending) return;
-    this.pendingQuestions.delete(questionId);
-    // This driver only emits text/single_select questions (v1), so a
-    // multi_select array is collapsed defensively to its first element.
-    pending.answer(Array.isArray(answer) ? (answer[0] ?? "") : answer);
-  }
-
-  // Widened to `void | Promise<void>` because agent-core wraps this to also await
-  // the codex process's exit (see the factory in agent-core.ts).
-  dispose(): void | Promise<void> {
-    this.retractAllPending();
-    this.pendingApprovals.clear();
-    this.pendingQuestions.clear();
+  // Widened to `void | Promise<void>` because agent-core wraps dispose() to also
+  // await the codex process's exit (see the factory in agent-core.ts).
+  protected disposeBackend(): void | Promise<void> {
     this.ep.dispose();
   }
 
-  private retractAllPending(): void {
-    const pending = [...this.retractors.values()];
-    this.retractors.clear();
-    for (const retract of pending) retract();
-  }
-
-  // codex died mid-turn (stdout closed before turn/completed): emit a terminal
-  // turn-end so the app's active turn resolves instead of spinning. No-op when
-  // idle. Runs only on an UNEXPECTED close — dispose() suppresses the endpoint's
-  // onClose (see jsonrpc-stdio.ts).
-  private endActiveTurnOnClose(): void {
-    const turnId = this.activeTurnId;
-    if (!turnId) return;
-    this.send(createMessage("agent:turn-end", {
-      sessionId: this.sessionId,
-      turnId,
-      stopReason: "error",
-      error: {
-        category: "unknown",
-        message: "codex session ended unexpectedly",
-        retryable: false,
-      },
-    }));
+  protected clearTurnState(): void {
     this.fileChangePaths.clear();
     this.reasoningChannel.clear();
     this.reasoningSummaryIndex.clear();
     this.structuredPlanTurns.clear();
-    this.retractAllPending();
-    this.activeTurnId = null;
+    // The prompts these groups covered are withdrawn by the session's own
+    // retraction pass; only the rpcId index is ours to drop.
+    this.retractors.clear();
   }
 
   private registerHandlers(): void {
-    this.ep.onClose(() => this.endActiveTurnOnClose());
+    // codex died mid-turn (stdout closed before turn/completed): emit a terminal
+    // turn-end so the app's active turn resolves instead of spinning. No-op when
+    // idle. Runs only on an UNEXPECTED close — dispose() suppresses the
+    // endpoint's onClose (see jsonrpc-stdio.ts).
+    this.ep.onClose(() => {
+      if (!this.activeTurnId) return;
+      this.closeTurn({
+        stopReason: "error",
+        error: agentError({ category: "unknown", message: "codex session ended unexpectedly", retryable: false }),
+      });
+    });
 
     this.ep.onNotification("turn/started", (p) => {
-      this.activeTurnId = p?.turn?.id ?? null;
+      this.openTurn(p?.turn?.id ?? null);
       if (this.activeTurnId && !this.turnOrder.includes(this.activeTurnId)) {
         this.turnOrder.push(this.activeTurnId);
       }
-      this.send(createMessage("agent:turn-start", {
-        sessionId: this.sessionId,
-        turnId: this.activeTurnId ?? "",
-      }));
     });
 
     this.ep.onNotification("turn/completed", (p) => {
@@ -471,18 +355,10 @@ export class CodexDriver {
       const turnId: string = turn.id ?? this.activeTurnId ?? "";
       if (turnId && !this.turnOrder.includes(turnId)) this.turnOrder.push(turnId);
       const stopReason = mapTurnStatusToStopReason(turn.status ?? "completed");
-      if (turn.error) {
-        const error = mapCodexError(turn.error.codexErrorInfo ?? turn.error, turn.error.message ?? "turn failed");
-        this.send(createMessage("agent:turn-end", { sessionId: this.sessionId, turnId, stopReason, error }));
-      } else {
-        this.send(createMessage("agent:turn-end", { sessionId: this.sessionId, turnId, stopReason }));
-      }
-      this.fileChangePaths.clear();
-      this.reasoningChannel.clear();
-      this.reasoningSummaryIndex.clear();
-      this.structuredPlanTurns.clear();
-      this.retractAllPending();
-      this.activeTurnId = null;
+      const error = turn.error
+        ? mapCodexError(turn.error.codexErrorInfo ?? turn.error, turn.error.message ?? "turn failed")
+        : undefined;
+      this.closeTurn({ stopReason, turnId, ...(error ? { error } : {}) });
     });
 
     this.ep.onNotification("item/started", (p) => {
@@ -493,13 +369,11 @@ export class CodexDriver {
       if (p?.item?.type === "plan") return this.handleTextPlan(p);
       const item = mapThreadItem(p?.item);
       if (!item) return;
-      this.send(createMessage("agent:item-added", {
-        sessionId: this.sessionId,
+      this.emitItem(item.itemId, item as unknown as Record<string, unknown>, {
         turnId: p?.turnId ?? this.activeTurnId ?? "",
-        itemId: item.itemId,
-        parentItemId: item.parentItemId,
-        item,
-      }));
+        added: true,
+        ...(item.parentItemId ? { parentItemId: item.parentItemId } : {}),
+      });
     });
 
     this.ep.onNotification("item/completed", (p) => {
@@ -507,12 +381,10 @@ export class CodexDriver {
       if (p?.item?.type === "plan") return this.handleTextPlan(p);
       const item = mapThreadItem(p?.item);
       if (!item) return;
-      this.send(createMessage("agent:item-updated", {
-        sessionId: this.sessionId,
+      this.emitItem(item.itemId, item as unknown as Record<string, unknown>, {
         turnId: p?.turnId ?? this.activeTurnId ?? "",
-        itemId: item.itemId,
-        item,
-      }));
+        added: false,
+      });
     });
 
     // Structured plan: replaces any text-blob plan for the turn (codex's own
@@ -529,13 +401,12 @@ export class CodexDriver {
 
     this.ep.onNotification("thread/tokenUsage/updated", (p) => {
       const u = p?.tokenUsage ?? {};
-      this.send(createMessage("agent:usage", {
-        sessionId: this.sessionId,
+      this.emitUsage({
         turnId: p?.turnId ?? this.activeTurnId ?? undefined,
         total: mapTokenBreakdown(u.total),
         last: mapTokenBreakdown(u.last),
         contextWindow: typeof u.modelContextWindow === "number" ? u.modelContextWindow : null,
-      }));
+      });
     });
 
     // One wire frame (agent:item-delta) for every streamable chunk; the app
@@ -544,12 +415,11 @@ export class CodexDriver {
     // both plain text on the codex side (the base64 command/exec/outputDelta is
     // a different, unused connection-scoped API).
     const onTextDelta = (p: any): void => {
-      this.send(createMessage("agent:item-delta", {
-        sessionId: this.sessionId,
-        turnId: p?.turnId ?? this.activeTurnId ?? "",
-        itemId: p?.itemId ?? "",
-        textChunk: String(p?.delta ?? ""),
-      }));
+      this.emitDelta(
+        String(p?.itemId ?? ""),
+        String(p?.delta ?? ""),
+        p?.turnId ?? this.activeTurnId ?? "",
+      );
     };
     this.ep.onNotification("item/agentMessage/delta", onTextDelta);
     this.ep.onNotification("item/commandExecution/outputDelta", onTextDelta);
@@ -567,12 +437,7 @@ export class CodexDriver {
       const idx = Number(p?.summaryIndex ?? 0);
       const prev = this.reasoningSummaryIndex.get(itemId);
       if (prev !== undefined && idx > prev) {
-        this.send(createMessage("agent:item-delta", {
-          sessionId: this.sessionId,
-          turnId: p?.turnId ?? this.activeTurnId ?? "",
-          itemId,
-          textChunk: "\n\n",
-        }));
+        this.emitDelta(itemId, "\n\n", p?.turnId ?? this.activeTurnId ?? "");
       }
       this.reasoningSummaryIndex.set(itemId, idx);
       onTextDelta(p);
@@ -582,17 +447,17 @@ export class CodexDriver {
     // structured turn/plan/updated stream is the authoritative plan source.
 
     // codex withdrew a pending server->client request (e.g. turn aborted). The
-    // requestId matches the original request's inbound rpc id; fire its retractor
-    // to answer codex locally and drop the app-side prompt.
+    // requestId matches the original request's inbound rpc id; fire its group to
+    // answer codex locally and drop the app-side prompt.
     this.ep.onNotification("serverRequest/resolved", (p) => {
       // No id means nothing to correlate; bail rather than let a missing id
       // collapse to the "" key and fire an unrelated retractor.
       if (p?.requestId == null) return;
       const key = String(p.requestId);
-      const retract = this.retractors.get(key);
-      if (!retract) return;
+      const group = this.retractors.get(key);
+      if (!group) return;
       this.retractors.delete(key);
-      retract();
+      group.retract();
     });
 
     this.ep.onRequest("item/commandExecution/requestApproval", (p, rpcId) =>
@@ -647,54 +512,42 @@ export class CodexDriver {
   // or when the turn dies and the still-pending prompts are retracted
   // (finishRetracted). Shared by requestUserInput and the elicitation form path,
   // which differ only in how they build each prompt and assemble their reply. A
-  // single retractor is keyed by the inbound rpc id; the per-prompt answer path
-  // is guarded so a prompt is counted at most once. Callers guarantee items ≥ 1.
+  // single prompt group is keyed by the inbound rpc id; the session guarantees
+  // each prompt is answered at most once. Callers guarantee items >= 1.
   private collectAnswers<T>(
     rpcId: number | string | undefined,
     items: T[],
     spec: {
-      send: (item: T, questionId: string) => void;
+      question: (item: T) => { req: QuestionRequest; labels?: readonly string[] };
       onAnswer: (item: T, value: string) => void;
       finishComplete: () => void;
       finishRetracted: (retracted: T[]) => void;
     },
   ): void {
     const key = this.retractorKey(rpcId);
-    const open = new Map<string, T>();
+    const group = this.promptGroup();
+    this.retractors.set(key, group);
+    const retracted: T[] = [];
     let remaining = items.length;
-    this.retractors.set(key, () => {
-      const retracted: T[] = [];
-      for (const [questionId, item] of open) {
-        if (this.pendingQuestions.delete(questionId)) {
-          retracted.push(item);
-          this.send(createMessage("agent:request-retracted", { sessionId: this.sessionId, questionId }));
-        }
-      }
-      open.clear();
-      spec.finishRetracted(retracted);
-    });
     for (const item of items) {
-      const questionId = `q-${this.questionCounter++}`;
-      open.set(questionId, item);
-      spec.send(item, questionId);
-      this.pendingQuestions.set(questionId, {
-        answer: (value) => {
-          if (!open.delete(questionId)) return;
-          spec.onAnswer(item, value);
-          if (--remaining === 0) {
-            this.retractors.delete(key);
-            spec.finishComplete();
-          }
-        },
-      });
+      const { req, labels } = spec.question(item);
+      this.askQuestion(req, (value) => {
+        if (value === null) retracted.push(item);
+        else spec.onAnswer(item, Array.isArray(value) ? (value[0] ?? "") : value);
+        if (--remaining > 0) return;
+        this.retractors.delete(key);
+        // Partial sets still reply — collected answers stand, retracted entries
+        // fill an empty array — then the app-side prompts are withdrawn.
+        if (retracted.length > 0) spec.finishRetracted(retracted);
+        else spec.finishComplete();
+      }, { group, single: true, ...(labels ? { labels } : {}) });
     }
   }
 
   // One agent:question per codex questions[] entry; the RPC reply is sent once,
   // after ALL entries are answered: {answers: {<codexId>: {answers: [text]}}}.
-  // codex options carry only label+description (no id) — synthesize index ids
-  // for the app and translate the echoed index back to the label, mirroring
-  // opencode-driver's questionOptions pattern.
+  // codex options carry only label+description (no id) — the session synthesizes
+  // index ids for the app and translates the echoed index back to the label.
   private handleUserInput(p: any, rpcId?: number | string): Promise<unknown> {
     const rawQuestions: any[] = Array.isArray(p?.questions) ? p.questions : [];
     const prepared = rawQuestions.map((q) => {
@@ -716,22 +569,17 @@ export class CodexDriver {
       const answers: Record<string, { answers: string[] }> = {};
       if (prepared.length === 0) return resolve({ answers });
       this.collectAnswers(rpcId, prepared, {
-        send: (q, questionId) => this.send(createMessage("agent:question", {
-          sessionId: this.sessionId,
-          questionId,
-          itemId: p?.itemId,
-          kind: q.hasOptions ? "single_select" : "text",
-          prompt: q.prompt,
-          ...(q.isSecret ? { isSecret: true } : {}),
-          ...(q.hasOptions ? { options: q.options } : {}),
-        })),
-        onAnswer: (q, value) => {
-          const i = Number(value);
-          const text = q.hasOptions && Number.isInteger(i) && i >= 0 && i < q.labels.length ? q.labels[i]! : value;
-          answers[q.codexId] = { answers: [text] };
-        },
-        // Partial sets still reply — collected answers stand, retracted entries
-        // fill an empty array — then the app-side prompts are withdrawn.
+        question: (q) => ({
+          req: {
+            itemId: p?.itemId,
+            kind: q.hasOptions ? "single_select" : "text",
+            prompt: q.prompt,
+            ...(q.isSecret ? { isSecret: true } : {}),
+            ...(q.hasOptions ? { options: q.options } : {}),
+          },
+          ...(q.hasOptions ? { labels: q.labels } : {}),
+        }),
+        onAnswer: (q, text) => { answers[q.codexId] = { answers: [text] }; },
         finishComplete: () => resolve({ answers }),
         finishRetracted: (retracted) => {
           for (const q of retracted) answers[q.codexId] ??= { answers: [] };
@@ -742,47 +590,38 @@ export class CodexDriver {
   }
 
   // An MCP server behind codex asks the user for structured input. Flatten it
-  // (codex-elicitation) onto agent:question primitives and reassemble the reply.
+  // (./elicitation) onto agent:question primitives and reassemble the reply.
   private handleElicitation(p: any, rpcId?: number | string): Promise<unknown> {
     const plan = planElicitation(p);
     return new Promise((resolve) => {
-      // Single-prompt paths (url / json-fallback) manage their own retractor
-      // because the answer value itself decides accept vs decline; the multi-
-      // field form path below uses the shared collectAnswers helper instead.
+      // Single-prompt paths (url / json-fallback) manage their own group because
+      // the answer value itself decides accept vs decline; the multi-field form
+      // path below uses the shared collectAnswers helper instead.
       if (plan.mode === "url" || plan.mode === "json-fallback") {
         const key = this.retractorKey(rpcId);
-        const questionId = `q-${this.questionCounter++}`;
-        this.sendQuestion(questionId, plan.question);
-        this.retractors.set(key, () => {
-          if (this.pendingQuestions.delete(questionId)) {
-            this.send(createMessage("agent:request-retracted", { sessionId: this.sessionId, questionId }));
+        const group = this.promptGroup();
+        this.retractors.set(key, group);
+        this.askQuestion(questionRequest(plan.question), (raw) => {
+          this.retractors.delete(key);
+          if (raw === null) { resolve({ action: "cancel" }); return; }
+          const v = Array.isArray(raw) ? (raw[0] ?? "") : raw;
+          if (plan.mode === "url") {
+            resolve(v === "done" ? { action: "accept" } : { action: "decline" });
+            return;
           }
-          resolve({ action: "cancel" });
-        });
-        this.pendingQuestions.set(questionId, {
-          answer: (v) => {
-            this.retractors.delete(key);
-            if (plan.mode === "url") {
-              resolve(v === "done" ? { action: "accept" } : { action: "decline" });
-              return;
-            }
-            try {
-              resolve({ action: "accept", content: JSON.parse(v) });
-            } catch {
-              // Never leave the server request hanging on a bad answer; decline
-              // and tell the user why the prompt vanished.
-              resolve({ action: "decline" });
-              this.send(createMessage("agent:error", {
-                sessionId: this.sessionId,
-                error: {
-                  category: "unknown",
-                  message: "elicitation answer was not valid JSON; request declined",
-                  retryable: false,
-                },
-              }));
-            }
-          },
-        });
+          try {
+            resolve({ action: "accept", content: JSON.parse(v) });
+          } catch {
+            // Never leave the server request hanging on a bad answer; decline
+            // and tell the user why the prompt vanished.
+            resolve({ action: "decline" });
+            this.emitError(agentError({
+              category: "unknown",
+              message: "elicitation answer was not valid JSON; request declined",
+              retryable: false,
+            }));
+          }
+        }, { group, single: true });
         return;
       }
       const content: Record<string, unknown> = {};
@@ -790,7 +629,7 @@ export class CodexDriver {
       // prompt), so this is a defensive cancel, not a silent auto-accept.
       if (plan.questions.length === 0) return resolve({ action: "cancel" });
       this.collectAnswers(rpcId, plan.questions, {
-        send: (fq, questionId) => this.sendQuestion(questionId, fq),
+        question: (fq) => ({ req: questionRequest(fq) }),
         onAnswer: (fq, v) => { content[fq.name] = fq.coerce(v); },
         finishComplete: () => resolve({ action: "accept", content }),
         finishRetracted: () => resolve({ action: "cancel" }),
@@ -798,43 +637,24 @@ export class CodexDriver {
     });
   }
 
-  private sendQuestion(questionId: string, q: FlatQuestion): void {
-    this.send(createMessage("agent:question", {
-      sessionId: this.sessionId,
-      questionId,
-      kind: q.kind,
-      prompt: q.prompt,
-      ...(q.options ? { options: q.options } : {}),
-    }));
-  }
-
   private handleApproval(p: any, rpcId: number | string | undefined, opts: {
     title: string;
     options: Array<{ optionId: string; label: string; kind: "allow_once" | "allow_always" | "reject" }>;
     reply: (optionId: string | null) => unknown;
   }): Promise<unknown> {
-    const permissionId = `perm-${this.approvalCounter++}`;
-    this.send(createMessage("agent:permission-request", {
-      sessionId: this.sessionId,
-      permissionId,
-      itemId: p?.itemId,
-      title: opts.title,
-      reason: p?.reason ?? undefined,
-      options: opts.options,
-    }));
     return new Promise((resolve) => {
       const key = this.retractorKey(rpcId);
-      this.pendingApprovals.set(permissionId, {
-        answer: (o) => {
-          this.retractors.delete(key);
-          resolve(opts.reply(o));
-        },
-      });
-      this.retractors.set(key, () => {
-        if (!this.pendingApprovals.delete(permissionId)) return;
-        resolve(opts.reply(null));
-        this.send(createMessage("agent:request-retracted", { sessionId: this.sessionId, permissionId }));
-      });
+      const group = this.promptGroup();
+      this.retractors.set(key, group);
+      this.askPermission({
+        itemId: p?.itemId,
+        title: opts.title,
+        reason: p?.reason ?? undefined,
+        options: opts.options,
+      }, (o) => {
+        this.retractors.delete(key);
+        resolve(opts.reply(o));
+      }, group);
     });
   }
 
@@ -852,16 +672,14 @@ export class CodexDriver {
     if (this.structuredPlanTurns.has(turnId)) return;
     this.emitPlan(turnId, [{ text: String(p?.item?.text ?? ""), status: "pending" }]);
   }
+}
 
-  private emitPlan(turnId: string, entries: Array<{ text: string; status: string }>): void {
-    const itemId = `plan:${turnId}`;
-    this.send(createMessage("agent:item-updated", {
-      sessionId: this.sessionId,
-      turnId,
-      itemId,
-      item: { itemId, kind: "plan", entries },
-    }));
-  }
+function questionRequest(q: FlatQuestion): QuestionRequest {
+  return {
+    kind: q.kind,
+    prompt: q.prompt,
+    ...(q.options ? { options: q.options } : {}),
+  };
 }
 
 function permissionsTitle(profile: any): string {
