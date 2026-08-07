@@ -2,11 +2,11 @@
 // previously read colors through ghostty_color_rgb_get, which takes the
 // GhosttyColorRgb struct BY VALUE — Dart FFI mismarshals that 3xuint8 struct on
 // macOS/iOS arm64, so every terminal color resolved to black and colored text
-// was invisible (only default-foreground text showed). The vendored ghostty_vte
-// fork reads the struct fields directly. This test feeds 16-color, 256-color and
+// was invisible (only default-foreground text showed). The forked ghostty_vte
+// reads the struct fields directly. This test feeds 16-color, 256-color and
 // truecolor SGR into the real native engine and asserts non-black RGB.
 //
-// Gated on native availability (like color_parity_test): a host without the
+// Gated on native availability: a host without the
 // prebuilt libghostty-vt no-ops rather than failing.
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';

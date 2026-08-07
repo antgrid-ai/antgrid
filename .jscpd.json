@@ -8,9 +8,6 @@
   "gitignore": true,
   "ignore": [
     "**/node_modules/**",
-    "**/packages/ghostty_vte/**",
-    "**/packages/ghostty_vte_flutter/**",
-    "**/packages/portable_pty/**",
     "**/generated/**",
     "**/*.g.dart",
     "**/*.freezed.dart",

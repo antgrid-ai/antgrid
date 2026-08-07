@@ -59,7 +59,6 @@ node_modules
 /app/coverage/
 /packages/*/build/
 /packages/*/pubspec.lock
-/packages/*/rust/target/
 
 # Symbolication related
 app.*.symbols

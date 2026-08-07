@@ -222,13 +222,6 @@ async function main() {
 
   await db.$disconnect();
 
-  // --- Android 16 KB-aligned PTY override (best-effort) ---
-  // Rebuilds libportable_pty_rs.so aligned for Android 15's 16 KB page check.
-  // Self-skips when Rust or an r28+ NDK is absent, so web-only setups are not
-  // blocked. See scripts/build-pty-android.ts.
-  console.log("\nBuilding 16 KB-aligned Android PTY override (skipped if Rust/NDK absent)...");
-  spawnSync("bun", ["run", "scripts/build-pty-android.ts"], { cwd: ROOT, stdio: "inherit" });
-
   // --- Agent tooling: Dart MCP server ---
   console.log("\nRegistering the Dart MCP server for coding agents...");
   ensureDartMcp(ROOT);

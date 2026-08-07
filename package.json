@@ -9,7 +9,6 @@
     "worktree": "bun run scripts/worktree.ts",
     "wt": "bun run scripts/wt-where.ts",
     "sym": "bun run scripts/sym.ts",
-    "pty:android": "bun run scripts/build-pty-android.ts",
     "dev": "bun run scripts/dev.ts",
     "dev:web": "bun run --filter antgrid-web dev",
     "dev:relay": "bun run --filter antgrid-relay dev",

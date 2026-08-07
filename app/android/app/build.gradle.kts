@@ -39,8 +39,8 @@ android {
 
     // Keep native libs uncompressed and 16 KB zip-aligned in the APK so the
     // installer can mmap them directly on Android 15 16 KB-page devices.
-    // Per-lib ELF LOAD-segment alignment is a separate concern (NDK r28+ /
-    // upstream prebuilts) — this only governs how they're packed.
+    // Per-lib ELF LOAD-segment alignment is a separate concern, fixed by the
+    // flags each prebuilt was linked with — this only governs how they're packed.
     packaging {
         jniLibs {
             useLegacyPackaging = false

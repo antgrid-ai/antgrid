@@ -16,7 +16,6 @@ aspire/
 # rather than the whole dir — keep this list in sync when adding Dart packages.
 packages/antgrid_eval_client/
 packages/antgrid_relay_client/
-packages/ghostty_vte_flutter/
 
 # Repo-only — never needed at runtime
 .claude/

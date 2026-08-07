@@ -1,14 +1,9 @@
 name: Setup Android toolchain
 description: >-
-  Java + Flutter + Bun + Rust + NDK r28, with the aligned PTY override built into
-  app/.prebuilt/. Shared by ci-android.yml and deploy-android.yml so the toolchain
-  (and its version pins) live in ONE place. Caches the Flutter SDK, cargo build,
-  Gradle home, and the Bun install cache.
-
-inputs:
-  pty-targets:
-    description: portable_pty targets passed to build-pty-android.ts.
-    default: arm64,x64
+  Java + Flutter + Bun + Rust + NDK. Shared by ci-android.yml and
+  deploy-android.yml so the toolchain (and its version pins) live in ONE place.
+  Caches the Flutter SDK, the cargo registry, Gradle home, and the Bun install
+  cache.
 
 runs:
   using: composite
@@ -35,22 +30,26 @@ runs:
         key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
         restore-keys: bun-${{ runner.os }}-
 
-    # Rust + the Android cross-compile targets build-pty-android.ts needs.
+    # super_clipboard -> super_native_extensions compiles Rust during the release
+    # AAB build. Its cargokit installs the toolchain targets it needs itself, so
+    # none are declared here — but it will NOT install rustup (a missing one is a
+    # hard RustupNotFoundException), so rustup must already exist.
     - uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: aarch64-linux-android,x86_64-linux-android
 
-    # Cache the cargo registry + target/ so the portable_pty cross-compile isn't
-    # rebuilt from scratch every run (the slowest part of a cold Android job).
+    # Preserves ~/.cargo so super_native_extensions doesn't re-fetch the crate
+    # index and its dependencies on every cold run.
     - uses: Swatinem/rust-cache@v2
       with:
-        key: pty-android
+        key: android
 
     # Caches ~/.gradle (wrapper dists + resolved deps) so Flutter's Gradle build
     # doesn't re-download the Android dependency graph each run.
     - uses: gradle/actions/setup-gradle@v5
 
-    # NDK r28+ — its lld defaults LOAD p_align to 16 KB. Not cached: the extracted
+    # Present only to supply llvm-readelf to both workflows' 16 KB alignment
+    # gate, which resolves it under $ANDROID_NDK_HOME — nothing in CI links
+    # Android native code with this NDK, so the r28 pin is not load-bearing and
+    # the symlink below is the whole point of the step. Not cached: the extracted
     # NDK is multi-GB and would evict the higher-value Gradle/Rust/Flutter caches
     # under the 10 GB repo budget.
     - name: Install NDK r28
@@ -68,13 +67,9 @@ runs:
         fi
         ln -sf "$ANDROID_SDK_ROOT/ndk/28.2.13676358" "$ANDROID_NDK_HOME"
 
+    # Warms the pub cache — including the git dependency_overrides, whose clones
+    # are the slowest part of a cold resolve — before analyze/test/build.
     - name: Flutter pub get
       working-directory: app
       shell: bash
-      run: flutter pub get          # populates the pub cache the script reads
-
-    # Must run AFTER pub get (portable_pty crate in the cache) and BEFORE the
-    # build (so the aligned .so is in app/.prebuilt/ when the hook looks).
-    - name: Build 16 KB-aligned PTY override
-      shell: bash
-      run: bun run scripts/build-pty-android.ts --targets ${{ inputs.pty-targets }}
+      run: flutter pub get

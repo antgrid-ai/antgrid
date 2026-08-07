@@ -170,28 +170,31 @@ flutter_native_splash:
     image: "assets/icon/android12-splash-wordmark.png"
   web: false
 
-# Vendored fork of ghostty_vte_flutter with a `showFocusRing` constructor
-# param gating upstream's hardcoded #2A83FF focus border, plus
-# `showKeyboardOnInteraction`/`GhosttyTerminalSoftKeyboardController` so hosts
-# can reserve taps for scroll/select and summon the mobile IME explicitly.
-# Drop this override (and the vendored copy under packages/) once both ship
-# upstream.
+# The terminal engine and PTY layer come from a fork of kingwill101/dart_terminal
+# carrying fixes upstream has not taken: an FFI colour bug, the host hooks the
+# terminal view needs, and Android PTY binaries linked to pass Play's 16 KB
+# page-alignment gate. What diverges and what it would take to go back:
+# docs/dart-terminal-fork-release.md. `ref` is a commit SHA on purpose — the fork
+# cuts no VTE release, and a branch would make every `pub get` a moving target.
 dependency_overrides:
+  # The fork's packages need hooks 2.x, which needs meta ^1.19.0; the Flutter SDK
+  # pins 1.18.0, so solving fails outright without this.
+  meta: 1.19.0
   ghostty_vte_flutter:
-    path: ../packages/ghostty_vte_flutter
-  # Vendored fork of ghostty_vte 0.1.3 carrying a pure-Dart FFI fix:
-  # VtRgbColor.fromNative read colors via a struct-BY-VALUE accessor that Dart
-  # FFI mismarshals on macOS/iOS arm64, so every terminal color resolved to
-  # black (colored text invisible; only default-fg text showed). The native
-  # libghostty-vt is unchanged — the build hook still downloads the official
-  # prebuilt. Drop once the fix lands upstream (kingwill101/dart_terminal).
+    git:
+      url: https://github.com/bharathm03/dart_terminal.git
+      path: pkgs/vte/ghostty_vte_flutter
+      ref: ef2a31d4fb957ef37d8cae4b0ea89ff508bcaa09
   ghostty_vte:
-    path: ../packages/ghostty_vte
-  # Vendored fork of portable_pty 0.0.5 with a one-block patch so iOS honours the
-  # native-assets dynamic link-mode preference (iOS simulator). See the package's
-  # lib/src/hook/artifacts.dart for the why; drop once upstream fixes it.
+    git:
+      url: https://github.com/bharathm03/dart_terminal.git
+      path: pkgs/vte/ghostty_vte
+      ref: ef2a31d4fb957ef37d8cae4b0ea89ff508bcaa09
   portable_pty:
-    path: ../packages/portable_pty
+    git:
+      url: https://github.com/bharathm03/dart_terminal.git
+      path: pkgs/pty/portable_pty
+      ref: ef2a31d4fb957ef37d8cae4b0ea89ff508bcaa09
 
 # Microsoft Store packaging (MSIX). The Store signs the package itself, so no
 # code-signing cert is used on this path (unlike the Inno Setup installer in
