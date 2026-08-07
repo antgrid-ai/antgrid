@@ -1,0 +1,92 @@
+name: Bug report
+description: Something isn't working the way it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please don't use this form for security problems. Report those privately —
+        see [SECURITY.md](https://github.com/antgrid-ai/antgrid/blob/development/SECURITY.md).
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which component?
+      description: Pick the one where the problem shows up. If you aren't sure, say so and describe the symptom — we'll route it.
+      options:
+        - App (Flutter UI, mobile or desktop)
+        - Bridge (runs on the dev machine — terminals, files, ports, tunnels)
+        - Relay (WebSocket router)
+        - Web (app.antgrid.ai — sign-in, licensing, subscriptions)
+        - Building from source / local setup
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: connection
+    attributes:
+      label: Local or over the relay?
+      description: A bug that only appears over the relay is a very different bug from one that reproduces locally.
+      options:
+        - Local — app and bridge on the same machine
+        - Over the relay — controlling another machine remotely
+        - Both
+        - Not applicable
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system and version
+      description: For a relay bug, give both ends — the machine running the bridge and the device running the app.
+      placeholder: "e.g. Windows 11 26200 (bridge) + Android 15, Pixel 8 (app)"
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Antgrid version
+      description: The version of the app or bridge you're running. If you built from source, give the commit SHA instead.
+      placeholder: "e.g. 1.2.3, or commit 8f0786a2"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What went wrong, and what did you expect instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: If it isn't reliably reproducible, describe what you were doing when it happened and how often you've seen it.
+      placeholder: |
+        1. Open a project on ...
+        2. Start a session with ...
+        3. See ...
+    validations:
+      required: true
+
+  - type: input
+    id: agent
+    attributes:
+      label: Which coding agent?
+      description: Only if the bug involves a session — Claude Code, Codex, or whichever you were running.
+      placeholder: "e.g. Claude Code"
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Logs, screenshots, or recordings
+      description: Anything that shows the problem. Drag and drop files here. Scrub tokens, paths you'd rather not publish, and anything else sensitive first.
+    validations:
+      required: false
