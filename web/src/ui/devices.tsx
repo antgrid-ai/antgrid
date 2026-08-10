@@ -1,4 +1,5 @@
 import { Layout } from "./layout.js";
+import { DownloadCard } from "./download-card.js";
 import type { DeviceRow } from "../models/device.js";
 
 export function DevicesPage(props: {
@@ -22,18 +23,9 @@ export function DevicesPage(props: {
 
 export function DevicesTable({ devices }: { devices: DeviceRow[] }) {
   if (devices.length === 0) {
-    return (
-      <div class="card bg-base-100 border border-base-300 border-dashed">
-        <div class="card-body items-center text-center py-10">
-          <div class="font-mono text-sm text-base-content/60">No devices yet</div>
-          <p class="text-xs text-base-content/50 max-w-sm">
-            Sign in on the Antgrid app or run{" "}
-            <code class="px-1 bg-base-200 rounded">antgrid pair</code> on your
-            machine. The device row appears after sign-in provisioning completes.
-          </p>
-        </div>
-      </div>
-    );
+    // There is no pairing ceremony — the bridge is a headless child of the
+    // desktop app, so the empty state points at the install, not a CLI.
+    return <DownloadCard />;
   }
   return (
     <div class="card bg-base-100 border border-base-300 overflow-x-auto">

@@ -1,6 +1,7 @@
 import { Layout } from "./layout.js";
 import { asset } from "./asset.js";
 import { ActiveSessionsCard } from "./active-sessions.js";
+import { DownloadCard } from "./download-card.js";
 import type { UserSession } from "../services/sessions.js";
 import type { SubscriptionRow } from "../models/subscription.js";
 import type { PlanRow } from "../models/plan.js";
@@ -110,6 +111,9 @@ export function DashboardPage(props: DashboardPageProps) {
       <div id="subscription-card">
         <SubscriptionCard {...props} />
       </div>
+      {/* Gate on the worker axis, not tier/promotional — during the beta every
+          account is promotional, and the card must show there too. */}
+      {props.activeWorkers === 0 ? <DownloadCard /> : null}
       <ActiveSessionsCard sessions={props.sessions} now={props.now} />
 
       <script

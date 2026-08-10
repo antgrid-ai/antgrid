@@ -27,6 +27,19 @@ test("signed-in user sees the devices table on /devices", async () => {
   expect(html).toContain("Revoke");
 });
 
+test("empty devices page shows the download card, not pairing instructions", async () => {
+  const { app } = buildTestApp(pg.db, pg.url);
+  const user = await createTestUser(pg.db);
+  await createTestSubscription(pg.db, user.id);
+  const { cookie } = await createTestSession(pg.db, user.id);
+
+  const res = await app.request("/devices", { headers: { cookie } });
+  const html = await res.text();
+  expect(html).toContain("Download the desktop app");
+  // The pairing CLI was never the shipped flow; keep it from resurfacing.
+  expect(html).not.toContain("antgrid pair");
+});
+
 test("unauthenticated → redirect to /login", async () => {
   const { app } = buildTestApp(pg.db, pg.url);
   const res = await app.request("/devices");
