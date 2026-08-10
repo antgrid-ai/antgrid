@@ -3,18 +3,22 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../connection/supervisor_state.dart';
 import '../../design/ab_colors.dart';
+import '../../design/ab_icons.dart';
 import '../../design/ab_status_tone.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_chip.dart';
 import '../../design/widgets/ab_empty_state.dart';
+import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_section_header.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../../design/widgets/ab_status_dot.dart';
 import '../../models/recent_session_row.dart';
+import '../../providers/new_session_picker.dart';
 import '../../providers/project_work_status.dart';
 import '../../providers/recent_sessions.dart';
 import '../../providers/supervisor_status.dart';
 import '../../services/control_plane_client.dart';
+import '../../utils/platform_utils.dart';
 import '../ab_status_helpers.dart';
 import 'recent_session_row_widget.dart';
 
@@ -63,19 +67,34 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
     final rows = ref.watch(recentSessionsProvider);
 
     if (rows.isEmpty) {
+      // A fresh phone install has no Local source and no machines on the
+      // account, so every path into a session is dead (project chip, drawer,
+      // Send). This is the one surface with room to say what unblocks it, so
+      // the connect guide replaces the generic empty state until a machine
+      // shows up in the inventory. `isMobilePlatform` first is load-bearing:
+      // desktop short-circuits before touching the picker-source chain.
+      final showConnectGuide =
+          isMobilePlatform && ref.watch(pickerMachineUuidsProvider).isEmpty;
+      // "Describe a task below" is a lie while nothing is picked — Send stays
+      // disabled without a valid target — so name the actual next step.
+      final hasTarget = ref.watch(newSessionHasValidTargetProvider);
       // A scrollable empty state so the ancestor RefreshIndicator (in
       // new_session_content.dart) always has a gesture target: AbEmptyState
       // is a bare Center with no Scrollable of its own, so pull-to-refresh
       // would be inert here without this wrapper.
-      return const CustomScrollView(
-        physics: AlwaysScrollableScrollPhysics(),
+      return CustomScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
         slivers: [
           SliverFillRemaining(
             hasScrollBody: false,
-            child: AbEmptyState(
-              title: 'No recent sessions',
-              subtitle: 'Describe a task below to start your first session.',
-            ),
+            child: showConnectGuide
+                ? const _ConnectMachineGuide()
+                : AbEmptyState(
+                    title: 'No recent sessions',
+                    subtitle: hasTarget
+                        ? 'Describe a task below to start your first session.'
+                        : 'Pick a project, then describe a task below.',
+                  ),
           ),
         ],
       );
@@ -485,6 +504,87 @@ class _ConnectingIndicator extends ConsumerWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Mobile-only first-run guide. There is no onboarding flow, so a phone with
+/// zero machines on the account lands on an app where every affordance is a
+/// dead end; these are the three steps that make the rest of the UI exist.
+/// Kept private: the drawer and project chip stay one-liners and defer here.
+class _ConnectMachineGuide extends StatelessWidget {
+  const _ConnectMachineGuide();
+
+  static const _steps = [
+    'Install Antgrid on the computer where your agents run.',
+    'Sign in there with this same account.',
+    "Turn on Remote in that computer's title bar.",
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.antgrid;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: AbTokens.space24),
+        child: ConstrainedBox(
+          // Keeps step lines readable on tablets; no-op on phone widths.
+          constraints: const BoxConstraints(maxWidth: 320),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AbIcon(AbIcons.server, size: 32, color: t.textDisabled),
+              const SizedBox(height: AbTokens.space12),
+              Text(
+                'No machines yet',
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontSm,
+                  color: t.textPrimary,
+                  fontWeight: FontWeight.w500,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: AbTokens.space14),
+              for (var i = 0; i < _steps.length; i++) ...[
+                if (i > 0) const SizedBox(height: AbTokens.space8),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Mono ordinals: tabular digits keep the gutter aligned,
+                    // matching the terminal-native ordinal treatment elsewhere.
+                    Text(
+                      '${i + 1}.',
+                      style: AbTokens.monoStyle(
+                        fontSize: AbTokens.fontXs,
+                        color: t.accent,
+                      ),
+                    ),
+                    const SizedBox(width: AbTokens.space8),
+                    Expanded(
+                      child: Text(
+                        _steps[i],
+                        style: AbTokens.sansStyle(
+                          fontSize: AbTokens.fontXs,
+                          color: t.textSecondary,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+              const SizedBox(height: AbTokens.space14),
+              Text(
+                "That machine's projects then show up here.",
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontXxs,
+                  color: t.textMuted,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

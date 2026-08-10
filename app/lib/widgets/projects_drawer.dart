@@ -10,6 +10,7 @@ import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
 import '../design/widgets/ab_brand_mark.dart';
 import '../design/widgets/ab_button.dart';
+import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
@@ -33,6 +34,7 @@ import '../services/control_plane_client.dart';
 import '../utils/platform_utils.dart';
 import 'account_footer.dart';
 import 'drawer_entry_row.dart' show DrawerEntryRow, MachineDrawerHeaderRow;
+import 'open_folder_button.dart';
 import 'session_row.dart';
 import 'update_row.dart';
 
@@ -286,31 +288,30 @@ class _Body extends ConsumerWidget {
 
   Widget _list(BuildContext context, WidgetRef ref) {
     if (entries.isEmpty) {
-      // Point at the real entry points rather than a nonexistent "[+]". On
-      // desktop the New Session canvas (with its "Open local folder" / "Pair
-      // remote project" cards) sits right beside this drawer, so steer there;
-      // local folders aren't supported on mobile, so name only pairing.
-      final String message;
-      if (hasFilter) {
-        message = 'No matches.';
-      } else {
-        message = 'No projects yet.';
-      }
       // A scrollable (not a bare Center) so the pull-to-refresh gesture works
       // with zero rows — overscroll needs something scrollable to grab.
       return ListView(
         physics: const AlwaysScrollableScrollPhysics(),
         children: [
           Padding(
-            padding: const EdgeInsets.all(AbTokens.space16),
-            child: Text(
-              message,
-              textAlign: TextAlign.center,
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontXs,
-                color: context.antgrid.textMuted,
-              ),
-            ),
+            padding: const EdgeInsets.symmetric(vertical: AbTokens.space24),
+            child: hasFilter
+                ? const AbEmptyState.compact(title: 'No matches.')
+                // Mobile has no local folders — this drawer fills from machines
+                // on the account, so point there (the New Session canvas
+                // carries the full connect steps).
+                : isMobilePlatform
+                ? const AbEmptyState(
+                    title: 'No projects yet',
+                    subtitle: 'Connect a machine to see its projects here.',
+                  )
+                // Desktop's real entry point is a local folder; offer it
+                // in place instead of describing where else to find it.
+                : const AbEmptyState(
+                    title: 'No projects yet',
+                    subtitle: 'Open a folder to get started.',
+                    action: OpenFolderButton(),
+                  ),
           ),
         ],
       );

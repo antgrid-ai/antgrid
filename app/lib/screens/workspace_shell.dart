@@ -10,7 +10,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart'
-    show LocalTransportHandshakeException, RelayConnectionState;
+    show LocalTransportHandshakeException, RelayConnectionState, RpcException;
 
 import '../connection/relay_mechanisms.dart' show ConnectionBlockedException;
 import '../connection/supervisor_state.dart'
@@ -1697,10 +1697,14 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
           retryLabel: 'retry',
         ),
         BlockReason.licenseExpired => (
-          headline: 'subscription expired',
+          // LICENSE_EXPIRED is the relay's verdict for "no active plan", which
+          // an account that never subscribed hits too — so no "renew your
+          // subscription" framing.
+          headline: 'this account can\'t reach machines remotely',
           tip:
-              'The relay rejected this connection\'s license. Renew the '
-              'subscription, then Retry.',
+              'The relay declined this connection\'s access token. Sign in '
+              'again on this device to mint a fresh one, or check that your '
+              'plan includes remote access, then Retry.',
           retryLabel: 'retry',
         ),
         BlockReason.agentOffline => (
@@ -1737,6 +1741,20 @@ class _LocalLaunchErrorScreen extends StatelessWidget {
           retryLabel: 'retry',
         ),
       };
+    }
+    // A bridge that answered and refused the verb. NOT_ALLOWED is the blanket
+    // refusal while the machine's remote-access switch is off — only that
+    // machine can fix it, so name where the switch lives instead of echoing
+    // the bridge's "mobile access is disabled" vocabulary.
+    if (e is RpcException && e.code == 'NOT_ALLOWED') {
+      return (
+        headline: 'remote access is off on this machine',
+        tip:
+            'The machine is reachable, but remote access is switched off '
+            'there. Turn it on in Antgrid on that computer — the Remote chip '
+            'in the title bar — then Retry.',
+        retryLabel: 'retry',
+      );
     }
     if (e is LocalTransportHandshakeException && e.closeCode == 4409) {
       return (

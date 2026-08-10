@@ -103,11 +103,13 @@ class ProjectPanel extends ConsumerWidget {
       );
     }
 
-    // Remote machine: expand its live advert. The mobile "nothing paired yet"
+    // Remote machine: expand its live advert. The mobile "no machines yet"
     // fallback source ('machine:none') carries a null uuid — surface a graceful
     // hint rather than force-unwrapping it (which crashed the tappable chip).
+    // Copy matches EnvironmentPanel's machines hint; the full connect steps
+    // live in the canvas behind this panel (_ConnectMachineGuide).
     final uuid = source.machineUuid;
-    if (uuid == null) return const PanelHint('No machines paired');
+    if (uuid == null) return const PanelHint('No machines on this account');
 
     final cp = ref.watch(controlPlaneStateProvider(uuid));
     final rows = cp.value == null

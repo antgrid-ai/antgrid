@@ -111,7 +111,16 @@ void main() {
     });
     await tester.pump();
 
-    expect(find.text('mobile access is disabled on this machine'), findsOneWidget);
+    // NOT_ALLOWED gets human copy naming where the switch lives; the raw
+    // code+message stays visible as the banner's detail line.
+    expect(
+      find.textContaining('Remote access is off on this machine'),
+      findsOneWidget,
+    );
+    expect(
+      find.text('NOT_ALLOWED: mobile access is disabled on this machine'),
+      findsOneWidget,
+    );
     // The list is still shown alongside the banner.
     expect(find.byType(AbListRow), findsNWidgets(2));
   });

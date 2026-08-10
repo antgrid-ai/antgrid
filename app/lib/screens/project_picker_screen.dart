@@ -13,6 +13,7 @@ import '../design/widgets/ab_status_dot.dart';
 import '../models/session_target.dart';
 import '../providers/agent_transport.dart';
 import '../services/control_plane_client.dart';
+import '../widgets/ab_status_helpers.dart';
 
 /// Project picker. Lists the projects the agent advertises over the control
 /// plane — its whole catalog when mobile access is on for that machine, nothing
@@ -95,6 +96,13 @@ class _ErrorBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final antgrid = context.antgrid;
+    // Map by CODE, not message text — the bridge's wording is not a contract.
+    // The raw code/message stays visible as a detail line (code/data → mono)
+    // so a bug report still carries what the agent actually said.
+    final friendly = friendlyErrorCopy(error.code);
+    final raw = error.message.isEmpty
+        ? error.code
+        : '${error.code}: ${error.message}';
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(
@@ -105,12 +113,27 @@ class _ErrorBanner extends StatelessWidget {
         color: antgrid.bgRaised,
         border: Border(bottom: BorderSide(color: antgrid.borderSubtle)),
       ),
-      child: Text(
-        error.message.isEmpty ? error.code : error.message,
-        style: AbTokens.sansStyle(
-          fontSize: AbTokens.fontXs,
-          color: antgrid.error,
-        ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            friendly ?? (error.message.isEmpty ? error.code : error.message),
+            style: AbTokens.sansStyle(
+              fontSize: AbTokens.fontXs,
+              color: antgrid.error,
+            ),
+          ),
+          if (friendly != null) ...[
+            const SizedBox(height: AbTokens.space4),
+            Text(
+              raw,
+              style: AbTokens.monoStyle(
+                fontSize: AbTokens.fontXxs,
+                color: antgrid.textMuted,
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }

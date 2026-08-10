@@ -30,12 +30,33 @@ String _rungLabel(ConnRung rung) => switch (rung) {
 };
 
 String _blockReasonLabel(BlockReason reason) => switch (reason) {
-  BlockReason.licenseExpired => 'License expired',
+  // LICENSE_EXPIRED is the relay's verdict for "no active plan", which an
+  // account that never subscribed hits too — the label must not presume a
+  // lapsed subscription.
+  BlockReason.licenseExpired => 'Plan or sign-in needed',
   BlockReason.agentOffline => 'Agent offline',
   BlockReason.sessionTakenOver => 'Taken over',
   BlockReason.superseded => 'Superseded',
   BlockReason.deviceRevoked => 'Device revoked',
   BlockReason.handshakeFailing => 'Handshake failing',
+};
+
+/// Human copy for a structured bridge/relay refusal, keyed by error CODE —
+/// never by matching message text, which is the bridge's wording and not a
+/// contract. Returns null for codes without dedicated copy so each surface
+/// keeps its own fallback (usually the raw message).
+String? friendlyErrorCopy(String? code) => switch (code) {
+  // The bridge refuses every project verb with NOT_ALLOWED while the machine's
+  // remote-access switch is off; its raw "mobile access is disabled on this
+  // machine" names neither the switch nor where to find it.
+  'NOT_ALLOWED' =>
+    'Remote access is off on this machine. Turn it on in Antgrid on that '
+        'computer — the Remote chip in the title bar.',
+  // Same never-subscribed caveat as _blockReasonLabel's licenseExpired arm.
+  'LICENSE_EXPIRED' =>
+    'This account can\'t reach machines remotely right now. Sign in again, '
+        'or check your plan.',
+  _ => null,
 };
 
 /// Maps [TerminalSessionState] to a status tone for the leading dot.

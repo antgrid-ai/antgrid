@@ -218,7 +218,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(tester.takeException(), isNull);
-    expect(find.text('No machines paired'), findsOneWidget);
+    expect(find.text('No machines on this account'), findsOneWidget);
   });
 
   testWidgets('local panel with no projects shows the empty-state hint', (

@@ -138,8 +138,138 @@ void main() {
         storage: storage,
         httpClient: client,
       );
-      await service.handleDeepLink(Uri.parse('antgrid://auth/callback?error=x'));
+      await service.handleDeepLink(Uri.parse('antgrid://auth/callback'));
       expect(await storage.readCookie(), isNull);
+    });
+
+    group('OAuth failure surfacing', () {
+      AuthService make(
+        MockClient client, {
+        Future<bool> Function(Uri url)? launchUrl,
+      }) =>
+          AuthService(
+            licenseApiUrl: 'https://lic.test',
+            storage: _InMemoryStorage(),
+            httpClient: client,
+            // Never the default in these tests: on desktop `flutter test`
+            // registers the real url_launcher Dart plugin, which would open an
+            // actual browser on the test machine.
+            launchUrl: launchUrl ?? (_) async => false,
+          );
+
+      /// Runs [act] with [service]'s oauthFailures collected, then yields the
+      /// emitted messages (a microtask turn later — broadcast streams deliver
+      /// asynchronously).
+      Future<List<String>> failuresDuring(
+        AuthService service,
+        Future<void> Function() act,
+      ) async {
+        final messages = <String>[];
+        final sub = service.oauthFailures.listen(messages.add);
+        await act();
+        await Future<void>.delayed(Duration.zero);
+        await sub.cancel();
+        return messages;
+      }
+
+      test('a ?error= bounce emits a failure without touching the network',
+          () async {
+        // The handoff redirects errors back as ?error=no_session|server_error;
+        // previously the handler dropped them and the user saw nothing.
+        final service =
+            make(MockClient((req) async => fail('no network call expected')));
+        final messages = await failuresDuring(
+          service,
+          () => service.handleDeepLink(
+            Uri.parse('antgrid://auth/callback?error=no_session'),
+          ),
+        );
+        expect(messages, ["Sign-in didn't complete. Try again."]);
+      });
+
+      test('failure copy names the provider startOAuth recorded', () async {
+        final service = make(
+          MockClient((req) async => fail('no network call expected')),
+          launchUrl: (_) async => true,
+        );
+        await service.startOAuth('github');
+        final messages = await failuresDuring(
+          service,
+          () => service.handleDeepLink(
+            Uri.parse('antgrid://auth/callback?error=server_error'),
+          ),
+        );
+        expect(messages, ["GitHub sign-in didn't complete. Try again."]);
+      });
+
+      test('startOAuth surfaces an unopenable browser as AuthException',
+          () async {
+        // launchUrl reporting false and launchUrl throwing both mean the same
+        // thing to the user: the browser never opened.
+        final refused =
+            make(MockClient((req) async => fail('no network call expected')));
+        await expectLater(
+          refused.startOAuth('github'),
+          throwsA(isA<AuthException>()),
+        );
+
+        final threw = make(
+          MockClient((req) async => fail('no network call expected')),
+          launchUrl: (_) async => throw Exception('no handler'),
+        );
+        await expectLater(
+          threw.startOAuth('github'),
+          throwsA(isA<AuthException>()),
+        );
+      });
+
+      test('a network failure during redemption emits a failure', () async {
+        final service =
+            make(MockClient((req) async => throw http.ClientException('off')));
+        final messages = await failuresDuring(
+          service,
+          () => service.handleDeepLink(
+            Uri.parse('antgrid://auth/callback?token=ott-abc'),
+          ),
+        );
+        expect(messages, hasLength(1));
+      });
+
+      test('a non-200 verify response emits a failure', () async {
+        final service = make(MockClient((req) async => http.Response('', 401)));
+        final messages = await failuresDuring(
+          service,
+          () => service.handleDeepLink(
+            Uri.parse('antgrid://auth/callback?token=ott-abc'),
+          ),
+        );
+        expect(messages, hasLength(1));
+      });
+
+      test('a 200 verify without a session cookie emits a failure', () async {
+        final service = make(MockClient((req) async => http.Response('{}', 200)));
+        final messages = await failuresDuring(
+          service,
+          () => service.handleDeepLink(
+            Uri.parse('antgrid://auth/callback?token=ott-abc'),
+          ),
+        );
+        expect(messages, hasLength(1));
+      });
+
+      test('a successful redemption emits nothing', () async {
+        final service = make(MockClient((req) async =>
+            http.Response('{"session":{}}', 200, headers: {
+              'set-cookie': 'better-auth.session_token=signed.ok; Path=/',
+            })));
+        final messages = await failuresDuring(
+          service,
+          () => service.handleDeepLink(
+            Uri.parse('antgrid://auth/callback?token=ott-abc'),
+          ),
+        );
+        expect(messages, isEmpty);
+      });
     });
 
     test('signOut clears the cookie', () async {

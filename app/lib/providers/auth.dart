@@ -69,8 +69,16 @@ final signedInProvider = Provider<bool?>((ref) {
   );
 });
 
+/// Beta: remote access is included on every tier, so the Pro gate below is
+/// short-circuited rather than deleted — flip this to false when paid plans
+/// launch to restore it. The relay and web never gate remote by tier (the
+/// relay reads no entitlement claim), so this const is the ONLY switch.
+/// TODO(bharath): flip to false when paid plans launch.
+const bool kRemoteAccessFreeDuringBeta = true;
+
 /// True when the signed-in user needs Pro for mobile/relay features.
-bool requiresProForRemote(String? tier) => tier == null || tier == 'free';
+bool requiresProForRemote(String? tier) =>
+    !kRemoteAccessFreeDuringBeta && (tier == null || tier == 'free');
 
 Future<void> openUpgradeInBrowser(
   ProviderContainer ref, {

@@ -5,8 +5,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/models/recent_session_row.dart';
 import 'package:antgrid/models/session_entry.dart';
+import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/services/control_plane_client.dart';
+import 'package:antgrid/widgets/new_session/picker_sources.dart';
 import 'package:antgrid/widgets/recent_sessions/recent_sessions_tab.dart';
 
 Widget _wrap(Widget child) {
@@ -272,6 +274,48 @@ void main() {
     await tester.pump();
 
     expect(find.textContaining('1 needs you'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('mobile with no machines shows the connect guide', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          recentSessionsProvider.overrideWithValue(const []),
+          // No machine sources at all → pickerMachineUuidsProvider is empty
+          // without touching the projects/recents/inventory providers.
+          pickerSourcesProvider.overrideWithValue(const <PickerSource>[]),
+        ],
+        child: _wrap(const RecentSessionsTab()),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('No machines yet'), findsOneWidget);
+    expect(
+      find.textContaining('Turn on Remote'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('No recent sessions'), findsNothing);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('desktop empty state names the pick-a-project step when no '
+      'target is selected', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [recentSessionsProvider.overrideWithValue(const [])],
+        child: _wrap(const RecentSessionsTab()),
+      ),
+    );
+    await tester.pump();
+    expect(
+      find.text('Pick a project, then describe a task below.'),
+      findsOneWidget,
+    );
     debugDefaultTargetPlatformOverride = null;
   });
 }

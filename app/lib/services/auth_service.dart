@@ -1,9 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
-import 'package:url_launcher/url_launcher.dart';
+import 'package:url_launcher/url_launcher.dart' as url_launcher;
 
 import '../config/build_info.dart';
 import '../config/storage_scope.dart';
@@ -152,13 +153,38 @@ class AuthService {
     required this.storage,
     http.Client? httpClient,
     DateTime Function()? now,
+    Future<bool> Function(Uri url)? launchUrl,
   }) : _http = httpClient ?? http.Client(),
-       _now = now ?? DateTime.now;
+       _now = now ?? DateTime.now,
+       _launchUrl = launchUrl ?? _launchExternal;
 
   final String licenseApiUrl;
   final AuthStorage storage;
   final http.Client _http;
   final DateTime Function() _now;
+
+  /// Injectable for tests only: on desktop `flutter test` registers the REAL
+  /// Dart url_launcher plugin, so exercising [startOAuth] against the default
+  /// would open an actual browser on the test machine.
+  final Future<bool> Function(Uri url) _launchUrl;
+
+  static Future<bool> _launchExternal(Uri url) => url_launcher.launchUrl(
+    url,
+    mode: url_launcher.LaunchMode.externalApplication,
+  );
+
+  /// User-facing OAuth failures that surface OUTSIDE any call stack: the
+  /// browser detour means the outcome arrives later as a deep link, long after
+  /// [startOAuth]'s future completed, so [handleDeepLink] has no caller to
+  /// throw to that could show UI. Whatever sign-in surface is on screen listens
+  /// here; broadcast, so with no listener the event is simply dropped.
+  Stream<String> get oauthFailures => _oauthFailures.stream;
+  final _oauthFailures = StreamController<String>.broadcast();
+
+  /// Provider of the most recent [startOAuth] in this process, kept only to
+  /// name it in failure copy. Null on a cold-start callback (the process was
+  /// killed during the browser detour) — copy falls back to the generic form.
+  String? _lastOAuthProvider;
 
   /// Open the system browser to begin OAuth. Provider is "github" or "google".
   /// We pass `callbackURL=/oauth/handoff` so the server can mint
@@ -166,16 +192,39 @@ class AuthService {
   /// `antgrid://` deep link; [handleDeepLink] redeems it for the session cookie.
   /// Deep links can't receive cookies directly, and forwarding the raw session
   /// would expose it to custom-scheme hijacking and logging.
+  ///
+  /// Throws [AuthException] when the browser cannot be opened; failures of the
+  /// round-trip itself are reported on [oauthFailures].
   Future<void> startOAuth(String provider) async {
+    _lastOAuthProvider = provider;
     // Better-Auth's social sign-in is POST-only; `/oauth/start` is the
     // browser-navigable GET wrapper that 302s to the provider authorize URL.
     final url = buildOAuthStartUri(
       licenseApiUrl: licenseApiUrl,
       provider: provider,
     );
-    if (!await launchUrl(url, mode: LaunchMode.externalApplication)) {
-      throw Exception('Could not open browser');
+    final bool opened;
+    try {
+      opened = await _launchUrl(url);
+    } catch (_) {
+      // url_launcher throws (rather than returning false) on some platforms
+      // when nothing can take the URL; both shapes mean the same thing here.
+      throw AuthException('Could not open the browser');
     }
+    if (!opened) throw AuthException('Could not open the browser');
+  }
+
+  void _emitOAuthFailure() {
+    final provider = switch (_lastOAuthProvider) {
+      'github' => 'GitHub',
+      'google' => 'Google',
+      _ => null,
+    };
+    _oauthFailures.add(
+      provider == null
+          ? "Sign-in didn't complete. Try again."
+          : "$provider sign-in didn't complete. Try again.",
+    );
   }
 
   /// Parse `antgrid://auth/callback?token=<ott>`, redeem the single-use one-time
@@ -184,30 +233,46 @@ class AuthService {
   /// the deep link, so a hijacked or logged link yields nothing replayable.
   Future<void> handleDeepLink(Uri uri) async {
     if (uri.scheme != 'antgrid' || uri.host != 'auth') return;
+    // The handoff bounces its own failures back as `?error=` (no_session |
+    // server_error — web/src/routes/oauth-handoff.ts) so the app regains the
+    // foreground; without surfacing it the user lands on an unchanged sign-in
+    // screen with no explanation.
+    if (uri.queryParameters['error'] != null) {
+      _emitOAuthFailure();
+      return;
+    }
     final token = uri.queryParameters['token'];
     if (token == null || token.isEmpty) return;
     // The verify response carries the session cookie; never redeem (and receive
     // it) over plaintext. Consistent with the magic-link methods' guard.
     if (!_transportIsSecure) return;
     // This may run on the cold-start deep link (before runApp), so a thrown
-    // network error here would crash launch. Redemption is best-effort: on any
-    // failure we leave the cookie unset and the user can retry sign-in.
+    // network error here would crash launch. Redemption never throws: on any
+    // failure the cookie stays unset and the failure is reported on
+    // [oauthFailures] so the sign-in screen can offer a retry.
     try {
       final res = await _http.post(
         Uri.parse('$licenseApiUrl/api/auth/one-time-token/verify'),
         headers: {'content-type': 'application/json'},
         body: jsonEncode({'token': token}),
       );
-      if (res.statusCode != 200) return;
+      if (res.statusCode != 200) {
+        _emitOAuthFailure();
+        return;
+      }
       // The signed session cookie only exists in Set-Cookie — the JSON body's
       // `token` is the unsigned DB token, not the signed cookie the server
       // expects on replay. [_extractSessionCookie] captures the full
       // `name=value` pair (real name, prefix included) for verbatim replay.
       final cookie = _extractSessionCookie(res.headers['set-cookie']);
-      if (cookie == null) return;
+      if (cookie == null) {
+        _emitOAuthFailure();
+        return;
+      }
       await storage.writeCookie(cookie);
     } catch (_) {
       // Offline, server unreachable, or malformed response — never rethrow.
+      _emitOAuthFailure();
     }
   }
 

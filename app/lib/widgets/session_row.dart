@@ -30,6 +30,7 @@ import '../providers/ui_attention_providers.dart';
 import '../services/control_plane_client.dart';
 import '../services/sessions_service.dart';
 import '../util/external_open_target.dart';
+import 'ab_status_helpers.dart' show friendlyErrorCopy;
 import 'agent_work_status_dot.dart';
 import 'drawer_entry_row.dart' show activateDrawerEntryById, ensureRemoteOnline;
 import 'session_rename_dialog.dart';
@@ -641,7 +642,12 @@ class _SessionMenu extends ConsumerWidget {
       if (!context.mounted || session.id != capturedId) return;
       final code = error.errorCode;
       if (code != 'WORKTREE_DIRTY' && code != 'WORKTREE_UNPUSHED') {
-        showAbSnackBar(context, error.message ?? 'Could not delete the session');
+        showAbSnackBar(
+          context,
+          friendlyErrorCopy(code) ??
+              error.message ??
+              'Could not delete the session',
+        );
         return;
       }
       blockedBy = code!;
@@ -692,7 +698,12 @@ class _SessionMenu extends ConsumerWidget {
       return await service.delete(id, force: force, deleteBranch: deleteBranch);
     } on SessionOperationException catch (error) {
       if (context.mounted) {
-        showAbSnackBar(context, error.message ?? 'Could not delete the session');
+        showAbSnackBar(
+          context,
+          friendlyErrorCopy(error.errorCode) ??
+              error.message ??
+              'Could not delete the session',
+        );
       }
       return null;
     }

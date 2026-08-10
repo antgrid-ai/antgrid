@@ -45,16 +45,22 @@ String _ticket({required String email}) => jsonEncode({
   'startedAt': DateTime.now().toUtc().toIso8601String(),
 });
 
-Widget _wrap(AuthStorage storage) {
-  final auth = AuthService(
-    licenseApiUrl: 'https://lic.test',
-    storage: storage,
-    // Any poll a restore kicks off parks on pending — the test is about what
-    // the screen does with the ticket, not the round-trip.
-    httpClient: MockClient(
-      (_) async => http.Response(jsonEncode({'status': 'pending'}), 200),
-    ),
-  );
+AuthService _authFor(AuthStorage storage) => AuthService(
+  licenseApiUrl: 'https://lic.test',
+  storage: storage,
+  // Any poll a restore kicks off parks on pending — the test is about what
+  // the screen does with the ticket, not the round-trip.
+  httpClient: MockClient(
+    (_) async => http.Response(jsonEncode({'status': 'pending'}), 200),
+  ),
+  // The default launcher is the REAL url_launcher Dart plugin on desktop
+  // `flutter test`, which would open an actual browser on the test machine.
+  launchUrl: (_) async => false,
+);
+
+Widget _wrap(AuthStorage storage) => _wrapService(_authFor(storage));
+
+Widget _wrapService(AuthService auth) {
   return ProviderScope(
     overrides: [authServiceProvider.overrideWithValue(auth)],
     child: MaterialApp(
@@ -105,5 +111,36 @@ void main() {
 
     expect(find.text('Check your email'), findsOneWidget);
     expect(find.textContaining('old@example.com'), findsOneWidget);
+  });
+
+  testWidgets('a failed browser launch surfaces on the form', (tester) async {
+    // The injected launcher reports the browser never opened. Previously the
+    // resulting throw vanished into an unawaited callback and the screen never
+    // changed.
+    final storage = _GatedStorage(null)..gate.complete();
+    await tester.pumpWidget(_wrap(storage));
+
+    await tester.tap(find.text('Continue with GitHub'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Could not open the browser'), findsOneWidget);
+  });
+
+  testWidgets('a deep-link OAuth error bounce surfaces on the form', (
+    tester,
+  ) async {
+    final storage = _GatedStorage(null)..gate.complete();
+    final auth = _authFor(storage);
+    await tester.pumpWidget(_wrapService(auth));
+
+    // The web handoff bounces failures back as ?error= — the screen learns of
+    // them only through the service's failure stream.
+    await auth.handleDeepLink(
+      Uri.parse('antgrid://auth/callback?error=no_session'),
+    );
+    await tester.pump();
+
+    expect(find.text("Sign-in didn't complete. Try again."), findsOneWidget);
   });
 }

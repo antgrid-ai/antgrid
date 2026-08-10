@@ -53,18 +53,48 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   Timer? _pollTimer;
   bool _polling = false;
   int _pollTicks = 0;
+  StreamSubscription<String>? _oauthFailureSub;
 
   @override
   void initState() {
     super.initState();
-    _restorePendingSignIn();
+    // OAuth outcomes arrive as a deep link long after the button's future
+    // completed (and possibly into a fresh process), so failures reach the
+    // screen through this stream, not a call stack.
+    _oauthFailureSub = ref
+        .read(authServiceProvider)
+        .oauthFailures
+        .listen(_onOAuthFailure);
+    // Never throws (see restorePendingMagicLink), so no catchError needed.
+    unawaited(_restorePendingSignIn());
   }
 
   @override
   void dispose() {
     _pollTimer?.cancel();
+    _oauthFailureSub?.cancel();
     _emailController.dispose();
     super.dispose();
+  }
+
+  void _onOAuthFailure(String message) {
+    // A late bounce must not clobber an in-progress magic-link flow — OAuth is
+    // only ever started from the form, so only the form shows its failures.
+    if (!mounted || _phase != _Phase.form) return;
+    setState(() => _error = message);
+  }
+
+  Future<void> _startOAuth(String provider) async {
+    ref
+        .read(analyticsServiceProvider)
+        ?.track(AnalyticsEvents.signInStarted, props: {'provider': provider});
+    setState(() => _error = null);
+    try {
+      await ref.read(authServiceProvider).startOAuth(provider);
+    } on AuthException catch (e) {
+      if (!mounted) return;
+      setState(() => _error = e.message);
+    }
   }
 
   /// Reclaim a sign-in started before this process existed.
@@ -275,7 +305,6 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
 
   Widget _formBody(BuildContext context, bool canPop) {
     final antgrid = context.antgrid;
-    final auth = ref.read(authServiceProvider);
     final busy = _phase == _Phase.submitting;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -316,28 +345,12 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         const SizedBox(height: AbTokens.space16),
         _SignInButton(
           label: 'Continue with GitHub',
-          onPressed: () {
-            ref
-                .read(analyticsServiceProvider)
-                ?.track(
-                  AnalyticsEvents.signInStarted,
-                  props: {'provider': 'github'},
-                );
-            auth.startOAuth('github');
-          },
+          onPressed: () => _startOAuth('github'),
         ),
         const SizedBox(height: AbTokens.space8),
         _SignInButton(
           label: 'Continue with Google',
-          onPressed: () {
-            ref
-                .read(analyticsServiceProvider)
-                ?.track(
-                  AnalyticsEvents.signInStarted,
-                  props: {'provider': 'google'},
-                );
-            auth.startOAuth('google');
-          },
+          onPressed: () => _startOAuth('google'),
         ),
         if (canPop && !isMobilePlatform) ...[
           const SizedBox(height: AbTokens.space16),
