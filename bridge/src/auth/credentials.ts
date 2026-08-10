@@ -51,6 +51,8 @@ export interface ReadBootstrapOptions {
   stdin?: NodeJS.ReadableStream;
   /** Max time to wait for stdin to close. Defaults to 10 seconds. */
   timeoutMs?: number;
+  /** Sink for the human-launch notice (test seam). Defaults to stderr. */
+  writeNotice?: (line: string) => void;
 }
 
 /**
@@ -62,6 +64,15 @@ export async function readBootstrapPayload(
 ): Promise<BootstrapPayload> {
   const stdin = opts.stdin ?? process.stdin;
   const timeoutMs = opts.timeoutMs ?? 10_000;
+
+  // A human running the binary in a terminal gets a TTY on stdin; the desktop
+  // app always spawns us with a pipe. Say what we're waiting for up front —
+  // otherwise a direct launch sits silent for the whole timeout and looks hung.
+  if ((stdin as NodeJS.ReadStream).isTTY) {
+    const write = opts.writeNotice ?? ((line: string) => process.stderr.write(line + "\n"));
+    write("antgrid-bridge is normally launched by the Antgrid desktop app, which supplies a bootstrap payload on stdin.");
+    write(`Waiting up to ${Math.round(timeoutMs / 1000)}s for that payload, then exiting with an error. Press Ctrl+C to quit now; to use Antgrid, launch the desktop app.`);
+  }
 
   const readAll = (async () => {
     const chunks: Buffer[] = [];

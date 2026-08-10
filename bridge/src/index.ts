@@ -183,7 +183,7 @@ program
     }
     const cfg = await buildConfigFromBootstrap({ cwd: process.cwd(), io: consoleBootstrapIO() });
     writeConfigYaml(path, cfg);
-    console.log(`Written to ${path}. Run 'antgrid' to start the agent.`);
+    console.log(`Written to ${path}. Open this project in the Antgrid desktop app — it launches and manages the bridge for you.`);
   });
 
 // antgrid phones subcommand — inspect and drop local phone records. Whether a

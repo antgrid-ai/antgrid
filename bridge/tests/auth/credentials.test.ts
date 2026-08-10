@@ -98,4 +98,22 @@ describe("readBootstrapPayload", () => {
     await expect(readBootstrapPayload({ stdin: inert, timeoutMs: 200 })).rejects.toThrow(/bootstrap payload/i);
     expect(Date.now() - t0).toBeLessThan(1000);
   });
+
+  it("prints a human-launch notice when stdin is a TTY", async () => {
+    const tty = new Readable({ read() {} }) as Readable & { isTTY?: boolean };
+    tty.isTTY = true;
+    const lines: string[] = [];
+    await expect(
+      readBootstrapPayload({ stdin: tty, timeoutMs: 200, writeNotice: (l) => lines.push(l) }),
+    ).rejects.toThrow(/bootstrap payload/i);
+    expect(lines.join("\n")).toContain("Antgrid desktop app");
+    expect(lines.join("\n")).toContain("Ctrl+C");
+  });
+
+  it("stays silent on a piped (non-TTY) stdin", async () => {
+    const lines: string[] = [];
+    const p = await readBootstrapPayload({ stdin: streamOf(local), writeNotice: (l) => lines.push(l) });
+    expect(p.firstProject?.projectId).toBe("proj1");
+    expect(lines).toEqual([]);
+  });
 });
