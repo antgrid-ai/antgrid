@@ -4,33 +4,55 @@ import Eyebrow from "../ui/Eyebrow.astro";
 import Button from "../ui/Button.astro";
 import ProofCard from "./ProofCard.astro";
 import { links } from "../../config";
+import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../../data/pricing";
+
+const offerPct = Math.round((1 - YEARLY_OFFER_USD / YEARLY_LIST_USD) * 100);
 ---
-<section class="mx-auto max-w-5xl px-6 pb-20 pt-16">
-  <div class="grid items-center gap-12 md:grid-cols-2">
-    <div>
-      <Eyebrow class="mb-5 flex items-center gap-2 leading-4">
-        <img src="/logo/antgrid-wordmark.svg" alt="antgrid" class="h-4.75 w-auto -mt-1" />
-        <span>· mission control for your AI coding agents</span>
-      </Eyebrow>
-      <h1 class="mb-4 font-medium leading-[1.1] tracking-tight text-ink">
-        <span class="mb-1.5 block text-xl leading-snug text-muted md:text-2xl">Starting an agent is easy.</span>
-        <span class="block text-4xl md:text-5xl">Knowing it finished isn't.</span>
-      </h1>
-      <p class="mb-3 max-w-xl text-base leading-relaxed text-muted">
-        Run Claude Code, Codex and Cursor on your own machine — then watch, steer and approve them from your phone.
-        <span class="text-indigo">End-to-end encrypted.</span>
-      </p>
-      <p class="mb-7 max-w-xl text-base leading-relaxed text-muted">
-        antgrid's supervisor stays with the run: it answers what it can, wakes you for what it can't, and calls a task done only with evidence — test output, exit codes — never the agent's say-so.
-      </p>
-      <div class="flex flex-wrap items-center gap-3">
-        <Button href={links.startFree} variant="primary">Start free<Icon name="tabler:arrow-right" width="16" height="16" /></Button>
-        <Button href={links.download} variant="outline">Download</Button>
+<section class="relative overflow-hidden">
+  <div class="pointer-events-none absolute inset-0 bg-dotgrid" aria-hidden="true"></div>
+  <div class="pointer-events-none absolute -top-40 right-[-10%] h-[560px] w-[720px] glow-indigo" aria-hidden="true"></div>
+
+  <div class="relative mx-auto max-w-shell px-6 pb-20 pt-16">
+    <div class="grid items-center gap-12 md:grid-cols-2">
+      <div>
+        <Eyebrow class="mb-4">Claude Code · Codex · Cursor</Eyebrow>
+        {BETA_FREE ? (
+          <a
+            href={links.pricing}
+            class="mb-5 inline-flex items-center gap-2 rounded-full border border-indigodeep2 bg-indigodeep/40 px-3 py-1 font-mono text-[11px] text-indigo2 transition-colors hover:border-indigobtn hover:text-indigo3"
+          >
+            <span class="rounded-full bg-indigobtn px-1.5 py-px text-[9.5px] font-medium text-white">beta</span>
+            Free during beta — all Pro features included
+            <Icon name="tabler:arrow-right" width="12" height="12" />
+          </a>
+        ) : OFFER_ACTIVE && (
+          <a
+            href={links.pricing}
+            class="mb-5 inline-flex items-center gap-2 rounded-full border border-indigodeep2 bg-indigodeep/40 px-3 py-1 font-mono text-[11px] text-indigo2 transition-colors hover:border-indigobtn hover:text-indigo3"
+          >
+            <span class="rounded-full bg-indigobtn px-1.5 py-px text-[9.5px] font-medium text-white">{offerPct}% off</span>
+            Launch offer — Pro ${YEARLY_OFFER_USD}/year
+            <Icon name="tabler:arrow-right" width="12" height="12" />
+          </a>
+        )}
+        <h1 class="mb-5 font-medium leading-[1.1] tracking-tight text-ink">
+          <span class="mb-2 block text-xl leading-snug text-muted md:text-2xl">Your agent says it's done.</span>
+          <span class="block text-5xl md:text-6xl">Make it prove it.</span>
+        </h1>
+        <p class="mb-8 max-w-xl text-base leading-relaxed text-muted">
+          Stack next steps in plain text — antgrid's Handler answers the agent for you, and nothing counts as done without test output, exit codes or a diff.
+        </p>
+        <div class="flex flex-wrap items-center gap-3">
+          <Button href={links.startFree} variant="primary">Start free<Icon name="tabler:arrow-right" width="16" height="16" /></Button>
+          <Button href={links.download} variant="outline">Download</Button>
+        </div>
+        <p class="mt-4 text-[12.5px] text-muted2">
+          Desktop out now · End-to-end encrypted · iOS &amp; Android coming to the App Store &amp; Play.
+        </p>
       </div>
-      <p class="mt-4 text-[12.5px] text-muted2">
-        Desktop out now · iOS &amp; Android coming to the App Store &amp; Play.
-      </p>
+      <div class="pc-animate">
+        <ProofCard />
+      </div>
     </div>
-    <ProofCard />
   </div>
 </section>

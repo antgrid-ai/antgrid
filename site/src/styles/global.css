@@ -1,20 +1,29 @@
 @import "tailwindcss";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/jetbrains-mono";
 
 @theme {
-  --color-page: #0a0a0b;
-  --color-panel: #18181b;
-  --color-chrome: #1c1c1f;
-  --color-group: #141417;
+  /* Surface ramp, dark → light: page < group < panel < chrome. Perceived
+     difference compresses hard at the bottom of the luminance scale, so each
+     step needs ~6+ points of RGB to read as a distinct elevation — a 3-4 point
+     step here is invisible even though the same step is obvious at mid-grey.
+     Keep page off the #000 floor: ink-on-page above ~19:1 reads as glare. */
+  --color-page: #101015;
+  --color-panel: #1d1d24;
+  --color-chrome: #23232b;
+  --color-group: #17171d;
 
-  --color-edge: #27272a;
-  --color-edge-inner: #1f1f23;
-  --color-edge-emph: #3f3f46;
+  --color-edge: #2f2f38;
+  --color-edge-inner: #26262e;
+  --color-edge-emph: #474751;
 
-  --color-ink: #fafafa;
+  --color-ink: #f2f2f5;
   --color-ink2: #d4d4d8;
   --color-muted: #a1a1aa;
-  --color-muted2: #71717a;
-  --color-faint: #52525b;
+  /* muted2/faint are picked for contrast on --color-page, not panel: 4.5:1 (AA
+     body) and 3:1 (AA UI) respectively. Darkening either drops muted2 below AA. */
+  --color-muted2: #7d7d86;
+  --color-faint: #5f5f68;
 
   --color-indigo: #818cf8;
   --color-indigo2: #a5b4fc;
@@ -25,12 +34,19 @@
 
   --color-amber: #fbbf24;
   --color-amber2: #fcd34d;
-  --color-amberbg: #1a160c;
-  --color-amberbg2: #2a2113;
+  /* Tinted surfaces, kept at panel luminance so `bg-amberbg/40` still reads as a
+     raised highlight over --color-panel rather than dimming it. */
+  --color-amberbg: #201b10;
+  --color-amberbg2: #302719;
   --color-ok: #4ade80;
 
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Code", "Segoe UI Mono", Menlo, Consolas, monospace;
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Code", Menlo, Consolas, monospace;
+
+  /* Page shell (`max-w-shell`) — nav, footer and every landing section share it,
+     so they can't drift apart. Prose caps (max-w-xl/2xl) are deliberately NOT
+     tied to this: body copy stays at a readable measure however wide the shell. */
+  --container-shell: 72rem;
 }
 
 html {
@@ -43,4 +59,116 @@ body {
   color: var(--color-ink);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
+}
+
+/* ---- Atmosphere -------------------------------------------------------- */
+
+/* Indigo radial glow — position with inset utilities on an absolute wrapper. */
+.glow-indigo {
+  background: radial-gradient(closest-side, rgba(99, 102, 241, 0.16), transparent 70%);
+}
+
+/* Faint dot grid, masked so it fades out toward the bottom. */
+.bg-dotgrid {
+  background-image: radial-gradient(circle, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+  background-size: 26px 26px;
+  mask-image: linear-gradient(to bottom, black 20%, transparent 90%);
+}
+
+/* Card elevation: soft drop shadow + a brighter top edge, as if lit from above. */
+.card-lit {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 24px 64px -24px rgba(0, 0, 0, 0.7);
+}
+
+/* ---- Motion ------------------------------------------------------------ */
+
+/* Scroll reveal: only hidden once JS has confirmed it can reveal again. */
+html.js .reveal {
+  opacity: 0;
+  transform: translateY(14px);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+}
+html.js .reveal.in {
+  opacity: 1;
+  transform: none;
+}
+
+/* Staggered load-in for the hero proof card (scoped so the OG shot stays static). */
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+.pc-animate .pc-row {
+  opacity: 0;
+  animation: rise-in 0.5s ease forwards;
+  animation-delay: var(--pc-delay, 0s);
+}
+
+/* Story-loop mode: the ProofCard script upgrades the one-shot stagger to a
+   looping state machine. `.pc-loop` retires the keyframe stagger (the script
+   owns visibility via `.pc-off`), and hidden rows keep their box so the card
+   never changes height mid-loop. Must sit AFTER the .pc-animate rule — equal
+   specificity, order decides. */
+.pc-loop .pc-row {
+  opacity: 1;
+  animation: none;
+  transition: opacity 0.45s ease, transform 0.45s ease;
+}
+.pc-loop .pc-row.pc-off {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+/* Typing caret for the instruction chip while the script is typing. */
+@keyframes caret-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+.pc-caret::after {
+  content: "▍";
+  margin-left: 1px;
+  color: var(--color-indigo);
+  animation: caret-blink 0.9s step-end infinite;
+}
+
+/* Live status dot. */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.animate-pulse-dot {
+  animation: pulse-dot 2.2s ease-in-out infinite;
+}
+
+/* Ciphertext ticker: content is rendered twice; scroll one copy's height. */
+@keyframes cipher-scroll {
+  from { transform: translateY(0); }
+  to { transform: translateY(-50%); }
+}
+.cipher-scroll {
+  animation: cipher-scroll 14s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.js .reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+  .pc-animate .pc-row {
+    opacity: 1;
+    animation: none;
+  }
+  .animate-pulse-dot,
+  .cipher-scroll,
+  .pc-caret::after {
+    animation: none;
+  }
+  /* The loop script never starts under reduced motion, but if the preference
+     flips mid-session the rows must not keep transitioning. */
+  .pc-loop .pc-row {
+    transition: none;
+  }
 }

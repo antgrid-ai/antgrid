@@ -5,13 +5,14 @@ import Chip from "../ui/Chip.astro";
 
 const cipher = ["k7Vd2+Rm9pQ1fX0aZ", "hN8wYc4Lbe6Tj/Ou2", "gP5sKi0nDqWx3Hr+M", "zA9vCt7Bf1Ul6Ey4o", "Js2Rn8Xa0Pd5Mk3Iq", "4Wb7Lz1Tv9Co6Ge+H"];
 ---
-<section class="mx-auto max-w-5xl px-6 py-20">
+<section class="reveal border-y border-edge-inner bg-group/60">
+  <div class="mx-auto max-w-shell px-6 py-20">
   <Eyebrow class="mb-4 flex items-center gap-2"><Icon name="tabler:lock" width="14" height="14" />End-to-end encrypted</Eyebrow>
   <h2 class="mb-3.5 text-3xl font-medium tracking-tight text-ink">The relay can't read a byte.</h2>
-  <p class="mb-2.5 max-w-xl text-[15px] leading-relaxed text-muted">
+  <p class="mb-2.5 max-w-xl text-base leading-relaxed text-muted">
     Everything you just saw — terminal output, your prompts, the files, every approval — is sealed on your machine and only opens on your phone. The server in the middle just forwards blobs it can never decrypt.
   </p>
-  <p class="mb-7 max-w-xl text-[13px] leading-relaxed text-muted2">
+  <p class="mb-7 max-w-xl text-[14px] leading-relaxed text-muted2">
     The alternative is letting someone else's machine hold your code. <span class="text-ink2">antgrid runs the agent on yours</span> — and the relay in between is built so it can't read what passes through.
   </p>
 
@@ -19,7 +20,7 @@ const cipher = ["k7Vd2+Rm9pQ1fX0aZ", "hN8wYc4Lbe6Tj/Ou2", "gP5sKi0nDqWx3Hr+M", "
     <div class="overflow-hidden rounded-lg border border-edge bg-panel">
       <div class="flex items-center justify-between border-b border-edge-inner bg-chrome px-3 py-2.5">
         <span class="flex items-center gap-1.5 text-xs text-ink2"><Icon name="tabler:eye" class="text-indigo" width="15" height="15" />What you see</span>
-        <span class="rounded border border-[#1F3A26] bg-[#0E1A12] px-1.5 py-0.5 font-mono text-[10px] text-ok">decrypted</span>
+        <span class="rounded border border-[#26432f] bg-[#131f18] px-1.5 py-0.5 font-mono text-[10px] text-ok">decrypted</span>
       </div>
       <pre class="overflow-hidden p-3 font-mono text-[11.5px] leading-relaxed text-ink2"><span class="text-faint">studio-workstation · </span><span class="text-indigo">Claude Code</span>
 <span class="text-muted2">02:14</span>  Editing <span class="text-indigo2">auth/session.ts</span>
@@ -35,11 +36,11 @@ const cipher = ["k7Vd2+Rm9pQ1fX0aZ", "hN8wYc4Lbe6Tj/Ou2", "gP5sKi0nDqWx3Hr+M", "
     </div>
 
     <div class="overflow-hidden rounded-lg border border-edge bg-group">
-      <div class="flex items-center justify-between border-b border-edge-inner bg-[#19191c] px-3 py-2.5">
+      <div class="flex items-center justify-between border-b border-edge-inner bg-[#202027] px-3 py-2.5">
         <span class="flex items-center gap-1.5 text-xs text-muted"><Icon name="tabler:lock" class="text-muted2" width="15" height="15" />What the relay sees</span>
         <span class="rounded border border-edge bg-[#0E0E10] px-1.5 py-0.5 font-mono text-[10px] text-muted2">ciphertext</span>
       </div>
-      <pre class="break-all p-3 font-mono text-[11.5px] leading-relaxed text-edge-emph">{cipher.join("\n")}</pre>
+      <pre class="relative max-h-36 overflow-hidden break-all p-3 font-mono text-[11.5px] leading-relaxed text-edge-emph"><span class="cipher-scroll block">{cipher.join("\n") + "\n" + cipher.join("\n") + "\n"}</span></pre>
     </div>
   </div>
 
@@ -48,5 +49,6 @@ const cipher = ["k7Vd2+Rm9pQ1fX0aZ", "hN8wYc4Lbe6Tj/Ou2", "gP5sKi0nDqWx3Hr+M", "
     <Chip><Icon name="tabler:shield-lock" class="text-indigo" width="13" height="13" />AES-256-GCM</Chip>
     <Chip><Icon name="tabler:device-mobile" class="text-indigo" width="13" height="13" />keys never leave your devices</Chip>
     <Chip><Icon name="tabler:database-off" class="text-indigo" width="13" height="13" />nothing readable stored</Chip>
+  </div>
   </div>
 </section>

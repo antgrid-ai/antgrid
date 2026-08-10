@@ -1,18 +1,22 @@
 ---
 import Base from "../layouts/Base.astro";
 import Hero from "../components/sections/Hero.astro";
+import Phases from "../components/sections/Phases.astro";
 import Fleet from "../components/sections/Fleet.astro";
+import Worktrees from "../components/sections/Worktrees.astro";
 import Privacy from "../components/sections/Privacy.astro";
 import CrossAgent from "../components/sections/CrossAgent.astro";
 import ClosingCta from "../components/sections/ClosingCta.astro";
 ---
 <Base
-  title="antgrid — mission control for your AI coding agents"
-  description="Run Claude Code, Codex and Cursor on your own machine, then watch, steer and approve them from your phone. End-to-end encrypted."
+  title="antgrid — make your coding agents prove they're done"
+  description="Run Claude Code, Codex and Cursor on your own machine, then watch and steer them from your phone. Handler marks nothing done without test output, exit codes or a diff. End-to-end encrypted."
   path="/"
 >
   <Hero />
+  <Phases />
   <Fleet />
+  <Worktrees />
   <Privacy />
   <CrossAgent />
   <ClosingCta />

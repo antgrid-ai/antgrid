@@ -10,10 +10,10 @@ const agents = ["Claude Code", "Codex", "opencode", "Cursor", "GitHub Copilot", 
 const steps = [
   { n: 1, icon: "tabler:download", title: "Install on your machine", body: "The desktop app runs your agents in real terminals and links them to your phone — Windows, macOS, Linux.", accent: false },
   { n: 2, icon: "tabler:terminal-2", title: "Run any agent", body: "Start Claude Code, Codex or Cursor exactly how you do now. antgrid wraps them — no workflow change.", accent: false },
-  { n: 3, icon: "tabler:device-mobile", title: "Take it with you", body: "Watch, steer and approve from your phone. Step away — an AI supervisor keeps the run moving, checks the work against real evidence, and wakes you for the calls it can't make.", accent: true },
+  { n: 3, icon: "tabler:device-mobile", title: "Take it with you", body: "Watch, steer and approve from your phone — or step away. Stack next steps in plain text; Handler tracks each one, answers the agent for you, and wakes you only for the calls that need a human.", accent: true },
 ];
 ---
-<section class="mx-auto max-w-5xl px-6 py-20">
+<section class="reveal mx-auto max-w-shell px-6 py-20">
   <Eyebrow class="mb-4">Works with your stack</Eyebrow>
   <h2 class="mb-3.5 text-3xl font-medium tracking-tight text-ink">Bring the agent you already use.</h2>
   <p class="mb-6 max-w-xl text-base leading-relaxed text-muted">
@@ -38,7 +38,7 @@ const steps = [
           <Icon name={s.icon} class={s.accent ? "text-indigo" : "text-faint"} width="19" height="19" />
         </div>
         <div class="mb-1.5 text-sm font-medium text-ink">{s.title}</div>
-        <div class="text-[12.5px] leading-relaxed text-muted">{s.body}</div>
+        <div class="text-[13.5px] leading-relaxed text-muted">{s.body}</div>
       </div>
     ))}
   </div>

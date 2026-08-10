@@ -9,6 +9,12 @@
 // is what re-opens the paid path — see docs/plans/2026-07-30-worker-limit-pricing.md.
 import { links } from "../config";
 
+// Single switch for the beta-free period: banners the pricing page, hides the
+// trial card, relabels paid CTAs to "Available after beta", and swaps the hero
+// pill and closing-CTA copy. Flip to false when plans activate — and update
+// support.md's beta note by hand, it is static markdown.
+export const BETA_FREE = true;
+
 export const TRIAL_DAYS = 7;
 export const FREE_WORKERS = 2;
 export const TRIAL_WORKERS = 2;
@@ -63,7 +69,7 @@ export const trial: PlanCardData = {
   unit: `/ ${TRIAL_DAYS} days`,
   note: `Full Pro for ${TRIAL_DAYS} days, then $${OFFER_ACTIVE ? YEARLY_OFFER_USD : YEARLY_LIST_USD}/year`,
   features: [
-    "AI supervisor — evidence-gated \"done\", wakes you for the rest",
+    "Handler AI assistant — stack instructions, evidence-gated \"done\", one-tap undo",
     `Up to ${TRIAL_WORKERS} worker machines`,
     "Everything in Free",
   ],
@@ -82,7 +88,7 @@ export const proYearly: PlanCardData = {
   unit: "/ year",
   note: `${TRIAL_DAYS}-day free trial, then $${OFFER_ACTIVE ? YEARLY_OFFER_USD : YEARLY_LIST_USD}/year`,
   features: [
-    "AI supervisor — evidence-gated \"done\", wakes you for the rest",
+    "Handler AI assistant — stack instructions, evidence-gated \"done\", one-tap undo",
     `Up to ${PRO_WORKERS} worker machines`,
     "Encrypted remote control from your phone",
     "Fleet view across all your machines",

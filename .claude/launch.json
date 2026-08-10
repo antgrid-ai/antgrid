@@ -8,6 +8,18 @@
       "port": 8787
     },
     {
+      "name": "site",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["run", "--cwd", "site", "dev"],
+      "port": 4321
+    },
+    {
+      "name": "site-alt",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["run", "--cwd", "site", "dev", "--port", "4322"],
+      "port": 4322
+    },
+    {
       "name": "relay",
       "runtimeExecutable": "bun",
       "runtimeArgs": ["run", "dev:relay"],

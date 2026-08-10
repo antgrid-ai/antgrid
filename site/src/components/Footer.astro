@@ -3,14 +3,14 @@ import { Icon } from "astro-icon/components";
 import { links } from "../config";
 ---
 <footer class="border-t border-edge-inner">
-  <div class="mx-auto max-w-5xl px-6 pb-8 pt-12">
+  <div class="mx-auto max-w-shell px-6 pb-8 pt-12">
     <div class="grid grid-cols-2 gap-8 md:grid-cols-[1.7fr_1fr_1fr_1fr]">
       <div>
-        <div class="mb-2.5 flex items-center gap-2 font-mono text-base font-medium text-ink">
-          <Icon name="tabler:layout-grid" class="text-indigo" width="16" height="16" />antgrid
+        <div class="mb-2.5">
+          <img src="/logo/antgrid-wordmark.svg" alt="antgrid" class="h-6 w-auto" />
         </div>
         <p class="mb-3.5 max-w-[230px] text-[12.5px] leading-relaxed text-muted">
-          Mission control for your AI coding agents — run them on your machine, command them from your phone.
+          Run your coding agents on your machine, steer them from your phone — and nothing counts as done without evidence.
         </p>
         <span class="inline-flex items-center gap-1.5 rounded border border-edge px-2.5 py-1 font-mono text-[10.5px] text-muted2">
           <Icon name="tabler:lock" class="text-indigo" width="12" height="12" />end-to-end encrypted · zero-knowledge relay

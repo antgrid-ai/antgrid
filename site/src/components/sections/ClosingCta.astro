@@ -3,7 +3,7 @@ import { Icon } from "astro-icon/components";
 import Eyebrow from "../ui/Eyebrow.astro";
 import Button from "../ui/Button.astro";
 import { links } from "../../config";
-import { FREE_WORKERS } from "../../data/pricing";
+import { BETA_FREE, FREE_WORKERS } from "../../data/pricing";
 
 const stores = [
   { icon: "tabler:brand-apple", label: "App Store" },
@@ -11,14 +11,20 @@ const stores = [
   { icon: "tabler:brand-apple", label: "Mac App Store" },
 ];
 ---
-<section id="download" class="mx-auto max-w-5xl px-6 py-16">
-  <div class="rounded-xl border border-indigodeep2 bg-[#131318] px-9 py-12 text-center">
+<section id="download" class="reveal mx-auto max-w-shell px-6 py-16">
+  <div class="card-lit relative overflow-hidden rounded-xl border border-indigodeep2 bg-[#17171e] px-9 py-12 text-center">
+    <div class="pointer-events-none absolute -top-48 left-1/2 h-[420px] w-[640px] -translate-x-1/2 glow-indigo" aria-hidden="true"></div>
+    <div class="relative">
     <Eyebrow class="mb-4.5">Get started</Eyebrow>
     <h2 class="mb-3.5 text-3xl font-medium leading-tight tracking-tight text-ink md:text-4xl">
       Let your agents run.<br />Check in when it matters.
     </h2>
-    <p class="mx-auto mb-7 max-w-md text-[15px] leading-relaxed text-muted">
-      Set up antgrid in a couple of minutes. <span class="text-ink2">Free on {FREE_WORKERS} machines</span>, remote control included — you pay only to add machines and the AI supervisor.
+    <p class="mx-auto mb-7 max-w-md text-base leading-relaxed text-muted">
+      {BETA_FREE ? (
+        <>Set up antgrid in a couple of minutes. <span class="text-ink2">Free while in beta — every feature included.</span> When plans arrive, you pay only to add machines and Handler, the built-in AI assistant.</>
+      ) : (
+        <>Set up antgrid in a couple of minutes. <span class="text-ink2">Free on {FREE_WORKERS} machines</span>, remote control included — you pay only to add machines and Handler, the built-in AI assistant.</>
+      )}
     </p>
     <div class="mb-3.5 flex flex-wrap items-center justify-center gap-3">
       <Button href={links.startFree} variant="primary">Start free<Icon name="tabler:arrow-right" width="16" height="16" /></Button>
@@ -42,6 +48,7 @@ const stores = [
           <span class="rounded border border-edge px-1.5 py-px font-mono text-[9px] text-faint">soon</span>
         </span>
       ))}
+    </div>
     </div>
   </div>
 </section>

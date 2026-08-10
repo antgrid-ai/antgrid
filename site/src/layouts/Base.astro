@@ -19,5 +19,22 @@ const { title, description, ogImage, path } = Astro.props;
     <Nav />
     <slot />
     <Footer />
+    <script>
+      // Scroll reveal: the hidden state only applies under html.js, so a failed
+      // script leaves the page fully visible rather than permanently blank.
+      document.documentElement.classList.add("js");
+      const io = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (entry.isIntersecting) {
+              entry.target.classList.add("in");
+              io.unobserve(entry.target);
+            }
+          }
+        },
+        { threshold: 0.12 },
+      );
+      document.querySelectorAll(".reveal").forEach((el) => io.observe(el));
+    </script>
   </body>
 </html>

@@ -2,7 +2,7 @@
 import { Icon } from "astro-icon/components";
 import Button from "../ui/Button.astro";
 import { links } from "../../config";
-import type { PlanCardData } from "../../data/pricing";
+import { BETA_FREE, type PlanCardData } from "../../data/pricing";
 interface Props { plan: PlanCardData }
 const { plan } = Astro.props;
 const discountPct = plan.listUsd ? Math.round((1 - plan.priceUsd / plan.listUsd) * 100) : null;
@@ -26,7 +26,7 @@ const discountPct = plan.listUsd ? Math.round((1 - plan.priceUsd / plan.listUsd)
   </div>
   <div class="mt-auto">
     {plan.comingSoon ? (
-      <button type="button" disabled class="inline-flex w-full cursor-not-allowed items-center justify-center gap-2 rounded-md border border-edge px-6 py-3 text-sm font-medium text-faint">Coming soon</button>
+      <button type="button" disabled class="inline-flex w-full cursor-not-allowed items-center justify-center gap-2 rounded-md border border-edge px-6 py-3 text-sm font-medium text-faint">{BETA_FREE ? "Available after beta" : "Coming soon"}</button>
     ) : (
       <Button href={plan.ctaHref ?? links.checkout(plan.checkoutId ?? plan.id)} variant={plan.recommended ? "primary" : "outline"} class="w-full justify-center">{plan.cta}</Button>
     )}

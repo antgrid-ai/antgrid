@@ -1,11 +1,11 @@
 ---
 import Eyebrow from "../ui/Eyebrow.astro";
-import { TRIAL_DAYS, FREE_WORKERS } from "../../data/pricing";
+import { BETA_FREE, TRIAL_DAYS, FREE_WORKERS } from "../../data/pricing";
 ---
 <div class="mb-8 text-center">
   <Eyebrow class="mb-3.5">Pricing</Eyebrow>
   <h1 class="mb-3 text-3xl font-medium tracking-tight text-ink">Priced by machines, not by how much you run.</h1>
   <p class="mx-auto max-w-xl text-[14.5px] leading-relaxed text-muted">
-    Every plan includes encrypted remote control from your phone. You're capped only on worker machines — the computers running antgrid. Projects, terminals and sessions on them are unlimited. Start free on {FREE_WORKERS} machines, or take Pro for a {TRIAL_DAYS}-day trial.
+    Every plan includes encrypted remote control from your phone. You're capped only on worker machines — the computers running antgrid. Projects, terminals and sessions on them are unlimited. {BETA_FREE ? "During the beta, all of it is free." : `Start free on ${FREE_WORKERS} machines, or take Pro for a ${TRIAL_DAYS}-day trial.`}
   </p>
 </div>
