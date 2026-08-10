@@ -1,0 +1,134 @@
+---
+import Legal from "../layouts/Legal.astro";
+import { links, RELEASES_URL } from "../config";
+---
+<Legal frontmatter={{
+  title: "Get started — antgrid",
+  description: "Install the Antgrid desktop app on Windows, macOS or Linux, run your first agent session, and connect your phone.",
+  path: "/get-started",
+}}>
+  <h1>Get started with antgrid</h1>
+
+  <p>
+    antgrid is the command centre for the coding agents you already use. Setup is
+    three steps — install the desktop app, open a project, connect your phone —
+    and takes about five minutes. Free while in beta, no card required.
+  </p>
+
+  <h2>Before you start: bring a coding agent</h2>
+
+  <p>
+    antgrid drives a terminal coding agent — it doesn't ship one. Install at
+    least one on the computer where you'll work and make sure it runs from a
+    plain terminal:
+  </p>
+  <ul>
+    <li>
+      <strong>Claude Code</strong> (<code>claude</code>), <strong>Codex</strong>
+      (<code>codex</code>), <strong>opencode</strong>, <strong>Cursor</strong>,
+      or any other terminal agent.
+    </li>
+    <li>
+      If it runs in a terminal, antgrid can run it. Your agent keeps its own
+      account and API keys — antgrid never routes your prompts or code through
+      its servers.
+    </li>
+  </ul>
+
+  <h2>Step 1 — Install the desktop app</h2>
+
+  <p>
+    Everything runs inside one desktop app — your agents' terminals, files, git
+    and browser preview. There's no separate CLI or background service to
+    install.
+  </p>
+
+  <h3>Windows</h3>
+  <p>
+    <a href={links.downloadWindows}>Download for Windows</a> fetches the
+    Microsoft Store installer. Run it, then launch antgrid from the Start menu.
+  </p>
+
+  <h3>macOS</h3>
+  <p>
+    <a href={links.downloadMacos}>Download the .dmg</a>, open it, drag antgrid
+    into Applications, then launch it.
+  </p>
+
+  <h3>Linux</h3>
+  <p>
+    <a href={links.downloadLinux}>Download the AppImage</a>, make it executable,
+    then run it:
+  </p>
+  <pre><code>chmod +x antgrid-linux.AppImage
+./antgrid-linux.AppImage</code></pre>
+
+  <p>
+    All desktop builds are published on
+    <a href={RELEASES_URL}>our GitHub releases</a>.
+  </p>
+
+  <p>
+    Launch the app and <strong>sign in</strong> — email magic link, GitHub, or
+    Google. That account is what links your devices together.
+  </p>
+
+  <h2>Step 2 — Open your first project</h2>
+
+  <ol>
+    <li>In the desktop app, open the folder of a project you're working on.</li>
+    <li>
+      Open a terminal in it and start your agent exactly how you do now —
+      <code>claude</code>, <code>codex</code>, or whatever you use. antgrid
+      wraps the real terminal, so nothing about your workflow changes.
+    </li>
+    <li>
+      antgrid recognises Claude Code, Codex, opencode, Cursor and other common
+      agents for session naming and notifications; anything else still runs as a
+      plain terminal.
+    </li>
+  </ol>
+
+  <h2>Step 3 — Connect your phone</h2>
+
+  <p>
+    The mobile apps are in beta — iOS via TestFlight, Android via Google Play
+    internal testing. Email
+    <a href="mailto:contact@radhaai.com">contact@radhaai.com</a> for an invite.
+  </p>
+
+  <ol>
+    <li>
+      Install the antgrid app on your phone and
+      <strong>sign in with the same account</strong>. Your computer appears
+      automatically — there's no pairing step or QR code.
+    </li>
+    <li>
+      On the computer, turn on the <strong>Remote</strong> switch — the Remote
+      chip in antgrid's title bar. It's off by default on every machine and is
+      the machine-wide gate for remote control. Free during the beta.
+    </li>
+    <li>
+      That's it. Live terminal output, files and sessions from anywhere,
+      end-to-end encrypted — the relay only ever sees sealed bytes.
+    </li>
+  </ol>
+
+  <h2>If something doesn't work</h2>
+
+  <ul>
+    <li>
+      <strong>Your computer doesn't show up on the phone</strong> — make sure
+      antgrid is running on the computer, both devices are signed in to the same
+      account, a project is open, and both are online.
+    </li>
+    <li>
+      <strong>"Remote access is blocked"</strong> — the Remote switch on that
+      computer is off. Turn it on in the title bar.
+    </li>
+    <li>
+      More help: <a href="/support">Support</a>, or email
+      <a href="mailto:contact@radhaai.com">contact@radhaai.com</a>.
+    </li>
+  </ul>
+</Legal>

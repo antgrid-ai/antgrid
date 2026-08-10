@@ -66,7 +66,7 @@ test("no horizontal overflow on mobile", async ({ page }) => {
 test("internal links resolve (no dangling hrefs to missing pages)", async ({ page }) => {
   const removedPages = ["/docs", "/security"];
 
-  for (const startPath of ["/", "/pricing"]) {
+  for (const startPath of ["/", "/pricing", "/get-started"]) {
     await page.goto(startPath);
     const hrefs = await page.locator("a[href^='/']").evaluateAll((els) =>
       [...new Set(els.map((e) => (e as HTMLAnchorElement).getAttribute("href")!))].filter((h) => !h.startsWith("/#"))

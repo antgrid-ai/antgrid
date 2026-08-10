@@ -1,10 +1,17 @@
 import { test, expect } from "@playwright/test";
 
-test("desktop nav shows Start free pointing at app login", async ({ page }) => {
+test("desktop nav Start free routes to the download band", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/");
   const cta = page.getByRole("link", { name: "Start free" }).first();
-  await expect(cta).toHaveAttribute("href", /app\.antgrid\.ai\/login/);
+  await expect(cta).toHaveAttribute("href", "/#download");
+});
+
+test("desktop nav links the quickstart", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/");
+  const link = page.getByRole("link", { name: "Get started" }).first();
+  await expect(link).toHaveAttribute("href", "/get-started");
 });
 
 test("mobile menu toggles open", async ({ page }) => {

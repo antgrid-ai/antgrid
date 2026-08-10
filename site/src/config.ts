@@ -8,10 +8,13 @@ export const RELEASES_URL = "https://github.com/antgrid-ai/antgrid-releases";
 
 export const links = {
   signIn: `${APP_URL}/login`,
-  startFree: `${APP_URL}/login`,
+  // Start free lands on the download band, not app sign-in — the desktop app is
+  // the product entry point; billing sign-in stays on links.signIn.
+  startFree: "/#download",
   pricing: "/pricing",
   features: "/#fleet",
   download: "/#download",
+  getStarted: "/get-started",
   downloadMacos: `${RELEASES_URL}/releases/latest/download/antgrid-macos.dmg`,
   // Microsoft Store deep link (product 9N0P7ZRL4D9W); version-stable like the
   // GitHub release URLs above, so a new build never needs a site deploy.

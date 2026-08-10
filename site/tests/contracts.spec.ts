@@ -26,15 +26,30 @@ test("desktop downloads point at the published release artifacts", async ({ page
   await expect(band.getByText("Microsoft Store")).toHaveCount(0);
 });
 
-test("Start free resolves to app sign-in on both pages", async ({ page }) => {
+test("Start free routes to the download band on both pages", async ({ page }) => {
   for (const path of ["/", "/pricing"]) {
     await page.goto(path);
     const ctas = page.getByRole("link", { name: /^Start free/ });
     expect(await ctas.count(), `${path} must offer a Start free CTA`).toBeGreaterThan(0);
     for (let i = 0; i < (await ctas.count()); i++) {
-      await expect(ctas.nth(i)).toHaveAttribute("href", /app\.antgrid\.ai\/login/);
+      await expect(ctas.nth(i)).toHaveAttribute("href", "/#download");
     }
   }
+});
+
+test("Sign in stays wired to app login", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByRole("link", { name: "Sign in" }).first()).toHaveAttribute(
+    "href",
+    /app\.antgrid\.ai\/login/
+  );
+});
+
+test("get-started download links point at the published release artifacts", async ({ page }) => {
+  await page.goto("/get-started");
+  await expect(page.getByRole("link", { name: /download for windows/i })).toHaveAttribute("href", DOWNLOADS.windows);
+  await expect(page.getByRole("link", { name: /download the \.dmg/i })).toHaveAttribute("href", DOWNLOADS.macos);
+  await expect(page.getByRole("link", { name: /download the appimage/i })).toHaveAttribute("href", DOWNLOADS.linux);
 });
 
 test("the paid path stays closed: no checkout links anywhere", async ({ page }) => {
