@@ -76,11 +76,14 @@ void main() {
       List<RecentSessionRow> recents = const [],
       List<DeviceSummary> phones = const [],
       Set<String> latched = const {},
+      bool handlerArmed = false,
     }) async {
       useInMemoryPrefs();
       final firstRunStore = await FirstRunStore.open();
-      if (latched.isNotEmpty) {
-        await firstRunStore.write(FirstRunState(completedSteps: latched));
+      if (latched.isNotEmpty || handlerArmed) {
+        await firstRunStore.write(
+          FirstRunState(completedSteps: latched, handlerArmedOnce: handlerArmed),
+        );
       }
       final projectStore = await ProjectStore.open();
       if (withProject) {
@@ -108,15 +111,17 @@ void main() {
       return (container, firstRunStore);
     }
 
-    test('all steps start unchecked with no signals', () async {
+    test('all steps start unchecked with no signals, armHandler last', () async {
       final (container, _) = await build(signedIn: null);
-      final done = _doneById(container.read(desktopFirstRunStepsProvider));
-      expect(done, {
+      final steps = container.read(desktopFirstRunStepsProvider);
+      expect(_doneById(steps), {
         FirstRunStepIds.signIn: false,
         FirstRunStepIds.openProject: false,
         FirstRunStepIds.startSession: false,
         FirstRunStepIds.connectPhone: false,
+        FirstRunStepIds.armHandler: false,
       });
+      expect(steps.last.id, FirstRunStepIds.armHandler);
     });
 
     test('steps check off as their live signals arrive', () async {
@@ -125,6 +130,7 @@ void main() {
         withProject: true,
         recents: [_row('s1')],
         phones: [_device(kind: 'app', platform: 'ios', name: 'iPhone')],
+        handlerArmed: true,
       );
       // Keep the autoDispose chain alive across the device fetch.
       final sub = container.listen(desktopFirstRunStepsProvider, (_, _) {});
@@ -145,6 +151,18 @@ void main() {
       expect(done[FirstRunStepIds.signIn], isTrue);
       expect(done[FirstRunStepIds.connectPhone], isTrue);
       expect(done[FirstRunStepIds.openProject], isFalse);
+    });
+
+    test('markHandlerArmed flips the armHandler step and persists', () async {
+      final (container, _) = await build(signedIn: null);
+      var done = _doneById(container.read(desktopFirstRunStepsProvider));
+      expect(done[FirstRunStepIds.armHandler], isFalse);
+
+      container.read(firstRunProvider.notifier).markHandlerArmed();
+      done = _doneById(container.read(desktopFirstRunStepsProvider));
+      expect(done[FirstRunStepIds.armHandler], isTrue);
+      // Fire-and-forget persist has landed in the WithCache cache already.
+      expect((await FirstRunStore.open()).read().handlerArmedOnce, isTrue);
     });
   });
 
@@ -248,6 +266,18 @@ void main() {
       done = _doneById(sub.read());
       expect(done[FirstRunStepIds.openedProject], isTrue);
     });
+
+    test('mobile checklist carries no armHandler step', () async {
+      final container = await build();
+      final sub = container.listen(mobileFirstRunStepsProvider, (_, _) {});
+      await container.read(accountAgentsProvider.future);
+      await Future<void>.delayed(Duration.zero);
+      expect(sub.read().map((s) => s.id), [
+        FirstRunStepIds.machineLinked,
+        FirstRunStepIds.remoteOn,
+        FirstRunStepIds.openedProject,
+      ]);
+    });
   });
 
   group('firstRunChecklistVisibleProvider + controller persistence', () {
@@ -316,6 +346,21 @@ void main() {
       final s = (await FirstRunStore.open()).read();
       expect(s.nudgeSoftDismissed, isTrue);
       expect(s.nudgeDeviceDismissed, isTrue);
+      expect(s.checklistDismissed, isFalse);
+    });
+
+    test('dismissHandlerAwayHint persists independently of the rest', () async {
+      useInMemoryPrefs();
+      final store = await FirstRunStore.open();
+      final container = ProviderContainer(
+        overrides: [firstRunStoreProvider.overrideWithValue(store)],
+      );
+      addTearDown(container.dispose);
+
+      container.read(firstRunProvider.notifier).dismissHandlerAwayHint();
+      final s = (await FirstRunStore.open()).read();
+      expect(s.handlerAwayHintDismissed, isTrue);
+      expect(s.handlerArmedOnce, isFalse);
       expect(s.checklistDismissed, isFalse);
     });
   });

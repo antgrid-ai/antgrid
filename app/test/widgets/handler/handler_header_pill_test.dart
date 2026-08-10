@@ -2,13 +2,17 @@
 // state with no call to action, so it must read as status and stay inert.
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/providers/agent_transport.dart';
+import 'package:antgrid/providers/first_run.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/value_controller.dart';
+import 'package:antgrid/storage/first_run_store.dart';
 import 'package:antgrid/widgets/agent_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import '../../helpers/prefs_test_mock.dart';
 
 HandlerSessionState _session(
   String terminalId, {
@@ -36,9 +40,15 @@ Future<void> _pump(
   WidgetTester tester,
   Map<String, HandlerSessionState> sessions,
 ) async {
+  // The control reads first-run state while nothing is armed in focus (the
+  // labeled-shield decision), which happens on the pre-emission first frame
+  // here even though every case focuses an armed session.
+  useInMemoryPrefs();
+  final store = await FirstRunStore.open();
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
+        firstRunStoreProvider.overrideWithValue(store),
         activeSessionIdProvider.overrideWith(() => ValueController('t1')),
         selectedRegistrationIdProvider.overrideWith((_) => null),
         handlerStateProvider.overrideWith(

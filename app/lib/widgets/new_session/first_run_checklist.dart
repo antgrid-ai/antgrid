@@ -88,6 +88,9 @@ String? _desktopHintFor(String? firstOpenStepId) => switch (firstOpenStepId) {
   FirstRunStepIds.startSession => 'Pick a project, describe a task, hit send.',
   FirstRunStepIds.connectPhone =>
     'Sign in to Antgrid on your phone with this account.',
+  FirstRunStepIds.armHandler =>
+    'Open a session, then click the shield in the title bar — Handler '
+        'replies while you are away.',
   _ => null,
 };
 

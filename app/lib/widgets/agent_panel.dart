@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -5,15 +7,19 @@ import '../constants/breakpoints.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
+import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_chip.dart';
+import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_toolbar.dart';
+import '../design/widgets/ab_tooltip.dart';
 import '../models/handler_state.dart';
 import '../models/session_entry.dart';
 import '../providers/agent_catalog.dart';
 import '../providers/agent_transport.dart';
 import '../providers/device_provisioning.dart';
+import '../providers/first_run.dart';
 import '../providers/projects.dart';
 import '../providers/providers.dart';
 import '../providers/session_mode.dart';
@@ -24,6 +30,8 @@ import '../utils/platform_utils.dart';
 import 'agent_transcript_view.dart';
 import 'command_bar.dart';
 import 'command_output_overlay.dart';
+import 'handler/handler_arm_explainer.dart';
+import 'handler/handler_away_hint.dart';
 import 'handler/handler_item_status.dart';
 import 'handler/handler_pa_bar.dart';
 import 'remote_access_control.dart';
@@ -95,6 +103,7 @@ class AgentPanel extends ConsumerWidget {
                   children: [TerminalScreen(), CommandOutputOverlay()],
                 ),
         ),
+        const HandlerAwayHint(),
         const HandlerPaBar(),
         const CommandTray(),
       ],
@@ -169,6 +178,13 @@ String parkedPillLabel(int? parkedUntil) {
   return '$head · UNTIL ${at.toUpperCase()}';
 }
 
+/// Whether the header shield renders as a labeled 'Handler' button instead of
+/// the bare icon: only until the user has armed once, and never while the
+/// focused session is armed — an armed shield needs no teaching. Top-level so
+/// the form decision is exercised directly, like [titleBarProjectActions].
+bool shieldShowsLabel({required bool armedOnce, required bool sessionArmed}) =>
+    !armedOnce && !sessionArmed;
+
 /// Handler status pill + shield rendered in the agent panel header, scoped to
 /// the FOCUSED session — arming is per-terminal, not per-project.
 ///
@@ -200,6 +216,9 @@ class HandlerHeaderControl extends ConsumerWidget {
       catalog,
       agent,
       chat: entry?.mode == 'chat',
+    );
+    final armedOnce = ref.watch(
+      firstRunProvider.select((s) => s.handlerArmedOnce),
     );
     final p = context.antgrid;
 
@@ -276,10 +295,31 @@ class HandlerHeaderControl extends ConsumerWidget {
       if (service == null) return;
       if (session != null) {
         service.disarm(activeId);
-      } else {
-        service.arm(terminalId: activeId, notifyOnly: state.defaultNotifyOnly);
+        return;
       }
+      // Fire-and-forget: past the explainer await everything runs on the
+      // container, never this widget's ref, and nothing in the flow can throw.
+      unawaited(
+        armWithFirstRunExplainer(
+          context: context,
+          container: ref.container,
+          service: service,
+          terminalId: activeId,
+          notifyOnly: state.defaultNotifyOnly,
+          agentObservable: agentObservable,
+          agentLabel: catalog[agent]?.label,
+        ),
+      );
     }
+
+    // Arming is one tap, so this tooltip is the only place the pre-arm
+    // coverage answer can reach the user — an agent that reports nothing
+    // arms just as silently as one that is merely quiet.
+    final shieldTooltip = session != null
+        ? 'Disarm Handler'
+        : agentObservable == false
+        ? unwatchableNotice(catalog[agent]?.label)
+        : 'Arm Handler';
 
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -288,21 +328,25 @@ class HandlerHeaderControl extends ConsumerWidget {
           pill,
           const SizedBox(width: AbTokens.space6),
         ],
-        AbIconButton(
-          icon: AbIcons.shield,
-          // Arming is one tap, so this tooltip is the only place the pre-arm
-          // coverage answer can reach the user — an agent that reports nothing
-          // arms just as silently as one that is merely quiet.
-          tooltip: session != null
-              ? 'Disarm Handler'
-              : agentObservable == false
-              ? unwatchableNotice(catalog[agent]?.label)
-              : 'Arm Handler',
-          tone: session != null
-              ? AbIconButtonTone.accent
-              : AbIconButtonTone.normal,
-          onTap: toggleArm,
-        ),
+        if (shieldShowsLabel(armedOnce: armedOnce, sessionArmed: session != null))
+          AbTooltip(
+            message: shieldTooltip,
+            child: AbButton(
+              compact: true,
+              label: 'Handler',
+              leading: AbIcon(AbIcons.shield, size: AbTokens.iconButtonGlyph),
+              onTap: toggleArm,
+            ),
+          )
+        else
+          AbIconButton(
+            icon: AbIcons.shield,
+            tooltip: shieldTooltip,
+            tone: session != null
+                ? AbIconButtonTone.accent
+                : AbIconButtonTone.normal,
+            onTap: toggleArm,
+          ),
       ],
     );
   }

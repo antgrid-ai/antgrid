@@ -18,6 +18,8 @@ class FirstRunState {
     this.completedSteps = const <String>{},
     this.nudgeSoftDismissed = false,
     this.nudgeDeviceDismissed = false,
+    this.handlerArmedOnce = false,
+    this.handlerAwayHintDismissed = false,
   });
 
   final bool checklistDismissed;
@@ -33,18 +35,33 @@ class FirstRunState {
   final bool nudgeSoftDismissed;
   final bool nudgeDeviceDismissed;
 
+  /// True once the user has ever armed Handler — any session, any platform.
+  /// Cross-project app-install discovery state (shield label collapse,
+  /// explainer/away-hint suppression, checklist step), NOT handler config —
+  /// which is why it lives here and not in the bridge's HandlerState.
+  final bool handlerArmedOnce;
+
+  /// Global kill for the away-moment hint once the user closes it — it must
+  /// never nag across sessions or projects.
+  final bool handlerAwayHintDismissed;
+
   FirstRunState copyWith({
     bool? checklistDismissed,
     bool? checklistCompleted,
     Set<String>? completedSteps,
     bool? nudgeSoftDismissed,
     bool? nudgeDeviceDismissed,
+    bool? handlerArmedOnce,
+    bool? handlerAwayHintDismissed,
   }) => FirstRunState(
     checklistDismissed: checklistDismissed ?? this.checklistDismissed,
     checklistCompleted: checklistCompleted ?? this.checklistCompleted,
     completedSteps: completedSteps ?? this.completedSteps,
     nudgeSoftDismissed: nudgeSoftDismissed ?? this.nudgeSoftDismissed,
     nudgeDeviceDismissed: nudgeDeviceDismissed ?? this.nudgeDeviceDismissed,
+    handlerArmedOnce: handlerArmedOnce ?? this.handlerArmedOnce,
+    handlerAwayHintDismissed:
+        handlerAwayHintDismissed ?? this.handlerAwayHintDismissed,
   );
 
   Map<String, dynamic> toJson() => {
@@ -53,6 +70,8 @@ class FirstRunState {
     'completedSteps': completedSteps.toList(),
     'nudgeSoftDismissed': nudgeSoftDismissed,
     'nudgeDeviceDismissed': nudgeDeviceDismissed,
+    'handlerArmedOnce': handlerArmedOnce,
+    'handlerAwayHintDismissed': handlerAwayHintDismissed,
   };
 
   /// Defensive: any bad field degrades to its default rather than aborting the
@@ -68,6 +87,8 @@ class FirstRunState {
           : const <String>{},
       nudgeSoftDismissed: flag(j['nudgeSoftDismissed']),
       nudgeDeviceDismissed: flag(j['nudgeDeviceDismissed']),
+      handlerArmedOnce: flag(j['handlerArmedOnce']),
+      handlerAwayHintDismissed: flag(j['handlerAwayHintDismissed']),
     );
   }
 }

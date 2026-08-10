@@ -21,6 +21,8 @@ void main() {
     expect(s.completedSteps, isEmpty);
     expect(s.nudgeSoftDismissed, isFalse);
     expect(s.nudgeDeviceDismissed, isFalse);
+    expect(s.handlerArmedOnce, isFalse);
+    expect(s.handlerAwayHintDismissed, isFalse);
   });
 
   test('write then re-open round-trips every field', () async {
@@ -33,6 +35,8 @@ void main() {
         completedSteps: {'signIn', 'openProject'},
         nudgeSoftDismissed: true,
         nudgeDeviceDismissed: true,
+        handlerArmedOnce: true,
+        handlerAwayHintDismissed: true,
       ),
     );
 
@@ -43,6 +47,8 @@ void main() {
     expect(s.completedSteps, {'signIn', 'openProject'});
     expect(s.nudgeSoftDismissed, isTrue);
     expect(s.nudgeDeviceDismissed, isTrue);
+    expect(s.handlerArmedOnce, isTrue);
+    expect(s.handlerAwayHintDismissed, isTrue);
   });
 
   test('corrupt JSON degrades to defaults instead of throwing', () async {

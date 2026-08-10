@@ -32,6 +32,7 @@ List<FirstRunStep> _desktopSteps({
   bool openProject = false,
   bool startSession = false,
   bool connectPhone = false,
+  bool armHandler = false,
 }) => [
   (id: FirstRunStepIds.signIn, label: 'Sign in', done: signIn),
   (id: FirstRunStepIds.openProject, label: 'Open a project', done: openProject),
@@ -44,6 +45,11 @@ List<FirstRunStep> _desktopSteps({
     id: FirstRunStepIds.connectPhone,
     label: 'Connect your phone',
     done: connectPhone,
+  ),
+  (
+    id: FirstRunStepIds.armHandler,
+    label: 'Arm Handler on a session',
+    done: armHandler,
   ),
 ];
 
@@ -66,9 +72,9 @@ void main() {
     );
     await tester.pump(); // latch microtask
 
-    expect(find.text('SETUP · 1/4'), findsOneWidget);
+    expect(find.text('SETUP · 1/5'), findsOneWidget);
     expect(find.text('[x]'), findsOneWidget);
-    expect(find.text('[ ]'), findsNWidgets(3));
+    expect(find.text('[ ]'), findsNWidgets(4));
     // First unchecked step's contextual hint.
     expect(find.text('Open a folder from the composer below.'), findsOneWidget);
 
@@ -96,11 +102,11 @@ void main() {
       _wrap(const FirstRunChecklistCard(), overrides: overrides),
     );
     await tester.pump();
-    expect(find.text('SETUP · 0/4'), findsOneWidget);
+    expect(find.text('SETUP · 0/5'), findsOneWidget);
 
     await tester.tap(find.byTooltip("Dismiss — won't show again"));
     await tester.pump();
-    expect(find.text('SETUP · 0/4'), findsNothing);
+    expect(find.text('SETUP · 0/5'), findsNothing);
     expect(store.read().checklistDismissed, isTrue);
 
     // Fresh scope over the same prefs — an app restart — stays hidden.
@@ -114,7 +120,7 @@ void main() {
       ),
     );
     await tester.pump();
-    expect(find.text('SETUP · 0/4'), findsNothing);
+    expect(find.text('SETUP · 0/5'), findsNothing);
     debugDefaultTargetPlatformOverride = null;
   });
 
@@ -134,6 +140,7 @@ void main() {
               openProject: true,
               startSession: true,
               connectPhone: true,
+              armHandler: true,
             ),
           ),
         ],
@@ -142,7 +149,7 @@ void main() {
     // First frame renders; the microtask then writes checklistCompleted and
     // the card unmounts on the next pump.
     await tester.pump();
-    expect(find.text('SETUP · 4/4'), findsNothing);
+    expect(find.text('SETUP · 5/5'), findsNothing);
     expect(store.read().checklistCompleted, isTrue);
 
     // Restart with every live signal regressed (steps unchecked): completion
@@ -158,6 +165,40 @@ void main() {
     );
     await tester.pump();
     expect(find.textContaining('SETUP'), findsNothing);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('armHandler cursor hint renders when it is the first unchecked '
+      'step', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    useInMemoryPrefs();
+    final store = await FirstRunStore.open();
+    await tester.pumpWidget(
+      _wrap(
+        const FirstRunChecklistCard(),
+        overrides: [
+          firstRunStoreProvider.overrideWithValue(store),
+          desktopFirstRunStepsProvider.overrideWith(
+            (_) => _desktopSteps(
+              signIn: true,
+              openProject: true,
+              startSession: true,
+              connectPhone: true,
+            ),
+          ),
+        ],
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('SETUP · 4/5'), findsOneWidget);
+    expect(
+      find.text(
+        'Open a session, then click the shield in the title bar — Handler '
+        'replies while you are away.',
+      ),
+      findsOneWidget,
+    );
     debugDefaultTargetPlatformOverride = null;
   });
 

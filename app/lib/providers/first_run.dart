@@ -26,6 +26,7 @@ abstract final class FirstRunStepIds {
   static const openProject = 'openProject';
   static const startSession = 'startSession';
   static const connectPhone = 'connectPhone';
+  static const armHandler = 'armHandler';
   // Mobile.
   static const machineLinked = 'machineLinked';
   static const remoteOn = 'remoteOn';
@@ -77,6 +78,18 @@ class FirstRunController extends Notifier<FirstRunState> {
   void dismissNudgeDevice() {
     if (state.nudgeDeviceDismissed) return;
     _commit(state.copyWith(nudgeDeviceDismissed: true));
+  }
+
+  /// Called on EVERY successful arm (idempotent): the flag retires the first-arm
+  /// explainer, the labeled shield, and the away-moment hint in one write.
+  void markHandlerArmed() {
+    if (state.handlerArmedOnce) return;
+    _commit(state.copyWith(handlerArmedOnce: true));
+  }
+
+  void dismissHandlerAwayHint() {
+    if (state.handlerAwayHintDismissed) return;
+    _commit(state.copyWith(handlerAwayHintDismissed: true));
   }
 }
 
@@ -164,6 +177,19 @@ final desktopFirstRunStepsProvider =
           id: FirstRunStepIds.connectPhone,
           label: 'Connect your phone',
           done: done(FirstRunStepIds.connectPhone, hasPhone),
+        ),
+        // Desktop-only step: the mobile checklist's contract is "fill the
+        // Recent canvas's empty slot until the steps that make the rest of the
+        // UI exist are done" — arming happens inside an open session, after
+        // that canvas is gone. The flag is still global, so an arm performed on
+        // mobile checks this step too.
+        (
+          id: FirstRunStepIds.armHandler,
+          label: 'Arm Handler on a session',
+          done: done(
+            FirstRunStepIds.armHandler,
+            ref.watch(firstRunProvider.select((s) => s.handlerArmedOnce)),
+          ),
         ),
       ];
     });
