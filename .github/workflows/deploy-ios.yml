@@ -72,12 +72,10 @@ jobs:
           flutter-version: '3.44.2'   # keep in lockstep with setup-android/build-desktop
           cache: true
 
-      # Insurance, not a known requirement: portable_pty's release ships a STATIC
-      # iOS payload, and whether Flutter's native-assets driver accepts it is
-      # unsettled (docs/dart-terminal-fork-release.md, open question 1). If it
-      # refuses, the hook falls back to compiling the crate, and the runner's
-      # preinstalled Rust lacks the device target. Drop once a real device and
-      # simulator build confirm the download resolves.
+      # Required whenever the iOS prebuilt download comes up empty: portable_pty's
+      # hook then compiles the crate, and the runner's preinstalled Rust lacks the
+      # device target. Keep it — a missing or stale iOS asset turns into a build
+      # failure rather than a source build without it.
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios
