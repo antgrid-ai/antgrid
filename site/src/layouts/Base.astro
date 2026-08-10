@@ -22,6 +22,15 @@ const { title, description, ogImage, path } = Astro.props;
     <script>
       // Scroll reveal: the hidden state only applies under html.js, so a failed
       // script leaves the page fully visible rather than permanently blank.
+      const reveals = [...document.querySelectorAll(".reveal")];
+      // Pre-mark anything already on screen BEFORE the hidden state lands: on a
+      // slow load first paint beats this end-of-body script, and adding `js`
+      // alone would animate visible sections to transparent. `.in` and `js` in
+      // one task resolve to the same computed style the element already has.
+      for (const el of reveals) {
+        const r = el.getBoundingClientRect();
+        if (r.top < innerHeight && r.bottom > 0) el.classList.add("in");
+      }
       document.documentElement.classList.add("js");
       const io = new IntersectionObserver(
         (entries) => {
@@ -34,7 +43,7 @@ const { title, description, ogImage, path } = Astro.props;
         },
         { threshold: 0.12 },
       );
-      document.querySelectorAll(".reveal").forEach((el) => io.observe(el));
+      reveals.forEach((el) => { if (!el.classList.contains("in")) io.observe(el); });
     </script>
   </body>
 </html>

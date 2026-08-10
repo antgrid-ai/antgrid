@@ -86,7 +86,11 @@ export const proYearly: PlanCardData = {
   priceUsd: OFFER_ACTIVE ? YEARLY_OFFER_USD : YEARLY_LIST_USD,
   listUsd: OFFER_ACTIVE ? YEARLY_LIST_USD : undefined,
   unit: "/ year",
-  note: `${TRIAL_DAYS}-day free trial, then $${OFFER_ACTIVE ? YEARLY_OFFER_USD : YEARLY_LIST_USD}/year`,
+  // Under BETA_FREE the card's button is disabled ("Available after beta"), so the
+  // copy must not promise a startable trial or a running subscription.
+  note: BETA_FREE
+    ? "Free while the beta runs — this is the launch price"
+    : `${TRIAL_DAYS}-day free trial, then $${OFFER_ACTIVE ? YEARLY_OFFER_USD : YEARLY_LIST_USD}/year`,
   features: [
     "Handler AI assistant — stack instructions, evidence-gated \"done\", one-tap undo",
     `Up to ${PRO_WORKERS} worker machines`,
@@ -96,6 +100,8 @@ export const proYearly: PlanCardData = {
     "E2E zero-knowledge relay · priority support",
   ],
   cta: "Get Pro Yearly",
-  ctaFooter: `$${OFFER_ACTIVE ? YEARLY_OFFER_USD : YEARLY_LIST_USD}/year · renews automatically · cancel anytime`,
+  ctaFooter: BETA_FREE
+    ? `$${OFFER_ACTIVE ? YEARLY_OFFER_USD : YEARLY_LIST_USD}/year when plans activate`
+    : `$${OFFER_ACTIVE ? YEARLY_OFFER_USD : YEARLY_LIST_USD}/year · renews automatically · cancel anytime`,
   recommended: true,
 };

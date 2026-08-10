@@ -1,22 +1,29 @@
 import { test, expect } from "@playwright/test";
 
+// Page-level structure, the positioning claims the product is sold on, and page health.
+// Marketing wording is deliberately NOT asserted: it changes constantly, and a test that
+// restates the copy only ever reports that the copy changed — which git already does.
+// Anything whose failure costs money or traffic lives in contracts.spec.ts.
+
 test.describe("home head", () => {
-  test("has title, description and og:image", async ({ page }) => {
+  test("has title, description and an absolute og:image", async ({ page }) => {
     await page.goto("/");
     await expect(page).toHaveTitle(/antgrid/i);
     const desc = page.locator('meta[name="description"]');
     await expect(desc).toHaveAttribute("content", /end-to-end encrypted/i);
+    // Absolute URL rather than a specific filename — social scrapers reject a relative
+    // og:image, and the artwork is expected to be re-cut without touching this test.
     const og = page.locator('meta[property="og:image"]');
-    await expect(og).toHaveAttribute("content", /knowing-it-finished\.png/);
+    await expect(og).toHaveAttribute("content", /^https?:\/\/.+\.(png|jpe?g|webp)$/);
   });
 });
 
-test("hero headline, E2E clause and CTAs", async ({ page }) => {
+test("hero has a single non-empty h1 and leads with the E2E claim", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByRole("heading", { level: 1 })).toContainText(/knowing it finished isn't/i);
+  const h1 = page.getByRole("heading", { level: 1 });
+  await expect(h1).toHaveCount(1);
+  expect((await h1.innerText()).trim().length).toBeGreaterThan(0);
   await expect(page.locator("section").first()).toContainText("End-to-end encrypted");
-  await expect(page.getByRole("link", { name: /^Start free/ }).last()).toHaveAttribute("href", /app\.antgrid\.ai\/login/);
-  await expect(page.getByText("woke you", { exact: false }).first()).toBeVisible();
 });
 
 test("fleet groups by machine and floats needs-you", async ({ page }) => {
@@ -42,24 +49,10 @@ test("cross-agent shows agents and the 3 steps", async ({ page }) => {
   await expect(page.getByText("Take it with you")).toBeVisible();
 });
 
-test("closing CTA: Start free, direct downloads, store chips, correct pricing copy", async ({ page }) => {
+test("closing CTA band renders with app stores still pending", async ({ page }) => {
   await page.goto("/#download");
   const band = page.locator("#download");
-  await expect(band).toContainText("Free on 2 machines");
-  await expect(band.getByRole("link", { name: /^Start free/ })).toHaveAttribute("href", /app\.antgrid\.ai\/login/);
-  await expect(band.getByRole("link", { name: /download for macos/i })).toHaveAttribute(
-    "href",
-    "https://github.com/Radha-AI-Products/antgrid-releases/releases/latest/download/antgrid-macos.dmg"
-  );
-  await expect(band.getByRole("link", { name: /download for windows/i })).toHaveAttribute(
-    "href",
-    "https://get.microsoft.com/installer/download/9N0P7ZRL4D9W?referrer=appbadge&cid=site"
-  );
-  await expect(band.getByRole("link", { name: /download for linux/i })).toHaveAttribute(
-    "href",
-    "https://github.com/Radha-AI-Products/antgrid-releases/releases/latest/download/antgrid-linux.AppImage"
-  );
-  await expect(band.getByText("Microsoft Store")).toHaveCount(0);
+  await expect(band).toBeVisible();
   await expect(band.getByText("soon").first()).toBeVisible();
 });
 

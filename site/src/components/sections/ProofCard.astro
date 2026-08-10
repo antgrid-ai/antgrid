@@ -16,7 +16,9 @@ import { Icon } from "astro-icon/components";
 //   (the hero) and replays the session — instruction typed, items queued, a
 //   false "done" rejected, evidence landing, snapshot, wake. It rewrites row
 //   state from the data-* attributes and restores this static state as the
-//   final frame of every cycle, so the two modes cannot drift apart.
+//   final frame of every cycle. Every string the script writes is read back
+//   from this markup, so copy edits cannot drift the two modes apart —
+//   structural edits (adding a row) must also update the schedule below.
 const backlog = [
   { icon: "tabler:check", tone: "text-ok", item: "auth suite", evidence: "142 passed · exit 0", active: "running…" },
   { icon: "tabler:minus", tone: "text-faint", item: "fix lint", evidence: "skipped — already clean" },
@@ -101,16 +103,20 @@ const instruction = "get tests green, fix lint if broken, then open a PR";
       const el = items[i].querySelector("[data-ev]");
       if (el) el.textContent = text;
     };
-    const count = (n: number) => { countEl.textContent = `${n} of 3 resolved — on evidence, never say-so`; };
+    const countTpl = countEl.textContent ?? "";
+    const count = (n: number) => { countEl.textContent = countTpl.replace(/^\d+/, String(n)); };
     const show = (el: HTMLElement) => el.classList.remove("pc-off");
 
     let timers: ReturnType<typeof setTimeout>[] = [];
     const at = (ms: number, fn: () => void) => timers.push(setTimeout(fn, ms));
+    // clearTimeout also cancels intervals — timeout and interval IDs share one space.
+    const stop = () => { timers.forEach(clearTimeout); timers = []; };
 
     const reset = () => {
       rows.forEach((r) => r.classList.add("pc-off"));
       items.forEach((el, i) => { icon(el, "queued"); ev(i, "queued"); });
       instr.textContent = "";
+      instr.classList.remove("pc-caret");
       count(0);
     };
 
@@ -125,7 +131,7 @@ const instruction = "get tests green, fix lint if broken, then open a PR";
     };
 
     const run = () => {
-      timers = [];
+      stop();
       reset();
       at(300, () => { show(rows[0]); type(); });
       at(2600, () => show(rows[1]));
@@ -135,7 +141,7 @@ const instruction = "get tests green, fix lint if broken, then open a PR";
       at(5600, () => show(rows[4]));
       at(7400, () => { icon(items[0], "final"); ev(0, finals[0]); count(1); });
       at(8400, () => { icon(items[1], "final"); ev(1, finals[1]); count(2); });
-      at(9200, () => ev(2, finals[2]));
+      at(9200, () => { icon(items[2], "final"); ev(2, finals[2]); });
       at(10200, () => show(rows[5]));
       at(11800, () => show(rows[6]));
       at(16000, () => rows.forEach((r) => r.classList.add("pc-off")));
@@ -143,8 +149,19 @@ const instruction = "get tests green, fix lint if broken, then open a PR";
     };
 
     card.classList.add("pc-loop");
-    // Double rAF: the pc-off starting state must commit before transitions arm,
-    // or the first reset would animate instead of snapping.
+    // Hide in the same task as the class add: transitions only animate between
+    // two painted frames, so when this runs before first paint the card starts
+    // blank with no fade — and when it runs after (slow load), the worst case is
+    // one fade-out instead of the finished card flashing and erasing itself.
+    reset();
     requestAnimationFrame(() => requestAnimationFrame(run));
+
+    // A throttled background tab can't finish a cycle before the next begins
+    // (the 32ms typing ticks clamp to ≥1s), which would stack live intervals —
+    // stop the loop while hidden and restart it fresh on return.
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) stop();
+      else run();
+    });
   }
 </script>

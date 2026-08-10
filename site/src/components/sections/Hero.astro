@@ -50,7 +50,8 @@ const offerPct = Math.round((1 - YEARLY_OFFER_USD / YEARLY_LIST_USD) * 100);
           Desktop out now · End-to-end encrypted · iOS &amp; Android coming to the App Store &amp; Play.
         </p>
       </div>
-      <div class="pc-animate">
+      {/* min-w-0 for the same reason as the Worktrees card — see the comment there. */}
+      <div class="pc-animate min-w-0">
         <ProofCard />
       </div>
     </div>
