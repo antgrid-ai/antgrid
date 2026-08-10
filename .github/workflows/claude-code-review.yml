@@ -12,12 +12,20 @@ jobs:
   claude-review:
     # The trigger phrase must never contain `@claude`: claude.yml matches that
     # as a substring, so a shared token makes both workflows answer at once.
+    #
+    # The association check comes first for the same reason as in claude.yml — on
+    # a public repo an unprivileged commenter must not be able to spend the
+    # account's OAuth token. Both events here carry it on `comment`.
     if: |
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+        github.event.comment.author_association)
+      && (
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request != null &&
         contains(github.event.comment.body, '/code-review')) ||
       (github.event_name == 'pull_request_review_comment' &&
         contains(github.event.comment.body, '/code-review'))
+      )
 
     runs-on: ubuntu-latest
     permissions:

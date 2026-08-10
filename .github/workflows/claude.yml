@@ -12,11 +12,22 @@ on:
 
 jobs:
   claude:
+    # Public-repo gate, checked BEFORE the trigger phrase: without it any stranger
+    # can spend CLAUDE_CODE_OAUTH_TOKEN by commenting `@claude`, with the comment
+    # body as untrusted input. Each event carries the association in a different
+    # place and exactly one is non-null, so `||` coalesces to the live one — for
+    # issue_comment that is the COMMENTER, not the issue author (both exist).
     if: |
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+        github.event.comment.author_association
+        || github.event.review.author_association
+        || github.event.issue.author_association)
+      && (
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+      )
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -67,6 +67,12 @@ jobs:
   # manual dispatch runs only the chosen environment. A PR to any other base
   # yields [] and the tofu job is skipped.
   setup:
+    # Fork PRs never plan against production Azure. They are denied the secrets
+    # above and would fail anyway, but this skips them outright rather than
+    # leaving a red X and an OIDC login attempt on every contributor PR that
+    # happens to touch infra/tofu/**. Redundant once this workflow moves to the
+    # private ops repo; correct to keep until it does.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     outputs:
       environments: ${{ steps.pick.outputs.environments }}

@@ -26,7 +26,13 @@ concurrency:
 
 jobs:
   build_and_deploy:
-    if: github.event_name == 'push' || github.event.action != 'closed'
+    # Fork PRs are correctly denied AZURE_STATIC_WEB_APPS_API_TOKEN, so without
+    # this they would fail with a red X on every contributor PR rather than being
+    # skipped. Same guard on close_preview below.
+    if: |
+      github.event_name == 'push' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.action != 'closed')
     runs-on: ubuntu-latest
     name: Build and deploy
     steps:
@@ -71,7 +77,10 @@ jobs:
           skip_api_build: true
 
   close_preview:
-    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    if: |
+      github.event_name == 'pull_request' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     name: Close PR preview
     steps:

@@ -1,0 +1,93 @@
+name: CI
+
+# The required status check for `development` and `main`.
+#
+# Deliberately NOT path-filtered. GitHub reports a required check that never ran
+# as pending forever, so a path filter here would wedge every PR that happens to
+# miss it. ci-web and ci-android stay separate precisely because they ARE
+# path-scoped and therefore cannot be required.
+#
+# Nothing here touches a secret, so it passes on fork PRs — that is the point.
+# `evals/` is deliberately absent: it spawns real agents, relays and PTYs and
+# cannot run on a fork. It stays on `bun run --filter antgrid-evals test:evals`.
+
+on:
+  pull_request:
+  push:
+    branches: [main, development]
+
+# Newer pushes to the same PR/branch supersede in-flight runs.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typescript:
+    name: TypeScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3'
+
+      - name: Cache Bun install cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - run: bun install --frozen-lockfile
+
+      # Workspaces are enumerated rather than swept with `--filter='*'`: the
+      # sweep would pull in web, which needs a Postgres service and is already
+      # covered by ci-web. Failures accumulate so one broken workspace does not
+      # hide the state of the others.
+      - name: Typecheck
+        run: |
+          fail=0
+          for ws in antgrid-wire antgrid-bridge antgrid-relay; do
+            echo "::group::typecheck $ws"
+            bun run --filter "$ws" typecheck || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail
+
+      - name: Test
+        run: |
+          fail=0
+          for ws in antgrid-wire antgrid-bridge antgrid-relay; do
+            echo "::group::test $ws"
+            bun run --filter "$ws" test || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail
+
+  dart:
+    name: Dart packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # antgrid_relay_client is pure Dart with no Flutter dependency, so the
+      # Dart SDK alone is enough — no Flutter toolchain, no cache to warm.
+      - uses: dart-lang/setup-dart@v1
+
+      - name: Test antgrid_relay_client
+        working-directory: packages/antgrid_relay_client
+        run: |
+          dart pub get
+          dart test
+
+  font-tokens:
+    name: Font tokens
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Run the script directly rather than via the root `check:font-tokens`
+      # script, so this job needs no Bun install at all.
+      - name: Check for raw fontSize literals
+        run: bash app/scripts/check_font_tokens.sh
