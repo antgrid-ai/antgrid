@@ -43,6 +43,10 @@ final remoteAccessNudgeProvider = Provider.autoDispose<RemoteAccessNudge?>((
   // Unknown (still loading / host unreachable) or already on → say nothing.
   if (policy == null || policy.enabled) return null;
   final fr = ref.watch(firstRunProvider);
+  // Both variants dismissed → nothing can ever render; return BEFORE watching
+  // the device inventory so its minute-cadence poll tears down instead of
+  // fetching forever for a value that can only be null.
+  if (fr.nudgeSoftDismissed && fr.nudgeDeviceDismissed) return null;
   // The ACCOUNT device inventory, not the bridge roster (remoteDevicesProvider)
   // — the roster only lists devices that already connected to this machine,
   // which mostly can't happen before remote access is on; the nudge's whole

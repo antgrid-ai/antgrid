@@ -176,10 +176,25 @@ class AuthService {
   /// User-facing OAuth failures that surface OUTSIDE any call stack: the
   /// browser detour means the outcome arrives later as a deep link, long after
   /// [startOAuth]'s future completed, so [handleDeepLink] has no caller to
-  /// throw to that could show UI. Whatever sign-in surface is on screen listens
-  /// here; broadcast, so with no listener the event is simply dropped.
+  /// throw to that could show UI. Whatever sign-in surface is on screen
+  /// listens here. A failure with no listener yet (the cold-start deep link
+  /// can be consumed before any sign-in surface subscribes) is held and
+  /// replayed to the first subscriber instead of being dropped.
   Stream<String> get oauthFailures => _oauthFailures.stream;
-  final _oauthFailures = StreamController<String>.broadcast();
+  late final StreamController<String> _oauthFailures =
+      StreamController<String>.broadcast(
+    onListen: () {
+      final pending = _pendingOAuthFailure;
+      if (pending == null) return;
+      _pendingOAuthFailure = null;
+      // Microtask: the subscriber that triggered onListen must be fully
+      // registered before the replayed event is dispatched.
+      scheduleMicrotask(() {
+        if (_oauthFailures.hasListener) _oauthFailures.add(pending);
+      });
+    },
+  );
+  String? _pendingOAuthFailure;
 
   /// Provider of the most recent [startOAuth] in this process, kept only to
   /// name it in failure copy. Null on a cold-start callback (the process was
@@ -220,11 +235,17 @@ class AuthService {
       'google' => 'Google',
       _ => null,
     };
-    _oauthFailures.add(
-      provider == null
-          ? "Sign-in didn't complete. Try again."
-          : "$provider sign-in didn't complete. Try again.",
-    );
+    final message = provider == null
+        ? "Sign-in didn't complete. Try again."
+        : "$provider sign-in didn't complete. Try again.";
+    // No listener yet (cold-start deep link consumed before the sign-in
+    // screen subscribes) — hold the failure for onListen instead of dropping
+    // it on the broadcast floor.
+    if (_oauthFailures.hasListener) {
+      _oauthFailures.add(message);
+    } else {
+      _pendingOAuthFailure = message;
+    }
   }
 
   /// Parse `antgrid://auth/callback?token=<ott>`, redeem the single-use one-time
@@ -246,9 +267,10 @@ class AuthService {
     // The verify response carries the session cookie; never redeem (and receive
     // it) over plaintext. Consistent with the magic-link methods' guard.
     if (!_transportIsSecure) return;
-    // This may run on the cold-start deep link (before runApp), so a thrown
-    // network error here would crash launch. Redemption never throws: on any
-    // failure the cookie stays unset and the failure is reported on
+    // This may run on the cold-start deep link, unawaited from main() (see
+    // main.dart's getInitialLink consumption), so a thrown network error here
+    // would surface as an unhandled zone error. Redemption never throws: on
+    // any failure the cookie stays unset and the failure is reported on
     // [oauthFailures] so the sign-in screen can offer a retry.
     try {
       final res = await _http.post(

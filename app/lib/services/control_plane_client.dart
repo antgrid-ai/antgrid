@@ -268,8 +268,11 @@ class ControlPlaneClient {
     }
     // Absent key (older bridge) CLEARS a stale flag from a previous new-bridge
     // advert — exactly one of the two params is effective per advert, keeping
-    // the tri-state honest across a bridge downgrade or mixed replay.
-    final rae = json['remoteAccessEnabled'] as bool?;
+    // the tri-state honest across a bridge downgrade or mixed replay. An
+    // `is bool` check, not a cast: a malformed value must degrade to "did not
+    // say" under this method's never-throw contract, like every other field.
+    final raeRaw = json['remoteAccessEnabled'];
+    final rae = raeRaw is bool ? raeRaw : null;
     _setState(
       _state.copyWith(
         projects: projects,

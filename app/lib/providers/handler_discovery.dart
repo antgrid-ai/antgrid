@@ -49,8 +49,13 @@ final handlerAwayNowFnProvider = Provider<DateTime Function()>(
 /// Leaving attention or switching the active session resets the clock —
 /// switching onto a session already blocked restarts it from now, since we
 /// cannot know how long it has been waiting on someone who wasn't looking.
+///
+/// autoDispose is load-bearing: this watches autoDispose providers
+/// (sessionWorkStatusProvider), and a keep-alive watcher would pin those —
+/// and, through [handlerAwayHintProvider], the minute ticker — alive for the
+/// process lifetime, defeating their documented teardown contracts.
 final handlerAwayAttentionSinceProvider =
-    NotifierProvider<HandlerAwayAttentionSinceNotifier, DateTime?>(
+    NotifierProvider.autoDispose<HandlerAwayAttentionSinceNotifier, DateTime?>(
       HandlerAwayAttentionSinceNotifier.new,
     );
 
@@ -89,10 +94,48 @@ class HandlerAwayAttentionSinceNotifier extends Notifier<DateTime?> {
   }
 }
 
+/// Pre-arm Handler coverage for the FOCUSED session: the catalog's per-agent
+/// prediction, resolved through the same tool fallback as the bridge's own
+/// thunk (an absent per-session tool means the project default). ONE provider
+/// so the header shield, the away hint, and the explainer can never answer the
+/// coverage question differently for the same session.
+typedef FocusedSessionCoverage = ({
+  String? agent,
+  String? agentLabel,
+  bool? observable,
+});
+
+final focusedSessionCoverageProvider =
+    Provider.autoDispose<FocusedSessionCoverage>((ref) {
+      final entry = ref.watch(activeSessionProvider);
+      final handlerState =
+          ref.watch(handlerStateProvider).value ?? const HandlerState.initial();
+      final agent = entry?.tool ?? handlerState.defaultTool;
+      final catalog = ref.watch(agentCatalogProvider);
+      return (
+        agent: agent,
+        agentLabel: catalog[agent]?.label,
+        observable: handlerObservableFromCatalog(
+          catalog,
+          agent,
+          chat: entry?.mode == 'chat',
+        ),
+      );
+    });
+
 /// The composed away-moment signal for the focused session. `nowMinuteProvider`
 /// is the "now" heartbeat: the hint appearing up to a minute late is fine and
 /// avoids a dedicated timer.
-final handlerAwayHintProvider = Provider<bool>((ref) {
+///
+/// autoDispose, and the retired-flags check runs FIRST: between them, the
+/// minute ticker (and the status derivation behind it) tears down both when no
+/// hint surface is mounted and for every user who has ever armed — instead of
+/// re-deriving once a minute for the rest of the process.
+final handlerAwayHintProvider = Provider.autoDispose<bool>((ref) {
+  final firstRun = ref.watch(firstRunProvider);
+  if (firstRun.handlerArmedOnce || firstRun.handlerAwayHintDismissed) {
+    return false;
+  }
   final activeId = ref.watch(activeSessionIdProvider);
   final entryId = ref.watch(selectedRegistrationIdProvider);
   if (activeId == null || entryId == null) return false;
@@ -106,15 +149,6 @@ final handlerAwayHintProvider = Provider<bool>((ref) {
   );
   final handlerState =
       ref.watch(handlerStateProvider).value ?? const HandlerState.initial();
-  // Same pre-arm coverage derivation as HandlerHeaderControl: an absent
-  // per-session tool resolves to the project default, as the bridge's own
-  // thunk does.
-  final agent = entry?.tool ?? handlerState.defaultTool;
-  final agentObservable = handlerObservableFromCatalog(
-    ref.watch(agentCatalogProvider),
-    agent,
-    chat: entry?.mode == 'chat',
-  );
   final now =
       ref.watch(nowMinuteProvider).value ??
       ref.read(handlerAwayNowFnProvider)();
@@ -123,7 +157,7 @@ final handlerAwayHintProvider = Provider<bool>((ref) {
     attentionSince: ref.watch(handlerAwayAttentionSinceProvider),
     now: now,
     sessionArmed: handlerState.sessions.containsKey(activeId),
-    agentObservable: agentObservable,
-    firstRun: ref.watch(firstRunProvider),
+    agentObservable: ref.watch(focusedSessionCoverageProvider).observable,
+    firstRun: firstRun,
   );
 });

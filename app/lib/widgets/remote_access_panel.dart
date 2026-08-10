@@ -15,6 +15,7 @@ import '../design/widgets/ab_tooltip.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../launcher/host_control_client.dart';
 import '../providers/device_provisioning.dart';
+import '../providers/first_run.dart';
 import '../providers/remote_access.dart';
 import '../services/devices_api.dart';
 import '../util/relative_time.dart';
@@ -58,13 +59,14 @@ class RemoteAccessPanel extends ConsumerWidget {
 /// the panel switch below and the New Session remote-access nudge — the wording
 /// of this grant must never fork.
 ///
-/// Resolves the notifier BEFORE the dialog: the caller's element can die while
-/// the dialog is up (popup panel dismissed, canvas rebuild), and a WidgetRef
-/// read after an await would then throw.
+/// Resolves the notifier (and captures the container) BEFORE the dialog: the
+/// caller's element can die while the dialog is up (popup panel dismissed,
+/// canvas rebuild), and a WidgetRef read after an await would then throw.
 Future<void> confirmAndEnableRemoteAccess(
   BuildContext context,
   WidgetRef ref,
 ) async {
+  final container = ref.container;
   final notifier = ref.read(remoteAccessPolicyProvider.notifier);
   final ok = await AbConfirmDialog.show(
     context: context,
@@ -76,6 +78,15 @@ Future<void> confirmAndEnableRemoteAccess(
   );
   if (!ok) return;
   await notifier.setEnabled(true);
+  // Once remote access has been on — from ANY surface — the one-time soft
+  // nudge has served its purpose and must never resurrect after a later
+  // disable. Latched here, in the flow every enable routes through, because a
+  // widget-side listener only exists while its surface happens to be mounted.
+  // `setEnabled` reports failure as error STATE (retaining the prior value),
+  // so a failed enable reads false here and correctly leaves the nudge alive.
+  if (container.read(remoteAccessPolicyProvider).value?.enabled == true) {
+    container.read(firstRunProvider.notifier).dismissNudgeSoft();
+  }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

@@ -440,11 +440,14 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
     ref
         .read(remoteProjectStatusProvider.notifier)
         .setMachineStatuses(uuid, statuses);
-    // Advertised-project count for the mobile first-run checklist's "Remote is
-    // on" proxy — same single-writer discipline as the status maps above.
+    // Advert summary for the mobile first-run checklist's "Remote is on" step
+    // — same single-writer discipline as the status maps above.
     ref
         .read(machineAdvertisedProjectsProvider.notifier)
-        .setCount(uuid, state.projects.length);
+        .setAdvert(uuid, (
+          projectCount: state.projects.length,
+          remoteAccessEnabled: state.remoteAccessEnabled,
+        ));
     // Same fold for the per-session map the session rows dot themselves from.
     // Absent (older bridge / cold project) stays absent — that's what tells the
     // rows to fall back to the project status above.

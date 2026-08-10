@@ -10,7 +10,7 @@ import '../../providers/control_plane.dart';
 import '../../providers/new_session_picker.dart';
 import '../../providers/now_ticker.dart';
 import '../../util/relative_time.dart';
-import '../ab_status_helpers.dart' show friendlyErrorCopy;
+import '../ab_status_helpers.dart' show emptyAdvertHint;
 import 'environment_menu.dart';
 import 'picker_sources.dart';
 
@@ -108,7 +108,7 @@ class ProjectPanel extends ConsumerWidget {
     // fallback source ('machine:none') carries a null uuid — surface a graceful
     // hint rather than force-unwrapping it (which crashed the tappable chip).
     // Copy matches EnvironmentPanel's machines hint; the full connect steps
-    // live in the canvas behind this panel (_ConnectMachineGuide).
+    // live in the canvas behind this panel (MobileFirstRunChecklist).
     final uuid = source.machineUuid;
     if (uuid == null) return const PanelHint('No machines on this account');
 
@@ -123,21 +123,17 @@ class ProjectPanel extends ConsumerWidget {
         PanelSectionHeader(source.label),
         if (cp.isLoading && rows.isEmpty)
           const PanelHint('Connecting…')
-        // The advert arrived and said the machine's remote-access switch is
-        // off — neither offline nor "no projects". Same copy as the
-        // NOT_ALLOWED verb refusal: one switch, one wording (the arm is a
-        // literal in ab_status_helpers.dart, so the `!` cannot fire).
-        else if (cp.value?.remoteAccessEnabled == false)
-          PanelHint(friendlyErrorCopy('NOT_ALLOWED')!)
-        else if (cp.value?.remoteAccessEnabled == true && rows.isEmpty)
-          const PanelHint('No projects on this machine yet')
-        // An empty FLAG-LESS advert is the common OFFLINE case: a null/absent
-        // control-plane client yields an empty ControlPlaneState (not an
-        // error), so an error and an empty advert with no remoteAccessEnabled
-        // (older bridge) both read as "offline", not "no projects" — ported
-        // from the old rail's _OfflineMachineRow.
-        else if (cp.hasError || rows.isEmpty)
+        // Error BEFORE the advert's tri-state: Riverpod retains the previous
+        // value alongside an error, and a stale advert must not claim the
+        // switch is off (or the catalog empty) for a machine that is actually
+        // unreachable — same ordering as the drawer's error arm.
+        else if (cp.hasError)
           const PanelHint('Machine offline')
+        // The advert said WHY it is empty (switch off / genuinely no projects
+        // / flag-less older bridge reads as offline, ported from the old
+        // rail's _OfflineMachineRow) — shared copy with the projects drawer.
+        else if (rows.isEmpty)
+          PanelHint(emptyAdvertHint(cp.value?.remoteAccessEnabled))
         else
           for (final p in rows)
             PanelRow(

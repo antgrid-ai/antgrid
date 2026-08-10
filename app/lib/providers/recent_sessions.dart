@@ -211,32 +211,33 @@ bool _sameStatuses(
   Map<String, AgentWorkStatus> b,
 ) => const MapEquality<String, AgentWorkStatus>().equals(a, b);
 
-/// Count of projects each connected machine currently advertises, keyed by
-/// bare machineUuid. >0 is the app-side proxy for "that machine's remote
-/// access is on" (a bridge with remote off advertises nothing). Written
-/// imperatively by the app_shell control-plane reaper — the SAME single-writer
-/// pattern as [remoteProjectStatusProvider], and for the same reason (the
-/// per-machine `ref.watch` fan-in crash described above). Not derivable from
-/// [remoteProjectLabelsProvider]: that map only records projects with a
-/// non-empty label, and labels deliberately persist across disconnects.
-///
-/// TODO(first-run): when ControlPlaneState grows the explicit
-/// remote-access-enabled advert flag (in-flight on another chain), write that
-/// flag here from _onControlPlaneState instead of the project count — this
-/// notifier is the single seam to swap.
-final machineAdvertisedProjectsProvider =
-    NotifierProvider<MachineAdvertisedProjectsController, Map<String, int>>(
-      MachineAdvertisedProjectsController.new,
-    );
+/// What each connected machine's last `agent:projects` advert said, keyed by
+/// bare machineUuid: the advertised-project count plus the machine-level
+/// remote-access flag (null = flag-less older bridge). "Remote access is on"
+/// is the explicit flag when the bridge sent one, with count > 0 as the
+/// older-bridge fallback (a bridge with remote off advertises nothing).
+typedef MachineAdvertSummary = ({int projectCount, bool? remoteAccessEnabled});
 
-class MachineAdvertisedProjectsController extends Notifier<Map<String, int>> {
+/// Written imperatively by the app_shell control-plane reaper — the SAME
+/// single-writer pattern as [remoteProjectStatusProvider], and for the same
+/// reason (the per-machine `ref.watch` fan-in crash described above). Not
+/// derivable from [remoteProjectLabelsProvider]: that map only records
+/// projects with a non-empty label, and labels deliberately persist across
+/// disconnects.
+final machineAdvertisedProjectsProvider = NotifierProvider<
+  MachineAdvertisedProjectsController,
+  Map<String, MachineAdvertSummary>
+>(MachineAdvertisedProjectsController.new);
+
+class MachineAdvertisedProjectsController
+    extends Notifier<Map<String, MachineAdvertSummary>> {
   @override
-  Map<String, int> build() => const {};
+  Map<String, MachineAdvertSummary> build() => const {};
 
   /// No-op when unchanged, so an advert re-delivery triggers no rebuild.
-  void setCount(String machineUuid, int count) {
-    if (state[machineUuid] == count) return;
-    state = {...state, machineUuid: count};
+  void setAdvert(String machineUuid, MachineAdvertSummary advert) {
+    if (state[machineUuid] == advert) return;
+    state = {...state, machineUuid: advert};
   }
 
   /// Drop [machineUuid] entirely — a disconnected machine must not keep

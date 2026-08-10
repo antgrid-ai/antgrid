@@ -1,8 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../design/widgets/ab_confirm_dialog.dart';
+import '../../models/handler_state.dart';
 import '../../providers/first_run.dart';
+import '../../providers/providers.dart';
 import '../../services/handler_service.dart';
 import 'handler_item_status.dart';
 
@@ -73,5 +77,45 @@ Future<void> armWithFirstRunExplainer({
     if (!ok) return;
   }
   service.arm(terminalId: terminalId, notifyOnly: notifyOnly);
-  container.read(firstRunProvider.notifier).markHandlerArmed();
+  latchHandlerArmedOnConfirmation(container, terminalId);
+}
+
+/// How long to wait for the bridge's `handler:status` to list a just-armed
+/// session before giving up on latching. Generous: a slow relay round-trip
+/// must not read as a failed arm.
+const kHandlerArmConfirmWindow = Duration(seconds: 30);
+
+/// Latch [FirstRunState.handlerArmedOnce] when the bridge REPORTS the session
+/// armed (its `handler:status` lists [terminalId]), not on the send: the arm
+/// itself is fire-and-forget, and a dropped send must keep the explainer, the
+/// labeled shield, and the away hint alive for the next attempt. The
+/// subscription self-cancels on confirmation or after
+/// [kHandlerArmConfirmWindow]; an unconfirmed arm simply never latches.
+void latchHandlerArmedOnConfirmation(
+  ProviderContainer container,
+  String terminalId,
+) {
+  if (container.read(firstRunProvider).handlerArmedOnce) return;
+  ProviderSubscription<AsyncValue<HandlerState>>? sub;
+  Timer? timeout;
+  bool confirmed(HandlerState? state) =>
+      state?.sessions.containsKey(terminalId) ?? false;
+  void latch() {
+    timeout?.cancel();
+    sub?.close();
+    sub = null;
+    container.read(firstRunProvider.notifier).markHandlerArmed();
+  }
+
+  sub = container.listen(handlerStateProvider, (_, next) {
+    if (confirmed(next.value)) latch();
+  });
+  timeout = Timer(kHandlerArmConfirmWindow, () {
+    sub?.close();
+    sub = null;
+  });
+  // The status may already list the session (re-arm race after a disarm the
+  // bridge never processed) — check once so the latch doesn't wait on a
+  // change that never comes.
+  if (confirmed(container.read(handlerStateProvider).value)) latch();
 }

@@ -245,10 +245,25 @@ void main() {
       expect(done[FirstRunStepIds.remoteOn], isFalse);
       expect(done[FirstRunStepIds.openedProject], isFalse);
 
-      // Machine advertises projects → the "Remote is on" proxy flips.
+      // A flag-less advert (older bridge) falls back to the projects-visible
+      // proxy.
       container
           .read(machineAdvertisedProjectsProvider.notifier)
-          .setCount('m1', 2);
+          .setAdvert('m1', (projectCount: 2, remoteAccessEnabled: null));
+      done = _doneById(sub.read());
+      expect(done[FirstRunStepIds.remoteOn], isTrue);
+
+      // The explicit machine-level flag outranks the proxy in both
+      // directions: remote off with projects visible reads off, remote on
+      // with zero projects reads on.
+      container
+          .read(machineAdvertisedProjectsProvider.notifier)
+          .setAdvert('m1', (projectCount: 2, remoteAccessEnabled: false));
+      done = _doneById(sub.read());
+      expect(done[FirstRunStepIds.remoteOn], isFalse);
+      container
+          .read(machineAdvertisedProjectsProvider.notifier)
+          .setAdvert('m1', (projectCount: 0, remoteAccessEnabled: true));
       done = _doneById(sub.read());
       expect(done[FirstRunStepIds.remoteOn], isTrue);
 

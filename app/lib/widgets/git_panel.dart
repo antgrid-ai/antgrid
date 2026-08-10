@@ -159,6 +159,8 @@ class _GitChangesHeader extends StatelessWidget {
               leading: AbIcon(
                 AbIcons.gitCommit,
                 size: AbTokens.iconButtonGlyph,
+                // Match the primary variant's accentForeground label.
+                color: context.antgrid.accentForeground,
               ),
               variant: AbButtonVariant.primary,
               onTap: statuses.isEmpty

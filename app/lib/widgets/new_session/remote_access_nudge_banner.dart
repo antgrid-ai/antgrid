@@ -38,15 +38,12 @@ class RemoteAccessNudgeBanner extends ConsumerWidget {
       // Same voice as RemoteAccessControl's listener, carried here because
       // that one only lives while the title-bar chip is mounted — a failed
       // enable from this canvas must be voiced on this canvas. Transition-only,
-      // so a retained error never re-toasts on rebuild.
+      // so a retained error never re-toasts on rebuild. (Soft-nudge retirement
+      // on enable is NOT here: a listener behind the visibility early-out above
+      // misses enables performed while no nudge renders, so it lives in
+      // confirmAndEnableRemoteAccess — the flow every enable routes through.)
       if (next is AsyncError && prev is! AsyncError) {
         showAbSnackBar(context, 'Could not update remote access. Try again.');
-      }
-      // Soft-nudge auto-retirement: once remote access is on — from ANY
-      // surface — the one-time mention has served its purpose and must never
-      // resurrect after a later disable.
-      if (next.value?.enabled == true && prev?.value?.enabled != true) {
-        ref.read(firstRunProvider.notifier).dismissNudgeSoft();
       }
     });
 

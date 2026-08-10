@@ -80,7 +80,8 @@ class FirstRunController extends Notifier<FirstRunState> {
     _commit(state.copyWith(nudgeDeviceDismissed: true));
   }
 
-  /// Called on EVERY successful arm (idempotent): the flag retires the first-arm
+  /// Called on every bridge-CONFIRMED arm (idempotent; see
+  /// latchHandlerArmedOnConfirmation): the flag retires the first-arm
   /// explainer, the labeled shield, and the away-moment hint in one write.
   void markHandlerArmed() {
     if (state.handlerArmedOnce) return;
@@ -209,13 +210,13 @@ final mobileFirstRunStepsProvider =
       // it).
       final machineLinked =
           (ref.watch(accountAgentsProvider).value ?? const []).isNotEmpty;
-      // Projects-visible proxy for "remote access is on": a bridge with remote
-      // off advertises nothing (see machineAdvertisedProjectsProvider for the
-      // seam to swap once the explicit advert flag lands).
+      // The explicit machine-level flag when the bridge sent one; a flag-less
+      // older bridge falls back to the projects-visible proxy (remote off
+      // advertises nothing).
       final remoteOn = ref
           .watch(machineAdvertisedProjectsProvider)
           .values
-          .any((n) => n > 0);
+          .any((a) => a.remoteAccessEnabled ?? (a.projectCount > 0));
       // Latch-on-event: the selection nulls on sign-out, which is exactly why
       // the persisted latch carries it. NOT recentAgentsProvider — a
       // RecentAgent row is upserted on any transport materialization

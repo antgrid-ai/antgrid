@@ -16,10 +16,10 @@ import '../design/widgets/ab_toolbar.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../models/handler_state.dart';
 import '../models/session_entry.dart';
-import '../providers/agent_catalog.dart';
 import '../providers/agent_transport.dart';
 import '../providers/device_provisioning.dart';
 import '../providers/first_run.dart';
+import '../providers/handler_discovery.dart';
 import '../providers/projects.dart';
 import '../providers/providers.dart';
 import '../providers/session_mode.dart';
@@ -206,17 +206,9 @@ class HandlerHeaderControl extends ConsumerWidget {
     final service = serviceWhenReady(ref, handlerServiceProvider);
     // This header is the PRE-arm surface — usually nothing is armed yet, so the
     // catalog's per-agent prediction is the only coverage answer that exists.
-    // A SessionEntry carries `tool` only when it OVERRODE the project default,
-    // so an absent one resolves to the project's, as the bridge's own thunk
-    // does.
-    final catalog = ref.watch(agentCatalogProvider);
-    final entry = ref.watch(activeSessionProvider);
-    final agent = entry?.tool ?? state.defaultTool;
-    final agentObservable = handlerObservableFromCatalog(
-      catalog,
-      agent,
-      chat: entry?.mode == 'chat',
-    );
+    // Shared derivation (focusedSessionCoverageProvider), so this shield, the
+    // away hint, and the explainer can never answer coverage differently.
+    final coverage = ref.watch(focusedSessionCoverageProvider);
     final armedOnce = ref.watch(
       firstRunProvider.select((s) => s.handlerArmedOnce),
     );
@@ -306,8 +298,8 @@ class HandlerHeaderControl extends ConsumerWidget {
           service: service,
           terminalId: activeId,
           notifyOnly: state.defaultNotifyOnly,
-          agentObservable: agentObservable,
-          agentLabel: catalog[agent]?.label,
+          agentObservable: coverage.observable,
+          agentLabel: coverage.agentLabel,
         ),
       );
     }
@@ -317,8 +309,8 @@ class HandlerHeaderControl extends ConsumerWidget {
     // arms just as silently as one that is merely quiet.
     final shieldTooltip = session != null
         ? 'Disarm Handler'
-        : agentObservable == false
-        ? unwatchableNotice(catalog[agent]?.label)
+        : coverage.observable == false
+        ? unwatchableNotice(coverage.agentLabel)
         : 'Arm Handler';
 
     return Row(
@@ -334,7 +326,13 @@ class HandlerHeaderControl extends ConsumerWidget {
             child: AbButton(
               compact: true,
               label: 'Handler',
-              leading: AbIcon(AbIcons.shield, size: AbTokens.iconButtonGlyph),
+              leading: AbIcon(
+                AbIcons.shield,
+                size: AbTokens.iconButtonGlyph,
+                // Match AbButton's normal-variant label color — an untinted
+                // AbIcon renders the SVG's own fill, not the theme's.
+                color: p.textSecondary,
+              ),
               onTap: toggleArm,
             ),
           )

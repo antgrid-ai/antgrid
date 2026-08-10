@@ -32,7 +32,7 @@ import '../providers/providers.dart';
 import '../providers/sessions.dart';
 import '../services/control_plane_client.dart';
 import '../utils/platform_utils.dart';
-import 'ab_status_helpers.dart' show friendlyErrorCopy;
+import 'ab_status_helpers.dart' show emptyAdvertHint;
 import 'account_footer.dart';
 import 'drawer_entry_row.dart' show DrawerEntryRow, MachineDrawerHeaderRow;
 import 'open_folder_button.dart';
@@ -481,21 +481,14 @@ class _MachineProjects extends ConsumerWidget {
         ),
         child: const Align(alignment: Alignment.centerLeft, child: AbLoading()),
       ),
-      error: (_, _) => _machineHint(context, 'Machine offline.'),
+      error: (_, _) => _machineHint(context, 'Machine offline'),
       data: (state) {
         final projects = state.projects;
         if (projects.isEmpty) {
-          // The advert said WHY it is empty: `false` is the machine's
-          // remote-access switch, `true` a genuinely empty catalog; only a
-          // flag-less advert (older bridge / nothing received) stays the
-          // neutral offline copy. The switch copy is the NOT_ALLOWED verb
-          // refusal's — one switch, one wording (the arm is a literal in
-          // ab_status_helpers.dart, so the `!` cannot fire).
-          return _machineHint(context, switch (state.remoteAccessEnabled) {
-            false => friendlyErrorCopy('NOT_ALLOWED')!,
-            true => 'No projects on this machine yet.',
-            null => 'Offline — no projects advertised.',
-          });
+          return _machineHint(
+            context,
+            emptyAdvertHint(state.remoteAccessEnabled),
+          );
         }
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,

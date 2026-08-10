@@ -59,6 +59,20 @@ String? friendlyErrorCopy(String? code) => switch (code) {
   _ => null,
 };
 
+/// Copy for a machine whose advert lists no projects, keyed by the tri-state
+/// machine-level `remoteAccessEnabled` flag: `false` is the machine's
+/// remote-access switch (the NOT_ALLOWED verb refusal's copy — one switch, one
+/// wording, and the arm is a literal above so the `!` cannot fire), `true` a
+/// genuinely empty catalog, and `null` (no advert / flag-less older bridge)
+/// the neutral offline copy. Shared by the projects drawer and the New Session
+/// picker so the two surfaces can never describe the same machine two ways.
+String emptyAdvertHint(bool? remoteAccessEnabled) =>
+    switch (remoteAccessEnabled) {
+      false => friendlyErrorCopy('NOT_ALLOWED')!,
+      true => 'No projects on this machine yet',
+      null => 'Machine offline',
+    };
+
 /// Maps [TerminalSessionState] to a status tone for the leading dot.
 AbStatusTone sessionStateTone(TerminalSessionState state) {
   return switch (state) {
