@@ -14,7 +14,7 @@ function warnings(text: string): FloorWarning[] {
 // What the engine's call site does, condensed: classify a proposed reply and ask
 // which of its warnings survive the session's authorization.
 function stillWarns(auth: ReturnType<typeof createAuthorization>, text: string): FloorWarning[] {
-  return partitionWarnings(auth, warnings(text), text).warn;
+  return partitionWarnings(auth, warnings(text), text, PROJECT).warn;
 }
 
 function armed(...instructions: string[]) {
@@ -90,7 +90,7 @@ describe("provenance", () => {
     const auth = armed("go ahead and run mkfs.ext4 /dev/sdb on the spare disk");
     const floor = classifyDestructive("mkfs.ext4 /dev/sdb", PROJECT);
     expect(floor.hard).toHaveLength(1);
-    expect(isAuthorized(auth, floor.hard[0]!, "mkfs.ext4 /dev/sdb")).toBe(false);
+    expect(isAuthorized(auth, floor.hard[0]!, "mkfs.ext4 /dev/sdb", PROJECT)).toBe(false);
     // Nothing about the hard command leaks into the session's grants either.
     expect(auth.patterns.size).toBe(0);
   });
@@ -168,7 +168,7 @@ describe("partitionWarnings", () => {
     // snapshot pass has to be able to see what was authorized.
     const auth = armed("force push branch");
     const text = "git push --force origin feat/x and rm -rf build";
-    const { warn, authorized } = partitionWarnings(auth, warnings(text), text);
+    const { warn, authorized } = partitionWarnings(auth, warnings(text), text, PROJECT);
     expect(authorized.map((w) => w.tier)).toEqual(["DESTRUCTIVE"]);
     expect(authorized[0]!.matched).toContain("git push --force");
     expect(warn.map((w) => w.matched)).toEqual(["rm -rf"]);

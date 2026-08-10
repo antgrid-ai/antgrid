@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -11,6 +12,7 @@ import '../../models/handler_state.dart';
 import '../../providers/providers.dart';
 import '../../providers/sessions.dart';
 import '../../providers/value_controller.dart';
+import '../transcript/format.dart';
 import 'handler_backlog_drawer.dart';
 import 'handler_item_status.dart';
 
@@ -97,7 +99,11 @@ String _needsYouHint(HandlerSessionState session) {
     // nothing", and a user who types anyway loses the free-text questions
     // queued behind the prompt — the silent clearing this whole line exists to
     // stop, merely moved to the mixed case.
-    final others = session.escalations.length - prompts;
+    // Counted off the bridge's own total, for the same reason the branch below is —
+    // a row the lenient parse dropped must not shrink the number of questions this
+    // line promises to clear. Floored: the two arrive in one snapshot but the parse
+    // can only ever lose rows, never invent them.
+    final others = math.max(0, session.pendingEscalations - prompts);
     final answer = 'Answer ${_promptSubject(prompts)} in the transcript';
     if (others == 0) return '$answer — not here';
     final questions = others == 1 ? 'question' : '$others questions';
@@ -139,13 +145,16 @@ String _parkedLabel(HandlerSessionState session, DateTime now) {
   // A deadline already behind us means the resume is in flight, not that the
   // session is overdue — counting into negative time would read as stuck.
   if (left <= Duration.zero) return '$head · resuming';
-  return '$head · resumes in ${_countdown(left)}';
+  return '$head · resumes in ${formatDuration(left)}';
 }
 
-String _countdown(Duration d) {
-  if (d.inHours > 0) return '${d.inHours}h ${d.inMinutes % 60}m';
-  if (d.inMinutes > 0) return '${d.inMinutes}m ${d.inSeconds % 60}s';
-  return '${d.inSeconds}s';
+/// Whether a countdown is still counting towards something. A deadline already
+/// behind us renders a constant string, so a ticker past it repaints once a second
+/// for information that cannot change.
+bool _hasLiveDeadline(HandlerSessionState session, DateTime now) {
+  final until = session.parkedUntil;
+  if (session.runState != HandlerRunState.parked || until == null) return false;
+  return DateTime.fromMillisecondsSinceEpoch(until).isAfter(now);
 }
 
 /// Pinned status line for the focused terminal (spec §4.2): what Handler is
@@ -200,16 +209,11 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
       _syncCountdownTicker(false);
       return const SizedBox.shrink();
     }
-    _syncCountdownTicker(
-      session.runState == HandlerRunState.parked && session.parkedUntil != null,
-    );
+    final now = DateTime.now();
+    _syncCountdownTicker(_hasLiveDeadline(session, now));
 
     final p = context.antgrid;
-    final tone = switch (session.runState) {
-      HandlerRunState.handling || HandlerRunState.needsYou => p.accent,
-      HandlerRunState.parked => p.warning,
-      HandlerRunState.watching => p.textMuted,
-    };
+    final tone = handlerRunStateColor(p, session.runState);
     final openBacklog =
         ref.watch(handlerBacklogOpenerProvider) ??
         (id) => unawaited(showHandlerBacklogDrawer(context, id));
@@ -230,7 +234,7 @@ class _HandlerPaBarState extends ConsumerState<HandlerPaBar> {
         subtitleMaxLines: 2,
         crossAxisAlignment: CrossAxisAlignment.start,
         leading: AbIcon(AbIcons.list, size: 12, color: tone),
-        title: Text(handlerPaStatusLabel(session)),
+        title: Text(handlerPaStatusLabel(session, now: now)),
         // Unstyled: AbListRow already renders a subtitle as muted chrome, and
         // restating it here would silently drop the row's line height.
         subtitle: hint == null ? null : Text(hint),

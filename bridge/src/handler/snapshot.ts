@@ -205,11 +205,23 @@ function segmentsOf(text: string): string[] {
     .filter(Boolean);
 }
 
-/** Quote-aware word split. Not a shell: it recognizes quoting and nothing else. */
+/**
+ * Quote-aware word split. Not a shell: it recognizes quoting and nothing else.
+ *
+ * Backticks are dropped from unquoted tokens because a judge reply is markdown, and
+ * "run `rm -rf node_modules`" is its ordinary spelling of a command. The floor matches
+ * straight through the fence — its patterns anchor with `\b` and a backtick is a
+ * non-word character — so a planner that kept the fence disagreed with the floor on the
+ * COMMON case and left it flagged, injected and unprotected, which is the same failure
+ * commandRanges below already guards the other half of.
+ */
 function tokenize(segment: string): string[] {
   const out: string[] = [];
   for (const m of segment.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)) {
-    out.push(m[1] ?? m[2] ?? m[3]!);
+    const quoted = m[1] ?? m[2];
+    if (quoted !== undefined) { out.push(quoted); continue; }
+    const bare = m[3]!.replace(/`/g, "");
+    if (bare) out.push(bare);
   }
   return out;
 }
@@ -285,11 +297,16 @@ function planCommand(tokens: string[], from: number, to: number, trigger: string
     if (!rest.some((t) => hasShortFlag(t, "f") || t === "--force")) return null;
     // Mirror the real flags minus force, so the dry run answers for THIS
     // command: -d/-x/-X and any pathspec change what would be removed.
+    //
+    // Only ONE f comes off: `-ff` is what reaches into a nested git repository, and
+    // dropping both left the dry run listing the plain directories while the real
+    // clean took the nested repo too — an entry reporting "snapshotted" over files no
+    // copy was ever made of.
     const dryRunArgs = ["clean", "-n"];
     for (const t of rest) {
       if (t === "--force") continue;
       if (/^-[a-zA-Z]+$/.test(t)) {
-        const kept = t.slice(1).replace(/f/g, "");
+        const kept = t.slice(1).replace(/f/, "");
         if (kept) dryRunArgs.push(`-${kept}`);
         continue;
       }
@@ -636,11 +653,17 @@ async function copyToTrash(
   const targets: string[] = [];
   for (const raw of absPaths) {
     const p = shellExpands ? await resolveOperand(raw, ctx) : raw;
-    if (/[*?[\]]/.test(p)) {
-      return failed(action, trigger, "unsupported", `cannot snapshot a glob operand: ${p}`);
-    }
-    if (shellExpands && UNEXPANDED_OPERAND.test(p)) {
-      return failed(action, trigger, "unsupported", `cannot resolve a shell-expanded operand: ${p}`);
+    // Both guards are about text a SHELL would have expanded, so both belong behind the
+    // same flag. snapshotClean's operands come back from `git clean -n`, which reports
+    // paths that exist — a repo holding `app/[id]/page.tsx` was aborting its whole clean
+    // snapshot over a real filename.
+    if (shellExpands) {
+      if (/[*?[\]]/.test(p)) {
+        return failed(action, trigger, "unsupported", `cannot snapshot a glob operand: ${p}`);
+      }
+      if (UNEXPANDED_OPERAND.test(p)) {
+        return failed(action, trigger, "unsupported", `cannot resolve a shell-expanded operand: ${p}`);
+      }
     }
     const abs = resolve(ctx.projectPath, p);
     if (!insideProject(abs, ctx.projectPath)) {
@@ -858,10 +881,15 @@ async function undoPrePush(entry: PrePushSnapshot, ctx: Ctx): Promise<UndoResult
     safety = pin;
   }
 
-  const args = ["push", "--force"];
-  // No lease when the ref is gone from the remote: there is nothing to lose, and
-  // a lease naming a tip that does not exist would reject the restore.
-  if (observed) args.push(`--force-with-lease=${entry.ref}:${observed.sha}`);
+  // The lease is the ONLY force flag when there is a tip to lease against: git lets
+  // `--force` override `--force-with-lease` on the same command line, so sending both
+  // made the lease inert — a teammate pushing between the ls-remote above and this
+  // push lost that commit, unfetched and unpinned. No lease when the ref is gone from
+  // the remote: there is nothing to lose, and a lease naming a tip that does not exist
+  // would reject the restore.
+  const args = observed
+    ? ["push", `--force-with-lease=${entry.ref}:${observed.sha}`]
+    : ["push", "--force"];
   args.push(entry.remote, `${entry.remoteSha}:${entry.ref}`);
 
   const pushed = await ctx.git(ctx.projectPath, args);

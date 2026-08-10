@@ -108,7 +108,12 @@ class HandlerScreen extends ConsumerWidget {
       }
       final text = await showHandlerReplySheet(context, e);
       if (text == null) return;
-      service.reply(e, text);
+      // Re-resolved after the sheet, exactly like onDisarm below: the sheet stays open
+      // for as long as the user types, and the focused project's session can be rebuilt
+      // in that window. The build-time instance would be disposed by then, and
+      // `reply` answers a disposed service with `false` — an answer the user typed,
+      // silently dropped, under a card that still reads as answered.
+      focusedServiceOrNull(container, (s) => s.handlerService)?.reply(e, text);
     }
 
     Widget meta(String terminalId, int at) => _RowMeta(
@@ -228,17 +233,21 @@ class HandlerScreen extends ConsumerWidget {
         ],
         if (state.snapshots.isNotEmpty) ...[
           _section('Undo', state.snapshots.length, p.warning, p),
-          SliverList.list(
-            children: [
-              for (final s in state.snapshots.reversed)
-                _SnapshotRow(
-                  snapshot: s,
-                  meta: meta(s.terminalId, s.at),
-                  pending: state.pendingUndo.contains(s.snapshotId),
-                  onUndo: () => service?.undo(s),
-                  p: p,
-                ),
-            ],
+          // Lazy for the same reason the activity feed below is: the store keeps up
+          // to MAX_STORED offers and every flagged inject re-sends its row.
+          SliverList.builder(
+            itemCount: state.snapshots.length,
+            itemBuilder: (_, i) {
+              final s = state.snapshots[state.snapshots.length - 1 - i];
+              return _SnapshotRow(
+                snapshot: s,
+                meta: meta(s.terminalId, s.at),
+                pending: state.pendingUndo.contains(s.snapshotId),
+                onUndo: () =>
+                    focusedServiceOrNull(container, (x) => x.handlerService)?.undo(s),
+                p: p,
+              );
+            },
           ),
         ],
         _section('Activity', null, p.textMuted, p),

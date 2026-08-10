@@ -475,6 +475,17 @@ class HandlerService {
         }),
       );
     }
+    // Every row this send retires, not just the one that was tapped. One submitted
+    // line clears the terminal's whole free-text set (below, and in the bridge), so a
+    // sibling left out of this set comes back off the next status snapshot with its
+    // one-tap chip live — and that tap puts a second line into a session the first
+    // one already unblocked.
+    for (final e in _state.escalations) {
+      if (e.terminalId == escalation.terminalId &&
+          e.kind != 'resolve_in_session') {
+        _answeredEscalations.add(e.escalationId);
+      }
+    }
     _answeredEscalations.add(escalation.escalationId);
     final sessions = Map<String, HandlerSessionState>.from(_state.sessions);
     final answered = sessions[escalation.terminalId];

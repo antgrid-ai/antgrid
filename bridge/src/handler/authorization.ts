@@ -15,7 +15,7 @@
 //                  host must not open the network.
 // HARD (§5.3) is liftable by nothing at all.
 
-import { classifyDestructive, type FloorWarning } from "./destructive-floor";
+import { classifyDestructive, isInsideProject, type FloorWarning } from "./destructive-floor";
 
 export interface InstructionAuthorization {
   /** Floor pattern sources whose OPERATION a user named. */
@@ -142,6 +142,14 @@ function hostsIn(text: string): Set<string> {
   return out;
 }
 
+/** The subset of `hostsIn` that can only be a destination — a URL authority or an IP. */
+function destinationsIn(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of text.matchAll(URL_AUTHORITY)) out.add(normalizeHost(m[1]!));
+  for (const m of text.matchAll(IPV4)) out.add(m[0]!);
+  return out;
+}
+
 // Windows spellings are folded the way the floor folds them, and sentence punctuation is
 // dropped so "check /etc/hosts." authorizes the path the reply names without the period.
 function normalizePath(p: string): string {
@@ -153,6 +161,27 @@ function normalizePath(p: string): string {
 
 function grant(into: Set<string>, value: string): void {
   if (into.size < MAX_LITERALS) into.add(value);
+}
+
+// Both halves of the grant read an instruction as if every clause in it ASKED for
+// something, so "never force push" handed out exactly the lift it forbade — and the
+// asymmetry above makes that the worst direction available: the sentence most likely
+// to be written about a dangerous command is the one telling Handler not to run it.
+const PROHIBITION =
+  /\b(?:never|not|don't|doesn't|didn't|won't|can't|cannot|shouldn't|mustn't|avoid(?:s|ing)?|refrain|instead\s+of|rather\s+than)\b/i;
+
+// Clause-level, not sentence-level: "delete the build dir, but never touch
+// node_modules" has to keep its first half. Rejoined with newlines because every floor
+// pattern spans with `[^\n]*`, so a dropped clause cannot be bridged across.
+//
+// A sentence break needs the whitespace AFTER it. The dots that matter here sit inside
+// tokens — `.env`, `log.txt`, `logs.example.com` — and splitting on a bare `.` tore
+// apart the very commands and hosts this function exists to read.
+function grantableClauses(text: string): string {
+  return text
+    .split(/(?<=[.!?])\s+|[;\n]+|\s+but\s+/i)
+    .filter((clause) => !PROHIBITION.test(clause))
+    .join("\n");
 }
 
 export function createAuthorization(): InstructionAuthorization {
@@ -172,22 +201,25 @@ export function authorizeInstruction(
   auth: InstructionAuthorization, text: string, projectPath: string,
 ): GrantSummary {
   const before = { p: auth.patterns.size, f: auth.paths.size, h: auth.hosts.size };
+  // Every grant below reads the PERMITTED clauses, never the raw text: a prohibition
+  // names the same command a request does, and only the polarity tells them apart.
+  const asked = grantableClauses(text);
   // floor.hard is ignored, not consulted: §5.3 has no lift, so naming one of those
   // commands in an instruction must leave no trace here.
-  const floor = classifyDestructive(text, projectPath);
+  const floor = classifyDestructive(asked, projectPath);
   for (const w of floor.warnings) {
     if (w.tier === "ABS_PATH") grant(auth.paths, normalizePath(w.matched));
     else grant(auth.patterns, w.pattern);
   }
   for (const lift of ALIAS_LIFTS) {
-    if (lift.phrases.some((re) => re.test(text))) {
+    if (lift.phrases.some((re) => re.test(asked))) {
       for (const p of lift.patterns) grant(auth.patterns, p);
     }
   }
   // Harvested from the whole instruction rather than only from an egress match: the user
   // names the destination in prose ("post it to logs.example.com"), while the command
   // shape that carries it there shows up later, in the reply.
-  for (const h of hostsIn(text)) grant(auth.hosts, h);
+  for (const h of hostsIn(asked)) grant(auth.hosts, h);
 
   const added = <T>(set: Set<T>, n: number) => [...set].slice(n);
   return {
@@ -195,6 +227,22 @@ export function authorizeInstruction(
     paths: added(auth.paths, before.f),
     hosts: added(auth.hosts, before.h),
   };
+}
+
+// Targets a pattern lift cannot reach on its own: `~`-rooted, parent-escaping, or
+// absolute and outside the project. A pattern lift is a claim about an OPERATION, so
+// without this "recursively delete the build directory" also authorized `rm -rf ~/.ssh`
+// — same pattern, a target the user said nothing about. Naming one of these still
+// works; it needs the second grade of lift (the literal one) to do it.
+const OUTSIDE_ROOTED = /(?:^|[\s'"=])~[/\\]|(?:^|[\s'"=/\\])\.\.[/\\]/;
+const ABSOLUTE_TARGET = /(?:^|[\s'"=])(\/[^\s'"]+|[A-Za-z]:[\\/][^\s'"]+)/g;
+
+function namesTargetOutsideProject(flaggedText: string, projectPath: string): boolean {
+  if (OUTSIDE_ROOTED.test(flaggedText)) return true;
+  for (const m of flaggedText.matchAll(ABSOLUTE_TARGET)) {
+    if (!isInsideProject(m[1]!, projectPath)) return true;
+  }
+  return false;
 }
 
 /**
@@ -209,14 +257,22 @@ export function authorizeInstruction(
  * one the user is least likely to have meant.
  */
 export function isAuthorized(
-  auth: InstructionAuthorization, w: FloorWarning, flaggedText: string,
+  auth: InstructionAuthorization, w: FloorWarning, flaggedText: string, projectPath: string,
 ): boolean {
   if (w.tier === "HARD") return false;
   // Exact match only. A path lift is a claim about one file, never about its directory.
   if (w.tier === "ABS_PATH") return auth.paths.has(normalizePath(w.matched));
   if (!auth.patterns.has(w.pattern)) return false;
+  if (namesTargetOutsideProject(flaggedText, projectPath)) return false;
   if (w.tier !== "EGRESS") return true;
-  const hosts = hostsIn(flaggedText);
+  // Destinations only. A bare dotted token is read as a host so the grant side can
+  // harvest one from prose, but the two sides read DIFFERENT texts — the instruction
+  // and the reply — so requiring every such token here rejected `curl -T app.log
+  // https://logs.example.com` against an authorization naming that exact host. Bare
+  // tokens still stand alone when the text carries no URL or IP at all, which is what
+  // keeps an unresolvable destination failing closed.
+  const explicit = destinationsIn(flaggedText);
+  const hosts = explicit.size > 0 ? explicit : hostsIn(flaggedText);
   if (hosts.size === 0) return false;
   for (const h of hosts) {
     if (!auth.hosts.has(h)) return false;
@@ -231,9 +287,12 @@ export function isAuthorized(
  */
 export function partitionWarnings(
   auth: InstructionAuthorization, warnings: FloorWarning[], flaggedText: string,
+  projectPath: string,
 ): { warn: FloorWarning[]; authorized: FloorWarning[] } {
   const warn: FloorWarning[] = [];
   const authorized: FloorWarning[] = [];
-  for (const w of warnings) (isAuthorized(auth, w, flaggedText) ? authorized : warn).push(w);
+  for (const w of warnings) {
+    (isAuthorized(auth, w, flaggedText, projectPath) ? authorized : warn).push(w);
+  }
   return { warn, authorized };
 }

@@ -38,6 +38,15 @@ import { logger } from "../logger";
 
 const log = logger.child({ component: "handler-engine" });
 
+/**
+ * One escalation as it leaves the engine. A COPY, never the record itself:
+ * `handler:status` is a bus REPLAY_TYPE, so the frame is retained by reference until
+ * the next one, and `escalate()` pushes onto the live array in place.
+ */
+function escalationWire(e: OpenEscalation): OpenEscalation {
+  return { ...e };
+}
+
 export interface HandlerEvent {
   terminalId: string;
   event: "turn_end" | "awaiting_input" | "permission_request" | "question"
@@ -441,8 +450,15 @@ export class HandlerEngine {
   // Fire-and-forget: the entries are already unreachable through the store, so
   // nothing the user can still act on waits on the cleanup.
   private release(entries: StoredSnapshot[]): void {
+    this.releaseEntries(entries.map((e) => e.entry));
+  }
+
+  // The same cleanup for captures that never made it INTO the store, which the store
+  // can therefore never retire on their behalf.
+  private releaseEntries(entries: SnapshotEntry[]): void {
+    if (entries.length === 0) return;
     void (this.deps.releaseSnapshotsFn ?? ((e: SnapshotEntry[]) =>
-      releaseSnapshots(e, { abDir: this.deps.abDir })))(entries.map((e) => e.entry))
+      releaseSnapshots(e, { abDir: this.deps.abDir })))(entries)
       .catch((err: unknown) => log.warn("handler snapshot cleanup failed: %s", err));
   }
 
@@ -796,6 +812,12 @@ export class HandlerEngine {
     // (parallel tool calls open two at once), and dropping the sibling's row would
     // be the same silently-blocked session by another route.
     const resolved = opts?.resolvedPromptId;
+    // Same race onPromptRetracted handles, by the other route: a prompt still waiting
+    // on its judge call has no escalation row yet, so the filter below cannot reach it
+    // and claimQueuedPrompt would mint a `resolve_in_session` row for a prompt the user
+    // already answered — one nothing can ever retire, since the resolve that would name
+    // it has been and gone.
+    if (resolved !== undefined) this.dropQueuedPrompts(terminalId, resolved);
     const kept = s.escalations.filter((e) => e.kind === "resolve_in_session"
       && (resolved === undefined || (e.promptId !== undefined && e.promptId !== resolved)));
     const cleared = kept.length < s.escalations.length;
@@ -1104,7 +1126,8 @@ export class HandlerEngine {
 
         // The floor's ONE call site (spec §5). It inspects the text Handler is
         // about to inject, never the commands the agent goes on to run.
-        const floor = classifyDestructive(probe, this.deps.projectPath(evt.terminalId), reply);
+        const projectPath = this.deps.projectPath(evt.terminalId);
+        const floor = classifyDestructive(probe, projectPath, reply);
         // Checked before the partition, and never against it: §5.3 is liftable by
         // nothing, so no instruction can reach this branch.
         if (floor.hard.length > 0) {
@@ -1115,7 +1138,7 @@ export class HandlerEngine {
         // warning stream. It stays a separate list rather than being filtered away
         // because an authorized action is still snapshotted (§5.2) — the snapshot pass
         // reads `authorized` here, alongside `warn`.
-        const { warn, authorized } = partitionWarnings(s.auth, floor.warnings, probe);
+        const { warn, authorized } = partitionWarnings(s.auth, floor.warnings, probe, projectPath);
 
         const guardReason = this.guard.check(evt.terminalId, probe);
         if (guardReason) return this.escalate(evt.terminalId, s, decision, guardReason);
@@ -1133,10 +1156,14 @@ export class HandlerEngine {
           : [];
         // The snapshot pass awaits git and the filesystem; a concurrent disarm may
         // have dropped this session, and injecting into one the user stopped is the
-        // boundary this whole file is built around. Whatever was captured is left in
-        // the store unadvertised — a reply that was never sent has nothing to undo —
-        // and the next fresh arm on this slot reclaims it.
-        if (this.sessions.get(evt.terminalId) !== s) return;
+        // boundary this whole file is built around. A reply that was never sent has
+        // nothing to undo, so what was captured is released here rather than stored:
+        // it never reached the store, so no later retire can see it, and a backup ref
+        // left behind pins its stash commit against `git gc` for the life of the repo.
+        if (this.sessions.get(evt.terminalId) !== s) {
+          this.releaseEntries(snapshots.flatMap((o) => (o.status === "snapshotted" ? [o.entry] : [])));
+          return;
+        }
 
         this.deps.adapter.injectReply(evt.terminalId, written);
         this.guard.recordAutoReply(evt.terminalId, probe);
@@ -1499,7 +1526,7 @@ export class HandlerEngine {
       at: this.now(),
     };
     this.deps.sendAb(createMessage("handler:escalation", {
-      projectId: this.deps.projectId, terminalId, ...esc,
+      projectId: this.deps.projectId, terminalId, ...escalationWire(esc),
     }));
     s.escalations.push(esc);
     s.state = "needs_you";
@@ -1711,8 +1738,12 @@ export class HandlerEngine {
       pendingEscalations: s.escalations.length,
       armedAt: s.armedAt,
       goal: s.goal,
-      backlog: s.backlog,
-      escalations: s.escalations,
+      // Copied, never the live arrays: handler:status is a REPLAY_TYPE, so the bus
+      // holds this frame by reference until the next one — and escalate() pushes onto
+      // s.escalations in place, which rewrote a frame already published and left the
+      // cached replay's pendingEscalations disagreeing with its own escalation list.
+      backlog: [...s.backlog],
+      escalations: s.escalations.map(escalationWire),
       judgeTool: s.judgeTool,
       judgeModel: s.judgeModel,
       parkKind: s.parkKind,
