@@ -31,7 +31,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  OWNER: radha-ai-products
+  # Derived, never hardcoded: GHCR packages are org-scoped and do NOT follow a
+  # repo transfer, so a literal owner here goes stale the moment the repo moves
+  # and every push 403s against an org this token has no write on. GHCR requires
+  # a lowercase path — safe while the org login is already lowercase.
+  OWNER: ${{ github.repository_owner }}
 
 permissions:
   contents: read
@@ -122,6 +126,9 @@ jobs:
           # and expires when the job ends.
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # compose.app.yml has no GitHub context to derive the owner from, so it
+          # is passed down rather than duplicated as a second literal.
+          GHCR_OWNER: ${{ github.repository_owner }}
         with:
           # See the scp step above for the host/SSH_HOST-override rationale.
           host: ${{ secrets.SSH_HOST || format('app.{0}', env.DOMAIN) }}
@@ -130,7 +137,7 @@ jobs:
           username: azureuser
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           # DOMAIN is the job-level env above; deploy.sh reads it to build app.$DOMAIN.
-          envs: IMAGE_TAG,DOMAIN,GHCR_USER,GHCR_TOKEN
+          envs: IMAGE_TAG,DOMAIN,GHCR_USER,GHCR_TOKEN,GHCR_OWNER
           script: |
             set -e
             cd /srv/antgrid
@@ -142,4 +149,4 @@ jobs:
             trap 'rm -rf "$DOCKER_CONFIG"' EXIT
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
             chmod +x deploy.sh
-            IMAGE_TAG="$IMAGE_TAG" DOMAIN="$DOMAIN" ./deploy.sh
+            IMAGE_TAG="$IMAGE_TAG" DOMAIN="$DOMAIN" GHCR_OWNER="$GHCR_OWNER" ./deploy.sh

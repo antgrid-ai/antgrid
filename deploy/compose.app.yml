@@ -15,7 +15,10 @@
 
 services:
   web:
-    image: ghcr.io/radha-ai-products/antgrid-web:${IMAGE_TAG:-latest}
+    # Owner is passed down from the deploy workflow (GHCR packages are org-scoped
+    # and do not follow a repo transfer). The literal default keeps a manual
+    # `./deploy.sh` on the VM pulling from the right org instead of failing.
+    image: ghcr.io/${GHCR_OWNER:-antgrid-ai}/antgrid-web:${IMAGE_TAG:-latest}
     container_name: web-${COLOR:?set COLOR=blue|green}
     restart: unless-stopped
     env_file: .env
@@ -40,7 +43,7 @@ services:
       start_period: 20s
 
   relay:
-    image: ghcr.io/radha-ai-products/antgrid-relay:${IMAGE_TAG:-latest}
+    image: ghcr.io/${GHCR_OWNER:-antgrid-ai}/antgrid-relay:${IMAGE_TAG:-latest}
     container_name: relay-${COLOR:?set COLOR=blue|green}
     restart: unless-stopped
     env_file: .env
