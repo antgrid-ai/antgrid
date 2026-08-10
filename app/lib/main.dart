@@ -5,7 +5,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_svg/flutter_svg.dart';
 import 'package:http/http.dart' as http;
 import 'package:push/push.dart';
 
@@ -20,7 +19,6 @@ import 'design/ab_text_density.dart';
 import 'design/ab_theme.dart';
 import 'design/ab_tokens.dart';
 import 'design/theme_presets.dart';
-import 'design/widgets/ab_window_controls.dart';
 import 'launcher/host_teardown.dart';
 import 'project/limits.dart';
 import 'project/perf_recorder.dart';
@@ -58,8 +56,7 @@ import 'storage/recent_agents_store.dart';
 import 'storage/recent_ports_store.dart';
 import 'update/update_gate.dart';
 import 'util/ab_log.dart';
-import 'widgets/window_title_bar.dart';
-import 'window/window_capabilities.dart';
+import 'widgets/auth_splash.dart';
 import 'window/window_chrome.dart';
 
 /// Push is Android (FCM) and iOS (APNs) only — desktop has no transport.
@@ -473,45 +470,10 @@ class _AppHome extends ConsumerWidget {
     });
 
     final signedIn = ref.watch(signedInProvider);
-    if (signedIn == null) return const _AuthSplash();
+    if (signedIn == null) return const AuthSplash();
 
     if (isMobilePlatform && !signedIn) return const SignInScreen();
 
     return const AppShell();
-  }
-}
-
-/// Neutral splash shown while sign-in state is unknown (cold start before
-/// `currentUserProvider` resolves and no cached cookie was observed). Renders
-/// in the design-system theme so there's no flash to a contrasting palette.
-class _AuthSplash extends StatelessWidget {
-  const _AuthSplash();
-
-  @override
-  Widget build(BuildContext context) {
-    final splash = Center(
-      child: SvgPicture.asset(
-        'assets/logo/antgrid-wordmark.svg',
-        height: AbTokens.space16 * 4.5,
-        semanticsLabel: 'antgrid',
-      ),
-    );
-    return Scaffold(
-      body: appOwnsWindowChrome
-          // The OS bar is already hidden by the time the first frame lands, so
-          // even this pre-auth screen needs somewhere to drag from and a close
-          // button — resolving the session can stall on a slow network. Bare
-          // chrome only: the data-bearing contents watch project providers
-          // that have no meaning before sign-in resolves.
-          ? Column(
-              children: [
-                const WindowTitleBar(
-                  child: Row(children: [Spacer(), AbWindowControls()]),
-                ),
-                Expanded(child: splash),
-              ],
-            )
-          : splash,
-    );
   }
 }

@@ -19,6 +19,7 @@ import '../services/account_api.dart';
 import '../services/app_settings_service.dart';
 import '../widgets/color_swatch_button.dart';
 import '../widgets/delete_account_dialog.dart';
+import '../widgets/settings/help_about_section.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
 import 'design_gallery_screen.dart';
 import 'upgrade_screen.dart';
@@ -368,6 +369,14 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                         !settings.telemetryEnabled,
                       ),
                     ),
+                  ],
+                ),
+                const SizedBox(height: AbTokens.space12),
+                const _Section(
+                  title: 'HELP',
+                  body: [
+                    SizedBox(height: AbTokens.space8),
+                    HelpAboutSection(),
                   ],
                 ),
                 const SizedBox(height: AbTokens.space12),
