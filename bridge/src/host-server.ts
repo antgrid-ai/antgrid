@@ -545,7 +545,13 @@ export class HostServer {
 
   private sendProjectsAdvertisement(bus: MessageBus): void {
     bus.publish(
-      createMessage("agent:projects", { projects: this.buildProjectsAdvertisement() }),
+      createMessage("agent:projects", {
+        projects: this.buildProjectsAdvertisement(),
+        // Read live (never captured) — same rule as the remoteAccessEnabled()
+        // dep below: a mobile-access:set must be reflected by the very
+        // re-advertise it triggers.
+        remoteAccessEnabled: this.remoteAccessPolicy.isEnabled(),
+      }),
       "control",
     );
   }

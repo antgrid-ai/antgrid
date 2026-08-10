@@ -374,6 +374,14 @@ const AgentProjectsMessage = BaseMessage.extend({
       streamId: z.string().optional(),
     }),
   ),
+  // Machine-level: the remote-access switch's live state, stamped on every
+  // advert by current bridges (absent = older bridge). `false` is what lets a
+  // phone explain an empty catalog ("remote access is off on that machine")
+  // instead of rendering a neutral empty machine; `true` + empty projects
+  // disambiguates "online, no projects yet" from offline. Must stay listed
+  // here: this schema is what parseMessage keeps, so an undeclared field is
+  // silently stripped off any re-parsed frame.
+  remoteAccessEnabled: z.boolean().optional(),
 });
 
 /**

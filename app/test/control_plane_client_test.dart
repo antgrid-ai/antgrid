@@ -98,6 +98,79 @@ void main() {
     },
   );
 
+  group('machine-level remoteAccessEnabled', () {
+    test('false parses (switch off — empty projects with a reason)', () async {
+      final t = FakeAgentTransport();
+      final client = ControlPlaneClient(transport: t);
+      addTearDown(client.dispose);
+
+      t.emit('agent:projects', {
+        'projects': <Object>[],
+        'remoteAccessEnabled': false,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(client.currentState.projects, isEmpty);
+      expect(client.currentState.remoteAccessEnabled, isFalse);
+    });
+
+    test('true parses (online, genuinely no projects)', () async {
+      final t = FakeAgentTransport();
+      final client = ControlPlaneClient(transport: t);
+      addTearDown(client.dispose);
+
+      t.emit('agent:projects', {
+        'projects': <Object>[],
+        'remoteAccessEnabled': true,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(client.currentState.remoteAccessEnabled, isTrue);
+    });
+
+    test('absent key → null, and a keyless advert resets a stale flag', () async {
+      final t = FakeAgentTransport();
+      final client = ControlPlaneClient(transport: t);
+      addTearDown(client.dispose);
+
+      // Older bridge: no key at all → unknown, never assumed off.
+      t.emit('agent:projects', {'projects': <Object>[]});
+      await Future<void>.delayed(Duration.zero);
+      expect(client.currentState.remoteAccessEnabled, isNull);
+
+      // A new-bridge advert sets the flag…
+      t.emit('agent:projects', {
+        'projects': <Object>[],
+        'remoteAccessEnabled': false,
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(client.currentState.remoteAccessEnabled, isFalse);
+
+      // …and a subsequent keyless advert (bridge downgrade / mixed replay)
+      // clears it back to unknown rather than leaving the stale flag.
+      t.emit('agent:projects', {'projects': <Object>[]});
+      await Future<void>.delayed(Duration.zero);
+      expect(client.currentState.remoteAccessEnabled, isNull);
+    });
+
+    test('clearAdvert() resets the flag to unknown', () async {
+      final t = FakeAgentTransport();
+      final client = ControlPlaneClient(transport: t);
+      addTearDown(client.dispose);
+
+      t.emit('agent:projects', {
+        'projects': <Object>[],
+        'remoteAccessEnabled': true,
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(client.currentState.remoteAccessEnabled, isTrue);
+
+      // A dropped peer says nothing about its switch — back to neutral copy.
+      client.clearAdvert();
+      expect(client.currentState.remoteAccessEnabled, isNull);
+    });
+  });
+
   test('startProject sends a project:start with the projectId', () async {
     final t = FakeAgentTransport();
     final client = ControlPlaneClient(transport: t);

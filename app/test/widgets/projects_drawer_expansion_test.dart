@@ -20,6 +20,7 @@ import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/control_plane.dart';
 import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
+import 'package:antgrid/widgets/ab_status_helpers.dart';
 import 'package:antgrid/widgets/projects_drawer.dart';
 import 'package:antgrid/widgets/session_row.dart';
 
@@ -194,6 +195,46 @@ void main() {
 
     expect(find.text('Alpha'), findsOneWidget);
   });
+
+  testWidgets(
+    'expanded machine explains an advert with remoteAccessEnabled:false',
+    (tester) async {
+      // The bridge advertises [] while its remote-access switch is off, and the
+      // machine-level flag is what lets the subtree say WHY instead of the
+      // neutral "Offline — no projects advertised." wording. The copy is the
+      // NOT_ALLOWED verb refusal's, pinned via friendlyErrorCopy so the two
+      // surfaces can't drift.
+      await seedRemoteMachine();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            ...stores.overrides,
+            projectStatusProvider(
+              _machineUuid,
+            ).overrideWith((_) => Stream.value(const ProjectStatus.empty())),
+            currentUserProvider.overrideWith((_) async => null),
+            accountAgentsProvider.overrideWith((_) async => const []),
+            controlPlaneStateProvider(_machineUuid).overrideWith(
+              (_) => Stream.value(
+                const ControlPlaneState(
+                  projects: [],
+                  remoteAccessEnabled: false,
+                ),
+              ),
+            ),
+          ],
+          child: const MaterialApp(home: Scaffold(body: ProjectsDrawer())),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text(_machineName));
+      await tester.pumpAndSettle();
+
+      expect(find.text(friendlyErrorCopy('NOT_ALLOWED')!), findsOneWidget);
+      expect(find.text('Offline — no projects advertised.'), findsNothing);
+    },
+  );
 
   for (final layout in <({String name, Size size})>[
     (name: 'phone', size: const Size(390, 844)),

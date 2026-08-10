@@ -10,6 +10,7 @@ import '../../providers/control_plane.dart';
 import '../../providers/new_session_picker.dart';
 import '../../providers/now_ticker.dart';
 import '../../util/relative_time.dart';
+import '../ab_status_helpers.dart' show friendlyErrorCopy;
 import 'environment_menu.dart';
 import 'picker_sources.dart';
 
@@ -122,10 +123,19 @@ class ProjectPanel extends ConsumerWidget {
         PanelSectionHeader(source.label),
         if (cp.isLoading && rows.isEmpty)
           const PanelHint('Connecting…')
-        // An empty advert is the common OFFLINE case: a null/absent control-plane
-        // client yields an empty ControlPlaneState (not an error), so both an
-        // error and an empty advert read as "offline", not "no projects" —
-        // ported from the old rail's _OfflineMachineRow.
+        // The advert arrived and said the machine's remote-access switch is
+        // off — neither offline nor "no projects". Same copy as the
+        // NOT_ALLOWED verb refusal: one switch, one wording (the arm is a
+        // literal in ab_status_helpers.dart, so the `!` cannot fire).
+        else if (cp.value?.remoteAccessEnabled == false)
+          PanelHint(friendlyErrorCopy('NOT_ALLOWED')!)
+        else if (cp.value?.remoteAccessEnabled == true && rows.isEmpty)
+          const PanelHint('No projects on this machine yet')
+        // An empty FLAG-LESS advert is the common OFFLINE case: a null/absent
+        // control-plane client yields an empty ControlPlaneState (not an
+        // error), so an error and an empty advert with no remoteAccessEnabled
+        // (older bridge) both read as "offline", not "no projects" — ported
+        // from the old rail's _OfflineMachineRow.
         else if (cp.hasError || rows.isEmpty)
           const PanelHint('Machine offline')
         else

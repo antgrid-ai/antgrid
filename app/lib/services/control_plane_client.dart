@@ -15,6 +15,9 @@ export '../models/agent_work_status.dart' show AgentWorkStatus;
 /// Hand-mirrors the bridge `agent:projects` entry schema
 /// (`{ projectId, label?, path?, running, status?, runningSessions? }`) per the
 /// package convention that the Dart side mirrors the TS Zod schemas by hand.
+/// Beside the entries, the message carries a machine-level top-level
+/// `remoteAccessEnabled?` flag — that one lands on
+/// [ControlPlaneState.remoteAccessEnabled], not here.
 class AdvertisedProject {
   final String projectId;
   final String? label;
@@ -154,24 +157,38 @@ class ControlPlaneState {
   final List<AgentDescriptor> agents;
   final ControlPlaneError? lastError;
 
+  /// Machine-level remote-access switch off the last `agent:projects` advert.
+  /// Null = no advert yet or an older bridge that didn't say — render neutral
+  /// copy, never assume off. `false` + empty [projects] is "the switch is off";
+  /// `true` + empty is "online, genuinely no projects".
+  final bool? remoteAccessEnabled;
+
   const ControlPlaneState({
     this.projects = const [],
     this.tools = const [],
     this.agents = const [],
     this.lastError,
+    this.remoteAccessEnabled,
   });
 
+  /// Per repo convention, never pass `clearRemoteAccessEnabled: true` together
+  /// with a non-null [remoteAccessEnabled].
   ControlPlaneState copyWith({
     List<AdvertisedProject>? projects,
     List<AdvertisedTool>? tools,
     List<AgentDescriptor>? agents,
     ControlPlaneError? lastError,
     bool clearError = false,
+    bool? remoteAccessEnabled,
+    bool clearRemoteAccessEnabled = false,
   }) => ControlPlaneState(
     projects: projects ?? this.projects,
     tools: tools ?? this.tools,
     agents: agents ?? this.agents,
     lastError: clearError ? null : (lastError ?? this.lastError),
+    remoteAccessEnabled: clearRemoteAccessEnabled
+        ? null
+        : (remoteAccessEnabled ?? this.remoteAccessEnabled),
   );
 }
 
@@ -249,7 +266,18 @@ class ControlPlaneClient {
         }
       }
     }
-    _setState(_state.copyWith(projects: projects, clearError: true));
+    // Absent key (older bridge) CLEARS a stale flag from a previous new-bridge
+    // advert — exactly one of the two params is effective per advert, keeping
+    // the tri-state honest across a bridge downgrade or mixed replay.
+    final rae = json['remoteAccessEnabled'] as bool?;
+    _setState(
+      _state.copyWith(
+        projects: projects,
+        clearError: true,
+        remoteAccessEnabled: rae,
+        clearRemoteAccessEnabled: rae == null,
+      ),
+    );
   }
 
   void _handleTools(Map<String, dynamic> json) {

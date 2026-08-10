@@ -32,6 +32,7 @@ import '../providers/providers.dart';
 import '../providers/sessions.dart';
 import '../services/control_plane_client.dart';
 import '../utils/platform_utils.dart';
+import 'ab_status_helpers.dart' show friendlyErrorCopy;
 import 'account_footer.dart';
 import 'drawer_entry_row.dart' show DrawerEntryRow, MachineDrawerHeaderRow;
 import 'open_folder_button.dart';
@@ -459,8 +460,10 @@ Widget _machineHint(BuildContext context, String text) {
 /// machine's control-plane socket — kept alive while the row stays open by the
 /// expanded-machine union in [controlPlaneAliveTargetsProvider]; collapsing the
 /// row drops it from that set and the reaper closes the socket. An empty/errored
-/// advert reads as "offline" (an absent control-plane client yields an empty
-/// [ControlPlaneState], not an error), matching the New Session picker.
+/// FLAG-LESS advert reads as "offline" (an absent control-plane client yields an
+/// empty [ControlPlaneState], not an error), matching the New Session picker; an
+/// advert carrying the machine-level `remoteAccessEnabled` flag says WHY it is
+/// empty (switch off vs genuinely no projects) and is rendered as such.
 class _MachineProjects extends ConsumerWidget {
   final String machineUuid;
   const _MachineProjects({required this.machineUuid});
@@ -482,7 +485,17 @@ class _MachineProjects extends ConsumerWidget {
       data: (state) {
         final projects = state.projects;
         if (projects.isEmpty) {
-          return _machineHint(context, 'Offline — no projects advertised.');
+          // The advert said WHY it is empty: `false` is the machine's
+          // remote-access switch, `true` a genuinely empty catalog; only a
+          // flag-less advert (older bridge / nothing received) stays the
+          // neutral offline copy. The switch copy is the NOT_ALLOWED verb
+          // refusal's — one switch, one wording (the arm is a literal in
+          // ab_status_helpers.dart, so the `!` cannot fire).
+          return _machineHint(context, switch (state.remoteAccessEnabled) {
+            false => friendlyErrorCopy('NOT_ALLOWED')!,
+            true => 'No projects on this machine yet.',
+            null => 'Offline — no projects advertised.',
+          });
         }
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,

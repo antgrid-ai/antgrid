@@ -9,6 +9,7 @@ import 'package:antgrid/design/widgets/ab_chip.dart';
 import 'package:antgrid/providers/control_plane.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/services/control_plane_client.dart';
+import 'package:antgrid/widgets/ab_status_helpers.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
 import 'package:antgrid/widgets/new_session/project_menu.dart';
 
@@ -180,6 +181,65 @@ void main() {
 
       expect(find.text('Machine offline'), findsOneWidget);
       expect(find.text('No projects advertised'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'remote panel explains remoteAccessEnabled:false instead of "offline"',
+    (tester) async {
+      // The advert arrived and said the switch is off — same wording as the
+      // NOT_ALLOWED verb refusal, pinned via friendlyErrorCopy so the two
+      // surfaces can't drift apart.
+      await tester.pumpWidget(
+        _host(
+          sources: const [_remoteSource],
+          extraOverrides: [
+            controlPlaneStateProvider('u1').overrideWith(
+              (ref) => Stream.value(
+                const ControlPlaneState(
+                  projects: [],
+                  remoteAccessEnabled: false,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(ProjectChip));
+      await tester.pumpAndSettle();
+
+      expect(find.text(friendlyErrorCopy('NOT_ALLOWED')!), findsOneWidget);
+      expect(find.text('Machine offline'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'remote panel reads remoteAccessEnabled:true + empty as "no projects yet"',
+    (tester) async {
+      await tester.pumpWidget(
+        _host(
+          sources: const [_remoteSource],
+          extraOverrides: [
+            controlPlaneStateProvider('u1').overrideWith(
+              (ref) => Stream.value(
+                const ControlPlaneState(
+                  projects: [],
+                  remoteAccessEnabled: true,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(ProjectChip));
+      await tester.pumpAndSettle();
+
+      expect(find.text('No projects on this machine yet'), findsOneWidget);
+      expect(find.text('Machine offline'), findsNothing);
     },
   );
 

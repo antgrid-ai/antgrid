@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { HostServer } from "../src/host-server";
 import { computeProjectId } from "../src/project-id";
 import { MessageBus } from "../src/message-bus";
-import type { AbMessage } from "../src/protocol";
+import { createMessage, type AbMessage } from "../src/protocol";
 
 let host: HostServer | null = null;
 const folders: string[] = [];
@@ -144,10 +144,13 @@ test("mobile-access:set re-advertises to the connected control-plane phone", asy
   const seen: AbMessage[] = [];
   bus.subscribe({ deliver: (m) => seen.push(m) });
 
-  // With the machine switch off, a re-advertise yields an empty project list.
+  // With the machine switch off, a re-advertise yields an empty project list,
+  // and the machine-level flag says WHY — false, not merely absent (a fresh
+  // machine defaults off).
   host.readvertiseForTest(bus, "pk1");
   const first = seen.filter((m) => m.type === "agent:projects").at(-1) as any;
   expect(first?.projects).toEqual([]);
+  expect(first?.remoteAccessEnabled).toBe(false);
 
   // The desktop turns mobile access on. handleRemoteAccessVerb re-advertises
   // itself, so the connected phone must see projA WITHOUT reconnecting.
@@ -155,4 +158,37 @@ test("mobile-access:set re-advertises to the connected control-plane phone", asy
 
   const last = seen.filter((m) => m.type === "agent:projects").at(-1) as any;
   expect(last.projects.map((p: any) => p.projectId)).toEqual([projA]);
+  expect(last.remoteAccessEnabled).toBe(true);
+
+  // Off again: the same advert that empties the catalog flips the flag, so the
+  // phone can render "remote access is off" instead of a neutral empty machine.
+  await setMobileAccess(host, false);
+
+  const off = seen.filter((m) => m.type === "agent:projects").at(-1) as any;
+  expect(off.projects).toEqual([]);
+  expect(off.remoteAccessEnabled).toBe(false);
+});
+
+test("state.snapshot recompute stamps remoteAccessEnabled on the fresh advert", async () => {
+  host = new HostServer({});
+  await openTemp(host);
+  await setMobileAccess(host, true);
+
+  const bus = new MessageBus();
+  const seen: AbMessage[] = [];
+  bus.subscribe({ deliver: (m) => seen.push(m) });
+
+  // Welcome-replay path: the snapshot RPC re-publishes agent:projects before
+  // answering, so the replayed frame must carry the flag too — a phone whose
+  // only advert comes from replay would otherwise never learn the switch state.
+  host.dispatchControlPlaneInbound(
+    createMessage("request", { requestId: "r1", method: "state.snapshot", params: { types: ["*"] } }) as any,
+    "control",
+    bus,
+  );
+
+  const advert = seen.filter((m) => m.type === "agent:projects").at(-1) as any;
+  expect(advert).toBeDefined();
+  expect(advert.remoteAccessEnabled).toBe(true);
+  expect(advert.projects.length).toBe(1);
 });
