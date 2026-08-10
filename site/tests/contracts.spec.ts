@@ -9,9 +9,9 @@ import { test, expect } from "@playwright/test";
 // Nothing here may assert marketing wording. Assert targets, counts and states only.
 
 const DOWNLOADS = {
-  macos: "https://github.com/Radha-AI-Products/antgrid-releases/releases/latest/download/antgrid-macos.dmg",
+  macos: "https://github.com/antgrid-ai/antgrid-releases/releases/latest/download/antgrid-macos.dmg",
   windows: "https://get.microsoft.com/installer/download/9N0P7ZRL4D9W?referrer=appbadge&cid=site",
-  linux: "https://github.com/Radha-AI-Products/antgrid-releases/releases/latest/download/antgrid-linux.AppImage",
+  linux: "https://github.com/antgrid-ai/antgrid-releases/releases/latest/download/antgrid-linux.AppImage",
 };
 
 test("desktop downloads point at the published release artifacts", async ({ page }) => {

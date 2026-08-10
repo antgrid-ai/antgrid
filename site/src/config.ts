@@ -4,7 +4,7 @@ export const APP_URL = import.meta.env.PUBLIC_APP_URL ?? "https://app.antgrid.ai
 // Public releases repo. `releases/latest/download/<asset>` redirects to the
 // newest stable release's asset of that exact filename, so these URLs never
 // change across versions — cutting a release never requires a site deploy.
-export const RELEASES_URL = "https://github.com/Radha-AI-Products/antgrid-releases";
+export const RELEASES_URL = "https://github.com/antgrid-ai/antgrid-releases";
 
 export const links = {
   signIn: `${APP_URL}/login`,

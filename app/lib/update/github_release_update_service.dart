@@ -52,13 +52,13 @@ class GithubReleaseUpdateService {
   /// `releases/latest` excludes prereleases and drafts, matching the build
   /// workflow's rule that a prerelease tag never moves the stable channel.
   static const String latestReleaseUrl =
-      'https://api.github.com/repos/Radha-AI-Products/antgrid-releases/releases/latest';
+      'https://api.github.com/repos/antgrid-ai/antgrid-releases/releases/latest';
 
   /// Human-facing release page. Linux's update row opens this in the browser
   /// rather than direct-downloading the AppImage: replacing an AppImage is a
   /// manual step, and the page carries the per-asset install notes.
   static const String latestDownloadPageUrl =
-      'https://github.com/Radha-AI-Products/antgrid-releases/releases/latest';
+      'https://github.com/antgrid-ai/antgrid-releases/releases/latest';
 
   Future<bool> isUpdateAvailable() async {
     final client = _injected ?? http.Client();

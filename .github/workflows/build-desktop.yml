@@ -3,7 +3,7 @@ name: Build — desktop (macOS / Windows / Linux)
 # Desktop builds for macOS + Windows + Linux. Two entry points:
 #   - Push a v* tag        -> builds all platforms (release). macOS + Linux are
 #                             published as a GitHub Release on the PUBLIC repo
-#                             Radha-AI-Products/antgrid-releases; Windows ships to
+#                             antgrid-ai/antgrid-releases; Windows ships to
 #                             the Microsoft Store (MSIX) instead of a direct
 #                             download. The site links releases/latest/download/
 #                             <asset> — the mac/linux asset filenames
@@ -445,7 +445,7 @@ jobs:
           # as unverifiable (nothing to compare); any OTHER fetch failure or
           # an unparseable appcast FAILS the build — treating it like the 404
           # case would silently disable this guard exactly when it matters.
-          APPCAST_URL="https://github.com/Radha-AI-Products/antgrid-releases/releases/latest/download/appcast.xml"
+          APPCAST_URL="https://github.com/antgrid-ai/antgrid-releases/releases/latest/download/appcast.xml"
           HTTP_CODE="$(curl -sSL --retry 3 -o prev-appcast.xml -w '%{http_code}' "$APPCAST_URL")" || HTTP_CODE=000
           if [ "$HTTP_CODE" = "200" ]; then
             # Bind both reads to the SAME first <item> via xmllint (already a
@@ -504,8 +504,8 @@ jobs:
           <sparkle:version>${BUILD}</sparkle:version>
           <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
           <sparkle:minimumSystemVersion>${MIN_OS}</sparkle:minimumSystemVersion>
-          <sparkle:releaseNotesLink>https://github.com/Radha-AI-Products/antgrid-releases/releases/tag/${TAG}</sparkle:releaseNotesLink>
-          <enclosure url="https://github.com/Radha-AI-Products/antgrid-releases/releases/download/${TAG}/antgrid-macos.dmg" ${ENCLOSURE_ATTRS} type="application/octet-stream"/>
+          <sparkle:releaseNotesLink>https://github.com/antgrid-ai/antgrid-releases/releases/tag/${TAG}</sparkle:releaseNotesLink>
+          <enclosure url="https://github.com/antgrid-ai/antgrid-releases/releases/download/${TAG}/antgrid-macos.dmg" ${ENCLOSURE_ATTRS} type="application/octet-stream"/>
           </item>
           </channel>
           </rss>
@@ -820,7 +820,7 @@ jobs:
           # delta-updatable when one does. The zsync asset name is as
           # load-bearing as the AppImage's own: installed apps resolve it by
           # exact match against releases/latest.
-          UPDINFO="gh-releases-zsync|Radha-AI-Products|antgrid-releases|latest|antgrid-linux.AppImage.zsync"
+          UPDINFO="gh-releases-zsync|antgrid-ai|antgrid-releases|latest|antgrid-linux.AppImage.zsync"
           ARCH=x86_64 "$TOOL" --appimage-extract-and-run \
             -u "$UPDINFO" "$APPDIR" antgrid-linux.AppImage
           # appimagetool silently skips the .zsync when zsyncmake is missing —
@@ -879,7 +879,7 @@ jobs:
           # target rejecting the request) as 404 would ship the fleet-wide
           # feed breakage this guard exists to prevent.
           if [ ! -f appcast.xml ] && [ -z "$prerelease" ]; then
-            APPCAST_URL="https://github.com/Radha-AI-Products/antgrid-releases/releases/latest/download/appcast.xml"
+            APPCAST_URL="https://github.com/antgrid-ai/antgrid-releases/releases/latest/download/appcast.xml"
             HTTP_CODE="$(curl -sSL --retry 3 -o /dev/null -w '%{http_code}' "$APPCAST_URL")" || HTTP_CODE=000
             if [ "$HTTP_CODE" = "200" ]; then
               echo "::error::installed apps already poll an appcast, but this release has none (unsigned build?) — publishing would break the update feed."
@@ -892,7 +892,7 @@ jobs:
           assets="antgrid-macos.dmg antgrid-linux.AppImage antgrid-linux.AppImage.zsync"
           [ -f appcast.xml ] && assets="$assets appcast.xml"
           gh release create "$TAG" \
-            --repo Radha-AI-Products/antgrid-releases \
+            --repo antgrid-ai/antgrid-releases \
             --title "Antgrid $TAG" \
             --notes "Desktop builds for Antgrid $TAG.
 
