@@ -12,8 +12,10 @@ import '../../providers/projects.dart';
 import '../../providers/recent_sessions.dart';
 import '../open_folder_button.dart';
 import '../recent_sessions/recent_sessions_tab.dart';
+import 'first_run_checklist.dart';
 import 'new_session_composer.dart';
 import 'picker_sources.dart';
+import 'remote_access_nudge_banner.dart';
 
 /// Canvas for the New Session page: recent sessions fill the space above a
 /// bottom-anchored composer (chip row + prompt input). The composer is the
@@ -58,6 +60,8 @@ class NewSessionContent extends ConsumerWidget {
                     ),
                     child: _TopBar(onOpenDrawer: onOpenDrawer),
                   ),
+                  const FirstRunChecklistCard(),
+                  const RemoteAccessNudgeBanner(),
                   // Recents fill the canvas. RefreshIndicator keeps the old
                   // pull-to-refresh contract (inventory + viewed machine advert).
                   Expanded(

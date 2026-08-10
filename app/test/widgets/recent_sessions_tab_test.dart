@@ -5,11 +5,16 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/models/recent_session_row.dart';
 import 'package:antgrid/models/session_entry.dart';
+import 'package:antgrid/providers/account_agents.dart';
+import 'package:antgrid/providers/first_run.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/services/control_plane_client.dart';
+import 'package:antgrid/storage/first_run_store.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
 import 'package:antgrid/widgets/recent_sessions/recent_sessions_tab.dart';
+
+import '../helpers/prefs_test_mock.dart';
 
 Widget _wrap(Widget child) {
   return ProviderScope(
@@ -277,23 +282,27 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
-  testWidgets('mobile with no machines shows the connect guide', (
-    tester,
-  ) async {
+  testWidgets('mobile with the checklist not yet done shows it in place of '
+      'the empty state', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    useInMemoryPrefs();
+    final firstRunStore = await FirstRunStore.open();
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
           recentSessionsProvider.overrideWithValue(const []),
-          // No machine sources at all → pickerMachineUuidsProvider is empty
-          // without touching the projects/recents/inventory providers.
+          // No machine sources at all, without touching the
+          // projects/recents/inventory providers.
           pickerSourcesProvider.overrideWithValue(const <PickerSource>[]),
+          firstRunStoreProvider.overrideWithValue(firstRunStore),
+          // Short-circuit the network-backed inventory: no machines yet.
+          accountAgentsProvider.overrideWith((_) async => const []),
         ],
         child: _wrap(const RecentSessionsTab()),
       ),
     );
     await tester.pump();
-    expect(find.text('No machines yet'), findsOneWidget);
+    expect(find.text('Connect a machine'), findsOneWidget);
     expect(
       find.textContaining('Turn on Remote'),
       findsOneWidget,

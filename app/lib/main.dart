@@ -32,6 +32,7 @@ import 'providers/auth.dart';
 import 'providers/cached_sessions.dart';
 import 'providers/collapsed_drawer.dart';
 import 'providers/drawer_order.dart';
+import 'providers/first_run.dart';
 import 'providers/host_status.dart';
 import 'providers/local_host_warmup.dart';
 import 'providers/post_signin_provisioning.dart';
@@ -51,6 +52,7 @@ import 'services/push_background_handler.dart';
 import 'storage/cached_sessions_store.dart';
 import 'storage/drawer_collapsed_store.dart';
 import 'storage/drawer_order_store.dart';
+import 'storage/first_run_store.dart';
 import 'storage/project_store.dart';
 import 'storage/recent_agents_store.dart';
 import 'storage/recent_ports_store.dart';
@@ -137,6 +139,7 @@ Future<void> main() async {
     drawerOrderStore,
     drawerCollapsedStore,
     cachedSessionsStore,
+    firstRunStore,
     prefs,
   ) = await (
     ProjectStore.open(),
@@ -145,6 +148,7 @@ Future<void> main() async {
     DrawerOrderStore.open(),
     DrawerCollapsedStore.open(),
     CachedSessionsStore.open(),
+    FirstRunStore.open(),
     openAppSettingsPrefs(),
   ).wait;
   final initialAppSettings = AppSettings.fromPrefs(prefs);
@@ -173,6 +177,7 @@ Future<void> main() async {
       drawerOrderStoreProvider.overrideWithValue(drawerOrderStore),
       drawerCollapsedStoreProvider.overrideWithValue(drawerCollapsedStore),
       cachedSessionsStoreProvider.overrideWithValue(cachedSessionsStore),
+      firstRunStoreProvider.overrideWithValue(firstRunStore),
       appSettingsServiceProvider.overrideWith(
         () => AppSettingsService(prefs, initialAppSettings),
       ),

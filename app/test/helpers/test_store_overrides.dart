@@ -13,6 +13,7 @@ import 'package:flutter_riverpod/misc.dart';
 import 'package:antgrid/providers/cached_sessions.dart';
 import 'package:antgrid/providers/collapsed_drawer.dart';
 import 'package:antgrid/providers/drawer_order.dart';
+import 'package:antgrid/providers/first_run.dart';
 import 'package:antgrid/providers/projects.dart';
 import 'package:antgrid/providers/recent_agents.dart';
 import 'package:antgrid/providers/recent_ports.dart';
@@ -23,6 +24,7 @@ import 'package:antgrid/services/app_settings_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/storage/drawer_collapsed_store.dart';
 import 'package:antgrid/storage/drawer_order_store.dart';
+import 'package:antgrid/storage/first_run_store.dart';
 import 'package:antgrid/storage/project_store.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid/storage/recent_ports_store.dart';
@@ -74,6 +76,7 @@ Future<TestStoreOverrides> buildTestStoreOverrides() async {
     drawerCollapsedStore,
     cachedSessionsStore,
     recentPortsStore,
+    firstRunStore,
     prefs,
   ) = await (
     ProjectStore.open(),
@@ -82,6 +85,7 @@ Future<TestStoreOverrides> buildTestStoreOverrides() async {
     DrawerCollapsedStore.open(),
     CachedSessionsStore.open(),
     RecentPortsStore.open(),
+    FirstRunStore.open(),
     openAppSettingsPrefs(),
   ).wait;
   // Deterministic, NOT eagerly created: ProjectStatusCache.testInstance only
@@ -103,6 +107,7 @@ Future<TestStoreOverrides> buildTestStoreOverrides() async {
       drawerCollapsedStoreProvider.overrideWithValue(drawerCollapsedStore),
       cachedSessionsStoreProvider.overrideWithValue(cachedSessionsStore),
       recentPortsStoreProvider.overrideWithValue(recentPortsStore),
+      firstRunStoreProvider.overrideWithValue(firstRunStore),
       projectStatusCacheProvider.overrideWithValue(
         ProjectStatusCache.testInstance(root: statusCacheRoot),
       ),

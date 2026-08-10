@@ -394,6 +394,10 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
         ref
             .read(remoteSessionStatusProvider.notifier)
             .setMachineSessionStatuses(uuid, const {});
+        // The advert-count map must stay honest for a disconnected machine —
+        // the first-run checklist's persisted latch keeps its step CHECKED,
+        // but any live consumer must see this machine advertising nothing.
+        ref.read(machineAdvertisedProjectsProvider.notifier).clear(uuid);
         ref.read(cachedSessionsStoreProvider).clearStatusesForMachine('$uuid.');
         // Clear stale advert-delta tracking so a reconnect triggers a fresh
         // re-peek regardless of whether the new advert matches the pre-disconnect
@@ -436,6 +440,11 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
     ref
         .read(remoteProjectStatusProvider.notifier)
         .setMachineStatuses(uuid, statuses);
+    // Advertised-project count for the mobile first-run checklist's "Remote is
+    // on" proxy — same single-writer discipline as the status maps above.
+    ref
+        .read(machineAdvertisedProjectsProvider.notifier)
+        .setCount(uuid, state.projects.length);
     // Same fold for the per-session map the session rows dot themselves from.
     // Absent (older bridge / cold project) stays absent — that's what tells the
     // rows to fall back to the project status above.

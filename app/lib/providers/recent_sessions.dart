@@ -211,6 +211,42 @@ bool _sameStatuses(
   Map<String, AgentWorkStatus> b,
 ) => const MapEquality<String, AgentWorkStatus>().equals(a, b);
 
+/// Count of projects each connected machine currently advertises, keyed by
+/// bare machineUuid. >0 is the app-side proxy for "that machine's remote
+/// access is on" (a bridge with remote off advertises nothing). Written
+/// imperatively by the app_shell control-plane reaper — the SAME single-writer
+/// pattern as [remoteProjectStatusProvider], and for the same reason (the
+/// per-machine `ref.watch` fan-in crash described above). Not derivable from
+/// [remoteProjectLabelsProvider]: that map only records projects with a
+/// non-empty label, and labels deliberately persist across disconnects.
+///
+/// TODO(first-run): when ControlPlaneState grows the explicit
+/// remote-access-enabled advert flag (in-flight on another chain), write that
+/// flag here from _onControlPlaneState instead of the project count — this
+/// notifier is the single seam to swap.
+final machineAdvertisedProjectsProvider =
+    NotifierProvider<MachineAdvertisedProjectsController, Map<String, int>>(
+      MachineAdvertisedProjectsController.new,
+    );
+
+class MachineAdvertisedProjectsController extends Notifier<Map<String, int>> {
+  @override
+  Map<String, int> build() => const {};
+
+  /// No-op when unchanged, so an advert re-delivery triggers no rebuild.
+  void setCount(String machineUuid, int count) {
+    if (state[machineUuid] == count) return;
+    state = {...state, machineUuid: count};
+  }
+
+  /// Drop [machineUuid] entirely — a disconnected machine must not keep
+  /// reading as "remote access on" (persisted checklist latches are separate).
+  void clear(String machineUuid) {
+    if (!state.containsKey(machineUuid)) return;
+    state = {...state}..remove(machineUuid);
+  }
+}
+
 /// Flat, recency-sorted list of every cached session across all projects and
 /// devices. Rebuilds when the cache changes (via [cacheChangesProvider]) or any
 /// metadata source (projects / recent agents / inventory / local uuid /

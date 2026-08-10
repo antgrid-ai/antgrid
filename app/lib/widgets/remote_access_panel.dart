@@ -54,6 +54,30 @@ class RemoteAccessPanel extends ConsumerWidget {
   }
 }
 
+/// The one confirm-then-enable flow for machine-wide remote access. Reused by
+/// the panel switch below and the New Session remote-access nudge — the wording
+/// of this grant must never fork.
+///
+/// Resolves the notifier BEFORE the dialog: the caller's element can die while
+/// the dialog is up (popup panel dismissed, canvas rebuild), and a WidgetRef
+/// read after an await would then throw.
+Future<void> confirmAndEnableRemoteAccess(
+  BuildContext context,
+  WidgetRef ref,
+) async {
+  final notifier = ref.read(remoteAccessPolicyProvider.notifier);
+  final ok = await AbConfirmDialog.show(
+    context: context,
+    title: 'Turn on remote access?',
+    body:
+        'Every device signed in to your account will be able to open and '
+        'drive every project on this machine, until you turn it off.',
+    confirmLabel: 'Turn on',
+  );
+  if (!ok) return;
+  await notifier.setEnabled(true);
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // The switch
 // ──────────────────────────────────────────────────────────────────────────────
@@ -62,21 +86,11 @@ class _AccessSection extends ConsumerWidget {
   const _AccessSection();
 
   Future<void> _set(BuildContext context, WidgetRef ref, bool next) async {
-    // Resolved before the dialog: a WidgetRef read after an await can land on a
-    // disposed element, and this panel is a popup route the confirm can outlive.
-    final notifier = ref.read(remoteAccessPolicyProvider.notifier);
     if (next) {
-      final ok = await AbConfirmDialog.show(
-        context: context,
-        title: 'Turn on remote access?',
-        body:
-            'Every device signed in to your account will be able to open and '
-            'drive every project on this machine, until you turn it off.',
-        confirmLabel: 'Turn on',
-      );
-      if (!ok) return;
+      await confirmAndEnableRemoteAccess(context, ref);
+      return;
     }
-    await notifier.setEnabled(next);
+    await ref.read(remoteAccessPolicyProvider.notifier).setEnabled(false);
   }
 
   @override
