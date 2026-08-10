@@ -885,6 +885,120 @@ void main() {
   );
 
   test(
+    'a snapshot REPLACES live turns it renumbers, rather than doubling them',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = AgentSessionService.fromSession(session);
+
+      // claude's disk replay numbers turns `resumed:N`; the same turn went out
+      // live as `turn-N`. Nothing dedups those two ids, so an appending reducer
+      // renders the whole conversation twice.
+      Map<String, dynamic> turnFrames(String turnId) => {
+        'sessionId': 'p',
+        'frames': [
+          {'type': 'agent:turn-start', 'sessionId': 'p', 'turnId': turnId},
+          {
+            'type': 'agent:item-added',
+            'sessionId': 'p',
+            'turnId': turnId,
+            'itemId': 'i1',
+            'item': {
+              'itemId': 'i1',
+              'kind': 'message',
+              'role': 'user',
+              'text': 'hello',
+            },
+          },
+          {
+            'type': 'agent:turn-end',
+            'sessionId': 'p',
+            'turnId': turnId,
+            'stopReason': 'end_turn',
+          },
+        ],
+      };
+
+      t.requestHandler = (method, params) => {'frames': <dynamic>[]};
+      await svc.hydrateIfNeeded('p');
+
+      // The live turn, then the retry the empty snapshot armed — which now
+      // answers with the same turn under the replay's id space.
+      for (final f in turnFrames('turn-0')['frames'] as List) {
+        t.emit(f['type'] as String, f as Map<String, dynamic>);
+      }
+      t.requestHandler = (method, params) => turnFrames('resumed:0');
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+
+      final turns = svc.stateFor('p').turns;
+      expect(turns.length, 1);
+      expect(turns.single.turnId, 'resumed:0');
+    },
+  );
+
+  test(
+    'an empty snapshot leaves a live transcript alone, rather than wiping it',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await newSession(t);
+      final svc = AgentSessionService.fromSession(session);
+
+      t.emit('agent:turn-start', {'sessionId': 'p', 'turnId': 'turn-0'});
+      t.emit('agent:turn-end', {
+        'sessionId': 'p',
+        'turnId': 'turn-0',
+        'stopReason': 'end_turn',
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      // A driver that can't read its own store reports an empty snapshot.
+      t.requestHandler = (method, params) => {'frames': <dynamic>[]};
+      await svc.hydrateIfNeeded('p');
+
+      expect(svc.stateFor('p').turns.length, 1);
+    },
+  );
+
+  test('a snapshot keeps the open turn it cannot carry', () async {
+    final t = FakeAgentTransport();
+    final session = await newSession(t);
+    final svc = AgentSessionService.fromSession(session);
+
+    // The in-flight turn has no turn-end yet, so no snapshot reports it — it
+    // must survive the replace, and stay last.
+    t.requestHandler = (method, params) => {
+      'frames': [
+        {
+          'id': '0',
+          'timestamp': 1,
+          'type': 'agent:turn-start',
+          'sessionId': 'p',
+          'turnId': 'resumed:0',
+        },
+        {
+          'id': '1',
+          'timestamp': 1,
+          'type': 'agent:turn-end',
+          'sessionId': 'p',
+          'turnId': 'resumed:0',
+          'stopReason': 'end_turn',
+        },
+      ],
+    };
+
+    t.emit('agent:turn-start', {'sessionId': 'p', 'turnId': 'live-1'});
+    await Future<void>.delayed(Duration.zero);
+
+    await svc.hydrateIfNeeded('p');
+
+    final turns = svc.stateFor('p').turns;
+    expect(turns.map((t) => t.turnId), ['resumed:0', 'live-1']);
+    expect(svc.stateFor('p').openTurn?.turnId, 'live-1');
+  });
+
+
+  test(
     'cancel names the turn the UI shows as running, so the bridge can close it',
     () async {
       final t = FakeAgentTransport();

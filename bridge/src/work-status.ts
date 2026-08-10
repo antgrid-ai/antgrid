@@ -192,13 +192,24 @@ function clearNotifications(
   return next;
 }
 
+/** Drop [id]'s open requests — [requestId] to drop only that one, absent for all
+ *  of them. Returns the SAME map when there was nothing to drop, including for a
+ *  [requestId] the session never had open. */
 function clearRequests(
   map: ReadonlyMap<string, ReadonlySet<string>>,
   id: string,
+  requestId?: string,
 ): ReadonlyMap<string, ReadonlySet<string>> {
-  if (!map.has(id)) return map;
+  const open = map.get(id);
+  if (!open || (requestId !== undefined && !open.has(requestId))) return map;
   const next = new Map(map);
-  next.delete(id);
+  if (requestId === undefined || open.size === 1) {
+    next.delete(id);
+  } else {
+    const rest = new Set(open);
+    rest.delete(requestId);
+    next.set(id, rest);
+  }
   return next;
 }
 
@@ -230,10 +241,18 @@ function sameIds(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
  *  moment the session appears and discards it otherwise, so the hold lasts
  *  exactly the length of that race.
  *
+ *  [answered] narrows the block-clear to one request id, for the caller that
+ *  knows which one the user replied to ({@link answerRequest}). Absent — the
+ *  hook path, which carries no request id — clears the session's whole set.
+ *
  *  Pure; returns the SAME object when nothing changes — including for an
  *  UNATTRIBUTED start with nothing running, which has no session to be held
  *  against and would otherwise light up an unrelated session that starts later. */
-export function turnStart(prev: WorkStatusState, sessionId?: string): WorkStatusState {
+export function turnStart(
+  prev: WorkStatusState,
+  sessionId?: string,
+  answered?: string,
+): WorkStatusState {
   if (sessionId !== undefined && !prev.runningSessions.has(sessionId)) {
     // The held start still clears this session's block: `openRequest` does not
     // gate on liveness, so a request CAN be keyed to a session no list has shown
@@ -244,7 +263,7 @@ export function turnStart(prev: WorkStatusState, sessionId?: string): WorkStatus
     // (foldNotification falls back to the project-wide key), so clearing
     // notifications here could only wipe an unattributed one on the word of a
     // session that may never exist.
-    const pendingRequests = clearRequests(prev.pendingRequests, sessionId);
+    const pendingRequests = clearRequests(prev.pendingRequests, sessionId, answered);
     if (prev.pendingTurns.has(sessionId) && pendingRequests === prev.pendingRequests) return prev;
     return build({
       ...inputsOf(prev),
@@ -255,7 +274,7 @@ export function turnStart(prev: WorkStatusState, sessionId?: string): WorkStatus
   if (prev.runningSessions.size === 0) return prev;
   const id = sessionId ?? UNATTRIBUTED_TURN;
   const notifications = clearNotifications(prev.notifications, id);
-  const pendingRequests = clearRequests(prev.pendingRequests, id);
+  const pendingRequests = clearRequests(prev.pendingRequests, id, answered);
   const open = prev.activeTurns.has(id);
   if (notifications === prev.notifications && pendingRequests === prev.pendingRequests && open) {
     return prev;
@@ -268,19 +287,35 @@ export function turnStart(prev: WorkStatusState, sessionId?: string): WorkStatus
   });
 }
 
-/** The user answered the permission/question [sessionId] was blocked on (a chat
- *  `agent:permission-resolve` / `agent:question-resolve`).
+/** The user answered the permission/question [requestId] that [sessionId] was
+ *  blocked on (a chat `agent:permission-resolve` / `agent:question-resolve`).
  *
  *  {@link turnStart}, but ONLY when there was actually something to answer. A
  *  resolve that races a retraction — or arrives for a request the turn already
  *  took down — would otherwise open a turn that no turn-end will ever close,
- *  wedging the session on "working" until it stops. Pure; SAME object when
- *  nothing was pending. */
-export function answerRequest(prev: WorkStatusState, sessionId: string): WorkStatusState {
+ *  wedging the session on "working" until it stops.
+ *
+ *  Scoped to [requestId], because an agent can be stopped on several at once
+ *  (parallel tool calls ask permission per call) and one answer unblocks one of
+ *  them. Taking the whole set dropped the session from "attention" to "working"
+ *  while it was still waiting, and nothing later corrected it: the request left
+ *  open is what holds the turn open, so the turn-end that would have refreshed
+ *  the dot cannot arrive until the block the dot is denying is gone. Absent —
+ *  every request on the session, the reading {@link clearRequests} gives an
+ *  id-less caller.
+ *
+ *  Pure; SAME object when nothing was pending. */
+export function answerRequest(
+  prev: WorkStatusState,
+  sessionId: string,
+  requestId?: string,
+): WorkStatusState {
   const own = prev.notifications.get(sessionId);
   const blocked = own !== undefined && isCallToAction(own);
-  if (!blocked && !prev.pendingRequests.has(sessionId)) return prev;
-  return turnStart(prev, sessionId);
+  const open = prev.pendingRequests.get(sessionId);
+  const answered = requestId === undefined ? open !== undefined : open?.has(requestId) === true;
+  if (!blocked && !answered) return prev;
+  return turnStart(prev, sessionId, requestId);
 }
 
 /** The user typed into [sessionId]'s PTY. Terminal-mode sessions have no
@@ -380,17 +415,9 @@ function closeRequest(
   sessionId: string,
   requestId: string | undefined,
 ): WorkStatusState {
-  const open = prev.pendingRequests.get(sessionId);
-  if (!open || (requestId !== undefined && !open.has(requestId))) return prev;
-  const next = new Map(prev.pendingRequests);
-  if (requestId === undefined || open.size === 1) {
-    next.delete(sessionId);
-  } else {
-    const rest = new Set(open);
-    rest.delete(requestId);
-    next.set(sessionId, rest);
-  }
-  return build({ ...inputsOf(prev), pendingRequests: next });
+  const pendingRequests = clearRequests(prev.pendingRequests, sessionId, requestId);
+  if (pendingRequests === prev.pendingRequests) return prev;
+  return build({ ...inputsOf(prev), pendingRequests });
 }
 
 function foldNotification(

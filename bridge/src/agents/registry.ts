@@ -53,8 +53,12 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
       // claude exits 1 with "Input must be provided ... when using --print" —
       // i.e. every judge call silently fails closed. Verified against the real
       // CLI; keep the prompt ahead of any variadic flag added here later.
+      // --no-session-persistence keeps judge runs out of the user's own history:
+      // a supervisor pass is machine bookkeeping, and one per agent pause buries
+      // the sessions the user actually started under /resume. Valid only with
+      // --print, which this argv already uses.
       cmd: (prompt, model) => [
-        "claude", "-p", prompt, "--allowedTools",
+        "claude", "-p", prompt, "--no-session-persistence", "--allowedTools",
         "Read,Grep,Glob,Bash(git status:*),Bash(git diff:*),Bash(git log:*)",
         ...(model ? ["--model", model] : []),
       ],
@@ -88,8 +92,11 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
       // closed for every non-repo project. It does not widen the tier — the
       // read-only sandbox is what makes this argv provably read-only, and that
       // check only guards against writes in untracked dirs.
+      // --ephemeral is codex's equivalent of claude's --no-session-persistence:
+      // no rollout file, so `codex exec resume --last` still points at the user's
+      // own work rather than at whichever supervisor pass ran most recently.
       cmd: (prompt, model) => [
-        "codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check",
+        "codex", "exec", "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check",
         ...(model ? ["-m", model] : []), prompt,
       ],
     },
@@ -138,6 +145,22 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
       tier: "transcript",
       cmd: (prompt, model) =>
         ["opencode", "run", "--agent", "plan", ...(model ? ["--model", model] : []), prompt],
+      // opencode has no --ephemeral, so persistence is redirected instead of
+      // disabled: the whole session store is one SQLite file, and OPENCODE_DB
+      // takes `:memory:` verbatim (opencode's own tests and its desktop dev build
+      // use the same override), so the judge's session is never written anywhere.
+      //
+      // Safe for auth, which is the question this turns on: model credentials
+      // live in auth.json under the DATA dir, read via OPENCODE_AUTH_CONTENT or
+      // the file — never through the database. (The `credential` table alongside
+      // `session` is connector secrets, not provider auth.) For the same reason
+      // never redirect XDG_DATA_HOME to achieve this: that WOULD move auth.json.
+      //
+      // What the scratch DB does lose is the `account` row, so an opencode-account
+      // token is absent for this spawn — no session sharing, and no account-backed
+      // remote config. A judge shares nothing; remote config is the live risk if a
+      // team serves the judge's model settings that way.
+      env: { OPENCODE_DB: ":memory:" },
     },
     transcript: readOpencodeTranscript,
     // No resolveTitle: opencode's plugin posts the title inline.

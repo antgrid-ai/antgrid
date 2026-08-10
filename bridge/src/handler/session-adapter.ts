@@ -1,5 +1,5 @@
 // Transport seam (spec §Session adapter seam): everything above this interface —
-// Brief, judge, ledger, floors, runaway guard — is transport-agnostic. The PTY
+// goal + backlog, judge, floors, runaway guard — is transport-agnostic. The PTY
 // adapter writes to a live terminal; the structured (chat) adapter lives in
 // structured-adapter.ts and rides the driver's prompt path.
 export interface SessionAdapter {

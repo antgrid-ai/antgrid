@@ -27,8 +27,15 @@ export interface ActivityRecord {
   // "parked"/"resumed" are lifecycle EVENTS, not verdicts about the supervised
   // work — they sit here beside the other non-decision kinds so the activity
   // feed can show why a session went quiet.
-  decision: "continue" | "handle" | "escalate" | "brief_armed" | "brief_edited"
-    | "item_satisfied" | "wrapped_up" | "parked" | "resumed";
+  //
+  // One kind per item outcome rather than a single "item_resolved": a skip is as
+  // consequential as a completion (spec §4.3), so the feed must distinguish them
+  // without parsing the reason text. Kept in lockstep with the same enum in
+  // protocol.ts and the app's handler_state.dart — a value missing from either
+  // renders as an unknown row at runtime, never as a build error.
+  decision: "continue" | "handle" | "escalate" | "armed" | "goal_edited"
+    | "item_done" | "item_blocked" | "item_skipped" | "item_failed"
+    | "instruction_dropped" | "floor_warning" | "wrapped_up" | "parked" | "resumed";
   reason: string;
   detail?: string;
 }

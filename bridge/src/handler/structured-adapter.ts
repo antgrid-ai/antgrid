@@ -1,17 +1,17 @@
 // bridge/src/handler/structured-adapter.ts
 import type { AbMessage } from "../protocol";
 import type { SessionAdapter } from "./session-adapter";
-import { PLAN_MAX_CHARS } from "./context";
+import { DECIDE_MAX_CHARS } from "./context";
 
 // Flatten a driver transcript snapshot into judge-readable plain text.
 // Snapshots arrive as agent:item-added/updated frames (claude nests them inside
 // one agent:transcript-replay). Keyed by itemId so an item-updated (e.g. a tool
 // call completing) replaces its item-added line instead of duplicating it.
-// The default cap is the LARGEST context budget any caller uses (plan), not the
-// decide budget: assembleContext trims to the per-purpose budget afterwards, so a
-// tighter ceiling here can only subtract from it — capping at the decide budget
-// meant a `plan` call on a chat slot could never see more than decide-sized history.
-export function renderSnapshotText(frames: AbMessage[], maxChars = PLAN_MAX_CHARS): string {
+// The default cap must stay at or above the LARGEST per-purpose budget in
+// context.ts, and tracks it — assembleContext trims to the caller's budget after
+// this returns, so a ceiling below it silently subtracts history no caller can ask
+// back. `decide` is currently the only tier; a larger one has to move this too.
+export function renderSnapshotText(frames: AbMessage[], maxChars = DECIDE_MAX_CHARS): string {
   const byItem = new Map<string, string>();
   const walk = (frame: Record<string, unknown>) => {
     if (frame.type === "agent:transcript-replay") {

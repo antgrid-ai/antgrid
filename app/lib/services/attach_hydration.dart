@@ -18,9 +18,11 @@ import 'agent_session_service.dart';
 /// bridge if it was already running — and hydrating off the entry `start()`
 /// returns.
 ///
-/// Firing this after a real start is harmless: the driver's own start-time
-/// replay and this pull carry identical turn/item ids, which the reducer dedups
-/// (turn-start by turnId, items by upsert).
+/// Firing this after a real start is harmless: both the driver's start-time
+/// replay and this pull carry the whole transcript, and the reducer installs
+/// either as a replacement rather than appending it
+/// ([AgentSessionService._applyFullTranscript]). Id dedup is NOT what makes
+/// that safe — claude's two id spaces don't line up.
 ///
 /// Driven from the ONE chokepoint every session activation funnels through —
 /// [AgentTranscriptView.initState] (the view is keyed by session id, so a fresh

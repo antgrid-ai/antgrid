@@ -8,14 +8,8 @@ void main() {
     'state': 'watching',
     'pendingEscalations': 2,
     'armedAt': 1,
-    'doneWhenMet': false,
-    'brief': {
-      'taskSummary': 'summary',
-      'willHandle': [],
-      'wakeFor': [],
-      'thenItems': [],
-    },
-    'ledger': [],
+    'goal': 'summary',
+    'backlog': [],
   };
 
   test('handler:status parses raw session maps and optional defaultTool', () {
@@ -77,37 +71,6 @@ void main() {
     );
   });
 
-  test('handler:planResult parses fallback with optional briefs', () {
-    final m = parseAbMessage({
-      'type': 'handler:planResult',
-      'id': 'x',
-      'timestamp': 1,
-      'projectId': 'p',
-      'terminalId': 't1',
-      'fallback': true,
-      'brief': sessionWire['brief'],
-    });
-    expect(m, isA<HandlerPlanResultMessage>());
-    final r = m as HandlerPlanResultMessage;
-    expect(r.terminalId, 't1');
-    expect(r.fallback, true);
-    expect(r.brief, isNotNull);
-    expect(r.previousBrief, isNull);
-  });
-
-  test('handler:planResult with a missing fallback returns null', () {
-    expect(
-      parseAbMessage({
-        'type': 'handler:planResult',
-        'id': 'x',
-        'timestamp': 1,
-        'projectId': 'p',
-        'terminalId': 't1',
-      }),
-      isNull,
-    );
-  });
-
   test('handler:escalation parses all fields including floorRule', () {
     final m = parseAbMessage({
       'type': 'handler:escalation',
@@ -147,6 +110,47 @@ void main() {
     expect((m as HandlerEscalationMessage).floorRule, isNull);
   });
 
+  test('handler:escalation carries quick choices through the push', () {
+    final m =
+        parseAbMessage({
+              'type': 'handler:escalation',
+              'id': 'x',
+              'timestamp': 1,
+              'projectId': 'p',
+              'escalationId': 'e1',
+              'terminalId': 't1',
+              'question': 'q',
+              'reasoning': 'r',
+              'draftReply': 'use bun',
+              'urgency': 'normal',
+              'choices': [
+                {'choiceId': 'approve', 'label': 'Approve', 'text': 'use bun'},
+                {'choiceId': 'reject', 'label': 'Reject', 'text': 'stop'},
+              ],
+            })
+            as HandlerEscalationMessage;
+    expect(m.choices, hasLength(2));
+    expect(m.choices![0].text, 'use bun');
+  });
+
+  test('handler:escalation without choices parses with choices null', () {
+    // An empty card is worse than no card: the row must fall back to the
+    // free-text sheet whenever the bridge offered nothing.
+    final m = parseAbMessage({
+      'type': 'handler:escalation',
+      'id': 'x',
+      'timestamp': 1,
+      'projectId': 'p',
+      'escalationId': 'e1',
+      'terminalId': 't1',
+      'question': 'q',
+      'reasoning': 'r',
+      'draftReply': 'd',
+      'urgency': 'normal',
+    });
+    expect((m as HandlerEscalationMessage).choices, isNull);
+  });
+
   test('handler:activity parses, detail optional', () {
     final m = parseAbMessage({
       'type': 'handler:activity',
@@ -167,19 +171,28 @@ void main() {
     expect(a.detail, isNull);
   });
 
-  test('handler:activity accepts the new brief-lifecycle decision kinds', () {
-    final m = parseAbMessage({
-      'type': 'handler:activity',
-      'id': 'x',
-      'timestamp': 1,
-      'projectId': 'p',
-      'recordId': 'r1',
-      'at': 1700,
-      'terminalId': 't1',
-      'decision': 'brief_armed',
-      'reason': 'armed',
-    });
-    expect((m as HandlerActivityMessage).decision, 'brief_armed');
+  test('handler:activity accepts the item-lifecycle decision kinds', () {
+    for (final decision in [
+      'armed',
+      'goal_edited',
+      'item_done',
+      'item_blocked',
+      'item_skipped',
+      'item_failed',
+    ]) {
+      final m = parseAbMessage({
+        'type': 'handler:activity',
+        'id': 'x',
+        'timestamp': 1,
+        'projectId': 'p',
+        'recordId': 'r1',
+        'at': 1700,
+        'terminalId': 't1',
+        'decision': decision,
+        'reason': 'run the tests',
+      });
+      expect((m as HandlerActivityMessage).decision, decision);
+    }
   });
 
   test('handler:activity with a non-string detail parses with detail null', () {

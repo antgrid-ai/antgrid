@@ -421,6 +421,37 @@ test("answering flips that session straight back to working", () => {
   expect(answerRequest(asked, "r0").sessionStatuses.get("r0")).toBe("working");
 });
 
+test("answering one of two prompts leaves the session on attention", () => {
+  // Parallel tool calls ask permission per call, so a chat session can be
+  // stopped on two at once. Answering one clears one; the dot dropping to
+  // "working" here is the whole call-to-action signal lying about a session
+  // that still needs the user — and it never self-corrects, since the request
+  // left open is what keeps the turn from ending.
+  const asked = fold([
+    sessions(1), turnStartFrame("r0"), permission("r0", "p1"), permission("r0", "p2"),
+  ]);
+  expect(asked.sessionStatuses.get("r0")).toBe("attention");
+  const one = answerRequest(asked, "r0", "p1");
+  expect(one.pendingRequests.get("r0")).toEqual(new Set(["p2"]));
+  expect(one.sessionStatuses.get("r0")).toBe("attention");
+  const both = answerRequest(one, "r0", "p2");
+  expect(both.pendingRequests.has("r0")).toBe(false);
+  expect(both.sessionStatuses.get("r0")).toBe("working");
+});
+
+test("a resolve for a request the retraction already took opens no turn, even beside a live sibling", () => {
+  // The retraction-race guard, now that "something pending" is no longer a
+  // stand-in for "the answered one was pending". p1 is gone, so this resolve has
+  // nothing to resume — and a turn opened on the strength of p2 is one no
+  // turn-end closes, which is the wedge on "working" the guard exists for.
+  const asked = fold([
+    sessions(1), permission("r0", "p1"), permission("r0", "p2"),
+    retracted("r0", { permissionId: "p1" }),
+  ]);
+  expect(asked.activeTurns.has("r0")).toBe(false);
+  expect(answerRequest(asked, "r0", "p1")).toBe(asked);
+});
+
 test("a resolve with nothing pending does NOT open a turn (no wedge on working)", () => {
   // A resolve can race the retraction that already closed the request, or arrive
   // for one the turn took down. Opening a turn then would leave the session on

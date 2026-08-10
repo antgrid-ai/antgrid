@@ -58,6 +58,23 @@ class LocalNotificationService {
   /// Best-effort OS notification. No-ops if the plugin failed to initialize
   /// (`_ready == false`); logs and swallows any platform error so a delivery
   /// failure never breaks the caller. Callers fire-and-forget.
+  ///
+  /// Carries no `payload:`/`actions:` and [init] registers no response
+  /// callback, because a tapped action here has nothing to deliver and nowhere
+  /// to deliver it: `bridge/src/push/push-dispatcher.ts` seals only
+  /// `{title, body, kind, projectId, sourceMessageId}`, so an escalation's
+  /// quick choices never reach this layer; and an answer must be sealed on a
+  /// live E2E session (`HandlerService.reply` → `ProjectSession.send`), which
+  /// a background/headless isolate does not have and no offline queue holds.
+  /// On iOS the escalation notification is not ours at all — the NSE in
+  /// `ios/NotificationService` renders the APNs alert, and the forked `push`
+  /// plugin never forwards `response.actionIdentifier`.
+  ///
+  /// TODO(handler): quick-choice notification actions (spec §4.6) need, in
+  /// order: `choices` sealed into the push payload and carried through
+  /// `DecodedPush`; a pending-answer store flushed once `handler:status`
+  /// replays the still-unanswered escalation; then `showsUserInterface: true`
+  /// actions here so the tap resumes the app instead of a headless isolate.
   Future<void> show({required String title, required String body}) async {
     if (!_ready) return;
     final id = _nextId;

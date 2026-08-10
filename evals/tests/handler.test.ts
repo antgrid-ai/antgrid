@@ -4,10 +4,10 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setupTestEnv, type TestEnv } from "../helpers/harness";
-import { createMessage } from "../../bridge/src/protocol";
+import { createMessage, type HandlerInstructionItem } from "../../bridge/src/protocol";
 import { firstProjectStream } from "../support/stream";
 
-// Each test owns its env: the brief-lifecycle scenario needs agent-process env
+// Each test owns its env: the backlog-lifecycle scenario needs agent-process env
 // vars (the scripted judge) that a shared beforeAll env can't carry.
 let env: TestEnv | undefined;
 let streamId: string;
@@ -19,9 +19,10 @@ test("Notify-only: a handler-event triggers a handler:escalation at the app", as
   streamId = await firstProjectStream(env.app, env.projectId, 10_000);
 
   // Arm Handler in notify-only mode — every event escalates without spending a judge call.
+  // No backlog: arming carries no required payload, and notify-only never transitions items.
   env.app.sendOnStream(streamId, createMessage("handler:configure", {
     projectId: env.projectId, terminalId: "agent-main", armed: true, notifyOnly: true,
-    brief: { taskSummary: "watch for input", willHandle: [], wakeFor: ["anything"], thenItems: [] },
+    goal: "watch for input",
   }));
   await env.app.waitForStreamAbType(streamId, "handler:status", 5_000);
 
@@ -40,7 +41,7 @@ test("Notify-only: a handler-event triggers a handler:escalation at the app", as
   expect((esc as any).terminalId).toBe("agent-main");
 }, 40_000);
 
-test("Brief lifecycle: arm -> auto-answer -> satisfied-ledger -> wrap-up", async () => {
+test("Backlog lifecycle: arm -> auto-answer -> item done -> wrap-up", async () => {
   // The agent runs as a spawned process, so in-process runDecisionFn injection is
   // unreachable — swap the judge CLI for a scripted bun script via judge.ts's
   // eval-only env override (ANTGRID_EVAL_TEST + ANTGRID_TEST_JUDGE_SCRIPT). Each
@@ -58,10 +59,16 @@ const n = (await Bun.file(state).exists()) ? Number(await Bun.file(state).text()
 await Bun.write(state, String(n + 1));
 console.log(JSON.stringify(outputs[Math.min(n, outputs.length - 1)]));
 `;
+  // The scripted judge answers with ids, so the eval and the arm below have to
+  // agree on one — a transition naming anything else is rejected by design.
+  const ITEM_ID = "item-followup";
+  const BACKLOG: HandlerInstructionItem[] = [
+    { id: ITEM_ID, text: "follow-up one", status: "queued", createdAt: Date.now() },
+  ];
   const OUTPUTS = [
     { decision: "handle", confidence: 0.9, reason: "routine prompt", reply: "continue" },
     { decision: "continue", confidence: 0.9, reason: "task done",
-      satisfiedItems: [{ item: "follow-up one", evidence: "ran" }], doneWhenMet: true },
+      transitions: [{ id: ITEM_ID, status: "done", evidence: "ran" }] },
   ];
   writeFileSync(scriptPath, FAKE_JUDGE);
   writeFileSync(outputsPath, JSON.stringify(OUTPUTS));
@@ -76,19 +83,19 @@ console.log(JSON.stringify(outputs[Math.min(n, outputs.length - 1)]));
   });
   streamId = await firstProjectStream(env.app, env.projectId, 10_000);
 
-  // Arm with a full brief: doneWhen + one then-item drives the wrap-up at the end.
+  // One queued item is the whole wrap-up condition: the session auto-disarms once
+  // every item is terminal, so a single `done` drives the end of the lifecycle.
   env.app.sendOnStream(streamId, createMessage("handler:configure", {
     projectId: env.projectId, terminalId: "agent-main", armed: true, notifyOnly: false,
-    brief: {
-      taskSummary: "test task", willHandle: ["test prompts"], wakeFor: ["danger"],
-      doneWhen: "done marker printed", thenItems: ["follow-up one"],
-    },
+    goal: "test task", backlog: BACKLOG,
   }));
   const armedStatus = await env.app.waitFor(
     (m: any) => m._streamId === streamId
       && m.type === "handler:status" && m.sessions.length === 1, 5_000,
   );
   expect(armedStatus.sessions[0].terminalId).toBe("agent-main");
+  expect(armedStatus.sessions[0].goal).toBe("test task");
+  expect(armedStatus.sessions[0].backlog).toEqual(BACKLOG);
 
   const portFile = `${env.abDir}/api.port`;
   const port = (await Bun.file(portFile).text()).trim();
@@ -98,8 +105,8 @@ console.log(JSON.stringify(outputs[Math.min(n, outputs.length - 1)]));
   // the first's resulting activity before firing the second, or both calls could
   // race the same state file and read call-index 0 twice.
   //
-  // First turn_end -> scripted "handle" (auto-answer, no wrap-up yet since
-  // doneWhenMet isn't set). The reply is injected into the synthetic terminalId,
+  // First turn_end -> scripted "handle" (auto-answer, no wrap-up yet: the one
+  // backlog item is still queued). The reply is injected into the synthetic terminalId,
   // which TerminalManager.write() no-ops on (unknown terminal) — harmless.
   await fetch(`http://127.0.0.1:${port}/handler-event`, {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -111,8 +118,8 @@ console.log(JSON.stringify(outputs[Math.min(n, outputs.length - 1)]));
   );
   expect(handleActivity.terminalId).toBe("agent-main");
 
-  // Second turn_end -> scripted "continue" with the follow-up satisfied and
-  // doneWhenMet true, which triggers wrap-up (auto-disarm).
+  // Second turn_end -> scripted "continue" transitioning the only backlog item to
+  // done, which leaves the backlog fully terminal and triggers wrap-up (auto-disarm).
   await fetch(`http://127.0.0.1:${port}/handler-event`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ terminalId: "agent-main", event: "turn_end", agent: "claude" }),
@@ -120,11 +127,12 @@ console.log(JSON.stringify(outputs[Math.min(n, outputs.length - 1)]));
 
   // Assert RELATIVE order (not adjacency — a "continue" activity lands between
   // the last two) of the remaining activity kinds that mark the lifecycle.
-  const satisfiedActivity = await env.app.waitFor(
+  const doneActivity = await env.app.waitFor(
     (m: any) => m._streamId === streamId
-      && m.type === "handler:activity" && m.decision === "item_satisfied", 15_000,
+      && m.type === "handler:activity" && m.decision === "item_done", 15_000,
   );
-  expect(satisfiedActivity.detail).toBe("ran");
+  // No `outcome` on the transition, so the record falls back to the evidence.
+  expect(doneActivity.detail).toBe("ran");
 
   const wrappedActivity = await env.app.waitFor(
     (m: any) => m._streamId === streamId

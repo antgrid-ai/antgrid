@@ -224,11 +224,38 @@ class AgentSessionService {
     }
   }
 
+  /// Install a whole-transcript batch — the pushed `agent:transcript-replay`
+  /// and the pulled `session.transcriptSnapshot` alike — as the session's
+  /// history.
+  ///
+  /// Both carry the WHOLE settled transcript, so they replace what we hold
+  /// rather than appending to it. Id dedup cannot do that job across drivers:
+  /// claude's disk replay numbers its turns `resumed:N` while the same turns
+  /// went out live as `turn-N`, so appending renders the entire conversation a
+  /// second time — which is exactly what the post-turn retry in [_endTurn]
+  /// triggers.
+  ///
+  /// Two things survive the replace. An EMPTY batch replaces nothing: a driver
+  /// that could not read its store reports one, and it must not wipe a
+  /// transcript we watched arrive live. And the open turn is re-appended,
+  /// because neither batch carries it — it has not ended, which is the very
+  /// reason that retry exists.
+  void _applyFullTranscript(String sessionId, List<Object?> frames) {
+    if (frames.isEmpty) return;
+    final open = stateFor(sessionId).openTurn;
+    _setState(sessionId, stateFor(sessionId).copyWith(turns: const []));
+    _dispatchFrames(frames);
+    if (open == null) return;
+    final s = stateFor(sessionId);
+    if (s.turns.any((t) => t.turnId == open.turnId)) return;
+    _setState(sessionId, s.copyWith(turns: [...s.turns, open]));
+  }
+
   void _onJson(Map<String, dynamic> json) {
     if (_disposed) return;
     final parsed = parseAbMessage(json);
     if (parsed is AgentTranscriptReplay) {
-      _dispatchFrames(parsed.frames);
+      _applyFullTranscript(parsed.sessionId, parsed.frames);
       return;
     }
     final at = _envTime(json);
@@ -758,7 +785,7 @@ class AgentSessionService {
         params: {'sessionId': sessionId},
       );
       _hydrating.remove(sessionId);
-      _dispatchFrames((res['frames'] as List?) ?? const []);
+      _applyFullTranscript(sessionId, (res['frames'] as List?) ?? const []);
       if (armRetryOnEmpty && stateFor(sessionId).turns.isEmpty) {
         _pendingHydrationRetry.add(sessionId);
       } else {

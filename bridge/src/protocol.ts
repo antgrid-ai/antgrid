@@ -665,52 +665,57 @@ const PushRegisterMessage = BaseMessage.extend({
   pushPubkey: PushPubkeyB64,
 });
 
-// Wire shape for a handler's brief — what it will/won't do, when to wake the
-// user, and the running to-do ledger. Shared by configure (set), status
-// (per-session snapshot), and planResult (proposed/previous).
-export const HandlerBriefWire = z.object({
-  taskSummary: z.string(),
-  willHandle: z.array(z.string()),
-  wakeFor: z.array(z.string()),
-  doneWhen: z.string().optional(),
-  thenItems: z.array(z.string()),
+// Wire mirror of InstructionItem (handler/backlog.ts) — the live instruction
+// stack, shared by configure (set) and status (per-session snapshot). Mirrored
+// by hand rather than imported, for the same reason the Dart app mirrors it a
+// third time: bridge-internal storage must not be able to move the wire
+// contract silently. Keep the three in lockstep.
+export const InstructionItemWire = z.object({
+  id: z.string(),
+  text: z.string(),
+  dependsOn: z.array(z.string()).optional(),
+  condition: z.string().optional(),
+  status: z.enum(["queued", "active", "done", "blocked", "skipped", "failed"]),
+  outcome: z.string().optional(),
+  evidence: z.string().optional(),
+  createdAt: z.number(),
 });
 
-const HandlerPlanRequestMessage = BaseMessage.extend({
-  type: z.literal("handler:planRequest"),
-  projectId: z.string(),
-  terminalId: z.string(),
-  // One-shot judge choice for THIS plan call ('' = the session's default
-  // tool): lets "pick a judge, regenerate" draft with the judge the user
-  // picked instead of the stored one. Not persisted — arming persists.
-  judgeTool: z.string().optional(),
-  judgeModel: z.string().optional(),
-});
+// Every backlog operation resolves an id to at most one item, so a duplicate id
+// leaves the shadowed copy unreachable by any transition and `allTerminal` false
+// forever — a session that can never wrap up. backlog.ts checks uniqueness at
+// the boundary rather than assuming it, and for anything the app sends this is
+// that boundary.
+const BacklogWire = z.array(InstructionItemWire).refine(
+  (items) => new Set(items.map((i) => i.id)).size === items.length,
+  { message: "duplicate item id" },
+);
 
-const HandlerPlanResultMessage = BaseMessage.extend({
-  type: z.literal("handler:planResult"),
-  projectId: z.string(),
-  terminalId: z.string(),
-  fallback: z.boolean(),
-  brief: HandlerBriefWire.optional(),
-  previousBrief: HandlerBriefWire.optional(),
-  // The session's STORED judge choice (record on disk / armed session), so a
-  // freshly restarted app can seed the briefing sheet's picker — status
-  // snapshots only cover armed sessions, and a disarmed session's pick would
-  // otherwise be unreachable.
-  judgeTool: z.string().optional(),
-  judgeModel: z.string().optional(),
-});
-
-// `armed: true` requires a brief (see refine below) — the invariant that
-// distinguishes "handler configured but idle" from "handler actively armed".
-// parseMessageFast skips this refine AND every field check below (it matches
-// KNOWN_TYPES and nothing else); agent-core re-validates the whole payload with
-// HandlerConfigureWire before arming on that hot path.
-const HandlerConfigureFields = z.object({
+// Payload-only schema for the parseMessageFast hot path, which matches
+// KNOWN_TYPES and checks NOTHING else; agent-core re-parses the whole payload
+// with this before arming. `notifyOnly` is why it re-parses everything rather
+// than the one field it acts on — arriving absent it would read as falsy and
+// silently run an auto-injecting session the user asked to be notify-only.
+//
+// Arming deliberately carries no required payload: one tap arms with whatever
+// the session already holds. Any rule making `armed: true` demand a filled-in
+// field puts a form back in front of that tap, which is the thing 1-tap arming
+// exists to remove — so keep this schema free of whole-payload rules.
+//
+// HandlerConfigureMessage below is this shape inside a message envelope and must
+// stay in lockstep, or the hot path admits what the union rejects. Field-level
+// rules (BacklogWire) ride along through `.shape`; a whole-payload `.refine`
+// would have to be written on both.
+export const HandlerConfigureWire = z.object({
   terminalId: z.string(),
   armed: z.boolean(),
-  brief: HandlerBriefWire.optional(),
+  // The session objective in the user's own words.
+  goal: z.string().optional(),
+  // Absent = leave the stored backlog untouched, `[]` = clear it — the same
+  // absent-vs-empty split as judgeTool below. Extraction appends to the
+  // bridge's copy behind a non-blocking arm, so a sender that always shipped a
+  // full backlog would overwrite items it never saw.
+  backlog: BacklogWire.optional(),
   notifyOnly: z.boolean(),
   // Per-SESSION judge choice, persisted in the terminal's handler-session
   // record by arm(). Empty string = clear back to default (the session's own
@@ -718,25 +723,64 @@ const HandlerConfigureFields = z.object({
   judgeTool: z.string().optional(),
   judgeModel: z.string().optional(),
 });
-const armedRequiresBrief = (m: { armed: boolean; brief?: unknown }) => !m.armed || !!m.brief;
-
-// Payload-only re-validation for the parseMessageFast hot path, which checks the
-// message type and NOTHING else. agent-core parses with this before arming:
-// `notifyOnly` is as safety-relevant as the brief — arriving absent it would read
-// as falsy and silently run an auto-injecting session the user asked to be
-// notify-only. Keep in lockstep with HandlerConfigureMessage below.
-export const HandlerConfigureWire = HandlerConfigureFields.refine(armedRequiresBrief, {
-  message: "armed requires a brief",
-});
 
 const HandlerConfigureMessage = BaseMessage.extend({
   type: z.literal("handler:configure"),
   projectId: z.string(),
-}).extend(HandlerConfigureFields.shape).refine(armedRequiresBrief, { message: "armed requires a brief" });
+}).extend(HandlerConfigureWire.shape);
+
+// Mid-flight instruction stacking: one sentence in, extracted items appended to
+// the session's backlog. Payload-only schema for the same reason as
+// HandlerConfigureWire — parseMessageFast admits it on the discriminator alone,
+// so agent-core re-parses with this before the text reaches extraction, and the
+// envelope below rides on `.shape` so the two cannot drift apart.
+//
+// Keep whole-payload rules off this schema too: stacking is one line typed on a
+// phone (or one preset chip), and a cross-field precondition would put a form in
+// front of it.
+export const HandlerInstructWire = z.object({
+  terminalId: z.string(),
+  // Untrusted remote text that ends up interpolated into the extraction prompt.
+  // Extraction truncates for prompt budget; the cap is here so an absurd payload
+  // is refused at the wire instead of being carried that far.
+  text: z.string().max(10_000),
+});
+
+const HandlerInstructMessage = BaseMessage.extend({
+  type: z.literal("handler:instruct"),
+  projectId: z.string(),
+}).extend(HandlerInstructWire.shape);
+
+// One tap-to-answer option on a quick-choice escalation (§4.6). `text` is sent as
+// the USER's own reply through the ordinary reply transport, so it must be
+// something a session can actually receive: whitespace alone is dropped by every
+// consumer, which turns the chip into a button that silently does nothing.
+// Control characters are rejected rather than flattened — a one-tap sends text the
+// user never opened in an editable field, and an embedded CR would submit two lines
+// into the PTY.
+//
+// `choiceId` names the intent so a notification action can round-trip back to the
+// app; it is identity, never authority. Nothing may derive an authorization lift
+// from it (see quickChoicesFor in handler/engine.ts).
+//
+// Hand-mirrors EscalationChoiceSchema (handler/session-store.ts); field-level
+// rules ride into HandlerEscalationMessage through `.shape`, so they must live
+// here rather than on the enclosing object.
+const EscalationChoiceWire = z.object({
+  choiceId: z.string().min(1).max(40),
+  label: z.string().min(1).max(40),
+  text: z.string().min(1).max(400).regex(/^[^\x00-\x1f\x7f]+$/).refine((t) => t.trim().length > 0),
+});
+
+const uniqueChoiceIds = (cs: { choiceId: string }[]): boolean =>
+  new Set(cs.map((c) => c.choiceId)).size === cs.length;
 
 // Shared by the one-shot escalation push and the per-session status snapshot
 // (which replays unanswered escalations so a reconnecting/restarted app can
 // rebuild answerable rows, not just a pending count).
+//
+// Hand-mirrors OpenEscalationSchema (handler/session-store.ts), which persists the
+// same payload, and the Dart mirror in app/lib/models/handler_state.dart.
 const OpenEscalationWire = z.object({
   escalationId: z.string(),
   question: z.string(),
@@ -749,8 +793,68 @@ const OpenEscalationWire = z.object({
   // question) that must be resolved in the chat UI — injected text can't
   // answer it, and auto-approval is deliberately impossible (see engine).
   kind: z.enum(["reply", "resolve_in_session"]).optional(),
+  // §4.6 quick choices, optional exactly the way `kind` is: absent means "free-text
+  // reply", so an app that predates this renders its reply sheet unchanged. Two is
+  // the floor because one chip is a card with no alternative, and the free-text
+  // escape hatch is app-authored — never an entry here — so no bridge can ship a
+  // card without one.
+  //
+  // The uniqueness refinement rides the ARRAY, not this object, so `.shape` below
+  // still carries it into HandlerEscalationMessage: every surface resolves a tap
+  // by first match, so a repeated choiceId sends text the user did not read.
+  choices: z.array(EscalationChoiceWire).min(2).max(3)
+    .refine(uniqueChoiceIds, "choiceId must be unique").optional(),
   at: z.number(),
 });
+
+// One §5.2 snapshot, as the app sees it. Shared by the one-shot advert and the
+// per-project replay on `handler:status`, the same way OpenEscalationWire is
+// shared — an app that reconnected (or restarted) after the advert must still be
+// able to offer the undo.
+//
+// Project-scoped rather than session-scoped on purpose: a snapshot outlives the
+// armed session that took it, because the wrap-up summary offering the undo is
+// read long after the session disarmed.
+export const HandlerSnapshotWire = z.object({
+  snapshotId: z.string(),
+  // The supervised slot the flagged reply was injected into.
+  terminalId: z.string(),
+  at: z.number(),
+  action: z.enum(["reset_hard", "force_push", "rm_rf", "git_clean"]),
+  // The command segment that triggered the snapshot.
+  trigger: z.string(),
+  // One line describing what was actually saved.
+  summary: z.string(),
+  // "available" = undoable now; "undone" = spent, a repeat tap is a no-op;
+  // "failed" = the last attempt failed and may be retried (`detail` says why).
+  // Only an entry the bridge actually captured is ever advertised: an action the
+  // snapshot could not protect is an activity row, never an undo offer.
+  state: z.enum(["available", "undone", "failed"]),
+  detail: z.string().optional(),
+});
+
+const HandlerSnapshotMessage = BaseMessage.extend({
+  type: z.literal("handler:snapshot"),
+  projectId: z.string(),
+}).extend(HandlerSnapshotWire.shape);
+
+// One-tap undo of a snapshot the bridge advertised. Payload-only schema for the
+// same reason as HandlerConfigureWire: parseMessageFast admits it on the
+// discriminator alone, so agent-core re-parses with this before anything runs.
+//
+// No terminalId: the id names the entry, and the entry carries its own session
+// and project path. Undo is deliberately NOT gated on authorization (§5.4) —
+// anyone who can drive this project can already drive its terminal, and a second
+// authorization concept would only make the safety net harder to reach than the
+// action it reverses.
+export const HandlerUndoWire = z.object({
+  snapshotId: z.string(),
+});
+
+const HandlerUndoMessage = BaseMessage.extend({
+  type: z.literal("handler:undo"),
+  projectId: z.string(),
+}).extend(HandlerUndoWire.shape);
 
 const HandlerSessionSnapshot = z.object({
   terminalId: z.string(),
@@ -758,9 +862,8 @@ const HandlerSessionSnapshot = z.object({
   state: z.enum(["watching", "handling", "needs_you", "parked"]),
   pendingEscalations: z.number().int().nonnegative(),
   armedAt: z.number(),
-  doneWhenMet: z.boolean(),
-  brief: HandlerBriefWire,
-  ledger: z.array(z.object({ item: z.string(), evidence: z.string(), at: z.number() })),
+  goal: z.string(),
+  backlog: BacklogWire,
   escalations: z.array(OpenEscalationWire),
   // Why the session is parked and when it wakes (epoch ms), for the countdown
   // chip. Present only while state is "parked".
@@ -783,9 +886,15 @@ const HandlerStatusMessage = BaseMessage.extend({
   // project agent tool) — chat slots resolve from their own SessionEntry.tool
   // app-side. Judge overrides themselves are per-session (see snapshot).
   defaultTool: z.string().optional(),
-  // Project default for the briefing sheet's notify-only seed (config v2).
+  // Project default seeding a newly armed session's notify-only (config v2).
   defaultNotifyOnly: z.boolean(),
   sessions: z.array(HandlerSessionSnapshot),
+  // Every snapshot this project still knows about, replayed for the same reason
+  // escalations are: an app that restarted between the advert and the tap would
+  // otherwise have no way to reach the undo. Not nested under a session — the
+  // sessions array holds only ARMED sessions, and a wrapped-up one is exactly
+  // when the offer matters most.
+  snapshots: z.array(HandlerSnapshotWire),
 });
 
 const HandlerEscalationMessage = BaseMessage.extend({
@@ -800,10 +909,15 @@ const HandlerActivityMessage = BaseMessage.extend({
   recordId: z.string(),
   at: z.number(),
   terminalId: z.string(),
+  // Kept in lockstep with ActivityRecord.decision (handler/config.ts) and the
+  // app's handler_state.dart. One kind per item outcome rather than a single
+  // "item_resolved": a skip is as consequential as a completion (spec §4.3), so
+  // the feed distinguishes them without parsing the reason text.
   decision: z.enum([
     "continue", "handle", "escalate",
-    "brief_armed", "brief_edited", "item_satisfied", "wrapped_up",
-    "parked", "resumed",
+    "armed", "goal_edited",
+    "item_done", "item_blocked", "item_skipped", "item_failed",
+    "instruction_dropped", "floor_warning", "wrapped_up", "parked", "resumed",
   ]),
   reason: z.string(),
   detail: z.string().optional(),
@@ -1534,12 +1648,13 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   CommandDoneMessage,
   NotificationPushMessage,
   PushRegisterMessage,
-  HandlerPlanRequestMessage,
-  HandlerPlanResultMessage,
   HandlerConfigureMessage,
+  HandlerInstructMessage,
   HandlerStatusMessage,
   HandlerEscalationMessage,
   HandlerActivityMessage,
+  HandlerSnapshotMessage,
+  HandlerUndoMessage,
   GitStatusMessage,
   GitDiffRequestMessage,
   GitDiffContentMessage,
@@ -1650,14 +1765,15 @@ export type CommandOutput = z.infer<typeof CommandOutputMessage>;
 export type CommandDone = z.infer<typeof CommandDoneMessage>;
 export type NotificationPush = z.infer<typeof NotificationPushMessage>;
 export type PushRegister = z.infer<typeof PushRegisterMessage>;
-export type HandlerBrief = z.infer<typeof HandlerBriefWire>;
-export type HandlerPlanRequest = z.infer<typeof HandlerPlanRequestMessage>;
-export type HandlerPlanResult = z.infer<typeof HandlerPlanResultMessage>;
+export type HandlerInstructionItem = z.infer<typeof InstructionItemWire>;
 export type HandlerConfigureMsg = z.infer<typeof HandlerConfigureMessage>;
+export type HandlerInstructMsg = z.infer<typeof HandlerInstructMessage>;
 export type HandlerSessionSnapshot = z.infer<typeof HandlerSessionSnapshot>;
 export type HandlerStatusMsg = z.infer<typeof HandlerStatusMessage>;
 export type HandlerEscalationMsg = z.infer<typeof HandlerEscalationMessage>;
 export type HandlerActivityMsg = z.infer<typeof HandlerActivityMessage>;
+export type HandlerSnapshotMsg = z.infer<typeof HandlerSnapshotMessage>;
+export type HandlerUndoMsg = z.infer<typeof HandlerUndoMessage>;
 export type GitStatus = z.infer<typeof GitStatusMessage>;
 export type GitDiffRequest = z.infer<typeof GitDiffRequestMessage>;
 export type GitDiffContent = z.infer<typeof GitDiffContentMessage>;
@@ -1829,8 +1945,8 @@ const KNOWN_TYPES = new Set<string>([
   "ports:update", "preview:url",
   "agent:disconnecting", "agent:projects", "agent:tools", "stream-ready", "stream-invalid", "control:result", "app:ready",
   "command:run", "command:output", "command:done", "notification:push", "push:register",
-  "handler:planRequest", "handler:planResult",
-  "handler:configure", "handler:status", "handler:escalation", "handler:activity",
+  "handler:configure", "handler:instruct", "handler:status", "handler:escalation", "handler:activity",
+  "handler:snapshot", "handler:undo",
   "git:status", "git:diff", "git:diff-content",
   "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",
   "git:commit", "git:commit-result", "git:discard", "git:discard-result",

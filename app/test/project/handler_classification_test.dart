@@ -11,7 +11,14 @@ void main() {
     expect(classifyAbMessageByType('handler:activity'), MessageTier.heavy);
   });
 
-  test('handler:configure is NOT inbound-classified (outbound only)', () {
+  test('handler:snapshot routes to the heavy tier', () {
+    // Unclassified, the undo advert is dropped before HandlerService sees it
+    // and the offer only ever appears after a status replay.
+    expect(classifyAbMessageByType('handler:snapshot'), MessageTier.heavy);
+  });
+
+  test('handler:configure and handler:undo are outbound only', () {
     expect(classifyAbMessageByType('handler:configure'), MessageTier.ignore);
+    expect(classifyAbMessageByType('handler:undo'), MessageTier.ignore);
   });
 }

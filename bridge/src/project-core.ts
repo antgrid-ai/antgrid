@@ -201,11 +201,11 @@ export class ProjectCore {
     this.commitWork(userReply(this._work, sessionId, opts));
   }
 
-  /** The user answered a permission/question on [sessionId]. Clears the block and
-   *  resumes the turn, but only if something was pending; see
+  /** The user answered the permission/question [requestId] on [sessionId].
+   *  Clears that block and resumes the turn, but only if it was pending; see
    *  {@link answerRequest}. */
-  noteAnswer(sessionId: string): void {
-    this.commitWork(answerRequest(this._work, sessionId));
+  noteAnswer(sessionId: string, requestId?: string): void {
+    this.commitWork(answerRequest(this._work, sessionId, requestId));
   }
 
   /** First register outcome of a REMOTE-mode core's primary relay slot (null in
@@ -260,7 +260,7 @@ export class ProjectCore {
       remoteAccessEnabled: this.deps.remoteAccessEnabled,
       onTurnStart: (sessionId) => this.noteTurnStart(sessionId),
       onUserReply: (sessionId, replyOpts) => this.noteUserReply(sessionId, replyOpts),
-      onAnswer: (sessionId) => this.noteAnswer(sessionId),
+      onAnswer: (sessionId, requestId) => this.noteAnswer(sessionId, requestId),
       // The single source of per-session work status: SessionManager stamps it
       // onto `session:updated` from THIS reduction rather than keeping a second
       // one of its own. Read lazily — the fold that answers it runs after the

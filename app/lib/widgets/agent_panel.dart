@@ -24,7 +24,8 @@ import '../utils/platform_utils.dart';
 import 'agent_transcript_view.dart';
 import 'command_bar.dart';
 import 'command_output_overlay.dart';
-import 'handler/handler_briefing_sheet.dart';
+import 'handler/handler_item_status.dart';
+import 'handler/handler_pa_bar.dart';
 import 'remote_access_control.dart';
 import 'remote_host_chip.dart';
 import 'session_agent_mark.dart';
@@ -94,6 +95,7 @@ class AgentPanel extends ConsumerWidget {
                   children: [TerminalScreen(), CommandOutputOverlay()],
                 ),
         ),
+        const HandlerPaBar(),
         const CommandTray(),
       ],
     );
@@ -150,20 +152,30 @@ List<Widget> titleBarProjectActions(WidgetRef ref) {
 /// wake time is the whole message; without a deadline (`selfResuming` parks
 /// have none) the bare state is all we can honestly promise.
 ///
+/// "PAUSED", not the wire's "parked": this pill and the Handler tab describe
+/// one session from two corners of the same window, so they use
+/// [handlerRunStateLabel]'s vocabulary rather than the protocol's.
+///
+/// Day-aware for the same reason, and it matters more here than anywhere: a
+/// rate limit that resets at 05:00 tomorrow, shown as a bare `05:00` tonight,
+/// reads as a deadline the session has already blown.
+///
 /// Top-level so the derivation is exercised directly, like
 /// [titleBarProjectActions].
-String parkedPillLabel(int? parkedUntil) => parkedUntil == null
-    ? 'PARKED'
-    : 'PARKED · UNTIL '
-          '${clockTime(DateTime.fromMillisecondsSinceEpoch(parkedUntil))}';
+String parkedPillLabel(int? parkedUntil) {
+  final head = handlerRunStateLabel(HandlerRunState.parked).toUpperCase();
+  if (parkedUntil == null) return head;
+  final at = dayAwareTime(DateTime.fromMillisecondsSinceEpoch(parkedUntil));
+  return '$head · UNTIL ${at.toUpperCase()}';
+}
 
 /// Handler status pill + shield rendered in the agent panel header, scoped to
 /// the FOCUSED session — arming is per-terminal, not per-project.
 ///
 /// Shows a state pill (WATCHING / HANDLING / NEEDS YOU `n`) for the focused
 /// session when armed, falling back to the project-wide pending count so
-/// escalations on other sessions stay visible. Tapping the shield opens
-/// [showHandlerBriefingSheet] to arm, edit, or disarm.
+/// escalations on other sessions stay visible. The shield toggles arming for
+/// the focused session.
 class HandlerHeaderControl extends ConsumerWidget {
   const HandlerHeaderControl({super.key});
 
@@ -176,9 +188,6 @@ class HandlerHeaderControl extends ConsumerWidget {
     // focused, so no early return here even with nothing armable in focus.
     final session = activeId != null ? state.sessions[activeId] : null;
     final service = serviceWhenReady(ref, handlerServiceProvider);
-    // Read in build, not inside openSheet: that callback runs after an await on
-    // the sheet, past which a WidgetRef read can throw.
-    final judgeTools = ref.watch(judgeCapableToolsProvider);
     // This header is the PRE-arm surface — usually nothing is armed yet, so the
     // catalog's per-agent prediction is the only coverage answer that exists.
     // A SessionEntry carries `tool` only when it OVERRODE the project default,
@@ -198,28 +207,29 @@ class HandlerHeaderControl extends ConsumerWidget {
     Color pillColor = p.textMuted;
     var pillNavigates = false;
     if (session != null) {
-      switch (session.runState) {
+      // Words and tone both come from the shared vocabulary, so this pill and
+      // the Handler tab never describe one session two ways.
+      final state = session.runState;
+      pillLabel = handlerRunStateLabel(state).toUpperCase();
+      pillColor = handlerRunStateColor(p, state);
+      switch (state) {
         case HandlerRunState.needsYou:
-          pillLabel = 'NEEDS YOU ${session.pendingEscalations}';
-          pillColor = p.accent;
+          pillLabel = '$pillLabel ${session.pendingEscalations}';
           pillNavigates = true;
-          break;
-        case HandlerRunState.handling:
-          pillLabel = 'HANDLING';
-          pillColor = p.accent;
-          break;
-        case HandlerRunState.watching:
-          // An armed session the bridge cannot observe never leaves "watching",
-          // so WATCHING there is precisely the "armed and quiet" lie this field
-          // exists to end.
-          final unwatched =
-              session.observability == HandlerObservability.unsupported;
-          pillLabel = unwatched ? 'NOT WATCHED' : 'WATCHING';
-          pillColor = unwatched ? p.warning : p.textMuted;
           break;
         case HandlerRunState.parked:
           pillLabel = parkedPillLabel(session.parkedUntil);
-          pillColor = p.textMuted;
+          break;
+        case HandlerRunState.watching:
+          // An armed session the bridge cannot observe never leaves "watching",
+          // so the shared vocabulary's WATCHING is precisely the "armed and
+          // quiet" lie observability exists to end.
+          if (session.observability == HandlerObservability.unsupported) {
+            pillLabel = 'NOT WATCHED';
+            pillColor = p.warning;
+          }
+          break;
+        case HandlerRunState.handling:
           break;
       }
     }
@@ -258,30 +268,16 @@ class HandlerHeaderControl extends ConsumerWidget {
       return pill ?? const SizedBox.shrink();
     }
 
-    Future<void> openSheet() async {
+    // Spec §4.1: arming is one tap and carries no payload — no goal, no
+    // backlog, no judge override. Everything the session needs is either
+    // already stored on the bridge or extracted behind the handoff, so sending
+    // any of those keys here would overwrite state this control never showed.
+    void toggleArm() {
       if (service == null) return;
-      final choice = await showHandlerBriefingSheet(
-        context,
-        terminalId: activeId,
-        service: service,
-        judgeTools: judgeTools,
-        initialBrief: session?.brief,
-        initialNotifyOnly: session?.notifyOnly,
-        observability: session?.observability,
-        agentObservable: agentObservable,
-        agentLabel: catalog[agent]?.label,
-      );
-      if (choice == null) return;
-      if (choice.disarm) {
+      if (session != null) {
         service.disarm(activeId);
       } else {
-        service.arm(
-          terminalId: activeId,
-          brief: choice.brief,
-          notifyOnly: choice.notifyOnly,
-          judgeTool: choice.judgeTool,
-          judgeModel: choice.judgeModel,
-        );
+        service.arm(terminalId: activeId, notifyOnly: state.defaultNotifyOnly);
       }
     }
 
@@ -294,11 +290,18 @@ class HandlerHeaderControl extends ConsumerWidget {
         ],
         AbIconButton(
           icon: AbIcons.shield,
-          tooltip: 'Handler',
+          // Arming is one tap, so this tooltip is the only place the pre-arm
+          // coverage answer can reach the user — an agent that reports nothing
+          // arms just as silently as one that is merely quiet.
+          tooltip: session != null
+              ? 'Disarm Handler'
+              : agentObservable == false
+              ? unwatchableNotice(catalog[agent]?.label)
+              : 'Arm Handler',
           tone: session != null
               ? AbIconButtonTone.accent
               : AbIconButtonTone.normal,
-          onTap: openSheet,
+          onTap: toggleArm,
         ),
       ],
     );

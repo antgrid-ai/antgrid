@@ -7,6 +7,7 @@ import '../../design/ab_status_tone.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_chip.dart';
 import '../../design/widgets/ab_empty_state.dart';
+import '../../design/widgets/ab_section_header.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../../design/widgets/ab_status_dot.dart';
 import '../../models/recent_session_row.dart';
@@ -424,41 +425,21 @@ class _GroupHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final t = context.antgrid;
-    return Padding(
+    return AbSectionHeader(
+      label: label,
+      count: count,
+      // Mono: this label is a machine or project NAME, not a category word.
+      mono: true,
+      rule: true,
       padding: const EdgeInsets.fromLTRB(
         AbTokens.space16,
         AbTokens.space12,
         AbTokens.space16,
         AbTokens.space4,
       ),
-      child: Row(
-        children: [
-          Text(
-            label.toUpperCase(),
-            style: AbTokens.monoStyle(
-              fontSize: AbTokens.fontXxs,
-              color: t.textMuted,
-              letterSpacing: 0.66,
-            ),
-          ),
-          const SizedBox(width: AbTokens.space6),
-          Text(
-            '· $count',
-            style: AbTokens.monoStyle(
-              fontSize: AbTokens.fontXxs,
-              color: t.textMuted,
-              letterSpacing: 0.66,
-            ),
-          ),
-          if (machineUuid != null) ...[
-            const SizedBox(width: AbTokens.space8),
-            _ConnectingIndicator(machineUuid: machineUuid!),
-          ],
-          const SizedBox(width: AbTokens.space10),
-          const Expanded(child: AbSeparator.horizontal()),
-        ],
-      ),
+      trailing: machineUuid == null
+          ? null
+          : _ConnectingIndicator(machineUuid: machineUuid!),
     );
   }
 }

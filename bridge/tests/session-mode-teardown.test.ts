@@ -14,13 +14,8 @@ import type { AbMessage } from "../src/protocol";
 // TerminalManager.onTerminalExited callback and its onStopChat), because the
 // hazard lives in that wiring and not in SessionManager alone.
 
-const BRIEF = {
-  taskSummary: "Migrating auth",
-  willHandle: ["routine prompts"],
-  wakeFor: ["schema changes"],
-  doneWhen: "tests pass",
-  thenItems: ["/compact"],
-};
+const GOAL = "Migrating auth";
+const BACKLOG = [{ id: "i1", text: "run the tests", status: "queued" as const, createdAt: 1 }];
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -123,13 +118,13 @@ describe("session mode flip — teardown ordering", () => {
   // Resolved 2026-07-31: a flip preserves the arming. The exit-driven disarm is
   // SUPPRESSED for the duration of the flip rather than undone afterwards —
   // disarm() persists the record unarmed and arm() rehydrates only from an
-  // armed one, so a disarm/re-arm round trip would quietly reset the ledger,
+  // armed one, so a disarm/re-arm round trip would quietly reset the backlog,
   // armedAt and any open escalations.
   it("keeps an armed session armed across a terminal→chat flip", async () => {
     const c = makeCore(dir);
     const s = c.sessions.create("t", { tool: "codex" });
     c.sessions.start(s.id);
-    c.engine.arm({ terminalId: s.id, brief: BRIEF, notifyOnly: false });
+    c.engine.arm({ terminalId: s.id, goal: GOAL, backlog: BACKLOG, notifyOnly: false });
     expect(c.isArmed(s.id)).toBe(true);
 
     const flip = c.sessions.setMode(s.id, "chat");
@@ -150,7 +145,7 @@ describe("session mode flip — teardown ordering", () => {
     const c = makeCore(dir);
     const s = c.sessions.create("t", { tool: "codex" });
     c.sessions.start(s.id);
-    c.engine.arm({ terminalId: s.id, brief: BRIEF, notifyOnly: false });
+    c.engine.arm({ terminalId: s.id, goal: GOAL, backlog: BACKLOG, notifyOnly: false });
 
     const flip = c.sessions.setMode(s.id, "chat");
     await tick();
@@ -176,7 +171,7 @@ describe("session mode flip — teardown ordering", () => {
     const c = makeCore(dir);
     const s = c.sessions.create("t", { tool: "codex" });
     c.sessions.start(s.id);
-    c.engine.arm({ terminalId: s.id, brief: BRIEF, notifyOnly: false });
+    c.engine.arm({ terminalId: s.id, goal: GOAL, backlog: BACKLOG, notifyOnly: false });
     expect(c.isArmed(s.id)).toBe(true);
 
     c.exitPty(s.id); // the agent died on its own, no setMode in flight
@@ -207,7 +202,7 @@ describe("session mode flip — teardown ordering", () => {
     const c = makeCore(dir, { chatTeardown: () => gate.promise });
     const s = c.sessions.create("c", { tool: "codex", mode: "chat" });
     c.sessions.start(s.id);
-    c.engine.arm({ terminalId: s.id, brief: BRIEF, notifyOnly: false });
+    c.engine.arm({ terminalId: s.id, goal: GOAL, backlog: BACKLOG, notifyOnly: false });
 
     const flip = c.sessions.setMode(s.id, "terminal");
     await tick();

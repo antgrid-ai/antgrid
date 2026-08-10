@@ -2,7 +2,6 @@
 import { test, expect } from "bun:test";
 import { extractJsonObject } from "../../src/handler/json-extract";
 import { parseDecisionFromOutput } from "../../src/handler/decision";
-import { parseBriefFromOutput } from "../../src/handler/brief";
 
 test("extracts a bare object", () => {
   expect(extractJsonObject('{"a":1}')).toEqual({ a: 1 });
@@ -51,11 +50,11 @@ test("a real decision survives trailing prose containing braces", () => {
   expect(r.error).toBeUndefined();
 });
 
-test("a real brief survives trailing prose containing braces", () => {
+test("a decision reporting transitions survives trailing prose containing braces", () => {
   const stdout = [
-    "Plan:",
-    '{"taskSummary":"fix the build","willHandle":["retry"],"wakeFor":["deploy"],"thenItems":[]}',
+    "Here is my decision:",
+    '{"decision":"continue","confidence":0.9,"reason":"tests passed","transitions":[{"id":"i1","status":"done","evidence":"3 passed"}]}',
     "Adjust {as needed}.",
   ].join("\n");
-  expect(parseBriefFromOutput(stdout)?.taskSummary).toBe("fix the build");
+  expect(parseDecisionFromOutput(stdout).decision?.transitions?.[0].id).toBe("i1");
 });

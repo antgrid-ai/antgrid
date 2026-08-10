@@ -891,6 +891,32 @@ describe("SessionManager start/stop", () => {
   });
 
   it("start() passes a persisted agentSessionId as resumeId for chat", () => {
+    // Empty codexHome → resume pre-flight is optimistic → resumes.
+    const codexHome = tempDir();
+    try {
+      const calls: any[] = [];
+      const sm = new SessionManager({
+        projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeFakeTerm() as any,
+        agentSpec: { command: "claude", name: "claude-code" },
+        sendMessage: () => {},
+        onStartChat: (o) => calls.push(o),
+        codexHome,
+      });
+      const s = sm.create("c", { tool: "codex", mode: "chat" });
+      sm.setAgentSession(s.id, "thread-xyz");
+      sm.start(s.id);
+      expect(calls[0].resumeId).toBe("thread-xyz");
+      sm.flushNow();
+    } finally {
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("start() drops and clears a chat resume id whose conversation is gone", () => {
+    // A dead id is unrecoverable for chat: the driver would resume it on every
+    // start, the backend answers "no conversation found", and the session never
+    // comes alive again. Claude's pre-flight is the posted transcript path, so a
+    // path that does not exist is the positive "it's gone" this asserts on.
     const calls: any[] = [];
     const sm = new SessionManager({
       projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeFakeTerm() as any,
@@ -898,10 +924,12 @@ describe("SessionManager start/stop", () => {
       sendMessage: () => {},
       onStartChat: (o) => calls.push(o),
     });
-    const s = sm.create("c", { tool: "codex", mode: "chat" });
-    sm.setAgentSession(s.id, "thread-xyz");
+    const s = sm.create("c", { tool: "claude-code", mode: "chat" });
+    sm.setAgentSession(s.id, "gone-1", join(dir, "no-such-transcript.jsonl"));
     sm.start(s.id);
-    expect(calls[0].resumeId).toBe("thread-xyz");
+    expect(calls[0].resumeId).toBeUndefined();
+    // Cleared in place, so the next start doesn't re-run the same dead resume.
+    expect(sm.get(s.id)?.agentSessionId).toBeUndefined();
     sm.flushNow();
   });
 
@@ -1092,20 +1120,27 @@ describe("SessionManager start/stop", () => {
   });
 
   it("setMode carries the agent conversation across the flip", async () => {
-    const starts: any[] = [];
-    const sm = new SessionManager({
-      projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeFakeTerm() as any,
-      agentSpec: { command: "claude", name: "claude-code" },
-      sendMessage: () => {},
-      onStartChat: (o) => starts.push(o),
-    });
-    const s = sm.create("t", { tool: "codex" });
-    sm.setAgentSession(s.id, "thread-xyz");
-    await sm.setMode(s.id, "chat");
-    sm.start(s.id);
-    expect(starts[0].resumeId).toBe("thread-xyz");
-    expect(sm.get(s.id)?.agentSessionId).toBe("thread-xyz");
-    sm.flushNow();
+    // Empty codexHome → resume pre-flight is optimistic → resumes.
+    const codexHome = tempDir();
+    try {
+      const starts: any[] = [];
+      const sm = new SessionManager({
+        projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: makeFakeTerm() as any,
+        agentSpec: { command: "claude", name: "claude-code" },
+        sendMessage: () => {},
+        onStartChat: (o) => starts.push(o),
+        codexHome,
+      });
+      const s = sm.create("t", { tool: "codex" });
+      sm.setAgentSession(s.id, "thread-xyz");
+      await sm.setMode(s.id, "chat");
+      sm.start(s.id);
+      expect(starts[0].resumeId).toBe("thread-xyz");
+      expect(sm.get(s.id)?.agentSessionId).toBe("thread-xyz");
+      sm.flushNow();
+    } finally {
+      rmSync(codexHome, { recursive: true, force: true });
+    }
   });
 
   it("setMode refuses chat for a tool with no driver, and refuses archived sessions", async () => {

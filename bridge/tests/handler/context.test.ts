@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import {
   stripAnsi, assembleContext,
-  PTY_MAX_CHARS, PLAN_MAX_CHARS, DECIDE_MAX_CHARS,
+  PTY_MAX_CHARS, DECIDE_MAX_CHARS, DECIDE_MAX_MSGS,
 } from "../../src/handler/context";
 import { readLastClaudeMessages } from "../../src/agents/claude-code/transcript";
 
@@ -44,19 +44,19 @@ test("assembleContext falls back to stripped PTY otherwise", async () => {
 });
 
 describe("context budgets", () => {
-  it("uses plan budgets for purpose=plan (transcript path)", async () => {
-    // 60 numbered lines → transcript reader returns last PLAN_MAX_MSGS (50)
+  it("keeps only the last DECIDE_MAX_MSGS transcript messages", async () => {
     const path = join(mkdtempSync(join(tmpdir(), "ab-ctx-")), "t.jsonl");
-    const lines = Array.from({ length: 60 }, (_, i) =>
+    const total = DECIDE_MAX_MSGS + 10;
+    const lines = Array.from({ length: total }, (_, i) =>
       JSON.stringify({ message: { content: `msg-${i}` } }));
     writeFileSync(path, lines.join("\n"), "utf8");
-    const r = await assembleContext({ tool: "claude-code", transcriptPath: path, recentPty: "", purpose: "plan" });
+    const r = await assembleContext({ tool: "claude-code", transcriptPath: path, recentPty: "", purpose: "decide" });
     expect(r.source).toBe("transcript");
-    expect(r.text).toContain("msg-59");
-    expect(r.text).not.toContain("msg-9\n"); // 60-50=10 → msg-9 dropped
+    expect(r.text).toContain(`msg-${total - 1}`);
+    expect(r.text).not.toContain("msg-9\n"); // the 10 oldest are dropped
   });
-  it("caps the pty fallback at PTY_MAX_CHARS regardless of purpose", async () => {
-    const r = await assembleContext({ tool: "codex", recentPty: "x".repeat(20_000), purpose: "plan" });
+  it("caps the pty fallback at PTY_MAX_CHARS, below the decide budget", async () => {
+    const r = await assembleContext({ tool: "codex", recentPty: "x".repeat(20_000), purpose: "decide" });
     expect(r.source).toBe("pty");
     expect(r.text.length).toBe(PTY_MAX_CHARS);
   });
@@ -64,24 +64,17 @@ describe("context budgets", () => {
 
 // A chat session's recentOutput is a RENDERED transcript snapshot, not noisy PTY
 // scrollback. Capping it at PTY_MAX_CHARS pinned chat sessions to the PTY ceiling
-// for every purpose, so a "plan" call could never reach its larger budget.
+// regardless of the purpose budget, so they reasoned over less history than a
+// terminal session on the same call.
 test("rendered recentKind gets the purpose budget, not the PTY cap", async () => {
-  const big = "x".repeat(PLAN_MAX_CHARS + 5_000);
+  const big = "x".repeat(DECIDE_MAX_CHARS + 5_000);
   const rendered = await assembleContext({
-    tool: "codex", recentPty: big, purpose: "plan", recentKind: "rendered",
-  });
-  expect(rendered.text.length).toBe(PLAN_MAX_CHARS);
-
-  const pty = await assembleContext({ tool: "codex", recentPty: big, purpose: "plan" });
-  expect(pty.text.length).toBe(PTY_MAX_CHARS);
-});
-
-test("rendered recentKind still respects the tighter decide budget", async () => {
-  const big = "x".repeat(PLAN_MAX_CHARS + 5_000);
-  const r = await assembleContext({
     tool: "codex", recentPty: big, purpose: "decide", recentKind: "rendered",
   });
-  expect(r.text.length).toBe(DECIDE_MAX_CHARS);
+  expect(rendered.text.length).toBe(DECIDE_MAX_CHARS);
+
+  const pty = await assembleContext({ tool: "codex", recentPty: big, purpose: "decide" });
+  expect(pty.text.length).toBe(PTY_MAX_CHARS);
 });
 
 // --- codex/opencode transcript dispatch ---

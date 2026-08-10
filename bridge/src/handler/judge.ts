@@ -4,7 +4,7 @@ import {
   buildDecidePrompt, buildRetryPrompt, parseDecisionFromOutput,
   type HandlerDecision,
 } from "./decision";
-import { buildPlanPrompt, parseBriefFromOutput, type Brief } from "./brief";
+import { buildExtractPrompt, parseItemsFromOutput, type ExtractedItem } from "./extract";
 
 // One spawn of the agent's own CLI (reusing its auth). Spawn failure → null.
 // A timeout still returns whatever stdout was captured before the kill — the
@@ -13,10 +13,17 @@ import { buildPlanPrompt, parseBriefFromOutput, type Brief } from "./brief";
 // retry leg (retry exists for malformed output, not for a hung judge).
 async function spawnJudge(
   cmd: string[], cwd: string, timeoutMs: number, spawn: typeof Bun.spawn,
+  env?: Record<string, string>,
 ): Promise<{ stdout: string; timedOut: boolean } | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const proc = spawn(cmd, { cwd, stdout: "pipe", stderr: "ignore" });
+    // Spread process.env: Bun.spawn's `env` REPLACES the environment rather than
+    // merging, so passing the overrides alone would strip PATH and the agent's
+    // own auth vars out from under the judge.
+    const proc = spawn(cmd, {
+      cwd, stdout: "pipe", stderr: "ignore",
+      ...(env ? { env: { ...process.env, ...env } } : {}),
+    });
     let timedOut = false;
     timer = setTimeout(() => {
       timedOut = true;
@@ -49,10 +56,9 @@ function resolveCmd(cmd: string[], prompt: string): string[] {
 //
 // timeoutMs is a TOTAL budget across both attempts, not per-spawn: the retry gets
 // only the time the first attempt left unspent. This keeps worst-case wall time at
-// ~timeoutMs so callers can bound the whole call — the app's plan backstop, for
-// one, is set just above the bridge's plan timeout on the assumption the bridge
-// always resolves first; a per-spawn budget would let a slow-but-malformed first
-// attempt push the real total to ~2×timeoutMs and lose that race.
+// ~timeoutMs, which is what lets a caller racing this against its own deadline
+// bound it; a per-spawn budget would let a slow-but-malformed first attempt push
+// the real total to ~2×timeoutMs and lose that race.
 async function runWithRetry<T>(opts: {
   tool: string; model?: string; cwd: string; timeoutMs: number;
   spawn?: typeof Bun.spawn; transcriptPath?: string;
@@ -69,7 +75,7 @@ async function runWithRetry<T>(opts: {
 
   const prompt = opts.makePrompt(path);
   const started = Date.now();
-  const out1 = await spawnJudge(resolveCmd(judge.cmd(prompt, opts.model), prompt), opts.cwd, opts.timeoutMs, spawn);
+  const out1 = await spawnJudge(resolveCmd(judge.cmd(prompt, opts.model), prompt), opts.cwd, opts.timeoutMs, spawn, judge.env);
   if (out1 === null) return null;
   const r1 = opts.parse(out1.stdout);
   if (r1.value) return r1.value;
@@ -80,20 +86,22 @@ async function runWithRetry<T>(opts: {
   const remaining = opts.timeoutMs - (Date.now() - started);
   if (remaining <= 0) return null;
   const retryPrompt = buildRetryPrompt(prompt, r1.error ?? "invalid output");
-  const out2 = await spawnJudge(resolveCmd(judge.cmd(retryPrompt, opts.model), retryPrompt), opts.cwd, remaining, spawn);
+  const out2 = await spawnJudge(resolveCmd(judge.cmd(retryPrompt, opts.model), retryPrompt), opts.cwd, remaining, spawn, judge.env);
   if (out2 === null) return null;
   return opts.parse(out2.stdout).value;
 }
 
 export async function runDecision(opts: {
-  tool: string; model?: string; brief: Brief; ledgerText: string; context: string;
+  tool: string; model?: string; goal: string; backlogText: string; context: string;
   transcriptPath?: string; cwd: string; timeoutMs?: number; spawn?: typeof Bun.spawn;
+  floorWarnings?: string[];
 }): Promise<HandlerDecision | null> {
   return runWithRetry<HandlerDecision>({
     tool: opts.tool, model: opts.model, cwd: opts.cwd,
     timeoutMs: opts.timeoutMs ?? 45_000, spawn: opts.spawn, transcriptPath: opts.transcriptPath,
     makePrompt: (path) => buildDecidePrompt({
-      brief: opts.brief, ledgerText: opts.ledgerText, context: opts.context, transcriptPath: path,
+      goal: opts.goal, backlogText: opts.backlogText, context: opts.context, transcriptPath: path,
+      floorWarnings: opts.floorWarnings,
     }),
     parse: (stdout) => {
       const r = parseDecisionFromOutput(stdout);
@@ -102,28 +110,22 @@ export async function runDecision(opts: {
   });
 }
 
-/**
- * Budget for a plan call. Measured, not guessed: a real `claude -p` plan over a
- * short context takes ~25s and codex ~17s, and a full PLAN_MAX_CHARS transcript
- * is slower still — the old 25s default put Claude on a coin flip.
- *
- * Keep in lockstep with `_kPlanTimeout` in the app's handler_briefing_sheet.dart,
- * which must stay ABOVE this so the bridge's own fallback result always wins the
- * race and the sheet never gives up first.
- */
-export const PLAN_TIMEOUT_MS = 45_000;
-
-export async function runPlan(opts: {
-  tool: string; model?: string; context: string; transcriptPath?: string;
-  cwd: string; timeoutMs?: number; spawn?: typeof Bun.spawn;
-}): Promise<Brief | null> {
-  return runWithRetry<Brief>({
+// Deliberately no transcriptPath and no context parameter: extraction reads the
+// user's instruction and nothing else (spec §3.1), so there is no context tier to
+// assemble. The budget is well under decide's 45s because this prompt
+// carries no transcript excerpt and the arm it feeds is non-blocking (§3.2) — a
+// slower one only widens the window in which the backlog is still empty.
+export async function runExtraction(opts: {
+  tool: string; model?: string; text: string; cwd: string;
+  timeoutMs?: number; spawn?: typeof Bun.spawn;
+}): Promise<ExtractedItem[] | null> {
+  return runWithRetry<ExtractedItem[]>({
     tool: opts.tool, model: opts.model, cwd: opts.cwd,
-    timeoutMs: opts.timeoutMs ?? PLAN_TIMEOUT_MS, spawn: opts.spawn, transcriptPath: opts.transcriptPath,
-    makePrompt: (path) => buildPlanPrompt(opts.context, path),
+    timeoutMs: opts.timeoutMs ?? 20_000, spawn: opts.spawn,
+    makePrompt: () => buildExtractPrompt(opts.text),
     parse: (stdout) => {
-      const brief = parseBriefFromOutput(stdout);
-      return { value: brief, error: brief ? undefined : "output did not match the brief schema" };
+      const r = parseItemsFromOutput(stdout);
+      return { value: r.items, error: r.error };
     },
   });
 }

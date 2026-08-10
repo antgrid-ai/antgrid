@@ -146,7 +146,7 @@ const Set<String> _heavyTypes = <String>{
   'file:search-done',
   'handler:escalation',
   'handler:activity',
-  'handler:planResult',
+  'handler:snapshot',
   'agent:item-added',
   'agent:item-delta',
   'agent:item-updated',

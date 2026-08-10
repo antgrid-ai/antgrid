@@ -1,17 +1,31 @@
 // bridge/src/handler/engine.ts
 import { createMessage, type AbMessage } from "../protocol";
-import { classifyDestructive } from "./destructive-floor";
+import { classifyDestructive, describeWarning, type FloorWarning } from "./destructive-floor";
+import {
+  authorizeInstruction, createAuthorization, partitionWarnings,
+  type InstructionAuthorization,
+} from "./authorization";
+import {
+  clearSessionTrash, describeSnapshot, planSnapshots, releaseSnapshots, takeSnapshots, undoSnapshot,
+  SNAPSHOT_PATTERNS, type SnapshotEntry, type SnapshotOutcome, type UndoResult,
+} from "./snapshot";
+import { loadSnapshots, pruneSnapshots, saveSnapshots, type StoredSnapshot } from "./snapshot-store";
 import { RunawayGuard } from "./runaway-guard";
 import { assembleContext } from "./context";
-import { runPlan as defaultRunPlan, runDecision as defaultRunDecision } from "./judge";
+import { runDecision as defaultRunDecision, runExtraction as defaultRunExtraction } from "./judge";
+import { MAX_ITEM_CHARS, type ExtractedItem } from "./extract";
 import {
   loadHandlerConfig, appendActivity,
   type HandlerConfig, type ActivityRecord,
 } from "./config";
 import {
-  loadHandlerSession, saveHandlerSession, renderLedger, remainingThenItems,
-  type Brief, type LedgerEntry, type HandlerSessionRecord, type OpenEscalation,
-} from "./brief";
+  loadHandlerSession, saveHandlerSession, EscalationChoiceSchema,
+  type EscalationChoice, type HandlerSessionRecord, type OpenEscalation,
+} from "./session-store";
+import {
+  allTerminal, applyTransitions, propagateBlocked, renderBacklog, summarize,
+  type InstructionItem, type ItemStatus,
+} from "./backlog";
 import { stripAnsi } from "./context";
 import type { SessionAdapter } from "./session-adapter";
 import { handlerObservable, judgeCapable } from "../agents/registry";
@@ -34,6 +48,11 @@ export interface HandlerEvent {
   // text) — carried into the escalation body so the notification says WHAT
   // the agent is asking, not just that it asked.
   detail?: string;
+  // The driver's own id for a blocking prompt (permissionId / questionId). The
+  // resolve RPC names the same id, which is what lets a resolve retire the one
+  // escalation it answered while a second prompt on the same terminal — drivers
+  // hold a MAP of pending ones — keeps its row.
+  promptId?: string;
   // When the provider's limit window ends (epoch ms). Detectors capture it from
   // a side channel; absent means fall back to a fixed wait.
   resetsAt?: number;
@@ -65,9 +84,151 @@ function isLifecycle(evt: HandlerEvent): boolean {
  */
 export type HandlerObservability = "full" | "escalate_only" | "unsupported";
 
+// One tap arms with no payload at all, so an activity row can legitimately be
+// written before anything has stated what the session is for.
+const NO_GOAL = "(no goal set)";
+
+// A ceiling on the WHOLE stack, where extract.ts's MAX_ITEMS bounds only one
+// response: renderBacklog(backlog) is interpolated into every subsequent decide
+// prompt, so repeated instructs would starve the supervisor's context budget —
+// and that shows up as worse decisions, nowhere near this file.
+const MAX_BACKLOG_ITEMS = 100;
+
+// How many past floor warnings ride along in the next decide prompt. Enough to
+// show a pattern the Assistant keeps repeating, short enough that a long session
+// does not spend its context budget re-reading its own history.
+const MAX_REMEMBERED_WARNINGS = 5;
+
+// The item outcomes the activity feed carries a kind for. A skip is as
+// consequential as a completion (§4.3), so they stay distinguishable without
+// parsing the reason text.
+const ITEM_DECISION: Partial<Record<ItemStatus, ActivityRecord["decision"]>> = {
+  done: "item_done",
+  blocked: "item_blocked",
+  skipped: "item_skipped",
+  failed: "item_failed",
+};
+
+type SummaryStatus = keyof ReturnType<typeof summarize>;
+const SUMMARY_GROUPS: [SummaryStatus, string][] = [
+  ["done", "Done"],
+  ["failed", "Failed"],
+  ["blocked", "Blocked"],
+  ["skipped", "Skipped"],
+];
+
+// Item text and the goal are free text the user typed or extraction produced, so
+// either can carry newlines that would render a push body as a broken multi-line
+// notification.
+function oneLine(s: string): string {
+  return s.replace(/\s+/g, " ").trim();
+}
+
+// `??` is the wrong operator against a judge decision: `notify.body`/`notify.draftReply`
+// are `z.string()`, not optional, so a judge answering `handle` fills the whole notify
+// block with EMPTY strings rather than omitting it. A nullish fallback then never fires
+// and the escalation reaches the app with no question and no draft — a card the user
+// can read but cannot act on.
+function firstFilled(...values: (string | undefined)[]): string | undefined {
+  return values.find((v) => v !== undefined && v.trim() !== "");
+}
+
+// Renders judge text for a HUMAN to read in an escalation, never for injection. The
+// control characters that force some of these escalations are exactly what must stay
+// visible here, so they are escaped rather than stripped.
+function previewForUser(s: string, max = 300): string {
+  const escaped = s.replace(
+    /[\x00-\x1f\x7f]/g,
+    (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`,
+  );
+  return escaped.length > max ? `${escaped.slice(0, max)}…` : escaped;
+}
+
+// A stored snapshot as the app sees it. `state` is derived rather than stored:
+// "undone" is the only spent state, and a failed attempt leaves the entry
+// retryable, so the two can never disagree with what an undo would actually do.
+function snapshotWire(st: StoredSnapshot) {
+  return {
+    snapshotId: st.entry.id,
+    terminalId: st.terminalId,
+    at: st.entry.at,
+    action: st.action,
+    trigger: st.entry.trigger,
+    summary: describeSnapshot(st.entry),
+    state: st.undoneAt !== undefined ? "undone" as const : st.failure ? "failed" as const : "available" as const,
+    ...(st.failure ? { detail: st.failure } : {}),
+  };
+}
+
 function wakeClock(at: number): string {
   const d = new Date(at);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+// The "don't do it" half of a quick-choice card. Engine-authored and constant, not
+// judge output: reject has to mean the same thing on every card, and it is the one
+// choice whose text a user is least likely to read before tapping.
+const REJECT_CHOICE_TEXT = "Do not proceed. Wait for my instructions.";
+
+/**
+ * The §4.6 quick-choice card for an escalation the engine has already built.
+ *
+ * Minted here rather than asked of the judge: the judge could propose a richer set,
+ * but its labels are Assistant output reaching a one-tap control, and §5.4 is
+ * emphatic that nothing about authorization may derive from Assistant output. The
+ * one thing the judge does contribute is the draft it already composed, which the
+ * [Approve] choice sends VERBATIM — so the app must render `text`, not only `label`.
+ *
+ * A tap carries NO §5.4 authorization lift. It answers through the ordinary reply
+ * transport (terminal:input / agent:prompt), never through handler:instruct:
+ * - `instruct` is the single feed point for §5.4 and it also queues an extraction,
+ *   so a tap would mint a backlog item no terminal status can ever resolve and the
+ *   session could never wrap up.
+ * - A lift minted by tapping a label the judge wrote is the laundering path §5.4
+ *   closes: a compromised agent composes an escalation whose [Approve] chip
+ *   silences every later advisory row.
+ * The costs are not symmetric — under-lifting costs one advisory activity row per
+ * repeat (post-Phase-5 the advisory floor records rather than escalates), while
+ * over-lifting costs a session-wide grant the user never read. The real lift stays
+ * one control away, in the user's own words, through the PA bar.
+ */
+export function quickChoicesFor(p: {
+  kind?: "reply" | "resolve_in_session";
+  floorRule?: string;
+  draftReply: string;
+  projectPath: string;
+  open?: readonly OpenEscalation[];
+}): EscalationChoice[] | undefined {
+  // An option-based agent prompt is answered by the chat resolve RPC alone, and a
+  // chip's only transport is injected text (terminal:input / agent:prompt), which
+  // such a prompt cannot consume — which is what `kind` exists to say. So any chip
+  // offered here would be a button that does nothing at all.
+  if (p.kind === "resolve_in_session") return undefined;
+  // Escalations stack per terminal (nothing serializes the blocking-prompt path).
+  // An agent blocked on a permission/question reads nothing until that prompt is
+  // resolved, so a one-tap offered beside an unanswered one sends text into a
+  // stalled session and leaves the pill exactly where it was: an action that looks
+  // like it cleared the situation and did not. The free-text sheet costs the user
+  // the same send but makes them read first; that is the deliberate half-step this
+  // withholds. The app enforces the mirror of this for the order the bridge cannot
+  // see (a prompt arriving AFTER a card was already minted).
+  if (p.open?.some((e) => e.kind === "resolve_in_session")) return undefined;
+  // floorRule is set only by the §5.3 HARD floor, which nothing lifts. Those keep
+  // costing a human who reads the text behind the reply sheet's floor banner.
+  if (p.floorRule !== undefined) return undefined;
+  const draft = p.draftReply.trim();
+  if (!draft) return undefined;
+  // A one-tap must not carry a command the floor recognizes — advisory hits as much
+  // as hard ones, since the editable sheet is where the user actually reads what
+  // they are about to send.
+  const floor = classifyDestructive(draft, p.projectPath);
+  if (floor.hard.length > 0 || floor.warnings.length > 0) return undefined;
+  // Validated against the wire rule itself rather than a second copy of its bounds:
+  // an over-long or control-char draft is one the app could not offer as a chip, and
+  // it falls back to the free-text sheet instead.
+  const approve = EscalationChoiceSchema.safeParse({ choiceId: "approve", label: "Approve", text: draft });
+  if (!approve.success) return undefined;
+  return [approve.data, { choiceId: "reject", label: "Reject", text: REJECT_CHOICE_TEXT }];
 }
 
 export interface HandlerEngineDeps {
@@ -97,8 +258,16 @@ export interface HandlerEngineDeps {
    *  same session identity the hook-sourced ones do; without it the per-session
    *  work reduction would miss the one turn end the handler resolves itself. */
   sendPush?: (message: string, terminalId: string) => void;
-  runPlanFn?: typeof defaultRunPlan;
   runDecisionFn?: typeof defaultRunDecision;
+  runExtractionFn?: typeof defaultRunExtraction;
+  // §5.2 snapshot/undo, injectable: the real ones shell out to git and copy trees,
+  // so a test that could not replace them would need a repo on disk.
+  takeSnapshotsFn?: typeof takeSnapshots;
+  undoSnapshotFn?: typeof undoSnapshot;
+  clearTrashFn?: (sessionId: string) => Promise<void>;
+  releaseSnapshotsFn?: (entries: SnapshotEntry[]) => Promise<void>;
+  loadSnapshotsFn?: () => StoredSnapshot[];
+  saveSnapshotsFn?: (entries: StoredSnapshot[]) => void;
   loadConfigFn?: () => HandlerConfig;
   appendActivityFn?: (rec: ActivityRecord) => void;
   loadSessionFn?: (terminalId: string) => HandlerSessionRecord | null;
@@ -109,11 +278,12 @@ export interface HandlerEngineDeps {
 }
 
 interface ArmedSession {
-  brief: Brief;
+  goal: string;
+  // The live instruction stack, and the only record of progress: an item's own
+  // status is what it has reached, so nothing accumulates alongside it.
+  backlog: InstructionItem[];
   notifyOnly: boolean;
   armedAt: number;
-  doneWhenMet: boolean;
-  ledger: LedgerEntry[];
   state: "watching" | "handling" | "needs_you" | "parked";
   // Full payloads, not a count: status snapshots replay these so the app can
   // always render an answerable row for every pending escalation.
@@ -125,6 +295,17 @@ interface ArmedSession {
   selfResuming?: boolean;
   // Consecutive terminal transient failures. A judged decision clears it.
   transientFailures: number;
+  // Advisory floor hits on replies this session already injected (§5.1), fed back
+  // into the next decide prompt. Deliberately not persisted: the activity log is
+  // the durable audit trail, and this copy exists only to shape the next call.
+  floorWarnings: string[];
+  // What the user's own instructions authorized for this session (§5.4). Not
+  // persisted, unlike the backlog those instructions also produced: rebuilding it
+  // after a restart could only come from the stored item text, which extraction
+  // wrote — laundering judge output into an authorization is exactly what §5.4
+  // exists to prevent. A restart therefore costs one advisory row per operation
+  // the user has to name again, which is the cheap side of that trade.
+  auth: InstructionAuthorization;
   // Consecutive limit parks that ended with the limit still in force. Not
   // persisted, unlike transientFailures: it bounds one in-process park→nudge
   // cycle, and a restart is itself a break in that cycle.
@@ -141,15 +322,28 @@ interface ArmedSession {
   parkAwaitingJudge?: boolean;
 }
 
+// Where a session lands once whatever it was doing is over — a judged decision,
+// a submitted line, the end of a park. An escalation the user never answered
+// outranks all three: "watching" with a pending row is a session the app draws
+// as quiet over an agent that is still waiting.
+function restingState(s: ArmedSession): "watching" | "needs_you" {
+  return s.escalations.length > 0 ? "needs_you" : "watching";
+}
+
 export class HandlerEngine {
   private guard: RunawayGuard;
   private sessions = new Map<string, ArmedSession>();
   private cachedConfig: HandlerConfig | null = null;
   private seq = 0;
-  // Per-terminal decision chain. handleEvent is fire-and-forget from agent-core
-  // (each /handler-event POST is unawaited), so two events for one terminal could
-  // otherwise run concurrent judge calls that both pass the disarm recheck and both
-  // inject — two conflicting replies from one supervised decision. Serialize them.
+  // Per-terminal work chain, covering everything that spawns an agent CLI.
+  // handleEvent is fire-and-forget from agent-core (each /handler-event POST is
+  // unawaited), so two events for one terminal could otherwise run concurrent
+  // judge calls that both pass the disarm recheck and both inject — two
+  // conflicting replies from one supervised decision. Extraction rides the same
+  // chain: two instructions typed a second apart would otherwise extract
+  // concurrently and append in completion order, and for items the user stated
+  // without an ordering word their position in the list is the ONLY record of
+  // the order they asked for them in.
   private chains = new Map<string, Promise<void>>();
   // Newest event per terminal, for coalescing: events queued behind a slow judge
   // call are stale by the time they'd run (the agent has already moved on), so
@@ -157,7 +351,20 @@ export class HandlerEngine {
   // would run one full judge spawn (up to 45s) per queued event, composing
   // replies against context the agent left minutes ago.
   private latest = new Map<string, HandlerEvent>();
+  // Blocking-prompt events on the chain but not yet judged. Prompts are exempt
+  // from `latest` (see handleEvent), so a retraction that lands while one is
+  // still waiting has nothing there to take it out of — this is what it removes
+  // it from instead. Keyed by event, not by prompt id, so a prompt that never
+  // named one is still droppable.
+  private queuedPrompts = new Map<string, Set<HandlerEvent>>();
   private timers: TimerRegistry;
+  // Read-through cache of the project's snapshot store. Cached because
+  // emitStatus reads the whole list on every status broadcast; every mutation
+  // writes through and prunes on the same terms as the file, so the two agree.
+  private storedSnapshots: StoredSnapshot[] | null = null;
+  // Undos in flight, by snapshot id. Two taps on one row must not run two undos:
+  // the second would be acting on a tree the first already moved.
+  private undoing = new Set<string>();
 
   constructor(private deps: HandlerEngineDeps) {
     this.guard = deps.guard ?? new RunawayGuard();
@@ -212,108 +419,157 @@ export class HandlerEngine {
     (this.deps.saveSessionFn ?? ((r: HandlerSessionRecord) =>
       saveHandlerSession(this.deps.abDir, this.deps.projectId, r)))(rec);
   }
-  private persist(terminalId: string, s: ArmedSession, armed: boolean): void {
+  private snapshots(): StoredSnapshot[] {
+    this.storedSnapshots ??= this.deps.loadSnapshotsFn
+      ? this.deps.loadSnapshotsFn()
+      : loadSnapshots(this.deps.abDir, this.deps.projectId);
+    return this.storedSnapshots;
+  }
+
+  // Prunes before caching, not only before writing: an entry the file drops is an
+  // undo offer the next restart cannot honor, so advertising it would promise a
+  // tap that silently stops working. Whatever the prune drops takes its bytes and
+  // its gc pin with it.
+  private saveSnapshots(entries: StoredSnapshot[]): void {
+    const { kept, dropped } = pruneSnapshots(entries);
+    this.storedSnapshots = kept;
+    (this.deps.saveSnapshotsFn ?? ((e: StoredSnapshot[]) =>
+      saveSnapshots(this.deps.abDir, this.deps.projectId, e)))(kept);
+    if (dropped.length) this.release(dropped);
+  }
+
+  // Fire-and-forget: the entries are already unreachable through the store, so
+  // nothing the user can still act on waits on the cleanup.
+  private release(entries: StoredSnapshot[]): void {
+    void (this.deps.releaseSnapshotsFn ?? ((e: SnapshotEntry[]) =>
+      releaseSnapshots(e, { abDir: this.deps.abDir })))(entries.map((e) => e.entry))
+      .catch((err: unknown) => log.warn("handler snapshot cleanup failed: %s", err));
+  }
+
+  private persist(terminalId: string, s: ArmedSession, armed: boolean, suspended?: boolean): void {
     this.saveSession({
-      version: 1, terminalId, armed, brief: s.brief, notifyOnly: s.notifyOnly,
-      armedAt: s.armedAt, doneWhenMet: s.doneWhenMet, ledger: s.ledger,
+      version: 2, terminalId, armed, suspended, goal: s.goal, backlog: s.backlog,
+      notifyOnly: s.notifyOnly, armedAt: s.armedAt,
       escalations: s.escalations, judgeTool: s.judgeTool, judgeModel: s.judgeModel,
       parkKind: s.parkKind, parkedUntil: s.parkedUntil, transientFailures: s.transientFailures,
       parkAwaitingJudge: s.parkAwaitingJudge,
     });
   }
 
-  async plan(terminalId: string, judge?: { judgeTool?: string; judgeModel?: string }): Promise<void> {
-    const rec = this.loadSession(terminalId);
-    const previous = rec?.brief;
-    const stored = this.storedJudge(terminalId, rec);
-    // One-shot override for THIS call only ('' = force the session default);
-    // fall through to the stored choice, then the session's own tool. Not
-    // persisted — arming is what persists a judge choice.
-    const tool =
-      judge?.judgeTool === "" ? this.deps.tool(terminalId)
-      : judge?.judgeTool !== undefined && judgeCapable(judge.judgeTool) ? judge.judgeTool
-      : stored.tool ?? this.deps.tool(terminalId);
-    const model = judge?.judgeModel !== undefined
-      ? (judge.judgeModel.trim() || undefined)
-      : stored.model;
-    const ctx = await assembleContext({
-      // The OBSERVED session's tool decides how its transcript is read — the
-      // judge choice only swaps who judges.
-      tool: this.deps.tool(terminalId),
-      transcriptPath: this.deps.adapter.transcriptPath(terminalId),
-      agentSessionId: this.deps.agentSessionId?.(terminalId),
-      recentPty: await this.deps.adapter.recentOutput(terminalId),
-      recentKind: this.deps.adapter.outputKind(terminalId),
-      purpose: "plan",
-    });
-    const runPlanFn = this.deps.runPlanFn ?? defaultRunPlan;
-    const brief = await runPlanFn({
-      tool, model, context: ctx.text,
-      // ctx.transcriptPath is the file the context actually came from (for codex,
-      // a rollout path the adapter never knew); judge.ts still gates the hint by tier.
-      transcriptPath: ctx.transcriptPath ?? this.deps.adapter.transcriptPath(terminalId),
-      cwd: this.deps.projectPath(terminalId),
-    });
-    this.deps.sendAb(createMessage("handler:planResult", {
-      projectId: this.deps.projectId,
-      terminalId,
-      fallback: brief === null,
-      brief: brief ?? undefined,
-      previousBrief: previous,
-      // STORED judge, not the override: this echo is how a freshly restarted
-      // app seeds the sheet's picker for a disarmed session.
-      judgeTool: stored.tool,
-      judgeModel: stored.model,
-    }));
-  }
-
-  arm(p: { terminalId: string; brief: Brief; notifyOnly: boolean; judgeTool?: string; judgeModel?: string }): void {
+  arm(p: {
+    terminalId: string; goal?: string; backlog?: InstructionItem[];
+    notifyOnly: boolean; judgeTool?: string; judgeModel?: string;
+  }): void {
+    // MAX_BACKLOG_ITEMS bounds the stack renderBacklog interpolates into every
+    // later decide prompt, and appendItems is not the only way in: a
+    // `handler:configure` payload assigns the list wholesale and BacklogWire
+    // bounds only its shape. Clamped here, the one place a backlog is ever
+    // assigned, so the wire path cannot outgrow the extraction path.
+    const backlog = p.backlog !== undefined && p.backlog.length > MAX_BACKLOG_ITEMS
+      ? p.backlog.slice(0, MAX_BACKLOG_ITEMS)
+      : p.backlog;
+    // Same reason appendItems records its drops: the status snapshot the app
+    // gets back carries the clamped list with nothing saying why it is short,
+    // so without a feed row the missing items are indistinguishable from items
+    // the user never sent.
+    if (p.backlog !== undefined && backlog !== undefined && backlog.length < p.backlog.length) {
+      this.record(p.terminalId, "instruction_dropped",
+        `backlog is full (${MAX_BACKLOG_ITEMS} items)`,
+        `${p.backlog.length - backlog.length} item(s) not tracked`);
+    }
     const existing = this.sessions.get(p.terminalId);
     if (existing) {
       // Mutate in place, never replace: an in-flight judge call holds a reference
       // to this session and re-checks identity after its await — swapping in a
       // fresh object would silently drop that decision and leave the copied
-      // "handling" state with nothing left to reset it. Edited brief keeps the
-      // ledger (spec: mid-flight edits preserve it); items no longer in
-      // thenItems simply stop rendering as remaining.
-      existing.brief = p.brief;
+      // "handling" state with nothing left to reset it.
+      //
+      // Absent means "leave it alone", never "clear it" (an empty backlog is sent
+      // as []): a re-arm or a notify-only toggle carries no backlog, and the
+      // bridge's copy is the one holding the statuses this session has banked.
+      const goalChanged = p.goal !== undefined && p.goal.trim() !== existing.goal.trim();
+      if (p.goal !== undefined) existing.goal = p.goal;
+      if (backlog !== undefined) existing.backlog = backlog;
       existing.notifyOnly = p.notifyOnly;
       this.applyJudgeChoice(existing, p);
       this.persist(p.terminalId, existing, true);
-      this.record(p.terminalId, "brief_edited", p.brief.taskSummary);
+      // Only when the goal actually moved: `handler:configure` is also the
+      // backlog-edit and notify-only path (see updateBacklog in the app), and a
+      // "Goal edited" row over an unchanged goal is a feed that misreports what
+      // happened on every reorder and every toggle.
+      if (goalChanged) this.record(p.terminalId, "goal_edited", existing.goal || NO_GOAL);
       this.emitStatus();
+      // A goal landing on a session whose backlog is still empty is the user's
+      // first statement of what this session is for — the 1-tap arm before it had
+      // nothing to extract. Once items exist, a new goal is a rename: stacking
+      // more work goes through handler:instruct, and re-extracting here would
+      // append a second copy of the sentence on every edit.
+      if (goalChanged && backlog === undefined && existing.goal.trim()) {
+        this.queueExtraction(p.terminalId, existing.goal.trim(), { onlyIfEmpty: true });
+      }
       return;
     }
     // No in-memory session, but a bridge restart leaves the persisted record
-    // behind — rehydrate ledger/escalations/doneWhenMet from it so re-arming
-    // doesn't clobber progress the previous process already banked.
+    // behind — rehydrate goal/backlog/escalations from it so re-arming doesn't
+    // clobber progress the previous process already banked.
+    //
+    // `suspended` is what makes that reachable across a restart at all: a host
+    // shutdown kills the PTYs, and a dead terminal disarms (onTerminalExit), so
+    // gating on `armed` alone meant the record was ALWAYS unarmed by the time
+    // anyone re-armed. `armed` still counts on its own — a hard kill leaves the
+    // record as it stood, with no exit handler to run.
     const rec = this.loadSession(p.terminalId);
-    const resumed = rec?.armed ? rec : null;
+    const resumed = rec && (rec.armed || rec.suspended) ? rec : null;
+    // A genuinely new session on this slot is the moment the previous one's undo
+    // offers stop meaning anything — and the only such moment. Disarm is NOT one:
+    // a wrap-up disarms while the offer still matters, since the summary that
+    // carries it is read hours later. A resumed record is the same session
+    // continuing across a restart, so it keeps everything.
+    if (!resumed) this.retireSnapshots(p.terminalId);
     const stored = this.storedJudge(p.terminalId, rec);
+    // A `resolve_in_session` row names a prompt held by a driver in a runtime that
+    // is gone — suspension follows the terminal's exit, and a restart rebuilds every
+    // driver with no pending prompts — so nothing is left to resolve or retract it.
+    // Carrying one across would wedge the slot: no typed line clears it, wrap-up
+    // never fires, a notify-only session goes silent, and the park nudge stops.
+    const carried = (resumed?.escalations ?? []).filter((e) => e.kind !== "resolve_in_session");
     const s: ArmedSession = {
-      brief: p.brief,
+      goal: p.goal ?? resumed?.goal ?? "",
+      backlog: backlog ?? resumed?.backlog ?? [],
       notifyOnly: p.notifyOnly,
       armedAt: resumed?.armedAt ?? this.now(),
-      doneWhenMet: resumed?.doneWhenMet ?? false,
-      ledger: resumed?.ledger ?? [],
-      state: resumed && resumed.escalations.length > 0 ? "needs_you" : "watching",
-      escalations: resumed?.escalations ?? [],
+      state: carried.length > 0 ? "needs_you" : "watching",
+      escalations: carried,
       // Seed from the persisted record (armed pre-restart OR the last disarmed
       // pick), then let an explicit choice on this arm override it.
       judgeTool: stored.tool,
       judgeModel: stored.model,
       transientFailures: resumed?.transientFailures ?? 0,
       limitParks: 0,
+      floorWarnings: [],
+      auth: createAuthorization(),
     };
     this.applyJudgeChoice(s, p);
     this.sessions.set(p.terminalId, s);
     this.persist(p.terminalId, s, true);
-    this.record(p.terminalId, resumed ? "brief_edited" : "brief_armed", s.brief.taskSummary);
+    // "armed" either way: nothing is edited on this path — the goal is whatever the
+    // previous process banked — and a real edit re-arms an in-memory session, which
+    // is recorded above. Deliberately NOT "resumed", which belongs to the park
+    // lifecycle; spending it here would make "did the park end?" unanswerable from
+    // the feed. The rehydrated rows above this one are what mark it as a resume.
+    this.record(p.terminalId, "armed", s.goal || NO_GOAL);
     this.emitStatus();
     // Rehydrated last, so the arm record still reads as the session's opening
     // line and a deadline already past can resume straight into the new process.
     if (resumed?.parkKind && resumed.parkedUntil !== undefined) {
       this.rehydratePark(p.terminalId, s, resumed.parkKind, resumed.parkedUntil, resumed.parkAwaitingJudge);
+    }
+    // §3.2: the user types one sentence and the session arms immediately, with
+    // extraction resolving behind the handoff. Skipped once a backlog exists — a
+    // rehydrated or app-supplied one is already the user's list, and extracting
+    // the goal alongside it would double every item.
+    if (s.goal.trim() && backlog === undefined) {
+      this.queueExtraction(p.terminalId, s.goal.trim(), { onlyIfEmpty: true });
     }
   }
 
@@ -343,18 +599,176 @@ export class HandlerEngine {
     this.emitStatus();
   }
 
-  disarm(terminalId: string): void {
+  /**
+   * Stack more instructions onto a live session (§3.2). Returns without waiting
+   * on the extraction spawn: arming and stacking are one tap, and a supervisor
+   * that made the user watch a 20s CLI run before their sentence appeared would
+   * be a worse product than one that fills the list a moment later.
+   *
+   * Instructing never arms — `handler:configure` is the only thing that does.
+   *
+   * This is also the ONE feed point for §5.4 authorization. The arm-time goal is
+   * deliberately not one: it is a statement of what the session is for, and a lift
+   * has to be traceable to a sentence the user wrote to authorize an action.
+   */
+  instruct(p: { terminalId: string; text: string }): void {
+    const s = this.sessions.get(p.terminalId);
+    if (!s) {
+      log.warn("handler instruct ignored: no armed session for %s", p.terminalId);
+      return;
+    }
+    const text = p.text.trim();
+    if (!text) return;
+    // Taken from the raw payload and BEFORE the extraction spawn: extraction output is
+    // judge-authored, so deriving a lift from it would let a compromised agent widen
+    // its own permissions through the extractor.
+    authorizeInstruction(s.auth, text, this.deps.projectPath(p.terminalId));
+    this.queueExtraction(p.terminalId, text);
+  }
+
+  // `onlyIfEmpty` is for the arm-time pass (§3.2): the goal is extracted once,
+  // and the check has to happen at DEQUEUE time, or a goal edited twice while the
+  // first spawn was still running would append the sentence in both forms.
+  private queueExtraction(terminalId: string, text: string, opts: { onlyIfEmpty?: boolean } = {}): void {
+    void this.enqueue(terminalId, () => this.extractAndAppend(terminalId, text, opts));
+  }
+
+  private async extractAndAppend(
+    terminalId: string, text: string, opts: { onlyIfEmpty?: boolean },
+  ): Promise<void> {
+    // Resolved here rather than where the work was queued: the session may have
+    // been disarmed, or its judge re-picked, while this waited its turn.
+    const s = this.sessions.get(terminalId);
+    if (!s) return;
+    if (opts.onlyIfEmpty && s.backlog.length > 0) return;
+
+    // Same resolution the decide path uses, through the same helper: the tool is
+    // an untrusted string either way, and `judgeCapable` is where that check
+    // lives for every caller.
+    const tool = s.judgeTool ?? this.deps.tool(terminalId);
+    // Held to the bound the extractor's own items are held to. The fallback is
+    // the EXPECTED path on a rate-limited account, so an unbounded one would put
+    // a whole pasted instruction into every decide prompt from here on.
+    const raw: ExtractedItem[] = [{ ref: "raw", text: text.slice(0, MAX_ITEM_CHARS) }];
+
+    let items: ExtractedItem[] | null = null;
+    if (judgeCapable(tool)) {
+      const runExtractionFn = this.deps.runExtractionFn ?? defaultRunExtraction;
+      try {
+        items = await runExtractionFn({ tool, model: s.judgeModel, text, cwd: this.deps.projectPath(terminalId) });
+      } catch (err) {
+        // A session parked on a provider limit lands here: the extraction spawn
+        // shares that limited account. The instruction survives as one raw item,
+        // which is why this path needs no park-aware branching.
+        log.warn("handler extraction failed for %s: %s", terminalId, err);
+      }
+    }
+    // Caught rather than thrown on: nothing awaits this chain entry, and the
+    // append is the whole point of the call, so a failed disk write would
+    // otherwise be invisible.
+    try {
+      this.appendItems(terminalId, s, items?.length ? items : raw);
+    } catch (err) {
+      log.error("handler instruct append failed for %s: %s", terminalId, err);
+    }
+  }
+
+  // The one path items reach the backlog by. Everything the extractor is not
+  // allowed to own — ids, status, createdAt — is decided here, after the spawn.
+  private appendItems(terminalId: string, s: ArmedSession, extracted: ExtractedItem[]): void {
+    // The extraction await yielded the event loop; a concurrent disarm or
+    // terminal-exit may have dropped or replaced this session, and appending
+    // would re-persist a session the user stopped as armed. An auto-wrap-up
+    // reaches here the same way, and there the user has already been pushed
+    // "done" — so the lost instruction leaves no other trace at all.
+    if (this.sessions.get(terminalId) !== s) {
+      log.warn("handler dropped %d extracted item(s) for %s: session no longer armed",
+        extracted.length, terminalId);
+      return;
+    }
+
+    const room = Math.max(0, MAX_BACKLOG_ITEMS - s.backlog.length);
+    const kept = extracted.slice(0, room);
+    const dropped = extracted.length - kept.length;
+    if (dropped > 0) {
+      log.warn("handler backlog cap reached for %s: dropped %d item(s)", terminalId, dropped);
+      // The bridge's stdout is not a surface the phone can read, and the status
+      // snapshot it gets back is byte-identical to the one it already had — so
+      // without a feed row the user's instruction vanishes silently.
+      this.record(terminalId, "instruction_dropped",
+        `backlog is full (${MAX_BACKLOG_ITEMS} items)`, `${dropped} item(s) not tracked`);
+    }
+    // Nothing appended means nothing to persist and no snapshot worth
+    // broadcasting; the record above is the whole outcome.
+    if (kept.length === 0) return;
+
+    // Minted against the backlog AS IT STANDS NOW, never before the spawn: the
+    // backlog may have moved while extraction ran, and a duplicate id leaves the
+    // shadowed item unreachable by every transition — so `allTerminal` can never
+    // be true again and the session can never wrap up.
+    const used = new Set(s.backlog.map((i) => i.id));
+    const ids = kept.map(() => {
+      let id = this.id("item");
+      while (used.has(id)) id = this.id("item");
+      used.add(id);
+      return id;
+    });
+
+    // Refs are resolved after every id exists, because an item may depend on one
+    // declared later in the same response. First occurrence wins: a ref names one
+    // item, and a dependsOn was written against the first thing to claim it.
+    const idByRef = new Map<string, string>();
+    kept.forEach((e, n) => { if (!idByRef.has(e.ref)) idByRef.set(e.ref, ids[n]!); });
+
+    const now = this.now();
+    // Replaced, not pushed into: an earlier emitStatus handed the old array out
+    // by reference, and absorbTransitions keeps the same discipline.
+    s.backlog = [...s.backlog, ...kept.map((e, n): InstructionItem => {
+      const id = ids[n]!;
+      // Intra-batch only, and a ref naming nothing in this batch (or itself) is
+      // DROPPED rather than carried through: nextActionable reads an unresolvable
+      // dependency id as unsatisfied, so keeping one would strand the item queued,
+      // undrivable and non-terminal forever.
+      const dependsOn = (e.dependsOn ?? [])
+        .flatMap((ref) => { const dep = idByRef.get(ref); return dep && dep !== id ? [dep] : []; });
+      return {
+        id, text: e.text, status: "queued", createdAt: now,
+        ...(dependsOn.length > 0 ? { dependsOn } : {}),
+        ...(e.condition ? { condition: e.condition } : {}),
+      };
+    })];
+
+    // No propagateBlocked: every item here is `queued` with intra-batch deps, so
+    // there is nothing to derive. The decide path already runs it each pass.
+    this.persist(terminalId, s, true);
+    this.emitStatus();
+  }
+
+  /**
+   * `suspended` distinguishes "the runtime went away" from "the user turned
+   * supervision off" — see the resume gate in arm(). Only onTerminalExit passes
+   * it; a `handler:configure {armed:false}` is the user's own decision and must
+   * leave nothing to rehydrate.
+   */
+  disarm(terminalId: string, opts?: { suspended?: boolean }): void {
     const s = this.sessions.get(terminalId);
     if (!s) return;
     this.sessions.delete(terminalId);
     this.latest.delete(terminalId);
+    this.queuedPrompts.delete(terminalId);
     this.unparkIfParked(terminalId, s);
-    this.persist(terminalId, s, false);
+    this.persist(terminalId, s, false, opts?.suspended);
     this.guard.reset(terminalId);
     this.emitStatus();
   }
 
-  onUserReply(terminalId: string, data: string): void {
+  /**
+   * A human answered on this terminal. `resolvedPromptId` marks the caller as a
+   * chat resolve RPC (`agent:permission-resolve` / `-question-resolve`) and names
+   * the prompt it answered — the only thing that retires a `resolve_in_session`
+   * row, see the clearing rule below.
+   */
+  onUserReply(terminalId: string, data: string, opts?: { resolvedPromptId?: string }): void {
     this.guard.reset(terminalId);
     const s = this.sessions.get(terminalId);
     if (!s) return;
@@ -362,22 +776,38 @@ export class HandlerEngine {
     // comes first: typing into an armed terminal must not cost one disk write +
     // one encrypted status broadcast per character.
     if (!/[\r\n]/.test(data)) return;
-    // A human at the keyboard ends a park — before the escalations-empty
+    // A human at the keyboard ends a park — before the nothing-changed
     // early-return below, which a parked session normally satisfies.
     const unparked = this.unparkIfParked(terminalId, s);
     // Pending escalations clear only on a SUBMITTED line — a stray keypress must
-    // not silently swallow an unanswered question — and a submit clears ALL of
-    // them: once a human line reaches the agent, every earlier pause-question
-    // for this terminal is stale (each pause supersedes the last).
-    if (!unparked && s.escalations.length === 0) return;
-    s.escalations = [];
+    // not silently swallow an unanswered question — and a submit clears every row
+    // that a line can actually answer: once a human line reaches the agent, each
+    // earlier free-text pause-question for this terminal is stale (each pause
+    // supersedes the last).
+    //
+    // A `resolve_in_session` row is not one of those. It names an option-based
+    // prompt that only the chat resolve RPC can answer (see OpenEscalationWire.kind),
+    // so a typed line retires nothing: clearing it would drop the session to
+    // "watching" while the agent stays blocked, and nothing would re-raise it —
+    // escalation needs a NEW event, and a blocked agent emits none.
+    //
+    // A resolve retires the row for the prompt it names, plus any row too old to
+    // carry an id at all. Never every row: drivers hold a MAP of pending prompts
+    // (parallel tool calls open two at once), and dropping the sibling's row would
+    // be the same silently-blocked session by another route.
+    const resolved = opts?.resolvedPromptId;
+    const kept = s.escalations.filter((e) => e.kind === "resolve_in_session"
+      && (resolved === undefined || (e.promptId !== undefined && e.promptId !== resolved)));
+    const cleared = kept.length < s.escalations.length;
+    if (!unparked && !cleared) return;
+    s.escalations = kept;
     // A human line is a fresh attempt, so the failure series that led here is
     // over. Without this the counters stay at their ceiling — only a judged turn
     // clears transientFailures — and the very next failure would page again
     // instead of backing off.
     s.transientFailures = 0;
     s.limitParks = 0;
-    s.state = "watching";
+    s.state = restingState(s);
     this.persist(terminalId, s, true);
     this.emitStatus();
   }
@@ -398,35 +828,42 @@ export class HandlerEngine {
     this.emitStatus();
   }
 
-  // A driver withdrew its pending permission/question (agent:request-retracted):
-  // the forced escalation now points at a prompt that no longer exists. Clear
-  // pending escalations — same all-at-once semantics as onUserReply, each pause
-  // supersedes the last — WITHOUT resetting the runaway guard: retraction is
-  // the agent moving on, not a human answering.
-  onPromptRetracted(terminalId: string): void {
-    // Drop a queued blocking-prompt event, BEFORE the escalations-empty guard: a
-    // permission/question event can still be waiting behind an earlier slow judge
-    // call (handleEvent's coalescing chain) when the retraction lands, so
-    // s.escalations is empty here even though `latest` still points at the
-    // not-yet-run event. Leaving it would let the coalescing check in handleEvent
-    // (`this.latest.get(id) === evt`) match on dequeue and resurrect an escalation
-    // for a prompt the driver already retracted.
-    //
-    // Scoped to blocking prompts, NOT unconditional: a chat session sends
-    // agent:turn-end and then retracts every pending prompt synchronously in the
-    // same stack (ChatSession.closeTurn -> endTurn -> retractAllPending), so a
-    // blanket delete swallows the turn_end queued microseconds earlier — leaving
-    // an armed session watching a dead agent on exactly the "stream died mid-turn
-    // while a prompt was outstanding" case turn_end-on-error exists to catch.
-    if (isBlockingPrompt(this.latest.get(terminalId))) this.latest.delete(terminalId);
+  /**
+   * A driver withdrew a pending permission/question (agent:request-retracted):
+   * the forced escalation now points at a prompt that no longer exists. Retires
+   * that row — unlike a typed line, a retraction means the prompt is genuinely
+   * gone, so nothing can still be waiting on it — but WITHOUT resetting the
+   * runaway guard: retraction is the agent moving on, not a human answering.
+   *
+   * Scoped to `promptId` because drivers withdraw one at a time: codex keys its
+   * retractors per JSON-RPC request, so cancelling one elicitation leaves every
+   * other prompt on that session live. Clearing the list wholesale took their
+   * rows with it and rested the session at "watching" over a blocked agent.
+   *
+   * No id means the whole set is gone — both wire fields are optional, and
+   * work-status.ts's `closeRequest` reads an id-less retraction the same way.
+   */
+  onPromptRetracted(terminalId: string, promptId?: string): void {
+    // Before the session lookup, and never against `latest`: a prompt can still
+    // be waiting behind an earlier slow judge call when the retraction lands, and
+    // it must not escalate on dequeue for a prompt the driver already took back.
+    // Drivers send agent:turn-end and then retract synchronously in the same
+    // stack (claude's endActiveTurnOnFailure/onResult, codex's turn-complete
+    // handler), so anything that reached into `latest` here would swallow the
+    // turn_end queued microseconds earlier — leaving an armed session watching a
+    // dead agent on exactly the case turn_end-on-error exists to catch.
+    this.dropQueuedPrompts(terminalId, promptId);
     const s = this.sessions.get(terminalId);
     if (!s) return;
-    // Also before the escalations-empty return: a parked session normally has
-    // none, so an unpark placed after it would be dead code.
+    // Before the no-op return: a parked session normally has no escalations at
+    // all, so an unpark placed after it would be dead code.
     const unparked = this.unparkIfParked(terminalId, s);
-    if (!unparked && s.escalations.length === 0) return;
-    s.escalations = [];
-    s.state = "watching";
+    const kept = promptId === undefined
+      ? []
+      : s.escalations.filter((e) => e.promptId !== promptId);
+    if (!unparked && kept.length === s.escalations.length) return;
+    s.escalations = kept;
+    s.state = restingState(s);
     this.persist(terminalId, s, true);
     this.emitStatus();
   }
@@ -436,10 +873,7 @@ export class HandlerEngine {
   private unparkIfParked(terminalId: string, s: ArmedSession): boolean {
     if (s.state !== "parked") return false;
     this.timers.cancel(terminalId);
-    // An escalation the user never answered outlives the park it was parked
-    // through, so the pill must go back to needs_you — "watching" with a
-    // pending row is a state the rest of the engine never produces.
-    s.state = s.escalations.length > 0 ? "needs_you" : "watching";
+    s.state = restingState(s);
     s.parkKind = undefined;
     s.parkedUntil = undefined;
     s.selfResuming = undefined;
@@ -453,39 +887,83 @@ export class HandlerEngine {
    * A terminal died. Reclaim its guard and pending state, and disarm — a
    * runtime that is gone cannot be supervised.
    *
+   * Persisted as SUSPENDED, not plainly disarmed: the session slot outlives its
+   * PTY (reopening it reuses the id), so the backlog and any unanswered
+   * escalation must survive to the next arm. Without that, every host shutdown
+   * silently emptied the session it was supposed to preserve.
+   *
    * `keepArmed` is for a session:set-mode flip, where the runtime is being
    * swapped underneath a session that itself survives. The supervisor is keyed
    * by session id, so disarming there would answer "I changed how I'm viewing
-   * this" with "your supervision is off". It must SUPPRESS the disarm rather
-   * than re-arm afterwards: disarm() persists the record as unarmed, and a
-   * later arm() rehydrates only from an armed record — so the round trip would
-   * quietly reset the ledger, armedAt and any open escalations.
+   * this" with "your supervision is off" — a status flap the user never asked
+   * for, on a session that never stopped being supervised.
    */
   onTerminalExit(terminalId: string, opts?: { keepArmed?: boolean }): void {
     this.guard.reset(terminalId);
     if (!this.sessions.has(terminalId)) return;
     if (opts?.keepArmed) return;
-    this.disarm(terminalId);
+    this.disarm(terminalId, { suspended: true });
+  }
+
+  // Tack work onto the terminal's chain. A prior item's rejection must not block
+  // later ones, so it is swallowed before ours runs.
+  private enqueue(terminalId: string, run: () => Promise<void>): Promise<void> {
+    const prev = this.chains.get(terminalId) ?? Promise.resolve();
+    const next = prev.catch(() => {}).then(run);
+    this.chains.set(terminalId, next);
+    const done = () => { if (this.chains.get(terminalId) === next) this.chains.delete(terminalId); };
+    next.then(done, done);
+    return next;
   }
 
   handleEvent(evt: HandlerEvent): Promise<void> {
-    // Tack this event onto the terminal's chain; a prior event's rejection must
-    // not block later events, so swallow it before running ours. At dequeue
-    // time, run only if this is still the newest event for the terminal —
-    // anything superseded while waiting is dropped, not judged.
+    // At dequeue time, run only if this is still the newest event for the
+    // terminal — anything superseded while waiting is dropped, not judged.
     //
     // Lifecycle events sit outside that rule entirely: a limit_hit and a later
     // turn_end mean different things, so neither may supersede the other. They
     // still ride the chain, so they cannot race a judge call already in flight.
+    //
+    // Blocking prompts sit outside it for the same reason: an agent can be
+    // stopped on two at once — every driver holds a MAP of pending ones, and
+    // work-status.ts models them as a set per session — so a second prompt is
+    // another question, not a fresher reading of one state. Superseding left the
+    // agent blocked on a prompt with no row, no push, and no further event to
+    // raise it again. Retraction is what takes a prompt off the chain instead.
     const lifecycle = isLifecycle(evt);
-    if (!lifecycle) this.latest.set(evt.terminalId, evt);
-    const prev = this.chains.get(evt.terminalId) ?? Promise.resolve();
-    const next = prev.catch(() => {}).then(() =>
-      lifecycle || this.latest.get(evt.terminalId) === evt ? this.handleEventInner(evt) : undefined);
-    this.chains.set(evt.terminalId, next);
-    const done = () => { if (this.chains.get(evt.terminalId) === next) this.chains.delete(evt.terminalId); };
-    next.then(done, done);
-    return next;
+    const blocking = isBlockingPrompt(evt);
+    if (!lifecycle && !blocking) this.latest.set(evt.terminalId, evt);
+    if (blocking) this.trackQueuedPrompt(evt);
+    return this.enqueue(evt.terminalId, async () => {
+      const live = blocking
+        ? this.claimQueuedPrompt(evt)
+        : lifecycle || this.latest.get(evt.terminalId) === evt;
+      if (live) await this.handleEventInner(evt);
+    });
+  }
+
+  private trackQueuedPrompt(evt: HandlerEvent): void {
+    const queued = this.queuedPrompts.get(evt.terminalId) ?? new Set<HandlerEvent>();
+    queued.add(evt);
+    this.queuedPrompts.set(evt.terminalId, queued);
+  }
+
+  // Whether this prompt is still worth escalating. A retraction that arrived
+  // while it waited has already removed it, which is what stops a withdrawn
+  // prompt from becoming a "needs you" row nothing can ever answer.
+  private claimQueuedPrompt(evt: HandlerEvent): boolean {
+    const queued = this.queuedPrompts.get(evt.terminalId);
+    if (!queued?.delete(evt)) return false;
+    if (queued.size === 0) this.queuedPrompts.delete(evt.terminalId);
+    return true;
+  }
+
+  private dropQueuedPrompts(terminalId: string, promptId?: string): void {
+    const queued = this.queuedPrompts.get(terminalId);
+    if (!queued) return;
+    if (promptId === undefined) queued.clear();
+    else for (const evt of queued) if (evt.promptId === promptId) queued.delete(evt);
+    if (queued.size === 0) this.queuedPrompts.delete(terminalId);
   }
 
   private async handleEventInner(evt: HandlerEvent): Promise<void> {
@@ -521,7 +999,7 @@ export class HandlerEngine {
       this.escalate(evt.terminalId, s, {
         decision: "escalate", confidence: 1, reason: "blocking prompt requires you",
         notify: { title: "Handler", body, draftReply: "", urgency: "high" },
-      }, undefined, undefined, "resolve_in_session");
+      }, undefined, undefined, "resolve_in_session", evt.promptId);
       return;
     }
 
@@ -562,10 +1040,11 @@ export class HandlerEngine {
       });
       const runDecisionFn = this.deps.runDecisionFn ?? defaultRunDecision;
       decision = await runDecisionFn({
-        tool: s.judgeTool ?? tool, model: s.judgeModel, brief: s.brief,
-        ledgerText: renderLedger(s.brief, s.ledger),
+        tool: s.judgeTool ?? tool, model: s.judgeModel, goal: s.goal,
+        backlogText: renderBacklog(s.backlog),
         context: ctx.text, transcriptPath: ctx.transcriptPath ?? transcriptPath,
         cwd: this.deps.projectPath(evt.terminalId),
+        floorWarnings: s.floorWarnings,
       });
     } catch {
       if (this.sessions.get(evt.terminalId) === s) this.onJudgeUnavailable(evt, s);
@@ -586,7 +1065,7 @@ export class HandlerEngine {
     // A rejection must not strand state in "handling" — reset before rethrowing so
     // the next event isn't ignored and the app's status pill reflects reality.
     try {
-      this.absorbLedger(evt.terminalId, s, decision);
+      this.absorbTransitions(evt.terminalId, s, decision);
       // Wrap-up is checked AFTER acting on the decision (see each branch below):
       // a final `handle` reply must reach the agent before disarm, and an
       // escalation never wraps up — wake-rules trump completion.
@@ -623,17 +1102,53 @@ export class HandlerEngine {
           return this.escalate(evt.terminalId, s, decision, "slash commands are not supported in chat sessions");
         }
 
+        // The floor's ONE call site (spec §5). It inspects the text Handler is
+        // about to inject, never the commands the agent goes on to run.
         const floor = classifyDestructive(probe, this.deps.projectPath(evt.terminalId), reply);
-        if (floor.blocked) return this.escalate(evt.terminalId, s, decision, `floor: ${floor.reason}`, floor.reason);
+        // Checked before the partition, and never against it: §5.3 is liftable by
+        // nothing, so no instruction can reach this branch.
+        if (floor.hard.length > 0) {
+          const reason = describeWarning(floor.hard[0]!);
+          return this.escalate(evt.terminalId, s, decision, `floor: ${reason}`, reason);
+        }
+        // §5.4: what the user's own instructions already authorized drops out of the
+        // warning stream. It stays a separate list rather than being filtered away
+        // because an authorized action is still snapshotted (§5.2) — the snapshot pass
+        // reads `authorized` here, alongside `warn`.
+        const { warn, authorized } = partitionWarnings(s.auth, floor.warnings, probe);
 
         const guardReason = this.guard.check(evt.terminalId, probe);
         if (guardReason) return this.escalate(evt.terminalId, s, decision, guardReason);
 
+        if (authorized.length > 0) {
+          log.info("handler floor: %d warning(s) authorized by instruction for %s",
+            authorized.length, evt.terminalId);
+        }
+        // §5.2, and the reason the floor can afford to be advisory: prepare the undo
+        // BEFORE the agent is told to do the thing. Authorized warnings count here —
+        // §5.4 drops the warning, never the safety net ("I asked for it" is not the
+        // same as "I wanted that exact result").
+        const snapshots = warn.length + authorized.length > 0
+          ? await this.prepareSnapshots(evt.terminalId, written)
+          : [];
+        // The snapshot pass awaits git and the filesystem; a concurrent disarm may
+        // have dropped this session, and injecting into one the user stopped is the
+        // boundary this whole file is built around. Whatever was captured is left in
+        // the store unadvertised — a reply that was never sent has nothing to undo —
+        // and the next fresh arm on this slot reclaims it.
+        if (this.sessions.get(evt.terminalId) !== s) return;
+
         this.deps.adapter.injectReply(evt.terminalId, written);
         this.guard.recordAutoReply(evt.terminalId, probe);
+        // Both recorded after the inject and before the handle row, so the feed reads
+        // as "what was saved, what was flagged, then what was sent". Auditability is
+        // what prevention was traded for (§5.1), so nothing here is conditional on the
+        // Assistant's own view of the risk.
+        this.recordSnapshots(evt.terminalId, s, snapshots, [...warn, ...authorized]);
+        this.noteFloorWarnings(evt.terminalId, s, warn);
         this.record(evt.terminalId, "handle", decision.reason, written);
         if (this.maybeWrapUp(evt.terminalId, s)) return;
-        s.state = "watching";
+        s.state = restingState(s);
         this.persist(evt.terminalId, s, true);
         this.emitStatus();
         return;
@@ -642,20 +1157,21 @@ export class HandlerEngine {
       if (decision.decision === "continue") {
         this.record(evt.terminalId, "continue", decision.reason);
         if (this.maybeWrapUp(evt.terminalId, s)) return;
-        s.state = "watching";
+        s.state = restingState(s);
         this.persist(evt.terminalId, s, true);
         this.emitStatus();
         return;
       }
 
-      // escalate: deliberately no wrap-up check — an escalation with doneWhenMet
-      // stays pending for the human; auto-disarming would bury the question.
+      // escalate: deliberately no wrap-up check — an escalation raised on the
+      // same pass that completed the backlog stays pending for the human;
+      // auto-disarming would bury the question.
       this.escalate(evt.terminalId, s, decision);
     } catch (err) {
       // A wrap-up (or a concurrent disarm) may already have dropped this
       // session; resetting its state here would re-persist it as armed.
       if (this.sessions.get(evt.terminalId) === s) {
-        s.state = s.escalations.length > 0 ? "needs_you" : "watching";
+        s.state = restingState(s);
         this.emitStatus();
       }
       throw err;
@@ -752,7 +1268,16 @@ export class HandlerEngine {
             draftReply: "", urgency: "normal",
           },
         });
+        return;
       }
+      // Suppressing the duplicate row must not also suppress the state move: a
+      // judge failure arrives with handleEventInner having already set
+      // "handling", and neither the park nor the escalate below runs on this
+      // leg — so the pill would report work nobody is doing until the next
+      // event happens to land.
+      s.state = "needs_you";
+      this.persist(evt.terminalId, s, true);
+      this.emitStatus();
       return;
     }
     const until = this.now() + transientBackoffMs(s.transientFailures);
@@ -844,55 +1369,97 @@ export class HandlerEngine {
     this.deps.adapter.injectReply(terminalId, "continue");
   }
 
-  // Record judge-declared satisfied items (dedup by exact item string) and count
-  // progress toward the runaway guard: real progress is evidence of non-looping.
-  private absorbLedger(terminalId: string, s: ArmedSession, decision: HandlerDecision): void {
-    // Only the brief's own follow-ups count as satisfied. The judge is untrusted:
-    // if arbitrary item strings were accepted, a looping judge could mint a fresh
-    // fake "satisfied" item every turn, and since progress resets the runaway
-    // guard's consecutive counter, that would let it drive unbounded auto-replies
-    // past the cap. Bounding to thenItems caps total progress at |thenItems| (a
-    // user-defined, finite set) — and matches remainingThenItems, which already
-    // measures completion by exact-string membership in thenItems.
-    const allowed = new Set(s.brief.thenItems);
-    let progressed = false;
-    for (const it of decision.satisfiedItems ?? []) {
-      if (!allowed.has(it.item)) continue;
-      if (s.ledger.some((e) => e.item === it.item)) continue;
-      s.ledger.push({ item: it.item, evidence: it.evidence, at: this.now() });
-      this.record(terminalId, "item_satisfied", it.item, it.evidence);
-      progressed = true;
+  // Move backlog items on the evaluator's word — inside the bounds
+  // applyTransitions enforces — and count real progress toward the runaway guard:
+  // progress is evidence of non-looping.
+  private absorbTransitions(terminalId: string, s: ArmedSession, decision: HandlerDecision): void {
+    const result = applyTransitions(s.backlog, decision.transitions ?? [], this.now());
+    // A rejection is an attempted invariant violation — a minted id, a terminal
+    // move with no evidence, a completed item walked back — and this log is the
+    // only place it can surface: the item simply does not move, so no downstream
+    // state ever looks wrong. Dropping these silently is how a judge quietly
+    // fishing for progress stays invisible.
+    for (const r of result.rejected) {
+      log.warn("handler transition rejected for %s: %s (id=%s status=%s)",
+        terminalId, r.reason, r.transition.id, r.transition.status);
     }
-    if (decision.doneWhenMet && s.brief.doneWhen) s.doneWhenMet = true;
-    if (progressed) this.guard.recordProgress(terminalId);
-    if (progressed || decision.doneWhenMet) this.persist(terminalId, s, true);
+    // Blocking is derived, never judged (§3.3): an item is blocked because
+    // something it depends on is, which is why it carries no evidence and why the
+    // evaluator is not asked for it. Without this call `dependsOn` would be
+    // decorative — extracted, rendered, and never acted on.
+    const wasBlocked = new Set(result.backlog.filter((i) => i.status === "blocked").map((i) => i.id));
+    s.backlog = propagateBlocked(result.backlog);
+    const byId = new Map(s.backlog.map((i) => [i.id, i]));
+
+    for (const a of result.applied) {
+      const kind = ITEM_DECISION[a.item.status];
+      // `queued`/`active` say where an item currently sits, which the live status
+      // pill already shows; the four kinds below are things that HAPPENED to it,
+      // and the feed is a history of those.
+      if (kind) this.record(terminalId, kind, a.item.text, a.item.outcome ?? a.item.evidence);
+    }
+    // A derived block is the one status change with no transition behind it, so
+    // it would otherwise move an item with nothing in the feed explaining why.
+    const derived = s.backlog.filter((i) => i.status === "blocked" && !wasBlocked.has(i.id));
+    for (const i of derived) {
+      const on = (i.dependsOn ?? []).flatMap((id) => {
+        const dep = byId.get(id);
+        return dep && (dep.status === "blocked" || dep.status === "failed") ? [oneLine(dep.text)] : [];
+      });
+      this.record(terminalId, "item_blocked", i.text, `waiting on: ${on.join(", ")}`);
+    }
+
+    if (result.progressed) this.guard.recordProgress(terminalId);
+    if (result.applied.length > 0 || derived.length > 0) this.persist(terminalId, s, true);
   }
 
-  // Auto-disarm only when the brief defines an end: doneWhen (judged met, sticky)
-  // and/or thenItems (all satisfied). Neither defined → supervise until disarmed.
+  // Auto-disarm once every item has reached a terminal state (§2.2). A `blocked`
+  // item is deliberately not one: it is revivable, and the evaluator can still
+  // resolve it as `skipped` or `failed` on evidence — which is the deadlock fix,
+  // since "correctly did not happen" is now sayable and an unreachable item no
+  // longer holds the session open forever.
   // Called only from the handle/continue branches — never on escalate.
   private maybeWrapUp(terminalId: string, s: ArmedSession): boolean {
     // A wrap-up disarms the session. Never do that while a human question is
-    // outstanding: an earlier escalate may have carried doneWhenMet (absorbLedger
-    // runs on every decision, including escalate), so a later handle/continue
-    // could otherwise auto-disarm and silently bury the unanswered escalation.
+    // outstanding: an earlier escalate may already have banked the transitions
+    // that completed the backlog (absorbTransitions runs on every decision,
+    // including escalate), so a later handle/continue could otherwise auto-disarm
+    // and silently bury the unanswered escalation.
     if (s.escalations.length > 0) return false;
-    const hasDone = !!s.brief.doneWhen;
-    const hasThen = s.brief.thenItems.length > 0;
-    if (!hasDone && !hasThen) return false;
-    if (hasDone && !s.doneWhenMet) return false;
-    if (hasThen && remainingThenItems(s.brief, s.ledger).length > 0) return false;
-    this.record(terminalId, "wrapped_up", s.brief.doneWhen ?? "all follow-ups satisfied", s.brief.taskSummary);
-    // The push is the morning-after summary (spec: "summarizes the ledger") —
-    // name what got done, don't just count it. Capped so a long thenItems list
-    // can't blow past OS notification limits.
-    const items = s.ledger.map((e) => e.item);
-    const shown = items.slice(0, 3).join(", ");
-    const more = items.length > 3 ? ` +${items.length - 3} more` : "";
-    const summary = items.length > 0 ? `. Done: ${shown}${more}` : "";
-    this.deps.sendPush?.(`Handler: done — ${s.brief.taskSummary}${summary}`, terminalId);
+    if (!allTerminal(s.backlog)) return false;
+    this.record(terminalId, "wrapped_up", "every backlog item resolved", s.goal || NO_GOAL);
+    this.deps.sendPush?.(
+      `Handler: done — ${oneLine(s.goal) || "session complete"}${this.wrapUpSummary(s.backlog)}${this.undoNote(terminalId)}`,
+      terminalId,
+    );
     this.disarm(terminalId);
     return true;
+  }
+
+  // The morning-after summary. §2.2 puts the non-`done` outcomes at the centre of
+  // it — an item nobody could reach is the one thing the user has to act on — and
+  // a bare count reads the same whether the work was moot or the assistant gave
+  // up, so each group names its items. Capped so a long backlog can't blow past
+  // OS notification limits.
+  private wrapUpSummary(backlog: InstructionItem[]): string {
+    const counts = summarize(backlog);
+    const parts: string[] = [];
+    for (const [status, label] of SUMMARY_GROUPS) {
+      const total = counts[status];
+      if (total === 0) continue;
+      const shown = backlog.filter((i) => i.status === status).slice(0, 3).map((i) => oneLine(i.text));
+      const more = total > shown.length ? ` +${total - shown.length} more` : "";
+      parts.push(`${label}: ${shown.join(", ")}${more}`);
+    }
+    return parts.length > 0 ? `. ${parts.join(". ")}` : "";
+  }
+
+  // The wrap-up push is the last thing the user reads about this session, and the
+  // session is disarmed by the time they read it — so it is also the last place
+  // the undo can be made discoverable before it is needed (§5.5).
+  private undoNote(terminalId: string): string {
+    const open = this.snapshots().filter((e) => e.terminalId === terminalId && e.undoneAt === undefined);
+    return open.length > 0 ? `. ${open.length} flagged action(s) can still be undone` : "";
   }
 
   // Last non-empty output lines (PTY scrollback or rendered chat snapshot),
@@ -908,16 +1475,27 @@ export class HandlerEngine {
   private escalate(
     terminalId: string, s: ArmedSession, decision: HandlerDecision,
     forcedReason?: string, floorRule?: string, kind?: "reply" | "resolve_in_session",
+    promptId?: string,
   ): void {
     const reason = forcedReason ?? decision.reason;
+    // Carries the text a harness guard rejected, so the reply sheet can show what
+    // Handler wanted to send and let the user edit it down. Safe to pass raw: the wire
+    // leaves `draftReply` unconstrained while `EscalationChoiceWire.text` bans control
+    // chars and caps length, so `quickChoicesFor` withholds the one-tap chip on exactly
+    // the drafts a guard would have refused.
+    const draftReply = firstFilled(decision.notify?.draftReply, decision.reply) ?? "";
     const esc: OpenEscalation = {
       escalationId: this.id("esc"),
-      question: decision.notify?.body ?? "Agent needs you",
+      question: firstFilled(decision.notify?.body) ?? "Agent needs you",
       reasoning: reason,
-      draftReply: decision.notify?.draftReply ?? decision.reply ?? "",
+      draftReply,
       urgency: decision.notify?.urgency ?? "normal",
       floorRule,
       kind,
+      promptId,
+      choices: quickChoicesFor({
+        kind, floorRule, draftReply, projectPath: this.deps.projectPath(terminalId), open: s.escalations,
+      }),
       at: this.now(),
     };
     this.deps.sendAb(createMessage("handler:escalation", {
@@ -925,9 +1503,176 @@ export class HandlerEngine {
     }));
     s.escalations.push(esc);
     s.state = "needs_you";
-    this.record(terminalId, "escalate", reason, decision.notify?.draftReply ?? decision.reply);
+    // The activity row is read, never injected, so the control chars that forced some
+    // of these escalations are escaped into view rather than written raw into the feed.
+    this.record(terminalId, "escalate", reason, draftReply === "" ? undefined : previewForUser(draftReply));
     this.persist(terminalId, s, true);
     this.emitStatus();
+  }
+
+  // A warning is both an audit row the user reads later and context the next
+  // decide prompt reads immediately; both come from the same list so the Assistant
+  // can never be told less than the user was.
+  private noteFloorWarnings(terminalId: string, s: ArmedSession, warnings: FloorWarning[]): void {
+    for (const w of warnings) {
+      this.record(terminalId, "floor_warning", describeWarning(w), w.pattern);
+      this.rememberWarning(s, describeWarning(w));
+    }
+  }
+
+  private rememberWarning(s: ArmedSession, line: string): void {
+    s.floorWarnings.push(line);
+    if (s.floorWarnings.length > MAX_REMEMBERED_WARNINGS) {
+      s.floorWarnings = s.floorWarnings.slice(-MAX_REMEMBERED_WARNINGS);
+    }
+  }
+
+  /**
+   * Take the §5.2 snapshots the about-to-be-injected text calls for. Records and
+   * advertises nothing: the inject that would justify an undo offer has not
+   * happened yet, and a promise about a reply that was never sent is worse than
+   * no promise at all.
+   */
+  private async prepareSnapshots(terminalId: string, text: string): Promise<SnapshotOutcome[]> {
+    try {
+      return await (this.deps.takeSnapshotsFn ?? takeSnapshots)({
+        text, projectPath: this.deps.projectPath(terminalId), sessionId: terminalId, abDir: this.deps.abDir,
+      });
+    } catch (err) {
+      // takeSnapshots reports its own failures as outcomes, so reaching here means
+      // it could not even do that. planSnapshots is pure, so the rows can still
+      // name which actions went unprotected.
+      log.error("handler snapshot pass failed for %s: %s", terminalId, err);
+      return planSnapshots(text).map((p): SnapshotOutcome => ({
+        status: "failed", action: p.action, trigger: p.trigger, reason: "io_error", detail: String(err),
+      }));
+    }
+  }
+
+  /**
+   * Turn the outcomes into what the user can act on. Only a captured snapshot
+   * becomes an undo offer; an action that could NOT be protected becomes an
+   * unsuppressible advisory row instead, because the one thing worse than a
+   * flagged action is being told it can be undone when it cannot.
+   *
+   * The failure row is written even when authorization suppressed the warning:
+   * the user authorized the operation, never the loss of its undo.
+   *
+   * `flagged` is the floor's own verdict, and it is the backstop for the two
+   * parsers disagreeing: a §5.2 shape the floor recognized but the planner
+   * produced no plan for would otherwise pass in complete silence, which reads to
+   * the user exactly like an action that was fully snapshotted.
+   */
+  private recordSnapshots(
+    terminalId: string, s: ArmedSession, outcomes: SnapshotOutcome[], flagged: FloorWarning[],
+  ): void {
+    for (const o of outcomes) {
+      if (o.status === "snapshotted") {
+        this.storeSnapshot({ terminalId, action: o.action, entry: o.entry });
+        continue;
+      }
+      // "nothing" means nothing was at risk, which needs no row of its own.
+      if (o.status !== "failed") continue;
+      this.recordUnprotected(terminalId, s, o.trigger, `${o.reason}: ${o.detail}`);
+    }
+
+    const covered = new Set(outcomes.map((o) => o.action));
+    for (const w of flagged) {
+      const action = SNAPSHOT_PATTERNS.get(w.pattern);
+      if (!action || covered.has(action)) continue;
+      this.recordUnprotected(terminalId, s, w.matched, `${action}: the flagged command could not be parsed into a snapshot plan`);
+    }
+  }
+
+  private recordUnprotected(terminalId: string, s: ArmedSession, trigger: string, detail: string): void {
+    const line = `flagged action was not protected: ${trigger}`;
+    this.record(terminalId, "floor_warning", line, detail);
+    this.rememberWarning(s, line);
+  }
+
+  private storeSnapshot(st: StoredSnapshot): void {
+    this.saveSnapshots([...this.snapshots(), st]);
+    this.sendSnapshot(st);
+  }
+
+  private sendSnapshot(st: StoredSnapshot): void {
+    this.deps.sendAb(createMessage("handler:snapshot", {
+      projectId: this.deps.projectId, ...snapshotWire(st),
+    }));
+  }
+
+  // Drops this slot's undo offers and the copies behind them. Called only from a
+  // fresh arm (see arm()), never from disarm.
+  private retireSnapshots(terminalId: string): void {
+    const before = this.snapshots();
+    const kept = before.filter((e) => e.terminalId !== terminalId);
+    const retired = before.filter((e) => e.terminalId === terminalId);
+    if (retired.length) {
+      this.saveSnapshots(kept);
+      // A backup ref pins its stash commit against `git gc` for as long as it
+      // exists, so the git side of a retire needs the same cleanup the trash side
+      // has always had.
+      this.release(retired);
+    }
+    void (this.deps.clearTrashFn ?? ((id: string) => clearSessionTrash(id, this.deps.abDir)))(terminalId)
+      .catch((err: unknown) => log.warn("handler trash cleanup failed for %s: %s", terminalId, err));
+  }
+
+  /**
+   * Perform the undo an advertised snapshot promised (§5.2).
+   *
+   * Deliberately NOT gated on §5.4 authorization: anyone who can drive this
+   * project can already drive its terminal, so a second authorization concept
+   * would only make the safety net harder to reach than the action it reverses.
+   *
+   * Idempotent in every direction the app can get wrong — an id this project no
+   * longer has resyncs the sender, an already-undone entry just re-states itself,
+   * and a failed attempt leaves the entry spendable so a retry is possible.
+   */
+  async undo(snapshotId: string): Promise<void> {
+    const st = this.snapshots().find((e) => e.entry.id === snapshotId);
+    if (!st) {
+      // The sender is holding a row this project no longer has (a fresh arm
+      // retired it, or the store aged it out). A status resync is what removes it.
+      log.warn("handler undo ignored: unknown snapshot %s", snapshotId);
+      this.emitStatus();
+      return;
+    }
+    if (st.undoneAt !== undefined) return this.sendSnapshot(st);
+    if (this.undoing.has(snapshotId)) return;
+    this.undoing.add(snapshotId);
+
+    let result: UndoResult;
+    try {
+      result = await (this.deps.undoSnapshotFn ?? undoSnapshot)(st.entry, { abDir: this.deps.abDir });
+    } catch (err) {
+      result = { ok: false, detail: String(err) };
+    } finally {
+      this.undoing.delete(snapshotId);
+    }
+
+    // Re-read rather than mutating the entry found before the await: a snapshot
+    // taken while the undo ran has already rewritten the list.
+    const entries = this.snapshots().map((e) => e.entry.id !== snapshotId ? e : {
+      ...e,
+      undoneAt: result.ok ? this.now() : undefined,
+      failure: result.ok ? undefined : result.detail,
+    });
+    // The undo had to discard live state to get back, so that state was stashed on
+    // the way past. Recording it is what keeps the undo from being the second
+    // destructive act.
+    const safety: StoredSnapshot | undefined = result.safety
+      ? {
+        terminalId: st.terminalId,
+        action: result.safety.kind === "pre_push_sha" ? "force_push" : "reset_hard",
+        entry: result.safety,
+      }
+      : undefined;
+    this.saveSnapshots(safety ? [...entries, safety] : entries);
+
+    const updated = this.snapshots().find((e) => e.entry.id === snapshotId);
+    if (updated) this.sendSnapshot(updated);
+    if (safety) this.sendSnapshot(safety);
   }
 
   private record(terminalId: string, decision: ActivityRecord["decision"], reason: string, detail?: string): void {
@@ -957,7 +1702,7 @@ export class HandlerEngine {
   // Public: agent-core also emits on every app handshake so a fresh app sees
   // defaultNotifyOnly/defaultTool before anything is armed. Judge choices are
   // per-session now, carried on each session snapshot, and are never cleared
-  // by this emit — only arm()/plan() touch them.
+  // by this emit — only arm() touches them.
   emitStatus(): void {
     const sessions = [...this.sessions.entries()].map(([terminalId, s]) => ({
       terminalId,
@@ -965,9 +1710,8 @@ export class HandlerEngine {
       state: s.state,
       pendingEscalations: s.escalations.length,
       armedAt: s.armedAt,
-      doneWhenMet: s.doneWhenMet,
-      brief: s.brief,
-      ledger: s.ledger,
+      goal: s.goal,
+      backlog: s.backlog,
       escalations: s.escalations,
       judgeTool: s.judgeTool,
       judgeModel: s.judgeModel,
@@ -984,6 +1728,10 @@ export class HandlerEngine {
       defaultTool: this.deps.tool(),
       defaultNotifyOnly: this.cfg().defaultNotifyOnly,
       sessions,
+      // Project-scoped, not per session: an undo offer outlives the session that
+      // took it, and an app that restarted between the advert and the tap has no
+      // other way back to it.
+      snapshots: this.snapshots().map(snapshotWire),
     }));
   }
 }

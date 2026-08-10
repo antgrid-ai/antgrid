@@ -369,7 +369,14 @@ export interface AgentSpec {
    *  tool to reads, "transcript" that the restriction is config-level and
    *  unverified — and the tier is what decides whether the judge is handed a
    *  transcript path it could act on. */
-  judge?: { tier: JudgeTier; cmd: (prompt: string, model?: string) => string[] };
+  /** `env` is merged over the bridge's own environment for the judge spawn
+   *  ONLY — never for a terminal session (that is the spec-level `env`). It
+   *  exists for agents whose session persistence can't be turned off by a flag. */
+  judge?: {
+    tier: JudgeTier;
+    cmd: (prompt: string, model?: string) => string[];
+    env?: Record<string, string>;
+  };
   /** Returns messages AND, only when the source is a followable file, its path.
    *  Never synthesize a path: a "transcript"-tier judge has no verified
    *  read-only restriction, so it gets no file hint it could not follow. */

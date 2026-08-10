@@ -40,6 +40,11 @@ final _agentFocusCoordinatorProvider = Provider<AgentFocusCoordinator>(
 /// the focused project's running agent terminal, but only while the app is
 /// resumed AND the agent surface is on screen.
 ///
+/// Watched from `AppShell`, which outlives the New Session ↔ workspace route
+/// swap. A listener that unmounts leaves this keep-alive binder stale, and the
+/// remount's first `watch` then flushes it — and its terminal dependencies —
+/// from inside build(), which crashes; see the comment at the watch site.
+///
 /// Uses `watch`, not `listen` + imperative `read`: a `read` of a dependency
 /// that is dirty mid-frame (e.g. `agentTerminalProvider` during a project
 /// switch) would force a nested synchronous rebuild if it fired inside a

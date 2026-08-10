@@ -150,6 +150,17 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   @override
   Widget build(BuildContext context) {
+    // DEC-1004 focus routing for agent terminals. Bound HERE and not inside
+    // WorkspaceShell because the binder is keep-alive and WorkspaceShell is
+    // swapped out whole by the New Session route: with its only listener gone
+    // the binder keeps its element but stops flushing, and its terminal
+    // dependencies drift stale behind it. The next mount's first `watch` then
+    // flushes that chain from inside build(), the changed dependency
+    // re-invalidates the binder, and riverpod schedules the refresh by calling
+    // setState on the ProviderScope — mid-build, which throws. Any host that
+    // survives the picker/workspace swap keeps the chain fresh; this is the
+    // nearest one.
+    ref.watch(agentFocusBinderProvider);
     final routed = _buildAgentRouting();
     // Mounted here rather than inside WorkspaceShell because the OS bar is
     // hidden process-wide (initDesktopWindowChrome): any full-window route

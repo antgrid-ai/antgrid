@@ -118,62 +118,79 @@ class _TabItemState extends State<_TabItem> {
         ? context.antgrid.textPrimary
         : context.antgrid.textSecondary;
 
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      onEnter: (_) => setState(() => _hovering = true),
-      onExit: (_) => setState(() => _hovering = false),
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: widget.onTap,
-        child: Container(
-          // Pin each tab to the bar's full height so the active-tab accent
-          // underline anchors flush at the bottom edge instead of floating
-          // mid-bar at the tab's intrinsic content height.
-          height: AbTokens.statusHeaderHeight,
-          padding: const EdgeInsets.symmetric(horizontal: AbTokens.space12),
-          decoration: BoxDecoration(
-            border: Border(
-              bottom: BorderSide(
-                color: widget.isActive ? context.antgrid.accent : Colors.transparent,
-                width: 2,
+    return Semantics(
+      button: true,
+      selected: widget.isActive,
+      // The badge is drawn as a bare number, which announces as a stray digit
+      // after the tab name; folding it into the label is what makes it read as
+      // this tab's count. A bare GestureDetector announces as nothing at all,
+      // so both the role and the selected state have to be stated here.
+      label: widget.badgeCount > 0
+          ? '${widget.view.label}, ${widget.badgeCount}'
+          : widget.view.label,
+      // Excluding the subtree takes the GestureDetector's tap action with it,
+      // which would leave a button assistive tech can see and cannot press.
+      excludeSemantics: true,
+      onTap: widget.onTap,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hovering = true),
+        onExit: (_) => setState(() => _hovering = false),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.onTap,
+          child: Container(
+            // Pin each tab to the bar's full height so the active-tab accent
+            // underline anchors flush at the bottom edge instead of floating
+            // mid-bar at the tab's intrinsic content height.
+            height: AbTokens.statusHeaderHeight,
+            padding: const EdgeInsets.symmetric(horizontal: AbTokens.space12),
+            decoration: BoxDecoration(
+              border: Border(
+                bottom: BorderSide(
+                  color: widget.isActive
+                      ? context.antgrid.accent
+                      : Colors.transparent,
+                  width: 2,
+                ),
               ),
             ),
-          ),
-          child: Row(
-            children: [
-              AbIcon(widget.view.icon, size: 14, color: color),
-              const SizedBox(width: AbTokens.space6),
-              Text(
-                widget.view.label,
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontXs,
-                  color: color,
-                ),
-              ),
-              if (widget.badgeCount > 0) ...[
+            child: Row(
+              children: [
+                AbIcon(widget.view.icon, size: 14, color: color),
                 const SizedBox(width: AbTokens.space6),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: AbTokens.space4,
-                    vertical: 1,
+                Text(
+                  widget.view.label,
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: color,
                   ),
-                  decoration: BoxDecoration(
-                    color: context.antgrid.bgRaised,
-                    border: Border.all(color: context.antgrid.borderSubtle),
-                    borderRadius: AbTokens.borderRadius3,
-                  ),
-                  child: Text(
-                    widget.badgeCount > 99 ? '99+' : '${widget.badgeCount}',
-                    style: AbTokens.sansStyle(
-                      fontSize: AbTokens.fontXs,
-                      color: widget.isActive
-                          ? context.antgrid.textPrimary
-                          : context.antgrid.textMuted,
+                ),
+                if (widget.badgeCount > 0) ...[
+                  const SizedBox(width: AbTokens.space6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: AbTokens.space4,
+                      vertical: 1,
+                    ),
+                    decoration: BoxDecoration(
+                      color: context.antgrid.bgRaised,
+                      border: Border.all(color: context.antgrid.borderSubtle),
+                      borderRadius: AbTokens.borderRadius3,
+                    ),
+                    child: Text(
+                      widget.badgeCount > 99 ? '99+' : '${widget.badgeCount}',
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontXs,
+                        color: widget.isActive
+                            ? context.antgrid.textPrimary
+                            : context.antgrid.textMuted,
+                      ),
                     ),
                   ),
-                ),
+                ],
               ],
-            ],
+            ),
           ),
         ),
       ),

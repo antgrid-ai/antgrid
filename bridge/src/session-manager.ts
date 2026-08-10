@@ -786,14 +786,19 @@ export class SessionManager {
   }
 
   /**
-   * Resume tokens for the slot's last-active agent conversation, or [] when none
-   * was captured or it no longer exists on disk. A stale id (conversation deleted
-   * via the agent's own tools) is cleared in place so the next start spawns fresh
-   * rather than a "resume failed" PTY. Shared by the per-session-tool and the
-   * default-spec (copilot) launch paths.
+   * The slot's last-active agent conversation id, or undefined when none was
+   * captured or it no longer exists on disk. A stale id (conversation deleted
+   * via the agent's own tools, or written under a cwd this slot no longer runs
+   * in — a managed worktree that has since gone) is cleared in place so the next
+   * start opens a fresh conversation.
+   *
+   * EVERY start path must come through here, PTY and chat alike. A dead id is
+   * worse for chat than for a PTY: the driver resumes it on every start, the
+   * backend answers "no conversation found", and nothing clears the id — so the
+   * session is bricked for good rather than for one spawn.
    */
-  private resumeArgsFor(tool: string, entry: PersistedEntry): string[] {
-    if (!entry.agentSessionId) return [];
+  private resumeIdFor(tool: string, entry: PersistedEntry): string | undefined {
+    if (!entry.agentSessionId) return undefined;
     const resumable = sessionResumable({
       tool,
       agentSessionId: entry.agentSessionId,
@@ -801,12 +806,22 @@ export class SessionManager {
       codexHome: this.opts.codexHome,
       copilotHome: this.opts.copilotHome,
     });
-    if (resumable) return resumeArgv(tool, entry.agentSessionId);
+    if (resumable) return entry.agentSessionId;
     entry.agentSessionId = undefined;
     entry.agentTranscriptPath = undefined;
     this.resumableCache.delete(entry.id);
     this.changed();
-    return [];
+    return undefined;
+  }
+
+  /**
+   * Resume tokens for the slot's last-active agent conversation, or [] when
+   * [resumeIdFor] has nothing live to resume. Shared by the per-session-tool and
+   * the default-spec (copilot) launch paths.
+   */
+  private resumeArgsFor(tool: string, entry: PersistedEntry): string[] {
+    const resumeId = this.resumeIdFor(tool, entry);
+    return resumeId ? resumeArgv(tool, resumeId) : [];
   }
 
   start(id: string, initialPrompt?: string): void | Promise<void> {
@@ -854,14 +869,16 @@ export class SessionManager {
     if (entry.archived) throw new Error(`cannot start archived session: ${id}`);
     if (entry.mode === "chat") {
       // Chat sessions have no PTY. Delegate to the structured manager; the
-      // persisted agentSessionId (codex threadId / opencode sessionID) resumes
-      // the prior conversation. Tool defaults to codex — chat is only offered for
-      // codex/opencode, gated app-side and re-checked in startChat.
+      // persisted agentSessionId (claude session / codex threadId / opencode
+      // sessionID) resumes the prior conversation, through the same liveness
+      // pre-flight the PTY path uses. Tool defaults to codex — chat is offered
+      // only for chat-capable tools, gated app-side and re-checked in startChat.
       this.runningChat.add(id);
+      const chatTool = entry.tool ?? "codex";
       this.opts.onStartChat?.({
         sessionId: id,
-        tool: entry.tool ?? "codex",
-        resumeId: entry.agentSessionId,
+        tool: chatTool,
+        resumeId: this.resumeIdFor(chatTool, entry),
         config: entry.config,
         initialPrompt,
       });

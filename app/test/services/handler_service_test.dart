@@ -1,5 +1,4 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:antgrid/models/ab_message.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/handler_service.dart';
@@ -18,19 +17,13 @@ Future<ProjectSession> _newSession(FakeAgentTransport t) async {
   );
 }
 
-Map<String, dynamic> _briefJson({String taskSummary = 'summary'}) => {
-  'taskSummary': taskSummary,
-  'willHandle': ['fix lint'],
-  'wakeFor': ['destructive ops'],
-  'thenItems': ['run tests'],
-};
-
 Map<String, dynamic> _sessionJson({
   required String terminalId,
   required int pendingEscalations,
   String state = 'watching',
   bool notifyOnly = false,
-  Map<String, dynamic>? brief,
+  String goal = 'summary',
+  List<Map<String, dynamic>> backlog = const [],
   List<Map<String, dynamic>> escalations = const [],
   String? judgeTool,
   String? judgeModel,
@@ -40,9 +33,8 @@ Map<String, dynamic> _sessionJson({
   'state': state,
   'pendingEscalations': pendingEscalations,
   'armedAt': 0,
-  'doneWhenMet': false,
-  'brief': brief ?? _briefJson(),
-  'ledger': [],
+  'goal': goal,
+  'backlog': backlog,
   'escalations': escalations,
   'judgeTool': ?judgeTool,
   'judgeModel': ?judgeModel,
@@ -59,7 +51,25 @@ Map<String, dynamic> _sessionEntryJson(String id, {String mode = 'terminal'}) =>
       'mode': mode,
     };
 
-Map<String, dynamic> _escalationJson(String escalationId, {String? kind}) => {
+Map<String, dynamic> _snapshotJson({
+  String snapshotId = 's1',
+  String state = 'available',
+}) => {
+  'projectId': 'p',
+  'snapshotId': snapshotId,
+  'terminalId': 't1',
+  'at': 5,
+  'action': 'force_push',
+  'trigger': 'git push --force origin feat/x',
+  'summary': 'pre-push SHA abc1234 recorded',
+  'state': state,
+};
+
+Map<String, dynamic> _escalationJson(
+  String escalationId, {
+  String? kind,
+  List<Map<String, dynamic>>? choices,
+}) => {
   'escalationId': escalationId,
   'question': 'q',
   'reasoning': 'r',
@@ -67,7 +77,17 @@ Map<String, dynamic> _escalationJson(String escalationId, {String? kind}) => {
   'urgency': 'normal',
   'at': 1,
   'kind': ?kind,
+  'choices': ?choices,
 };
+
+const _choicesJson = [
+  {'choiceId': 'approve', 'label': 'Approve', 'text': 'd'},
+  {
+    'choiceId': 'reject',
+    'label': 'Reject',
+    'text': 'Do not proceed. Wait for my instructions.',
+  },
+];
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -167,7 +187,6 @@ void main() {
 
       svc.arm(
         terminalId: 't1',
-        brief: HandlerBrief.fromWire(_briefJson())!,
         notifyOnly: false,
         judgeTool: 'opencode',
         judgeModel: 'm1',
@@ -179,11 +198,7 @@ void main() {
       // Arming without touching the judge controls omits the override keys, so
       // the bridge leaves the session's stored judge record alone (no
       // clobber-to-default).
-      svc.arm(
-        terminalId: 't1',
-        brief: HandlerBrief.fromWire(_briefJson())!,
-        notifyOnly: false,
-      );
+      svc.arm(terminalId: 't1', notifyOnly: false);
       final plain = t.sent.lastWhere((m) => m['type'] == 'handler:configure');
       expect(plain.containsKey('judgeTool'), isFalse);
       expect(plain.containsKey('judgeModel'), isFalse);
@@ -194,34 +209,43 @@ void main() {
     },
   );
 
-  test('planResult is surfaced on planResultStream', () async {
+  test('status carries the session goal and backlog', () async {
     final t = FakeAgentTransport();
     final session = await _newSession(t);
     final svc = HandlerService.fromSession(session);
     final sub = session.heavyStream.listen((_) {});
 
-    final received = <HandlerPlanResultMessage>[];
-    final planSub = svc.planResultStream.listen(received.add);
-
-    t.emit('handler:planResult', {
+    t.emit('handler:status', {
       'projectId': 'p',
-      'terminalId': 't1',
-      'fallback': false,
-      'brief': _briefJson(taskSummary: 'proposed'),
-      'previousBrief': _briefJson(taskSummary: 'previous'),
+      'sessions': [
+        _sessionJson(
+          terminalId: 't1',
+          pendingEscalations: 0,
+          goal: 'get the tests passing',
+          backlog: [
+            {
+              'id': 'i1',
+              'text': 'run the tests',
+              'status': 'done',
+              'createdAt': 1,
+            },
+            {
+              'id': 'i2',
+              'text': 'open a PR',
+              'status': 'queued',
+              'createdAt': 2,
+            },
+          ],
+        ),
+      ],
     });
     await Future<void>.delayed(Duration.zero);
 
-    expect(received, hasLength(1));
-    expect(received.single.terminalId, 't1');
-    expect(received.single.fallback, false);
-    expect(received.single.brief?['taskSummary'], 'proposed');
-    // planResult never mutates HandlerState — only lands on its own stream.
-    expect(svc.currentState.sessions, isEmpty);
-    // previousBrief is cached for the re-arm flow.
-    expect(svc.lastKnownBrief('t1')?.taskSummary, 'previous');
+    final s = svc.currentState.sessions['t1']!;
+    expect(s.goal, 'get the tests passing');
+    expect(s.backlogTotal, 2);
+    expect(s.backlogDone, 1);
 
-    await planSub.cancel();
     await sub.cancel();
     await svc.dispose();
     await session.close();
@@ -255,42 +279,6 @@ void main() {
     await session.close();
   });
 
-  test(
-    'lastKnownBrief survives the session leaving the status snapshot',
-    () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = HandlerService.fromSession(session);
-      final sub = session.heavyStream.listen((_) {});
-
-      t.emit('handler:status', {
-        'projectId': 'p',
-        'sessions': [
-          _sessionJson(
-            terminalId: 't1',
-            pendingEscalations: 0,
-            brief: _briefJson(taskSummary: 'armed brief'),
-          ),
-        ],
-      });
-      await Future<void>.delayed(Duration.zero);
-
-      expect(svc.currentState.sessions.keys, ['t1']);
-      expect(svc.lastKnownBrief('t1')?.taskSummary, 'armed brief');
-
-      // t1 disarmed / wrapped up server-side: the next snapshot omits it.
-      t.emit('handler:status', {'projectId': 'p', 'sessions': []});
-      await Future<void>.delayed(Duration.zero);
-
-      expect(svc.currentState.sessions, isEmpty);
-      expect(svc.lastKnownBrief('t1')?.taskSummary, 'armed brief');
-
-      await sub.cancel();
-      await svc.dispose();
-      await session.close();
-    },
-  );
-
   test('judge pick survives disarm via the cache', () async {
     final t = FakeAgentTransport();
     final session = await _newSession(t);
@@ -322,59 +310,6 @@ void main() {
     await session.close();
   });
 
-  test('planResult echo seeds the judge cache', () async {
-    final t = FakeAgentTransport();
-    final session = await _newSession(t);
-    final svc = HandlerService.fromSession(session);
-    final sub = session.heavyStream.listen((_) {});
-
-    t.emit('handler:planResult', {
-      'projectId': 'p',
-      'terminalId': 't2',
-      'fallback': false,
-      'judgeTool': 'opencode',
-      'judgeModel': 'sm',
-    });
-    await Future<void>.delayed(Duration.zero);
-
-    expect(svc.lastKnownJudge('t2')?.tool, 'opencode');
-
-    await sub.cancel();
-    await svc.dispose();
-    await session.close();
-  });
-
-  test('armed session wins over a stale cache entry', () async {
-    final t = FakeAgentTransport();
-    final session = await _newSession(t);
-    final svc = HandlerService.fromSession(session);
-    final sub = session.heavyStream.listen((_) {});
-
-    t.emit('handler:planResult', {
-      'projectId': 'p',
-      'terminalId': 't3',
-      'fallback': false,
-      'judgeTool': 'opencode',
-    });
-    t.emit('handler:status', {
-      'projectId': 'p',
-      'sessions': [
-        _sessionJson(
-          terminalId: 't3',
-          pendingEscalations: 0,
-          judgeTool: 'codex',
-        ),
-      ],
-    });
-    await Future<void>.delayed(Duration.zero);
-
-    expect(svc.lastKnownJudge('t3')?.tool, 'codex');
-
-    await sub.cancel();
-    await svc.dispose();
-    await session.close();
-  });
-
   test('arm() optimistically updates the judge cache before the snapshot '
       'round-trips', () async {
     final t = FakeAgentTransport();
@@ -397,17 +332,11 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     expect(svc.lastKnownJudge('t1')?.tool, 'codex');
 
-    // …then an edit-arm switching to 'opencode'. No new snapshot yet:
-    // reopening the sheet in this window must seed the NEW pick — a stale
-    // seed committed by a touched arm would silently revert the choice.
+    // …then a re-arm switching to 'opencode'. No new snapshot yet: reopening a
+    // picker in this window must seed the NEW pick — a stale seed committed by
+    // a touched arm would silently revert the choice.
     svc.arm(
       terminalId: 't1',
-      brief: const HandlerBrief(
-        taskSummary: 's',
-        willHandle: ['w'],
-        wakeFor: [],
-        thenItems: [],
-      ),
       notifyOnly: false,
       judgeTool: 'opencode',
       judgeModel: '',
@@ -447,8 +376,8 @@ void main() {
 
     // …then re-armed with the judge cleared back to default. The session
     // stays armed (still present in the snapshot) with null judge fields —
-    // this must NOT read back as the stale 'codex' pick, or the briefing
-    // sheet would silently re-seed and re-arm it on next open.
+    // this must NOT read back as the stale 'codex' pick, or a picker would
+    // silently re-seed and re-arm it on next open.
     t.emit('handler:status', {
       'projectId': 'p',
       'sessions': [_sessionJson(terminalId: 't1', pendingEscalations: 0)],
@@ -562,6 +491,51 @@ void main() {
     await session.close();
   });
 
+  test('answering a free-text row leaves its sibling prompt pending', () async {
+    // The optimistic clear mirrors the bridge's rule (onUserReply keeps every
+    // `resolve_in_session` row), so a wholesale local clear would blank the pill
+    // over a still-blocked agent until the next status frame put it back.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+    final sub = session.heavyStream.listen((_) {});
+
+    t.emit('session:list:result', {
+      'projectId': 'p',
+      'sessions': [_sessionEntryJson('chat-1', mode: 'chat')],
+    });
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': [
+        _sessionJson(
+          terminalId: 'chat-1',
+          pendingEscalations: 2,
+          state: 'needs_you',
+          escalations: [
+            _escalationJson('e1'),
+            _escalationJson('e2', kind: 'resolve_in_session'),
+          ],
+        ),
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    svc.reply(
+      svc.currentState.escalations.firstWhere((e) => e.escalationId == 'e1'),
+      'looks good',
+    );
+
+    final answered = svc.currentState.sessions['chat-1']!;
+    expect(answered.pendingEscalations, 1);
+    expect(answered.escalations.single.escalationId, 'e2');
+    expect(answered.runState, HandlerRunState.needsYou);
+    expect(svc.currentState.escalations.map((e) => e.escalationId), ['e2']);
+
+    await sub.cancel();
+    await svc.dispose();
+    await session.close();
+  });
+
   test('escalation kind is parsed off the wire and defaults to null', () async {
     final t = FakeAgentTransport();
     final session = await _newSession(t);
@@ -617,4 +591,165 @@ void main() {
     await svc.dispose();
     await session.close();
   });
+
+  test('choices survive the status-snapshot escalation replay', () async {
+    // The replay is what rebuilds answerable rows after a reconnect or a
+    // restart. Choices only on the one-shot push would turn every replayed
+    // decision card back into a plain row the next time status landed.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+    final sub = session.heavyStream.listen((_) {});
+
+    t.emit('handler:escalation', {
+      'projectId': 'p',
+      'terminalId': 't1',
+      ..._escalationJson('e1', choices: _choicesJson),
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.currentState.escalations.single.choices, hasLength(2));
+
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': [
+        _sessionJson(
+          terminalId: 't1',
+          pendingEscalations: 1,
+          state: 'needs_you',
+          escalations: [_escalationJson('e1', choices: _choicesJson)],
+        ),
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    final replayed = svc.currentState.escalations.single;
+    expect(replayed.choices, hasLength(2));
+    expect(replayed.choiceById('approve')!.text, 'd');
+
+    await sub.cancel();
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('a snapshot advert lands, then its re-advert replaces it', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+    final sub = session.heavyStream.listen((_) {});
+
+    t.emit('handler:snapshot', _snapshotJson());
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.snapshots.single.action, 'force_push');
+    expect(svc.currentState.snapshots.single.undoable, isTrue);
+
+    // The bridge re-sends the same id on every state change, so a second row
+    // here would offer an undo the first row already says is spent.
+    t.emit('handler:snapshot', _snapshotJson(state: 'undone'));
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.snapshots, hasLength(1));
+    expect(svc.currentState.snapshots.single.undoable, isFalse);
+    expect(svc.currentState.snapshots.single.undone, isTrue);
+
+    await sub.cancel();
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('status replays the offers and clears the in-flight undo', () async {
+    // The replay is what lets an app that restarted between the advert and the
+    // tap still reach the undo.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+    final sub = session.heavyStream.listen((_) {});
+
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': <Map<String, dynamic>>[],
+      'snapshots': [_snapshotJson()],
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.currentState.snapshots.single.snapshotId, 's1');
+
+    svc.undo(svc.currentState.snapshots.single);
+    expect(svc.currentState.pendingUndo, {'s1'});
+
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': <Map<String, dynamic>>[],
+      'snapshots': [_snapshotJson(state: 'undone')],
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.pendingUndo, isEmpty);
+    expect(svc.currentState.snapshots.single.undone, isTrue);
+
+    await sub.cancel();
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('a status replay does not drop an undo that is still running', () async {
+    // Status is re-emitted on any session's activity, and it reports an in-flight
+    // undo as still 'available' — the entry only changes state when its own
+    // handler:snapshot frame lands. Clearing on that would flip the row back to a
+    // live Undo chip mid-push, and the re-tap it invites is discarded silently.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+    final sub = session.heavyStream.listen((_) {});
+
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': <Map<String, dynamic>>[],
+      'snapshots': [_snapshotJson()],
+    });
+    await Future<void>.delayed(Duration.zero);
+    svc.undo(svc.currentState.snapshots.single);
+    expect(svc.currentState.pendingUndo, {'s1'});
+
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': <Map<String, dynamic>>[],
+      'snapshots': [_snapshotJson()],
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.currentState.pendingUndo, {'s1'});
+
+    // An id the replay no longer names cannot still be in flight.
+    t.emit('handler:status', {
+      'projectId': 'p',
+      'sessions': <Map<String, dynamic>>[],
+      'snapshots': <Map<String, dynamic>>[],
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.currentState.pendingUndo, isEmpty);
+
+    await sub.cancel();
+    await svc.dispose();
+    await session.close();
+  });
+
+  test(
+    'a bridge with no snapshots array still delivers its sessions',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+
+      t.emit('handler:status', {
+        'projectId': 'p',
+        'sessions': [_sessionJson(terminalId: 't1', pendingEscalations: 0)],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.sessions.keys, ['t1']);
+      expect(svc.currentState.snapshots, isEmpty);
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
 }

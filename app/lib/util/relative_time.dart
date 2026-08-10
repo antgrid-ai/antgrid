@@ -25,6 +25,23 @@ String clockTime(DateTime when) {
   return '$h:$m';
 }
 
+/// Wall-clock label that keeps its day: `14:05` today, `Aug 3 14:05` before
+/// that. [clockTime] alone is only honest on a surface read the same day — on a
+/// log written while the user was away, last night's `23:40` and tonight's are
+/// the same four characters.
+///
+/// [now] is injectable so the day boundary is deterministic in tests.
+String dayAwareTime(DateTime when, {DateTime? now}) {
+  final local = when.toLocal();
+  final ref = (now ?? DateTime.now()).toLocal();
+  final sameDay =
+      local.year == ref.year &&
+      local.month == ref.month &&
+      local.day == ref.day;
+  final clock = clockTime(local);
+  return sameDay ? clock : '${_months[local.month - 1]} ${local.day} $clock';
+}
+
 const _months = [
   'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',

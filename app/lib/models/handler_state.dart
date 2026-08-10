@@ -66,80 +66,85 @@ HandlerObservability? handlerObservabilityFromWire(dynamic s) {
   }
 }
 
-/// A handler's brief — what it will/won't do, when to wake the user, and the
-/// checklist to run once `doneWhen` is met. Mirrors the bridge's
-/// `HandlerBriefWire` (`bridge/src/protocol.ts`).
-class HandlerBrief {
-  final String taskSummary;
-  final List<String> willHandle;
-  final List<String> wakeFor;
-  final String? doneWhen;
-  final List<String> thenItems;
+/// One entry of the live instruction stack. Mirrors the bridge's
+/// `InstructionItemWire` (`bridge/src/protocol.ts`) field for field.
+class HandlerInstructionItem {
+  /// Stable across the session — the bridge's evaluator answers with ids and
+  /// never with prose, so this is what a transition addresses.
+  final String id;
+  final String text;
 
-  const HandlerBrief({
-    required this.taskSummary,
-    required this.willHandle,
-    required this.wakeFor,
-    this.doneWhen,
-    required this.thenItems,
+  /// Ids this item waits on, extracted from the user's own ordering words. The
+  /// bridge derives `blocked` from them; the app never authors one (spec §3.3).
+  final List<String>? dependsOn;
+  final String? condition;
+
+  // 'queued' | 'active' | 'done' | 'blocked' | 'skipped' | 'failed'
+  final String status;
+  final String? outcome;
+
+  /// Verbatim transcript substring justifying the current [status].
+  final String? evidence;
+  final int createdAt;
+
+  const HandlerInstructionItem({
+    required this.id,
+    required this.text,
+    this.dependsOn,
+    this.condition,
+    required this.status,
+    this.outcome,
+    this.evidence,
+    required this.createdAt,
   });
 
-  static HandlerBrief? fromWire(dynamic json) {
+  static HandlerInstructionItem? fromWire(dynamic json) {
     if (json is! Map) return null;
-    final taskSummary = json['taskSummary'];
-    final willHandleJson = json['willHandle'];
-    final wakeForJson = json['wakeFor'];
-    final thenItemsJson = json['thenItems'];
-    if (taskSummary is! String ||
-        willHandleJson is! List ||
-        wakeForJson is! List ||
-        thenItemsJson is! List) {
+    final id = json['id'];
+    final text = json['text'];
+    final status = json['status'];
+    final createdAt = json['createdAt'];
+    if (id is! String ||
+        text is! String ||
+        status is! String ||
+        createdAt is! num) {
       return null;
     }
-    if (willHandleJson.any((e) => e is! String) ||
-        wakeForJson.any((e) => e is! String) ||
-        thenItemsJson.any((e) => e is! String)) {
+    final dependsOnJson = json['dependsOn'];
+    if (dependsOnJson != null &&
+        (dependsOnJson is! List || dependsOnJson.any((e) => e is! String))) {
       return null;
     }
-    final doneWhen = json['doneWhen'];
-    if (doneWhen != null && doneWhen is! String) return null;
-    return HandlerBrief(
-      taskSummary: taskSummary,
-      willHandle: willHandleJson.cast<String>(),
-      wakeFor: wakeForJson.cast<String>(),
-      doneWhen: doneWhen as String?,
-      thenItems: thenItemsJson.cast<String>(),
+    final condition = json['condition'];
+    final outcome = json['outcome'];
+    final evidence = json['evidence'];
+    if ((condition != null && condition is! String) ||
+        (outcome != null && outcome is! String) ||
+        (evidence != null && evidence is! String)) {
+      return null;
+    }
+    return HandlerInstructionItem(
+      id: id,
+      text: text,
+      dependsOn: dependsOnJson?.cast<String>(),
+      condition: condition as String?,
+      status: status,
+      outcome: outcome as String?,
+      evidence: evidence as String?,
+      createdAt: createdAt.toInt(),
     );
   }
 
   Map<String, dynamic> toWire() => {
-    'taskSummary': taskSummary,
-    'willHandle': willHandle,
-    'wakeFor': wakeFor,
-    if (doneWhen != null) 'doneWhen': doneWhen,
-    'thenItems': thenItems,
+    'id': id,
+    'text': text,
+    if (dependsOn != null) 'dependsOn': dependsOn,
+    if (condition != null) 'condition': condition,
+    'status': status,
+    if (outcome != null) 'outcome': outcome,
+    if (evidence != null) 'evidence': evidence,
+    'createdAt': createdAt,
   };
-}
-
-class HandlerLedgerEntry {
-  final String item;
-  final String evidence;
-  final int at;
-
-  const HandlerLedgerEntry({
-    required this.item,
-    required this.evidence,
-    required this.at,
-  });
-
-  static HandlerLedgerEntry? fromWire(dynamic json) {
-    if (json is! Map) return null;
-    final item = json['item'];
-    final evidence = json['evidence'];
-    final at = json['at'];
-    if (item is! String || evidence is! String || at is! num) return null;
-    return HandlerLedgerEntry(item: item, evidence: evidence, at: at.toInt());
-  }
 }
 
 /// One armed handler session (per terminal). Mirrors the bridge's
@@ -150,9 +155,12 @@ class HandlerSessionState {
   final HandlerRunState runState;
   final int pendingEscalations;
   final int armedAt;
-  final bool doneWhenMet;
-  final HandlerBrief brief;
-  final List<HandlerLedgerEntry> ledger;
+
+  /// The session objective, and the live instruction stack working towards it.
+  /// An item's own status is the whole record of progress — nothing
+  /// accumulates alongside the backlog.
+  final String goal;
+  final List<HandlerInstructionItem> backlog;
 
   /// Unanswered escalations replayed with every status snapshot, so the
   /// "needs you" list survives app restarts and reconnects (the one-shot
@@ -187,9 +195,8 @@ class HandlerSessionState {
     required this.runState,
     required this.pendingEscalations,
     required this.armedAt,
-    required this.doneWhenMet,
-    required this.brief,
-    required this.ledger,
+    required this.goal,
+    required this.backlog,
     required this.escalations,
     this.judgeTool,
     this.judgeModel,
@@ -198,10 +205,12 @@ class HandlerSessionState {
     this.observability,
   });
 
-  /// Count of `brief.thenItems` this session's ledger already covers.
-  int get thenTotal => brief.thenItems.length;
-  int get thenSatisfied =>
-      ledger.where((e) => brief.thenItems.contains(e.item)).length;
+  int get backlogTotal => backlog.length;
+
+  /// Only `done` counts, never the other terminal states: `skipped` and
+  /// `failed` close an item without achieving it, and reporting them as
+  /// progress is the summary-inflation failure mode spec §4.3 guards against.
+  int get backlogDone => backlog.where((i) => i.status == 'done').length;
 
   HandlerSessionState copyWith({
     HandlerRunState? runState,
@@ -213,9 +222,8 @@ class HandlerSessionState {
     runState: runState ?? this.runState,
     pendingEscalations: pendingEscalations ?? this.pendingEscalations,
     armedAt: armedAt,
-    doneWhenMet: doneWhenMet,
-    brief: brief,
-    ledger: ledger,
+    goal: goal,
+    backlog: backlog,
     escalations: escalations ?? this.escalations,
     judgeTool: judgeTool,
     judgeModel: judgeModel,
@@ -231,28 +239,26 @@ class HandlerSessionState {
     final state = json['state'];
     final pendingEscalations = json['pendingEscalations'];
     final armedAt = json['armedAt'];
-    final doneWhenMet = json['doneWhenMet'];
-    final ledgerJson = json['ledger'];
+    final goal = json['goal'];
+    final backlogJson = json['backlog'];
     if (terminalId is! String ||
         notifyOnly is! bool ||
         state is! String ||
         pendingEscalations is! num ||
         armedAt is! num ||
-        doneWhenMet is! bool ||
-        ledgerJson is! List) {
+        goal is! String ||
+        backlogJson is! List) {
       return null;
     }
     final runState = handlerRunStateFromWire(state);
     if (runState == null) return null;
-    final brief = HandlerBrief.fromWire(json['brief']);
-    if (brief == null) return null;
-    // Lenient like escalations below: a malformed ledger row is recoverable
-    // detail — rejecting the whole session over it would silently drop the
-    // armed card (and its pending escalations) from the snapshot.
-    final ledger = <HandlerLedgerEntry>[];
-    for (final e in ledgerJson) {
-      final entry = HandlerLedgerEntry.fromWire(e);
-      if (entry != null) ledger.add(entry);
+    // Lenient like escalations below: a malformed item is recoverable detail —
+    // rejecting the whole session over it would silently drop the armed card
+    // (and its pending escalations) from the snapshot.
+    final backlog = <HandlerInstructionItem>[];
+    for (final e in backlogJson) {
+      final item = HandlerInstructionItem.fromWire(e);
+      if (item != null) backlog.add(item);
     }
     // Lenient (missing/malformed → empty) rather than rejecting the whole
     // session: an escalation row is recoverable detail, the armed session
@@ -277,9 +283,8 @@ class HandlerSessionState {
       runState: runState,
       pendingEscalations: pendingEscalations.toInt(),
       armedAt: armedAt.toInt(),
-      doneWhenMet: doneWhenMet,
-      brief: brief,
-      ledger: ledger,
+      goal: goal,
+      backlog: backlog,
       escalations: escalations,
       judgeTool: judgeTool is String ? judgeTool : null,
       judgeModel: judgeModel is String ? judgeModel : null,
@@ -287,6 +292,107 @@ class HandlerSessionState {
       parkedUntil: parkedUntil is num ? parkedUntil.toInt() : null,
       observability: handlerObservabilityFromWire(json['observability']),
     );
+  }
+}
+
+/// One 1-tap answer offered on a decision card (spec §4.6). Mirrors the
+/// bridge's `EscalationChoiceWire` (`bridge/src/protocol.ts`) and
+/// `EscalationChoiceSchema` (`bridge/src/handler/session-store.ts`) — three
+/// hand-written copies of one shape, so the bounds below move with them.
+class HandlerEscalationChoice {
+  /// Stable semantic name (`approve` / `reject`) that survives a round-trip
+  /// through an OS notification action. Identity, never authority: a tap sends
+  /// [text], which the bridge authored, never anything the caller supplies.
+  final String choiceId;
+
+  /// Chip label.
+  final String label;
+
+  /// What the tap sends into the session. Surfaces MUST render this alongside
+  /// [label] rather than behind it — `[Approve]` carries the judge's draft
+  /// reply verbatim, and a one-tap the user cannot read is one they cannot
+  /// refuse.
+  final String text;
+
+  const HandlerEscalationChoice({
+    required this.choiceId,
+    required this.label,
+    required this.text,
+  });
+
+  static const _maxChoiceId = 40;
+  static const _maxLabel = 40;
+  static const _maxText = 400;
+
+  /// The wire's own rule. A control character would render as an unreadable
+  /// chip and, on the PTY path, submit an extra line past the answer.
+  static final _printable = RegExp(r'^[^\x00-\x1f\x7f]+$');
+
+  static HandlerEscalationChoice? fromWire(dynamic json) {
+    if (json is! Map) return null;
+    final choiceId = json['choiceId'];
+    final label = json['label'];
+    final text = json['text'];
+    if (choiceId is! String ||
+        label is! String ||
+        text is! String ||
+        choiceId.isEmpty ||
+        choiceId.length > _maxChoiceId ||
+        label.isEmpty ||
+        label.length > _maxLabel ||
+        text.length > _maxText ||
+        // Whitespace alone is dropped by every consumer of [text] — the send
+        // path refuses to submit a bare newline into a session — so it would
+        // render as a chip that silently does nothing.
+        text.trim().isEmpty ||
+        !_printable.hasMatch(text)) {
+      return null;
+    }
+    return HandlerEscalationChoice(
+      choiceId: choiceId,
+      label: label,
+      text: text,
+    );
+  }
+
+  /// Parses the optional `choices` array carried by both the one-shot
+  /// escalation push and the status replay. Returns null — never an empty list
+  /// — whenever the row must fall back to the free-text reply sheet, so a
+  /// surface renders a card exactly when this is non-null:
+  ///
+  ///  - the key is absent: an older bridge, or a draft this one declined to
+  ///    make one-tappable. Tolerating absence is the whole compatibility
+  ///    contract, the same one `kind` already established.
+  ///  - [kind] is `resolve_in_session`. That escalation is an option-based
+  ///    agent prompt, resolvable only by the chat RPC that needs a
+  ///    permissionId the escalation never carries; a chip on one would inject
+  ///    text that answers nothing while the bridge clears the row anyway. The
+  ///    bridge refuses to mint these — this is the app's own floor, because a
+  ///    dead button is invisible to whoever taps it.
+  ///  - the count is outside the wire's 2..3, or any entry is malformed. A card
+  ///    is never one chip, so a partial list is dropped whole rather than
+  ///    rendered short — and dropping only the choices keeps the escalation
+  ///    itself answerable by text.
+  ///  - two entries share a [choiceId]. A tap is resolved by first match, so a
+  ///    repeated id sends the text of a chip the user did not read — which is
+  ///    exactly what passing the id rather than the choice is supposed to make
+  ///    impossible.
+  static List<HandlerEscalationChoice>? listFromWire(
+    dynamic json, {
+    String? kind,
+  }) {
+    if (kind == 'resolve_in_session') return null;
+    if (json is! List || json.length < 2 || json.length > 3) return null;
+    final choices = <HandlerEscalationChoice>[];
+    for (final e in json) {
+      final choice = fromWire(e);
+      if (choice == null) return null;
+      choices.add(choice);
+    }
+    if (choices.map((c) => c.choiceId).toSet().length != choices.length) {
+      return null;
+    }
+    return choices;
   }
 }
 
@@ -303,6 +409,12 @@ class HandlerEscalation {
   // prompt (permission/question) answered in the chat transcript UI.
   final String? kind;
 
+  /// The quick choices to render as a decision card, or null for a plain
+  /// free-text row. Never empty — see [HandlerEscalationChoice.listFromWire]
+  /// for every reason this is null. [draftReply] is populated either way, so
+  /// the free-text sheet is unaffected by its presence.
+  final List<HandlerEscalationChoice>? choices;
+
   const HandlerEscalation({
     required this.escalationId,
     required this.terminalId,
@@ -313,7 +425,31 @@ class HandlerEscalation {
     this.floorRule,
     required this.at,
     this.kind,
+    this.choices,
   });
+
+  /// The same escalation with its card withdrawn, still answerable in the
+  /// user's own words. This is the fallback for every situation where a one-tap
+  /// would be unsafe but the question is still open — degrading to the
+  /// free-text row the app has always had, never to an unanswerable row.
+  HandlerEscalation withoutChoices() => HandlerEscalation(
+    escalationId: escalationId,
+    terminalId: terminalId,
+    question: question,
+    reasoning: reasoning,
+    draftReply: draftReply,
+    urgency: urgency,
+    floorRule: floorRule,
+    at: at,
+    kind: kind,
+  );
+
+  HandlerEscalationChoice? choiceById(String choiceId) {
+    for (final c in choices ?? const <HandlerEscalationChoice>[]) {
+      if (c.choiceId == choiceId) return c;
+    }
+    return null;
+  }
 
   /// Parses one entry of a status snapshot's per-session `escalations` array.
   /// The wire entry has no terminalId (it is nested under its session), so the
@@ -348,6 +484,87 @@ class HandlerEscalation {
       floorRule: floorRule as String?,
       at: at.toInt(),
       kind: kind as String?,
+      choices: HandlerEscalationChoice.listFromWire(json['choices'], kind: kind),
+    );
+  }
+}
+
+/// One snapshot the bridge took before injecting a flagged reply, and the undo
+/// it offers (spec §5.2). Mirrors `HandlerSnapshotWire` (`bridge/src/protocol.ts`).
+///
+/// Project-scoped rather than nested under a session: the offer outlives the
+/// session that took it, and a wrapped-up session is when it matters most.
+class HandlerSnapshot {
+  final String snapshotId;
+
+  /// The supervised slot the flagged reply was injected into.
+  final String terminalId;
+  final int at;
+
+  // 'reset_hard' | 'force_push' | 'rm_rf' | 'git_clean'
+  final String action;
+
+  /// The command segment that tripped the floor.
+  final String trigger;
+
+  /// One line naming what was actually saved.
+  final String summary;
+
+  // 'available' | 'undone' | 'failed'
+  final String state;
+
+  /// Why the last undo attempt failed. Present only while [state] is 'failed'.
+  final String? detail;
+
+  const HandlerSnapshot({
+    required this.snapshotId,
+    required this.terminalId,
+    required this.at,
+    required this.action,
+    required this.trigger,
+    required this.summary,
+    required this.state,
+    this.detail,
+  });
+
+  /// 'failed' is undoable on purpose — the bridge treats a failed attempt as
+  /// retryable, and an undo that could not run is not an undo that must not.
+  /// A state a newer bridge invented is NOT offered: a tap that quietly does
+  /// nothing is worse than no tap at all.
+  bool get undoable => state == 'available' || state == 'failed';
+
+  bool get undone => state == 'undone';
+
+  /// Parses one entry of the status replay, or the flat advert envelope — the
+  /// two carry the same fields, so this is the single parse site for both.
+  static HandlerSnapshot? fromWire(dynamic json) {
+    if (json is! Map) return null;
+    final snapshotId = json['snapshotId'];
+    final terminalId = json['terminalId'];
+    final at = json['at'];
+    final action = json['action'];
+    final trigger = json['trigger'];
+    final summary = json['summary'];
+    final state = json['state'];
+    if (snapshotId is! String ||
+        terminalId is! String ||
+        at is! num ||
+        action is! String ||
+        trigger is! String ||
+        summary is! String ||
+        state is! String) {
+      return null;
+    }
+    final detail = json['detail'];
+    return HandlerSnapshot(
+      snapshotId: snapshotId,
+      terminalId: terminalId,
+      at: at.toInt(),
+      action: action,
+      trigger: trigger,
+      summary: summary,
+      state: state,
+      detail: detail is String ? detail : null,
     );
   }
 }
@@ -356,8 +573,14 @@ class HandlerActivityRecord {
   final String recordId;
   final int at;
   final String terminalId;
-  // 'continue' | 'handle' | 'escalate' | 'brief_armed' | 'brief_edited' |
-  // 'item_satisfied' | 'wrapped_up' | 'parked' | 'resumed'
+  // Keep in lockstep with the bridge's ActivityRecord.decision
+  // (`bridge/src/handler/config.ts`) and HandlerActivityMessage
+  // (`bridge/src/protocol.ts`) — an unlisted value fails at runtime as an
+  // unrenderable feed row, never at compile time.
+  // 'continue' | 'handle' | 'escalate' | 'armed' | 'goal_edited' |
+  // 'item_done' | 'item_blocked' | 'item_skipped' | 'item_failed' |
+  // 'instruction_dropped' | 'floor_warning' | 'wrapped_up' | 'parked' |
+  // 'resumed'
   final String decision;
   final String reason;
   final String? detail;
@@ -384,12 +607,23 @@ class HandlerState {
   final List<HandlerEscalation> escalations;
   final List<HandlerActivityRecord> activity;
 
+  /// Undo offers for this project, oldest first. Not keyed by session — they
+  /// survive the disarm of the session that took them.
+  final List<HandlerSnapshot> snapshots;
+
+  /// Snapshot ids whose `handler:undo` is out and whose result has not come
+  /// back yet. The bridge re-states the entry either way, so this only keeps a
+  /// second tap from looking live during the round trip.
+  final Set<String> pendingUndo;
+
   const HandlerState({
     this.defaultTool,
     this.defaultNotifyOnly = false,
     required this.sessions,
     required this.escalations,
     required this.activity,
+    this.snapshots = const [],
+    this.pendingUndo = const {},
   });
 
   const HandlerState.initial()
@@ -397,7 +631,9 @@ class HandlerState {
       defaultNotifyOnly = false,
       sessions = const {},
       escalations = const [],
-      activity = const [];
+      activity = const [],
+      snapshots = const [],
+      pendingUndo = const {};
 
   // Absence of any session is the wire's implicit 'off' — there is no
   // standalone off/on flag now that arming is per-terminal.
@@ -415,6 +651,8 @@ class HandlerState {
     Map<String, HandlerSessionState>? sessions,
     List<HandlerEscalation>? escalations,
     List<HandlerActivityRecord>? activity,
+    List<HandlerSnapshot>? snapshots,
+    Set<String>? pendingUndo,
   }) {
     return HandlerState(
       defaultTool: defaultTool ?? this.defaultTool,
@@ -422,6 +660,8 @@ class HandlerState {
       sessions: sessions ?? this.sessions,
       escalations: escalations ?? this.escalations,
       activity: activity ?? this.activity,
+      snapshots: snapshots ?? this.snapshots,
+      pendingUndo: pendingUndo ?? this.pendingUndo,
     );
   }
 }

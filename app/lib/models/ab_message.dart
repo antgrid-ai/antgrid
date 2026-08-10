@@ -3,6 +3,7 @@ import 'package:uuid/uuid.dart';
 import 'agent_event.dart' show parseAgentEvent;
 import 'agent_hello.dart';
 import 'file_tree_models.dart';
+import 'handler_state.dart' show HandlerEscalationChoice;
 import 'layout_models.dart';
 import 'preview_models.dart';
 import 'service_status.dart';
@@ -248,7 +249,7 @@ class TerminalSizeMessage {
   });
 }
 
-/// Raw per-session maps — typed parsing (brief, ledger, run state, judge)
+/// Raw per-session maps — typed parsing (goal, backlog, run state, judge)
 /// lives in `HandlerSessionState.fromWire` (`handler_state.dart`), not here.
 class HandlerStatusMessage {
   final String id;
@@ -261,6 +262,12 @@ class HandlerStatusMessage {
   final bool defaultNotifyOnly;
   final List<Map<String, dynamic>> sessions;
 
+  /// Every §5.2 snapshot the project still knows about, replayed like the
+  /// escalations so an app that restarted between the advert and the tap can
+  /// still reach the undo. Project-level, not per session: the offer matters
+  /// most once the session that took it has wrapped up.
+  final List<Map<String, dynamic>> snapshots;
+
   const HandlerStatusMessage({
     required this.id,
     required this.timestamp,
@@ -268,33 +275,25 @@ class HandlerStatusMessage {
     this.defaultTool,
     required this.defaultNotifyOnly,
     required this.sessions,
+    this.snapshots = const [],
   });
 }
 
-class HandlerPlanResultMessage {
+/// Advert of one snapshot the bridge captured, re-sent whenever its state
+/// changes. The payload is flat (`HandlerSnapshotWire` extended onto the
+/// envelope), so the whole envelope is handed to `HandlerSnapshot.fromWire` —
+/// the same parse the status replay uses, so the two paths cannot drift.
+class HandlerSnapshotMessage {
   final String id;
   final int timestamp;
   final String projectId;
-  final String terminalId;
-  final bool fallback;
-  final Map<String, dynamic>? brief;
-  final Map<String, dynamic>? previousBrief;
+  final Map<String, dynamic> snapshot;
 
-  /// The session's stored judge choice, echoed so the briefing sheet can seed
-  /// its picker after an app restart (status only covers armed sessions).
-  final String? judgeTool;
-  final String? judgeModel;
-
-  const HandlerPlanResultMessage({
+  const HandlerSnapshotMessage({
     required this.id,
     required this.timestamp,
     required this.projectId,
-    required this.terminalId,
-    required this.fallback,
-    this.brief,
-    this.previousBrief,
-    this.judgeTool,
-    this.judgeModel,
+    required this.snapshot,
   });
 }
 
@@ -311,6 +310,11 @@ class HandlerEscalationMessage {
   final String? floorRule;
   final String? kind;
 
+  /// Null unless the bridge offered a decision card; see
+  /// [HandlerEscalationChoice.listFromWire], which is the single parse site
+  /// this and the status replay share.
+  final List<HandlerEscalationChoice>? choices;
+
   const HandlerEscalationMessage({
     required this.id,
     required this.timestamp,
@@ -323,6 +327,7 @@ class HandlerEscalationMessage {
     required this.urgency,
     this.floorRule,
     this.kind,
+    this.choices,
   });
 }
 
@@ -333,8 +338,8 @@ class HandlerActivityMessage {
   final String recordId;
   final int at;
   final String terminalId;
-  // 'continue' | 'handle' | 'escalate' | 'brief_armed' | 'brief_edited' |
-  // 'item_satisfied' | 'wrapped_up' | 'parked' | 'resumed'
+  // Value list documented on HandlerActivityRecord (`handler_state.dart`),
+  // which is the app-side lockstep site for the bridge's enum.
   final String decision;
   final String reason;
   final String? detail;
@@ -1236,6 +1241,15 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         for (final s in sessionsJson) {
           if (s is Map<String, dynamic>) sessions.add(s);
         }
+        // Absent is empty, not a parse failure: a bridge older than the undo
+        // offer still has to deliver its armed sessions.
+        final snapshotsJson = json['snapshots'];
+        final snapshots = <Map<String, dynamic>>[];
+        if (snapshotsJson is List) {
+          for (final s in snapshotsJson) {
+            if (s is Map<String, dynamic>) snapshots.add(s);
+          }
+        }
         return HandlerStatusMessage(
           id: id,
           timestamp: timestamp,
@@ -1245,37 +1259,19 @@ Object? parseAbMessage(Map<String, dynamic> json) {
               : null,
           defaultNotifyOnly: json['defaultNotifyOnly'] == true,
           sessions: sessions,
+          snapshots: snapshots,
         );
       }
 
-    case 'handler:planResult':
+    case 'handler:snapshot':
       {
         final projectId = json['projectId'];
-        final terminalId = json['terminalId'];
-        final fallback = json['fallback'];
-        if (projectId is! String ||
-            terminalId is! String ||
-            fallback is! bool) {
-          return null;
-        }
-        final briefJson = json['brief'];
-        final previousBriefJson = json['previousBrief'];
-        return HandlerPlanResultMessage(
+        if (projectId is! String) return null;
+        return HandlerSnapshotMessage(
           id: id,
           timestamp: timestamp,
           projectId: projectId,
-          terminalId: terminalId,
-          fallback: fallback,
-          brief: briefJson is Map<String, dynamic> ? briefJson : null,
-          previousBrief: previousBriefJson is Map<String, dynamic>
-              ? previousBriefJson
-              : null,
-          judgeTool: json['judgeTool'] is String
-              ? json['judgeTool'] as String
-              : null,
-          judgeModel: json['judgeModel'] is String
-              ? json['judgeModel'] as String
-              : null,
+          snapshot: json,
         );
       }
 
@@ -1298,6 +1294,7 @@ Object? parseAbMessage(Map<String, dynamic> json) {
           return null;
         }
         final floorRule = json['floorRule'];
+        final kind = json['kind'] is String ? json['kind'] as String : null;
         return HandlerEscalationMessage(
           id: id,
           timestamp: timestamp,
@@ -1312,7 +1309,11 @@ Object? parseAbMessage(Map<String, dynamic> json) {
           // non-string here would throw out of the message stream instead of
           // degrading to "no floor rule".
           floorRule: floorRule is String ? floorRule : null,
-          kind: json['kind'] is String ? json['kind'] as String : null,
+          kind: kind,
+          choices: HandlerEscalationChoice.listFromWire(
+            json['choices'],
+            kind: kind,
+          ),
         );
       }
 

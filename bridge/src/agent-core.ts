@@ -19,7 +19,7 @@ import { loadConfig, findConfigFile, projectName, type AbConfig } from "./config
 import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from "./bootstrap";
 import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } from "./known-agents";
 import { augmentAgentLaunch } from "./agent-launch-augmenter";
-import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
+import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, HandlerInstructWire, HandlerUndoWire, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle, type SessionTitleBody } from "./api-server";
 import { MessageBus } from "./message-bus";
@@ -254,7 +254,7 @@ export interface BuildAgentCoreOptions {
    *  owning ProjectCore can clear the block and resume the turn. Distinct from
    *  {@link onTurnStart}: it opens a turn only if something was actually
    *  pending. Bridge-internal — never surfaces to the app. */
-  onAnswer?: (sessionId: string) => void;
+  onAnswer?: (sessionId: string, requestId?: string) => void;
   /** This session's status in the owner's work reduction, stamped onto each
    *  `session:updated` entry so the app has a per-session status on the LIVE
    *  session stream rather than only on the advert. The owner must call
@@ -624,15 +624,31 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // a submitted answer by definition. The engine's own auto-reply calls
         // structured.handleAgentMessage directly and never passes through
         // here (it must not reset the guard that counts it).
-        handlerEngine.onUserReply(msg.sessionId, "\r");
+        //
+        // Only a RESOLVE retires a `resolve_in_session` escalation, and only the
+        // row for the prompt it names: it carries the permissionId/questionId the
+        // blocked driver is waiting on. A bare prompt is injected text, which such
+        // a prompt cannot consume — clearing its row would blank the "needs you"
+        // pill on a session that is still blocked.
+        handlerEngine.onUserReply(msg.sessionId, "\r", {
+          resolvedPromptId: msg.type === "agent:permission-resolve"
+            ? msg.permissionId
+            : msg.type === "agent:question-resolve" ? msg.questionId : undefined,
+        });
         // A RESOLVE additionally unblocks the session: the block is gone and the
         // agent resumes on THIS session, so report it now rather than waiting for
         // the driver's next outbound frame — that is what flips the session's dot
         // from "needs you" back to "working" the instant the user replies. A bare
         // prompt is excluded; its driver emits a real `agent:turn-start`. Not
         // onTurnStart either: a resolve that raced a retraction has nothing to
-        // resume, and must not open a turn nothing will close.
-        if (msg.type !== "agent:prompt") opts.onAnswer?.(msg.sessionId);
+        // resume, and must not open a turn nothing will close. Named, for the
+        // same reason the escalation above is: one answer unblocks one prompt.
+        if (msg.type !== "agent:prompt") {
+          opts.onAnswer?.(
+            msg.sessionId,
+            msg.type === "agent:permission-resolve" ? msg.permissionId : msg.questionId,
+          );
+        }
         void structured?.handleAgentMessage(msg);
         return;
       case "agent:cancel":
@@ -670,14 +686,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       case "handler:configure": {
         // parseMessageFast (the encrypted/local hot path) validates only the
-        // message type — every field below is still untrusted, and validating
-        // just the brief is not enough: a `notifyOnly` that arrives absent or
-        // non-bool reads as falsy and would arm an auto-injecting session the
-        // user asked to be notify-only.
+        // message type — every field below is still untrusted, so every field
+        // arming acts on has to be re-parsed, not just the ones the sender
+        // happened to fill in: a `notifyOnly` that arrives absent or non-bool
+        // reads as falsy and would arm an auto-injecting session the user asked
+        // to be notify-only.
         const parsed = HandlerConfigureWire.safeParse(msg);
-        if (parsed.success && parsed.data.armed && parsed.data.brief) {
-          const { terminalId, brief, notifyOnly, judgeTool, judgeModel } = parsed.data;
-          handlerEngine.arm({ terminalId, brief, notifyOnly, judgeTool, judgeModel });
+        if (parsed.success && parsed.data.armed) {
+          const { terminalId, goal, backlog, notifyOnly, judgeTool, judgeModel } = parsed.data;
+          handlerEngine.arm({ terminalId, goal, backlog, notifyOnly, judgeTool, judgeModel });
         } else if (parsed.success) {
           handlerEngine.disarm(parsed.data.terminalId);
         } else {
@@ -690,18 +707,41 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         }
         break;
       }
-      case "handler:planRequest":
-        // Same untrusted-payload rule: a non-string terminalId would spend a full
-        // judge spawn planning against an empty context for a slot that can't exist.
-        if (typeof msg.terminalId !== "string") {
-          logger.warn("handler:planRequest ignored: malformed payload");
-          break;
+      case "handler:instruct": {
+        // Same re-parse discipline as handler:configure above: parseMessageFast
+        // validated the type and nothing else, and this text is interpolated into
+        // the extraction prompt.
+        const parsed = HandlerInstructWire.safeParse(msg);
+        if (parsed.success) {
+          handlerEngine.instruct({ terminalId: parsed.data.terminalId, text: parsed.data.text });
+        } else {
+          // Rejected WITHOUT disarming, for the same reason a malformed arm is: a
+          // bad instruct must not tear down the live armed session it was meant to
+          // add to. Re-emit status so the sender's UI resyncs.
+          logger.warn("handler:instruct rejected: malformed payload");
+          handlerEngine.emitStatus();
         }
-        handlerEngine.plan(msg.terminalId, {
-          judgeTool: typeof msg.judgeTool === "string" ? msg.judgeTool : undefined,
-          judgeModel: typeof msg.judgeModel === "string" ? msg.judgeModel : undefined,
-        }).catch((err) => logger.error("Handler plan failed: %s", err));
         break;
+      }
+      case "handler:undo": {
+        // Same re-parse discipline as the two above: parseMessageFast validated the
+        // type and nothing else, and this id selects a filesystem/git operation.
+        const parsed = HandlerUndoWire.safeParse(msg);
+        if (parsed.success) {
+          // Nothing awaits an inbound frame, and undo() reports its own outcome on
+          // the wire, so it carries its own sink.
+          void handlerEngine.undo(parsed.data.snapshotId).catch((err) => {
+            logger.warn("handler:undo failed: %s", err);
+          });
+        } else {
+          // Rejected WITHOUT disarming, for the same reason a malformed arm is: a
+          // bad undo must not tear down the live armed session it names nothing in.
+          // Re-emit status so the sender's UI resyncs.
+          logger.warn("handler:undo rejected: malformed payload");
+          handlerEngine.emitStatus();
+        }
+        break;
+      }
       case "terminal:start": {
         const savedService = (runtime.config.services ?? []).find((s) => s.name === msg.terminalId);
         const isSession = !!sessions?.get(msg.terminalId);
@@ -1768,13 +1808,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           ? { terminalId: msg.sessionId, ...lifecycle }
           : { terminalId: msg.sessionId, event: "turn_end" };
       } else if (msg.type === "agent:permission-request") {
-        evt = { terminalId: msg.sessionId, event: "permission_request", detail: msg.title };
+        evt = { terminalId: msg.sessionId, event: "permission_request", detail: msg.title, promptId: msg.permissionId };
       } else if (msg.type === "agent:question") {
-        evt = { terminalId: msg.sessionId, event: "question", detail: msg.prompt };
+        evt = { terminalId: msg.sessionId, event: "question", detail: msg.prompt, promptId: msg.questionId };
       } else if (msg.type === "agent:request-retracted") {
         // The blocking prompt is gone — clear its forced escalation instead of
         // leaving a "needs you" row pointing at a prompt that no longer exists.
-        handlerEngine.onPromptRetracted(msg.sessionId);
+        handlerEngine.onPromptRetracted(msg.sessionId, msg.permissionId ?? msg.questionId);
       }
       if (evt) {
         handlerEngine.handleEvent(evt).catch((err) => logger.error("Handler chat event failed: %s", err));
@@ -2135,7 +2175,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Re-sync the config-error dot on every connect (see emitConfigState).
     emitConfigState();
     // Seed the app's Handler defaults (judge overrides, notify-only) even when
-    // nothing is armed — the briefing sheet arms with what it was seeded with.
+    // nothing is armed — arming is one tap and carries no payload, so it arms
+    // with whatever this snapshot seeded.
     handlerEngine.emitStatus();
     // Sessions are no longer auto-created on connect; the app routes the user
     // to the New Session page when the list is empty so they pick an agent.

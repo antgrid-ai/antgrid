@@ -22,14 +22,8 @@ HandlerSessionState _session(
   runState: runState,
   pendingEscalations: pendingEscalations,
   armedAt: 1,
-  doneWhenMet: false,
-  brief: const HandlerBrief(
-    taskSummary: 'summary',
-    willHandle: [],
-    wakeFor: [],
-    thenItems: [],
-  ),
-  ledger: const [],
+  goal: 'summary',
+  backlog: const [],
   escalations: const [],
   parkKind: parkKind,
   parkedUntil: parkedUntil,
@@ -61,7 +55,8 @@ Future<void> _pump(
 
 void main() {
   testWidgets('a parked session shows its wake time', (tester) async {
-    final until = DateTime(2026, 7, 31, 14, 5);
+    final today = DateTime.now();
+    final until = DateTime(today.year, today.month, today.day, 14, 5);
     await _pump(tester, {
       't1': _session(
         't1',
@@ -69,12 +64,33 @@ void main() {
         parkedUntil: until.millisecondsSinceEpoch,
       ),
     });
-    expect(find.text('PARKED · UNTIL 14:05'), findsOneWidget);
+    expect(find.text('PAUSED · UNTIL 14:05'), findsOneWidget);
+  });
+
+  // Day-aware, like the Handler card's own park note: a bare `05:00` on a
+  // deadline that is actually tomorrow reads as one the session already blew.
+  testWidgets('a wake time on another day carries its date', (tester) async {
+    final until = DateTime.now().add(const Duration(days: 1));
+    await _pump(tester, {
+      't1': _session(
+        't1',
+        parkKind: 'limit',
+        parkedUntil: DateTime(
+          until.year,
+          until.month,
+          until.day,
+          5,
+        ).millisecondsSinceEpoch,
+      ),
+    });
+    expect(find.textContaining('PAUSED · UNTIL '), findsOneWidget);
+    expect(find.textContaining('05:00'), findsOneWidget);
+    expect(find.text('PAUSED · UNTIL 05:00'), findsNothing);
   });
 
   testWidgets('a park with no deadline shows a bare label', (tester) async {
     await _pump(tester, {'t1': _session('t1', parkKind: 'outage')});
-    expect(find.text('PARKED'), findsOneWidget);
+    expect(find.text('PAUSED'), findsOneWidget);
   });
 
   testWidgets('an escalation elsewhere still outranks a parked pill', (

@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 
 import '../../design/ab_colors.dart';
+import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_adaptive_sheet.dart';
 import '../../design/widgets/ab_button.dart';
 import '../../design/widgets/ab_dialog.dart';
+import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_text_field.dart';
 import '../../models/handler_state.dart';
 
@@ -144,13 +146,26 @@ class _FloorBanner extends StatelessWidget {
         border: Border.all(color: p.warning),
         borderRadius: AbTokens.borderRadius3,
       ),
-      child: Text(
-        '⛔ Safety floor: $rule — approving sends this as YOUR reply',
-        style: AbTokens.sansStyle(
-          fontSize: AbTokens.fontXs,
-          fontWeight: FontWeight.w600,
-          color: p.warning,
-        ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // The same shield every other floor surface uses — the Handler tab's
+          // escalation rail and its `floor_warning` feed rows. An emoji here
+          // rendered in whatever the platform's font stack supplied, at a size
+          // and weight nothing in the design system controlled.
+          AbIcon(AbIcons.shield, size: 12, color: p.warning),
+          const SizedBox(width: AbTokens.space6),
+          Expanded(
+            child: Text(
+              'Safety floor: $rule — approving sends this as YOUR reply',
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXs,
+                fontWeight: FontWeight.w600,
+                color: p.warning,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

@@ -59,6 +59,9 @@ class AbListRow extends StatefulWidget {
     this.leading,
     required this.title,
     this.subtitle,
+    this.titleMaxLines = 1,
+    this.subtitleMaxLines = 1,
+    this.crossAxisAlignment = CrossAxisAlignment.center,
     this.actions,
     this.trailing,
     this.selected = false,
@@ -88,6 +91,20 @@ class AbListRow extends StatefulWidget {
   final Widget? leading;
   final Widget title;
   final Widget? subtitle;
+
+  /// Lines the title may fill before it ellipsizes. One suits a label the user
+  /// scans past; raise it where the title is prose they must read to act on the
+  /// row at all — a model-authored question clipped at 40 characters is a
+  /// decision made without its subject.
+  final int titleMaxLines;
+  final int subtitleMaxLines;
+
+  /// Where [leading] and [trailing] sit against a content block taller than
+  /// they are. Centre suits the single-line default; pass
+  /// [CrossAxisAlignment.start] alongside a raised [titleMaxLines] so a leading
+  /// glyph stays beside the line it qualifies instead of drifting down to the
+  /// middle of the wrapped block.
+  final CrossAxisAlignment crossAxisAlignment;
   final List<AbRowAction>? actions;
   final Widget? trailing;
   final bool selected;
@@ -151,7 +168,7 @@ class _AbListRowState extends State<AbListRow> {
             DefaultTextStyle.merge(
               style: AbTokens.sansStyle(height: 1.2),
               overflow: TextOverflow.ellipsis,
-              maxLines: 1,
+              maxLines: widget.titleMaxLines,
               child: widget.title,
             ),
             if (widget.subtitle != null) ...[
@@ -163,7 +180,7 @@ class _AbListRowState extends State<AbListRow> {
                   height: 1.2,
                 ),
                 overflow: TextOverflow.ellipsis,
-                maxLines: 1,
+                maxLines: widget.subtitleMaxLines,
                 child: widget.subtitle!,
               ),
             ],
@@ -205,7 +222,12 @@ class _AbListRowState extends State<AbListRow> {
       // its whole height, so it — not its trailing icons — owns the vertical
       // touch dimension. Declared unconditionally so an informational row
       // keeps the same height as its interactive neighbours in the same list.
-      child: AbCompactTapTargets(child: Row(children: children)),
+      child: AbCompactTapTargets(
+        child: Row(
+          crossAxisAlignment: widget.crossAxisAlignment,
+          children: children,
+        ),
+      ),
     );
 
     if (_isSelected && widget.selectionStyle == AbRowSelection.accentBar) {

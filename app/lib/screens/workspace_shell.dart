@@ -679,8 +679,6 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     final width = MediaQuery.sizeOf(context).width;
     final isMobile = width < kCompactBreakpoint;
 
-    // Drive DEC-1004 focus routing for agent terminals.
-    ref.watch(agentFocusBinderProvider);
     // Desktop always shows the agent panel; mobile visibility is set by the
     // PageView's onPageChanged (and the mobile initializer), so only force-true
     // here on desktop to avoid clobbering the mobile page state.
@@ -880,6 +878,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
                     ),
                     MobileBottomNav(
                       selected: _selectedView,
+                      badges: _workspaceBadges(),
                       onSelected: (v) => setState(() {
                         _selectedView = v;
                         _updatePrefs();

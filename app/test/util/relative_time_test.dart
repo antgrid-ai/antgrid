@@ -87,4 +87,30 @@ void main() {
       expect(absoluteTime(DateTime(2026, 12, 25, 12, 0)), 'Dec 25, 2026, 12:00 PM');
     });
   });
+
+  group('dayAwareTime', () {
+    test('today is the bare clock', () {
+      expect(dayAwareTime(DateTime(2026, 6, 13, 9, 4), now: now), '09:04');
+    });
+
+    // The whole point: a Handler log is written while the user is away and read
+    // afterwards, so last night's 23:40 and tonight's must not be four
+    // identical characters.
+    test('yesterday carries its date even at the same clock time', () {
+      final lastNight = DateTime(2026, 6, 12, 23, 40);
+      final tonight = DateTime(2026, 6, 13, 23, 40);
+      expect(dayAwareTime(lastNight, now: now), 'Jun 12 23:40');
+      expect(dayAwareTime(tonight, now: now), '23:40');
+    });
+
+    // Same day-of-month, a month apart — a date-only comparison on `day` would
+    // call this today.
+    test('a month back is not today', () {
+      expect(dayAwareTime(DateTime(2026, 5, 13, 12, 0), now: now), 'May 13 12:00');
+    });
+
+    test('a year back is not today', () {
+      expect(dayAwareTime(DateTime(2025, 6, 13, 12, 0), now: now), 'Jun 13 12:00');
+    });
+  });
 }

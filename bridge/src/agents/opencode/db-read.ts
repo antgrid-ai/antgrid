@@ -3,8 +3,8 @@ import { Database } from "bun:sqlite";
 import { join, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 
-// Rows fetched per read. Must stay comfortably wider than PLAN_MAX_MSGS /
-// DECIDE_MAX_MSGS (handler/context.ts): most assistant rows are tool-only and
+// Rows fetched per read. Must stay comfortably wider than DECIDE_MAX_MSGS
+// (handler/context.ts): most assistant rows are tool-only and
 // yield no text parts, so the message budget is filled from a larger row window.
 const ROW_CAP = 200;
 
