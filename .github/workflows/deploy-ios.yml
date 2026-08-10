@@ -84,6 +84,14 @@ jobs:
         working-directory: app
         run: flutter pub get
 
+      # The committed ghostty-vt override beats the release download with no hash
+      # check, so bumping the fork ref updates the bindings and leaves the binary
+      # behind. Nothing downstream notices: it archives and passes ITMS validation,
+      # then throws on device at the first call of a symbol the dylib lacks. This is
+      # the only gate that sees it.
+      - name: Verify committed ghostty-vt dylib matches the bindings
+        run: bash scripts/check-ghostty-ios-abi.sh
+
       # Import the distribution cert into a throwaway keychain, install the App
       # Store provisioning profile, and write ExportOptions.plist — same
       # throwaway-keychain pattern as the macOS signing job in build-desktop.yml.

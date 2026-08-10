@@ -1,21 +1,27 @@
 name: Build — ghostty-vt iOS prebuilt
 
-# Regenerates the App-Store-compliant libghostty-vt.dylib for iOS device and
-# uploads it as an artifact. Run this manually, download the artifact, and commit
-# it to app/.prebuilt/ios-arm64/ (see scripts/build-ghostty-ios.sh for the why).
+# Regenerates the libghostty-vt.dylib for iOS device and uploads it as an
+# artifact. Run this manually, download the artifact, and commit it to
+# app/.prebuilt/ios-arm64/ (see scripts/build-ghostty-ios.sh for the why).
 #
-# MUST run on macos-15 (Xcode <= 16): Zig 0.15.2's linker — required to build
-# ghostty debcffba — cannot link against the macOS 26 / Xcode 26 SDK, so the
-# deploy-ios runner (which may move to macos-26 for ITMS-90725) cannot build this.
-# Committing the prebuilt decouples the deploy runner's SDK from Zig entirely.
+# Runs on any macOS image: the script downloads the upstream release asset and
+# restamps its minos, so there is no Zig and no SDK constraint. It used to be
+# pinned to macos-15 because Zig 0.15.2's linker cannot link against the
+# macOS 26 SDK; that relink is no longer needed (ghostty_vte-v0.1.4 ships an
+# ld64-linked asset). The artifact stays committed regardless, so the deploy
+# runner never fetches or builds it.
 
 on:
   workflow_dispatch:
     inputs:
-      ghostty_ref:
-        description: ghostty-org/ghostty commit to build (must match the vendored ghostty_vte bindings' ABI)
+      vte_release_tag:
+        description: ghostty_vte release to take the device asset from (must match the vendored bindings' ABI — the script verifies this)
         required: false
-        default: debcffbadb75221a030319c075fae12cfe114176
+        default: ghostty_vte-v0.1.4
+      expected_payload_sha256:
+        description: sha256 the fork's native_prebuilt.lock.yaml records for ios-arm64 (leave blank to use the script default)
+        required: false
+        default: ''
       ios_min:
         description: Minimum iOS version stamped into the dylib (must match Flutter's native-asset framework MinimumOSVersion — see script; ITMS-90208)
         required: false
@@ -23,15 +29,32 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
 
+      # The script's ABI check compares the dylib's exports against the resolved
+      # ghostty_vte bindings, so it needs a pub resolution to find them. Without
+      # this it degrades to a warning and the drift it exists to catch slips past.
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.44.2'   # keep in lockstep with deploy-ios
+          cache: true
+
+      - name: Flutter pub get
+        working-directory: app
+        run: flutter pub get
+
       - name: Build compliant libghostty-vt.dylib
         env:
-          GHOSTTY_REF: ${{ inputs.ghostty_ref }}
+          VTE_RELEASE_TAG: ${{ inputs.vte_release_tag }}
           IOS_MIN: ${{ inputs.ios_min }}
-        run: bash scripts/build-ghostty-ios.sh
+        run: |
+          if [ -n "${{ inputs.expected_payload_sha256 }}" ]; then
+            export EXPECTED_PAYLOAD_SHA256='${{ inputs.expected_payload_sha256 }}'
+          fi
+          bash scripts/build-ghostty-ios.sh
 
       - uses: actions/upload-artifact@v7
         with:

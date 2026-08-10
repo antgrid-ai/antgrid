@@ -1,41 +1,53 @@
 #!/usr/bin/env bash
 #
-# Produce an App-Store-compliant libghostty-vt.dylib for iOS device (arm64).
+# Produce the libghostty-vt.dylib for iOS device (arm64) that
+# app/.prebuilt/ios-arm64/ carries, from the upstream ghostty_vte release.
 #
 # WHY THIS EXISTS
-#   ghostty-vt is a Zig library. Zig's self-hosted Mach-O linker emits a dylib
-#   that is NOT built by Apple's ld64, so it lacks LC_ENCRYPTION_INFO_64, is not
-#   PIE, and isn't 16 KB segment-aligned. App Store validation rejects exactly
-#   that binary (ITMS-90125 / ITMS-90209 / ITMS-90080). No post-processing tool
-#   can inject LC_ENCRYPTION_INFO — it is an ld64 artifact. So we let Zig only
-#   COMPILE (produce libghostty-vt.a), then do the FINAL LINK with Apple's
-#   clang/ld64, which stamps all three. The result is a normal dynamic dylib the
-#   ghostty_vte build hook bundles as-is (DynamicLoadingBundled), which is the
-#   only link mode Flutter's iOS native-assets driver accepts.
+#   Upstream's published iOS device asset is linked by Apple's ld64 and is
+#   App-Store-compliant as shipped — except for one field. Its minos is 17.0
+#   (Zig's default for aarch64-ios), while Flutter's iOS native-assets driver
+#   hardcodes every wrapped framework's Info.plist MinimumOSVersion to 13.0
+#   (targetIOSVersion, flutter/flutter#145104) regardless of the app's deployment
+#   target. A framework binary whose minos exceeds the version its own Info.plist
+#   advertises is ITMS-90208, so this script restamps minos and changes nothing
+#   else. There is no compile step and no source build.
+#
+#   It used to do much more. Through ghostty_vte-v0.1.3 the asset was linked by
+#   Zig's OWN Mach-O linker (Mach-O build tool 5, no LC_ENCRYPTION_INFO_64,
+#   old-style LC_DYLD_INFO_ONLY) and Apple additionally rejected it for
+#   ITMS-90125/90209/90080; curing that required letting Zig only compile and
+#   handing the final link to ld64, which meant installing Zig and running on a
+#   macOS with Xcode <= 16. v0.1.4 switched upstream to ld64 (tool LD, chained
+#   fixups, LC_ENCRYPTION_INFO_64 present) and made all of that unnecessary.
+#   The pre-flight checks below assert that upstream has not regressed to the Zig
+#   linker — if they fire, the relink approach is needed again and lives in git
+#   history (see docs/ios-ghostty-vt-appstore-rejection.md).
 #
 # WHERE IT RUNS
-#   macOS with Xcode <= 16 (e.g. the GitHub `macos-15` runner). Zig 0.15.2's
-#   linker cannot link against the macOS 26 / Xcode 26 SDK, so this cannot run on
-#   a macOS 26 host — build the artifact on macos-15 and commit the result.
+#   Any macOS with the Xcode command line tools. No Zig, no pinned runner image.
 #
 # OUTPUT
 #   app/.prebuilt/ios-arm64/libghostty-vt.dylib (force-tracked; the hook's
-#   .prebuilt/ lookup finds it before the non-compliant upstream download).
-#
-# GHOSTTY_REF must match the ghostty submodule pinned by the ghostty_vte release
-# whose bindings this repo vendors, or the C ABI can drift from
-# ghostty_vte_bindings_generated.dart. debcffba == ghostty_vte-v0.1.3.
+#   .prebuilt/ lookup finds it before the release download, unconditionally and
+#   without consulting the lock's hashes).
 set -euo pipefail
 
-GHOSTTY_REF="${GHOSTTY_REF:-debcffbadb75221a030319c075fae12cfe114176}"
-ZIG_VERSION="${ZIG_VERSION:-0.15.2}"
-# 13.0 must equal Flutter's hardcoded native-asset framework MinimumOSVersion
-# (targetIOSVersion in flutter_tools ios/native_assets.dart, flutter/flutter#145104).
-# Flutter stamps ghostty-vt.framework/Info.plist with that constant regardless of the
-# app's deployment target; if the dylib's minos exceeds it, the framework binary can't
-# run on the OS its own Info.plist advertises → App Store ITMS-90208. A lower floor than
-# the 15.5 app is fine (a framework may support more), and this matches every other
-# bundled native asset (the hook builds portable_pty at the same targetVersion).
+# The release the vendored ghostty_vte bindings belong to. Keep in lockstep with
+# `releaseTag` in the fork's pkgs/vte/ghostty_vte/lib/src/hook/asset_hashes.dart:
+# a dylib from an older ghostty exports fewer symbols than newer bindings declare,
+# and because @Native resolution is lazy even in AOT that surfaces only as an
+# ArgumentError at the first call of each absent function — on device, never on
+# simulator. The symbol check at the end of this script is what catches it.
+VTE_RELEASE_REPO="${VTE_RELEASE_REPO:-kingwill101/dart_terminal}"
+VTE_RELEASE_TAG="${VTE_RELEASE_TAG:-ghostty_vte-v0.1.4}"
+# The payload hash the fork's native_prebuilt.lock.yaml records for ios-arm64.
+# Pinning it here ties the committed override to the same bytes the hook would
+# have downloaded, so a silently re-cut upstream asset fails loudly.
+EXPECTED_PAYLOAD_SHA256="${EXPECTED_PAYLOAD_SHA256:-71d259c95a320e914657dddd1f95ff2ad25057c8dc9f92f577073d495777ad3a}"
+# Must equal Flutter's native-asset framework MinimumOSVersion (see the ITMS-90208
+# note above). A framework may declare a lower floor than the app; the app's own
+# deployment target is what actually bounds the install base.
 IOS_MIN="${IOS_MIN:-13.0}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${OUT_DIR:-$REPO_ROOT/app/.prebuilt/ios-arm64}"
@@ -43,68 +55,72 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+die() { printf '\033[1;31mFAIL:\033[0m %s\n' "$*" >&2; exit 1; }
 
-# ── Zig 0.15.2 (the version ghostty debcffba requires) ──
-ZARCH="$(uname -m)"; [ "$ZARCH" = "arm64" ] && ZARCH=aarch64
-ZIG_DIR="$WORK/zig"
-log "Installing Zig $ZIG_VERSION ($ZARCH-macos)"
-curl -fsSL "https://ziglang.org/download/$ZIG_VERSION/zig-$ZARCH-macos-$ZIG_VERSION.tar.xz" -o "$WORK/zig.tar.xz"
-mkdir -p "$ZIG_DIR" && tar xf "$WORK/zig.tar.xz" -C "$ZIG_DIR" --strip-components=1
-ZIG="$ZIG_DIR/zig"
-"$ZIG" version
+# __LINKEDIT must start on a 16 KB boundary (ITMS-90209). Guard the regex
+# explicitly: an empty offset (otool format drift, segment missing) is 0 in bash
+# arithmetic and would pass the modulo check silently.
+assert_compliant() {
+  local dylib="$1" label="$2"
+  otool -l "$dylib" | grep -q LC_ENCRYPTION_INFO_64 \
+    || die "$label: LC_ENCRYPTION_INFO_64 absent (ITMS-90125) — upstream relinked with Zig?"
+  local le
+  le="$(otool -l "$dylib" | awk '/segname __LINKEDIT/{f=1} f&&/fileoff/{print $2; exit}')"
+  [[ "$le" =~ ^[0-9]+$ ]] && [ $((le % 16384)) -eq 0 ] \
+    || die "$label: __LINKEDIT fileoff '$le' missing or not 16 KB-aligned (ITMS-90209)"
+  vtool -show-build "$dylib" | grep -qE '^ +tool +LD$' \
+    || die "$label: not stamped by Apple's ld64 (ITMS-90125 risk) — upstream relinked with Zig?"
+}
 
-# ── ghostty source at the pinned ref ──
-log "Cloning ghostty @ $GHOSTTY_REF"
-git clone --filter=blob:none https://github.com/ghostty-org/ghostty "$WORK/ghostty"
-git -C "$WORK/ghostty" checkout --quiet "$GHOSTTY_REF"
-git -C "$WORK/ghostty" submodule update --init --recursive --depth 1
+# ── Fetch the published device asset ──
+URL="https://github.com/$VTE_RELEASE_REPO/releases/download/$VTE_RELEASE_TAG/vte-ios-arm64.tar.gz"
+log "Downloading $URL"
+curl -fsSL "$URL" -o "$WORK/vte-ios-arm64.tar.gz"
+# Extract into a subdirectory: the tarball holds the dylib at its root, which
+# would otherwise collide with the restamp output written beside it.
+mkdir -p "$WORK/upstream"
+tar xzf "$WORK/vte-ios-arm64.tar.gz" -C "$WORK/upstream"
+UPSTREAM="$(find "$WORK/upstream" -name 'libghostty-vt.dylib' | head -1)"
+[ -n "$UPSTREAM" ] || die "libghostty-vt.dylib not found in the tarball"
 
-# ── Zig builds the static archive ──
-# No global --sysroot: it would also apply to ghostty's NATIVE build-helper tools
-# (uucode table generators run on the host) and break their host libc link. Zig
-# auto-detects the macOS SDK for native tools and the iOS SDK for the aarch64-ios
-# target via xcrun (this mirrors the ghostty_vte hook's own source-build call).
-IOS_SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
-log "Building libghostty-vt.a for aarch64-ios (Zig compile only)"
-# Run inside the ghostty checkout so Zig's .zig-cache lands in $WORK (cleaned by
-# the trap), not the caller's CWD / repo root.
-(
-  cd "$WORK/ghostty"
-  "$ZIG" build -Demit-lib-vt=true -Dtarget=aarch64-ios -Doptimize=ReleaseFast -Dsimd=false \
-    --prefix "$WORK/prefix" --summary all
-)
+ACTUAL_SHA="$(shasum -a 256 "$UPSTREAM" | cut -d' ' -f1)"
+[ "$ACTUAL_SHA" = "$EXPECTED_PAYLOAD_SHA256" ] \
+  || die "payload sha256 $ACTUAL_SHA != expected $EXPECTED_PAYLOAD_SHA256 (asset re-cut, or wrong tag)"
+log "Payload hash matches the fork lock's ios-arm64 entry"
 
-STATIC="$(find "$WORK/prefix" -name 'libghostty-vt.a' | head -1)"
-[ -n "$STATIC" ] || { echo "libghostty-vt.a not produced" >&2; exit 1; }
-log "Static archive: $STATIC"
+# ── Assert upstream is still ld64-linked before trusting a restamp ──
+log "Verifying the upstream asset is App-Store-compliant apart from minos"
+assert_compliant "$UPSTREAM" upstream
 
-# ── FINAL LINK with Apple clang/ld64 → compliant dynamic dylib ──
+# ── Restamp minos; preserve the platform's SDK and linker records ──
+SDK="$(vtool -show-build "$UPSTREAM" | awk '/^ +sdk /{print $2; exit}')"
+LD_VERSION="$(vtool -show-build "$UPSTREAM" | awk '/^ +version /{print $2; exit}')"
 DYLIB="$WORK/libghostty-vt.dylib"
-log "Relinking with clang/ld64 (arm64-apple-ios$IOS_MIN)"
-xcrun --sdk iphoneos clang -dynamiclib -arch arm64 -mios-version-min="$IOS_MIN" \
-  -isysroot "$IOS_SDK" -install_name @rpath/libghostty-vt.dylib \
-  -Wl,-all_load "$STATIC" -o "$DYLIB"
+cp "$UPSTREAM" "$DYLIB"
+log "Restamping minos -> $IOS_MIN (sdk $SDK, tool ld $LD_VERSION)"
+vtool -set-build-version ios "$IOS_MIN" "$SDK" -tool ld "$LD_VERSION" -replace \
+  -output "$DYLIB" "$DYLIB"
 
-# ── Verify the three rejections are cured before publishing ──
-log "Verifying App Store compliance"
-otool -l "$DYLIB" | grep -q "LC_ENCRYPTION_INFO_64" \
-  || { echo "FAIL: LC_ENCRYPTION_INFO_64 absent (ITMS-90125)" >&2; exit 1; }
-# __LINKEDIT must start on a 16 KB boundary (ITMS-90209).
-LE_OFF="$(otool -l "$DYLIB" | awk '/segname __LINKEDIT/{f=1} f&&/fileoff/{print $2; exit}')"
-# Guard the regex explicitly: an empty LE_OFF (otool format drift, segment
-# missing) is 0 in bash arithmetic and would pass the modulo check silently.
-[[ "$LE_OFF" =~ ^[0-9]+$ ]] && [ $((LE_OFF % 16384)) -eq 0 ] \
-  || { echo "FAIL: __LINKEDIT fileoff '$LE_OFF' missing or not 16 KB-aligned (ITMS-90209)" >&2; exit 1; }
-otool -hv "$DYLIB" | grep -q "PIE" \
-  || echo "WARN: PIE flag not reported (ITMS-90080 is a warning only)"
-# minos must equal IOS_MIN: if it overshoots the MinimumOSVersion Flutter stamps into
-# the wrapping framework's Info.plist, Apple rejects with ITMS-90208 (see IOS_MIN note).
+# ── Verify the result ──
+log "Verifying the restamped dylib"
+assert_compliant "$DYLIB" restamped
 MINOS="$(vtool -show-build "$DYLIB" | awk '/minos/{print $2; exit}')"
-[ "$MINOS" = "$IOS_MIN" ] \
-  || { echo "FAIL: dylib minos '$MINOS' != IOS_MIN '$IOS_MIN' (ITMS-90208 risk)" >&2; exit 1; }
+[ "$MINOS" = "$IOS_MIN" ] || die "minos '$MINOS' != IOS_MIN '$IOS_MIN' (ITMS-90208)"
+[ "$(otool -D "$DYLIB" | tail -1)" = "@rpath/libghostty-vt.dylib" ] \
+  || die "unexpected install name $(otool -D "$DYLIB" | tail -1)"
+# The restamp must not perturb anything else in the file.
+UP_SYMS="$(nm -gU "$UPSTREAM" | grep -c ' _ghostty_')"
+NEW_SYMS="$(nm -gU "$DYLIB" | grep -c ' _ghostty_')"
+[ "$UP_SYMS" = "$NEW_SYMS" ] || die "export count changed across the restamp ($UP_SYMS -> $NEW_SYMS)"
+log "$NEW_SYMS exported ghostty_ symbols"
+
+# ── The check that would have caught the v0.1.3/v0.1.4 ABI drift ──
+# Verify BEFORE installing, so a mismatched artifact never lands in .prebuilt/.
+log "Checking the ABI against the resolved bindings"
+bash "$REPO_ROOT/scripts/check-ghostty-ios-abi.sh" "$DYLIB"
 
 mkdir -p "$OUT_DIR"
 cp "$DYLIB" "$OUT_DIR/libghostty-vt.dylib"
 log "Wrote $OUT_DIR/libghostty-vt.dylib"
-otool -l "$OUT_DIR/libghostty-vt.dylib" | grep -A2 "LC_ENCRYPTION_INFO_64"
-vtool -show-build "$OUT_DIR/libghostty-vt.dylib" | grep -E "platform|minos"
+shasum -a 256 "$OUT_DIR/libghostty-vt.dylib"
+vtool -show-build "$OUT_DIR/libghostty-vt.dylib" | grep -E 'platform|minos|sdk|tool|version'
