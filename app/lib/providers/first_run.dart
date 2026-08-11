@@ -54,6 +54,10 @@ class FirstRunController extends Notifier<FirstRunState> {
     _commit(state.copyWith(checklistDismissed: true));
   }
 
+  void toggleChecklistCollapsed() {
+    _commit(state.copyWith(checklistCollapsed: !state.checklistCollapsed));
+  }
+
   /// Union [ids] into the persisted latch; a no-op (all already latched)
   /// writes nothing.
   void latchSteps(Set<String> ids) {
@@ -117,15 +121,19 @@ typedef FirstRunStep = ({String id, String label, bool done});
 /// detectPlatform() writes exactly 'ios'/'android' for mobile) — so no fragile
 /// displayName suffix matching.
 ///
-/// autoDispose + nowMinuteProvider: re-fetches once a minute ONLY while a
-/// checklist card / nudge banner is mounted; hidden surfaces stop the poll.
+/// autoDispose + slowPollTickProvider: re-fetches only while a checklist
+/// surface / nudge banner is mounted, and at a five-minute cadence rather than
+/// a one-minute one — the checklist is docked in the sidebar, so it is mounted
+/// for the whole session (until completed or dismissed) instead of only while
+/// the New Session canvas is open. Nothing here renders a clock; a phone
+/// appearing on the account minutes late costs nothing.
 /// Deliberately the ACCOUNT inventory (`GET /account/devices`), not the
 /// bridge-side roster (remote_access.dart's remoteDevicesProvider) — that only
 /// lists devices that already connected to this machine, whereas these
 /// surfaces fire on "signed in to the account".
 final otherAccountMobileDevicesProvider =
     FutureProvider.autoDispose<List<DeviceSummary>>((ref) async {
-      ref.watch(nowMinuteProvider);
+      ref.watch(slowPollTickProvider);
       if (ref.watch(signedInProvider) != true) return const [];
       try {
         final devices = await ref.watch(devicesApiProvider).list();
@@ -142,8 +150,8 @@ final otherAccountMobileDevicesProvider =
       }
     });
 
-/// Desktop setup steps. autoDispose so the minute-cadence device poll behind
-/// step 4 tears down with the last mounted checklist card.
+/// Desktop setup steps. autoDispose so the device poll behind step 4 tears
+/// down for good once the checklist is completed or dismissed.
 final desktopFirstRunStepsProvider =
     Provider.autoDispose<List<FirstRunStep>>((ref) {
       final latched = ref.watch(
@@ -155,7 +163,12 @@ final desktopFirstRunStepsProvider =
       final signedIn = ref.watch(signedInProvider) == true;
       final hasProject = ref.watch(projectsProvider).isNotEmpty;
       final hasSession = ref.watch(recentSessionsProvider).isNotEmpty;
+      // Short-circuit BEFORE the watch, not inside done(): the latch can never
+      // un-check, so subscribing past it would keep the account-device poll
+      // running for the rest of the session (the sidebar section stays mounted
+      // while step 5 is open) to re-answer a question with no remaining effect.
       final hasPhone =
+          latched.contains(FirstRunStepIds.connectPhone) ||
           (ref.watch(otherAccountMobileDevicesProvider).value ?? const [])
               .isNotEmpty;
       return [

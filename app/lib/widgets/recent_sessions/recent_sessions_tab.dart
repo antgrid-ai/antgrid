@@ -20,7 +20,7 @@ import '../../providers/supervisor_status.dart';
 import '../../services/control_plane_client.dart';
 import '../../utils/platform_utils.dart';
 import '../ab_status_helpers.dart';
-import '../new_session/first_run_checklist.dart';
+import '../first_run_checklist.dart';
 import 'recent_session_row_widget.dart';
 import 'recent_sessions_summary.dart';
 

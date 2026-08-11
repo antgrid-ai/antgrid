@@ -10,6 +10,7 @@ import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
+import '../design/widgets/ab_disclosure_chevron.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
@@ -193,32 +194,24 @@ class _DrawerEntryRowState extends ConsumerState<DrawerEntryRow> {
       onHoverStart: _startPrefetch,
       onHoverEnd: _cancelPrefetch,
       builder: (context, hovered) => AbListRow(
+        // Folder by default; chevron on hover. Both sit in the same pinned slot
+        // so the glyph swap doesn't shift the title.
         leading: Opacity(
           opacity: isWarm ? 1.0 : 0.6,
-          // Folder by default; chevron on hover. Slot width pinned so the
-          // glyph swap doesn't shift the title.
-          child: SizedBox(
-            width: AbTokens.drawerLeadingSlot,
-            height: AbTokens.drawerLeadingSlot,
-            child: Center(
-              child: hovered
-                  ? AnimatedRotation(
-                      turns: expanded ? 0.25 : 0,
-                      duration: const Duration(milliseconds: 120),
-                      child: AbIcon(
-                        AbIcons.chevronRight,
-                        size: 10,
-                        color: context.antgrid.textMuted,
-                      ),
-                    )
-                  : AbIcon(
+          child: hovered
+              ? AbDisclosureChevron(expanded: expanded)
+              : SizedBox(
+                  width: AbTokens.drawerLeadingSlot,
+                  height: AbTokens.drawerLeadingSlot,
+                  child: Center(
+                    child: AbIcon(
                       AbIcons.folder,
                       // Match chevron size so the glyph doesn't shrink on hover.
                       size: 10,
                       color: context.antgrid.textMuted,
                     ),
-            ),
-          ),
+                  ),
+                ),
         ),
         title: Text(
           entry.displayName,

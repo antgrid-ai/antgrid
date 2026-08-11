@@ -4,7 +4,7 @@ import 'package:antgrid/providers/first_run.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/storage/first_run_store.dart';
-import 'package:antgrid/widgets/new_session/first_run_checklist.dart';
+import 'package:antgrid/widgets/first_run_checklist.dart';
 import 'package:antgrid/widgets/recent_sessions/recent_sessions_tab.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
 import 'package:flutter/foundation.dart';
@@ -54,14 +54,14 @@ List<FirstRunStep> _desktopSteps({
 ];
 
 void main() {
-  testWidgets('desktop card shows checked/unchecked markers from the steps '
+  testWidgets('sidebar section shows checked/unchecked markers from the steps '
       'and latches the done ones', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.windows;
     useInMemoryPrefs();
     final store = await FirstRunStore.open();
     await tester.pumpWidget(
       _wrap(
-        const FirstRunChecklistCard(),
+        const FirstRunSetupSection(),
         overrides: [
           firstRunStoreProvider.overrideWithValue(store),
           desktopFirstRunStepsProvider.overrideWith(
@@ -76,11 +76,14 @@ void main() {
     expect(find.text('[x]'), findsOneWidget);
     expect(find.text('[ ]'), findsNWidgets(4));
     // First unchecked step's contextual hint.
-    expect(find.text('Open a folder from the composer below.'), findsOneWidget);
+    expect(
+      find.text('Open a folder to add your first project.'),
+      findsOneWidget,
+    );
 
     // The done step is latched into the persisted state.
     final container = ProviderScope.containerOf(
-      tester.element(find.byType(FirstRunChecklistCard)),
+      tester.element(find.byType(FirstRunSetupSection)),
     );
     expect(container.read(firstRunProvider).completedSteps, {
       FirstRunStepIds.signIn,
@@ -99,7 +102,7 @@ void main() {
       desktopFirstRunStepsProvider.overrideWith((_) => _desktopSteps()),
     ];
     await tester.pumpWidget(
-      _wrap(const FirstRunChecklistCard(), overrides: overrides),
+      _wrap(const FirstRunSetupSection(), overrides: overrides),
     );
     await tester.pump();
     expect(find.text('SETUP · 0/5'), findsOneWidget);
@@ -112,7 +115,7 @@ void main() {
     // Fresh scope over the same prefs — an app restart — stays hidden.
     await tester.pumpWidget(
       _wrap(
-        const FirstRunChecklistCard(),
+        const FirstRunSetupSection(),
         overrides: [
           firstRunStoreProvider.overrideWithValue(await FirstRunStore.open()),
           desktopFirstRunStepsProvider.overrideWith((_) => _desktopSteps()),
@@ -131,7 +134,7 @@ void main() {
     final store = await FirstRunStore.open();
     await tester.pumpWidget(
       _wrap(
-        const FirstRunChecklistCard(),
+        const FirstRunSetupSection(),
         overrides: [
           firstRunStoreProvider.overrideWithValue(store),
           desktopFirstRunStepsProvider.overrideWith(
@@ -156,7 +159,7 @@ void main() {
     // is latched, so the card must not come back.
     await tester.pumpWidget(
       _wrap(
-        const FirstRunChecklistCard(),
+        const FirstRunSetupSection(),
         overrides: [
           firstRunStoreProvider.overrideWithValue(await FirstRunStore.open()),
           desktopFirstRunStepsProvider.overrideWith((_) => _desktopSteps()),
@@ -175,7 +178,7 @@ void main() {
     final store = await FirstRunStore.open();
     await tester.pumpWidget(
       _wrap(
-        const FirstRunChecklistCard(),
+        const FirstRunSetupSection(),
         overrides: [
           firstRunStoreProvider.overrideWithValue(store),
           desktopFirstRunStepsProvider.overrideWith(
@@ -194,21 +197,108 @@ void main() {
     expect(find.text('SETUP · 4/5'), findsOneWidget);
     expect(
       find.text(
-        'Open a session, then click the shield in the title bar — Handler '
-        'replies while you are away.',
+        'Click the shield in a session title bar — Handler replies while you '
+        'are away.',
       ),
       findsOneWidget,
     );
     debugDefaultTargetPlatformOverride = null;
   });
 
-  testWidgets('desktop card renders nothing on mobile', (tester) async {
+  testWidgets('collapse folds the steps to the header row, leaves the count '
+      'visible, and persists across a restart', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    useInMemoryPrefs();
+    final store = await FirstRunStore.open();
+    await tester.pumpWidget(
+      _wrap(
+        const FirstRunSetupSection(),
+        overrides: [
+          firstRunStoreProvider.overrideWithValue(store),
+          desktopFirstRunStepsProvider.overrideWith(
+            (_) => _desktopSteps(signIn: true),
+          ),
+        ],
+      ),
+    );
+    await tester.pump();
+    expect(find.text('Sign in'), findsOneWidget);
+
+    // The header row itself is the toggle — tapping its label collapses.
+    await tester.tap(find.text('SETUP · 1/5'));
+    await tester.pump();
+    expect(find.text('SETUP · 1/5'), findsOneWidget);
+    expect(find.text('Sign in'), findsNothing);
+    expect(
+      find.text('Open a folder to add your first project.'),
+      findsNothing,
+    );
+    expect(store.read().checklistCollapsed, isTrue);
+    // Collapse is not dismissal: the surface is still live.
+    expect(store.read().checklistDismissed, isFalse);
+
+    // Fresh scope over the same prefs — an app restart — stays collapsed.
+    await tester.pumpWidget(
+      _wrap(
+        const FirstRunSetupSection(),
+        overrides: [
+          firstRunStoreProvider.overrideWithValue(await FirstRunStore.open()),
+          desktopFirstRunStepsProvider.overrideWith(
+            (_) => _desktopSteps(signIn: true),
+          ),
+        ],
+      ),
+    );
+    await tester.pump();
+    expect(find.text('SETUP · 1/5'), findsOneWidget);
+    expect(find.text('Sign in'), findsNothing);
+
+    // Fold back open: collapse is a toggle, not a one-way retirement. Asserted
+    // on the UI only — this scope holds a second FirstRunStore, and the first
+    // one's WithCache cache never sees a write made through the second.
+    await tester.tap(find.text('SETUP · 1/5'));
+    await tester.pump();
+    expect(find.text('Sign in'), findsOneWidget);
+    expect(
+      find.text('Open a folder to add your first project.'),
+      findsOneWidget,
+    );
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('dismissing from the header does not also toggle collapse', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    useInMemoryPrefs();
+    final store = await FirstRunStore.open();
+    await tester.pumpWidget(
+      _wrap(
+        const FirstRunSetupSection(),
+        overrides: [
+          firstRunStoreProvider.overrideWithValue(store),
+          desktopFirstRunStepsProvider.overrideWith((_) => _desktopSteps()),
+        ],
+      ),
+    );
+    await tester.pump();
+
+    // The ✕ is nested inside the collapse-toggling header row; the inner
+    // recognizer must win the arena or a dismiss silently collapses too.
+    await tester.tap(find.byTooltip("Dismiss — won't show again"));
+    await tester.pump();
+    expect(store.read().checklistDismissed, isTrue);
+    expect(store.read().checklistCollapsed, isFalse);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('sidebar section renders nothing on mobile', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
     useInMemoryPrefs();
     final store = await FirstRunStore.open();
     await tester.pumpWidget(
       _wrap(
-        const FirstRunChecklistCard(),
+        const FirstRunSetupSection(),
         overrides: [firstRunStoreProvider.overrideWithValue(store)],
       ),
     );

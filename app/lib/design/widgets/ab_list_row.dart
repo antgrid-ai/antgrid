@@ -88,6 +88,12 @@ class AbListRow extends StatefulWidget {
          'horizontalPadding: 0. Use AbRowSelection.surface instead.',
        );
 
+  /// Gap between [leading] and the title block. Public because a caller that
+  /// indents content UNDER the title (a sub-list hanging off a header row) has
+  /// to reproduce this row's own indent, and re-deriving it from a literal
+  /// silently misaligns the moment the row is retuned.
+  static const leadingGap = AbTokens.space8;
+
   final Widget? leading;
   final Widget title;
   final Widget? subtitle;
@@ -158,7 +164,7 @@ class _AbListRowState extends State<AbListRow> {
     final children = <Widget>[
       if (widget.leading != null) ...[
         widget.leading!,
-        const SizedBox(width: AbTokens.space8),
+        const SizedBox(width: AbListRow.leadingGap),
       ],
       Expanded(
         child: Column(

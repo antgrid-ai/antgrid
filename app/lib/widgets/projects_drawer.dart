@@ -9,6 +9,7 @@ import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
 import '../design/widgets/ab_brand_mark.dart';
 import '../design/widgets/ab_button.dart';
+import '../design/widgets/ab_disclosure_chevron.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
@@ -33,6 +34,7 @@ import '../utils/platform_utils.dart';
 import 'ab_status_helpers.dart' show emptyAdvertHint;
 import 'account_footer.dart';
 import 'drawer_entry_row.dart' show DrawerEntryRow, MachineDrawerHeaderRow;
+import 'first_run_checklist.dart';
 import 'open_folder_button.dart';
 import 'session_row.dart';
 import 'update_row.dart';
@@ -67,6 +69,10 @@ class ProjectsDrawer extends ConsumerWidget {
             const _NavActions(),
             _GroupLabel(label: 'PROJECTS', count: entries.length),
             Expanded(child: _Body(entries: entries)),
+            // Docked here, not on the New Session canvas: the drawer is the
+            // only desktop surface mounted on both routes, and the last setup
+            // steps are performed from inside a session.
+            const FirstRunSetupSection(),
             const UpdateRow(),
             const _Footer(),
           ],
@@ -457,21 +463,7 @@ class _AdvertisedProjectRow extends ConsumerWidget {
             horizontalPadding: 0,
             density: AbRowDensity.sm,
             hoverable: true,
-            leading: SizedBox(
-              width: AbTokens.drawerLeadingSlot,
-              height: AbTokens.drawerLeadingSlot,
-              child: Center(
-                child: AnimatedRotation(
-                  turns: expanded ? 0.25 : 0,
-                  duration: const Duration(milliseconds: 120),
-                  child: AbIcon(
-                    AbIcons.chevronRight,
-                    size: 10,
-                    color: t.textMuted,
-                  ),
-                ),
-              ),
-            ),
+            leading: AbDisclosureChevron(expanded: expanded),
             title: Text(
               name,
               overflow: TextOverflow.ellipsis,

@@ -15,6 +15,7 @@ class FirstRunState {
   const FirstRunState({
     this.checklistDismissed = false,
     this.checklistCompleted = false,
+    this.checklistCollapsed = false,
     this.completedSteps = const <String>{},
     this.nudgeSoftDismissed = false,
     this.nudgeDeviceDismissed = false,
@@ -24,6 +25,11 @@ class FirstRunState {
 
   final bool checklistDismissed;
   final bool checklistCompleted;
+
+  /// Folds the sidebar checklist to its header row. Distinct from
+  /// [checklistDismissed] — reversible, and the step count stays on screen.
+  /// Defaults to expanded: the surface exists to be read on a first run.
+  final bool checklistCollapsed;
 
   /// Latched step ids (see FirstRunStepIds in providers/first_run.dart) — a
   /// live signal regressing (offline inventory, disconnected machine) never
@@ -48,6 +54,7 @@ class FirstRunState {
   FirstRunState copyWith({
     bool? checklistDismissed,
     bool? checklistCompleted,
+    bool? checklistCollapsed,
     Set<String>? completedSteps,
     bool? nudgeSoftDismissed,
     bool? nudgeDeviceDismissed,
@@ -56,6 +63,7 @@ class FirstRunState {
   }) => FirstRunState(
     checklistDismissed: checklistDismissed ?? this.checklistDismissed,
     checklistCompleted: checklistCompleted ?? this.checklistCompleted,
+    checklistCollapsed: checklistCollapsed ?? this.checklistCollapsed,
     completedSteps: completedSteps ?? this.completedSteps,
     nudgeSoftDismissed: nudgeSoftDismissed ?? this.nudgeSoftDismissed,
     nudgeDeviceDismissed: nudgeDeviceDismissed ?? this.nudgeDeviceDismissed,
@@ -67,6 +75,7 @@ class FirstRunState {
   Map<String, dynamic> toJson() => {
     'checklistDismissed': checklistDismissed,
     'checklistCompleted': checklistCompleted,
+    'checklistCollapsed': checklistCollapsed,
     'completedSteps': completedSteps.toList(),
     'nudgeSoftDismissed': nudgeSoftDismissed,
     'nudgeDeviceDismissed': nudgeDeviceDismissed,
@@ -82,6 +91,7 @@ class FirstRunState {
     return FirstRunState(
       checklistDismissed: flag(j['checklistDismissed']),
       checklistCompleted: flag(j['checklistCompleted']),
+      checklistCollapsed: flag(j['checklistCollapsed']),
       completedSteps: steps is List
           ? steps.whereType<String>().toSet()
           : const <String>{},

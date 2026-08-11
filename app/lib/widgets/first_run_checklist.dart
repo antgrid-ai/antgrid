@@ -2,13 +2,15 @@ import 'package:collection/collection.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../design/ab_colors.dart';
-import '../../design/ab_icons.dart';
-import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_icon.dart';
-import '../../design/widgets/ab_icon_button.dart';
-import '../../providers/first_run.dart';
-import '../../utils/platform_utils.dart';
+import '../design/ab_colors.dart';
+import '../design/ab_icons.dart';
+import '../design/ab_tokens.dart';
+import '../design/widgets/ab_disclosure_chevron.dart';
+import '../design/widgets/ab_icon.dart';
+import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_list_row.dart';
+import '../providers/first_run.dart';
+import '../utils/platform_utils.dart';
 
 /// Latch newly-done steps and record completion, from build — via a microtask,
 /// because provider state must never be written during build. Idempotent: the
@@ -28,7 +30,7 @@ void _latchAndMaybeComplete(WidgetRef ref, List<FirstRunStep> steps) {
     final n = container.read(firstRunProvider.notifier);
     if (newlyDone.isNotEmpty) n.latchSteps(newlyDone);
     // markChecklistCompleted flips firstRunChecklistVisibleProvider false, so
-    // the card unmounts on the next frame — the "never re-show" persistence.
+    // the surface unmounts on the next frame — the "never re-show" persistence.
     if (allDone) n.markChecklistCompleted();
   });
 }
@@ -82,23 +84,41 @@ class _FirstRunStepRow extends StatelessWidget {
 }
 
 /// Contextual one-liner for the FIRST unchecked desktop step. Sign-in gets
-/// none — the sign-in screen owns that flow.
+/// none — the sign-in screen owns that flow. Kept short enough to survive the
+/// sidebar's ~244px of text width without turning into a paragraph.
 String? _desktopHintFor(String? firstOpenStepId) => switch (firstOpenStepId) {
-  FirstRunStepIds.openProject => 'Open a folder from the composer below.',
+  // Names no surface on purpose: from the sidebar the nearest Open Folder
+  // button is the drawer's own empty state, from New Session it is the
+  // composer, and the hint cannot know which one the user is looking at.
+  FirstRunStepIds.openProject => 'Open a folder to add your first project.',
   FirstRunStepIds.startSession => 'Pick a project, describe a task, hit send.',
   FirstRunStepIds.connectPhone =>
     'Sign in to Antgrid on your phone with this account.',
   FirstRunStepIds.armHandler =>
-    'Open a session, then click the shield in the title bar — Handler '
-        'replies while you are away.',
+    'Click the shield in a session title bar — Handler replies while you are '
+        'away.',
   _ => null,
 };
 
-/// Desktop first-run checklist card, mounted unconditionally on the New
-/// Session canvas — it self-gates (mobile / dismissed / completed ⇒ shrink),
-/// so the call site stays a single stable line.
-class FirstRunChecklistCard extends ConsumerWidget {
-  const FirstRunChecklistCard({super.key});
+/// Aligns the step markers under the header's TITLE rather than its chevron:
+/// the drawer gutter plus [AbListRow]'s leading slot and the gap after it.
+const _stepIndent =
+    AbTokens.drawerGutter + AbTokens.drawerLeadingSlot + AbListRow.leadingGap;
+
+/// Desktop setup checklist, docked in the sidebar directly above `UpdateRow`
+/// and the account footer.
+///
+/// It belongs to the DRAWER, not the New Session canvas, because the drawer is
+/// the only desktop surface mounted on both routes. Two of the five steps
+/// ("Connect your phone", "Arm Handler on a session") are performed from inside
+/// a session, where the canvas — and with it the checklist, its live signals
+/// and its latch — did not exist: the old card was never on screen at the
+/// moment its last steps became actionable.
+///
+/// Self-gates (mobile / dismissed / completed ⇒ shrink), so the call site stays
+/// a single stable line.
+class FirstRunSetupSection extends ConsumerWidget {
+  const FirstRunSetupSection({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -109,63 +129,89 @@ class FirstRunChecklistCard extends ConsumerWidget {
     final steps = ref.watch(desktopFirstRunStepsProvider);
     _latchAndMaybeComplete(ref, steps);
     final t = context.antgrid;
+    final collapsed = ref.watch(
+      firstRunProvider.select((s) => s.checklistCollapsed),
+    );
     final doneCount = steps.where((s) => s.done).length;
     final firstOpen = steps.firstWhereOrNull((s) => !s.done);
     final hint = _desktopHintFor(firstOpen?.id);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        AbTokens.space16,
-        AbTokens.space12,
-        AbTokens.space16,
-        0,
+    return Container(
+      decoration: BoxDecoration(
+        border: Border(top: BorderSide(color: t.borderSubtle)),
       ),
-      child: Container(
-        padding: const EdgeInsets.all(AbTokens.space12),
-        decoration: BoxDecoration(
-          color: t.bgSurface,
-          border: Border.all(color: t.borderSubtle),
-          borderRadius: BorderRadius.circular(AbTokens.radius8),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    'SETUP · $doneCount/${steps.length}',
-                    style: AbTokens.monoStyle(
-                      fontSize: AbTokens.fontXs,
-                      letterSpacing: 0.66,
-                      color: t.textMuted,
-                    ),
-                  ),
-                ),
-                AbIconButton(
-                  icon: AbIcons.close,
-                  tooltip: "Dismiss — won't show again",
-                  onTap: () =>
-                      ref.read(firstRunProvider.notifier).dismissChecklist(),
-                ),
-              ],
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: AbTokens.drawerGutter,
             ),
-            const SizedBox(height: AbTokens.space8),
-            for (final s in steps) ...[
-              // Compare ids, not references: record identity is unspecified in
-              // Dart (a record can be re-boxed between reads).
-              _FirstRunStepRow(step: s, isCursor: s.id == firstOpen?.id),
-              const SizedBox(height: AbTokens.space6),
-            ],
-            if (hint != null)
-              Text(
-                hint,
+            child: AbListRow(
+              horizontalPadding: 0,
+              density: AbRowDensity.sm,
+              // No `hoverable`: a full-width fill on a docked header reads as a
+              // slab, not a row. The pointer cursor and the chevron are the
+              // affordance — this is chrome, not a list row to be picked out of
+              // its neighbours.
+              leading: AbDisclosureChevron(expanded: !collapsed),
+              // Same treatment as the drawer's PROJECTS label — this is the
+              // second group header in one column, and a section header is
+              // chrome, so sans (see the font rule in app/CLAUDE.md).
+              title: Text(
+                'SETUP · $doneCount/${steps.length}',
                 style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontXxs,
+                  fontSize: AbTokens.fontXs,
+                  letterSpacing: 1.4,
+                  fontWeight: FontWeight.w600,
                   color: t.textMuted,
                 ),
               ),
-          ],
-        ),
+              trailing: AbIconButton(
+                icon: AbIcons.close,
+                tone: AbIconButtonTone.muted,
+                tooltip: "Dismiss — won't show again",
+                onTap: () =>
+                    ref.read(firstRunProvider.notifier).dismissChecklist(),
+              ),
+              onTap: () =>
+                  ref.read(firstRunProvider.notifier).toggleChecklistCollapsed(),
+            ),
+          ),
+          if (!collapsed)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                _stepIndent,
+                0,
+                AbTokens.drawerGutter,
+                AbTokens.space8,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (var i = 0; i < steps.length; i++) ...[
+                    if (i > 0) const SizedBox(height: AbTokens.space6),
+                    // Compare ids, not references: record identity is
+                    // unspecified in Dart (a record can be re-boxed between
+                    // reads).
+                    _FirstRunStepRow(
+                      step: steps[i],
+                      isCursor: steps[i].id == firstOpen?.id,
+                    ),
+                  ],
+                  if (hint != null) ...[
+                    const SizedBox(height: AbTokens.space8),
+                    Text(
+                      hint,
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontXxs,
+                        color: t.textMuted,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -175,6 +221,10 @@ class FirstRunChecklistCard extends ConsumerWidget {
 /// three steps that make the rest of the UI exist are done (or the user
 /// dismisses it). Successor to the static connect-machine guide: same centered
 /// skeleton, but the rows check themselves off from live signals.
+///
+/// Stays on the canvas rather than following the desktop checklist into the
+/// drawer: on mobile that drawer is a slide-in behind a hamburger, and
+/// onboarding a user has to go looking for is not onboarding.
 class MobileFirstRunChecklist extends ConsumerWidget {
   const MobileFirstRunChecklist({super.key});
 

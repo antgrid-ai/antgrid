@@ -177,7 +177,7 @@ void main() {
           signedInProvider.overrideWith((_) => true),
           // Deterministic single tick — the real periodic stream would leave a
           // pending timer.
-          nowMinuteProvider.overrideWith((_) => Stream.value(DateTime(2026))),
+          slowPollTickProvider.overrideWith((_) => Stream.value(0)),
           devicesApiProvider.overrideWithValue(
             _FakeDevicesApi([
               _device(kind: 'agent', platform: 'windows', name: 'Rig'),

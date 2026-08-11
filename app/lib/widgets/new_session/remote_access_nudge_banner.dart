@@ -15,9 +15,13 @@ import '../../providers/remote_access_nudge.dart';
 import '../remote_access_panel.dart' show confirmAndEnableRemoteAccess;
 
 /// Remote-access nudge on the New Session canvas (desktop only), mounted
-/// unconditionally right under the first-run checklist — it self-gates via
+/// unconditionally under the top bar — it self-gates via
 /// [remoteAccessNudgeProvider] (mobile / checklist visible / remote on /
 /// dismissed ⇒ shrink), so the call site stays a single stable line.
+///
+/// The setup checklist it used to sit beneath is docked in the sidebar now
+/// (`FirstRunSetupSection`); the "checklist visible" gate above is what still
+/// keeps the two from saying "connect your phone" at the same time.
 ///
 /// Two variants, one fact: the soft variant mentions remote control exists;
 /// the device variant names the phone that signed in and offers the switch.
