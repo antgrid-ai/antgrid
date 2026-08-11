@@ -75,11 +75,37 @@ SP_OBJECT_ID="$(az ad sp show --id "$APP_ID" --query id -o tsv)"
 # Federated credentials: one per GitHub OIDC subject the workflow uses.
 #   - pull_request           : the plan-on-PR job
 #   - ref:refs/heads/<branch>: workflow_dispatch on the default branch (apply)
+# The subject GitHub presents is not always `repo:<owner>/<repo>:…` — orgs now
+# get ID-qualified subjects (`repo:<owner>@<orgid>/<repo>@<repoid>:…`) by
+# default, and a credential built on the other form is rejected at login with
+# AADSTS700213, which reads like a broken app registration rather than a string
+# mismatch. Ask GitHub which prefix it will send instead of assuming one.
+SUB_PREFIX="repo:${GITHUB_REPO}"
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+  detected="$(gh api "repos/${GITHUB_REPO}/actions/oidc/customization/sub" \
+    --jq '.sub_claim_prefix // empty' 2>/dev/null || true)"
+  if [[ -n "$detected" ]]; then SUB_PREFIX="$detected"; fi
+fi
+
+# Credential names are unique per app, so they carry the repo and branch. Fixed
+# names work only until this script is pointed at a second repo.
+slugify() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | tr -s '-' | sed 's/^-//; s/-$//'; }
+FIC_SLUG="$(slugify "$GITHUB_REPO")"
+
 add_fic() {
   local name="$1" subject="$2"
   if az ad app federated-credential list --id "$APP_ID" \
        --query "[?subject=='$subject'] | [0].id" -o tsv | grep -q .; then
-    echo "    federated cred '$name' already exists"
+    echo "    federated cred for '$subject' already exists"
+    return
+  fi
+  # Report a taken name rather than letting the create abort the run under
+  # `set -e`: that happens before any secret is written, so the repo is left
+  # half-wired by an error that names Azure instead of the collision.
+  if az ad app federated-credential list --id "$APP_ID" \
+       --query "[?name=='$name'] | [0].id" -o tsv | grep -q .; then
+    echo "    !! name '$name' is taken by a different subject — skipped." >&2
+    echo "       Remove or rename it and re-run; CI cannot log in without this." >&2
     return
   fi
   az ad app federated-credential create --id "$APP_ID" --parameters "{
@@ -91,8 +117,9 @@ add_fic() {
   echo "    federated cred '$name' created"
 }
 say "OIDC federated credentials for $GITHUB_REPO"
-add_fic "gh-pull-request" "repo:${GITHUB_REPO}:pull_request"
-add_fic "gh-default-branch" "repo:${GITHUB_REPO}:ref:refs/heads/${DEFAULT_BRANCH}"
+echo "    subject prefix: $SUB_PREFIX"
+add_fic "${FIC_SLUG}-pull-request" "${SUB_PREFIX}:pull_request"
+add_fic "${FIC_SLUG}-$(slugify "$DEFAULT_BRANCH")" "${SUB_PREFIX}:ref:refs/heads/${DEFAULT_BRANCH}"
 
 say "Role assignment: Contributor on subscription"
 # NOTE: `az role assignment list/create` mis-routes to a tenant-level request on
