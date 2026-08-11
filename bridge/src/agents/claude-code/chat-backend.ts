@@ -121,6 +121,12 @@ const STDERR_TAIL_MAX_CHARS = 2_000;
 // Bound on the in-memory transcript history (see `history`) — keeps a
 // long-lived session's getTranscriptSnapshot() replay from growing unbounded.
 const HISTORY_MAX_ENTRIES = 500;
+// Bound on `recentlySettled` (see field doc) — a long session settling many
+// background tasks can't grow this map without limit.
+const RECENTLY_SETTLED_CAP = 20;
+// How long dispose() waits on the background-task reap before giving up, so a
+// wedged control channel can't stall teardown.
+const BACKGROUND_REAP_GRACE_MS = 1_000;
 
 // The SDK's fixed PermissionMode enum (setPermissionMode), NOT a discovered
 // catalog — supportedAgents() lists subagent definitions, which are not modes.
@@ -202,6 +208,35 @@ export class ClaudeDriver extends ChatSession {
   // Real user prompts only (not the "/compact" push) and each turn's final
   // assistant text, capped so a long-lived session can't grow unbounded.
   private history: any[] = [];
+
+  // ── Background tasks ─────────────────────────────────────────────────────
+  // The SDK reports backgrounded work (run_in_background Bash, subagents,
+  // monitors) via system task_* messages: task_started mints a task_id,
+  // task_updated patches status, task_notification settles it. Session-scoped
+  // (tasks outlive turns); the full list is re-emitted on every change
+  // (latest-wins, like agent:capabilities).
+  private backgroundTasks = new Map<string, {
+    taskId: string;
+    kind: string;
+    title: string;
+    // Advertised as-is: the SDK's non-terminal states (pending, running,
+    // paused) are the app's to render, and a paused task reported as running is
+    // a lie the wire field exists to avoid.
+    status: string;
+    itemId?: string;
+    turnId: string;
+    startedAt: number;
+    // Last-known fields of the correlated tool item. seenItems/itemCache clear
+    // at turn end but the settle can land turns later — re-emitting a COMPLETE
+    // item (the app replaces items wholesale) needs this snapshot.
+    itemSnapshot?: Record<string, unknown>;
+  }>();
+
+  // task_updated is a raw state-patch stream that can flip a task to a terminal
+  // status before the separately-computed task_notification (carrying the
+  // summary) arrives — settling on the patch would otherwise drop that summary
+  // on the floor forever. Bounded (RECENTLY_SETTLED_CAP), oldest evicted first.
+  private recentlySettled = new Map<string, { itemId?: string; turnId: string; itemSnapshot?: Record<string, unknown> }>();
 
   // Last raw SDK model list, kept so resolvedModel-based mapping (default row →
   // concrete alias, system:init.model → alias) can run outside mapModelInfos,
@@ -311,6 +346,7 @@ export class ClaudeDriver extends ChatSession {
       if (this.activeTurnId) {
         this.closeTurn({ stopReason: "error", error: mapFailureError(message, this.limitSnapshot()) });
       }
+      this.clearBackgroundTasks();
     }
   }
 
@@ -333,6 +369,9 @@ export class ClaudeDriver extends ChatSession {
         // CLI re-broadcasts here on a live mode change (shift+tab, escalation).
         if (c.subtype === "status") return this.onStatus(c);
         if (c.subtype === "compact_boundary") return this.onCompactBoundary(c);
+        if (c.subtype === "task_started") return this.onTaskStarted(c);
+        if (c.subtype === "task_updated") return this.onTaskUpdated(c);
+        if (c.subtype === "task_notification") return this.onTaskNotification(c);
         return;
       // No "stream_event" case: those only arrive with includePartialMessages,
       // which v1 doesn't enable (no live token streaming; text lands per
@@ -455,6 +494,166 @@ export class ClaudeDriver extends ChatSession {
       ? `Context compacted (${meta.trigger}): ${meta.pre_tokens ?? "?"} -> ${meta.post_tokens ?? "?"} tokens`
       : "Context compacted";
     this.emitItem(`compaction:${c?.uuid ?? this.turnCounter}`, { kind: "compaction", summary }, { turnId });
+  }
+
+  private publishBackgroundTasks(): void {
+    this.emitBackgroundTasks([...this.backgroundTasks.values()].map((t) => ({
+      taskId: t.taskId, kind: t.kind, title: t.title, status: t.status,
+      ...(t.itemId ? { itemId: t.itemId } : {}),
+      startedAt: t.startedAt,
+    })));
+  }
+
+  private taskByItemId(itemId: string) {
+    for (const t of this.backgroundTasks.values()) if (t.itemId === itemId) return t;
+    return undefined;
+  }
+
+  private onTaskStarted(c: any): void {
+    if (!c?.task_id || c.skip_transcript) return;
+    const itemId = c.tool_use_id ? `tool:${c.tool_use_id}` : undefined;
+    const task = {
+      taskId: String(c.task_id),
+      kind: String(c.task_type ?? (c.subagent_type ? "subagent" : "shell")),
+      title: String(c.description ?? c.task_id),
+      status: "running",
+      itemId,
+      turnId: this.activeTurnId ?? "",
+      startedAt: Date.now(),
+      itemSnapshot: itemId ? this.cachedItem(itemId) : undefined,
+    };
+    this.backgroundTasks.set(task.taskId, task);
+    if (itemId) {
+      // The stub tool_result ("running in the background") may already have
+      // marked the item completed (onToolResult can't tell a stub from a real
+      // result when it arrives first) — re-assert running. The item↔task link
+      // travels on the advertised list's itemId, not on the item.
+      // `kind` is restated rather than left to the merge: a resumed session (or
+      // any task_started landing past its turn's cache clear) has nothing to
+      // merge over, and an item frame without one fails AgentItemSchema.
+      this.emitItem(itemId, { kind: "tool_call", status: "running" }, { turnId: task.turnId });
+      task.itemSnapshot = this.cachedItem(itemId);
+    }
+    this.publishBackgroundTasks();
+  }
+
+  private onTaskUpdated(c: any): void {
+    const task = this.backgroundTasks.get(String(c?.task_id ?? ""));
+    if (!task) return;
+    const status = c?.patch?.status;
+    // The patch beat task_notification to the terminal status: settle now, but
+    // keep the item's identity in recentlySettled so the summary the notification
+    // carries can still be attached when it lands (see recentlySettled doc).
+    if (status === "completed" || status === "failed") {
+      this.settleTask(task, status === "completed" ? "completed" : "error", undefined, { recoverable: true });
+      return;
+    }
+    // A kill is a stop, not a failure — it is what our own stopTask does. The
+    // CLI emits this patch and then a task_notification for the same kill
+    // (which reports it as "stopped", never "killed"), so the summary rides in
+    // on the notification: settle recoverable, or every stop loses its summary.
+    if (status === "killed") {
+      this.settleTask(task, "cancelled", undefined, { recoverable: true });
+      return;
+    }
+    let changed = false;
+    if (typeof status === "string" && status !== task.status) {
+      task.status = status;
+      changed = true;
+    }
+    if (typeof c?.patch?.description === "string") {
+      task.title = c.patch.description;
+      changed = true;
+    }
+    if (changed) this.publishBackgroundTasks();
+  }
+
+  // The notification's own verdict, or null when it carries none.
+  private notificationStatus(c: any): string | null {
+    if (c?.status === "completed") return "completed";
+    if (c?.status === "stopped") return "cancelled";
+    return typeof c?.status === "string" ? "error" : null;
+  }
+
+  private onTaskNotification(c: any): void {
+    const taskId = String(c?.task_id ?? "");
+    const task = this.backgroundTasks.get(taskId);
+    if (!task) return this.recoverLateSummary(taskId, c);
+    this.settleTask(task, this.notificationStatus(c) ?? "error",
+      typeof c?.summary === "string" ? c.summary : undefined);
+  }
+
+  // Remove the task and settle its transcript item. The settle can land turns
+  // after the item's own turn (seenItems/itemCache cleared), so a COMPLETE
+  // item is re-emitted from the snapshot under the ORIGINAL turnId.
+  private settleTask(task: { taskId: string; itemId?: string; turnId: string; title: string; itemSnapshot?: Record<string, unknown> }, status: string, summary: string | undefined, opts?: { recoverable?: boolean }): void {
+    this.backgroundTasks.delete(task.taskId);
+    if (task.itemId) {
+      this.emitItem(task.itemId, this.settledItemFields(task.itemId, task.itemSnapshot, task.title, status, summary), { turnId: task.turnId });
+      if (opts?.recoverable) {
+        this.recentlySettled.set(task.taskId, { itemId: task.itemId, turnId: task.turnId, itemSnapshot: this.cachedItem(task.itemId) });
+        if (this.recentlySettled.size > RECENTLY_SETTLED_CAP) {
+          const oldest = this.recentlySettled.keys().next().value;
+          if (oldest !== undefined) this.recentlySettled.delete(oldest);
+        }
+      }
+    }
+    this.publishBackgroundTasks();
+  }
+
+  // A task_notification for a task no longer in backgroundTasks (settled early
+  // by task_updated) recovers its summary from recentlySettled instead of being
+  // dropped — one-shot, and deliberately does NOT call emitBackgroundTasks():
+  // the task is not, and must not become, part of the live advertised list again.
+  private recoverLateSummary(taskId: string, c: any): void {
+    const stashed = this.recentlySettled.get(taskId);
+    if (!stashed || typeof c?.summary !== "string") return;
+    this.recentlySettled.delete(taskId);
+    if (!stashed.itemId) return;
+    // The notification outranks the patch that settled early: a task the patch
+    // reported completed can still notify as failed, and that is the verdict.
+    const priorStatus = (stashed.itemSnapshot as any)?.status;
+    const status = this.notificationStatus(c)
+      ?? (typeof priorStatus === "string" ? priorStatus : "completed");
+    this.emitItem(stashed.itemId,
+      this.settledItemFields(stashed.itemId, stashed.itemSnapshot, "", status, c.summary),
+      { turnId: stashed.turnId });
+  }
+
+  // Shared by settleTask and recoverLateSummary: layers status + an appended
+  // summary onto whatever terminal content the item already has.
+  private settledItemFields(itemId: string, itemSnapshot: Record<string, unknown> | undefined, fallbackTitle: string, status: string, summary: string | undefined): Record<string, unknown> {
+    const snapshot = this.cachedItem(itemId) ?? itemSnapshot
+      ?? { kind: "tool_call", toolKind: "shell", title: fallbackTitle };
+    if (!summary) return { ...snapshot, status };
+    // The summary appends to the item's terminal block IN PLACE: a settle must
+    // not be able to drop content it doesn't own (a diff, a text block) just
+    // because today's background tasks only ever produce terminal output.
+    const prior: any[] = Array.isArray((snapshot as any).content) ? (snapshot as any).content : [];
+    const at = prior.findIndex((b: any) => b?.type === "terminal");
+    const priorTerm: string = at === -1 ? "" : prior[at]?.data ?? "";
+    const merged = { type: "terminal", data: priorTerm ? `${priorTerm}\n${summary}` : summary };
+    return {
+      ...snapshot,
+      status,
+      content: at === -1 ? [...prior, merged] : prior.map((b, i) => (i === at ? merged : b)),
+    };
+  }
+
+  // Backend died: its tasks are gone (or orphaned and unmanageable) — drop
+  // them from the advertised list rather than showing zombies. A dead backend
+  // also can't deliver a late notification, so nothing is left to recover.
+  private clearBackgroundTasks(): void {
+    this.recentlySettled.clear();
+    if (this.backgroundTasks.size === 0) return;
+    this.backgroundTasks.clear();
+    this.publishBackgroundTasks();
+  }
+
+  async stopTask(taskId: string): Promise<void> {
+    // No optimistic local removal — the SDK's task_notification
+    // (status "stopped") is the settle signal and re-emits the list.
+    await this.q?.stopTask(taskId);
   }
 
   private ingestCommands(entries: any): void {
@@ -663,11 +862,18 @@ export class ClaudeDriver extends ChatSession {
     const turnId = this.activeTurnId ?? "";
     for (const b of Array.isArray(c?.message?.content) ? c.message.content : []) {
       if (b?.type !== "tool_result") continue;
+      const itemId = `tool:${b.tool_use_id}`;
       const data = typeof b.content === "string" ? b.content : JSON.stringify(b.content);
-      this.emitItem(`tool:${b.tool_use_id}`, {
-        kind: "tool_call", status: b.is_error ? "error" : "completed",
+      // A backgrounded Bash returns a stub result while the process keeps
+      // running — task_notification is the real settle event. Keep the item
+      // running until then.
+      const live = this.taskByItemId(itemId);
+      this.emitItem(itemId, {
+        kind: "tool_call",
+        status: live ? "running" : b.is_error ? "error" : "completed",
         content: [{ type: "terminal", data }],
       }, { turnId });
+      if (live) live.itemSnapshot = this.cachedItem(itemId);
     }
   }
 
@@ -825,6 +1031,15 @@ export class ClaudeDriver extends ChatSession {
   // after the grace period, escalate to aborting the spawn's AbortController
   // as a hard kill and wait once more before giving up.
   protected async disposeBackend(): Promise<void> {
+    // Best-effort reap before teardown: on the SIGKILL escalation path the SDK
+    // kills only the CLI pid (no process group), orphaning background shells.
+    if (this.backgroundTasks.size > 0) {
+      const stops = [...this.backgroundTasks.keys()].map(
+        (id) => this.q?.stopTask(id).catch(() => {}) ?? Promise.resolve(),
+      );
+      await Promise.race([Promise.all(stops), Bun.sleep(BACKGROUND_REAP_GRACE_MS)]);
+      this.clearBackgroundTasks();
+    }
     this.controller?.end("dispose");
     try { this.q?.close(); } catch { /* best effort */ }
     const timedOut = Symbol("dispose-timeout");

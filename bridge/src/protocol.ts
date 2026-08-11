@@ -1559,6 +1559,39 @@ const AgentUsageMessage = BaseMessage.extend({
   contextWindow: z.number().nullable().optional(),
 });
 
+// Live inventory of the agent's background tasks (backgrounded shells,
+// subagents, monitors). Latest-wins full-list semantics like
+// agent:capabilities: each frame REPLACES the session's list; a finished task
+// simply drops out. Session-scoped — tasks outlive turns.
+const AgentBackgroundTaskSchema = z.object({
+  // Driver-native handle — what agent:task-stop takes, opaque to everyone else.
+  // Unique only within the live list: codex's is the unified-exec processId (an
+  // OS pid, reusable once the process is gone), so never key anything durable
+  // off it.
+  taskId: z.string(),
+  kind: z.string(), // shell | subagent | monitor | workflow (+future)
+  title: z.string(), // command line for shells, description otherwise
+  status: z.string(), // driver-native: running | pending | paused (+future)
+  // The transcript tool_call item this task detached from, when known.
+  itemId: z.string().optional(),
+  startedAt: z.number().optional(), // epoch ms
+  killable: z.boolean().optional(), // absent = true
+});
+
+const AgentBackgroundTasksMessage = BaseMessage.extend({
+  type: z.literal("agent:background-tasks"),
+  sessionId: z.string(),
+  tasks: z.array(AgentBackgroundTaskSchema),
+});
+
+// App -> agent: stop one background task. Routed to the driver's stopTask
+// (claude Query.stopTask / codex thread/backgroundTerminals/terminate).
+const AgentTaskStopMessage = BaseMessage.extend({
+  type: z.literal("agent:task-stop"),
+  sessionId: z.string(),
+  taskId: z.string(),
+});
+
 // ── Inbound app→agent control-plane messages ──────────────────────────────────
 // These carry the app's intent into the active agent session. sessionId scopes
 // each message to one running agent session (not the project). requestId on
@@ -1728,12 +1761,14 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentRequestRetractedMessage,
   AgentErrorMessage,
   AgentUsageMessage,
+  AgentBackgroundTasksMessage,
   AgentPromptMessage,
   AgentCancelMessage,
   AgentSetConfigMessage,
   AgentSessionActionMessage,
   AgentPermissionResolveMessage,
   AgentQuestionResolveMessage,
+  AgentTaskStopMessage,
 ]);
 
 export type AbMessage = z.infer<typeof AbMessageSchema>;
@@ -1867,6 +1902,9 @@ export type AgentQuestion = z.infer<typeof AgentQuestionMessage>;
 export type AgentRequestRetracted = z.infer<typeof AgentRequestRetractedMessage>;
 export type AgentErrorEvent = z.infer<typeof AgentErrorMessage>;
 export type AgentUsageEvent = z.infer<typeof AgentUsageMessage>;
+export type AgentBackgroundTask = z.infer<typeof AgentBackgroundTaskSchema>;
+export type AgentBackgroundTasksEvent = z.infer<typeof AgentBackgroundTasksMessage>;
+export type AgentTaskStop = z.infer<typeof AgentTaskStopMessage>;
 export type AgentPrompt = z.infer<typeof AgentPromptMessage>;
 export type AgentCancel = z.infer<typeof AgentCancelMessage>;
 export type AgentSetConfig = z.infer<typeof AgentSetConfigMessage>;
@@ -1984,8 +2022,9 @@ const KNOWN_TYPES = new Set<string>([
   "agent:snapshot", "agent:capabilities", "agent:updateAvailable",
   "agent:update", "agent:updateResult",
   "agent:permission-request", "agent:question", "agent:request-retracted", "agent:error", "agent:usage",
+  "agent:background-tasks",
   "agent:prompt", "agent:cancel", "agent:set-config",
-  "agent:session-action", "agent:permission-resolve", "agent:question-resolve",
+  "agent:session-action", "agent:permission-resolve", "agent:question-resolve", "agent:task-stop",
 ]);
 
 export function parseMessageFast(raw: string): AbMessage | null {

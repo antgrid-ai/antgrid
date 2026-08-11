@@ -28,6 +28,9 @@ export interface ClaudeQueryLike extends AsyncIterable<SDKMessage> {
   // (xhigh + standing dynamic-workflow orchestration) — it is NOT an
   // effortLevel value, so it's set on its own key.
   applyFlagSettings(settings: { effortLevel?: string | null; ultracode?: boolean }): Promise<void>;
+  // Stops a background task by id; the SDK then emits a task_notification
+  // with status "stopped" (sdk.d.ts Query.stopTask).
+  stopTask(taskId: string): Promise<void>;
   close(): void;
 }
 

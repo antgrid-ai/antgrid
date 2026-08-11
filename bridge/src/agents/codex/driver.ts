@@ -13,11 +13,20 @@ export function codexNotifyOnlyArgs(augArgs: string[]): string[] {
   return [augArgs[i - 1], augArgs[i]]; // ["-c", "notify=[...]"]
 }
 
+// Unified exec (exec_command/write_stdin with persistent background sessions)
+// is default-ON everywhere EXCEPT Windows builds (codex features/src/lib.rs:
+// `default_enabled: !cfg!(windows)`). Background-task tracking depends on it,
+// so force it on explicitly — a no-op where it's already the default. Uses the
+// top-level scalar key (safest for app-server's -c parser).
+export function codexUnifiedExecArgs(): string[] {
+  return ["-c", "experimental_use_unified_exec_tool=true"];
+}
+
 export function createDriver(ctx: DriverCtx): StructuredDriver {
   const chatAug = ctx.chatAugment();
   const spawned = spawnCodex({
     cwd: ctx.projectPath,
-    args: ["app-server", ...codexNotifyOnlyArgs(chatAug.args)],
+    args: ["app-server", ...codexUnifiedExecArgs(), ...codexNotifyOnlyArgs(chatAug.args)],
     env: chatAug.env,
   });
   const driver = new CodexDriver({

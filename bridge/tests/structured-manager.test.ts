@@ -294,7 +294,11 @@ describe("StructuredAgentManager", () => {
     });
     await mgr.startChat({ sessionId: "s1", tool: "codex" });
     await mgr.stopChat("s1");
-    expect(events).toEqual(["clear", "drop:s1"]);
+    // Twice: once before dispose so a reconnect during a slow teardown replays
+    // nothing stale, and once after, because dispose itself emits session-scoped
+    // frames (a driver clearing its background-task list) that would otherwise
+    // re-cache a tombstone for a session that no longer exists.
+    expect(events).toEqual(["clear", "drop:s1", "drop:s1"]);
   });
 
   it("getTranscriptSnapshot delegates to the driver when running", async () => {

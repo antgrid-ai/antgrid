@@ -29,6 +29,12 @@ export interface StructuredDriver {
   getTranscriptSnapshot?(): Promise<AbMessage[]>;
   resolvePermission(permissionId: string, optionId: string): void;
   resolveQuestion(questionId: string, answer: string | string[]): void;
+  // Stop one background task (agent:task-stop). Optional for the same reason as
+  // getTranscriptSnapshot above: presence IS the capability, so there is no
+  // second list to keep in lockstep. The verb is unreachable for a driver that
+  // implements nothing — the app only offers a stop for a task the session
+  // itself advertised — so the no-op is an invariant, not a silent default.
+  stopTask?(taskId: string): Promise<void>;
   // May be async: a driver whose backend holds a process-global lock (codex's
   // ~/.codex sqlite) resolves only once that process has fully exited, so a
   // restart doesn't race the dying one for the lock.
@@ -247,6 +253,11 @@ export class StructuredAgentManager {
     this.stopping.set(sessionId, teardown);
     return teardown.finally(() => {
       if (this.stopping.get(sessionId) === teardown) this.stopping.delete(sessionId);
+      // Again, because dispose() itself emits session-scoped frames (a driver
+      // clearing its background-task list), which would otherwise re-cache a
+      // tombstone the earlier drop had just removed. A restart for this id waits
+      // out `stopping`, so nothing live can be dropped here.
+      this.dropSessionReplay?.(sessionId);
     });
   }
 
@@ -305,6 +316,9 @@ export class StructuredAgentManager {
           if (typeof msg.value === "string") {
             this.onSetConfig?.(msg.sessionId, msg.key, msg.value);
           }
+          break;
+        case "agent:task-stop":
+          await this.drivers.get(msg.sessionId)?.stopTask?.(msg.taskId);
           break;
         default:
           break;

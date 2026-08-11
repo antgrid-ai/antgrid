@@ -23,12 +23,20 @@ class ToolCallCard extends StatefulWidget {
   final ToolCallRowData data;
   final int rowIndex;
   final bool expanded;
+
+  /// Whether this item is one of the session's live background tasks, per the
+  /// advertised agent:background-tasks list — the only thing that knows. It is
+  /// not readable off the item: codex stamps a pid on every unified-exec
+  /// command, foreground ones included, and cannot tell background from
+  /// foreground until a turn ends with the process still alive.
+  final bool isBackground;
   final VoidCallback onToggle;
   const ToolCallCard({
     super.key,
     required this.data,
     required this.rowIndex,
     required this.expanded,
+    required this.isBackground,
     required this.onToggle,
   });
 
@@ -74,6 +82,16 @@ class _ToolCallCardState extends State<ToolCallCard> {
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
+              if (widget.isBackground) ...[
+                Text(
+                  'bg',
+                  style: AbTokens.monoStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: c.accent,
+                  ),
+                ),
+                const SizedBox(width: AbTokens.space4),
+              ],
               if (hasBody)
                 AbIcon(
                   widget.expanded ? AbIcons.chevronDown : AbIcons.chevronRight,
@@ -117,13 +135,18 @@ class _ToolCallCardState extends State<ToolCallCard> {
     // error text in Markdown/HTML too, not just the plain-text native path.
     if (item.error != null) {
       final message = item.error!.message;
-      children.add(wrap(
-        () => plainTextSource(message),
-        Text(
-          message,
-          style: AbTokens.monoStyle(fontSize: AbTokens.fontSm, color: c.error),
+      children.add(
+        wrap(
+          () => plainTextSource(message),
+          Text(
+            message,
+            style: AbTokens.monoStyle(
+              fontSize: AbTokens.fontSm,
+              color: c.error,
+            ),
+          ),
         ),
-      ));
+      );
     }
 
     for (final block in item.content ?? const <ToolContent>[]) {
@@ -136,35 +159,51 @@ class _ToolCallCardState extends State<ToolCallCard> {
             wrap(() => codeSource(_terminalVisible(data)), _terminal(data, c)),
           );
         case 'diff':
-          children.add(wrap(
-            () => diffSource(_diffCache.putIfAbsent(block, () => diffLinesFor(block))),
-            _diff(block, c),
-          ));
+          children.add(
+            wrap(
+              () => diffSource(
+                _diffCache.putIfAbsent(block, () => diffLinesFor(block)),
+              ),
+              _diff(block, c),
+            ),
+          );
         case 'text':
           final txt = block.text ?? '';
-          children.add(wrap(
-            () => codeSource(txt),
-            Text(
-              txt,
-              style: AbTokens.monoStyle(
-                fontSize: AbTokens.fontSm,
-                color: c.textSecondary,
+          children.add(
+            wrap(
+              () => codeSource(txt),
+              Text(
+                txt,
+                style: AbTokens.monoStyle(
+                  fontSize: AbTokens.fontSm,
+                  color: c.textSecondary,
+                ),
               ),
             ),
-          ));
+          );
       }
     }
     if (item.rawInput != null) {
-      children.add(wrap(
-        () => codeSource(_jsonVisible('input', item.rawInput!), language: 'json'),
-        _json('input', item.rawInput!, c),
-      ));
+      children.add(
+        wrap(
+          () => codeSource(
+            _jsonVisible('input', item.rawInput!),
+            language: 'json',
+          ),
+          _json('input', item.rawInput!, c),
+        ),
+      );
     }
     if (item.rawOutput != null) {
-      children.add(wrap(
-        () => codeSource(_jsonVisible('output', item.rawOutput!), language: 'json'),
-        _json('output', item.rawOutput!, c),
-      ));
+      children.add(
+        wrap(
+          () => codeSource(
+            _jsonVisible('output', item.rawOutput!),
+            language: 'json',
+          ),
+          _json('output', item.rawOutput!, c),
+        ),
+      );
     }
 
     return Container(

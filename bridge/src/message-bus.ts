@@ -47,8 +47,17 @@ const REPLAY_TYPES: ReadonlySet<string> = new Set([
 /**
  * Session-scoped replay: cached per (type, sessionId), not per type — one
  * frame per TYPE would clobber capabilities across concurrent chat sessions.
+ *
+ * `agent:background-tasks` is here for the same reason as the handler snapshot
+ * above: it is a latest-wins full list, so an app that attaches after the last
+ * change has nothing to rebuild the strip from — a shell backgrounded before
+ * the reconnect would be invisible, and therefore unstoppable, until it
+ * settled.
  */
-const SESSION_REPLAY_TYPES: ReadonlySet<string> = new Set(["agent:capabilities"]);
+const SESSION_REPLAY_TYPES: ReadonlySet<string> = new Set([
+  "agent:capabilities",
+  "agent:background-tasks",
+]);
 
 interface CachedFrame {
   msg: AbMessage;

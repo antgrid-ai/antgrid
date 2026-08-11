@@ -51,7 +51,7 @@ function makeFakeQuery(opts?: {
   let done = false;
   let failure: unknown = null;
   const waiters: Array<() => void> = [];
-  const control = { interrupt: 0, setModel: [] as any[], setPermissionMode: [] as string[], applyFlagSettings: [] as any[] };
+  const control = { interrupt: 0, setModel: [] as any[], setPermissionMode: [] as string[], applyFlagSettings: [] as any[], stopTask: [] as string[] };
 
   async function* gen() {
     let i = 0;
@@ -67,6 +67,7 @@ function makeFakeQuery(opts?: {
     setModel: async (m?: string) => { control.setModel.push(m); await opts?.setModel?.(m); },
     setPermissionMode: async (m: string) => { control.setPermissionMode.push(m); await opts?.setPermissionMode?.(m); },
     applyFlagSettings: async (s: any) => { control.applyFlagSettings.push(s); await opts?.applyFlagSettings?.(s); },
+    stopTask: async (id: string) => { control.stopTask.push(id); },
     supportedCommands: async () => [],
     supportedModels: opts?.supportedModels ?? (async () => []),
     initializationResult: opts?.initializationResult ?? (async () => ({})),
@@ -1457,5 +1458,264 @@ describe("ClaudeDriver rate-limit snapshot", () => {
     const end = lastTurnEnd(sent);
     expect(end?.stopReason).toBe("error");
     expect(end?.error?.category).toBe("rate_limited");
+  });
+});
+
+describe("ClaudeDriver background tasks", () => {
+  // Boots a session with one backgrounded Bash: assistant tool_use, then the
+  // task_started system message. Callers append the stub tool_result / turn
+  // result / notification per scenario.
+  async function withBackgroundedBash() {
+    const made = makeDriver();
+    await made.driver.start();
+    await made.driver.prompt("run the dev server");
+    made.fake.emit({ type: "assistant", uuid: "u1", message: { content: [
+      { type: "tool_use", id: "tu1", name: "Bash", input: { command: "bun dev", run_in_background: true } },
+    ] } });
+    made.fake.emit({ type: "system", subtype: "task_started", task_id: "task-1",
+      tool_use_id: "tu1", description: "bun dev", task_type: "shell" });
+    await flush();
+    return made;
+  }
+
+  const lastTasksFrame = (sent: AbMessage[]) =>
+    sent.filter((m) => m.type === "agent:background-tasks").at(-1) as any;
+  const lastItemFrame = (sent: AbMessage[], itemId: string) =>
+    sent.filter((m: any) => (m.type === "agent:item-added" || m.type === "agent:item-updated") && m.itemId === itemId).at(-1) as any;
+
+  it("task_started emits the task list and keeps the tool item running", async () => {
+    const { sent } = await withBackgroundedBash();
+    const frame = lastTasksFrame(sent);
+    expect(frame.tasks).toHaveLength(1);
+    expect(frame.tasks[0].taskId).toBe("task-1");
+    expect(frame.tasks[0].kind).toBe("shell");
+    expect(frame.tasks[0].title).toBe("bun dev");
+    // itemId is the only item↔task link; it is what badges the row as "bg".
+    expect(frame.tasks[0].itemId).toBe("tool:tu1");
+    expect(lastItemFrame(sent, "tool:tu1").item.status).toBe("running");
+  });
+
+  it("keeps the item running when the stub tool_result lands after task_started", async () => {
+    const { sent, fake } = await withBackgroundedBash();
+    fake.emit({ type: "user", message: { content: [
+      { type: "tool_result", tool_use_id: "tu1", content: "running in the background" },
+    ] } });
+    await flush();
+    expect(lastItemFrame(sent, "tool:tu1").item.status).toBe("running");
+  });
+
+  it("re-marks the item running when the stub result precedes task_started", async () => {
+    const { driver, sent, fake } = makeDriver();
+    await driver.start();
+    await driver.prompt("go");
+    fake.emit({ type: "assistant", uuid: "u1", message: { content: [
+      { type: "tool_use", id: "tu1", name: "Bash", input: { command: "bun dev", run_in_background: true } },
+    ] } });
+    fake.emit({ type: "user", message: { content: [
+      { type: "tool_result", tool_use_id: "tu1", content: "running in the background" },
+    ] } });
+    fake.emit({ type: "system", subtype: "task_started", task_id: "task-1",
+      tool_use_id: "tu1", description: "bun dev", task_type: "shell" });
+    await flush();
+    const last = lastItemFrame(sent, "tool:tu1");
+    expect(last.item.status).toBe("running");
+    expect(lastTasksFrame(sent).tasks[0].itemId).toBe("tool:tu1");
+  });
+
+  it("task_notification settles the item on its ORIGINAL turn even after turn end", async () => {
+    const { sent, fake } = await withBackgroundedBash();
+    fake.emit({ type: "user", message: { content: [
+      { type: "tool_result", tool_use_id: "tu1", content: "running in the background" },
+    ] } });
+    fake.emit({ type: "result", usage: { input_tokens: 1, output_tokens: 1 } }); // turn ends, caches clear
+    fake.emit({ type: "system", subtype: "task_notification", task_id: "task-1",
+      tool_use_id: "tu1", status: "completed", output_file: "/tmp/out.txt", summary: "exited 0" });
+    await flush();
+    expect(lastTasksFrame(sent).tasks).toHaveLength(0);
+    const last = lastItemFrame(sent, "tool:tu1");
+    expect(last.item.status).toBe("completed");
+    expect(last.item.title).toBe("Bash");   // snapshot survived the turn-end cache clear
+    expect(last.turnId).toBe("turn-0");     // original turn, not the (absent) active one
+  });
+
+  it("appends the summary to the item's existing terminal output, in place", async () => {
+    const { sent, fake } = await withBackgroundedBash();
+    fake.emit({ type: "user", message: { content: [
+      { type: "tool_result", tool_use_id: "tu1", content: "listening on :3000" },
+    ] } });
+    fake.emit({ type: "system", subtype: "task_notification", task_id: "task-1",
+      tool_use_id: "tu1", status: "completed", output_file: "/tmp/out.txt", summary: "exited 0" });
+    await flush();
+    const content = lastItemFrame(sent, "tool:tu1").item.content as any[];
+    expect(content).toHaveLength(1);
+    expect(content[0].data).toBe("listening on :3000\nexited 0");
+  });
+
+  it("a failed task settles the item as error", async () => {
+    const { sent, fake } = await withBackgroundedBash();
+    fake.emit({ type: "system", subtype: "task_notification", task_id: "task-1",
+      tool_use_id: "tu1", status: "failed", output_file: "/tmp/out.txt", summary: "exited 1" });
+    await flush();
+    expect(lastItemFrame(sent, "tool:tu1").item.status).toBe("error");
+    expect(lastTasksFrame(sent).tasks).toHaveLength(0);
+  });
+
+  it("a task_updated message with status \"killed\" settles the item as cancelled and drops it from the list", async () => {
+    const { sent, fake } = await withBackgroundedBash();
+    fake.emit({ type: "system", subtype: "task_updated", task_id: "task-1",
+      patch: { status: "killed" } });
+    await flush();
+    expect(lastItemFrame(sent, "tool:tu1").item.status).toBe("cancelled");
+    expect(lastTasksFrame(sent).tasks).toHaveLength(0);
+  });
+
+  // What pressing the stop button actually looks like on the wire: one kill in
+  // the CLI emits the task_updated patch (status "killed") and THEN the
+  // task_notification carrying the summary (a killed task notifies as
+  // "stopped"). Always that order — so the patch must not settle the item as
+  // an error, and must leave the summary that follows recoverable.
+  it("a user stop settles the item as cancelled and still attaches the summary that follows", async () => {
+    const { driver, sent, fake } = await withBackgroundedBash();
+    await driver.stopTask("task-1");
+    fake.emit({ type: "system", subtype: "task_updated", task_id: "task-1",
+      patch: { status: "killed" } });
+    await flush();
+    const tasksFramesBefore = sent.filter((m) => m.type === "agent:background-tasks").length;
+
+    fake.emit({ type: "system", subtype: "task_notification", task_id: "task-1",
+      tool_use_id: "tu1", status: "stopped", output_file: "/tmp/out.txt", summary: "stopped by user" });
+    await flush();
+
+    const last = lastItemFrame(sent, "tool:tu1");
+    expect(last.item.status).toBe("cancelled");
+    expect((last.item.content as any[])[0].data).toBe("stopped by user");
+    // Recovering the summary must not resurrect the task in the advertised list.
+    expect(sent.filter((m) => m.type === "agent:background-tasks")).toHaveLength(tasksFramesBefore);
+    expect(lastTasksFrame(sent).tasks).toHaveLength(0);
+  });
+
+  it("a task_updated message with only patch.description updates the advertised title without settling", async () => {
+    const { sent, fake } = await withBackgroundedBash();
+    fake.emit({ type: "system", subtype: "task_updated", task_id: "task-1",
+      patch: { description: "bun dev (still building)" } });
+    await flush();
+    const frame = lastTasksFrame(sent);
+    expect(frame.tasks).toHaveLength(1);
+    expect(frame.tasks[0].taskId).toBe("task-1");
+    expect(frame.tasks[0].title).toBe("bun dev (still building)");
+    expect(lastItemFrame(sent, "tool:tu1").item.status).toBe("running");
+  });
+
+  it("advertises a non-terminal patch status instead of always reporting running", async () => {
+    const { sent, fake } = await withBackgroundedBash();
+    expect(lastTasksFrame(sent).tasks[0].status).toBe("running");
+    fake.emit({ type: "system", subtype: "task_updated", task_id: "task-1",
+      patch: { status: "paused" } });
+    await flush();
+    const frame = lastTasksFrame(sent);
+    expect(frame.tasks).toHaveLength(1);
+    expect(frame.tasks[0].status).toBe("paused");
+    // A pause is not a settle — the transcript row stays running.
+    expect(lastItemFrame(sent, "tool:tu1").item.status).toBe("running");
+  });
+
+  it("skip_transcript tasks are never advertised", async () => {
+    const { driver, sent, fake } = makeDriver();
+    await driver.start();
+    fake.emit({ type: "system", subtype: "task_started", task_id: "task-x",
+      description: "housekeeping", skip_transcript: true });
+    await flush();
+    expect(sent.filter((m) => m.type === "agent:background-tasks")).toHaveLength(0);
+  });
+
+  it("stopTask delegates to Query.stopTask", async () => {
+    const { driver, fake } = makeDriver();
+    await driver.start();
+    await driver.stopTask("task-9");
+    expect(fake.control.stopTask).toEqual(["task-9"]);
+  });
+
+  it("dispose() best-effort stops live tasks and clears the advertised list", async () => {
+    const { driver, sent, fake } = await withBackgroundedBash();
+    fake.finish();
+    await driver.dispose();
+    expect(fake.control.stopTask).toEqual(["task-1"]);
+    expect(lastTasksFrame(sent).tasks).toHaveLength(0);
+  });
+
+  it("a task_notification arriving after a task_updated-completed settle still attaches its summary", async () => {
+    const { sent, fake } = await withBackgroundedBash();
+    fake.emit({ type: "system", subtype: "task_updated", task_id: "task-1",
+      patch: { status: "completed" } });
+    await flush();
+    // Settled already, with no summary yet — the race this test covers.
+    expect(lastItemFrame(sent, "tool:tu1").item.status).toBe("completed");
+    expect(lastTasksFrame(sent).tasks).toHaveLength(0);
+    const itemFramesBefore = sent.filter((m: any) => (m.type === "agent:item-added" || m.type === "agent:item-updated") && m.itemId === "tool:tu1").length;
+    const tasksFramesBefore = sent.filter((m) => m.type === "agent:background-tasks").length;
+
+    fake.emit({ type: "system", subtype: "task_notification", task_id: "task-1",
+      tool_use_id: "tu1", status: "completed", output_file: "/tmp/out.txt", summary: "exited 0" });
+    await flush();
+
+    const itemFrames = sent.filter((m: any) => (m.type === "agent:item-added" || m.type === "agent:item-updated") && m.itemId === "tool:tu1");
+    expect(itemFrames).toHaveLength(itemFramesBefore + 1);
+    const last = lastItemFrame(sent, "tool:tu1");
+    expect(last.item.status).toBe("completed");
+    expect((last.item.content as any[])[0].data).toBe("exited 0");
+    // Recovering the summary must not resurrect the task in the advertised list.
+    expect(sent.filter((m) => m.type === "agent:background-tasks")).toHaveLength(tasksFramesBefore);
+    expect(lastTasksFrame(sent).tasks).toHaveLength(0);
+  });
+
+  it("a second task_notification for a task already recovered via the late-summary path is a no-op", async () => {
+    const { sent, fake } = await withBackgroundedBash();
+    fake.emit({ type: "system", subtype: "task_updated", task_id: "task-1",
+      patch: { status: "completed" } });
+    fake.emit({ type: "system", subtype: "task_notification", task_id: "task-1",
+      tool_use_id: "tu1", status: "completed", output_file: "/tmp/out.txt", summary: "exited 0" });
+    await flush();
+
+    const itemFramesBefore = sent.filter((m: any) => (m.type === "agent:item-added" || m.type === "agent:item-updated") && m.itemId === "tool:tu1").length;
+    const tasksFramesBefore = sent.filter((m) => m.type === "agent:background-tasks").length;
+
+    fake.emit({ type: "system", subtype: "task_notification", task_id: "task-1",
+      tool_use_id: "tu1", status: "completed", output_file: "/tmp/out.txt", summary: "exited 0 again" });
+    await flush();
+
+    expect(sent.filter((m: any) => (m.type === "agent:item-added" || m.type === "agent:item-updated") && m.itemId === "tool:tu1")).toHaveLength(itemFramesBefore);
+    expect(sent.filter((m) => m.type === "agent:background-tasks")).toHaveLength(tasksFramesBefore);
+    expect((lastItemFrame(sent, "tool:tu1").item.content as any[])[0].data).toBe("exited 0"); // not overwritten by the second summary
+  });
+
+  it("recentlySettled is bounded — a late notification for a task evicted past the cap is a no-op", async () => {
+    const { driver, fake, sent } = makeDriver();
+    await driver.start();
+    await driver.prompt("go");
+    const CAP = 20;
+    for (let i = 0; i <= CAP; i++) {
+      fake.emit({ type: "assistant", uuid: `u${i}`, message: { content: [
+        { type: "tool_use", id: `tu${i}`, name: "Bash", input: { command: "x", run_in_background: true } },
+      ] } });
+      fake.emit({ type: "system", subtype: "task_started", task_id: `task-${i}`,
+        tool_use_id: `tu${i}`, description: "x", task_type: "shell" });
+      fake.emit({ type: "system", subtype: "task_updated", task_id: `task-${i}`,
+        patch: { status: "completed" } });
+    }
+    await flush();
+
+    // task-0 was the first settle stashed — pushed out once the CAP+1'th
+    // (task-20) settle landed, so its late notification recovers nothing.
+    const tu0FramesBefore = sent.filter((m: any) => (m.type === "agent:item-added" || m.type === "agent:item-updated") && m.itemId === "tool:tu0").length;
+    fake.emit({ type: "system", subtype: "task_notification", task_id: "task-0",
+      tool_use_id: "tu0", status: "completed", output_file: "/tmp/out.txt", summary: "late" });
+    await flush();
+    expect(sent.filter((m: any) => (m.type === "agent:item-added" || m.type === "agent:item-updated") && m.itemId === "tool:tu0")).toHaveLength(tu0FramesBefore);
+
+    // The most recently settled task is still within the cap and recoverable.
+    fake.emit({ type: "system", subtype: "task_notification", task_id: `task-${CAP}`,
+      tool_use_id: `tu${CAP}`, status: "completed", output_file: "/tmp/out.txt", summary: "recovered" });
+    await flush();
+    expect((lastItemFrame(sent, `tool:tu${CAP}`).item.content as any[])[0].data).toBe("recovered");
   });
 });

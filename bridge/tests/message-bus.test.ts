@@ -171,6 +171,24 @@ describe("session-scoped replay (agent:capabilities)", () => {
   const caps = (sessionId: string, currentModelId?: string) =>
     createMessage("agent:capabilities", { sessionId, ...(currentModelId ? { currentModelId } : {}) });
 
+  // A shell backgrounded before the app attached is otherwise invisible until
+  // it settles — and an app that never saw it can never offer a stop for it.
+  it("replays the latest background-task list per session", () => {
+    const bus = new MessageBus();
+    const tasks = (sessionId: string, taskId: string) => createMessage("agent:background-tasks", {
+      sessionId,
+      tasks: [{ taskId, kind: "shell", title: "bun dev", status: "running" }],
+    });
+    bus.publish(tasks("s1", "task-1"), "control");
+    bus.publish(tasks("s2", "task-9"), "control");
+    bus.publish(tasks("s1", "task-2"), "control");
+    const frames = bus.getSnapshot(["agent:background-tasks"]) as any[];
+    expect(frames).toHaveLength(2);
+    expect(frames.find((f) => f.sessionId === "s1")?.tasks[0].taskId).toBe("task-2");
+    bus.dropSessionReplay("s1");
+    expect(bus.getSnapshot(["agent:background-tasks"])).toHaveLength(1);
+  });
+
   it("caches one frame per session, latest wins within a session", () => {
     const bus = new MessageBus();
     bus.publish(caps("s1", "m1"), "control");

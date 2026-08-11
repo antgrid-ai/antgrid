@@ -1015,4 +1015,65 @@ void main() {
       expect(cancels.single['turnId'], 't1');
     },
   );
+
+  test('reduces agent:background-tasks latest-wins', () async {
+    final t = FakeAgentTransport();
+    final session = await newSession(t);
+    final svc = AgentSessionService.fromSession(session);
+
+    t.emit('agent:background-tasks', {
+      'sessionId': 'p',
+      'tasks': [
+        {
+          'taskId': 'task-1',
+          'kind': 'shell',
+          'title': 'bun dev',
+          'status': 'running',
+        },
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.stateFor('p').backgroundTasks?.tasks, hasLength(1));
+    expect(svc.stateFor('p').backgroundTasks?.tasks.single.taskId, 'task-1');
+
+    // The settle frame replaces the whole list.
+    t.emit('agent:background-tasks', {'sessionId': 'p', 'tasks': const []});
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.stateFor('p').backgroundTasks?.tasks, isEmpty);
+  });
+
+  test('stopTask sends agent:task-stop', () async {
+    final t = FakeAgentTransport();
+    final session = await newSession(t);
+    final svc = AgentSessionService.fromSession(session);
+
+    svc.stopTask('p', 'task-1');
+
+    final sent = t.sent.last;
+    expect(sent['type'], 'agent:task-stop');
+    expect(sent['sessionId'], 'p');
+    expect(sent['taskId'], 'task-1');
+  });
+
+  test('background tasks survive a session reset', () async {
+    final t = FakeAgentTransport();
+    final session = await newSession(t);
+    final svc = AgentSessionService.fromSession(session);
+
+    t.emit('agent:background-tasks', {
+      'sessionId': 'p',
+      'tasks': [
+        {
+          'taskId': 'task-1',
+          'kind': 'shell',
+          'title': 'bun dev',
+          'status': 'running',
+        },
+      ],
+    });
+    t.emit('agent:session-reset', {'sessionId': 'p'});
+    await Future<void>.delayed(Duration.zero);
+    // A rollback does not kill background processes — the list carries over.
+    expect(svc.stateFor('p').backgroundTasks?.tasks, hasLength(1));
+  });
 }

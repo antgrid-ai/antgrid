@@ -34,6 +34,7 @@ Future<void> _pump(
   WidgetTester tester, {
   required AgentItem item,
   bool expanded = false,
+  bool isBackground = false,
   VoidCallback? onToggle,
 }) {
   return tester.pumpWidget(
@@ -47,6 +48,7 @@ Future<void> _pump(
                 data: ToolCallRowData(item),
                 rowIndex: 0,
                 expanded: expanded,
+                isBackground: isBackground,
                 onToggle: onToggle ?? () {},
               ),
             ),
@@ -58,6 +60,31 @@ Future<void> _pump(
 }
 
 void main() {
+  group('bg badge', () {
+    testWidgets('shows for an advertised background task', (tester) async {
+      await _pump(
+        tester,
+        item: _item(status: 'running', title: 'bun dev'),
+        isBackground: true,
+      );
+      expect(find.text('bg'), findsOneWidget);
+    });
+
+    // The regression this guards: codex stamps a processId (the OS pid) on
+    // EVERY unified-exec command, so a foreground `ls` used to flash "bg" for
+    // its whole run. Background-ness comes from the advertised task list only.
+    testWidgets('stays hidden for a running foreground command', (
+      tester,
+    ) async {
+      await _pump(
+        tester,
+        item: _item(status: 'running', title: 'ls'),
+        isBackground: false,
+      );
+      expect(find.text('bg'), findsNothing);
+    });
+  });
+
   group('header status glyph', () {
     testWidgets('running shows AbLoadingDot spinner', (tester) async {
       await _pump(
@@ -145,6 +172,7 @@ void main() {
                         data: ToolCallRowData(item),
                         rowIndex: 0,
                         expanded: expanded,
+                        isBackground: false,
                         onToggle: () => setState(() => expanded = true),
                       ),
                     ),

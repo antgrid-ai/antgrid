@@ -658,6 +658,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         handlerEngine.onTurnCancelled(msg.sessionId);
         void structured?.handleAgentMessage(msg);
         return;
+      // Pure routing, deliberately: stopping ONE background task neither answers
+      // a prompt (no onUserReply — pending escalations stand) nor ends the turn
+      // the task was spawned from (no onTurnCancelled — the agent keeps working).
+      case "agent:task-stop":
       case "agent:set-config":
       case "agent:session-action":
         void structured?.handleAgentMessage(msg);

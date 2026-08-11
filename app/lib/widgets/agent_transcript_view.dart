@@ -36,6 +36,7 @@ import '../services/attach_hydration.dart';
 import '../services/upload_service.dart';
 import '../util/ab_log.dart';
 import '../utils/platform_utils.dart';
+import 'transcript/background_tasks_strip.dart';
 import 'transcript/composer/composer_attachments.dart';
 import 'transcript/composer/composer_controller.dart';
 import 'transcript/composer/rich_composer.dart';
@@ -548,6 +549,11 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
         _cachedVersion = _ephemeralVersion;
       }
       final rows = _cachedRows!;
+      final backgroundItemIds = <String>{
+        for (final t
+            in state.backgroundTasks?.tasks ?? const <AgentBackgroundTask>[])
+          if (t.itemId != null) t.itemId!,
+      };
 
       // Stick-to-bottom: jump after the frame that laid out any new rows, but
       // only while the user hasn't scrolled away to read earlier history. Only
@@ -661,7 +667,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
                             final row = rows[i];
                             return KeyedSubtree(
                               key: ValueKey(row.rowKey),
-                              child: _buildRow(row, i),
+                              child: _buildRow(row, i, backgroundItemIds),
                             );
                           },
                         ),
@@ -786,6 +792,11 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Expanded(child: body),
+            BackgroundTasksStrip(
+              tasks: effectiveState.backgroundTasks?.tasks ?? const [],
+              onStop: (task) =>
+                  _service()?.stopTask(widget.sessionId, task.taskId),
+            ),
             if (showUpdateBanner)
               _UpdateBanner(
                 updating: effectiveState.updating,
@@ -1023,7 +1034,11 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
     );
   }
 
-  Widget _buildRow(TranscriptRow row, int rowIndex) => switch (row) {
+  Widget _buildRow(
+    TranscriptRow row,
+    int rowIndex,
+    Set<String> backgroundItemIds,
+  ) => switch (row) {
     MessageRowData r => MessageRow(
       data: r,
       rowIndex: rowIndex,
@@ -1049,6 +1064,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
       data: r,
       rowIndex: rowIndex,
       expanded: _expandedItemIds.contains(r.item.itemId),
+      isBackground: backgroundItemIds.contains(r.item.itemId),
       onToggle: () => _toggleWithScrollStability(
         () => _toggle(_expandedItemIds, r.item.itemId),
       ),

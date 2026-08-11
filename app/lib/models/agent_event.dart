@@ -420,6 +420,36 @@ class AgentUsageEvent {
   });
 }
 
+/// One live background task (backgrounded shell, subagent, monitor). Mirrors
+/// the bridge AgentBackgroundTaskSchema; [taskId] is the driver-native handle
+/// agent:task-stop takes, never an OS pid.
+class AgentBackgroundTask {
+  final String taskId;
+  final String kind; // shell | subagent | monitor | workflow
+  final String title;
+  final String status;
+  final String? itemId;
+  final DateTime? startedAt;
+  final bool killable;
+  const AgentBackgroundTask({
+    required this.taskId,
+    required this.kind,
+    required this.title,
+    required this.status,
+    this.itemId,
+    this.startedAt,
+    this.killable = true,
+  });
+}
+
+/// Latest-wins full list of a session's live background tasks. A finished
+/// task simply drops out of the next frame.
+class AgentBackgroundTasks {
+  final String sessionId;
+  final List<AgentBackgroundTask> tasks;
+  const AgentBackgroundTasks({required this.sessionId, this.tasks = const []});
+}
+
 class AgentCapabilityCommand {
   final String id;
   final String name;
@@ -655,6 +685,26 @@ Object? parseAgentEvent(Map<String, dynamic> json) {
               ? null
               : AgentTokenUsage.fromJson(json['last']),
           contextWindow: (json['contextWindow'] as num?)?.toInt(),
+        ),
+      );
+    case 'agent:background-tasks':
+      return AgentBackgroundTasks(
+        sessionId: json['sessionId'] as String? ?? '',
+        tasks: _mapList(
+          json['tasks'],
+          (t) => AgentBackgroundTask(
+            taskId: t['taskId'] as String? ?? '',
+            kind: t['kind'] as String? ?? 'shell',
+            title: t['title'] as String? ?? '',
+            status: t['status'] as String? ?? 'running',
+            itemId: t['itemId'] as String?,
+            startedAt: t['startedAt'] is num
+                ? DateTime.fromMillisecondsSinceEpoch(
+                    (t['startedAt'] as num).toInt(),
+                  )
+                : null,
+            killable: t['killable'] as bool? ?? true,
+          ),
         ),
       );
     case 'agent:request-retracted':

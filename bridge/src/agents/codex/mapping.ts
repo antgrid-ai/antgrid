@@ -75,6 +75,11 @@ export function mapThreadItem(raw: any): AgentItem | null {
       return reasoning({ itemId, text });
     }
     case "commandExecution":
+      // raw.processId (the OS pid) is deliberately NOT surfaced on the item:
+      // under unified exec codex assigns one to every command, foreground
+      // included, so it says nothing about background-ness. The backend keys
+      // its background registry off it only once a turn ends with the process
+      // still alive (see chat-backend's liveExecs/backgroundLive).
       return toolCall({
         itemId, toolKind: "shell",
         status: mapToolStatus(raw.status), title: String(raw.command ?? "shell"),

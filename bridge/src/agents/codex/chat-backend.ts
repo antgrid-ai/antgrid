@@ -88,6 +88,20 @@ export class CodexDriver extends ChatSession {
   private reasoningChannel = new Map<string, "content" | "summary">();
   private reasoningSummaryIndex = new Map<string, number>();
 
+  // ── Background terminals ──────────────────────────────────────────────────
+  // Live commandExecution items by itemId. Entries outlive turn end (codex
+  // defers item/completed to real process exit); removed on item/completed.
+  private liveExecs = new Map<string, { processId: string; title: string; startedAt: number }>();
+  // processIds promoted at a turn boundary while still running — the set
+  // advertised as agent:background-tasks. Foreground commands that finish
+  // within their turn never enter it, matching claude's semantics.
+  private backgroundLive = new Set<string>();
+  // itemIds whose process WE terminated. codex reports a process it killed as
+  // status "failed" exitCode -1 — identical on the wire to a genuine crash — so
+  // without remembering the intent here every user stop renders as a red error.
+  // Keyed by itemId, not processId: an OS pid can be reused, a codex itemId can't.
+  private stoppedExecs = new Set<string>();
+
   private readonly diagnoseStartFailure?: () => Promise<string | null>;
 
   constructor(opts: CodexDriverOpts) {
@@ -296,6 +310,43 @@ export class CodexDriver extends ChatSession {
     await this.ep.request("turn/interrupt", { threadId: this.threadId, turnId });
   }
 
+  private publishBackgroundTasks(): void {
+    this.emitBackgroundTasks(
+      [...this.liveExecs.entries()]
+        .filter(([, e]) => this.backgroundLive.has(e.processId))
+        .map(([itemId, e]) => ({
+          taskId: e.processId, kind: "shell", title: e.title, status: "running",
+          itemId, startedAt: e.startedAt,
+        })),
+    );
+  }
+
+  async stopTask(taskId: string): Promise<void> {
+    // codex emits the deferred ExecCommandEnd (→ item/completed) once the
+    // process actually dies; that path removes the entry and re-emits the list.
+    const itemId = [...this.liveExecs].find(([, e]) => e.processId === taskId)?.[0];
+    if (itemId) this.stoppedExecs.add(itemId);
+    try {
+      await this.ep.request("thread/backgroundTerminals/terminate", {
+        threadId: this.threadId,
+        processId: taskId,
+      });
+    } catch (e) {
+      if (itemId) this.stoppedExecs.delete(itemId); // nothing was killed; a later failure is genuine
+      throw e;
+    }
+  }
+
+  // codex is gone — advertised terminals with it. Clears without emitting when
+  // nothing was advertised (a dispose of an idle session stays frame-silent).
+  private clearBackgroundTasks(): void {
+    const hadAdvertised = this.backgroundLive.size > 0;
+    this.backgroundLive.clear();
+    this.liveExecs.clear();
+    this.stoppedExecs.clear();
+    if (hadAdvertised) this.publishBackgroundTasks();
+  }
+
   async compact(): Promise<void> {
     await this.ep.request("thread/compact/start", { threadId: this.threadId });
   }
@@ -317,6 +368,7 @@ export class CodexDriver extends ChatSession {
   // Widened to `void | Promise<void>` because agent-core wraps dispose() to also
   // await the codex process's exit (see the factory in agent-core.ts).
   protected disposeBackend(): void | Promise<void> {
+    this.clearBackgroundTasks();
     this.ep.dispose();
   }
 
@@ -336,6 +388,9 @@ export class CodexDriver extends ChatSession {
     // idle. Runs only on an UNEXPECTED close — dispose() suppresses the
     // endpoint's onClose (see jsonrpc-stdio.ts).
     this.ep.onClose(() => {
+      // Unconditional, ahead of the idle bail: codex dying takes its background
+      // terminals with it whether or not a turn was open to end.
+      this.clearBackgroundTasks();
       if (!this.activeTurnId) return;
       this.closeTurn({
         stopReason: "error",
@@ -359,12 +414,31 @@ export class CodexDriver extends ChatSession {
         ? mapCodexError(turn.error.codexErrorInfo ?? turn.error, turn.error.message ?? "turn failed")
         : undefined;
       this.closeTurn({ stopReason, turnId, ...(error ? { error } : {}) });
+      // codex defers a commandExecution's item/completed to REAL process exit,
+      // so anything still open at turn close is by definition running in the
+      // background. Promote it into the advertised list.
+      let promoted = false;
+      for (const e of this.liveExecs.values()) {
+        if (!this.backgroundLive.has(e.processId)) {
+          this.backgroundLive.add(e.processId);
+          promoted = true;
+        }
+      }
+      if (promoted) this.publishBackgroundTasks();
     });
 
     this.ep.onNotification("item/started", (p) => {
       if (p?.item?.type === "fileChange") {
         const changes: any[] = Array.isArray(p.item.changes) ? p.item.changes : [];
         this.fileChangePaths.set(String(p.item.id ?? ""), changes.map((c) => String(c?.path ?? "")));
+      }
+      if (p?.item?.type === "commandExecution"
+        && typeof p.item.processId === "string" && p.item.processId.length > 0) {
+        this.liveExecs.set(String(p.item.id ?? ""), {
+          processId: p.item.processId,
+          title: String(p.item.command ?? "shell"),
+          startedAt: Date.now(),
+        });
       }
       if (p?.item?.type === "plan") return this.handleTextPlan(p);
       const item = mapThreadItem(p?.item);
@@ -378,9 +452,18 @@ export class CodexDriver extends ChatSession {
 
     this.ep.onNotification("item/completed", (p) => {
       if (p?.item?.type === "fileChange") this.fileChangePaths.delete(String(p.item.id ?? ""));
+      let stopped = false;
+      if (p?.item?.type === "commandExecution") {
+        const key = String(p.item.id ?? "");
+        const entry = this.liveExecs.get(key);
+        this.liveExecs.delete(key);
+        if (entry && this.backgroundLive.delete(entry.processId)) this.publishBackgroundTasks();
+        stopped = this.stoppedExecs.delete(key);
+      }
       if (p?.item?.type === "plan") return this.handleTextPlan(p);
       const item = mapThreadItem(p?.item);
       if (!item) return;
+      if (stopped) item.status = "cancelled"; // we killed it — codex's "failed" is our stop
       this.emitItem(item.itemId, item as unknown as Record<string, unknown>, {
         turnId: p?.turnId ?? this.activeTurnId ?? "",
         added: false,

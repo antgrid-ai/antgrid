@@ -85,6 +85,7 @@ const Set<String> _statusTypes = <String>{
   'agent:request-retracted',
   'agent:error',
   'agent:usage',
+  'agent:background-tasks',
   ...kConfigValidityTypes,
   'config:write-result',
   'config:detect-tools-result',

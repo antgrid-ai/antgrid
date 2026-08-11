@@ -1359,6 +1359,7 @@ Object? parseAbMessage(Map<String, dynamic> json) {
     case 'agent:request-retracted':
     case 'agent:error':
     case 'agent:usage':
+    case 'agent:background-tasks':
     case 'agent:capabilities':
     case 'agent:updateAvailable':
     case 'agent:updateResult':

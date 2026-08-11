@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { buildChatSpawnAugment } from "../src/agent-core";
-import { codexNotifyOnlyArgs } from "../src/agents/codex/driver";
+import { codexNotifyOnlyArgs, codexUnifiedExecArgs } from "../src/agents/codex/driver";
 
 describe("codex chat-mode augment", () => {
   it("slices out only the notify=[...] -c pair", () => {
@@ -21,5 +21,9 @@ describe("codex chat-mode augment", () => {
 
   it("stamps the slot id into the correlation env", () => {
     expect(buildChatSpawnAugment("codex", "slot-7", 8790).env.ANTGRID_TERMINAL_ID).toBe("slot-7");
+  });
+
+  it("forces unified exec on (codex defaults it OFF on Windows; background terminals need it)", () => {
+    expect(codexUnifiedExecArgs()).toEqual(["-c", "experimental_use_unified_exec_tool=true"]);
   });
 });

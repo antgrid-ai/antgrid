@@ -11,7 +11,7 @@
 // state (the live turn id, the current selection, the disposed flag) that a
 // message-passing seam would have to re-expose accessor by accessor.
 
-import { createMessage, createTranscriptReplay, type AbMessage, type AgentError, type AgentItem } from "../protocol";
+import { createMessage, createTranscriptReplay, type AbMessage, type AgentBackgroundTask, type AgentError, type AgentItem } from "../protocol";
 import { resolveConfigPick, type ConfigPick } from "./set-config";
 import type { AgentUsageBreakdown } from "./normalize";
 import type { StructuredDriver } from "./structured-manager";
@@ -398,6 +398,16 @@ export abstract class ChatSession implements StructuredDriver {
     }));
   }
 
+  /** Last full item emitted under `itemId`, or undefined once the turn that
+   *  owned it ended (endTurn clears the cache) or for a backend that does not
+   *  `mergeItems`. Read-only on purpose: a backend that needs an item to
+   *  outlive its turn must copy it out, not mutate the merge cache. Exists for
+   *  work whose settle lands in a LATER turn than the item it completes —
+   *  claude's background tasks, the one case the per-turn clear cannot serve. */
+  protected cachedItem(itemId: string): Record<string, unknown> | undefined {
+    return this.itemCache.get(itemId);
+  }
+
   protected emitDelta(itemId: string, textChunk: string, turnId: string): void {
     this.send(createMessage("agent:item-delta", {
       sessionId: this.sessionId,
@@ -437,6 +447,15 @@ export abstract class ChatSession implements StructuredDriver {
 
   protected emitError(error: AgentError): void {
     this.send(createMessage("agent:error", { sessionId: this.sessionId, error }));
+  }
+
+  /** The session's whole background-task inventory. Latest-wins full-list
+   *  semantics like agent:capabilities — each frame REPLACES the app's list, so
+   *  a settled task drops out by being absent rather than by a delete frame.
+   *  Session-scoped, not turn-scoped: a backgrounded shell outlives the turn
+   *  that spawned it, which is why this takes no turnId. */
+  protected emitBackgroundTasks(tasks: AgentBackgroundTask[]): void {
+    this.send(createMessage("agent:background-tasks", { sessionId: this.sessionId, tasks }));
   }
 
   protected emitSessionReset(): void {

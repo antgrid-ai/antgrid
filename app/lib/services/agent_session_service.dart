@@ -50,6 +50,10 @@ class AgentSessionState {
   final Map<String, AgentTokenUsage> usageByTurn;
   final AgentCapabilities? capabilities;
 
+  /// Live background tasks (latest-wins full list from agent:background-tasks),
+  /// or null before the first frame. An empty-list frame means "none running".
+  final AgentBackgroundTasks? backgroundTasks;
+
   /// Proactive "a newer CLI exists" notice for this session's tool, or null.
   /// Advisory — rendered as a dismissible chip.
   final AgentUpdateAvailable? updateAvailable;
@@ -80,6 +84,7 @@ class AgentSessionState {
     this.usageByItem = const {},
     this.usageByTurn = const {},
     this.capabilities,
+    this.backgroundTasks,
     this.updateAvailable,
     this.updating = false,
     this.updateResult,
@@ -95,6 +100,7 @@ class AgentSessionState {
     Map<String, AgentTokenUsage>? usageByItem,
     Map<String, AgentTokenUsage>? usageByTurn,
     AgentCapabilities? capabilities,
+    AgentBackgroundTasks? backgroundTasks,
     AgentUpdateAvailable? updateAvailable,
     bool clearUpdateAvailable = false,
     bool? updating,
@@ -110,6 +116,7 @@ class AgentSessionState {
     usageByItem: usageByItem ?? this.usageByItem,
     usageByTurn: usageByTurn ?? this.usageByTurn,
     capabilities: capabilities ?? this.capabilities,
+    backgroundTasks: backgroundTasks ?? this.backgroundTasks,
     updateAvailable: clearUpdateAvailable
         ? null
         : (updateAvailable ?? this.updateAvailable),
@@ -355,6 +362,11 @@ class AgentSessionService {
         parsed.sessionId,
         stateFor(parsed.sessionId).copyWith(capabilities: parsed),
       );
+    } else if (parsed is AgentBackgroundTasks) {
+      _setState(
+        parsed.sessionId,
+        stateFor(parsed.sessionId).copyWith(backgroundTasks: parsed),
+      );
     } else if (parsed is AgentUpdateAvailable) {
       final sid = parsed.sessionId;
       if (sid != null) {
@@ -505,6 +517,9 @@ class AgentSessionService {
       sessionId,
       AgentSessionState(
         capabilities: prev.capabilities,
+        // A codex rollback/session reset does not kill the actual background OS
+        // processes, so the task list carries over.
+        backgroundTasks: prev.backgroundTasks,
         // Tool-level, not turn-level — survives a session reset. An update's own
         // restart can trip a reset mid-flight, so its progress/result carry over
         // too (else the spinner would vanish before the result lands).
@@ -610,6 +625,19 @@ class AgentSessionService {
       createAbMessage('agent:cancel', {
         'sessionId': sessionId,
         'turnId': ?stateFor(sessionId).openTurn?.turnId,
+      }),
+    );
+  }
+
+  /// Stop one background task. The bridge routes this to the driver's native
+  /// kill (claude Query.stopTask / codex backgroundTerminals/terminate); the
+  /// refreshed agent:background-tasks frame is the confirmation — no
+  /// optimistic local removal.
+  void stopTask(String sessionId, String taskId) {
+    session.send(
+      createAbMessage('agent:task-stop', {
+        'sessionId': sessionId,
+        'taskId': taskId,
       }),
     );
   }
