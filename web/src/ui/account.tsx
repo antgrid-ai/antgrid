@@ -3,6 +3,13 @@ import { Layout } from "./layout.js";
 export type AccountPageProps = {
   user: { email?: string | null };
   blockedBySubscription: boolean;
+  /** False for an account created by magic link or GitHub/Google that has
+   *  never had a password — the card offers "set" instead of "change". */
+  hasPassword: boolean;
+  minPasswordLength: number;
+  maxPasswordLength: number;
+  passwordNotice?: string | null;
+  passwordError?: string | null;
 };
 
 export function AccountPage(props: AccountPageProps) {
@@ -14,7 +21,9 @@ export function AccountPage(props: AccountPageProps) {
           Signed in as <span class="font-mono">{props.user.email}</span>.
         </p>
 
-        <div class="card bg-base-100 border border-error/40">
+        <PasswordCard {...props} />
+
+        <div class="card bg-base-100 border border-error/40 mt-6">
           <div class="card-body">
             <h2 class="card-title font-mono text-error">Delete account</h2>
             <p class="text-sm text-base-content/70">
@@ -67,6 +76,118 @@ export function AccountPage(props: AccountPageProps) {
         }}
       />
     </Layout>
+  );
+}
+
+function PasswordCard(props: AccountPageProps) {
+  const {
+    hasPassword,
+    minPasswordLength,
+    maxPasswordLength,
+    passwordNotice,
+    passwordError,
+  } = props;
+  return (
+    <div class="card bg-base-100 border border-base-300">
+      <div class="card-body">
+        <h2 class="card-title font-mono">
+          {hasPassword ? "Change password" : "Set a password"}
+        </h2>
+        <p class="text-sm text-base-content/70">
+          {hasPassword
+            ? "Your account can sign in with a password. Changing it signs you out of your other browser sessions."
+            : "Your account signs in with a magic link or GitHub/Google. Adding a password gives you a second way in — the existing ones keep working. Saving signs you out of your other browser sessions."}
+        </p>
+
+        {passwordNotice && (
+          <div class="alert alert-success font-mono text-sm mt-2" role="status">
+            <span>{passwordNotice}</span>
+          </div>
+        )}
+        {passwordError && (
+          <div class="alert alert-error font-mono text-sm mt-2" role="alert">
+            <span>{passwordError}</span>
+          </div>
+        )}
+
+        <form
+          method="post"
+          action="/ui/account/password"
+          class="mt-4 space-y-3"
+          onsubmit="this.querySelector('button[type=submit]').disabled=true;this.querySelector('button[type=submit]').textContent='Saving…';"
+        >
+          {/* Password managers key a change on an accompanying username field
+              and will not update an existing entry without one — they'd save a
+              second, blank-username credential and keep autofilling the old
+              password at /login. Hidden and unsubmittable; the server takes the
+              user from the session. */}
+          <input
+            type="email"
+            name="username"
+            value={props.user.email ?? ""}
+            autocomplete="username"
+            readonly
+            hidden
+            aria-hidden="true"
+            tabindex={-1}
+          />
+          {/* `label for=` rather than `legend`: a legend names the fieldset, not
+              the control, so all three announce as a bare "password, edit".
+              Matches the delete form below. */}
+          {hasPassword && (
+            <fieldset class="fieldset">
+              <label class="fieldset-legend font-mono" for="account-current-password">
+                Current password
+              </label>
+              <input
+                type="password"
+                id="account-current-password"
+                name="currentPassword"
+                required
+                autocomplete="current-password"
+                class="input input-bordered font-mono w-full"
+              />
+            </fieldset>
+          )}
+          <fieldset class="fieldset">
+            <label class="fieldset-legend font-mono" for="account-new-password">
+              {hasPassword ? "New password" : "Password"}
+            </label>
+            <input
+              type="password"
+              id="account-new-password"
+              name="password"
+              required
+              minlength={minPasswordLength}
+              maxlength={maxPasswordLength}
+              autocomplete="new-password"
+              class="input input-bordered font-mono w-full"
+            />
+            <p class="label text-xs">
+              Between {minPasswordLength} and {maxPasswordLength} characters.
+            </p>
+          </fieldset>
+          <fieldset class="fieldset">
+            <label class="fieldset-legend font-mono" for="account-confirm-password">
+              Confirm password
+            </label>
+            <input
+              type="password"
+              id="account-confirm-password"
+              name="confirmPassword"
+              required
+              minlength={minPasswordLength}
+              maxlength={maxPasswordLength}
+              autocomplete="new-password"
+              class="input input-bordered font-mono w-full"
+            />
+          </fieldset>
+          <button type="submit" class="btn btn-primary font-mono">
+            {hasPassword ? "Change password" : "Set password"}
+          </button>
+        </form>
+      </div>
+    </div>
   );
 }
 

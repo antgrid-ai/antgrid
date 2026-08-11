@@ -143,4 +143,156 @@ void main() {
 
     expect(find.text("Sign-in didn't complete. Try again."), findsOneWidget);
   });
+
+  group('password', () {
+    /// Drives the screen to the password form and fills both fields. Returns
+    /// the paths every request hit, so a test can assert what the screen asked
+    /// the server for as well as what it rendered.
+    Future<List<String>> openPasswordForm(
+      WidgetTester tester, {
+      required Future<http.Response> Function(http.Request) respond,
+      String email = 'user@example.com',
+      String password = 'a-very-long-password',
+      String mode = 'Sign in with a password',
+    }) async {
+      final paths = <String>[];
+      final storage = _GatedStorage(null)..gate.complete();
+      await tester.pumpWidget(
+        _wrapService(
+          AuthService(
+            licenseApiUrl: 'https://lic.test',
+            storage: storage,
+            httpClient: MockClient((req) async {
+              paths.add(req.url.path);
+              return respond(req);
+            }),
+            launchUrl: (_) async => false,
+          ),
+        ),
+      );
+      await tester.tap(find.text(mode));
+      await tester.pump();
+      await tester.enterText(find.byType(TextField).first, email);
+      await tester.enterText(find.byType(TextField).last, password);
+      await tester.pump();
+      return paths;
+    }
+
+    testWidgets(
+      'the password form is reached from a link, not shown by default',
+      (tester) async {
+        final storage = _GatedStorage(null)..gate.complete();
+        await tester.pumpWidget(_wrap(storage));
+
+        expect(find.byType(TextField), findsOneWidget);
+        expect(find.text('Send magic link'), findsOneWidget);
+
+        await tester.tap(find.text('Sign in with a password'));
+        await tester.pump();
+
+        expect(find.byType(TextField), findsNWidgets(2));
+        expect(find.text('Sign in'), findsOneWidget);
+        expect(
+          find.text('Send magic link'),
+          findsNothing,
+          reason: 'the two forms are alternatives, not stacked',
+        );
+      },
+    );
+
+    testWidgets('an unverified sign-in asks for verification and resends', (
+      tester,
+    ) async {
+      final paths = await openPasswordForm(
+        tester,
+        respond: (req) async =>
+            http.Response(jsonEncode({'code': 'EMAIL_NOT_VERIFIED'}), 403),
+      );
+
+      await tester.tap(find.text('Sign in'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Check your email'), findsOneWidget);
+      expect(find.textContaining('user@example.com'), findsOneWidget);
+      // sendOnSignIn is off server-side, so the screen has to ask for the mail
+      // itself or the user waits on something that was never sent.
+      expect(paths, contains('/api/auth/send-verification-email'));
+    });
+
+    testWidgets(
+      'a rejected credential shows one message and stays on the form',
+      (tester) async {
+        await openPasswordForm(
+          tester,
+          respond: (req) async => http.Response(
+            jsonEncode({'code': 'INVALID_EMAIL_OR_PASSWORD'}),
+            401,
+          ),
+        );
+
+        await tester.tap(find.text('Sign in'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Invalid email or password'), findsOneWidget);
+        expect(find.byType(TextField), findsNWidgets(2));
+      },
+    );
+
+    testWidgets('sign-up lands on check-email without claiming the address was '
+        'free', (tester) async {
+      await openPasswordForm(
+        tester,
+        mode: 'Sign in with a password',
+        respond: (req) async => http.Response(jsonEncode({'user': {}}), 200),
+      );
+      await tester.tap(find.text('Create an account'));
+      await tester.pump();
+      await tester.tap(find.text('Create account'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Check your email'), findsOneWidget);
+      expect(
+        find.textContaining('Already had an account'),
+        findsOneWidget,
+        reason: 'sign-up answers a taken address with a synthetic success',
+      );
+    });
+
+    testWidgets('a short password is refused before any request', (
+      tester,
+    ) async {
+      final paths = await openPasswordForm(
+        tester,
+        mode: 'Sign in with a password',
+        password: 'short',
+        respond: (req) async => http.Response('{}', 200),
+      );
+      await tester.tap(find.text('Create an account'));
+      await tester.pump();
+      await tester.tap(find.text('Create account'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('at least'), findsOneWidget);
+      expect(paths, isEmpty);
+    });
+
+    testWidgets('forgot-password answers identically for any address', (
+      tester,
+    ) async {
+      final paths = await openPasswordForm(
+        tester,
+        respond: (req) async =>
+            http.Response(jsonEncode({'status': true}), 200),
+      );
+
+      await tester.tap(find.text('Forgot your password?'));
+      await tester.pumpAndSettle();
+
+      expect(paths, contains('/api/auth/request-password-reset'));
+      expect(
+        find.textContaining('If that address has an Antgrid account'),
+        findsOneWidget,
+      );
+    });
+  });
 }

@@ -9,6 +9,7 @@ import '../design/ab_tokens.dart';
 import '../design/widgets/ab_focus_ring.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_loading.dart';
+import '../design/widgets/ab_password_field.dart';
 import '../design/widgets/ab_text_field.dart';
 import '../project/limits.dart';
 import '../analytics/events.dart';
@@ -30,7 +31,8 @@ import '../services/auth_service.dart';
 /// Magic-link is the primary method: the email form drives the web
 /// cross-device flow ([AuthService.startMagicLink] / [AuthService.pollStatus])
 /// entirely over HTTPS — no browser, no deeplink. GitHub/Google remain as
-/// secondary options on the existing browser+deeplink path.
+/// secondary options on the existing browser+deeplink path. Email + password is
+/// secondary too, reached from a link under the form.
 class SignInScreen extends ConsumerStatefulWidget {
   const SignInScreen({super.key});
 
@@ -38,7 +40,25 @@ class SignInScreen extends ConsumerStatefulWidget {
   ConsumerState<SignInScreen> createState() => _SignInScreenState();
 }
 
-enum _Phase { form, submitting, pending, expired, bounced }
+/// What the screen is DOING. Kept separate from [_FormMode], which is what the
+/// form is asking for: [pending]/[expired]/[bounced] belong to the magic link
+/// alone and [verifyEmail]/[resetSent] to the password paths, and folding the
+/// two axes into one enum would put the magic link's restore-and-poll
+/// invariants (see [_SignInScreenState._restorePendingSignIn]) on states that
+/// have nothing to do with it.
+enum _Phase {
+  form,
+  submitting,
+  pending,
+  expired,
+  bounced,
+  verifyEmail,
+  resetSent,
+}
+
+/// What the form is ASKING FOR. Magic link is the default and stays the primary
+/// method; password is reached deliberately, mirroring the web's disclosure.
+enum _FormMode { magicLink, password, signUp }
 
 class _SignInScreenState extends ConsumerState<SignInScreen> {
   static const _pollInterval = Duration(seconds: 3);
@@ -47,8 +67,14 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   static const _maxPollTicks = 220;
 
   final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
   _Phase _phase = _Phase.form;
+  _FormMode _mode = _FormMode.magicLink;
   String? _error;
+
+  /// Non-error status line (a resend landed, a reset went out). Separate from
+  /// [_error] so a success message can never be styled as a failure.
+  String? _notice;
   MagicLinkSession? _session;
   Timer? _pollTimer;
   bool _polling = false;
@@ -74,6 +100,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     _pollTimer?.cancel();
     _oauthFailureSub?.cancel();
     _emailController.dispose();
+    _passwordController.dispose();
     super.dispose();
   }
 
@@ -110,13 +137,16 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         .restorePendingMagicLink();
     if (!mounted || session == null) return;
     // Whatever the user has already done by hand wins: a link they started
-    // (_session set, or _phase moved off the form) or an address they are
-    // part-way through typing. A cold-start keychain read can easily outlast
-    // the first keystrokes, and clobbering them would swap the field back to a
-    // stale address and strand the user on a pending screen they never asked
-    // for.
+    // (_session set, or _phase moved off the form), an address they are
+    // part-way through typing, or a switch to one of the password modes — the
+    // restored ticket is a MAGIC-LINK sign-in, so resuming it would yank
+    // someone out of the form they deliberately opened. A cold-start keychain
+    // read can easily outlast the first keystrokes, and clobbering them would
+    // swap the field back to a stale address and strand the user on a pending
+    // screen they never asked for.
     if (_session != null ||
         _phase != _Phase.form ||
+        _mode != _FormMode.magicLink ||
         _emailController.text.isNotEmpty) {
       return;
     }
@@ -166,6 +196,141 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         _phase = _Phase.form;
         _error = e.message;
       });
+    }
+  }
+
+  void _setMode(_FormMode mode) {
+    setState(() {
+      _mode = mode;
+      _phase = _Phase.form;
+      _error = null;
+      _notice = null;
+    });
+  }
+
+  /// Everything the two password submissions share: validate the address, park
+  /// the UI on [_Phase.submitting], run [body], and route an [AuthException]
+  /// back to the form. [body] owns the success side, because the two have
+  /// nothing in common there — one lands in the app, the other in a mailbox.
+  Future<void> _submitPassword(Future<void> Function(String email) body) async {
+    final email = _emailController.text.trim();
+    if (!_looksLikeEmail(email)) {
+      setState(() => _error = 'Enter a valid email');
+      return;
+    }
+    setState(() {
+      _phase = _Phase.submitting;
+      _error = null;
+      _notice = null;
+    });
+    try {
+      await body(email);
+    } on AuthException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _phase = _Phase.form;
+        _error = e.message;
+      });
+    }
+  }
+
+  Future<void> _signInWithPassword() => _submitPassword((email) async {
+    final password = _passwordController.text;
+    if (password.isEmpty) {
+      // Not a length check: the minimum applies to passwords being CHOSEN, and
+      // restating it here would tell an attacker the policy while blocking
+      // nothing the server won't reject anyway.
+      setState(() {
+        _phase = _Phase.form;
+        _error = 'Enter your password';
+      });
+      return;
+    }
+    ref
+        .read(analyticsServiceProvider)
+        ?.track(AnalyticsEvents.signInStarted, props: {'provider': 'password'});
+    final outcome = await ref
+        .read(authServiceProvider)
+        .signInWithPassword(email: email, password: password);
+    if (!mounted) return;
+    switch (outcome) {
+      case PasswordSignIn.ok:
+        ref
+            .read(analyticsServiceProvider)
+            ?.track(AnalyticsEvents.signInCompleted);
+        // Cookie already persisted by the service. Same warm-up as the
+        // magic-link ready path so pricing is ready when the shell opens.
+        ref.invalidate(currentUserProvider);
+        ref.invalidate(subscriptionProvider);
+        ref.invalidate(pricingCatalogProvider);
+        prefetchSubscriptionCache(ref);
+      case PasswordSignIn.invalidCredentials:
+        setState(() {
+          _phase = _Phase.form;
+          _error = 'Invalid email or password';
+        });
+      case PasswordSignIn.emailNotVerified:
+        setState(() => _phase = _Phase.verifyEmail);
+        // The server sends nothing on this branch (`sendOnSignIn: false`, see
+        // web/src/auth/better-auth.ts) — without this the user waits on a mail
+        // that was never going to arrive.
+        try {
+          await ref.read(authServiceProvider).sendVerificationEmail(email);
+        } on AuthException catch (e) {
+          if (!mounted) return;
+          // Handled here rather than left to `_submitPassword`: the sign-in
+          // reached a verdict, so bouncing back to the form would throw away
+          // a correct password over a failed follow-up send. The resend
+          // button on this screen is the retry.
+          setState(() => _error = e.message);
+        }
+    }
+  });
+
+  Future<void> _signUpWithPassword() => _submitPassword((email) async {
+    final password = _passwordController.text;
+    final lengthError = passwordLengthError(password);
+    if (lengthError != null) {
+      setState(() {
+        _phase = _Phase.form;
+        _error = lengthError;
+      });
+      return;
+    }
+    ref
+        .read(analyticsServiceProvider)
+        ?.track(
+          AnalyticsEvents.signInStarted,
+          props: {'provider': 'password_signup'},
+        );
+    await ref
+        .read(authServiceProvider)
+        .signUpWithPassword(email: email, password: password);
+    if (!mounted) return;
+    setState(() => _phase = _Phase.verifyEmail);
+  });
+
+  Future<void> _forgotPassword() => _submitPassword((email) async {
+    await ref.read(authServiceProvider).requestPasswordReset(email);
+    if (!mounted) return;
+    setState(() => _phase = _Phase.resetSent);
+  });
+
+  Future<void> _resendVerification() async {
+    final email = _emailController.text.trim();
+    setState(() {
+      _error = null;
+      _notice = null;
+    });
+    try {
+      await ref.read(authServiceProvider).sendVerificationEmail(email);
+      if (!mounted) return;
+      // The server answers identically whether or not it sent anything, so
+      // this confirms the REQUEST, not a delivery we cannot vouch for.
+      setState(() => _notice = 'Sent. Check your inbox again in a moment.');
+    } on AuthException catch (e) {
+      if (!mounted) return;
+      setState(() => _error = e.message);
     }
   }
 
@@ -242,6 +407,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
       _phase = _Phase.form;
       _session = null;
       _error = null;
+      _notice = null;
     });
   }
 
@@ -285,14 +451,15 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
                       semanticsLabel: 'antgrid',
                     ),
                     const SizedBox(height: AbTokens.space12),
-                    if (_phase == _Phase.pending)
-                      _pendingBody(context)
-                    else if (_phase == _Phase.bounced)
-                      _bouncedBody(context)
-                    else if (_phase == _Phase.expired)
-                      _expiredBody(context)
-                    else
-                      _formBody(context, canPop),
+                    switch (_phase) {
+                      _Phase.pending => _pendingBody(context),
+                      _Phase.bounced => _bouncedBody(context),
+                      _Phase.expired => _expiredBody(context),
+                      _Phase.verifyEmail => _verifyEmailBody(context),
+                      _Phase.resetSent => _resetSentBody(context),
+                      _Phase.form ||
+                      _Phase.submitting => _formBody(context, canPop),
+                    },
                   ],
                 ),
               ),
@@ -304,15 +471,32 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   }
 
   Widget _formBody(BuildContext context, bool canPop) {
-    final antgrid = context.antgrid;
     final busy = _phase == _Phase.submitting;
+    final isSignUp = _mode == _FormMode.signUp;
+    final wantsPassword = _mode != _FormMode.magicLink;
+    final submit = switch (_mode) {
+      _FormMode.magicLink => _sendLink,
+      _FormMode.password => _signInWithPassword,
+      _FormMode.signUp => _signUpWithPassword,
+    };
+    final busyLabel = switch (_mode) {
+      _FormMode.magicLink => 'Sending…',
+      _FormMode.password => 'Signing in…',
+      _FormMode.signUp => 'Creating…',
+    };
+    final label = switch (_mode) {
+      _FormMode.magicLink => 'Send magic link',
+      _FormMode.password => 'Sign in',
+      _FormMode.signUp => 'Create account',
+    };
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Text(
-          'Sign in to continue',
+          isSignUp ? 'Create your account' : 'Sign in to continue',
           textAlign: TextAlign.center,
-          style: AbTokens.sansStyle(color: antgrid.textMuted),
+          style: AbTokens.sansStyle(color: context.antgrid.textMuted),
         ),
         const SizedBox(height: AbTokens.space16),
         AbTextField(
@@ -321,26 +505,34 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
           height: AbTokens.rowHeightLg,
           enabled: !busy,
           keyboardType: TextInputType.emailAddress,
-          textInputAction: TextInputAction.go,
-          onSubmitted: (_) => busy ? null : _sendLink(),
+          // With a password below, Enter should reach it rather than submit a
+          // half-filled form.
+          textInputAction: wantsPassword
+              ? TextInputAction.next
+              : TextInputAction.go,
+          onSubmitted: wantsPassword ? null : (_) => busy ? null : _sendLink(),
         ),
-        if (_error != null) ...[
+        if (wantsPassword) ...[
           const SizedBox(height: AbTokens.space8),
-          Text(
-            _error!,
-            textAlign: TextAlign.center,
-            style: AbTokens.sansStyle(
-              fontSize: AbTokens.fontXs,
-              color: antgrid.error,
-            ),
+          AbPasswordField(
+            controller: _passwordController,
+            hintText: isSignUp
+                ? 'At least $kMinPasswordLength characters'
+                : 'Password',
+            enabled: !busy,
+            textInputAction: TextInputAction.go,
+            onSubmitted: (_) => busy ? null : submit(),
           ),
         ],
+        ?_message(context),
         const SizedBox(height: AbTokens.space8),
         _SignInButton(
-          label: busy ? 'Sending…' : 'Send magic link',
-          onPressed: busy ? null : _sendLink,
+          label: busy ? busyLabel : label,
+          onPressed: busy ? null : submit,
         ),
-        const SizedBox(height: AbTokens.space16),
+        const SizedBox(height: AbTokens.space8),
+        ..._modeLinks(busy),
+        const SizedBox(height: AbTokens.space8),
         const _OrDivider(),
         const SizedBox(height: AbTokens.space16),
         _SignInButton(
@@ -359,6 +551,167 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
             onTap: () => Navigator.of(context).maybePop(),
           ),
         ],
+      ],
+    );
+  }
+
+  /// The links under the primary button. Each mode offers exactly the ways out
+  /// of it, so no mode is a dead end: password reaches reset and sign-up,
+  /// sign-up reaches sign-in, and both can fall back to the magic link — which
+  /// is also the answer for an account that has no password at all, the case
+  /// INVALID_EMAIL_OR_PASSWORD deliberately refuses to distinguish.
+  List<Widget> _modeLinks(bool busy) {
+    switch (_mode) {
+      case _FormMode.magicLink:
+        return [
+          _MutedLink(
+            label: 'Sign in with a password',
+            onTap: () => _setMode(_FormMode.password),
+          ),
+        ];
+      case _FormMode.password:
+        return [
+          _MutedLink(
+            label: 'Forgot your password?',
+            onTap: busy ? null : _forgotPassword,
+          ),
+          _MutedLink(
+            label: 'Create an account',
+            onTap: () => _setMode(_FormMode.signUp),
+          ),
+          _MutedLink(
+            label: 'Use a magic link instead',
+            onTap: () => _setMode(_FormMode.magicLink),
+          ),
+        ];
+      case _FormMode.signUp:
+        return [
+          _MutedLink(
+            label: 'Already have an account? Sign in',
+            onTap: () => _setMode(_FormMode.password),
+          ),
+          _MutedLink(
+            label: 'Use a magic link instead',
+            onTap: () => _setMode(_FormMode.magicLink),
+          ),
+        ];
+    }
+  }
+
+  /// The error or notice line, or null when there is neither. An error wins:
+  /// the two are set as a pair (one always cleared with the other), so this
+  /// only orders them when a later failure lands on an earlier success.
+  Widget? _message(BuildContext context) {
+    final text = _error ?? _notice;
+    if (text == null) return null;
+    return Padding(
+      padding: const EdgeInsets.only(top: AbTokens.space8),
+      child: Text(
+        text,
+        textAlign: TextAlign.center,
+        style: AbTokens.sansStyle(
+          fontSize: AbTokens.fontXs,
+          color: _error != null
+              ? context.antgrid.error
+              : context.antgrid.textMuted,
+        ),
+      ),
+    );
+  }
+
+  Widget _verifyEmailBody(BuildContext context) {
+    final antgrid = context.antgrid;
+    final email = _emailController.text.trim();
+    final fromSignUp = _mode == _FormMode.signUp;
+    // Only a failed send sets `_error` on this screen, and every send clears it
+    // first — so this reads as "the last send failed", which is what keeps the
+    // claim below from asserting a link the user is never going to get.
+    final sent = _error == null;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          'Check your email',
+          textAlign: TextAlign.center,
+          style: AbTokens.sansStyle(color: antgrid.textPrimary),
+        ),
+        const SizedBox(height: AbTokens.space8),
+        Text(
+          fromSignUp
+              ? 'Open the verification link sent to\n$email\nto finish creating '
+                    "your account — you can't sign in until you do."
+              : 'Your password is correct, but\n$email\nhasn\'t been verified '
+                    'yet.${sent ? ' We sent a fresh link.' : ''}',
+          textAlign: TextAlign.center,
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontXs,
+            color: antgrid.textMuted,
+          ),
+        ),
+        // Sign-up answers an address that already has an account with a
+        // synthetic success and sends nothing, so that it cannot be used to
+        // enumerate users. That user is otherwise left waiting on mail that
+        // will never arrive — say so without claiming which case they are in.
+        if (fromSignUp) ...[
+          const SizedBox(height: AbTokens.space8),
+          Text(
+            'Already had an account with this address? Nothing was sent — sign '
+            'in instead.',
+            textAlign: TextAlign.center,
+            style: AbTokens.sansStyle(
+              fontSize: AbTokens.fontXs,
+              color: antgrid.textMuted,
+            ),
+          ),
+        ],
+        ?_message(context),
+        const SizedBox(height: AbTokens.space16),
+        // The password is still in the field behind this screen, so verifying
+        // and coming back costs one tap. If the OS killed the app during the
+        // detour it is simply gone, and the user signs in normally — it is
+        // never persisted anywhere.
+        if (_passwordController.text.isNotEmpty)
+          _SignInButton(
+            label: "I've verified — sign in",
+            onPressed: () {
+              _setMode(_FormMode.password);
+              unawaited(_signInWithPassword());
+            },
+          ),
+        const SizedBox(height: AbTokens.space8),
+        _MutedLink(label: 'Resend the link', onTap: _resendVerification),
+        _MutedLink(label: 'Use a different email', onTap: _backToForm),
+      ],
+    );
+  }
+
+  Widget _resetSentBody(BuildContext context) {
+    final antgrid = context.antgrid;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          'Check your email',
+          textAlign: TextAlign.center,
+          style: AbTokens.sansStyle(color: antgrid.textPrimary),
+        ),
+        const SizedBox(height: AbTokens.space8),
+        Text(
+          // Enumeration-safe on the server, so the copy has to be too: it
+          // answers a known and an unknown address identically.
+          'If that address has an Antgrid account, a reset link is on its way. '
+          'The link expires in one hour and opens in your browser.',
+          textAlign: TextAlign.center,
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontXs,
+            color: antgrid.textMuted,
+          ),
+        ),
+        const SizedBox(height: AbTokens.space16),
+        _SignInButton(
+          label: 'Back to sign in',
+          onPressed: () => _setMode(_FormMode.password),
+        ),
       ],
     );
   }
@@ -474,7 +827,10 @@ class _OrDivider extends StatelessWidget {
 class _MutedLink extends StatefulWidget {
   const _MutedLink({required this.label, required this.onTap});
   final String label;
-  final VoidCallback onTap;
+
+  /// Null renders the disabled state (opacity 0.4, no interaction), per the
+  /// design system's disabled contract.
+  final VoidCallback? onTap;
 
   @override
   State<_MutedLink> createState() => _MutedLinkState();
@@ -486,6 +842,23 @@ class _MutedLinkState extends State<_MutedLink> {
   @override
   Widget build(BuildContext context) {
     final antgrid = context.antgrid;
+    final onTap = widget.onTap;
+    if (onTap == null) {
+      return Opacity(
+        opacity: 0.4,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: AbTokens.space8),
+          child: Text(
+            widget.label,
+            textAlign: TextAlign.center,
+            style: AbTokens.sansStyle(
+              color: antgrid.textMuted,
+              fontSize: AbTokens.fontXs,
+            ),
+          ),
+        ),
+      );
+    }
     return FocusableActionDetector(
       mouseCursor: SystemMouseCursors.click,
       onShowFocusHighlight: (v) {
@@ -494,13 +867,13 @@ class _MutedLinkState extends State<_MutedLink> {
       actions: {
         ActivateIntent: CallbackAction<ActivateIntent>(
           onInvoke: (_) {
-            widget.onTap();
+            onTap();
             return null;
           },
         ),
       },
       child: GestureDetector(
-        onTap: widget.onTap,
+        onTap: onTap,
         child: AbFocusRing(
           focused: _focused,
           borderRadius: AbTokens.borderRadius,

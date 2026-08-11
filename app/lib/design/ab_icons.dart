@@ -83,4 +83,9 @@ abstract final class AbIcons {
   // Codicons ship no literal keyboard glyph; record_keys (key caps) is VS
   // Code's own keyboard-shortcuts icon.
   static const keyboard = Codicon.record_keys;
+  // Reveal/mask pair for secret fields. The glyph depicts the ACTION, not the
+  // state: [eye] while the value is masked (tap to reveal), [eyeClosed] while
+  // it is showing (tap to hide) — the convention every password manager uses.
+  static const eye = Codicon.eye;
+  static const eyeClosed = Codicon.eye_closed;
 }

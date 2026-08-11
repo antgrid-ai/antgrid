@@ -26,6 +26,7 @@ class AbTextField extends StatefulWidget {
     this.hintText,
     this.prefixIcon,
     this.showClearButton = false,
+    this.suffix,
     this.onChanged,
     this.onSubmitted,
     this.onTap,
@@ -33,6 +34,8 @@ class AbTextField extends StatefulWidget {
     this.autofocus = false,
     this.enabled = true,
     this.obscureText = false,
+    this.autocorrect = true,
+    this.enableSuggestions = true,
     this.keyboardType,
     this.textInputAction,
     this.fillColor,
@@ -54,6 +57,12 @@ class AbTextField extends StatefulWidget {
   /// the field is enabled.
   final bool showClearButton;
 
+  /// Trailing widget inside the box, after the clear button. For controls the
+  /// field itself can't own — a reveal toggle, a unit label. Unlike the clear
+  /// button it is always rendered, so an empty field still shows it; a caller
+  /// that wants it to come and go should swap the value it passes.
+  final Widget? suffix;
+
   final ValueChanged<String>? onChanged;
   final ValueChanged<String>? onSubmitted;
   final VoidCallback? onTap;
@@ -68,6 +77,14 @@ class AbTextField extends StatefulWidget {
   /// Masks input (e.g. secrets/passwords). Forwarded to the internal
   /// [TextField]. Defaults to false so existing callers are unaffected.
   final bool obscureText;
+
+  /// Both default true to match [TextField], but a secret field must set them
+  /// false: Flutter does NOT derive them from [obscureText], so an Android IME
+  /// keeps offering suggestions for a masked value and rewrites it on the way
+  /// out. It bites hardest behind a reveal toggle, where flipping [obscureText]
+  /// on a suggestion-backed field can drop the composing region entirely.
+  final bool autocorrect;
+  final bool enableSuggestions;
   final TextInputType? keyboardType;
   final TextInputAction? textInputAction;
 
@@ -237,6 +254,8 @@ class _AbTextFieldState extends State<AbTextField> {
                 enabled: enabled,
                 autofocus: widget.autofocus,
                 obscureText: widget.obscureText,
+                autocorrect: widget.autocorrect,
+                enableSuggestions: widget.enableSuggestions,
                 keyboardType: widget.keyboardType,
                 textInputAction: widget.textInputAction,
                 onChanged: widget.onChanged,
@@ -268,6 +287,7 @@ class _AbTextFieldState extends State<AbTextField> {
               ),
             ),
             ?clearButton,
+            ?widget.suffix,
           ],
         ),
       ),

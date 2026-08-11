@@ -80,6 +80,23 @@ const bool kRemoteAccessFreeDuringBeta = true;
 bool requiresProForRemote(String? tier) =>
     !kRemoteAccessFreeDuringBeta && (tier == null || tier == 'free');
 
+/// Open the web account page, which owns setting and changing a password.
+///
+/// Deliberately a browser hand-off rather than an in-app form: a password write
+/// is the one account action that has to re-authenticate, revoke the user's
+/// other sessions, and honour the server's own rate limiting, and `/account`
+/// already does all three. The browser may not carry a session — the app's
+/// cookie is its own and cannot be lent out (`/one-time-token/generate` refuses
+/// any request that arrives over HTTP) — so the user may have to sign in there;
+/// the magic link works cross-device for exactly this.
+Future<void> openAccountInBrowser(ProviderContainer ref) async {
+  final base = ref.read(licenseApiUrlProvider).replaceAll(RegExp(r'/+$'), '');
+  await launchUrl(
+    Uri.parse('$base/account'),
+    mode: LaunchMode.externalApplication,
+  );
+}
+
 Future<void> openUpgradeInBrowser(
   ProviderContainer ref, {
   String? planId,

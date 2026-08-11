@@ -97,6 +97,42 @@ Uri buildOAuthStartUri({
   );
 }
 
+/// Bounds enforced before a password ever leaves the device. Mirror of
+/// `MIN_PASSWORD_LENGTH` / `MAX_PASSWORD_LENGTH` in
+/// web/src/auth/better-auth.ts — keep in lockstep. The server rejects an
+/// out-of-range value with PASSWORD_TOO_SHORT / PASSWORD_TOO_LONG, codes this
+/// client has no branch for, so drift surfaces as a generic "try again" the
+/// user can never satisfy.
+const int kMinPasswordLength = 12;
+const int kMaxPasswordLength = 128;
+
+/// Both bounds in one message, or null when [password] is acceptable. Mirrors
+/// `passwordLengthError` in web/src/routes/ui.tsx so the two surfaces word the
+/// same rule the same way.
+String? passwordLengthError(String password) {
+  if (password.length < kMinPasswordLength) {
+    return 'Password must be at least $kMinPasswordLength characters';
+  }
+  if (password.length > kMaxPasswordLength) {
+    return 'Password must be at most $kMaxPasswordLength characters';
+  }
+  return null;
+}
+
+/// Outcome of [AuthService.signInWithPassword].
+///
+/// [emailNotVerified] is a STATE, not a failure — Better-Auth verifies the
+/// password before it checks `emailVerified` (api/routes/sign-in.mjs), so
+/// reaching it means the credentials were right. The caller routes to
+/// verification instead of showing an error.
+///
+/// [invalidCredentials] deliberately collapses several server answers into one:
+/// a wrong password, an unknown address, and an account that has no password at
+/// all (magic-link/OAuth only) all return INVALID_EMAIL_OR_PASSWORD. Telling
+/// them apart in the UI would rebuild the enumeration oracle the server is
+/// avoiding.
+enum PasswordSignIn { ok, invalidCredentials, emailNotVerified }
+
 /// Thrown by magic-link flows on a non-recoverable failure (bad response,
 /// insecure transport). Pending/transient poll failures are NOT exceptions —
 /// see [MagicLinkStatus.error].
@@ -317,6 +353,145 @@ class AuthService {
     // the next launch and mint a fresh session the moment the old link is
     // approved — silently undoing the sign-out.
     await _discardQuietly();
+  }
+
+  /// POST JSON to an account-service path, carrying the app's User-Agent and
+  /// NO cookie.
+  ///
+  /// Cookieless is load-bearing, not incidental: `/send-verification-email`
+  /// looks up a session first and, finding one, throws EMAIL_MISMATCH or
+  /// EMAIL_ALREADY_VERIFIED instead of taking the anonymous branch these flows
+  /// need (api/routes/email-verification.mjs). The web routes strip the cookie
+  /// for the same reason — see `anonymousHeaders` in web/src/routes/ui.tsx.
+  Future<http.Response> _postAuthJson(
+    String path,
+    Map<String, Object?> body,
+  ) async {
+    try {
+      return await _http.post(
+        Uri.parse('$licenseApiUrl$path'),
+        headers: {
+          'content-type': 'application/json',
+          'user-agent': _antgridUserAgent(),
+        },
+        body: jsonEncode(body),
+      );
+    } catch (_) {
+      throw AuthException('Could not reach the sign-in server');
+    }
+  }
+
+  /// Better-Auth serializes a thrown APIError as `{code, message}`. Match on
+  /// `code` — the stable BASE_ERROR_CODES key — never `message`, which is prose
+  /// and gets reworded upstream. Mirrors `authErrorCode` in
+  /// web/src/routes/ui.tsx.
+  static String? _errorCode(http.Response res) {
+    try {
+      final body = jsonDecode(res.body) as Map<String, dynamic>?;
+      final code = body?['code'];
+      return code is String ? code : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Normalized the same way web/src/routes/ui.tsx normalizes a submitted form,
+  /// so an address typed here and one typed there resolve to the same user.
+  static String _normalizeEmail(String email) => email.trim().toLowerCase();
+
+  /// Sign in with an email and password, persisting the session cookie on
+  /// success. Never throws for a rejected credential — see [PasswordSignIn].
+  ///
+  /// [password] is passed through untouched. Leading and trailing spaces are
+  /// part of what the user chose; trimming here would break every later
+  /// comparison against what the server stored.
+  Future<PasswordSignIn> signInWithPassword({
+    required String email,
+    required String password,
+  }) async {
+    _assertSecureTransport();
+    final res = await _postAuthJson('/api/auth/sign-in/email', {
+      'email': _normalizeEmail(email),
+      'password': password,
+    });
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      final cookie = _extractSessionCookie(res.headers['set-cookie']);
+      if (cookie == null) throw AuthException('Unexpected server response');
+      await storage.writeCookie(cookie);
+      return PasswordSignIn.ok;
+    }
+    if (res.statusCode == 429) {
+      throw AuthException('Too many attempts. Try again in a minute.');
+    }
+    switch (_errorCode(res)) {
+      case 'EMAIL_NOT_VERIFIED':
+        return PasswordSignIn.emailNotVerified;
+      case 'INVALID_EMAIL_OR_PASSWORD':
+      case 'INVALID_EMAIL':
+        return PasswordSignIn.invalidCredentials;
+      default:
+        throw AuthException('Could not sign in. Try again.');
+    }
+  }
+
+  /// Create an account. Mints NO session — the server runs `autoSignIn: false`
+  /// with `requireEmailVerification`, so the caller's next step is always
+  /// "check your email", never a signed-in shell.
+  ///
+  /// Success here does NOT mean the address was free. Better-Auth answers an
+  /// address that already has an account with a synthetic success and sends
+  /// nothing, so that sign-up cannot enumerate users (api/routes/sign-up.mjs);
+  /// this client cannot tell the two apart and the copy downstream must not
+  /// claim to.
+  Future<void> signUpWithPassword({
+    required String email,
+    required String password,
+  }) async {
+    _assertSecureTransport();
+    final lengthError = passwordLengthError(password);
+    if (lengthError != null) throw AuthException(lengthError);
+    final res = await _postAuthJson('/api/auth/sign-up/email', {
+      'email': _normalizeEmail(email),
+      'password': password,
+      // Required by the endpoint and unused by us — the address stands in for
+      // it, exactly as /ui/signup does on the web.
+      'name': _normalizeEmail(email),
+    });
+    if (res.statusCode >= 200 && res.statusCode < 300) return;
+    if (res.statusCode == 429) {
+      throw AuthException('Too many attempts. Try again later.');
+    }
+    throw AuthException('Could not create the account. Try again.');
+  }
+
+  /// Ask the server to re-send the verification link for [email].
+  ///
+  /// Answers identically whether or not the address has an unverified account,
+  /// so a non-2xx discloses nothing and is swallowed. A TRANSPORT failure is
+  /// not the same thing and propagates: the request never reached the server,
+  /// nothing was sent, and saying so leaks nothing about whether the address
+  /// exists — whereas reporting success would leave the user waiting on mail
+  /// nobody was asked to send.
+  Future<void> sendVerificationEmail(String email) async {
+    _assertSecureTransport();
+    await _postAuthJson('/api/auth/send-verification-email', {
+      'email': _normalizeEmail(email),
+    });
+  }
+
+  /// Ask the server to email a password-reset link for [email]. The reset
+  /// itself happens in a browser; the app only starts it.
+  ///
+  /// No `redirectTo` — the endpoint runs `originCheck` over that field, and our
+  /// `sendResetPassword` builds the link from its own base URL regardless
+  /// (web/src/auth/better-auth.ts), so sending one could only ever fail.
+  /// Enumeration-safe like the above, and it draws the same line: a uniform
+  /// server answer is swallowed, an unreachable server is reported.
+  Future<void> requestPasswordReset(String email) async {
+    _assertSecureTransport();
+    await _postAuthJson('/api/auth/request-password-reset', {
+      'email': _normalizeEmail(email),
+    });
   }
 
   /// Begin a magic-link sign-in. POSTs the email to the cross-device start

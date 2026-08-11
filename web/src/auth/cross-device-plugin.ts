@@ -16,6 +16,7 @@ import type { PrismaClient } from "../generated/prisma/client.js";
 import type { SendEmail } from "./email.js";
 import type { BetterAuthPlugin } from "better-auth";
 import { provisionProductAccountForUser } from "../models/subscription.js";
+import { purgeUnprovenPasswordCredential } from "../models/credential.js";
 
 export type CrossDevicePluginOptions = {
   db: PrismaClient;
@@ -150,6 +151,12 @@ export const crossDeviceMagicLink = (opts: CrossDevicePluginOptions) => {
 
           await provisionProductAccountForUser(opts.db, user.id);
           if (!user.emailVerified) {
+            // This flip is what would arm a password planted on the address by
+            // someone who never proved they owned it — sign-up writes the
+            // credential row before verification and only withholds the
+            // session. The owner is standing right here holding the link, and
+            // they did not ask for that password. See models/credential.ts.
+            await purgeUnprovenPasswordCredential(opts.db, user.id);
             user = await ctx.context.internalAdapter.updateUser(user.id, {
               emailVerified: true,
             });

@@ -18,11 +18,12 @@ function appWithSignOutCookies(cookies: string[]) {
       },
     },
   } as unknown as Auth;
-  // db/env/relay/clientIp are unused by the /logout handler.
+  // db/relay/clientIp are unused by the /logout handler; BETTER_AUTH_URL is
+  // not — the router derives its same-origin check from it at construction.
   return uiRoutes({
     db: {} as never,
     auth,
-    env: {} as never,
+    env: { BETTER_AUTH_URL: "http://localhost" } as never,
     relay: {} as never,
     clientIp: () => null,
   });

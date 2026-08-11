@@ -888,5 +888,311 @@ void main() {
         expect(requested, isFalse, reason: 'must not leak token over http');
       });
     });
+
+    group('password sign-in', () {
+      test('stores the session cookie on success', () async {
+        final storage = _InMemoryStorage();
+        late http.Request captured;
+        final service = AuthService(
+          licenseApiUrl: 'https://lic.test',
+          storage: storage,
+          httpClient: MockClient((req) async {
+            captured = req;
+            return http.Response(
+              jsonEncode({'token': 't'}),
+              200,
+              headers: {
+                'set-cookie':
+                    '__Secure-better-auth.session_token=signed.abc; Path=/; HttpOnly',
+              },
+            );
+          }),
+        );
+
+        final outcome = await service.signInWithPassword(
+          email: 'A@B.com',
+          password: 'correct horse battery',
+        );
+
+        expect(outcome, PasswordSignIn.ok);
+        expect(captured.url.path, '/api/auth/sign-in/email');
+        expect(
+          await storage.readCookie(),
+          '__Secure-better-auth.session_token=signed.abc',
+          reason: 'the prefixed name is stored verbatim for replay',
+        );
+      });
+
+      test('normalizes the address but never the password', () async {
+        late http.Request captured;
+        final service = AuthService(
+          licenseApiUrl: 'https://lic.test',
+          storage: _InMemoryStorage(),
+          httpClient: MockClient((req) async {
+            captured = req;
+            return http.Response(
+              jsonEncode({'code': 'INVALID_EMAIL_OR_PASSWORD'}),
+              401,
+            );
+          }),
+        );
+
+        await service.signInWithPassword(
+          email: '  Mixed@Case.COM ',
+          password: '  spaces matter  ',
+        );
+
+        final body = jsonDecode(captured.body) as Map<String, dynamic>;
+        expect(body['email'], 'mixed@case.com');
+        expect(
+          body['password'],
+          '  spaces matter  ',
+          reason: 'trimming would break every later compare server-side',
+        );
+      });
+
+      test('reports EMAIL_NOT_VERIFIED as a state, not a failure', () async {
+        final service = AuthService(
+          licenseApiUrl: 'https://lic.test',
+          storage: _InMemoryStorage(),
+          httpClient: MockClient(
+            (req) async => http.Response(
+              jsonEncode({'code': 'EMAIL_NOT_VERIFIED', 'message': 'nope'}),
+              403,
+            ),
+          ),
+        );
+
+        expect(
+          await service.signInWithPassword(email: 'a@b.com', password: 'pw'),
+          PasswordSignIn.emailNotVerified,
+        );
+      });
+
+      test('collapses a rejected credential to one outcome', () async {
+        final service = AuthService(
+          licenseApiUrl: 'https://lic.test',
+          storage: _InMemoryStorage(),
+          httpClient: MockClient(
+            (req) async => http.Response(
+              jsonEncode({'code': 'INVALID_EMAIL_OR_PASSWORD'}),
+              401,
+            ),
+          ),
+        );
+
+        expect(
+          await service.signInWithPassword(email: 'a@b.com', password: 'pw'),
+          PasswordSignIn.invalidCredentials,
+        );
+      });
+
+      test('does not write a cookie the server never sent', () async {
+        final storage = _InMemoryStorage();
+        final service = AuthService(
+          licenseApiUrl: 'https://lic.test',
+          storage: storage,
+          httpClient: MockClient((req) async => http.Response('{}', 200)),
+        );
+
+        await expectLater(
+          service.signInWithPassword(email: 'a@b.com', password: 'pw'),
+          throwsA(isA<AuthException>()),
+        );
+        expect(await storage.readCookie(), isNull);
+      });
+
+      test('refuses to send a password over plaintext', () async {
+        var requested = false;
+        final service = AuthService(
+          licenseApiUrl: 'http://evil.test',
+          storage: _InMemoryStorage(),
+          httpClient: MockClient((req) async {
+            requested = true;
+            return http.Response('{}', 200);
+          }),
+        );
+
+        await expectLater(
+          service.signInWithPassword(email: 'a@b.com', password: 'pw'),
+          throwsA(isA<AuthException>()),
+        );
+        expect(requested, isFalse);
+      });
+    });
+
+    group('password sign-up', () {
+      test(
+        'sends the address as the required name and mints no session',
+        () async {
+          final storage = _InMemoryStorage();
+          late http.Request captured;
+          final service = AuthService(
+            licenseApiUrl: 'https://lic.test',
+            storage: storage,
+            httpClient: MockClient((req) async {
+              captured = req;
+              return http.Response(jsonEncode({'user': {}}), 200);
+            }),
+          );
+
+          await service.signUpWithPassword(
+            email: 'New@User.com',
+            password: 'a-very-long-password',
+          );
+
+          expect(captured.url.path, '/api/auth/sign-up/email');
+          final body = jsonDecode(captured.body) as Map<String, dynamic>;
+          expect(body['email'], 'new@user.com');
+          expect(body['name'], 'new@user.com');
+          expect(
+            await storage.readCookie(),
+            isNull,
+            reason: 'autoSignIn is off — no session exists until verification',
+          );
+        },
+      );
+
+      test('rejects a short password before the round trip', () async {
+        var requested = false;
+        final service = AuthService(
+          licenseApiUrl: 'https://lic.test',
+          storage: _InMemoryStorage(),
+          httpClient: MockClient((req) async {
+            requested = true;
+            return http.Response('{}', 200);
+          }),
+        );
+
+        await expectLater(
+          service.signUpWithPassword(email: 'a@b.com', password: 'short'),
+          throwsA(
+            isA<AuthException>().having(
+              (e) => e.message,
+              'message',
+              contains('$kMinPasswordLength'),
+            ),
+          ),
+        );
+        expect(requested, isFalse);
+      });
+
+      test(
+        'rejects a password past the ceiling before the round trip',
+        () async {
+          var requested = false;
+          final service = AuthService(
+            licenseApiUrl: 'https://lic.test',
+            storage: _InMemoryStorage(),
+            httpClient: MockClient((req) async {
+              requested = true;
+              return http.Response('{}', 200);
+            }),
+          );
+
+          await expectLater(
+            service.signUpWithPassword(
+              email: 'a@b.com',
+              password: 'x' * (kMaxPasswordLength + 1),
+            ),
+            throwsA(isA<AuthException>()),
+          );
+          expect(
+            requested,
+            isFalse,
+            reason: 'the server throws PASSWORD_TOO_LONG with no branch here',
+          );
+        },
+      );
+    });
+
+    group('verification and reset sends', () {
+      test(
+        'sends no cookie, so the endpoint takes its anonymous branch',
+        () async {
+          final storage = _InMemoryStorage();
+          await storage.writeCookie('better-auth.session_token=live.session');
+          late http.Request captured;
+          final service = AuthService(
+            licenseApiUrl: 'https://lic.test',
+            storage: storage,
+            httpClient: MockClient((req) async {
+              captured = req;
+              return http.Response(jsonEncode({'status': true}), 200);
+            }),
+          );
+
+          await service.sendVerificationEmail('a@b.com');
+
+          expect(captured.url.path, '/api/auth/send-verification-email');
+          expect(
+            captured.headers.keys.map((k) => k.toLowerCase()),
+            isNot(contains('cookie')),
+            reason: 'a session turns this into EMAIL_MISMATCH/ALREADY_VERIFIED',
+          );
+        },
+      );
+
+      test('reset carries no redirectTo for originCheck to reject', () async {
+        late http.Request captured;
+        final service = AuthService(
+          licenseApiUrl: 'https://lic.test',
+          storage: _InMemoryStorage(),
+          httpClient: MockClient((req) async {
+            captured = req;
+            return http.Response(jsonEncode({'status': true}), 200);
+          }),
+        );
+
+        await service.requestPasswordReset('  A@B.com ');
+
+        expect(captured.url.path, '/api/auth/request-password-reset');
+        final body = jsonDecode(captured.body) as Map<String, dynamic>;
+        expect(body['email'], 'a@b.com');
+        expect(body.containsKey('redirectTo'), isFalse);
+      });
+
+      test(
+        'swallows a non-2xx — the answer is uniform and tells us nothing',
+        () async {
+          final service = AuthService(
+            licenseApiUrl: 'https://lic.test',
+            storage: _InMemoryStorage(),
+            httpClient: MockClient(
+              (req) async => http.Response(
+                jsonEncode({'code': 'USER_NOT_FOUND'}),
+                400,
+              ),
+            ),
+          );
+
+          await expectLater(
+            service.sendVerificationEmail('a@b.com'),
+            completes,
+          );
+          await expectLater(service.requestPasswordReset('a@b.com'), completes);
+        },
+      );
+
+      test('reports a network failure — nothing was sent', () async {
+        final service = AuthService(
+          licenseApiUrl: 'https://lic.test',
+          storage: _InMemoryStorage(),
+          httpClient: MockClient((req) async => throw Exception('offline')),
+        );
+
+        // The distinction the swallow above must not eat: the request never
+        // reached the server, so saying so leaks nothing about the address —
+        // and claiming success strands the user waiting on mail nobody sent.
+        await expectLater(
+          service.sendVerificationEmail('a@b.com'),
+          throwsA(isA<AuthException>()),
+        );
+        await expectLater(
+          service.requestPasswordReset('a@b.com'),
+          throwsA(isA<AuthException>()),
+        );
+      });
+    });
   });
 }

@@ -59,5 +59,8 @@ export function buildTestApp(
   return {
     app: buildApp({ db, auth, env, corsOrigins: env.CORS_ORIGINS, relay }),
     env,
+    // Exposed so a test can drive an internal Better-Auth step the HTTP surface
+    // can't reach on its own — OAuth linking, which needs a live provider.
+    auth,
   };
 }

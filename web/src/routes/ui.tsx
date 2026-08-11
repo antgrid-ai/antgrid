@@ -24,6 +24,15 @@ import {
 import { revokeUserDevice } from "../services/device.js";
 import { tokenBucket } from "../util/rate-limit.js";
 import { LoginPage } from "../ui/login.js";
+import { SignUpPage } from "../ui/signup.js";
+import { ForgotPasswordPage } from "../ui/forgot-password.js";
+import { ResetPasswordPage, ResetLinkInvalidPage } from "../ui/reset-password.js";
+import { CheckEmailPage, VerifyEmailFailedPage } from "../ui/check-email.js";
+import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from "../auth/better-auth.js";
+import {
+  hasPasswordCredential,
+  pruneDuplicatePasswordCredentials,
+} from "../models/credential.js";
 import { DashboardPage } from "../ui/dashboard.js";
 import { DevicesPage } from "../ui/devices.js";
 import { PricingPage } from "../ui/pricing.js";
@@ -71,9 +80,119 @@ export function uiRoutes(deps: {
   const r = new Hono<{ Variables: AuthVars }>();
   const startLimiter = tokenBucket(5, 0.2); // 5 burst, 1 per 5s, per IP
   const approveSignInLimiter = tokenBucket(10, 0.5); // 10 burst, 1 per 2s, per IP
+  // Better-Auth's own customRules cover the same endpoints but only arm in
+  // production (`rateLimit.enabled` defaults to `isProduction`), and they never
+  // see these /ui/* paths anyway — the browser forms reach the endpoints via
+  // `auth.api.*`, which is not routed and so never reaches the limiter. Every
+  // form below must therefore carry its own bucket; there is no backstop.
+  const passwordSignInLimiter = tokenBucket(10, 0.2); // 10 burst, 1 per 5s, per IP
+  const signUpLimiter = tokenBucket(5, 1 / 60); // 5 burst, 1 per minute, per IP
+  const passwordEmailLimiter = tokenBucket(5, 1 / 60); // reset + resend sends
+  // Submitting the reset FORM, kept off the send bucket above: a user fixing a
+  // mismatched confirmation must not spend the budget for requesting a new link.
+  const resetSubmitLimiter = tokenBucket(10, 0.2); // 10 burst, 1 per 5s, per IP
+  // Keyed by USER, not IP: this one guards an authenticated form whose failure
+  // mode is a current-password oracle, and changePassword scrypt-hashes the new
+  // password before it verifies the old one — two hashes per wrong guess.
+  const passwordWriteLimiter = tokenBucket(5, 1 / 20); // 5 burst, 1 per 20s
 
   function ipKey(c: import("hono").Context): string {
     return deps.clientIp(c) ?? "unknown";
+  }
+
+  const appOrigin = new URL(deps.env.BETTER_AUTH_URL).origin;
+
+  /** Reject a state-changing form post that some other site initiated.
+   *
+   *  Better-Auth ships exactly this check (`formCsrfMiddleware` on
+   *  /sign-in/email) but it is inert for the in-process `auth.api.*` calls
+   *  these routes make: it opens `if (!ctx.request) return`, and there is no
+   *  request object to hand it — forwarding an Origin header does not arm it
+   *  either, since `validateOrigin` reads `ctx.request.headers`. Unguarded,
+   *  evil.com can sign a victim's browser into an ATTACKER's account
+   *  (/ui/login/password forwards the resulting Set-Cookie), and can plant a
+   *  password on a signed-in victim (/ui/account/password takes no current
+   *  password when the account has none yet).
+   *
+   *  A caller sending neither Origin nor Sec-Fetch-Site is not a browser and
+   *  has no ambient credentials to abuse, so it passes; browsers always send at
+   *  least one on a form POST. Origin is compared against the configured public
+   *  origin rather than the request URL, which behind the reverse proxy is the
+   *  internal one. */
+  r.use("*", async (c, next) => {
+    if (c.req.method === "GET" || c.req.method === "HEAD") return next();
+    const origin = c.req.header("origin");
+    const site = c.req.header("sec-fetch-site");
+    const sameOrigin = origin
+      ? origin === appOrigin
+      : !site || site === "same-origin" || site === "none";
+    if (!sameOrigin) return c.text("Forbidden", 403);
+    return next();
+  });
+
+  /** Headers for an `auth.api.*` call made on behalf of a browser form. Those
+   *  endpoints have no socket, so hand them the ALREADY-resolved client IP as a
+   *  single hop rather than the forgeable chain — their rate buckets key off it.
+   *  Same contract as /ui/login/start. */
+  function forwardedHeaders(c: import("hono").Context): Record<string, string> {
+    return {
+      "content-type": "application/json",
+      "user-agent": c.req.header("user-agent") ?? "",
+      "x-forwarded-for": deps.clientIp(c) ?? "",
+      cookie: c.req.header("cookie") ?? "",
+    };
+  }
+
+  /** With `asResponse`, Better-Auth serializes a thrown APIError into the
+   *  response. Match on `code` (the stable BASE_ERROR_CODES key), never
+   *  `message` — that one is prose and gets reworded upstream. */
+  async function authErrorCode(res: Response): Promise<string | null> {
+    try {
+      const body = (await res.json()) as { code?: unknown };
+      return typeof body.code === "string" ? body.code : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Headers for an `auth.api.*` call that must take its UNAUTHENTICATED
+   *  branch. `sendVerificationEmail` looks up the session first and, when it
+   *  finds one, throws EMAIL_MISMATCH/EMAIL_ALREADY_VERIFIED instead of
+   *  reaching the enumeration-safe path the resend button relies on — so it
+   *  must not see the browser's cookie. */
+  function anonymousHeaders(c: import("hono").Context): Record<string, string> {
+    const { cookie: _cookie, ...rest } = forwardedHeaders(c);
+    return rest;
+  }
+
+  /** Both bounds, in one message. Better-Auth throws PASSWORD_TOO_LONG ahead of
+   *  every other check and the code matches none of the handlers' cases, so an
+   *  unenforced ceiling surfaces as a generic "try again" that never succeeds. */
+  function passwordLengthError(password: string): string | null {
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      return `Password must be at least ${MIN_PASSWORD_LENGTH} characters`;
+    }
+    if (password.length > MAX_PASSWORD_LENGTH) {
+      return `Password must be at most ${MAX_PASSWORD_LENGTH} characters`;
+    }
+    return null;
+  }
+
+  function forwardSetCookies(c: import("hono").Context, res: Response): void {
+    // One header per cookie — see the /logout comment below for why
+    // `headers.get("set-cookie")` cannot be used here.
+    for (const sc of res.headers.getSetCookie()) {
+      c.header("set-cookie", sc, { append: true });
+    }
+  }
+
+  function redirectWith(
+    c: import("hono").Context,
+    path: string,
+    params: Record<string, string>
+  ) {
+    const qs = new URLSearchParams(params).toString();
+    return c.redirect(qs ? `${path}?${qs}` : path);
   }
 
   r.get("/", (c) => c.redirect("/dashboard"));
@@ -101,7 +220,286 @@ export function uiRoutes(deps: {
   r.get("/login", (c) => {
     const sent = c.req.query("sent") ?? null;
     const error = c.req.query("error") ?? null;
-    return c.html(<LoginPage sent={sent} error={error} />);
+    const notice = c.req.query("notice") ?? null;
+    return c.html(<LoginPage sent={sent} error={error} notice={notice} />);
+  });
+
+  r.get("/signup", (c) =>
+    c.html(
+      <SignUpPage
+        error={c.req.query("error") ?? null}
+        email={c.req.query("email") ?? null}
+        minPasswordLength={MIN_PASSWORD_LENGTH}
+        maxPasswordLength={MAX_PASSWORD_LENGTH}
+      />
+    )
+  );
+
+  r.post("/ui/signup", async (c) => {
+    // Bucket first, body second. Bun hands the handler the request as soon as
+    // the headers land and streams the body lazily, so returning before
+    // `formData()` costs nothing — reading it first buffers an attacker-chosen
+    // body (128 MiB by default, ~4x that in RSS) for a request already destined
+    // for 429. Same order as /ui/login/start below.
+    if (!signUpLimiter(ipKey(c))) {
+      return redirectWith(c, "/signup", { error: "Too many requests" });
+    }
+    const form = await c.req.formData();
+    const email = String(form.get("email") ?? "").trim().toLowerCase();
+    // Never trim a password: leading/trailing spaces are part of what the user
+    // chose, and silently dropping them here would break every later compare.
+    const password = String(form.get("password") ?? "");
+    const confirm = String(form.get("confirmPassword") ?? "");
+    const fail = (message: string) => redirectWith(c, "/signup", { error: message, email });
+
+    if (!email) return fail("Email required");
+    if (password !== confirm) return fail("Passwords do not match");
+    const lengthError = passwordLengthError(password);
+    if (lengthError) return fail(lengthError);
+
+    const res = await deps.auth.api.signUpEmail({
+      method: "POST",
+      headers: forwardedHeaders(c),
+      body: { email, password, name: email },
+      asResponse: true,
+    });
+    if (!res.ok) {
+      // Not "that email is taken": with requireEmailVerification on,
+      // Better-Auth answers an existing address with a synthetic success
+      // (api/routes/sign-up.mjs) so sign-up can't be used to enumerate users.
+      // A failure here is a real one — validation or the adapter.
+      return fail("Could not create the account. Try again.");
+    }
+    // No cookie to forward — autoSignIn is off, so a session only exists once
+    // the emailed link is opened.
+    return redirectWith(c, "/login/check-email", { email });
+  });
+
+  r.post("/ui/login/password", async (c) => {
+    if (!passwordSignInLimiter(ipKey(c))) {
+      return redirectWith(c, "/login", { error: "Too many requests" });
+    }
+    const form = await c.req.formData();
+    const email = String(form.get("email") ?? "").trim().toLowerCase();
+    const password = String(form.get("password") ?? "");
+
+    if (!email || !password) {
+      return redirectWith(c, "/login", { error: "Email and password required" });
+    }
+
+    const res = await deps.auth.api.signInEmail({
+      method: "POST",
+      headers: forwardedHeaders(c),
+      body: { email, password },
+      asResponse: true,
+    });
+    if (!res.ok) {
+      if ((await authErrorCode(res)) === "EMAIL_NOT_VERIFIED") {
+        // Reached only AFTER the password verified (api/routes/sign-in.mjs), so
+        // naming this state discloses nothing a correct password didn't already.
+        // Issue the resend here rather than via `sendOnSignIn`: the token is a
+        // stateless JWT with no cooldown, so the send has to spend the same
+        // per-IP email budget as the resend button or a self-registered,
+        // never-verified address becomes a 700-mails-an-hour firehose.
+        const sent = passwordEmailLimiter(ipKey(c));
+        if (sent) {
+          await deps.auth.api
+            .sendVerificationEmail({
+              method: "POST",
+              headers: anonymousHeaders(c),
+              body: { email },
+              asResponse: true,
+            })
+            .catch(() => undefined);
+        }
+        // Report what actually happened. Claiming a fresh link on the throttled
+        // branch leaves the user waiting on mail nobody sent, and their only
+        // recourse — signing in again — spends the sign-in bucket instead.
+        return redirectWith(c, "/login/check-email", {
+          email,
+          ...(sent ? { resent: "1" } : { throttled: "1" }),
+        });
+      }
+      // Everything else collapses to one message deliberately: Better-Auth
+      // returns the same INVALID_EMAIL_OR_PASSWORD for a wrong password, an
+      // unknown address, AND an account that has no password at all
+      // (magic-link/OAuth only). Wording that told them apart would be an
+      // enumeration oracle — the standing hint under the form is what tells
+      // that last user where to go instead.
+      return redirectWith(c, "/login", { error: "Invalid email or password" });
+    }
+    forwardSetCookies(c, res);
+    return c.redirect("/dashboard");
+  });
+
+  r.get("/login/check-email", (c) => {
+    const email = c.req.query("email") ?? null;
+    const throttled = c.req.query("throttled");
+    return c.html(
+      <CheckEmailPage
+        kind="verify"
+        email={email}
+        notice={
+          c.req.query("resent")
+            ? "Your email isn't verified yet — we've sent a fresh link."
+            : null
+        }
+        error={
+          throttled
+            ? "Too many requests — no link was sent. Wait a minute, then use " +
+              "the button below."
+            : null
+        }
+      />
+    );
+  });
+
+  r.post("/ui/verify-email/resend", async (c) => {
+    // Address rides in the query, not the body, so the throttled reply can echo
+    // it back without reading a body we are about to discard — the page needs it
+    // to render the address AND the resend button, which is gated on having one.
+    // Keeps the bucket ahead of any body read; see /ui/signup for why.
+    const email = (c.req.query("email") ?? "").trim().toLowerCase();
+    if (!email) return c.redirect("/login");
+    if (!passwordEmailLimiter(ipKey(c))) {
+      return redirectWith(c, "/login/check-email", { email, throttled: "1" });
+    }
+    // Enumeration-safe by construction: the endpoint reports success without
+    // sending for an unknown or already-verified address, so the reply below is
+    // the same either way. Errors are swallowed for that same reason. Sent
+    // WITHOUT the cookie — a signed-in caller (back button after verifying)
+    // would otherwise be answered from the session branch, which throws rather
+    // than taking the path this comment describes.
+    await deps.auth.api
+      .sendVerificationEmail({
+        method: "POST",
+        headers: anonymousHeaders(c),
+        body: { email },
+        asResponse: true,
+      })
+      .catch(() => undefined);
+    return redirectWith(c, "/login/check-email", { email, resent: "1" });
+  });
+
+  // Landing for the emailed verification link. Better-Auth redirects here bare
+  // on success — with `autoSignInAfterVerification` the session cookie is
+  // already set, so /dashboard just works — and with `?error=<CODE>` when the
+  // token is expired or forged.
+  r.get("/login/verified", async (c) => {
+    if (c.req.query("error")) return c.html(<VerifyEmailFailedPage />);
+    // Only the FIRST open of the link carries a session: Better-Auth
+    // short-circuits an already-verified user before the
+    // autoSignInAfterVerification block, so it redirects here bare. That is the
+    // normal case whenever a mail scanner prefetches the link (SafeLinks,
+    // Proofpoint) or the user opens it on a second device — bouncing them to
+    // /dashboard would land them on an unexplained sign-in page instead.
+    const session = await deps.auth.api.getSession({ headers: c.req.raw.headers });
+    if (!session) {
+      return redirectWith(c, "/login", {
+        notice: "Email verified. Sign in to continue.",
+      });
+    }
+    return c.redirect("/dashboard");
+  });
+
+  r.get("/forgot-password", (c) =>
+    c.html(<ForgotPasswordPage error={c.req.query("error") ?? null} />)
+  );
+
+  r.post("/ui/forgot-password", async (c) => {
+    if (!passwordEmailLimiter(ipKey(c))) {
+      return redirectWith(c, "/forgot-password", { error: "Too many requests" });
+    }
+    const form = await c.req.formData();
+    const email = String(form.get("email") ?? "").trim().toLowerCase();
+    if (!email) return redirectWith(c, "/forgot-password", { error: "Email required" });
+    await deps.auth.api
+      .requestPasswordReset({
+        method: "POST",
+        headers: forwardedHeaders(c),
+        // Relative path: Better-Auth origin-checks redirectTo, and the token
+        // callback appends `?token=` (or `?error=`) to it before we render.
+        body: { email, redirectTo: "/reset-password" },
+        asResponse: true,
+      })
+      .catch(() => undefined);
+    // Always the same answer, whether or not that address has an account — the
+    // endpoint is enumeration-safe and this page must not undo that. No email
+    // is echoed back for the same reason, which is also why the redirect below
+    // carries no params.
+    //
+    // Redirect rather than render: a rendered POST leaves the send in history,
+    // so a refresh re-submits it and spends another token from a bucket the
+    // user needs to request a replacement link.
+    return c.redirect("/forgot-password/sent");
+  });
+
+  r.get("/forgot-password/sent", (c) => c.html(<CheckEmailPage kind="reset" />));
+
+  r.get("/reset-password", (c) => {
+    const token = c.req.query("token") ?? "";
+    // No token means Better-Auth's `/reset-password/:token` callback rejected
+    // it and bounced here with `?error=INVALID_TOKEN`; a bare visit lands the
+    // same way. Never render the form without one.
+    if (!token) return c.html(<ResetLinkInvalidPage />);
+    return c.html(
+      <ResetPasswordPage
+        token={token}
+        error={c.req.query("error") ?? null}
+        minPasswordLength={MIN_PASSWORD_LENGTH}
+        maxPasswordLength={MAX_PASSWORD_LENGTH}
+      />
+    );
+  });
+
+  r.post("/ui/reset-password", async (c) => {
+    // The token is unguessable, so this bucket is not the security boundary —
+    // it is what keeps an unauthenticated endpoint that does a DB lookup and a
+    // scrypt hash per call from being a free CPU lever. Better-Auth's own
+    // /reset-password rule cannot cover it (in-process call, no router).
+    //
+    // Its OWN bucket, not the send bucket: this form is submitted repeatedly by
+    // a user fixing a mismatched confirmation, and every one of those attempts
+    // would otherwise spend budget they need to request a NEW reset link if
+    // this token lapses.
+    if (!resetSubmitLimiter(ipKey(c))) {
+      // Keep the token — dropping it strands a user holding a still-valid link
+      // with no way back to the form.
+      const throttledToken = c.req.query("token") ?? "";
+      if (!throttledToken) return c.html(<ResetLinkInvalidPage />);
+      return redirectWith(c, "/reset-password", {
+        token: throttledToken,
+        error: "Too many attempts. Wait a moment, then try again.",
+      });
+    }
+    const form = await c.req.formData();
+    const token = String(form.get("token") ?? "");
+    const password = String(form.get("password") ?? "");
+    const confirm = String(form.get("confirmPassword") ?? "");
+    if (!token) return c.html(<ResetLinkInvalidPage />);
+    const fail = (message: string) =>
+      redirectWith(c, "/reset-password", { token, error: message });
+
+    if (password !== confirm) return fail("Passwords do not match");
+    const lengthError = passwordLengthError(password);
+    if (lengthError) return fail(lengthError);
+
+    const res = await deps.auth.api.resetPassword({
+      method: "POST",
+      headers: forwardedHeaders(c),
+      body: { token, newPassword: password },
+      asResponse: true,
+    });
+    if (!res.ok) {
+      const code = await authErrorCode(res);
+      if (code === "INVALID_TOKEN") return c.html(<ResetLinkInvalidPage />);
+      return fail("Could not set your password. Try again.");
+    }
+    // revokeSessionsOnPasswordReset dropped every session for this user,
+    // including any this browser held, so there is nothing to sign in to yet.
+    return redirectWith(c, "/login", {
+      notice: "Password updated. Sign in with your new password.",
+    });
   });
 
   r.post("/ui/login/start", async (c) => {
@@ -522,8 +920,95 @@ export function uiRoutes(deps: {
     const userId = c.get("userId");
     await provisionProductAccountForUser(deps.db, userId);
     // Same predicate the DELETE endpoint uses — one source of truth.
-    const blocked = await hasRenewingPaidSubscription(deps.db, userId);
-    return c.html(<AccountPage user={{ email: c.get("userEmail") }} blockedBySubscription={blocked} />);
+    const [blocked, hasPassword] = await Promise.all([
+      hasRenewingPaidSubscription(deps.db, userId),
+      hasPasswordCredential(deps.db, userId),
+    ]);
+    return c.html(
+      <AccountPage
+        user={{ email: c.get("userEmail") }}
+        blockedBySubscription={blocked}
+        hasPassword={hasPassword}
+        minPasswordLength={MIN_PASSWORD_LENGTH}
+        maxPasswordLength={MAX_PASSWORD_LENGTH}
+        passwordNotice={c.req.query("passwordNotice") ?? null}
+        passwordError={c.req.query("passwordError") ?? null}
+      />
+    );
+  });
+
+  r.post("/ui/account/password", requireUserOrRedirect({ auth: deps.auth }), async (c) => {
+    const userId = c.get("userId");
+    const fail = (message: string) =>
+      redirectWith(c, "/account", { passwordError: message });
+
+    // Per-user, and ahead of the body read. A session holder can otherwise
+    // grind `currentPassword` here without limit — the reply distinguishes a
+    // wrong one — and each attempt costs two scrypt hashes, because
+    // changePassword hashes the NEW password before verifying the old.
+    if (!passwordWriteLimiter(userId)) return fail("Too many attempts. Try again shortly.");
+
+    const form = await c.req.formData();
+    const password = String(form.get("password") ?? "");
+    const confirm = String(form.get("confirmPassword") ?? "");
+    const currentPassword = String(form.get("currentPassword") ?? "");
+
+    if (password !== confirm) return fail("Passwords do not match");
+    const lengthError = passwordLengthError(password);
+    if (lengthError) return fail(lengthError);
+
+    // The two endpoints are not interchangeable: setPassword refuses a user who
+    // already has one, changePassword refuses one who doesn't. Read the current
+    // state rather than inferring it from which fields the form submitted.
+    const hasPassword = await hasPasswordCredential(deps.db, userId);
+    const res = hasPassword
+      ? await deps.auth.api.changePassword({
+          method: "POST",
+          headers: forwardedHeaders(c),
+          body: { currentPassword, newPassword: password, revokeOtherSessions: true },
+          asResponse: true,
+        })
+      : await deps.auth.api.setPassword({
+          method: "POST",
+          headers: forwardedHeaders(c),
+          body: { newPassword: password },
+          asResponse: true,
+        });
+
+    if (!res.ok) {
+      const code = await authErrorCode(res);
+      if (code === "INVALID_PASSWORD") return fail("Current password is incorrect");
+      return fail("Could not update your password");
+    }
+    // revokeOtherSessions kills EVERY session for the user and issues a fresh
+    // one — dropping this cookie would sign the user out of the very tab they
+    // just changed their password in.
+    forwardSetCookies(c, res);
+
+    if (!hasPassword) {
+      // setPassword takes no `revokeOtherSessions` and sends no notification,
+      // so on its own it lets whoever is holding a session mint a permanent way
+      // back in that survives the owner signing out and revoking every device —
+      // the credential lives on the account, not the session. Match what the
+      // change branch above already does, and leave a line an operator can
+      // alert on, next to auth.password.reset.
+      // Forward its Set-Cookie for the same reason as above: revokeOtherSessions
+      // rotates the surviving session's token, and the acting tab is that one.
+      const revoked = await deps.auth.api
+        .revokeOtherSessions({ headers: c.req.raw.headers, asResponse: true })
+        .catch(() => undefined);
+      if (revoked) forwardSetCookies(c, revoked);
+      // setPassword is check-then-create with no unique index behind it; two
+      // submits that interleave leave a second row whose hash outlives the next
+      // change. Converge on one.
+      await pruneDuplicatePasswordCredentials(deps.db, userId);
+      console.info(
+        JSON.stringify({ evt: "auth.password.set", userId, at: new Date().toISOString() })
+      );
+    }
+    return redirectWith(c, "/account", {
+      passwordNotice: hasPassword ? "Password changed." : "Password set.",
+    });
   });
 
   r.post("/ui/account/delete", requireUserOrRedirect({ auth: deps.auth }), async (c) => {

@@ -8,6 +8,7 @@ import '../design/ab_icons.dart';
 import '../design/ab_theme.dart';
 import '../design/ab_tokens.dart';
 import '../design/widgets/ab_button.dart';
+import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_panel_header.dart';
 import '../design/widgets/ab_snack_bar.dart';
@@ -383,6 +384,32 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                 _Section(
                   title: 'ACCOUNT',
                   body: [
+                    if (ref.watch(currentUserProvider).value != null) ...[
+                      const SizedBox(height: AbTokens.space8),
+                      Text(
+                        'Set or change your password on the web, where a '
+                        'password change can re-check who you are and sign out '
+                        'your other sessions.',
+                        style: AbTokens.sansStyle(
+                          fontSize: AbTokens.fontXxs,
+                          color: antgrid.textMuted,
+                        ),
+                      ),
+                      const SizedBox(height: AbTokens.space8),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: AbButton(
+                          label: 'MANAGE PASSWORD',
+                          leading: AbIcon(
+                            AbIcons.link,
+                            size: 10,
+                            color: antgrid.textSecondary,
+                          ),
+                          onTap: () => openAccountInBrowser(ref.container),
+                        ),
+                      ),
+                      const SizedBox(height: AbTokens.space16),
+                    ],
                     const SizedBox(height: AbTokens.space8),
                     Text(
                       'Permanently delete your account and all associated data. '
