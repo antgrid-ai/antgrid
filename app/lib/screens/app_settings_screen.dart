@@ -149,7 +149,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                             children: [
                               Text(
                                 'Pricing',
-                                style: AbTokens.monoStyle(
+                                style: AbTokens.sansStyle(
                                   color: antgrid.textPrimary,
                                 ),
                               ),

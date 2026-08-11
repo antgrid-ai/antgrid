@@ -72,7 +72,7 @@ class AccountFooter extends ConsumerWidget {
                   Expanded(
                     child: Text(
                       user != null ? user.email : 'Sign in',
-                      style: AbTokens.monoStyle(
+                      style: AbTokens.sansStyle(
                         fontSize: AbTokens.fontXs,
                         color: tone,
                         letterSpacing: 0.2,

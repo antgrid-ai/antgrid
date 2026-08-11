@@ -49,7 +49,7 @@ class ImageViewer extends StatelessWidget {
   Widget _failure(AbColors c) => Center(
         child: Text(
           "Couldn't render this image",
-          style: AbTokens.monoStyle(color: c.textMuted),
+          style: AbTokens.sansStyle(color: c.textMuted),
         ),
       );
 }

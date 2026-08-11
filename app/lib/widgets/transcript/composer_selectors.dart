@@ -111,7 +111,7 @@ class ComposerSelectors extends StatelessWidget {
         const SizedBox(width: AbTokens.space8),
         Text(
           'loading models…',
-          style: AbTokens.monoStyle(
+          style: AbTokens.sansStyle(
             fontSize: AbTokens.fontXs,
             color: context.antgrid.textMuted,
           ),

@@ -195,7 +195,7 @@ class DiffViewer extends StatelessWidget {
                   child: Text(
                     'View file',
                     style:
-                        AbTokens.monoStyle(
+                        AbTokens.sansStyle(
                           fontSize: AbTokens.fontXs,
                           color: context.antgrid.accent,
                         ).copyWith(

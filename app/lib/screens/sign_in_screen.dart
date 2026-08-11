@@ -312,7 +312,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         Text(
           'Sign in to continue',
           textAlign: TextAlign.center,
-          style: AbTokens.monoStyle(color: antgrid.textMuted),
+          style: AbTokens.sansStyle(color: antgrid.textMuted),
         ),
         const SizedBox(height: AbTokens.space16),
         AbTextField(
@@ -371,7 +371,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         Text(
           'Check your email',
           textAlign: TextAlign.center,
-          style: AbTokens.monoStyle(color: antgrid.textPrimary),
+          style: AbTokens.sansStyle(color: antgrid.textPrimary),
         ),
         const SizedBox(height: AbTokens.space8),
         Text(
@@ -398,7 +398,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         Text(
           'Link expired',
           textAlign: TextAlign.center,
-          style: AbTokens.monoStyle(color: antgrid.textPrimary),
+          style: AbTokens.sansStyle(color: antgrid.textPrimary),
         ),
         const SizedBox(height: AbTokens.space8),
         Text(
@@ -425,7 +425,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         Text(
           'Email bounced',
           textAlign: TextAlign.center,
-          style: AbTokens.monoStyle(color: antgrid.textPrimary),
+          style: AbTokens.sansStyle(color: antgrid.textPrimary),
         ),
         const SizedBox(height: AbTokens.space8),
         Text(
@@ -509,7 +509,7 @@ class _MutedLinkState extends State<_MutedLink> {
             child: Text(
               widget.label,
               textAlign: TextAlign.center,
-              style: AbTokens.monoStyle(
+              style: AbTokens.sansStyle(
                 color: antgrid.textMuted,
                 fontSize: AbTokens.fontXs,
               ),
@@ -548,7 +548,7 @@ class _SignInButtonState extends State<_SignInButton> {
       child: Text(
         widget.label,
         textAlign: TextAlign.center,
-        style: AbTokens.monoStyle(color: antgrid.textPrimary),
+        style: AbTokens.sansStyle(color: antgrid.textPrimary),
       ),
     );
     if (!enabled) return Opacity(opacity: 0.4, child: visual);

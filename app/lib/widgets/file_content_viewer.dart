@@ -433,7 +433,7 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
       return Center(
         child: Text(
           'No content',
-          style: AbTokens.monoStyle(color: context.antgrid.textMuted),
+          style: AbTokens.sansStyle(color: context.antgrid.textMuted),
         ),
       );
     }
@@ -642,7 +642,7 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
           onTap: widget.onClose,
           child: Text(
             'Close',
-            style: AbTokens.monoStyle(color: context.antgrid.accent),
+            style: AbTokens.sansStyle(color: context.antgrid.accent),
           ),
         ),
       );

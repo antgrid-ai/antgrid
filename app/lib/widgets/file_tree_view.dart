@@ -98,7 +98,7 @@ class FileTreeView extends StatelessWidget {
           ),
           child: Text(
             '${entries.length} changed file${entries.length == 1 ? '' : 's'}',
-            style: AbTokens.monoStyle(
+            style: AbTokens.sansStyle(
               fontWeight: FontWeight.w600,
               color: context.antgrid.textMuted,
             ),

@@ -100,14 +100,14 @@ class ViewerModifiedBanner extends StatelessWidget {
           Expanded(
             child: Text(
               'File changed externally',
-              style: AbTokens.monoStyle(color: c.warning),
+              style: AbTokens.sansStyle(color: c.warning),
             ),
           ),
           GestureDetector(
             onTap: onRefresh,
             child: Text(
               'Refresh',
-              style: AbTokens.monoStyle(color: c.accent),
+              style: AbTokens.sansStyle(color: c.accent),
             ),
           ),
         ],

@@ -149,7 +149,7 @@ class _GitChangesHeader extends StatelessWidget {
             ],
             Text(
               'Changes',
-              style: AbTokens.monoStyle(color: context.antgrid.textMuted),
+              style: AbTokens.sansStyle(color: context.antgrid.textMuted),
             ),
             const Spacer(),
             AbButton(

@@ -172,7 +172,7 @@ class _CommandButtonState extends ConsumerState<_CommandButton> {
               const SizedBox(width: AbTokens.space8),
               Text(
                 'Run "${widget.command.name}"?',
-                style: AbTokens.monoStyle(
+                style: AbTokens.sansStyle(
                   fontSize: AbTokens.fontBody,
                   fontWeight: FontWeight.w600,
                 ),

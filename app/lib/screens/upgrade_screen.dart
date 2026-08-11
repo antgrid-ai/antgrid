@@ -121,7 +121,7 @@ class _ErrorState extends StatelessWidget {
           children: [
             Text(
               message,
-              style: AbTokens.monoStyle(color: context.antgrid.error),
+              style: AbTokens.sansStyle(color: context.antgrid.error),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: AbTokens.space12),
@@ -147,7 +147,7 @@ class _PricingBody extends StatelessWidget {
           padding: const EdgeInsets.all(AbTokens.space16),
           child: Text(
             'Could not load pricing.',
-            style: AbTokens.monoStyle(color: context.antgrid.textSecondary),
+            style: AbTokens.sansStyle(color: context.antgrid.textSecondary),
           ),
         ),
       );
@@ -210,7 +210,7 @@ class _PricingCta extends StatelessWidget {
         alignment: Alignment.center,
         child: Text(
           label,
-          style: AbTokens.monoStyle(
+          style: AbTokens.sansStyle(
             fontSize: AbTokens.fontSm,
             fontWeight: FontWeight.w500,
             color: p.textMuted,
@@ -232,7 +232,7 @@ class _PricingHeader extends StatelessWidget {
         Text(
           'Simple, honest pricing',
           textAlign: TextAlign.center,
-          style: AbTokens.monoStyle(
+          style: AbTokens.sansStyle(
             fontSize: AbTokens.fontDisplayMd,
             fontWeight: FontWeight.w700,
             color: antgrid.textPrimary,
@@ -294,7 +294,7 @@ class _FreeTrialBanner extends StatelessWidget {
                 const _PlanBadge(label: 'FREE TRIAL'),
                 Text(
                   '${catalog.trialDays}-day trial',
-                  style: AbTokens.monoStyle(
+                  style: AbTokens.sansStyle(
                     fontSize: AbTokens.fontXs,
                     color: antgrid.textMuted,
                   ),
@@ -304,7 +304,7 @@ class _FreeTrialBanner extends StatelessWidget {
             const SizedBox(height: AbTokens.space8),
             Text(
               '${catalog.trialDays}-day free trial, then $yearlyDisplay/year',
-              style: AbTokens.monoStyle(
+              style: AbTokens.sansStyle(
                 fontSize: AbTokens.fontLg,
                 fontWeight: FontWeight.w600,
                 color: antgrid.textPrimary,
@@ -433,7 +433,7 @@ class _PlanCard extends StatelessWidget {
           children: [
             Text(
               title,
-              style: AbTokens.monoStyle(
+              style: AbTokens.sansStyle(
                 fontSize: AbTokens.fontXl,
                 fontWeight: FontWeight.w700,
                 color: antgrid.textPrimary,
@@ -465,7 +465,7 @@ class _PlanCard extends StatelessWidget {
             const SizedBox(height: AbTokens.space6),
             Text(
               priceNote,
-              style: AbTokens.monoStyle(
+              style: AbTokens.sansStyle(
                 fontSize: AbTokens.fontXs,
                 color: antgrid.textMuted,
               ),
