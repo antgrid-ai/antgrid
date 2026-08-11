@@ -14,8 +14,9 @@ name: Publish images — relay + web (GHCR)
 # Every push also publishes an immutable :<short-sha>. Ops rolls out the moving
 # tag by default and pins a short SHA to roll back.
 #
-# `deploy/**` is deliberately absent from the paths filter: it no longer affects
-# the images, and editing it here changes nothing until the ops repo ships it.
+# The rollout files this used to sit beside (`deploy/`, `infra/`) no longer exist
+# here at all — they live only in the ops repo. Nothing in this repository can
+# reach a server; the furthest it goes is a tag in the registry.
 
 on:
   push:

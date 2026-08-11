@@ -115,3 +115,10 @@ docs/superpowers/specs/
 /app/windows/flutter/generated_plugin_registrant.cc
 /app/windows/flutter/generated_plugin_registrant.h
 /app/windows/flutter/generated_plugins.cmake
+
+# Infra + rollout moved to the private ops repo (antgrid-ai/antgrid-ops). Local
+# leftovers stay on disk after the removal — including infra/tofu/.tf-passphrase,
+# which was only ever ignored by infra/tofu/.gitignore and would become
+# committable the moment that file left with the directory.
+/infra/
+/deploy/

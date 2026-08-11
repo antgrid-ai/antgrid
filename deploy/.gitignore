@@ -1,4 +1,0 @@
-# Secrets and generated runtime files — never commit.
-.env
-caddy/sites/active.caddy
-ACTIVE
