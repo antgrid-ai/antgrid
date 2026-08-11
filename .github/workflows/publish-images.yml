@@ -1,0 +1,92 @@
+name: Publish images — relay + web (GHCR)
+
+# Builds the relay and web images and pushes them to GHCR. It does NOT deploy.
+#
+# The rollout half of this pipeline lives in the private antgrid-ai/antgrid-ops
+# repo. This repo is public and accepts PRs from strangers; the blue-green flip
+# needs an SSH key to the production VM. Splitting at the registry keeps every
+# deploy credential out of reach — the only permission needed here is
+# packages:write against the org's own GHCR, via the ephemeral GITHUB_TOKEN.
+#
+# Branch -> moving tag:
+#   main         -> :prod
+#   development  -> :staging
+# Every push also publishes an immutable :<short-sha>. Ops rolls out the moving
+# tag by default and pins a short SHA to roll back.
+#
+# `deploy/**` is deliberately absent from the paths filter: it no longer affects
+# the images, and editing it here changes nothing until the ops repo ships it.
+
+on:
+  push:
+    branches: [main, development]
+    paths:
+      - 'relay/**'
+      - 'web/**'
+      - 'package.json'
+      - 'bun.lock'
+      - 'bunfig.toml'
+      - '.github/workflows/publish-images.yml'
+  workflow_dispatch:
+
+# Serialize per branch so two pushes in quick succession cannot race the moving
+# tag into pointing at the older of the two builds.
+concurrency:
+  group: publish-images-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  # Derived, never hardcoded: GHCR packages are org-scoped and do NOT follow a
+  # repo transfer, so a literal owner here goes stale the moment the repo moves
+  # and every push 403s against an org this token has no write on. GHCR requires
+  # a lowercase path — safe while the org login is already lowercase.
+  OWNER: ${{ github.repository_owner }}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # Both images are independent — build them concurrently via a matrix.
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [web, relay]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Short SHA = the immutable tag a rollout pins to. The env name is a
+      # per-environment moving tag — kept separate so main and development never
+      # clobber each other's "latest".
+      - id: tag
+        run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - id: envname
+        run: echo "env=${{ github.ref_name == 'main' && 'prod' || 'staging' }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build & push ${{ matrix.service }}
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.service }}/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ env.OWNER }}/antgrid-${{ matrix.service }}:${{ steps.tag.outputs.tag }}
+            ghcr.io/${{ env.OWNER }}/antgrid-${{ matrix.service }}:${{ steps.envname.outputs.env }}
+          cache-from: type=gha,scope=${{ matrix.service }}-${{ steps.envname.outputs.env }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}-${{ steps.envname.outputs.env }}
+
+      # The rollout runs in a different repo and cannot read this job's outputs,
+      # so print the tag an operator feeds to antgrid-ops rather than leaving
+      # them to derive it from the commit SHA by hand.
+      - name: Summarise
+        run: echo 'antgrid-${{ matrix.service }} → ${{ steps.tag.outputs.tag }} (also tagged ${{ steps.envname.outputs.env }})' >> "$GITHUB_STEP_SUMMARY"
