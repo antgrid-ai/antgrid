@@ -1,4 +1,4 @@
-// Project→stream binding hydration coverage (design §7.4): a reconnecting
+// Project→stream binding hydration coverage: a reconnecting
 // phone must be able to bind a project stream from PULLED state (the
 // `state.snapshot` reply), not only from live `stream-ready` /
 // `agent:projects` pushes — the bridge's replay-cache dedup can legally
@@ -304,11 +304,11 @@ void main() {
     });
   });
 
-  // Regression (Phase C smoke, 2026-07-27): a bridge restart re-attaches every
-  // project under fresh ids, so the phone's cached id is dead. Before the
-  // bridge answered `stream-invalid` the phone replayed onto it forever —
-  // "Couldn't load this project's sessions: TimeoutException" until a force
-  // quit; backing out of the project and re-entering never renegotiated.
+  // Regression: a bridge restart re-attaches every project under fresh ids, so
+  // the phone's cached id is dead. Before the bridge answered `stream-invalid`
+  // the phone replayed onto it forever — "Couldn't load this project's
+  // sessions: TimeoutException" until a force quit; backing out of the project
+  // and re-entering never renegotiated.
   group('stream-invalid (host restart self-heal)', () {
     Future<void> settle() =>
         Future<void>.delayed(const Duration(milliseconds: 20));

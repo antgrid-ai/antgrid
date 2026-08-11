@@ -26,7 +26,7 @@ describe("GET /subscriptions/me", () => {
     const body = await res.json();
     expect(body.subscription.tier).toBe("pro");
     expect(body.subscription.worker_limit).toBe(3);
-    // Compatibility mirror for app builds already in the field (Phase 1.5).
+    // Compatibility mirror for app builds already in the field.
     expect(body.subscription.session_limit).toBe(3);
     expect(body.subscription.plan_id).toBe(PLAN_UUID.pro_yearly);
     expect(body.active_devices).toBe(0);

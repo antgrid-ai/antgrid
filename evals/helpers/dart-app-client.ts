@@ -248,9 +248,9 @@ export class DartAppClient {
   }
 
   async connect(relayUrl: string, licenseToken: string): Promise<void> {
-    // Mandatory in v3: the app hello carries the account's own license token
-    // (design §4.2). Omitting it makes the Dart CLI reject the command outright
-    // rather than dial token-free, so this stays required here.
+    // Mandatory in v3: the app hello carries the account's own license token.
+    // Omitting it makes the Dart CLI reject the command outright rather than
+    // dial token-free, so this stays required here.
     this.sendCommand({ action: "connect", relayUrl, licenseToken });
     await this.waitForState("authenticated");
   }
@@ -288,7 +288,7 @@ export class DartAppClient {
 
   /**
    * Drill into a project: control-plane `project:start`, then the agent's
-   * `stream-ready { projectId, streamId }` (design §7.4) — resolved at 0 RTT
+   * `stream-ready { projectId, streamId }` — resolved at 0 RTT
    * when the `agent:projects` advert already carried the stream. No new socket.
    */
   async openProjectStream(projectId: string, timeoutMs = 25_000): Promise<string> {

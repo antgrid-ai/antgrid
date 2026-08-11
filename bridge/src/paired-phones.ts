@@ -13,7 +13,7 @@ export interface PairedPhone {
   label?: string;
   pairedAt: string;
   lastSeenAt: string;
-  // Push (Phase 1): persistent X25519 push pubkey + current FCM token. The relay
+  // Push: persistent X25519 push pubkey + the current FCM/APNs token. The relay
   // never stores these; the bridge supplies them per push:deliver.
   pushPubkey?: string;
   pushToken?: string;

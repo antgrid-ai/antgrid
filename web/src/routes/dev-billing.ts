@@ -48,10 +48,11 @@ export function devBillingRoutes(deps: { db: DB }) {
         provider: sub.provider,
         status: sub.status,
         worker_limit: sub.workerLimit,
-        // Compatibility mirror for app builds already in the field, which parse
-        // `session_limit` as non-null. Drop once the worker_limit app release
-        // ships — see "Deploy order" in
-        // docs/plans/2026-07-30-worker-limit-pricing.md.
+        // `session_limit` is the retired name for `worker_limit`. No app build
+        // reaches this dev-only route; the old key is echoed only to keep a
+        // dev-granted subscription the same shape as the real ones. Drop it in
+        // the same commit as the production mirrors — web/src/routes/billing.ts
+        // carries the condition.
         session_limit: sub.workerLimit,
         device_limit: sub.deviceLimit,
         current_period_end: sub.currentPeriodEnd,

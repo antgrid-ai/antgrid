@@ -13,7 +13,7 @@ import 'providers.dart';
 /// Owns exactly one relay socket (one [RelayService]) and its single
 /// [MachineSession] for one bare machine `deviceUuid`. v3: there is ONE socket
 /// per machine — the control plane and every project ride sealed streams inside
-/// the one E2E session (design §2). No sub-deviceId, no socket-per-project.
+/// the one E2E session. No sub-deviceId, no socket-per-project.
 ///
 /// The connection is not opened by its callers: a [ConnectionSupervisor] owns
 /// dial, redial and give-up, and callers only declare that they want it

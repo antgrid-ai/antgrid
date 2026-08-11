@@ -86,7 +86,7 @@ final licenseTokenMinterProvider = FutureProvider<LicenseTokenMinter?>((
 
 /// The app's per-launch relay epoch — a single global monotonic counter in
 /// SharedPreferences (`antgrid.relay_epoch`), computed once as
-/// `max(stored + 1, unixSeconds)` and persisted (design §6.3). The wall-clock
+/// `max(stored + 1, unixSeconds)` and persisted. The wall-clock
 /// floor makes a storage wipe / reinstall a non-event: a fresh install still
 /// out-epochs any zombie connection whose counter came from a sane past.
 final relayEpochProvider = FutureProvider<int>((ref) async {

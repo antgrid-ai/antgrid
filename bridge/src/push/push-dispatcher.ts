@@ -15,7 +15,7 @@ export interface PushDispatcherDeps {
   projectId: string;
   /** True when the phone can't receive in-band and a fallback push should fire.
    *  This is the SUPPRESSION union (peer offline OR app backgrounded), not bare
-   *  peer-offline — a connected-but-backgrounded phone (Phase 1) must still push. */
+   *  peer-offline — a connected-but-backgrounded phone must still push. */
   shouldFallback: () => boolean;
   /** The phones eligible to receive this notification; empty means nowhere to
    *  send. Plural because with no live peer the agent can't know which allowed

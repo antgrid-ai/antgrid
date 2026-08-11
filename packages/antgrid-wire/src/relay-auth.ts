@@ -3,7 +3,7 @@
 // single TS implementation. Byte-for-byte mirror of
 // packages/antgrid_relay_client/lib/src/relay_auth.dart; the shared vector
 // fixture (evals/fixtures/relay-hello-vector.json) pins both.
-// Spec: docs/plans/2026-07-16-relay-v3-connection-redesign.md §4.1.
+// Spec: relay/CLAUDE.md (`server.ts` — hello verification order).
 
 import { createHash } from "node:crypto";
 

@@ -18,8 +18,8 @@ export interface TrustedPeersOpts {
 }
 
 /**
- * Account device inventory as the E2E-admission trust source (spec 2026-07-24
- * §3.3/§5). Sync lookup from an in-memory map backed by a durable disk cache so
+ * Account device inventory as the E2E-admission trust source.
+ * Sync lookup from an in-memory map backed by a durable disk cache so
  * handleClientHello stays synchronous; an unknown identity triggers a throttled
  * background refresh and relies on the phone's handshake retransmit landing on
  * the warmed cache — same self-heal shape as the relay's JWKS kid-miss cooldown.

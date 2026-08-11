@@ -1,8 +1,7 @@
-// resolvePhoneEd25519PubB64 resolution order (spec 2026-07-24 §3.3, task 6):
+// resolvePhoneEd25519PubB64 resolution order:
 // explicit map -> account inventory (TrustedPeersProvider) -> paired-phones
-// store -> noteMiss() + undefined. The explicit-map and paired-phones paths
-// predate this task; these tests cover the newly-inserted inventory step and
-// its ordering relative to the two existing sources.
+// store -> noteMiss() + undefined. These tests cover the inventory step and
+// its ordering relative to the explicit-map and paired-phones sources.
 import { test, expect } from "bun:test";
 import { RelayClient } from "../src/relay-client";
 import { generateEphemeralKeypair } from "../src/key-exchange";

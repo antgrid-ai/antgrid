@@ -13,8 +13,8 @@ import { createPushDispatcher } from "./push/push-dispatcher";
 import { sealPush } from "./push/seal";
 
 /** Host-level dependencies injected into a remote-mode ProjectCore. In local
- *  mode these are unused. The host owns the single machine relay socket (design
- *  §7); a core attaches its bus as a multiplexed stream rather than owning a
+ *  mode these are unused. The host owns the single machine relay socket;
+ *  a core attaches its bus as a multiplexed stream rather than owning a
  *  RelayClient of its own. */
 export interface ProjectCoreRemoteDeps {
   /** Attach this core's bus as a stream on the machine socket, allocating a
@@ -54,7 +54,7 @@ export interface PromotionHandle {
 /** Outcome of a relay stream's FIRST admission — `ok` once the relay acks the
  *  stream-open, otherwise the typed rejection the relay answered with (current
  *  relays admit unconditionally; the retired `SESSION_LIMIT_EXCEEDED` still
- *  arrives from older ones). Stream admission is its own signal (design §7.3):
+ *  arrives from older ones). Stream admission is its own signal:
  *  a rejection leaves the socket and every other stream live. */
 export type RegisterOutcome =
   | { ok: true }
@@ -375,7 +375,7 @@ export class ProjectCore {
    *  session is undisturbed. Shared by {@link startRemote} (fresh remote core)
    *  and {@link promote} (already-open local core); the caller owns the returned
    *  handle's lifetime. Encryption is NEVER optional — the machine socket owns
-   *  the one E2E session every stream is sealed under (design §7). */
+   *  the one E2E session every stream is sealed under. */
   private attachRelayStream(
     core: AgentCore,
     bus: MessageBus,

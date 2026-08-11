@@ -40,7 +40,7 @@ function makeCountingFactory(): { factory: () => Promise<RemoteRuntime>; tokenCa
 // A machine-relay-client stub whose promoted stream is rejected by the relay
 // gate the instant it attaches — the account is at its concurrent remote-agent
 // cap. Mirrors the real relay `error{ref}` (server.ts) → StreamMux `onRejected`
-// (design §7.3: a rejected stream-open leaves the socket and every other
+// (a rejected stream-open leaves the socket and every other
 // stream live — there is no more per-registration terminal-close outcome).
 function makeSessionLimitedRelayFactory(code = "SESSION_LIMIT_EXCEEDED") {
   return (_opts: RelayClientOptions): RelayClient =>

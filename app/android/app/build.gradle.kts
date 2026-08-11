@@ -8,10 +8,12 @@ plugins {
 }
 
 // FCM is opt-in per deployment: the google-services plugin hard-fails the build
-// when google-services.json is absent, and the file is environment-specific
-// (operator drops it in — see docs FCM relay setup runbook). Apply the plugin
-// only when the file is present so a fresh clone / CI still builds; push simply
-// stays inert until Firebase is configured.
+// when google-services.json is absent, and that file is gitignored — each
+// deployment provisions its own Firebase Android app for this applicationId.
+// Apply the plugin only when the file is present so a fresh clone or CI still
+// builds; push then stays inert until the file lands AND the relay holds the
+// FCM service-account triple (loadFcmConfig in relay/src/config.ts), without
+// which push:deliver answers "unconfigured".
 if (file("google-services.json").exists()) {
     apply(plugin = "com.google.gms.google-services")
 }

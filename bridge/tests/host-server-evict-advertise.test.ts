@@ -48,12 +48,11 @@ async function setMobileAccess(h: HostServer, enabled: boolean): Promise<void> {
   await h.handleRemoteAccessVerb({ id: "t", type: "mobile-access:set", enabled });
 }
 
-// Regression (Phase C smoke, 2026-07-27): after a bridge restart the host
-// re-opens projects on its own, AFTER the handshake advert has already gone out
-// — so the phone's catalog stayed a snapshot of a host with nothing open, and
-// nothing ever told it the project was back. handleControlPlaneVerb only
-// re-advertises for a phone's own project:start, which a phone that believes it
-// is still bound never sends.
+// Regression: after a bridge restart the host re-opens projects on its own,
+// AFTER the handshake advert has already gone out — so the phone's catalog
+// stayed a snapshot of a host with nothing open, and nothing ever told it the
+// project was back. handleControlPlaneVerb only re-advertises for a phone's
+// own project:start, which a phone that believes it is still bound never sends.
 test("re-advertises agent:projects when a project is opened without a phone asking (restart / desktop-side open)", async () => {
   host = new HostServer({});
 

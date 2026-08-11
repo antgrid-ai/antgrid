@@ -1,7 +1,7 @@
 import type { Connection } from "./connections.js";
 
 /**
- * Account-derived routing authorization (spec 2026-07-24 §3.2): both sides
+ * Account-derived routing authorization: both sides
  * proved account identity at hello, so v1 routing reduces to same-account.
  * This is the ONLY place routing authorization lives — future cross-account
  * shares extend this function, nothing else.

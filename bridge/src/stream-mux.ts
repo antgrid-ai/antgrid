@@ -13,8 +13,8 @@ export const INVALID_NOTICE_COOLDOWN_MS = 5_000;
 export const INVALID_NOTICE_TTL_MS = 60_000;
 
 /** A project's attachment to the single machine relay socket. Opaque `streamId`
- *  namespaces this project's sealed frames inside the one E2E session (design
- *  §7.1); `detach()` releases it, `sendTunnel` routes a preview/tunnel-protocol
+ *  namespaces this project's sealed frames inside the one E2E session;
+ *  `detach()` releases it, `sendTunnel` routes a preview/tunnel-protocol
  *  message tagged with the stream. */
 export interface StreamHandle {
   readonly streamId: string;
@@ -65,7 +65,7 @@ interface StreamEntry {
 }
 
 /**
- * Multiplexes project streams over the single machine relay socket (design §7).
+ * Multiplexes project streams over the single machine relay socket.
  * Owned by the machine {@link RelayClient}: it allocates opaque stream ids,
  * drives stream-open/close admission, tags outbound bus traffic with the
  * stream's id, and routes inbound `{s, m}` envelopes back to the right project
@@ -87,7 +87,7 @@ export class StreamMux {
   ) {}
 
   attach(bus: MessageBus, opts: AttachStreamOpts): StreamHandle {
-    // 16 hex chars from 8 random bytes — opaque, allocated agent-side (§7.1).
+    // 16 hex chars from 8 random bytes — opaque, allocated agent-side.
     const streamId = randomBytes(8).toString("hex");
     // Gate at the send, not at attach/detach: the stream stays open and the core
     // keeps running, so flipping the switch back on resumes delivery with no

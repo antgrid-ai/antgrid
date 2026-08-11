@@ -8,7 +8,7 @@ const ROOT = resolve(import.meta.dir, "../..");
  * Merge-gate: the golden-vector fixtures are the pins between independent
  * implementations, and a dirty fixture means the pinned suites were not
  * re-run against it:
- * - e2e-handshake-vectors.json (design §12): the v2 handshake crypto is
+ * - e2e-handshake-vectors.json: the v2 handshake crypto is
  *   byte-for-byte unchanged in v3; pinned by the bridge and Dart vector
  *   suites (run-and-reported separately per the phase X4 work order).
  * - relay-envelope-vectors.json: the antgrid-wire Zod schemas vs the

@@ -3,11 +3,11 @@ import { startRelay, allocatePort, setupTestEnv } from "../../helpers/harness";
 import { RelayClient } from "../../helpers/relay-client";
 
 /**
- * v3 connection resilience. The v2 offline-queue behaviour is GONE (design §6.4):
+ * v3 connection resilience. The v2 offline-queue behaviour is GONE:
  * a routed frame to an offline peer is rejected with `error{PEER_OFFLINE,
  * retryable:true}` and never queued — queued ciphertext could only ever be
  * undecryptable after the reconnect rekey, so the queue was deleted. The error
- * contract (design §3.3) keeps the socket open for every application-layer
+ * contract keeps the socket open for every application-layer
  * failure (PEER_OFFLINE, NOT_AUTHORIZED, MESSAGE_RATE_LIMITED).
  */
 
@@ -56,7 +56,7 @@ describe("connection resilience (v3)", () => {
       const limited = await limitedP;
       expect(limited.code).toBe("MESSAGE_RATE_LIMITED");
       expect(limited.retryable).toBe(true);
-      // Rate limiting drops the message but never closes the socket (design §3.3).
+      // Rate limiting drops the message but never closes the socket.
       expect(await app.waitForClose(500)).toBe(false);
     } finally {
       await app?.disconnect();
@@ -70,9 +70,9 @@ describe("connection resilience (v3)", () => {
     try {
       app = await RelayClient.connectAndAuth(relay.url, { deviceType: "app" });
       const errP = app.waitForType("error", 5_000);
-      // No same-account target and no grant → uniform PEER_OFFLINE (spec
-      // 2026-07-24 §3.2: deny and offline are indistinguishable, no presence
-      // oracle for an unauthorized sender). Mirrors relay/tests/routing.test.ts.
+      // No same-account target and no grant → uniform PEER_OFFLINE (deny and
+      // offline are indistinguishable, no presence oracle for an unauthorized
+      // sender). Mirrors relay/tests/routing.test.ts.
       app.sendMessage(crypto.randomUUID(), "control", "should-fail");
       const error = await errP;
       expect(error.code).toBe("PEER_OFFLINE");

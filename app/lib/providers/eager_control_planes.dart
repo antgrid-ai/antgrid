@@ -22,8 +22,8 @@ final eagerControlPlanesEnabledProvider = Provider<bool>(
 
 /// Ceiling on proactive dials per launch. Each dial is a persistent WebSocket
 /// + E2E session held for the whole foregrounded lifetime — a battery and
-/// radio cost per machine (the relay itself never caps bare control-plane
-/// connections; see docs/plans/pricing-active-sessions.md) — so eagerness is
+/// radio cost per machine, and the relay meters no per-account quota against
+/// them (see the Streams bullet in `relay/CLAUDE.md`) — so eagerness is
 /// bounded to the machines the user most recently connected to; the rest keep
 /// the on-demand flow.
 const int kEagerControlPlaneCap = 3;

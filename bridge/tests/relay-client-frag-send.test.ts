@@ -159,7 +159,7 @@ describe("RelayClient receive fragmentation seam", () => {
       size: 2500,
       encoding: "utf8",
     });
-    // Control-plane traffic is the `{ m }` envelope with `s` omitted (design §7.1).
+    // Control-plane traffic is the `{ m }` envelope with `s` omitted.
     const json = JSON.stringify({ m: msg });
     const frames = buildFragments(json, "rx-1", { type: "file:content", key: "a.txt" }, 1000);
 

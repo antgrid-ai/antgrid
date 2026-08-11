@@ -84,7 +84,7 @@ const int _kMaxRoutableStalls = 3;
 /// Consecutive `SUPERSEDED` rejections tolerated before the connection is
 /// declared lost to another holder.
 ///
-/// On current relays (design §6.3 equal-epoch rule) a redial presenting this
+/// On current relays (equal-epoch rule) a redial presenting this
 /// launch's own epoch under the same key evicts its zombie and admits, so
 /// consecutive rejections can only come from a genuinely newer holder — a
 /// later launch of this install. The tolerance is kept for relays predating

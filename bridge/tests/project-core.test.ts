@@ -80,7 +80,7 @@ test("local ProjectCore.shutdown tears down the listener", async () => {
 
 test("promoting a LOCAL core attaches its bus as a stream and reflects the admission outcome", async () => {
   // v3: promote() no longer builds its own RelayClient with a machine identity
-  // (design §7) — it attaches the core's EXISTING bus as a stream on the host's
+  // — it attaches the core's EXISTING bus as a stream on the host's
   // one machine socket via ProjectCoreRemoteDeps.attachStream. isRelayRegistered()
   // and firstRegister must track that stream's onAdmitted/onRejected outcome.
   const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-promo-"));

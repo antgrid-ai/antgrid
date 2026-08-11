@@ -14,6 +14,6 @@ key.properties
 **/*.keystore
 **/*.jks
 
-# FCM config is environment-specific and carries an API key — operator drops it
-# in per deployment (see docs/runbooks/fcm-relay-setup.md). Never commit it.
+# FCM config is environment-specific and carries an API key — the operator
+# downloads it from the Firebase console per deployment. Never commit it.
 app/google-services.json

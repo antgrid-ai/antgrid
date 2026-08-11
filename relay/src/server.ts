@@ -156,7 +156,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
     sendJson(ws, { type: "error", code, message, retryable, ...opts });
   }
 
-  /** Every relay-initiated close is preceded by a typed error frame (design §3.3). */
+  /** Every relay-initiated close is preceded by a typed error frame. */
   function sendErrorAndClose(
     ws: ServerWebSocket<WsData>,
     code: string,
@@ -213,7 +213,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
     const hello = result.data;
 
     // (2) Clock window — the only retryable AUTH_FAILED; serverTime lets a
-    // wrong-clocked client recompute its offset and retry once (design §13.1).
+    // wrong-clocked client recompute its offset and retry once.
     const now = Date.now();
     const tsMs = Date.parse(hello.ts);
     if (!Number.isFinite(tsMs) || Math.abs(now - tsMs) > config.clockSkewMs) {
@@ -286,7 +286,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       };
     }
 
-    // (6) Epoch arbitration (design §6.3).
+    // (6) Epoch arbitration.
     const existing = connections.getByDeviceId(hello.deviceId);
     if (existing) {
       if (hello.publicKey !== existing.publicKey) {
@@ -317,12 +317,11 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
         // time, so an equal-epoch hello with a fresh nonce is that instance
         // redialing after its watchdog closed a half-open socket the relay
         // hasn't reaped yet. Rejecting it strands the device: SUPERSEDED is
-        // retryable:false, and clients rightly stop reconnecting on it
-        // (design §6.3).
+        // retryable:false, and clients rightly stop reconnecting on it.
         //
         // Release the superseded connection (dropping its openStreams) BEFORE
         // inserting the successor, so one device is never counted twice across
-        // a restart (design §7.3).
+        // a restart.
         connections.remove(existing);
         sendErrorAndClose(existing.ws, "SUPERSEDED", "replaced by a newer connection", false, 1008);
       } else {
@@ -363,7 +362,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
 
     // A reconnecting device with a live same-account peer is immediately
     // reachable — tell both sides so a mid-session phone can trigger its
-    // rekey (design §6.2, spec 2026-07-24 §4).
+    // rekey.
     for (const peer of presencePeers(conn)) {
       sendJson(peer.ws, { type: "peer-online", peerId: conn.deviceId });
       sendJson(ws, { type: "peer-online", peerId: peer.deviceId });
@@ -371,7 +370,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
   }
 
   async function handleControlMessage(ws: ServerWebSocket<WsData>, raw: string): Promise<void> {
-    // JSON control messages are rate-limited per connection (design §3.3) —
+    // JSON control messages are rate-limited per connection —
     // dropped, never closed, so a pairing burst degrades gracefully.
     if (!jsonRateLimiter.allow(ws.data.connectionId)) {
       sendError(ws, "MESSAGE_RATE_LIMITED", "control message rate limit exceeded", true);
@@ -519,7 +518,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       return;
     }
 
-    // Authorization: account-derived and nothing else (spec §3.2). Uniform
+    // Authorization: account-derived and nothing else. Uniform
     // PEER_OFFLINE for deny-and-offline alike — an unauthorized sender must not
     // learn liveness (no presence oracle).
     const target = connections.getByDeviceId(header.to);
@@ -644,7 +643,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       async message(ws, message) {
         if (ws.data.phase === "awaiting-hello") {
           // The first frame MUST be a text hello — a binary frame here is a
-          // protocol violation (design §4.1 step 1).
+          // protocol violation (step 1).
           if (typeof message !== "string") {
             sendErrorAndClose(ws, "PROTOCOL_VIOLATION", "First frame must be a hello", false, 1008);
             return;
@@ -673,7 +672,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
         lastPong.delete(conn.deviceId);
 
         // No cascade close: same-account peers stay connected and just go
-        // offline to us (design §6.4). Must pass the Connection object, not
+        // offline to us. Must pass the Connection object, not
         // deviceId — connections.remove(conn) already ran above, so a
         // re-lookup here would find nothing.
         fanOutPeerPresence(conn, "peer-offline");

@@ -1,4 +1,4 @@
-// v3 desktop "enable mobile access" wizard (design §7.4, plan B5). In v2
+// v3 desktop "enable mobile access" wizard. In v2
 // relay-promotion.ts built its own RelayClient and reacted to its connection
 // events (onAuthenticated/onPaired/onError). In v3 there is exactly
 // ONE machine RelayClient, owned by HostServer — this controller just asks the

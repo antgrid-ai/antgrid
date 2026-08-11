@@ -6,9 +6,9 @@ import type { TestEnv } from "./harness";
 /**
  * Thin wrapper around `RelayClient` that drives a full account-trusted
  * session (hello with an account token → E2E handshake admitted from the
- * account inventory) with no pairing ceremony — the production path since
- * Phase B. `TestApp.connect` is single-shot; a caller that needs to absorb
- * the agent-just-spawned startup race uses `waitAgentReachable`
+ * account inventory) with no pairing ceremony — the production path.
+ * `TestApp.connect` is single-shot; a caller that needs to absorb the
+ * agent-just-spawned startup race uses `waitAgentReachable`
  * (`evals/support/reachable.ts`), which retries it.
  */
 export class TestApp {
@@ -43,8 +43,8 @@ export class TestApp {
    * NOT a safe, additive probe, even with the default slot. Two layers are
    * involved: the relay routes the slotted hello to a distinct connection, so
    * it no longer sends a SUPERSEDED close to `env.app`'s socket — but the
-   * bridge (`bridge/src/relay-client.ts`, single-active-phone takeover, spec
-   * 2026-07-24 §4.3) still sees a second same-account slot as a competing
+   * bridge (`bridge/src/relay-client.ts`, single-active-phone takeover) still
+   * sees a second same-account slot as a competing
    * phone. It sends a sealed `session-takeover` to the previously-established
    * session, zeroizes those keys, and stops liveness — deliberately, that's
    * production behaviour, not a bug. So after a second `TestApp.connect(env)`,

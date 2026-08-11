@@ -81,11 +81,6 @@ const PongMessage = BaseMessage.extend({
   type: z.literal("pong"),
 });
 
-const HandshakeChallengeMessage = BaseMessage.extend({
-  type: z.literal("handshake:challenge"),
-  nonce: z.string(),
-});
-
 const HandshakeClientHelloMessage = BaseMessage.extend({
   type: z.literal("handshake:client-hello"),
   pubkey: z.string(),
@@ -370,7 +365,7 @@ const AgentProjectsMessage = BaseMessage.extend({
       lastActiveAt: z.string().optional(),
       // Present when the project has an admitted relay data-plane stream: the
       // phone binds its ProjectSession services to this streamId without a fresh
-      // project:start (design §7.4). Absent for a stopped/unpromoted project.
+      // project:start. Absent for a stopped/unpromoted project.
       streamId: z.string().optional(),
     }),
   ),
@@ -427,7 +422,7 @@ const AgentToolsMessage = BaseMessage.extend({
 });
 
 // Outbound agent→app, control plane only: announces the streamId a phone binds
-// its ProjectSession services to for `projectId` (design §7.4). Sent when a
+// its ProjectSession services to for `projectId`. Sent when a
 // project's relay data-plane stream is admitted; also carried per-project in the
 // `agent:projects` advertisement so a reconnecting phone can bind without a
 // fresh project:start. E2E-opaque to the relay. No inbound switch case.
@@ -1657,7 +1652,6 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentStatusMessage,
   PingMessage,
   PongMessage,
-  HandshakeChallengeMessage,
   HandshakeClientHelloMessage,
   HandshakeAgentHelloMessage,
   HandshakeAgentReadyMessage,
@@ -1779,7 +1773,6 @@ export type TerminalOutput = z.infer<typeof TerminalOutputMessage>;
 export type TerminalInput = z.infer<typeof TerminalInputMessage>;
 export type TerminalStarted = z.infer<typeof TerminalStartedMessage>;
 export type TerminalExited = z.infer<typeof TerminalExitedMessage>;
-export type HandshakeChallenge = z.infer<typeof HandshakeChallengeMessage>;
 export type HandshakeClientHello = z.infer<typeof HandshakeClientHelloMessage>;
 export type HandshakeAgentHello = z.infer<typeof HandshakeAgentHelloMessage>;
 export type HandshakeAgentReady = z.infer<typeof HandshakeAgentReadyMessage>;
@@ -1986,7 +1979,7 @@ export function parseMessage(raw: string): AbMessage | null {
 const KNOWN_TYPES = new Set<string>([
   "terminal:output", "terminal:input", "terminal:started", "terminal:exited", "terminal:notification",
   "terminal:start", "terminal:stop", "terminal:resize", "terminal:size", "agent:status",
-  "ping", "pong", "handshake:challenge", "handshake:client-hello", "handshake:agent-hello", "handshake:agent-ready",
+  "ping", "pong", "handshake:client-hello", "handshake:agent-hello", "handshake:agent-ready",
   "tree:full", "tree:update", "file:read", "file:content",
   "ports:update", "preview:url",
   "agent:disconnecting", "agent:projects", "agent:tools", "stream-ready", "stream-invalid", "control:result", "app:ready",

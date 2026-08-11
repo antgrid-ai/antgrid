@@ -2,7 +2,7 @@
 // replacement for the deleted relay_transport_test.dart /
 // relay_transport_frag_test.dart suites, now exercised at the MachineSession
 // level (one E2E session multiplexing project streams via sealed `{s, m}`
-// envelopes, per design §2/§7.1) instead of the old socket-per-project
+// envelopes) instead of the old socket-per-project
 // RelayTransport.
 import 'dart:convert';
 import 'dart:typed_data';

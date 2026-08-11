@@ -3,7 +3,7 @@ import { startRelay, allocatePort } from "../helpers/harness";
 import { RelayClient } from "../helpers/relay-client";
 
 /**
- * v3 makes the license token MANDATORY for apps (design §4.2): the tokenless
+ * v3 makes the license token MANDATORY for apps: the tokenless
  * legacy-QR registration path is deleted, and the hello schema requires
  * `licenseToken` (min length 1). A phone that presents an empty/absent token is
  * therefore not even a well-formed v3 hello — the relay rejects it terminally

@@ -25,7 +25,7 @@ import { createMessage } from "../../../bridge/src/protocol";
  *  4. v3 — make-before-break rekey (replaces the v2 plaintext lockout): after a
  *     confirmed session, a fresh transcript-signed client-hello on the LIVE
  *     socket runs a rekey while old keys stay live for receiving, then swaps
- *     atomically. The session keeps routing traffic across the swap (design §6.2).
+ *     atomically. The session keeps routing traffic across the swap.
  *
  *  5. reconnect re-handshake: a confirmed session, then the phone disconnects
  *     and reconnects with the same identity. The relay sends `peer-online` and a
@@ -115,7 +115,7 @@ describe("handshake MITM", () => {
     expect(await env.app.waitForAbType("agent:projects", 5_000)).toBeTruthy();
 
     // v3 replaces v2's post-establishment plaintext lockout with make-before-break
-    // rekey (design §6.2): a fresh, transcript-signed client-hello on the LIVE
+    // rekey: a fresh, transcript-signed client-hello on the LIVE
     // socket is NOT dropped — the agent verifies the pinned phone key and runs a
     // new handshake while the OLD keys stay live for receiving, then atomically
     // swaps. Forgery is still impossible (signature required); a replay can never

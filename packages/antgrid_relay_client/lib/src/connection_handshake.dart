@@ -35,7 +35,7 @@ typedef HandshakeLogger =
 /// crypto: a phone-generated `attemptId` correlates every frame, frames go out
 /// kind-1 (handshake plaintext) / kind-0 (sealed), and the phone retransmits
 /// `app:ready` until the agent's sealed `established` arrives — only then does
-/// [run] complete (design §6.1). All per-run state is instance-local.
+/// [run] complete. All per-run state is instance-local.
 ///
 /// Lives in this package, not in the app, so the app and the eval CLI drive the
 /// SAME driver: a second copy is what let the eval client sit on the v2
@@ -281,7 +281,7 @@ class ConnectionHandshake {
 
   /// Retransmit sealed `app:ready` every [_appReadyRetransmit] (re-sealed each
   /// time; GCM nonces are per-seal) until `established` arrives or the attempt
-  /// times out — closes the dropped-`app:ready` wedge (design §6.1 step 5).
+  /// times out — closes the dropped-`app:ready` wedge.
   void _startAppReadyRetransmit(SessionKeys keys, String attemptId) {
     Future<void> send() async {
       if (_cancelled) return;

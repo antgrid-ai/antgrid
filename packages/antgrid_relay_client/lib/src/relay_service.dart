@@ -53,16 +53,17 @@ class RelayService {
   Timer? _connectTimeout;
   Duration _connectTimeoutDuration = const Duration(seconds: 15);
 
-  /// The bare machine `deviceUuid` this socket serves. Phase A fans
-  /// `peer-online`/`peer-offline` out account-wide (all of a user's machines),
-  /// so this scopes which presence frames may drive THIS connection's state.
+  /// The bare machine `deviceUuid` this socket serves. The relay fans
+  /// `peer-online`/`peer-offline` out account-wide (all of a user's machines —
+  /// `presencePeers` in `relay/src/server.ts`), so this scopes which presence
+  /// frames may drive THIS connection's state.
   String? _machineDeviceId;
 
   /// Hello-nonce source only — not a security control (the relay's replay cache
   /// is keyed on `(deviceId, nonce)`, and a signed hello is what authenticates).
   final Random _rng = Random();
 
-  /// Clock-skew self-heal (design §13.1): an `AUTH_FAILED` carrying `serverTime`
+  /// Clock-skew self-heal: an `AUTH_FAILED` carrying `serverTime`
   /// yields an offset that is applied to the NEXT hello's `ts`. Applied at most
   /// once per distinct offset value; a second consecutive skew failure with the
   /// same offset surfaces normally (the reconnect keeps the already-adjusted
@@ -80,7 +81,7 @@ class RelayService {
   Stream<AppState> get stateStream => _stateController.stream;
   Stream<IncomingRouteMessage> get messageStream => _messageController.stream;
 
-  /// Every typed relay `error` frame (design §3.3). The `retryable`/`ref` fields
+  /// Every typed relay `error` frame. The `retryable`/`ref` fields
   /// are the failure-signalling contract the Dart client cannot get from WS
   /// close codes; [MachineSession] and the connection supervisor classify
   /// failures off this.
@@ -118,8 +119,8 @@ class RelayService {
   /// socket as a failure.
   ///
   /// [licenseToken] is REQUIRED in v3 — apps authenticate with their own account
-  /// token (design §4.2). [epoch] is a per-device monotonic counter (the app
-  /// owns storage; see design §6.3) used for connection-instance arbitration.
+  /// token. [epoch] is a per-device monotonic counter (the app
+  /// owns storage) used for connection-instance arbitration.
   Future<void> connect(
     String relayUrl,
     DeviceIdentity identity, {
@@ -372,7 +373,7 @@ class RelayService {
     }
   }
 
-  /// Presence frames are account-wide since Phase A; only the machine this
+  /// The relay's presence fan-out is account-wide; only the machine this
   /// socket serves may drive this connection's presence state. Fail CLOSED when
   /// the machine id is unset (no live connect() supplied one): attribute no
   /// presence rather than fail open and let any sibling machine's frame flip
@@ -414,7 +415,7 @@ class RelayService {
       return;
     }
 
-    // Terminal-vs-retryable is the error contract (design §3.3): a
+    // Terminal-vs-retryable is the error contract: a
     // `retryable:false` frame precedes an intentional close, so the caller must
     // not dial again. SUPERSEDED/PROTOCOL_VIOLATION/NOT_AUTHORIZED land here —
     // none is a license error.

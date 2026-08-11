@@ -199,7 +199,7 @@ describe("ErrorCode", () => {
 
 // Pins the absence of the pairing/grant rendezvous schemas (design cutover:
 // admission is account-derived trust, not a pair-request/pair-approval round
-// trip; see docs/superpowers/specs/2026-07-24-app-connection-identity-unification-design.md).
+// trip — see the root `CLAUDE.md`, "gated by account membership").
 // Each payload below is a FULLY VALID instance of the deleted shape — parsing
 // it must fail only because the type itself is gone, not because the payload
 // is incomplete (a `{ type }`-only object would fail validation regardless of

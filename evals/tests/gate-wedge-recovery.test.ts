@@ -5,7 +5,7 @@ import { RelayClient } from "../helpers/relay-client";
 import { createMessage } from "../../bridge/src/protocol";
 
 /**
- * Merge-gate item 2 (design §6.1, §12): the acked handshake's step 5 kills the
+ * Merge-gate item 2: the acked handshake's `established` step kills the
  * asymmetric-establishment wedge by construction — the phone retransmits
  * `app:ready` every 2s until `established`, and neither side dispatches app
  * traffic before its own terminal event. These three scenarios each exercise

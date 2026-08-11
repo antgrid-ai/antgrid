@@ -286,8 +286,8 @@ class HostControlClient {
   }
 
   /// Opens a core for [projectId]. [mode] defaults to `local` — the desktop
-  /// driver's only mode today (see design §Data plane) — but is a parameter so
-  /// Phase B can request `remote` without a second near-duplicate method.
+  /// driver's only mode today — but is a parameter so a remote caller can ask
+  /// for `remote` without a second near-duplicate method.
   Future<OpenResult> projectOpen({
     required String projectId,
     required String projectPath,

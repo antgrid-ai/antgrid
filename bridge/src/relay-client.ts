@@ -39,13 +39,13 @@ import { StreamMux, type AttachStreamOpts, type StreamHandle } from "./stream-mu
 export interface RelayClientOptions {
   url: string;
   identity: DeviceIdentity;
-  /** Machine dir for the persistent connection-epoch counter (design §6.3). */
+  /** Machine dir for the persistent connection-epoch counter. */
   abDir?: string;
   /** Called on each (re)handshake to get a fresh ephemeral keypair for E2E. */
   generateKeypair: () => EphemeralKeypair;
   /** Fired on `welcome` — the single 1-RTT authentication event. */
   onAuthenticated?: () => void;
-  /** Kept exception (design §B2): the relay rejected our license with an
+  /** Fired only when the relay rejected our license with an
    *  identity-dead verdict (LICENSE_INVALID | LICENSE_REVOKED). LICENSE_EXPIRED
    *  is recoverable by time (see {@link redialWithFreshToken}) and does NOT fire
    *  this; SUPERSEDED must NEVER call it — re-enrolling would be
@@ -70,11 +70,11 @@ export interface RelayClientOptions {
    *  client-hello records the device, and where `backfillPeerPubkey` recovers a
    *  reconnecting phone's pubkey after an agent restart. */
   pairedPhones?: PairedPhonesStore;
-  /** Account device inventory (spec 2026-07-24 §3.3); consulted before the
+  /** Account device inventory; consulted before the
    *  paired-phones store when resolving a phone's Ed25519 pubkey. */
   trustedPeers?: TrustedPeersProvider;
-  /** Test seam: overrides the half-open handshake-attempt expiry (design §6.2's
-   *  30s default). Production never sets this. */
+  /** Test seam: overrides the half-open handshake-attempt expiry (see
+   *  `HALF_OPEN_MS`). Production never sets this. */
   halfOpenMs?: number;
 }
 
@@ -82,9 +82,9 @@ const HEARTBEAT_INTERVAL = 25_000;
 const INITIAL_BACKOFF = 1_000;
 const MAX_BACKOFF = 30_000;
 /** A half-open handshake attempt (client-hello seen, app:ready never arrived)
- *  is discarded after this (design §6.2). Live sessions are unaffected. */
+ *  is discarded after this. Live sessions are unaffected. */
 const HALF_OPEN_MS = 30_000;
-/** Send a sealed ping after this much sealed-receive silence (design §6.2). */
+/** Send a sealed ping after this much sealed-receive silence. */
 const PING_SILENCE_MS = 20_000;
 /** Consecutive unanswered pings before the E2E session is declared dead. */
 const MAX_MISSED_PONGS = 2;
@@ -128,8 +128,8 @@ interface E2eAttempt {
   transport: E2eTransport;
   sessionKeys: SessionKeys;
   // The phone deviceId this session's keys belong to. Anchors outgoing
-  // addressing to the session (spec 2026-07-24 single-active-phone §4.1), so a
-  // sibling's bare presence can't repoint frames away from the live peer.
+  // addressing to the session, so a sibling's bare presence can't repoint
+  // frames away from the live peer.
   peerId: string;
 }
 
@@ -174,9 +174,9 @@ function signEd25519(seedB64: string, data: Uint8Array): string {
 }
 
 /**
- * The single machine↔relay connection (design §2). Authenticates with one signed
- * `hello`, then runs a reactive/acked E2E session (§6.1) and multiplexes project
- * streams inside it (§7). There is exactly one live phone session per machine.
+ * The single machine↔relay connection. Authenticates with one signed
+ * `hello`, then runs a reactive/acked E2E session and multiplexes project
+ * streams inside it. There is exactly one live phone session per machine.
  */
 export class RelayClient {
   private ws: WebSocket | null = null;
@@ -190,13 +190,13 @@ export class RelayClient {
   private authenticated = false;
   private _peerId: string | null = null;
   private readonly epoch: number;
-  /** Learned wall-clock correction from a clock-skew AUTH_FAILED (design §13.1). */
+  /** Learned wall-clock correction from a clock-skew AUTH_FAILED. */
   private clockOffsetMs = 0;
   private clockOffsetApplied = false;
   /** The last relay `error` frame; its `retryable` decides reconnect on close. */
   private lastError: { code: string; retryable: boolean } | null = null;
 
-  // E2E session state (design §6.1). `established` is the confirmed session;
+  // E2E session state. `established` is the confirmed session;
   // `pending` is an in-flight (half-open) attempt whose candidate keys stay live
   // for receiving only, until its app:ready confirm verifies (make-before-break).
   private established: E2eAttempt | null = null;
@@ -282,8 +282,8 @@ export class RelayClient {
   }
 
   constructor(private opts: RelayClientOptions) {
-    // Computed once per process and reused across every (re)connect (design
-    // §6.3): epoch identifies this process INSTANCE, not this socket. A redial
+    // Computed once per process and reused across every (re)connect: epoch
+    // identifies this process INSTANCE, not this socket. A redial
     // presenting the same epoch relies on the relay's equal-epoch rule
     // (same key + equal epoch ⇒ newest socket wins) to evict its own
     // half-open zombie; minting per dial instead would let a stale process
@@ -509,8 +509,8 @@ export class RelayClient {
           break;
         }
         // Bare presence is not a handshake: a same-account sibling coming online
-        // must never repoint the address of a live session (spec 2026-07-24
-        // single-active-phone §4.4). Only a verified handshake moves it; adopt a
+        // must never repoint the address of a live session. Only a verified
+        // handshake moves it; adopt a
         // presence peer as the default address solely when nothing is established.
         if (!this.established) this._peerId = msg.peerId;
         this.backfillPeerPubkey(msg.peerId);
@@ -572,7 +572,7 @@ export class RelayClient {
     }
 
     // Clock-skew self-heal: learn the offset and let the retryable reconnect
-    // re-hello with a corrected `ts` (design §13.1).
+    // re-hello with a corrected `ts`.
     if (msg.code === "AUTH_FAILED" && msg.serverTime) this.applyClockOffset(msg.serverTime);
 
     log.error(
@@ -581,7 +581,7 @@ export class RelayClient {
     );
     this.opts.onError?.(msg.code, msg.message);
 
-    // Kept exception (B2): only an identity-dead LICENSE verdict tells the user
+    // Only an identity-dead LICENSE verdict tells the user
     // to re-enroll. LICENSE_EXPIRED is recoverable by time — it takes the plain
     // terminal path (retryable:false stops reconnect at the close handler) while
     // token maintenance keeps re-minting and redials on a fresh mint. SUPERSEDED
@@ -604,7 +604,7 @@ export class RelayClient {
     log.warn("Relay clock skew detected; applying %dms offset to the next hello", offset);
   }
 
-  // --- Binary frame receive path (kind-byte dispatch, design §3.1) ---
+  // --- Binary frame receive path (kind-byte dispatch) ---
 
   private handleBinaryFrame(buf: Buffer): void {
     let decoded: { header: unknown; payload: Uint8Array; kind: FrameKind };
@@ -639,7 +639,7 @@ export class RelayClient {
 
   /** Kind-1 plaintext admits exactly the two handshake types; the agent only
    *  ever consumes client-hello. A frame that is not a signature-valid
-   *  client-hello is dropped with a log (design §3.1). */
+   *  client-hello is dropped with a log. */
   private handleHandshakeFrame(payload: Uint8Array, from: string): void {
     let obj: { type?: string } | null = null;
     try {
@@ -745,7 +745,7 @@ export class RelayClient {
     if (tunnel) this.opts.onTunnelMessage?.(tunnel);
   }
 
-  // --- E2E session frames (design §6.1) ---
+  // --- E2E session frames ---
 
   private handleSessionFrame(obj: { type: string; attemptId?: string; confirm?: string; capabilities?: { checkoutRouting?: boolean } }): void {
     switch (obj.type) {
@@ -857,9 +857,9 @@ export class RelayClient {
     }
 
     // A different device's signature-verified client-hello supersedes the live
-    // session explicitly (spec 2026-07-24 single-active-phone §4.3) — the sig is
-    // proof of the new phone's identity, so don't wait for liveness to discover
-    // the old session is obsolete. Same-device rekey keeps make-before-break
+    // session explicitly — the sig is proof of the new phone's identity, so
+    // don't wait for liveness to discover the old session is obsolete.
+    // Same-device rekey keeps make-before-break
     // (the established session survives below until the new app:ready confirms).
     if (this.established && this.established.peerId !== peerId) {
       // Notify the displaced phone with its own (still-live) keys before
@@ -933,8 +933,8 @@ export class RelayClient {
     const tag = Buffer.from(obj.confirm ?? "", "base64");
 
     // Idempotent: the phone retransmits app:ready every 2s until it sees
-    // `established` (design §6.1 step 5). A duplicate for the live session just
-    // re-acks — no state change.
+    // `established`. A duplicate for the live session just re-acks — no
+    // state change.
     if (this.established && this.established.attemptId === attemptId) {
       this.sendSessionFrame({ type: "established", attemptId }, this.established.transport);
       return;
@@ -952,7 +952,7 @@ export class RelayClient {
       this.peerCheckoutRouting = obj.capabilities?.checkoutRouting === true;
       // Self-correct the address to the promoted session's peer (already equal
       // to it for same-device rekey; makes a presence flap during the pending
-      // window harmless — spec 2026-07-24 §4.3).
+      // window harmless).
       this._peerId = this.established.peerId;
       this.pending = null;
       this.stopHalfOpenTimer();
@@ -972,8 +972,8 @@ export class RelayClient {
   }
 
   /** Try each known identity source in priority order — verified cache →
-   *  account inventory (spec 2026-07-24 §3.3) → paired-phones store (parallel
-   *  path until Phase C) — returning the first one `verify` accepts. A cache
+   *  account inventory → paired-phones store (a parallel path) — returning
+   *  the first one `verify` accepts. A cache
    *  hit is preferred for the hot path but does NOT short-circuit: if it fails
    *  verification the loop falls through to the inventory rather than
    *  dead-ending on a stale key. Warms a throttled inventory refresh when
@@ -1027,7 +1027,7 @@ export class RelayClient {
   }
 
   /**
-   * Wrap `msg` in the `{ s?, m }` stream envelope (design §7.1), fragment the
+   * Wrap `msg` in the `{ s?, m }` stream envelope, fragment the
    * ENVELOPE json (so `s` survives fragmentation), seal each fragment under the
    * established session keys, and send. Control-plane traffic uses
    * `CONTROL_STREAM_ID` (`s` omitted). Dropped — never sent in cleartext — when
@@ -1343,7 +1343,7 @@ export class RelayClient {
   }
 
   /** The E2E session is unresponsive: drop keys and wait for the phone's rekey
-   *  (it owns retry pacing — design §6.2). The socket is left intact. */
+   *  (it owns retry pacing). The socket is left intact. */
   private declareSessionDead(): void {
     log.warn("E2E session declared dead (2 missed pongs) — dropping keys, awaiting rekey");
     this.tearDownEstablished();

@@ -20,7 +20,7 @@ import '../util/ab_log.dart';
 ///
 /// The desktop driver always opens the first project as `mode: "local"`; the
 /// `machine` block is included whenever a [DeviceRecord] exists so the host can
-/// later open a remote core over the control plane (Phase B) without respawning.
+/// later open a remote core over the control plane without respawning.
 /// Use [BootstrapPayload.machineOnly] to spawn a project-less host (omits `firstProject`).
 class BootstrapPayload {
   BootstrapPayload({
@@ -55,8 +55,9 @@ class BootstrapPayload {
   /// `flutter run --machine`). Null leaves the host untethered (CLI spawns).
   final int? ownerPid;
 
-  /// First-core mode. `local` for the desktop driver; a parameter (not a
-  /// literal) so Phase B can spawn the host with a `remote` first core.
+  /// First-core mode. The app only ever spawns `local`; the field stays a
+  /// parameter because the bridge's `BootstrapPayloadSchema` also accepts
+  /// `remote`, which additionally requires a `machine` block.
   final String mode;
   final DeviceRecord? device;
   final String? licenseApiUrl;
@@ -234,11 +235,11 @@ class LocalAgentLauncher {
     String? relayUrl,
   ) async {
     // The host's stdin bootstrap, consumed only if ensureHost must spawn fresh.
-    // `??=`: the FIRST project to open wins, so the machine block reflects that
-    // project's mobile-access state. Sufficient today — desktop phone promotion
-    // carries device creds per-message via agent:enableRelay, NOT via this block
-    // — but a future Phase B remote-open must push creds at promotion time
-    // rather than relying on first-open ordering here.
+    // `??=`: the FIRST project to open wins, so whichever device record was
+    // resolvable then is what the host runs on for its whole life — it reads
+    // stdin once, and no app path pushes fresh credentials into a live host.
+    // A stale (or machine-less) block is reconciled only by the sign-in
+    // force-respawn in `local_host_warmup.dart`.
     _host.bootstrapBuilder ??= () => BootstrapPayload(
           projectId: projectId,
           projectPath: folder,

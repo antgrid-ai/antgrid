@@ -22,9 +22,8 @@ function frame(to: string, text: string, kind: FrameKind = FrameKind.sealed): Ui
   return encodeRouteFrame({ type: "message", to, channel: "control" }, new TextEncoder().encode(text), kind);
 }
 
-// mayRoute is the ONLY routing authority post-Task-4 — there is no pairing or
-// grant step left to skip. These two pin the property directly (spec
-// 2026-07-24 §3.2).
+// mayRoute is the ONLY routing authority — there is no pairing or grant step
+// left to skip. These two pin the property directly.
 test("same-account routing needs no grant", async () => {
   const sharedToken = "task4-same-account";
   const gate = makeFakeLicenseGate({ agentUid: () => `user-app-${sharedToken}` });
@@ -56,7 +55,7 @@ test("cross-account routing is denied as PEER_OFFLINE (no presence oracle)", asy
 // and an app's uid from its licenseToken, so two connections that don't share
 // a token/deviceId scheme land on different accounts by default — no grant
 // and no account match, so both directions get the uniform PEER_OFFLINE deny
-// (spec 2026-07-24 §3.2: no presence oracle for an unauthorized sender).
+// (no presence oracle for an unauthorized sender).
 test("no grant, cross-account -> PEER_OFFLINE in both directions", async () => {
   relay = startServer(defaultConfig);
   const agent = await connectHello(relay, { deviceId: "route-agent-nogrant" });
@@ -84,7 +83,7 @@ test("no grant, target never connected -> PEER_OFFLINE, same reply as a live cro
 });
 
 // mayRoute (relay/src/authz.ts): same-account connections route with zero
-// grant setup — it is the ONLY routing authority (spec 2026-07-24 §3.2).
+// grant setup — it is the ONLY routing authority.
 test("same-account, no grant, routes app->agent", async () => {
   const sharedToken = "shared-acct-route";
   const gate = makeFakeLicenseGate({ agentUid: () => `user-app-${sharedToken}` });

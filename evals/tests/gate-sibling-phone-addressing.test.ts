@@ -17,8 +17,8 @@ import { createTestProject } from "../helpers/fixtures";
 import { createMessage } from "../../bridge/src/protocol";
 
 /**
- * Regression for the Phase A two-phone mis-addressing bug (spec 2026-07-24
- * single-active-phone): with two phones signed into ONE account, a bare
+ * Regression for the two-phone mis-addressing bug: with two phones signed
+ * into ONE account, a bare
  * `peer-online` for the sibling used to overwrite the agent's `_peerId`, so the
  * agent sealed replies with the ACTIVE phone's keys but addressed them `to:` the
  * sibling. The active phone went deaf. Post-fix, only a verified handshake

@@ -1,6 +1,6 @@
 // SUPERSEDED must never render as a license revocation ("re-activate")
 // condition — it just means a newer instance of ourselves took over the
-// socket (design §6.3 epoch arbitration). The authoritative classification
+// socket (epoch arbitration). The authoritative classification
 // (RelayLicenseErrorCode.fromWire('SUPERSEDED') is null, and
 // ConnectionSupervisor.noteRelayError blocks it as `superseded`, never
 // `deviceRevoked`) is pinned at the package level in

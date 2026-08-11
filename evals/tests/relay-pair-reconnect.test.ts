@@ -4,7 +4,7 @@ import { firstProjectStream } from "../support/stream";
 import { createMessage } from "../../bridge/src/protocol";
 
 /**
- * v3 reconnect with no pairing at all (design §5.1, Phase A/B). Admission is
+ * v3 reconnect with no pairing at all. Admission is
  * relay same-account routing (`mayRoute`) + the bridge's account-inventory
  * trust (`TrustedPeersProvider`), neither of which is a per-connection state —
  * both are authorization FACTS that outlive a dropped socket. When the phone

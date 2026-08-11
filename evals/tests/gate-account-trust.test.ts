@@ -27,9 +27,7 @@ import { loadPairedPhones } from "../../bridge/src/paired-phones";
  * the E2E transcript as its own `kind:"app"` `DeviceRecord`, and the bridge
  * resolves it from the account peers inventory (`TrustedPeersProvider`/
  * `resolvePhoneEd25519PubB64`), authorized on the wire by the relay's
- * same-account routing (`mayRoute`, `authz.ts`). See
- * docs/superpowers/specs/2026-07-24-app-connection-identity-unification-design.md §0
- * for the design.
+ * same-account routing (`mayRoute`, `authz.ts`).
  *
  * Choreography copied from `gate-relay-restart.test.ts` (same
  * `startRestartableRelay` force-close-and-fresh-port technique — harness.ts's

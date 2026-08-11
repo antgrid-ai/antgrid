@@ -10,8 +10,8 @@ import { TestApp } from "../helpers/test-app";
  * Each probe attempt is NOT a harmless side effect on `env.app`. The relay
  * half is safe: `TestApp.connect`'s default slot keeps this probe's socket
  * distinct from `env.app`'s, so the relay never SUPERSEDED-closes it. But the
- * bridge's single-active-phone takeover (`bridge/src/relay-client.ts`, spec
- * 2026-07-24 §4.3) still fires on every successful attempt here, since it
+ * bridge's single-active-phone takeover (`bridge/src/relay-client.ts`) still
+ * fires on every successful attempt here, since it
  * sees a second same-account slot regardless of relay routing — it sends
  * `env.app` a sealed `session-takeover` and tears its E2E session down. A
  * single successful attempt is therefore enough to end `env.app`'s session;

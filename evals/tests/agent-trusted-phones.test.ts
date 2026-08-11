@@ -5,7 +5,7 @@ import { firstProjectStream } from "../support/stream";
 import { createMessage } from "../../bridge/src/protocol";
 
 /**
- * Account-level trust survives an agent restart (design §5.1 + §6.3). After the
+ * Account-level trust survives an agent restart. After the
  * agent restarts (new epoch supersedes its old relay connection), the same phone
  * resumes routing WITHOUT re-pairing: peer-offline → peer-online, a fresh E2E
  * handshake over the surviving account-trust admission, and project verbs flow

@@ -5,8 +5,12 @@
 // OFFER_ACTIVE=false here so the struck price/discount disappear.
 //
 // Checkout is deliberately unwired this release: every card that would charge carries
-// `comingSoon`, which swaps the checkout link for a disabled button. Clearing the flag
-// is what re-opens the paid path — see docs/plans/2026-07-30-worker-limit-pricing.md.
+// `comingSoon`, which swaps the checkout link for a disabled button. Clearing it here
+// re-points the CTA at web's live `/checkout` (`web/src/routes/ui.tsx`), but the same
+// shutter is duplicated on web's own pricing page (`ComingSoonCta` in
+// web/src/ui/pricing.tsx) and on the app's WORKER_CAP Upgrade button
+// (app/lib/screens/device_cap_dialog.dart) — flip all three together, or the funnel
+// sells a plan two of its three entry points still refuse.
 import { links } from "../config";
 
 // Single switch for the beta-free period: banners the pricing page, hides the

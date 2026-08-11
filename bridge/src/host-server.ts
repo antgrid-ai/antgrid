@@ -183,8 +183,8 @@ export class HostServer {
   private controlPlaneRelay: RelayClient | null = null;
   // retained to prevent GC of the bus before shutdown
   private controlPlaneBus: MessageBus | null = null;
-  // Account device inventory, the primary E2E-admission trust source (spec
-  // 2026-07-24 §3.3). Built once on the first startRemoteControlPlane() call
+  // Account device inventory, the primary E2E-admission trust source.
+  // Built once on the first startRemoteControlPlane() call
   // and reused across reconnects so its in-memory cache stays warm; refreshed
   // on the existing heartbeat cadence (see pushHeartbeat()).
   private trustedPeers: TrustedPeersProvider | null = null;
@@ -338,10 +338,10 @@ export class HostServer {
     const client = buildClient({
       url: joinRelayWsPath(r.relayUrl),
       // Bare deviceUuid: this is the ONLY registration shape in v3 — one socket
-      // per machine, project cores attach as multiplexed streams (design §7).
+      // per machine, project cores attach as multiplexed streams.
       identity: { ...r.identity, deviceId: r.auth.deviceUuid },
       abDir,
-      // Kept exception (B2): a terminal relay LICENSE verdict tells the user to
+      // A terminal relay LICENSE verdict tells the user to
       // re-enroll (index.ts writes auth_revoked + exits). SUPERSEDED never does.
       onAuthRevoked: () => this.requireRemoteConfig().onAuthRevoked(),
       getLicenseToken: () => Promise.resolve(rt.maint.getToken()),
@@ -511,7 +511,7 @@ export class HostServer {
         const dialable = (entry?.core.isRelayRegistered() ?? false)
           && (!needsCheckoutRouting || peerCanRoute);
         // A reconnecting phone binds its ProjectSession to this streamId without a
-        // fresh project:start (design §7.4). Only surfaced for a dialable stream.
+        // fresh project:start. Only surfaced for a dialable stream.
         const streamId = dialable ? this.streamIds.get(id) : undefined;
         // Live work status + running-session count for warm cores only. Cold
         // projects omit both (their agent PTY isn't alive → nothing "working");
@@ -1018,7 +1018,7 @@ export class HostServer {
         // failure, requireRemoteConfig, core.start spawn/config error); return a
         // structured error instead of letting it reject into the void caller.
         try {
-          await this.open(projectId, seen.path, "remote"); // reuses Phase A open()
+          await this.open(projectId, seen.path, "remote");
         } catch (err) {
           return { ok: false, error: { code: "OPEN_FAILED", message: (err as Error)?.message ?? String(err) } };
         }
@@ -1078,7 +1078,7 @@ export class HostServer {
       .then((outcome) => {
         if (outcome.ok) {
           // Advertise the streamId binding so the phone can attach its
-          // ProjectSession services without a fresh project:start (design §7.4).
+          // ProjectSession services without a fresh project:start.
           const streamId = this.streamIds.get(projectId);
           if (streamId) {
             bus.publish(createMessage("stream-ready", { projectId, streamId }), "control");
@@ -1367,7 +1367,7 @@ export class HostServer {
     let relayUrl: string | undefined;
     if (mode === "remote") {
       await this.ensureRemoteRuntime();
-      // A remote core attaches to the ONE machine socket (design §7); ensure it
+      // A remote core attaches to the ONE machine socket; ensure it
       // is up (startControlPlane already opened it when launched with remote
       // config — this guards the wizard-bootstrapped path).
       if (!this.controlPlaneRelay) await this.startRemoteControlPlane();
@@ -1604,7 +1604,7 @@ export class HostServer {
   }
 
   /** Stream-attach surface for a project core: it attaches its bus to the ONE
-   *  machine socket (design §7) rather than owning a RelayClient. The wrapper
+   *  machine socket rather than owning a RelayClient. The wrapper
    *  records the allocated streamId under `projectId` (for the advertisement +
    *  stream-ready) and clears it on detach. */
   private remoteDepsFor(projectId: string): ProjectCoreRemoteDeps {

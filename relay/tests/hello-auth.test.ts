@@ -98,7 +98,7 @@ test("Host-header mismatch is rejected (hello signed for a different relayHost)"
   const err = await first;
   // The relay rebuilds the sig body with ITS OWN Host header, so a hello
   // signed for another host fails signature verification, not a dedicated
-  // "host mismatch" code (design §4.1 step 4).
+  // "host mismatch" code (step 4).
   expect(err).toMatchObject({ type: "error", code: "AUTH_FAILED", retryable: false });
   expect(await closed).toBe(1008);
 });

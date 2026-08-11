@@ -14,13 +14,13 @@ type EnableMsg = Extract<AbMessage, { type: "agent:enableRelay" }>;
  * HostServer (which owns the single {@link RelayClient}): the wizard never builds
  * a relay client of its own — it brings the machine socket up (from the
  * app-supplied credentials if it isn't already) and attaches the local core as a
- * stream (design §7.4).
+ * stream.
  */
 export interface MachineRelaySession {
   attachStream(bus: MessageBus, opts: AttachStreamOpts): StreamHandle;
   currentPeerPubkey(): string | null;
   sendPushDeliver(msg: { pushToken: string; provider: "fcm" | "apns"; blob: { epk: string; box: string } }): void;
-  /** Bare machine deviceUuid — the QR `d=` payload (no `.projectId`; §7.4). */
+  /** Bare machine deviceUuid — the QR `d=` payload (no `.projectId`). */
   agentDeviceId: string;
   /** Account-device Ed25519 public key (standard base64). */
   ed25519Pub: string;
@@ -63,7 +63,7 @@ export interface RelayPromotionController {
  * listener. When the user enables mobile access, the app sends
  * `agent:enableRelay` carrying the signed-in account device's credentials. In
  * v3 this controller does NOT build its own relay connection: it asks the host
- * to bring the single machine socket up (design §7), builds the QR (bare
+ * to bring the single machine socket up, builds the QR (bare
  * deviceUuid), and attaches the local core's bus as a
  * stream. `agent:disableRelay` detaches the stream — the machine socket stays,
  * owned by the control plane.

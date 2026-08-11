@@ -4,7 +4,7 @@ import { createMessage } from "../../../bridge/src/protocol";
 import { firstProjectStream } from "../../support/stream";
 
 /**
- * v3: terminals run on the firstProject STREAM (design §7), not the control
+ * v3: terminals run on the firstProject STREAM, not the control
  * plane. A late-binding phone can't observe the config-autostarted service's
  * live terminal:started/output (they precede the bind and the snapshot carries no
  * scrollback), so these drive terminals the phone STARTS itself — the same E2E

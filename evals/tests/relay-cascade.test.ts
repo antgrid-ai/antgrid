@@ -3,7 +3,7 @@ import { createHmac } from "node:crypto";
 import { RELAY_INTERNAL_SECRET, setupTestEnv } from "../helpers/harness";
 
 /**
- * v3 disconnect semantics (design §6.4): there is NO cascade close. When the
+ * v3 disconnect semantics: there is NO cascade close. When the
  * agent quits or is license-revoked, the phone's socket STAYS OPEN and it is
  * told the peer went away (`peer-offline`, fanned out by same-account
  * presence, `relay/src/server.ts`'s `fanOutPeerPresence`) — an error-frame

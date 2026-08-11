@@ -94,9 +94,9 @@ class CommandHandler {
 
   Future<void> _handleConnect(Map<String, dynamic> cmd) async {
     final relayUrl = cmd['relayUrl'] as String?;
-    // v3 admission: every app hello carries its own account license token
-    // (design §4.2). There is no token-free app dial to fall back to, so a
-    // missing token is a caller bug, not a mode.
+    // v3 admission: every app hello carries its own account license token.
+    // There is no token-free app dial to fall back to, so a missing token is
+    // a caller bug, not a mode.
     final licenseToken = cmd['licenseToken'] as String?;
     if (relayUrl == null ||
         licenseToken == null ||
@@ -222,7 +222,7 @@ class CommandHandler {
   }
 
   /// Drill into a project: `project:start` on the control plane, then await the
-  /// agent's `stream-ready` (design §7.4). Resolves at 0 RTT when the advert
+  /// agent's `stream-ready`. Resolves at 0 RTT when the advert
   /// already carried the stream.
   Future<void> _handleProjectStart(Map<String, dynamic> cmd) async {
     final session = _session;

@@ -66,7 +66,7 @@ interface Bucket {
 }
 
 /**
- * Per-key token bucket for JSON control messages (design §3.3): a sustained
+ * Per-key token bucket for JSON control messages: a sustained
  * `refillPerSec` with a `burst` allowance so a legitimate pairing burst of a
  * few messages never trips, while a flood is throttled. The v2 fixed-window
  * `MessageRateLimiter` still guards binary route frames; this covers the JSON

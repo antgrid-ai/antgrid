@@ -4,7 +4,7 @@ import { logger } from "./logger";
 const log = logger.child({ component: "relay-epoch" });
 
 /**
- * Connection-instance epoch for v3 hello arbitration (design §6.3/§13.2).
+ * Connection-instance epoch for v3 hello arbitration.
  *
  * Computed once per process as `max(stored + 1, unixSeconds)` and persisted
  * back before returning: the wall-clock floor makes a storage wipe / reinstall

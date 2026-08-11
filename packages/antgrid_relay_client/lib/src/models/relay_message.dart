@@ -194,7 +194,7 @@ class IncomingRouteMessage {
   final Uint8List payload;
   final int? ts;
 
-  /// The route-frame kind byte (v3 §3.1). `handshake` (0x01) carries plaintext
+  /// The route-frame kind byte. `handshake` (0x01) carries plaintext
   /// client/agent-hello; `sealed` (0x00) carries every ciphertext payload
   /// (session frames and stream traffic). Endpoints dispatch on this instead of
   /// try-parsing the payload as plaintext JSON.

@@ -101,8 +101,9 @@ void main() {
     });
 
     test('retired types no longer dispatch', () {
-      // The pairing frames are retired app-side but a Phase C-era relay may
-      // still emit them: they must parse to null (ignored), never throw.
+      // The pairing ceremony is gone from the current relay, but a client can
+      // be pointed at an older relay binary that still emits its frames: they
+      // must parse to null (ignored), never throw.
       // relay_legacy_pair_frames_test.dart pins the socket-level consequence.
       const retired = [
         'challenge',

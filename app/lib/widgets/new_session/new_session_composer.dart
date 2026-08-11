@@ -51,15 +51,6 @@ bool newSessionCanStart({
     (!isCustom || customCmd.trim().isNotEmpty) &&
     (!isolated || isolationReady);
 
-/// Bottom-anchored composer for the New Session canvas.
-///
-/// Assembles the chip row ([EnvironmentChip] + [ProjectChip]), a multiline
-/// prompt field, and the bottom control row (mode chip, gear popover, agent
-/// selector, send button). Also owns the form listeners that used to live in
-/// `SessionConfig` (target -> seed agent, agent -> mode default, detection ->
-/// installed-agent snap) and the submit handler that used to live in
-/// `NewSessionContent`'s `_SessionFooter` — both source files are deleted in
-/// Phase B.
 /// Minimum row slack (hint intrinsic width + trailing gap, with margin)
 /// before the Enter-to-start hint is worth rendering at all.
 const double _enterHintMinWidth = 96;
@@ -83,6 +74,13 @@ const double _chipLabelCapFraction = 0.3;
 /// chip's own chrome — which is a render overflow, not a truncation.
 const double _branchChipFloor = kComposerChipFullMinWidth;
 
+/// Bottom-anchored composer for the New Session canvas.
+///
+/// Assembles the chip row ([EnvironmentChip] + [ProjectChip]), a multiline
+/// prompt field, and the bottom control row (mode chip, gear popover, agent
+/// selector, send button). Also owns the form listeners (target -> seed agent,
+/// agent -> mode default, detection -> installed-agent snap) and the submit
+/// handler.
 class NewSessionComposer extends ConsumerStatefulWidget {
   const NewSessionComposer({
     super.key,

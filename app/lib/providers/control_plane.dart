@@ -37,7 +37,7 @@ final controlPlaneClientForProvider = FutureProvider.family<ControlPlaneClient?,
     if (transport == null) return null;
     // Reactive offline: the relay transport never emits a disconnect, so feed
     // the client the machine socket's peer-presence. In v3 the phone's socket is
-    // NOT cascade-closed when the agent drops (design §6.4) — the relay sends
+    // NOT cascade-closed when the agent drops — the relay sends
     // `peer-offline` (which keeps the socket `paired`), so presence must key on
     // the peer-presence stream, not the connection state. `RelayService` emits
     // false on both `peer-offline` and a raw socket drop, so a `false` here

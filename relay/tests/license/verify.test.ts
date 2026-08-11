@@ -97,10 +97,10 @@ describe("verifyDeviceToken", () => {
     }
   });
 
-  // The deploy-order guarantee behind retiring the worker-limit rename: web may
-  // stop minting `sessionLimit` at will, and a garbage value from a token minted
-  // mid-rollout must not be read as a verdict either. The relay ignores the claim
-  // entirely (docs/plans/2026-07-30-worker-limit-pricing.md).
+  // License verification is identity/validity only — the relay holds no
+  // entitlement claim (relay/CLAUDE.md, the `license/` bullet), so web may
+  // stop minting `sessionLimit` at any time, and a stale or garbage value from
+  // an older mint must never be read as a verdict.
   test("no entitlement claim is required — tokens with or without sessionLimit verify", async () => {
     const kp = await makeKeyPair("k1");
     const provider = makeProvider([kp.publicJwk]);

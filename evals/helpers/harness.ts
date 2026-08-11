@@ -149,7 +149,7 @@ const EVAL_USER_ID = "eval-user";
 
 /**
  * Fake v3 LicenseGate. Accepts any non-empty token (agents and apps alike —
- * v3 requires a token for BOTH, design §4.2) and returns a fixed uid.
+ * v3 requires a token for BOTH) and returns a fixed uid.
  */
 function fakeLicenseGate(): LicenseGate {
   // `pk` mirrors the real gate's `claims.pk` (the pubkey the token attests).
@@ -539,7 +539,7 @@ export const spawnAgentForRelay = spawnAgent;
 /**
  * Legacy compound relay registration id (`${deviceUuid}.${projectId}`). v3 has
  * no compound registration — the agent registers ONE socket as the bare
- * `deviceUuid` and projects are streams (design §7). Retained only for scenarios
+ * `deviceUuid` and projects are streams. Retained only for scenarios
  * still on the v2 per-project-socket shape (their migration to streams is X3).
  */
 export function agentRegistrationId(deviceUuid: string, projectDir: string): string {
@@ -822,7 +822,7 @@ export async function setupDartTestEnv(opts: {
   // the Dart client connects (see setupTestEnv for the ordering rationale).
   await setMobileAccess(abDir, true);
 
-  // v3: app hello now carries a mandatory license token (design §4.2); the Dart
+  // v3: app hello now carries a mandatory license token; the Dart
   // eval CLI forwards it to RelayService.connect.
   await app.connect(relay.url, TEST_LICENSE_TOKEN);
   // Pair-free: the phone addresses the agent by the coordinates it already

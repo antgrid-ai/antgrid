@@ -13,7 +13,7 @@ export interface WsData {
   /**
    * Normalized `Host` header of the upgrade request (lowercased, scheme-default
    * port dropped). Rebuilt into the hello signature body server-side so a
-   * cross-relay-replayed hello fails the signature (design §4.1 step 4).
+   * cross-relay-replayed hello fails the signature (step 4).
    */
   relayHost: string;
   deviceId?: string;
@@ -48,14 +48,14 @@ export interface Connection {
    * a redial minted in the same millisecond; the nonce alone would only cover the
    * single most recent frame, leaving every earlier captured hello a valid
    * eviction ticket. Defence in depth behind the replay cache, which is
-   * capacity-bounded and does not survive a restart (design §6.3).
+   * capacity-bounded and does not survive a restart.
    */
   helloNonce: string;
   helloTs: number;
   ws: ServerWebSocket<WsData>;
   ip: string;
   connectedAt: number;
-  /** Transport diagnostics only — NEVER consulted for arbitration (design §6.3). */
+  /** Transport diagnostics only — NEVER consulted for arbitration. */
   lastSeen: number;
   claims?: ConnectionClaims;
   /** Agents only: opaque stream ids, released wholesale when the entry drops. */
@@ -113,7 +113,7 @@ export class Connections {
    * Remove a connection from both indexes (used both on socket close and on
    * epoch supersession). Removing the entry drops its `openStreams` set, which
    * is how a superseded agent's streams are released before the successor is
-   * inserted (design §6.3 / §7.3).
+   * inserted.
    */
   remove(conn: Connection): void {
     this.byConnectionId.delete(conn.connectionId);
@@ -169,7 +169,8 @@ export class Connections {
    * assertion helper `tests/epochs.test.ts` uses to prove a superseded epoch
    * releases its streams. Do NOT delete it as dead, and do NOT re-introduce a
    * per-account stream cap against it — metering open streams taxes the fleet
-   * view and warm-project LRU (see docs/plans/2026-07-30-worker-limit-pricing.md).
+   * view and warm-project LRU, and the paid axis is a worker (agent-device) cap
+   * enforced by web at device registration (relay/CLAUDE.md, the Streams bullet).
    */
   countOpenStreamsForUser(userId: string): number {
     let count = 0;

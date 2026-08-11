@@ -5,7 +5,7 @@
 // (handshake vs sealed), and a mandatory sealed `established{attemptId}` from
 // the agent — `run()` only completes on that, retransmitting sealed
 // `app:ready` every [ConnectionHandshake]'s `appReadyRetransmit` interval
-// until it arrives (design §6.1 step 5).
+// until it arrives.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';

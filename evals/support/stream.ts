@@ -6,7 +6,7 @@ import { createMessage, type AbMessage } from "../../bridge/src/protocol";
  * v3 project data-plane helpers.
  *
  * In v3 a machine holds ONE sealed session; project traffic runs as streams
- * inside it (design §7.1). The machine control plane (`s` omitted) carries only
+ * inside it. The machine control plane (`s` omitted) carries only
  * host verbs, pairing UX, and the catalog adverts (`agent:projects` /
  * `agent:tools`); every project verb (`file:read`, `terminal:*`, `git:*`, …)
  * must be tagged with the project's `streamId`. `setupTestEnv` admits the app,

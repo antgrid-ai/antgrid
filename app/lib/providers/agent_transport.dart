@@ -125,7 +125,7 @@ final agentTransportForProvider = FutureProvider.family<AgentTransport?, String>
 /// then binds [projectId] to a stream over it: the control plane (stream "0")
 /// for a bare machine id, or the project's data-plane stream for a compound
 /// `<uuid>.<projectId>` — 0 RTT when the agent already advertised its streamId,
-/// else `project:start` + await `stream-ready` (design §7.4). No new socket, no
+/// else `project:start` + await `stream-ready`. No new socket, no
 /// per-project handshake, so the v2 drill-in race is gone. Rekey lives inside
 /// [MachineSession]; keys hot-swap under the live streams with no invalidate
 /// here.
@@ -539,7 +539,7 @@ Future<AgentTransport?> _buildLocalTransportFor(
   // device + endpoints are always carried into the host's machine bootstrap
   // whenever a device record exists, so the always-on control plane runs for
   // every local host — independent of any per-project flag. The desktop's own
-  // transport stays loopback. (See design §"Data plane".)
+  // transport stays loopback.
   final result = await launcher.openProject(
     folder,
     device: device,

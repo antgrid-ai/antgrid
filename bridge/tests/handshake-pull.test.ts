@@ -1,5 +1,5 @@
-// v3 E2E session state machine (design §6.1-6.2, plan B3/B6): reactive,
-// acked, make-before-break. Replaces the v2 pull-model handshake suite — the
+// v3 E2E session state machine: reactive, acked, make-before-break.
+// Replaces the v2 pull-model handshake suite — the
 // wire dispatch is now kind-byte (handshake vs sealed) rather than try-parse,
 // every handshake message carries an `attemptId`, and a fresh client-hello
 // triggers a REKEY (a new candidate attempt) even while a session is already
@@ -179,9 +179,9 @@ test("duplicate app:ready for the live attemptId is idempotent: single establish
   expect(handshakeDone).toBe(1);
   const sentBefore = sent.length;
 
-  // The phone retransmits app:ready every 2s until it sees `established`
-  // (design §6.1 step 5) — a duplicate for the already-live attempt must not
-  // re-run the swap or re-fire onHandshakeComplete, just re-ack.
+  // The phone retransmits app:ready every 2s until it sees `established` —
+  // a duplicate for the already-live attempt must not re-run the swap or
+  // re-fire onHandshakeComplete, just re-ack.
   const appReadyJson = JSON.stringify({ type: "app:ready", attemptId, confirm: phoneConfirmTag(phoneKeys.confirm).toString("base64") });
   injectFrame(client, FrameKind.sealed, phoneTransport.seal(appReadyJson));
 
@@ -295,7 +295,7 @@ test("sealed app envelope on the preview channel is routed to onTunnelMessage af
   const { client, phoneTransport } = establishSession({ agentEd: ed25519Pair(), phoneEd: ed25519Pair(), attemptId: "attempt-a" });
   (client as any).opts.onTunnelMessage = (m: unknown) => tunnelMsgs.push(m);
 
-  // App traffic is always the `{ m }` envelope now (design §7.1) — even
+  // App traffic is always the `{ m }` envelope now — even
   // non-AbMessage tunnel-protocol frames, which fall through parseMessageFast
   // to parseTunnelMessage inside dispatchControlPlane.
   const tunnelReq = { type: "tunnel:http-request", requestId: "req-1", port: 3000, method: "GET", path: "/" };
@@ -406,7 +406,7 @@ test("rekey mid-session: old keys decrypt until the new confirm, then swap + zer
   expect((client as any).pending?.attemptId).toBe("attempt-b");
 
   // Old keys STILL decrypt while the rekey is only pending (two live receive
-  // contexts, design §6.2).
+  // contexts).
   const probeAAgain = phoneA.seal(JSON.stringify({ type: "ping" }));
   expect(oldEstablished.transport.open(probeAAgain)).not.toBeNull();
 

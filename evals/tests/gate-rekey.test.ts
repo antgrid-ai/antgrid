@@ -3,7 +3,7 @@ import { setupTestEnv, type TestEnv } from "../helpers/harness";
 import { createMessage } from "../../bridge/src/protocol";
 
 /**
- * Merge-gate item 3 (design §6.2, §12): make-before-break rekey keeps the
+ * Merge-gate item 3: make-before-break rekey keeps the
  * pre-rekey session keys live for RECEIVING until the new attempt's confirm
  * verifies, then atomically swaps and zeroizes the old keys — on both ends.
  * Avoid `expect(promise).rejects.toThrow()` in this file: it reproducibly

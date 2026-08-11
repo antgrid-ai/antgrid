@@ -103,11 +103,11 @@ class DevicesApi extends CookieApiClient implements DevicesApiCreator {
         final cap = _deviceCapFromBody(res.body, kind: DeviceCapKind.worker);
         throw ProvisioningException('WORKER_CAP', cap.message, cap: cap);
       }
-      // Two-axis pricing: device registration is gated only by the fair-use
-      // device cap (`deviceLimit`, identical across ALL tiers incl. free) — NOT
-      // a paid/subscription gate. The remedy is to remove a device, never to
-      // upgrade. See web/src/routes/devices.ts (DEVICE_CAP body) and
-      // docs/plans/2026-07-30-worker-limit-pricing.md.
+      // The other axis, and NOT a paid gate: `deviceLimit` is a flat fair-use
+      // registration ceiling, identical across ALL tiers including free, so the
+      // only remedy is to remove a device — upgrading can never clear it. The
+      // DEVICE_CAP body is built in web/src/routes/devices.ts; the two-axis
+      // model is web/CLAUDE.md (the security-invariants paragraph).
       final cap = _deviceCapFromBody(res.body);
       throw ProvisioningException('DEVICE_CAP', cap.message, cap: cap);
     }

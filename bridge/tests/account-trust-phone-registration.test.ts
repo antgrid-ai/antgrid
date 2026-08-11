@@ -1,4 +1,4 @@
-// Account-trust admission (spec 2026-07-24 §3.3) has no pair-request, so the
+// Account-trust admission has no pair-request, so the
 // client-hello path is the ONLY place a same-account phone's row can be created.
 // The row grants nothing — authorization is the machine's mobile-access switch —
 // but without it a fully connected phone is invisible to `antgrid phones list`

@@ -1,4 +1,4 @@
-// E2E v3 drill-in (start-on-open) over the REAL bridge + relay (design §7.4):
+// E2E v3 drill-in (start-on-open) over the REAL bridge + relay:
 //   1. setupTestEnv admits ONE app once against the control plane (bare
 //      deviceUuid) with account-trust — no pairing ceremony — and completes
 //      the E2E handshake.
@@ -64,7 +64,7 @@ test("drill-in: start a stopped project as a stream on the ONE socket, zero new 
 
     // === Drill in: this must add NO new relay connection and run NO pair. ===
     // openProjectStream issues only a sealed control-plane `project:start` and
-    // awaits `stream-ready` — no pair-request, no hello, no new socket (§7.4).
+    // awaits `stream-ready` — no pair-request, no hello, no new socket.
     const connectionsBefore = env.relay.connectionCount();
     const streamB = await cp.openProjectStream(projB, 12_000);
     expect(streamB).toBeTruthy();

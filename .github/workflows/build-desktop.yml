@@ -410,8 +410,11 @@ jobs:
       # publish an appcast (installed apps would download the unsigned dmg
       # and fail verification, fleet-wide). EdDSA signing is additive on top
       # when SPARKLE_ED_PRIVATE_KEY is set; only once SUPublicEDKey ships in
-      # Info.plist may the gate accept EdDSA without Apple signing. Runbook:
-      # docs/runbooks/macos-sparkle-updates.md.
+      # app/macos/Runner/Info.plist may the gate accept EdDSA without Apple
+      # signing. That key is a one-way door and must ship AFTER the secret is
+      # already signing appcasts: an app carrying it rejects every later
+      # enclosure without a valid edSignature, so from then on a lost or
+      # rotated secret bricks every install's update path, not just CI.
       - name: Generate Sparkle appcast
         id: appcast
         # The release-path half must match the publish job verbatim: a

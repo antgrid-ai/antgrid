@@ -13,13 +13,14 @@ import 'models/relay_message.dart';
 import 'models/stream_envelope.dart';
 import 'relay_service.dart';
 
-/// v3 §6.2 liveness constants (mirror `bridge/src/relay-client.ts`).
+/// Liveness constants; mirror `bridge/src/relay-client.ts`.
+/// Spec: docs/protocol/e2e-handshake.md §"Sealed liveness".
 const int kPingSilenceSeconds = 20;
 const int kMaxMissedPongs = 2;
 const int _kConsecutiveTimeoutsToRekey = 3;
 
 /// Drives ONE E2E handshake attempt-cycle over a [MachineSession]'s socket,
-/// completing only after the agent's sealed `established` (design §6.1 step 5).
+/// completing only after the agent's sealed `established`.
 /// The app implements this wrapping `ConnectionHandshake`; the package stays
 /// Flutter-free. Each [perform] must run a FRESH attempt (new `attemptId`).
 abstract class SessionHandshaker {
@@ -256,7 +257,7 @@ class MachineSession {
 
   /// Bind a project to its stream: return a known streamId at 0 RTT, else send
   /// [startMessage] (a `project:start`) on the control plane and await the
-  /// agent's `stream-ready` (design §7.4).
+  /// agent's `stream-ready`.
   Future<String> bindProject(
     String projectId,
     Map<String, dynamic> startMessage, {
@@ -545,7 +546,7 @@ class MachineSession {
       return;
     }
     final type = json['type'];
-    // Sealed-payload disambiguation (v3 §7.1): a top-level `type` string is a
+    // Sealed-payload disambiguation: a top-level `type` string is a
     // session/liveness frame; an `m` field is stream/app traffic.
     if (type is String) {
       _handleSessionFrame(type);
@@ -584,7 +585,7 @@ class MachineSession {
   /// for LIVE frames and for `state.snapshot`-replayed frames alike — the
   /// bridge's replay-cache dedup can legally suppress a byte-identical live
   /// re-advert after an app kill+reopen, so the snapshot pull is the reconnect
-  /// binding contract (design §7.4), not a cache warm-up.
+  /// binding contract, not a cache warm-up.
   void _snoopControl(String sid, Object? m) {
     if (sid != kControlStreamId || m is! Map<String, dynamic>) return;
     final type = m['type'];
@@ -861,7 +862,7 @@ class StreamTransport extends BufferedAgentTransport {
       session.notifyRpcResult(timedOut: false);
       return r;
     } on RpcException catch (e) {
-      // ≥3 consecutive E_TIMEOUTs is a rekey trigger (design §6.2).
+      // ≥3 consecutive E_TIMEOUTs is a rekey trigger.
       session.notifyRpcResult(timedOut: e.code == 'E_TIMEOUT');
       rethrow;
     }
@@ -898,7 +899,7 @@ class StreamTransport extends BufferedAgentTransport {
           // Snapshot-replayed frames must feed the session's stream-binding
           // map exactly like live frames: the bridge's replay-cache dedup can
           // suppress the live re-advert after an app kill+reopen, making this
-          // pull the ONLY carrier of `agent:projects{streamId}` (design §7.4).
+          // pull the ONLY carrier of `agent:projects{streamId}`.
           // No-op for non-control streams.
           session._snoopControl(streamId, m);
           fresh.add(InboundMessage('control', m));

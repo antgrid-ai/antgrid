@@ -4,8 +4,8 @@
  * Verifies that an agent booted from a stdin `BootstrapPayload` (remote mode)
  * mints a token from the fake license API, authenticates with the relay via a
  * signed v3 `hello`, and can be reached by an app with no pairing ceremony —
- * account-trust admission is the production path since Phase B (the app-side
- * pairing surface is deleted; `autoOpen`/`reconnect` connect exactly as
+ * account-trust admission is the production path (the app-side pairing
+ * surface is deleted; `autoOpen`/`reconnect` connect exactly as
  * `setupTestEnv` does here). This replaces the old on-disk enrollment model
  * (seeded identity.json + jwt.json), removed in the OAuth migration.
  */

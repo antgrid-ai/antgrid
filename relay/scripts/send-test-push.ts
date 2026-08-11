@@ -4,8 +4,8 @@
  * driven by hand. The Firebase console cannot send data-only messages, so this
  * is the only way to exercise the background/terminated delivery path.
  *
- * Reads the same three env vars the relay does; see
- * docs/runbooks/fcm-relay-setup.md.
+ * Reads the relay's own FCM env (`FCM_PROJECT_ID`, `FCM_CLIENT_EMAIL`,
+ * `FCM_PRIVATE_KEY`), so a shell configured for the relay runs it unchanged.
  *
  *   bun run relay/scripts/send-test-push.ts <device-token> [key=value ...]
  */

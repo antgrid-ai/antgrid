@@ -6,8 +6,8 @@ import { TestApp } from "../helpers/test-app";
 import type { TestEnv } from "../helpers/harness";
 
 /**
- * Failure-matrix row created by the relay-slot fix (not in the original
- * spec's §7 matrix): an app's `hello.deviceId` is now a per-machine SLOT
+ * Failure-matrix row created by the relay-slot fix: an app's `hello.deviceId`
+ * is now a per-machine SLOT
  * (`<accountDeviceUuid>#<machineDeviceUuid>`), so ONE account device (one
  * phone) can hold a live E2E session with TWO different bridges (two
  * machines) at once without either superseding the other. Unit coverage

@@ -17,7 +17,7 @@ export interface RelayConfig {
    * relay runs out of memory. Raise it freely; it is not a product limit.
    */
   maxStreamsPerConnection: number;
-  /** ± window a hello `ts` may deviate from server time (design §4.1 step 2). */
+  /** ± window a hello `ts` may deviate from server time (step 2). */
   clockSkewMs: number;
   /** How long a `(deviceId, nonce)` hello pair is remembered (replay guard). */
   replayTtlMs: number;

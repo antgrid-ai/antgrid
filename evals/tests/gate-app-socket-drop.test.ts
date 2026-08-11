@@ -6,8 +6,7 @@ import { TestApp } from "../helpers/test-app";
  * Failure-matrix row: the app's socket drops (network blip, backgrounding,
  * etc.) — an unintentional close, not a deliberate `disconnect()`. Recovery
  * is a plain redial under the SAME identity: no pairing ceremony, since
- * admission is account trust (Phase B), not a grant tied to a specific
- * socket.
+ * admission is account trust, not a grant tied to a specific socket.
  *
  * `TestApp.dropSocket()` hard-closes the WS without touching E2E/session
  * bookkeeping (see its doc comment) — a real network drop looks the same

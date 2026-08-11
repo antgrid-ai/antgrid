@@ -1,4 +1,4 @@
-// v3 hello auth (design §4.1, plan B1/B2). Replaces the v2 register/challenge
+// v3 hello auth. Replaces the v2 register/challenge
 // suite: there is no more challenge round trip, no protocolVersion:2 register,
 // and reconnect is decided by the error contract's `retryable` flag instead of
 // per-code lists.
@@ -326,7 +326,7 @@ test("a stream-open rejection (ref===streamId) is routed to the mux and never re
   });
 
   expect(rejected).toEqual([{ code: "SESSION_LIMIT_EXCEEDED", message: "cap reached" }]);
-  // The load-bearing assertion (B2): lastError must stay null so an unrelated
+  // The load-bearing assertion: lastError must stay null so an unrelated
   // later close doesn't read this stream rejection's retryable:false and wrongly
   // stop reconnecting the whole socket.
   expect((client as any).lastError).toBeNull();

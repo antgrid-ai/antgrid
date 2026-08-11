@@ -1,4 +1,4 @@
-// v3 stream multiplexing (design §7, plan B4/B6): one machine socket, project
+// v3 stream multiplexing: one machine socket, project
 // cores attach as opaque streamId-tagged streams. Two layers are covered here:
 // StreamMux in isolation (against a stub transport — no crypto, no socket),
 // and the real RelayClient wiring the envelope through seal/fragment/send so

@@ -1,9 +1,10 @@
-// Phase A fans `peer-online`/`peer-offline` out ACCOUNT-WIDE (all of a user's
-// machines), not just the one this socket is paired with. These tests cover
-// the resulting filter: only presence frames for THIS socket's machine may
-// drive its state. Uses `debugHandleFrame`/`debugSetMachineDeviceId` (the
-// test-only seams documented on RelayService), mirroring the no-socket style
-// of relay_service_hello_test.dart.
+// The relay fans `peer-online`/`peer-offline` out ACCOUNT-WIDE (all of a
+// user's machines — `presencePeers` in `relay/src/server.ts`), not just the
+// one this socket serves. These tests cover the resulting filter: only
+// presence frames for THIS socket's machine may drive its state. Uses
+// `debugHandleFrame`/`debugSetMachineDeviceId` (the test-only seams documented
+// on RelayService), mirroring the no-socket style of
+// relay_service_hello_test.dart.
 import 'dart:convert';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';

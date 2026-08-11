@@ -61,7 +61,7 @@ async function drillIntoProject(app: RelayClient, projectId: string, timeoutMs =
 }
 
 /**
- * Merge-gate item 4 (design §6.3, §12): epochs replace the old 60s
+ * Merge-gate item 4: epochs replace the old 60s
  * ACTIVE_THRESHOLD_MS liveness heuristic. Two halves:
  *
  *  1. A focused, low-level relay-only test using RelayClient AS a fake agent
@@ -123,7 +123,7 @@ describe("gate: epoch supersession — relay arbitration", () => {
     const deviceId = crypto.randomUUID();
     // The half-open scenario: the client's watchdog closed this socket and
     // redialed with the SAME per-process epoch, but the relay hasn't reaped
-    // the old connection yet (design §6.3, equal-epoch rule).
+    // the old connection yet (equal-epoch rule).
     const zombie = await RelayClient.connectAndAuth(relay.url, {
       deviceType: "agent",
       name: "epoch-zombie",
@@ -204,8 +204,8 @@ describe("gate: epoch supersession — agent restart end-to-end", () => {
     const preStreamId = await drillIntoProject(app, env.projectId, 8_000);
     expect(typeof preStreamId).toBe("string");
 
-    // Phase A's same-account presence fan-out emits a peer-online to this phone
-    // at the agent's INITIAL connect (spec 2026-07-24 §4), which the client
+    // The same-account presence fan-out emits a peer-online to this phone at
+    // the agent's INITIAL connect, which the client
     // queues. Drop it so the waiter below binds to the genuinely-fresh
     // post-restart peer-online (emitted when the new agent re-registers and is
     // routable), not the stale queued one — otherwise the one-shot rekey fires
@@ -227,7 +227,7 @@ describe("gate: epoch supersession — agent restart end-to-end", () => {
     await app.rekey(env.agentDeviceId, env.agent.ed25519Pubkey, 10_000);
 
     // Streams rebind: the pre-restart streamId is invalid — the relay closes
-    // an agent's streams on disconnect (design §6.4) — so the cached entry
+    // an agent's streams on disconnect — so the cached entry
     // must be dropped before re-drilling in (see drillIntoProject's gap note:
     // relay-client.ts never invalidates streamByProject on peer-offline/rekey).
     (app as any).streamByProject.delete(env.projectId);

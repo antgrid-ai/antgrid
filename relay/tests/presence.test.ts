@@ -22,7 +22,7 @@ afterEach(() => {
 // mayRoute's account-derived authorization (Task 1) generalizes routing to
 // same-account peers with zero grant setup; this generalizes PRESENCE the
 // same way — peer-online/offline must reach same-account cross-type peers
-// too, not just grant-linked ones (spec 2026-07-24 §4).
+// too, not just grant-linked ones.
 test("same-account, no grant: bidirectional peer-online when the agent connects after the app", async () => {
   const sharedToken = "presence-shared-hello";
   const gate = makeFakeLicenseGate({ agentUid: () => `user-app-${sharedToken}` });

@@ -34,9 +34,12 @@
 	     Sparkle only runs when the user clicks Update. Without this key Sparkle
 	     would show its own "check automatically?" permission prompt at launch.
 	     No SUPublicEDKey: updates verify via the Developer ID code signature
-	     (old and new app signed by the same team). If an EdDSA key is ever
-	     added, every later release MUST be sign_update-signed — see
-	     docs/runbooks/macos-sparkle-updates.md. -->
+	     (old and new app signed by the same team). Adding a key here is a
+	     one-way door — every later enclosure must then carry a valid
+	     edSignature, and the key can be rotated only by a coordinated
+	     release, never silently. The "Generate Sparkle appcast" step in
+	     .github/workflows/build-desktop.yml must already be signing
+	     appcasts before this key ships; it owns the matching gate. -->
 	<key>SUEnableAutomaticChecks</key>
 	<false/>
 	<key>SUAutomaticallyUpdate</key>

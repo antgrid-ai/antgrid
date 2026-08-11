@@ -188,10 +188,13 @@ export function billingRoutes(deps: {
           label: p.label,
           tier: p.tier,
           worker_limit: p.workerLimit,
-          // Compatibility mirror for app builds already in the field, which
-          // parse `session_limit` as non-null. Drop once the worker_limit app
-          // release ships — see "Deploy order" in
-          // docs/plans/2026-07-30-worker-limit-pricing.md.
+          // `session_limit` is the retired name for `worker_limit`, and this is
+          // the response the app actually reads the limit from: `fromJson` in
+          // app/lib/models/subscription_info.dart prefers `worker_limit` and
+          // falls back to this key, but builds predating the rename cast
+          // `session_limit` as non-null and throw when it is absent.
+          // TODO(billing): drop this and every other `session_limit` mirror in
+          // web/src/routes once no pre-rename app build is still in the field.
           session_limit: p.workerLimit,
           device_limit: p.deviceLimit,
           recurring: p.recurring,

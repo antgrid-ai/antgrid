@@ -1,9 +1,9 @@
-// E2E v3 multi-STREAM coexistence (design §7 — one socket, project multiplexing):
+// E2E v3 multi-STREAM coexistence (one socket, project multiplexing):
 //   ONE phone holds ONE relay socket and ONE sealed session. The machine control
 //   plane plus two project data planes are STREAMS inside that single session
 //   (`{ s, m }` envelopes), not separate sockets. This replaces the v2 "one phone
 //   pubkey, N per-registration sockets via sub-deviceIds" model — sub-deviceIds
-//   and compound `deviceUuid.projectId` registrations are gone (design §7.4).
+//   and compound `deviceUuid.projectId` registrations are gone.
 //
 // Asserts: (1) traffic on each project stream comes back tagged with THAT stream's
 // id — the streams are isolated; (2) exactly ONE relay connection exists per side
@@ -56,7 +56,7 @@ test("one phone socket carries control + two project streams, isolated, on a sin
     // turned it on) — what still needs retrying is the catalog catching up with
     // the loopback open/stop above.
     // projA (already running) → streamId from the advert; projB → project:start
-    // opens its stream (design §7.4). Both streams live in the ONE session.
+    // opens its stream. Both streams live in the ONE session.
     // projB was explicitly stopped above, so this project:start takes the
     // FRESH-open path (terminals: startup commands run), not the idempotent
     // republish — 12s per attempt matches drill-in.test.ts's budget for that

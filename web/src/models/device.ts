@@ -134,8 +134,8 @@ export async function listAppDevicePeers(
   db: Tx,
   userId: string
 ): Promise<{ deviceId: string; publicKey: Buffer }[]> {
-  // Same filter as listAppDeviceKeys — keep the two in lockstep until Phase C
-  // deletes the keys-only variant.
+  // Same filter as listAppDeviceKeys — keep the two in lockstep; they list the
+  // same active app devices and differ only in the columns selected.
   const rows = await db.device.findMany({
     where: { userId, kind: "app" as DeviceKind, revokedAt: null },
     select: { deviceId: true, publicKey: true },

@@ -18,7 +18,7 @@ import { createTestProject } from "../helpers/fixtures";
 import { createMessage } from "../../bridge/src/protocol";
 
 /**
- * Merge-gate item 5 (design §5.1, §5.4, §6.4, §12): a relay restart wipes all
+ * Merge-gate item 5: a relay restart wipes all
  * in-memory connection/grant state; recovery is the AGENT'S OWN reconnect
  * (real bridge backoff, unattended) landing a fresh `hello`, followed by the
  * phone re-establishing its E2E session with NO pairing at all — admission is

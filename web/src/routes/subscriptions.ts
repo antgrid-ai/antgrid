@@ -44,10 +44,10 @@ export function subscriptionRoutes(deps: { db: DB; auth: Auth }) {
       },
       tier,
       worker_limit: workerLimit,
-      // `session_limit` is a compatibility mirror for app builds already in the
-      // field, which parse it as non-null. Drop once the worker_limit app
-      // release ships — see "Deploy order" in
-      // docs/plans/2026-07-30-worker-limit-pricing.md.
+      // `session_limit` is the retired name for `worker_limit`, kept in
+      // lockstep with the `/billing/plans` mirror (web/src/routes/billing.ts)
+      // that app builds predating the rename hard-require. Drop them together
+      // once no such build is still in the field.
       session_limit: workerLimit,
       device_limit: deviceLimit,
       promotional,

@@ -25,11 +25,11 @@ import {
 import { FragReassembler } from "../../bridge/src/frag-reassembler";
 
 /** The fake license token the eval relay gate (`fakeLicenseGate`) accepts. v3
- *  requires it for BOTH device types (design §4.2), so an app now sends it too.
+ *  requires it for BOTH device types, so an app now sends it too.
  *  Duplicated (not imported from harness.ts) to avoid a helper import cycle. */
 const TEST_LICENSE_TOKEN = "eval-license-token";
 
-/** Monotonic per-launch epoch source (design §6.3). A client (re)started within
+/** Monotonic per-launch epoch source. A client (re)started within
  *  one test presents a strictly higher epoch than its predecessor, so the newer
  *  connection supersedes the old on the relay. */
 let epochCounter = 0;
@@ -117,7 +117,7 @@ export class RelayClient {
   /** The nonce sent in the most recent hello — reuse it via `reuseNonce`. */
   lastHelloNonce = "";
 
-  // --- E2E session state (design §6.1) ---
+  // --- E2E session state ---
   /** The confirmed session (or, mid-initial-handshake, the derived candidate the
    *  phone confirms last). Make-before-break rekey keeps it live for RECEIVING
    *  until the pending attempt establishes. */
@@ -132,18 +132,18 @@ export class RelayClient {
    *  Replayed once the relevant transport is installed. */
   private pendingEncrypted: Uint8Array[] = [];
 
-  // --- Multiplexed project streams (design §7.1) ---
+  // --- Multiplexed project streams ---
   /** projectId → streamId, learned from control-plane `stream-ready`/`agent:projects`. */
   private streamByProject = new Map<string, string>();
 
-  // --- Phone-side liveness (design §6.2 from the phone's perspective) ---
+  // --- Phone-side liveness (from the phone's perspective) ---
   private livenessTimer: ReturnType<typeof setInterval> | null = null;
   private lastSealedRecvAt = 0;
   private missedPongs = 0;
   private pingSilenceMs = 20_000;
   private maxMissedPongs = 2;
   /** Test lever: drop inbound sealed `pong`s so this client's liveness starves
-   *  and it rekeys (design §6.2). The relay is zero-knowledge and cannot single
+   *  and it rekeys. The relay is zero-knowledge and cannot single
    *  out sealed pongs, so the "swallow pongs" lever lives at the endpoint. */
   private swallowPongs = false;
   private rekeyInFlight = false;
@@ -176,7 +176,7 @@ export class RelayClient {
   }
 
   /** Create a relay client, connect, and authenticate with a single signed
-   *  v3 `hello` (design §4). `licenseToken`/`epoch` default sensibly; the
+   *  v3 `hello`. `licenseToken`/`epoch` default sensibly; the
    *  forge hooks let R-level tests drive rejection paths. */
   static async connectAndAuth(
     relayUrl: string,
@@ -307,7 +307,7 @@ export class RelayClient {
     });
   }
 
-  /** Sign + send the single v3 `hello` (design §4.1). Honors the forge hooks. */
+  /** Sign + send the single v3 `hello`. Honors the forge hooks. */
   private async sendHello(relayUrl: string): Promise<void> {
     const licenseToken = this.helloOpts.licenseToken ?? TEST_LICENSE_TOKEN;
     const epoch = this.helloOpts.epoch ?? nextEpoch();
@@ -369,7 +369,7 @@ export class RelayClient {
     });
   }
 
-  // --- Binary receive path (kind-byte dispatch, design §3.1) ---
+  // --- Binary receive path (kind-byte dispatch) ---
 
   private handleBinaryFrame(data: ArrayBuffer | Uint8Array): void {
     const buf = Buffer.from(data as Uint8Array);
@@ -435,7 +435,7 @@ export class RelayClient {
     if (obj && typeof obj === "object" && typeof obj.type === "string") {
       // Bare session/liveness frame (top-level `type`). App traffic is always
       // wrapped in `{ s?, m }`, so a top-level `type` is unambiguously a session
-      // frame (design §6.1 / §7.1).
+      // frame.
       if (obj.type === "pong" && this.swallowPongs) return; // liveness lever — drop, don't record
       if (!fromPending) this.recordSealedRecv();
       this.handleSessionFrame(obj);
@@ -455,7 +455,7 @@ export class RelayClient {
         return;
       case "established":
         // dropEstablished hook: swallow the FIRST established for the in-flight
-        // attempt so the phone must retransmit app:ready to establish (design §6.1).
+        // attempt so the phone must retransmit app:ready to establish.
         if (this.dropEstablishedAttemptId && obj.attemptId === this.dropEstablishedAttemptId) {
           this.dropEstablishedAttemptId = null;
           return;
@@ -472,8 +472,8 @@ export class RelayClient {
         this.missedPongs = 0;
         return;
       case "session-takeover":
-        // Sent by the bridge's single-active-phone takeover (spec 2026-07-24
-        // §4.3) to the session it's about to tear down. Deliver it like any
+        // Sent by the bridge's single-active-phone takeover to the session
+        // it's about to tear down. Deliver it like any
         // other session frame so a test can `waitFor` the mechanism directly,
         // instead of only inferring it from a later dead round trip.
         this.deliver(obj);
@@ -501,7 +501,7 @@ export class RelayClient {
 
   /** Parse a plaintext AbMessage (or tunnel frame) and route it to waiters/queue.
    *  `streamId` tags it so `waitForStreamAbType` can distinguish project streams
-   *  from the control plane (design §7.1); control-plane messages carry none. */
+   *  from the control plane; control-plane messages carry none. */
   private dispatchAbMessage(json: string, streamId?: string): void {
     const msg = parseMessage(json);
     if (!msg) {
@@ -517,7 +517,7 @@ export class RelayClient {
       }
       return;
     }
-    // `stream-ready` teaches the phone the streamId for a project (design §7.4).
+    // `stream-ready` teaches the phone the streamId for a project.
     if (msg.type === ("stream-ready" as AbMessage["type"])) {
       const anyMsg = msg as any;
       if (anyMsg.projectId && anyMsg.streamId) this.streamByProject.set(anyMsg.projectId, anyMsg.streamId);
@@ -539,7 +539,7 @@ export class RelayClient {
     this.messageQueue.push(msg);
   }
 
-  // --- E2E handshake (design §6.1) ---
+  // --- E2E handshake ---
 
   /** Set while a `dropEstablished` attempt is in flight (the attemptId whose
    *  first `established` must be swallowed). */
@@ -576,7 +576,7 @@ export class RelayClient {
        *  verifies the agent-hello transcript signature and ABORTS on mismatch. */
       agentEd25519Pub?: string;
       /** Wedge-recovery hook: skip the FIRST app:ready send; the 2s retransmit
-       *  then establishes the session (design §12 wedge recovery). */
+       *  then establishes the session (wedge recovery). */
       dropFirstAppReady?: boolean;
       /** Wedge-recovery hook: swallow the agent's first `established` so the phone
        *  retransmits app:ready and establishes on the agent's idempotent re-send. */
@@ -705,7 +705,7 @@ export class RelayClient {
   }
 
   /**
-   * Make-before-break rekey on the LIVE socket (design §6.2): run a fresh
+   * Make-before-break rekey on the LIVE socket: run a fresh
    * handshake while keeping the current session's keys live for receiving,
    * then atomically swap and zeroize the old keys. Used by the rekey gate test
    * (drive it directly, or let phone-side liveness auto-trigger it).
@@ -804,12 +804,12 @@ export class RelayClient {
     for (const p of pending) this.handleSealedFrame(Buffer.from(p), "control");
   }
 
-  // --- Streams (design §7) ---
+  // --- Streams ---
 
   /**
    * Drill into a project: send control-plane `project:start`, await the sealed
    * `stream-ready { projectId, streamId }`, and return the streamId to tag
-   * subsequent project traffic (design §7.4). No new socket, no pairing.
+   * subsequent project traffic. No new socket, no pairing.
    */
   async openProjectStream(projectId: string, timeoutMs = 10_000): Promise<string> {
     const existing = this.streamByProject.get(projectId);
@@ -850,7 +850,7 @@ export class RelayClient {
     this.sendAppEnvelope(CONTROL_STREAM_ID, data, "preview");
   }
 
-  /** Wrap `msg` in the `{ s?, m }` stream envelope (design §7.1), seal, and send.
+  /** Wrap `msg` in the `{ s?, m }` stream envelope, seal, and send.
    *  Control-plane traffic uses `CONTROL_STREAM_ID` (`s` omitted). */
   private sendAppEnvelope(streamId: string, msg: unknown, channel: "control" | "preview"): void {
     const ctx = this.established;
@@ -916,7 +916,7 @@ export class RelayClient {
     this.ws.send(data);
   }
 
-  // --- Phone-side liveness (design §6.2) ---
+  // --- Phone-side liveness ---
 
   private recordSealedRecv(): void {
     this.lastSealedRecvAt = Date.now();
@@ -939,7 +939,7 @@ export class RelayClient {
   /**
    * Enable phone-side liveness: after `pingSilenceMs` of sealed-receive silence
    * send a sealed ping; after `maxMissedPongs` unanswered pings, auto-rekey on
-   * the live socket (design §6.2). Off by default so short tests aren't
+   * the live socket. Off by default so short tests aren't
    * disturbed. Combine with {@link setSwallowPongs} to starve liveness on demand.
    */
   enableLiveness(
@@ -968,7 +968,7 @@ export class RelayClient {
   }
 
   /** Test lever: when true, inbound sealed `pong`s are dropped (not counted), so
-   *  phone-side liveness starves and rekeys (design §6.2). */
+   *  phone-side liveness starves and rekeys. */
   setSwallowPongs(v: boolean): void {
     this.swallowPongs = v;
   }
@@ -1075,14 +1075,14 @@ export class RelayClient {
 
   /** Override the `licenseToken` presented on the NEXT hello (a fresh
    *  `connectAndAuth`/`reconnectAndAuth`). Lets a caller simulate an app
-   *  token that expires mid-session and recovers on the next mint (design §8
-   *  token-expiry row) without a real JWT. Persists until overridden again. */
+   *  token that expires mid-session and recovers on the next mint, without a
+   *  real JWT. Persists until overridden again. */
   setLicenseToken(token: string): void {
     this.helloOpts.licenseToken = token;
   }
 
   /** Reconnect with the SAME identity, restoring the paired peer id — the grant
-   *  survives on the relay, so routing works immediately (design §5.1). Call
+   *  survives on the relay, so routing works immediately. Call
    *  `performE2EHandshake` again for a fresh session. */
   async reconnect(relayUrl: string, pairedPeerId: string): Promise<void> {
     this.resetE2e();

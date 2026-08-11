@@ -23,7 +23,7 @@ export const HelloMessage = z.object({
   // Connection-instance arbitration: highest epoch wins, loser gets SUPERSEDED.
   epoch: z.number().int().nonnegative(),
   // REQUIRED for both device types — apps authenticate with their own account
-  // token; the tokenless legacy-QR path no longer exists (design §4.2).
+  // token; the tokenless legacy-QR path no longer exists.
   licenseToken: z.string().min(1).max(8192),
   ts: z.string().datetime(),
   nonce: z.string().min(20).max(64), // base64, ≥16 random bytes
@@ -125,12 +125,12 @@ export const ErrorMessage = z.object({
   type: z.literal("error"),
   code: ErrorCode,
   message: z.string(),
-  // The error contract is law (design §3.3): every error states whether the
+  // The error contract is law: every error states whether the
   // client may retry the same action unchanged. Terminal-vs-retryable
   // classification lives HERE, not in per-client code lists.
   retryable: z.boolean(),
   ref: z.string().optional(), // echoes the rejected streamId
-  serverTime: z.string().datetime().optional(), // clock-skew AUTH_FAILED only (design §4.1)
+  serverTime: z.string().datetime().optional(), // clock-skew AUTH_FAILED only
 });
 
 export const PeerOfflineMessage = z.object({
@@ -160,7 +160,7 @@ export const ServerMessage = z.discriminatedUnion("type", [
   PongMessage,
 ]);
 
-// --- Sealed stream envelope (endpoint-internal; design §7.1) ---
+// --- Sealed stream envelope (endpoint-internal) ---
 //
 // Wraps every sealed payload as `{ s?, m }` so one machine socket multiplexes
 // project streams. The relay NEVER sees this — it lives inside the ciphertext.
