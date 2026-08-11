@@ -21,6 +21,12 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Pinned rather than inherited: `bun install` runs the root postinstall out of
+# the PR's own checkout, so a fork PR executes its own install scripts here. An
+# org default of read/write would hand them a writable token.
+permissions:
+  contents: read
+
 jobs:
   typescript:
     name: TypeScript
@@ -28,9 +34,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Exact patch, not floating '1.3': the relay's APNs path needs >= 1.3.14
+      # (see the relay Bun floor in CLAUDE.md), and this job runs its suite.
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: '1.3'
+          bun-version: '1.3.14'
 
       - name: Cache Bun install cache
         uses: actions/cache@v6

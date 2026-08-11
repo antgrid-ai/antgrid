@@ -24,24 +24,24 @@ on:
     paths:
       - 'relay/**'
       - 'web/**'
+      # Both Dockerfiles COPY packages/antgrid-wire/src, so a wire-only commit
+      # changes what ships. Omitting it leaves the moving tag on an image built
+      # from the old wire source and publishes no :<sha> for the commit ops
+      # would pin to roll back.
+      - 'packages/**'
+      - '.dockerignore'
       - 'package.json'
       - 'bun.lock'
       - 'bunfig.toml'
       - '.github/workflows/publish-images.yml'
   workflow_dispatch:
 
-# Serialize per branch so two pushes in quick succession cannot race the moving
-# tag into pointing at the older of the two builds.
+# Serialized on the moving tag rather than the ref: every ref that is not main
+# resolves to :staging, so keying on ref_name would let two refs push the same
+# tag concurrently and leave whichever happened to finish last.
 concurrency:
-  group: publish-images-${{ github.ref_name }}
+  group: publish-images-${{ github.ref_name == 'main' && 'prod' || 'staging' }}
   cancel-in-progress: false
-
-env:
-  # Derived, never hardcoded: GHCR packages are org-scoped and do NOT follow a
-  # repo transfer, so a literal owner here goes stale the moment the repo moves
-  # and every push 403s against an org this token has no write on. GHCR requires
-  # a lowercase path — safe while the org login is already lowercase.
-  OWNER: ${{ github.repository_owner }}
 
 permissions:
   contents: read
@@ -66,13 +66,30 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Derived, never hardcoded: GHCR packages are org-scoped and do NOT follow
+      # a repo transfer, so a literal owner goes stale the moment the repo moves
+      # and every push 403s against an org this token has no write on. Lowercased
+      # because GHCR rejects any uppercase in the path and GitHub returns the
+      # owner case-preserved — a fork owned by a mixed-case account otherwise
+      # fails on its first push.
+      - id: owner
+        run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
       # Short SHA = the immutable tag a rollout pins to. The env name is a
       # per-environment moving tag — kept separate so main and development never
-      # clobber each other's "latest".
+      # clobber each other's "latest". Only the two protected branches get one:
+      # workflow_dispatch accepts any ref, and since ops rolls out the moving tag
+      # by default an unguarded dispatch would put unmerged code into staging
+      # from a repo that shows no sign of having done so.
       - id: tag
         run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
       - id: envname
-        run: echo "env=${{ github.ref_name == 'main' && 'prod' || 'staging' }}" >> "$GITHUB_OUTPUT"
+        run: |
+          case "$GITHUB_REF_NAME" in
+            main)        echo "env=prod" >> "$GITHUB_OUTPUT" ;;
+            development) echo "env=staging" >> "$GITHUB_OUTPUT" ;;
+            *)           echo "env=" >> "$GITHUB_OUTPUT" ;;
+          esac
 
       - name: Build & push ${{ matrix.service }}
         uses: docker/build-push-action@v7
@@ -81,13 +98,20 @@ jobs:
           file: ${{ matrix.service }}/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ env.OWNER }}/antgrid-${{ matrix.service }}:${{ steps.tag.outputs.tag }}
-            ghcr.io/${{ env.OWNER }}/antgrid-${{ matrix.service }}:${{ steps.envname.outputs.env }}
-          cache-from: type=gha,scope=${{ matrix.service }}-${{ steps.envname.outputs.env }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}-${{ steps.envname.outputs.env }}
+            ghcr.io/${{ steps.owner.outputs.owner }}/antgrid-${{ matrix.service }}:${{ steps.tag.outputs.tag }}
+            ${{ steps.envname.outputs.env && format('ghcr.io/{0}/antgrid-{1}:{2}', steps.owner.outputs.owner, matrix.service, steps.envname.outputs.env) || '' }}
+          # Scoped per service, not per environment: main and development build
+          # the same Dockerfile from the same lockfile, and splitting the scope
+          # leaves the rarely-pushed prod half cold against GHA's 7-day eviction.
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
       # The rollout runs in a different repo and cannot read this job's outputs,
       # so print the tag an operator feeds to antgrid-ops rather than leaving
       # them to derive it from the commit SHA by hand.
       - name: Summarise
-        run: echo 'antgrid-${{ matrix.service }} → ${{ steps.tag.outputs.tag }} (also tagged ${{ steps.envname.outputs.env }})' >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          echo "antgrid-${{ matrix.service }} → ${{ steps.tag.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${{ steps.envname.outputs.env }}" ]; then
+            echo "  also tagged ${{ steps.envname.outputs.env }}" >> "$GITHUB_STEP_SUMMARY"
+          fi

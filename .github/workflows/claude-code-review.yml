@@ -28,10 +28,15 @@ jobs:
       )
 
     runs-on: ubuntu-latest
+    # Write on both comment surfaces, because a review with findings posts them:
+    # inline comments go through the pull-requests API and the tracking comment
+    # through the issues API. Read-only here would make a 403 look exactly like a
+    # clean review, which is the one signal this workflow must not fake. The
+    # association check above is what keeps that write out of a stranger's reach.
     permissions:
       contents: read
-      pull-requests: read
-      issues: read
+      pull-requests: write
+      issues: write
       id-token: write
 
     steps:

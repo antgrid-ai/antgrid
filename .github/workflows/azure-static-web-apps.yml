@@ -26,13 +26,13 @@ concurrency:
 
 jobs:
   build_and_deploy:
-    # Fork PRs are correctly denied AZURE_STATIC_WEB_APPS_API_TOKEN, so without
-    # this they would fail with a red X on every contributor PR rather than being
-    # skipped. Same guard on close_preview below.
+    # `closed` is handled by close_preview; everything else builds. The fork
+    # guard lives on the Deploy step rather than here because this job is the
+    # only place site/ is built, type-checked and Playwright-tested — skipping
+    # the whole job would leave a contributor PR touching site/ with no checks
+    # at all rather than with one expected red X.
     if: |
-      github.event_name == 'push' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
-       github.event.action != 'closed')
+      github.event_name == 'push' || github.event.action != 'closed'
     runs-on: ubuntu-latest
     name: Build and deploy
     steps:
@@ -67,7 +67,13 @@ jobs:
       - name: Test
         working-directory: site
         run: bun run test
+      # Fork PRs are correctly denied AZURE_STATIC_WEB_APPS_API_TOKEN, so this
+      # step would fail with a red X on every contributor PR. Same guard on
+      # close_preview below.
       - name: Deploy
+        if: |
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
         uses: Azure/static-web-apps-deploy@v1
         with:
           azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
