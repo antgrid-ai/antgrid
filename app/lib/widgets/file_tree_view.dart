@@ -319,34 +319,38 @@ class _ChangedFileRow extends StatelessWidget {
               children: [
                 const SizedBox(width: AbTokens.space16),
                 Expanded(
-                  child: Row(
-                    children: [
-                      // File name has priority: inflexible, so it's laid out at
-                      // full width first and the Expanded dir path below takes only
-                      // the leftover (ellipsizing, then vanishing when there's no
-                      // room). Only a name wider than the whole row can overflow.
-                      Text(
-                        fileName,
-                        style: AbTokens.monoStyle(
-                          fontSize: AbTokens.fontSm,
-                          color: isSelected
-                              ? context.antgrid.accent
-                              : context.antgrid.textPrimary,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      const SizedBox(width: AbTokens.space8),
-                      Expanded(
-                        child: Text(
-                          dirPath,
+                  // One paragraph, not two Texts in a Row. The name must have
+                  // priority — laid out first, shortened only once it alone
+                  // exceeds the row — and a Flex cannot express that: an
+                  // inflexible name overflows outright (a long test filename in
+                  // a narrow panel is enough), while making it flexible divides
+                  // the width PROPORTIONALLY and clips names that had room. A
+                  // single line of spans ellipsizes from the tail, which is
+                  // that priority exactly, and cannot overflow at all.
+                  child: Text.rich(
+                    TextSpan(
+                      children: [
+                        TextSpan(
+                          text: fileName,
                           style: AbTokens.monoStyle(
-                            fontSize: AbTokens.fontXxs,
-                            color: context.antgrid.textMuted,
+                            fontSize: AbTokens.fontSm,
+                            color: isSelected
+                                ? context.antgrid.accent
+                                : context.antgrid.textPrimary,
                           ),
-                          overflow: TextOverflow.ellipsis,
                         ),
-                      ),
-                    ],
+                        if (dirPath.isNotEmpty)
+                          TextSpan(
+                            text: '  $dirPath',
+                            style: AbTokens.monoStyle(
+                              fontSize: AbTokens.fontXxs,
+                              color: context.antgrid.textMuted,
+                            ),
+                          ),
+                      ],
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
                 const SizedBox(width: AbTokens.space8),

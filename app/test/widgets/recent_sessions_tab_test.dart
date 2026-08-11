@@ -13,6 +13,7 @@ import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/storage/first_run_store.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
 import 'package:antgrid/widgets/recent_sessions/recent_sessions_tab.dart';
+import 'package:antgrid/widgets/session_search_field.dart';
 
 import '../helpers/prefs_test_mock.dart';
 
@@ -125,6 +126,51 @@ void main() {
     await tester.pump();
     expect(find.textContaining('Sessions'), findsOneWidget);
     expect(find.text('Fix auth bug'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('the mobile list spends no row on a search field', (
+    tester,
+  ) async {
+    // Mobile's search is an icon in the canvas top bar opening a full-screen
+    // modal — an inline field here cost a row of a phone screen and, sharing it
+    // with the three group chips, was too narrow to read a session name in.
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    final row = RecentSessionRow(
+      session: const SessionEntry(
+        id: 's1',
+        name: 'Fix auth bug',
+        createdAt: 0,
+        lastUsedAt: 1,
+        archived: false,
+        running: false,
+      ),
+      origin: const RecentOrigin(
+        isLocal: true,
+        registrationId: 'p',
+        projectId: 'p',
+        machineUuid: null,
+        projectName: 'antgrid',
+        deviceName: 'This device',
+      ),
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          recentSessionsProvider.overrideWithValue([row]),
+        ],
+        child: _wrap(const RecentSessionsTab()),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byType(SessionSearchField), findsNothing);
+    expect(find.text('MACHINE'), findsOneWidget);
+
     debugDefaultTargetPlatformOverride = null;
   });
 

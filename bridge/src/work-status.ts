@@ -386,18 +386,30 @@ export function userReply(
   });
 }
 
-/** The turn on [sessionId] is over — its turn-end frame, or a cancel. Anything
- *  it was blocked on died with it. */
-function closeTurn(prev: WorkStatusState, sessionId: string): WorkStatusState {
+/** The turn on [sessionId] is over — its turn-end frame, a chat cancel, or a
+ *  hook-based session's Esc interrupt (see {@link isInterruptKeystroke} in
+ *  agent-core.ts, the only other caller). Anything it was blocked on died
+ *  with it. Pure; SAME object when there was nothing open to close, so a
+ *  second Esc — or one after the real turn-end already landed — is a no-op. */
+export function closeTurn(prev: WorkStatusState, sessionId: string): WorkStatusState {
   const activeTurns = withoutTurn(prev.activeTurns, sessionId);
   const pendingTurns = withoutTurn(prev.pendingTurns, sessionId);
   const pendingRequests = clearRequests(prev.pendingRequests, sessionId);
+  // A chat session's block lives in pendingRequests; a terminal-mode session's
+  // lives in notifications (permission_request/awaiting_input from the hook) —
+  // clearing only the former left an Esc-interrupted terminal session stuck on
+  // "attention" forever, since neither a chat turn-end nor a cancel had ever
+  // needed to touch this map before. Same helper turnStart uses to open a turn,
+  // for the same reason: it also drops the UNATTRIBUTED fallback, since nothing
+  // is left running THIS session's block against once its turn is gone.
+  const notifications = clearNotifications(prev.notifications, sessionId);
   if (activeTurns === prev.activeTurns
     && pendingTurns === prev.pendingTurns
-    && pendingRequests === prev.pendingRequests) {
+    && pendingRequests === prev.pendingRequests
+    && notifications === prev.notifications) {
     return prev;
   }
-  return build({ ...inputsOf(prev), activeTurns, pendingTurns, pendingRequests });
+  return build({ ...inputsOf(prev), activeTurns, pendingTurns, pendingRequests, notifications });
 }
 
 /** The agent asked [sessionId] something it cannot proceed without. */

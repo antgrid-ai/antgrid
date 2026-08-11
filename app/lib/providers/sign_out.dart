@@ -8,6 +8,7 @@ import '../services/sign_out_service.dart';
 import 'auth.dart';
 import 'connection_identity.dart';
 import 'device_provisioning.dart';
+import 'entry_cleanup.dart';
 import 'providers.dart';
 import 'push.dart';
 import 'recent_agents.dart';
@@ -44,11 +45,18 @@ final signOutServiceProvider = Provider<SignOutService>((ref) {
     },
     closeSessions: () async {
       final controller = ref.read(projectSessionRegistryProvider.notifier);
-      // Evict a snapshot — forceEvict mutates the underlying list.
-      for (final id in controller.registry.openProjects.toList()) {
-        controller.forceEvict(id);
-      }
+      // Evict a snapshot — forceEvictAndSettle mutates the underlying list.
+      // AWAITED (not the fire-and-forget forceEvict): eviction's `onEvict`
+      // writes the project's session + status caches, and `clearCaches` below
+      // deletes those very files — same write-then-purge ordering the delete
+      // paths depend on. Concurrent across projects — each only touches its
+      // own cache entries, so there's no ordering dependency between them.
+      await Future.wait([
+        for (final id in controller.registry.openProjects.toList())
+          controller.forceEvictAndSettle(id),
+      ]);
     },
+    clearCaches: () => purgeAccountCaches(ref),
     releaseControlPlanes: () async {
       // Per-id release, not disposeAll: disposeAll closes the manager's change
       // stream for good, and the same manager must serve a later re-sign-in.
@@ -60,10 +68,16 @@ final signOutServiceProvider = Provider<SignOutService>((ref) {
   );
 });
 
-/// The single hard sign-out entry point for the UI. Runs the full teardown,
-/// then invalidates the identity-derived providers so the app re-renders in its
-/// signed-out state and a fresh sign-in re-provisions cleanly.
-Future<void> performHardSignOut(WidgetRef ref) async {
+/// The single hard sign-out entry point. Runs the full teardown, then
+/// invalidates the identity- and account-derived providers so the app
+/// re-renders in its signed-out state and a fresh sign-in re-provisions
+/// cleanly.
+///
+/// Takes a [ProviderContainer], not a `WidgetRef`: server-driven revocation
+/// (see `device_revocation.dart`) has to sign out from an error callback with
+/// no widget behind it, and a `WidgetRef` read after the teardown's awaits
+/// would throw on a disposed element anyway.
+Future<void> performHardSignOut(ProviderContainer ref) async {
   await ref.read(signOutServiceProvider).hardSignOut();
   ref.invalidate(licenseTokenMinterProvider);
   ref.invalidate(connectionTokenMinterProvider);
@@ -72,4 +86,12 @@ Future<void> performHardSignOut(WidgetRef ref) async {
   ref.invalidate(subscriptionProvider);
   ref.invalidate(pricingCatalogProvider);
   ref.read(deviceCapProvider.notifier).set(null);
+  // The caches are gone from disk, but the always-mounted ControlPlaneReaper
+  // holds its own in-memory copy (paired-machine list, account inventory,
+  // agent catalog, labels/status maps) and would keep serving it for the rest
+  // of the process otherwise. `controlPlaneResetProvider` is the reaper's own
+  // reset hook — see its doc for why this is one call rather than a hand-kept
+  // list of the providers it owns. Without it the drawer and Recent list still
+  // show the signed-out account's machines until the app is restarted.
+  ref.read(controlPlaneResetProvider)?.call();
 }

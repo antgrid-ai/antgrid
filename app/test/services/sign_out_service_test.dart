@@ -153,6 +153,8 @@ void main() {
         var sessionsClosed = false;
         var pushCleared = false;
         var pushClearedBeforeSessionsClosed = false;
+        var cachesCleared = false;
+        var cachesClearedAfterSessionsClosed = false;
 
         final svc = SignOutService(
           authService: a.auth,
@@ -166,6 +168,10 @@ void main() {
           },
           stopMinter: () async => minterStopped = true,
           closeSessions: () async => sessionsClosed = true,
+          clearCaches: () async {
+            cachesCleared = true;
+            cachesClearedAfterSessionsClosed = sessionsClosed;
+          },
         );
 
         await svc.hardSignOut();
@@ -207,6 +213,20 @@ void main() {
           pushClearedBeforeSessionsClosed,
           isTrue,
           reason: 'push-clear must send before sessions/transports teardown',
+        );
+        expect(
+          cachesCleared,
+          isTrue,
+          reason:
+              'account-derived caches (sessions, labels, paired machines) are '
+              'wiped, not just identity material',
+        );
+        expect(
+          cachesClearedAfterSessionsClosed,
+          isTrue,
+          reason:
+              'the cache purge must follow session teardown — eviction writes '
+              'the very caches it deletes',
         );
 
         await recent.close();

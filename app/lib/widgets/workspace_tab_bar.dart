@@ -38,6 +38,7 @@ class WorkspaceTabBar extends StatelessWidget {
     this.badges = const {},
     this.isExpanded = false,
     this.onToggleExpand,
+    this.onClose,
   });
 
   final WorkspaceView selected;
@@ -45,6 +46,7 @@ class WorkspaceTabBar extends StatelessWidget {
   final Map<WorkspaceView, int> badges;
   final bool isExpanded;
   final VoidCallback? onToggleExpand;
+  final VoidCallback? onClose;
 
   @override
   Widget build(BuildContext context) {
@@ -77,16 +79,67 @@ class WorkspaceTabBar extends StatelessWidget {
               ),
             ),
           ),
-          if (onToggleExpand != null)
+          if (onToggleExpand != null || onClose != null)
             Padding(
               padding: const EdgeInsets.only(right: AbTokens.space6),
-              child: AbIconButton(
-                icon: isExpanded ? AbIcons.collapse : AbIcons.expand,
-                tooltip: isExpanded ? 'Restore' : 'Expand',
-                onTap: onToggleExpand,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                spacing: AbTokens.space2,
+                children: [
+                  if (onToggleExpand != null)
+                    AbIconButton(
+                      icon: isExpanded ? AbIcons.collapse : AbIcons.expand,
+                      tooltip: isExpanded ? 'Restore' : 'Expand',
+                      onTap: onToggleExpand,
+                    ),
+                  // Hides the panel outright (not a collapse to a strip); the
+                  // window title bar's panel control is the way back.
+                  if (onClose != null)
+                    AbIconButton(
+                      icon: AbIcons.close,
+                      tooltip: 'Hide panel',
+                      onTap: onClose,
+                    ),
+                ],
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+/// A workspace view's pending-count badge. Shared by the tab strip's
+/// [_TabItem] and the agent bar's workspace menu (`WorkspaceMenuPanel` in
+/// `workspace_menu_button.dart`) so a count reads identically — same shape,
+/// and [active] (the view's selected state, not hover) drives the same
+/// dim-unless-selected foreground in both places rather than two widgets that
+/// could quietly diverge.
+class WorkspaceViewBadge extends StatelessWidget {
+  const WorkspaceViewBadge({super.key, required this.count, this.active = false});
+
+  final int count;
+  final bool active;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AbTokens.space4,
+        vertical: 1,
+      ),
+      decoration: BoxDecoration(
+        color: p.bgRaised,
+        border: Border.all(color: p.borderSubtle),
+        borderRadius: AbTokens.borderRadius3,
+      ),
+      child: Text(
+        count > 99 ? '99+' : '$count',
+        style: AbTokens.sansStyle(
+          fontSize: AbTokens.fontXs,
+          color: active ? p.textPrimary : p.textMuted,
+        ),
       ),
     );
   }
@@ -168,25 +221,9 @@ class _TabItemState extends State<_TabItem> {
                 ),
                 if (widget.badgeCount > 0) ...[
                   const SizedBox(width: AbTokens.space6),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: AbTokens.space4,
-                      vertical: 1,
-                    ),
-                    decoration: BoxDecoration(
-                      color: context.antgrid.bgRaised,
-                      border: Border.all(color: context.antgrid.borderSubtle),
-                      borderRadius: AbTokens.borderRadius3,
-                    ),
-                    child: Text(
-                      widget.badgeCount > 99 ? '99+' : '${widget.badgeCount}',
-                      style: AbTokens.sansStyle(
-                        fontSize: AbTokens.fontXs,
-                        color: widget.isActive
-                            ? context.antgrid.textPrimary
-                            : context.antgrid.textMuted,
-                      ),
-                    ),
+                  WorkspaceViewBadge(
+                    count: widget.badgeCount,
+                    active: widget.isActive,
                   ),
                 ],
               ],

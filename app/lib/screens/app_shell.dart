@@ -10,10 +10,12 @@ import '../project/limits.dart';
 import '../project/mobile_lifecycle.dart';
 import '../project/project_session_registry.dart';
 import '../providers/providers.dart';
+import '../providers/account_agents.dart';
 import '../providers/agent_catalog.dart';
 import '../providers/agent_transport.dart';
 import '../providers/cached_sessions.dart';
 import '../providers/control_plane.dart';
+import '../providers/device_revocation.dart';
 import '../providers/recent_sessions.dart';
 import '../providers/connection_identity.dart';
 import '../providers/relay_connection.dart';
@@ -21,6 +23,7 @@ import '../providers/ui_attention_providers.dart';
 import '../services/control_plane_client.dart';
 import '../storage/cached_sessions_store.dart';
 import '../launcher/host_control_client.dart';
+import '../navigation/back_intent.dart';
 import '../util/ab_log.dart';
 import '../widgets/window_title_bar.dart';
 import 'new_session_screen.dart';
@@ -74,6 +77,10 @@ class _AppShellState extends ConsumerState<AppShell> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _kickEagerDials();
     });
+    // Cold start: nothing else would notice a device revoked while the app was
+    // closed — the session cookie outlives the device row, so the account still
+    // resolves and desktop may never dial a relay at all.
+    unawaited(checkDeviceRevoked(ref.container));
   }
 
   /// One kick at a time: a single foregrounding fires both onRestart and
@@ -104,6 +111,9 @@ class _AppShellState extends ConsumerState<AppShell> {
   }
 
   void _reconnectRelay() {
+    // Own cooldown inside; a revoke that landed while backgrounded has no other
+    // way in on a machine whose ladder is already Blocked.
+    unawaited(checkDeviceRevoked(ref.container));
     ref.invalidate(licenseTokenMinterProvider);
     AbLog.info('AppShell', 'app resumed — re-evaluating machine ladders');
     ref.invalidate(connectionTokenMinterProvider);
@@ -150,6 +160,10 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   @override
   Widget build(BuildContext context) {
+    return AppBackScope(child: _buildShell(context));
+  }
+
+  Widget _buildShell(BuildContext context) {
     // DEC-1004 focus routing for agent terminals. Bound HERE and not inside
     // WorkspaceShell because the binder is keep-alive and WorkspaceShell is
     // swapped out whole by the New Session route: with its only listener gone
@@ -321,7 +335,9 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
     // Reconcile already-open sockets once at first mount, not only on the next
     // alive-set change. Post-frame so the invalidations don't run mid-build.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _reconcile(ref.read(controlPlaneAliveTargetsProvider));
+      if (!mounted) return;
+      ref.read(controlPlaneResetProvider.notifier).set(_resetForSignOut);
+      _reconcile(ref.read(controlPlaneAliveTargetsProvider));
     });
     // listenManual here (not `ref.listen` in build — see the removed override
     // below): a build-time `ref.listen` forces Riverpod to synchronously flush
@@ -416,6 +432,34 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
         fireImmediately: true,
       );
     }
+  }
+
+  /// Drops every piece of account-derived in-memory state this reaper owns.
+  /// Published via [controlPlaneResetProvider] so [performHardSignOut] has one
+  /// call instead of hand-listing this fan-in — see that provider's doc.
+  ///
+  /// `_catalogSyncedPort` reset is what makes the LOCAL bridge's agent catalog
+  /// re-populate after a sign-out + re-sign-in with the bridge process still
+  /// running on the same port: without it, [_pollLocalProjectStatus] believes
+  /// the (just-invalidated) catalog is already synced for that port and never
+  /// re-issues `tools:list`, leaving every local-project agent capability
+  /// unknown until the bridge or app restarts.
+  void _resetForSignOut() {
+    _catalogSyncedPort = null;
+    _lastAdvertRunning.clear();
+    _lastAdvertStatus.clear();
+    _lastAdvertRunningCount.clear();
+    _seedingSessions.clear();
+    for (final sub in _labelSubs.values) {
+      sub.close();
+    }
+    _labelSubs.clear();
+    ref.invalidate(pairedAgentProvider);
+    ref.invalidate(accountAgentsProvider);
+    ref.invalidate(agentCatalogProvider);
+    ref.invalidate(remoteProjectLabelsProvider);
+    ref.invalidate(remoteProjectStatusProvider);
+    ref.invalidate(remoteSessionStatusProvider);
   }
 
   void _onControlPlaneState(String uuid, AsyncValue<ControlPlaneState> next) {
@@ -576,6 +620,12 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
       sub.close();
     }
     _labelSubs.clear();
+    try {
+      ref.read(controlPlaneResetProvider.notifier).set(null);
+    } catch (_) {
+      // Container may already be torn down (app shutdown) — nothing to
+      // retract.
+    }
     super.dispose();
   }
 

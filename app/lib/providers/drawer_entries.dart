@@ -10,7 +10,6 @@ import 'device_provisioning.dart';
 import 'drawer_order.dart';
 import 'projects.dart';
 import 'recent_agents.dart';
-import 'value_controller.dart';
 
 /// Pure helper — merges source lists into a single drawer-entry list,
 /// preserving the source order of each list (locals first, then remotes, then
@@ -51,19 +50,6 @@ List<DrawerEntry> mergeDrawerEntries({
     for (final a in inventory)
       if (!coveredUuids.contains(a.deviceUuid)) InventoryAgentEntry(a),
   ];
-}
-
-/// Case-insensitive substring match across displayName, subtitle, id.
-List<DrawerEntry> filterDrawerEntries(List<DrawerEntry> entries, String query) {
-  final q = query.trim().toLowerCase();
-  if (q.isEmpty) return entries;
-  return entries
-      .where((e) {
-        return e.displayName.toLowerCase().contains(q) ||
-            e.subtitle.toLowerCase().contains(q) ||
-            e.id.toLowerCase().contains(q);
-      })
-      .toList(growable: false);
 }
 
 /// Applies a user-defined ordering to [entries]. Ids from [order] that match
@@ -113,8 +99,3 @@ final drawerEntriesProvider = Provider<List<DrawerEntry>>((ref) {
     order,
   );
 });
-
-/// Session-only filter text. Not persisted across launches (per spec).
-final drawerFilterProvider = NotifierProvider<ValueController<String>, String>(
-  () => ValueController(''),
-);

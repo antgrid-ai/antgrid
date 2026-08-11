@@ -146,6 +146,21 @@ export function hasTypedContent(data: string): boolean {
   return data.replace(/\r$/, "").length > 0;
 }
 
+/**
+ * Whether a `terminal:input` payload was a bare Escape keypress — the
+ * interactive interrupt shortcut every agent CLI honors, and the only signal
+ * a hook-based session gets that the user meant to abort a running turn.
+ *
+ * Exactly `\x1b` and nothing else: any longer sequence starting with ESC
+ * (arrow keys, function keys, alt+key, kitty-protocol chunks, alt+enter's
+ * `\x1b\r`) is content, not an interrupt, and must not be misread as one — a
+ * PTY assembles a full escape sequence before writing it, so a lone ESC byte
+ * in one frame unambiguously means the user pressed just that key.
+ */
+export function isInterruptKeystroke(data: string): boolean {
+  return data === "\x1b";
+}
+
 export interface AgentCore {
   /** Wire up an outbound transport. The bus's inbound handler is set so the
    *  transport can dispatch incoming messages back into core. */
@@ -255,6 +270,17 @@ export interface BuildAgentCoreOptions {
    *  {@link onTurnStart}: it opens a turn only if something was actually
    *  pending. Bridge-internal — never surfaces to the app. */
   onAnswer?: (sessionId: string, requestId?: string) => void;
+  /** Fired when the user presses a bare Escape key into [sessionId]'s PTY (see
+   *  {@link isInterruptKeystroke}), so the owning ProjectCore can close the
+   *  turn the hook model has no other way to end. A hook-based session's only
+   *  turn-end signal is its own Stop/completion hook, which most agent CLIs
+   *  never fire on a manual interrupt — without this the working dot outlives
+   *  an Esc that genuinely aborted the turn. Bridge-internal — never surfaces
+   *  to the app, and purely a work-status close: the keystroke itself already
+   *  reached the CLI via the normal PTY write and is what actually interrupts
+   *  it. A later real turn-end/notification for the same turn is harmless
+   *  (closeTurn is idempotent on an already-closed turn). */
+  onInterrupt?: (sessionId: string) => void;
   /** This session's status in the owner's work reduction, stamped onto each
    *  `session:updated` entry so the app has a per-session status on the LIVE
    *  session stream rather than only on the advert. The owner must call
@@ -687,6 +713,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           submitted: isSubmitKeystroke(msg.data),
           typed: hasTypedContent(msg.data),
         });
+        if (isInterruptKeystroke(msg.data)) opts.onInterrupt?.(msg.terminalId);
         break;
       case "handler:configure": {
         // parseMessageFast (the encrypted/local hot path) validates only the

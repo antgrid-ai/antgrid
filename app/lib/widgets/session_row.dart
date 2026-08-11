@@ -130,10 +130,11 @@ class _SessionRowState extends ConsumerState<SessionRow> {
 
   AbStatusTone _tone() {
     if (session.archived) return AbStatusTone.disabled;
-    if (session.running) return AbStatusTone.success;
-    // Stopped: a faint gray, dimmer than `neutral` (textSecondary), so the
-    // hollow ring recedes instead of reading as a lit indicator.
-    return AbStatusTone.muted;
+    if (session.running) return AbStatusTone.info;
+    // Stopped: the agent-at-rest gray, dimmer than `neutral` (textSecondary),
+    // so the hollow ring recedes instead of reading as a lit indicator. Not
+    // `muted` — an idle agent is a lifecycle state, not de-emphasized text.
+    return AbStatusTone.agentIdle;
   }
 
   /// The leading indicator. Work status owns the slot whenever the agent has

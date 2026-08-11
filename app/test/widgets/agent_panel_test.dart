@@ -260,31 +260,58 @@ void main() {
     },
   );
 
-  testWidgets(
-    'at a wide width AgentPanel shows neither the drawer button nor the breadcrumb',
-    (tester) async {
-      try {
-        debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
-        tester.view.physicalSize = const Size(1000, 800);
-        tester.view.devicePixelRatio = 1.0;
-        addTearDown(tester.view.reset);
+  /// Pumps the desktop AgentPanel at 1000px, where [AgentBar] replaces the
+  /// mobile header.
+  Future<void> pumpWide(WidgetTester tester) async {
+    tester.view.physicalSize = const Size(1000, 800);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
 
-        final stores = await buildTestStoreOverrides();
-        addTearDown(stores.close);
+    final stores = await buildTestStoreOverrides();
+    addTearDown(stores.close);
 
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [...stores.overrides],
-            child: const MaterialApp(home: Scaffold(body: AgentPanel())),
-          ),
-        );
-        await tester.pump();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [...stores.overrides],
+        child: const MaterialApp(home: Scaffold(body: AgentPanel())),
+      ),
+    );
+    await tester.pump();
+  }
 
-        expect(find.byTooltip('Projects'), findsNothing);
-        expect(find.byType(TitleBarBreadcrumb), findsNothing);
-      } finally {
-        debugDefaultTargetPlatformOverride = null;
-      }
-    },
-  );
+  // The breadcrumb moved OUT of the window title bar and into AgentBar, so the
+  // desktop path carries it too now — only the mobile drawer button is still
+  // exclusive to the narrow header.
+  testWidgets('at a wide width AgentBar carries the breadcrumb', (
+    tester,
+  ) async {
+    try {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      await pumpWide(tester);
+
+      expect(find.byType(AgentBar), findsOneWidget);
+      expect(find.byType(TitleBarBreadcrumb), findsOneWidget);
+      expect(find.byTooltip('Projects'), findsNothing);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  // Every pane control belongs to a surface that stays mounted in every panel
+  // mode; a copy here would be stranded in the one mode that unmounts this bar.
+  testWidgets('AgentBar carries no layout controls of its own', (tester) async {
+    try {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      await pumpWide(tester);
+
+      expect(find.byTooltip('Expand'), findsNothing);
+      expect(find.byTooltip('Restore'), findsNothing);
+      expect(find.byTooltip('Collapse panel'), findsNothing);
+      expect(find.byTooltip('Hide panel'), findsNothing);
+      expect(find.byTooltip('Hide projects'), findsNothing);
+      expect(find.byTooltip('Show projects'), findsNothing);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
 }

@@ -74,6 +74,13 @@ String emptyAdvertHint(bool? remoteAccessEnabled) =>
     };
 
 /// Maps [TerminalSessionState] to a status tone for the leading dot.
+///
+/// Green/red/grey and NOT the agent tones an agent session row uses for what
+/// looks like the same three states: a terminal is a process, so "running" is
+/// genuinely the good outcome and pairs against a red "exited". An agent that
+/// stopped has simply finished a turn — nothing failed — which is why that side
+/// paints rest as [AbStatusTone.agentIdle] and never as success/danger. Don't
+/// unify the two on the strength of the shared word "running".
 AbStatusTone sessionStateTone(TerminalSessionState state) {
   return switch (state) {
     TerminalSessionState.running => AbStatusTone.success,

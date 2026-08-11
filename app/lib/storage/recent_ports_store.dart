@@ -122,6 +122,20 @@ class RecentPortsStore {
     await _write(all, projectId, const <RecentPort>[]);
   }
 
+  /// Drops every remembered port for every project. Used by hard sign-out —
+  /// the ports were observed on machines reached under the account that is
+  /// going away. Emits one empty snapshot per project that had entries so live
+  /// [RecentPortsNotifier]s drop their lists too.
+  Future<void> clear() async {
+    final all = _readAll();
+    if (all.isEmpty) return;
+    await _prefs.setString(_key, jsonEncode(<String, dynamic>{}));
+    if (_changes.isClosed) return;
+    for (final projectId in all.keys) {
+      _changes.add(RecentPortsChange(projectId, const <RecentPort>[]));
+    }
+  }
+
   Future<void> close() => _changes.close();
 
   Future<void> _write(

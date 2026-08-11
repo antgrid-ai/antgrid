@@ -159,16 +159,6 @@ void main() {
       expect(entries, isEmpty);
     });
 
-    test('filters by displayName, subtitle, id (case-insensitive)', () {
-      final entries = mergeDrawerEntries(locals: [p1, p2], remotes: [r1]);
-      expect(filterDrawerEntries(entries, 'A').map((e) => e.id), ['p1']);
-      expect(filterDrawerEntries(entries, '/B').map((e) => e.id), ['p2']);
-      expect(filterDrawerEntries(entries, 'PROJ').map((e) => e.id), [
-        'r1.proj',
-      ]);
-      expect(filterDrawerEntries(entries, ''), entries);
-    });
-
     group('machine vs project entry discrimination', () {
       RecentAgent recent({
         required String agentDeviceId,

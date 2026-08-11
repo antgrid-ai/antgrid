@@ -4,8 +4,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../analytics/events.dart';
 import '../models/file_tree_models.dart';
+import '../navigation/back_intent.dart';
 import '../providers/analytics.dart';
 import '../providers/providers.dart';
+import '../providers/visible_surface.dart';
+import '../widgets/workspace_tab_bar.dart';
 import '../services/file_service.dart';
 import '../constants/breakpoints.dart';
 import '../widgets/file_tree_view.dart';
@@ -43,7 +46,9 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
     // Fire once when the explorer UI actually mounts — not in the
     // ProjectSession constructor, which runs for every warmed/background
     // session the user never views.
-    ref.read(analyticsServiceProvider)?.track(AnalyticsEvents.fileExplorerOpened);
+    ref
+        .read(analyticsServiceProvider)
+        ?.track(AnalyticsEvents.fileExplorerOpened);
   }
 
   @override
@@ -53,19 +58,56 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
       return const AbLoading(message: 'loading files...');
     }
     final treeStateAsync = ref.watch(fileTreeStateProvider);
+    // watch, not the `ref.read` in [_onScreen]: the registered `active` flags
+    // below have to be recomputed when this tab goes on or off screen.
+    final onScreen =
+        ref.watch(visibleWorkspaceViewProvider) == WorkspaceView.files;
 
-    return treeStateAsync.when(
-      loading: () => const AbLoading(message: 'loading files...'),
-      error: (error, _) =>
-          AbEmptyState.error(title: 'Error loading files: $error'),
-      data: (state) => _FileExplorerBody(
-        state: state,
-        fileService: fileService,
-        searchOpen: _searchOpen,
-        onToggleSearch: () => setState(() => _searchOpen = !_searchOpen),
-        onCloseSearch: () => setState(() => _searchOpen = false),
+    return BackHandler(
+      priority: BackPriority.fileViewer,
+      active: onScreen && treeStateAsync.value?.files.selectedFilePath != null,
+      onBack: _backFromViewer,
+      child: BackHandler(
+        priority: BackPriority.fileSearch,
+        active: onScreen && _searchOpen,
+        onBack: _backFromSearch,
+        child: treeStateAsync.when(
+          loading: () => const AbLoading(message: 'loading files...'),
+          error: (error, _) =>
+              AbEmptyState.error(title: 'Error loading files: $error'),
+          data: (state) => _FileExplorerBody(
+            state: state,
+            fileService: fileService,
+            searchOpen: _searchOpen,
+            onToggleSearch: () => setState(() => _searchOpen = !_searchOpen),
+            onCloseSearch: () => setState(() => _searchOpen = false),
+          ),
+        ),
       ),
     );
+  }
+
+  bool get _onScreen =>
+      ref.read(visibleWorkspaceViewProvider) == WorkspaceView.files;
+
+  bool _backFromViewer() {
+    if (!_onScreen) return false;
+    if (ref.read(fileTreeStateProvider).value?.files.selectedFilePath == null) {
+      return false;
+    }
+    // The façade throws while the focused project's session is unresolved, and
+    // this runs outside build(): decline the press rather than take the app
+    // down (see focusedServiceOrNull).
+    final service = focusedServiceOrNull(ref.container, (s) => s.fileService);
+    if (service == null) return false;
+    service.clearViewingFile();
+    return true;
+  }
+
+  bool _backFromSearch() {
+    if (!_onScreen || !_searchOpen) return false;
+    setState(() => _searchOpen = false);
+    return true;
   }
 }
 
@@ -113,9 +155,7 @@ class _FileExplorerBody extends ConsumerWidget {
         ),
         AbIconButton(
           icon: AbIcons.search,
-          tone: searchOpen
-              ? AbIconButtonTone.accent
-              : AbIconButtonTone.normal,
+          tone: searchOpen ? AbIconButtonTone.accent : AbIconButtonTone.normal,
           onTap: onToggleSearch,
           tooltip: 'Search in files',
         ),
@@ -247,7 +287,10 @@ class _FileExplorerBody extends ConsumerWidget {
               const SizedBox(width: AbTokens.space4),
               const Text(
                 'File Explorer',
-                style: TextStyle(fontSize: AbTokens.fontBody, color: Colors.grey),
+                style: TextStyle(
+                  fontSize: AbTokens.fontBody,
+                  color: Colors.grey,
+                ),
               ),
             ],
           ),

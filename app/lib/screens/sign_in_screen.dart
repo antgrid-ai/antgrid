@@ -15,6 +15,7 @@ import '../project/limits.dart';
 import '../analytics/events.dart';
 import '../providers/analytics.dart';
 import '../providers/auth.dart';
+import '../providers/device_revocation.dart';
 import '../providers/subscription.dart';
 import '../services/auth_service.dart';
 
@@ -93,6 +94,24 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         .listen(_onOAuthFailure);
     // Never throws (see restorePendingMagicLink), so no catchError needed.
     unawaited(_restorePendingSignIn());
+    // `ref.listen` below fires only on CHANGE, so a user ALREADY settled when
+    // this screen mounts never reaches it. That is not hypothetical: if
+    // `hardSignOut` throws, `performHardSignOut` never reaches its
+    // invalidations, yet `handleDeviceRevoked` still raises the revoked notice
+    // (it does so in a `finally`) — leaving a live `currentUserProvider` behind
+    // the one flag that pins the root to this screen. Nothing else could then
+    // retire it.
+    //
+    // `isLoading`, not just a null check, is what keeps this off the SUCCESSFUL
+    // path: there `currentUserProvider` was invalidated, and a rebuilding
+    // FutureProvider still reports its previous value.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final user = ref.read(currentUserProvider);
+      if (!user.isLoading && user.value != null) {
+        clearRevokedNotice(ref.container);
+      }
+    });
   }
 
   @override
@@ -418,9 +437,11 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
 
     ref.listen<AsyncValue<CurrentUser?>>(currentUserProvider, (prev, next) {
       final user = next.value;
-      if (user != null && Navigator.of(context).canPop()) {
-        Navigator.of(context).pop();
-      }
+      if (user == null) return;
+      // Load-bearing when the user got here by revocation: the notice is what
+      // pins the root to this screen, so nothing else can retire it.
+      clearRevokedNotice(ref.container);
+      if (Navigator.of(context).canPop()) Navigator.of(context).pop();
     });
 
     return Scaffold(

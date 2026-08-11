@@ -13,9 +13,11 @@ import 'package:antgrid/providers/agent_catalog.dart';
 import 'package:antgrid/providers/new_session_action.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/value_controller.dart';
+import 'package:antgrid/widgets/new_session/branch_menu.dart';
 import 'package:antgrid/widgets/new_session/environment_menu.dart';
 import 'package:antgrid/widgets/new_session/new_session_composer.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
+import 'package:antgrid/widgets/new_session/project_menu.dart';
 
 // Fabricated sources follow the pattern used in test/widgets/project_menu_test.dart
 // and test/widgets/environment_menu_test.dart: pickerSourcesProvider is a pure
@@ -97,9 +99,10 @@ List<Override> _baseOverrides({
   Map<String, AgentDescriptor>? catalog,
   bool worktreeSupported = false,
   String currentBranch = 'main',
+  List<PickerSource> sources = const [_localSource],
 }) {
   return [
-    pickerSourcesProvider.overrideWithValue(const [_localSource]),
+    pickerSourcesProvider.overrideWithValue(sources),
     newSessionDetectedToolsProvider.overrideWith((ref) async => detected),
     newSessionChatCapableToolsProvider.overrideWith((ref) async => chatCapable),
     agentCatalogProvider.overrideWith(
@@ -306,6 +309,71 @@ void main() {
 
     expect(find.text('RadhaAI - 96352d'), findsOneWidget);
     expect(find.text('Select project…'), findsOneWidget);
+  });
+
+  testWidgets('full context row keeps the branch legible at phone width', (
+    tester,
+  ) async {
+    // Every term of the row long at once — a machine name, a project name, a
+    // branch AND the worktree chip. The chips' own chrome (glyph + chevron +
+    // padding) already exceeded what a phone row could hand out, so the branch
+    // slot fell below the chip's floor and overflowed by ~17px, rendering as a
+    // glyph and a chevron either side of nothing.
+    const machine = 'DESKTOP-TMDH9M9';
+    const project = PickerProject(
+      id: 'p-iter-compiler',
+      name: 'iter-compiler',
+      detail: '/home/me/iter-compiler',
+      isLocal: false,
+      machineUuid: 'M',
+    );
+    tester.view.physicalSize = const Size(1080, 2340);
+    tester.view.devicePixelRatio = 2.625;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(
+      _host(
+        overrides: _baseOverrides(
+          target: project,
+          worktreeSupported: true,
+          currentBranch: 'Revoke1',
+          sources: const [
+            PickerSource(
+              id: 'machine:M',
+              label: machine,
+              isLocal: false,
+              projects: [project],
+              machineUuid: 'M',
+            ),
+          ],
+        ),
+        // The canvas pads the composer; without it the row under test is
+        // wider than the phone it is meant to reproduce.
+        wrap: (composer) =>
+            Padding(padding: const EdgeInsets.all(16), child: composer),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Ellipsized text keeps its full data, so finding the label is proof the
+    // chip still renders one — the state the overflow destroyed.
+    expect(find.text(machine), findsOneWidget);
+    expect(find.text('iter-compiler'), findsOneWidget);
+    expect(find.text('Revoke1'), findsOneWidget);
+
+    // One line, and every chip still the same height: a chip that sheds its
+    // label must not shed the label's line box with it.
+    final row = <Finder>[
+      find.byType(EnvironmentChip),
+      find.byType(ProjectChip),
+      find.byType(BranchChip),
+      find.byKey(const Key('new-session-worktree-chip')),
+    ];
+    for (final chip in row) {
+      expect(tester.getCenter(chip).dy, tester.getCenter(row.first).dy);
+      expect(tester.getSize(chip).height, tester.getSize(row.first).height);
+    }
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('terminal-only agent pins mode to TERMINAL, Chat cell dead', (

@@ -54,4 +54,9 @@ class AgentCatalogStore {
     _key,
     jsonEncode({for (final e in catalog.entries) e.key: e.value.toJson()}),
   );
+
+  /// Drops the whole cached catalog. Used by hard sign-out — every descriptor
+  /// here was advertised by a machine on the account being left, and each key is
+  /// re-advertised on the first connect after a new sign-in.
+  Future<void> clear() => _prefs.remove(_key);
 }

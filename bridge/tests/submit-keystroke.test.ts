@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { hasTypedContent, isSubmitKeystroke } from "../src/agent-core";
+import { hasTypedContent, isInterruptKeystroke, isSubmitKeystroke } from "../src/agent-core";
 
 // Gates the work-status turn inference for agents with no pre-turn hook. A false
 // positive opens a turn nothing will close, so the negatives matter more than the
@@ -46,4 +46,24 @@ test("anything before the CR is content, including escape sequences", () => {
   expect(hasTypedContent("a")).toBe(true);
   expect(hasTypedContent("\x1b[A")).toBe(true);
   expect(hasTypedContent("\x1b\r")).toBe(true);
+});
+
+// Gates the terminal-mode interrupt close in work-status.ts. A false positive
+// would close a turn still legitimately in flight (e.g. mid arrow-key nav), so
+// only the exact bare-ESC byte counts.
+
+test("a bare Escape keypress is an interrupt", () => {
+  expect(isInterruptKeystroke("\x1b")).toBe(true);
+});
+
+test("any longer ESC-prefixed sequence is content, not an interrupt", () => {
+  for (const data of ["\x1b[A", "\x1b[13;2u", "\x1b\r", "\x1bOP", "\x1b\x1b"]) {
+    expect(isInterruptKeystroke(data)).toBe(false);
+  }
+});
+
+test("ordinary keys and an empty payload are not an interrupt", () => {
+  for (const data of ["a", "\r", "\t", "\x03", ""]) {
+    expect(isInterruptKeystroke(data)).toBe(false);
+  }
 });

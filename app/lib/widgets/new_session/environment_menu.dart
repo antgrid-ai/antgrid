@@ -96,6 +96,37 @@ class EnvironmentPanel extends ConsumerWidget {
   }
 }
 
+/// Leading glyph size shared by [ComposerChip] and [ComposerToggleChip].
+const double _chipGlyphSize = 12;
+
+/// Trailing chevron size — smaller than the leading glyph: it is punctuation,
+/// not identity.
+const double _chipChevronSize = 10;
+
+/// What a composer chip spends before its label: horizontal padding, the 1px
+/// border on each side, and the leading glyph. Also the chip's floor — this
+/// much is what a chip stripped down to its glyph still occupies, so a row
+/// that reserves it can never squeeze a chip into an overflow.
+const double kComposerChipGlyphWidth =
+    AbTokens.space8 * 2 + 2 + _chipGlyphSize;
+
+/// What the trailing chevron costs on top of [kComposerChipGlyphWidth]: the
+/// gap that separates it from the label, plus its own glyph.
+const double kComposerChipChevronWidth = AbTokens.space6 + _chipChevronSize;
+
+/// Room a label needs before it is worth drawing at all — roughly four mono
+/// characters, plus the gap after the leading glyph so this adds straight onto
+/// a slot width. Anything less renders as a lone ellipsis, which says less
+/// than the glyph it sits beside already does.
+const double kComposerChipMinLabelWidth = AbTokens.space6 + 30;
+
+/// Slot width at which a [ComposerChip] still renders `[glyph] label
+/// [chevron]`. Narrower slots fall back to the glyph alone.
+const double kComposerChipFullMinWidth =
+    kComposerChipGlyphWidth +
+    kComposerChipChevronWidth +
+    kComposerChipMinLabelWidth;
+
 /// Compact bordered chip for the composer's context row: `[icon] label
 /// [chevron]`. Mono label — environment/project names are identifiers, not UI
 /// chrome prose. Shared by Tasks 6-8 (environment/project/agent chips).
@@ -127,47 +158,77 @@ class ComposerChip extends StatelessWidget {
         builder: (ctx) {
           final p = ctx.antgrid;
           final fg = attention ? p.accent : p.textPrimary;
-          return GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: () => onTap(ctx),
-            child: Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: AbTokens.space8,
-                vertical: AbTokens.space4,
-              ),
-              decoration: BoxDecoration(
-                border: Border.all(
-                  color: attention ? p.accent : p.borderDefault,
+          final labelStyle = AbTokens.monoStyle(
+            fontSize: AbTokens.fontSm,
+            color: fg,
+          );
+          return LayoutBuilder(
+            builder: (context, constraints) {
+              // A chip is handed a slot, it doesn't ask for one: the context
+              // row caps machine/project and gives the branch whatever is
+              // left, so the slot can land below what the chip would rather
+              // draw. Shed the label and the chevron together — a chevron
+              // beside an ellipsis is chrome pointing at nothing — and let the
+              // glyph stand in, rather than overflowing the row.
+              final showLabel =
+                  constraints.maxWidth >= kComposerChipFullMinWidth;
+              // Genuinely no room: nothing can be tapped in zero pixels.
+              if (constraints.maxWidth <= 0) {
+                return const SizedBox.shrink();
+              }
+              final body = Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: AbTokens.space8,
+                  vertical: AbTokens.space4,
                 ),
-                borderRadius: AbTokens.borderRadius3,
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  AbIcon(icon, size: 12, color: fg),
-                  const SizedBox(width: AbTokens.space6),
-                  // Ellipsize rather than overflow: labels are user/machine
-                  // supplied (a machine name can carry a device-uuid suffix),
-                  // so the chip must survive a narrow row. Requires callers to
-                  // give the chip a bounded width — a flex slot, not a bare
-                  // Row child.
-                  Flexible(
-                    child: Text(
-                      label,
-                      maxLines: 1,
-                      softWrap: false,
-                      overflow: TextOverflow.ellipsis,
-                      style: AbTokens.monoStyle(
-                        fontSize: AbTokens.fontSm,
-                        color: fg,
-                      ),
-                    ),
+                decoration: BoxDecoration(
+                  border: Border.all(
+                    color: attention ? p.accent : p.borderDefault,
                   ),
-                  const SizedBox(width: AbTokens.space6),
-                  AbIcon(AbIcons.chevronDown, size: 10, color: p.textMuted),
-                ],
-              ),
-            ),
+                  borderRadius: AbTokens.borderRadius3,
+                ),
+                child: SizedBox(
+                  height: showLabel
+                      ? null
+                      : _measureLabel(context, label, labelStyle).height,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      AbIcon(icon, size: _chipGlyphSize, color: fg),
+                      if (showLabel) ...[
+                        const SizedBox(width: AbTokens.space6),
+                        // Ellipsize rather than overflow: labels are
+                        // user/machine supplied (a machine name can carry
+                        // a device-uuid suffix), so the chip must survive
+                        // a narrow row. Requires callers to give the chip
+                        // a bounded width — a flex slot, not a bare Row
+                        // child.
+                        Flexible(
+                          child: Text(
+                            label,
+                            maxLines: 1,
+                            softWrap: false,
+                            overflow: TextOverflow.ellipsis,
+                            style: labelStyle,
+                          ),
+                        ),
+                        const SizedBox(width: AbTokens.space6),
+                        AbIcon(
+                          AbIcons.chevronDown,
+                          size: _chipChevronSize,
+                          color: p.textMuted,
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              );
+              return GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => onTap(ctx),
+                child: _chipInSlot(constraints.maxWidth, body),
+              );
+            },
           );
         },
       ),
@@ -219,48 +280,75 @@ class _ComposerToggleChipState extends State<ComposerToggleChip> {
         ? p.accent
         : p.textSecondary;
 
-    Widget chip = AnimatedContainer(
-      duration: AbTokens.motionDefault,
-      curve: Curves.easeOut,
-      padding: const EdgeInsets.symmetric(
-        horizontal: AbTokens.space8,
-        vertical: AbTokens.space4,
-      ),
-      decoration: BoxDecoration(
-        // Same accent-at-alpha-40 fill the segmented control uses for its
-        // selected cell, so "on" reads the same wherever it appears.
-        color: widget.value ? p.accent.withAlpha(40) : null,
-        border: Border.all(
-          color: !enabled
-              ? p.borderSubtle
-              : widget.value
-              ? p.accent
-              : p.borderDefault,
-        ),
-        borderRadius: AbTokens.borderRadius3,
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          AbIcon(
-            widget.value ? AbIcons.circleCheck : AbIcons.circle,
-            size: 12,
-            color: fg,
+    final labelStyle = AbTokens.monoStyle(
+      fontSize: AbTokens.fontSm,
+      color: fg,
+    );
+
+    Widget chip = LayoutBuilder(
+      builder: (context, constraints) {
+        // All-or-nothing, unlike [ComposerChip]: this chip's label is a
+        // constant and its only word, so an ellipsized stub of it carries
+        // nothing the state glyph doesn't already carry. Measuring is what
+        // makes that decision exact at any text scale.
+        final labelSize = _measureLabel(context, widget.label, labelStyle);
+        final showLabel =
+            constraints.maxWidth >=
+            kComposerChipGlyphWidth + AbTokens.space6 + labelSize.width;
+        if (constraints.maxWidth <= 0) {
+          return const SizedBox.shrink();
+        }
+        final body = AnimatedContainer(
+          duration: AbTokens.motionDefault,
+          curve: Curves.easeOut,
+          padding: const EdgeInsets.symmetric(
+            horizontal: AbTokens.space8,
+            vertical: AbTokens.space4,
           ),
-          const SizedBox(width: AbTokens.space6),
-          // Bounded like [ComposerChip]'s label, for the same reason: the chip
-          // lives in a Wrap that can hand it less than its intrinsic width.
-          Flexible(
-            child: Text(
-              widget.label,
-              maxLines: 1,
-              softWrap: false,
-              overflow: TextOverflow.ellipsis,
-              style: AbTokens.monoStyle(fontSize: AbTokens.fontSm, color: fg),
+          decoration: BoxDecoration(
+            // Same accent-at-alpha-40 fill the segmented control uses for
+            // its selected cell, so "on" reads the same wherever it
+            // appears.
+            color: widget.value ? p.accent.withAlpha(40) : null,
+            border: Border.all(
+              color: !enabled
+                  ? p.borderSubtle
+                  : widget.value
+                  ? p.accent
+                  : p.borderDefault,
+            ),
+            borderRadius: AbTokens.borderRadius3,
+          ),
+          child: SizedBox(
+            height: showLabel ? null : labelSize.height,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                AbIcon(
+                  widget.value ? AbIcons.circleCheck : AbIcons.circle,
+                  size: _chipGlyphSize,
+                  color: fg,
+                ),
+                if (showLabel) ...[
+                  const SizedBox(width: AbTokens.space6),
+                  Flexible(
+                    child: Text(
+                      widget.label,
+                      maxLines: 1,
+                      softWrap: false,
+                      overflow: TextOverflow.ellipsis,
+                      style: labelStyle,
+                    ),
+                  ),
+                ],
+              ],
             ),
           ),
-        ],
-      ),
+        );
+        // Same slot contract as [ComposerChip]: new_session_composer's
+        // worktreeMax can hand this chip less than the icon-only footprint.
+        return _chipInSlot(constraints.maxWidth, body);
+      },
     );
 
     final tooltip = widget.tooltip;
@@ -308,21 +396,70 @@ class _ComposerToggleChipState extends State<ComposerToggleChip> {
   }
 }
 
+/// Binds [body] to the [slotWidth] a chip was handed, scaling it only for a
+/// slot narrower than [kComposerChipGlyphWidth].
+///
+/// Scaling is the last resort, for a slot below even the glyph-only footprint —
+/// a bare `SizedBox.shrink` there silently dropped a chip whenever the composer
+/// row's cap/floor math left one that narrow, and an unguarded chip sizes itself
+/// off its Row's intrinsic content regardless, which is a render overflow rather
+/// than a truncation. Above that width the chip has already shed its label to
+/// fit, and a [FittedBox] is NOT the same fallback: it lays its child out
+/// unbounded, so the label never reaches its ellipsis and the whole chip —
+/// border, padding and text together — shrinks, leaving each chip on the row a
+/// different height.
+Widget _chipInSlot(double slotWidth, Widget body) => ConstrainedBox(
+  constraints: BoxConstraints(maxWidth: slotWidth),
+  child: slotWidth < kComposerChipGlyphWidth
+      ? FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerLeft,
+          child: body,
+        )
+      : body,
+);
+
+/// Size [label] would occupy unwrapped, at the ambient text scale. The width
+/// decides whether a constant label is worth drawing; the height is what a
+/// label-less chip pins itself to, so shedding the word doesn't also shrink the
+/// chip out of line with its neighbours.
+Size _measureLabel(BuildContext context, String label, TextStyle style) {
+  // Merge the ambient default the way [Text] itself does — the chip's styles
+  // leave `height` unset, so measuring the bare style would miss the theme's
+  // line-height multiplier and under-report by a few pixels.
+  final merged = DefaultTextStyle.of(context).style.merge(style);
+  final painter = TextPainter(
+    text: TextSpan(text: label, style: merged),
+    textDirection: Directionality.of(context),
+    textScaler: MediaQuery.textScalerOf(context),
+    maxLines: 1,
+  )..layout();
+  return painter.size;
+}
+
 /// Uppercase mono section header, mirroring `AbMenu`'s header treatment
 /// (`app/lib/design/widgets/ab_menu.dart`) so grouped panels read as one
 /// popup system.
 class PanelSectionHeader extends StatelessWidget {
-  const PanelSectionHeader(this.label, {super.key});
+  const PanelSectionHeader(this.label, {super.key, this.mono = true});
 
   final String label;
 
+  /// False for a panel of navigational chrome (e.g. the workspace menu's
+  /// "Workspace" header) rather than a picker over identifiers — sans is the
+  /// font-token rule for chrome, mono for data (see app/CLAUDE.md's Design
+  /// Rules). Defaults true: every existing caller here is an
+  /// environment/branch/project picker, where the rows below ARE identifiers.
+  final bool mono;
+
   @override
   Widget build(BuildContext context) {
+    final style = mono ? AbTokens.monoStyle : AbTokens.sansStyle;
     return Padding(
       padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
       child: Text(
         label.toUpperCase(),
-        style: AbTokens.monoStyle(
+        style: style(
           fontSize: AbTokens.fontXs,
           letterSpacing: 0.66,
           color: context.antgrid.textMuted,
@@ -347,6 +484,7 @@ class PanelRow extends StatefulWidget {
     required this.selected,
     required this.onTap,
     this.trailing,
+    this.mono = true,
   });
 
   final String icon;
@@ -354,6 +492,10 @@ class PanelRow extends StatefulWidget {
   final bool selected;
   final VoidCallback onTap;
   final Widget? trailing;
+
+  /// False for a panel of navigational chrome rather than a picker over
+  /// identifiers — see [PanelSectionHeader.mono], same rule and same default.
+  final bool mono;
 
   @override
   State<PanelRow> createState() => _PanelRowState();
@@ -411,7 +553,7 @@ class _PanelRowState extends State<PanelRow> {
                 child: Text(
                   widget.label,
                   overflow: TextOverflow.ellipsis,
-                  style: AbTokens.monoStyle(
+                  style: (widget.mono ? AbTokens.monoStyle : AbTokens.sansStyle)(
                     fontSize: AbTokens.fontSm,
                     color: fg,
                   ),

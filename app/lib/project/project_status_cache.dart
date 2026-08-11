@@ -87,4 +87,14 @@ class ProjectStatusCache {
     final f = await _fileFor(projectId);
     if (await f.exists()) await f.delete();
   }
+
+  /// Deletes every cached status file. Used by hard sign-out, which has no id
+  /// list to iterate — the drawer entries it would enumerate are themselves
+  /// being wiped, and a status file left behind rehydrates a branch name and
+  /// dirty count for a project the next user of this install never opened.
+  Future<void> clearAll() async {
+    final root = await _rootDir;
+    final dir = Directory(p.join(root.path, 'cache', 'project-status'));
+    if (await dir.exists()) await dir.delete(recursive: true);
+  }
 }

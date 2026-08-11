@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../connection/supervisor_state.dart';
+import '../../constants/breakpoints.dart';
 import '../../design/ab_colors.dart';
 import '../../design/ab_status_tone.dart';
 import '../../design/ab_tokens.dart';
@@ -21,6 +22,7 @@ import '../../utils/platform_utils.dart';
 import '../ab_status_helpers.dart';
 import '../new_session/first_run_checklist.dart';
 import 'recent_session_row_widget.dart';
+import 'recent_sessions_summary.dart';
 
 enum _RecentGroupBy { machine, project, status }
 
@@ -103,26 +105,20 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
       );
     }
 
-    // Effective per-row status (this session's own advert entry, masked to done
-    // for a stopped session), computed once here and reused for grouping and the
-    // header counts — so "1 needs you" counts the ONE blocked session, not every
-    // session sharing its project. Watches both advert maps ONCE (not per row);
-    // keyed by row identity, distinct instances per build.
-    final advert = ref.watch(remoteProjectStatusProvider);
-    final perSession = ref.watch(remoteSessionStatusProvider);
+    // Effective per-row status, computed once for the whole list (see
+    // [recentSessionStatusesProvider]) and shared with the summary line, so
+    // "1 needs you" counts the ONE blocked session, not every session sharing
+    // its project.
+    final statusByKey = ref.watch(recentSessionStatusesProvider);
     final statusFor = <RecentSessionRow, AgentWorkStatus>{
       for (final r in rows)
-        r: sessionRowStatus(
-          advert: advert[r.origin.registrationId],
-          perSession: perSession[r.origin.registrationId],
-          sessionId: r.session.id,
-          running: r.session.running,
-        ),
+        r:
+            statusByKey[recentStatusKey(
+              r.origin.registrationId,
+              r.session.id,
+            )] ??
+            AgentWorkStatus.done,
     };
-    final counts = <AgentWorkStatus, int>{};
-    for (final s in statusFor.values) {
-      counts[s] = (counts[s] ?? 0) + 1;
-    }
 
     final groups = _groupSessions(rows, _groupBy, statusFor);
 
@@ -130,8 +126,6 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
       slivers: [
         SliverToBoxAdapter(
           child: _SessionsHeader(
-            total: rows.length,
-            counts: counts,
             groupBy: _groupBy,
             onGroupBy: (g) => setState(() => _groupBy = g),
           ),
@@ -161,25 +155,6 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
     );
   }
 }
-
-/// Status-group ordering: the two call-to-action states first (a blocked or
-/// errored agent is what the user opened Recent to find), then working, then
-/// done.
-const _statusOrder = [
-  AgentWorkStatus.attention,
-  AgentWorkStatus.error,
-  AgentWorkStatus.working,
-  AgentWorkStatus.done,
-];
-
-String workStatusLabel(AgentWorkStatus s) => switch (s) {
-  // "Needs you", not "Needs attention": it reads as the summary badge
-  // ("1 needs you") and matches the Handler pill's wording for the same idea.
-  AgentWorkStatus.attention => 'Needs you',
-  AgentWorkStatus.error => 'Error',
-  AgentWorkStatus.working => 'Working',
-  AgentWorkStatus.done => 'Done',
-};
 
 List<_SessionGroup> _groupSessions(
   List<RecentSessionRow> rows,
@@ -213,7 +188,7 @@ List<_SessionGroup> _groupSessions(
 
   final keys = groupBy == _RecentGroupBy.status
       ? [
-          for (final s in _statusOrder) s.name,
+          for (final s in kWorkStatusOrder) s.name,
         ].where(buckets.containsKey).toList()
       : (buckets.keys.toList()..sort(
           (a, b) =>
@@ -235,46 +210,19 @@ List<_SessionGroup> _groupSessions(
   ];
 }
 
-/// Title row, group-by filter chips, and running/done summary badges.
+/// Group-by filter chips, plus (on desktop only) the title and summary badges.
+///
+/// On mobile those two live in the canvas's top bar instead
+/// ([RecentSessionsSummaryLine]) — sharing the drawer button's row rather than
+/// spending one of their own, and staying put while the list scrolls.
 class _SessionsHeader extends StatelessWidget {
-  const _SessionsHeader({
-    required this.total,
-    required this.counts,
-    required this.groupBy,
-    required this.onGroupBy,
-  });
+  const _SessionsHeader({required this.groupBy, required this.onGroupBy});
 
-  final int total;
-  final Map<AgentWorkStatus, int> counts;
   final _RecentGroupBy groupBy;
   final ValueChanged<_RecentGroupBy> onGroupBy;
 
-  /// Badge tone per state — attention/error stand out (amber/red), working is
-  /// live (accent + pulse), done recedes (muted).
-  Color _color(BuildContext context, AgentWorkStatus s) {
-    final t = context.antgrid;
-    return switch (s) {
-      AgentWorkStatus.attention => t.warning,
-      AgentWorkStatus.error => t.error,
-      AgentWorkStatus.working => t.accent,
-      AgentWorkStatus.done => t.textMuted,
-    };
-  }
-
   @override
   Widget build(BuildContext context) {
-    final t = context.antgrid;
-
-    final title = Text(
-      'Sessions · $total total',
-      overflow: TextOverflow.ellipsis,
-      style: AbTokens.sansStyle(
-        fontSize: AbTokens.fontMd,
-        color: t.textPrimary,
-        fontWeight: FontWeight.w600,
-      ),
-    );
-
     final chips = [
       _GroupChip(
         label: 'Machine',
@@ -295,58 +243,40 @@ class _SessionsHeader extends StatelessWidget {
       ),
     ];
 
-    final badges = Wrap(
-      alignment: WrapAlignment.end,
-      spacing: AbTokens.space8,
-      runSpacing: AbTokens.space6,
-      children: [
-        for (final s in _statusOrder)
-          if ((counts[s] ?? 0) > 0)
-            _SummaryBadge(
-              label: '${counts[s]} ${workStatusLabel(s).toLowerCase()}',
-              color: _color(context, s),
-              // Pulse the live states (working + attention) so activity
-              // registers without reading the numbers.
-              live:
-                  s == AgentWorkStatus.working || s == AgentWorkStatus.attention,
-              tone: s,
-            ),
-      ],
-    );
-
-    final isNarrow = MediaQuery.sizeOf(context).width < 600;
+    final isNarrow = MediaQuery.sizeOf(context).width < kCompactBreakpoint;
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(
+      padding: EdgeInsets.fromLTRB(
         AbTokens.space16,
-        AbTokens.space12,
+        isNarrow ? AbTokens.space4 : AbTokens.space12,
         AbTokens.space16,
         AbTokens.space8,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (isNarrow) ...[
+          if (isNarrow)
+            // No search here: on mobile it is an icon in the canvas's top bar
+            // (see SessionSearchButton), which stays put while this list
+            // scrolls and costs the list no row of its own.
+            Row(mainAxisAlignment: MainAxisAlignment.end, children: chips)
+          else
             Row(
               children: [
-                Expanded(child: Align(alignment: Alignment.centerLeft, child: title)),
-                const SizedBox(width: AbTokens.space10),
-                badges,
-              ],
-            ),
-            const SizedBox(height: AbTokens.space8),
-            Row(mainAxisAlignment: MainAxisAlignment.end, children: chips),
-          ] else
-            Row(
-              children: [
-                Expanded(
-                  child: Align(alignment: Alignment.centerLeft, child: title),
+                const Expanded(
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: RecentSessionsTitle(),
+                  ),
                 ),
                 const SizedBox(width: AbTokens.space10),
                 ...chips,
                 const SizedBox(width: AbTokens.space10),
-                Expanded(
-                  child: Align(alignment: Alignment.centerRight, child: badges),
+                const Expanded(
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: RecentSessionsSummaryBadges(),
+                  ),
                 ),
               ],
             ),
@@ -354,53 +284,6 @@ class _SessionsHeader extends StatelessWidget {
           const AbSeparator.horizontal(),
         ],
       ),
-    );
-  }
-}
-
-class _SummaryBadge extends StatelessWidget {
-  const _SummaryBadge({
-    required this.label,
-    required this.color,
-    required this.tone,
-    this.live = false,
-  });
-
-  final String label;
-  final Color color;
-
-  /// The state this badge summarizes — drives the live dot's tone.
-  final AgentWorkStatus tone;
-
-  /// Prefix a pulsing activity dot — used for the live states (working /
-  /// attention) so activity registers at a glance without reading the numbers.
-  final bool live;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        if (live) ...[
-          AbStatusDot(
-            tone: tone == AgentWorkStatus.attention
-                ? AbStatusTone.warning
-                : AbStatusTone.info,
-            size: AbDotSize.sm,
-            style: AbDotStyle.filled,
-            pulse: true,
-          ),
-          const SizedBox(width: AbTokens.space6),
-        ],
-        Text(
-          label,
-          style: AbTokens.sansStyle(
-            fontSize: AbTokens.fontXs,
-            color: color,
-            fontWeight: FontWeight.w500,
-          ),
-        ),
-      ],
     );
   }
 }

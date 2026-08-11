@@ -58,12 +58,9 @@ class ProjectPickerScreen extends ConsumerWidget {
                           final p = projects[i];
                           return _ProjectRow(
                             project: p,
-                            onOpen: () =>
-                                ref
-                                    .read(selectedTargetProvider.notifier)
-                                    .set(RemoteTarget.legacy(
-                                  p.projectId,
-                                )),
+                            onOpen: () => ref
+                                .read(selectedTargetProvider.notifier)
+                                .set(RemoteTarget.legacy(p.projectId)),
                             onStart: () => client.startProject(p.projectId),
                           );
                         },
@@ -158,7 +155,7 @@ class _ProjectRow extends StatelessWidget {
     final running = project.running;
     return AbListRow(
       leading: AbStatusDot(
-        tone: running ? AbStatusTone.success : AbStatusTone.disabled,
+        tone: running ? AbStatusTone.info : AbStatusTone.agentIdle,
         pulse: running,
       ),
       title: Text(project.label ?? project.projectId),

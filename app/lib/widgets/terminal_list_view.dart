@@ -13,10 +13,13 @@ import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../models/terminal_models.dart';
+import '../navigation/back_intent.dart';
 import '../providers/providers.dart';
+import '../providers/visible_surface.dart';
 import '../services/terminal_service.dart';
 import 'terminal_detail_view.dart';
 import 'terminal_view_wrapper.dart';
+import 'workspace_tab_bar.dart';
 import 'ab_status_helpers.dart';
 
 /// List-first terminal view for non-agent terminals with pin support.
@@ -61,12 +64,35 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
 
   String _terminalName(String id) => 'Terminal ${id.split('-').last}';
 
+  bool _backFromPushed() {
+    if (ref.read(visibleWorkspaceViewProvider) != WorkspaceView.terminals) {
+      return false;
+    }
+    if (_pushedTerminalId == null) return false;
+    setState(() => _pushedTerminalId = null);
+    return true;
+  }
+
   @override
   Widget build(BuildContext context) {
     final terminalService = serviceWhenReady(ref, terminalServiceProvider);
     if (terminalService == null) {
       return const AbLoading(message: 'loading terminals...');
     }
+    // watch, not the `ref.read` in [_backFromPushed]: the `active` flag has to
+    // be recomputed when this tab goes on or off screen.
+    final onScreen =
+        ref.watch(visibleWorkspaceViewProvider) == WorkspaceView.terminals;
+
+    return BackHandler(
+      priority: BackPriority.pushedTerminal,
+      active: onScreen && _pushedTerminalId != null,
+      onBack: _backFromPushed,
+      child: _buildBody(terminalService),
+    );
+  }
+
+  Widget _buildBody(TerminalService terminalService) {
     final tabs = _adHocTerminals;
 
     // Push navigation — fullscreen terminal output.

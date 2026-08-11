@@ -29,6 +29,7 @@ import 'providers/analytics.dart';
 import 'providers/auth.dart';
 import 'providers/cached_sessions.dart';
 import 'providers/collapsed_drawer.dart';
+import 'providers/device_revocation.dart';
 import 'providers/drawer_order.dart';
 import 'providers/first_run.dart';
 import 'providers/host_status.dart';
@@ -468,6 +469,12 @@ class _AppHome extends ConsumerWidget {
         showDeviceCapDialog(context, ref, next);
       }
     });
+
+    // A revocation forces the sign-in screen on EVERY platform. Desktop is
+    // otherwise ungated (it drives its own machine locally and only offers
+    // sign-in from the drawer), but a revoked device has no credentials left —
+    // leaving it in the shell would show a workspace it can no longer reach.
+    if (ref.watch(revokedNoticeProvider)) return const SignInScreen();
 
     final signedIn = ref.watch(signedInProvider);
     if (signedIn == null) return const AuthSplash();

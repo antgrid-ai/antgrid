@@ -26,12 +26,27 @@ void main() {
       Map<String, AgentWorkStatus>? perSession,
       String sessionId = 's1',
       bool running = true,
+      AgentWorkStatus? live,
     }) => sessionRowStatus(
       advert: advert,
       perSession: perSession,
       sessionId: sessionId,
       running: running,
+      live: live,
     );
+
+    test('the open project\'s live stamp outranks a lagging advert', () {
+      // The chat you are looking at moves on its own data plane; the Recent row
+      // must not keep saying "done" until the machine's advert comes round.
+      expect(
+        call(
+          live: AgentWorkStatus.working,
+          perSession: const {'s1': AgentWorkStatus.done},
+          running: false,
+        ),
+        AgentWorkStatus.working,
+      );
+    });
 
     test('a running session with no advert at all is done, not working', () {
       // The regression this guards: a merely-open session used to read
@@ -112,7 +127,10 @@ void main() {
       container
           .read(remoteSessionStatusProvider.notifier)
           .setMachineSessionStatuses('m1', const {
-            'm1.p': {'s1': AgentWorkStatus.working, 's2': AgentWorkStatus.attention},
+            'm1.p': {
+              's1': AgentWorkStatus.working,
+              's2': AgentWorkStatus.attention,
+            },
           });
       expect(
         container.read(
@@ -243,9 +261,10 @@ void main() {
 
     test('another machine\'s attention does not leak into this one', () {
       final container = _seeded('m1', const {'m1.a': AgentWorkStatus.done});
-      container
-          .read(remoteProjectStatusProvider.notifier)
-          .setMachineStatuses('m2', const {'m2.a': AgentWorkStatus.attention});
+      container.read(remoteProjectStatusProvider.notifier).setMachineStatuses(
+        'm2',
+        const {'m2.a': AgentWorkStatus.attention},
+      );
       expect(
         container.read(machineWorkStatusProvider('m1')),
         AgentWorkStatus.done,
@@ -261,9 +280,9 @@ void main() {
       // the '<uuid>.' prefix match must not treat those as any machine's.
       final container = ProviderContainer();
       addTearDown(container.dispose);
-      container
-          .read(remoteProjectStatusProvider.notifier)
-          .setLocalStatuses(const {'antgrid': AgentWorkStatus.attention});
+      container.read(remoteProjectStatusProvider.notifier).setLocalStatuses(
+        const {'antgrid': AgentWorkStatus.attention},
+      );
       expect(container.read(machineWorkStatusProvider('m1')), isNull);
     });
   });

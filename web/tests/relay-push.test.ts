@@ -5,7 +5,7 @@ describe("relay push", () => {
   test("no-op when baseUrl unset", async () => {
     let called = 0;
     const fetchImpl = (async () => { called++; return new Response(); }) as any;
-    await pushRevoke({}, "dev-1", fetchImpl);
+    await pushRevoke({}, "dev-1", "user-1", fetchImpl);
     expect(called).toBe(0);
   });
 
@@ -15,11 +15,13 @@ describe("relay push", () => {
       calls.push({ url, init });
       return new Response();
     }) as any;
-    await pushRevoke({ baseUrl: "http://relay.local", secret: "s" }, "dev-1", fetchImpl);
+    await pushRevoke({ baseUrl: "http://relay.local", secret: "s" }, "dev-1", "user-1", fetchImpl);
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("http://relay.local/internal/revoke");
     expect((calls[0].init.headers as any)["x-antgrid-signature"]).toMatch(/^[0-9a-f]{64}$/);
-    expect(calls[0].init.body).toBe('{"deviceId":"dev-1"}');
+    // The account scope is load-bearing: the same deviceId exists under other
+    // users, and the relay closes sockets by what this body says.
+    expect(calls[0].init.body).toBe('{"deviceId":"dev-1","userId":"user-1"}');
   });
 
   test("POSTs to /internal/expire", async () => {
@@ -35,7 +37,7 @@ describe("relay push", () => {
 
   test("swallows fetch errors", async () => {
     const fetchImpl = (async () => { throw new Error("network"); }) as any;
-    await pushRevoke({ baseUrl: "http://relay.local", secret: "s" }, "dev-1", fetchImpl);
+    await pushRevoke({ baseUrl: "http://relay.local", secret: "s" }, "dev-1", "user-1", fetchImpl);
     expect(true).toBe(true);
   });
 

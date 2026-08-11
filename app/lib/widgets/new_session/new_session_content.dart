@@ -11,7 +11,9 @@ import '../../providers/new_session_picker.dart';
 import '../../providers/projects.dart';
 import '../../providers/recent_sessions.dart';
 import '../open_folder_button.dart';
+import '../recent_sessions/recent_sessions_summary.dart';
 import '../recent_sessions/recent_sessions_tab.dart';
+import '../session_search_modal.dart';
 import 'first_run_checklist.dart';
 import 'new_session_composer.dart';
 import 'picker_sources.dart';
@@ -28,7 +30,10 @@ class NewSessionContent extends ConsumerWidget {
 
   final VoidCallback? onOpenDrawer;
 
-  static const double _maxWidth = 680;
+  // Matches the Claude desktop conversation column. The cap covers the whole
+  // canvas (recents + composer) so the two read as one document rather than a
+  // phone layout stranded mid-window.
+  static const double _maxWidth = 880;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -51,15 +56,19 @@ class NewSessionContent extends ConsumerWidget {
               constraints: const BoxConstraints(maxWidth: _maxWidth),
               child: Column(
                 children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(
-                      AbTokens.space16,
-                      AbTokens.space16,
-                      AbTokens.space16,
-                      0,
+                  // Desktop has no drawer button (the drawer is always on), so
+                  // the bar collapses away entirely rather than reserving a
+                  // strip of empty canvas.
+                  if (onOpenDrawer != null)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(
+                        AbTokens.space16,
+                        AbTokens.space16,
+                        AbTokens.space16,
+                        0,
+                      ),
+                      child: _TopBar(onOpenDrawer: onOpenDrawer!),
                     ),
-                    child: _TopBar(onOpenDrawer: onOpenDrawer),
-                  ),
                   const FirstRunChecklistCard(),
                   const RemoteAccessNudgeBanner(),
                   // Recents fill the canvas. RefreshIndicator keeps the old
@@ -146,35 +155,30 @@ class NewSessionContent extends ConsumerWidget {
   }
 }
 
-/// Top bar: optional hamburger and a mono breadcrumb.
+/// Top bar: the mobile drawer button and the session-search icon, with the
+/// sessions count and its status badges sharing the row rather than costing one
+/// of their own.
 ///
-/// Watches [selectedTargetProjectProvider] internally so picking a target only
-/// rebuilds this bar, not the whole New Session canvas.
-class _TopBar extends ConsumerWidget {
+/// This bar is mobile's navigation bar, which is where both platforms' search
+/// guidance puts a search icon — reachable without scrolling, and costing a
+/// glyph rather than the full row an inline field would take from a phone.
+///
+/// Carries no breadcrumb — the composer's project chip already names the
+/// target, and the route is self-evidently New Session.
+class _TopBar extends StatelessWidget {
   const _TopBar({required this.onOpenDrawer});
 
-  final VoidCallback? onOpenDrawer;
+  final VoidCallback onOpenDrawer;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final breadcrumbTarget =
-        ref.watch(selectedTargetProjectProvider)?.name ?? 'no project';
+  Widget build(BuildContext context) {
     return Row(
       children: [
-        if (onOpenDrawer != null) ...[
-          AbIconButton(icon: AbIcons.menu, onTap: onOpenDrawer),
-          const SizedBox(width: AbTokens.space8),
-        ],
-        Expanded(
-          child: Text(
-            '$breadcrumbTarget / new session',
-            overflow: TextOverflow.ellipsis,
-            style: AbTokens.monoStyle(
-              fontSize: AbTokens.fontSm,
-              color: context.antgrid.textMuted,
-            ),
-          ),
-        ),
+        AbIconButton(icon: AbIcons.menu, onTap: onOpenDrawer),
+        const SizedBox(width: AbTokens.space8),
+        const Expanded(child: RecentSessionsSummaryLine()),
+        const SizedBox(width: AbTokens.space8),
+        const SessionSearchButton(),
       ],
     );
   }

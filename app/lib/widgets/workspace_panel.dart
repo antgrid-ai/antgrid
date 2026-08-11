@@ -19,6 +19,7 @@ class WorkspacePanel extends StatelessWidget {
     this.viewBadges = const {},
     this.isExpanded = false,
     this.onToggleExpand,
+    this.onClose,
     this.showTabBar = true,
   });
 
@@ -27,6 +28,7 @@ class WorkspacePanel extends StatelessWidget {
   final Map<WorkspaceView, int> viewBadges;
   final bool isExpanded;
   final VoidCallback? onToggleExpand;
+  final VoidCallback? onClose;
   final bool showTabBar;
 
   @override
@@ -42,6 +44,7 @@ class WorkspacePanel extends StatelessWidget {
               badges: viewBadges,
               isExpanded: isExpanded,
               onToggleExpand: onToggleExpand,
+              onClose: onClose,
             ),
           Expanded(
             child: IndexedStack(

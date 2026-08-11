@@ -33,8 +33,10 @@ bool shouldShowInAppToast(AppLifecycleState lifecycle) =>
 /// [onWorkspaceSurface] and [agentSurfaceVisible] are both needed because
 /// neither implies the other. On mobile the workspace surface is a two-page
 /// PageView — agent | files/git/preview — so the surface being up says nothing
-/// about the transcript being visible; on desktop the agent panel is always
-/// visible in the 3-zone layout, including while settings covers the workspace.
+/// about the transcript being visible; on desktop the agent panel is usually
+/// visible in the 3-zone layout, but not while a workbench surface (settings,
+/// new session) or the agent bar's full-workbench view surface covers it, nor
+/// while the context panel is expanded to fill the route.
 ///
 /// A null/empty [sessionId] (a hook that carried no terminal id) matches
 /// nothing and always surfaces, rather than being silently swallowed. Session

@@ -5,7 +5,40 @@ import 'ab_colors.dart';
 /// Semantic status tone for dots, indicators, and any future status surface.
 /// Resolves to a concrete color via [color]. Keep this layer thin —
 /// domain enums map to tones in their own adapters, never directly to colors.
-enum AbStatusTone { neutral, info, success, warning, danger, muted, disabled }
+///
+/// Two families live here. [neutral]/[info]/[success]/[warning]/[danger]/
+/// [muted]/[disabled] are generic UI semantics (bright, and they shift per theme
+/// preset). [agentIdle]/[agentThinking]/[agentRunning]/[agentAttention] describe
+/// what an agent is *doing* and resolve to the warm theme-invariant `status*`
+/// palette.
+///
+/// The rule is narrow, and it is about REST, not about the whole family: an
+/// agent at rest — idle, stopped, finished — takes [agentIdle], never [success]
+/// or [muted]. An agent that finished a turn is not the same claim as an
+/// operation that "succeeded"; painting them alike puts a green check beside
+/// every dormant session.
+///
+/// Everything an agent does that is NOT rest keeps the generic semantics, so it
+/// speaks the same language as the rest of the UI: [info] for live/working (the
+/// accent, pulsing), [warning] for "needs you", [danger] for a failure. See
+/// `agentWorkStatusDotSpec`, which is the canonical mapping.
+///
+/// That leaves [agentThinking]/[agentRunning]/[agentAttention] used only by
+/// `AbAgentTab`, itself only mounted in the design gallery. Prefer the generic
+/// tones for new agent surfaces; reach for these three only if the tab ships.
+enum AbStatusTone {
+  neutral,
+  info,
+  success,
+  warning,
+  danger,
+  muted,
+  disabled,
+  agentIdle,
+  agentThinking,
+  agentRunning,
+  agentAttention,
+}
 
 extension AbStatusToneColor on AbStatusTone {
   Color color(BuildContext context) {
@@ -22,6 +55,10 @@ extension AbStatusToneColor on AbStatusTone {
       // textDisabled's WCAG-exempt one. If a future consumer renders this
       // tone as readable text, it needs textMuted explicitly, not this tone.
       AbStatusTone.disabled => palette.iconMuted,
+      AbStatusTone.agentIdle => palette.statusIdle,
+      AbStatusTone.agentThinking => palette.statusThinking,
+      AbStatusTone.agentRunning => palette.statusRunning,
+      AbStatusTone.agentAttention => palette.statusAttention,
     };
   }
 }

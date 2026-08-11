@@ -16,8 +16,13 @@ class AbBrandMark extends StatelessWidget {
   ///
   /// Uses the transparent variant: the plated `antgrid-mark.svg` paints a
   /// #18181B tile on a #09090B bar, which reads as elevation.
-  const AbBrandMark.icon({super.key, this.height = 18})
+  const AbBrandMark.icon({super.key, this.height = iconHeight})
     : _asset = 'assets/logo/antgrid-mark-transparent.svg';
+
+  /// Default height of [AbBrandMark.icon] — and its width, the mark being
+  /// square. Exposed so a layout that reserves room for the mark can add it up
+  /// without measuring (the window title bar's centred search box does).
+  static const double iconHeight = 18;
 
   final double height;
   final String _asset;

@@ -40,6 +40,7 @@ class SignOutService {
     this.stopMinter,
     this.clearPushToken,
     this.closeSessions,
+    this.clearCaches,
     this.releaseControlPlanes,
     FlutterSecureStorage? secureStorage,
     void Function(Object error, StackTrace stack)? onStepError,
@@ -66,12 +67,19 @@ class SignOutService {
   /// sessions can't ask agents to stop later.
   final Future<void> Function()? clearPushToken;
 
-  /// Initiates teardown of live relay/project transports. Note this only
-  /// *starts* the teardown — the registry's eviction is fire-and-forget, so a
-  /// transport may briefly outlive the credentials cleared below. Acceptable:
-  /// sign-out is terminal and the relay cascade-closes paired peers on the
-  /// agent's own disconnect.
+  /// Tears down live relay/project transports, awaiting each eviction so the
+  /// callbacks that write the session/status caches have settled before
+  /// [clearCaches] deletes them.
   final Future<void> Function()? closeSessions;
+
+  /// Wipes every persisted cache derived from the account — cached session
+  /// lists, project labels and work status, remembered ports, the agent
+  /// catalog, the paired-machine list, per-project file-tree prefs. Identity
+  /// material has its own steps below; this is the DATA those machines
+  /// reported, which the drawer and Recent list render straight off disk on the
+  /// next launch, signed in or not. Runs after [closeSessions] so no live
+  /// write-through can land behind it.
+  final Future<void> Function()? clearCaches;
 
   /// Closes every machine control-plane socket still open (eager launch dials,
   /// viewed machines — [closeSessions] only evicts project sessions, never
@@ -115,6 +123,7 @@ class SignOutService {
     await _swallow('clearPushIdentity', pushIdentity.clear);
     await _swallow('clearRecentAgents', recentAgentsStore.clear);
     await _swallow('clearRetiredPhoneKeys', _sweepRetiredPhonePairingKeys);
+    await _swallow('clearCaches', () async => clearCaches?.call());
 
     // After clearRecentAgents: anything a mid-sign-out resume eagerly dialed
     // is caught here too.

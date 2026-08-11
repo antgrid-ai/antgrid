@@ -15,10 +15,13 @@ import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../design/widgets/ab_url_field.dart';
 import '../models/preview_models.dart';
+import '../navigation/back_intent.dart';
 import '../providers/analytics.dart';
 import '../services/preview_service.dart';
 import '../providers/agent_transport.dart';
 import '../providers/providers.dart';
+import '../providers/visible_surface.dart';
+import '../widgets/workspace_tab_bar.dart';
 import '../util/ab_log.dart';
 import '../widgets/port_entry.dart';
 import '../widgets/port_list_widget.dart';
@@ -179,16 +182,27 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   @override
   Widget build(BuildContext context) {
     final previewStateAsync = ref.watch(previewStateProvider);
+    // watch, not the `ref.read` in [_backFromPreview]: the `active` flag has to
+    // be recomputed when this tab goes on or off screen.
+    final onScreen =
+        ref.watch(visibleWorkspaceViewProvider) == WorkspaceView.preview;
 
-    return previewStateAsync.when(
-      loading: () => const AbLoading(message: 'loading preview...'),
-      error: (error, _) => Center(
-        child: Text(
-          'Error: $error',
-          style: const TextStyle(color: Colors.grey),
+    return BackHandler(
+      priority: BackPriority.previewContent,
+      active:
+          onScreen &&
+          (_canGoBack || previewStateAsync.value?.selectedPort != null),
+      onBack: _backFromPreview,
+      child: previewStateAsync.when(
+        loading: () => const AbLoading(message: 'loading preview...'),
+        error: (error, _) => Center(
+          child: Text(
+            'Error: $error',
+            style: const TextStyle(color: Colors.grey),
+          ),
         ),
+        data: (state) => _buildContent(state),
       ),
-      data: (state) => _buildContent(state),
     );
   }
 
@@ -281,7 +295,10 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         // webview_flutter builds the controller eagerly (unlike inappwebview's
         // onWebViewCreated), so recreate it here on every origin change and let
         // the ValueKey below swap the underlying platform view.
-        _webViewController = _buildController(origin, context.antgrid.bgDeepest);
+        _webViewController = _buildController(
+          origin,
+          context.antgrid.bgDeepest,
+        );
       }
 
       return _buildPreviewView();
@@ -320,6 +337,41 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     );
   }
 
+  /// Drops the selected port and every bit of webview state derived from it.
+  /// Returns false when there is no service to deselect on.
+  bool _showPortList() {
+    final preview = focusedServiceOrNull(
+      ref.container,
+      (s) => s.previewService,
+    );
+    if (preview == null) return false;
+    preview.deselectPort();
+    setState(() {
+      _webViewController = null;
+      _origin = '';
+      _canGoBack = false;
+      _canGoForward = false;
+    });
+    return true;
+  }
+
+  /// Back inside the preview: one webview page first, then the whole preview.
+  bool _backFromPreview() {
+    if (ref.read(visibleWorkspaceViewProvider) != WorkspaceView.preview) {
+      return false;
+    }
+    // Re-check at invoke time: the controller can be gone since registration.
+    if (_canGoBack && _webViewController != null) {
+      unawaited(_webViewController!.goBack());
+      // _refreshHistoryFlags re-syncs from onUrlChange.
+      return true;
+    }
+    if (ref.read(previewStateProvider).value?.selectedPort == null) {
+      return false;
+    }
+    return _showPortList();
+  }
+
   Widget _buildPreviewView() {
     // [previewStateProvider] keeps its last value while it re-runs, so this
     // view can render one frame past a session that was invalidated (host
@@ -336,17 +388,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
             AbIconButton(
               icon: AbIcons.list,
               tooltip: 'Show port list',
-              onTap: preview == null
-                  ? null
-                  : () {
-                      preview.deselectPort();
-                      setState(() {
-                        _webViewController = null;
-                        _origin = '';
-                        _canGoBack = false;
-                        _canGoForward = false;
-                      });
-                    },
+              onTap: preview == null ? null : _showPortList,
             ),
             AbIconButton(
               icon: AbIcons.chevronLeft,

@@ -219,6 +219,22 @@ abstract final class AbTokens {
   static const bottomNavHeight = 56.0;
   static const collapsedStripWidth = 36.0;
 
+  /// Ceiling for the centred session-search field AND the result popup hung
+  /// under it. The field shrinks below this on a narrow window; the cap stops a
+  /// wide one turning a search box into the widest thing in the title bar. The
+  /// popup measures its own width off the field, so this bounds them together.
+  static const sessionSearchWidth = 560.0;
+
+  /// Height at which the search popup stops growing and starts scrolling.
+  static const sessionSearchPopupMaxHeight = 420.0;
+
+  /// Floors for a popup measured off its field. The panel takes the field's
+  /// width and whatever height is free beneath it, so a squeezed title bar or a
+  /// raised keyboard would otherwise shrink it to a sliver; below these it
+  /// overhangs instead, which at least keeps rows reachable.
+  static const sessionSearchPopupMinWidth = 280.0;
+  static const sessionSearchPopupMinHeight = 160.0;
+
   // Standard row heights — all toolbars/headers must use one of these.
   static const rowHeightXs =
       28.0; // compact filter fields (floor: 24px clear btn)

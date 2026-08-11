@@ -19,6 +19,7 @@ final _kFollowSystemBrightness = scopedStorageKey(
   'antgrid.follow_system_brightness.v1',
 );
 final _kTelemetryEnabled = scopedStorageKey('app.telemetry.enabled');
+final _kSidebarHidden = scopedStorageKey('antgrid.sidebar_hidden.v1');
 
 /// Every key AppSettings persists. The WithCache instance backing app settings
 /// must allow exactly these — reads/writes of any other key throw.
@@ -33,6 +34,7 @@ final appSettingsPrefsKeys = <String>{
   _kReduceMotion,
   _kFollowSystemBrightness,
   _kTelemetryEnabled,
+  _kSidebarHidden,
 };
 
 @immutable
@@ -48,6 +50,7 @@ class AppSettings {
     this.reduceMotion = false,
     this.followSystemBrightness = false,
     this.telemetryEnabled = true,
+    this.sidebarHidden = false,
   });
 
   final String? defaultRelayUrl;
@@ -60,6 +63,12 @@ class AppSettings {
   final bool reduceMotion;
   final bool followSystemBrightness;
   final bool telemetryEnabled;
+
+  /// Desktop projects-drawer visibility. App-wide rather than per-project (as
+  /// `ProjectPreferences.panelMode` is): the drawer is how you MOVE between
+  /// projects, so scoping its visibility to the focused one would flip it on
+  /// every switch.
+  final bool sidebarHidden;
 
   static const defaults = AppSettings();
 
@@ -75,6 +84,7 @@ class AppSettings {
     bool? reduceMotion,
     bool? followSystemBrightness,
     bool? telemetryEnabled,
+    bool? sidebarHidden,
   }) {
     return AppSettings(
       defaultRelayUrl: clearDefaultRelayUrl
@@ -90,6 +100,7 @@ class AppSettings {
       followSystemBrightness:
           followSystemBrightness ?? this.followSystemBrightness,
       telemetryEnabled: telemetryEnabled ?? this.telemetryEnabled,
+      sidebarHidden: sidebarHidden ?? this.sidebarHidden,
     );
   }
 
@@ -116,6 +127,7 @@ class AppSettings {
       followSystemBrightness:
           prefs.getBool(_kFollowSystemBrightness) ?? false,
       telemetryEnabled: prefs.getBool(_kTelemetryEnabled) ?? true,
+      sidebarHidden: prefs.getBool(_kSidebarHidden) ?? false,
     );
   }
 }
@@ -218,6 +230,11 @@ class AppSettingsService extends Notifier<AppSettings> {
     await _prefs.setBool(_kTelemetryEnabled, enabled);
   }
 
+  Future<void> setSidebarHidden(bool hidden) async {
+    state = state.copyWith(sidebarHidden: hidden);
+    await _prefs.setBool(_kSidebarHidden, hidden);
+  }
+
   Future<void> reset() async {
     state = AppSettings.defaults;
     await Future.wait([
@@ -231,6 +248,7 @@ class AppSettingsService extends Notifier<AppSettings> {
       _prefs.remove(_kReduceMotion),
       _prefs.remove(_kFollowSystemBrightness),
       _prefs.remove(_kTelemetryEnabled),
+      _prefs.remove(_kSidebarHidden),
     ]);
   }
 }

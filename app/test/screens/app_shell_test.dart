@@ -99,5 +99,14 @@ void main() {
 
       expect(find.byType(WorkspaceShell), findsOneWidget);
     });
+
+    // AppBackScope owns the app's ONLY PopScope. A second one on the same route
+    // would double-handle every system back press.
+    testWidgets('mounts exactly one PopScope', (tester) async {
+      await tester.pumpWidget(buildTestShell(width: 400));
+      await tester.pump();
+
+      expect(find.byType(PopScope<Object?>), findsOneWidget);
+    });
   });
 }

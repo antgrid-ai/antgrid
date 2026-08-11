@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
+import '../design/ab_icons.dart';
 import '../design/widgets/ab_icon.dart';
+import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_separator.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
 import 'workspace_tab_bar.dart';
@@ -11,11 +14,17 @@ class MobileBottomNav extends StatelessWidget {
     super.key,
     required this.selected,
     required this.onSelected,
+    this.onOpenDrawer,
     this.badges = const {},
   });
 
   final WorkspaceView selected;
   final ValueChanged<WorkspaceView> onSelected;
+
+  /// Jumps to the projects drawer page. The swipe chain (workspace → agent →
+  /// drawer) is the primary route; this is the discoverable one, and it skips
+  /// the intermediate agent page.
+  final VoidCallback? onOpenDrawer;
 
   /// Same map the desktop [WorkspaceTabBar] renders. Mobile is the surface
   /// Handler exists for, and its `NEEDS YOU` pill lives in the agent header —
@@ -33,6 +42,22 @@ class MobileBottomNav extends StatelessWidget {
       ),
       child: Row(
         children: [
+          if (onOpenDrawer != null) ...[
+            // Fixed width, outside the Expanded tabs: it is not a view, so it
+            // must not take an equal share or read as a sixth tab.
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: AbTokens.space10),
+              child: AbIconButton(
+                icon: AbIcons.menu,
+                tooltip: 'Projects',
+                onTap: onOpenDrawer,
+              ),
+            ),
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: AbTokens.space10),
+              child: AbSeparator.vertical(),
+            ),
+          ],
           for (final view in WorkspaceView.values)
             Expanded(
               child: _NavItem(

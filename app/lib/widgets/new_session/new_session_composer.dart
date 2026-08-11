@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -74,6 +76,12 @@ const double _composerRowRoomyMinWidth = 460;
 /// branch on the line no matter how pathological the machine and project names
 /// get.
 const double _chipLabelCapFraction = 0.3;
+
+/// Room the branch chip is guaranteed on the context row: enough to render its
+/// glyph, its chevron and a readable stub of the ref. The row hands the branch
+/// its remainder, and a fraction-only cap can leave a remainder below the
+/// chip's own chrome — which is a render overflow, not a truncation.
+const double _branchChipFloor = kComposerChipFullMinWidth;
 
 class NewSessionComposer extends ConsumerStatefulWidget {
   const NewSessionComposer({
@@ -392,28 +400,63 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
               //     intrinsic below that cap so the branch keeps the TRUE
               //     remainder — flexing all three instead would strand each
               //     one's unused share and truncate the branch early;
-              //   - the worktree chip never shrinks: its label is a constant,
-              //     and it is the only word the chip has.
+              //   - the worktree chip keeps its word until keeping it would
+              //     starve the branch, then falls back to its state glyph: the
+              //     word is a constant the tooltip repeats, the branch name
+              //     isn't.
               child: LayoutBuilder(
                 builder: (context, rowConstraints) {
-                  final cap = BoxConstraints(
-                    maxWidth: rowConstraints.maxWidth * _chipLabelCapFraction,
+                  const gaps = AbTokens.space6 * 3;
+                  // Guards against Infinity - Infinity = NaN below: the only
+                  // production ancestor bounds this row (see
+                  // new_session_content.dart's ConstrainedBox), but an
+                  // unbounded one must degrade the chips to their narrowest
+                  // state rather than poison every constraint downstream.
+                  final row = rowConstraints.maxWidth.isFinite
+                      ? rowConstraints.maxWidth
+                      : 0.0;
+                  // The cap is a fraction of the row, but never more than what
+                  // is left once the branch holds its floor and the worktree
+                  // chip its glyph. The fraction alone is not enough: on a
+                  // phone two long labels claiming it left the branch a
+                  // remainder below its own chrome, which renders as an
+                  // overflow, not as a truncation.
+                  final cap = math.max(
+                    0.0,
+                    math.min(
+                      row * _chipLabelCapFraction,
+                      (row -
+                              gaps -
+                              kComposerChipGlyphWidth -
+                              _branchChipFloor) /
+                          2,
+                    ),
                   );
+                  // Whatever the caps left above the branch's floor: enough for
+                  // the worktree chip's word, or it falls back to its glyph.
+                  final worktreeMax = math.max(
+                    0.0,
+                    row - gaps - cap * 2 - _branchChipFloor,
+                  );
+                  final capBox = BoxConstraints(maxWidth: cap);
                   return Row(
                     children: [
                       ConstrainedBox(
-                        constraints: cap,
+                        constraints: capBox,
                         child: const EnvironmentChip(),
                       ),
                       const SizedBox(width: AbTokens.space6),
                       ConstrainedBox(
-                        constraints: cap,
+                        constraints: capBox,
                         child: ProjectChip(onOpenFolder: widget.onOpenFolder),
                       ),
                       const SizedBox(width: AbTokens.space6),
                       const Flexible(child: BranchChip()),
                       const SizedBox(width: AbTokens.space6),
-                      const _WorktreeChip(),
+                      ConstrainedBox(
+                        constraints: BoxConstraints(maxWidth: worktreeMax),
+                        child: const _WorktreeChip(),
+                      ),
                     ],
                   );
                 },

@@ -84,6 +84,59 @@ class PreferencesService {
     }
   }
 
+  /// Drops every project's persisted preferences. Used by hard sign-out: the
+  /// expanded paths and selected file are a map of the previous account's
+  /// repositories, so they must not survive into the next sign-in.
+  ///
+  /// Cancels the pending debounce WITHOUT flushing it — a `_save()` in flight
+  /// would rewrite the very entry being deleted — and resets the in-memory
+  /// state, which is the source `_save()` re-encodes from.
+  Future<void> clearAll() async {
+    _debounceTimer?.cancel();
+    _debounceTimer = null;
+    _allPrefs = {};
+    _projectId = null;
+    _current = const ProjectPreferences();
+    _loaded = true;
+    if (!_controller.isClosed) _controller.add(_current);
+    try {
+      final file = await _getFile();
+      if (await file.exists()) await file.delete();
+    } catch (_) {
+      // Best-effort: the in-memory reset above already stops the stale prefs
+      // from being served or rewritten this launch.
+    }
+  }
+
+  /// Drops persisted preferences for every project [isLocal] rejects (i.e.
+  /// every REMOTE project), preserving entries [isLocal] accepts. Used by hard
+  /// sign-out: the account it purges owns the remote projects, not the ones
+  /// opened from a local folder on this machine, so those must survive.
+  ///
+  /// Cancels the pending debounce WITHOUT flushing it, same reasoning as
+  /// [clearAll]: a `_save()` in flight would rewrite entries this is deleting.
+  /// [_readAll] guarantees [_allPrefs] holds every project ever saved, not
+  /// just the currently loaded one, before the filter runs.
+  Future<void> clearAccountScoped(bool Function(String projectId) isLocal) async {
+    _debounceTimer?.cancel();
+    _debounceTimer = null;
+    await _readAll();
+    _allPrefs.removeWhere((id, _) => !isLocal(id));
+    final id = _projectId;
+    if (id != null && !isLocal(id)) {
+      _projectId = null;
+      _current = const ProjectPreferences();
+      if (!_controller.isClosed) _controller.add(_current);
+    }
+    try {
+      final file = await _getFile();
+      await file.writeAsString(jsonEncode(_allPrefs));
+    } catch (_) {
+      // Best-effort, same as clearAll: the in-memory filter above already
+      // stops the purged entries from being served or rewritten this launch.
+    }
+  }
+
   Future<void> flush() => _flushIfPending();
 
   Future<void> _flushIfPending() async {

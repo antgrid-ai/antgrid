@@ -40,11 +40,20 @@ class AbIconButton extends StatefulWidget {
     this.tooltip,
     this.boxSize,
     this.glyphSize,
+    this.selected = false,
   });
 
   final String icon;
   final VoidCallback? onTap;
   final AbIconButtonTone tone;
+
+  /// Latches the button ON: filled background and accent glyph, held until
+  /// something turns it off. For controls whose effect OUTLIVES the tap — a
+  /// popup pinned open, a mode left engaged — where the user otherwise has only
+  /// the effect itself to infer the state from, and none to infer it from when
+  /// the effect is off screen. Hover, which the pointer takes away with it,
+  /// deliberately does not look like this.
+  final bool selected;
 
   /// Overrides [tone] when provided. Prefer [tone] for consistency.
   final Color? color;
@@ -81,8 +90,15 @@ class _AbIconButtonState extends State<AbIconButton> {
 
   @override
   Widget build(BuildContext context) {
+    final p = context.antgrid;
     final disabled = widget.onTap == null;
-    final glyphColor = widget.color ?? _toneColor();
+    final on = widget.selected && !disabled;
+    final glyphColor = widget.color ?? (on ? p.accent : _toneColor());
+    // Selected outranks hover: the pointer resting on an already-lit button
+    // must not read as a second, different state.
+    final background = on
+        ? p.bgSelected
+        : (_hovered && !disabled ? p.bgElevated : const Color(0x00000000));
 
     // Chrome scales with type. Without this the glyph stays 14px and the box
     // 24px next to text the user asked to double, so the icon shrinks
@@ -99,9 +115,7 @@ class _AbIconButtonState extends State<AbIconButton> {
       dimension: boxSize,
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: _hovered && !disabled
-              ? context.antgrid.bgElevated
-              : const Color(0x00000000),
+          color: background,
           borderRadius: AbTokens.borderRadius3,
         ),
         child: Center(

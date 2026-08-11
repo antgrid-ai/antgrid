@@ -587,6 +587,7 @@ class AgentSessionService {
     }
     final turn = _turnById(end.sessionId, end.turnId);
     if (turn == null) return;
+    _cancelFallbacks.remove(end.sessionId)?.cancel();
     _setState(
       end.sessionId,
       stateFor(end.sessionId).copyWith(
@@ -615,18 +616,44 @@ class AgentSessionService {
     );
   }
 
+  // Bounds how long the working indicator can keep pulsing after cancel() —
+  // if agent:turn-end never lands (dropped frame, dead socket, reconnect
+  // race), the turn is force-closed locally instead of blinking forever.
+  static const _cancelFallbackDelay = Duration(seconds: 5);
+  final Map<String, Timer> _cancelFallbacks = {};
+
   /// Ask the bridge to stop the turn this client currently renders as running.
   ///
   /// Sends the turnId so the bridge can answer even when it has no live turn:
   /// it replies with that turn's `agent:turn-end`, which is what lets the UI
   /// recover from a lost turn-end instead of showing a turn that never closes.
+  /// A local fallback timer closes the turn anyway if that reply never
+  /// arrives, so the working indicator can't outlive the user's cancel.
   void cancel(String sessionId) {
+    final turnId = stateFor(sessionId).openTurn?.turnId;
     session.send(
       createAbMessage('agent:cancel', {
         'sessionId': sessionId,
-        'turnId': ?stateFor(sessionId).openTurn?.turnId,
+        'turnId': ?turnId,
       }),
     );
+    if (turnId == null) return;
+    _cancelFallbacks.remove(sessionId)?.cancel();
+    _cancelFallbacks[sessionId] = Timer(_cancelFallbackDelay, () {
+      _cancelFallbacks.remove(sessionId);
+      if (_disposed) return;
+      final turn = _turnById(sessionId, turnId);
+      if (turn == null || turn.stopReason != null) return;
+      _setState(
+        sessionId,
+        stateFor(sessionId).copyWith(
+          turns: _replaceTurn(
+            sessionId,
+            turn.copyWith(stopReason: 'cancelled', endedAt: DateTime.now()),
+          ),
+        ),
+      );
+    });
   }
 
   /// Stop one background task. The bridge routes this to the driver's native
@@ -842,6 +869,10 @@ class AgentSessionService {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    for (final t in _cancelFallbacks.values) {
+      t.cancel();
+    }
+    _cancelFallbacks.clear();
     for (final id in _hydratedSessions) {
       session.unhydrate('transcript:$id');
     }

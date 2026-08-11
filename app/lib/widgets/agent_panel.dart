@@ -40,6 +40,7 @@ import 'session_agent_mark.dart';
 import 'session_mode_control.dart';
 import 'session_rename_dialog.dart';
 import 'window_title_bar.dart';
+import 'workspace_menu_button.dart';
 
 class AgentPanel extends ConsumerWidget {
   const AgentPanel({super.key});
@@ -66,29 +67,34 @@ class AgentPanel extends ConsumerWidget {
 
     return Column(
       children: [
-        // Desktop replaced the old shared header with the window title bar,
-        // but on mobile no title bar mounts, so the drawer button and
-        // project/session context (breadcrumb, branch pill) must survive here.
+        // Two headers, one layout: mobile needs a button for its slide-in
+        // drawer, desktop toggles that drawer from the window title bar
+        // instead. Both carry the same session context (breadcrumb, branch
+        // pill, agent mark, mode, handler) — the title bar yields the controls
+        // while either is up (see agentBarMountedProvider) and never renders
+        // the name at all.
         if (MediaQuery.sizeOf(context).width < kCompactBreakpoint)
           AbToolbar.custom(
             children: [
-              Builder(
-                builder: (innerCtx) => AbIconButton(
-                  icon: AbIcons.menu,
-                  tooltip: 'Projects',
-                  onTap: () => Scaffold.of(innerCtx).openDrawer(),
-                ),
+              // Via provider, not Scaffold.of: the mobile drawer is a PageView
+              // page, so there is no ScaffoldState holding it.
+              AbIconButton(
+                icon: AbIcons.menu,
+                tooltip: 'Projects',
+                onTap: ref.watch(openDrawerProvider),
               ),
               const SizedBox(width: AbTokens.space6),
-              const Expanded(child: TitleBarBreadcrumb()),
-              const SizedBox(width: AbTokens.space8),
               const SessionAgentMark(),
+              const SizedBox(width: AbTokens.space8),
+              const Expanded(child: TitleBarBreadcrumb()),
               const SizedBox(width: AbTokens.space6),
               const SessionModeControl(),
               const SizedBox(width: AbTokens.space8),
               const HandlerHeaderControl(),
             ],
-          ),
+          )
+        else
+          const AgentBar(),
         Expanded(
           child: isChat
               // Keyed by session so switching sessions rebuilds the State —
@@ -106,6 +112,46 @@ class AgentPanel extends ConsumerWidget {
         const HandlerAwayHint(),
         const HandlerPaBar(),
         const CommandTray(),
+      ],
+    );
+  }
+}
+
+/// The agent panel's desktop header, mirroring `WorkspaceTabBar` across the
+/// resizable divider: same height, same background, so the two read as one
+/// continuous strip.
+///
+/// Where the workspace side puts tabs, this side puts the session's identity —
+/// the breadcrumb and branch pill the window title bar used to carry. Moving
+/// them here is what makes them sit above the transcript they describe rather
+/// than above the whole window.
+///
+/// Carries none of the pane-resizing controls, unlike the workspace side: the
+/// agent is the PRIMARY view, so every panel mode either shows it or leaves a
+/// tappable collapsed strip in its place, and every affordance that resizes a
+/// pane already lives on a surface that stays mounted in every mode — the
+/// workspace tab bar, and the window title bar's sidebar and panel controls.
+///
+/// The one exception is [WorkspaceMenuButton], which selects a view rather than
+/// sizing a pane: it is a shortcut into the context panel's five tabs from the
+/// bar the user is already looking at, and it stays reachable in the panel modes
+/// where the tab strip is off screen.
+class AgentBar extends StatelessWidget {
+  const AgentBar({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return AbToolbar.custom(
+      children: [
+        const SessionAgentMark(),
+        const SizedBox(width: AbTokens.space8),
+        const Expanded(child: TitleBarBreadcrumb()),
+        const SizedBox(width: AbTokens.space6),
+        const SessionModeControl(),
+        const SizedBox(width: AbTokens.space8),
+        const HandlerHeaderControl(),
+        const SizedBox(width: AbTokens.space6),
+        const WorkspaceMenuButton(),
       ],
     );
   }
@@ -263,15 +309,15 @@ class HandlerHeaderControl extends ConsumerWidget {
     final pill = pillLabel == null
         ? null
         : pillNavigates
-            ? MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: () => ref.read(revealHandlerTabProvider)?.call(),
-                  child: AbChip.system(label: pillLabel, color: pillColor),
-                ),
-              )
-            : AbChip.system(label: pillLabel, color: pillColor);
+        ? MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => ref.read(revealHandlerTabProvider)?.call(),
+              child: AbChip.system(label: pillLabel, color: pillColor),
+            ),
+          )
+        : AbChip.system(label: pillLabel, color: pillColor);
 
     // No armable focus target: hide the shield but keep the project-wide
     // NEEDS YOU pill reachable.

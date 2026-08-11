@@ -6,6 +6,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/main.dart';
 import 'package:antgrid/providers/auth.dart';
+import 'package:antgrid/providers/device_revocation.dart';
+import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/screens/app_shell.dart';
 import 'package:antgrid/screens/sign_in_screen.dart';
 import 'package:antgrid/screens/upgrade_screen.dart';
@@ -28,13 +30,26 @@ void main() {
     required double width,
     bool signedIn = false,
     String tier = 'pro',
+    bool revoked = false,
+    bool settledUser = false,
   }) {
     return ProviderScope(
       overrides: [
         ...stores.overrides,
-        currentUserProvider.overrideWith(
-          (_) async => signedIn ? _user(tier: tier) : null,
-        ),
+        revokedNoticeProvider.overrideWith(() => ValueController(revoked)),
+        // A FutureProvider whose create returns synchronously is `AsyncData`
+        // from the very first read, so a `ref.listen` on it never observes a
+        // change — which is exactly the state a failed sign-out teardown
+        // leaves behind. The default async form resolves a frame later and
+        // does fire the listener.
+        if (settledUser)
+          currentUserProvider.overrideWith(
+            (_) => signedIn ? _user(tier: tier) : null,
+          )
+        else
+          currentUserProvider.overrideWith(
+            (_) async => signedIn ? _user(tier: tier) : null,
+          ),
         hasStoredSessionProvider.overrideWith((_) async => signedIn),
         nativeUpgradePlatformProvider.overrideWith((_) => true),
       ],
@@ -103,6 +118,51 @@ void main() {
 
       expect(find.byType(AppShell), findsOneWidget);
       expect(find.byType(SignInScreen), findsNothing);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  // The one exception to "desktop is never gated". Same inputs as the test
+  // above — which lands in AppShell — plus the revoked notice: a device the
+  // account revoked has no credentials left, so leaving it in the shell would
+  // show a workspace it can no longer reach.
+  testWidgets('a revoked desktop device is forced to SignInScreen', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    try {
+      await tester.pumpWidget(
+        buildApp(width: 800, signedIn: false, revoked: true),
+      );
+      await tester.pump();
+
+      expect(find.byType(SignInScreen), findsOneWidget);
+      expect(find.byType(AppShell), findsNothing);
+      // The plain sign-in screen is the whole remedy — no revocation copy.
+      expect(find.textContaining('revoked'), findsNothing);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  // A `hardSignOut` that throws never reaches performHardSignOut's
+  // invalidations, so currentUserProvider stays settled and non-null — while
+  // handleDeviceRevoked has already raised the notice from its `finally`. The
+  // sign-in screen's `ref.listen` fires only on CHANGE, so without the mount
+  // check the notice pins the root here with nothing able to retire it.
+  testWidgets('a revoked device with a surviving session is not stuck', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    try {
+      await tester.pumpWidget(
+        buildApp(width: 800, signedIn: true, revoked: true, settledUser: true),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(SignInScreen), findsNothing);
+      expect(find.byType(AppShell), findsOneWidget);
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }

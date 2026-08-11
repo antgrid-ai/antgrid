@@ -92,6 +92,28 @@ class CachedSessionsStore {
     _scheduleFlush();
   }
 
+  /// Drops every cached session, label and status in one shot. Used by hard
+  /// sign-out: the whole cache describes machines reachable under the account
+  /// that is going away, so a re-sign-in (possibly as a DIFFERENT user) must not
+  /// find another account's session names and project labels already on screen.
+  ///
+  /// Flushes synchronously rather than leaving it to the debounce — sign-out's
+  /// next steps drop the credentials, and a timer that fires after the app is
+  /// signed out is not something the caller can wait on.
+  Future<void> clear() async {
+    final cleared = _mem.keys.toList(growable: false);
+    _mem.clear();
+    _labels.clear();
+    _statuses.clear();
+    _entriesDirty = true;
+    _labelsDirty = true;
+    _statusesDirty = true;
+    for (final entryId in cleared) {
+      if (!_changes.isClosed) _changes.add(entryId);
+    }
+    await flushNow();
+  }
+
   /// Last-seen human project label for [entryId], or `null` if never observed.
   String? label(String entryId) => _labels[entryId];
 

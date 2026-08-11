@@ -82,7 +82,7 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
       case DeleteAccountResult.ok:
         // Full local teardown + provider invalidation; the root re-renders in
         // its signed-out state (sign-in screen on mobile).
-        await performHardSignOut(ref);
+        await performHardSignOut(ref.container);
       case DeleteAccountResult.blockedBySubscription:
         final go = await AbConfirmDialog.show(
           context: context,

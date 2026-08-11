@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../ab_colors.dart';
 import '../ab_icons.dart';
+import '../ab_status_tone.dart';
 import '../ab_tokens.dart';
 import 'ab_icon.dart';
 import 'ab_status_pill.dart';
@@ -71,20 +72,13 @@ class _AbAgentTabState extends State<AbAgentTab>
     super.dispose();
   }
 
-  Color _dotColor(AbColors p) {
-    switch (widget.status) {
-      case AbAgentStatus.idle:
-        return p.statusIdle;
-      case AbAgentStatus.thinking:
-        return p.statusThinking;
-      case AbAgentStatus.running:
-        return p.statusRunning;
-      case AbAgentStatus.attention:
-        return p.statusAttention;
-      case AbAgentStatus.error:
-        return p.error;
-    }
-  }
+  AbStatusTone get _tone => switch (widget.status) {
+    AbAgentStatus.idle => AbStatusTone.agentIdle,
+    AbAgentStatus.thinking => AbStatusTone.agentThinking,
+    AbAgentStatus.running => AbStatusTone.agentRunning,
+    AbAgentStatus.attention => AbStatusTone.agentAttention,
+    AbAgentStatus.error => AbStatusTone.danger,
+  };
 
   bool get _pulses =>
       widget.status == AbAgentStatus.thinking ||
@@ -144,14 +138,17 @@ class _AbAgentTabState extends State<AbAgentTab>
                     width: 6,
                     height: 6,
                     decoration: BoxDecoration(
-                      color: _dotColor(p),
+                      color: _tone.color(context),
                       borderRadius: AbTokens.borderRadiusFull,
                     ),
                   ),
                 ),
               ),
               const SizedBox(width: 6),
-              Text(widget.name, style: TextStyle(fontSize: AbTokens.fontMd, color: fg)),
+              Text(
+                widget.name,
+                style: TextStyle(fontSize: AbTokens.fontMd, color: fg),
+              ),
               if (widget.duration != null) ...[
                 const SizedBox(width: 6),
                 Text(

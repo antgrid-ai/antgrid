@@ -23,6 +23,12 @@ abstract final class AbIcons {
   // CURRENT state (filled edge = pane showing), not the result of clicking.
   static const layoutSidebarRight = Codicon.layout_sidebar_right;
   static const layoutSidebarRightOff = Codicon.layout_sidebar_right_off;
+  static const layoutSidebarLeft = Codicon.layout_sidebar_left;
+  static const layoutSidebarLeftOff = Codicon.layout_sidebar_left_off;
+  // The workspace views as one thing, for the agent bar's menu into them.
+  // Deliberately not a sidebar glyph: in chat mode there is no pane to point
+  // at — the views arrive as a floating card.
+  static const workspace = Codicon.layout;
   static const back = Codicon.arrow_left;
   static const chevronLeft = Codicon.chevron_left;
   static const chevronRight = Codicon.chevron_right;

@@ -11,7 +11,14 @@ export interface InternalRouteDeps {
   relayInternalSecret: string;
 }
 
-const RevokeBody = z.object({ deviceId: z.string().min(1).max(128) });
+// `userId` is optional for version skew only (a web deployed before this
+// relay): present, it scopes the revoke to one account, which is what a
+// deviceId shared by two accounts requires. Absent, we fall back to the old
+// unscoped behaviour rather than refusing the revoke.
+const RevokeBody = z.object({
+  deviceId: z.string().min(1).max(128),
+  userId: z.string().min(1).max(256).optional(),
+});
 const ExpireBody = z.object({ userId: z.string().min(1).max(256) });
 const ListConnectionsBody = z.object({
   issuedAt: z.number().int(),
@@ -91,18 +98,30 @@ export async function handleRevoke(req: Request, deps: InternalRouteDeps): Promi
     if (verified.response.status === 401) logger.warn("license_revoke.bad_signature", {});
     return verified.response;
   }
-  const { deviceId } = verified.data;
-  deps.licenseCache.markRevoked(deviceId);
+  const { deviceId, userId } = verified.data;
+  deps.licenseCache.markRevoked(deviceId, userId);
   // Every socket the account device holds, not just `getByDeviceId(deviceId)`:
   // an app registers one per-machine slot (`<deviceId>#<machine>`) per machine
   // it controls, so a bare-id lookup would leave a revoked phone's live E2E
   // sessions routing until it chose to disconnect.
-  const conns = deps.connections.getByAccountDevice(deviceId);
+  //
+  // Then narrowed to the revoking account: a deviceId is unique per ACCOUNT,
+  // not globally, so the same one can be live under a second user who revoked
+  // nothing (see RevokeBody). Connections past hello always carry `claims`;
+  // one without them has no proven account, so it cannot be the target.
+  const conns = deps.connections
+    .getByAccountDevice(deviceId)
+    .filter((c) => userId === undefined || c.claims?.uid === userId);
   let closed = 0;
   for (const conn of conns) {
     if (closeWithLicense(conn, "LICENSE_REVOKED")) closed += 1;
   }
-  logger.info("license_revoke", { deviceId, wsClosed: closed > 0, socketsClosed: closed });
+  logger.info("license_revoke", {
+    deviceId,
+    scoped: userId !== undefined,
+    wsClosed: closed > 0,
+    socketsClosed: closed,
+  });
   return Response.json({ ok: true });
 }
 

@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { answerRequest, initialWorkStatus, reduceWorkStatus, turnStart, userReply, type WorkStatusState } from "../src/work-status";
+import { answerRequest, closeTurn, initialWorkStatus, reduceWorkStatus, turnStart, userReply, type WorkStatusState } from "../src/work-status";
 import type { AbMessage } from "../src/protocol";
 
 function push(notificationType: string, sessionId?: string): AbMessage {
@@ -92,6 +92,39 @@ test("a turn-end notification closes the hook-opened turn (terminal-mode session
   expect(working.status).toBe("working");
   const ended = reduceWorkStatus(working, push("task_complete", "r0"));
   expect(ended.activeTurns.has("r0")).toBe(false);
+});
+
+test("closeTurn ends a hook-based session's turn on a bare Esc, with no stop hook required", () => {
+  // Terminal-mode sessions have no cancel RPC — project-core's onInterrupt
+  // (agent-core's isInterruptKeystroke) calls closeTurn directly the instant
+  // the user presses Esc, rather than waiting on a Stop hook most CLIs never
+  // fire for a manual interrupt.
+  const working = turnStart(fold([sessions(1)]), "r0");
+  expect(working.status).toBe("working");
+  const interrupted = closeTurn(working, "r0");
+  expect(interrupted.status).toBe("done");
+  expect(interrupted.activeTurns.has("r0")).toBe(false);
+});
+
+test("closeTurn also clears whatever the session was blocked on", () => {
+  const blocked = fold([sessions(1), turnStartFrame("r0"), push("permission_request", "r0")]);
+  expect(blocked.status).toBe("attention");
+  expect(closeTurn(blocked, "r0").status).toBe("done");
+});
+
+test("closeTurn on a session with nothing open is a no-op (SAME object)", () => {
+  const idle = fold([sessions(1)]);
+  expect(closeTurn(idle, "r0")).toBe(idle);
+  // A late/duplicate Esc after the turn already closed is also a no-op.
+  const done = fold([sessions(1), turnStartFrame("r0"), turnEndFrame("r0")]);
+  expect(closeTurn(done, "r0")).toBe(done);
+});
+
+test("closeTurn leaves a sibling session's turn running", () => {
+  const s = fold([sessions(2), turnStartFrame("r0"), turnStartFrame("r1")]);
+  const interrupted = closeTurn(s, "r0");
+  expect(interrupted.sessionStatuses.get("r0")).toBe("done");
+  expect(interrupted.sessionStatuses.get("r1")).toBe("working");
 });
 
 test("awaiting_input yields attention when the turn hasn't resolved yet (a genuine mid-turn block)", () => {

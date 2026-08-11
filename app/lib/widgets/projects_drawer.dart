@@ -2,7 +2,6 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../design/ab_icons.dart';
@@ -16,7 +15,6 @@ import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_menu.dart';
-import '../design/widgets/ab_search_field.dart';
 import '../design/widgets/ab_tap_target.dart';
 import '../models/drawer_entry.dart';
 import '../models/session_target.dart';
@@ -42,45 +40,16 @@ import 'update_row.dart';
 /// Always-visible (desktop) / slide-in (mobile) drawer listing local projects
 /// and paired remote agents merged by last-access. Width is fixed at 288px on
 /// desktop; on mobile it fills the natural Scaffold drawer width.
-class ProjectsDrawer extends ConsumerStatefulWidget {
-  const ProjectsDrawer({super.key, this.searchFocusNode});
-  final FocusNode? searchFocusNode;
+class ProjectsDrawer extends ConsumerWidget {
+  const ProjectsDrawer({super.key});
 
   @override
-  ConsumerState<ProjectsDrawer> createState() => _ProjectsDrawerState();
-}
-
-class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
-  late final TextEditingController _searchController;
-  // Only created when the parent didn't pass one in. Skipping the allocation
-  // when WorkspaceShell owns the focus node (the common case).
-  FocusNode? _ownedFocusNode;
-
-  @override
-  void initState() {
-    super.initState();
-    _searchController = TextEditingController(
-      text: ref.read(drawerFilterProvider),
-    );
-    if (widget.searchFocusNode == null) {
-      _ownedFocusNode = FocusNode();
-    }
-  }
-
-  @override
-  void dispose() {
-    _searchController.dispose();
-    _ownedFocusNode?.dispose();
-    super.dispose();
-  }
-
-  FocusNode get _focusNode => widget.searchFocusNode ?? _ownedFocusNode!;
-
-  @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Unfiltered by design. The session search lives in the window title bar
+    // and aims at the Recent list, which is the complete flat view of sessions;
+    // narrowing THIS list by its projects' sessions only hid rows the user was
+    // looking straight at.
     final entries = ref.watch(drawerEntriesProvider);
-    final filter = ref.watch(drawerFilterProvider);
-    final filtered = filterDrawerEntries(entries, filter);
 
     return MenuBoundsScope(
       child: Container(
@@ -96,25 +65,24 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
           children: [
             const _Header(),
             const _NavActions(),
-            _GroupLabel(label: 'PROJECTS', count: filtered.length),
-            _SearchField(
-              controller: _searchController,
-              focusNode: _focusNode,
-              onChanged: (q) => ref.read(drawerFilterProvider.notifier).set(q),
-              onClear: () {
-                _searchController.clear();
-                ref.read(drawerFilterProvider.notifier).set('');
-              },
-            ),
-            Expanded(
-              child: _Body(entries: filtered, hasFilter: filter.isNotEmpty),
-            ),
+            _GroupLabel(label: 'PROJECTS', count: entries.length),
+            Expanded(child: _Body(entries: entries)),
             const UpdateRow(),
             const _Footer(),
           ],
         ),
       ),
     );
+  }
+}
+
+/// Mobile: the drawer is a slide-in overlay, so an action that navigates
+/// elsewhere must dismiss it or the destination stays hidden behind it. No-op on
+/// desktop, where the drawer is always-on chrome rather than a route.
+void closeDrawerIfOverlay(BuildContext context) {
+  final scaffold = Scaffold.maybeOf(context);
+  if (scaffold?.hasDrawer == true && scaffold!.isDrawerOpen) {
+    Navigator.of(context).pop();
   }
 }
 
@@ -221,46 +189,6 @@ class _GroupLabel extends ConsumerWidget {
   }
 }
 
-class _SearchField extends StatelessWidget {
-  final TextEditingController controller;
-  final FocusNode focusNode;
-  final ValueChanged<String> onChanged;
-  final VoidCallback onClear;
-  const _SearchField({
-    required this.controller,
-    required this.focusNode,
-    required this.onChanged,
-    required this.onClear,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    // Magnifier glyph is field chrome, not part of the drawer row-icon
-    // column — left at the default 24px slot. Vertical gap to the next
-    // row lives on `_NavActions.top` only.
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        AbTokens.drawerGutter,
-        AbTokens.space8,
-        AbTokens.drawerGutter,
-        0,
-      ),
-      child: CallbackShortcuts(
-        bindings: {const SingleActivator(LogicalKeyboardKey.escape): onClear},
-        child: AbSearchField(
-          controller: controller,
-          focusNode: focusNode,
-          hint: 'filter…',
-          height: AbTokens.rowHeightXs,
-          debounce: null,
-          onChanged: onChanged,
-          onClear: onClear,
-        ),
-      ),
-    );
-  }
-}
-
 class _Footer extends ConsumerWidget {
   const _Footer();
 
@@ -272,8 +200,7 @@ class _Footer extends ConsumerWidget {
 
 class _Body extends ConsumerWidget {
   final List<DrawerEntry> entries;
-  final bool hasFilter;
-  const _Body({required this.entries, required this.hasFilter});
+  const _Body({required this.entries});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -289,6 +216,11 @@ class _Body extends ConsumerWidget {
 
   Widget _list(BuildContext context, WidgetRef ref) {
     if (entries.isEmpty) {
+      // Point at the real entry points rather than a nonexistent "[+]". On
+      // desktop the New Session canvas (with its "Open local folder" / "Pair
+      // remote project" cards) sits right beside this drawer, so steer there;
+      // local folders aren't supported on mobile, so name only pairing.
+      //
       // A scrollable (not a bare Center) so the pull-to-refresh gesture works
       // with zero rows — overscroll needs something scrollable to grab.
       return ListView(
@@ -296,12 +228,11 @@ class _Body extends ConsumerWidget {
         children: [
           Padding(
             padding: const EdgeInsets.symmetric(vertical: AbTokens.space24),
-            child: hasFilter
-                ? const AbEmptyState.compact(title: 'No matches.')
+            child:
                 // Mobile has no local folders — this drawer fills from machines
                 // on the account, so point there (the New Session canvas
                 // carries the full connect steps).
-                : isMobilePlatform
+                isMobilePlatform
                 ? const AbEmptyState(
                     title: 'No projects yet',
                     subtitle: 'Connect a machine to see its projects here.',
@@ -315,17 +246,6 @@ class _Body extends ConsumerWidget {
                   ),
           ),
         ],
-      );
-    }
-    // While the search filter is active, indices in `entries` no longer match
-    // the unfiltered list — fall back to a plain list so a long-press can't
-    // commit a nonsensical reorder.
-    if (hasFilter) {
-      return ListView.builder(
-        physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.only(bottom: AbTokens.space4),
-        itemCount: entries.length,
-        itemBuilder: (_, i) => _EntryWithSessions(entry: entries[i]),
       );
     }
     return ReorderableListView.builder(
@@ -594,12 +514,7 @@ class _AdvertisedProjectRow extends ConsumerWidget {
       machineUuid: machineUuid,
       project: project,
     );
-    // Mobile: the drawer is a slide-in overlay — close it so the New Session
-    // page is visible. No-op on desktop (drawer is always-on, not a route).
-    final scaffold = Scaffold.maybeOf(context);
-    if (scaffold?.hasDrawer == true && scaffold!.isDrawerOpen) {
-      Navigator.of(context).pop();
-    }
+    closeDrawerIfOverlay(context);
   }
 }
 

@@ -7,6 +7,7 @@ import '../connection/connection_supervisor.dart';
 import '../connection/relay_mechanisms.dart';
 import '../connection/supervisor_state.dart';
 import '../util/device_id.dart';
+import 'device_revocation.dart';
 import 'providers.dart';
 
 /// Owns exactly one relay socket (one [RelayService]) and its single
@@ -24,9 +25,16 @@ class RelayConnection {
   RelayConnection({
     required this.machineDeviceId,
     required CryptoService crypto,
+    this.onDeviceRevoked,
     // Test seam: inject a fake RelayService. Production passes null.
     RelayService? relayOverride,
   }) : relay = relayOverride ?? RelayService(crypto: crypto);
+
+  /// Fires when the relay tells us this device has been revoked from the
+  /// account. Distinct from the supervisor's `Blocked(deviceRevoked)`, which
+  /// only stops this machine's ladder: revocation is an ACCOUNT verdict, so the
+  /// app has to sign out, and only the provider layer can do that.
+  final void Function()? onDeviceRevoked;
 
   RelayMechanisms? _mechanisms;
   ConnectionSupervisor? _supervisor;
@@ -87,6 +95,17 @@ class RelayConnection {
     if (!_statuses.isClosed) _statuses.add(status);
   }
 
+  /// `LICENSE_REVOKED` ONLY. `LICENSE_INVALID` reaches the same supervisor
+  /// block but is a token/deviceUuid/pk binding mismatch, which a coords or
+  /// agent-pin bug produces just as easily as a real revocation — signing the
+  /// user out on it would turn a connection bug into a forced re-auth.
+  void _noteAuthCode(String? code) {
+    if (RelayLicenseErrorCode.fromWire(code) ==
+        RelayLicenseErrorCode.licenseRevoked) {
+      onDeviceRevoked?.call();
+    }
+  }
+
   /// Declare that this machine's connection is wanted, constructing the
   /// supervisor on the first call. Later calls are no-ops: the supervisor is
   /// per-machine and every project on the machine rides the same one, so the
@@ -98,8 +117,10 @@ class RelayConnection {
     if (_disposed || _supervisor != null) return;
     _mechanisms = mechanisms;
     final supervisor = _supervisor = ConnectionSupervisor(mechanisms);
-    mechanisms.onTerminalAuthError = (code) =>
-        supervisor.noteRelayError(code, retryable: false);
+    mechanisms.onTerminalAuthError = (code) {
+      _noteAuthCode(code);
+      supervisor.noteRelayError(code, retryable: false);
+    };
     mechanisms.onSessionTakenOver = supervisor.noteSessionTakenOver;
     mechanisms.onSessionDown = supervisor.noteSessionDown;
     mechanisms.onSessionReplaced = () {
@@ -120,9 +141,10 @@ class RelayConnection {
       }),
     );
     _subs.add(
-      relay.errorStream.listen(
-        (e) => supervisor.noteRelayError(e.code, retryable: e.retryable),
-      ),
+      relay.errorStream.listen((e) {
+        _noteAuthCode(e.code);
+        supervisor.noteRelayError(e.code, retryable: e.retryable);
+      }),
     );
     // One listener, mechanism first: the supervisor re-derives the ladder
     // synchronously inside notePresence and reads `mechanisms.agentOnline`
@@ -254,7 +276,13 @@ class RelayConnectionManager {
   final _changesController = StreamController<int>.broadcast();
   int _changeSeq = 0;
 
-  RelayConnectionManager({required CryptoService crypto}) : _crypto = crypto;
+  RelayConnectionManager({required CryptoService crypto, this.onDeviceRevoked})
+    : _crypto = crypto;
+
+  /// Handed to every connection this manager builds — see
+  /// [RelayConnection.onDeviceRevoked]. Any machine's socket can carry the
+  /// verdict, since it is our own device that was revoked, not theirs.
+  final void Function()? onDeviceRevoked;
 
   /// Fires whenever a connection is added to or removed from [_connections].
   ///
@@ -276,7 +304,11 @@ class RelayConnectionManager {
     final key = baseDeviceUuid(machineDeviceId);
     final existing = _connections[key];
     if (existing != null) return existing;
-    final conn = RelayConnection(machineDeviceId: key, crypto: _crypto);
+    final conn = RelayConnection(
+      machineDeviceId: key,
+      crypto: _crypto,
+      onDeviceRevoked: onDeviceRevoked,
+    );
     _connections[key] = conn;
     _notifyChanged();
     return conn;
@@ -341,7 +373,12 @@ class RelayConnectionManager {
 }
 
 final relayConnectionManagerProvider = Provider<RelayConnectionManager>((ref) {
-  final mgr = RelayConnectionManager(crypto: ref.read(cryptoServiceProvider));
+  final mgr = RelayConnectionManager(
+    crypto: ref.read(cryptoServiceProvider),
+    // `ref.container`, not `ref`: the sign-out teardown outlives this callback
+    // and reads providers across several awaits.
+    onDeviceRevoked: () => unawaited(handleDeviceRevoked(ref.container)),
+  );
   ref.onDispose(mgr.disposeAll);
   return mgr;
 });

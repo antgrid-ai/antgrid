@@ -14,9 +14,12 @@ import '../design/widgets/ab_tap_target.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_separator.dart';
 import '../models/file_tree_models.dart';
+import '../navigation/back_intent.dart';
 import '../providers/analytics.dart';
 import '../providers/providers.dart';
+import '../providers/visible_surface.dart';
 import '../services/file_service.dart';
+import '../widgets/workspace_tab_bar.dart';
 import '../widgets/diff_viewer.dart';
 import '../widgets/file_viewer_router.dart';
 import '../widgets/file_tree_view.dart';
@@ -52,28 +55,61 @@ class _GitPanelState extends ConsumerState<GitPanel> {
     final treeStateAsync = ref.watch(fileTreeStateProvider);
     final statuses =
         treeStateAsync.value?.gitFileStatuses ?? const <String, String>{};
+    final git = treeStateAsync.value?.git;
+    // watch, not the `ref.read` in [_backFromViewer]: the `active` flag has to
+    // be recomputed when this tab goes on or off screen.
+    final onScreen =
+        ref.watch(visibleWorkspaceViewProvider) == WorkspaceView.git;
 
     // Loading/error keep the same header (no back affordance) so the panel
     // chrome doesn't jump when data arrives; the data case owns its own header
     // because only it knows the active layout (see _GitPanelBody).
-    return treeStateAsync.when(
-      loading: () => _GitPanelScaffold(
-        statuses: statuses,
-        fileService: fileService,
-        body: const AbLoading(message: 'loading changes...'),
-      ),
-      error: (error, _) => _GitPanelScaffold(
-        statuses: statuses,
-        fileService: fileService,
-        body: Center(
-          child: Text(
-            'Error: $error',
-            style: TextStyle(color: context.antgrid.textMuted),
+    return BackHandler(
+      priority: BackPriority.gitViewer,
+      active: onScreen && (git?.viewingPath != null || git?.diffPath != null),
+      onBack: _backFromViewer,
+      child: treeStateAsync.when(
+        loading: () => _GitPanelScaffold(
+          statuses: statuses,
+          fileService: fileService,
+          body: const AbLoading(message: 'loading changes...'),
+        ),
+        error: (error, _) => _GitPanelScaffold(
+          statuses: statuses,
+          fileService: fileService,
+          body: Center(
+            child: Text(
+              'Error: $error',
+              style: TextStyle(color: context.antgrid.textMuted),
+            ),
           ),
         ),
+        data: (state) => _GitPanelBody(state: state, fileService: fileService),
       ),
-      data: (state) => _GitPanelBody(state: state, fileService: fileService),
     );
+  }
+
+  /// Steps out ONE level: the file opened from a diff, then the diff itself.
+  /// Deliberately unlike the compact header's back button, which clears both at
+  /// once because it means "return to the changes list".
+  bool _backFromViewer() {
+    if (ref.read(visibleWorkspaceViewProvider) != WorkspaceView.git) {
+      return false;
+    }
+    final git = ref.read(fileTreeStateProvider).value?.git;
+    if (git == null) return false;
+    // Runs outside build(): the façade throws while the session is unresolved.
+    final service = focusedServiceOrNull(ref.container, (s) => s.fileService);
+    if (service == null) return false;
+    if (git.viewingPath != null) {
+      service.clearGitViewing();
+      return true;
+    }
+    if (git.diffPath != null) {
+      service.clearDiff();
+      return true;
+    }
+    return false;
   }
 }
 

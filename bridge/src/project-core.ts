@@ -6,7 +6,7 @@ import { createRelayPromotion, type RelayPromotionController, type RelayPromotio
 import type { AttachStreamOpts, StreamHandle } from "./stream-mux";
 import { createMessage, type AbMessage, type SessionEntry, type WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
-import { answerRequest, initialWorkStatus, reduceWorkStatus, turnStart, userReply, type WorkStatusState } from "./work-status";
+import { answerRequest, closeTurn, initialWorkStatus, reduceWorkStatus, turnStart, userReply, type WorkStatusState } from "./work-status";
 import { logger } from "./logger";
 const log = logger.child({ component: "project-core" });
 import { createPushDispatcher } from "./push/push-dispatcher";
@@ -208,6 +208,13 @@ export class ProjectCore {
     this.commitWork(answerRequest(this._work, sessionId, requestId));
   }
 
+  /** The user pressed a bare Esc into [sessionId]'s PTY — close its turn now
+   *  rather than wait on a Stop hook the CLI may never fire for a manual
+   *  interrupt. See {@link closeTurn}. */
+  noteInterrupt(sessionId: string): void {
+    this.commitWork(closeTurn(this._work, sessionId));
+  }
+
   /** First register outcome of a REMOTE-mode core's primary relay slot (null in
    *  local mode, or before start()). Lets the host gate the phone-facing
    *  `running:true` advert on a real register and surface a terminal rejection
@@ -261,6 +268,7 @@ export class ProjectCore {
       onTurnStart: (sessionId) => this.noteTurnStart(sessionId),
       onUserReply: (sessionId, replyOpts) => this.noteUserReply(sessionId, replyOpts),
       onAnswer: (sessionId, requestId) => this.noteAnswer(sessionId, requestId),
+      onInterrupt: (sessionId) => this.noteInterrupt(sessionId),
       // The single source of per-session work status: SessionManager stamps it
       // onto `session:updated` from THIS reduction rather than keeping a second
       // one of its own. Read lazily — the fold that answers it runs after the

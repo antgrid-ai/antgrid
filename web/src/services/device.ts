@@ -31,6 +31,6 @@ export async function revokeUserDevice(
     await deleteDeviceOAuthClient(auth, device.oauthClientId, args.headers);
   }
   await markDeviceRevoked(db, device.id);
-  await pushRevoke(relay, device.deviceId);
+  await pushRevoke(relay, device.deviceId, args.userId);
   return "revoked";
 }

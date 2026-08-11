@@ -10,6 +10,7 @@ import '../providers/sign_out.dart';
 ///
 /// Returns `true` if the user confirmed and sign-out ran, `false` if cancelled.
 Future<bool> confirmAndHardSignOut(BuildContext context, WidgetRef ref) async {
+  final container = ref.container;
   final ok = await AbConfirmDialog.show(
     context: context,
     title: 'Sign out and remove this device?',
@@ -20,6 +21,6 @@ Future<bool> confirmAndHardSignOut(BuildContext context, WidgetRef ref) async {
     destructive: true,
   );
   if (!ok) return false;
-  await performHardSignOut(ref);
+  await performHardSignOut(container);
   return true;
 }

@@ -144,6 +144,32 @@ BoxDecoration _popupDecoration(AbColors p) {
   );
 }
 
+/// [showAbPanel]'s chrome without its route — the popup surface as a plain
+/// widget, for anchored popups that own their own overlay.
+///
+/// A [PopupRoute] closes on the first click outside it, which is right for a
+/// menu you pick from and wrong for one the user pins open; those mount this in
+/// an [OverlayPortal] instead and still read as the same popup.
+class AbPopupSurface extends StatelessWidget {
+  const AbPopupSurface({super.key, required this.child, this.width = 280});
+
+  final Widget child;
+  final double width;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      type: MaterialType.transparency,
+      child: Container(
+        constraints: BoxConstraints(maxWidth: width, minWidth: 0),
+        padding: const EdgeInsets.all(5),
+        decoration: _popupDecoration(context.antgrid),
+        child: child,
+      ),
+    );
+  }
+}
+
 /// Whether [showAbMenu] should open above or below the anchor first.
 /// If the preferred side has no room, the delegate flips to the other.
 enum AbMenuPlacement { below, above }
@@ -275,18 +301,7 @@ class _AbPanelRoute<T> extends PopupRoute<T> {
     Animation<double> secondaryAnimation,
   ) {
     final panel = Builder(
-      builder: (ctx) {
-        final p = ctx.antgrid;
-        return Material(
-          type: MaterialType.transparency,
-          child: Container(
-            constraints: BoxConstraints(maxWidth: width, minWidth: 0),
-            padding: const EdgeInsets.all(5),
-            decoration: _popupDecoration(p),
-            child: builder(ctx),
-          ),
-        );
-      },
+      builder: (ctx) => AbPopupSurface(width: width, child: builder(ctx)),
     );
     // Esc dismisses; Tab/Shift-Tab traverse the panel's focusable content
     // (e.g. PanelRow rows, gear-popover fields), kept inside the popup by the

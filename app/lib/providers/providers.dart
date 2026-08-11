@@ -670,6 +670,23 @@ final switchToAgentProvider =
       () => ValueController(null),
     );
 
+/// Callback that reveals the projects drawer. Set by whichever mobile route is
+/// mounted (WorkspaceShell or NewSessionScreen).
+///
+/// A provider rather than `Scaffold.of(context).openDrawer()` because the
+/// drawer is a PageView page on mobile, not a `Scaffold.drawer` — there is no
+/// ScaffoldState to ask. Null on desktop, where the drawer is always on screen.
+///
+/// **A route may only retract the callback it published.** The two routes hand
+/// off in one frame, and the outgoing one's deferred clear lands AFTER the
+/// incoming one's post-frame publish (post-frame callbacks drain inside the
+/// frame's task; microtasks only once it ends), so an unconditional null erases
+/// the live route's callback and leaves its drawer button disabled.
+final openDrawerProvider =
+    NotifierProvider<ValueController<VoidCallback?>, VoidCallback?>(
+      () => ValueController(null),
+    );
+
 /// The desktop context panel's visibility plus the callback that flips it.
 ///
 /// Set by WorkspaceShell (which owns panel mode) and rendered by the window
@@ -686,12 +703,64 @@ final contextPanelControlProvider =
       ({bool hidden, VoidCallback toggle})?
     >(() => ValueController(null));
 
+/// The desktop projects drawer's visibility plus the callback that flips it.
+///
+/// Published by WorkspaceShell and rendered by the window title bar for exactly
+/// the reason [contextPanelControlProvider] is: the bar mounts above every route
+/// and cannot reach that State. Null on mobile, whose drawer is a slide-in
+/// overlay with no persistent visibility to toggle, and on the New Session
+/// route, which always shows the drawer — a toggle there would claim to govern
+/// something it doesn't.
+final sidebarControlProvider =
+    NotifierProvider<
+      ValueController<({bool hidden, VoidCallback toggle})?>,
+      ({bool hidden, VoidCallback toggle})?
+    >(() => ValueController(null));
+
+/// Whether the desktop [AgentBar] is on screen, published by WorkspaceShell the
+/// same way as [contextPanelControlProvider].
+///
+/// That bar owns the session controls — agent mark, mode control, handler
+/// shield — so the window title bar must drop its copies while it is up, and
+/// take them back when it isn't: the New Session route, the settings overlay,
+/// and the collapsed-agent panel mode all render without it and would otherwise
+/// leave the session with no mode switch and no handler at all.
+///
+/// The session's NAME is deliberately not part of this handover — it lives only
+/// in the agent bar, above the transcript it names (see `TitleBarBreadcrumb`).
+final agentBarMountedProvider =
+    NotifierProvider<ValueController<bool>, bool>(() => ValueController(false));
+
+/// Whether a desktop [WorkspaceViewSurface] (Preview/Files/Git/Terminals/
+/// Handler opened full-workbench, replacing the agent/context split) is on
+/// screen, published by WorkspaceShell alongside [agentBarMountedProvider].
+///
+/// The surface brings its own header (back/close) naming the view, so unlike
+/// the New Session route or the settings overlay it must NOT have the window
+/// title bar hand the session controls back — that duplicated the agent mark,
+/// mode control and handler chip one row above a view whose own chrome already
+/// has a way back to them.
+final workspaceViewSurfaceActiveProvider =
+    NotifierProvider<ValueController<bool>, bool>(() => ValueController(false));
+
 /// Callback to reveal the Handler workspace tab (desktop: select the sidebar
 /// view; mobile: also swipe to the workspace page). Set by WorkspaceShell —
 /// same registration pattern as [switchToAgentProvider]. Typed VoidCallback
 /// rather than taking a WorkspaceView so this file doesn't import the widget
 /// layer where that enum lives.
 final revealHandlerTabProvider =
+    NotifierProvider<ValueController<VoidCallback?>, VoidCallback?>(
+      () => ValueController(null),
+    );
+
+/// Callback that resets every piece of account-derived in-memory state the
+/// always-mounted `ControlPlaneReaper` owns (agent catalog, paired/account
+/// agent lists, remote project labels/status, and the reaper's own advert
+/// bookkeeping) — set by the reaper itself. [performHardSignOut] calls this
+/// instead of hand-listing that fan-in, so a provider added to the reaper's
+/// account-derived state later can't be added to its own reset and forgotten
+/// in sign-out (or the reverse).
+final controlPlaneResetProvider =
     NotifierProvider<ValueController<VoidCallback?>, VoidCallback?>(
       () => ValueController(null),
     );

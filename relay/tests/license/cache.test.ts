@@ -36,6 +36,20 @@ describe("LicenseCache", () => {
     expect(() => c.markRevoked("missing")).not.toThrow();
   });
 
+  // One slot per deviceId, but a deviceId is unique per ACCOUNT only — two
+  // accounts on the same physical device share the slot, and the last to verify
+  // owns it. Unscoped, one account's revoke rejects the other's next hello.
+  test("markRevoked scoped to a userId leaves another account's entry alone", () => {
+    const c = new LicenseCache({ maxEntries: 4 });
+    c.set(sample({ deviceId: "shared", userId: "u2" }));
+
+    c.markRevoked("shared", "u1");
+    expect(c.get("shared")?.revoked).toBe(false);
+
+    c.markRevoked("shared", "u2");
+    expect(c.get("shared")?.revoked).toBe(true);
+  });
+
   test("dropByUser flips all entries for that user and returns deviceIds", () => {
     const c = new LicenseCache({ maxEntries: 4 });
     c.set(sample({ deviceId: "d1", userId: "u1" }));

@@ -17,9 +17,21 @@ function sign(secret: string, body: string): string {
 // hang there stacks past Bun.serve's 10s idleTimeout and 500s the whole request.
 const RELAY_PUSH_TIMEOUT_MS = 3000;
 
-export async function pushRevoke(cfg: RelayPushConfig, deviceId: string, fetchImpl: typeof fetch = fetch): Promise<void> {
+/**
+ * `userId` is not redundant with `deviceId`: the device row is unique on
+ * `[userId, deviceId]`, so the SAME deviceId legitimately exists under two
+ * accounts (one emulator or restored image signed into both). Without the
+ * account scope the relay closes every socket holding that deviceId — evicting,
+ * and now signing out, an account that revoked nothing.
+ */
+export async function pushRevoke(
+  cfg: RelayPushConfig,
+  deviceId: string,
+  userId: string,
+  fetchImpl: typeof fetch = fetch
+): Promise<void> {
   if (!cfg.baseUrl || !cfg.secret) return;
-  const body = JSON.stringify({ deviceId });
+  const body = JSON.stringify({ deviceId, userId });
   const signature = sign(cfg.secret, body);
   try {
     await fetchImpl(`${cfg.baseUrl}/internal/revoke`, {

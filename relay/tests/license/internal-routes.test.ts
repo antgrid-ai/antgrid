@@ -230,6 +230,50 @@ test("revoke: closes the agent ws 4002 with a typed LICENSE_REVOKED error first,
   r.stop();
 });
 
+// A deviceId is unique per ACCOUNT (`[userId, deviceId]` on the device row),
+// not globally: one phone image signed into two accounts produces two rows with
+// the same deviceId. Both hold app SLOTS (`<deviceId>#<machine>`), which is how
+// two of them can be live at once — a bare-id holder would have lost the pubkey
+// conflict check at hello. Revoking one account must not touch the other, which
+// the app now reads as "sign out", not merely "reconnect later".
+test("revoke: scoped by userId — a second account on the SAME deviceId keeps "
+  + "its socket and an unpoisoned cache entry", async () => {
+  const { signer, jwks } = await makeSigner();
+  const cache = new LicenseCache({ maxEntries: 100 });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
+  const r = startWith({ licenseGate: gate, licenseCache: cache });
+
+  const shared = "shared-device-uuid";
+  const mine = await helloApp({
+    relay: r, signer, deviceId: `${shared}#mach-a`, uid: "user-1",
+    azp: "client-a", tokenDeviceUuid: shared,
+  });
+  const theirs = await helloApp({
+    relay: r, signer, deviceId: `${shared}#mach-b`, uid: "user-2",
+    azp: "client-b", tokenDeviceUuid: shared,
+  });
+
+  const mineEvt = nextMessageOrClose(mine.ws);
+
+  const res = await postInternal(r.server.port!, "/internal/revoke", {
+    deviceId: shared,
+    userId: "user-1",
+  });
+  expect(res.status).toBe(200);
+
+  const result = await mineEvt;
+  expect(result.msg).toMatchObject({ type: "error", code: "LICENSE_REVOKED", retryable: false });
+  expect(result.closeCode).toBe(4002);
+
+  expect(theirs.ws.readyState).toBe(1);
+  // One cache slot per deviceId, so the two accounts share it and the last to
+  // verify owns it — flipping it unscoped would reject user-2's next hello.
+  expect(cache.get(shared)?.userId).toBe("user-2");
+  expect(cache.get(shared)?.revoked).toBe(false);
+
+  r.stop();
+});
+
 test("revoke: device not connected -> still 200, cache marked", async () => {
   const cache = new LicenseCache({ maxEntries: 100 });
   cache.set({ jti: "jti-orphan", deviceId: "dev-orphan", userId: "user-1", tier: "pro", pk: "pk-orphan", revoked: false });

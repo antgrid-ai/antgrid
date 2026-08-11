@@ -14,6 +14,7 @@ const ENTRIES = {
   htmx: "src/ui/entries/htmx.ts",
   checkout: "src/ui/entries/checkout.ts",
   dashboard: "src/ui/entries/dashboard.ts",
+  devices: "src/ui/entries/devices.ts",
 } as const;
 
 export type AssetName = keyof typeof ENTRIES;

@@ -38,9 +38,20 @@ export class LicenseCache {
     return this.entries.get(deviceId);
   }
 
-  markRevoked(deviceId: string): void {
+  /**
+   * [userId] scopes the flip to one account. Entries are keyed by deviceId
+   * alone, but a deviceId is only unique WITHIN an account (`[userId,
+   * deviceId]` on the device row), so two accounts on the same physical device
+   * share this slot — and whoever verified last owns it. Flipping it
+   * unconditionally makes one account's revoke reject the other's next hello.
+   * Omit it only for a caller that genuinely means "this deviceId, whoever
+   * holds it".
+   */
+  markRevoked(deviceId: string, userId?: string): void {
     const entry = this.entries.get(deviceId);
-    if (entry) entry.revoked = true;
+    if (!entry) return;
+    if (userId !== undefined && entry.userId !== userId) return;
+    entry.revoked = true;
   }
 
   dropByUser(userId: string): string[] {

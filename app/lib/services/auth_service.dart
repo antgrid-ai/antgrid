@@ -755,6 +755,14 @@ class AuthService {
       Uri.parse('$licenseApiUrl/account/me'),
       headers: {'cookie': cookie},
     );
+    if (res.statusCode == 401) {
+      // A definitive rejection, not a transport hiccup: drop the cookie so
+      // `hasStoredSessionProvider` stops reading true. Leaving it at rest keeps
+      // the optimistic fallback in `signedInProvider` re-asserting "signed in"
+      // on every later offline blip, for a session the server already refuses.
+      await storage.clearCookie();
+      return null;
+    }
     if (res.statusCode != 200) return null;
     final body = jsonDecode(res.body) as Map<String, dynamic>?;
     if (body == null) return null;
