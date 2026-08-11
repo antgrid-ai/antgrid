@@ -38,4 +38,17 @@ resource "azurerm_linux_virtual_machine" "main" {
     sku       = "server"
     version   = "latest"
   }
+
+  # cloud-init executes once, at first boot, so editing the template cannot
+  # change a running host. Azure still treats custom_data as immutable, so
+  # without this tofu offers to destroy and recreate the VM to "apply" a change
+  # that would have no effect — taking /srv/antgrid/.env, which exists nowhere
+  # else, and handing the rebuilt host the committed key list (see
+  # ssh_keys.auto.tfvars) rather than the key CI actually holds.
+  # To land a template change for real, replace the VM deliberately:
+  #   tofu apply -replace=azurerm_linux_virtual_machine.main
+  # and re-do the one-time .env upload afterwards.
+  lifecycle {
+    ignore_changes = [custom_data]
+  }
 }
