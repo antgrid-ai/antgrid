@@ -10,6 +10,7 @@ import '../design/ab_colors.dart';
 import '../design/widgets/ab_brand_mark.dart';
 import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_disclosure_chevron.dart';
+import '../design/widgets/ab_docked_column.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
@@ -56,28 +57,99 @@ class ProjectsDrawer extends ConsumerWidget {
     return MenuBoundsScope(
       child: Container(
         width: 288,
+        // Clipped because [AbDockedColumn] never squeezes its header: on a
+        // window too short for even that, a truncated sidebar beats chrome
+        // bleeding over the workspace beside it.
+        clipBehavior: Clip.hardEdge,
         decoration: BoxDecoration(
           color: context.antgrid.bgDeep,
           border: Border(
             right: BorderSide(color: context.antgrid.borderDefault),
           ),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const _Header(),
-            const _NavActions(),
-            _GroupLabel(label: 'PROJECTS', count: entries.length),
-            Expanded(child: _Body(entries: entries)),
-            // Docked here, not on the New Session canvas: the drawer is the
-            // only desktop surface mounted on both routes, and the last setup
-            // steps are performed from inside a session.
-            const FirstRunSetupSection(),
-            const UpdateRow(),
-            const _Footer(),
-          ],
+        // Not a Column: on a first run the chrome below the list is ~300px of
+        // fixed height, which a short window cannot pay for — and a Flex
+        // answers that by asserting, because its non-flex children are laid out
+        // unbounded. Here the list yields first and the setup section scrolls
+        // inside its own slot, so no height can overflow.
+        child: AbDockedColumn(
+          // Keeps a strip of the list on screen however short the window gets;
+          // otherwise a tall checklist leaves the sidebar showing no projects at
+          // all. Borrowed from the token scale as a floor, not a measurement:
+          // drawer rows are AbRowDensity.sm and size to their content, so this
+          // is nothing to keep in sync with them.
+          minBodyExtent: AbTokens.rowHeightLg,
+          header: _TopChrome(count: entries.length),
+          body: _Body(entries: entries),
+          // Docked here, not on the New Session canvas: the drawer is the only
+          // desktop surface mounted on both routes, and the last setup steps
+          // are performed from inside a session.
+          dock: const _SetupDock(),
+          // Both are permanent affordances, so neither may be scrolled out of
+          // reach — the update row in particular stays pending until the app
+          // restarts (see update_row.dart). The account footer is declared last
+          // so it is the last BUDGETED slot to give up a pixel; only the
+          // unbudgeted header outranks it.
+          pinned: const [UpdateRow(), _Footer()],
         ),
       ),
+    );
+  }
+}
+
+/// Fixed chrome above the project list. One slot because [AbDockedColumn]
+/// budgets per slot and none of these three may be compressed — the New Session
+/// button is the drawer's primary action.
+///
+/// This is the header slot, which is never budgeted at all, so it outranks even
+/// the pinned rows: on a panel too short for it the account footer is already
+/// gone while these three still paint whole, and the drawer's clip is what
+/// keeps them off the workspace.
+class _TopChrome extends StatelessWidget {
+  const _TopChrome({required this.count});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const _Header(),
+        const _NavActions(),
+        _GroupLabel(label: 'PROJECTS', count: count),
+      ],
+    );
+  }
+}
+
+/// The setup checklist in its docked slot, between the project list and the
+/// pinned rows below it.
+///
+/// Scrollable because this is the slot [AbDockedColumn] compresses once the
+/// list is at its floor — a bare section here would only move the overflow one
+/// level down. It scrolls only when it must: given room the viewport takes the
+/// content's own height, so the docked layout is unchanged at every size that
+/// fits.
+class _SetupDock extends ConsumerWidget {
+  const _SetupDock();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // The section self-gates to nothing on mobile and once the checklist is
+    // done or dismissed, which is most of an install's life. Gating here too
+    // keeps a Scrollable (and the ScrollBehavior's Scrollbar) out of every
+    // sidebar that will never scroll one.
+    if (!desktopSetupSectionVisible(ref)) return const SizedBox.shrink();
+    return const SingleChildScrollView(
+      // Explicit rather than platform-derived: docked chrome that rubber-bands
+      // under a trackpad flick (macOS's default physics) reads as broken.
+      physics: ClampingScrollPhysics(),
+      // Never the PrimaryScrollController's: the project list beside it is the
+      // drawer's scrollable of record.
+      primary: false,
+      child: FirstRunSetupSection(),
     );
   }
 }

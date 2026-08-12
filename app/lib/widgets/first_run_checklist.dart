@@ -115,17 +115,24 @@ const _stepIndent =
 /// and its latch — did not exist: the old card was never on screen at the
 /// moment its last steps became actionable.
 ///
+/// Whether [FirstRunSetupSection] will render anything right now.
+///
+/// The section's own gate, hoisted so a host can also skip the chrome it would
+/// otherwise wrap around nothing — the drawer's dock supplies a scroll view,
+/// which would otherwise outlive the checklist by the whole life of the
+/// install. Keep this as the single expression both sides read.
+bool desktopSetupSectionVisible(WidgetRef ref) =>
+    !isMobilePlatform && ref.watch(firstRunChecklistVisibleProvider);
+
 /// Self-gates (mobile / dismissed / completed ⇒ shrink), so the call site stays
-/// a single stable line.
+/// a single stable line — or [desktopSetupSectionVisible] where the host has
+/// chrome of its own to skip.
 class FirstRunSetupSection extends ConsumerWidget {
   const FirstRunSetupSection({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    if (isMobilePlatform) return const SizedBox.shrink();
-    if (!ref.watch(firstRunChecklistVisibleProvider)) {
-      return const SizedBox.shrink();
-    }
+    if (!desktopSetupSectionVisible(ref)) return const SizedBox.shrink();
     final steps = ref.watch(desktopFirstRunStepsProvider);
     _latchAndMaybeComplete(ref, steps);
     final t = context.antgrid;
