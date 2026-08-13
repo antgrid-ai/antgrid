@@ -19,6 +19,7 @@ import '../../providers/now_ticker.dart';
 import '../../providers/project_work_status.dart';
 import '../../providers/recent_sessions.dart';
 import '../../services/control_plane_client.dart';
+import '../../util/detached.dart';
 import '../../util/relative_time.dart';
 import '../agent_work_status_dot.dart';
 
@@ -112,7 +113,13 @@ class _RecentSessionRowWidgetState
       // row's own context where there is no Navigator (widget tests).
       final host = Navigator.maybeOf(context, rootNavigator: true)?.context;
       widget.onOpened?.call();
-      openRecentSession(host ?? context, ref.container, row);
+      // Detached: nothing awaits a tap handler, so an activation that rejects
+      // (a bridge verb whose reply never lands) would surface as a fatal.
+      detached(
+        'RecentSessionRow',
+        'session open failed',
+        () => openRecentSession(host ?? context, ref.container, row),
+      );
     }
 
     final content = Container(
@@ -135,7 +142,7 @@ class _RecentSessionRowWidgetState
                   agentLabel: agentLabel,
                   relTime: relTime,
                   rowBg: rowBg,
-                  onDelete: () => _confirmDelete(context, ref),
+                  onDelete: () => _deleteDetached(context, ref),
                 )
               : _DesktopLayout(
                   row: row,
@@ -144,7 +151,7 @@ class _RecentSessionRowWidgetState
                   relTime: relTime,
                   rowBg: rowBg,
                   showDelete: _hovered || _focused,
-                  onDelete: () => _confirmDelete(context, ref),
+                  onDelete: () => _deleteDetached(context, ref),
                 );
         },
       ),
@@ -174,6 +181,14 @@ class _RecentSessionRowWidgetState
       ),
     );
   }
+
+  /// Same boundary as `onTap`: the delete button's callback is `void`, so the
+  /// confirm chain's failure has to stop here.
+  void _deleteDetached(BuildContext context, WidgetRef ref) => detached(
+    'RecentSessionRow',
+    'session delete failed',
+    () => _confirmDelete(context, ref),
+  );
 
   Future<void> _confirmDelete(BuildContext context, WidgetRef ref) async {
     // Captured before the dialog await: a confirmed delete must still run if

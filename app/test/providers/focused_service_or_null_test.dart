@@ -65,4 +65,81 @@ void main() {
       same(session.sessionsService),
     );
   });
+
+  // warmServiceFor is the counterpart every explicit user action goes through:
+  // the windows where the synchronous read above answers null are exactly when a
+  // Start button or a rename is pressed, so it waits the project out instead of
+  // dropping the action.
+  group('warmServiceFor', () {
+    test('waits out a session that is still resolving', () async {
+      final session = await _buildFakeSession();
+      final pending = Completer<ProjectSession>();
+      final c = ProviderContainer(
+        overrides: [
+          projectSessionProvider('test').overrideWith((ref) => pending.future),
+        ],
+      );
+      addTearDown(c.dispose);
+
+      final pick = warmServiceFor(c, 'test', (s) => s.sessionsService);
+      // Still unresolved: the synchronous twin would have answered null here.
+      expect(focusedServiceOrNull(c, (s) => s.sessionsService), isNull);
+
+      pending.complete(session);
+      expect(await pick, same(session.sessionsService));
+    });
+
+    test('resolves an entry that is NOT the focused project', () async {
+      final other = await _buildFakeSession();
+      final c = ProviderContainer(
+        overrides: [
+          selectedRegistrationIdProvider.overrideWithValue('focused'),
+          projectSessionProvider('other').overrideWith((ref) async => other),
+        ],
+      );
+      addTearDown(c.dispose);
+
+      // The point of the explicit entryId: a drawer row or a dialog outliving
+      // its focus must reach ITS project, not whichever one is focused.
+      expect(
+        await warmServiceFor(c, 'other', (s) => s.sessionsService),
+        same(other.sessionsService),
+      );
+    });
+
+    test('returns null once the timeout is out rather than hanging', () async {
+      final c = ProviderContainer(
+        overrides: [
+          // Never completes — an unreachable agent.
+          projectSessionProvider(
+            'test',
+          ).overrideWith((ref) => Completer<ProjectSession>().future),
+        ],
+      );
+      addTearDown(c.dispose);
+
+      expect(
+        await warmServiceFor(
+          c,
+          'test',
+          (s) => s.sessionsService,
+          timeout: const Duration(milliseconds: 20),
+        ),
+        isNull,
+      );
+    });
+
+    test('returns null when the project fails to open', () async {
+      final c = ProviderContainer(
+        overrides: [
+          projectSessionProvider(
+            'test',
+          ).overrideWith((ref) async => throw StateError('no transport')),
+        ],
+      );
+      addTearDown(c.dispose);
+
+      expect(await warmServiceFor(c, 'test', (s) => s.sessionsService), isNull);
+    });
+  });
 }

@@ -12,6 +12,7 @@ import '../design/widgets/ab_chip.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_snack_bar.dart';
+import '../design/widgets/pulsing_opacity.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../models/handler_state.dart';
@@ -25,6 +26,8 @@ import '../providers/providers.dart';
 import '../providers/session_mode.dart';
 import '../providers/sessions.dart';
 import '../screens/terminal_screen.dart';
+import '../util/ab_log.dart';
+import '../util/detached.dart';
 import '../util/relative_time.dart';
 import '../utils/platform_utils.dart';
 import 'agent_transcript_view.dart';
@@ -362,11 +365,11 @@ class HandlerHeaderControl extends ConsumerWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (pill != null) ...[
-          pill,
-          const SizedBox(width: AbTokens.space6),
-        ],
-        if (shieldShowsLabel(armedOnce: armedOnce, sessionArmed: session != null))
+        if (pill != null) ...[pill, const SizedBox(width: AbTokens.space6)],
+        if (shieldShowsLabel(
+          armedOnce: armedOnce,
+          sessionArmed: session != null,
+        ))
           AbTooltip(
             message: shieldTooltip,
             child: AbButton(
@@ -397,38 +400,129 @@ class HandlerHeaderControl extends ConsumerWidget {
 }
 
 /// The breadcrumb leaf for the active session — tap to rename it via the
-/// shared [promptSessionRename] dialog (desktop and mobile alike). Commits via
-/// the focused project's [sessionsServiceProvider] — the active session always
-/// belongs to the focused project.
-class EditableSessionLeaf extends ConsumerWidget {
+/// shared [promptSessionRename] dialog (desktop and mobile alike). The active
+/// session belongs to the focused project, so the commit resolves that
+/// project's id up front and then routes through [warmServiceFor] — see
+/// [_rename] for why the id is captured rather than re-read after the dialog.
+class EditableSessionLeaf extends ConsumerStatefulWidget {
   final SessionEntry session;
   const EditableSessionLeaf({super.key, required this.session});
 
-  Future<void> _rename(BuildContext context, WidgetRef ref) async {
+  @override
+  ConsumerState<EditableSessionLeaf> createState() =>
+      _EditableSessionLeafState();
+}
+
+class _EditableSessionLeafState extends ConsumerState<EditableSessionLeaf> {
+  /// The name the user asked for while the rename is in flight, else null.
+  ///
+  /// Shown in place of the committed name and pulsing, which is the same shape
+  /// [SessionModeControl] uses for a flip in flight (`activeSessionModeProvider`
+  /// hands out the pending mode the same way): the breadcrumb reads as "being
+  /// applied" without claiming it landed. A refusal clears it, so the old name
+  /// comes back alongside the message rather than a wrong name sticking.
+  ///
+  /// Local state, not an app-wide provider like `pendingSessionModeProvider`:
+  /// nothing outside this leaf renders a rename in flight, and the cost of
+  /// losing it (the breadcrumb unmounted mid-rename, e.g. a panel-mode change)
+  /// is a missing pulse, not a wrong name.
+  String? _pendingName;
+
+  /// Uses `State.context` and guards every post-await UI touch on `mounted`
+  /// rather than taking a [BuildContext] parameter — the two are the same
+  /// element here, and only the State's own flag is a valid guard for it.
+  Future<void> _rename() async {
+    final session = widget.session;
     final id = session.id;
-    // Container captured BEFORE the dialog: the breadcrumb can be rebuilt away
-    // while it is open, and a `WidgetRef` touched past that point throws.
+    // Container and entry id captured BEFORE the dialog: the breadcrumb can be
+    // rebuilt away while it is open, and a `WidgetRef` touched past that point
+    // throws. The id is read here rather than after, so the rename commits
+    // against the project that owned this session when the dialog opened — a
+    // focus switch behind an open dialog must not retarget it at another agent.
     final container = ref.container;
+    final entryId = container.read(selectedRegistrationIdProvider);
     final name = await promptSessionRename(context, session.name);
     if (name == null || name == session.name) return;
-    // Resolve the service AFTER the dialog without throwing: the focused
-    // project can transiently re-resolve while the dialog is open (transport
-    // reconnect, auth cascade), which makes `sessionsServiceProvider` throw
-    // (_ProjectSessionLoading / StateError). Await so a slow or failed rename
-    // surfaces rather than being swallowed fire-and-forget.
-    final svc = focusedServiceOrNull(container, (s) => s.sessionsService);
-    await svc?.rename(id, name);
+    // The asked-for name goes up the moment the dialog closes and comes down in
+    // the `finally` below, so every outcome ends with the breadcrumb telling the
+    // truth: on success the `session:updated` push has already made
+    // [widget.session] carry it (the swap back is invisible), and on a refusal
+    // or a dropped reply the committed name returns alongside the message.
+    // Guarded on `mounted` in both directions rather than bailing: a rename the
+    // user confirmed still commits when the breadcrumb was rebuilt away behind
+    // the dialog — it just has nowhere to show a pulse.
+    if (mounted) setState(() => _pendingName = name);
+    try {
+      await _commit(container, entryId, id, name);
+    } finally {
+      if (mounted) setState(() => _pendingName = null);
+    }
+  }
+
+  Future<void> _commit(
+    ProviderContainer container,
+    String? entryId,
+    String id,
+    String name,
+  ) async {
+    // Resolved AFTER the dialog, and WARMED: the project can transiently
+    // re-resolve while the dialog is open (transport reconnect, auth cascade),
+    // which makes `sessionsServiceProvider` throw and the synchronous
+    // `focusedServiceOrNull` answer null — dropping a rename the user already
+    // confirmed. Warming waits that window out instead.
+    final svc = entryId == null
+        ? null
+        : await warmServiceFor(container, entryId, (s) => s.sessionsService);
+    // Surfaced to the user, not to the top-level error handler: the tap that
+    // got us here discards this future, so a dropped reply (TimeoutException
+    // after the service's 15s bound) escaping here is a fatal crash. The
+    // breadcrumb still reads the old name, so say why — and the two failures get
+    // different copy, since nothing is sent when the project never warms and
+    // blaming the agent for not answering would describe a round trip that
+    // never happened.
+    void report(String reason) {
+      if (mounted) {
+        showAbSnackBar(context, "Couldn't rename the session — $reason");
+      }
+    }
+
+    if (svc == null) {
+      AbLog.error(
+        'AgentPanel',
+        'session rename skipped: project did not warm',
+        fields: {'sessionId': id, 'entryId': entryId},
+      );
+      report("couldn't reach this project. Try again in a moment.");
+      return;
+    }
+    try {
+      await svc.rename(id, name);
+    } on TimeoutException {
+      report("the agent didn't answer. Check the connection and try again.");
+    }
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
+    final pending = _pendingName;
+    // Style inherited from the breadcrumb leaf's DefaultTextStyle.
+    final Widget leaf = Text(
+      pending ?? widget.session.name,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+    );
     return MouseRegion(
-      cursor: SystemMouseCursors.click,
+      // Not a click target while committing — the dialog is the only way in and
+      // a second one would race the first rename.
+      cursor: pending == null
+          ? SystemMouseCursors.click
+          : SystemMouseCursors.basic,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: () => _rename(context, ref),
-        // Style inherited from the breadcrumb leaf's DefaultTextStyle.
-        child: Text(session.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+        onTap: pending != null
+            ? null
+            : () => detached('AgentPanel', 'session rename failed', _rename),
+        child: pending == null ? leaf : PulsingOpacity(child: leaf),
       ),
     );
   }

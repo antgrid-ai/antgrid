@@ -154,11 +154,17 @@ final terminalNotificationsProvider =
         final session = ref.watch(projectSessionProvider(id)).value;
         if (session == null) continue;
         for (final bundle in session.checkoutServiceBundles) {
-          subs.add(bundle.terminalService.notificationStream.listen(controller.add));
+          subs.add(
+            bundle.terminalService.notificationStream.listen(controller.add),
+          );
         }
-        subs.add(session.checkoutServiceBundleStream.listen((bundle) {
-          subs.add(bundle.terminalService.notificationStream.listen(controller.add));
-        }));
+        subs.add(
+          session.checkoutServiceBundleStream.listen((bundle) {
+            subs.add(
+              bundle.terminalService.notificationStream.listen(controller.add),
+            );
+          }),
+        );
       }
       ref.onDispose(() {
         for (final s in subs) {
@@ -182,11 +188,17 @@ final agentPushNotificationsProvider = StreamProvider<NotificationPushMessage>((
     final session = ref.watch(projectSessionProvider(id)).value;
     if (session == null) continue;
     for (final bundle in session.checkoutServiceBundles) {
-      subs.add(bundle.terminalService.pushNotificationStream.listen(controller.add));
+      subs.add(
+        bundle.terminalService.pushNotificationStream.listen(controller.add),
+      );
     }
-    subs.add(session.checkoutServiceBundleStream.listen((bundle) {
-      subs.add(bundle.terminalService.pushNotificationStream.listen(controller.add));
-    }));
+    subs.add(
+      session.checkoutServiceBundleStream.listen((bundle) {
+        subs.add(
+          bundle.terminalService.pushNotificationStream.listen(controller.add),
+        );
+      }),
+    );
   }
   ref.onDispose(() {
     for (final s in subs) {
@@ -383,9 +395,9 @@ T? serviceWhenReady<T>(WidgetRef ref, ProviderListenable<T> provider) {
 ///
 /// Registers no listeners, so it stays valid past the widget that scheduled the
 /// callback. Build-time readers want [serviceWhenReady] instead, which rebuilds
-/// the widget once the session lands; an explicit user action on a possibly
-/// COLD project wants an awaited `projectSessionProvider(id).future`, which
-/// warms it.
+/// the widget once the session lands; an explicit user action wants
+/// [warmServiceFor], which warms a cold or re-resolving project instead of
+/// answering null in exactly the window the action exists to recover from.
 T? focusedServiceOrNull<T>(
   ProviderContainer ref,
   T Function(ProjectSession) pick,
@@ -394,6 +406,43 @@ T? focusedServiceOrNull<T>(
   if (id == null) return null;
   final session = ref.read(projectSessionProvider(id)).value;
   return session == null ? null : pick(session);
+}
+
+/// Picks a per-project service off [entryId]'s [ProjectSession], WARMING the
+/// project if it isn't live yet. Null only once [timeout] is out, so callers
+/// no-op or report rather than misroute.
+///
+/// The warming counterpart to [focusedServiceOrNull], and what an explicit user
+/// action on a session should use. The two windows that make the synchronous
+/// read answer null — a project focused before its session is built, and a live
+/// session invalidated under a steady focus by a host restart, an LRU eviction
+/// or the connection-retry action — are precisely the ones a "Start" button or a
+/// rename exists to recover from; answering null there drops a confirmed action
+/// with nothing sent and nothing said.
+///
+/// Keyed on an EXPLICIT [entryId], never on focus: the drawer renders rows for
+/// non-focused warm projects, and a dialog can outlive the focus it opened
+/// under, so resolving through the focused id would send the action to another
+/// agent and mutate a same-id session there. Callers capture the id up front
+/// and pass it here.
+///
+/// [timeout] bounds the wait so an unreachable agent can't hang the action —
+/// raise it past the default only for a path that may be waiting on a cold
+/// remote open rather than an already-warm project.
+Future<T?> warmServiceFor<T>(
+  ProviderContainer ref,
+  String entryId,
+  T Function(ProjectSession) pick, {
+  Duration timeout = const Duration(seconds: 10),
+}) async {
+  try {
+    final session = await ref
+        .read(projectSessionProvider(entryId).future)
+        .timeout(timeout);
+    return pick(session);
+  } catch (_) {
+    return null;
+  }
 }
 
 T? focusedCheckoutServiceOrNull<T>(
@@ -728,8 +777,9 @@ final sidebarControlProvider =
 ///
 /// The session's NAME is deliberately not part of this handover — it lives only
 /// in the agent bar, above the transcript it names (see `TitleBarBreadcrumb`).
-final agentBarMountedProvider =
-    NotifierProvider<ValueController<bool>, bool>(() => ValueController(false));
+final agentBarMountedProvider = NotifierProvider<ValueController<bool>, bool>(
+  () => ValueController(false),
+);
 
 /// Whether a desktop [WorkspaceViewSurface] (Preview/Files/Git/Terminals/
 /// Handler opened full-workbench, replacing the agent/context split) is on

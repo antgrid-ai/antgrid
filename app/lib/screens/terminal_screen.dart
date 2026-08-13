@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -5,12 +7,15 @@ import '../design/ab_colors.dart';
 import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_loading.dart';
+import '../design/widgets/ab_snack_bar.dart';
 import '../models/terminal_models.dart';
 import '../project/project_session_registry.dart';
 import '../providers/agent_transport.dart';
 import '../providers/new_session_picker.dart' show enterNewSession;
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
+import '../util/ab_log.dart';
+import '../util/detached.dart';
 import '../widgets/terminal_view_wrapper.dart';
 
 /// Shows the terminal for the currently active session.
@@ -50,11 +55,13 @@ class TerminalScreen extends ConsumerWidget {
               sessionId: activeSession.id,
               title: 'Chat stopped',
               buttonLabel: 'Restart',
+              pendingLabel: 'Restarting…',
             )
           : _StoppedSessionEmptyState(
               sessionId: activeSession.id,
               title: 'Session stopped',
               buttonLabel: 'Start',
+              pendingLabel: 'Starting…',
             );
     }
 
@@ -101,35 +108,126 @@ class TerminalScreen extends ConsumerWidget {
 /// agent panel toolbar and command tray remain mounted around this widget so
 /// the user keeps access to project controls (status, git branch, settings,
 /// mobile-access).
-class _StoppedSessionEmptyState extends ConsumerWidget {
+class _StoppedSessionEmptyState extends ConsumerStatefulWidget {
   final String sessionId;
   final String title;
   final String buttonLabel;
+
+  /// Label while the start is in flight — the press can wait out a project
+  /// warm-up plus a bridge round trip, so the button has to say it is working.
+  final String pendingLabel;
+
   const _StoppedSessionEmptyState({
     required this.sessionId,
     required this.title,
     required this.buttonLabel,
+    required this.pendingLabel,
   });
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_StoppedSessionEmptyState> createState() =>
+      _StoppedSessionEmptyStateState();
+}
+
+class _StoppedSessionEmptyStateState
+    extends ConsumerState<_StoppedSessionEmptyState> {
+  /// True from the press until the start is answered, refused or timed out.
+  bool _starting = false;
+
+  /// Uses `State.context` and guards every post-await UI touch on `mounted`
+  /// rather than taking a [BuildContext] parameter — the two are the same
+  /// element here, and only the State's own flag is a valid guard for it.
+  Future<void> _start() async {
+    // Latched rather than merely inert: the button below is non-interactive
+    // while this runs, but a keyboard activation racing the first frame would
+    // otherwise queue a second `session:start` behind the first.
+    if (_starting) return;
+    setState(() => _starting = true);
+    try {
+      await _startInner();
+    } finally {
+      // A start that lands unmounts this widget — `session:updated` flips
+      // `running` and TerminalScreen renders the terminal instead — so the
+      // common success path never reaches a setState here.
+      if (mounted) setState(() => _starting = false);
+    }
+  }
+
+  Future<void> _startInner() async {
+    final sessionId = widget.sessionId;
+    // Resolved off the session, not through the throwing façade: the guard in
+    // [TerminalScreen] proves the session was resolved when this widget was
+    // BUILT, which a tap arriving after a reconnect or LRU evict no longer
+    // implies — and the throw would be unhandled from here.
+    //
+    // WARMED rather than read synchronously: this button is the only way back
+    // from a stopped session, and the windows where the project isn't live —
+    // the reconnect and LRU-evict ones — are exactly when the user reaches for
+    // it. Reading `focusedServiceOrNull` here answered null in those windows and
+    // dropped the press. The id is captured before the await so a focus switch
+    // mid-warm can't retarget the start at another project's session.
+    final container = ref.container;
+    final entryId = container.read(selectedRegistrationIdProvider);
+    final svc = entryId == null
+        ? null
+        : await warmServiceFor(container, entryId, (s) => s.sessionsService);
+    if (svc == null) {
+      // Reported, not `?.`-skipped: a press that reaches neither the agent nor
+      // the log is indistinguishable from a dead button.
+      AbLog.error(
+        'TerminalScreen',
+        'session start skipped: project did not warm',
+        fields: {'sessionId': sessionId, 'entryId': entryId},
+      );
+      if (mounted) {
+        showAbSnackBar(
+          context,
+          "Couldn't reach this project. Reopen it and try again.",
+        );
+      }
+      return;
+    }
+    try {
+      await svc.start(sessionId);
+    } on TimeoutException {
+      // The button the user just pressed is still on screen and the session is
+      // still stopped, so a silent swallow reads as a dropped tap. A dropped
+      // reply doesn't prove the start failed — the bridge may have spawned the
+      // PTY anyway, in which case `session:updated` replaces this empty state
+      // on its own — so the copy invites a retry without claiming either way.
+      if (mounted) {
+        showAbSnackBar(
+          context,
+          "The agent didn't answer. If the session doesn't come up in a moment, "
+          'try again.',
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return ColoredBox(
       color: context.antgrid.bgDeepest,
       child: AbEmptyState(
-        title: title,
+        title: widget.title,
         action: AbButton(
-          label: buttonLabel,
-          onTap: () async {
-            // Resolved off the session, not through the throwing façade: the
-            // guard above proves the session was resolved when this widget was
-            // BUILT, which a tap arriving after a reconnect or LRU evict no
-            // longer implies — and the throw would be unhandled from here.
-            final svc = focusedServiceOrNull(
-              ref.container,
-              (s) => s.sessionsService,
-            );
-            await svc?.start(sessionId);
-          },
+          label: _starting ? widget.pendingLabel : widget.buttonLabel,
+          // The dot is what separates "busy" from "broken": `onTap: null` also
+          // buys AbButton's dimmed disabled state, and dimming alone on a button
+          // the user just pressed reads as a control that died under the press.
+          // It pulses by scale, so it stays legible at that opacity.
+          leading: _starting ? const AbLoadingDot(size: 8) : null,
+          // Inert while in flight, matching SessionModeControl: a second press
+          // would queue a second `session:start` behind the first. No tooltip or
+          // reason — the user just pressed it.
+          onTap: _starting
+              ? null
+              // `onTap` is a VoidCallback, so nothing awaits the start —
+              // detached rather than an `async` closure whose rejection would
+              // land on the top-level handler as a fatal.
+              : () =>
+                    detached('TerminalScreen', 'session start failed', _start),
         ),
       ),
     );

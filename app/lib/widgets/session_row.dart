@@ -29,6 +29,7 @@ import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
 import '../services/control_plane_client.dart';
 import '../services/sessions_service.dart';
+import '../util/detached.dart';
 import '../util/external_open_target.dart';
 import 'ab_status_helpers.dart' show friendlyErrorCopy;
 import 'agent_work_status_dot.dart';
@@ -100,10 +101,10 @@ class _SessionRowState extends ConsumerState<SessionRow> {
   /// edit mode. Idempotent via the [_editing] guard so the Enter →
   /// dispose → blur sequence doesn't rename twice.
   ///
-  /// Routes to THIS row's project via [sessionsServiceFor] (warming it back if
-  /// the LRU evicted it mid-edit), not the focused project. Captures the ids
-  /// before [_exitEdit]/`await` so it stays correct even if the row unmounts
-  /// during the warm-up.
+  /// Routes to THIS row's project via [warmServiceFor] (warming it back if the
+  /// LRU evicted it mid-edit), not the focused project. Captures the ids before
+  /// [_exitEdit]/`await` so it stays correct even if the row unmounts during the
+  /// warm-up.
   Future<void> _commitEdit() async {
     if (!_editing) return;
     final name = _editController?.text.trim() ?? '';
@@ -112,9 +113,23 @@ class _SessionRowState extends ConsumerState<SessionRow> {
     final sessionId = session.id;
     _exitEdit();
     if (!changed) return;
-    final svc = await sessionsServiceFor(ref.container, entryId);
-    if (svc != null) unawaited(svc.rename(sessionId, name));
+    final svc = await warmServiceFor(
+      ref.container,
+      entryId,
+      (s) => s.sessionsService,
+    );
+    // Awaited, not `unawaited`: a dropped reply fails this future with a
+    // TimeoutException, and every caller runs this detached — an unawaited
+    // rejection would have nothing to land on but the top-level error handler.
+    // The row keeps showing the old name, which is the truth until the bridge
+    // confirms otherwise.
+    await svc?.rename(sessionId, name);
   }
+
+  /// Both commit triggers (Enter, blur) are `void` callbacks, so the rename's
+  /// failure has to be caught here or it becomes a top-level fatal.
+  void _commitDetached() =>
+      detached('SessionRow', 'session rename failed', _commitEdit);
 
   void _exitEdit() {
     _editController?.dispose();
@@ -243,7 +258,13 @@ class _SessionRowState extends ConsumerState<SessionRow> {
           // Small vertical margin so adjacent rows don't touch.
           margin: const EdgeInsets.symmetric(vertical: 1),
           // Disable activation while editing so taps stay in the field.
-          onTap: _editing ? null : () => _activate(context, ref.container),
+          onTap: _editing
+              ? null
+              : () => detached(
+                  'SessionRow',
+                  'session activate failed',
+                  () => _activate(context, ref.container),
+                ),
           // Desktop: double-tap a running session (in any warm project) to
           // rename it inline. The row's SerialTap recognizer keeps single-tap
           // selection instant, so wiring this on many rows costs no latency.
@@ -286,16 +307,32 @@ class _SessionRowState extends ConsumerState<SessionRow> {
       // or LRU evict — with no ProjectSession behind it yet. Warms it if cold.
       // 30s, not the 10s default: this is the one path that may be waiting on a
       // cold remote open rather than an already-warm project.
-      final svc = await sessionsServiceFor(
+      final svc = await warmServiceFor(
         ref,
         liveId!,
+        (s) => s.sessionsService,
         timeout: const Duration(seconds: 30),
       );
       if (svc == null) return;
       if (ref.read(selectedRegistrationIdProvider) != liveId) return;
       ref.read(activeSessionIdProvider.notifier).set(session.id);
       if (!session.running) {
-        await svc.start(session.id);
+        // A dropped reply must not abandon the focus + surface + nav writes
+        // below: the user asked for THIS session, and the bridge may have
+        // spawned the PTY anyway (`session:updated` then reconciles the row).
+        // Leaving the activeSessionId set while the surface never switches is
+        // the worst of both — a tap that visibly did nothing.
+        try {
+          await svc.start(session.id);
+        } on TimeoutException {
+          if (context.mounted) {
+            showAbSnackBar(
+              context,
+              "The agent didn't answer. If the session doesn't come up in a "
+              'moment, try again.',
+            );
+          }
+        }
         // A different project can be activated while start() is in flight. The
         // writes below (focus, surface, nav entry) all belong to THIS project,
         // so drop them rather than commit them against the new focus.
@@ -363,13 +400,13 @@ class _SessionRowState extends ConsumerState<SessionRow> {
         return KeyEventResult.ignored;
       },
       onFocusChange: (hasFocus) {
-        if (!hasFocus) _commitEdit();
+        if (!hasFocus) _commitDetached();
       },
       child: TextField(
         controller: _editController,
         focusNode: _editFocus,
         maxLines: 1,
-        onSubmitted: (_) => _commitEdit(),
+        onSubmitted: (_) => _commitDetached(),
         style: AbTokens.sansStyle(
           height: 1.2,
           color: context.antgrid.textPrimary,
@@ -416,28 +453,6 @@ final class _CopyPath extends _SessionMenuChoice {
   const _CopyPath();
 }
 
-/// Resolve the [SessionsService] for [entryId]'s project — not the focused one.
-/// The drawer renders rows for non-focused warm projects too, so routing
-/// through `sessionsServiceProvider` (keyed on the focused project) would send
-/// the action to the wrong agent and mutate/destroy a same-id session there.
-/// Warms the project if cold (a rename/kebab action is explicit intent on that
-/// session); bounded by [timeout] so an unreachable agent can't hang. Returns
-/// null when it can't be reached, so callers no-op rather than misroute.
-Future<SessionsService?> sessionsServiceFor(
-  ProviderContainer ref,
-  String entryId, {
-  Duration timeout = const Duration(seconds: 10),
-}) async {
-  try {
-    final ps = await ref
-        .read(projectSessionProvider(entryId).future)
-        .timeout(timeout);
-    return ps.sessionsService;
-  } catch (_) {
-    return null;
-  }
-}
-
 class _SessionMenu extends ConsumerWidget {
   final String entryId;
   final SessionEntry session;
@@ -450,11 +465,10 @@ class _SessionMenu extends ConsumerWidget {
         // Explicit destiny: the menu chain awaits dialogs and bridge RPCs, and
         // an unhandled rejection from a fire-and-forget `void` call would land
         // outside any build() as a fatal.
-        void open() => unawaited(
-          _openMenu(anchor, ref.container).catchError(
-            (Object error, StackTrace stack) =>
-                debugPrint('session menu failed: $error\n$stack'),
-          ),
+        void open() => detached(
+          'SessionRow',
+          'session menu failed',
+          () => _openMenu(anchor, ref.container),
         );
         // The parent row drives single/double tap through a
         // [SerialTapGestureRecognizer] that eagerly claims the gesture arena on
@@ -579,23 +593,37 @@ class _SessionMenu extends ConsumerWidget {
     ProviderContainer ref,
     _SessionAction action,
   ) async {
-    final svc = await sessionsServiceFor(ref, entryId);
+    final svc = await warmServiceFor(ref, entryId, (s) => s.sessionsService);
     if (svc == null || !anchor.mounted) return;
-    switch (action) {
-      case _SessionAction.start:
-        await svc.start(session.id);
-      case _SessionAction.stop:
-        await svc.stopSession(session.id);
-      case _SessionAction.rename:
-        final name = await promptSessionRename(anchor, session.name);
-        if (name != null && name.trim().isNotEmpty) {
-          await svc.rename(session.id, name.trim());
-        }
-      case _SessionAction.archive:
-        await svc.archive(session.id);
-        _disconnectIfEmpty(ref);
-      case _SessionAction.delete:
-        await _deleteSession(anchor, ref, svc);
+    // Every branch here is an explicit menu pick, so a dropped reply owes the
+    // user an answer: the row keeps rendering the pre-action state (still
+    // running after Stop, old name after Rename), which without this reads as a
+    // menu item that did nothing. Not a claim of failure — the bridge may have
+    // applied it and `session:updated` will reconcile the row.
+    try {
+      switch (action) {
+        case _SessionAction.start:
+          await svc.start(session.id);
+        case _SessionAction.stop:
+          await svc.stopSession(session.id);
+        case _SessionAction.rename:
+          final name = await promptSessionRename(anchor, session.name);
+          if (name != null && name.trim().isNotEmpty) {
+            await svc.rename(session.id, name.trim());
+          }
+        case _SessionAction.archive:
+          await svc.archive(session.id);
+          _disconnectIfEmpty(ref);
+        case _SessionAction.delete:
+          await _deleteSession(anchor, ref, svc);
+      }
+    } on TimeoutException {
+      if (anchor.mounted) {
+        showAbSnackBar(
+          anchor,
+          "The agent didn't answer. Check the connection and try again.",
+        );
+      }
     }
   }
 

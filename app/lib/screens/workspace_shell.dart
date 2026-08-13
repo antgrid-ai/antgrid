@@ -45,7 +45,9 @@ import '../services/local_notification_service.dart';
 import '../services/push_background_handler.dart'
     show decodePush, pushDataOf, pushDedupKey;
 import '../services/push_identity.dart';
+import '../services/sessions_service.dart' show SessionsService;
 import '../util/ab_log.dart';
+import '../util/detached.dart';
 import '../utils/notification_routing.dart';
 import '../utils/platform_utils.dart';
 import '../widgets/agent_panel.dart';
@@ -231,7 +233,11 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       ref.read(revealHandlerTabProvider.notifier).set(revealHandlerTab);
       ref.read(openDrawerProvider.notifier).set(_publishedOpenDrawer);
       if (ref.read(selectedRegistrationIdProvider) != null) {
-        _bootstrapSessions();
+        detached(
+          'WorkspaceShell',
+          'session bootstrap failed',
+          _bootstrapSessions,
+        );
       }
     });
   }
@@ -451,6 +457,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   /// Project-switch race guard: capture the project id at entry and re-check
   /// after every await. If the user switches A → B mid-flight, the stale A
   /// run aborts before issuing any further session mutations.
+  ///
+  /// Both callers run this detached, so nothing here may reject — see
+  /// [detached].
   Future<void> _bootstrapSessions() async {
     final triggeredFor = ref.read(selectedRegistrationIdProvider);
     if (triggeredFor == null) return;
@@ -506,7 +515,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       if (desired != null) {
         ref.read(activeSessionIdProvider.notifier).set(desired.id);
         if (!desired.running) {
-          await svc.start(desired.id);
+          await _startBestEffort(svc, desired.id);
           if (!mounted) return;
           if (ref.read(selectedRegistrationIdProvider) != triggeredFor) return;
         }
@@ -552,7 +561,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       ref.read(activeSessionIdProvider.notifier).set(active.first.id);
       final session = active.first;
       if (!session.running) {
-        await svc.start(session.id);
+        await _startBestEffort(svc, session.id);
         if (!mounted) return;
         if (ref.read(selectedRegistrationIdProvider) != triggeredFor) return;
       }
@@ -561,6 +570,26 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       // Bump server-side lastUsedAt so a second app connecting later sees
       // the actual recency (parity with manual tap in session_row.dart).
       svc.focus(session.id);
+    }
+  }
+
+  /// Auto-start on project-open, which the user did not ask for and is not
+  /// waiting on. A dropped or late `session:start` reply throws (the service's
+  /// 15s pending-reply bound) — routine when the project is opened on a resume
+  /// that finds the transport still re-establishing — and the bridge may well
+  /// have started the session anyway, with `session:updated` reconciling the row.
+  /// So the failure is logged and the bootstrap continues to the focus + nav
+  /// writes below rather than abandoning them; the stopped-session empty state
+  /// carries the retry if the start really never landed.
+  Future<void> _startBestEffort(SessionsService svc, String sessionId) async {
+    try {
+      await svc.start(sessionId);
+    } catch (e) {
+      AbLog.error(
+        'WorkspaceShell',
+        'auto-start failed',
+        fields: {'sessionId': sessionId, 'error': '$e'},
+      );
     }
   }
 
@@ -634,7 +663,11 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // ref.listenManual to keep widget lifecycle straightforward.
     ref.listen<String?>(selectedRegistrationIdProvider, (prev, next) {
       if (next == null || prev == next) return;
-      _bootstrapSessions();
+      detached(
+        'WorkspaceShell',
+        'session bootstrap failed',
+        _bootstrapSessions,
+      );
     });
 
     // Keep the active session id valid as the session list churns (delete /
@@ -1117,7 +1150,8 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     openMobileDrawer();
   }
 
-  void _confirmExitFling() => unawaited(_confirmExit());
+  void _confirmExitFling() =>
+      detached('WorkspaceShell', 'exit prompt failed', _confirmExit);
 
   Future<void> _confirmExit() async {
     // A flick can deliver the threshold twice before the dialog mounts.

@@ -49,10 +49,15 @@ class FakePairedAgentNotifier extends AsyncNotifier<List<PairedAgent>>
 /// Pumps the real [AppShell] (which renders WorkspaceShell once paired), with
 /// a fake window chrome since WorkspaceShell mounts `WindowTitleBar` directly.
 ///
+/// Pass [transport] to drive the wire from the test (inspect `sent`, `emit`
+/// replies); it must come through this parameter rather than [extraOverrides],
+/// because Riverpod 3 asserts on a family overridden twice in one container.
+///
 /// Returns the container so a test can read what the shell publishes.
 Future<ProviderContainer> pumpWorkspaceShell(
   WidgetTester tester, {
   bool withProject = true,
+  AgentTransport Function(String projectId)? transport,
   List<Override> extraOverrides = const [],
 }) async {
   useInMemoryPrefs();
@@ -85,7 +90,8 @@ Future<ProviderContainer> pumpWorkspaceShell(
         // A real relay/local transport would need a live socket, and the shell
         // routes to its blocking-error screen if the transport fails.
         agentTransportForProvider.overrideWith(
-          (ref, projectId) async => FakeAgentTransport(),
+          (ref, projectId) async =>
+              transport?.call(projectId) ?? FakeAgentTransport(),
         ),
         windowChromeProvider.overrideWithValue(FakeWindowChrome()),
         // Last so a caller can replace any of the defaults above.
