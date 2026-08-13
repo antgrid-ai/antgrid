@@ -1,20 +1,26 @@
 name: Deploy — Android (Play Store)
 
-# Publishes a signed release AAB to the Play Store internal track on push to
-# development or main (i.e. when a PR merges). PR-time analyze/test/build now
-# lives in ci-android.yml, so this no longer runs on PRs — one Android toolchain
-# setup per PR instead of two.
-# development -> internal track  (manual promote to alpha/beta/production from Play Console)
-# main        -> production track (add a separate job or extend this workflow when ready)
+# Publishes a signed release AAB to the Play Store internal track once a night,
+# if anything shipped that day. PR-time analyze/test/build lives in
+# ci-android.yml, so this never runs on PRs — one Android toolchain setup per PR
+# instead of two.
+# Nightly rather than per-push, in lockstep with deploy-ios.yml: an internal
+# track that gains four builds a day is noise, and one publish per shipping day
+# is the cadence testers actually consume. See that file for the reasoning.
+#
+# `schedule` only ever fires on the DEFAULT branch, so in practice this is
+# development -> internal track (promote to alpha/beta/production by hand from
+# the Play Console). The `production` environment selected below when
+# ref_name == 'main' is now reachable only through a manual workflow_dispatch
+# run from main — merging to main publishes nothing on its own.
 
 on:
-  push:
-    branches: [development, main]
-    paths:
-      - 'app/**'
-      - 'packages/**'
-      - '.github/workflows/deploy-android.yml'
-      - '.github/actions/setup-android/action.yml'
+  # Ten minutes after deploy-ios.yml so the two don't contend for the same
+  # scheduler slot; off the hour for the same queueing reason documented there.
+  # Both stamp versionName from the clock, and a ten-minute offset is far from
+  # any UTC day boundary, so the two stores stay on the same day number.
+  schedule:
+    - cron: '27 3 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -22,8 +28,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  # Restores the `paths:` filter the push trigger provided — a scheduled event
+  # carries none. See .github/actions/deploy-gate.
+  gate:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      go: ${{ steps.gate.outputs.go }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: gate
+        uses: ./.github/actions/deploy-gate
+        with:
+          workflow: deploy-android.yml
+          paths: app packages .github/workflows/deploy-android.yml .github/actions/setup-android
+          token: ${{ github.token }}
+
+  deploy:
+    needs: gate
+    # Only an explicit 'false' stops a build — see deploy-ios.yml for why a
+    # dead gate job must still deploy.
+    if: ${{ !cancelled() && needs.gate.outputs.go != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       ANDROID_NDK_HOME: ${{ github.workspace }}/ndk-r28
     environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}

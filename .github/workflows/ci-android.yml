@@ -1,10 +1,15 @@
 name: CI — android
 
 # PR/main verification for the Flutter app: analyze (app + the first-party Dart
-# packages) + test + a release AAB build gated on 16 KB ELF alignment. This is
-# the ONLY Android job on a PR — the Play Store publish (deploy-android.yml) no
-# longer runs on PRs, so the toolchain is set up once per PR, not twice. Shared
-# setup lives in .github/actions/setup-android.
+# packages) + test, plus a release AAB build gated on 16 KB ELF alignment. This
+# is the ONLY Android job on a PR — the Play Store publish (deploy-android.yml)
+# runs nightly and never on PRs, so the toolchain is set up once per PR, not
+# twice. Shared setup lives in .github/actions/setup-android.
+#
+# The AAB build is half the wall-clock of this workflow and is skipped on PRs
+# that leave the native surface alone (see the `native` step). It stays
+# unconditional on push to main: deploy-android.yml no longer fires there, so
+# this is the only thing standing between main and an unverified release build.
 
 on:
   pull_request:
@@ -29,12 +34,47 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     env:
       # Where setup-android symlinks the NDK, and where the alignment gate below
       # resolves llvm-readelf from.
       ANDROID_NDK_HOME: ${{ github.workspace }}/ndk-r28
     steps:
+      # Full history so the native-surface diff below can reach the PR base.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # Splits the release build in two. The 4-ABI AAB costs ~11 of this
+      # workflow's ~23 minutes, and most of that is Rust and bundle packaging
+      # that only the paths below can affect — so a Dart-only PR builds a
+      # single-ABI release APK instead (see the two build steps). That keeps the
+      # part that DOES depend on app/lib and packages/ — Dart AOT via
+      # gen_snapshot, tree-shaking, R8 and manifest merge, none of which
+      # `flutter test` exercises because it runs on the JIT VM — while dropping
+      # three ABIs' worth of native compilation nothing in the diff can reach.
+      #
+      # Anything that is not a pull_request — push to main above — always builds
+      # the full AAB; so does an unreadable base, since a skipped gate must never
+      # be the reason a release build went unverified.
+      - name: Does this change touch the native surface?
+        id: native
+        run: |
+          set -euo pipefail
+          base='${{ github.event.pull_request.base.sha }}'
+          if [ "${{ github.event_name }}" != pull_request ] || [ -z "$base" ] \
+             || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --quiet "$base" HEAD -- \
+               app/android app/pubspec.yaml app/pubspec.lock \
+               .github/actions/setup-android .github/workflows/ci-android.yml; then
+            echo "Native surface untouched — skipping the release AAB build."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
 
       # The release AAB builds super_native_extensions (Rust) for 4 ABIs plus
       # Flutter/pdfium .so files; native-lib stripping exhausted the runner's
@@ -74,7 +114,16 @@ jobs:
         working-directory: app
         run: flutter test
 
+      # The cheap half of the split: no native input moved, so one ABI proves
+      # the release toolchain as well as four would. 16 KB alignment is NOT
+      # checked here — the libs are the prebuilt ones this diff cannot touch.
+      - name: Build release APK (arm64 only)
+        if: steps.native.outputs.changed != 'true'
+        working-directory: app
+        run: flutter build apk --release --target-platform android-arm64
+
       - name: Build release AAB
+        if: steps.native.outputs.changed == 'true'
         working-directory: app
         run: flutter build appbundle --release
 
@@ -83,6 +132,7 @@ jobs:
       # the max-page-size flags. 32-bit armeabi-v7a is exempt: 16 KB pages are a
       # 64-bit-only feature.
       - name: Verify 16 KB alignment
+        if: steps.native.outputs.changed == 'true'
         run: |
           READELF="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
           unzip -o app/build/app/outputs/bundle/release/app-release.aab 'base/lib/*/*.so' -d /tmp/aab
@@ -99,6 +149,7 @@ jobs:
           exit $fail
 
       - uses: actions/upload-artifact@v7
+        if: steps.native.outputs.changed == 'true'
         with:
           name: app-release-aab
           path: app/build/app/outputs/bundle/release/app-release.aab

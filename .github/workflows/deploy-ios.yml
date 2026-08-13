@@ -1,12 +1,27 @@
 name: Deploy — iOS (TestFlight)
 
-# Publishes a signed release .ipa to TestFlight on push to development or main
-# (i.e. when a PR merges). The direct analogue of deploy-android.yml's Play Store
-# internal track: TestFlight builds go to internal testers; promotion to an App
-# Store review submission is a manual step in App Store Connect.
+# Publishes a signed release .ipa to TestFlight once a night, if anything shipped
+# that day. The direct analogue of deploy-android.yml's Play Store internal
+# track: TestFlight builds go to internal testers; promotion to an App Store
+# review submission is a manual step in App Store Connect.
 #
 # development / main -> TestFlight (same app record). Unlike Play's internal vs
 # production tracks, iOS has one upload target; the App Store submission is manual.
+#
+# NOT on push. This job holds a macos runner for ~9 minutes, and macOS bills at
+# 10x — at ~4 merges a day it was over half of the repo's entire Actions spend,
+# to ship builds nobody installed one-per-merge. Nightly with a change gate
+# keeps the same daily tester cadence for a fraction of that.
+#
+# Know what that trades away: this is the ONLY workflow anywhere in the repo
+# that builds iOS. `flutter build ipa`, the CocoaPods resolve, the Xcode
+# archive, the iOS 26 SDK assertion and check-ghostty-ios-abi.sh run here and
+# nowhere else, so a Podfile, Info.plist, entitlements or ghostty-vt bindings
+# change that breaks the archive is now found the next morning rather than ~10
+# minutes after the merge. That is deliberate — an iOS build on every PR would
+# cost more than the per-merge deploys did — but it is a real reduction in
+# signal, not just a shift in when signing errors surface. Cutting a release
+# candidate is a good moment to run this by hand rather than trust last night's.
 #
 # Required secrets (Settings -> Secrets and variables -> Actions):
 #   IOS_DIST_CERT_BASE64          base64 of an "Apple Distribution" .p12
@@ -29,12 +44,14 @@ name: Deploy — iOS (TestFlight)
 # resolve signing, and it's echoed into ExportOptions.plist below.
 
 on:
-  push:
-    branches: [development, main]
-    paths:
-      - 'app/**'
-      - 'packages/**'
-      - '.github/workflows/deploy-ios.yml'
+  # ~03:17 UTC = ~08:47 IST, so the build is in TestFlight by the start of the
+  # day. Deliberately not on the hour: GitHub queues scheduled runs and the top
+  # of the hour is its most contended slot, where a cron can slip by 30+ minutes.
+  #
+  # `schedule` only ever fires on the default branch (development), so shipping
+  # main to TestFlight is a manual `workflow_dispatch` run from that branch.
+  schedule:
+    - cron: '17 3 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -42,11 +59,39 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Restores the `paths:` filter the push trigger used to provide — a scheduled
+  # event carries none. Cheap ubuntu job so the 10x macOS runner never boots on a
+  # night when nothing under app/ or packages/ moved.
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      go: ${{ steps.gate.outputs.go }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: gate
+        uses: ./.github/actions/deploy-gate
+        with:
+          workflow: deploy-ios.yml
+          paths: app packages .github/workflows/deploy-ios.yml
+          token: ${{ github.token }}
+
   deploy:
+    needs: gate
+    # Not `== 'true'`: that skips the deploy whenever the gate JOB dies (runner
+    # fault, checkout failure, the timeout above) rather than merely reporting
+    # nothing to do, which is the fail-closed outcome the gate is written to
+    # avoid. Only an explicit 'false' — the gate having looked and found nothing
+    # — stops a build. `!cancelled()` keeps a cancelled workflow from deploying.
+    if: ${{ !cancelled() && needs.gate.outputs.go != 'false' }}
     # macos-26 defaults to Xcode 26 / iOS 26 SDK. App Store Connect now hard-
     # rejects anything built with an older SDK (ITMS-90725), and macos-15 still
     # defaults to Xcode 16.4 (iOS 18.5 SDK) — so the runner label is load-bearing.
     runs-on: macos-26
+    timeout-minutes: 45
     environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
 
     steps:

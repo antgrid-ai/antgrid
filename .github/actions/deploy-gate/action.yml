@@ -1,0 +1,102 @@
+name: Deploy gate
+description: >-
+  Decides whether a scheduled deploy has anything new to ship. A `push` trigger
+  gets path filtering for free; `schedule` does not, so the filter has to be
+  re-created as an explicit diff between HEAD and the commit the last successful
+  run of the same workflow already shipped. Run this in its own ubuntu job and
+  gate the real deploy on its output — a macOS deploy job bills at 10x, so it
+  must never start just to discover it has nothing to do.
+
+inputs:
+  workflow:
+    description: >-
+      Workflow file name (e.g. deploy-ios.yml) whose last successful run on this
+      branch defines the baseline commit. Must be the caller's own file, or the
+      gate compares against an unrelated deploy history.
+    required: true
+  paths:
+    description: Space-separated pathspecs whose movement justifies a deploy.
+    required: true
+  token:
+    description: 'Token carrying `actions: read`, for looking up the baseline run.'
+    required: true
+
+outputs:
+  go:
+    description: '"true" when the deploy should run.'
+    value: ${{ steps.decide.outputs.go }}
+
+runs:
+  using: composite
+  steps:
+    # Every uncertain case deploys. A gate that fails closed silently stops
+    # shipping, and nothing would page you about builds that never happened.
+    - id: decide
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        WORKFLOW: ${{ inputs.workflow }}
+        DEPLOY_PATHS: ${{ inputs.paths }}
+      run: |
+        set -euo pipefail
+        # -f disables globbing for the whole script. DEPLOY_PATHS must stay
+        # unquoted below so it word-splits into several pathspecs, and without
+        # this bash would also expand them against the workspace first — so the
+        # obvious migration from the old trigger, `paths: app/** packages/**`,
+        # would silently become `app/*`, dropping dotfile directories like
+        # app/.prebuilt, where the iOS ghostty dylib lives. git wants the
+        # patterns themselves, never the shell's idea of what they match.
+        set -f
+
+        go() { echo "$1 — deploying."; echo "go=true" >> "$GITHUB_OUTPUT"; exit 0; }
+
+        if [ "${GITHUB_EVENT_NAME}" = workflow_dispatch ]; then
+          go "Manual dispatch"
+        fi
+
+        # The baseline can be many commits back on a quiet week. actions/checkout
+        # defaults to depth 1, which would leave it unreachable and fail the gate
+        # open every single night — the exact cost this exists to avoid. Deepen
+        # here rather than demanding fetch-depth:0 from every caller.
+        # `|| true` so a fetch failure falls through to the reachability check
+        # below and deploys, rather than aborting under `set -e` — which would
+        # fail closed, the one outcome this gate must never produce.
+        if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+          git fetch --unshallow --quiet || true
+        fi
+
+        base=$(gh api \
+          "repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW}/runs?status=success&branch=${GITHUB_REF_NAME}&per_page=1" \
+          -q '.workflow_runs[0].head_sha' 2>/dev/null || true)
+
+        # A 404 (renamed workflow file, say) prints its JSON body on stdout, so
+        # an emptiness check alone would carry an error message forward as if it
+        # were a commit. Demand the shape of a sha instead.
+        case "$base" in
+          *[!0-9a-f]*|'') go "No usable baseline run of ${WORKFLOW} on ${GITHUB_REF_NAME}" ;;
+        esac
+
+        # A force-push or a branch rewrite can strip the baseline out of the
+        # history we just fetched; there is then nothing to diff against.
+        if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+          go "Baseline ${base} is not in this history"
+        fi
+
+        if [ "$base" = "$GITHUB_SHA" ]; then
+          echo "HEAD is already deployed ($base) — skipping."
+          echo "go=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "Diffing ${base}..${GITHUB_SHA} over: ${DEPLOY_PATHS}"
+        # Unquoted on purpose: DEPLOY_PATHS is a space-separated pathspec list.
+        if git diff --quiet "$base" "$GITHUB_SHA" -- $DEPLOY_PATHS; then
+          echo "No changes under the deploy paths since ${base} — skipping."
+          echo "go=false" >> "$GITHUB_OUTPUT"
+        else
+          # awk, not `head -20`: head exits at 20 lines and SIGPIPEs git, which
+          # under `set -o pipefail` aborts the script and fails the gate closed.
+          # awk drains the whole stream and only prints the first 20.
+          git diff --name-only "$base" "$GITHUB_SHA" -- $DEPLOY_PATHS | awk 'NR<=20'
+          go "Changes found"
+        fi

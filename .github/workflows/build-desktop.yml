@@ -92,6 +92,7 @@ jobs:
   # dart-defines.
   version:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     outputs:
@@ -185,6 +186,12 @@ jobs:
     if: ${{ github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'both' || inputs.platform == 'macos' }}
     needs: [version]
     runs-on: macos-15
+    # This job normally finishes in ~9 minutes. One hung run sat here for 4
+    # hours before failing and cost more billable minutes than every PR that
+    # month combined — macOS bills at 10x, and GitHub's default cap is 6 hours.
+    # Notarization is the usual suspect: `xcrun notarytool ... --wait` blocks on
+    # an Apple-side queue with no deadline of its own.
+    timeout-minutes: 45
     env:
       # Tag pushes carry no inputs — default to a release build.
       BUILD_MODE: ${{ inputs.build_mode || 'release' }}
@@ -395,8 +402,19 @@ jobs:
         run: |
           set -euo pipefail
           codesign --force --timestamp --sign "$IDENTITY" "antgrid-macos.dmg"
+          # --timeout is not optional on a 10x-billed runner: bare --wait polls
+          # Apple's queue forever, and a stuck submission once held this job for
+          # four hours. Exceeding it exits non-zero, so a slow notarization fails
+          # the release loudly instead of quietly draining the month's minutes.
+          #
+          # 30m, not 15: Apple quotes "most requests complete in under 15
+          # minutes" and has had multi-hour backlogs, so a tighter cap would
+          # redden ordinary releases on a queue that was merely slow. The rest
+          # of this job measures ~9.5 min, which keeps the worst case inside the
+          # 45-minute job cap above — raise both together or neither.
           xcrun notarytool submit "antgrid-macos.dmg" \
-            --apple-id "$APPLE_ID" --password "$APPLE_PW" --team-id "$TEAM_ID" --wait
+            --apple-id "$APPLE_ID" --password "$APPLE_PW" --team-id "$TEAM_ID" \
+            --wait --timeout 30m
           xcrun stapler staple "antgrid-macos.dmg"
 
       # Sparkle appcast for macOS in-app updates. Release paths only —
@@ -537,6 +555,8 @@ jobs:
     if: ${{ github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'both' || inputs.platform == 'windows' }}
     needs: [version]
     runs-on: windows-latest
+    # ~30 min typical; windows bills at 2x.
+    timeout-minutes: 75
     env:
       BUILD_MODE: ${{ inputs.build_mode || 'release' }}
       DEST: ${{ (inputs.build_mode == '' || inputs.build_mode == 'release') && 'Release' || inputs.build_mode == 'profile' && 'Profile' || 'Debug' }}
@@ -686,6 +706,7 @@ jobs:
     if: ${{ github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'linux' }}
     needs: [version]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       BUILD_MODE: ${{ inputs.build_mode || 'release' }}
       # Flutter's Linux product folder is the LOWERCASE mode (release/profile/
@@ -852,6 +873,7 @@ jobs:
     if: ${{ (github.event_name == 'push' && github.ref_type == 'tag') || inputs.release }}
     needs: [version, macos, linux]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/download-artifact@v7
         with:

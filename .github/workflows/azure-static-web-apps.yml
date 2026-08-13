@@ -34,6 +34,7 @@ jobs:
     if: |
       github.event_name == 'push' || github.event.action != 'closed'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     name: Build and deploy
     steps:
       - uses: actions/checkout@v7
@@ -88,6 +89,7 @@ jobs:
       github.event.action == 'closed' &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     name: Close PR preview
     steps:
       - name: Close

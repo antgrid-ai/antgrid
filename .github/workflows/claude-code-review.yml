@@ -28,6 +28,7 @@ jobs:
       )
 
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Write on both comment surfaces, because a review with findings posts them:
     # inline comments go through the pull-requests API and the tracking comment
     # through the issues API. Read-only here would make a 403 look exactly like a

@@ -13,6 +13,7 @@ on:
 jobs:
   smoke:
     runs-on: windows-latest
+    timeout-minutes: 15
     env:
       MSSTORE_TENANT_ID: ${{ secrets.MSSTORE_TENANT_ID }}
       MSSTORE_SELLER_ID: ${{ secrets.MSSTORE_SELLER_ID }}
