@@ -1,6 +1,8 @@
 import 'package:flutter/widgets.dart' show AppLifecycleState;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../models/pending_nav.dart';
+import '../models/settings_section.dart';
 import '../utils/agent_focus_coordinator.dart';
 import 'providers.dart';
 import 'value_controller.dart';
@@ -26,6 +28,26 @@ final workbenchSurfaceProvider =
     NotifierProvider<ValueController<WorkbenchSurface>, WorkbenchSurface>(
       () => ValueController(WorkbenchSurface.workspace),
     );
+
+/// A settings block a navigation named, waiting for the settings screen to
+/// scroll it into view.
+///
+/// Grouped with [workbenchSurfaceProvider] because it details one of those
+/// surfaces. Handed over as pending state for the same reason as
+/// `pendingWorkspaceViewProvider`: the nav layer writes the surface but cannot
+/// reach the screen that surface mounts, which may not exist yet when a link
+/// lands. `AppSettingsScreen` drains it on mount and on change, and clears it
+/// on consumption.
+///
+/// Null is a written value, not just an absence: a location naming no section
+/// writes null so a section left pending by an earlier one cannot scroll this
+/// destination. The [PendingNav] stamp covers the other half — a project switch
+/// that never goes through the nav layer at all.
+final pendingSettingsSectionProvider =
+    NotifierProvider<
+      ValueController<PendingNav<SettingsSection>?>,
+      PendingNav<SettingsSection>?
+    >(() => ValueController(null));
 
 /// Holds the single [AgentFocusCoordinator] instance. Kept in its own provider
 /// so it survives every rebuild of [agentFocusBinderProvider] — the coordinator

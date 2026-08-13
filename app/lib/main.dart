@@ -40,6 +40,7 @@ import 'providers/provider_retry.dart';
 import 'providers/push.dart';
 import 'providers/recent_agents.dart';
 import 'providers/recent_ports.dart';
+import 'navigation/nav_console.dart';
 import 'navigation/nav_controller.dart';
 import 'navigation/nav_serialization.dart';
 import 'screens/app_shell.dart';
@@ -442,7 +443,12 @@ class AbApp extends ConsumerWidget {
                   width: snackBarWidth,
                 ),
               ),
-              child: AbTextDensity(child: child!),
+              // Mounted from the builder, not from a screen: the console has to
+              // outlive every route and stay out of the shell's own layout,
+              // which is also what lets it drive navigation from wherever the
+              // app currently is. It renders nothing unless the driver entry
+              // point enabled it.
+              child: AbTextDensity(child: NavConsole(child: child!)),
             ),
           ),
         );

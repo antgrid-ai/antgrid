@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/agent_transport.dart';
 import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
+import '../providers/visible_surface.dart';
 import 'nav_location.dart';
 
 /// Upper bound on retained history entries. Oldest `past` entries are dropped
@@ -58,10 +59,11 @@ class NavController extends Notifier<NavState> {
   }
 
   /// Record-only: the calling user-intent site has already written the
-  /// underlying providers; this just appends to history. No-op when the new
-  /// location equals the current one (avoids duplicate entries on re-taps).
+  /// underlying providers; this just appends to history. No-op when [loc] names
+  /// the destination history is already at (avoids duplicate entries on
+  /// re-taps).
   void commit(NavLocation loc) {
-    if (state.current == loc) return;
+    if (_namesCurrentDestination(loc)) return;
     final past = state.current == null
         ? <NavLocation>[]
         : [...state.past, state.current!];
@@ -69,6 +71,25 @@ class NavController extends Notifier<NavState> {
         ? past.sublist(past.length - kNavHistoryCap)
         : past;
     state = NavState(past: capped, current: loc, future: const []);
+  }
+
+  /// Whether [loc] is the place `current` already is.
+  ///
+  /// The dedupe keys on target/surface/sessionId, not on the whole location:
+  /// view/settingsSection/file are things a link ASKS FOR at a destination, and
+  /// only the deep-link codec ever sets them. Comparing them would let one link
+  /// carrying a view turn every later re-tap of the same session into a
+  /// duplicate entry that back() then answers by re-applying the view. A
+  /// location that itself names one is a distinct request and always records.
+  bool _namesCurrentDestination(NavLocation loc) {
+    final cur = state.current;
+    if (cur == null) return false;
+    if (loc.view != null || loc.settingsSection != null || loc.file != null) {
+      return cur == loc;
+    }
+    return cur.target == loc.target &&
+        cur.surface == loc.surface &&
+        cur.sessionId == loc.sessionId;
   }
 
   void back() {
@@ -122,6 +143,40 @@ class NavController extends Notifier<NavState> {
     // A null target is a surface-only location (e.g. a `nav/settings` deep
     // link). It overlays whatever project is focused and must NOT deselect it,
     // so we never write selectedTargetProvider in that case.
+
+    // The rest of the location is handed to its destination screen as pending
+    // state instead of called from here: none of those screens is guaranteed
+    // mounted (a link can land at launch, and the FileService behind one of them
+    // does not exist until the project's session finishes constructing), and the
+    // shell's reveal callback is null on mobile regardless.
+    //
+    // AFTER the focus write above, and stamped with the focus it leaves behind,
+    // because both halves are read by the drains: a drain that runs off one of
+    // these writes must see the project the location names, and one that runs
+    // much later must be able to tell that it no longer does.
+    //
+    // Each is written when null too — that drops a value left pending by an
+    // earlier location, which this destination must not inherit. Unconditional,
+    // unlike the session id above, because a link may name a tab or a file in
+    // the project that is already focused.
+    final pendingTarget = ref.read(selectedTargetProvider);
+    ref
+        .read(pendingWorkspaceViewProvider.notifier)
+        .set(
+          loc.view == null ? null : (target: pendingTarget, value: loc.view!),
+        );
+    ref
+        .read(pendingSettingsSectionProvider.notifier)
+        .set(
+          loc.settingsSection == null
+              ? null
+              : (target: pendingTarget, value: loc.settingsSection!),
+        );
+    ref
+        .read(pendingFilePathProvider.notifier)
+        .set(
+          loc.file == null ? null : (target: pendingTarget, value: loc.file!),
+        );
   }
 }
 

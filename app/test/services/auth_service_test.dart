@@ -142,6 +142,26 @@ void main() {
       expect(await storage.readCookie(), isNull);
     });
 
+    // `queryParameters` percent-DECODES and throws on an escape that is not
+    // valid UTF-8. Any web page can fire this URL, and main() dispatches deep
+    // links unawaited, so a throw here is an unhandled async error.
+    test('ignores a deep link with an undecodable percent-escape', () async {
+      final storage = _InMemoryStorage();
+      final client = MockClient((req) async {
+        fail('should not call the network for an undecodable link');
+      });
+      final service = AuthService(
+        licenseApiUrl: 'https://lic.test',
+        storage: storage,
+        httpClient: client,
+      );
+      await expectLater(
+        service.handleDeepLink(Uri.parse('antgrid://auth/callback?token=%80')),
+        completes,
+      );
+      expect(await storage.readCookie(), isNull);
+    });
+
     group('OAuth failure surfacing', () {
       AuthService make(
         MockClient client, {

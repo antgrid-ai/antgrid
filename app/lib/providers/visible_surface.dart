@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../widgets/workspace_tab_bar.dart';
+import '../models/pending_nav.dart';
+import '../models/workspace_view.dart';
 import 'providers.dart';
 import 'value_controller.dart';
 
@@ -15,12 +16,52 @@ import 'value_controller.dart';
 /// route is mounted, a workbench surface overlays the workspace, mobile is on
 /// the agent page, or desktop has the context panel hidden.
 ///
-/// Lives here rather than in `ui_attention_providers.dart` because it needs the
-/// [WorkspaceView] enum from the widget layer, which that file avoids.
+/// Grouped here with the rest of the workspace-view state
+/// ([workspaceBadgesProvider], [workspaceMenuControlProvider]) rather than in
+/// `ui_attention_providers.dart`, which holds the surface/lifecycle attention
+/// state.
 final visibleWorkspaceViewProvider =
     NotifierProvider<ValueController<WorkspaceView?>, WorkspaceView?>(
       () => ValueController(null),
     );
+
+/// A workspace tab a navigation named, waiting for WorkspaceShell to show it.
+///
+/// The nav layer cannot reveal a view itself: [workspaceMenuControlProvider]'s
+/// `reveal` is null whenever the shell is unmounted and always on mobile, and a
+/// deep link can arrive before the shell mounts at all. Same handover as
+/// `pendingActiveSessionIdProvider` — the shell drains it on mount and on
+/// change, and clears it on consumption.
+///
+/// Null is a written value, not just an absence: a location naming no view
+/// writes null so a view left pending by an earlier one is dropped rather than
+/// applied to this destination. The [PendingNav] stamp covers the other half —
+/// a project switch that never goes through the nav layer at all.
+final pendingWorkspaceViewProvider =
+    NotifierProvider<
+      ValueController<PendingNav<WorkspaceView>?>,
+      PendingNav<WorkspaceView>?
+    >(() => ValueController(null));
+
+/// A file a navigation named, waiting for the file explorer to open it.
+///
+/// Grouped with [pendingWorkspaceViewProvider] because a file is only reachable
+/// through [WorkspaceView.files], and handed over the same way for the same
+/// reason: a link can land before the explorer — or the project's FileService —
+/// exists, so there is nothing for the nav layer to call.
+///
+/// The path is CHECKOUT-relative. `FileExplorerScreen` resolves it against the
+/// focused checkout's FileService, so an isolated session opens the file in its
+/// own worktree; `navLocationFromUri` has already refused anything that could
+/// climb out of that checkout.
+///
+/// Null is a written value, not just an absence — as for the pending view, and
+/// stamped with its project for the same reason.
+final pendingFilePathProvider =
+    NotifierProvider<
+      ValueController<PendingNav<String>?>,
+      PendingNav<String>?
+    >(() => ValueController(null));
 
 /// Counts the workspace views advertise on their tab: unstaged git files, and
 /// escalations the handler is waiting on.

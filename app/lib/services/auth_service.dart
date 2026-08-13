@@ -290,15 +290,25 @@ class AuthService {
   /// the deep link, so a hijacked or logged link yields nothing replayable.
   Future<void> handleDeepLink(Uri uri) async {
     if (uri.scheme != 'antgrid' || uri.host != 'auth') return;
+    final Map<String, String> query;
+    try {
+      query = uri.queryParameters;
+    } on FormatException {
+      // The getter percent-DECODES, and an escape that is not valid UTF-8
+      // (`antgrid://auth/x?token=%80`) throws out of it. Any web page can fire
+      // that URL, and main()'s handleLink is unawaited, so the throw would land
+      // as an unhandled async error rather than an ignored link.
+      return;
+    }
     // The handoff bounces its own failures back as `?error=` (no_session |
     // server_error — web/src/routes/oauth-handoff.ts) so the app regains the
     // foreground; without surfacing it the user lands on an unchanged sign-in
     // screen with no explanation.
-    if (uri.queryParameters['error'] != null) {
+    if (query['error'] != null) {
       _emitOAuthFailure();
       return;
     }
-    final token = uri.queryParameters['token'];
+    final token = query['token'];
     if (token == null || token.isEmpty) return;
     // The verify response carries the session cookie; never redeem (and receive
     // it) over plaintext. Consistent with the magic-link methods' guard.

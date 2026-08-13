@@ -746,8 +746,8 @@ final workspaceViewSurfaceActiveProvider =
 /// Callback to reveal the Handler workspace tab (desktop: select the sidebar
 /// view; mobile: also swipe to the workspace page). Set by WorkspaceShell —
 /// same registration pattern as [switchToAgentProvider]. Typed VoidCallback
-/// rather than taking a WorkspaceView so this file doesn't import the widget
-/// layer where that enum lives.
+/// rather than taking a `WorkspaceView`: the Handler tab is the only
+/// destination this hook exists to reach.
 final revealHandlerTabProvider =
     NotifierProvider<ValueController<VoidCallback?>, VoidCallback?>(
       () => ValueController(null),

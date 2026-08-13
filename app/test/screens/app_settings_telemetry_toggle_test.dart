@@ -17,18 +17,12 @@ _buildService() async {
   return (service: AppSettingsService(prefs, seed), prefs: prefs);
 }
 
-/// Drags the ListView until 'Anonymous usage analytics' is fully on-screen.
-/// The PRIVACY section is placed near the bottom of the settings screen, so a
-/// fresh pump may leave it off-screen — and the ListView's cache extent can
-/// build the row while it is still below the fold, so existence in the tree
-/// is not enough for a hittable tap; ensureVisible does the final alignment.
+/// Brings 'Anonymous usage analytics' fully on-screen. The PRIVACY section sits
+/// near the bottom of the settings screen, so a fresh pump leaves it below the
+/// fold; the screen builds every section eagerly, so the row is in the tree but
+/// not yet hittable, and ensureVisible does the alignment a tap needs.
 Future<void> _scrollToPrivacy(WidgetTester tester) async {
-  final label = find.text('Anonymous usage analytics');
-  while (label.evaluate().isEmpty) {
-    await tester.drag(find.byType(ListView), const Offset(0, -200));
-    await tester.pumpAndSettle();
-  }
-  await tester.ensureVisible(label);
+  await tester.ensureVisible(find.text('Anonymous usage analytics'));
   await tester.pumpAndSettle();
 }
 

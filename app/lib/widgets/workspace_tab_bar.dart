@@ -5,8 +5,12 @@ import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
+import '../models/workspace_view.dart';
 
-enum WorkspaceView { preview, files, git, terminals, handler }
+/// The enum is a model — nothing below the widget layer may reach into this
+/// file for it — but every widget-layer caller wants it together with the
+/// presentation extension defined here, so it arrives through this import too.
+export 'package:antgrid/models/workspace_view.dart';
 
 extension WorkspaceViewUI on WorkspaceView {
   String get label => switch (this) {

@@ -5,8 +5,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../analytics/events.dart';
 import '../models/file_tree_models.dart';
 import '../navigation/back_intent.dart';
+import '../providers/agent_transport.dart';
 import '../providers/analytics.dart';
 import '../providers/providers.dart';
+import '../providers/sessions.dart';
 import '../providers/visible_surface.dart';
 import '../widgets/workspace_tab_bar.dart';
 import '../services/file_service.dart';
@@ -54,6 +56,18 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
   @override
   Widget build(BuildContext context) {
     final fileService = serviceWhenReady(ref, fileServiceProvider);
+    // Watched rather than listened to, because this is also the retry trigger:
+    // a launch-time link reaches this screen before the project's FileService
+    // exists, and the rebuild that finally lands the service is the frame the
+    // drain has to run on. Deferred a frame so neither the clear nor the
+    // selection writes provider state during build.
+    final pendingFilePath = ref.watch(pendingFilePathProvider);
+    if (fileService != null && pendingFilePath != null && _checkoutSettled) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _drainPendingFilePath();
+      });
+    }
     if (fileService == null) {
       return const AbLoading(message: 'loading files...');
     }
@@ -87,6 +101,52 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
     );
   }
 
+  /// Whether [focusedCheckoutIdProvider] can be believed yet.
+  ///
+  /// It derives the checkout from the ACTIVE SESSION, and answers `main` both
+  /// while the project's session list is still in flight and while a session id
+  /// a navigation asked for is still queued for `_bootstrapSessions`. Draining
+  /// in either window opens the path in the project's main tree — the one thing
+  /// a checkout-relative path must never do. Watched in `build`, so the frame
+  /// that settles the session is also the retry.
+  bool get _checkoutSettled =>
+      ref.watch(freshSessionsStateProvider) != null &&
+      ref.watch(pendingActiveSessionIdProvider) == null;
+
+  /// Open the file a navigation left in [pendingFilePathProvider], and clear it
+  /// so a later rebuild cannot replay a spent link.
+  ///
+  /// The service is re-resolved here rather than captured from `build()`: this
+  /// runs a frame later, and a project switch in between disposes the service
+  /// that build saw. Resolving it through [focusedCheckoutServiceOrNull] is
+  /// also what makes the path checkout-scoped — an isolated session opens the
+  /// file in its own worktree, not in the project's main tree. An unresolved
+  /// session leaves the path pending instead of dropping it, so the rebuild
+  /// that lands the session still honours the link; a path stamped for another
+  /// project is spent unopened, since this explorer is not its destination.
+  void _drainPendingFilePath() {
+    final pending = ref.read(pendingFilePathProvider);
+    if (pending == null) return;
+    if (pending.target != ref.read(selectedTargetProvider)) {
+      ref.read(pendingFilePathProvider.notifier).set(null);
+      return;
+    }
+    // Re-checked a frame later for the same reason the service is: a session
+    // switch in between puts the checkout back in flight, and the path stays
+    // pending rather than landing in the wrong tree.
+    if (ref.read(freshSessionsStateProvider) == null ||
+        ref.read(pendingActiveSessionIdProvider) != null) {
+      return;
+    }
+    final service = focusedCheckoutServiceOrNull(
+      ref.container,
+      (s) => s.fileService,
+    );
+    if (service == null) return;
+    ref.read(pendingFilePathProvider.notifier).set(null);
+    service.selectFile(pending.value);
+  }
+
   bool get _onScreen =>
       ref.read(visibleWorkspaceViewProvider) == WorkspaceView.files;
 
@@ -97,8 +157,13 @@ class _FileExplorerScreenState extends ConsumerState<FileExplorerScreen> {
     }
     // The façade throws while the focused project's session is unresolved, and
     // this runs outside build(): decline the press rather than take the app
-    // down (see focusedServiceOrNull).
-    final service = focusedServiceOrNull(ref.container, (s) => s.fileService);
+    // down (see focusedCheckoutServiceOrNull). Checkout-scoped like the rest of
+    // this screen — the main-checkout façade would clear the viewing file of a
+    // tree that is not the one on screen in an isolated session.
+    final service = focusedCheckoutServiceOrNull(
+      ref.container,
+      (s) => s.fileService,
+    );
     if (service == null) return false;
     service.clearViewingFile();
     return true;

@@ -340,7 +340,10 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// Drops the selected port and every bit of webview state derived from it.
   /// Returns false when there is no service to deselect on.
   bool _showPortList() {
-    final preview = focusedServiceOrNull(
+    // Checkout-scoped like every other read in this screen: an isolated session
+    // previews its own worktree's ports, and deselecting on the main checkout's
+    // service would leave the webview on screen with nothing to clear it.
+    final preview = focusedCheckoutServiceOrNull(
       ref.container,
       (s) => s.previewService,
     );

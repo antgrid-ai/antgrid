@@ -99,7 +99,14 @@ class _GitPanelState extends ConsumerState<GitPanel> {
     final git = ref.read(fileTreeStateProvider).value?.git;
     if (git == null) return false;
     // Runs outside build(): the façade throws while the session is unresolved.
-    final service = focusedServiceOrNull(ref.container, (s) => s.fileService);
+    // Checkout-scoped to match the service this panel was BUILT with — the
+    // main-checkout façade would clear the git viewing state of a tree that is
+    // not the one on screen in an isolated session, so the press would report
+    // itself handled while nothing moved.
+    final service = focusedCheckoutServiceOrNull(
+      ref.container,
+      (s) => s.fileService,
+    );
     if (service == null) return false;
     if (git.viewingPath != null) {
       service.clearGitViewing();

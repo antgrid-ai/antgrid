@@ -770,6 +770,18 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       }
     }
 
+    // Watched rather than listened to, and only past the boot gate above,
+    // because a rebuild is also the RETRY: a link can name a tab before this
+    // route has prefs or a PageView, and the build that finally lands one is the
+    // frame the drain has to run on. Deferred a frame so the drain's provider
+    // writes never land during build.
+    if (ref.watch(pendingWorkspaceViewProvider) != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _drainPendingWorkspaceView();
+      });
+    }
+
     final width = MediaQuery.sizeOf(context).width;
     final isMobile = width < kCompactBreakpoint;
     // _surfaceView is desktop-only state (mobile reaches views by swiping to
@@ -1170,6 +1182,40 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
   void _closeViewSurface() {
     setState(() => _surfaceView = null);
+  }
+
+  /// Show the view a navigation left in [pendingWorkspaceViewProvider].
+  ///
+  /// Spent only once it has actually been honoured, so a route that cannot show
+  /// it yet leaves it for the rebuild that can — dropping it there would make
+  /// the link a silent no-op. A value stamped for another project is spent
+  /// without being shown: it named a destination this route is not.
+  void _drainPendingWorkspaceView() {
+    final pending = ref.read(pendingWorkspaceViewProvider);
+    if (pending == null) return;
+    final notifier = ref.read(pendingWorkspaceViewProvider.notifier);
+    if (pending.target != ref.read(selectedTargetProvider)) {
+      notifier.set(null);
+      return;
+    }
+    final mobile = _isMobileLayout;
+    // Mobile needs the PageView, which does not exist until a build past the
+    // boot gate — and a tab switched behind the page the user is looking at
+    // reads as a no-op, so the move is half the request, not a flourish.
+    if (mobile && !_pageController.hasClients) return;
+    notifier.set(null);
+    if (mobile) {
+      // [_openViewSurface] already degrades to the tab here, but leaves the
+      // PageView on the agent page.
+      _selectView(pending.value);
+      _goToPage(_MobilePage.workspace);
+      return;
+    }
+    // Desktop takes the whole workbench, which is what naming a destination
+    // reads as. The surface registers its own back handler, so a back press
+    // unwinds it before nav history moves — it is the newest layer on the
+    // route, and every other dismissible surface unwinds in that order too.
+    _openViewSurface(pending.value);
   }
 
   bool get _isMobileLayout =>

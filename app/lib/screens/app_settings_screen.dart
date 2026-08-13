@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -14,8 +16,12 @@ import '../design/widgets/ab_panel_header.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_tap_target.dart';
 import '../design/widgets/ab_text_field.dart';
+import '../models/pending_nav.dart';
+import '../models/settings_section.dart';
+import '../providers/agent_transport.dart';
 import '../providers/auth.dart';
 import '../providers/sign_out.dart';
+import '../providers/ui_attention_providers.dart';
 import '../services/account_api.dart';
 import '../services/app_settings_service.dart';
 import '../widgets/color_swatch_button.dart';
@@ -38,6 +44,34 @@ const _uiScaleSteps = <_UiScaleStep>[
   _UiScaleStep('Large', 1.30),
 ];
 
+/// The key [section]'s frame carries, and the handle a navigation scrolls to.
+///
+/// A [GlobalObjectKey] rather than a `GlobalKey` map held by the screen's
+/// State, so the target can be named from outside that State — the enum value
+/// IS the identity, so the same section yields an equal key on every rebuild.
+/// Uniqueness holds because only one settings screen is ever mounted: AppShell
+/// picks exactly one of the two routes that host it.
+GlobalObjectKey settingsSectionKey(SettingsSection section) =>
+    GlobalObjectKey(section);
+
+extension SettingsSectionUI on SettingsSection {
+  /// The section's header text. Lives beside the sections rather than on the
+  /// model so display strings stay out of the model layer, and derived from the
+  /// enum rather than written per call site so a header and the value that
+  /// addresses it cannot drift apart.
+  String get title => switch (this) {
+    SettingsSection.billing => 'BILLING',
+    SettingsSection.connection => 'CONNECTION',
+    SettingsSection.appearance => 'APPEARANCE',
+    SettingsSection.uiSize => 'UI SIZE',
+    SettingsSection.accessibility => 'ACCESSIBILITY',
+    SettingsSection.design => 'DESIGN',
+    SettingsSection.privacy => 'PRIVACY',
+    SettingsSection.help => 'HELP',
+    SettingsSection.account => 'ACCOUNT',
+  };
+}
+
 class AppSettingsScreen extends ConsumerStatefulWidget {
   const AppSettingsScreen({super.key, this.onClose});
 
@@ -55,6 +89,41 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
     super.initState();
     final initial = ref.read(appSettingsServiceProvider).defaultRelayUrl ?? '';
     _relayCtrl = TextEditingController(text: initial);
+    // A link naming a section writes it before this screen exists — the surface
+    // it also names is what mounts us — so the first frame is the first chance
+    // to honour it. Post-frame: the sections need to be laid out before one can
+    // be scrolled to.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _drainPendingSettingsSection();
+    });
+  }
+
+  /// Scroll to the section a navigation left in [pendingSettingsSectionProvider]
+  /// and clear it, so a later mount cannot replay a spent link.
+  ///
+  /// A section stamped for another project is spent without scrolling: the
+  /// settings surface belongs to the project it was opened over, and the user
+  /// has since moved to a different one.
+  void _drainPendingSettingsSection() {
+    final pending = ref.read(pendingSettingsSectionProvider);
+    if (pending == null) return;
+    ref.read(pendingSettingsSectionProvider.notifier).set(null);
+    if (pending.target != ref.read(selectedTargetProvider)) return;
+    // Silently does nothing for a section this build omits — BILLING,
+    // CONNECTION and DESIGN are all conditional — which is the codec's
+    // degrade-rather-than-reject contract carried through to the destination.
+    final ctx = settingsSectionKey(pending.value).currentContext;
+    if (ctx == null) return;
+    unawaited(
+      Scrollable.ensureVisible(
+        ctx,
+        duration: AbTokens.motionSettle,
+        // Header to the top of the viewport: a section is a block, and landing
+        // on its first row reads as "here it is" where centring it does not.
+        alignment: 0,
+      ),
+    );
   }
 
   @override
@@ -87,7 +156,8 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
         final go = await AbConfirmDialog.show(
           context: context,
           title: 'Cancel your subscription first',
-          body: 'You have an active subscription. Cancel it before deleting your '
+          body:
+              'You have an active subscription. Cancel it before deleting your '
               'account. Subscriptions billed by the App Store or Google Play must '
               'also be cancelled in your store account.',
           confirmLabel: 'Manage subscription',
@@ -110,6 +180,16 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
     final service = ref.read(appSettingsServiceProvider.notifier);
     final isNarrow = MediaQuery.sizeOf(context).width < 600;
 
+    // Links that land while this screen is already up (and back/forward over
+    // them) drain here; the initState post-frame callback covers the mount.
+    ref.listen<PendingNav<SettingsSection>?>(pendingSettingsSectionProvider, (
+      _,
+      next,
+    ) {
+      if (next == null) return;
+      _drainPendingSettingsSection();
+    });
+
     final palette = paletteFor(
       preset: settings.preset,
       customBg: settings.customBg,
@@ -131,125 +211,88 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
             ],
           ),
           Expanded(
-            child: ListView(
+            // Not a ListView: scroll-to-section resolves its target through the
+            // section's key context, and a lazy sliver has built no element for
+            // a section below the fold — null exactly for the sections a link
+            // is most useful for. Nine cheap blocks are affordable eagerly.
+            child: SingleChildScrollView(
               padding: const EdgeInsets.all(AbTokens.space12),
-              children: [
-                if (defaultNativeUpgradePlatformCheck()) ...[
-                  _Section(
-                    title: 'BILLING',
-                    body: [
-                      const SizedBox(height: AbTokens.space8),
-                      InkWell(
-                        onTap: () => openUpgrade(context, ref.container),
-                        borderRadius: AbTokens.borderRadius,
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            vertical: AbTokens.space8,
-                          ),
-                          child: Row(
-                            children: [
-                              Text(
-                                'Pricing',
-                                style: AbTokens.sansStyle(
-                                  color: antgrid.textPrimary,
+              child: Column(
+                // ListView stretched its children across the viewport; a Column
+                // centres them, which would shrink-wrap every section frame.
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (defaultNativeUpgradePlatformCheck()) ...[
+                    _Section(
+                      section: SettingsSection.billing,
+                      body: [
+                        const SizedBox(height: AbTokens.space8),
+                        InkWell(
+                          onTap: () => openUpgrade(context, ref.container),
+                          borderRadius: AbTokens.borderRadius,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              vertical: AbTokens.space8,
+                            ),
+                            child: Row(
+                              children: [
+                                Text(
+                                  'Pricing',
+                                  style: AbTokens.sansStyle(
+                                    color: antgrid.textPrimary,
+                                  ),
                                 ),
-                              ),
-                              const Spacer(),
-                              AbIconButton(
-                                icon: AbIcons.chevronRight,
-                                onTap: () => openUpgrade(context, ref.container),
-                              ),
-                            ],
+                                const Spacer(),
+                                AbIconButton(
+                                  icon: AbIcons.chevronRight,
+                                  onTap: () =>
+                                      openUpgrade(context, ref.container),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: AbTokens.space12),
-                ],
-                if (!isNarrow) ...[
-                  _Section(
-                    title: 'CONNECTION',
-                    body: [
-                      const SizedBox(height: AbTokens.space8),
-                      Text(
-                        'Default relay URL — used when pairing via a URI that doesn\'t specify a relay.',
-                        style: AbTokens.sansStyle(
-                          fontSize: AbTokens.fontXxs,
-                          color: antgrid.textMuted,
-                        ),
-                      ),
-                      const SizedBox(height: AbTokens.space8),
-                      AbTextField(
-                        controller: _relayCtrl,
-                        hintText: 'wss://relay.example.com',
-                        onSubmitted: (v) => _saveRelayUrl(service, v),
-                      ),
-                      const SizedBox(height: AbTokens.space8),
-                      Align(
-                        alignment: Alignment.centerRight,
-                        child: AbButton(
-                          label: 'SAVE URL',
-                          onTap: () => _saveRelayUrl(service, _relayCtrl.text),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: AbTokens.space12),
-                ],
-                _Section(
-                  title: 'APPEARANCE',
-                  body: [
-                    const SizedBox(height: AbTokens.space8),
-                    Text(
-                      'Theme preset',
-                      style: AbTokens.sansStyle(
-                        fontSize: AbTokens.fontXxs,
-                        color: antgrid.textMuted,
-                      ),
-                    ),
-                    const SizedBox(height: AbTokens.space8),
-                    Wrap(
-                      spacing: AbTokens.space8,
-                      runSpacing: AbTokens.space8,
-                      children: [
-                        for (final preset in AbThemePreset.values)
-                          _PresetTile(
-                            preset: preset,
-                            selected: settings.preset == preset,
-                            caption:
-                                settings.followSystemBrightness &&
-                                    preset == AbThemePreset.light
-                                ? 'used when system is light'
-                                : null,
-                            onTap: () => preset == AbThemePreset.custom
-                                ? service.setCustomColors(
-                                    bg: settings.customBg ?? palette.bgDeepest,
-                                    primary:
-                                        settings.customPrimary ??
-                                        palette.signalMut,
-                                    accent:
-                                        settings.customAccent ?? palette.accent,
-                                  )
-                                : service.setPreset(preset),
-                          ),
                       ],
                     ),
-                    const SizedBox(height: AbTokens.space8),
-                    _ToggleRow(
-                      title: 'Follow system light/dark',
-                      caption:
-                          'System light mode shows the Light preset; dark mode '
-                          'shows your chosen preset.',
-                      enabled: settings.followSystemBrightness,
-                      onTap: () => service.setFollowSystemBrightness(
-                        !settings.followSystemBrightness,
-                      ),
+                    const SizedBox(height: AbTokens.space12),
+                  ],
+                  if (!isNarrow) ...[
+                    _Section(
+                      section: SettingsSection.connection,
+                      body: [
+                        const SizedBox(height: AbTokens.space8),
+                        Text(
+                          'Default relay URL — used when pairing via a URI that doesn\'t specify a relay.',
+                          style: AbTokens.sansStyle(
+                            fontSize: AbTokens.fontXxs,
+                            color: antgrid.textMuted,
+                          ),
+                        ),
+                        const SizedBox(height: AbTokens.space8),
+                        AbTextField(
+                          controller: _relayCtrl,
+                          hintText: 'wss://relay.example.com',
+                          onSubmitted: (v) => _saveRelayUrl(service, v),
+                        ),
+                        const SizedBox(height: AbTokens.space8),
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: AbButton(
+                            label: 'SAVE URL',
+                            onTap: () =>
+                                _saveRelayUrl(service, _relayCtrl.text),
+                          ),
+                        ),
+                      ],
                     ),
-                    if (settings.preset == AbThemePreset.custom) ...[
-                      const SizedBox(height: AbTokens.space12),
+                    const SizedBox(height: AbTokens.space12),
+                  ],
+                  _Section(
+                    section: SettingsSection.appearance,
+                    body: [
+                      const SizedBox(height: AbTokens.space8),
                       Text(
-                        'Custom colors — surface, border, and text are derived from these.',
+                        'Theme preset',
                         style: AbTokens.sansStyle(
                           fontSize: AbTokens.fontXxs,
                           color: antgrid.textMuted,
@@ -260,136 +303,211 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                         spacing: AbTokens.space8,
                         runSpacing: AbTokens.space8,
                         children: [
-                          ColorSwatchButton(
-                            label: 'BG',
-                            color: settings.customBg ?? palette.bgDeepest,
-                            onChanged: (c) => service.setCustomColors(bg: c),
+                          for (final preset in AbThemePreset.values)
+                            _PresetTile(
+                              preset: preset,
+                              selected: settings.preset == preset,
+                              caption:
+                                  settings.followSystemBrightness &&
+                                      preset == AbThemePreset.light
+                                  ? 'used when system is light'
+                                  : null,
+                              onTap: () => preset == AbThemePreset.custom
+                                  ? service.setCustomColors(
+                                      bg:
+                                          settings.customBg ??
+                                          palette.bgDeepest,
+                                      primary:
+                                          settings.customPrimary ??
+                                          palette.signalMut,
+                                      accent:
+                                          settings.customAccent ??
+                                          palette.accent,
+                                    )
+                                  : service.setPreset(preset),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: AbTokens.space8),
+                      _ToggleRow(
+                        title: 'Follow system light/dark',
+                        caption:
+                            'System light mode shows the Light preset; dark mode '
+                            'shows your chosen preset.',
+                        enabled: settings.followSystemBrightness,
+                        onTap: () => service.setFollowSystemBrightness(
+                          !settings.followSystemBrightness,
+                        ),
+                      ),
+                      if (settings.preset == AbThemePreset.custom) ...[
+                        const SizedBox(height: AbTokens.space12),
+                        Text(
+                          'Custom colors — surface, border, and text are derived from these.',
+                          style: AbTokens.sansStyle(
+                            fontSize: AbTokens.fontXxs,
+                            color: antgrid.textMuted,
                           ),
-                          ColorSwatchButton(
-                            label: 'PRIMARY',
-                            color: settings.customPrimary ?? palette.signalMut,
-                            onChanged: (c) =>
-                                service.setCustomColors(primary: c),
-                          ),
-                          ColorSwatchButton(
-                            label: 'ACCENT',
-                            color: settings.customAccent ?? palette.accent,
-                            onChanged: (c) =>
-                                service.setCustomColors(accent: c),
-                          ),
+                        ),
+                        const SizedBox(height: AbTokens.space8),
+                        Wrap(
+                          spacing: AbTokens.space8,
+                          runSpacing: AbTokens.space8,
+                          children: [
+                            ColorSwatchButton(
+                              label: 'BG',
+                              color: settings.customBg ?? palette.bgDeepest,
+                              onChanged: (c) => service.setCustomColors(bg: c),
+                            ),
+                            ColorSwatchButton(
+                              label: 'PRIMARY',
+                              color:
+                                  settings.customPrimary ?? palette.signalMut,
+                              onChanged: (c) =>
+                                  service.setCustomColors(primary: c),
+                            ),
+                            ColorSwatchButton(
+                              label: 'ACCENT',
+                              color: settings.customAccent ?? palette.accent,
+                              onChanged: (c) =>
+                                  service.setCustomColors(accent: c),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ],
+                  ),
+                  const SizedBox(height: AbTokens.space12),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: AbButton(
+                      label: 'RESET TO DEFAULTS',
+                      onTap: () async {
+                        await service.reset();
+                        if (!mounted) return;
+                        _relayCtrl.text = '';
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: AbTokens.space12),
+                  _Section(
+                    section: SettingsSection.uiSize,
+                    body: [
+                      const SizedBox(height: AbTokens.space8),
+                      Text(
+                        'Scales text across the app. Spacing and row heights stay constant.',
+                        style: AbTokens.sansStyle(
+                          fontSize: AbTokens.fontXxs,
+                          color: antgrid.textMuted,
+                        ),
+                      ),
+                      const SizedBox(height: AbTokens.space8),
+                      Wrap(
+                        spacing: AbTokens.space8,
+                        runSpacing: AbTokens.space8,
+                        children: [
+                          for (final step in _uiScaleSteps)
+                            _UiScaleChip(
+                              step: step,
+                              selected: settings.uiScale == step.value,
+                              onTap: () => service.setUiScale(step.value),
+                            ),
                         ],
                       ),
                     ],
-                  ],
-                ),
-                const SizedBox(height: AbTokens.space12),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: AbButton(
-                    label: 'RESET TO DEFAULTS',
-                    onTap: () async {
-                      await service.reset();
-                      if (!mounted) return;
-                      _relayCtrl.text = '';
-                    },
                   ),
-                ),
-                const SizedBox(height: AbTokens.space12),
-                _Section(
-                  title: 'UI SIZE',
-                  body: [
-                    const SizedBox(height: AbTokens.space8),
-                    Text(
-                      'Scales text across the app. Spacing and row heights stay constant.',
-                      style: AbTokens.sansStyle(
-                        fontSize: AbTokens.fontXxs,
-                        color: antgrid.textMuted,
+                  const SizedBox(height: AbTokens.space12),
+                  _Section(
+                    section: SettingsSection.accessibility,
+                    body: [
+                      const SizedBox(height: AbTokens.space8),
+                      _ToggleRow(
+                        title: 'Reduce motion',
+                        caption:
+                            'Stops pulsing status dots and loading animations. '
+                            'Indicators hold a static "busy" state instead.',
+                        enabled: settings.reduceMotion,
+                        onTap: () =>
+                            service.setReduceMotion(!settings.reduceMotion),
                       ),
-                    ),
-                    const SizedBox(height: AbTokens.space8),
-                    Wrap(
-                      spacing: AbTokens.space8,
-                      runSpacing: AbTokens.space8,
-                      children: [
-                        for (final step in _uiScaleSteps)
-                          _UiScaleChip(
-                            step: step,
-                            selected: settings.uiScale == step.value,
-                            onTap: () => service.setUiScale(step.value),
+                    ],
+                  ),
+                  // Dev-only: the design gallery is a developer reference, not a
+                  // user-facing feature — keep it out of release builds.
+                  if (!kReleaseMode) ...[
+                    const SizedBox(height: AbTokens.space12),
+                    _Section(
+                      section: SettingsSection.design,
+                      body: [
+                        const SizedBox(height: AbTokens.space8),
+                        AbButton(
+                          label: 'Open design gallery',
+                          onTap: () => Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => const DesignGalleryScreen(),
+                            ),
                           ),
+                        ),
                       ],
                     ),
                   ],
-                ),
-                const SizedBox(height: AbTokens.space12),
-                _Section(
-                  title: 'ACCESSIBILITY',
-                  body: [
-                    const SizedBox(height: AbTokens.space8),
-                    _ToggleRow(
-                      title: 'Reduce motion',
-                      caption:
-                          'Stops pulsing status dots and loading animations. '
-                          'Indicators hold a static "busy" state instead.',
-                      enabled: settings.reduceMotion,
-                      onTap: () =>
-                          service.setReduceMotion(!settings.reduceMotion),
-                    ),
-                  ],
-                ),
-                // Dev-only: the design gallery is a developer reference, not a
-                // user-facing feature — keep it out of release builds.
-                if (!kReleaseMode) ...[
                   const SizedBox(height: AbTokens.space12),
                   _Section(
-                    title: 'DESIGN',
+                    section: SettingsSection.privacy,
                     body: [
                       const SizedBox(height: AbTokens.space8),
-                      AbButton(
-                        label: 'Open design gallery',
-                        onTap: () => Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => const DesignGalleryScreen(),
-                          ),
+                      _ToggleRow(
+                        title: 'Anonymous usage analytics',
+                        caption:
+                            'No code, files, or prompts — ever. Opt out anytime.',
+                        enabled: settings.telemetryEnabled,
+                        onTap: () => service.setTelemetryEnabled(
+                          !settings.telemetryEnabled,
                         ),
                       ),
                     ],
                   ),
-                ],
-                const SizedBox(height: AbTokens.space12),
-                _Section(
-                  title: 'PRIVACY',
-                  body: [
-                    const SizedBox(height: AbTokens.space8),
-                    _ToggleRow(
-                      title: 'Anonymous usage analytics',
-                      caption:
-                          'No code, files, or prompts — ever. Opt out anytime.',
-                      enabled: settings.telemetryEnabled,
-                      onTap: () => service.setTelemetryEnabled(
-                        !settings.telemetryEnabled,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: AbTokens.space12),
-                const _Section(
-                  title: 'HELP',
-                  body: [
-                    SizedBox(height: AbTokens.space8),
-                    HelpAboutSection(),
-                  ],
-                ),
-                const SizedBox(height: AbTokens.space12),
-                _Section(
-                  title: 'ACCOUNT',
-                  body: [
-                    if (ref.watch(currentUserProvider).value != null) ...[
+                  const SizedBox(height: AbTokens.space12),
+                  _Section(
+                    section: SettingsSection.help,
+                    body: const [
+                      SizedBox(height: AbTokens.space8),
+                      HelpAboutSection(),
+                    ],
+                  ),
+                  const SizedBox(height: AbTokens.space12),
+                  _Section(
+                    section: SettingsSection.account,
+                    body: [
+                      if (ref.watch(currentUserProvider).value != null) ...[
+                        const SizedBox(height: AbTokens.space8),
+                        Text(
+                          'Set or change your password on the web, where a '
+                          'password change can re-check who you are and sign out '
+                          'your other sessions.',
+                          style: AbTokens.sansStyle(
+                            fontSize: AbTokens.fontXxs,
+                            color: antgrid.textMuted,
+                          ),
+                        ),
+                        const SizedBox(height: AbTokens.space8),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: AbButton(
+                            label: 'MANAGE PASSWORD',
+                            leading: AbIcon(
+                              AbIcons.link,
+                              size: 10,
+                              color: antgrid.textSecondary,
+                            ),
+                            onTap: () => openAccountInBrowser(ref.container),
+                          ),
+                        ),
+                        const SizedBox(height: AbTokens.space16),
+                      ],
                       const SizedBox(height: AbTokens.space8),
                       Text(
-                        'Set or change your password on the web, where a '
-                        'password change can re-check who you are and sign out '
-                        'your other sessions.',
+                        'Permanently delete your account and all associated data. '
+                        'This cannot be undone.',
                         style: AbTokens.sansStyle(
                           fontSize: AbTokens.fontXxs,
                           color: antgrid.textMuted,
@@ -399,38 +517,15 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                       Align(
                         alignment: Alignment.centerLeft,
                         child: AbButton(
-                          label: 'MANAGE PASSWORD',
-                          leading: AbIcon(
-                            AbIcons.link,
-                            size: 10,
-                            color: antgrid.textSecondary,
-                          ),
-                          onTap: () => openAccountInBrowser(ref.container),
+                          label: 'DELETE ACCOUNT',
+                          color: antgrid.error,
+                          onTap: _deleteAccount,
                         ),
                       ),
-                      const SizedBox(height: AbTokens.space16),
                     ],
-                    const SizedBox(height: AbTokens.space8),
-                    Text(
-                      'Permanently delete your account and all associated data. '
-                      'This cannot be undone.',
-                      style: AbTokens.sansStyle(
-                        fontSize: AbTokens.fontXxs,
-                        color: antgrid.textMuted,
-                      ),
-                    ),
-                    const SizedBox(height: AbTokens.space8),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: AbButton(
-                        label: 'DELETE ACCOUNT',
-                        color: antgrid.error,
-                        onTap: _deleteAccount,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
+                  ),
+                ],
+              ),
             ),
           ),
         ],
@@ -439,9 +534,15 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
   }
 }
 
+/// One addressable block of the settings list: a titled, bordered frame whose
+/// key is derived from [section], so every section is reachable by a
+/// `nav/settings?section=` link by construction rather than by remembering to
+/// pass one.
 class _Section extends StatelessWidget {
-  const _Section({required this.title, required this.body});
-  final String title;
+  _Section({required this.section, required this.body})
+    : super(key: settingsSectionKey(section));
+
+  final SettingsSection section;
   final List<Widget> body;
 
   @override
@@ -455,7 +556,7 @@ class _Section extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(title, style: AbTokens.sansStyle()),
+          Text(section.title, style: AbTokens.sansStyle()),
           ...body,
         ],
       ),
@@ -642,9 +743,7 @@ class _SettingsToggle extends StatelessWidget {
       decoration: BoxDecoration(
         // "on" = accent; "off" = elevated background with subtle border.
         color: enabled ? antgrid.accent : antgrid.bgElevated,
-        border: enabled
-            ? null
-            : Border.all(color: antgrid.borderDefault),
+        border: enabled ? null : Border.all(color: antgrid.borderDefault),
         borderRadius: AbTokens.borderRadiusFull,
       ),
       child: Padding(

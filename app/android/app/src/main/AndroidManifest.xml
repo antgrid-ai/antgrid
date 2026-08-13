@@ -48,7 +48,16 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
+                <!-- Hosts stay enumerated: dropping the restriction would hand
+                     this activity every antgrid:// URL, including hosts nothing
+                     handles. Keep in lockstep with handleLink in lib/main.dart,
+                     which dispatches `nav` to the NavLocation codec and `auth`
+                     to OAuth token redemption.
+                     Android merges <data> attributes across a filter as a cross
+                     product, so a second scheme added here would also inherit
+                     every host below. One scheme per filter. -->
                 <data android:scheme="antgrid" android:host="auth" />
+                <data android:scheme="antgrid" android:host="nav" />
             </intent-filter>
         </activity>
         <!-- Don't delete the meta-data below.
