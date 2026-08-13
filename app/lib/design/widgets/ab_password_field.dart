@@ -13,10 +13,10 @@ import 'ab_text_field.dart';
 /// focus treatment — stays in the primitive, so a password field lines up with
 /// its neighbours by construction.
 ///
-/// The reveal toggle is why sign-up carries no "confirm password" field. A
-/// masked confirm on a phone keyboard is the worst typo trap available: it
-/// catches a mistyped repeat and misses a consistently mistyped original.
-/// Letting the user read what they typed catches both.
+/// The reveal toggle is why no caller pairs this with a "confirm password"
+/// field. A masked confirm on a phone keyboard is the worst typo trap
+/// available: it catches a mistyped repeat and misses a consistently mistyped
+/// original. Letting the user read what they typed catches both.
 class AbPasswordField extends StatefulWidget {
   const AbPasswordField({
     super.key,
@@ -26,6 +26,7 @@ class AbPasswordField extends StatefulWidget {
     this.enabled = true,
     this.autofocus = false,
     this.textInputAction,
+    this.autofillHints,
     this.onChanged,
     this.onSubmitted,
     this.height,
@@ -37,6 +38,9 @@ class AbPasswordField extends StatefulWidget {
   final bool enabled;
   final bool autofocus;
   final TextInputAction? textInputAction;
+
+  /// Forwarded to [AbTextField]; see the note there on why null opts out.
+  final Iterable<String>? autofillHints;
   final ValueChanged<String>? onChanged;
   final ValueChanged<String>? onSubmitted;
   final double? height;
@@ -61,6 +65,7 @@ class _AbPasswordFieldState extends State<AbPasswordField> {
       autocorrect: false,
       enableSuggestions: false,
       textInputAction: widget.textInputAction,
+      autofillHints: widget.autofillHints,
       onChanged: widget.onChanged,
       onSubmitted: widget.onSubmitted,
       height: widget.height ?? AbTokens.rowHeightLg,

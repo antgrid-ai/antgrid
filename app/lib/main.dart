@@ -43,6 +43,7 @@ import 'providers/recent_ports.dart';
 import 'navigation/nav_console.dart';
 import 'navigation/nav_controller.dart';
 import 'navigation/nav_serialization.dart';
+import 'navigation/platform_route_guard.dart';
 import 'screens/app_shell.dart';
 import 'screens/device_cap_dialog.dart';
 import 'screens/sign_in_screen.dart';
@@ -258,6 +259,11 @@ Future<void> main() async {
       }),
     );
   }
+
+  // Deep links are routed here, never by the framework. Registered before
+  // runApp so it outranks WidgetsApp's own observer, which can only crash on a
+  // platform route push — see PlatformRouteGuard.
+  WidgetsBinding.instance.addObserver(PlatformRouteGuard());
 
   // Deep-link handler: `antgrid://nav/...` applies a nav location;
   // `antgrid://auth/callback?token=<ott>` is redeemed for a session.

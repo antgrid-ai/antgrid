@@ -40,6 +40,15 @@
               android:name="io.flutter.embedding.android.NormalTheme"
               android:resource="@style/NormalTheme"
               />
+            <!-- The embedding's own deep-link handling defaults to ON and
+                 forwards every VIEW intent below to Flutter's navigation
+                 channel, where a home-only MaterialApp can only crash (see
+                 PlatformRouteGuard in lib/navigation/). The app_links plugin
+                 reads the intent through its own listener, so turning this off
+                 costs nothing and is what the plugin expects. -->
+            <meta-data
+                android:name="flutter_deeplinking_enabled"
+                android:value="false" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>

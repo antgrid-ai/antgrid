@@ -369,6 +369,165 @@ describe("cross-device sign-in end-to-end", () => {
     );
   });
 
+  test("the browser that asked for the link is signed in by opening it", async () => {
+    const cap = makeCapture();
+    const { app } = buildTestApp(pg.db, pg.url, {
+      sendEmail: cap.sendEmail,
+      usePrismaAdapter: true,
+    });
+
+    const startRes = await app.fetch(
+      new Request("http://localhost/ui/login/start", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: "email=hana@example.com",
+      })
+    );
+    const bind = (startRes.headers.get("set-cookie") ?? "").split(";")[0];
+
+    const u = new URL(cap.captured.at(-1)!.text.match(/https?:\/\/[^\s]+/)![0]);
+    const open = await app.fetch(
+      new Request(`http://localhost${u.pathname}${u.search}`, {
+        headers: { cookie: bind },
+      })
+    );
+
+    // No approval screen: the request came from this browser seconds ago, so
+    // there is no second party for it to warn.
+    expect(open.status).toBe(302);
+    expect(open.headers.get("location")).toBe("/dashboard");
+    const session = (open.headers.get("set-cookie") ?? "").match(
+      /better-auth\.session_token=[^;,]+/
+    );
+    expect(session).not.toBeNull();
+    const dash = await app.fetch(
+      new Request("http://localhost/dashboard", { headers: { cookie: session![0] } })
+    );
+    expect(dash.status).toBe(200);
+  });
+
+  test("a link opened without the bind cookie still meets the approval screen", async () => {
+    const cap = makeCapture();
+    const { app } = buildTestApp(pg.db, pg.url, {
+      sendEmail: cap.sendEmail,
+      usePrismaAdapter: true,
+    });
+
+    const first = await app.fetch(
+      new Request("http://localhost/ui/login/start", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: "email=ivan@example.com",
+      })
+    );
+    const link = new URL(cap.captured.at(-1)!.text.match(/https?:\/\/[^\s]+/)![0]);
+
+    // A second, unrelated sign-in in some other browser: it holds a bind cookie
+    // of its own, which must not pass for the one this link was minted with —
+    // the cookie names a row, and it isn't this one.
+    const other = await app.fetch(
+      new Request("http://localhost/ui/login/start", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: "email=judy@example.com",
+      })
+    );
+    const otherBind = (other.headers.get("set-cookie") ?? "").split(";")[0];
+    expect(otherBind).not.toBe((first.headers.get("set-cookie") ?? "").split(";")[0]);
+
+    const headerSets: Record<string, string>[] = [{}, { cookie: otherBind }];
+    for (const headers of headerSets) {
+      const open = await app.fetch(
+        new Request(`http://localhost${link.pathname}${link.search}`, { headers })
+      );
+      expect(open.status).toBe(200);
+      expect(await open.text()).toContain("Approve sign-in");
+    }
+  });
+
+  test("the waiting tab is sent to the dashboard, not told its link expired", async () => {
+    const cap = makeCapture();
+    const { app } = buildTestApp(pg.db, pg.url, {
+      sendEmail: cap.sendEmail,
+      usePrismaAdapter: true,
+    });
+
+    const startRes = await app.fetch(
+      new Request("http://localhost/ui/login/start", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: "email=kim@example.com",
+      })
+    );
+    const bind = (startRes.headers.get("set-cookie") ?? "").split(";")[0];
+    const id = startRes.headers.get("location")!.match(/\/login\/pending\/([0-9a-f-]+)/)![1];
+
+    // The other tab in this browser opens the link and claims the session,
+    // which consumes the row and clears the bind cookie.
+    const u = new URL(cap.captured.at(-1)!.text.match(/https?:\/\/[^\s]+/)![0]);
+    const open = await app.fetch(
+      new Request(`http://localhost${u.pathname}${u.search}`, {
+        headers: { cookie: bind },
+      })
+    );
+    const session = (open.headers.get("set-cookie") ?? "").match(
+      /better-auth\.session_token=[^;,]+/
+    )![0];
+
+    // The tab left behind polls with what the browser now carries: a session,
+    // and no bind cookie. "Link expired" is the one answer that cannot be true.
+    const poll = await app.fetch(
+      new Request(`http://localhost/ui/login/poll/${id}`, {
+        headers: { cookie: session },
+      })
+    );
+    expect(poll.headers.get("hx-redirect")).toBe("/dashboard");
+  });
+
+  test("a poll from a browser signed in as someone else is still expired", async () => {
+    const cap = makeCapture();
+    const { app } = buildTestApp(pg.db, pg.url, {
+      sendEmail: cap.sendEmail,
+      usePrismaAdapter: true,
+    });
+
+    // One browser completes a sign-in as lena, and is left holding her session.
+    const lena = await app.fetch(
+      new Request("http://localhost/ui/login/start", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: "email=lena@example.com",
+      })
+    );
+    const lenaLink = new URL(cap.captured.at(-1)!.text.match(/https?:\/\/[^\s]+/)![0]);
+    const lenaOpen = await app.fetch(
+      new Request(`http://localhost${lenaLink.pathname}${lenaLink.search}`, {
+        headers: { cookie: (lena.headers.get("set-cookie") ?? "").split(";")[0] },
+      })
+    );
+    const lenaSession = (lenaOpen.headers.get("set-cookie") ?? "").match(
+      /better-auth\.session_token=[^;,]+/
+    )![0];
+
+    // It then starts a sign-in as mo and abandons it. Holding a session says
+    // nothing about THAT flow, so the poll must not hand mo's tab a dashboard.
+    const mo = await app.fetch(
+      new Request("http://localhost/ui/login/start", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: "email=mo@example.com",
+      })
+    );
+    const moId = mo.headers.get("location")!.match(/\/login\/pending\/([0-9a-f-]+)/)![1];
+
+    const poll = await app.fetch(
+      new Request(`http://localhost/ui/login/poll/${moId}`, {
+        headers: { cookie: lenaSession },
+      })
+    );
+    expect(poll.headers.get("hx-redirect")).toContain("Link%20expired");
+  });
+
   test("status endpoint surfaces a bounce after a webhook marks the row", async () => {
     const cap = makeCapture();
     const KEY = "webhook-secret-key-abcdefghij";

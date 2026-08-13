@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show TextInput;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import '../design/ab_colors.dart';
@@ -18,6 +19,14 @@ import '../providers/auth.dart';
 import '../providers/device_revocation.dart';
 import '../providers/subscription.dart';
 import '../services/auth_service.dart';
+import '../storage/last_auth_method_store.dart';
+
+/// Declared here rather than under `providers/` so `storage/` stays free of
+/// Riverpod: this screen is the only consumer, and tests override it to
+/// substitute a store over a fake prefs backend.
+final lastAuthMethodStoreProvider = Provider<LastAuthMethodStore>(
+  (ref) => LastAuthMethodStore(),
+);
 
 /// Sign-in screen.
 ///
@@ -29,11 +38,25 @@ import '../services/auth_service.dart';
 /// "Continue without signing in" are shown. It auto-pops when
 /// [currentUserProvider] flips to a non-null user.
 ///
-/// Magic-link is the primary method: the email form drives the web
+/// The form is two steps: an address, then whatever that address needs. Which
+/// is decided by [LastAuthMethodStore] and nothing else — asking the server
+/// what an address uses would hand out an enumeration oracle, so a device that
+/// has never watched this address sign in simply falls through to the magic
+/// link, which works for every address (approving one creates the account).
+///
+/// Magic-link is that fallback and the primary method: it drives the web
 /// cross-device flow ([AuthService.startMagicLink] / [AuthService.pollStatus])
 /// entirely over HTTPS — no browser, no deeplink. GitHub/Google remain as
-/// secondary options on the existing browser+deeplink path. Email + password is
-/// secondary too, reached from a link under the form.
+/// secondary options on the existing browser+deeplink path.
+///
+/// There is no password SIGN-UP here. Creating an account with one lands on
+/// "check your email" and then needs a second trip back to sign in (the server
+/// runs `autoSignIn: false` with `requireEmailVerification`), which is the same
+/// mail the link sends and a step longer; and a password set on an address
+/// nobody has proven is dropped the moment someone proves it
+/// (`purgeUnprovenPasswordCredential`, web). Adding a password to an account is
+/// a signed-in action on the web account page, so this screen only ever signs
+/// in with one that already exists.
 class SignInScreen extends ConsumerStatefulWidget {
   const SignInScreen({super.key});
 
@@ -41,12 +64,12 @@ class SignInScreen extends ConsumerStatefulWidget {
   ConsumerState<SignInScreen> createState() => _SignInScreenState();
 }
 
-/// What the screen is DOING. Kept separate from [_FormMode], which is what the
-/// form is asking for: [pending]/[expired]/[bounced] belong to the magic link
-/// alone and [verifyEmail]/[resetSent] to the password paths, and folding the
-/// two axes into one enum would put the magic link's restore-and-poll
-/// invariants (see [_SignInScreenState._restorePendingSignIn]) on states that
-/// have nothing to do with it.
+/// What the screen is DOING. Kept separate from [_Step], which is what the form
+/// is asking for: [pending]/[expired]/[bounced] belong to the magic link alone
+/// and [verifyEmail]/[resetSent] to the password paths, and folding the two axes
+/// into one enum would put the magic link's restore-and-poll invariants (see
+/// [_SignInScreenState._restorePendingSignIn]) on states that have nothing to
+/// do with it.
 enum _Phase {
   form,
   submitting,
@@ -57,9 +80,12 @@ enum _Phase {
   resetSent,
 }
 
-/// What the form is ASKING FOR. Magic link is the default and stays the primary
-/// method; password is reached deliberately, mirroring the web's disclosure.
-enum _FormMode { magicLink, password, signUp }
+/// How far through the form the user is. [password] is reached from a
+/// remembered hint, from step 1's escape link, or from a screen that already
+/// knows the address needs one. None of those asks the server anything, which
+/// is what keeps the address step from implying whether the account behind it
+/// has a password at all.
+enum _Step { email, password }
 
 class _SignInScreenState extends ConsumerState<SignInScreen> {
   static const _pollInterval = Duration(seconds: 3);
@@ -67,10 +93,14 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   // window so an unreachable server doesn't poll forever.
   static const _maxPollTicks = 220;
 
+  /// Matches `RESEND_COOLDOWN_SECONDS` in `web/src/ui/auth-memory.ts` so a user
+  /// waits the same time whichever surface they started on.
+  static const _resendCooldown = Duration(seconds: 45);
+
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   _Phase _phase = _Phase.form;
-  _FormMode _mode = _FormMode.magicLink;
+  _Step _step = _Step.email;
   String? _error;
 
   /// Non-error status line (a resend landed, a reset went out). Separate from
@@ -81,6 +111,19 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   bool _polling = false;
   int _pollTicks = 0;
   StreamSubscription<String>? _oauthFailureSub;
+
+  /// Bumped every time the user walks away from the flow they were in
+  /// ([_backToForm], [_goToStep]). A request that snapshots this and finds it
+  /// changed knows its flow was abandoned mid-air. [_pollOnce]'s
+  /// `identical(_session, …)` cannot stand in for it on the resend path: the
+  /// late resend is precisely what would install the new [_session].
+  int _flowGeneration = 0;
+
+  /// Seconds left before the pending screen will send another link. Armed on
+  /// every send — including the first, so landing on the pending screen already
+  /// starts the clock — and counted down by [_cooldownTimer].
+  int _resendSecondsLeft = 0;
+  Timer? _cooldownTimer;
 
   @override
   void initState() {
@@ -117,6 +160,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   @override
   void dispose() {
     _pollTimer?.cancel();
+    _cooldownTimer?.cancel();
     _oauthFailureSub?.cancel();
     _emailController.dispose();
     _passwordController.dispose();
@@ -130,17 +174,59 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     setState(() => _error = message);
   }
 
+  /// Records [method] as the way [email] signs in, so the next Continue can
+  /// route straight there. Fire-and-forget by design: [LastAuthMethodStore]
+  /// never throws, and a lost write costs the user exactly one extra tap next
+  /// time — never a failed sign-in.
+  ///
+  /// [store] is for callers recording AFTER an await, where reading it off
+  /// [ref] could land on a widget that is already gone.
+  void _remember(
+    String email,
+    AuthMethod method, {
+    LastAuthMethodStore? store,
+  }) {
+    if (!_looksLikeEmail(email)) return;
+    final LastAuthMethodStore target =
+        store ?? ref.read(lastAuthMethodStoreProvider);
+    unawaited(target.remember(email, method));
+  }
+
   Future<void> _startOAuth(String provider) async {
     ref
         .read(analyticsServiceProvider)
         ?.track(AnalyticsEvents.signInStarted, props: {'provider': provider});
-    setState(() => _error = null);
+    final email = _emailController.text.trim();
+    // Captured up front: the hint below is written after the await, and the
+    // browser detour can outlive this widget — a `ref` touched then throws.
+    final store = ref.read(lastAuthMethodStoreProvider);
+    final auth = ref.read(authServiceProvider);
+    // Back to the form even if Continue routed us here from [_Phase.submitting]:
+    // OAuth's outcome arrives as a deep link much later, and [_onOAuthFailure]
+    // only shows itself on the form.
+    setState(() {
+      _phase = _Phase.form;
+      _error = null;
+    });
     try {
-      await ref.read(authServiceProvider).startOAuth(provider);
+      await auth.startOAuth(provider);
     } on AuthException catch (e) {
       if (!mounted) return;
       setState(() => _error = e.message);
+      return;
     }
+    // Only once the browser is actually up: written before the launch, the hint
+    // outlives a launch that never happened and then routes every later
+    // Continue back to a provider that has never worked. It still records the
+    // TYPED address, not whichever one the user authenticates as — the callback
+    // deep link carries none — so a hint can still land wrong. What keeps that
+    // survivable is "Continue with a password": it reaches step 2 whatever the
+    // hint says, and step 2 carries the link.
+    _remember(
+      email,
+      provider == 'github' ? AuthMethod.github : AuthMethod.google,
+      store: store,
+    );
   }
 
   /// Reclaim a sign-in started before this process existed.
@@ -157,15 +243,15 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     if (!mounted || session == null) return;
     // Whatever the user has already done by hand wins: a link they started
     // (_session set, or _phase moved off the form), an address they are
-    // part-way through typing, or a switch to one of the password modes — the
-    // restored ticket is a MAGIC-LINK sign-in, so resuming it would yank
-    // someone out of the form they deliberately opened. A cold-start keychain
-    // read can easily outlast the first keystrokes, and clobbering them would
-    // swap the field back to a stale address and strand the user on a pending
-    // screen they never asked for.
+    // part-way through typing, or a move to the password step — the restored
+    // ticket is a MAGIC-LINK sign-in, so resuming it would yank someone out of
+    // the form they deliberately opened. A cold-start keychain read can easily
+    // outlast the first keystrokes, and clobbering them would swap the field
+    // back to a stale address and strand the user on a pending screen they
+    // never asked for.
     if (_session != null ||
         _phase != _Phase.form ||
-        _mode != _FormMode.magicLink ||
+        _step != _Step.email ||
         _emailController.text.isNotEmpty) {
       return;
     }
@@ -176,6 +262,9 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
       _phase = _Phase.pending;
     });
     _startPolling();
+    // The ticket carries no send time, so the conservative reading is that the
+    // link just went out — better one 45s wait than a resend burst on relaunch.
+    _startResendCooldown();
   }
 
   bool _looksLikeEmail(String s) {
@@ -183,6 +272,59 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     return t.contains('@') &&
         t.indexOf('@') > 0 &&
         t.indexOf('@') < t.length - 1;
+  }
+
+  /// Step 1's primary action, and a guess by construction. The stored hint is
+  /// the ONLY input to this routing — no server is asked what
+  /// [_emailController] holds, because an answer would tell anyone with a list
+  /// of addresses which of them have accounts. A null or wrong hint therefore
+  /// has to be survivable, and it is: every method below the divider names
+  /// itself and ignores the hint entirely, so the guess is never the only way
+  /// through.
+  Future<void> _continue() async {
+    final email = _emailController.text.trim();
+    if (!_looksLikeEmail(email)) {
+      setState(() => _error = 'Enter a valid email');
+      return;
+    }
+    final store = ref.read(lastAuthMethodStoreProvider);
+    setState(() {
+      _phase = _Phase.submitting;
+      _error = null;
+      _notice = null;
+    });
+    final method = await store.recall(email);
+    if (!mounted) return;
+    switch (method) {
+      case AuthMethod.password:
+        _goToStep(_Step.password);
+      case AuthMethod.github:
+        await _startOAuth('github');
+      case AuthMethod.google:
+        await _startOAuth('google');
+      // A remembered link, and an address this device has never seen, take the
+      // same path — the link is what works without knowing anything.
+      case AuthMethod.link:
+      case null:
+        await _sendLink();
+    }
+  }
+
+  /// Starts a magic link for [email]. Every ref read happens before the await
+  /// so nothing here depends on the widget outliving the request; the caller
+  /// owns the mounted check and the UI transition.
+  Future<MagicLinkSession> _startMagicLink(String email) {
+    final auth = ref.read(authServiceProvider);
+    ref
+        .read(analyticsServiceProvider)
+        ?.track(
+          AnalyticsEvents.signInStarted,
+          props: {'provider': 'magic_link'},
+        );
+    // Before the send lands, deliberately: a failed send does not change what
+    // this address needs, and the link is still the right answer next time.
+    _remember(email, AuthMethod.link);
+    return auth.startMagicLink(email);
   }
 
   Future<void> _sendLink() async {
@@ -196,19 +338,14 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
       _error = null;
     });
     try {
-      final session = await ref.read(authServiceProvider).startMagicLink(email);
+      final session = await _startMagicLink(email);
       if (!mounted) return;
-      ref
-          .read(analyticsServiceProvider)
-          ?.track(
-            AnalyticsEvents.signInStarted,
-            props: {'provider': 'magic_link'},
-          );
       setState(() {
         _session = session;
         _phase = _Phase.pending;
       });
       _startPolling();
+      _startResendCooldown();
     } on AuthException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -218,13 +355,125 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     }
   }
 
-  void _setMode(_FormMode mode) {
+  /// Send another link from the pending screen. Deliberately stays on
+  /// [_Phase.pending] — the user is still waiting, and swapping the body out
+  /// for a spinner would hide the state they are waiting in.
+  ///
+  /// The new pending row comes with a new bind cookie, so [_session] is
+  /// replaced and [_startPolling] re-aims the timer at it; a response still in
+  /// flight for the OLD session is dropped by the identity guard in
+  /// [_pollOnce], which is what stops a stale `expired` from landing on a link
+  /// that was just re-sent.
+  ///
+  /// Nothing hides the pending screen while this is outstanding, so "Use a
+  /// different email" sits live right beneath the tap — hence the generation
+  /// guard on the way back in.
+  Future<void> _resendLink() async {
+    if (_resendSecondsLeft > 0) return;
+    final email = _emailController.text.trim();
+    if (!_looksLikeEmail(email)) return;
     setState(() {
-      _mode = mode;
+      _error = null;
+      _notice = null;
+    });
+    // Armed before the request, not after: that is what makes one tap one send
+    // even while the round-trip is outstanding.
+    _startResendCooldown();
+    final generation = _flowGeneration;
+    try {
+      final session = await _startMagicLink(email);
+      if (!mounted) return;
+      if (_flowGeneration != generation || _phase != _Phase.pending) {
+        // The user abandoned this link while the send was in the air.
+        // [AuthService.startMagicLink] persists its ticket before returning, so
+        // it landed AFTER [_backToForm]'s discard; left there it would restore
+        // the abandoned address on the next launch. This can also drop a ticket
+        // a newer send just wrote, which costs that flow only its
+        // relaunch-restore — its in-memory session still polls to completion.
+        unawaited(ref.read(authServiceProvider).discardPendingMagicLink());
+        return;
+      }
+      setState(() {
+        _session = session;
+        // Confirms the REQUEST — the server answers identically whether or not
+        // it had somewhere to send to, and we cannot vouch for delivery.
+        _notice = 'Sent. Check your inbox again in a moment.';
+      });
+      _startPolling();
+    } on AuthException catch (e) {
+      if (!mounted ||
+          _flowGeneration != generation ||
+          _phase != _Phase.pending) {
+        return;
+      }
+      setState(() => _error = e.message);
+    }
+  }
+
+  void _startResendCooldown() {
+    _cooldownTimer?.cancel();
+    setState(() => _resendSecondsLeft = _resendCooldown.inSeconds);
+    _cooldownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      // Only the two screens carrying a resend show this counting down, so a
+      // flow that has moved on — approved, expired, bounced — must not keep
+      // rebuilding once a second for the rest of the window.
+      if (!mounted ||
+          (_phase != _Phase.pending && _phase != _Phase.verifyEmail)) {
+        timer.cancel();
+        _cooldownTimer = null;
+        return;
+      }
+      setState(() => _resendSecondsLeft--);
+      if (_resendSecondsLeft <= 0) {
+        timer.cancel();
+        _cooldownTimer = null;
+      }
+    });
+  }
+
+  void _goToStep(_Step step) {
+    setState(() {
+      _flowGeneration++;
+      _step = step;
       _phase = _Phase.form;
       _error = null;
       _notice = null;
     });
+  }
+
+  /// The password method, named and always visible. The hint that routes
+  /// Continue to step 2 is written only by a successful password sign-in
+  /// ([_signInWithPassword]), so without a door of its own the password step
+  /// could never be entered a first time — a password added on the web account
+  /// page would be unusable here forever.
+  ///
+  /// It is also what makes a WRONG hint survivable, now that step 1 offers no
+  /// link of its own: this reaches step 2 whatever the hint says, and step 2
+  /// carries "Email me a link instead".
+  ///
+  /// Deliberately writes NO hint on the way through: a user who guesses wrong
+  /// would otherwise be routed back to a password they do not have on every
+  /// later Continue. Same reasoning as the OAuth buttons, which record nothing
+  /// until the browser actually opens.
+  ///
+  /// The address is validated first for the same reason the web's
+  /// `/login/password` refuses to render without one: step 2 shows the address
+  /// as settled text with no field to fix it, so arriving without a usable one
+  /// is a dead end.
+  void _useMyPassword() {
+    if (!_looksLikeEmail(_emailController.text)) {
+      setState(() => _error = 'Enter a valid email');
+      return;
+    }
+    _goToStep(_Step.password);
+  }
+
+  /// Back to the address step from step 2. The typed address stays in the
+  /// field to be edited; the password does not, because it belonged to the
+  /// address being left behind.
+  void _changeEmail() {
+    _passwordController.clear();
+    _goToStep(_Step.email);
   }
 
   /// Everything the two password submissions share: validate the address, park
@@ -272,8 +521,19 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         .read(authServiceProvider)
         .signInWithPassword(email: email, password: password);
     if (!mounted) return;
+    // Both non-failure outcomes prove this address has a password (Better-Auth
+    // verifies it before it checks `emailVerified`), which is exactly what the
+    // hint records — so an unverified account still skips the link next time.
+    if (outcome != PasswordSignIn.invalidCredentials) {
+      _remember(email, AuthMethod.password);
+    }
     switch (outcome) {
       case PasswordSignIn.ok:
+        // Closes the group opened on step 1, which is what asks the platform
+        // manager to save the pair. Only on a verdict of OK: committing on a
+        // rejected credential would offer to save a password the server just
+        // refused, and this screen is about to be popped out from under it.
+        TextInput.finishAutofillContext();
         ref
             .read(analyticsServiceProvider)
             ?.track(AnalyticsEvents.signInCompleted);
@@ -295,6 +555,11 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         // that was never going to arrive.
         try {
           await ref.read(authServiceProvider).sendVerificationEmail(email);
+          if (!mounted) return;
+          // This screen IS the landing after that send, so the resend beneath
+          // it starts its clock here rather than offering an instant retry of
+          // mail that has not had time to arrive.
+          _startResendCooldown();
         } on AuthException catch (e) {
           if (!mounted) return;
           // Handled here rather than left to `_submitPassword`: the sign-in
@@ -306,29 +571,6 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     }
   });
 
-  Future<void> _signUpWithPassword() => _submitPassword((email) async {
-    final password = _passwordController.text;
-    final lengthError = passwordLengthError(password);
-    if (lengthError != null) {
-      setState(() {
-        _phase = _Phase.form;
-        _error = lengthError;
-      });
-      return;
-    }
-    ref
-        .read(analyticsServiceProvider)
-        ?.track(
-          AnalyticsEvents.signInStarted,
-          props: {'provider': 'password_signup'},
-        );
-    await ref
-        .read(authServiceProvider)
-        .signUpWithPassword(email: email, password: password);
-    if (!mounted) return;
-    setState(() => _phase = _Phase.verifyEmail);
-  });
-
   Future<void> _forgotPassword() => _submitPassword((email) async {
     await ref.read(authServiceProvider).requestPasswordReset(email);
     if (!mounted) return;
@@ -336,19 +578,33 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   });
 
   Future<void> _resendVerification() async {
+    if (_resendSecondsLeft > 0) return;
     final email = _emailController.text.trim();
+    // "Use a different email" sits directly beneath the resend and stays live
+    // for the whole round trip, so `mounted` alone would land this send's
+    // verdict on whatever flow replaced it. Same guard as [_resendLink], minus
+    // its discard: a verification send persists nothing to survive the abandon.
+    final generation = _flowGeneration;
     setState(() {
       _error = null;
       _notice = null;
     });
+    // Armed before the request, same as [_resendLink]: nothing hides this
+    // screen while the send is outstanding, so without it one tap per frame is
+    // one send per frame straight into the server's per-minute bucket.
+    _startResendCooldown();
+    bool abandoned() =>
+        !mounted ||
+        _flowGeneration != generation ||
+        _phase != _Phase.verifyEmail;
     try {
       await ref.read(authServiceProvider).sendVerificationEmail(email);
-      if (!mounted) return;
+      if (abandoned()) return;
       // The server answers identically whether or not it sent anything, so
       // this confirms the REQUEST, not a delivery we cannot vouch for.
       setState(() => _notice = 'Sent. Check your inbox again in a moment.');
     } on AuthException catch (e) {
-      if (!mounted) return;
+      if (abandoned()) return;
       setState(() => _error = e.message);
     }
   }
@@ -421,10 +677,17 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   void _backToForm() {
     _pollTimer?.cancel();
     _pollTicks = 0;
+    _cooldownTimer?.cancel();
+    _cooldownTimer = null;
     unawaited(ref.read(authServiceProvider).discardPendingMagicLink());
+    // The password belonged to the address being abandoned.
+    _passwordController.clear();
     setState(() {
+      _flowGeneration++;
       _phase = _Phase.form;
+      _step = _Step.email;
       _session = null;
+      _resendSecondsLeft = 0;
       _error = null;
       _notice = null;
     });
@@ -459,29 +722,36 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
                   onTap: () => Navigator.of(context).maybePop(),
                 ),
               ),
+            // One group spanning BOTH steps, which is what makes the address
+            // and the password a single credential to the platform password
+            // manager: the two fields never coexist on screen, and a group per
+            // step would commit the address on its own and offer to save a
+            // password with no username attached.
             Center(
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 320),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    SvgPicture.asset(
-                      'assets/logo/antgrid-wordmark.svg',
-                      height: AbTokens.space16 * 4,
-                      semanticsLabel: 'antgrid',
-                    ),
-                    const SizedBox(height: AbTokens.space12),
-                    switch (_phase) {
-                      _Phase.pending => _pendingBody(context),
-                      _Phase.bounced => _bouncedBody(context),
-                      _Phase.expired => _expiredBody(context),
-                      _Phase.verifyEmail => _verifyEmailBody(context),
-                      _Phase.resetSent => _resetSentBody(context),
-                      _Phase.form ||
-                      _Phase.submitting => _formBody(context, canPop),
-                    },
-                  ],
+              child: AutofillGroup(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 320),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      SvgPicture.asset(
+                        'assets/logo/antgrid-wordmark.svg',
+                        height: AbTokens.space16 * 4,
+                        semanticsLabel: 'antgrid',
+                      ),
+                      const SizedBox(height: AbTokens.space12),
+                      switch (_phase) {
+                        _Phase.pending => _pendingBody(context),
+                        _Phase.bounced => _bouncedBody(context),
+                        _Phase.expired => _expiredBody(context),
+                        _Phase.verifyEmail => _verifyEmailBody(context),
+                        _Phase.resetSent => _resetSentBody(context),
+                        _Phase.form ||
+                        _Phase.submitting => _formBody(context, canPop),
+                      },
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -491,31 +761,27 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     );
   }
 
-  Widget _formBody(BuildContext context, bool canPop) {
-    final busy = _phase == _Phase.submitting;
-    final isSignUp = _mode == _FormMode.signUp;
-    final wantsPassword = _mode != _FormMode.magicLink;
-    final submit = switch (_mode) {
-      _FormMode.magicLink => _sendLink,
-      _FormMode.password => _signInWithPassword,
-      _FormMode.signUp => _signUpWithPassword,
-    };
-    final busyLabel = switch (_mode) {
-      _FormMode.magicLink => 'Sending…',
-      _FormMode.password => 'Signing in…',
-      _FormMode.signUp => 'Creating…',
-    };
-    final label = switch (_mode) {
-      _FormMode.magicLink => 'Send magic link',
-      _FormMode.password => 'Sign in',
-      _FormMode.signUp => 'Create account',
-    };
+  Widget _formBody(BuildContext context, bool canPop) => switch (_step) {
+    _Step.email => _emailStepBody(context, canPop),
+    _Step.password => _passwordStepBody(context),
+  };
 
+  /// Step 1: an address and nothing else. No sign-in/sign-up fork, and no
+  /// password field — that fork would make the user answer a question about
+  /// their own account that only this device's memory can answer for them.
+  ///
+  /// Two tiers, and the split is what the hint is allowed to decide. Continue
+  /// is the fast path and the only thing that reads the hint; every button
+  /// below the divider names its own method and ignores it, so a hint that is
+  /// missing or wrong costs a tap rather than the account. None of them asks
+  /// the server anything.
+  Widget _emailStepBody(BuildContext context, bool canPop) {
+    final busy = _phase == _Phase.submitting;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Text(
-          isSignUp ? 'Create your account' : 'Sign in to continue',
+          'Sign in or create an account',
           textAlign: TextAlign.center,
           style: AbTokens.sansStyle(color: context.antgrid.textMuted),
         ),
@@ -526,45 +792,42 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
           height: AbTokens.rowHeightLg,
           enabled: !busy,
           keyboardType: TextInputType.emailAddress,
-          // With a password below, Enter should reach it rather than submit a
-          // half-filled form.
-          textInputAction: wantsPassword
-              ? TextInputAction.next
-              : TextInputAction.go,
-          onSubmitted: wantsPassword ? null : (_) => busy ? null : _sendLink(),
+          textInputAction: TextInputAction.go,
+          // `username`, not `email`: the manager has to file this against the
+          // password on step 2 as ONE credential, and it is the username half
+          // of that pair it looks for — a field tagged as a bare email address
+          // is offered contact suggestions instead and saves nothing.
+          autofillHints: const [AutofillHints.username],
+          onSubmitted: (_) => busy ? null : _continue(),
         ),
-        if (wantsPassword) ...[
-          const SizedBox(height: AbTokens.space8),
-          AbPasswordField(
-            controller: _passwordController,
-            hintText: isSignUp
-                ? 'At least $kMinPasswordLength characters'
-                : 'Password',
-            enabled: !busy,
-            textInputAction: TextInputAction.go,
-            onSubmitted: (_) => busy ? null : submit(),
-          ),
-        ],
         ?_message(context),
         const SizedBox(height: AbTokens.space8),
         _SignInButton(
-          label: busy ? busyLabel : label,
-          onPressed: busy ? null : submit,
+          label: busy ? 'Continuing…' : 'Continue',
+          onPressed: busy ? null : _continue,
         ),
-        const SizedBox(height: AbTokens.space8),
-        ..._modeLinks(busy),
         const SizedBox(height: AbTokens.space8),
         const _OrDivider(),
         const SizedBox(height: AbTokens.space16),
         _SignInButton(
           label: 'Continue with GitHub',
-          onPressed: () => _startOAuth('github'),
+          onPressed: busy ? null : () => _startOAuth('github'),
         ),
         const SizedBox(height: AbTokens.space8),
         _SignInButton(
           label: 'Continue with Google',
-          onPressed: () => _startOAuth('google'),
+          onPressed: busy ? null : () => _startOAuth('google'),
         ),
+        const SizedBox(height: AbTokens.space8),
+        // Unconditional, never keyed on what the store recalls: visibility that
+        // tracked the hint would flicker as the address is typed and would tell
+        // anyone watching the screen which addresses this device remembers.
+        _SignInButton(
+          label: 'Continue with a password',
+          onPressed: busy ? null : _useMyPassword,
+        ),
+        // The only muted thing on the screen, and the only one that leaves the
+        // flow rather than choosing a way through it.
         if (canPop && !isMobilePlatform) ...[
           const SizedBox(height: AbTokens.space16),
           _MutedLink(
@@ -576,47 +839,65 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
     );
   }
 
-  /// The links under the primary button. Each mode offers exactly the ways out
-  /// of it, so no mode is a dead end: password reaches reset and sign-up,
-  /// sign-up reaches sign-in, and both can fall back to the magic link — which
-  /// is also the answer for an account that has no password at all, the case
-  /// INVALID_EMAIL_OR_PASSWORD deliberately refuses to distinguish.
-  List<Widget> _modeLinks(bool busy) {
-    switch (_mode) {
-      case _FormMode.magicLink:
-        return [
-          _MutedLink(
-            label: 'Sign in with a password',
-            onTap: () => _setMode(_FormMode.password),
-          ),
-        ];
-      case _FormMode.password:
-        return [
-          _MutedLink(
-            label: 'Forgot your password?',
-            onTap: busy ? null : _forgotPassword,
-          ),
-          _MutedLink(
-            label: 'Create an account',
-            onTap: () => _setMode(_FormMode.signUp),
-          ),
-          _MutedLink(
-            label: 'Use a magic link instead',
-            onTap: () => _setMode(_FormMode.magicLink),
-          ),
-        ];
-      case _FormMode.signUp:
-        return [
-          _MutedLink(
-            label: 'Already have an account? Sign in',
-            onTap: () => _setMode(_FormMode.password),
-          ),
-          _MutedLink(
-            label: 'Use a magic link instead',
-            onTap: () => _setMode(_FormMode.magicLink),
-          ),
-        ];
-    }
+  /// Step 2. The address is settled, so it reads as text rather than an input;
+  /// "change" is the only way back. Every exit stays open — reset, and the
+  /// magic link, which is also the answer for an account whose password was
+  /// never set (the case INVALID_EMAIL_OR_PASSWORD refuses to distinguish).
+  Widget _passwordStepBody(BuildContext context) {
+    final antgrid = context.antgrid;
+    final busy = _phase == _Phase.submitting;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          'Enter your password',
+          textAlign: TextAlign.center,
+          style: AbTokens.sansStyle(color: antgrid.textMuted),
+        ),
+        const SizedBox(height: AbTokens.space8),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Flexible(
+              child: Text(
+                _emailController.text.trim(),
+                overflow: TextOverflow.ellipsis,
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontXs,
+                  color: antgrid.textPrimary,
+                ),
+              ),
+            ),
+            const SizedBox(width: AbTokens.space8),
+            _MutedLink(label: 'change', onTap: busy ? null : _changeEmail),
+          ],
+        ),
+        const SizedBox(height: AbTokens.space8),
+        AbPasswordField(
+          controller: _passwordController,
+          hintText: 'Password',
+          enabled: !busy,
+          textInputAction: TextInputAction.go,
+          autofillHints: const [AutofillHints.password],
+          onSubmitted: (_) => busy ? null : _signInWithPassword(),
+        ),
+        ?_message(context),
+        const SizedBox(height: AbTokens.space8),
+        _SignInButton(
+          label: busy ? 'Signing in…' : 'Sign in',
+          onPressed: busy ? null : _signInWithPassword,
+        ),
+        const SizedBox(height: AbTokens.space8),
+        _MutedLink(
+          label: 'Forgot your password?',
+          onTap: busy ? null : _forgotPassword,
+        ),
+        _MutedLink(
+          label: 'Email me a link instead',
+          onTap: busy ? null : _sendLink,
+        ),
+      ],
+    );
   }
 
   /// The error or notice line, or null when there is neither. An error wins:
@@ -643,7 +924,6 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   Widget _verifyEmailBody(BuildContext context) {
     final antgrid = context.antgrid;
     final email = _emailController.text.trim();
-    final fromSignUp = _mode == _FormMode.signUp;
     // Only a failed send sets `_error` on this screen, and every send clears it
     // first — so this reads as "the last send failed", which is what keeps the
     // claim below from asserting a link the user is never going to get.
@@ -658,33 +938,14 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         ),
         const SizedBox(height: AbTokens.space8),
         Text(
-          fromSignUp
-              ? 'Open the verification link sent to\n$email\nto finish creating '
-                    "your account — you can't sign in until you do."
-              : 'Your password is correct, but\n$email\nhasn\'t been verified '
-                    'yet.${sent ? ' We sent a fresh link.' : ''}',
+          'Your password is correct, but\n$email\nhasn\'t been verified '
+          'yet.${sent ? ' We sent a fresh link.' : ''}',
           textAlign: TextAlign.center,
           style: AbTokens.sansStyle(
             fontSize: AbTokens.fontXs,
             color: antgrid.textMuted,
           ),
         ),
-        // Sign-up answers an address that already has an account with a
-        // synthetic success and sends nothing, so that it cannot be used to
-        // enumerate users. That user is otherwise left waiting on mail that
-        // will never arrive — say so without claiming which case they are in.
-        if (fromSignUp) ...[
-          const SizedBox(height: AbTokens.space8),
-          Text(
-            'Already had an account with this address? Nothing was sent — sign '
-            'in instead.',
-            textAlign: TextAlign.center,
-            style: AbTokens.sansStyle(
-              fontSize: AbTokens.fontXs,
-              color: antgrid.textMuted,
-            ),
-          ),
-        ],
         ?_message(context),
         const SizedBox(height: AbTokens.space16),
         // The password is still in the field behind this screen, so verifying
@@ -695,12 +956,17 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
           _SignInButton(
             label: "I've verified — sign in",
             onPressed: () {
-              _setMode(_FormMode.password);
+              _goToStep(_Step.password);
               unawaited(_signInWithPassword());
             },
           ),
         const SizedBox(height: AbTokens.space8),
-        _MutedLink(label: 'Resend the link', onTap: _resendVerification),
+        _MutedLink(
+          label: _resendSecondsLeft > 0
+              ? 'Resend the link (${_resendSecondsLeft}s)'
+              : 'Resend the link',
+          onTap: _resendSecondsLeft > 0 ? null : _resendVerification,
+        ),
         _MutedLink(label: 'Use a different email', onTap: _backToForm),
       ],
     );
@@ -731,7 +997,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         const SizedBox(height: AbTokens.space16),
         _SignInButton(
           label: 'Back to sign in',
-          onPressed: () => _setMode(_FormMode.password),
+          onPressed: () => _goToStep(_Step.password),
         ),
       ],
     );
@@ -739,6 +1005,10 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
 
   Widget _pendingBody(BuildContext context) {
     final antgrid = context.antgrid;
+    final email = _emailController.text.trim();
+    // A restored ticket can arrive without its address (older schema), and
+    // there is nothing to re-send to then.
+    final canResend = _resendSecondsLeft == 0 && _looksLikeEmail(email);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -749,7 +1019,10 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         ),
         const SizedBox(height: AbTokens.space8),
         Text(
-          'Approve the sign-in link sent to\n${_emailController.text.trim()}',
+          'Approve the sign-in link sent to\n$email\n'
+          // Straight from the window the server actually enforces, so the two
+          // can never disagree about how long the user has.
+          'The link expires in ${kMagicLinkWindow.inMinutes} minutes.',
           textAlign: TextAlign.center,
           style: AbTokens.sansStyle(
             fontSize: AbTokens.fontXs,
@@ -758,7 +1031,14 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         ),
         const SizedBox(height: AbTokens.space16),
         const AbLoading(),
+        ?_message(context),
         const SizedBox(height: AbTokens.space16),
+        _MutedLink(
+          label: _resendSecondsLeft > 0
+              ? 'Resend the link (${_resendSecondsLeft}s)'
+              : 'Resend the link',
+          onTap: canResend ? _resendLink : null,
+        ),
         _MutedLink(label: 'Use a different email', onTap: _backToForm),
       ],
     );
@@ -832,7 +1112,7 @@ class _OrDivider extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: AbTokens.space8),
           child: Text(
-            'or continue with',
+            'or',
             style: AbTokens.sansStyle(
               fontSize: AbTokens.fontXs,
               color: antgrid.textMuted,

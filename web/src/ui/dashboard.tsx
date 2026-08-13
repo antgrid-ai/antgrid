@@ -37,6 +37,10 @@ const STATUS_BADGE: Record<SubscriptionRow["status"], string> = {
 
 export function DashboardPage(props: DashboardPageProps) {
   const pageData = JSON.stringify({
+    // Rendering this page means the session gate passed, so it is the honest
+    // place to announce a sign-in to any tab still waiting on one — see
+    // auth-signal.ts for why the address travels with it.
+    email: props.user.email ?? null,
     tier: props.tier,
     purchaseSuccess: props.purchaseSuccess === true,
     cancelNotice: props.cancelNotice ?? null,

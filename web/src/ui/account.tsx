@@ -1,4 +1,5 @@
 import { Layout } from "./layout.js";
+import { AUTH_MEMORY_SCRIPT } from "./auth-memory.js";
 
 export type AccountPageProps = {
   user: { email?: string | null };
@@ -75,6 +76,7 @@ export function AccountPage(props: AccountPageProps) {
             `if(i&&b){i.addEventListener('input',()=>{b.disabled=i.value.trim()!=='DELETE';});}`,
         }}
       />
+      <script dangerouslySetInnerHTML={{ __html: AUTH_MEMORY_SCRIPT }} />
     </Layout>
   );
 }
@@ -100,7 +102,19 @@ function PasswordCard(props: AccountPageProps) {
         </p>
 
         {passwordNotice && (
-          <div class="alert alert-success font-mono text-sm mt-2" role="status">
+          // The one place a password is acquired without ever visiting the
+          // sign-in flow, which is why the hint has to be written here: step 1
+          // routes on what the browser has WATCHED this address do, and a
+          // password set on this page is otherwise something it never sees. Left
+          // out, the password step stays unreachable for the very user who just
+          // asked for one — nothing else writes this hint but a password
+          // sign-in, which needs the hint to be reachable at all.
+          <div
+            class="alert alert-success font-mono text-sm mt-2"
+            role="status"
+            data-ab-remember-now="password"
+            data-ab-email={props.user.email ?? ""}
+          >
             <span>{passwordNotice}</span>
           </div>
         )}

@@ -26,7 +26,7 @@ set -uo pipefail
 # Pin to the toolchain floor documented in CLAUDE.md (Gradle/AGP minimums and
 # the KGP 2.2.20 invariant assume this). Keep in lockstep with the
 # FLUTTER_VERSION in .github/workflows/.
-FLUTTER_VERSION="3.44.2"
+FLUTTER_VERSION="3.47.0"
 FLUTTER_HOME="/opt/flutter"
 BUN_MIN="1.3.14"   # CLAUDE.md relay floor: below this, APNs fails TLS/ALPN
 NOTES="/opt/antgrid-setup-notes.txt"   # outside the repo, so the snapshot keeps it

@@ -44,6 +44,12 @@
 	<false/>
 	<key>SUAutomaticallyUpdate</key>
 	<false/>
+	<!-- app_links owns every antgrid:// URL (handleLink in lib/main.dart).
+	     Letting the embedder route them instead pushes the URI at a home-only
+	     MaterialApp, which can only crash — see PlatformRouteGuard in
+	     lib/navigation/. -->
+	<key>FlutterDeepLinkingEnabled</key>
+	<false/>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

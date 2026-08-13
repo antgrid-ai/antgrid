@@ -1,12 +1,13 @@
 import { Hono } from "hono";
+import { getCookie } from "hono/cookie";
 import { z } from "zod";
 import { isAPIError } from "better-auth/api";
 import type { DB } from "../db/index.js";
 import type { Auth } from "../auth/better-auth.js";
 import type { Env } from "../env.js";
 import type { RelayPushConfig } from "../relay/push.js";
-import { findByIdWithHashes, checkNonce } from "../models/pending-sign-in.js";
-import { ERR_ALREADY_APPROVED } from "../auth/cross-device-plugin.js";
+import { findByIdWithHashes, findValidById, checkNonce } from "../models/pending-sign-in.js";
+import { COOKIE_BROWSER_TOKEN, ERR_ALREADY_APPROVED } from "../auth/cross-device-plugin.js";
 import { ApproveSignInPage } from "../ui/approve-sign-in.js";
 import { ApprovedPage } from "../ui/approved.js";
 import {
@@ -24,10 +25,11 @@ import {
 import { revokeUserDevice } from "../services/device.js";
 import { tokenBucket } from "../util/rate-limit.js";
 import { LoginPage } from "../ui/login.js";
-import { SignUpPage } from "../ui/signup.js";
+import { LoginPasswordPage } from "../ui/login-password.js";
 import { ForgotPasswordPage } from "../ui/forgot-password.js";
 import { ResetPasswordPage, ResetLinkInvalidPage } from "../ui/reset-password.js";
 import { CheckEmailPage, VerifyEmailFailedPage } from "../ui/check-email.js";
+import { SignUpPage } from "../ui/signup.js";
 import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from "../auth/better-auth.js";
 import {
   hasPasswordCredential,
@@ -57,7 +59,7 @@ import {
   cancelRecurringSubscription,
   resumeRecurringSubscription,
 } from "../billing/cancel-subscription.js";
-import { PendingPage } from "../ui/pending.js";
+import { PendingPage, PollingIndicator } from "../ui/pending.js";
 import { ConnectionsPage } from "../ui/connections.js";
 import { fetchConnections } from "../relay/push.js";
 import { listUserSessions, type UserSession } from "../services/sessions.js";
@@ -86,8 +88,22 @@ export function uiRoutes(deps: {
   // `auth.api.*`, which is not routed and so never reaches the limiter. Every
   // form below must therefore carry its own bucket; there is no backstop.
   const passwordSignInLimiter = tokenBucket(10, 0.2); // 10 burst, 1 per 5s, per IP
-  const signUpLimiter = tokenBucket(5, 1 / 60); // 5 burst, 1 per minute, per IP
+  // Step 1 only decides where to go: no mail, no credential check, no lookup.
+  // It can afford to be loose because every branch it hands off to spends its
+  // own, tighter budget — this bucket exists so the router itself can't be the
+  // cheap way to make the expensive branches run.
+  const continueLimiter = tokenBucket(20, 1); // 20 burst, 1 per second, per IP
   const passwordEmailLimiter = tokenBucket(5, 1 / 60); // reset + resend sends
+  // Sized to Better-Auth's own `/sign-up/email` rule (10/hour), which this form
+  // never reaches: it calls the endpoint in-process. Each admitted request
+  // scrypt-hashes a password, writes a user + billing account, and sends mail.
+  const signUpLimiter = tokenBucket(10, 1 / 360); // 10 burst, 1 per 6min, per IP
+  // Submitting the sign-up FORM, kept off the bucket above for the same reason
+  // the reset form is: a mistyped confirmation or a too-short password is
+  // rejected before any of that work happens, and must not spend an hour-long
+  // budget — three fumbles from each of four people behind one NAT would
+  // otherwise lock the address out of signing up at all.
+  const signUpSubmitLimiter = tokenBucket(10, 0.2); // 10 burst, 1 per 5s, per IP
   // Submitting the reset FORM, kept off the send bucket above: a user fixing a
   // mismatched confirmation must not spend the budget for requesting a new link.
   const resetSubmitLimiter = tokenBucket(10, 0.2); // 10 burst, 1 per 5s, per IP
@@ -118,14 +134,27 @@ export function uiRoutes(deps: {
    *  has no ambient credentials to abuse, so it passes; browsers always send at
    *  least one on a form POST. Origin is compared against the configured public
    *  origin rather than the request URL, which behind the reverse proxy is the
-   *  internal one. */
+   *  internal one.
+   *
+   *  `Origin: null` is what a form POST from our OWN pages carries: app.ts sends
+   *  Referrer-Policy: no-referrer, and Fetch serializes a non-CORS request's
+   *  origin as `null` under that policy (fetch spec, "append a request Origin
+   *  header"). A sandboxed iframe sends the same value, so `null` names no site
+   *  either way and cannot be compared — such a request is decided on
+   *  Sec-Fetch-Site alone, which is forbidden-header-name and so unforgeable by
+   *  a page. Absent that header a stated-`null` origin is refused rather than
+   *  waved through: an attacker page can put itself in exactly that state with
+   *  its own no-referrer policy. */
   r.use("*", async (c, next) => {
     if (c.req.method === "GET" || c.req.method === "HEAD") return next();
     const origin = c.req.header("origin");
     const site = c.req.header("sec-fetch-site");
-    const sameOrigin = origin
-      ? origin === appOrigin
-      : !site || site === "same-origin" || site === "none";
+    const statedOrigin = origin && origin !== "null" ? origin : null;
+    const sameOrigin = statedOrigin
+      ? statedOrigin === appOrigin
+      : site
+        ? site === "same-origin" || site === "none"
+        : origin === undefined;
     if (!sameOrigin) return c.text("Forbidden", 403);
     return next();
   });
@@ -218,70 +247,141 @@ export function uiRoutes(deps: {
   });
 
   r.get("/login", (c) => {
-    const sent = c.req.query("sent") ?? null;
     const error = c.req.query("error") ?? null;
     const notice = c.req.query("notice") ?? null;
-    return c.html(<LoginPage sent={sent} error={error} notice={notice} />);
+    // Round-tripped by step 2's "change" link, so stepping back never costs the
+    // user the address they already typed.
+    const email = c.req.query("email") ?? null;
+    return c.html(<LoginPage error={error} notice={notice} email={email} />);
   });
 
-  r.get("/signup", (c) =>
-    c.html(
-      <SignUpPage
-        error={c.req.query("error") ?? null}
-        email={c.req.query("email") ?? null}
-        minPasswordLength={MIN_PASSWORD_LENGTH}
-        maxPasswordLength={MAX_PASSWORD_LENGTH}
-      />
-    )
-  );
-
-  r.post("/ui/signup", async (c) => {
-    // Bucket first, body second. Bun hands the handler the request as soon as
-    // the headers land and streams the body lazily, so returning before
-    // `formData()` costs nothing — reading it first buffers an attacker-chosen
-    // body (128 MiB by default, ~4x that in RSS) for a request already destined
-    // for 429. Same order as /ui/login/start below.
-    if (!signUpLimiter(ipKey(c))) {
-      return redirectWith(c, "/signup", { error: "Too many requests" });
-    }
-    const form = await c.req.formData();
-    const email = String(form.get("email") ?? "").trim().toLowerCase();
-    // Never trim a password: leading/trailing spaces are part of what the user
-    // chose, and silently dropping them here would break every later compare.
-    const password = String(form.get("password") ?? "");
-    const confirm = String(form.get("confirmPassword") ?? "");
-    const fail = (message: string) => redirectWith(c, "/signup", { error: message, email });
-
-    if (!email) return fail("Email required");
-    if (password !== confirm) return fail("Passwords do not match");
-    const lengthError = passwordLengthError(password);
-    if (lengthError) return fail(lengthError);
-
-    const res = await deps.auth.api.signUpEmail({
+  /** Send a cross-device magic link and hand the browser its pending page.
+   *
+   *  Two entry points reach it: step 1's fall-through below, and the forms that
+   *  post to /ui/login/start (step 2's "Email me a link instead", the pending
+   *  page's resend).
+   *
+   *  Its `startLimiter` token is spent by the CALLER, not here — each entry
+   *  point has to bucket ahead of its own body read (see /ui/login/continue),
+   *  and a second charge here would halve the budget rather than protect
+   *  anything. */
+  async function startMagicLink(c: import("hono").Context, email: string) {
+    const res = await deps.auth.api.crossDeviceStart({
       method: "POST",
-      headers: forwardedHeaders(c),
-      body: { email, password, name: email },
-      asResponse: true,
+      headers: {
+        "content-type": "application/json",
+        "user-agent": c.req.header("user-agent") ?? "",
+        // The plugin has no socket access, so hand it the ALREADY-resolved
+        // client IP as a single-hop header instead of the raw (forgeable)
+        // chain — it reads the rightmost hop (see cross-device-plugin.ts).
+        "x-forwarded-for": deps.clientIp(c) ?? "",
+        cookie: c.req.header("cookie") ?? "",
+      },
+      body: { email },
+      asResponse: true
     });
     if (!res.ok) {
-      // Not "that email is taken": with requireEmailVerification on,
-      // Better-Auth answers an existing address with a synthetic success
-      // (api/routes/sign-up.mjs) so sign-up can't be used to enumerate users.
-      // A failure here is a real one — validation or the adapter.
-      return fail("Could not create the account. Try again.");
+      return c.redirect(`/login?error=${encodeURIComponent("Could not send link")}`);
     }
-    // No cookie to forward — autoSignIn is off, so a session only exists once
-    // the emailed link is opened.
-    return redirectWith(c, "/login/check-email", { email });
+    forwardSetCookies(c, res);
+    const { id } = (await res.json()) as { id: string };
+    return c.redirect(`/login/pending/${id}?email=${encodeURIComponent(email)}`);
+  }
+
+  r.post("/ui/login/continue", async (c) => {
+    // Bucket first, body second, and the same order everywhere below. Bun hands
+    // the handler the request as soon as the headers land and streams the body
+    // lazily, so returning before `formData()` costs nothing — reading it first
+    // buffers an attacker-chosen body (128 MiB by default, ~4x that in RSS) for
+    // a request already destined for 429.
+    if (!continueLimiter(ipKey(c))) {
+      return redirectWith(c, "/login", { error: "Too many requests" });
+    }
+    const form = await c.req.formData();
+    const email = String(form.get("email") ?? "").trim();
+    // What the BROWSER remembers about its own last sign-in (ui/auth-memory.ts),
+    // never something this server looked up — no route here knows whether an
+    // address has an account, a password, or a provider, and keeping it that way
+    // is the whole design. So it is untrusted input like any other field.
+    const method = String(form.get("method") ?? "");
+    if (!email) return redirectWith(c, "/login", { error: "Email required" });
+
+    // The link branch, reached two ways: asked for outright, or landed on
+    // because nothing better is known. One body so both spend the same token —
+    // /ui/login/start's budget is what stands between this and a mailer.
+    const sendLink = async () => {
+      if (!startLimiter(ipKey(c))) {
+        return redirectWith(c, "/login", { error: "Too many requests" });
+      }
+      return startMagicLink(c, email);
+    };
+
+    // A submit button naming its own branch, read ahead of the switch: the hint
+    // says what this browser did last time, the button says what the user wants
+    // now, and the second outranks the first. `data-ab-recall` fills the hidden
+    // `method` field on every submit of this form, so a stale hint always rides
+    // along with the click trying to get away from it.
+    //
+    // `password` is the one step 1 renders — nothing else writes that hint but a
+    // password sign-in and /account, so a browser that has watched neither could
+    // never reach step 2 on its own, and a wrong provider hint would relaunch
+    // itself on every Continue. Neither branch asks the server anything about
+    // the address; step 2 is a form, not an answer.
+    //
+    // `link` is still honoured for a page cached before that button moved into
+    // the method block, so it is not routed by the very hint it was posted to
+    // escape.
+    const fallback = String(form.get("fallback") ?? "");
+    if (fallback === "password") {
+      return redirectWith(c, "/login/password", { email });
+    }
+    if (fallback === "link") return sendLink();
+
+    switch (method) {
+      case "password":
+        return redirectWith(c, "/login/password", { email });
+      // Switched on the two literals rather than forwarded: `method` is
+      // client-supplied, and a value it chose must never reach the `provider`
+      // param.
+      case "github":
+        return c.redirect("/oauth/start?provider=github&callbackURL=/dashboard");
+      case "google":
+        return c.redirect("/oauth/start?provider=google&callbackURL=/dashboard");
+      default:
+        // Absent, unrecognised, or simply wrong about this address — one answer
+        // for all three. The link is the only branch that needs no server-side
+        // verdict on whether the account exists, and it resolves either case:
+        // cross-device approve signs up on approve.
+        return sendLink();
+    }
+  });
+
+  r.get("/login/password", (c) => {
+    const email = c.req.query("email") ?? "";
+    // Never render step 2 without the address it belongs to: it has no email
+    // field of its own, so an empty one is a dead end, and reaching it at all
+    // means the client-side hint was lost — step 1 is where that is rebuilt.
+    if (!email) return c.redirect("/login");
+    return c.html(
+      <LoginPasswordPage email={email} error={c.req.query("error") ?? null} />
+    );
   });
 
   r.post("/ui/login/password", async (c) => {
     if (!passwordSignInLimiter(ipKey(c))) {
+      // Back to step 1, not step 2 — the address only exists in the body, and
+      // the bucket has to be spent before that is read (see /ui/login/continue).
+      // Step 1
+      // prefills the last-used address from the browser, so the round trip
+      // costs a click rather than the address.
       return redirectWith(c, "/login", { error: "Too many requests" });
     }
     const form = await c.req.formData();
     const email = String(form.get("email") ?? "").trim().toLowerCase();
     const password = String(form.get("password") ?? "");
+    // The checkbox is simply absent from the body when unchecked, so presence
+    // IS the answer — never compare against its value.
+    const rememberMe = form.has("rememberMe");
 
     if (!email || !password) {
       return redirectWith(c, "/login", { error: "Email and password required" });
@@ -290,7 +390,7 @@ export function uiRoutes(deps: {
     const res = await deps.auth.api.signInEmail({
       method: "POST",
       headers: forwardedHeaders(c),
-      body: { email, password },
+      body: { email, password, rememberMe },
       asResponse: true,
     });
     if (!res.ok) {
@@ -326,10 +426,82 @@ export function uiRoutes(deps: {
       // (magic-link/OAuth only). Wording that told them apart would be an
       // enumeration oracle — the standing hint under the form is what tells
       // that last user where to go instead.
-      return redirectWith(c, "/login", { error: "Invalid email or password" });
+      //
+      // Back to step 2 with the address intact: it was settled a step ago, and
+      // the "Email me a link instead" button this lands next to is the way out
+      // for the user the collapse is hiding.
+      return redirectWith(c, "/login/password", {
+        email,
+        error: "Invalid email or password",
+      });
     }
     forwardSetCookies(c, res);
     return c.redirect("/dashboard");
+  });
+
+  r.get("/signup", (c) =>
+    c.html(
+      <SignUpPage
+        email={c.req.query("email") ?? null}
+        error={c.req.query("error") ?? null}
+        minPasswordLength={MIN_PASSWORD_LENGTH}
+        maxPasswordLength={MAX_PASSWORD_LENGTH}
+      />
+    )
+  );
+
+  r.post("/ui/signup", async (c) => {
+    // Bucket ahead of the body read, as everywhere here — see
+    // /ui/login/continue for why the order is load bearing. This is the cheap
+    // one; the account write spends its own below, once the form is known good.
+    if (!signUpSubmitLimiter(ipKey(c))) {
+      return redirectWith(c, "/signup", { error: "Too many requests" });
+    }
+    const form = await c.req.formData();
+    const email = String(form.get("email") ?? "").trim().toLowerCase();
+    const password = String(form.get("password") ?? "");
+    const confirm = String(form.get("confirmPassword") ?? "");
+    // Carry the address back on every failure: this page has no step to return
+    // to, so dropping it turns a mistyped password into a retyped everything.
+    const fail = (message: string) =>
+      redirectWith(c, "/signup", { ...(email ? { email } : {}), error: message });
+
+    if (!email) return fail("Email required");
+    if (password !== confirm) return fail("Passwords do not match");
+    const lengthError = passwordLengthError(password);
+    if (lengthError) return fail(lengthError);
+    // Charged only now, so the expensive budget is spent by requests that
+    // actually reach the scrypt hash + user/billing write + mail. Keyed on the
+    // IP alone, so which address is being typed changes nothing here — the
+    // reply stays as address-blind as the success path.
+    if (!signUpLimiter(ipKey(c))) return fail("Too many requests");
+
+    const res = await deps.auth.api.signUpEmail({
+      method: "POST",
+      headers: forwardedHeaders(c),
+      // Named by address, matching the users the cross-device plugin creates —
+      // an account looks the same whichever door made it, and asking for a
+      // display name here would be a field with nothing riding on it.
+      body: { email, password, name: email },
+      asResponse: true,
+    });
+    if (!res.ok) {
+      const code = await authErrorCode(res);
+      if (code === "PASSWORD_TOO_SHORT" || code === "PASSWORD_TOO_LONG") {
+        return fail(passwordLengthError(password) ?? "Choose a different password");
+      }
+      // Not USER_ALREADY_EXISTS — with requireEmailVerification on, Better-Auth
+      // answers a duplicate with a synthetic success and sends nothing, which
+      // is what keeps this endpoint from being an enumeration oracle. It lands
+      // on the same page as a fresh sign-up, and that page says what a user in
+      // that case should do instead.
+      return fail("Could not create your account. Try again.");
+    }
+    // Deliberately NOT forwarding Set-Cookie. `autoSignIn` is off, so there is
+    // none — and were that default ever to change under us, forwarding it would
+    // hand the ProductAccount `user.create.after` just provisioned to whoever
+    // typed the address rather than to whoever can read the mail.
+    return redirectWith(c, "/login/check-email", { email, created: "1" });
   });
 
   r.get("/login/check-email", (c) => {
@@ -339,6 +511,9 @@ export function uiRoutes(deps: {
       <CheckEmailPage
         kind="verify"
         email={email}
+        // Only the sign-up landing writes the hint. The other way in here is an
+        // unverified password sign-in, whose browser already learned it.
+        rememberPassword={Boolean(c.req.query("created"))}
         notice={
           c.req.query("resent")
             ? "Your email isn't verified yet — we've sent a fresh link."
@@ -358,7 +533,7 @@ export function uiRoutes(deps: {
     // Address rides in the query, not the body, so the throttled reply can echo
     // it back without reading a body we are about to discard — the page needs it
     // to render the address AND the resend button, which is gated on having one.
-    // Keeps the bucket ahead of any body read; see /ui/signup for why.
+    // Keeps the bucket ahead of any body read; see /ui/login/continue.
     const email = (c.req.query("email") ?? "").trim().toLowerCase();
     if (!email) return c.redirect("/login");
     if (!passwordEmailLimiter(ipKey(c))) {
@@ -403,7 +578,15 @@ export function uiRoutes(deps: {
   });
 
   r.get("/forgot-password", (c) =>
-    c.html(<ForgotPasswordPage error={c.req.query("error") ?? null} />)
+    c.html(
+      <ForgotPasswordPage
+        error={c.req.query("error") ?? null}
+        // Carried in from step 2's "Forgot your password?" link. A prefill only
+        // — the page still sends to whatever is submitted, and still answers
+        // identically for an address with no account.
+        email={c.req.query("email") ?? null}
+      />
+    )
   );
 
   r.post("/ui/forgot-password", async (c) => {
@@ -503,37 +686,13 @@ export function uiRoutes(deps: {
   });
 
   r.post("/ui/login/start", async (c) => {
-    const ip = deps.clientIp(c);
-    if (!startLimiter(ip ?? "unknown")) {
+    if (!startLimiter(ipKey(c))) {
       return c.redirect("/login?error=Too%20many%20requests");
     }
     const form = await c.req.formData();
     const email = String(form.get("email") ?? "").trim();
     if (!email) return c.redirect("/login?error=Email%20required");
-
-    const res = await deps.auth.api.crossDeviceStart({
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "user-agent": c.req.header("user-agent") ?? "",
-        // The plugin has no socket access, so hand it the ALREADY-resolved
-        // client IP as a single-hop header instead of the raw (forgeable)
-        // chain — it reads the rightmost hop (see cross-device-plugin.ts).
-        "x-forwarded-for": ip ?? "",
-        cookie: c.req.header("cookie") ?? "",
-      },
-      body: { email },
-      asResponse: true
-    });
-    if (!res.ok) {
-      return c.redirect(`/login?error=${encodeURIComponent("Could not send link")}`);
-    }
-    // Forward Set-Cookie from the plugin response to the browser.
-    for (const [k, v] of res.headers) {
-      if (k.toLowerCase() === "set-cookie") c.header("Set-Cookie", v, { append: true });
-    }
-    const { id } = (await res.json()) as { id: string };
-    return c.redirect(`/login/pending/${id}?email=${encodeURIComponent(email)}`);
+    return startMagicLink(c, email);
   });
 
   r.get("/login/pending/:id", (c) => {
@@ -542,6 +701,55 @@ export function uiRoutes(deps: {
     if (!z.uuid().safeParse(id).success) return c.redirect("/login");
     return c.html(<PendingPage email={email} pendingId={id} />);
   });
+
+  /** Lowercased address this browser already holds a session for, if any. */
+  async function signedInAs(c: import("hono").Context): Promise<string | null> {
+    const session = await deps.auth.api.getSession({ headers: c.req.raw.headers });
+    return session?.user.email?.toLowerCase() ?? null;
+  }
+
+  /** Whether the browser opening this link is the one that asked for it.
+   *
+   *  The bind cookie is the same secret /sign-in/cross-device/status demands
+   *  before it hands out a session, so a match proves this browser started THIS
+   *  row — the approval screen exists to warn a second party, and here there
+   *  isn't one. It is httpOnly and written only by start, so no site can plant
+   *  it, and an unattended fetch (SafeLinks, Proofpoint, a mail client
+   *  prefetching URLs) carries no cookies at all and so still meets the screen.
+   */
+  function startedInThisBrowser(
+    c: import("hono").Context,
+    row: { id: string; browserTokenHash: Uint8Array }
+  ): boolean {
+    const cookie = getCookie(c, COOKIE_BROWSER_TOKEN);
+    if (!cookie) return false;
+    const dot = cookie.indexOf(".");
+    if (dot < 0 || cookie.slice(0, dot) !== row.id) return false;
+    return checkNonce(
+      row.browserTokenHash,
+      cookie.slice(dot + 1),
+      deps.env.BETTER_AUTH_SECRET
+    );
+  }
+
+  /** Turn an approved row into a session for the browser holding its bind
+   *  cookie. True when that browser leaves signed in as `email` either way: the
+   *  waiting tab may have claimed the row a poll earlier, which is the same
+   *  outcome one tab sooner, not a failure to report. */
+  async function claimApprovedSession(
+    c: import("hono").Context,
+    email: string
+  ): Promise<boolean> {
+    const res = await deps.auth.api.crossDeviceStatus({
+      method: "GET",
+      headers: { cookie: c.req.header("cookie") ?? "" },
+      asResponse: true,
+    });
+    forwardSetCookies(c, res);
+    const body = (await res.json()) as { status?: string };
+    if (body.status === "ready") return true;
+    return (await signedInAs(c)) === email.toLowerCase();
+  }
 
   r.get("/ui/login/poll/:id", async (c) => {
     const id = c.req.param("id");
@@ -562,6 +770,17 @@ export function uiRoutes(deps: {
       return c.text("");
     }
     if (body.status === "expired" || body.status === "consumed" || body.status === "unbound") {
+      // The tab that opened the link may have claimed the session itself, which
+      // consumes the row and clears the bind cookie — from here that is
+      // indistinguishable from a dead link. Telling a signed-in user their link
+      // expired is the one answer that is certainly wrong, so rule it out
+      // before saying it. Matched on the row's own address: a browser signed in
+      // as somebody else has not completed THIS flow.
+      const row = await findValidById(deps.db, id);
+      if (row && (await signedInAs(c)) === row.email.toLowerCase()) {
+        c.header("HX-Redirect", "/dashboard");
+        return c.text("");
+      }
       c.header("HX-Redirect", "/login?error=Link%20expired");
       return c.text("");
     }
@@ -576,17 +795,7 @@ export function uiRoutes(deps: {
       return c.text("");
     }
     // pending: re-render the same fragment so polling continues.
-    return c.html(
-      <div
-        id="poll"
-        class="text-xs text-base-content/50 font-mono"
-        hx-get={`/ui/login/poll/${id}`}
-        hx-trigger="every 3s"
-        hx-swap="outerHTML"
-      >
-        Waiting for approval…
-      </div>
-    );
+    return c.html(<PollingIndicator pendingId={id} />);
   });
 
   r.get("/login/approve", async (c) => {
@@ -602,11 +811,45 @@ export function uiRoutes(deps: {
     if (!checkNonce(row.nonceHash, token, deps.env.BETTER_AUTH_SECRET)) {
       return c.redirect("/login?error=Invalid%20link");
     }
+    // Both branches below are kept after the nonce check so neither the
+    // approval state nor the interstitial is readable from the row id alone.
+    const ownRequest = startedInThisBrowser(c, row);
+
     // Re-opening an approved link — back button, a second tap, a mail client
     // prefetching URLs — is a success the user already earned, not a reused
-    // link. Kept after the nonce check so the state isn't readable from the id.
+    // link. Whoever ends up signed in as the address on the row has nothing
+    // left to do here, so send them where they were going.
     if (row.approvedAt) {
-      return c.redirect("/login/approved");
+      const signedIn = ownRequest
+        ? await claimApprovedSession(c, row.email)
+        : (await signedInAs(c)) === row.email.toLowerCase();
+      return c.redirect(signedIn ? "/dashboard" : "/login/approved");
+    }
+
+    // The link opened in the browser that asked for it: approving is a step
+    // where the user confirms something to themselves, about a request they
+    // made seconds ago, on the device they made it from. Skip it and finish the
+    // sign-in here — the interstitial still stands for every other opener.
+    if (ownRequest) {
+      // Same budget the explicit approve spends: this path approves too.
+      if (!approveSignInLimiter(ipKey(c))) {
+        return c.redirect("/login?error=Too%20many%20requests");
+      }
+      try {
+        await deps.auth.api.crossDeviceApprove({
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: { id: row.id, token },
+        });
+      } catch (err) {
+        // A second open racing the first approved it already — that is this
+        // request's own work landing, so carry on and claim the session.
+        if (!(isAPIError(err) && err.body?.message === ERR_ALREADY_APPROVED)) {
+          return c.redirect("/login?error=Could%20not%20approve");
+        }
+      }
+      const signedIn = await claimApprovedSession(c, row.email);
+      return c.redirect(signedIn ? "/dashboard" : "/login/approved");
     }
     // expiresAt = createdAt + 10m. Showing expiresAt as "requested at" is
     // imprecise but acceptable for the approver UI.

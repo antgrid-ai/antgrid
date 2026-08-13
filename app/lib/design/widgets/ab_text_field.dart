@@ -38,6 +38,7 @@ class AbTextField extends StatefulWidget {
     this.enableSuggestions = true,
     this.keyboardType,
     this.textInputAction,
+    this.autofillHints,
     this.fillColor,
     this.height,
     this.contentPadding,
@@ -87,6 +88,13 @@ class AbTextField extends StatefulWidget {
   final bool enableSuggestions;
   final TextInputType? keyboardType;
   final TextInputAction? textInputAction;
+
+  /// What the platform password manager should offer here (e.g.
+  /// [AutofillHints.username]). Null — the default — opts the field OUT of
+  /// autofill entirely, which is what every field but the sign-in form wants:
+  /// Flutter only enrols a field the caller has named, and an unnamed one is
+  /// never filled and never prompts a save.
+  final Iterable<String>? autofillHints;
 
   /// Background fill. Defaults to [context.antgrid.bgSurface].
   final Color? fillColor;
@@ -258,6 +266,7 @@ class _AbTextFieldState extends State<AbTextField> {
                 enableSuggestions: widget.enableSuggestions,
                 keyboardType: widget.keyboardType,
                 textInputAction: widget.textInputAction,
+                autofillHints: widget.autofillHints,
                 onChanged: widget.onChanged,
                 onSubmitted: widget.onSubmitted,
                 onTap: widget.onTap,

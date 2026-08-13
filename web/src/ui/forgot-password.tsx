@@ -2,9 +2,12 @@ import { Layout } from "./layout.js";
 
 export type ForgotPasswordPageProps = {
   error?: string | null;
+  /** Carried by step 2's "Forgot your password?" link so arriving here never
+   *  costs the user the address they just typed. */
+  email?: string | null;
 };
 
-export function ForgotPasswordPage({ error }: ForgotPasswordPageProps) {
+export function ForgotPasswordPage({ error, email }: ForgotPasswordPageProps) {
   return (
     <Layout title="Reset password">
       <div class="max-w-md mx-auto mt-16 card bg-base-100 shadow-xl">
@@ -35,6 +38,7 @@ export function ForgotPasswordPage({ error }: ForgotPasswordPageProps) {
                 name="email"
                 required
                 autocomplete="email"
+                value={email ?? ""}
                 placeholder="you@example.com"
                 class="input input-bordered font-mono w-full"
               />

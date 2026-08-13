@@ -16,7 +16,7 @@ String _appcast({required String build, required String shortVersion}) =>
 <title>Antgrid v$shortVersion</title>
 <sparkle:version>$build</sparkle:version>
 <sparkle:shortVersionString>$shortVersion</sparkle:shortVersionString>
-<sparkle:minimumSystemVersion>10.15</sparkle:minimumSystemVersion>
+<sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
 <sparkle:releaseNotesLink>https://example.invalid/notes</sparkle:releaseNotesLink>
 <enclosure url="https://example.invalid/antgrid-macos.dmg" length="1" type="application/octet-stream"/>
 </item>

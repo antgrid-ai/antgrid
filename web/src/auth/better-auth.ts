@@ -50,7 +50,7 @@ const RESET_PASSWORD_CALLBACK = "/reset-password";
 const TRUSTED_SOCIAL_PROVIDERS = ["github", "google"] as const;
 
 /** Floor for a password guarding remote control of the user's dev machine.
- *  Above Better-Auth's default of 8; the sign-up and reset forms state it. */
+ *  Above Better-Auth's default of 8; the reset and account forms state it. */
 export const MIN_PASSWORD_LENGTH = 12;
 
 /** Better-Auth's own ceiling (`maxPasswordLength`, default 128). Restated here

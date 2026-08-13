@@ -1,7 +1,10 @@
 /**
  * Post-checkout UX — single status banner (grisb-style), poll until webhook provisions.
  */
+import { AUTH_CHANNEL, SIGNED_IN_EVENT } from "../auth-signal.js";
+
 type DashboardData = {
+  email: string | null;
   tier: string;
   purchaseSuccess: boolean;
   cancelNotice?: "immediate" | "pending" | "failed" | null;
@@ -128,6 +131,16 @@ function initPurchaseBanner(data: DashboardData) {
   });
 }
 
+/** Release any tab still waiting on a magic link for this address. Posted from
+ *  here rather than from the sign-in routes because a redirect leaves no page
+ *  of ours running: this is the first script that runs once the session exists. */
+function announceSignedIn(email: string | null) {
+  if (!email || typeof BroadcastChannel === "undefined") return;
+  const channel = new BroadcastChannel(AUTH_CHANNEL);
+  channel.postMessage({ t: SIGNED_IN_EVENT, email });
+  channel.close();
+}
+
 function init() {
   bindModal("cancel-subscription-btn", "cancel-subscription-modal", "data-cancel-dismiss");
   bindModal("resume-subscription-btn", "resume-subscription-modal", "data-resume-dismiss");
@@ -135,6 +148,7 @@ function init() {
   const data = readData();
   if (!data) return;
 
+  announceSignedIn(data.email);
   initNoticeStrip(data);
   initCancelReload(data);
   initPurchaseBanner(data);
