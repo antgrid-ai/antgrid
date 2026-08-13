@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
 import { buildTestApp } from "../helpers/app.js";
-import { createTestUser, createTestSession } from "../helpers/fixtures.js";
+import { createTestUser, createTestSession, addTestMember } from "../helpers/fixtures.js";
 import { ensureProductAccount } from "../../src/models/product-account.js";
 import {
   ensureFreeSubscription,
@@ -51,6 +51,39 @@ describe("GET /account", () => {
     const html = await res.text();
     expect(html).toContain("You have an active subscription");
     expect(html).not.toContain('name="confirm"');
+  });
+
+  test("an owner whose team still has members is told so, not offered the control", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const owner = await createTestUser(pg.db, "owner-team@example.com");
+    const member = await createTestUser(pg.db);
+    const { cookie } = await createTestSession(pg.db, owner.id);
+    const account = await provisionProductAccountForUser(pg.db, owner.id);
+    await addTestMember(pg.db, account.id, member.id);
+
+    const res = await app.request("/account", { headers: { cookie } });
+    const html = await res.text();
+    expect(html).toContain("still has team members");
+    expect(html).not.toContain('name="confirm"');
+  });
+
+  test("a member is not blocked by the subscription they merely bill against", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const owner = await createTestUser(pg.db);
+    const member = await createTestUser(pg.db, "member-page@example.com");
+    const teamAccount = await provisionProductAccountForUser(pg.db, owner.id);
+    const personal = await ensureProductAccount(pg.db, member.id);
+    await ensureFreeSubscription(pg.db, personal.id);
+    await addTestMember(pg.db, teamAccount.id, member.id);
+    const { cookie } = await createTestSession(pg.db, member.id);
+
+    const res = await app.request("/account", { headers: { cookie } });
+    const html = await res.text();
+    // The owner's grant is active and the member cannot cancel it; reading the
+    // block through membership would strand them on this page permanently.
+    expect(html).not.toContain("You have an active subscription");
+    expect(html).not.toContain("still has team members");
+    expect(html).toContain('name="confirm"');
   });
 
   test("redirects to /login without a session", async () => {

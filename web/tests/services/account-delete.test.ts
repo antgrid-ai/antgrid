@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
 import { buildTestApp } from "../helpers/app.js";
-import { createTestUser, createTestSession, createTestSubscription, createTestDevice } from "../helpers/fixtures.js";
+import { createTestUser, createTestSession, createTestSubscription, createTestDevice, addTestMember } from "../helpers/fixtures.js";
 import { createAuth } from "../../src/auth/better-auth.js";
 import { createEmailSender } from "../../src/auth/email.js";
 import { deleteUserAccount } from "../../src/services/account.js";
@@ -85,7 +85,7 @@ describe("deleteUserAccount", () => {
   test("blocks when a renewing paid subscription exists", async () => {
     const auth = authFor(pg.db, pg.url);
     const user = await createTestUser(pg.db, "bob@example.com");
-    await createTestSubscription(pg.db, user.id, { tier: "pro", planSlug: "pro_yearly" });
+    await createTestSubscription(pg.db, user.id, { tier: "pro" });
 
     const result = await deleteUserAccount(pg.db, { baseUrl: undefined, secret: undefined }, auth, {
       userId: user.id, headers: new Headers(),
@@ -103,7 +103,7 @@ describe("deleteUserAccount", () => {
     const user = await createTestUser(pg.db, "grace@example.com");
     // Seed a paid subscription that is pending-cancel: status active, cancelledAt in the future.
     // isPendingCancellation returns true → hasRenewingPaidSubscription returns false → deletion allowed.
-    const sub = await createTestSubscription(pg.db, user.id, { tier: "pro", planSlug: "pro_yearly" });
+    const sub = await createTestSubscription(pg.db, user.id, { tier: "pro" });
     const account = await pg.db.productAccount.findUniqueOrThrow({ where: { userId: user.id } });
     // Set cancelledAt to a future date and attach provider ids — simulating a pending-cancel paid sub.
     await pg.db.subscription.update({
@@ -145,7 +145,7 @@ describe("deleteUserAccount", () => {
     // ids still attached — exactly what the billing reducer's cancel path leaves
     // behind (it sets status but does not null provider ids). Deletion is allowed
     // because no active paid sub remains; the residual row must still be detached.
-    const sub = await createTestSubscription(pg.db, user.id, { tier: "pro", planSlug: "pro_yearly" });
+    const sub = await createTestSubscription(pg.db, user.id, { tier: "pro" });
     await pg.db.subscription.update({
       where: { id: sub.id },
       data: {
@@ -198,6 +198,130 @@ describe("deleteUserAccount", () => {
   });
 });
 
+describe("deleteUserAccount by role", () => {
+  const cfg = { baseUrl: undefined, secret: undefined };
+
+  async function team(): Promise<{ ownerId: string; memberId: string; teamId: string }> {
+    const owner = await createTestUser(pg.db);
+    const member = await createTestUser(pg.db);
+    await createTestSubscription(pg.db, owner.id, { tier: "pro" });
+    // The member's own account is free — the paid, renewing row lives on the
+    // team. That asymmetry is the whole point: it is what a delete guard
+    // resolved through membership would wrongly read as the member's.
+    const memberAccount = await ensureProductAccount(pg.db, member.id);
+    await ensureFreeSubscription(pg.db, memberAccount.id);
+    const teamAccount = await pg.db.productAccount.findUniqueOrThrow({
+      where: { userId: owner.id },
+    });
+    await addTestMember(pg.db, teamAccount.id, member.id);
+    return { ownerId: owner.id, memberId: member.id, teamId: teamAccount.id };
+  }
+
+  test("a member deletes their own user; the team is untouched and the seat is freed", async () => {
+    const auth = authFor(pg.db, pg.url);
+    const { ownerId, memberId, teamId } = await team();
+    const personal = await pg.db.productAccount.findUniqueOrThrow({ where: { userId: memberId } });
+    const teamSubsBefore = await pg.db.subscription.findMany({ where: { accountId: teamId } });
+
+    // The owner's renewing paid subscription is the one the member inherits;
+    // resolving the block through membership would 409 them out for good.
+    expect(
+      await deleteUserAccount(pg.db, cfg, auth, { userId: memberId, headers: new Headers() })
+    ).toBe("deleted");
+
+    expect(
+      (await pg.db.productAccount.findUniqueOrThrow({ where: { id: personal.id } })).deletedAt
+    ).not.toBeNull();
+    expect(
+      (await pg.db.productAccount.findUniqueOrThrow({ where: { id: teamId } })).deletedAt
+    ).toBeNull();
+    const teamSubsAfter = await pg.db.subscription.findMany({ where: { accountId: teamId } });
+    expect(teamSubsAfter).toEqual(teamSubsBefore);
+
+    // Seat freed: nothing may still count a tombstoned user against the owner's
+    // purchased cap, and the User row survives so the FK cascade never fires.
+    expect(
+      await pg.db.accountMember.count({ where: { userId: memberId, status: "active" } })
+    ).toBe(0);
+    const closed = await pg.db.accountMember.findFirstOrThrow({
+      where: { userId: memberId, accountId: teamId },
+    });
+    expect(closed.status).toBe("left");
+    expect(closed.endedAt).not.toBeNull();
+    // Left set, it would point a scrubbed user at a live team forever.
+    expect((await pg.db.user.findUniqueOrThrow({ where: { id: memberId } })).accountId).toBeNull();
+    expect(
+      await pg.db.accountMember.count({ where: { accountId: teamId, userId: ownerId, status: "active" } })
+    ).toBe(1);
+  });
+
+  test("an owner with an active member is refused before anything is mutated", async () => {
+    const auth = authFor(pg.db, pg.url);
+    const { ownerId, teamId } = await team();
+
+    expect(
+      await deleteUserAccount(pg.db, cfg, auth, { userId: ownerId, headers: new Headers() })
+    ).toBe("blocked_team");
+
+    const account = await pg.db.productAccount.findUniqueOrThrow({ where: { id: teamId } });
+    expect(account.deletedAt).toBeNull();
+    expect(await pg.db.subscription.count({ where: { accountId: teamId, status: "active" } })).toBe(1);
+    const owner = await pg.db.user.findUniqueOrThrow({ where: { id: ownerId } });
+    expect(owner.email).not.toContain("deleted+");
+  });
+
+  // The block is keyed on the account being tombstoned, not on the one the
+  // deleting user bills against — resolving it through membership would hand
+  // this user a way to delete a team out from under its members.
+  test("an owner who has since joined another team is still refused", async () => {
+    const auth = authFor(pg.db, pg.url);
+    const { ownerId, teamId } = await team();
+    const otherOwner = await createTestUser(pg.db);
+    await createTestSubscription(pg.db, otherOwner.id, { tier: "pro" });
+    const otherTeam = await pg.db.productAccount.findUniqueOrThrow({
+      where: { userId: otherOwner.id },
+    });
+    await addTestMember(pg.db, otherTeam.id, ownerId);
+
+    expect(
+      await deleteUserAccount(pg.db, cfg, auth, { userId: ownerId, headers: new Headers() })
+    ).toBe("blocked_team");
+    expect(
+      (await pg.db.productAccount.findUniqueOrThrow({ where: { id: teamId } })).deletedAt
+    ).toBeNull();
+  });
+
+  // The guard counts OTHER members. Counting the owner's own backfilled row and
+  // testing `> 0` would refuse every solo owner while looking exactly right.
+  test("an owner with no other members still deletes", async () => {
+    const auth = authFor(pg.db, pg.url);
+    const solo = await createTestUser(pg.db);
+    const account = await ensureProductAccount(pg.db, solo.id);
+    await ensureFreeSubscription(pg.db, account.id);
+    expect(
+      await pg.db.accountMember.count({ where: { accountId: account.id, status: "active" } })
+    ).toBe(1);
+
+    expect(
+      await deleteUserAccount(pg.db, cfg, auth, { userId: solo.id, headers: new Headers() })
+    ).toBe("deleted");
+    expect(
+      (await pg.db.productAccount.findUniqueOrThrow({ where: { id: account.id } })).deletedAt
+    ).not.toBeNull();
+    // Nothing holds an active membership on a tombstoned account — and a second
+    // (idempotent) call must not heal one back into existence.
+    expect(
+      await pg.db.accountMember.count({ where: { accountId: account.id, status: "active" } })
+    ).toBe(0);
+    expect(
+      await deleteUserAccount(pg.db, cfg, auth, { userId: solo.id, headers: new Headers() })
+    ).toBe("deleted");
+    expect(
+      await pg.db.accountMember.count({ where: { accountId: account.id, status: "active" } })
+    ).toBe(0);
+  });
+});
+
 describe("DELETE /account/me", () => {
   test("200 deletes; session cookie is dead afterward", async () => {
     const { app } = buildTestApp(pg.db, pg.url);
@@ -219,11 +343,48 @@ describe("DELETE /account/me", () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const user = await createTestUser(pg.db, "erin@example.com");
     const { cookie } = await createTestSession(pg.db, user.id);
-    await createTestSubscription(pg.db, user.id, { tier: "pro", planSlug: "pro_yearly" });
+    await createTestSubscription(pg.db, user.id, { tier: "pro" });
 
     const res = await app.request("/account/me", { method: "DELETE", headers: { cookie } });
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({ error: "SUBSCRIPTION_ACTIVE" });
+  });
+
+  test("409 TEAM_HAS_MEMBERS for an owner whose team still has a member", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const owner = await createTestUser(pg.db);
+    const member = await createTestUser(pg.db);
+    const { cookie } = await createTestSession(pg.db, owner.id);
+    await createTestSubscription(pg.db, owner.id, { tier: "pro" });
+    const teamAccount = await pg.db.productAccount.findUniqueOrThrow({ where: { userId: owner.id } });
+    await addTestMember(pg.db, teamAccount.id, member.id);
+
+    const res = await app.request("/account/me", { method: "DELETE", headers: { cookie } });
+    expect(res.status).toBe(409);
+    // Distinct from SUBSCRIPTION_ACTIVE: the owner cannot clear this one by
+    // cancelling, so the client must be able to tell the two refusals apart.
+    expect(await res.json()).toEqual({ error: "TEAM_HAS_MEMBERS" });
+  });
+
+  test("a member's own DELETE /account/me succeeds while the team bills on", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const owner = await createTestUser(pg.db);
+    const member = await createTestUser(pg.db);
+    await createTestSubscription(pg.db, owner.id, { tier: "pro" });
+    const teamAccount = await pg.db.productAccount.findUniqueOrThrow({ where: { userId: owner.id } });
+    const memberAccount = await ensureProductAccount(pg.db, member.id);
+    await ensureFreeSubscription(pg.db, memberAccount.id);
+    await addTestMember(pg.db, teamAccount.id, member.id);
+    const { cookie } = await createTestSession(pg.db, member.id);
+
+    const res = await app.request("/account/me", { method: "DELETE", headers: { cookie } });
+    expect(res.status).toBe(200);
+    expect(
+      (await pg.db.productAccount.findUniqueOrThrow({ where: { id: teamAccount.id } })).deletedAt
+    ).toBeNull();
+    expect(
+      await pg.db.subscription.count({ where: { accountId: teamAccount.id, status: "active" } })
+    ).toBe(1);
   });
 
   test("401 without a session", async () => {

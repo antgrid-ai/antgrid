@@ -5,6 +5,9 @@ class SubscriptionInfo {
     this.provider,
     this.planSlug,
     this.promotional = false,
+    this.role,
+    this.seats,
+    this.seatsUsed,
   });
 
   final String tier;
@@ -15,6 +18,22 @@ class SubscriptionInfo {
   /// True when [tier] is a temporary, unpurchased promo grant (in-app
   /// purchases aren't live yet) rather than a real subscription.
   final bool promotional;
+
+  /// The signed-in user's capacity on the account they bill against —
+  /// `owner` or `member`.
+  ///
+  /// Null when the server predates the field or could not read the stored
+  /// value. A role we don't know must never read as ownership, so this stays
+  /// unset rather than defaulting: a server that never sends it would
+  /// otherwise make every member look like an owner.
+  final String? role;
+
+  /// Seats purchased on the billing account, and how many are occupied.
+  ///
+  /// Null when the server predates them — never 0, which a caller would read
+  /// as a real count of none.
+  final int? seats;
+  final int? seatsUsed;
 
   bool get isPro => tier != 'free';
 
@@ -31,20 +50,35 @@ class SubscriptionInfo {
       provider: provider,
       planSlug: _planSlugFromSubscription(sub, tier),
       promotional: promotional,
+      role: _asString(json['role']),
+      // The server mirrors `seats` onto the subscription object as well as the
+      // top level; either shape parses so neither placement is load-bearing.
+      seats: _asCount(json['seats'] ?? sub?['seats']),
+      seatsUsed: _asCount(json['seats_used'] ?? sub?['seats_used']),
     );
   }
 }
+
+/// Role and seat counts are descriptive extras, while [SubscriptionInfo.tier]
+/// off the same payload decides what the app may do — so an unexpected value
+/// in one of them degrades to "not reported" instead of failing the whole
+/// parse and leaving the app with no subscription at all.
+String? _asString(Object? raw) => raw is String ? raw : null;
+
+/// JSON delivers a count as `1` or `1.0` depending on the encoder, so it goes
+/// through `num` rather than casting straight to `int`.
+int? _asCount(Object? raw) => raw is num ? raw.toInt() : null;
 
 /// Stable plan UUIDs from web `PLAN_UUID` — `/subscriptions/me` returns these as
 /// `subscription.plan_id`, not slugs.
 const _planIdToSlug = {
   '00000000-0000-4000-8000-000000000001': 'free',
   '00000000-0000-4000-8000-000000000002': 'pro_yearly',
-  '00000000-0000-4000-8000-000000000003': 'pro_lifetime',
   '00000000-0000-4000-8000-000000000004': 'trial',
+  '00000000-0000-4000-8000-000000000005': 'enterprise',
 };
 
-const _knownPlanSlugs = {'free', 'trial', 'pro_yearly', 'pro_lifetime'};
+const _knownPlanSlugs = {'free', 'trial', 'pro_yearly', 'enterprise'};
 
 String? _planSlugFromSubscription(Map<String, dynamic>? sub, String tier) {
   if (tier == 'free') return null;
@@ -67,8 +101,13 @@ String? _planSlugFromSubscription(Map<String, dynamic>? sub, String tier) {
     }
   }
 
-  // Paid tier without a resolvable plan_id — yearly is the safe default (never
-  // infer lifetime from a missing current_period_end; many yearly subs omit it).
+  // A tier that names a plan slug outright answers for itself. Enterprise is
+  // the case that needs it: sold by contract, it must never resolve to a slug a
+  // card can buy, which is what the paid default below would hand it.
+  if (_knownPlanSlugs.contains(tier)) return tier;
+
+  // Paid tier without a resolvable plan_id — yearly is the only plan a card can
+  // buy, so it is the safe guess for one we could not name.
   if (status == 'active' || tier == 'pro') return 'pro_yearly';
   return null;
 }

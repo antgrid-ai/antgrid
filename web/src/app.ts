@@ -19,6 +19,7 @@ import type { DB } from "./db/index.js";
 import type { Auth } from "./auth/better-auth.js";
 import type { Env } from "./env.js";
 import type { RelayPushConfig } from "./relay/push.js";
+import type { SendEmail } from "./auth/email.js";
 import { makeClientIpResolver } from "./util/client-ip.js";
 
 export type AppDeps = {
@@ -27,6 +28,10 @@ export type AppDeps = {
   env: Env;
   corsOrigins: string[];
   relay: RelayPushConfig;
+  /** Also handed to Better-Auth by the caller. The UI router needs its own
+   *  reference: invite mail is sent from a plain Hono handler, which has no
+   *  `auth.api.*` endpoint behind it to borrow the sender from. */
+  sendEmail: SendEmail;
 };
 
 export function buildApp(deps: AppDeps) {
@@ -115,7 +120,7 @@ export function buildApp(deps: AppDeps) {
   // live deployment even if DEV_BILLING_ENABLED leaks into its env.
   if (deps.env.NODE_ENV !== "production" && deps.env.DEV_BILLING_ENABLED === true) {
     console.warn(
-      "[server] DEV billing endpoint ENABLED (POST /dev/billing/subscription) — never enable in production"
+      "[server] DEV billing endpoints ENABLED (POST /dev/billing/subscription, POST /dev/billing/contract, POST /dev/billing/member) — never enable in production"
     );
     app.route("/", devBillingRoutes({ db: deps.db }));
   }
@@ -128,6 +133,7 @@ export function buildApp(deps: AppDeps) {
     env: deps.env,
     relay: deps.relay,
     clientIp,
+    sendEmail: deps.sendEmail,
   }));
 
   // Last-resort logger for anything thrown past a route handler — without this,

@@ -4,6 +4,9 @@ import { AUTH_MEMORY_SCRIPT } from "./auth-memory.js";
 export type AccountPageProps = {
   user: { email?: string | null };
   blockedBySubscription: boolean;
+  /** Owner of a team that still has members. Unlike the subscription block, the
+   *  user cannot clear this one themselves — v1 has no ownership transfer. */
+  blockedByTeam: boolean;
   /** False for an account created by magic link or GitHub/Google that has
    *  never had a password — the card offers "set" instead of "change". */
   hasPassword: boolean;
@@ -34,7 +37,14 @@ export function AccountPage(props: AccountPageProps) {
               identity.
             </p>
 
-            {props.blockedBySubscription ? (
+            {props.blockedByTeam ? (
+              <div class="alert alert-warning font-mono text-sm mt-2" role="status">
+                <span>
+                  Your account still has team members. Remove them, or contact
+                  support to transfer ownership, before deleting your account.
+                </span>
+              </div>
+            ) : props.blockedBySubscription ? (
               <div class="alert alert-warning font-mono text-sm mt-2" role="status">
                 <span>
                   You have an active subscription. Cancel it on your{" "}

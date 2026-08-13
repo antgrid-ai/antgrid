@@ -8,8 +8,8 @@ import 'scoped_prefs.dart';
 
 /// A machine this app has coordinates for. Admission is account trust, so this
 /// is a pure COORDINATES cache — where the machine lives (`relayUrl`) and which
-/// Ed25519 key to pin it against — kept so a reconnect needs neither a QR rescan
-/// nor a reachable `/account/agents`. Public values only: nothing here is a
+/// Ed25519 key to pin it against — kept so a reconnect does not need a reachable
+/// `/account/agents`. Public values only: nothing here is a
 /// credential, and no private key material may ever land in SharedPreferences.
 class RecentAgent {
   final String agentDeviceId;

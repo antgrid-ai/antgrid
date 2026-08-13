@@ -12,6 +12,17 @@ import { logger } from "../logger.js";
 
 type VerifyKey = Awaited<ReturnType<typeof importJWK>>;
 
+/**
+ * Hand-mirrors the `tier` web mints in `web/src/auth/oauth-provider.ts` — two
+ * workspaces, no shared type, and an unrecognised label is a terminal
+ * `LICENSE_INVALID` that stops a bridge reconnecting. Widen here BEFORE any
+ * `plans` row carries the new label. The relay never branches on tier; it
+ * stamps it onto the session for consumers downstream.
+ */
+const DEVICE_TIERS = ["free", "trial", "pro", "enterprise"] as const;
+
+export type DeviceTier = (typeof DEVICE_TIERS)[number];
+
 export interface DeviceClaims {
   /**
    * The device record id the agent registers with the relay as (its
@@ -22,7 +33,7 @@ export interface DeviceClaims {
    */
   deviceUuid: string;
   uid: string;
-  tier: "free" | "trial" | "pro";
+  tier: DeviceTier;
   /**
    * Per-credential revocation discriminator. Sourced from the OAuth `azp`
    * claim (the device's OAuth client id) — NOT a JWT `jti` (Better-Auth
@@ -77,8 +88,8 @@ function isNonEmptyString(v: unknown): v is string {
   return typeof v === "string" && v.length > 0;
 }
 
-function isValidTier(v: unknown): v is "free" | "trial" | "pro" {
-  return v === "free" || v === "trial" || v === "pro";
+function isValidTier(v: unknown): v is DeviceTier {
+  return DEVICE_TIERS.includes(v as DeviceTier);
 }
 
 export async function verifyDeviceToken(

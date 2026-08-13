@@ -59,7 +59,7 @@ describe("GET /billing/plans", () => {
       plans: Record<string, unknown>[];
     };
     expect(body.yearly_offer_active).toBe(true);
-    expect(body.plans.length).toBeGreaterThanOrEqual(3);
+    expect(body.plans.length).toBeGreaterThanOrEqual(2);
 
     for (const plan of body.plans) {
       expect(plan).toMatchObject({
@@ -74,7 +74,7 @@ describe("GET /billing/plans", () => {
     }
 
     expect(body.plans.map((p) => p.id)).toEqual(
-      expect.arrayContaining(["trial", "pro_yearly", "pro_lifetime"])
+      expect.arrayContaining(["trial", "pro_yearly"])
     );
     const trial = body.plans.find((p) => p.id === "trial");
     expect(trial).toMatchObject({ slug: "trial", trial: true, tier: "trial" });

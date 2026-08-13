@@ -10,7 +10,7 @@
 
   disableIfNoEncryptionCapabilities is deliberately NOT set: it would skip
   backup entirely on devices without a screen lock, which is exactly where the
-  reinstall/device_limit problem still bites. The uuid is an opaque identifier,
+  reinstall/app_device_limit problem still bites. The uuid is an opaque identifier,
   not a secret — it grants nothing without the device keypair, which is in
   secure storage and is not backed up.
 -->

@@ -13,8 +13,8 @@ export type DashboardPageProps = {
   subscription: SubscriptionRow;
   plan: PlanRow;
   tier: string;
-  deviceLimit: number;
-  activeDevices: number;
+  appDeviceLimit: number;
+  activeAppDevices: number;
   workerLimit: number;
   activeWorkers: number;
   sessions: UserSession[] | null;
@@ -154,22 +154,20 @@ function SubscriptionCard({
   subscription,
   plan,
   tier,
-  deviceLimit,
-  activeDevices,
+  appDeviceLimit,
+  activeAppDevices,
   workerLimit,
   activeWorkers,
 }: DashboardPageProps) {
   const pendingCancel = isPendingCancellation(subscription);
   const canCancel =
     plan.recurring &&
-    plan.slug !== "pro_lifetime" &&
     subscription.status === "active" &&
     !pendingCancel &&
     (subscription.providerSubscriptionId !== null || subscription.provider === "dev");
   const canResume =
     pendingCancel &&
     plan.recurring &&
-    plan.slug !== "pro_lifetime" &&
     (subscription.providerSubscriptionId !== null || subscription.provider === "dev");
   const periodEndDate = pendingCancel
     ? subscription.cancelledAt
@@ -190,7 +188,7 @@ function SubscriptionCard({
           </div>
           <div class="stats stats-horizontal mt-4 border border-base-300">
             <MeterStat label="Workers" used={activeWorkers} limit={workerLimit} />
-            <MeterStat label="Active devices" used={activeDevices} limit={deviceLimit} />
+            <MeterStat label="App devices" used={activeAppDevices} limit={appDeviceLimit} />
           </div>
         </div>
       </div>
@@ -218,7 +216,7 @@ function SubscriptionCard({
           </div>
           <div class="stats stats-horizontal mt-4 border border-base-300">
             <MeterStat label="Workers" used={activeWorkers} limit={workerLimit} />
-            <MeterStat label="Active devices" used={activeDevices} limit={deviceLimit} />
+            <MeterStat label="App devices" used={activeAppDevices} limit={appDeviceLimit} />
           </div>
         </div>
       </div>
@@ -239,7 +237,7 @@ function SubscriptionCard({
         </div>
         <div class="stats stats-horizontal mt-2 border border-base-300">
           <MeterStat label="Workers" used={activeWorkers} limit={workerLimit} />
-          <MeterStat label="Active devices" used={activeDevices} limit={deviceLimit} />
+          <MeterStat label="App devices" used={activeAppDevices} limit={appDeviceLimit} />
           <div class="stat">
             <div class="stat-title">Started</div>
             <div class="stat-value text-base font-mono">

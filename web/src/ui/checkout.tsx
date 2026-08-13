@@ -1,7 +1,12 @@
 import { Layout } from "./layout.js";
 import { asset } from "./asset.js";
 import { formatUsd, TRIAL_DAYS } from "../billing/plans.js";
-import type { CheckoutReadiness } from "../billing/checkout.js";
+import {
+  MAX_CHECKOUT_SEATS,
+  type CheckoutReadiness,
+  type CheckoutSession,
+  type CheckoutTotal,
+} from "../billing/checkout.js";
 
 export type CheckoutPlan = {
   id: string;
@@ -14,6 +19,24 @@ export type CheckoutPlan = {
   discountLabel?: string;
 };
 
+/**
+ * The transaction the buyer is looking at, exactly as the gateway call that
+ * created it reported back.
+ *
+ * This is the only source of a total on this page. Multiplying `chargePrice` by
+ * a seat count would put a number in front of the buyer that no gateway ever
+ * agreed to — discounts, tax and the gateway's own rounding all live on the far
+ * side of that arithmetic — and the two would then be settled against one
+ * invoice. No order, no total.
+ */
+export type CheckoutOrder = {
+  /** Seats this session was created for. Kept beside the total so a stepper
+   *  moved afterwards can be recognized as having invalidated it. */
+  seats: number;
+  total: CheckoutTotal | null;
+  session: CheckoutSession;
+};
+
 export type CheckoutPageProps = {
   user: { email?: string | null };
   plan: CheckoutPlan;
@@ -22,6 +45,14 @@ export type CheckoutPageProps = {
   readiness: CheckoutReadiness;
   checkoutAvailable: boolean;
   isDev: boolean;
+  /** Seats in the stepper — echoed back on a refusal so a buyer does not have
+   *  to retype the count that was just rejected. */
+  seats: number;
+  /** `plans.max_seats`. NULL is unlimited, leaving only the request bound. */
+  maxSeats: number | null;
+  order: CheckoutOrder | null;
+  /** Why the last submission produced no order. */
+  notice: string | null;
 };
 
 const BILLING_COUNTRIES: { code: string; name: string }[] = [
@@ -53,6 +84,10 @@ const SETTINGS_NAV = [
   { label: "Pricing", href: "/pricing" },
 ] as const;
 
+/** Stands in for a total nobody has quoted yet. Deliberately not a currency
+ *  amount: a placeholder that reads as money is a number the buyer will believe. */
+const NO_TOTAL = "—";
+
 function formatDate(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
@@ -63,33 +98,56 @@ function trialFirstChargeDate(): string {
   return formatDate(d);
 }
 
-function dueTodayLabel(plan: CheckoutPlan): string {
-  if (plan.trial && plan.recurring) return "$0";
-  return formatUsd(plan.chargePrice);
+/** The catalog price of ONE seat. Safe to render from our own constants because
+ *  it is not a charge — it is the sticker the gateway prices against. */
+function unitPriceLabel(plan: CheckoutPlan): string {
+  return `${formatUsd(plan.chargePrice)}/seat/year`;
+}
+
+function totalLabel(order: CheckoutOrder | null): string {
+  return order?.total?.display ?? NO_TOTAL;
+}
+
+function gatewayLabel(provider: "paddle" | "razorpay"): string {
+  return provider === "razorpay" ? "Razorpay" : "Paddle";
+}
+
+/** The highest count the stepper will offer: the plan's cap, or the request
+ *  sanity bound when the plan is unlimited. */
+export function seatCeiling(maxSeats: number | null): number {
+  return maxSeats === null ? MAX_CHECKOUT_SEATS : Math.min(maxSeats, MAX_CHECKOUT_SEATS);
 }
 
 function billingCadence(plan: CheckoutPlan): string {
-  if (plan.trial && plan.recurring) {
-    return `${TRIAL_DAYS}-day free trial, then ${formatUsd(plan.chargePrice)}/year`;
+  if (plan.trial) {
+    return `${TRIAL_DAYS}-day free trial, then ${unitPriceLabel(plan)}`;
   }
-  if (plan.recurring) return `Billed yearly · ${formatUsd(plan.chargePrice)}/year`;
-  return "One-time payment · no subscription";
+  return `Billed yearly · ${unitPriceLabel(plan)}`;
 }
 
 function billingDisclosure(plan: CheckoutPlan): string {
-  if (plan.trial && plan.recurring) {
-    return `Your card won't be charged until ${trialFirstChargeDate()}. Cancel anytime before then to avoid the ${formatUsd(plan.chargePrice)}/year charge. Subscription renews automatically unless canceled.`;
+  if (plan.trial) {
+    return `Your card won't be charged until ${trialFirstChargeDate()}. Cancel anytime before then to avoid the ${unitPriceLabel(plan)} charge. Subscription renews automatically unless canceled.`;
   }
-  if (plan.recurring) {
-    return `Renews automatically at ${formatUsd(plan.chargePrice)}/year. Cancel anytime before your renewal date.`;
-  }
-  return "One-time payment. No renewals or recurring charges.";
+  return `Renews automatically at ${unitPriceLabel(plan)}. Cancel anytime before your renewal date.`;
 }
 
 function checkoutCtaLabel(plan: CheckoutPlan): string {
-  if (plan.trial && plan.recurring) return `Start ${TRIAL_DAYS}-day free trial`;
-  if (plan.recurring) return "Confirm & checkout";
-  return "Complete purchase";
+  if (plan.trial) return `Start ${TRIAL_DAYS}-day free trial`;
+  return "Confirm & checkout";
+}
+
+function totalNote(props: CheckoutPageProps): string {
+  if (!props.order) return "Your total is quoted when you review the order.";
+  const seats = props.order.seats;
+  return `Quoted by ${gatewayLabel(props.order.session.provider)} for ${seats} seat${seats === 1 ? "" : "s"}.`;
+}
+
+/** Inline JSON for a `<script type="application/json">` block. `<` is escaped
+ *  because the HTML parser ends that block at the first `</script`, wherever it
+ *  appears — including inside a string the gateway chose. */
+function jsonScript(value: unknown): string {
+  return JSON.stringify(value).replace(/</g, "\\u003c");
 }
 
 function SubscriptionShell(props: CheckoutPageProps) {
@@ -130,8 +188,8 @@ function SubscriptionShell(props: CheckoutPageProps) {
                 <div class="stat-value text-xl font-mono">up to {plan.workerLimit}</div>
               </div>
               <div class="stat py-3">
-                <div class="stat-title font-mono text-xs">Due today</div>
-                <div class="stat-value text-xl font-mono">{dueTodayLabel(plan)}</div>
+                <div class="stat-title font-mono text-xs">Per seat</div>
+                <div class="stat-value text-xl font-mono">{formatUsd(plan.chargePrice)}</div>
               </div>
             </div>
           </div>
@@ -143,13 +201,19 @@ function SubscriptionShell(props: CheckoutPageProps) {
 
 export function CheckoutPage(props: CheckoutPageProps) {
   const plan = props.plan;
-  const due = dueTodayLabel(plan);
-  const wizardData = JSON.stringify({
+  const due = totalLabel(props.order);
+  const ceiling = seatCeiling(props.maxSeats);
+  const wizardData = jsonScript({
     email: props.user.email ?? "",
     plan,
     detectedCountry: props.detectedCountry,
     gateway: props.gateway,
     readiness: props.readiness,
+    seats: props.seats,
+    maxSeats: ceiling,
+    /** Null until an order exists; a stepper away from it means the total on
+     *  screen belongs to a transaction the buyer no longer wants. */
+    orderSeats: props.order?.seats ?? null,
   });
 
   return (
@@ -200,7 +264,7 @@ export function CheckoutPage(props: CheckoutPageProps) {
                   </select>
                 </div>
                 <span id="gateway-label" class="hidden">
-                  {props.gateway === "razorpay" ? "Razorpay" : "Paddle"}
+                  {gatewayLabel(props.order?.session.provider ?? props.gateway)}
                 </span>
               </div>
 
@@ -215,6 +279,78 @@ export function CheckoutPage(props: CheckoutPageProps) {
                     <p class="text-xs text-success font-mono mt-2">{plan.discountLabel}</p>
                   )}
                 </div>
+
+                {/* Submitting this form is what creates the transaction, and the
+                    total below is read off that same response. The +/- buttons
+                    are deliberately not submits: one gateway object per click
+                    would litter the merchant account with abandoned orders. The
+                    plan rides in the query string rather than a hidden field
+                    because the handler must know which page to re-render before
+                    it may read the body, and a throttled request never does. */}
+                <form
+                  method="post"
+                  action={`/ui/checkout/seats?planId=${encodeURIComponent(plan.id)}`}
+                  id="seat-form"
+                  class="space-y-3 border-t border-base-300 pt-3"
+                >
+                  {/* The country control lives in the panel beside this one, so
+                      it is mirrored here — the form must still carry a country
+                      with scripting off. */}
+                  <input
+                    type="hidden"
+                    name="country"
+                    id="seat-country"
+                    value={props.detectedCountry ?? ""}
+                  />
+                  <div class="flex items-center justify-between gap-3">
+                    <label class="text-sm font-mono text-base-content/60" for="seats-input">
+                      Seats
+                    </label>
+                    <div class="join">
+                      <button
+                        type="button"
+                        id="seats-dec"
+                        class="btn btn-sm join-item font-mono"
+                        aria-label="One fewer seat"
+                      >
+                        −
+                      </button>
+                      <input
+                        id="seats-input"
+                        name="seats"
+                        type="number"
+                        inputmode="numeric"
+                        min="1"
+                        max={String(ceiling)}
+                        step="1"
+                        value={String(props.seats)}
+                        class="input input-sm input-bordered join-item w-20 text-center font-mono"
+                      />
+                      <button
+                        type="button"
+                        id="seats-inc"
+                        class="btn btn-sm join-item font-mono"
+                        aria-label="One more seat"
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+                  <p id="seat-limit-note" class="text-xs font-mono text-base-content/50">
+                    {props.maxSeats === null
+                      ? "Add as many seats as you need."
+                      : `Up to ${props.maxSeats} seat${props.maxSeats === 1 ? "" : "s"} on this plan.`}
+                  </p>
+                  <button
+                    type="submit"
+                    id="btn-review"
+                    class="btn btn-sm btn-outline font-mono w-full"
+                    disabled={!props.checkoutAvailable}
+                  >
+                    {props.order ? "Update total" : "Review order"}
+                  </button>
+                </form>
+
                 <div class="space-y-1.5 text-sm font-mono border-t border-base-300 pt-3">
                   <div class="flex justify-between">
                     <span class="text-base-content/60">Workers</span>
@@ -227,6 +363,9 @@ export function CheckoutPage(props: CheckoutPageProps) {
                     </span>
                   </div>
                 </div>
+                <p id="summary-total-note" class="text-xs font-mono text-base-content/50">
+                  {totalNote(props)}
+                </p>
                 <p
                   id="summary-disclosure"
                   class="text-xs text-base-content/50 font-mono leading-relaxed"
@@ -235,6 +374,12 @@ export function CheckoutPage(props: CheckoutPageProps) {
                 </p>
               </div>
             </div>
+
+            {props.notice && (
+              <div id="checkout-notice" class="alert alert-warning mt-4">
+                <span class="font-mono text-sm">{props.notice}</span>
+              </div>
+            )}
 
             {!props.checkoutAvailable && (
               <div class="alert alert-warning mt-4">
@@ -280,21 +425,18 @@ export function CheckoutPage(props: CheckoutPageProps) {
 
           <div class="shrink-0 border-t border-base-300 px-4 sm:px-6 py-3 sm:py-4 flex flex-wrap items-center justify-between gap-y-2 bg-base-100">
             <span class="text-sm font-mono text-base-content/60">
-              {plan.trial && plan.recurring ? (
-                <>
-                  Due today <strong class="text-success">$0</strong>
-                </>
-              ) : (
-                <>
-                  Due today <strong class="text-base-content">{due}</strong>
-                </>
-              )}
+              Due today{" "}
+              <strong id="footer-due" class={plan.trial ? "text-success" : "text-base-content"}>
+                {due}
+              </strong>
             </span>
             <button
               type="button"
               id="btn-pay"
-              class={`btn btn-sm font-mono gap-1 ${plan.trial && plan.recurring ? "btn-success" : "btn-primary"}`}
-              disabled={!props.checkoutAvailable}
+              class={`btn btn-sm font-mono gap-1 ${plan.trial ? "btn-success" : "btn-primary"}`}
+              // No order means no transaction to open and no quoted total. The
+              // button that spends money stays shut until both exist.
+              disabled={!props.checkoutAvailable || !props.order}
             >
               {checkoutCtaLabel(plan)}
               <span aria-hidden="true">→</span>
@@ -311,6 +453,13 @@ export function CheckoutPage(props: CheckoutPageProps) {
         id="checkout-wizard-data"
         dangerouslySetInnerHTML={{ __html: wizardData }}
       />
+      {props.order && (
+        <script
+          type="application/json"
+          id="checkout-session-data"
+          dangerouslySetInnerHTML={{ __html: jsonScript(props.order.session) }}
+        />
+      )}
       <script src={asset("checkout")} defer />
     </Layout>
   );

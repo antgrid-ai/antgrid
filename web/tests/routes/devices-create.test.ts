@@ -1,7 +1,12 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
 import { buildTestApp } from "../helpers/app.js";
-import { createTestUser, createTestSession, createTestSubscription } from "../helpers/fixtures.js";
+import {
+  createTestUser,
+  createTestSession,
+  createTestSubscription,
+  addTestMember,
+} from "../helpers/fixtures.js";
 import { listAppDeviceKeys } from "../../src/models/device.js";
 
 let pg: PgHandle;
@@ -147,7 +152,7 @@ describe("POST /account/devices", () => {
     expect(res.status).toBe(401);
   });
 
-  test("free tier may register a device (fair-use device cap, not the paid axis)", async () => {
+  test("free tier may register a device (neither cap trips on the first one)", async () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const user = await createTestUser(pg.db, "bob@example.com");
     const { cookie } = await createTestSession(pg.db, user.id);
@@ -168,11 +173,11 @@ describe("POST /account/devices", () => {
     expect(res.status).toBe(201);
   });
 
-  test("returns 402 DEVICE_CAP when account exceeds the fair-use device limit", async () => {
+  test("returns 402 APP_DEVICE_CAP when the account's app devices hit the ceiling", async () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const user = await createTestUser(pg.db, "carol@example.com");
     const { cookie } = await createTestSession(pg.db, user.id);
-    await createTestSubscription(pg.db, user.id, { tier: "pro", deviceLimit: 3 });
+    await createTestSubscription(pg.db, user.id, { tier: "pro", appDeviceLimit: 3 });
 
     for (let i = 0; i < 3; i++) {
       const res = await app.request("/account/devices", {
@@ -182,8 +187,8 @@ describe("POST /account/devices", () => {
           deviceUuid: crypto.randomUUID(),
           ed25519Pub: Buffer.alloc(32, i + 1).toString("base64"),
           x25519Pub: Buffer.alloc(32, i + 10).toString("base64"),
-          platform: "linux",
-          displayName: `Device ${i + 1}`,
+          platform: "ios",
+          displayName: `Phone ${i + 1}`,
         }),
       });
       expect(res.status).toBe(201);
@@ -196,13 +201,13 @@ describe("POST /account/devices", () => {
         deviceUuid: crypto.randomUUID(),
         ed25519Pub: Buffer.alloc(32, 99).toString("base64"),
         x25519Pub: Buffer.alloc(32, 98).toString("base64"),
-        platform: "linux",
+        platform: "android",
         displayName: "One too many",
       }),
     });
     expect(capped.status).toBe(402);
     const body = (await capped.json()) as { error: string; limit: number };
-    expect(body.error).toBe("DEVICE_CAP");
+    expect(body.error).toBe("APP_DEVICE_CAP");
     expect(body.limit).toBe(3);
   });
 });
@@ -241,15 +246,15 @@ describe("POST /account/devices — worker cap", () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const user = await createTestUser(pg.db, "workers@example.com");
     const { cookie } = await createTestSession(pg.db, user.id);
-    await createTestSubscription(pg.db, user.id, { tier: "pro", workerLimit: 2, deviceLimit: 10 });
+    await createTestSubscription(pg.db, user.id, { tier: "pro", workerLimit: 2, appDeviceLimit: 10 });
 
     const first = await register(app, cookie, registerBody({ displayName: "Worker one" }));
     const second = await register(app, cookie, registerBody({ displayName: "Worker two" }));
     expect(first.status).toBe(201);
     expect(second.status).toBe(201);
 
-    // A phone consumes device_limit but never worker_limit, and must not be
-    // offered as something to sign out.
+    // A phone is measured against app_device_limit, never worker_limit, and
+    // must not be offered as something to sign out.
     const phone = await register(
       app,
       cookie,
@@ -269,7 +274,7 @@ describe("POST /account/devices — worker cap", () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const user = await createTestUser(pg.db, "reconnect@example.com");
     const { cookie } = await createTestSession(pg.db, user.id);
-    await createTestSubscription(pg.db, user.id, { tier: "pro", workerLimit: 2, deviceLimit: 10 });
+    await createTestSubscription(pg.db, user.id, { tier: "pro", workerLimit: 2, appDeviceLimit: 10 });
 
     const existing = registerBody({ displayName: "Worker one" });
     expect((await register(app, cookie, existing)).status).toBe(201);
@@ -287,7 +292,7 @@ describe("POST /account/devices — worker cap", () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const user = await createTestUser(pg.db, "apps@example.com");
     const { cookie } = await createTestSession(pg.db, user.id);
-    await createTestSubscription(pg.db, user.id, { tier: "pro", workerLimit: 1, deviceLimit: 10 });
+    await createTestSubscription(pg.db, user.id, { tier: "pro", workerLimit: 1, appDeviceLimit: 10 });
 
     expect((await register(app, cookie, registerBody({ displayName: "Worker" }))).status).toBe(201);
 
@@ -310,13 +315,13 @@ describe("POST /account/devices — worker cap", () => {
 
   // `kind` and `deviceUuid` are both client-supplied, so the reactivation
   // exemption has to be scoped to agent rows. Exempting any active row would
-  // let an account at its cap register cheap app rows and promote them,
-  // raising the paid axis to device_limit.
+  // let an account at its cap register app rows and promote them, raising the
+  // paid axis to app_device_limit.
   test("an active app row cannot be flipped to a worker while the cap is full", async () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const user = await createTestUser(pg.db, "flip@example.com");
     const { cookie } = await createTestSession(pg.db, user.id);
-    await createTestSubscription(pg.db, user.id, { tier: "pro", workerLimit: 1, deviceLimit: 10 });
+    await createTestSubscription(pg.db, user.id, { tier: "pro", workerLimit: 1, appDeviceLimit: 10 });
 
     expect((await register(app, cookie, registerBody({ displayName: "Worker" }))).status).toBe(201);
 
@@ -334,19 +339,121 @@ describe("POST /account/devices — worker cap", () => {
     expect(row?.kind).toBe("app");
   });
 
-  test("the device cap still fires first when workers are under their own limit", async () => {
+  // The inverse of the exemption above, and the reason the app-cap branch is
+  // guarded on `kind`: a user whose phones fill an abuse ceiling that pricing
+  // never mentions must not lose the ability to add a build machine.
+  test("a worker registers freely while the app-device ceiling is full", async () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const user = await createTestUser(pg.db, "independent@example.com");
     const { cookie } = await createTestSession(pg.db, user.id);
-    await createTestSubscription(pg.db, user.id, { tier: "pro", workerLimit: 5, deviceLimit: 2 });
+    await createTestSubscription(pg.db, user.id, { tier: "pro", workerLimit: 5, appDeviceLimit: 2 });
 
-    expect((await register(app, cookie, registerBody())).status).toBe(201);
-    expect((await register(app, cookie, registerBody())).status).toBe(201);
+    expect(
+      (await register(app, cookie, registerBody({ platform: "ios", displayName: "Phone one" })))
+        .status
+    ).toBe(201);
+    expect(
+      (await register(app, cookie, registerBody({ platform: "android", displayName: "Phone two" })))
+        .status
+    ).toBe(201);
 
-    const capped = await register(app, cookie, registerBody());
+    const thirdPhone = await register(
+      app,
+      cookie,
+      registerBody({ platform: "ios", displayName: "Phone three" })
+    );
+    expect(thirdPhone.status).toBe(402);
+    expect(((await thirdPhone.json()) as CapBody).error).toBe("APP_DEVICE_CAP");
+
+    expect((await register(app, cookie, registerBody({ displayName: "Worker" }))).status).toBe(201);
+  });
+
+  test("APP_DEVICE_CAP lists only app rows as remediation", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const user = await createTestUser(pg.db, "remediation@example.com");
+    const { cookie } = await createTestSession(pg.db, user.id);
+    await createTestSubscription(pg.db, user.id, { tier: "pro", workerLimit: 5, appDeviceLimit: 1 });
+
+    expect((await register(app, cookie, registerBody({ displayName: "Build box" }))).status).toBe(
+      201
+    );
+    expect(
+      (await register(app, cookie, registerBody({ platform: "ios", displayName: "Phone" }))).status
+    ).toBe(201);
+
+    const capped = await register(
+      app,
+      cookie,
+      registerBody({ platform: "android", displayName: "Second phone" })
+    );
     expect(capped.status).toBe(402);
     const body = (await capped.json()) as CapBody;
-    expect(body.error).toBe("DEVICE_CAP");
+    expect(body.error).toBe("APP_DEVICE_CAP");
+    // Offering the build box would tell the user to sign out the machine doing
+    // the work to make room for a phone.
+    expect(body.devices.map((d) => d.display_name)).toEqual(["Phone"]);
+  });
+
+  // Mirror of the app→agent promotion hole: the app-cap exemption is scoped to
+  // app rows for the same reason, or an account at the ceiling re-POSTs an
+  // active agent row as `kind:"app"` and buys app rows up to worker_limit.
+  test("an active agent row cannot be flipped to an app device while the ceiling is full", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const user = await createTestUser(pg.db, "flipapp@example.com");
+    const { cookie } = await createTestSession(pg.db, user.id);
+    await createTestSubscription(pg.db, user.id, { tier: "pro", workerLimit: 5, appDeviceLimit: 1 });
+
+    expect(
+      (await register(app, cookie, registerBody({ platform: "ios", displayName: "Phone" }))).status
+    ).toBe(201);
+
+    const worker = registerBody({ displayName: "Build box" });
+    expect((await register(app, cookie, worker)).status).toBe(201);
+
+    const flipped = await register(app, cookie, { ...worker, kind: "app" });
+    expect(flipped.status).toBe(402);
+    expect(((await flipped.json()) as CapBody).error).toBe("APP_DEVICE_CAP");
+
+    const row = await pg.db.device.findUnique({
+      where: { userId_deviceId: { userId: user.id, deviceId: worker.deviceUuid as string } },
+    });
+    expect(row?.kind).toBe("agent");
+  });
+});
+
+describe("POST /account/devices — membership", () => {
+  // The plan's per-member-not-per-account semantics: the limit comes from the
+  // team's contract, the count stays scoped to the registering user's own rows.
+  // A 5-seat team therefore gets 5 x worker_limit machines, which is accepted
+  // and is also why a resolver miss here is the only server-enforced paywall
+  // silently opening or closing.
+  test("a member registers against the owner's worker limit, counted over their own rows", async () => {
+    const { app } = buildTestApp(pg.db, pg.url);
+    const owner = await createTestUser(pg.db, "teamowner@example.com");
+    const member = await createTestUser(pg.db, "teammember@example.com");
+    await createTestSubscription(pg.db, owner.id, { tier: "pro", workerLimit: 2, appDeviceLimit: 10 });
+    // One machine each side of a limit the member's own contract would refuse.
+    await createTestSubscription(pg.db, member.id, { tier: "pro", workerLimit: 1, appDeviceLimit: 10 });
+    const team = await pg.db.productAccount.findUniqueOrThrow({ where: { userId: owner.id } });
+    await addTestMember(pg.db, team.id, member.id);
+
+    const { cookie: ownerCookie } = await createTestSession(pg.db, owner.id);
+    const { cookie } = await createTestSession(pg.db, member.id);
+
+    expect((await register(app, ownerCookie, registerBody({ displayName: "Owner box" }))).status).toBe(201);
+    expect((await register(app, ownerCookie, registerBody({ displayName: "Owner laptop" }))).status).toBe(201);
+
+    // The owner has already filled worker_limit; the member's own allowance is
+    // untouched, so a shared count would refuse the first of these.
+    expect((await register(app, cookie, registerBody({ displayName: "Member box" }))).status).toBe(201);
+    expect((await register(app, cookie, registerBody({ displayName: "Member laptop" }))).status).toBe(201);
+
+    const capped = await register(app, cookie, registerBody({ displayName: "Member third" }));
+    expect(capped.status).toBe(402);
+    const body = (await capped.json()) as CapBody;
+    expect(body.error).toBe("WORKER_CAP");
+    // The owner's limit, not the member's personal 1.
     expect(body.limit).toBe(2);
+    expect(body.devices.map((d) => d.display_name).sort()).toEqual(["Member box", "Member laptop"]);
   });
 });

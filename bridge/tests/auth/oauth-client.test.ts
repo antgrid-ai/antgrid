@@ -196,4 +196,64 @@ describe("startTokenMaintenance", () => {
       (globalThis as any).setTimeout = realSetTimeout;
     }
   });
+
+  // getTier is the bridge's only read of the server-signed `tier` claim, and it
+  // lives here rather than in a store of its own precisely so it cannot outlive
+  // the token: `current` is the sole mutable token holder, and the tier is
+  // derived from it on demand.
+  describe("getTier", () => {
+    function tokenWith(tier: string | undefined, expSec: number): string {
+      const seg = (o: object) => Buffer.from(JSON.stringify(o)).toString("base64url");
+      return [
+        seg({ alg: "EdDSA", typ: "JWT" }),
+        seg({ ...(tier === undefined ? {} : { tier }), exp: Math.floor(Date.now() / 1000) + expSec }),
+        "sig",
+      ].join(".");
+    }
+    const noClient = {} as unknown as OAuthClient;
+
+    it("reads the tier off the initial token", () => {
+      const maint = startTokenMaintenance(noClient, {
+        accessToken: tokenWith("pro", 3600), expiresAt: Date.now() + 3_600_000,
+      });
+      try { expect(maint.getTier()).toBe("pro"); } finally { maint.stop(); }
+    });
+
+    it("returns null for a token that carries no tier, an expired one, or a non-JWT", () => {
+      for (const token of [tokenWith(undefined, 3600), tokenWith("pro", -3600), "opaque-token", ""]) {
+        const maint = startTokenMaintenance(noClient, { accessToken: token, expiresAt: Date.now() + 3_600_000 });
+        try { expect(maint.getTier()).toBeNull(); } finally { maint.stop(); }
+      }
+    });
+
+    it("follows the token across a re-mint rather than caching the first answer", async () => {
+      // The downgrade path: web signs a new tier onto the next hourly token, and
+      // the bridge must be reading that one. A tier captured at startup would
+      // survive every re-mint and make the gate permanent.
+      const realSetTimeout = globalThis.setTimeout;
+      let pending: (() => void) | null = null;
+      (globalThis as any).setTimeout = ((fn: () => void, ms?: number, ...rest: unknown[]) => {
+        if ((ms ?? 0) >= 30_000) { pending = fn; return 0; }
+        return (realSetTimeout as any)(fn, ms, ...rest);
+      });
+      const flush = () => new Promise((r) => realSetTimeout(r, 0));
+      const client = {
+        mint: async (): Promise<MintedToken> => ({
+          accessToken: tokenWith("free", 3600), expiresAt: Date.now() + 3_600_000,
+        }),
+      } as unknown as OAuthClient;
+
+      try {
+        const maint = startTokenMaintenance(client, {
+          accessToken: tokenWith("pro", 3600), expiresAt: Date.now() + 3_600_000,
+        });
+        expect(maint.getTier()).toBe("pro");
+        pending!(); await flush();
+        expect(maint.getTier()).toBe("free");
+        maint.stop();
+      } finally {
+        (globalThis as any).setTimeout = realSetTimeout;
+      }
+    });
+  });
 });

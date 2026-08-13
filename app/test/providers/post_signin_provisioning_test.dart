@@ -144,20 +144,22 @@ void main() {
   );
 
   test(
-    'a DEVICE_CAP rejection populates deviceCapProvider (not a silent failure)',
+    'an APP_DEVICE_CAP rejection populates deviceCapProvider '
+    '(not a silent failure)',
     () async {
       final storage = _MemStorage();
       final store = KeychainDeviceStore(storage: storage);
       final cap = DeviceCapInfo(
         message:
             'Device limit reached (10/10). Remove a device to register this one.',
+        kind: DeviceCapKind.appDevice,
         limit: 10,
         devices: [
           CappedDevice(id: 'd1', deviceId: 'uuid-1', displayName: 'Old laptop'),
         ],
       );
       final fakeApi = _FakeDevicesApi(
-        fail: ProvisioningException('DEVICE_CAP', cap.message, cap: cap),
+        fail: ProvisioningException('APP_DEVICE_CAP', cap.message, cap: cap),
       );
       CurrentUser? userCtl;
 
@@ -189,14 +191,61 @@ void main() {
     },
   );
 
-  test('a DEVICE_CAP that resolves AFTER sign-out does not populate '
+  test('a WORKER_CAP rejection populates deviceCapProvider too', () async {
+    // Desktop registers its `kind:"agent"` record from this very call, so the
+    // paid axis is what a user signing in on one machine too many actually
+    // hits — falling through would strand them with no remediation.
+    final storage = _MemStorage();
+    final store = KeychainDeviceStore(storage: storage);
+    final cap = DeviceCapInfo(
+      message: 'You are using all 1 workers — sign one out to add this machine.',
+      kind: DeviceCapKind.worker,
+      limit: 1,
+      devices: [
+        CappedDevice(id: 'd1', deviceId: 'uuid-1', displayName: 'Build box'),
+      ],
+    );
+    final fakeApi = _FakeDevicesApi(
+      fail: ProvisioningException('WORKER_CAP', cap.message, cap: cap),
+    );
+    CurrentUser? userCtl;
+
+    final container = ProviderContainer(
+      overrides: [
+        keychainDeviceStoreProvider.overrideWithValue(store),
+        licenseApiUrlProvider.overrideWithValue('https://api.antgrid.test'),
+        deviceProvisioningProvider.overrideWithValue(
+          DeviceProvisioning(api: fakeApi, store: store, platform: 'linux'),
+        ),
+        currentUserProvider.overrideWith((ref) => userCtl),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.listen(postSignInProvisioningProvider, (_, _) {});
+
+    userCtl = CurrentUser(userId: 'u-1', email: 'a@b.test');
+    container.invalidate(currentUserProvider);
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    final captured = container.read(deviceCapProvider);
+    expect(captured, isNotNull);
+    expect(captured!.kind, DeviceCapKind.worker);
+    expect(captured.limit, 1);
+    expect(await store.read(), isNull);
+  });
+
+  test('a cap that resolves AFTER sign-out does not populate '
       'deviceCapProvider (no phantom dialog over the auth screen)', () async {
     final storage = _MemStorage();
     final store = KeychainDeviceStore(storage: storage);
     final gate = Completer<void>();
-    final cap = DeviceCapInfo(message: 'capped', limit: 10);
+    final cap = DeviceCapInfo(
+      message: 'capped',
+      kind: DeviceCapKind.appDevice,
+      limit: 10,
+    );
     final fakeApi = _FakeDevicesApi(
-      fail: ProvisioningException('DEVICE_CAP', cap.message, cap: cap),
+      fail: ProvisioningException('APP_DEVICE_CAP', cap.message, cap: cap),
       gate: gate,
     );
     CurrentUser? userCtl;

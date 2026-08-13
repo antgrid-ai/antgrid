@@ -37,14 +37,6 @@ PricingCatalog _catalog() => PricingCatalog(
       trial: false,
       priceDisplay: r'$49',
     ),
-    PricingPlan(
-      slug: 'pro_lifetime',
-      label: 'Pro Lifetime',
-      workerLimit: 3,
-      recurring: false,
-      trial: false,
-      priceDisplay: r'$99',
-    ),
   ],
   trialDays: 7,
   yearlyPriceDisplay: r'$49',
@@ -72,11 +64,9 @@ void main() {
 
       // Plans are visible (not hidden)...
       expect(find.text('Pro Yearly'), findsOneWidget);
-      expect(find.text('Pro Lifetime'), findsOneWidget);
       // ...but every CTA is a static "Coming soon", never a live checkout button.
-      expect(find.text('Coming soon'), findsNWidgets(3));
+      expect(find.text('Coming soon'), findsNWidgets(2));
       expect(find.text('Get Pro Yearly'), findsNothing);
-      expect(find.text('Get Lifetime Access'), findsNothing);
       // No indication of the account's actual (promotional) entitlement.
       expect(find.text('Current plan'), findsNothing);
       expect(find.textContaining('promotion'), findsNothing);

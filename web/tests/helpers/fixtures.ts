@@ -41,26 +41,37 @@ export async function createTestSubscription(
   opts: Partial<{
     tier: "trial" | "pro";
     workerLimit: number;
-    deviceLimit: number;
+    appDeviceLimit: number;
     planId: string;
-    planSlug: "pro_yearly" | "pro_lifetime";
     status: string;
     trialEndsAt: Date;
+    /** Purchased seat count. Left to the column default of one unless a suite
+     *  needs an over-subscribed account (headcount above seats), which is a
+     *  legal state no other fixture can reach. */
+    seats: number;
   }> = {}
 ): Promise<TestSubscription> {
   const tier = opts.tier ?? "pro";
   // Deliberately above every real plan value so unrelated suites never trip the
   // worker cap incidentally; cap tests pass an explicit limit.
   const workerLimit = opts.workerLimit ?? (tier === "trial" ? 2 : 10);
-  const deviceLimit = opts.deviceLimit ?? 10;
+  const appDeviceLimit = opts.appDeviceLimit ?? 10;
   const status = opts.status ?? "active";
   const trialEndsAt = opts.trialEndsAt ?? null;
-  const planId =
-    opts.planId ??
-    (opts.planSlug === "pro_lifetime" ? PLAN_UUID.pro_lifetime : PLAN_UUID.pro_yearly);
+  const planId = opts.planId ?? PLAN_UUID.pro_yearly;
   const account = await db.productAccount.upsert({
     where: { userId },
     create: { userId },
+    update: {},
+  });
+  // Production reaches account_members through the better-auth hooks, which no
+  // fixture runs. Without this row every suite would resolve entitlement down
+  // the personal-account fallback and prove nothing about membership. Upsert,
+  // not create: a second call for the same user would otherwise trip
+  // account_members_one_active_per_user_idx.
+  await db.accountMember.upsert({
+    where: { accountId_userId: { accountId: account.id, userId } },
+    create: { accountId: account.id, userId, role: "owner", status: "active" },
     update: {},
   });
   const row = await db.subscription.create({
@@ -70,12 +81,40 @@ export async function createTestSubscription(
       tier,
       status,
       workerLimit,
-      deviceLimit,
+      appDeviceLimit,
       trialEndsAt,
+      ...(opts.seats !== undefined ? { seats: opts.seats } : {}),
     },
     select: { id: true },
   });
   return { id: row.id, userId, tier, workerLimit };
+}
+
+/**
+ * Move `userId` onto `accountId` as an active member — the only way to build a
+ * team anywhere, since the invite flow does not exist yet.
+ *
+ * Closes any prior active membership first: the partial unique index rejects a
+ * second active row for a user, and every user a fixture has touched already
+ * owns one. Also writes the denormalized `user.account_id`, which nothing in
+ * `src/` reads but production's join path maintains.
+ */
+export async function addTestMember(
+  db: PrismaClient,
+  accountId: string,
+  userId: string,
+  role: "owner" | "member" = "member"
+): Promise<void> {
+  await db.accountMember.updateMany({
+    where: { userId, status: "active" },
+    data: { status: "left", endedAt: new Date() },
+  });
+  await db.accountMember.upsert({
+    where: { accountId_userId: { accountId, userId } },
+    create: { accountId, userId, role, status: "active" },
+    update: { role, status: "active", endedAt: null },
+  });
+  await db.user.update({ where: { id: userId }, data: { accountId } });
 }
 
 export async function createTestSession(

@@ -16,10 +16,6 @@ export type PricingPageProps = {
 
 const COMING_SOON_LABEL = "Coming soon";
 
-// Pro Lifetime is deliberately absent from this page: it stays in the catalog
-// and in checkout so existing holders keep entitlement, but it is no longer
-// marketed.
-
 const FREE_FEATURES = [
   "Run agents on up to {workers} machines",
   "Remote control from your phone",
@@ -212,9 +208,7 @@ function ProYearlyCard({ plan, price }: { plan: PlanRow; price: number }) {
 //   1. Delete the static replacement above this marker: PricingPageProps,
 //      COMING_SOON_LABEL, FREE_FEATURES, ComingSoonCta, PricingPage,
 //      FreeTrialBanner, FreeCard, ProYearlyCard (everything from `export type
-//      PricingPageProps` down to just above this marker). Re-add a Free card
-//      and decide whether Lifetime returns to the grid — it is intentionally
-//      unmarketed, not removed from the catalog.
+//      PricingPageProps` down to just above this marker). Re-add a Free card.
 //   2. Select everything below this marker and strip the leading "// " from
 //      each line (most editors: select + "toggle line comment").
 //   3. In web/src/routes/ui.tsx's `/pricing` handler, do the matching restore
@@ -227,7 +221,6 @@ function ProYearlyCard({ plan, price }: { plan: PlanRow; price: number }) {
 // import {
 //   displayPriceCents,
 //   formatUsd,
-//   PRICING,
 //   TRIAL_DAYS,
 //   type BillingEnv,
 //   type PlanId,
@@ -238,7 +231,7 @@ function ProYearlyCard({ plan, price }: { plan: PlanRow; price: number }) {
 //   user: { email?: string | null };
 //   plans: PlanRow[];
 //   env: BillingEnv;
-//   /** Active paid plan slug, if any (trial | pro_yearly | pro_lifetime). */
+//   /** Active paid plan slug, if any (trial | pro_yearly). */
 //   currentPlanSlug: PlanId | null;
 // };
 // 
@@ -261,15 +254,6 @@ function ProYearlyCard({ plan, price }: { plan: PlanRow; price: number }) {
 //   "Browser preview tunneling",
 //   "E2E encrypted — zero-knowledge relay",
 //   "Priority support",
-// ] as const;
-// 
-// const PRO_LIFETIME_FEATURES = [
-//   "Everything in Pro Yearly",
-//   "Lifetime updates",
-//   "No renewal fees",
-//   "Run agents on up to {workers} machines",
-//   "E2E encrypted — zero-knowledge relay",
-//   "Community support",
 // ] as const;
 // 
 // function CheckIcon() {
@@ -344,11 +328,9 @@ function ProYearlyCard({ plan, price }: { plan: PlanRow; price: number }) {
 //   const yearlyPrice = displayPriceCents("pro_yearly", props.env);
 //   const trialPlan = props.plans.find((p) => p.slug === "trial");
 //   const yearlyPlan = props.plans.find((p) => p.slug === "pro_yearly");
-//   const lifetimePlan = props.plans.find((p) => p.slug === "pro_lifetime");
 //   const current = props.currentPlanSlug;
 //   const hasActivePlan = current !== null;
-//   const showTrialBanner =
-//     current !== "pro_yearly" && current !== "pro_lifetime";
+//   const showTrialBanner = current !== "pro_yearly";
 //   const planLabel = activePlanLabel(current, props.plans);
 // 
 //   return (
@@ -389,13 +371,6 @@ function ProYearlyCard({ plan, price }: { plan: PlanRow; price: number }) {
 //             price={yearlyPrice}
 //             isCurrent={current === "pro_yearly"}
 //             isDisabled={hasActivePlan && current !== "pro_yearly"}
-//           />
-//         )}
-//         {lifetimePlan && (
-//           <ProLifetimeCard
-//             plan={lifetimePlan}
-//             isCurrent={current === "pro_lifetime"}
-//             isDisabled={hasActivePlan && current !== "pro_lifetime"}
 //           />
 //         )}
 //       </div>
@@ -508,55 +483,6 @@ function ProYearlyCard({ plan, price }: { plan: PlanRow; price: number }) {
 //           planId="pro_yearly"
 //           label="Get Pro Yearly"
 //           footer={`${formatUsd(price)}/year · Renews automatically · Cancel anytime`}
-//           isCurrent={isCurrent}
-//           isDisabled={isDisabled}
-//         />
-//       </div>
-//     </div>
-//   );
-// }
-// 
-// function ProLifetimeCard({
-//   plan,
-//   isCurrent,
-//   isDisabled = false,
-// }: {
-//   plan: PlanRow;
-//   isCurrent: boolean;
-//   isDisabled?: boolean;
-// }) {
-//   const price = PRICING.pro_lifetime.listPriceCents;
-//   const cardClass = (() => {
-//     const base = "card bg-base-100 h-full border";
-//     if (isCurrent) return `${base} border-primary`;
-//     if (isDisabled) return `${base} border-base-300 opacity-60`;
-//     return `${base} border-primary`;
-//   })();
-// 
-//   return (
-//     <div class={cardClass}>
-//       <div class="card-body flex flex-col h-full">
-//         <div class="flex items-center gap-2 flex-wrap">
-//           <h2 class="font-mono text-xl font-bold">{plan.label}</h2>
-//           {isCurrent ? (
-//             <span class="badge badge-primary font-mono text-xs font-bold">CURRENT</span>
-//           ) : !isDisabled ? (
-//             <span class="badge badge-primary font-mono text-xs font-bold">RECOMMENDED</span>
-//           ) : null}
-//         </div>
-// 
-//         <div class="mt-3 font-mono min-h-[4.75rem]">
-//           <span class="text-4xl font-bold">{formatUsd(price)}</span>
-//           <span class="text-sm text-base-content/50 ml-1">one-time</span>
-//           <p class="text-xs text-base-content/50 font-mono mt-1.5">Pay once, use forever.</p>
-//         </div>
-// 
-//         <FeatureList items={PRO_LIFETIME_FEATURES} workers={plan.workerLimit} />
-// 
-//         <PlanCta
-//           planId="pro_lifetime"
-//           label="Get Lifetime Access"
-//           footer="One-time payment · No subscription"
 //           isCurrent={isCurrent}
 //           isDisabled={isDisabled}
 //         />

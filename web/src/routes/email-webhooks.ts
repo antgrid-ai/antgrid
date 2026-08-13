@@ -2,6 +2,10 @@ import { Hono } from "hono";
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { DB } from "../db/index.js";
 import { markDelivery, type DeliveryStatus } from "../models/pending-sign-in.js";
+import {
+  INVITE_REFERENCE_PREFIX,
+  markInviteDelivery,
+} from "../models/account-invite.js";
 
 // ZeptoMail wraps BOTH top-level fields in single-element arrays:
 // { event_name: ["hardbounce"], event_message: [{ email_info: {...} }] }
@@ -50,6 +54,18 @@ function classify(name: string): DeliveryStatus | null {
   return name === "hardbounce" ? "bounced" : null;
 }
 
+function namespaceOf(ref: string | null): string {
+  if (ref === null) return "none";
+  return ref.startsWith(INVITE_REFERENCE_PREFIX) ? "invite" : "sign-in";
+}
+
+function markRef(db: DB, ref: string, status: DeliveryStatus): Promise<number> {
+  if (ref.startsWith(INVITE_REFERENCE_PREFIX)) {
+    return markInviteDelivery(db, ref.slice(INVITE_REFERENCE_PREFIX.length), status);
+  }
+  return markDelivery(db, ref, status);
+}
+
 export function emailWebhookRoutes(deps: { db: DB; webhookSecret?: string }) {
   const r = new Hono();
 
@@ -69,10 +85,17 @@ export function emailWebhookRoutes(deps: { db: DB; webhookSecret?: string }) {
       // mark nothing, and leave the app spinning to expiry with no trail. Log
       // whenever a classified bounce isn't recorded — hasRef distinguishes a
       // parse/contract problem (false) from a benign late/expired bounce (true).
-      const marked = ref ? await markDelivery(deps.db, ref, status) : 0;
+      //
+      // Two namespaces share one reference field. A bare reference is a
+      // `pending_sign_in` id and stays that way — mail already in flight when
+      // the invite feature shipped carries the bare form, so it cannot be
+      // migrated to a prefix. Invite mail is prefixed at the send site
+      // (`inviteEmailReference`); routed here to the wrong table it would update
+      // zero rows and warn as if it were a late bounce.
+      const marked = ref ? await markRef(deps.db, ref, status) : 0;
       if (marked === 0) {
         console.warn(
-          `[zeptomail-webhook] ${name} not recorded (hasRef=${ref !== null}): missing client_reference or unmatched/expired row`
+          `[zeptomail-webhook] ${name} not recorded (hasRef=${ref !== null}, ns=${namespaceOf(ref)}): missing client_reference or unmatched/expired row`
         );
       }
     } else if (name && !KNOWN_EVENTS.has(name)) {

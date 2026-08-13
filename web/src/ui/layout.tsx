@@ -48,6 +48,11 @@ export function Layout({ title, user, children }: LayoutProps) {
                 <a href="/devices" class="px-3 py-1.5 rounded hover:bg-base-200 font-mono">
                   Devices
                 </a>
+                {/* Shown to everyone: /team is a real page for a member too —
+                    it is where they find out whose account they bill against. */}
+                <a href="/team" class="px-3 py-1.5 rounded hover:bg-base-200 font-mono">
+                  Team
+                </a>
                 <a
                   href="/pricing"
                   class="px-3 py-1.5 rounded hover:bg-base-200 font-mono"

@@ -13,6 +13,7 @@ import 'package:antgrid/services/devices_api.dart';
 DeviceCapInfo _info() => DeviceCapInfo(
   message:
       'Device limit reached (10/10). Remove a device to register this one.',
+  kind: DeviceCapKind.appDevice,
   limit: 10,
   devices: [
     CappedDevice(id: 'd1', deviceId: 'uuid-aaa', displayName: 'Old laptop'),
@@ -37,7 +38,8 @@ void main() {
 
     expect(find.text('Device limit reached'), findsOneWidget);
     expect(find.textContaining('Remove a device'), findsOneWidget);
-    // The cap message must never push an upgrade — deviceLimit is flat by tier.
+    // The app-device ceiling is an abuse bound pricing never mentions, so no
+    // plan can raise it and the message must never push an upgrade.
     expect(find.textContaining('upgrade', skipOffstage: false), findsNothing);
     expect(find.text('Old laptop'), findsOneWidget);
     expect(find.text('Spare phone'), findsOneWidget);

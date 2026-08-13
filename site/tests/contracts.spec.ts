@@ -73,9 +73,12 @@ test("charging plans render a disabled button, never a live CTA", async ({ page 
   await expect(freeCard.getByRole("link", { name: /^Start free/ })).toHaveCount(1);
 });
 
-test("lifetime is not marketed", async ({ page }) => {
-  // Retired from marketing; existing holders keep entitlement server-side. Re-surfacing
-  // the word offers a plan that can no longer be bought.
-  await page.goto("/pricing");
-  await expect(page.locator("body")).not.toContainText(/lifetime/i);
-});
+// /privacy is excluded on purpose — it says "lifetime of the session", not a plan.
+for (const path of ["/pricing", "/terms", "/refunds", "/support"]) {
+  test(`lifetime is not offered on ${path}`, async ({ page }) => {
+    // There is no lifetime plan and no one-time-payment path. The word reappearing
+    // on a legal or marketing page promises terms nothing can honour.
+    await page.goto(path);
+    await expect(page.locator("body")).not.toContainText(/lifetime/i);
+  });
+}

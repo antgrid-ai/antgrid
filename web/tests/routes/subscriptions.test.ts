@@ -29,7 +29,7 @@ describe("GET /subscriptions/me", () => {
     // Compatibility mirror for app builds already in the field.
     expect(body.subscription.session_limit).toBe(3);
     expect(body.subscription.plan_id).toBe(PLAN_UUID.pro_yearly);
-    expect(body.active_devices).toBe(0);
+    expect(body.active_app_devices).toBe(0);
   });
 
   test("returns promotional pro subscription when user has no paid plan", async () => {
@@ -41,17 +41,17 @@ describe("GET /subscriptions/me", () => {
     const body = await res.json();
     expect(body.subscription).toMatchObject({
       tier: "pro",
-      worker_limit: 3,
-      session_limit: 3,
+      worker_limit: 10,
+      session_limit: 10,
       plan_id: PLAN_UUID.pro_yearly,
       promotional: true,
       cancelled_at: null,
     });
     expect(body.tier).toBe("pro");
-    expect(body.worker_limit).toBe(3);
-    expect(body.session_limit).toBe(3);
+    expect(body.worker_limit).toBe(10);
+    expect(body.session_limit).toBe(10);
     expect(body.promotional).toBe(true);
-    expect(body.active_devices).toBe(0);
+    expect(body.active_app_devices).toBe(0);
   });
 
   test("requires auth", async () => {

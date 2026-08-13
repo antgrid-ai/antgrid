@@ -5,24 +5,59 @@ import { listActiveDevices } from "../models/device.js";
 import { revokeUserDevice } from "./device.js";
 import { pushExpire } from "../relay/push.js";
 import {
-  activeSubscriptionForUser,
+  activeSubscriptionForAccount,
   cancelAllAccountSubscriptions,
   isPendingCancellation,
 } from "../models/subscription.js";
-import { ensureProductAccount } from "../models/product-account.js";
+import {
+  ensureProductAccount,
+  findProductAccountByUserId,
+} from "../models/product-account.js";
+import {
+  closeActiveMembership,
+  countOtherActiveMembers,
+  findActiveMembership,
+} from "../models/account-member.js";
 import { PLAN_SLUG_FREE } from "../models/plan.js";
 
-export type DeleteAccountResult = "deleted" | "blocked_subscription";
+export type DeleteAccountResult = "deleted" | "blocked_subscription" | "blocked_team";
 
 /** Block deletion only while a *paid* subscription will still auto-renew. A free
  *  plan, or a paid plan already pending cancellation, has no future charge and
- *  does not block. */
+ *  does not block.
+ *
+ *  Scoped to the account the user OWNS, not the one they bill against. A member
+ *  inherits their owner's renewing subscription and cannot cancel it, so
+ *  resolving through membership here would 409 them out of deleting their own
+ *  user permanently. */
 export async function hasRenewingPaidSubscription(db: DB, userId: string): Promise<boolean> {
-  const sub = await activeSubscriptionForUser(db, userId);
+  const owned = await findProductAccountByUserId(db, userId);
+  if (!owned) return false;
+  const sub = await activeSubscriptionForAccount(db, owned.id);
   if (!sub) return false;
   const plan = await db.plan.findUnique({ where: { id: sub.planId } });
   if (!plan || plan.slug === PLAN_SLUG_FREE) return false;
   return !isPendingCancellation(sub);
+}
+
+/**
+ * Block deletion of an owner whose team still has members: ProductAccount.userId
+ * is unique, so the account cannot be handed to one of them self-serve, and
+ * cascading the deletion would take the team's contract with it. Transfer is a
+ * support operation.
+ *
+ * Exported so `/account` renders the same answer `DELETE /account/me` gives —
+ * the page and the endpoint drifting apart is how an owner learns they are
+ * blocked only after typing DELETE.
+ */
+export async function isBlockedByTeamMembers(db: DB, userId: string): Promise<boolean> {
+  const owned = await findProductAccountByUserId(db, userId);
+  if (!owned) return false;
+  // Keyed on the account they OWN — the one this deletion tombstones — not the
+  // one they bill against. A member is blocked by nobody: their own account holds
+  // no other members. An owner who has since joined someone else's team still
+  // owns theirs, and deleting would tombstone it under its members.
+  return (await countOtherActiveMembers(db, owned.id, userId)) > 0;
 }
 
 /**
@@ -47,6 +82,16 @@ export async function deleteUserAccount(
   const account = await ensureProductAccount(db, userId);
   // Already tombstoned → idempotent success.
   if (account.deletedAt) return "deleted";
+
+  // A member's membership points at someone else's account; only their own is
+  // touched below. Everything from here down stays on `account` for exactly that
+  // reason — resolving the team here would let a member's self-deletion cancel
+  // the owner's subscriptions and tombstone the team.
+  const membership = await findActiveMembership(db, userId);
+  const isTeamMember = membership !== null && membership.accountId !== account.id;
+
+  // Both guards run before any mutation.
+  if (await isBlockedByTeamMembers(db, userId)) return "blocked_team";
 
   if (await hasRenewingPaidSubscription(db, userId)) return "blocked_subscription";
 
@@ -84,8 +129,16 @@ export async function deleteUserAccount(
         email: `deleted+${userId}@deleted.antgrid.invalid`,
         name: "Deleted user",
         image: null,
+        // A member's account_id names the team, which survives this deletion.
+        // syncUserAccountId only ever fills a null or matching value, so a
+        // scrubbed user would otherwise keep pointing at a live team forever.
+        ...(isTeamMember ? { accountId: null } : {}),
       },
     });
+
+    // Frees the seat. The owner's own row is closed too: nothing may hold an
+    // active membership on the account tombstoned below.
+    await closeActiveMembership(tx, userId, "left");
 
     // Hard-delete pure PII / credentials. OAuth client deletions cascade to
     // their access/refresh tokens and consents (schema FK onDelete: Cascade).

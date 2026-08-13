@@ -389,22 +389,6 @@ test("promotion wires (and clears) the gate's peer provider", async () => {
     provider = fn;
   };
 
-  // Minimal AgentCore stub capturing the provider wiring.
-  const core = {
-    relayUrl: "https://relay.example.com",
-    projectId: "projP",
-    abDir,
-    identity: { deviceId: "local-uuid", deviceName: "local", createdAt: "" },
-    nextKeypair: () => generateEphemeralKeypair(),
-    pairedPhones: { has: () => false } as never,
-    handleTunnelMessage: () => {},
-    onHandshakeComplete: () => {},
-    setPlainHook: () => {},
-    setPeerPubkeyProvider,
-    attachTransport: () => {},
-    shutdown: async () => 0,
-  } as never;
-
   // Stub machine relay session whose currentPeerPubkey is observable through
   // the wired provider — mirrors what HostServer.ensureMachineRelay() returns.
   const machineSession: MachineRelaySession = {
@@ -412,14 +396,10 @@ test("promotion wires (and clears) the gate's peer provider", async () => {
     currentPeerPubkey: () => "promoted-phone-pk",
     sendPushDeliver: () => {},
     agentDeviceId: "0bbd1111-2222-3333-4444-555566667777",
-    ed25519Pub: Buffer.from("edpub").toString("base64"),
-    relayBase: "https://relay.example.com",
   };
 
   const ctrl = createRelayPromotion({
-    core,
     bus,
-    hostName: "test-host",
     ensureMachineRelay: async () => machineSession,
     // Reproduces ProjectCore.attachLocalStreamForWizard's real wiring: wire
     // the gate's provider to the attached stream's peer, clear it on detach.

@@ -28,7 +28,7 @@ afterAll(async () => {
   licenseApi.stop();
 });
 
-test("agent:enableRelay promotes: pairingReady emitted, local channel intact", async () => {
+test("agent:enableRelay promotes: relayReady emitted, local channel intact", async () => {
   const seen: AbMessage[] = [];
   local.client.on((m) => seen.push(m));
 
@@ -55,20 +55,20 @@ test("agent:enableRelay promotes: pairingReady emitted, local channel intact", a
     }),
   );
 
-  // pairingReady lands almost immediately, well before a freshly-spawned PTY
+  // relayReady lands almost immediately, well before a freshly-spawned PTY
   // has echoed anything — wait for both signals under one deadline so the
   // "OK" assertion below isn't racing the shell.
   const deadline = Date.now() + 8_000;
   const sawOutput = () => seen.some((m) => m.type === "terminal:output" && m.data.includes("OK"));
   while (
     Date.now() < deadline &&
-    (!seen.some((m) => m.type === "agent:pairingReady") || !sawOutput())
+    (!seen.some((m) => m.type === "agent:relayReady") || !sawOutput())
   ) {
     await Bun.sleep(100);
   }
 
   expect(seen.filter((m) => m.type === "agent:relayError")).toEqual([]);
-  const ready = seen.find((m) => m.type === "agent:pairingReady");
+  const ready = seen.find((m) => m.type === "agent:relayReady");
   expect(ready).toBeDefined();
 
   const outputs = seen

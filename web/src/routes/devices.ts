@@ -12,6 +12,7 @@ import {
   resolveEntitlement,
 } from "../models/subscription.js";
 import { createDeviceOAuthClient, deleteDeviceOAuthClient } from "../models/device-oauth.js";
+import { countActiveSeatHolders, findActiveMembership } from "../models/account-member.js";
 import { tokenBucket } from "../util/rate-limit.js";
 import type { RelayPushConfig } from "../relay/push.js";
 
@@ -70,15 +71,15 @@ export function deviceRoutes(deps: { db: DB; auth: Auth; relay: RelayPushConfig 
     await provisionProductAccountForUser(deps.db, userId);
     const sub = await activeSubscriptionForUser(deps.db, userId);
     if (!sub) return c.json({ error: "NO_SUBSCRIPTION" }, 500);
-    const { deviceLimit, workerLimit } = resolveEntitlement(sub);
+    const { appDeviceLimit, workerLimit } = resolveEntitlement(sub);
 
-    // Two caps, both settled here at registration — a calm moment — rather than
-    // mid-work: the fair-use `deviceLimit` across all kinds, and the paid
-    // `workerLimit` on agent machines.
+    // Both caps are settled here at registration — a calm moment — rather than
+    // mid-work: the paid `workerLimit` on agent machines, and the `appDeviceLimit`
+    // abuse bound on phones and controllers.
     const capResult = await deps.db.$transaction((tx) =>
       checkCapAndUpsert(tx, {
         userId,
-        deviceLimit,
+        appDeviceLimit,
         workerLimit,
         deviceId: body.deviceUuid,
         publicKey: Buffer.from(body.ed25519Pub, "base64"),
@@ -87,10 +88,10 @@ export function deviceRoutes(deps: { db: DB; auth: Auth; relay: RelayPushConfig 
         displayName: body.displayName,
       })
     );
-    if (capResult.kind === "cap") {
+    if (capResult.kind === "app_device_cap") {
       return c.json(
         {
-          error: "DEVICE_CAP",
+          error: "APP_DEVICE_CAP",
           limit: capResult.limit,
           devices: capResult.devices.map((d) => ({
             id: d.id,
@@ -101,9 +102,10 @@ export function deviceRoutes(deps: { db: DB; auth: Auth; relay: RelayPushConfig 
         402
       );
     }
-    // Deliberately NOT folded into DEVICE_CAP: the remedy differs. DEVICE_CAP
-    // is fair-use and is only ever resolved by removing a device, while
-    // WORKER_CAP is the paid axis and upgrading resolves it too.
+    // Deliberately NOT folded into APP_DEVICE_CAP: the remedy differs, and so
+    // does what each code admits about the product. APP_DEVICE_CAP is an abuse
+    // bound that is never shown in pricing and is only ever resolved by removing
+    // an app device; WORKER_CAP is the paid axis, so upgrading resolves it too.
     if (capResult.kind === "worker_cap") {
       return c.json(
         {
@@ -182,7 +184,14 @@ export function deviceRoutes(deps: { db: DB; auth: Auth; relay: RelayPushConfig 
     await provisionProductAccountForUser(deps.db, userId);
     const sub = await activeSubscriptionForUser(deps.db, userId);
     if (!sub) return c.json({ error: "NO_SUBSCRIPTION" }, 500);
-    const { tier, workerLimit, deviceLimit, promotional } = resolveEntitlement(sub);
+    // Both read off the subscription's own account, so the purchased count and
+    // the occupied count are always about the same team.
+    const [membership, seatsUsed] = await Promise.all([
+      findActiveMembership(deps.db, userId),
+      countActiveSeatHolders(deps.db, sub.accountId),
+    ]);
+    const { tier, workerLimit, appDeviceLimit, promotional, capabilities } =
+      resolveEntitlement(sub);
     return c.json({
       userId,
       email,
@@ -193,8 +202,18 @@ export function deviceRoutes(deps: { db: DB; auth: Auth; relay: RelayPushConfig 
       // that app builds predating the rename hard-require. Drop them together
       // once no such build is still in the field.
       session_limit: workerLimit,
-      device_limit: deviceLimit,
+      app_device_limit: appDeviceLimit,
       promotional,
+      // Additive, and additive only: nothing above changed name, type or
+      // meaning, so a client that ignores these four reads exactly what it read
+      // before. No cap travels here either — `seats` describes what was bought,
+      // and enforcement stays where the writes are.
+      role: membership?.role ?? null,
+      seats: sub.seats,
+      seats_used: seatsUsed,
+      // Registry names inside, not snake_case — see the /subscriptions/me mirror
+      // in web/src/routes/subscriptions.ts.
+      capabilities,
     });
   });
 
@@ -206,6 +225,9 @@ export function deviceRoutes(deps: { db: DB; auth: Auth; relay: RelayPushConfig 
     });
     if (result === "blocked_subscription") {
       return c.json({ error: "SUBSCRIPTION_ACTIVE" }, 409);
+    }
+    if (result === "blocked_team") {
+      return c.json({ error: "TEAM_HAS_MEMBERS" }, 409);
     }
     return c.json({ ok: true });
   });

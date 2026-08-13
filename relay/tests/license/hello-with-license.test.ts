@@ -3,7 +3,7 @@ import { generateKeyPair, exportJWK, SignJWT } from "jose";
 import { startServer as startServerReal, type RelayServer, type RelayServerDeps } from "../../src/server.js";
 import { LicenseCache } from "../../src/license/cache.js";
 import { createLicenseGate } from "../../src/license/gate.js";
-import type { JwksProvider } from "../../src/license/verify.js";
+import type { DeviceTier, JwksProvider } from "../../src/license/verify.js";
 import type { JWK } from "jose";
 import {
   defaultConfig,
@@ -42,7 +42,7 @@ async function makeSigner(): Promise<SignerCtx> {
 interface MintOpts {
   deviceUuid: string;
   uid?: string;
-  tier?: "free" | "trial" | "pro";
+  tier?: DeviceTier;
   azp?: string;
   expSecondsFromNow?: number;
   pk?: string;
@@ -221,6 +221,23 @@ test("free tier agent hello still succeeds — tier gates nothing on the relay",
   const token = await mintToken(signer, { deviceUuid: "dev-free", tier: "free", pk: identity.publicKeyBase64 });
   const { msg } = await sendHello(r, {
     deviceId: "dev-free", deviceType: "agent", licenseToken: token,
+    publicKeyBase64: identity.publicKeyBase64, privateSeed: identity.privateSeed,
+  });
+  expect(msg).toMatchObject({ type: "welcome" });
+
+  r.stop();
+});
+
+test("enterprise tier agent hello succeeds — the widening reaches admission", async () => {
+  const { signer, jwks } = await makeSigner();
+  const cache = new LicenseCache({ maxEntries: 100 });
+  const gate = createLicenseGate({ licenseIssuerUrl: ISSUER, jwks, cache });
+  const r = startWith({ licenseGate: gate, licenseCache: cache });
+
+  const identity = await genRelayKeyPair();
+  const token = await mintToken(signer, { deviceUuid: "dev-ent", tier: "enterprise", pk: identity.publicKeyBase64 });
+  const { msg } = await sendHello(r, {
+    deviceId: "dev-ent", deviceType: "agent", licenseToken: token,
     publicKeyBase64: identity.publicKeyBase64, privateSeed: identity.privateSeed,
   });
   expect(msg).toMatchObject({ type: "welcome" });

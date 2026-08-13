@@ -35,8 +35,6 @@ class FakePairedAgentNotifier extends AsyncNotifier<List<PairedAgent>>
   Future<List<PairedAgent>> build() async => [testAgent];
 
   @override
-  Future<void> importCoordinates(dynamic qr) async {}
-  @override
   Future<void> selectAgent(String agentDeviceId) async {}
   @override
   Future<void> forgetMachine(String agentDeviceIdOrUuid) async {}

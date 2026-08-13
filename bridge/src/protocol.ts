@@ -998,28 +998,17 @@ const AgentActivationPendingMessage = BaseMessage.extend({
   userCode: z.string(),
   expiresAt: z.string(),
 });
+// The one success signal of the enable-relay path: the machine socket is up and
+// the local core is attached as a stream. Its counterpart `agent:relayError`
+// covers every failure, so without this the path is silent on success.
 const AgentRelayReadyMessage = BaseMessage.extend({
   type: z.literal("agent:relayReady"),
   agentDeviceId: z.string(),
-  pairingQr: z.string(),
 });
 const AgentRelayErrorMessage = BaseMessage.extend({
   type: z.literal("agent:relayError"),
   code: z.string(),
   message: z.string(),
-});
-
-
-const AgentPairingReadyMessage = BaseMessage.extend({
-  type: z.literal("agent:pairingReady"),
-  pairingQr: z.string(),
-  agentDeviceId: z.string(),
-});
-
-const AgentPhonePairedMessage = BaseMessage.extend({
-  type: z.literal("agent:phonePaired"),
-  phoneDeviceId: z.string(),
-  phoneLabel: z.string().optional(),
 });
 
 // Inbound app→agent control-plane verb: the paired phone asks the host to start
@@ -1706,8 +1695,6 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   AgentActivationPendingMessage,
   AgentRelayReadyMessage,
   AgentRelayErrorMessage,
-  AgentPairingReadyMessage,
-  AgentPhonePairedMessage,
   ProjectStartMessage,
   ConfigReadMessage,
   ConfigReadResultMessage,
@@ -1840,8 +1827,6 @@ export type AgentDisableRelay = z.infer<typeof AgentDisableRelayMessage>;
 export type AgentActivationPending = z.infer<typeof AgentActivationPendingMessage>;
 export type AgentRelayReady = z.infer<typeof AgentRelayReadyMessage>;
 export type AgentRelayError = z.infer<typeof AgentRelayErrorMessage>;
-export type AgentPairingReadyMessage = z.infer<typeof AgentPairingReadyMessage>;
-export type AgentPhonePairedMessage = z.infer<typeof AgentPhonePairedMessage>;
 export type ProjectStart = z.infer<typeof ProjectStartMessage>;
 export type ConfigRead = z.infer<typeof ConfigReadMessage>;
 export type ConfigReadResult = z.infer<typeof ConfigReadResultMessage>;
@@ -1995,7 +1980,6 @@ const KNOWN_TYPES = new Set<string>([
   "agent:hello", "port:detected",
   "agent:enableRelay", "agent:disableRelay",
   "agent:activationPending", "agent:relayReady", "agent:relayError",
-  "agent:pairingReady", "agent:phonePaired",
   "project:start",
   "config:read", "config:read-result", "config:write", "config:write-result",
   "config:changed", "config:detect-tools", "config:detect-tools-result",

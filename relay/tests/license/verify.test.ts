@@ -264,7 +264,7 @@ describe("verifyDeviceToken", () => {
     expect(result).toEqual({ ok: false, code: "LICENSE_INVALID" });
   });
 
-  test("bad tier → LICENSE_INVALID", async () => {
+  test("unrecognised tier label → LICENSE_INVALID", async () => {
     const kp = await makeKeyPair("k1");
     const provider = makeProvider([kp.publicJwk]);
     const token = await sign({
@@ -272,13 +272,36 @@ describe("verifyDeviceToken", () => {
       kid: "k1",
       deviceUuid: "d",
       uid: "u",
-      tier: "enterprise",
+      tier: "platinum",
       azp: "a",
       pk: DEFAULT_PK,
     });
 
     const result = await verifyDeviceToken(token, provider, ISSUER);
     expect(result).toEqual({ ok: false, code: "LICENSE_INVALID" });
+  });
+
+  // The predicate and the claim type are separate edits, and widening only the
+  // type typechecks green while still rejecting the token at runtime. This is
+  // the only assertion that can tell those two halves apart.
+  test("enterprise tier verifies — the union admits it", async () => {
+    const kp = await makeKeyPair("k1");
+    const provider = makeProvider([kp.publicJwk]);
+    const token = await sign({
+      privateKey: kp.privateKey,
+      kid: "k1",
+      deviceUuid: "device-ent",
+      uid: "user-ent",
+      tier: "enterprise",
+      azp: "client-ent",
+      pk: DEFAULT_PK,
+    });
+
+    const result = await verifyDeviceToken(token, provider, ISSUER);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.claims.tier).toBe("enterprise");
+    }
   });
 
   test("tampered claims (mutated middle segment) → LICENSE_INVALID", async () => {

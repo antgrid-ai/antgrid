@@ -73,7 +73,7 @@ final postSignInProvisioningProvider = Provider<void>((ref) {
         if (ref.read(currentUserProvider).value?.userId != user.userId) {
           return;
         }
-        final capped = e.code == 'DEVICE_CAP' || e.code == 'WORKER_CAP';
+        final capped = e.code == 'APP_DEVICE_CAP' || e.code == 'WORKER_CAP';
         if (capped && e.cap != null) {
           // Both caps reach the user mid-sign-in — desktop registers its
           // `kind:"agent"` record here, so signing in on one machine too many

@@ -32,9 +32,10 @@ Future<void> showDeviceCapDialog(
 
 /// Cap remediation dialog, shared by both caps because both are answered the
 /// same way: revoke one of the listed devices, then retry provisioning this
-/// machine. Only the copy differs — `deviceLimit` is flat across tiers so its
-/// variant never mentions upgrading, while the worker cap is the paid axis and
-/// shows an upgrade affordance (disabled until checkout ships).
+/// machine. Only the copy differs — `appDeviceLimit` is an abuse ceiling that
+/// pricing never mentions, so its variant never offers upgrading, while the
+/// worker cap is the paid axis and shows an upgrade affordance (disabled until
+/// checkout ships).
 class DeviceCapDialog extends ConsumerStatefulWidget {
   const DeviceCapDialog({super.key, required this.info});
 
@@ -100,11 +101,13 @@ class _DeviceCapDialogState extends ConsumerState<DeviceCapDialog> {
       if (!mounted) return;
       // Still capped (or transient) — keep the dialog open; the list already
       // reflects the removal so the user can free another slot.
-      final stillCapped = e.code == 'DEVICE_CAP' || e.code == 'WORKER_CAP';
+      final stillCapped =
+          e.code == 'APP_DEVICE_CAP' || e.code == 'WORKER_CAP';
       setState(() {
         // Re-seat on the cap the server just named. Removing a phone can clear
-        // DEVICE_CAP and leave WORKER_CAP standing (and vice versa), and only
-        // this rejection carries the new kind, limit and remediable devices.
+        // APP_DEVICE_CAP and leave WORKER_CAP standing (and vice versa), and
+        // only this rejection carries the new kind, limit and remediable
+        // devices.
         final next = stillCapped ? e.cap : null;
         if (next != null) {
           _info = next;

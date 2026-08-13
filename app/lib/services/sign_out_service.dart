@@ -173,7 +173,7 @@ class SignOutService {
   /// them. Desktop carries two independent rows — the main record and the
   /// controller record (see `keychain_device_store.dart`) — and both must be
   /// revoked here or the controller row survives every sign-out/sign-in cycle
-  /// and burns an account `device_limit` slot forever. Both reads happen
+  /// and burns an account `app_device_limit` slot forever. Both reads happen
   /// before either keychain slot is wiped further down in [hardSignOut].
   Future<void> _revokeDeviceServerSide() async {
     final device = await keychainStore.read();
@@ -192,8 +192,8 @@ class SignOutService {
       } catch (_) {
         // The rows are independent, and [hardSignOut] wipes the local pointer
         // to both a few steps later. Letting one transient failure abort the
-        // loop would orphan the other row on the account — burning a
-        // device_limit slot with nothing left locally to retry from.
+        // loop would orphan the other row on the account — burning an
+        // app_device_limit slot with nothing left locally to retry from.
         failed++;
       }
     }

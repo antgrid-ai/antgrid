@@ -36,4 +36,15 @@ describe("Layout", () => {
     }).toString();
     expect(html).toContain('href="/devices"');
   });
+
+  test("signed-in users get a /team nav link", () => {
+    // Shown to members too, not only owners: it is the only place a member is
+    // told whose account their plan and limits come from.
+    const html = Layout({
+      title: "Test",
+      user: { email: "gita@example.com" },
+      children: "x",
+    }).toString();
+    expect(html).toContain('href="/team"');
+  });
 });

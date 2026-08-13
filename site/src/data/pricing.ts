@@ -28,7 +28,7 @@ export const YEARLY_OFFER_USD = 49;
 export const OFFER_ACTIVE = true;
 
 export type PlanCardData = {
-  id: "free" | "trial" | "pro_yearly" | "pro_lifetime";
+  id: "free" | "trial" | "pro_yearly";
   // checkoutId overrides the planId sent to the checkout URL (e.g. yearly trial uses sku "trial").
   checkoutId?: string;
   // ctaHref bypasses checkout entirely — for CTAs that are just sign-in links.

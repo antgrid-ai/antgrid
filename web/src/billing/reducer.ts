@@ -1,6 +1,7 @@
 import type { Prisma } from "../generated/prisma/client.js";
 import type { DB, Tx } from "../db/index.js";
-import { pushExpire, type RelayPushConfig } from "../relay/push.js";
+import { pushExpireAll, type RelayPushConfig } from "../relay/push.js";
+import { listBillingAccountUserIds } from "../models/account-member.js";
 import { upsertBillingCustomer } from "../models/billing-customer.js";
 import { findPlanBySlug, type PlanRow } from "../models/plan.js";
 import {
@@ -23,13 +24,18 @@ function isUniqueViolation(e: unknown): boolean {
   return typeof e === "object" && e !== null && (e as { code?: string }).code === "P2002";
 }
 
-/** Webhook payloads may omit custom_data on subscription.canceled — resolve from our row. */
+/**
+ * Who and what this event is about.
+ *
+ * The row we already hold wins over gateway metadata. `notes.planId` and
+ * `custom_data.planId` are written once at checkout and never rewritten, so a
+ * subscription this reducer converted from trial to pro_yearly keeps reporting
+ * `trial` on every later event — and re-applying that would cancel the paid row
+ * and mint a fresh 7-day trial. Metadata is the fallback for a subscription we
+ * have never seen, which is the only case where it is the only thing there is
+ * (payloads may also omit custom_data entirely on subscription.canceled).
+ */
 async function resolveEventIdentity(db: DB, event: NormalizedEvent): Promise<NormalizedEvent | null> {
-  if (event.accountId && event.planId) {
-    const plan = await findPlanBySlug(db, event.planId);
-    if (plan) return event;
-  }
-
   if (event.providerSubscriptionId) {
     const sub = await db.subscription.findUnique({
       where: { providerSubscriptionId: event.providerSubscriptionId },
@@ -40,14 +46,9 @@ async function resolveEventIdentity(db: DB, event: NormalizedEvent): Promise<Nor
     }
   }
 
-  if (event.providerTransactionId) {
-    const sub = await db.subscription.findUnique({
-      where: { providerTransactionId: event.providerTransactionId },
-      include: { plan: true },
-    });
-    if (sub && isPlanId(sub.plan.slug)) {
-      return { ...event, accountId: sub.accountId, planId: sub.plan.slug };
-    }
+  if (event.accountId && event.planId) {
+    const plan = await findPlanBySlug(db, event.planId);
+    if (plan) return event;
   }
 
   return null;
@@ -77,6 +78,7 @@ async function upgradeTrialToProYearlyOnRenewal(
     providerSubscriptionId: event.providerSubscriptionId,
     providerTransactionId: event.providerTransactionId ?? null,
     currentPeriodEnd: event.currentPeriodEnd ?? null,
+    seats: event.quantity,
   });
   return true;
 }
@@ -94,7 +96,50 @@ async function isDuplicateActivation(
   });
   if (!sub || !isPlanId(sub.plan.slug)) return false;
   if (sub.accountId !== event.accountId || sub.plan.slug !== event.planId) return false;
+  // A portal seat edit is otherwise indistinguishable from a replay: same
+  // subscription, same account, same plan, still active. Only the count moved,
+  // and swallowing it here is what makes the edit invisible end to end — no
+  // write, no audit row, and a 200 the provider never retries.
+  if (event.quantity !== undefined && event.quantity !== sub.seats) return false;
   return isActiveSubscription(sub, now);
+}
+
+/**
+ * Write a seat count onto a subscription we already hold, in place.
+ *
+ * Returns whether it handled the event: false means there is no such live row
+ * and the caller should provision one instead. Recomputed here rather than
+ * trusted from the dedup read, which runs outside the advisory lock — two
+ * concurrent seat events would otherwise both see the pre-change count.
+ *
+ * Absolute, never a delta. Razorpay derives its providerEventId from a body
+ * hash, so a redelivery can genuinely run twice and has to land on the same
+ * number.
+ *
+ * The provider is the source of truth for what is billed, so a count below
+ * active headcount is written too and no member is removed. Clamping belongs to
+ * POST /billing/seats, the path we control; a reducer that clamped would leave
+ * the row disagreeing with the invoice.
+ */
+async function applySeatChangeInPlace(
+  tx: Tx,
+  event: NormalizedEvent,
+  now: Date
+): Promise<boolean> {
+  if (event.quantity === undefined || !event.providerSubscriptionId) return false;
+
+  const sub = await tx.subscription.findUnique({
+    where: { providerSubscriptionId: event.providerSubscriptionId },
+    include: { plan: true },
+  });
+  if (!sub || sub.accountId !== event.accountId || sub.plan.slug !== event.planId) return false;
+  if (!isActiveSubscription(sub, now)) return false;
+
+  await tx.subscription.update({
+    where: { id: sub.id },
+    data: { seats: event.quantity, updatedAt: now },
+  });
+  return true;
 }
 
 async function provisionActivatedPlan(
@@ -119,6 +164,7 @@ async function provisionActivatedPlan(
       currentPeriodEnd: event.currentPeriodEnd ?? null,
       trialStartedAt: now,
       trialEndsAt,
+      seats: event.quantity,
     });
     return;
   }
@@ -128,6 +174,7 @@ async function provisionActivatedPlan(
     providerSubscriptionId: event.providerSubscriptionId ?? null,
     providerTransactionId: event.providerTransactionId ?? null,
     currentPeriodEnd: event.currentPeriodEnd ?? null,
+    seats: event.quantity,
   });
 }
 
@@ -237,6 +284,9 @@ export async function applySubscriptionEvent(
             data: {
               status,
               currentPeriodEnd: event.currentPeriodEnd ?? undefined,
+              // The cycle-end catch-up: a seat change razorpay scheduled rather
+              // than applied is only observable once it has been charged for.
+              ...(event.quantity !== undefined ? { seats: event.quantity } : {}),
               ...(event.providerTransactionId
                 ? { providerTransactionId: event.providerTransactionId }
                 : {}),
@@ -248,7 +298,14 @@ export async function applySubscriptionEvent(
       }
 
       if (isActivation) {
-        await provisionActivatedPlan(tx, event, plan, now);
+        // A seat change on a live subscription must never be routed through
+        // provisioning: applyPlanToAccountSubscription detaches provider ids
+        // before its own lookup, so it would create a fresh row per portal
+        // edit, re-snapshotting limits from the current plan and losing the
+        // original createdAt — while every read still returns the newest row.
+        if (!(await applySeatChangeInPlace(tx, event, now))) {
+          await provisionActivatedPlan(tx, event, plan, now);
+        }
       } else if (event.providerSubscriptionId) {
         const cancelledAt = event.type === "canceled" || event.type === "expired" ? now : undefined;
         await tx.subscription.updateMany({
@@ -275,13 +332,10 @@ export async function applySubscriptionEvent(
     throw e;
   }
 
-  const owner = await db.productAccount.findUnique({
-    where: { id: event.accountId },
-    select: { userId: true },
-  });
-  if (owner) {
-    await pushExpire(relay, owner.userId, fetchImpl);
-  }
+  // A webhook is an ACCOUNT-level entitlement change, so it reaches every active
+  // member and not just the owner. Best-effort by position: this sits outside
+  // the transaction above.
+  await pushExpireAll(relay, await listBillingAccountUserIds(db, event.accountId), fetchImpl);
 
   return { duplicate: false };
 }

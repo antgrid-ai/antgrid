@@ -1,17 +1,10 @@
-import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
-import 'package:antgrid/models/qr_payload.dart';
 import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/providers/agent_transport.dart';
-import 'package:antgrid/providers/auth.dart';
-import 'package:antgrid/providers/connection_identity.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/recent_agents.dart';
 import 'package:antgrid/providers/relay_connection.dart';
-import 'package:antgrid/services/auth_service.dart';
-import 'package:antgrid/services/keychain_device_store.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_status.dart';
 import 'package:antgrid/project/project_status_cache.dart';
@@ -40,23 +33,6 @@ class _MemoryStorageService extends StorageService {
   @override
   Future<void> savePairedAgents(List<PairedAgent> agents) async {
     this.agents = List.of(agents);
-  }
-}
-
-/// Fails the FIRST persist, then succeeds — models a QR import that dies
-/// half-way so the retry path can be exercised.
-class _FailOnceStorageService extends StorageService {
-  List<PairedAgent> agents = <PairedAgent>[];
-  var saves = 0;
-
-  @override
-  Future<List<PairedAgent>> loadPairedAgents() async => List.of(agents);
-
-  @override
-  Future<void> savePairedAgents(List<PairedAgent> next) async {
-    saves++;
-    if (saves == 1) throw PairException('first import attempt failed');
-    agents = List.of(next);
   }
 }
 
@@ -287,62 +263,4 @@ void main() {
       expect(cachedSessions.get('N.project').map((s) => s.id), ['s2']);
     },
   );
-
-  test('a QR import can retry after a failed attempt', () async {
-    useInMemoryPrefs();
-    final recentStore = await RecentAgentsStore.open();
-    final storage = _FailOnceStorageService();
-    final container = ProviderContainer(
-      overrides: [
-        storageServiceProvider.overrideWithValue(storage),
-        recentAgentsStoreProvider.overrideWithValue(recentStore),
-        currentUserProvider.overrideWith(
-          (_) async => CurrentUser(
-            userId: 'user-1',
-            email: 'user@example.test',
-            tier: 'pro',
-          ),
-        ),
-        connectionDeviceRecordProvider.overrideWith(
-          (_) async => DeviceRecord(
-            userId: 'user-1',
-            deviceUuid: 'controller-uuid',
-            clientId: 'cid',
-            clientSecret: 'csec',
-            ed25519Pub: base64Encode(List<int>.filled(32, 1)),
-            ed25519Priv: base64Encode(List<int>.filled(32, 2)),
-            x25519Pub: base64Encode(List<int>.filled(32, 3)),
-            x25519Priv: base64Encode(List<int>.filled(32, 4)),
-          ),
-        ),
-      ],
-    );
-    addTearDown(container.dispose);
-    addTearDown(recentStore.close);
-
-    final qr = QrPayload(
-      relayUrl: 'ws://relay.test',
-      agentDeviceId: 'M.project',
-      agentEd25519PublicKey: Uint8List(32),
-      agentName: 'Machine M',
-    );
-
-    await expectLater(
-      container.read(pairedAgentProvider.notifier).importCoordinates(qr),
-      throwsA(isA<PairException>()),
-    );
-
-    await container.read(pairedAgentProvider.notifier).importCoordinates(qr);
-
-    expect(
-      storage.saves,
-      2,
-      reason: 'the AsyncError must not wedge the import',
-    );
-    expect(storage.agents.map((a) => a.agentDeviceId), ['M.project']);
-    // The QR is now a pure coordinate import: it persists a dialable
-    // RecentAgent row and nothing else.
-    expect(recentStore.list().map((r) => r.agentDeviceId), ['M.project']);
-    expect(recentStore.list().single.relayUrl, 'ws://relay.test');
-  });
 }

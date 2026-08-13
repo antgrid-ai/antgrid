@@ -1,11 +1,7 @@
-import { hostname } from "node:os";
-import { logger } from "./logger";
 import { AgentEnableRelayMessage, createMessage, type AbMessage } from "./protocol";
 import { MessageBus } from "./message-bus";
 import type { AttachStreamOpts, StreamHandle } from "./stream-mux";
 import type { ProjectCoreRemoteDeps } from "./project-core";
-import { buildConnectUri } from "./connect-uri";
-import type { AgentCore } from "./agent-core";
 
 type EnableMsg = Extract<AbMessage, { type: "agent:enableRelay" }>;
 
@@ -20,11 +16,8 @@ export interface MachineRelaySession {
   attachStream(bus: MessageBus, opts: AttachStreamOpts): StreamHandle;
   currentPeerPubkey(): string | null;
   sendPushDeliver(msg: { pushToken: string; provider: "fcm" | "apns"; blob: { epk: string; box: string } }): void;
-  /** Bare machine deviceUuid — the QR `d=` payload (no `.projectId`). */
+  /** Bare machine deviceUuid (no `.projectId`). */
   agentDeviceId: string;
-  /** Account-device Ed25519 public key (standard base64). */
-  ed25519Pub: string;
-  relayBase: string;
 }
 
 /** ProjectCore's local-core stream attachment, reused so the wizard path shares
@@ -35,10 +28,7 @@ export interface LocalStreamAttachment {
 }
 
 export interface RelayPromotionDeps {
-  core: AgentCore;
   bus: MessageBus;
-  /** Host machine name advertised in the pairing QR. */
-  hostName?: string;
   /** Bring the machine relay socket up (from the wizard credentials if absent)
    *  and return its pairing + attach surface. Absent for a bare agent with no
    *  host — enabling relay is then unsupported. */
@@ -63,8 +53,7 @@ export interface RelayPromotionController {
  * listener. When the user enables mobile access, the app sends
  * `agent:enableRelay` carrying the signed-in account device's credentials. In
  * v3 this controller does NOT build its own relay connection: it asks the host
- * to bring the single machine socket up, builds the QR (bare
- * deviceUuid), and attaches the local core's bus as a
+ * to bring the single machine socket up and attaches the local core's bus as a
  * stream. `agent:disableRelay` detaches the stream — the machine socket stays,
  * owned by the control plane.
  *
@@ -72,8 +61,7 @@ export interface RelayPromotionController {
  * every stream is sealed under; the relay only ever sees opaque blobs.
  */
 export function createRelayPromotion(deps: RelayPromotionDeps): RelayPromotionController {
-  const { core, bus } = deps;
-  const hostName = deps.hostName ?? process.env.ANTGRID_HOST_NAME ?? hostname();
+  const { bus } = deps;
 
   let session: MachineRelaySession | null = null;
   let attachment: LocalStreamAttachment | null = null;
@@ -87,33 +75,17 @@ export function createRelayPromotion(deps: RelayPromotionDeps): RelayPromotionCo
     bus.publish(createMessage("agent:relayError", { code, message }), "control");
   }
 
-  function emitConnectQr(s: MachineRelaySession): void {
-    const pairingQr = buildConnectUri({
-      relayUrl: s.relayBase,
-      agentDeviceId: s.agentDeviceId,
-      // Standard base64 to match how the app encodes ed25519Pub and how the
-      // relay decodes it — keep the decoder symmetric rather than leaning on
-      // Node's lenient base64url alphabet.
-      agentEd25519PublicKey: Buffer.from(s.ed25519Pub, "base64"),
-      agentName: core.identity.deviceName,
-      hostMachineName: hostName,
-    });
-    bus.publish(
-      createMessage("agent:pairingReady", {
-        pairingQr,
-        agentDeviceId: s.agentDeviceId,
-      }),
-      "control",
-    );
+  function emitReady(s: MachineRelaySession): void {
+    bus.publish(createMessage("agent:relayReady", { agentDeviceId: s.agentDeviceId }), "control");
   }
 
   async function start(msg: EnableMsg): Promise<void> {
     if (starting) return; // coalesce a concurrent enable — see finally.
     if (session && attachment) {
-      // Already promoted. A repeat enableRelay ("Pair another phone") just
-      // re-publishes the QR against the existing machine session — there is
-      // no pairing window left to gate a re-open on.
-      emitConnectQr(session);
+      // Already promoted. A repeat enableRelay re-answers with the same ready
+      // signal rather than attaching a second stream — admission is account
+      // trust, so there is no pairing window to re-open.
+      emitReady(session);
       return;
     }
     starting = true;
@@ -156,7 +128,7 @@ export function createRelayPromotion(deps: RelayPromotionDeps): RelayPromotionCo
       };
       attachment = deps.attach(remote);
       session = ensured;
-      emitConnectQr(ensured);
+      emitReady(ensured);
     } catch (e) {
       emitError("ENABLE_FAILED", e instanceof Error ? e.message : String(e));
       stop();

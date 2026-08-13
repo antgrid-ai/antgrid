@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -13,7 +12,6 @@ import '../config/storage_scope.dart';
 import '../connection/supervisor_state.dart';
 import '../models/ab_message.dart'
     show CommandInfo, NotificationPushMessage, TerminalNotificationMessage;
-import '../models/qr_payload.dart';
 import '../models/session_target.dart';
 import '../models/terminal_models.dart';
 import '../project/project_session.dart';
@@ -21,7 +19,6 @@ import '../project/project_session_registry.dart';
 import '../services/license_token_minter.dart';
 import '../services/storage_service.dart';
 import 'auth.dart';
-import 'connection_identity.dart';
 import 'device_provisioning.dart';
 import 'entry_cleanup.dart';
 import 'agent_transport.dart';
@@ -31,7 +28,6 @@ import 'seeded_stream.dart';
 import 'supervisor_status.dart';
 import 'recent_agents.dart';
 import 'sessions.dart' show focusedCheckoutIdProvider;
-import '../storage/recent_agents_store.dart';
 import '../models/file_tree_models.dart';
 import '../models/preview_models.dart';
 import '../services/file_service.dart';
@@ -851,75 +847,6 @@ class PairedAgentNotifier extends AsyncNotifier<List<PairedAgent>> {
       return List<PairedAgent>.from(await future);
     } catch (_) {
       return ref.read(storageServiceProvider).loadPairedAgents();
-    }
-  }
-
-  /// Import a machine's COORDINATES from a scanned QR code and focus it.
-  ///
-  /// There is no rendezvous left to run: admission is account trust, so the QR
-  /// only tells us where the machine lives and which Ed25519 key to pin it
-  /// against. Persisting that and focusing the machine is the whole flow —
-  /// reading its transport provider brings the supervisor up, which dials and
-  /// drives the E2E handshake as this app's own DeviceRecord.
-  Future<void> importCoordinates(QrPayload qr) async {
-    final user = await ref.read(currentUserProvider.future);
-    if (requiresProForRemote(user?.tier)) {
-      throw PairException(
-        'Pro subscription required — upgrade to connect mobile',
-      );
-    }
-    final agents = await _pairedAgentsSnapshot();
-
-    try {
-      // Resolved for its side effect: the import fails loudly here when the app
-      // has no device record to connect with at all, rather than silently
-      // persisting coordinates it can never dial.
-      await ref.read(connectionDeviceRecordProvider.future);
-      final now = DateTime.now();
-      await ref
-          .read(recentAgentsStoreProvider)
-          .upsert(
-            RecentAgent(
-              agentDeviceId: qr.agentDeviceId,
-              agentLabel: qr.agentName,
-              agentEd25519Pubkey: base64.encode(qr.agentEd25519PublicKey),
-              relayUrl: qr.relayUrl,
-              pairedAt: now,
-              lastConnectedAt: now,
-              hostMachineName: qr.hostMachineName,
-            ),
-          );
-
-      final agent = PairedAgent(
-        relayUrl: qr.relayUrl,
-        agentDeviceId: qr.agentDeviceId,
-        agentName: qr.agentName,
-      );
-
-      // Replace if already exists (re-import), otherwise append
-      final idx = agents.indexWhere(
-        (a) => a.agentDeviceId == agent.agentDeviceId,
-      );
-      if (idx >= 0) {
-        agents[idx] = agent;
-      } else {
-        agents.add(agent);
-      }
-
-      // Persist
-      final storage = ref.read(storageServiceProvider);
-      await storage.savePairedAgents(agents);
-
-      // Focus the new agent; reading its transport provider (driven by the
-      // workspace boot path) opens the machine socket and runs the handshake.
-      ref
-          .read(selectedTargetProvider.notifier)
-          .set(RemoteTarget.legacy(agent.agentDeviceId));
-
-      state = AsyncData(agents);
-    } catch (e, st) {
-      state = AsyncError(e, st);
-      rethrow;
     }
   }
 

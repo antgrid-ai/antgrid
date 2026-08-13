@@ -53,8 +53,6 @@ abstract final class AbIcons {
       Codicon.vm; // closest to "remote desktop machine" in Codicons
   static const radioTower = Codicon.radio_tower; // machine reachable remotely
   static const server = Codicon.server;
-  static const scan =
-      Codicon.device_camera; // QR scan (no QR glyph in Codicons)
   static const link = Codicon.link;
   static const add = Codicon.add;
   static const trash = Codicon.trash;

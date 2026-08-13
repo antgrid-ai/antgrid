@@ -6,7 +6,8 @@ import {
   ensureFreeSubscription,
   isPendingCancellation,
 } from "../models/subscription.js";
-import { pushExpire } from "../relay/push.js";
+import { pushExpireAll } from "../relay/push.js";
+import { listBillingAccountUserIds } from "../models/account-member.js";
 import type { CheckoutEnv } from "./checkout.js";
 import {
   getPaddleClient,
@@ -205,11 +206,9 @@ export async function cancelRecurringSubscription(
         });
         await ensureFreeSubscription(tx, accountId);
       });
-      const account = await db.productAccount.findUnique({
-        where: { id: accountId },
-        select: { userId: true },
-      });
-      if (account) await pushExpire(relay, account.userId, fetchImpl);
+      // Account-level: the drop to free applies to every active member, not
+      // only the owner who asked for it.
+      await pushExpireAll(relay, await listBillingAccountUserIds(db, accountId), fetchImpl);
       return { effective: "immediately" };
     }
 

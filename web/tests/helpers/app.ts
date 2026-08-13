@@ -12,7 +12,9 @@ import type { Env } from "../../src/env.js";
 export const TEST_BETTER_AUTH_SECRET = "antgrid-test-better-auth-secret-for-tests-only-not-prod";
 
 export type BuildTestAppOptions = {
-  /** Override the email sender. Defaults to the dev console sender. */
+  /** Override the email sender. Defaults to the dev console sender. Reaches
+   *  both Better-Auth and the UI router, so a capture array sees invite mail
+   *  as well as sign-in mail. */
   sendEmail?: SendEmail;
   /**
    * @deprecated No-op. The Prisma adapter is now always used so that sessions
@@ -57,7 +59,7 @@ export function buildTestApp(
   const auth = createAuth({ env, db, sendEmail });
   const relay = { baseUrl: env.RELAY_INTERNAL_URL, secret: env.RELAY_INTERNAL_SECRET };
   return {
-    app: buildApp({ db, auth, env, corsOrigins: env.CORS_ORIGINS, relay }),
+    app: buildApp({ db, auth, env, corsOrigins: env.CORS_ORIGINS, relay, sendEmail }),
     env,
     // Exposed so a test can drive an internal Better-Auth step the HTTP surface
     // can't reach on its own — OAuth linking, which needs a live provider.

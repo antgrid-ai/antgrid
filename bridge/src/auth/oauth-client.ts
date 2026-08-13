@@ -1,4 +1,5 @@
 import { logger } from "../logger.js";
+import { decodeAccessTokenClaims, liveTier, type AccessTokenClaims } from "./access-token-claims.js";
 const log = logger.child({ component: "oauth-client" });
 
 export interface MintedToken {
@@ -98,7 +99,8 @@ export class OAuthClient {
 
 /**
  * Maintain an always-fresh access token. Re-mints at 80% of TTL. Returns a
- * synchronous `getToken` suitable for RelayClient's `getLicenseToken`. Caller
+ * synchronous `getToken` suitable for RelayClient's `getLicenseToken`, and a
+ * `getTier` reading the server-signed product line off that same token. Caller
  * invokes `stop()` on shutdown to cancel the timer.
  */
 export function startTokenMaintenance(
@@ -110,10 +112,28 @@ export function startTokenMaintenance(
      *  the instant a renewed subscription's token lands. */
     onMinted?: () => void;
   },
-): { getToken: () => string; stop: () => void } {
+): { getToken: () => string; getTier: () => string | null; stop: () => void } {
   let current = initial;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
+  // The tier lives HERE, derived from `current`, because `current` is the only
+  // mutable token holder in the bridge and is assigned in exactly two places
+  // (the initial token above, and each re-mint below). A claim read through the
+  // getter therefore cannot outlive the token it was signed onto — there is no
+  // second store to invalidate and no TTL bookkeeping of its own.
+  //
+  // Memoized on the token STRING (the thing it describes, so the cache key
+  // cannot drift from it), but expiry is re-checked per call: a decoded payload
+  // is immutable, its validity is not.
+  let decodedFor = "";
+  let decoded: AccessTokenClaims | null = null;
+  function getTier(): string | null {
+    if (current.accessToken !== decodedFor) {
+      decodedFor = current.accessToken;
+      decoded = decodeAccessTokenClaims(current.accessToken);
+    }
+    return liveTier(decoded);
+  }
 
   function schedule(): void {
     if (stopped) return;
@@ -142,6 +162,7 @@ export function startTokenMaintenance(
 
   return {
     getToken: () => current.accessToken,
+    getTier,
     stop() {
       stopped = true;
       if (timer) clearTimeout(timer);

@@ -17,7 +17,8 @@
     "prisma:migrate:dev": "bunx --bun prisma@6 migrate dev",
     "prisma:migrate:deploy": "bunx --bun prisma@6 migrate deploy",
     "postinstall": "bunx --bun prisma@6 generate",
-    "generate:key": "bun run scripts/generate-signing-key.ts"
+    "generate:key": "bun run scripts/generate-signing-key.ts",
+    "reconcile:seats": "bun run scripts/reconcile-seats.ts"
   },
   "dependencies": {
     "@better-auth/core": "^1.6.9",

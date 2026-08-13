@@ -33,8 +33,8 @@ export function webhookRoutes(deps: {
     }
 
     const parsed = JSON.parse(raw) as unknown;
-    await applySubscriptionEvent(deps.db, deps.relay, event, parsed);
-    return c.json({ ok: true });
+    const result = await applySubscriptionEvent(deps.db, deps.relay, event, parsed);
+    return c.json({ ok: true, duplicate: result.duplicate });
   });
 
   r.post("/webhooks/razorpay", async (c) => {
@@ -57,8 +57,8 @@ export function webhookRoutes(deps: {
     }
 
     const parsed = JSON.parse(raw) as unknown;
-    await applySubscriptionEvent(deps.db, deps.relay, event, parsed);
-    return c.json({ ok: true });
+    const result = await applySubscriptionEvent(deps.db, deps.relay, event, parsed);
+    return c.json({ ok: true, duplicate: result.duplicate });
   });
 
   return r;

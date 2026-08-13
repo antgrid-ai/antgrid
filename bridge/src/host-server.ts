@@ -14,6 +14,7 @@ import { loadRemoteAccessPolicy, type RemoteAccessPolicyStore } from "./remote-a
 import { resolveAbDir } from "./antgrid-dir";
 import { VERSION } from "./version";
 import type { DeviceIdentity } from "./device";
+import type { TierClaim } from "./entitlement";
 import type { ProjectSummary, ConnectInfo, PairedPhoneSummary, KnownProject } from "./control-protocol";
 import { logger } from "./logger";
 const log = logger.child({ component: "host-server" });
@@ -101,7 +102,11 @@ export interface HostRemoteConfig {
 }
 
 export interface RemoteRuntime {
-  maint: { getToken: () => string; stop: () => void };
+  /** `getTier` is optional only so a test fake can honestly declare that it
+   *  holds no token claims — the real runtime always supplies it (it comes off
+   *  {@link startTokenMaintenance}). An absent one reads as an unreadable
+   *  claim, i.e. fail-closed, never as "no credentials". */
+  maint: { getToken: () => string; getTier?: () => string | null; stop: () => void };
 }
 
 /** The real machine OAuth runtime: mint an initial token and keep it fresh.
@@ -409,8 +414,8 @@ export class HostServer {
   }
 
   /** Bring the machine relay socket up (from the desktop wizard's credentials if
-   *  the host was launched local-only) and return its pairing + stream-attach
-   *  surface. Idempotent: reuses the live control-plane socket when present. */
+   *  the host was launched local-only) and return its stream-attach surface.
+   *  Idempotent: reuses the live control-plane socket when present. */
   async ensureMachineRelay(msg: AgentEnableRelay): Promise<MachineRelaySession> {
     const auth = msg.auth;
     if (!auth?.deviceUuid || !auth.ed25519Pub || !auth.ed25519Priv) {
@@ -477,8 +482,6 @@ export class HostServer {
       currentPeerPubkey: () => client.currentPeerPubkey(),
       sendPushDeliver: (m) => client.sendPushDeliver(m),
       agentDeviceId: auth.deviceUuid,
-      ed25519Pub: auth.ed25519Pub,
-      relayBase,
     };
   }
 
@@ -1391,7 +1394,7 @@ export class HostServer {
       remote = this.remoteDepsFor(projectId);
       // The core can't derive this itself — only a standalone agent with an
       // explicit antgrid.yaml `relayUrl:` has one in config, so a host-spawned
-      // core would otherwise banner a connect URI with no relay coordinate.
+      // core would otherwise banner itself as having no relay coordinate.
       relayUrl = this.requireRemoteConfig().relayUrl;
     }
     const core = new ProjectCore({
@@ -1403,6 +1406,13 @@ export class HostServer {
       // Read live, not captured: a `mobile-access:set` must take effect on every
       // already-warm core's gate without restarting it.
       remoteAccessEnabled: () => this.remoteAccessPolicy.isEnabled(),
+      // Same rule, and for a second reason on top of it: the desktop wizard can
+      // credential a host that launched local-only, and a core already warm at
+      // that moment must move with it rather than stay permanently uncredentialed.
+      // Deliberately NOT scoped to remote-mode cores — a signed-in Free user
+      // opening the same project locally would otherwise route around the gate,
+      // and local is the desktop default.
+      tierClaim: () => this.tierClaimNow(),
       ensureMachineRelay: (msg) => this.ensureMachineRelay(msg),
       ...(mode === "remote" ? { remote } : {}),
     });
@@ -1485,6 +1495,24 @@ export class HostServer {
    *  `opts.remote` silently no-ops on that whole path. */
   private remoteConfig(): HostRemoteConfig | null {
     return this.opts.remote ?? this.wizardRemote;
+  }
+
+  /**
+   * This machine's device credential as the entitlement gate sees it.
+   *
+   * A named method rather than an inline thunk because the two halves are read
+   * off DIFFERENT sources on purpose, and collapsing them is the one edit that
+   * turns the gate inside out. `credentialed` asks the CONFIG, never
+   * `remoteRuntime`: a host whose boot-time mint failed has credentials and no
+   * runtime, and answering "not credentialed" there would hand it the unwired
+   * pass — the fail-open every offline machine could then reproduce on purpose.
+   * The tier asks the runtime, whose absence is therefore an unreadable claim.
+   */
+  private tierClaimNow(): TierClaim {
+    return {
+      credentialed: this.remoteConfig() !== null,
+      tier: this.remoteRuntime?.maint.getTier?.() ?? null,
+    };
   }
 
   /** Push the machine's current mobile-access state (relayUrl, machineName, and

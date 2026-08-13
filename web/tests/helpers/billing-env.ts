@@ -14,7 +14,6 @@ type TestBillingEnv = Partial<CheckoutEnv> & {
 export const TEST_BILLING_SKUS = {
   paddle: {
     priceYearly: "pri_test_yearly",
-    priceLifetime: "pri_test_lifetime",
     discountYearlyOffer: "dsc_test_yearly",
     /** Sandbox notification destination "subscription" — subscription.canceled, transaction.completed */
     webhookDestinationId: "ntfset_01ktxnqqkwa0zmwjrkdcne65vq",
@@ -22,7 +21,6 @@ export const TEST_BILLING_SKUS = {
   razorpay: {
     planTrial: "plan_test_trial",
     planYearly: "plan_test_yearly",
-    amountLifetime: 9900,
   },
 } as const;
 
@@ -35,13 +33,11 @@ export function testBillingEnv(overrides: TestBillingEnv = {}): Partial<Env> {
     PADDLE_ENVIRONMENT: "sandbox",
     PADDLE_WEBHOOK_SECRET: "test_paddle_webhook",
     PADDLE_PRICE_YEARLY: TEST_BILLING_SKUS.paddle.priceYearly,
-    PADDLE_PRICE_LIFETIME: TEST_BILLING_SKUS.paddle.priceLifetime,
     PADDLE_DISCOUNT_ID_YEARLY_OFFER: TEST_BILLING_SKUS.paddle.discountYearlyOffer,
     RAZORPAY_KEY_ID: "rzp_test_key",
     RAZORPAY_KEY_SECRET: "rzp_test_secret",
     RAZORPAY_WEBHOOK_SECRET: "rzp_test_webhook",
     RAZORPAY_PLAN_YEARLY: TEST_BILLING_SKUS.razorpay.planYearly,
-    RAZORPAY_AMOUNT_LIFETIME: TEST_BILLING_SKUS.razorpay.amountLifetime,
     ...overrides,
   } as Partial<Env>;
 }

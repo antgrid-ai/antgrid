@@ -27,15 +27,6 @@ const _proYearlyFeatures = [
   'Priority support',
 ];
 
-const _proLifetimeFeatures = [
-  'Everything in Pro Yearly',
-  'Lifetime updates',
-  'No renewal fees',
-  'Up to {workers} workers',
-  'E2E encrypted — zero-knowledge relay',
-  'Community support',
-];
-
 class UpgradeScreen extends ConsumerStatefulWidget {
   const UpgradeScreen({super.key, this.onClose});
 
@@ -155,7 +146,6 @@ class _PricingBody extends StatelessWidget {
 
     final trialPlan = catalog.planBySlug('trial');
     final yearlyPlan = catalog.planBySlug('pro_yearly');
-    final lifetimePlan = catalog.planBySlug('pro_lifetime');
     final yearlyDisplay =
         yearlyPlan?.priceDisplay ?? catalog.yearlyPriceDisplay ?? '';
 
@@ -174,13 +164,6 @@ class _PricingBody extends StatelessWidget {
         const SizedBox(height: AbTokens.space24),
         if (yearlyPlan != null)
           _ProYearlyCard(plan: yearlyPlan, price: yearlyDisplay),
-        if (yearlyPlan != null && lifetimePlan != null)
-          const SizedBox(height: AbTokens.space16),
-        if (lifetimePlan != null)
-          _ProLifetimeCard(
-            plan: lifetimePlan,
-            price: lifetimePlan.priceDisplay ?? '',
-          ),
       ],
     );
   }
@@ -374,25 +357,6 @@ class _ProYearlyCard extends StatelessWidget {
       priceSuffix: '/ year',
       priceNote: 'Renews annually.',
       features: _proYearlyFeatures,
-      workers: plan.workerLimit,
-    );
-  }
-}
-
-class _ProLifetimeCard extends StatelessWidget {
-  const _ProLifetimeCard({required this.plan, required this.price});
-
-  final PricingPlan plan;
-  final String price;
-
-  @override
-  Widget build(BuildContext context) {
-    return _PlanCard(
-      title: plan.label,
-      price: price,
-      priceSuffix: 'one-time',
-      priceNote: 'Pay once, use forever.',
-      features: _proLifetimeFeatures,
       workers: plan.workerLimit,
     );
   }
@@ -605,9 +569,9 @@ Future<void> openUpgrade(
 // instead.
 //
 // TO RESTORE ONCE PAYMENT INTEGRATION SHIPS:
-//   1. Delete the static replacement above this marker: _proYearlyFeatures /
-//      _proLifetimeFeatures through _FeatureList (everything from
-//      `const _proYearlyFeatures` down to just above this marker).
+//   1. Delete the static replacement above this marker: everything from
+//      `const _proYearlyFeatures` through _FeatureList, down to just above
+//      this marker.
 //   2. Select everything below this marker and strip the leading "// " from
 //      each line (most editors: select + "toggle line comment").
 //   3. In web/src/routes/ui.tsx's `/pricing` handler and web/src/ui/pricing.tsx,
@@ -646,15 +610,7 @@ Future<void> openUpgrade(
 //   'E2E encrypted — zero-knowledge relay',
 //   'Priority support',
 // ];
-//
-// const _proLifetimeFeatures = [
-//   'Everything in Pro Yearly',
-//   'Lifetime updates',
-//   'No renewal fees',
-//   'Up to {workers} workers',
-//   'E2E encrypted — zero-knowledge relay',
-//   'Community support',
-// ];
+
 //
 // class UpgradeScreen extends ConsumerStatefulWidget {
 //   const UpgradeScreen({super.key, this.onClose});
@@ -817,15 +773,13 @@ Future<void> openUpgrade(
 //
 //     final current = catalog.currentPlanSlug;
 //     final hasActivePlan = current != null;
-//     final showTrialBanner = current != 'pro_yearly' && current != 'pro_lifetime';
+//     final showTrialBanner = current != 'pro_yearly';
 //     final trialPlan = catalog.planBySlug('trial');
 //     final yearlyPlan = catalog.planBySlug('pro_yearly');
-//     final lifetimePlan = catalog.planBySlug('pro_lifetime');
 //     final yearlyDisplay =
 //         yearlyPlan?.priceDisplay ?? catalog.yearlyPriceDisplay ?? '';
 //     final activePlanLabel = _activePlanLabel(
 //       yearlyPlan,
-//       lifetimePlan,
 //       trialPlan,
 //       current,
 //     );
@@ -860,31 +814,17 @@ Future<void> openUpgrade(
 //                 ? null
 //                 : () => checkout('pro_yearly'),
 //           ),
-//         if (yearlyPlan != null && lifetimePlan != null)
-//           const SizedBox(height: AbTokens.space16),
-//         if (lifetimePlan != null)
-//           _ProLifetimeCard(
-//             plan: lifetimePlan,
-//             price: lifetimePlan.priceDisplay ?? '',
-//             isCurrent: current == 'pro_lifetime',
-//             isDisabled: hasActivePlan && current != 'pro_lifetime',
-//             onCheckout: hasActivePlan && current != 'pro_lifetime'
-//                 ? null
-//                 : () => checkout('pro_lifetime'),
-//           ),
 //       ],
 //     );
 //   }
 //
 //   String? _activePlanLabel(
 //     PricingPlan? yearlyPlan,
-//     PricingPlan? lifetimePlan,
 //     PricingPlan? trialPlan,
 //     String? current,
 //   ) {
 //     return switch (current) {
 //       'pro_yearly' => yearlyPlan?.label ?? 'Pro Yearly',
-//       'pro_lifetime' => lifetimePlan?.label ?? 'Pro Lifetime',
 //       'trial' => trialPlan?.label ?? 'Trial',
 //       _ => info?.isPro == true ? 'Pro' : null,
 //     };
@@ -1218,40 +1158,7 @@ Future<void> openUpgrade(
 //     );
 //   }
 // }
-//
-// class _ProLifetimeCard extends StatelessWidget {
-//   const _ProLifetimeCard({
-//     required this.plan,
-//     required this.price,
-//     required this.isCurrent,
-//     required this.isDisabled,
-//     this.onCheckout,
-//   });
-//
-//   final PricingPlan plan;
-//   final String price;
-//   final bool isCurrent;
-//   final bool isDisabled;
-//   final VoidCallback? onCheckout;
-//
-//   @override
-//   Widget build(BuildContext context) {
-//     return _PlanCard(
-//       title: plan.label,
-//       price: price,
-//       priceSuffix: 'one-time',
-//       priceNote: 'Pay once, use forever.',
-//       features: _proLifetimeFeatures,
-//       workers: plan.workerLimit,
-//       isCurrent: isCurrent,
-//       isDisabled: isDisabled,
-//       recommended: !isCurrent && !isDisabled,
-//       ctaLabel: 'Get Lifetime Access',
-//       ctaFooter: 'One-time payment · No subscription',
-//       onCheckout: onCheckout,
-//     );
-//   }
-// }
+
 //
 // class _PlanCard extends StatelessWidget {
 //   const _PlanCard({

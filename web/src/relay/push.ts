@@ -122,6 +122,25 @@ export async function fetchUserConnections(
   return postConnections(cfg, { userId }, fetchImpl);
 }
 
+/**
+ * Expire every user whose entitlement just changed. An account-level change —
+ * a webhook, a cancellation — moves the tier for everyone billing against that
+ * account, and `pushExpire` is per user.
+ *
+ * The caller supplies the ids: membership is a billing concept and this module
+ * is the relay transport. Note the ceiling on what this achieves — expiring
+ * drops the license cache and closes sockets, so a DOWNGRADE lands on the next
+ * mint, but access REMOVAL does not (the device row keeps `revokedAt: null` and
+ * re-mints). That needs `pushRevoke` per device.
+ */
+export async function pushExpireAll(
+  cfg: RelayPushConfig,
+  userIds: string[],
+  fetchImpl: typeof fetch = fetch
+): Promise<void> {
+  await Promise.all([...new Set(userIds)].map((userId) => pushExpire(cfg, userId, fetchImpl)));
+}
+
 export async function pushExpire(cfg: RelayPushConfig, userId: string, fetchImpl: typeof fetch = fetch): Promise<void> {
   if (!cfg.baseUrl || !cfg.secret) return;
   const body = JSON.stringify({ userId });

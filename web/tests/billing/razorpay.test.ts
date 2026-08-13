@@ -6,12 +6,9 @@ import {
   razorpayPeriodEnd,
   verifyRazorpayHmac,
 } from "../../src/billing/razorpay.js";
+import { razorpaySignature, razorpaySubscriptionBody } from "../helpers/razorpay-sig.js";
 
 const SECRET = "rzp_test_webhook_secret";
-
-function razorpaySignature(rawBody: string, secret: string): string {
-  return createHmac("sha256", secret).update(rawBody).digest("hex");
-}
 
 describe("verifyRazorpayHmac", () => {
   test("accepts webhook body signature", () => {
@@ -62,7 +59,9 @@ describe("RazorpayProvider.verifyWebhook", () => {
     });
   });
 
-  test("normalizes payment.captured for lifetime", async () => {
+  test("payment.captured normalizes to nothing", async () => {
+    // Standalone order payments are gone with the one-time-payment path;
+    // every surviving activation arrives on a subscription.* event.
     const raw = JSON.stringify({
       event: "payment.captured",
       payload: {
@@ -71,18 +70,12 @@ describe("RazorpayProvider.verifyWebhook", () => {
             id: "pay_99",
             order_id: "order_99",
             customer_id: "cust_99",
-            notes: { accountId: "acc-1", planId: "pro_lifetime" },
+            notes: { accountId: "acc-1", planId: "pro_yearly" },
           },
         },
       },
     });
-    const ev = await provider.verifyWebhook(raw, razorpaySignature(raw, SECRET));
-    expect(ev).toMatchObject({
-      type: "activated",
-      planId: "pro_lifetime",
-      customerId: "cust_99",
-      providerTransactionId: "pay_99",
-    });
+    expect(await provider.verifyWebhook(raw, razorpaySignature(raw, SECRET))).toBeNull();
   });
 
   test("rejects bad signature", async () => {
@@ -189,6 +182,122 @@ describe("RazorpayProvider.verifyWebhook", () => {
   });
 });
 
+describe("RazorpayProvider.verifyWebhook — seat quantity", () => {
+  const provider = new RazorpayProvider({ webhookSecret: SECRET });
+
+  const liveSeatSub = {
+    id: "sub_seats",
+    customer_id: "cust_seats",
+    status: "active",
+    notes: { accountId: "acc-1", planId: "pro_yearly" },
+    current_end: 1893456000,
+  };
+
+  function normalize(raw: string) {
+    return provider.verifyWebhook(raw, razorpaySignature(raw, SECRET));
+  }
+
+  test("subscription.updated normalizes as an activation carrying the new quantity", async () => {
+    const ev = await normalize(
+      razorpaySubscriptionBody("subscription.updated", { ...liveSeatSub, quantity: 5 })
+    );
+    expect(ev).toMatchObject({
+      provider: "razorpay",
+      type: "activated",
+      accountId: "acc-1",
+      planId: "pro_yearly",
+      customerId: "cust_seats",
+      providerSubscriptionId: "sub_seats",
+      quantity: 5,
+    });
+  });
+
+  test("subscription.updated without notes still normalizes, for the reducer to resolve", async () => {
+    const { notes: _notes, ...noNotes } = liveSeatSub;
+    const ev = await normalize(
+      razorpaySubscriptionBody("subscription.updated", { ...noNotes, quantity: 4 })
+    );
+    expect(ev).toMatchObject({
+      type: "activated",
+      accountId: "",
+      providerSubscriptionId: "sub_seats",
+      quantity: 4,
+    });
+  });
+
+  test("a cycle-end scheduled change reports no quantity — the entity still holds the old one", async () => {
+    const ev = await normalize(
+      razorpaySubscriptionBody("subscription.updated", {
+        ...liveSeatSub,
+        quantity: 3,
+        has_scheduled_changes: true,
+        change_scheduled_at: 1893456000,
+      })
+    );
+    expect(ev).not.toBeNull();
+    expect(ev?.quantity).toBeUndefined();
+  });
+
+  test("subscription.updated on a non-active subscription normalizes to nothing", async () => {
+    const ev = await normalize(
+      razorpaySubscriptionBody("subscription.updated", {
+        ...liveSeatSub,
+        status: "halted",
+        quantity: 9,
+      })
+    );
+    expect(ev).toBeNull();
+  });
+
+  test("an absent quantity stays absent rather than defaulting to one seat", async () => {
+    const ev = await normalize(razorpaySubscriptionBody("subscription.updated", liveSeatSub));
+    expect(ev).not.toBeNull();
+    expect(ev?.quantity).toBeUndefined();
+  });
+
+  test("zero, negative, fractional and non-numeric quantities are not seat counts", async () => {
+    for (const quantity of [0, -2, 1.5, "", "abc", true, null, {}]) {
+      const ev = await normalize(
+        razorpaySubscriptionBody("subscription.updated", { ...liveSeatSub, quantity })
+      );
+      expect(ev?.quantity).toBeUndefined();
+    }
+  });
+
+  test("a digit-string quantity is read as a seat count", async () => {
+    const ev = await normalize(
+      razorpaySubscriptionBody("subscription.updated", { ...liveSeatSub, quantity: "7" })
+    );
+    expect(ev?.quantity).toBe(7);
+  });
+
+  test("subscription.charged carries the quantity for the cycle-end catch-up", async () => {
+    const ev = await normalize(
+      razorpaySubscriptionBody("subscription.charged", { ...liveSeatSub, quantity: 6 })
+    );
+    expect(ev).toMatchObject({ type: "renewed", quantity: 6 });
+  });
+
+  test("billing-cycle counts are never mistaken for seats", async () => {
+    const ev = await normalize(
+      razorpaySubscriptionBody("subscription.updated", {
+        ...liveSeatSub,
+        total_count: 12,
+        paid_count: 3,
+        remaining_count: "9",
+      })
+    );
+    expect(ev?.quantity).toBeUndefined();
+  });
+
+  test("an unrecognized subscription event still normalizes to nothing", async () => {
+    const ev = await normalize(
+      razorpaySubscriptionBody("subscription.pending", { ...liveSeatSub, quantity: 5 })
+    );
+    expect(ev).toBeNull();
+  });
+});
+
 describe("logRazorpayPaymentFailure", () => {
   test("returns true and logs payment.failed", () => {
     const warn = console.warn;
@@ -206,7 +315,7 @@ describe("logRazorpayPaymentFailure", () => {
               order_id: "order_fail",
               subscription_id: "sub_fail",
               customer_id: "cust_fail",
-              notes: { accountId: "acc-1", planId: "pro_lifetime" },
+              notes: { accountId: "acc-1", planId: "pro_yearly" },
               error_code: "BAD_REQUEST_ERROR",
               error_description: "Payment declined",
             },
@@ -217,7 +326,7 @@ describe("logRazorpayPaymentFailure", () => {
       expect(logs[0]?.[0]).toBe("[billing] razorpay payment failed");
       expect(logs[0]?.[1]).toMatchObject({
         paymentId: "pay_fail",
-        planId: "pro_lifetime",
+        planId: "pro_yearly",
         errorCode: "BAD_REQUEST_ERROR",
       });
     } finally {

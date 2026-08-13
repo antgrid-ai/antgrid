@@ -1,6 +1,12 @@
 /**
  * Checkout client — billing modal on subscription page, then Paddle/Razorpay overlay.
  * Matches grisb-training: close wizard modal before opening payment SDK.
+ *
+ * This script never creates a transaction. The seat form does that server-side,
+ * and the session it hands back is embedded in the page beside the total that
+ * same call quoted — so the overlay opens the very transaction whose number the
+ * buyer just read. A fetch here that created a second one would be a second
+ * price.
  */
 import { initializePaddle, type Paddle } from "@paddle/paddle-js";
 
@@ -21,6 +27,9 @@ type WizardData = {
   detectedCountry: string | null;
   gateway: "paddle" | "razorpay";
   readiness: Record<string, Record<string, boolean>>;
+  seats: number;
+  maxSeats: number;
+  orderSeats: number | null;
 };
 
 type PaddleSession = {
@@ -34,15 +43,13 @@ type PaddleSession = {
 type RazorpaySession = {
   provider: "razorpay";
   keyId: string;
-  isSubscription: boolean;
-  subscriptionId?: string;
+  subscriptionId: string;
   shortUrl?: string;
   callbackUrl?: string;
-  orderId?: string;
-  amount?: number;
-  currency?: string;
   planId?: string;
 };
+
+type CheckoutSession = PaddleSession | RazorpaySession;
 
 declare global {
   interface Window {
@@ -91,9 +98,19 @@ async function loadRazorpayCheckoutSdk(): Promise<void> {
   razorpayScriptLoaded = true;
 }
 
-function initCheckout(data: WizardData) {
+function readJson<T>(id: string): T | null {
+  const el = document.getElementById(id);
+  if (!el?.textContent) return null;
+  try {
+    return JSON.parse(el.textContent) as T;
+  } catch {
+    return null;
+  }
+}
+
+function initCheckout(data: WizardData, session: CheckoutSession | null) {
   const plan = data.plan;
-  let gateway = data.gateway;
+  let gateway = session?.provider ?? data.gateway;
 
   const params = new URLSearchParams(window.location.search);
   if (params.get("payment") === "success") {
@@ -101,23 +118,58 @@ function initCheckout(data: WizardData) {
     return;
   }
 
-  const btnPay = document.getElementById("btn-pay")!;
+  const btnPay = document.getElementById("btn-pay") as HTMLButtonElement;
+  const btnReview = document.getElementById("btn-review") as HTMLButtonElement;
+  const seatsInput = document.getElementById("seats-input") as HTMLInputElement;
+  const seatForm = document.getElementById("seat-form") as HTMLFormElement;
+  const seatCountry = document.getElementById("seat-country") as HTMLInputElement;
   const countrySelect = document.getElementById("billing-country") as HTMLSelectElement;
   const gatewayLabel = document.getElementById("gateway-label")!;
-  const payDisabledInitially = btnPay.hasAttribute("disabled");
+  const summaryDue = document.getElementById("summary-due")!;
+  const footerDue = document.getElementById("footer-due")!;
+  const totalNote = document.getElementById("summary-total-note")!;
 
-  function gatewayReady(gw: string, planId: string) {
+  function gatewayReady(gw: string, planId: string): boolean {
     const byPlan = data.readiness[gw];
-    return byPlan && byPlan[planId] === true;
+    return byPlan !== undefined && byPlan[planId] === true;
   }
+
+  /** Mirrors the server's `anyCheckoutReady`. Recomputed here rather than read
+   *  off the button's initial `disabled`, which also covers "no order yet" and
+   *  would make the first quote look like a misconfigured deployment. */
+  const checkoutAvailable = Object.values(data.readiness).some((byPlan) =>
+    Object.values(byPlan).some((ready) => ready)
+  );
 
   function setGatewayLabel(provider: "paddle" | "razorpay") {
     gateway = provider;
     gatewayLabel.textContent = provider === "razorpay" ? "Razorpay" : "Paddle";
   }
 
+  function clampSeats(value: number): number {
+    if (!Number.isFinite(value)) return 1;
+    return Math.min(Math.max(Math.trunc(value), 1), data.maxSeats);
+  }
+
+  /** A total belongs to the seat count it was quoted for. The moment the two
+   *  disagree the number on screen is about a transaction the buyer no longer
+   *  wants, so it goes away together with the button that would pay it. */
+  function syncSeatSelection() {
+    const seats = clampSeats(Number.parseInt(seatsInput.value, 10));
+    seatsInput.value = String(seats);
+    const quoted = session !== null && data.orderSeats === seats;
+    btnPay.disabled = !quoted || !checkoutAvailable;
+    btnReview.textContent = quoted ? "Update total" : "Review order";
+    if (!quoted) {
+      summaryDue.textContent = "—";
+      footerDue.textContent = "—";
+      totalNote.textContent = "Your total is quoted when you review the order.";
+    }
+  }
+
   countrySelect.addEventListener("change", () => {
     const code = countrySelect.value;
+    seatCountry.value = code;
     if (!code) return;
     fetch("/billing/confirm-country", {
       method: "POST",
@@ -137,6 +189,22 @@ function initCheckout(data: WizardData) {
     countrySelect.value = data.detectedCountry;
     gateway = data.gateway;
   }
+  seatCountry.value = countrySelect.value;
+
+  document.getElementById("seats-dec")!.addEventListener("click", () => {
+    seatsInput.value = String(clampSeats(Number.parseInt(seatsInput.value, 10) - 1));
+    syncSeatSelection();
+  });
+  document.getElementById("seats-inc")!.addEventListener("click", () => {
+    seatsInput.value = String(clampSeats(Number.parseInt(seatsInput.value, 10) + 1));
+    syncSeatSelection();
+  });
+  seatsInput.addEventListener("change", syncSeatSelection);
+
+  seatForm.addEventListener("submit", () => {
+    if (!countrySelect.value) return;
+    btnReview.classList.add("loading");
+  });
 
   function setCheckoutStatus(msg: string, showSpinner: boolean) {
     const content = document.getElementById("checkout-status-content")!;
@@ -154,11 +222,10 @@ function initCheckout(data: WizardData) {
   function setPayButtonLoading(loading: boolean) {
     btnPay.classList.toggle("loading", loading);
     if (loading) {
-      btnPay.setAttribute("disabled", "");
+      btnPay.disabled = true;
       return;
     }
-    if (payDisabledInitially) btnPay.setAttribute("disabled", "");
-    else btnPay.removeAttribute("disabled");
+    syncSeatSelection();
   }
 
   function redirectSuccess() {
@@ -209,82 +276,28 @@ function initCheckout(data: WizardData) {
     patchRazorpayBackdrop();
   }
 
-  if (params.get("payment") === "failed") {
-    onPaymentDismissed("Payment failed or was cancelled. Try again.");
-  }
-
-  async function verifyRazorpayOrderPayment(args: {
-    orderId: string;
-    paymentId: string;
-    signature: string;
-  }) {
-    const res = await fetch("/billing/verify-payment", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        provider: "razorpay",
-        orderId: args.orderId,
-        paymentId: args.paymentId,
-        signature: args.signature,
-      }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error((err as { error?: string }).error || `verify failed (${res.status})`);
-    }
-  }
-
-
-  async function openRazorpaySession(session: RazorpaySession) {
+  async function openRazorpaySession(rzpSession: RazorpaySession) {
     await loadRazorpayCheckoutSdk();
     if (!window.Razorpay) throw new Error("Razorpay checkout SDK failed to load");
 
     beginPaymentOverlay();
 
     const options: Record<string, unknown> = {
-      key: session.keyId,
+      key: rzpSession.keyId,
       name: "antgrid",
-      description: session.planId || plan.id,
+      description: rzpSession.planId || plan.id,
       prefill: { email: data.email },
       theme: { color: "#818CF8" },
       config: RAZORPAY_CARD_ONLY_CONFIG,
       redirect: false,
-      ...(session.callbackUrl ? { callback_url: session.callbackUrl } : {}),
+      ...(rzpSession.callbackUrl ? { callback_url: rzpSession.callbackUrl } : {}),
       modal: {
         ondismiss: () => onPaymentDismissed(),
       },
-      handler: async (response: Record<string, string>) => {
-        try {
-          if (session.isSubscription) {
-            redirectSuccess();
-            return;
-          }
-          const orderId = response.razorpay_order_id;
-          const paymentId = response.razorpay_payment_id;
-          const signature = response.razorpay_signature;
-          if (!orderId || !paymentId || !signature) {
-            throw new Error("Incomplete payment response");
-          }
-          setCheckoutStatus("Confirming payment…", true);
-          showCheckoutModal();
-          await verifyRazorpayOrderPayment({ orderId, paymentId, signature });
-          redirectSuccess();
-        } catch (e) {
-          showCheckoutModal();
-          const msg = e instanceof Error ? e.message : String(e);
-          setCheckoutStatus(`Payment verification failed: ${msg}`, false);
-          document.getElementById("checkout-retry")!.classList.remove("hidden");
-        }
-      },
+      // Subscriptions provision from the webhook, so the client only redirects.
+      handler: () => redirectSuccess(),
+      subscription_id: rzpSession.subscriptionId,
     };
-
-    if (session.isSubscription) {
-      options.subscription_id = session.subscriptionId;
-    } else {
-      options.order_id = session.orderId;
-      options.amount = session.amount;
-      options.currency = session.currency || "USD";
-    }
 
     const rzp = new window.Razorpay(options);
     rzp.on("payment.failed", (response) => {
@@ -294,11 +307,11 @@ function initCheckout(data: WizardData) {
     rzp.open();
   }
 
-  async function openPaddleSession(session: PaddleSession) {
+  async function openPaddleSession(paddleSession: PaddleSession) {
     if (!paddleInstance) {
       paddleInstance = await initializePaddle({
-        token: session.clientToken,
-        environment: session.environment,
+        token: paddleSession.clientToken,
+        environment: paddleSession.environment,
         checkout: {
           settings: { displayMode: "overlay", theme: "dark", locale: "en", variant: "one-page" },
         },
@@ -315,14 +328,14 @@ function initCheckout(data: WizardData) {
     beginPaymentOverlay();
 
     // customerAuthToken and customer.email are mutually exclusive in Paddle.js.
-    if (session.customerAuthToken) {
+    if (paddleSession.customerAuthToken) {
       paddleInstance.Checkout.open({
-        transactionId: session.transactionId,
-        customerAuthToken: session.customerAuthToken,
+        transactionId: paddleSession.transactionId,
+        customerAuthToken: paddleSession.customerAuthToken,
       });
     } else {
       const openOpts: { transactionId: string; customer?: { email: string } } = {
-        transactionId: session.transactionId,
+        transactionId: paddleSession.transactionId,
       };
       if (data.email) openOpts.customer = { email: data.email };
       paddleInstance.Checkout.open(openOpts);
@@ -330,28 +343,12 @@ function initCheckout(data: WizardData) {
   }
 
   async function openCheckout() {
+    if (!session) return;
     setPayButtonLoading(true);
     hideCheckoutStatus();
     document.getElementById("checkout-retry")!.classList.add("hidden");
     try {
-      const res = await fetch("/billing/checkout-session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ planId: plan.id, country: countrySelect.value }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        setPayButtonLoading(false);
-        setCheckoutStatus(
-          `Could not start payment: ${(err as { error?: string }).error || res.status}`,
-          false
-        );
-        document.getElementById("checkout-retry")!.classList.remove("hidden");
-        return;
-      }
-      const session = (await res.json()) as PaddleSession | RazorpaySession;
-      gateway = session.provider;
-      gatewayLabel.textContent = session.provider === "razorpay" ? "Razorpay" : "Paddle";
+      setGatewayLabel(session.provider);
       setPayButtonLoading(false);
       if (session.provider === "razorpay") await openRazorpaySession(session);
       else await openPaddleSession(session);
@@ -388,9 +385,11 @@ function initCheckout(data: WizardData) {
     hideCheckoutStatus();
     btnPay.click();
   });
+
+  syncSeatSelection();
 }
 
-const dataEl = document.getElementById("checkout-wizard-data");
-if (dataEl?.textContent) {
-  initCheckout(JSON.parse(dataEl.textContent) as WizardData);
+const wizard = readJson<WizardData>("checkout-wizard-data");
+if (wizard) {
+  initCheckout(wizard, readJson<CheckoutSession>("checkout-session-data"));
 }

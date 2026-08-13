@@ -4,12 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildAgentCore, type AgentCore } from "../src/agent-core";
 
-// Regression: the banner prints ONLY in remote mode, but `relayBase` was read
-// from `config.relayUrl` alone — which only a standalone agent with an explicit
-// antgrid.yaml `relayUrl:` ever has. A host-spawned remote core therefore baked
-// the literal placeholder "(local mode)" into the connect URI's `r=`, and the
-// app adopts `r=` verbatim whenever it is present (QrPayload.parse), so the
-// fallback relay never kicked in and the machine could not be connected.
+// Regression: `relayBase` was read from `config.relayUrl` alone — which only a
+// standalone agent with an explicit antgrid.yaml `relayUrl:` ever has — so a
+// host-spawned remote core resolved no relay at all and reported itself
+// unconfigured while the host was in fact dialing one.
 
 let prevAbDir: string | undefined;
 let abDir: string;
@@ -54,13 +52,6 @@ function bannerOutput(): string {
   return logSpy.mock.calls.map((c: unknown[]) => String(c[0] ?? "")).join("\n");
 }
 
-function connectUris(output: string): string[] {
-  return output
-    .split("\n")
-    .filter((l) => l.startsWith("Connect URI"))
-    .map((l) => l.slice(l.indexOf(":") + 1).trim());
-}
-
 const identity = {
   deviceId: "agent-dev",
   deviceName: "agent-dev",
@@ -68,7 +59,7 @@ const identity = {
   ed25519PublicKey: Buffer.alloc(32, 7).toString("base64"),
 };
 
-test("host-supplied relayUrl lands in every connect URI's r=", async () => {
+test("host-supplied relayUrl reaches the banner", async () => {
   core = await buildAgentCore({
     folder: tempFolder(),
     mode: "remote",
@@ -76,29 +67,17 @@ test("host-supplied relayUrl lands in every connect URI's r=", async () => {
     relayUrl: "wss://relay.example.test",
   });
 
-  const uris = connectUris(bannerOutput());
-  expect(uris.length).toBeGreaterThan(0);
-  for (const uri of uris) {
-    const r = new URL(uri).searchParams.get("r");
-    const decoded = Buffer.from(r!, "base64url").toString("utf8");
-    expect(() => new URL(decoded)).not.toThrow();
-  }
-  expect(
-    uris.some((u) => {
-      const r = new URL(u).searchParams.get("r");
-      return Buffer.from(r!, "base64url").toString("utf8") === "wss://relay.example.test";
-    }),
-  ).toBe(true);
+  const output = bannerOutput();
+  expect(output).toContain("wss://relay.example.test");
+  expect(output).not.toContain("(not configured)");
 }, 15_000);
 
-test("a remote core with no relay URL prints no connect URI at all", async () => {
+test("a remote core with no relay URL reports itself unconfigured", async () => {
   core = await buildAgentCore({
     folder: tempFolder(),
     mode: "remote",
     identity,
   });
 
-  const output = bannerOutput();
-  expect(connectUris(output)).toEqual([]);
-  expect(output).not.toContain("(local mode)");
+  expect(bannerOutput()).toContain("(not configured)");
 }, 15_000);

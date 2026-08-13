@@ -1,8 +1,10 @@
+import type { DeviceTier } from "./verify.js";
+
 export interface LicenseCacheEntry {
   jti: string;
   deviceId: string;
   userId: string;
-  tier: "free" | "trial" | "pro";
+  tier: DeviceTier;
   pk: string;
   revoked?: boolean;
 }

@@ -18,7 +18,7 @@
   deliberately not backed up). It carries antgrid.local_host_uuid, so a
   reinstall re-provisions onto the SAME account device row instead of minting a
   fresh one — an uninstall runs no code and can never revoke the old row, so
-  without this every reinstall permanently burns a fair-use device_limit slot.
+  without this every reinstall permanently burns an app_device_limit slot.
   The device keypair intentionally does NOT survive: re-provisioning mints a
   new one and the server rebinds it to the reused uuid.
 -->

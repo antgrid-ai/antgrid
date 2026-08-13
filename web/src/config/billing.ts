@@ -4,13 +4,11 @@ export type BillingConfig = {
     environment: "sandbox" | "production";
     clientToken: string;
     priceYearly: string;
-    priceLifetime: string;
     discountIdYearlyOffer: string;
     webhookDestinationId: string;
   };
   razorpay: {
     planYearly: string;
-    amountLifetime: number;
   };
 };
 
@@ -23,13 +21,11 @@ const DEVELOPMENT: BillingConfig = {
     environment: "sandbox",
     clientToken: "test_702c1651209f08cfcd237479b95",
     priceYearly: "pri_01ktx71cqeg9z71w0ef6ve6ccw",
-    priceLifetime: "pri_01ktzks8nyj0mw4s8as07jesx4",
     discountIdYearlyOffer: "dsc_01ktx8ean5ttvanhnfvjj7brz0",
     webhookDestinationId: "ntfset_01ktxnqqkwa0zmwjrkdcne65vq",
   },
   razorpay: {
     planYearly: "plan_T116LK54v4SZfL",
-    amountLifetime: 9900,
   },
 };
 
@@ -40,13 +36,11 @@ const STAGING: BillingConfig = {
     environment: "sandbox",
     clientToken: "test_702c1651209f08cfcd237479b95",
     priceYearly: "pri_01ktx71cqeg9z71w0ef6ve6ccw",
-    priceLifetime: "pri_01ktzks8nyj0mw4s8as07jesx4",
     discountIdYearlyOffer: "dsc_01ktx8ean5ttvanhnfvjj7brz0",
     webhookDestinationId: "ntfset_01ktxnqqkwa0zmwjrkdcne65vq",
   },
   razorpay: {
     planYearly: "plan_T116LK54v4SZfL",
-    amountLifetime: 9900,
   },
 };
 
@@ -56,13 +50,11 @@ const PRODUCTION: BillingConfig = {
     environment: "production",
     clientToken: "",
     priceYearly: "",
-    priceLifetime: "",
     discountIdYearlyOffer: "",
     webhookDestinationId: "",
   },
   razorpay: {
     planYearly: "",
-    amountLifetime: 9900,
   },
 };
 
@@ -85,9 +77,7 @@ export function billingToEnvFields(billing: BillingConfig) {
     PADDLE_CLIENT_TOKEN: opt(billing.paddle.clientToken),
     PADDLE_ENVIRONMENT: billing.paddle.environment,
     PADDLE_PRICE_YEARLY: opt(billing.paddle.priceYearly),
-    PADDLE_PRICE_LIFETIME: opt(billing.paddle.priceLifetime),
     PADDLE_DISCOUNT_ID_YEARLY_OFFER: opt(billing.paddle.discountIdYearlyOffer),
     RAZORPAY_PLAN_YEARLY: opt(billing.razorpay.planYearly),
-    RAZORPAY_AMOUNT_LIFETIME: billing.razorpay.amountLifetime,
   };
 }

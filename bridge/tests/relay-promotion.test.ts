@@ -13,23 +13,6 @@ import { createMessage, type AbMessage } from "../src/protocol";
 import { createRelayPromotion, type MachineRelaySession, type LocalStreamAttachment } from "../src/relay-promotion";
 import type { StreamHandle } from "../src/stream-mux";
 
-function makeCoreStub() {
-  return {
-    relayUrl: "https://relay.example.com",
-    projectId: "proj123",
-    abDir: "/tmp/abdir",
-    identity: { deviceId: "local-uuid", deviceName: "local", createdAt: "" },
-    nextKeypair: () => ({ publicKey: Buffer.from("pk"), privateKey: Buffer.from("sk") }),
-    pairedPhones: { has: () => false } as any,
-    handleTunnelMessage: () => {},
-    onHandshakeComplete: () => {},
-    setPlainHook: () => {},
-    setPeerPubkeyProvider: () => {},
-    attachTransport: () => {},
-    shutdown: async () => 0,
-  } as any;
-}
-
 const ENABLE = createMessage("agent:enableRelay", {
   relayUrl: "https://relay.example.com",
   auth: {
@@ -46,8 +29,6 @@ function makeMachineSession(overrides: Partial<MachineRelaySession> = {}): Machi
     currentPeerPubkey: () => null,
     sendPushDeliver: () => {},
     agentDeviceId: "0bbd1111-2222-3333-4444-555566667777",
-    ed25519Pub: Buffer.from("edpub").toString("base64"),
-    relayBase: "https://relay.example.com",
     ...overrides,
   };
 }
@@ -71,21 +52,21 @@ function makeDeps(session: MachineRelaySession) {
   };
 }
 
-test("enableRelay attaches the core as a stream and emits pairingReady from the machine session", async () => {
+test("enableRelay attaches the core as a stream and emits relayReady from the machine session", async () => {
   const bus = new MessageBus();
   const out: AbMessage[] = [];
   bus.setInboundHandler(() => {});
   const unsub = bus.subscribe({ deliver: (m) => out.push(m) });
   const session = makeMachineSession();
   const deps = makeDeps(session);
-  const ctrl = createRelayPromotion({ core: makeCoreStub(), bus, hostName: "test-host", ...deps });
+  const ctrl = createRelayPromotion({ bus, ...deps });
 
   expect(ctrl.handleInbound(ENABLE)).toBe(true);
   await Bun.sleep(10);
 
   expect(deps.calls.ensureMachineRelay).toBe(1);
   expect(deps.calls.attach).toBe(1);
-  const ready = out.find((m) => m.type === "agent:pairingReady");
+  const ready = out.find((m) => m.type === "agent:relayReady");
   expect(ready).toBeDefined();
   // @ts-expect-error narrowed at runtime
   expect(ready.agentDeviceId).toBe(session.agentDeviceId);
@@ -95,26 +76,25 @@ test("enableRelay attaches the core as a stream and emits pairingReady from the 
   unsub();
 });
 
-test("'Pair another phone' (already promoted) re-publishes the connect QR WITHOUT a second attach", async () => {
+test("a repeat enableRelay (already promoted) re-answers relayReady WITHOUT a second attach", async () => {
   const bus = new MessageBus();
   const out: AbMessage[] = [];
   bus.setInboundHandler(() => {});
   const unsub = bus.subscribe({ deliver: (m) => out.push(m) });
   const session = makeMachineSession();
   const deps = makeDeps(session);
-  const ctrl = createRelayPromotion({ core: makeCoreStub(), bus, hostName: "test-host", ...deps });
+  const ctrl = createRelayPromotion({ bus, ...deps });
 
   expect(ctrl.handleInbound(ENABLE)).toBe(true);
   await Bun.sleep(10);
-  expect(out.filter((m) => m.type === "agent:pairingReady").length).toBe(1);
+  expect(out.filter((m) => m.type === "agent:relayReady").length).toBe(1);
 
   // Under account trust there is no pairing window to gate on — a repeat
-  // enableRelay ("Pair another phone") against the ALREADY-promoted session
-  // just re-publishes the QR unconditionally.
+  // enableRelay against the ALREADY-promoted session just re-answers.
   expect(ctrl.handleInbound(ENABLE)).toBe(true);
   await Bun.sleep(10);
 
-  expect(out.filter((m) => m.type === "agent:pairingReady").length).toBe(2);
+  expect(out.filter((m) => m.type === "agent:relayReady").length).toBe(2);
   expect(deps.calls.ensureMachineRelay).toBe(1);
   expect(deps.calls.attach).toBe(1);
   ctrl.stop();
@@ -125,7 +105,7 @@ test("concurrent enableRelay calls coalesce onto a single in-flight bring-up", a
   const bus = new MessageBus();
   bus.setInboundHandler(() => {});
   const deps = makeDeps(makeMachineSession());
-  const ctrl = createRelayPromotion({ core: makeCoreStub(), bus, hostName: "test-host", ...deps });
+  const ctrl = createRelayPromotion({ bus, ...deps });
 
   // Both calls land before the first `await ensureMachineRelay` resolves — the
   // `starting` guard must make the second an immediate no-op.
@@ -148,9 +128,7 @@ test("a disableRelay landing mid-start cancels the in-flight attach", async () =
   let ensureCalls = 0;
   let attachCalls = 0;
   const ctrl = createRelayPromotion({
-    core: makeCoreStub(),
     bus,
-    hostName: "test-host",
     ensureMachineRelay: async () => { ensureCalls++; return gate; },
     attach: () => { attachCalls++; return { handle: { streamId: "s1", detach: () => {}, sendTunnel: () => {} }, detach: () => {} }; },
   });
@@ -162,7 +140,7 @@ test("a disableRelay landing mid-start cancels the in-flight attach", async () =
 
   expect(ensureCalls).toBe(1);
   expect(attachCalls).toBe(0); // the stale attempt never reaches attach()
-  expect(out.find((m) => m.type === "agent:pairingReady")).toBeUndefined();
+  expect(out.find((m) => m.type === "agent:relayReady")).toBeUndefined();
   unsub();
 });
 
@@ -175,9 +153,7 @@ test("ensureMachineRelay rejecting surfaces relayError(ENABLE_FAILED) and allows
   let ensureCalls = 0;
   let attachCalls = 0;
   const ctrl = createRelayPromotion({
-    core: makeCoreStub(),
     bus,
-    hostName: "test-host",
     ensureMachineRelay: async () => {
       ensureCalls++;
       if (fail) throw new Error("boom: machine socket failed to start");
@@ -210,7 +186,7 @@ test("enableRelay without any credentials emits relayError(NO_CREDENTIALS)", asy
   bus.setInboundHandler(() => {});
   const unsub = bus.subscribe({ deliver: (m) => out.push(m) });
   const deps = makeDeps(makeMachineSession());
-  const ctrl = createRelayPromotion({ core: makeCoreStub(), bus, ...deps });
+  const ctrl = createRelayPromotion({ bus, ...deps });
 
   ctrl.handleInbound(createMessage("agent:enableRelay", {}) as any);
   await Bun.sleep(10);
@@ -229,7 +205,7 @@ test("a malformed deviceUuid is rejected up front with INVALID_REQUEST, before e
   bus.setInboundHandler(() => {});
   const unsub = bus.subscribe({ deliver: (m) => out.push(m) });
   const deps = makeDeps(makeMachineSession());
-  const ctrl = createRelayPromotion({ core: makeCoreStub(), bus, hostName: "test-host", ...deps });
+  const ctrl = createRelayPromotion({ bus, ...deps });
 
   ctrl.handleInbound(
     createMessage("agent:enableRelay", {
@@ -251,7 +227,7 @@ test("enableRelay on a bare agent (no host — ensureMachineRelay/attach absent)
   const out: AbMessage[] = [];
   bus.setInboundHandler(() => {});
   const unsub = bus.subscribe({ deliver: (m) => out.push(m) });
-  const ctrl = createRelayPromotion({ core: makeCoreStub(), bus, hostName: "test-host" });
+  const ctrl = createRelayPromotion({ bus });
 
   ctrl.handleInbound(ENABLE);
   await Bun.sleep(10);
@@ -267,7 +243,7 @@ test("stop() detaches the stream it attached (the machine socket itself is the h
   const bus = new MessageBus();
   bus.setInboundHandler(() => {});
   const deps = makeDeps(makeMachineSession());
-  const ctrl = createRelayPromotion({ core: makeCoreStub(), bus, hostName: "test-host", ...deps });
+  const ctrl = createRelayPromotion({ bus, ...deps });
 
   expect(ctrl.handleInbound(ENABLE)).toBe(true);
   await Bun.sleep(10);
@@ -282,7 +258,7 @@ test("stop() detaches the stream it attached (the machine socket itself is the h
 test("disableRelay before any enable is a no-op and is consumed", () => {
   const bus = new MessageBus();
   bus.setInboundHandler(() => {});
-  const ctrl = createRelayPromotion({ core: makeCoreStub(), bus, ...makeDeps(makeMachineSession()) });
+  const ctrl = createRelayPromotion({ bus, ...makeDeps(makeMachineSession()) });
   expect(ctrl.handleInbound(createMessage("agent:disableRelay", {}) as any)).toBe(true);
   ctrl.stop();
 });
@@ -290,7 +266,7 @@ test("disableRelay before any enable is a no-op and is consumed", () => {
 test("non-promotion messages are not consumed", () => {
   const bus = new MessageBus();
   bus.setInboundHandler(() => {});
-  const ctrl = createRelayPromotion({ core: makeCoreStub(), bus, ...makeDeps(makeMachineSession()) });
+  const ctrl = createRelayPromotion({ bus, ...makeDeps(makeMachineSession()) });
   expect(
     ctrl.handleInbound(
       createMessage("terminal:resize", { terminalId: "t", cols: 80, rows: 24, clientId: "test" }) as any,

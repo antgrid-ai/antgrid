@@ -7,6 +7,7 @@ import type { PrismaClient } from "../generated/prisma/client.js";
 import type { SendEmail } from "./email.js";
 import type { Env } from "../env.js";
 import { findProductAccountByUserId } from "../models/product-account.js";
+import { findActiveMembership } from "../models/account-member.js";
 import { ensureDefaultSubscription, provisionProductAccountForUser } from "../models/subscription.js";
 import { purgeUnprovenPasswordCredential } from "../models/credential.js";
 
@@ -25,6 +26,14 @@ export type CreateAuthDeps = {
 
 async function provisionBillingAccount(db: PrismaClient, userId: string) {
   const existing = await findProductAccountByUserId(db, userId);
+  // A member keeps the personal account they owned before joining, so this is
+  // the branch that fires for them — and it fires on every sign-in and every
+  // token mint. Left ungated it re-mints a promotional Pro grant on that orphan
+  // account for the rest of the member's life: never read (entitlement resolves
+  // to the team), so nothing surfaces it, while it silently un-spends the
+  // grandfather grant accepting an invite is supposed to cost.
+  const membership = await findActiveMembership(db, userId);
+  if (membership && membership.accountId !== existing?.id) return;
   if (existing) {
     await ensureDefaultSubscription(db, existing.id);
     return;

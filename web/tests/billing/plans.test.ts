@@ -25,14 +25,13 @@ describe("plan catalog", () => {
       trial: false,
     });
     expect(PRICING.trial).toMatchObject({ trial: true, recurring: true });
-    expect(PRICING.pro_lifetime.listPriceCents).toBe(9900);
   });
 
   test("isPlanId narrows known ids only", () => {
     expect(isPlanId("trial")).toBe(true);
     expect(isPlanId("pro_yearly")).toBe(true);
-    expect(isPlanId("pro_lifetime")).toBe(true);
     expect(isPlanId("free")).toBe(false);
+    expect(isPlanId("pro_lifetime")).toBe(false);
   });
 
   test("displayPriceCents uses offer when YEARLY_OFFER_ACTIVE", () => {
@@ -40,20 +39,13 @@ describe("plan catalog", () => {
     expect(yearlyOfferActive(env)).toBe(true);
     expect(displayPriceCents("pro_yearly", env)).toBe(4900);
     expect(displayPriceCents("trial", env)).toBe(4900);
-    expect(displayPriceCents("pro_lifetime", env)).toBe(9900);
   });
 
   test("paddle trial and pro_yearly share PADDLE_PRICE_YEARLY", () => {
-    const env = {
-      PADDLE_PRICE_YEARLY: TEST_BILLING_SKUS.paddle.priceYearly,
-      PADDLE_PRICE_LIFETIME: TEST_BILLING_SKUS.paddle.priceLifetime,
-    };
+    const env = { PADDLE_PRICE_YEARLY: TEST_BILLING_SKUS.paddle.priceYearly };
     expect(resolveCheckoutSku("trial", "paddle", env)).toBe(TEST_BILLING_SKUS.paddle.priceYearly);
     expect(resolveCheckoutSku("pro_yearly", "paddle", env)).toBe(
       TEST_BILLING_SKUS.paddle.priceYearly
-    );
-    expect(resolveCheckoutSku("pro_lifetime", "paddle", env)).toBe(
-      TEST_BILLING_SKUS.paddle.priceLifetime
     );
     expect(isPaddleCheckoutReady(testBillingEnv(), "trial")).toBe(true);
   });
@@ -62,14 +54,10 @@ describe("plan catalog", () => {
     const env = {
       RAZORPAY_PLAN_TRIAL: TEST_BILLING_SKUS.razorpay.planTrial,
       RAZORPAY_PLAN_YEARLY: TEST_BILLING_SKUS.razorpay.planYearly,
-      RAZORPAY_AMOUNT_LIFETIME: TEST_BILLING_SKUS.razorpay.amountLifetime,
     };
     expect(resolveCheckoutSku("trial", "razorpay", env)).toBe(TEST_BILLING_SKUS.razorpay.planTrial);
     expect(resolveCheckoutSku("pro_yearly", "razorpay", env)).toBe(
       TEST_BILLING_SKUS.razorpay.planYearly
-    );
-    expect(resolveCheckoutSku("pro_lifetime", "razorpay", env)).toBe(
-      TEST_BILLING_SKUS.razorpay.amountLifetime
     );
   });
 
@@ -83,11 +71,6 @@ describe("plan catalog", () => {
       YEARLY_OFFER_ACTIVE: true,
       PADDLE_DISCOUNT_ID_YEARLY_OFFER: TEST_BILLING_SKUS.paddle.discountYearlyOffer,
     };
-    expect(resolvePaddleDiscountId("pro_yearly", env)).toBe(
-      TEST_BILLING_SKUS.paddle.discountYearlyOffer
-    );
-    expect(resolvePaddleDiscountId("trial", env)).toBe(
-      TEST_BILLING_SKUS.paddle.discountYearlyOffer
-    );
+    expect(resolvePaddleDiscountId(env)).toBe(TEST_BILLING_SKUS.paddle.discountYearlyOffer);
   });
 });

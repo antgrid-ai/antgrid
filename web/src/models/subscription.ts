@@ -1,17 +1,49 @@
 import type { Subscription } from "../generated/prisma/client.js";
 import type { Tx } from "../db/index.js";
 import { FREE_TIER } from "../billing/plans.js";
+import { readCapabilities, type Capabilities } from "../billing/capabilities.js";
 import type { PlanRow } from "./plan.js";
 import { findPlanBySlug, PLAN_SLUG_FREE } from "./plan.js";
 import { ensureProductAccount } from "./product-account.js";
+import { findActiveMembership, resolveBillingAccountId } from "./account-member.js";
 
 export type SubscriptionRow = Subscription;
 
-/** Create ProductAccount + default (promotional pro) subscription when a user is provisioned. */
+/**
+ * `subscriptions.provider` for a contract a human agreed rather than a gateway
+ * sold.
+ *
+ * Load-bearing, not a label: every catalog re-sync guards on this exact value
+ * (`WHERE "provider" IS DISTINCT FROM 'manual'`, see
+ * 20260815000000_enterprise_catalog), so a negotiated row written under any
+ * other provider is silently reset to the list price by the next catalog
+ * migration. Keep it in lockstep with that guard.
+ */
+export const MANUAL_PROVIDER = "manual";
+
+/**
+ * The account a user provisions against, created with a default (promotional
+ * pro) subscription if it is their own.
+ *
+ * A member gets the team's account back and nothing is written: membership never
+ * mutates the bill, so granting here would hand the team a promotional Pro row
+ * the owner never bought. It must also stay in step with
+ * `resolveBillingAccountId` — a caller that provisions one account and then reads
+ * entitlement from another (checkout metadata is the sharp case: the gateway
+ * writes the plan back to whatever id it was handed) fails silently.
+ */
 export async function provisionProductAccountForUser(
   db: Tx,
   userId: string
 ): Promise<{ id: string; userId: string }> {
+  const membership = await findActiveMembership(db, userId);
+  if (membership) {
+    const billing = await db.productAccount.findUnique({
+      where: { id: membership.accountId },
+      select: { id: true, userId: true },
+    });
+    if (billing && billing.userId !== userId) return billing;
+  }
   const account = await ensureProductAccount(db, userId);
   await ensureDefaultSubscription(db, account.id);
   return account;
@@ -20,14 +52,20 @@ export async function provisionProductAccountForUser(
 export function resolveEntitlement(sub: SubscriptionRow): {
   tier: string;
   workerLimit: number;
-  deviceLimit: number;
+  appDeviceLimit: number;
   promotional: boolean;
+  capabilities: Capabilities;
 } {
   return {
     tier: sub.tier,
     workerLimit: sub.workerLimit,
-    deviceLimit: sub.deviceLimit,
+    appDeviceLimit: sub.appDeviceLimit,
     promotional: sub.promotional,
+    // Read off the subscription like every other limit here, never off the
+    // plan: the row IS the contract, so an account that negotiated its own set
+    // must not be answered with the list price. Validated on the way out
+    // because the column is jsonb and holds whatever was written to it.
+    capabilities: readCapabilities(sub.capabilities),
   };
 }
 
@@ -57,9 +95,9 @@ function activeSubscriptionWhere(accountId: string, now = new Date()) {
 }
 
 export async function activeSubscriptionForUser(db: Tx, userId: string): Promise<SubscriptionRow | null> {
-  const account = await db.productAccount.findUnique({ where: { userId } });
-  if (!account) return null;
-  return activeSubscriptionForAccount(db, account.id);
+  const accountId = await resolveBillingAccountId(db, userId);
+  if (!accountId) return null;
+  return activeSubscriptionForAccount(db, accountId);
 }
 
 export async function activeSubscriptionForAccount(
@@ -133,7 +171,7 @@ export async function ensureFreeSubscription(db: Tx, accountId: string): Promise
       tier: FREE_TIER,
       status: "active",
       workerLimit: freePlan.workerLimit,
-      deviceLimit: freePlan.deviceLimit,
+      appDeviceLimit: freePlan.appDeviceLimit,
     },
   });
 }
@@ -253,6 +291,23 @@ export async function applyPlanToAccountSubscription(
     currentPeriodEnd?: Date | null;
     trialStartedAt?: Date | null;
     trialEndsAt?: Date | null;
+    /** Machines and app devices this contract was sold, when they are not the
+     *  plan's. Omitted takes the plan's, which is what every gateway-driven
+     *  apply does — the numbers follow the plan a customer is on. */
+    workerLimit?: number;
+    appDeviceLimit?: number;
+    /** Seats the provider is billing for. Omitted means the caller learned
+     *  nothing about seats, which on a fresh row is the column default of one
+     *  and on an existing row is whatever was already negotiated — never a
+     *  reset to one. */
+    seats?: number;
+    /** What this contract unlocks, when it is not the plan's list price.
+     *  Follows the `seats` rule rather than the limits above: a fresh row
+     *  snapshots the plan, an existing row keeps what it was sold. The two
+     *  differ because a gateway re-applying a plan carries no opinion about
+     *  capabilities at all, and a re-apply that silently stripped a negotiated
+     *  grant would be indistinguishable from one that never had it. */
+    capabilities?: Capabilities;
     /** Temporary unpurchased grant (see ensureDefaultSubscription). Real
      *  purchases must omit this — it defaults to false. */
     promotional?: boolean;
@@ -265,8 +320,8 @@ export async function applyPlanToAccountSubscription(
     accountId,
     planId: plan.id,
     tier: plan.tier,
-    workerLimit: plan.workerLimit,
-    deviceLimit: plan.deviceLimit,
+    workerLimit: fields.workerLimit ?? plan.workerLimit,
+    appDeviceLimit: fields.appDeviceLimit ?? plan.appDeviceLimit,
     provider: fields.provider,
     providerSubscriptionId: fields.providerSubscriptionId ?? null,
     providerTransactionId: fields.providerTransactionId ?? null,
@@ -275,6 +330,8 @@ export async function applyPlanToAccountSubscription(
     currentPeriodEnd: fields.currentPeriodEnd ?? null,
     trialStartedAt: fields.trialStartedAt ?? null,
     trialEndsAt: fields.trialEndsAt ?? null,
+    ...(fields.seats !== undefined ? { seats: fields.seats } : {}),
+    ...(fields.capabilities !== undefined ? { capabilities: fields.capabilities } : {}),
     promotional: fields.promotional ?? false,
     updatedAt: now,
   };
@@ -287,16 +344,16 @@ export async function applyPlanToAccountSubscription(
       return db.subscription.update({ where: { id: existing.id }, data });
     }
   }
-  if (fields.providerTransactionId) {
-    const existing = await db.subscription.findUnique({
-      where: { providerTransactionId: fields.providerTransactionId },
-    });
-    if (existing) {
-      return db.subscription.update({ where: { id: existing.id }, data });
-    }
-  }
-
-  return db.subscription.create({ data });
+  return db.subscription.create({
+    data: {
+      ...data,
+      // The snapshot: a fresh row starts at the plan's set unless the caller
+      // negotiated its own, so a later edit to the list price cannot reach a
+      // contract already sold. Validated on the way in as well as on the way
+      // out — a catalog blob nobody can read must not become a contract.
+      capabilities: fields.capabilities ?? readCapabilities(plan.capabilities),
+    },
+  });
 }
 
 export async function grantDevSubscription(
@@ -308,8 +365,14 @@ export async function grantDevSubscription(
     workerLimit: number;
     status: string;
     currentPeriodEnd: Date;
+    seats: number;
   }> = {}
 ): Promise<SubscriptionRow> {
+  // Lands on the account the user BILLS against, team included: a grant written
+  // anywhere else is one `activeSubscriptionForUser` would never read back, so
+  // the dev tool would answer `{ok: true}` having changed nothing observable.
+  // The cost is that granting to a member rewrites the team's contract, which is
+  // what `applyPlanToAccountSubscription` does to any account it is pointed at.
   const account = await provisionProductAccountForUser(db, userId);
 
   // Skip only a genuine paid subscription — a promotional grant (from
@@ -325,5 +388,49 @@ export async function grantDevSubscription(
   return applyPlanToAccountSubscription(db, account.id, plan, {
     provider: "dev",
     currentPeriodEnd: opts.currentPeriodEnd ?? new Date(Date.now() + 365 * 24 * 3600 * 1000),
+    ...(opts.seats !== undefined ? { seats: opts.seats } : {}),
+  });
+}
+
+/**
+ * Write a negotiated contract onto the account a user bills against.
+ *
+ * This is the per-customer half of the Enterprise mechanism: the plan row is the
+ * list price and one row serves every customer, while the ceilings, seats and
+ * capabilities a human agreed live here, on the subscription `resolveEntitlement`
+ * already reads. No purchase path can produce this row — a contact-sales plan is
+ * refused at checkout — and it goes through the same apply function every
+ * gateway uses, so a contract can never occupy a state a purchase could not.
+ *
+ * Omitted values take the plan's, which is what makes a contract that negotiated
+ * only capabilities cost nothing to write.
+ */
+export async function grantManualContract(
+  db: Tx,
+  userId: string,
+  opts: Partial<{
+    planSlug: string;
+    workerLimit: number;
+    appDeviceLimit: number;
+    seats: number;
+    capabilities: Capabilities;
+    /** Open-ended by default: a contract with no agreed end is active until one
+     *  is written, and `isActiveSubscription` reads a null period end as such. */
+    currentPeriodEnd: Date;
+  }> = {}
+): Promise<SubscriptionRow> {
+  const account = await provisionProductAccountForUser(db, userId);
+
+  const planSlug = opts.planSlug ?? "enterprise";
+  const plan = await findPlanBySlug(db, planSlug);
+  if (!plan) throw new Error(`unknown plan slug: ${planSlug}`);
+
+  return applyPlanToAccountSubscription(db, account.id, plan, {
+    provider: MANUAL_PROVIDER,
+    ...(opts.currentPeriodEnd ? { currentPeriodEnd: opts.currentPeriodEnd } : {}),
+    ...(opts.workerLimit !== undefined ? { workerLimit: opts.workerLimit } : {}),
+    ...(opts.appDeviceLimit !== undefined ? { appDeviceLimit: opts.appDeviceLimit } : {}),
+    ...(opts.seats !== undefined ? { seats: opts.seats } : {}),
+    ...(opts.capabilities !== undefined ? { capabilities: opts.capabilities } : {}),
   });
 }

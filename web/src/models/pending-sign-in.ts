@@ -1,6 +1,7 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import type { Tx } from "../db/index.js";
+import { hmacBytes, hmacMatches } from "../util/hmac.js";
 
 // Only a hard bounce is recorded. ZeptoMail emits no "delivered" webhook event
 // (verified against a live Agent: hardbounce/softbounce/fbl_compliant only), so
@@ -22,16 +23,6 @@ export type PendingSignInRow = {
   requesterUa: string | null;
   requesterIp: string | null;
 };
-
-// HMAC-SHA256(secret, value) returned as a Uint8Array<ArrayBuffer> — the strict
-// shape Prisma expects for Bytes columns in this project: never `Buffer`,
-// always `new Uint8Array(new ArrayBuffer(n))`.
-function hmac(secret: string, value: string): Uint8Array<ArrayBuffer> {
-  const digest = createHmac("sha256", secret).update(value).digest();
-  const out = new Uint8Array(new ArrayBuffer(digest.length));
-  out.set(digest);
-  return out;
-}
 
 export function generateNonce(): string {
   return randomBytes(NONCE_BYTES).toString("base64url");
@@ -64,8 +55,8 @@ export async function createPending(
     requesterIp: string | null;
   }
 ): Promise<PendingSignInRow> {
-  const nonceHash = hmac(args.secret, args.nonce);
-  const browserTokenHash = hmac(args.secret, args.browserToken);
+  const nonceHash = hmacBytes(args.secret, args.nonce);
+  const browserTokenHash = hmacBytes(args.secret, args.browserToken);
   const expiresAt = new Date(Date.now() + PENDING_TTL_SECONDS * 1000);
 
   return tx.pendingSignIn.create({
@@ -117,9 +108,7 @@ export async function findByIdWithHashes(
 
 /** Constant-time HMAC check: hashes `presented` with `secret`, compares to `stored`. */
 export function checkNonce(stored: Uint8Array, presented: string, secret: string): boolean {
-  const computed = hmac(secret, presented);
-  if (stored.length !== computed.length) return false;
-  return timingSafeEqual(stored, computed);
+  return hmacMatches(stored, presented, secret);
 }
 
 export async function markApproved(tx: Tx, id: string, userId: string): Promise<void> {

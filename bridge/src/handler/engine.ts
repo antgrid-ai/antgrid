@@ -29,6 +29,7 @@ import {
 import { stripAnsi } from "./context";
 import type { SessionAdapter } from "./session-adapter";
 import { handlerObservable, judgeCapable } from "../agents/registry";
+import { createEntitlementReader, type EntitlementReader } from "../entitlement";
 import { type HandlerDecision } from "./decision";
 import {
   LIMIT_FALLBACK_MS, LIMIT_PARK_CEILING, MIN_PARK_MS, TRANSIENT_CEILING, transientBackoffMs,
@@ -256,6 +257,13 @@ export interface HandlerEngineDeps {
    *  can flip after construction. Absent = assume observable (a bare engine in
    *  a test, or a caller that predates the declaration). */
   observable?: (terminalId: string) => boolean;
+  /** Whether the account behind this machine pays for Handler. Built by
+   *  {@link createEntitlementReader} from the live device token, and read on
+   *  every arm and every event rather than once — a token is re-minted hourly
+   *  and a subscription can lapse under a session that is already armed.
+   *  Absent = a bare engine with no host (a test), which is the unwired answer:
+   *  allowed. Refusal is spelled inside the verdict, never by absence. */
+  entitlement?: EntitlementReader;
   // The agent's native conversation id for a slot (codex thread id / opencode
   // sessionID), used to locate its on-disk transcript. Optional: absent means
   // context falls back to PTY scrollback.
@@ -374,13 +382,38 @@ export class HandlerEngine {
   // Undos in flight, by snapshot id. Two taps on one row must not run two undos:
   // the second would be acting on a tree the first already moved.
   private undoing = new Set<string>();
+  private entitlement: EntitlementReader;
 
   constructor(private deps: HandlerEngineDeps) {
+    this.entitlement = deps.entitlement ?? createEntitlementReader();
     this.guard = deps.guard ?? new RunawayGuard();
     this.timers = new TimerRegistry({
       now: () => this.now(),
       schedule: deps.schedule ?? defaultSchedule,
     });
+  }
+
+  /**
+   * The one entitlement question this engine asks, in the two places it asks
+   * it. Nothing here compares a tier — the capability name goes to the registry
+   * (../entitlement.ts) and a verdict comes back, so the next capability is
+   * added there and nowhere else.
+   *
+   * Not to be confused with `./authorization.ts`, which decides what a sentence
+   * a HUMAN typed permits a supervised agent to do. This decides what the
+   * account paid for.
+   */
+  private entitledForHandler(terminalId: string, at: "arm" | "event"): boolean {
+    const verdict = this.entitlement("handler");
+    if (verdict.allowed) return true;
+    // The log line is the whole user-visible signal by design: the refusal
+    // lands in the not-armed state the app already renders, and Handler carries
+    // no upgrade path on either end of the wire.
+    log.warn(
+      "handler %s refused for %s: entitlement %s (tier=%s)",
+      at, terminalId, verdict.reason, verdict.tier ?? "unknown",
+    );
+    return false;
   }
 
   private cfg(): HandlerConfig {
@@ -476,6 +509,23 @@ export class HandlerEngine {
     terminalId: string; goal?: string; backlog?: InstructionItem[];
     notifyOnly: boolean; judgeTool?: string; judgeModel?: string;
   }): void {
+    // Entitlement first, ahead of every side effect below — the backlog clamp
+    // records an activity row, and a refused arm must leave nothing behind.
+    //
+    // This is the narrowest correct point in the engine: `sessions.set` happens
+    // exactly once in this file, inside this method, and the restart-rehydration
+    // path is inside it too, so a persisted armed record cannot route around the
+    // gate by resurrecting itself. Every other public method is already a no-op
+    // without a session.
+    if (!this.entitledForHandler(p.terminalId, "arm")) {
+      // Refuse WITHOUT disarming, exactly as a malformed `handler:configure`
+      // does (agent-core.ts): a live session must not be torn down by a request
+      // that failed to replace it. Re-emit status so the sender's UI resyncs to
+      // the state that actually holds — which, for a slot that was never armed,
+      // is the ordinary not-armed state every layer already renders.
+      this.emitStatus();
+      return;
+    }
     // MAX_BACKLOG_ITEMS bounds the stack renderBacklog interpolates into every
     // later decide prompt, and appendItems is not the only way in: a
     // `handler:configure` payload assigns the list wholesale and BacklogWire
@@ -991,6 +1041,17 @@ export class HandlerEngine {
   private async handleEventInner(evt: HandlerEvent): Promise<void> {
     const s = this.sessions.get(evt.terminalId);
     if (!s) return; // unarmed session: Handler is per-session now
+
+    // The second read of the same predicate, and what actually bounds the
+    // revocation lag to the token's 3600s TTL — gating only at arm() would make
+    // it the armed session's lifetime instead. Suspend rather than return
+    // quietly: an armed row that silently never acts is worse than no row, and
+    // `suspended` (not a plain disarm) is what a host shutdown uses, so the goal
+    // and backlog survive for a re-arm once the subscription is back.
+    if (!this.entitledForHandler(evt.terminalId, "event")) {
+      this.disarm(evt.terminalId, { suspended: true });
+      return;
+    }
 
     if (isLifecycle(evt)) return this.handleLifecycle(evt, s);
 

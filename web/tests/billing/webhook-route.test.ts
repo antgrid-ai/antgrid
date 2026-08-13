@@ -20,11 +20,15 @@ beforeEach(async () => {
   await pg.truncate();
 });
 
-function activationBody(accountId: string, eventId = "evt_route_1"): string {
+function activationBody(
+  accountId: string,
+  eventId = "evt_route_1",
+  opts: { eventType?: string; quantity?: number } = {}
+): string {
   return JSON.stringify({
     event_id: eventId,
     notification_id: "ntf_1",
-    event_type: "subscription.activated",
+    event_type: opts.eventType ?? "subscription.activated",
     occurred_at: "2026-06-08T00:00:00Z",
     data: {
       id: "sub_route",
@@ -32,7 +36,20 @@ function activationBody(accountId: string, eventId = "evt_route_1"): string {
       customer_id: "ctm_route",
       custom_data: { accountId, planId: "pro_yearly" },
       current_billing_period: { starts_at: "2026-06-08T00:00:00Z", ends_at: "2027-06-08T00:00:00Z" },
+      ...(opts.quantity === undefined
+        ? {}
+        : { items: [{ status: "active", quantity: opts.quantity, price: { product_id: "pro_x" } }] }),
     },
+  });
+}
+
+type TestApp = { request: (path: string, init: RequestInit) => Response | Promise<Response> };
+
+async function post(app: TestApp, raw: string): Promise<Response> {
+  return app.request("/webhooks/paddle", {
+    method: "POST",
+    headers: { "content-type": "application/json", "paddle-signature": paddleSignature(raw, SECRET) },
+    body: raw,
   });
 }
 
@@ -72,6 +89,34 @@ describe("POST /webhooks/paddle", () => {
       body: raw,
     });
     expect(res2.status).toBe(200);
+    expect(await pg.db.subscription.count({ where: { accountId: account.id } })).toBe(1);
+  });
+
+  test("a portal seat change reaches the database", async () => {
+    const { app } = buildTestApp(pg.db, pg.url, {
+      envOverrides: testBillingEnv({ PADDLE_WEBHOOK_SECRET: SECRET }),
+    });
+    const user = await createTestUser(pg.db);
+    const account = await ensureProductAccount(pg.db, user.id);
+    await post(app, activationBody(account.id, "evt_seat_activate", { quantity: 3 }));
+
+    const raw = activationBody(account.id, "evt_seat_change", {
+      eventType: "subscription.updated",
+      quantity: 5,
+    });
+    const res = await post(app, raw);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, duplicate: false });
+    // The route cannot tell a silent no-op from a write, so assert the row.
+    const sub = await pg.db.subscription.findFirstOrThrow({
+      where: { providerSubscriptionId: "sub_route" },
+    });
+    expect(sub.seats).toBe(5);
+
+    // A byte-identical redelivery must not write again.
+    const replay = await post(app, raw);
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ ok: true, duplicate: true });
     expect(await pg.db.subscription.count({ where: { accountId: account.id } })).toBe(1);
   });
 

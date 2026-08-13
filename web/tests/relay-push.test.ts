@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { pushRevoke, pushExpire } from "../src/relay/push.js";
+import { pushRevoke, pushExpire, pushExpireAll } from "../src/relay/push.js";
 
 describe("relay push", () => {
   test("no-op when baseUrl unset", async () => {
@@ -33,6 +33,39 @@ describe("relay push", () => {
     await pushExpire({ baseUrl: "http://relay.local", secret: "s" }, "user-1", fetchImpl);
     expect(calls[0].url).toBe("http://relay.local/internal/expire");
     expect(calls[0].init.body).toBe('{"userId":"user-1"}');
+  });
+
+  test("pushExpireAll signs one expire per distinct user and no-ops on an empty set", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = (async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return new Response();
+    }) as any;
+    const cfg = { baseUrl: "http://relay.local", secret: "s" };
+
+    await pushExpireAll(cfg, [], fetchImpl);
+    expect(calls).toHaveLength(0);
+
+    // Owner and member sets overlap by construction — the owner is in both.
+    await pushExpireAll(cfg, ["user-1", "user-2", "user-1"], fetchImpl);
+    expect(calls.map((c) => JSON.parse(String(c.init.body)).userId)).toEqual(["user-1", "user-2"]);
+  });
+
+  test("one member's unreachable relay does not stop the rest of the fan-out", async () => {
+    const seen: string[] = [];
+    const fetchImpl = (async (_url: string, init: RequestInit) => {
+      const { userId } = JSON.parse(String(init.body));
+      if (userId === "user-1") throw new Error("network");
+      seen.push(userId);
+      return new Response();
+    }) as any;
+
+    await pushExpireAll(
+      { baseUrl: "http://relay.local", secret: "s" },
+      ["user-1", "user-2"],
+      fetchImpl
+    );
+    expect(seen).toEqual(["user-2"]);
   });
 
   test("swallows fetch errors", async () => {

@@ -109,10 +109,10 @@ Future<void> openUpgradeInBrowser(
 }
 
 /// Non-null when device provisioning was rejected by either cap (HTTP 402
-/// `DEVICE_CAP` or `WORKER_CAP`). Carries the limit + already-registered
+/// `APP_DEVICE_CAP` or `WORKER_CAP`). Carries the limit + already-registered
 /// devices so the remediation UI can offer to revoke one, and
 /// [DeviceCapInfo.kind] so it renders the right remedy: freeing a slot is the
-/// ONLY fix for the fair-use device cap, while the worker cap is the paid axis.
+/// ONLY fix for the app-device ceiling, while the worker cap is the paid axis.
 /// Cleared on success, sign-out, and dialog dismissal.
 final deviceCapProvider =
     NotifierProvider<ValueController<DeviceCapInfo?>, DeviceCapInfo?>(

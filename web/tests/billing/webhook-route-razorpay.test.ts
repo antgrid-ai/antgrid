@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
-import { createHmac } from "node:crypto";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
+import { razorpaySignature, razorpaySubscriptionBody } from "../helpers/razorpay-sig.js";
 import { buildTestApp } from "../helpers/app.js";
 import { createTestUser } from "../helpers/fixtures.js";
 import { ensureProductAccount } from "../../src/models/product-account.js";
@@ -20,25 +20,22 @@ beforeEach(async () => {
   await pg.truncate();
 });
 
-function razorpaySignature(rawBody: string, secret: string): string {
-  return createHmac("sha256", secret).update(rawBody).digest("hex");
+function subscriptionBody(
+  accountId: string,
+  opts: { event?: string; quantity?: number } = {}
+): string {
+  return razorpaySubscriptionBody(opts.event ?? "subscription.activated", {
+    id: "sub_route",
+    customer_id: "cust_route",
+    status: "active",
+    notes: { accountId, planId: "pro_yearly" },
+    current_end: 1893456000,
+    ...(opts.quantity === undefined ? {} : { quantity: opts.quantity }),
+  });
 }
 
 function activationBody(accountId: string): string {
-  return JSON.stringify({
-    event: "subscription.activated",
-    payload: {
-      subscription: {
-        entity: {
-          id: "sub_route",
-          customer_id: "cust_route",
-          status: "active",
-          notes: { accountId, planId: "pro_yearly" },
-          current_end: 1893456000,
-        },
-      },
-    },
-  });
+  return subscriptionBody(accountId);
 }
 
 describe("POST /webhooks/razorpay", () => {
@@ -76,6 +73,39 @@ describe("POST /webhooks/razorpay", () => {
     await app.request("/webhooks/razorpay", { method: "POST", headers, body: raw });
     const res2 = await app.request("/webhooks/razorpay", { method: "POST", headers, body: raw });
     expect(res2.status).toBe(200);
+    expect(await pg.db.subscription.count({ where: { accountId: account.id } })).toBe(1);
+  });
+
+  test("subscription.updated reaches the reducer and moves the seat count", async () => {
+    const { app } = buildTestApp(pg.db, pg.url, {
+      envOverrides: testBillingEnv({ RAZORPAY_WEBHOOK_SECRET: SECRET }),
+    });
+    const user = await createTestUser(pg.db);
+    const account = await ensureProductAccount(pg.db, user.id);
+
+    const post = async (raw: string) =>
+      app.request("/webhooks/razorpay", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-razorpay-signature": razorpaySignature(raw, SECRET),
+        },
+        body: raw,
+      });
+
+    await post(subscriptionBody(account.id, { quantity: 2 }));
+
+    const raw = subscriptionBody(account.id, { event: "subscription.updated", quantity: 6 });
+    const res = await post(raw);
+    expect(res.status).toBe(200);
+    // Before the subscription.updated branch existed this short-circuited to
+    // {ok:true, ignored:true} without ever reaching the reducer.
+    expect(await res.json()).toMatchObject({ ok: true, duplicate: false });
+
+    const sub = await pg.db.subscription.findFirstOrThrow({
+      where: { providerSubscriptionId: "sub_route" },
+    });
+    expect(sub.seats).toBe(6);
     expect(await pg.db.subscription.count({ where: { accountId: account.id } })).toBe(1);
   });
 

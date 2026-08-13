@@ -28,6 +28,8 @@ const APP_TABLES = [
   "webhook_events",
   "billing_customers",
   "subscriptions",
+  "account_members",
+  "account_invites",
   "product_accounts",
   "pending_sign_in",
   "analytic_event",

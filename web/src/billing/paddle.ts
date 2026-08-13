@@ -1,7 +1,9 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Environment, Paddle, type Subscription } from "@paddle/paddle-node-sdk";
+import { z } from "zod";
 import { isPlanId, type PlanId } from "./plans.js";
 import type { CheckoutEnv } from "./checkout.js";
+import { readSeatQuantity } from "./events.js";
 import type { NormalizedEvent, NormalizedEventType, PaymentProvider } from "./events.js";
 
 /** Paddle webhook signatures older than this are rejected (replay protection). */
@@ -62,6 +64,65 @@ export async function paddleResumePendingCancellation(
   subscriptionId: string
 ): Promise<Subscription> {
   return paddle.subscriptions.update(subscriptionId, { scheduledChange: null });
+}
+
+/**
+ * Rebill the subscription for `quantity` seats.
+ *
+ * The prices are read off the live subscription and resubmitted, never taken
+ * from the catalog: `buildPaddleTransactionItems` clones a non-catalog price
+ * with `trialPeriod: null` for `pro_yearly`, so the catalog id is a DIFFERENT
+ * price for exactly the plan people buy — sending it would move the customer
+ * onto a trial period and whatever amount the catalog currently holds.
+ *
+ * `items` replaces the whole line set, so a subscription carrying more than one
+ * live line has no unambiguous answer to which one the seats are on; the seat
+ * reader on the webhook side refuses the same shape for the same reason.
+ * `inactive` lines are already-removed ones and are not resubmitted.
+ *
+ * The proration mode is stated rather than defaulted: Paddle's default is an
+ * account-level setting, so leaving it off makes what the customer is charged
+ * depend on a dashboard toggle nobody here can see.
+ */
+export async function paddleUpdateSubscriptionQuantity(
+  paddle: Paddle,
+  subscriptionId: string,
+  quantity: number
+): Promise<Subscription> {
+  const current = await paddle.subscriptions.get(subscriptionId);
+  const live = (current.items ?? []).filter((item) => item.status !== "inactive");
+  if (live.length !== 1) {
+    throw new Error(`PADDLE_AMBIGUOUS_SUBSCRIPTION_ITEMS: ${live.length} live items`);
+  }
+  const priceId = live[0]?.price?.id;
+  if (!priceId) throw new Error("PADDLE_SUBSCRIPTION_ITEM_HAS_NO_PRICE");
+
+  return paddle.subscriptions.update(subscriptionId, {
+    items: [{ priceId, quantity }],
+    prorationBillingMode: "prorated_immediately",
+  });
+}
+
+/**
+ * Seats Paddle is billing on this subscription right now, or null when it
+ * reports none this side can read.
+ *
+ * The read half of `paddleUpdateSubscriptionQuantity`, and it asks the same
+ * question of the same field — `items[].quantity` on the one live line — because
+ * a reader that disagreed with the writer would report drift the moment we
+ * ourselves wrote the count.
+ *
+ * Null where the write twin throws: this runs over every subscription in a
+ * sweep, and a shape nothing can interpret is a subscription to leave alone, not
+ * a run to abort. An unreadable quantity is emphatically NOT zero — writing one
+ * would strand a whole team on a number no gateway ever billed.
+ */
+export async function paddleReadSubscriptionQuantity(
+  paddle: Paddle,
+  subscriptionId: string
+): Promise<number | null> {
+  const current = await paddle.subscriptions.get(subscriptionId);
+  return readPaddleQuantity(current.items) ?? null;
 }
 
 export function paddlePeriodEnd(subscription: Subscription): Date | null {
@@ -143,11 +204,56 @@ type PaddlePayload = {
     currentBillingPeriod?: PaddleBillingPeriod;
     billing_period?: PaddleBillingPeriod;
     billingPeriod?: PaddleBillingPeriod;
+    items?: unknown;
     details?: {
       totals?: { grand_total?: string; grandTotal?: string };
     };
   };
 };
+
+/** Only the two fields a seat read may touch. `quantity` stays `unknown` so the
+ *  seat parser, not this schema, decides what counts as a seat count. */
+const PaddleItemsSchema = z.array(
+  z.object({
+    status: z.string().optional(),
+    quantity: z.unknown().optional(),
+  })
+);
+
+/**
+ * Seats billed on this subscription, or undefined when the line set says nothing
+ * about them.
+ *
+ * Seats live on `items[].quantity`. Never on `price.quantity` — that is an
+ * allowed `{minimum, maximum}` range which reads as a plausible small integer
+ * and never moves when seats do. `inactive` items are removed lines that Paddle
+ * still lists.
+ *
+ * `buildPaddleTransactionItems` builds exactly one billable line per
+ * subscription, so two live lines means the payload is not one of ours and
+ * nothing here can tell which line carries the seats. Summing them would count
+ * removed lines and proration entries. Report nothing rather than guess.
+ *
+ * Takes the lines rather than a payload so the webhook and the API read share
+ * it: the SDK's `Subscription` entity is camelCase throughout, but `items`,
+ * `status` and `quantity` are spelled the same on both, and one rule is the only
+ * way a fetched count and a pushed one can agree.
+ */
+function readPaddleQuantity(items: unknown): number | undefined {
+  const parsed = PaddleItemsSchema.safeParse(items);
+  if (!parsed.success) return undefined;
+
+  const live = parsed.data.filter((item) => item.status !== "inactive");
+  if (live.length !== 1) {
+    if (live.length > 1) {
+      console.warn("[billing] paddle payload has several live items; seat count not read", {
+        liveItems: live.length,
+      });
+    }
+    return undefined;
+  }
+  return readSeatQuantity(live[0]?.quantity);
+}
 
 function readSubscriptionId(data: PaddlePayload["data"]): string | undefined {
   return data.subscription_id ?? data.subscriptionId;
@@ -220,6 +326,7 @@ export class PaddleProvider implements PaymentProvider {
       accountId: cd?.accountId ?? "",
       planId: cd?.planId ?? ("pro_yearly" as PlanId),
       customerId: customerId ?? "",
+      quantity: readPaddleQuantity(data.items),
     };
 
     if (event.event_type.startsWith("subscription.")) {
@@ -239,10 +346,6 @@ export class PaddleProvider implements PaymentProvider {
       const subscriptionId = readSubscriptionId(data);
       const periodEnd = readPeriodEnd(data);
       const totalCents = readTransactionTotalCents(data);
-
-      if (cd.planId === "pro_lifetime") {
-        return { ...base, type: "activated", providerTransactionId: data.id };
-      }
 
       // Trial checkout completes as $0 transaction.completed (subscription_id + billing_period).
       if (cd.planId === "trial") {

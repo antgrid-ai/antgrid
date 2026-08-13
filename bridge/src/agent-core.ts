@@ -42,6 +42,7 @@ import { resolveStructuredTitle } from "./agents/title-dispatch";
 import { generateSessionTitle } from "./agents/title-generate";
 import { agentSpec, BY_HOOK_NAME, handlerObservable } from "./agents/registry";
 import { HandlerEngine, type HandlerEvent } from "./handler/engine";
+import { createEntitlementReader, type TierClaimSource } from "./entitlement";
 import { classifyTurnEndError } from "./handler/lifecycle-classify";
 import { createDispatchAdapter, createPtyAdapter } from "./handler/session-adapter";
 import { createStructuredAdapter } from "./handler/structured-adapter";
@@ -251,6 +252,14 @@ export interface BuildAgentCoreOptions {
    *  agent with no host omits it and the gate reads FAIL-CLOSED, so an
    *  unwired core can never be driven by a phone. */
   remoteAccessEnabled?: () => boolean;
+  /** Live reading of this machine's device credential, for the entitlement gate
+   *  on paid capabilities (see entitlement.ts). Host-supplied. Absent means a
+   *  runtime that never had a token — a bare agent, a signed-out desktop, a
+   *  test — and reads as UNWIRED, which is allowed: the gate must not brick
+   *  local/offline work that no plan charges for. A credentialed machine whose
+   *  claim will not read is the fail-closed case, and it is expressed inside
+   *  {@link TierClaim}, not by this option's absence. */
+  tierClaim?: TierClaimSource;
   /** Fired when a turn-start hook pings the api-server (`POST /turn-start`), so
    *  the owning ProjectCore can reset its control-plane work status to "working"
    *  on a fresh turn. Bridge-internal — never surfaces to the app.
@@ -291,7 +300,7 @@ export interface BuildAgentCoreOptions {
   /** Relay base URL of the machine socket this core attaches to. Host-supplied
    *  in remote mode: only a standalone agent with an explicit `relayUrl:` in its
    *  antgrid.yaml can learn it from config, so without this a host-spawned
-   *  remote core has no relay coordinate to put in its banner/connect URI. */
+   *  remote core has no relay coordinate to report. */
   relayUrl?: string;
   /** Test-only release-gate override. Production callers omit this and use the
    * central capability constant. */
@@ -465,13 +474,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       version: VERSION,
       relayUrl: relayBase,
       identity,
-      mode: "agent",
       terminalCount: (buildAgentTerminalSpec() ? 1 : 0) + getServices().length || 1,
       commandCount: config.commands?.length,
       proxyCount: config.ports?.length,
       projectPath: project.path,
       projectId: project.id,
-      ed25519PublicKey: identity.ed25519PublicKey,
     }).catch((err) => log.warn("Banner display failed: %s", err));
   }
 
@@ -1264,6 +1271,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     projectId: project.id,
     projectPath: (terminalId) => checkoutPathFor(terminalId),
     tool: toolFor,
+    // Handler is a paid capability. The predicate is built once and reads the
+    // credential live on every call; the registry it consults is the single
+    // place the queued capabilities (devcontainer, …) get added.
+    entitlement: createEntitlementReader(opts.tierClaim),
     observable: (terminalId) => handlerObservable(
       agentKeyFor(terminalId),
       sessions?.get(terminalId)?.mode === "chat" ? "chat" : "terminal",

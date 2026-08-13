@@ -8,14 +8,9 @@ import {
   ensureProductAccount,
   ensureProductAccountCountry,
   isBillingProviderLocked,
-  lockBillingProvider,
   previewBillingProvider,
   updateProductAccountCountry,
 } from "../models/product-account.js";
-import {
-  findBillingCustomer,
-  upsertBillingCustomer,
-} from "../models/billing-customer.js";
 import { listActivePlans } from "../models/plan.js";
 import {
   displayPriceCents,
@@ -24,26 +19,24 @@ import {
   PRICING,
   yearlyOfferActive,
   type PlanId,
-  type ProviderId,
 } from "../billing/plans.js";
 import { detectCountryFromIp } from "../billing/geo.js";
 import type { ClientIpResolver } from "../util/client-ip.js";
-import {
-  createCheckoutSession,
-  isCheckoutConfigError,
-  verifyPayment,
-} from "../billing/checkout.js";
+import { MAX_CHECKOUT_SEATS } from "../billing/checkout.js";
+import { startCheckout } from "../billing/start-checkout.js";
 import {
   cancelRecurringSubscription,
   CancelSubscriptionError,
   resumeRecurringSubscription,
   ResumeSubscriptionError,
 } from "../billing/cancel-subscription.js";
+import { updateSubscriptionSeats, UpdateSeatsError } from "../billing/update-seats.js";
 import {
   activeSubscriptionForUser,
   provisionProductAccountForUser,
 } from "../models/subscription.js";
 import { PLAN_SLUG_FREE } from "../models/plan.js";
+import { isBillingAccountOwner } from "../models/account-member.js";
 import type { RelayPushConfig } from "../relay/push.js";
 
 const ConfirmCountryBody = z.object({
@@ -52,28 +45,22 @@ const ConfirmCountryBody = z.object({
 
 const CheckoutSessionBody = z.object({
   planId: z.string(),
-  currency: z.string().length(3).optional(),
   country: z.string().length(2).optional(),
+  // Strict number, not `z.coerce.number()`: coercion turns `true` into 1 and
+  // `""` into 0, so a malformed body would buy a seat count nobody chose.
+  // Absent is the only permitted default, and it is one seat.
+  seats: z.number().int().min(1).max(MAX_CHECKOUT_SEATS).optional(),
 });
 
-const VerifyPaymentBody = z.discriminatedUnion("provider", [
-  z.object({
-    provider: z.literal("razorpay"),
-    orderId: z.string().min(1),
-    paymentId: z.string().min(1),
-    signature: z.string().min(1),
-  }),
-  z.object({
-    provider: z.literal("paddle"),
-    transactionId: z.string().min(1),
-  }),
-]);
+/** Required and never defaulted, unlike checkout's: a resize request whose seat
+ *  count fell out of the body has no sensible reading, and treating it as one
+ *  seat would cancel a team. Strict for the same reason as above. */
+const SeatsBody = z.object({
+  seats: z.number().int().min(1).max(MAX_CHECKOUT_SEATS),
+});
 
-
-function razorpayCallbackRedirect(c: import("hono").Context, planId: string, ok: boolean): Response {
-  const target = ok
-    ? "/dashboard?purchase=success"
-    : `/checkout?planId=${encodeURIComponent(planId)}&payment=failed`;
+function razorpayCallbackRedirect(c: import("hono").Context): Response {
+  const target = "/dashboard?purchase=success";
   // 3DS completes in a Razorpay popup; hand off to the opener when possible.
   const html = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Payment</title></head><body><script>
 try {
@@ -99,39 +86,45 @@ export function billingRoutes(deps: {
 }) {
   const r = new Hono<{ Variables: AuthVars }>();
 
-  /** Razorpay redirect-mode checkout POSTs here (no session cookie). */
-  r.post("/billing/razorpay/callback", async (c) => {
-    const planId = c.req.query("planId") ?? "pro_lifetime";
-    const body = await c.req.parseBody();
-    const orderId = body.razorpay_order_id;
-    const paymentId = body.razorpay_payment_id;
-    const signature = body.razorpay_signature;
-
-    if (
-      typeof orderId === "string" &&
-      typeof paymentId === "string" &&
-      typeof signature === "string" &&
-      orderId.length > 0 &&
-      paymentId.length > 0 &&
-      signature.length > 0
-    ) {
-      try {
-        await verifyPayment(deps.db, deps.relay, deps.env, {
-          provider: "razorpay",
-          orderId,
-          paymentId,
-          signature,
-        });
-      } catch {
-        return razorpayCallbackRedirect(c, planId, false);
-      }
-    }
-
-    // Subscriptions provision via webhook; redirect is optimistic after auth charge.
-    return razorpayCallbackRedirect(c, planId, true);
-  });
+  /** Razorpay redirect-mode checkout POSTs here (no session cookie).
+   *  Subscriptions provision via webhook, so the redirect is optimistic. */
+  r.post("/billing/razorpay/callback", async (c) => razorpayCallbackRedirect(c));
 
   r.use("/billing/*", requireUser({ auth: deps.auth }));
+
+  /**
+   * Owner-only routes, listed rather than gated per handler so the set is
+   * readable in one place — `requireUser` sets no role and there is no session
+   * field carrying one, so each of these costs a DB read and nothing fails
+   * loudly when one is forgotten.
+   *
+   * The mutations they perform are account-wide, and two are irreversible:
+   * `lockBillingProvider` early-returns on an existing value, so a member merely
+   * reaching checkout would pin the whole team's gateway and tax treatment to
+   * their own country for good. Cancel and resume are the loud ones; the country
+   * and provider writes are the ones that cannot be undone.
+   *
+   * Every handler named here must be registered BELOW this loop. Hono runs a
+   * path-scoped `use` only for handlers registered after it, so one placed above
+   * keeps its entry in this list, reads as gated, and is not.
+   */
+  const OWNER_ONLY_PATHS = [
+    "/billing/checkout-intent",
+    "/billing/confirm-country",
+    "/billing/checkout",
+    "/billing/checkout-session",
+    "/billing/cancel-subscription",
+    "/billing/resume-subscription",
+    "/billing/seats",
+  ];
+  for (const path of OWNER_ONLY_PATHS) {
+    r.use(path, async (c, next) => {
+      if (!(await isBillingAccountOwner(deps.db, c.get("userId")))) {
+        return c.json({ error: "NOT_ACCOUNT_OWNER" }, 403);
+      }
+      await next();
+    });
+  }
 
   r.get("/billing/checkout-intent", async (c) => {
     const userId = c.get("userId");
@@ -169,7 +162,7 @@ export function billingRoutes(deps: {
             tier: p.tier,
             worker_limit: p.workerLimit,
             session_limit: p.workerLimit,
-            device_limit: p.deviceLimit,
+            app_device_limit: p.appDeviceLimit,
             recurring: p.recurring,
             trial: p.trial,
             list_price_cents: null,
@@ -196,7 +189,7 @@ export function billingRoutes(deps: {
           // TODO(billing): drop this and every other `session_limit` mirror in
           // web/src/routes once no pre-rename app build is still in the field.
           session_limit: p.workerLimit,
-          device_limit: p.deviceLimit,
+          app_device_limit: p.appDeviceLimit,
           recurring: p.recurring,
           trial: p.trial,
           list_price_cents: pricing.listPriceCents,
@@ -252,91 +245,22 @@ export function billingRoutes(deps: {
       return c.json({ error: "BAD_REQUEST" }, 400);
     }
 
-    const userId = c.get("userId");
-    const { id: accountId } = await provisionProductAccountForUser(deps.db, userId);
-    let account = await ensureProductAccount(deps.db, userId);
-    const detected =
-      account.country ??
-      (await detectCountryFromIp(deps.clientIp(c), deps.env.IPINFO_TOKEN));
-    if (!account.country && detected) {
-      account = await ensureProductAccountCountry(deps.db, accountId, detected, "ipinfo");
-    }
-    const country = (parsed.data.country ?? account.country ?? detected)?.toUpperCase();
-    if (!country) return c.json({ error: "COUNTRY_REQUIRED" }, 400);
-
-    const locked = isBillingProviderLocked(account);
-    let provider: ProviderId;
-    let billingCountry: string;
-
-    if (locked) {
-      billingCountry = country;
-      provider = account.billingProvider as ProviderId;
-      if (parsed.data.country || country !== account.country) {
-        await updateProductAccountCountry(deps.db, accountId, billingCountry, "manual");
-      }
-    } else {
-      if (!account.country || parsed.data.country) {
-        await updateProductAccountCountry(deps.db, accountId, country, "manual");
-      }
-      billingCountry = country;
-      provider = await lockBillingProvider(deps.db, accountId, country);
-    }
-
-    const billingCustomer = await findBillingCustomer(deps.db, accountId, provider);
-    const user = await deps.db.user.findUnique({
-      where: { id: userId },
-      select: { email: true },
+    const result = await startCheckout(deps.db, deps.env, {
+      userId: c.get("userId"),
+      planId: parsed.data.planId,
+      ...(parsed.data.country ? { country: parsed.data.country } : {}),
+      seats: parsed.data.seats ?? 1,
+      clientIp: deps.clientIp(c),
+      origin: new URL(c.req.url).origin,
     });
-
-    const origin = new URL(c.req.url).origin;
-    const razorpayCallbackUrl = `${origin}/billing/razorpay/callback?planId=${encodeURIComponent(parsed.data.planId)}`;
-
-    try {
-      const session = await createCheckoutSession(deps.env, {
-        planId: parsed.data.planId,
-        accountId,
-        country: billingCountry,
-        provider,
-        currency: parsed.data.currency,
-        email: user?.email,
-        providerCustomerId: billingCustomer?.providerCustomerId,
-        razorpayCallbackUrl,
-        // Persist the Razorpay customer the instant it's created — before the
-        // order/subscription call that can fail and orphan it (no fetch-by-email
-        // API to recover it cheaply). Sole persistence site: the reused-customer
-        // path already has the id in the DB, so no post-success upsert is needed.
-        onCustomerCreated: async (providerCustomerId) => {
-          await upsertBillingCustomer(deps.db, {
-            accountId,
-            provider: "razorpay",
-            providerCustomerId,
-          });
-        },
-      });
-      return c.json(session);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "checkout failed";
-      if (isCheckoutConfigError(msg)) return c.json({ error: msg }, 503);
-      throw e; // unexpected → central onError logs the stack and returns 500
-    }
-  });
-
-  /** Single post-payment verify — Razorpay lifetime orders; Paddle is webhook-driven. */
-  r.post("/billing/verify-payment", async (c) => {
-    const parsed = VerifyPaymentBody.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) return c.json({ error: "BAD_REQUEST" }, 400);
-
-    try {
-      const result = await verifyPayment(deps.db, deps.relay, deps.env, parsed.data);
-      return c.json(result);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "verify failed";
-      if (msg === "RAZORPAY_NOT_CONFIGURED") return c.json({ error: msg }, 503);
-      if (msg === "INVALID_SIGNATURE" || msg === "INVALID_PAYMENT") {
-        return c.json({ error: msg }, 400);
-      }
-      throw e; // unexpected → central onError logs the stack and returns 500
-    }
+    if (result.ok) return c.json(result.session);
+    return c.json(
+      {
+        error: result.error,
+        ...(result.error === "SEATS_ABOVE_PLAN_MAX" ? { max_seats: result.maxSeats } : {}),
+      },
+      result.status
+    );
   });
 
   /** Cancel recurring subscription at the gateway; entitlement updates via webhook. */
@@ -397,6 +321,56 @@ export function billingRoutes(deps: {
               ? 503
               : 502;
         return c.json({ error: e.code, message: e.message }, status);
+      }
+      throw e;
+    }
+  });
+
+  /** Resize the seats the account is billed for. Registered below the
+   *  OWNER_ONLY_PATHS loop — see the note there; above it the gate is inert. */
+  r.post("/billing/seats", async (c) => {
+    const parsed = SeatsBody.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "BAD_REQUEST" }, 400);
+
+    const userId = c.get("userId");
+    await provisionProductAccountForUser(deps.db, userId);
+    const sub = await activeSubscriptionForUser(deps.db, userId);
+    if (!sub) return c.json({ error: "NO_SUBSCRIPTION" }, 404);
+
+    const plan = await deps.db.plan.findUnique({ where: { id: sub.planId } });
+    if (!plan) return c.json({ error: "NO_SUBSCRIPTION" }, 404);
+    if (plan.slug === PLAN_SLUG_FREE) return c.json({ error: "NOT_RECURRING" }, 400);
+    if (!plan.recurring) return c.json({ error: "NOT_RECURRING" }, 400);
+
+    try {
+      const result = await updateSubscriptionSeats(deps.db, deps.env, {
+        accountId: sub.accountId,
+        subscription: { ...sub, plan },
+        seats: parsed.data.seats,
+      });
+      return c.json({ ok: true, ...result });
+    } catch (e) {
+      if (e instanceof UpdateSeatsError) {
+        const status =
+          e.code === "SEATS_BELOW_HEADCOUNT"
+            ? 409
+            : e.code === "SEATS_ABOVE_PLAN_MAX" ||
+                e.code === "NOT_RECURRING" ||
+                e.code === "NO_ACTIVE_SUBSCRIPTION" ||
+                e.code === "NO_PROVIDER_SUBSCRIPTION"
+              ? 400
+              : e.code === "PADDLE_NOT_CONFIGURED" || e.code === "RAZORPAY_NOT_CONFIGURED"
+                ? 503
+                : 502;
+        return c.json(
+          {
+            error: e.code,
+            message: e.message,
+            ...(e.code === "SEATS_BELOW_HEADCOUNT" ? { headcount: e.limit } : {}),
+            ...(e.code === "SEATS_ABOVE_PLAN_MAX" ? { max_seats: e.limit } : {}),
+          },
+          status
+        );
       }
       throw e;
     }

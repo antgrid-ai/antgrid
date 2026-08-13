@@ -49,8 +49,6 @@
 		</dict>
 		<key>UIApplicationSupportsIndirectInputEvents</key>
 		<true/>
-		<key>NSCameraUsageDescription</key>
-		<string>Antgrid needs camera access to scan QR codes for pairing.</string>
 		<key>UILaunchStoryboardName</key>
 		<string>LaunchScreen</string>
 		<key>UIMainStoryboardFile</key>

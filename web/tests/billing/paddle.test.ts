@@ -72,7 +72,9 @@ describe("PaddleProvider.verifyWebhook", () => {
     });
   });
 
-  test("transaction.completed for lifetime", async () => {
+  test("transaction.completed for a retired plan normalizes to nothing", async () => {
+    // There is no one-time-payment branch left: a transaction with no
+    // subscription_id has no surviving plan it could activate.
     const raw = body(
       "transaction.completed",
       {
@@ -82,12 +84,7 @@ describe("PaddleProvider.verifyWebhook", () => {
       },
       "evt_ltd"
     );
-    const ev = await provider.verifyWebhook(raw, paddleSignature(raw, SECRET));
-    expect(ev).toMatchObject({
-      type: "activated",
-      planId: "pro_lifetime",
-      providerTransactionId: "txn_5",
-    });
+    expect(await provider.verifyWebhook(raw, paddleSignature(raw, SECRET))).toBeNull();
   });
 
   test("transaction.completed for trial start ($0) activates with subscription", async () => {
@@ -163,6 +160,111 @@ describe("PaddleProvider.verifyWebhook", () => {
       planId: "pro_yearly",
       providerSubscriptionId: "sub_yearly",
     });
+  });
+
+  test("reads the seat count from items[].quantity on a subscription payload", async () => {
+    const raw = body("subscription.updated", {
+      id: "sub_77",
+      status: "active",
+      customer_id: "ctm_9",
+      custom_data: { accountId: "acc-1", planId: "pro_yearly" },
+      items: [{ status: "active", quantity: 5, price: { id: "pri_x", product_id: "pro_x" } }],
+    });
+    const ev = await provider.verifyWebhook(raw, paddleSignature(raw, SECRET));
+    expect(ev).toMatchObject({ type: "activated", providerSubscriptionId: "sub_77", quantity: 5 });
+  });
+
+  test("reads the seat count from a transaction payload too", async () => {
+    const raw = body(
+      "transaction.completed",
+      {
+        id: "txn_seats",
+        customer_id: "ctm_9",
+        subscription_id: "sub_yearly",
+        custom_data: { accountId: "acc-1", planId: "pro_yearly" },
+        items: [{ quantity: 3, price: { id: "pri_x", product_id: "pro_x" } }],
+        details: { totals: { grand_total: "29700" } },
+      },
+      "evt_txn_seats"
+    );
+    const ev = await provider.verifyWebhook(raw, paddleSignature(raw, SECRET));
+    expect(ev).toMatchObject({ type: "activated", quantity: 3 });
+  });
+
+  test("a cloned non-catalog price still yields its quantity", async () => {
+    // pro_yearly checks out on a cloned inline price, so the item carries no
+    // catalog price id at all — matching on one would read nothing for exactly
+    // the plan that is sold.
+    const raw = body("subscription.updated", {
+      id: "sub_clone",
+      status: "active",
+      customer_id: "ctm_9",
+      custom_data: { accountId: "acc-1", planId: "pro_yearly" },
+      items: [
+        {
+          status: "active",
+          quantity: 8,
+          price: { product_id: "pro_x", description: "Pro Yearly", unit_price: { amount: "9900" } },
+        },
+      ],
+    });
+    const ev = await provider.verifyWebhook(raw, paddleSignature(raw, SECRET));
+    expect(ev?.quantity).toBe(8);
+  });
+
+  test("an inactive item is skipped", async () => {
+    const raw = body("subscription.updated", {
+      id: "sub_77",
+      status: "active",
+      customer_id: "ctm_9",
+      custom_data: { accountId: "acc-1", planId: "pro_yearly" },
+      items: [
+        { status: "inactive", quantity: 9, price: { product_id: "pro_old" } },
+        { status: "active", quantity: 2, price: { product_id: "pro_x" } },
+      ],
+    });
+    const ev = await provider.verifyWebhook(raw, paddleSignature(raw, SECRET));
+    expect(ev?.quantity).toBe(2);
+  });
+
+  test("price.quantity is an allowed range, never the seat count", async () => {
+    const raw = body("subscription.updated", {
+      id: "sub_77",
+      status: "active",
+      customer_id: "ctm_9",
+      custom_data: { accountId: "acc-1", planId: "pro_yearly" },
+      items: [{ status: "active", price: { product_id: "pro_x", quantity: { minimum: 1, maximum: 100 } } }],
+    });
+    const ev = await provider.verifyWebhook(raw, paddleSignature(raw, SECRET));
+    expect(ev).not.toBeNull();
+    expect(ev?.quantity).toBeUndefined();
+  });
+
+  test("a payload with no items yields no quantity rather than one seat", async () => {
+    const raw = body("subscription.updated", {
+      id: "sub_77",
+      status: "active",
+      customer_id: "ctm_9",
+      custom_data: { accountId: "acc-1", planId: "pro_yearly" },
+    });
+    const ev = await provider.verifyWebhook(raw, paddleSignature(raw, SECRET));
+    expect(ev).not.toBeNull();
+    expect(ev?.quantity).toBeUndefined();
+  });
+
+  test("several live items are ambiguous, so no seat count is reported", async () => {
+    const raw = body("subscription.updated", {
+      id: "sub_77",
+      status: "active",
+      customer_id: "ctm_9",
+      custom_data: { accountId: "acc-1", planId: "pro_yearly" },
+      items: [
+        { status: "active", quantity: 4, price: { product_id: "pro_x" } },
+        { status: "trialing", quantity: 1, price: { product_id: "pro_y" } },
+      ],
+    });
+    const ev = await provider.verifyWebhook(raw, paddleSignature(raw, SECRET));
+    expect(ev?.quantity).toBeUndefined();
   });
 
   test("ignores unrelated events", async () => {

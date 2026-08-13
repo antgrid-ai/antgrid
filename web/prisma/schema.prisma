@@ -18,38 +18,128 @@ datasource db {
 // ---------- Product billing (separate from Better-Auth account) ----------
 
 model ProductAccount {
-  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId          String   @unique @map("user_id")
-  country         String?  @db.Char(2)
-  countrySource   String?  @map("country_source")
-  billingProvider String?  @map("billing_provider")
-  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String    @unique @map("user_id")
+  country         String?   @db.Char(2)
+  countrySource   String?   @map("country_source")
+  billingProvider String?   @map("billing_provider")
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   deletedAt       DateTime? @map("deleted_at") @db.Timestamptz(6)
 
   user             User              @relation("UserOwnedAccount", fields: [userId], references: [id], onDelete: Cascade)
-  billingUser      User?             @relation("UserBillingAccount")
+  billingUsers     User[]            @relation("UserBillingAccount")
+  members          AccountMember[]
+  invites          AccountInvite[]
   subscriptions    Subscription[]
   billingCustomers BillingCustomer[]
 
   @@map("product_accounts")
 }
 
+/// Who is on an account, and in what capacity. Membership never mutates the
+/// bill: removing a member frees a seat, it never lowers the invoice.
+model AccountMember {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId String    @map("account_id") @db.Uuid
+  userId    String    @map("user_id")
+  /// owner | member
+  role      String
+  /// active | left | removed
+  status    String
+  joinedAt  DateTime  @default(now()) @map("joined_at") @db.Timestamptz(6)
+  endedAt   DateTime? @map("ended_at") @db.Timestamptz(6)
+
+  account ProductAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  user    User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, userId], map: "account_members_account_user_key")
+  // `account_members_one_active_per_user_idx` is a PARTIAL unique index
+  // (WHERE status = 'active'), defined via raw SQL in the account_members
+  // migration. Prisma cannot model partial indexes and is blind to them on
+  // introspection — declaring a plain `@@index` here makes every `migrate dev`
+  // try to CREATE a conflicting index. Same convention as devices_user_active_idx.
+  @@map("account_members")
+}
+
+/// A promise of a seat that nobody occupies yet. Deliberately not an
+/// `account_members` row: a pending one would count against the seat holders
+/// and trip the one-active-membership index, so the create-time seat math adds
+/// the two counts instead.
+model AccountInvite {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId  String    @map("account_id") @db.Uuid
+  /// Citext, matching `user.email` — the invite must be case-insensitively the
+  /// same address the invitee signs in as.
+  email      String    @db.Citext
+  /// owner | member
+  role       String
+  /// pending | accepted | revoked | expired
+  status     String
+  /// HMAC of the token that travels in the invite URL. Plain token is never stored.
+  tokenHash  Bytes     @map("token_hash")
+  createdBy  String    @map("created_by")
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(6)
+  /// Set when the invite left `pending`; `status` says which terminal state.
+  resolvedAt DateTime? @map("resolved_at") @db.Timestamptz(6)
+  /// Delivery outcome reported by the ZeptoMail webhook, keyed by the
+  /// `invite:<id>` client_reference. null until an event arrives; only a hard
+  /// bounce is recorded (there is no delivered event).
+  deliveryStatus String? @map("delivery_status")
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  account ProductAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  creator User           @relation(fields: [createdBy], references: [id], onDelete: Cascade)
+
+  // `account_invites_one_pending_per_email_idx` is a PARTIAL unique index
+  // (WHERE status = 'pending'), defined via raw SQL in the account_invites
+  // migration. Prisma cannot model partial indexes and is blind to them on
+  // introspection — declaring a plain `@@unique` here makes every `migrate dev`
+  // try to CREATE a conflicting index. Same convention as
+  // account_members_one_active_per_user_idx.
+  @@index([accountId, status], map: "account_invites_account_status_idx")
+  @@index([email], map: "account_invites_email_idx")
+  @@index([expiresAt], map: "account_invites_expires_idx")
+  @@map("account_invites")
+}
+
 model Plan {
-  id           String  @id @db.Uuid
-  slug         String  @unique
-  label        String
-  tier         String
+  id             String  @id @db.Uuid
+  slug           String  @unique
+  label          String
+  tier           String
   // How many machines the account may run an agent on (the paid axis). One
   // active `kind:"agent"` device row is one worker; app rows are never counted.
-  workerLimit  Int     @map("worker_limit")
-  // Fair-use cap on how many devices an account may register. Not the paid
-  // axis — pricing is `workerLimit`. Kept generous (10) for all tiers.
-  deviceLimit  Int     @map("device_limit")
-  recurring    Boolean
-  trial        Boolean
-  active       Boolean @default(true)
-  sortOrder    Int     @default(0) @map("sort_order")
+  workerLimit    Int     @map("worker_limit")
+  // Abuse bound on `kind:"app"` rows (phones, desktop controllers) only. Never
+  // shown in pricing and never a lever: each app row mints an OAuth client and
+  // lands in `listAppDevicePeers`, which is returned in full to every bridge, so
+  // unbounded app registration puts an unbounded list on the E2E admission path.
+  appDeviceLimit Int     @map("app_device_limit")
+  // List-price seat cap. NULL is how an Enterprise contract says "unlimited",
+  // which also makes this the one catalog field Prisma treats as optional on
+  // create — omitting it from CATALOG_PLANS is not a compile error, and the row
+  // silently lands on unlimited.
+  maxSeats       Int?    @map("max_seats")
+  recurring      Boolean
+  trial          Boolean
+  // How often the charge recurs: none | yearly | lifetime | contract. Split out
+  // of `slug`, which was carrying product line, billing period and sales motion
+  // in one string.
+  billingPeriod  String  @default("yearly") @map("billing_period")
+  // Whether the row can be bought with a card (self_serve) or only through a
+  // human (contact_sales). Deliberately not `active`: a contact-sales plan is
+  // live, it is simply not purchasable, and collapsing the two puts two
+  // meanings back into one column.
+  salesMotion    String  @default("self_serve") @map("sales_motion")
+  // What the plan unlocks. Zod-validated on read (src/billing/capabilities.ts)
+  // rather than a boolean column per feature — a column per feature is a
+  // migration per feature. The @default mirrors a PERMANENT column default; see
+  // Subscription.seats for what dropping it costs.
+  capabilities   Json    @default("{}")
+  active         Boolean @default(true)
+  sortOrder      Int     @default(0) @map("sort_order")
 
   subscriptions Subscription[]
 
@@ -67,7 +157,16 @@ model Subscription {
   status                 String
   // Snapshotted from the plan at apply time (see applyPlanToAccountSubscription).
   workerLimit            Int       @map("worker_limit")
-  deviceLimit            Int       @map("device_limit")
+  appDeviceLimit         Int       @map("app_device_limit")
+  // The @default mirrors a PERMANENT column default (unlike the transient one
+  // 20260626000000_device_limit adds and drops). Without it `migrate dev` emits
+  // an ALTER … DROP DEFAULT and every subscription.create that omits seats
+  // starts failing on a NOT NULL column.
+  seats                  Int       @default(1)
+  // Snapshotted from the plan like every other limit, so a negotiated set is
+  // not the list price. Same permanent-default rule as `seats`; the vocabulary
+  // and the read-side validation live in src/billing/capabilities.ts.
+  capabilities           Json      @default("{}")
   // Temporary pro-tier grant (no real purchase behind it) while in-app
   // purchases aren't live yet. Always false for real purchases — see
   // applyPlanToAccountSubscription / ensureDefaultSubscription.
@@ -139,21 +238,25 @@ model Device {
 }
 
 model User {
-  id            String    @id
-  name          String
-  email         String    @db.Citext
-  emailVerified Boolean   @default(false)
-  image         String?
-  /// Denormalized ProductAccount.id — set when billing account is provisioned.
-  accountId     String?   @unique @map("account_id") @db.Uuid
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-  sessions      Session[]
-  accounts      Account[]
+  id                  String          @id
+  name                String
+  email               String          @db.Citext
+  emailVerified       Boolean         @default(false)
+  image               String?
+  /// Denormalized billing ProductAccount.id — not unique: members of a team all
+  /// point at the owner's account. `account_members` is the record of truth.
+  accountId           String?         @map("account_id") @db.Uuid
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+  sessions            Session[]
+  accounts            Account[]
+  memberships         AccountMember[]
+  sentInvites         AccountInvite[]
   ownedProductAccount ProductAccount? @relation("UserOwnedAccount")
   billingAccount      ProductAccount? @relation("UserBillingAccount", fields: [accountId], references: [id], onDelete: SetNull)
 
   @@unique([email])
+  @@index([accountId], map: "user_account_id_idx")
   @@map("user")
 }
 
