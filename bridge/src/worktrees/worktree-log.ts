@@ -8,10 +8,13 @@ export type WorktreeEvent =
   | "worktree_create_failed"
   | "worktree_resume_missing"
   | "worktree_resume_conflict"
+  | "worktree_resume_failed"
   | "worktree_delete_started"
   | "worktree_delete_blocked"
   | "worktree_delete_succeeded"
-  | "worktree_delete_failed";
+  | "worktree_delete_failed"
+  | "worktree_reconcile_completed"
+  | "worktree_forget_reclaimed";
 
 /** The complete field set. Branch names and filesystem paths are deliberately
  *  absent: these lines are the input to analytics, and a branch name is user
@@ -22,6 +25,12 @@ export interface WorktreeEventFields {
   sessionId?: string;
   elapsedMs?: number;
   errorCode?: string;
+  /** Counts only — reclamation and reconciliation are otherwise silent, so a
+   *  support bundle cannot tell "the user's worktrees vanished" from "we
+   *  reclaimed them". A count names no branch and no path. */
+  pruned?: number;
+  reclaimed?: number;
+  stranded?: number;
 }
 
 export function logWorktreeEvent(event: WorktreeEvent, fields: WorktreeEventFields = {}): void {

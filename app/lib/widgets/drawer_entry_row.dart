@@ -26,6 +26,7 @@ import '../project/perf_recorder.dart';
 import '../project/project_session_registry.dart';
 import '../project/project_status.dart';
 import '../providers/agent_transport.dart';
+import '../providers/cached_sessions.dart';
 import '../providers/drawer_entries.dart';
 import '../providers/collapsed_drawer.dart';
 import '../providers/drawer_expansion.dart';
@@ -45,6 +46,7 @@ import '../screens/upgrade_screen.dart';
 import '../services/control_plane_client.dart';
 import 'ab_status_helpers.dart';
 import 'agent_work_status_dot.dart';
+import 'session_isolation_badge.dart' show sessionIsIsolated;
 
 /// One row in the projects drawer.
 class DrawerEntryRow extends ConsumerStatefulWidget {
@@ -336,7 +338,7 @@ class _RemoveButtonState extends ConsumerState<_RemoveButton> {
           ? 'Remove ${entry.displayName}?'
           : 'Forget ${entry.displayName}?',
       body: isLocal
-          ? 'This stops any running sessions and removes it from your project history. The folder is not deleted.'
+          ? removeLocalProjectBody(container, entry.id)
           : 'This removes the saved trust relationship. You\'ll need to scan the QR code again to reconnect.',
       confirmLabel: isLocal ? 'Remove' : 'Forget',
       destructive: true,
@@ -366,6 +368,34 @@ class _RemoveButtonState extends ConsumerState<_RemoveButton> {
       if (mounted) setState(() => _busy = false);
     }
   }
+}
+
+/// What removing a local project actually costs, stated for this project.
+///
+/// The first sentence is unconditional and deliberately narrower than it used to
+/// be: removing a project makes the bridge forget it, and forgetting reclaims
+/// every managed checkout the project owns — so "the folder is not deleted" is
+/// true of the project folder and false of the isolated workspaces beneath the
+/// state directory. Naming only the folder keeps the reassurance the user
+/// actually needs (their repository is untouched) without extending it to
+/// directories this action does delete.
+///
+/// The isolation sentence is added from the SESSION CACHE, which knows only what
+/// this app has seen. That is why it names the consequence without counting
+/// sessions: a cold project reports nothing cached, and a promise about "your 2
+/// isolated sessions" would be wrong the moment the cache is stale or partial.
+/// The unconditional half has to stand on its own for exactly that case.
+String removeLocalProjectBody(ProviderContainer container, String projectId) {
+  const shared =
+      'This stops any running sessions and removes it from your project '
+      'history. The project folder is not deleted.';
+  final hasIsolated = container
+      .read(cachedSessionsProvider(projectId))
+      .any(sessionIsIsolated);
+  if (!hasIsolated) return shared;
+  return '$shared Its isolated sessions lose their separate working '
+      'directories, including any uncommitted changes in them. Their branches '
+      'are kept.';
 }
 
 /// Top-level helper so the kebab and inline connect actions can share one

@@ -105,7 +105,7 @@ export class ProjectCore {
 
   get projectId(): string { return this.core?.projectId ?? ""; }
   get localConnectInfo(): { port: number; token: string } | null { return this._localConnectInfo; }
-  hasManagedSessions(): boolean { return this.core?.hasManagedSessions() ?? false; }
+  hasIsolatedSessions(): boolean { return this.core?.hasIsolatedSessions() ?? false; }
 
   /** Current reduced work status (working/attention/done/error) for the
    *  control-plane advert. Defaults to "done" before any signal. */
@@ -284,7 +284,7 @@ export class ProjectCore {
     // subscriber (like the push dispatcher); lives for the bus's lifetime.
     bus.subscribe({ deliver: (msg) => {
       this.observeWorkStatus(msg);
-      if (msg.type === "session:updated" && core.hasManagedSessions()) {
+      if (msg.type === "session:updated" && core.hasIsolatedSessions()) {
         this.listener?.requireCheckoutRouting();
       }
     } });
@@ -406,7 +406,7 @@ export class ProjectCore {
       // because a remote-mode core holds no PromotionHandle for demoteAllPromoted
       // to tear down. Fail-closed, same as the inbound side.
       mayDeliver: () => (this.deps.remoteAccessEnabled?.() ?? false)
-        && (!core.hasManagedSessions() || remote.currentPeerSupportsCheckoutRouting?.() === true),
+        && (!core.hasIsolatedSessions() || remote.currentPeerSupportsCheckoutRouting?.() === true),
       onAdmitted: () => { this.relayRegistered = true; settleOnce({ ok: true }); },
       onRejected: (code, message) => { this.relayRegistered = false; settleOnce({ ok: false, code, message }); },
       // Suppress the heavy stream while the phone is gone; it rebuilds from

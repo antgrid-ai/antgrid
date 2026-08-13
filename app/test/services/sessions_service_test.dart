@@ -177,6 +177,111 @@ void main() {
     await session.close();
   });
 
+  group('start refusals', () {
+    /// The bridge's answer when an isolated session's checkout is gone.
+    void refuse(FakeAgentTransport t) {
+      final sent = t.sent.firstWhere((m) => m['type'] == 'session:start');
+      t.emit('session:result', {
+        'requestId': sent['requestId'],
+        'ok': false,
+        'errorCode': 'WORKTREE_MISSING',
+        'error': 'The isolated worktree is no longer available.',
+      });
+    }
+
+    test('default start still collapses a refusal to null', () async {
+      // The bootstrap and every other non-interactive caller await this bare,
+      // with nowhere to put an error — a throw there lands outside any build().
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final cache = await CachedSessionsStore.open();
+      final svc = SessionsService.fromSession(session, cache: cache);
+
+      final future = svc.start('s1');
+      await Future<void>.delayed(Duration.zero);
+      refuse(t);
+
+      expect(await future, isNull);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('raiseRefusal surfaces the code and the bridge message', () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final cache = await CachedSessionsStore.open();
+      final svc = SessionsService.fromSession(session, cache: cache);
+
+      final future = svc.start('s1', raiseRefusal: true);
+      await Future<void>.delayed(Duration.zero);
+      refuse(t);
+
+      await expectLater(
+        future,
+        throwsA(
+          isA<SessionOperationException>()
+              .having((e) => e.errorCode, 'errorCode', 'WORKTREE_MISSING')
+              .having((e) => e.message, 'message', contains('no longer')),
+        ),
+      );
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('raiseRefusal still completes with the entry on success', () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final cache = await CachedSessionsStore.open();
+      final svc = SessionsService.fromSession(session, cache: cache);
+
+      final future = svc.start('s1', raiseRefusal: true);
+      await Future<void>.delayed(Duration.zero);
+      final sent = t.sent.firstWhere((m) => m['type'] == 'session:start');
+      t.emit('session:result', {
+        'requestId': sent['requestId'],
+        'ok': true,
+        'session': {
+          'id': 's1',
+          'name': 'Session 1',
+          'createdAt': 0,
+          'lastUsedAt': 0,
+          'archived': false,
+          'running': true,
+        },
+      });
+
+      final entry = await future;
+      expect(entry?.id, 's1');
+      expect(entry?.running, isTrue);
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('dispose fails an in-flight raiseRefusal start', () async {
+      // Direct pin on _failPending having been taught about the opt-in map: a
+      // pending map it doesn't know about leaves the caller's future hanging
+      // forever, which is the silent bug a second map can introduce.
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final cache = await CachedSessionsStore.open();
+      final svc = SessionsService.fromSession(session, cache: cache);
+
+      final future = svc.start('s1', raiseRefusal: true);
+      await Future<void>.delayed(Duration.zero);
+      // Claimed before dispose completes it: an error landing on a future with
+      // no listener yet is an unhandled zone error, which the test binding
+      // fails on regardless of who awaits it afterwards.
+      final refused = expectLater(future, throwsA(isA<StateError>()));
+      await svc.dispose();
+      await refused;
+
+      await session.close();
+    });
+  });
+
   test('delete completes true on success', () async {
     final t = FakeAgentTransport();
     final session = await makeSession(t);

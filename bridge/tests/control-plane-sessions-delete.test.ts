@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
 import { SessionManager } from "../src/session-manager";
+import { WorktreeError } from "../src/worktrees/worktree-manager";
 
 function fakeRemoteConfig(): HostRemoteConfig {
   return {
@@ -37,7 +38,11 @@ async function setMobileAccess(h: HostServer, enabled: boolean): Promise<void> {
   await h.handleRemoteAccessVerb({ id: "t", type: "mobile-access:set", enabled });
 }
 function delReq(projectId: unknown, sessionId: unknown) {
-  return { id: "x", timestamp: 0, type: "request", requestId: "rq1", method: "sessions.delete", params: { projectId, sessionId } } as any;
+  return delReqWith(projectId, sessionId, {});
+}
+/** Same request with the confirm ladder's second-rung params attached. */
+function delReqWith(projectId: unknown, sessionId: unknown, extra: Record<string, unknown>) {
+  return { id: "x", timestamp: 0, type: "request", requestId: "rq1", method: "sessions.delete", params: { projectId, sessionId, ...extra } } as any;
 }
 
 beforeEach(() => {
@@ -103,6 +108,52 @@ test("a WARM core is delegated to and the disk file is NOT mutated", async () =>
   // Disk is the warm core's responsibility now — the handler must leave it alone.
   const left = await SessionManager.readPersisted(abDir!, "projWarm", true);
   expect(left.map((s: any) => s.id)).toEqual(["a"]);
+});
+
+test("a WARM core's WorktreeError is answered as ok:false, not left unanswered", async () => {
+  // The phone's delete confirm ladder is driven ENTIRELY by this refusal: it
+  // asks its force/delete-branch question only after seeing the code. The warm
+  // branch used to sit outside the handler's try, so the rejection escaped to a
+  // caller that only logs — the RPC published no frame at all and the phone hung
+  // until its own timeout, with nothing to tell the user what to confirm.
+  const h = host!;
+  seedSessions("projWarm", [{ id: "a", name: "A", createdAt: 1, lastUsedAt: 10, archived: false }]);
+  seedCatalog(h, "projWarm");
+  await setMobileAccess(h, true);
+  (h as any).cores.set("projWarm", {
+    core: {
+      deleteSession: () => { throw new WorktreeError("WORKTREE_DIRTY", "The isolated worktree has uncommitted changes."); },
+      shutdown: async () => {},
+    },
+    path: "/p", mode: "local", lastFocusedMs: 0,
+  });
+
+  const res = (await h.handleSessionsDeleteRpc(delReq("projWarm", "a"))) as any;
+  expect(res.ok).toBe(false);
+  expect(res.error.code).toBe("WORKTREE_DIRTY");
+});
+
+test("force and deleteBranch reach a warm core's deleteSession", async () => {
+  // The ladder's second rung is only honest if both flags survive the hop — and
+  // they must stay SEPARATE: force discards uncommitted work, deleteBranch
+  // destroys commits, and folding one into the other deletes what the user was
+  // never asked about.
+  const h = host!;
+  seedSessions("projWarm", [{ id: "a", name: "A", createdAt: 1, lastUsedAt: 10, archived: false }]);
+  seedCatalog(h, "projWarm");
+  await setMobileAccess(h, true);
+  const captured: { opts: any } = { opts: null };
+  (h as any).cores.set("projWarm", {
+    core: { deleteSession: (_id: string, opts: any) => { captured.opts = opts; return true; }, shutdown: async () => {} },
+    path: "/p", mode: "local", lastFocusedMs: 0,
+  });
+
+  const res = (await h.handleSessionsDeleteRpc(
+    delReqWith("projWarm", "a", { force: true, deleteBranch: true }),
+  )) as any;
+  expect(res.ok).toBe(true);
+  expect(captured.opts.force).toBe(true);
+  expect(captured.opts.deleteBranch).toBe(true);
 });
 
 test("with mobile access off the delete is rejected NOT_ALLOWED (no disk mutation)", async () => {

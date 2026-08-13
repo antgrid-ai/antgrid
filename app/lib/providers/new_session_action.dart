@@ -245,11 +245,13 @@ Future<void> startNewSession(
       final started = await svc.start(
         created.id,
         initialPrompt: prompt.isEmpty ? null : prompt,
+        raiseRefusal: true,
       );
-      // start failed (agent rejected the launch — e.g. an unknown tool on an
-      // older agent, or no agent configured). Stay on the New Session page so
-      // the user can retry rather than dropping into a session whose PTY never
-      // spawned.
+      // start failed with no reason on the wire (an `ok:true` carrying no
+      // session, or an older agent's bare rejection — an unknown tool, no agent
+      // configured); a CODED refusal is raised past here to the composer, which
+      // says what it was. Either way stay on the New Session page so the user
+      // can retry rather than dropping into a session whose PTY never spawned.
       if (started == null) return;
       if (ref.read(selectedRegistrationIdProvider) != pid) return;
       ref.read(activeSessionIdProvider.notifier).set(created.id);

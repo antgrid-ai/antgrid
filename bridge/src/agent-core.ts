@@ -219,8 +219,9 @@ export interface AgentCore {
    *  session not-running. Returns null before sessions are initialized
    *  (pre-handshake), signalling the caller to fall back to the on-disk list. */
   listSessions(includeArchived: boolean): SessionEntry[] | null;
-  /** True when this project has a non-main managed checkout. */
-  hasManagedSessions(): boolean;
+  /** True when any of this project's sessions runs somewhere other than main's
+   *  working tree, and therefore needs checkout-scoped routing. */
+  hasIsolatedSessions(): boolean;
   /** True when a work-status key is bound to the main checkout (or is not a
    *  session at all). Pre-handshake this answers true — nothing is isolated
    *  yet, so no guard should be narrowed away. */
@@ -2350,7 +2351,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         );
         return;
       }
-      if (source !== "loopback" && sessions?.hasManagedSessions() && !currentPeerCanRouteCheckouts()) {
+      if (source !== "loopback" && sessions?.hasIsolatedSessions() && !currentPeerCanRouteCheckouts()) {
         log.warn("Dropping inbound %s: remote app lacks checkout routing (project %s)", msg.type, project.id);
         return;
       }
@@ -2431,8 +2432,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     listSessions(includeArchived: boolean): SessionEntry[] | null {
       return sessions ? sessions.list(includeArchived) : null;
     },
-    hasManagedSessions(): boolean {
-      return sessions?.hasManagedSessions() ?? false;
+    hasIsolatedSessions(): boolean {
+      return sessions?.hasIsolatedSessions() ?? false;
     },
     isMainCheckoutSession(id: string): boolean {
       return sessions?.isMainCheckoutSession(id) ?? true;

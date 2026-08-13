@@ -33,9 +33,17 @@ class AbBranchPill extends StatelessWidget {
         children: [
           AbIcon(AbIcons.git, size: 10, color: palette.textMuted),
           const SizedBox(width: 5), // 5px non-ladder icon→label gap (mock spec)
-          Text(
-            branch,
-            style: AbTokens.monoStyle(fontSize: AbTokens.fontXs, color: palette.textMuted),
+          // A branch name is unbounded and the pill is usually the last child of
+          // a row whose other children cannot shrink, so it truncates itself
+          // rather than pushing that row into an overflow.
+          Flexible(
+            child: Text(
+              branch,
+              maxLines: 1,
+              softWrap: false,
+              overflow: TextOverflow.ellipsis,
+              style: AbTokens.monoStyle(fontSize: AbTokens.fontXs, color: palette.textMuted),
+            ),
           ),
           if (ahead > 0) ...[
             const SizedBox(width: AbTokens.space4),

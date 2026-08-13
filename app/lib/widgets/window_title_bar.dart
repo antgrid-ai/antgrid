@@ -25,6 +25,7 @@ import '../window/window_capabilities.dart';
 import '../window/window_chrome.dart';
 import 'agent_panel.dart';
 import 'session_agent_mark.dart';
+import 'session_isolation_badge.dart';
 import 'session_mode_control.dart';
 import 'session_search_field.dart';
 
@@ -489,19 +490,28 @@ class TitleBarBreadcrumb extends ConsumerWidget {
                 : EditableSessionLeaf(session: active),
           ),
         ),
+        if (active != null) SessionIsolationBadge(session: active),
         if (gitBranch != null) ...[
           const SizedBox(width: AbTokens.space8),
-          AbBranchPill(
-            branch: gitBranch,
-            onTap: () async {
-              await Clipboard.setData(ClipboardData(text: gitBranch));
-              if (!context.mounted) return;
-              showAbSnackBar(
-                context,
-                'Copied "$gitBranch"',
-                duration: const Duration(seconds: 2),
-              );
-            },
+          // Bounded, not Flexible: the breadcrumb is the only child that should
+          // absorb slack, and a second flexible sibling would split it evenly
+          // and truncate the name long before the row is actually tight. The
+          // cap is what keeps a long branch from making the badge + pill an
+          // unshrinkable floor on a narrow window.
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 160),
+            child: AbBranchPill(
+              branch: gitBranch,
+              onTap: () async {
+                await Clipboard.setData(ClipboardData(text: gitBranch));
+                if (!context.mounted) return;
+                showAbSnackBar(
+                  context,
+                  'Copied "$gitBranch"',
+                  duration: const Duration(seconds: 2),
+                );
+              },
+            ),
           ),
         ],
       ],

@@ -24,7 +24,9 @@ import '../../providers/agent_catalog.dart';
 import '../../providers/new_session_action.dart';
 import '../../providers/new_session_picker.dart';
 import '../../screens/upgrade_screen.dart';
+import '../../services/sessions_service.dart' show SessionOperationException;
 import '../../utils/platform_utils.dart';
+import '../ab_status_helpers.dart' show sessionRefusalCopy;
 import '../mode_segmented.dart';
 import 'branch_menu.dart';
 import 'environment_menu.dart';
@@ -63,7 +65,7 @@ const double _composerRowRoomyMinWidth = 460;
 
 /// Share of the context row a single picker label may claim before it starts
 /// ellipsizing. Two of them cap out together at well under the full row, which
-/// is what keeps the fixed-width worktree chip and a readable stub of the
+/// is what keeps the fixed-width isolation chip and a readable stub of the
 /// branch on the line no matter how pathological the machine and project names
 /// get.
 const double _chipLabelCapFraction = 0.3;
@@ -257,6 +259,22 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
         showAbSnackBar(context, e.userMessage);
         await openUpgrade(context, ref.container);
       }
+    } on SessionOperationException catch (e) {
+      // The bridge's create/start refusal is already user-facing text and the
+      // coded arms replace it where its wording names something the reader
+      // can't act on; either beats the raw exception the generic arm prints.
+      // No navigation — the user stays here with the form intact.
+      if (mounted) {
+        showAbSnackBar(
+          context,
+          sessionRefusalCopy(
+            e.errorCode,
+            e.message,
+            'Could not start the session.',
+          ),
+          duration: const Duration(seconds: 8),
+        );
+      }
     } catch (e) {
       if (mounted) {
         showAbSnackBar(
@@ -398,7 +416,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
               //     intrinsic below that cap so the branch keeps the TRUE
               //     remainder — flexing all three instead would strand each
               //     one's unused share and truncate the branch early;
-              //   - the worktree chip keeps its word until keeping it would
+              //   - the isolation chip keeps its word until keeping it would
               //     starve the branch, then falls back to its state glyph: the
               //     word is a constant the tooltip repeats, the branch name
               //     isn't.
@@ -414,7 +432,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                       ? rowConstraints.maxWidth
                       : 0.0;
                   // The cap is a fraction of the row, but never more than what
-                  // is left once the branch holds its floor and the worktree
+                  // is left once the branch holds its floor and the isolation
                   // chip its glyph. The fraction alone is not enough: on a
                   // phone two long labels claiming it left the branch a
                   // remainder below its own chrome, which renders as an
@@ -431,8 +449,8 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                     ),
                   );
                   // Whatever the caps left above the branch's floor: enough for
-                  // the worktree chip's word, or it falls back to its glyph.
-                  final worktreeMax = math.max(
+                  // the isolation chip's word, or it falls back to its glyph.
+                  final isolationChipMax = math.max(
                     0.0,
                     row - gaps - cap * 2 - _branchChipFloor,
                   );
@@ -452,8 +470,8 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                       const Flexible(child: BranchChip()),
                       const SizedBox(width: AbTokens.space6),
                       ConstrainedBox(
-                        constraints: BoxConstraints(maxWidth: worktreeMax),
-                        child: const _WorktreeChip(),
+                        constraints: BoxConstraints(maxWidth: isolationChipMax),
+                        child: const _IsolationChip(),
                       ),
                     ],
                   );
@@ -672,14 +690,19 @@ class _PromptField extends StatelessWidget {
   }
 }
 
-/// Worktree opt-in, as the last term of the context row's sentence:
-/// `Local · my-repo · main · worktree`.
+/// Isolation opt-in, as the last term of the context row's sentence:
+/// `Local · my-repo · main · isolated`.
 ///
 /// Last on purpose — it modifies the chip before it. Switching it on re-labels
 /// the branch chip to `Base: main`, which is the entire explanation of what
 /// isolation does to the current selection, delivered by the row itself.
-class _WorktreeChip extends ConsumerWidget {
-  const _WorktreeChip();
+///
+/// Labelled for the OUTCOME the user is choosing, not for the git mechanism
+/// that currently delivers it: the same switch is what a second isolation
+/// backend would ride in on, and a user who picked "worktree" could not be told
+/// afterwards that they had picked something else.
+class _IsolationChip extends ConsumerWidget {
+  const _IsolationChip();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -694,16 +717,24 @@ class _WorktreeChip extends ConsumerWidget {
     final ready = ref.watch(newSessionIsolationReadyProvider);
 
     return ComposerToggleChip(
+      // The key addresses the isolation toggle, not the word printed on it.
       key: const Key('new-session-worktree-chip'),
-      label: 'worktree',
+      label: 'isolated',
       value: ref.watch(newSessionIsolatedProvider),
       tooltip: ready
-          ? 'Give this session its own branch and working directory'
+          ? 'Give this session its own branch and workspace, separate from '
+                'your main tree'
           : catalog.isLoading
           ? 'Checking this project…'
           : catalog.value?.isRepository == false
           ? 'Requires a Git repository'
-          : 'Update the bridge to isolate sessions',
+          // Two causes collapse into this one false: the build-time
+          // WORKTREE_SESSIONS_SUPPORTED kill switch, which updating cannot
+          // clear, and a bridge predating the capability field, which updating
+          // is the only fix for (GitBranchCatalog reads it by exclusion). So it
+          // may neither promise an update works nor read as permanent.
+          : 'This machine can\'t create isolated sessions — check that its '
+                'Antgrid is up to date',
       onChanged: ready
           ? (next) => ref.read(newSessionIsolatedProvider.notifier).set(next)
           : null,

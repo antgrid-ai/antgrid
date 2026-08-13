@@ -56,8 +56,57 @@ String? friendlyErrorCopy(String? code) => switch (code) {
   'LICENSE_EXPIRED' =>
     'This account can\'t reach machines remotely right now. Sign in again, '
         'or check your plan.',
+  // Isolated-session refusals (WorktreeErrorCode in
+  // `bridge/src/worktrees/worktree-manager.ts`). An arm here REPLACES the
+  // bridge's own message, so a code earns one only where a single sentence is
+  // true of every producer. CONFLICT and CREATE_FAILED are deliberately absent:
+  // each spans causes as unlike as a locked checkout and a repository with no
+  // commit, so one sentence could only be vague enough to hide the actionable
+  // one, and the raw message says which. DIRTY and UNPUSHED are absent too —
+  // those are answered by the delete ladder's second question, and copy here
+  // would turn a recoverable prompt into a dead end. Every arm names the
+  // isolated SESSION rather than the worktree that backs it: the mechanism is
+  // the bridge's business and is not settled.
+  //
+  // Every producer is registration- or availability-shaped (no longer
+  // registered, manager or project path unavailable) rather than "the files are
+  // gone", and three of the five fire on the delete path — so this must not
+  // send the user back to delete.
+  'WORKTREE_MISSING' =>
+    'Antgrid can no longer reach this isolated session\'s workspace.',
+  // Claims no cause: one producer throws after the workspace was already
+  // removed and only the branch delete failed, another when the session would
+  // not stop.
+  'WORKTREE_DELETE_FAILED' =>
+    'Antgrid couldn\'t finish deleting this isolated session.',
+  // The producer is a build-time kill switch (WORKTREE_SESSIONS_SUPPORTED), not
+  // a version gate — updating cannot clear it.
+  'WORKTREE_UNSUPPORTED' =>
+    'This machine\'s Antgrid can\'t create isolated sessions.',
+  // Also produced by the plain branch RPC, and any banner code is rendered
+  // through here, so it must not mention isolation.
+  'NOT_GIT_REPOSITORY' => 'This project isn\'t a Git repository.',
+  'UNKNOWN_BASE_BRANCH' =>
+    'That base branch doesn\'t exist in this repository. Pick another one.',
+  // One producer rejects ANY absolute path, including one well inside the
+  // project, so the rule is "relative", not "inside". Names the key to edit
+  // because the machine holding it may not be the one reading this.
+  'WORKTREE_WORKING_DIR_UNSAFE' =>
+    'This session\'s agent.workingDir must be a path relative to the isolated '
+        'checkout. Fix it in antgrid.yaml on that machine.',
   _ => null,
 };
+
+/// One refusal, rendered: dedicated copy for [code], else the bridge's own
+/// [message], else [fallback].
+///
+/// The precedence is the contract. A code that has dedicated copy is never shown
+/// the bridge's raw wording — the arm exists precisely because that wording is
+/// wrong for the reader — and a code without one is never shown a generic
+/// sentence while the bridge has said something specific. [fallback] covers a
+/// transport-shaped refusal carrying neither.
+String sessionRefusalCopy(String? code, String? message, String fallback) =>
+    friendlyErrorCopy(code) ?? message ?? fallback;
 
 /// Copy for a machine whose advert lists no projects, keyed by the tri-state
 /// machine-level `remoteAccessEnabled` flag: `false` is the machine's

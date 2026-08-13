@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
 import { buildAgentCore, type AgentCore } from "../src/agent-core";
 import { MessageBus } from "../src/message-bus";
@@ -193,6 +193,58 @@ test("two isolated sessions edit the same relative file without seeing each othe
   expect(await read(one.checkoutId)).toBe("one\n");
   expect(await read(two.checkoutId)).toBe("two\n");
   expect(await read("main")).toBe("main\n");
+});
+
+/** Drive a whole upload through one checkout and return the file it produced. */
+async function uploadThrough(
+  bus: MessageBus,
+  sent: AbMessage[],
+  checkoutId: string,
+  content: string,
+): Promise<string> {
+  const requestId = `upload-${checkoutId}`;
+  bus.dispatchInbound(createMessage("file:upload-start", {
+    projectId: core!.projectId, requestId, fileName: "note.txt",
+    size: Buffer.byteLength(content), checkoutId,
+  }), "control", "loopback");
+  const ready = await waitFor(sent, (m) =>
+    m.type === "file:upload-ready" && m.requestId === requestId,
+  );
+  if (ready.type !== "file:upload-ready") throw new Error("upload was never ready");
+  bus.dispatchInbound(createMessage("file:upload-chunk", {
+    uploadId: ready.uploadId, seq: 0, data: Buffer.from(content).toString("base64"), checkoutId,
+  }), "control", "loopback");
+  await waitFor(sent, (m) => m.type === "file:upload-ack" && m.uploadId === ready.uploadId);
+  bus.dispatchInbound(createMessage("file:upload-done", {
+    uploadId: ready.uploadId, checkoutId,
+  }), "control", "loopback");
+  const result = await waitFor(sent, (m) =>
+    m.type === "file:upload-result" && m.requestId === requestId,
+  );
+  expect(result).toMatchObject({ ok: true, checkoutId });
+  if (result.type !== "file:upload-result" || !result.path) throw new Error("upload produced no path");
+  return result.path;
+}
+
+test("a write through one checkout's runtime is invisible to the other", async () => {
+  // The read tests above all write with the filesystem. This is the other
+  // direction: each runtime owns its own upload manager, so a write the bridge
+  // performs must land in the tree that asked for it and nowhere else.
+  writeFileSync(join(root, "same.txt"), "main\n");
+  await initRepo();
+  const { bus, sent, checkoutId, checkoutPath } = await startWithIsolatedSession();
+
+  const isolatedFile = await uploadThrough(bus, sent, checkoutId, "isolated\n");
+  const mainFile = await uploadThrough(bus, sent, "main", "main\n");
+  expect(readFileSync(isolatedFile, "utf8")).toBe("isolated\n");
+  expect(readFileSync(mainFile, "utf8")).toBe("main\n");
+
+  const isolatedRelative = relative(checkoutPath, isolatedFile);
+  const mainRelative = relative(root, mainFile);
+  expect(isolatedRelative.startsWith("..")).toBe(false);
+  expect(mainRelative.startsWith("..")).toBe(false);
+  expect(existsSync(join(root, isolatedRelative))).toBe(false);
+  expect(existsSync(join(checkoutPath, mainRelative))).toBe(false);
 });
 
 test("git branches and search follow the focused checkout, not main", async () => {

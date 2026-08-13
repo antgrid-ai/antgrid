@@ -1,3 +1,5 @@
+import 'package:antgrid_relay_client/antgrid_relay_client.dart'
+    show RpcException;
 import 'package:collection/collection.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -5,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/recent_session_row.dart';
 import '../services/account_agents_api.dart';
 import '../services/control_plane_client.dart';
+import '../services/sessions_service.dart' show SessionOperationException;
 import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
 import '../project/project_session_registry.dart';
@@ -345,16 +348,30 @@ Future<void> openRecentSession(
 /// failure, so the caller can message each case accurately.
 enum RecentSessionDeleteOutcome { deleted, offline, failed }
 
+/// The codes `BufferedAgentTransport` mints for itself when a request never
+/// reaches the bridge or never comes back. Everything else on an `RpcException`
+/// came from the bridge's own error frame — this is the only place the two
+/// vocabularies can be told apart, since both arrive as one exception type.
+const _kTransportRpcCodes = {'E_TIMEOUT', 'E_SEND_FAILED', 'E_UNKNOWN'};
+
 /// Delete a recent session.
 ///
 /// Local → data-plane via the project's SessionsService (obtained from the
 /// registry; warms the loopback session if cold).
 /// Remote → control-plane `sessions.delete` RPC, which works whether the
 /// project is running or stopped.
+///
+/// [force] and [deleteBranch] carry the second rung of the delete confirm
+/// ladder, so this is called twice for a blocked isolated session. A typed
+/// refusal is raised as [SessionOperationException] on BOTH paths rather than
+/// collapsed to [RecentSessionDeleteOutcome.failed]: the refusal is what tells
+/// the caller which second question to ask, and the enum has no room for it.
 Future<RecentSessionDeleteOutcome> deleteRecentSession(
   ProviderContainer ref,
-  RecentSessionRow row,
-) async {
+  RecentSessionRow row, {
+  bool? force,
+  bool? deleteBranch,
+}) async {
   final o = row.origin;
   final store = ref.read(cachedSessionsStoreProvider);
 
@@ -369,10 +386,16 @@ Future<RecentSessionDeleteOutcome> deleteRecentSession(
       final session = await ref.read(
         projectSessionProvider(o.registrationId).future,
       );
-      final ok = await session.sessionsService.delete(row.session.id);
+      final ok = await session.sessionsService.delete(
+        row.session.id,
+        force: force,
+        deleteBranch: deleteBranch,
+      );
       return ok
           ? RecentSessionDeleteOutcome.deleted
           : RecentSessionDeleteOutcome.failed;
+    } on SessionOperationException {
+      rethrow;
     } catch (_) {
       return RecentSessionDeleteOutcome.failed;
     }
@@ -384,10 +407,24 @@ Future<RecentSessionDeleteOutcome> deleteRecentSession(
   if (cp == null) return RecentSessionDeleteOutcome.offline;
   final bool ok;
   try {
-    // deleteSession lets RpcException (NOT_ALLOWED, timeout) propagate — catch
-    // it here rather than rejecting this Future, so the caller's confirm flow
-    // handles it as a plain failure like a `false` result.
-    ok = await cp.deleteSession(o.projectId, row.session.id);
+    ok = await cp.deleteSession(
+      o.projectId,
+      row.session.id,
+      force: force,
+      deleteBranch: deleteBranch,
+    );
+  } on RpcException catch (e) {
+    // Transport failures carry no bridge code and their message is a developer
+    // string ("request sessions.delete timed out", or an exception dump), while
+    // the ladder falls back to printing `message` verbatim — so they stay an
+    // untyped failure and get the surface's own copy.
+    if (_kTransportRpcCodes.contains(e.code)) {
+      return RecentSessionDeleteOutcome.failed;
+    }
+    // Re-typed, not rethrown: the caller branches on the bridge's refusal code
+    // and must not have to know whether this row's machine answered over the
+    // control plane or the data plane.
+    throw SessionOperationException(e.code, e.message);
   } catch (_) {
     return RecentSessionDeleteOutcome.failed;
   }

@@ -1,9 +1,9 @@
-import { existsSync, realpathSync } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { existsSync, realpathSync, statSync } from "node:fs";
+import { readdir, rm } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { resolveAbDir } from "../antgrid-dir";
 import { CheckoutStore } from "./checkout-store";
-import type { CheckoutRecord } from "./checkout-types";
+import { isManagedCheckoutKind, type CheckoutRecord } from "./checkout-types";
 import { parseWorktreeList } from "./git-worktree-list";
 import { runGit, type GitRunner } from "./project-resolver";
 import { logWorktreeEvent, worktreeErrorCode } from "./worktree-log";
@@ -13,6 +13,13 @@ import { logWorktreeEvent, worktreeErrorCode } from "./worktree-log";
  * against a 260-char MAX_PATH, and a JS project's `node_modules` spends well
  * over half of that on its own. Same reason `shortCheckoutId` is not a UUID. */
 const WORKTREE_ROOT_DIR = "wt";
+
+/** How recently a directory under the worktree root may have been touched and
+ * still be treated as a live create rather than an orphan. The project lock is
+ * per-process, so a second bridge pointed at the same ANTGRID_DIR is the one
+ * racer it cannot serialize; an orphan is by definition unreferenced, so
+ * nothing writes into it and its mtime ages past this. */
+const RECONCILE_GRACE_MS = 60_000;
 
 /** Filesystem-safe, and a path segment before it is an identifier — 10 chars
  * against a UUID's 36. 40 bits of randomness, guarded by the existing
@@ -142,7 +149,11 @@ export class WorktreeManager {
       this.repoPaths.set(args.projectId, repoPath);
       const listed = await this.git(["worktree", "list", "--porcelain", "-z"], repoPath);
       if (listed.exitCode !== 0) throw new WorktreeError("NOT_GIT_REPOSITORY", "This project is not a Git repository.");
-      await this.git(["worktree", "prune"], repoPath); // best effort only
+      // Create time is the only moment that already holds the project lock, the
+      // resolved repository and a reason to care that the tree is about to
+      // grow. It runs AFTER the repository probe so a non-repository still
+      // fails with NOT_GIT_REPOSITORY rather than on a reconcile symptom.
+      await this.reconcileLocked(args.projectId, repoPath);
 
       const base = await this.resolveBase(repoPath, args.baseBranch);
       const checkoutId = this.newCheckoutId();
@@ -176,6 +187,15 @@ export class WorktreeManager {
         throw new WorktreeError("WORKTREE_CREATE_FAILED", "Antgrid could not register the isolated worktree.");
       }
     });
+  }
+
+  /** The durable record for a checkout, or undefined when the project's store no
+   * longer names it. A pure store read, deliberately separate from `inspect`:
+   * that one answers "no such record" and "the project path is unavailable"
+   * with the same WORKTREE_MISSING, and only the first means there is nothing
+   * left to reclaim. */
+  async recordFor(projectId: string, checkoutId: string): Promise<CheckoutRecord | undefined> {
+    return this.storeFor(projectId).get(checkoutId);
   }
 
   async inspect(checkoutId: string): Promise<WorktreeInspection> {
@@ -229,7 +249,7 @@ export class WorktreeManager {
     const located = await this.findCheckout(args.checkoutId);
     if (!located) throw new WorktreeError("WORKTREE_MISSING", "The isolated worktree is no longer registered.");
     const { record, repoPath } = located;
-    if (!record.managed || record.kind !== "managed-worktree") {
+    if (!record.managed || !isManagedCheckoutKind(record.kind)) {
       throw new WorktreeError("WORKTREE_CONFLICT", "Antgrid does not own this checkout.");
     }
     const state = await this.inspect(args.checkoutId);
@@ -279,6 +299,135 @@ export class WorktreeManager {
       await this.git(["branch", "-D", record.branch], repoPath);
     }
     await this.storeFor(record.projectId).remove(record.id);
+  }
+
+  /** Reclaim every managed checkout of a project that is being forgotten, while
+   * its metadata still exists. Deliberately force-removing and deliberately
+   * partial: `forget()` deletes `agents/<id>/checkouts.json` immediately after,
+   * so a refusal here would only leave a worktree nothing can ever name again.
+   * `stranded` counts what survived — an entry left under our own root that Git
+   * would not release. */
+  async reclaimForgottenProject(projectId: string): Promise<{ reclaimed: number; stranded: number; root: string }> {
+    const wtRoot = resolve(this.abDir, WORKTREE_ROOT_DIR);
+    const root = resolve(wtRoot, projectId);
+    return this.withProjectLock(projectId, async () => {
+      // The id reaches this from a control-plane verb, and the recursive delete
+      // below must never be pointed outside our own state dir by a traversal
+      // component.
+      if (!pathBelow(wtRoot, root)) return { reclaimed: 0, stranded: 0, root };
+      const startedAt = this.now();
+      let repoPath: string | undefined;
+      try { repoPath = this.repoPaths.get(projectId) ?? await this.options.resolveRepoPath?.(projectId); }
+      catch { repoPath = undefined; }
+      let records: CheckoutRecord[] = [];
+      try {
+        records = (await this.storeFor(projectId).list())
+          .filter((record) => record.managed && isManagedCheckoutKind(record.kind));
+      } catch { /* an unreadable store still leaves the blanket removal below */ }
+      if (repoPath) {
+        for (const record of records) {
+          // `--force` twice on purpose: one still refuses a LOCKED worktree, and
+          // `worktree prune` skips locked entries forever. A project being
+          // forgotten is not a place to preserve a lock.
+          await this.git(["worktree", "remove", "--force", "--force", record.path], repoPath).catch(() => undefined);
+        }
+      }
+      // The common reason to forget a project is that its folder is already
+      // gone, in which case Git can be asked nothing and blanket-removing our
+      // own root is the only thing that reclaims the disk.
+      await rm(root, { recursive: true, force: true }).catch(() => undefined);
+      if (repoPath) await this.git(["worktree", "prune"], repoPath).catch(() => undefined);
+      const stranded = (await readdir(root).catch(() => [])).length;
+      logWorktreeEvent("worktree_forget_reclaimed", {
+        projectId, reclaimed: records.length, stranded, elapsedMs: this.now() - startedAt,
+      });
+      // Branches are deliberately kept: they carry the user's commits, and
+      // forgetting a project in Antgrid must never rewrite their repository.
+      return { reclaimed: records.length, stranded, root };
+    });
+  }
+
+  /** Drop checkout rows whose directory is gone and reclaim directories under
+   * this project's worktree root that no row names. Never throws: it is
+   * housekeeping on the side of work the caller actually asked for. */
+  async reconcile(projectId: string, repoPath?: string): Promise<{ pruned: number; reclaimed: number }> {
+    return this.withProjectLock(projectId, () => this.reconcileLocked(projectId, repoPath));
+  }
+
+  /** Counts ride in `counts` rather than the return value so a throw anywhere
+   * inside still reports what was already done — and, more importantly, so the
+   * create path this hangs off can never be failed by its own housekeeping. */
+  private async reconcileLocked(projectId: string, repoPath?: string): Promise<{ pruned: number; reclaimed: number }> {
+    const counts = { pruned: 0, reclaimed: 0 };
+    try { await this.reconcileInner(projectId, repoPath, counts); } catch { /* housekeeping only */ }
+    if (counts.pruned || counts.reclaimed) {
+      // Only when something moved: a no-op reconcile must not add a line to
+      // every isolated create.
+      logWorktreeEvent("worktree_reconcile_completed", { projectId, ...counts });
+    }
+    return counts;
+  }
+
+  private async reconcileInner(
+    projectId: string,
+    repoPath: string | undefined,
+    counts: { pruned: number; reclaimed: number },
+  ): Promise<void> {
+    const wtRoot = resolve(this.abDir, WORKTREE_ROOT_DIR);
+    const root = resolve(wtRoot, projectId);
+    if (!pathBelow(wtRoot, root)) return;
+    // A directory the user deleted by hand leaves a registration behind, and
+    // `worktree remove` refuses that path forever until the registration goes.
+    if (repoPath) await this.git(["worktree", "prune"], repoPath).catch(() => undefined);
+
+    const store = this.storeFor(projectId);
+    const state = await store.read();
+    const live = new Set<string>();
+    for (const record of state.records) {
+      if (!record.managed || existsSync(record.path)) {
+        live.add(canonical(record.path));
+        continue;
+      }
+      // A row is written only AFTER `worktree add` created the directory and
+      // `verifyCreated` confirmed it, under the same project lock this holds —
+      // so a row without a directory is always post-hoc loss, never a create in
+      // flight. Left in place it makes its session permanently undeletable:
+      // `remove()` can neither find the directory nor let Git drop it.
+      if (await store.remove(record.id)) counts.pruned++;
+    }
+
+    // Everything above is safe on a partial read — its failure direction is
+    // inaction. Everything below deletes on the strength of a checkout being
+    // ABSENT from that read, so it may only run when the read was whole: a row
+    // the file withheld names a LIVE worktree, and the store tolerating a bad
+    // row exists precisely so one bad row cannot hide its healthy siblings.
+    if (!state.healthy) return;
+
+    for (const entry of await readdir(root).catch(() => [] as string[])) {
+      const dir = resolve(root, entry);
+      if (!pathBelow(root, dir) || live.has(canonical(dir))) continue;
+      let mtimeMs: number;
+      try { mtimeMs = statSync(dir).mtimeMs; } catch { continue; }
+      if (this.now() - mtimeMs < RECONCILE_GRACE_MS) continue;
+      if (await this.hasLocalChanges(dir)) continue;
+      if (repoPath) await this.git(["worktree", "remove", "--force", "--force", dir], repoPath).catch(() => undefined);
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+      if (!existsSync(dir)) counts.reclaimed++;
+    }
+    if (repoPath && counts.reclaimed) await this.git(["worktree", "prune"], repoPath).catch(() => undefined);
+  }
+
+  /** Whether a reclaim candidate holds work someone would miss. Reconciliation
+   * rides on a create the user asked for and nothing else, so it must be at
+   * least as reluctant as the explicit delete in `removeNow`, which refuses
+   * WORKTREE_DIRTY. A genuine orphan comes straight out of `worktree add` and is
+   * clean; a dirty one is a directory something has been working in, whatever
+   * the metadata says. Git answering nothing means there is no checkout here to
+   * lose. */
+  private async hasLocalChanges(dir: string): Promise<boolean> {
+    const status = await this.git(["status", "--porcelain=v1", "--untracked-files=all"], dir)
+      .catch(() => undefined);
+    return status?.exitCode === 0 && status.stdout.trim().length > 0;
   }
 
   private async resolveBase(repoPath: string, baseBranch?: string): Promise<{ ref: string | null; commit: string }> {

@@ -433,7 +433,7 @@ void main() {
     expect(find.text('Delete session?'), findsOneWidget);
     expect(
       find.text(
-        'This permanently deletes "Fix auth bug" and cannot be undone.',
+        'This permanently deletes "Fix auth bug". This cannot be undone.',
       ),
       findsOneWidget,
     );

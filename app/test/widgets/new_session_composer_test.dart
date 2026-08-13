@@ -13,6 +13,9 @@ import 'package:antgrid/providers/agent_catalog.dart';
 import 'package:antgrid/providers/new_session_action.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/value_controller.dart';
+import 'package:antgrid/services/sessions_service.dart'
+    show SessionOperationException;
+import 'package:antgrid/widgets/ab_status_helpers.dart' show friendlyErrorCopy;
 import 'package:antgrid/widgets/new_session/branch_menu.dart';
 import 'package:antgrid/widgets/new_session/environment_menu.dart';
 import 'package:antgrid/widgets/new_session/new_session_composer.dart';
@@ -714,7 +717,8 @@ void main() {
     );
   });
 
-  group('worktree chip', () {
+  group('isolation chip', () {
+    // The key addresses the isolation toggle, not the word printed on it.
     Finder chip() => find.byKey(const Key('new-session-worktree-chip'));
 
     testWidgets('toggles isolation and re-labels the branch chip', (
@@ -903,6 +907,109 @@ void main() {
 
       await tester.pump(const Duration(seconds: 8));
       await tester.pump(const Duration(milliseconds: 300));
+    });
+  });
+
+  group('create-time isolation refusals', () {
+    /// Submits, then settles far enough for the refusal's snack bar to render.
+    Future<void> submitPrompt(WidgetTester tester) async {
+      await tester.enterText(
+        find.byKey(const Key('new-session-prompt-field')),
+        'start session',
+      );
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+    }
+
+    /// Drains the 8s snack bar so its dismiss timer can't outlive the test.
+    Future<void> drainSnackBar(WidgetTester tester) async {
+      await tester.pump(const Duration(seconds: 8));
+      await tester.pump(const Duration(milliseconds: 300));
+    }
+
+    Widget refusingHost(SessionOperationException refusal) => _host(
+      overrides: _baseOverrides(target: _project),
+      submit: (ref, {allowActiveSessions = false}) async => throw refusal,
+    );
+
+    testWidgets('a mapped code replaces the bridge wording', (tester) async {
+      await tester.pumpWidget(
+        refusingHost(
+          const SessionOperationException(
+            'UNKNOWN_BASE_BRANCH',
+            'unknown base branch: nope',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await submitPrompt(tester);
+
+      expect(
+        find.text(friendlyErrorCopy('UNKNOWN_BASE_BRANCH')!),
+        findsOneWidget,
+      );
+      // The generic arm would have printed the exception itself — which is what
+      // made friendlyErrorCopy's isolation arms unreachable from this path.
+      expect(find.textContaining('Failed to start session'), findsNothing);
+      expect(find.textContaining('unknown base branch'), findsNothing);
+
+      await drainSnackBar(tester);
+    });
+
+    testWidgets('an unmapped code keeps the bridge message', (tester) async {
+      await tester.pumpWidget(
+        refusingHost(
+          const SessionOperationException(
+            'WORKTREE_CREATE_FAILED',
+            'fatal: invalid reference: nope',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await submitPrompt(tester);
+
+      expect(find.text('fatal: invalid reference: nope'), findsOneWidget);
+
+      await drainSnackBar(tester);
+    });
+
+    testWidgets('a refusal carrying neither falls back', (tester) async {
+      await tester.pumpWidget(
+        refusingHost(const SessionOperationException(null, null)),
+      );
+      await tester.pumpAndSettle();
+      await submitPrompt(tester);
+
+      expect(find.text('Could not start the session.'), findsOneWidget);
+
+      await drainSnackBar(tester);
+    });
+
+    testWidgets('the composer stays put with the prompt intact', (
+      tester,
+    ) async {
+      // A refused create/start must not navigate: the whole point of reporting
+      // it here is that the user can fix the target and press Enter again.
+      await tester.pumpWidget(
+        refusingHost(
+          const SessionOperationException('WORKTREE_UNSUPPORTED', 'nope'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await submitPrompt(tester);
+
+      expect(find.byType(NewSessionComposer), findsOneWidget);
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(NewSessionComposer)),
+      );
+      expect(container.read(newSessionPromptProvider), 'start session');
+      expect(
+        find.text(friendlyErrorCopy('WORKTREE_UNSUPPORTED')!),
+        findsOneWidget,
+      );
+
+      await drainSnackBar(tester);
     });
   });
 }

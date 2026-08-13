@@ -14,8 +14,10 @@ import '../providers/agent_transport.dart';
 import '../providers/new_session_picker.dart' show enterNewSession;
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
+import '../services/sessions_service.dart' show SessionOperationException;
 import '../util/ab_log.dart';
 import '../util/detached.dart';
+import '../widgets/session_start_refusal.dart';
 import '../widgets/terminal_view_wrapper.dart';
 
 /// Shows the terminal for the currently active session.
@@ -188,7 +190,13 @@ class _StoppedSessionEmptyStateState
       return;
     }
     try {
-      await svc.start(sessionId);
+      await svc.start(sessionId, raiseRefusal: true);
+    } on SessionOperationException catch (error) {
+      // The bridge ANSWERED, and the answer was no — most often because this
+      // session's isolated checkout is gone. That is a different sentence from
+      // the timeout below, which invites a retry: retrying a refusal just earns
+      // the same refusal.
+      if (mounted) reportStartRefusal(context, error);
     } on TimeoutException {
       // The button the user just pressed is still on screen and the session is
       // still stopped, so a silent swallow reads as a dropped tap. A dropped

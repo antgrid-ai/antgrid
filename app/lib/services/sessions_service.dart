@@ -93,6 +93,7 @@ class SessionsService {
 
   final Map<String, PendingReply<List<SessionEntry>>> _pendingList = {};
   final Map<String, PendingReply<SessionEntry?>> _pendingMutations = {};
+  final Map<String, PendingReply<SessionEntry?>> _pendingRefusableMutations = {};
   final Map<String, PendingReply<SessionEntry?>> _pendingCreates = {};
   final Map<String, PendingReply<bool>> _pendingDeletes = {};
   final Map<String, PendingReply<SessionModeResult>> _pendingModeChanges = {};
@@ -188,6 +189,19 @@ class SessionsService {
         createPending.complete(entry);
       } else {
         createPending.fail(SessionOperationException(errorCode, error));
+      }
+      return;
+    }
+
+    // Same typed-refusal shape as create, for the mutations whose caller asked
+    // for the reason (see [start]). The untyped tail below still collapses a
+    // refusal to null for everyone else.
+    final refusablePending = _pendingRefusableMutations.remove(requestId);
+    if (refusablePending != null) {
+      if (ok) {
+        refusablePending.complete(entry);
+      } else {
+        refusablePending.fail(SessionOperationException(errorCode, error));
       }
       return;
     }
@@ -298,11 +312,24 @@ class SessionsService {
     return pending.future;
   }
 
-  Future<SessionEntry?> start(String id, {String? initialPrompt}) {
+  /// Starts [id]. With [raiseRefusal], a typed bridge refusal — an isolated
+  /// session whose checkout is gone, an antgrid.yaml that moved
+  /// `agent.workingDir` out of it — arrives as a [SessionOperationException]
+  /// instead of collapsing to null.
+  ///
+  /// Off by default, and it must stay off for the automatic starts: the project
+  /// bootstrap's most-recent-session start and any other non-interactive start
+  /// have nowhere to put an error, and a throw from there lands outside any
+  /// `build()` as a fatal.
+  Future<SessionEntry?> start(
+    String id, {
+    String? initialPrompt,
+    bool raiseRefusal = false,
+  }) {
     return _mutate('session:start', {
       'sessionId': id,
       'initialPrompt': ?initialPrompt,
-    });
+    }, raiseRefusal: raiseRefusal);
   }
 
   Future<SessionEntry?> stopSession(String id) {
@@ -368,12 +395,15 @@ class SessionsService {
     _send(createAbMessage('session:focus', {'sessionId': id}));
   }
 
-  Future<SessionEntry?> _mutate(String type, Map<String, dynamic> fields) {
+  Future<SessionEntry?> _mutate(
+    String type,
+    Map<String, dynamic> fields, {
+    bool raiseRefusal = false,
+  }) {
     final requestId = _newRequestId();
-    final pending = _newPending<SessionEntry?>(
-      () => _pendingMutations.remove(requestId),
-    );
-    _pendingMutations[requestId] = pending;
+    final map = raiseRefusal ? _pendingRefusableMutations : _pendingMutations;
+    final pending = _newPending<SessionEntry?>(() => map.remove(requestId));
+    map[requestId] = pending;
     unawaited(
       _send(createAbMessage(type, {'requestId': requestId, ...fields})),
     );
@@ -399,6 +429,10 @@ class SessionsService {
       p.fail(error);
     }
     _pendingMutations.clear();
+    for (final p in _pendingRefusableMutations.values) {
+      p.fail(error);
+    }
+    _pendingRefusableMutations.clear();
     for (final p in _pendingCreates.values) {
       p.fail(error);
     }

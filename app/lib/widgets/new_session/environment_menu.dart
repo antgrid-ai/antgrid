@@ -346,7 +346,8 @@ class _ComposerToggleChipState extends State<ComposerToggleChip> {
           ),
         );
         // Same slot contract as [ComposerChip]: new_session_composer's
-        // worktreeMax can hand this chip less than the icon-only footprint.
+        // isolationChipMax can hand this chip less than the icon-only
+        // footprint.
         return _chipInSlot(constraints.maxWidth, body);
       },
     );

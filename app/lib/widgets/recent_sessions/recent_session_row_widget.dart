@@ -6,11 +6,9 @@ import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_agent_mark.dart';
-import '../../design/widgets/ab_confirm_dialog.dart';
 import '../../design/widgets/ab_focus_ring.dart';
 import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_tap_target.dart';
-import '../../design/widgets/ab_snack_bar.dart';
 import '../../design/widgets/ab_tooltip.dart';
 import '../../models/recent_session_row.dart';
 import '../../providers/agent_catalog.dart';
@@ -19,24 +17,12 @@ import '../../providers/now_ticker.dart';
 import '../../providers/project_work_status.dart';
 import '../../providers/recent_sessions.dart';
 import '../../services/control_plane_client.dart';
+import '../../services/sessions_service.dart' show SessionOperationException;
 import '../../util/detached.dart';
 import '../../util/relative_time.dart';
 import '../agent_work_status_dot.dart';
-
-/// Confirm dialog for removing a cached recent-session entry.
-///
-/// Wraps [AbConfirmDialog.show] with wording specific to cache deletion
-/// ("cannot be undone") — distinct from live-agent deletion, which warns
-/// about process termination.
-Future<bool> showDeleteRecentSessionDialog(BuildContext context, String name) {
-  return AbConfirmDialog.show(
-    context: context,
-    title: 'Delete session?',
-    body: 'This permanently deletes "$name" and cannot be undone.',
-    confirmLabel: 'Delete',
-    destructive: true,
-  );
-}
+import '../session_delete_flow.dart';
+import '../session_isolation_badge.dart';
 
 /// One row in the Recent tab: agent mark (status-badged) · session name ·
 /// project · relative time · delete affordance (desktop hover).
@@ -194,24 +180,37 @@ class _RecentSessionRowWidgetState
     // Captured before the dialog await: a confirmed delete must still run if
     // this row was rebuilt away while the dialog was open.
     final container = ref.container;
-    final confirmed = await showDeleteRecentSessionDialog(
-      context,
-      row.session.name,
-    );
-    if (!confirmed) return;
-    final outcome = await deleteRecentSession(container, row);
-    if (!context.mounted) return;
-    switch (outcome) {
-      case RecentSessionDeleteOutcome.deleted:
-        widget.onDeleted?.call();
-      case RecentSessionDeleteOutcome.offline:
-        showAbSnackBar(
-          context,
-          '${row.origin.deviceName} is offline — connect to delete.',
+    final result = await confirmAndDeleteSession(
+      context: context,
+      sessionName: row.session.name,
+      checkoutKind: row.session.checkoutKind,
+      // A Recent row is a cache entry, so this surface can't promise anything
+      // about a process: the session may have no agent running to terminate.
+      sharedBody: 'This permanently deletes "${row.session.name}".',
+      delete: ({force, deleteBranch}) async {
+        final outcome = await deleteRecentSession(
+          container,
+          row,
+          force: force,
+          deleteBranch: deleteBranch,
         );
-      case RecentSessionDeleteOutcome.failed:
-        showAbSnackBar(context, 'Could not delete "${row.session.name}".');
-    }
+        // The ladder reports a SessionOperationException and nothing else, so
+        // the two non-refusal outcomes are raised as one too — a bare `false`
+        // would leave the offline case, the only one a user can act on, unsaid.
+        return switch (outcome) {
+          RecentSessionDeleteOutcome.deleted => true,
+          RecentSessionDeleteOutcome.offline => throw SessionOperationException(
+            null,
+            '${row.origin.deviceName} is offline — connect to delete.',
+          ),
+          RecentSessionDeleteOutcome.failed => throw SessionOperationException(
+            null,
+            'Could not delete "${row.session.name}".',
+          ),
+        };
+      },
+    );
+    if (result == SessionDeleteResult.deleted) widget.onDeleted?.call();
   }
 }
 
@@ -266,6 +265,9 @@ class _DesktopLayout extends StatelessWidget {
             child: Row(
               children: [
                 Flexible(child: _SessionName(name: row.session.name)),
+                // Non-flex, so the badge is measured before the name and a long
+                // name ellipsizes around it rather than pushing it off the row.
+                SessionIsolationBadge(session: row.session),
                 const SizedBox(width: AbTokens.space12),
               ],
             ),
@@ -361,6 +363,7 @@ class _MobileLayout extends StatelessWidget {
               ),
               const SizedBox(width: AbTokens.space12),
               Expanded(child: _SessionName(name: row.session.name)),
+              SessionIsolationBadge(session: row.session),
               const SizedBox(width: AbTokens.space8),
               // Only a custom launch command belongs on this line: an agent
               // with a mark is already named at the row's left edge, and

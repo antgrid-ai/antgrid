@@ -63,7 +63,9 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
     // Tell the bridge to forget the project too: its persisted `sessions.json`
     // is the AUTHORITATIVE session list (purgeEntryState only clears the app's
     // cache of it), so without this the old sessions reload when the same folder
-    // is reopened — same projectId, same store on disk.
+    // is reopened — same projectId, same store on disk. This also destroys the
+    // project's isolated working directories, which is why every caller of
+    // `remove` must confirm first — see `projectForget`'s contract.
     await _forgetOnHost(id);
     // If the removed project was active, clear the selection so the App
     // doesn't sit on a workspace shell with no transport.

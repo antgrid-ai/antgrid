@@ -18,7 +18,15 @@ import { initialPromptArgv } from "./initial-prompt";
 import type { WorkStatus } from "./protocol";
 import type { TerminalManager } from "./terminal-manager";
 import type { AbMessage, SessionEntry } from "./protocol";
-import type { CheckoutRecord } from "./worktrees/checkout-types";
+import {
+  CHECKOUT_KINDS,
+  CHECKOUT_STATES,
+  isIsolatedCheckoutKind,
+  isManagedCheckoutKind,
+  type CheckoutKind,
+  type CheckoutRecord,
+  type CheckoutState,
+} from "./worktrees/checkout-types";
 import { WorktreeError, type WorktreeManager } from "./worktrees/worktree-manager";
 import { logWorktreeEvent, worktreeErrorCode } from "./worktrees/worktree-log";
 
@@ -150,9 +158,9 @@ interface PersistedEntry {
   // model/mode/effort instead of reverting to the backend default.
   config?: Record<string, string>;
   checkoutId: string;
-  checkoutKind: "main" | "managed-worktree" | "external-worktree";
+  checkoutKind: CheckoutKind;
   checkoutBranch?: string | null;
-  checkoutState: "ready" | "missing" | "failed";
+  checkoutState: CheckoutState;
 }
 
 /** On-disk shape written by `flush()`; validated on read by PersistedFileSchema. */
@@ -182,9 +190,9 @@ const PersistedEntrySchema = z
     agentTranscriptPath: z.string().optional().catch(undefined),
     config: z.record(z.string(), z.string()).optional().catch(undefined),
     checkoutId: z.string().optional().catch(undefined),
-    checkoutKind: z.enum(["main", "managed-worktree", "external-worktree"]).optional().catch(undefined),
+    checkoutKind: z.enum(CHECKOUT_KINDS).optional().catch(undefined),
     checkoutBranch: z.string().nullable().optional().catch(undefined),
-    checkoutState: z.enum(["ready", "missing", "failed"]).optional().catch(undefined),
+    checkoutState: z.enum(CHECKOUT_STATES).optional().catch(undefined),
   })
   .transform((s): PersistedEntry => {
     const createdAt = s.createdAt ?? Date.now();
@@ -354,10 +362,14 @@ export class SessionManager {
     return out;
   }
 
-  /** Whether any persisted session requires checkout-scoped workspace routing. */
-  hasManagedSessions(): boolean {
+  /** Whether any persisted session requires checkout-scoped workspace routing.
+   *  This is the ROUTING question, not the ownership one — any checkout that is
+   *  not main's working tree needs it, whoever created it, so it must stay on
+   *  `isIsolatedCheckoutKind` even though every kind that answers true today is
+   *  also one Antgrid created. */
+  hasIsolatedSessions(): boolean {
     for (const entry of this.entries.values()) {
-      if (entry.checkoutKind === "managed-worktree") return true;
+      if (isIsolatedCheckoutKind(entry.checkoutKind)) return true;
     }
     return false;
   }
@@ -685,7 +697,7 @@ export class SessionManager {
   delete(id: string, options: DeleteSessionOptions = {}): boolean | Promise<boolean> {
     const entry = this.entries.get(id);
     if (!entry) return false;
-    if (entry.checkoutKind === "managed-worktree") {
+    if (isManagedCheckoutKind(entry.checkoutKind)) {
       return this.deleteManaged(entry, options);
     }
     if (this.tm.has(id)) this.tm.kill(id);
@@ -701,6 +713,23 @@ export class SessionManager {
     }
     const manager = this.opts.worktreeManager;
     if (!manager) throw new WorktreeError("WORKTREE_MISSING", "The isolated worktree manager is unavailable.");
+    if (!await manager.recordFor(this.opts.projectId, entry.checkoutId)) {
+      // The checkout metadata is gone (reconciled away, or lost with a forgotten
+      // project's store), so there is nothing left to reclaim and the session
+      // row is the only trace. Refusing here — which `inspect`'s
+      // WORKTREE_MISSING would — makes that row permanently undeletable.
+      if (this.tm.has(entry.id)) this.tm.kill(entry.id);
+      // Still torn down even though there is no worktree left to unlock: the
+      // checkout's `services:` PTYs, watcher and port detector outlive it, and
+      // once this row is gone nothing on the machine can name that checkoutId
+      // again. A no-op when no runtime was ever prepared.
+      await this.opts.teardownCheckoutRuntime?.(entry.checkoutId);
+      this.entries.delete(entry.id);
+      this.resumableCache.delete(entry.id);
+      await this.flushNowOrThrow();
+      this.notifyObservers();
+      return true;
+    }
     // First preflight gives the UI a non-destructive refusal. Kept in lockstep
     // with WorktreeManager.removeNow's own guard, which repeats it under the
     // project lock — the split codes must match or the dialog copy is wrong.
@@ -830,14 +859,43 @@ export class SessionManager {
     return this.startCheckout(id, initialPrompt, entry.checkoutId);
   }
 
+  /** The two unusable-checkout states are what the app's two badge treatments
+   *  are for, so every path that discovers one must stamp it: `missing` is not
+   *  recoverable in place, `failed` is a config/environment fault the user can
+   *  repair and retry. */
+  private markCheckoutState(sessionId: string, state: CheckoutState): void {
+    const entry = this.entries.get(sessionId);
+    if (!entry || entry.checkoutState === state) return;
+    entry.checkoutState = state;
+    this.changed();
+  }
+
   private async startCheckout(id: string, initialPrompt: string | undefined, checkoutId: string): Promise<void> {
-    const checkout = await this.opts.resolveCheckout?.(checkoutId);
+    let checkout: CheckoutRecord | undefined;
+    try {
+      checkout = await this.opts.resolveCheckout?.(checkoutId);
+    } catch (error) {
+      // The record is there; building its runtime is what failed. Repairable,
+      // so it is `failed` rather than `missing`.
+      this.markCheckoutState(id, "failed");
+      logWorktreeEvent("worktree_resume_failed", {
+        projectId: this.opts.projectId, checkoutId, sessionId: id,
+        errorCode: worktreeErrorCode(error),
+      });
+      throw error;
+    }
     if (!checkout || checkout.id !== checkoutId || !checkout.path) {
-      const entry = this.entries.get(id);
-      if (entry) {
-        entry.checkoutState = "missing";
-        this.changed();
-      }
+      this.markCheckoutState(id, "missing");
+      logWorktreeEvent("worktree_resume_missing", {
+        projectId: this.opts.projectId, checkoutId, sessionId: id,
+      });
+      throw new WorktreeError("WORKTREE_MISSING", "The isolated worktree is no longer available.");
+    }
+    if (!existsSync(checkout.path)) {
+      // The record is durable metadata and says nothing about the disk. Without
+      // this stat a hand-deleted worktree spawns a PTY whose cwd does not exist
+      // while the badge keeps claiming `ready`.
+      this.markCheckoutState(id, "missing");
       logWorktreeEvent("worktree_resume_missing", {
         projectId: this.opts.projectId, checkoutId, sessionId: id,
       });
@@ -849,17 +907,14 @@ export class SessionManager {
     } catch (error) {
       // The checkout is there but unusable — antgrid.yaml moved agent.workingDir
       // outside it since creation. Distinct from "missing" for triage.
+      this.markCheckoutState(id, "failed");
       logWorktreeEvent("worktree_resume_conflict", {
         projectId: this.opts.projectId, checkoutId, sessionId: id,
         errorCode: worktreeErrorCode(error),
       });
       throw error;
     }
-    const entry = this.entries.get(id);
-    if (entry && entry.checkoutState !== "ready") {
-      entry.checkoutState = "ready";
-      this.changed();
-    }
+    this.markCheckoutState(id, "ready");
     this.startNow(id, initialPrompt, checkout.path, spec);
   }
 

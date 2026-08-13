@@ -417,11 +417,29 @@ class ControlPlaneClient {
   /// Delete a session over the control plane — the Recent tab's delete path for
   /// a remote project (works whether the project is running or stopped; the
   /// bridge routes warm-core vs disk). Lets an [RpcException] (NOT_ALLOWED,
-  /// timeout) propagate so the caller can toast a failure.
-  Future<bool> deleteSession(String projectId, String sessionId) async {
+  /// `WORKTREE_DIRTY`, timeout) propagate so the caller can either climb its
+  /// confirm ladder or toast a failure.
+  ///
+  /// [force] and [deleteBranch] are omitted when null rather than sent as
+  /// `false`, because they carry the user's answer to a question that is only
+  /// asked after the first attempt is refused — before that there is no answer
+  /// to state. `removeCheckout` is deliberately never sent at all: whether an
+  /// isolated workspace is removed follows from the session's checkout kind,
+  /// which is the bridge's to read and not a phone's to assert.
+  Future<bool> deleteSession(
+    String projectId,
+    String sessionId, {
+    bool? force,
+    bool? deleteBranch,
+  }) async {
     final res = await transport.request(
       'sessions.delete',
-      params: {'projectId': projectId, 'sessionId': sessionId},
+      params: {
+        'projectId': projectId,
+        'sessionId': sessionId,
+        'force': ?force,
+        'deleteBranch': ?deleteBranch,
+      },
     );
     return res['deleted'] == true;
   }

@@ -9,7 +9,6 @@ import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_status_tone.dart';
 import '../design/ab_tokens.dart';
-import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_menu.dart';
@@ -31,10 +30,12 @@ import '../services/control_plane_client.dart';
 import '../services/sessions_service.dart';
 import '../util/detached.dart';
 import '../util/external_open_target.dart';
-import 'ab_status_helpers.dart' show friendlyErrorCopy;
 import 'agent_work_status_dot.dart';
 import 'drawer_entry_row.dart' show activateDrawerEntryById, ensureRemoteOnline;
+import 'session_delete_flow.dart';
+import 'session_isolation_badge.dart';
 import 'session_rename_dialog.dart';
+import 'session_start_refusal.dart';
 
 /// One row in the sessions sub-tree of [ProjectsDrawer]. Tapping focuses the
 /// session: if its parent project is not currently active, switches projects
@@ -234,10 +235,17 @@ class _SessionRowState extends ConsumerState<SessionRow> {
           // change the height; the field expands to the full title width.
           title: _editing
               ? _buildEditor()
-              : Text(
-                  session.name,
-                  style: AbTokens.sansStyle(),
-                  overflow: TextOverflow.ellipsis,
+              : Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        session.name,
+                        style: AbTokens.sansStyle(),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    SessionIsolationBadge(session: session),
+                  ],
                 ),
           // Hover-only kebab kept in the tree (and its size reserved) so the
           // row height never jitters — including while editing, when it's
@@ -294,6 +302,13 @@ class _SessionRowState extends ConsumerState<SessionRow> {
     BuildContext context,
     ProviderContainer ref,
   ) async {
+    // Captured before the first await: this row is routinely disposed by the
+    // switch its own tap triggers (mobile pops the drawer, a cross-project
+    // activate rebuilds it), and a refusal the user asked for must not vanish
+    // with it. The navigator outlives any one route or overlay entry; falls back
+    // to the row's own context where there is no Navigator (widget tests).
+    final refusalHost =
+        Navigator.maybeOf(context, rootNavigator: true)?.context ?? context;
     final liveId = ref.read(selectedRegistrationIdProvider);
     if (widget.entryId == liveId) {
       // Same project — local fast path. For a same-project remote `liveId`
@@ -317,17 +332,27 @@ class _SessionRowState extends ConsumerState<SessionRow> {
       if (ref.read(selectedRegistrationIdProvider) != liveId) return;
       ref.read(activeSessionIdProvider.notifier).set(session.id);
       if (!session.running) {
-        // A dropped reply must not abandon the focus + surface + nav writes
-        // below: the user asked for THIS session, and the bridge may have
-        // spawned the PTY anyway (`session:updated` then reconciles the row).
-        // Leaving the activeSessionId set while the surface never switches is
-        // the worst of both — a tap that visibly did nothing.
+        // The two failures end differently, and that is the whole point of
+        // catching them separately: a refusal is the bridge's answer that this
+        // session did NOT start, while a timeout is no answer at all.
         try {
-          await svc.start(session.id);
+          await svc.start(session.id, raiseRefusal: true);
+        } on SessionOperationException catch (error) {
+          // A refused start is the only signal this row has that its isolated
+          // checkout is gone — the tap was otherwise a silent no-op. Returning
+          // is part of the answer: focusing the workspace onto a session that
+          // never spawned reads as the app having lost the output.
+          if (refusalHost.mounted) reportStartRefusal(refusalHost, error);
+          return;
         } on TimeoutException {
-          if (context.mounted) {
+          // A dropped reply must not abandon the focus + surface + nav writes
+          // below: the user asked for THIS session, and the bridge may have
+          // spawned the PTY anyway (`session:updated` then reconciles the row).
+          // Leaving the activeSessionId set while the surface never switches is
+          // the worst of both — a tap that visibly did nothing.
+          if (refusalHost.mounted) {
             showAbSnackBar(
-              context,
+              refusalHost,
               "The agent didn't answer. If the session doesn't come up in a "
               'moment, try again.',
             );
@@ -599,11 +624,19 @@ class _SessionMenu extends ConsumerWidget {
     // user an answer: the row keeps rendering the pre-action state (still
     // running after Stop, old name after Rename), which without this reads as a
     // menu item that did nothing. Not a claim of failure — the bridge may have
-    // applied it and `session:updated` will reconcile the row.
+    // applied it and `session:updated` will reconcile the row. A REFUSAL is the
+    // opposite case and is caught per-branch: the bridge answered, and only the
+    // branch knows what its refusal means.
     try {
       switch (action) {
         case _SessionAction.start:
-          await svc.start(session.id);
+          // The kebab's explicit Start is the same intent as the row tap and
+          // must not answer differently.
+          try {
+            await svc.start(session.id, raiseRefusal: true);
+          } on SessionOperationException catch (error) {
+            if (anchor.mounted) reportStartRefusal(anchor, error);
+          }
         case _SessionAction.stop:
           await svc.stopSession(session.id);
         case _SessionAction.rename:
@@ -633,109 +666,16 @@ class _SessionMenu extends ConsumerWidget {
     SessionsService service,
   ) async {
     final capturedId = session.id;
-    if (session.checkoutKind != 'managed-worktree') {
-      final confirmed = await AbConfirmDialog.show(
-        context: context,
-        title: 'Delete session?',
-        body:
-            'This permanently deletes "${session.name}" and terminates its agent process. This cannot be undone.',
-        confirmLabel: 'Delete',
-        destructive: true,
-      );
-      if (!confirmed || !context.mounted || session.id != capturedId) return;
-      // A shared delete has no second chance to offer, so a refusal is simply
-      // reported. Before checkout-scoped deletion this returned false and the
-      // failure was silent.
-      final deleted = await _tryDelete(context, service, capturedId);
-      if (deleted == true) _disconnectIfEmpty(ref);
-      return;
-    }
-    final confirmed = await AbConfirmDialog.show(
+    final result = await confirmAndDeleteSession(
       context: context,
-      title: 'Delete isolated session?',
-      body:
-          'This permanently deletes "${session.name}", terminates its agent process and removes its isolated working directory. Its branch is kept. This cannot be undone.',
-      confirmLabel: 'Delete',
-      destructive: true,
+      sessionName: session.name,
+      checkoutKind: session.checkoutKind,
+      sharedBody:
+          'This permanently deletes "${session.name}" and terminates its agent process.',
+      delete: ({force, deleteBranch}) =>
+          service.delete(capturedId, force: force, deleteBranch: deleteBranch),
     );
-    if (!confirmed || !context.mounted || session.id != capturedId) return;
-    // Managed checkouts are always attempted non-destructively first. The
-    // bridge checks both uncommitted and unpushed work before removing anything.
-    final String blockedBy;
-    try {
-      final deleted = await service.delete(capturedId);
-      if (!context.mounted || session.id != capturedId) return;
-      if (deleted) _disconnectIfEmpty(ref);
-      return;
-    } on SessionOperationException catch (error) {
-      if (!context.mounted || session.id != capturedId) return;
-      final code = error.errorCode;
-      if (code != 'WORKTREE_DIRTY' && code != 'WORKTREE_UNPUSHED') {
-        showAbSnackBar(
-          context,
-          friendlyErrorCopy(code) ??
-              error.message ??
-              'Could not delete the session',
-        );
-        return;
-      }
-      blockedBy = code!;
-    }
-
-    final unpushed = blockedBy == 'WORKTREE_UNPUSHED';
-    // Branch deletion is offered only for unpushed commits, because that is the
-    // only case where keeping the branch actually preserves something. It is
-    // always a separate, unchecked choice — never folded into "force".
-    final choice = await AbConfirmDialog.showWithOption(
-      context: context,
-      title: unpushed
-          ? 'Delete worktree with unpushed commits?'
-          : 'Delete worktree with uncommitted changes?',
-      body: unpushed
-          ? 'This isolated session\'s branch has commits that exist nowhere else. Deleting removes its working directory; the branch is kept unless you also delete it.'
-          : 'This isolated session has uncommitted changes in its working directory. Force deletion discards them. Its branch is preserved.',
-      confirmLabel: 'Force delete',
-      destructive: true,
-      optionLabel: unpushed ? 'Also delete the branch and its commits' : null,
-    );
-    if (!choice.confirmed || !context.mounted || session.id != capturedId) {
-      return;
-    }
-
-    // Exactly one retry, with the captured id.
-    final deleted = await _tryDelete(
-      context,
-      service,
-      capturedId,
-      force: true,
-      deleteBranch: choice.optionSelected,
-    );
-    if (!context.mounted || session.id != capturedId) return;
-    if (deleted == true) _disconnectIfEmpty(ref);
-  }
-
-  /// Deletes and reports a typed refusal in the UI. Returns null when the
-  /// request failed — the caller must not treat that as a deletion.
-  Future<bool?> _tryDelete(
-    BuildContext context,
-    SessionsService service,
-    String id, {
-    bool? force,
-    bool? deleteBranch,
-  }) async {
-    try {
-      return await service.delete(id, force: force, deleteBranch: deleteBranch);
-    } on SessionOperationException catch (error) {
-      if (context.mounted) {
-        showAbSnackBar(
-          context,
-          friendlyErrorCopy(error.errorCode) ??
-              error.message ??
-              'Could not delete the session',
-        );
-      }
-      return null;
-    }
+    if (result == SessionDeleteResult.deleted) _disconnectIfEmpty(ref);
   }
 
   /// Wired here (call site) instead of as a listener on

@@ -26,6 +26,14 @@ analyzer:
     # `flutter analyze` fails CI on regressions; widget code must read
     # colors via `context.antgrid.<name>`.
     deprecated_member_use_from_same_package: warning
+  exclude:
+    - build/**
+    - android/**
+    - ios/**
+    - web/**
+    - windows/**
+    - macos/**
+    - linux/**
 
 linter:
   # The lint rules applied to this project can be customized in the

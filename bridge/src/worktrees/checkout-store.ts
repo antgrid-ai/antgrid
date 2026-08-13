@@ -16,6 +16,15 @@ const RecordSchema = z.object({
 });
 const FileSchema = z.object({ version: z.literal(1), checkouts: z.array(z.unknown()) });
 
+export interface CheckoutStoreState {
+  /** True only when the file was absent or read whole with every row parsed. A
+   * false here means "there may be rows I could not see", which is emphatically
+   * not the same answer as "there are no rows" — anything that DELETES on the
+   * strength of a checkout being unlisted must refuse to act on it. */
+  healthy: boolean;
+  records: CheckoutRecord[];
+}
+
 /** Durable metadata for managed checkouts. Corrupt rows are ignored individually
  * so a single interrupted/manual edit never hides healthy sibling worktrees. */
 export class CheckoutStore {
@@ -26,16 +35,36 @@ export class CheckoutStore {
   }
 
   async list(): Promise<CheckoutRecord[]> {
+    return (await this.read()).records;
+  }
+
+  /** `list()` plus whether the answer is complete. Readers that only display or
+   * look up a row want `list()`; a reader deriving "nothing names this" wants
+   * this one. */
+  async read(): Promise<CheckoutStoreState> {
     let raw: string;
-    try { raw = await readFile(this.path, "utf8"); } catch { return []; }
+    try { raw = await readFile(this.path, "utf8"); }
+    catch (error) {
+      // No file is the honest empty state. Anything else — EPERM/EBUSY while a
+      // sibling process renames the replacement into place, a half-written
+      // file — is an unknown one.
+      const absent = (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
+      return { healthy: absent, records: [] };
+    }
     try {
       const parsed = FileSchema.safeParse(JSON.parse(raw));
-      if (!parsed.success) return [];
-      return parsed.data.checkouts.flatMap((value) => {
+      if (!parsed.success) return { healthy: false, records: [] };
+      const records: CheckoutRecord[] = [];
+      let healthy = true;
+      for (const value of parsed.data.checkouts) {
         const row = RecordSchema.safeParse(value);
-        return row.success && row.data.projectId === this.projectId ? [row.data] : [];
-      });
-    } catch { return []; }
+        // A foreign projectId is filtered rather than trusted, but it is still a
+        // row this file should never have carried: `put` refuses the mismatch.
+        if (!row.success || row.data.projectId !== this.projectId) { healthy = false; continue; }
+        records.push(row.data);
+      }
+      return { healthy, records };
+    } catch { return { healthy: false, records: [] }; }
   }
 
   async get(id: string): Promise<CheckoutRecord | undefined> {

@@ -106,7 +106,7 @@ test("buildProjectsAdvertisement carries a warm core's work status", async () =>
     core: {
       workStatus: "attention",
       isRelayRegistered: () => true,
-      hasManagedSessions: () => false,
+      hasIsolatedSessions: () => false,
       shutdown: async () => {},
     },
     path: "/p", mode: "local", lastFocusedMs: 0,

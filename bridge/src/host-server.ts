@@ -36,6 +36,7 @@ import { listLocalBranches, checkoutLocalBranch } from "./git-branches";
 import { resolveProject } from "./worktrees/project-resolver";
 import { WorktreeError, WorktreeManager } from "./worktrees/worktree-manager";
 import { CheckoutStore } from "./worktrees/checkout-store";
+import { isIsolatedCheckoutKind, isManagedCheckoutKind } from "./worktrees/checkout-types";
 export { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
 import { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
 
@@ -506,7 +507,7 @@ export class HostServer {
       .map((id) => {
         const seen = this.seenProjects.get(id);
         const entry = this.cores.get(id);
-        const needsCheckoutRouting = entry?.core.hasManagedSessions() ?? false;
+        const needsCheckoutRouting = entry?.core.hasIsolatedSessions() ?? false;
         const peerCanRoute = this.controlPlaneRelay?.peerSupportsCheckoutRouting === true;
         const dialable = (entry?.core.isRelayRegistered() ?? false)
           && (!needsCheckoutRouting || peerCanRoute);
@@ -805,18 +806,34 @@ export class HostServer {
     }
     const entry = this.cores.get(projectId);
     let deleted: boolean;
-    if (entry) {
-      // Warm core owns sessions.json — delegate so the live state + disk + any
-      // connected peers stay in sync (kills the PTY, emits session:updated).
-      deleted = await entry.core.deleteSession(sessionId, { force, removeCheckout, deleteBranch });
-    } else {
-      try {
+    // BOTH branches sit inside the try: an isolated session refuses deletion
+    // (WORKTREE_DIRTY/WORKTREE_UNPUSHED) exactly as readily when its project is
+    // warm, and the caller at the `sessions.delete` dispatch only logs a
+    // rejected promise — it publishes no frame — so a throw escaping here is a
+    // phone RPC that never answers at all rather than one that says why.
+    try {
+      if (entry) {
+        // Warm core owns sessions.json — delegate so the live state + disk + any
+        // connected peers stay in sync (kills the PTY, emits session:updated).
+        deleted = await entry.core.deleteSession(sessionId, { force, removeCheckout, deleteBranch });
+      } else {
         deleted = await this.deleteColdSession(projectId, sessionId, { force, removeCheckout, deleteBranch });
-      } catch (error) {
-        const code = error instanceof WorktreeError ? error.code : "DELETE_FAILED";
-        const message = error instanceof WorktreeError ? error.message : "Could not delete this session.";
-        return createMessage("response", { requestId: req.requestId, ok: false, error: { code, message } });
       }
+    } catch (error) {
+      if (error instanceof WorktreeError) {
+        return createMessage("response", {
+          requestId: req.requestId, ok: false,
+          error: { code: error.code, message: error.message },
+        });
+      }
+      // Anything else is unexpected, and the generic reply below carries none of
+      // it — this is the only trace a support bundle will have of what actually
+      // failed (an EPERM/EBUSY sessions.json write, a corrupt entry).
+      log.warn("sessions.delete failed for %s/%s: %s", projectId, sessionId, error instanceof Error ? (error.stack ?? error.message) : String(error));
+      return createMessage("response", {
+        requestId: req.requestId, ok: false,
+        error: { code: "DELETE_FAILED", message: "Could not delete this session." },
+      });
     }
     return createMessage("response", { requestId: req.requestId, ok: true, result: { deleted } });
   }
@@ -1527,20 +1544,49 @@ export class HostServer {
    *  removed project's sessions reload on the next open. Each step is
    *  best-effort — a failure in one must never strand the others:
    *    1. stop a warm core (kills its PTYs + any relay slot),
-   *    2. delete the on-disk store dir (`agents/<id>/`, holding sessions.json),
-   *    3. drop the seen-catalog hint (also clears the stale projects.json entry).
+   *    2. reclaim the project's managed worktrees,
+   *    3. delete the on-disk store dir (`agents/<id>/`, holding sessions.json),
+   *    4. drop the seen-catalog hint (also clears the stale projects.json entry).
+   *  Step 2's position is the invariant, not a preference: it reads
+   *  `agents/<id>/checkouts.json`, which step 3 deletes, and it resolves the
+   *  repository from `seenProjects`, which step 4 drops — so anywhere later it
+   *  would leak the worktrees with nothing left able to name them.
    *  Deliberately does NOT touch the machine's mobile-access switch: that is
    *  machine-wide policy, and deleting one project must not turn the machine
    *  off (or on) for every other.
    *  Idempotent: forgetting an unknown/already-forgotten id is a no-op. */
   async forget(projectId: string): Promise<void> {
     await this.stop(projectId);
+    await this.reclaimManagedCheckouts(projectId);
     this.deleteProjectStores(projectId);
     if (this.seenProjects.delete(projectId)) this.flushSeen();
     // Unconditional: the advert IS the seen catalog now, so a forgotten project
     // must vanish from a live phone's picker without waiting for a reconnect
     // (the advertisement is otherwise only re-sent on handshake).
     this.readvertiseToControlPlane();
+  }
+
+  /** Force-remove every managed worktree of a project being forgotten, before
+   *  the metadata naming them dies with `agents/<id>/`. Uncommitted edits inside
+   *  one are destroyed, deliberately: forget() already deletes sessions.json
+   *  unconditionally, so a refusal would only produce a half-forgotten project
+   *  plus a worktree nothing can ever reach. The `antgrid/*` branches survive,
+   *  which bounds the loss to work the user never committed. */
+  private async reclaimManagedCheckouts(projectId: string): Promise<void> {
+    try {
+      const manager = new WorktreeManager({
+        abDir: resolveAbDir(),
+        resolveRepoPath: async (id) => this.seenProjects.get(id)?.path,
+      });
+      const { reclaimed, stranded, root } = await manager.reclaimForgottenProject(projectId);
+      if (stranded > 0) {
+        log.warn("host: forget(%s) left %d managed worktree(s) in %s that Git would not release; the metadata naming them is gone", projectId, stranded, root);
+      } else if (reclaimed > 0) {
+        log.info("host: forget(%s) reclaimed %d managed worktree(s)", projectId, reclaimed);
+      }
+    } catch (e) {
+      log.warn("host: forget(%s) could not reclaim managed worktrees: %s", projectId, e instanceof Error ? e.message : String(e));
+    }
   }
 
   /** Delete a project's on-disk per-project dirs (best-effort). Two locations,
@@ -1633,9 +1679,9 @@ export class HostServer {
    * the host-owned session store. A remote request never supplies a path. */
   private async projectRequiresCheckoutRouting(projectId: string): Promise<boolean> {
     const warm = this.cores.get(projectId)?.core;
-    if (warm) return warm.hasManagedSessions();
+    if (warm) return warm.hasIsolatedSessions();
     const sessions = await SessionManager.readPersisted(resolveAbDir(), projectId, true);
-    return sessions.some((session) => session.checkoutKind === "managed-worktree");
+    return sessions.some((session) => isIsolatedCheckoutKind(session.checkoutKind));
   }
 
   /** Cold deletion still owns the same safe worktree lifecycle as a warm core.
@@ -1648,7 +1694,7 @@ export class HostServer {
     const persisted = await SessionManager.readPersisted(resolveAbDir(), projectId, true);
     const session = persisted.find((entry) => entry.id === sessionId);
     if (!session) return false;
-    if (session.checkoutKind !== "managed-worktree") {
+    if (!isManagedCheckoutKind(session.checkoutKind)) {
       return SessionManager.deletePersisted(resolveAbDir(), projectId, sessionId);
     }
     if (options.removeCheckout === false) {
@@ -1658,6 +1704,13 @@ export class HostServer {
       abDir: resolveAbDir(),
       resolveRepoPath: async (id) => this.seenProjects.get(id)?.path,
     });
+    // Nothing left to reclaim: the checkout row was reconciled away, or died
+    // with a forgotten project's store. The cold path must not be able to
+    // refuse a session the warm path deletes — the drawer's delete reaches
+    // whichever one is live.
+    if (!await manager.recordFor(projectId, session.checkoutId)) {
+      return SessionManager.deletePersisted(resolveAbDir(), projectId, sessionId);
+    }
     // The manager repeats the dirty/unpushed preflight and only removes metadata
     // after Git confirms removal. Persist the session row last.
     await manager.remove({

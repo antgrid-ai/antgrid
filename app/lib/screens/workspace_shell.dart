@@ -45,7 +45,8 @@ import '../services/local_notification_service.dart';
 import '../services/push_background_handler.dart'
     show decodePush, pushDataOf, pushDedupKey;
 import '../services/push_identity.dart';
-import '../services/sessions_service.dart' show SessionsService;
+import '../services/sessions_service.dart'
+    show SessionOperationException, SessionsService;
 import '../util/ab_log.dart';
 import '../util/detached.dart';
 import '../utils/notification_routing.dart';
@@ -55,6 +56,7 @@ import '../widgets/mobile_bottom_nav.dart';
 import '../widgets/operational_error_toaster.dart';
 import '../widgets/projects_drawer.dart';
 import '../widgets/session_search_modal.dart';
+import '../widgets/session_start_refusal.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../widgets/resizable_pane.dart';
 import '../widgets/workspace_tab_bar.dart';
@@ -515,7 +517,17 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       if (desired != null) {
         ref.read(activeSessionIdProvider.notifier).set(desired.id);
         if (!desired.running) {
-          await _startBestEffort(svc, desired.id);
+          // The cross-project half of a session-row / Recent-list tap, so a
+          // refused start has to speak here too — otherwise the same tap reports
+          // its failure only when the project happened to be focused already.
+          // The `active.first` auto-start below stays silent: it is aimed at no
+          // session the user named.
+          try {
+            await _startBestEffort(svc, desired.id, raiseRefusal: true);
+          } on SessionOperationException catch (error) {
+            if (mounted) reportStartRefusal(context, error);
+            return;
+          }
           if (!mounted) return;
           if (ref.read(selectedRegistrationIdProvider) != triggeredFor) return;
         }
@@ -581,9 +593,21 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   /// So the failure is logged and the bootstrap continues to the focus + nav
   /// writes below rather than abandoning them; the stopped-session empty state
   /// carries the retry if the start really never landed.
-  Future<void> _startBestEffort(SessionsService svc, String sessionId) async {
+  ///
+  /// [raiseRefusal] is for the one caller whose session the user NAMED. A coded
+  /// refusal there is the bridge's answer that the session did not start — not
+  /// a dropped frame — so it is rethrown for the caller to show. Everything
+  /// else stays swallowed either way: the two failures are different events and
+  /// only the first is worth interrupting a project open for.
+  Future<void> _startBestEffort(
+    SessionsService svc,
+    String sessionId, {
+    bool raiseRefusal = false,
+  }) async {
     try {
-      await svc.start(sessionId);
+      await svc.start(sessionId, raiseRefusal: raiseRefusal);
+    } on SessionOperationException {
+      rethrow;
     } catch (e) {
       AbLog.error(
         'WorkspaceShell',

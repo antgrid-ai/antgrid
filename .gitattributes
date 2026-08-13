@@ -3,3 +3,8 @@
 # script breaks the shebang, and CRLF in a Dockerfile is fragile.
 *.sh        text eol=lf
 Dockerfile  text eol=lf
+
+# Flutter regenerates these with LF on every build regardless of host OS, so a
+# CRLF checkout (core.autocrlf=true on Windows) leaves them permanently dirty.
+# Only the *.h are tracked; the .cc/.cmake siblings are gitignored.
+generated_plugin_* text eol=lf

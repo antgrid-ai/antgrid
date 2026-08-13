@@ -5,6 +5,7 @@
     "typecheck": "tsc --noEmit",
     "test:mechanics": "bun test tests/",
     "test:evals": "bun test scenarios/ tests/",
+    "test:evals:isolation": "bun test tests/gate-worktree-isolation.test.ts",
     "test:evals:pairing": "bun test scenarios/pairing/",
     "test:evals:terminal": "bun test scenarios/terminal/",
     "test:evals:file-explorer": "bun test scenarios/file-explorer/",

@@ -391,10 +391,20 @@ class HostControlClient {
     await _post({'type': 'project:stop', 'projectId': projectId});
   }
 
-  /// Erase every machine-side trace of [projectId] (its persisted session store
-  /// and the seen-catalog hint). Called on project
-  /// delete so reopening the same folder doesn't reload the old sessions —
-  /// `sessions.json` on the bridge is authoritative; the app only caches it.
+  /// Erase every machine-side trace of [projectId]. Called on project delete so
+  /// reopening the same folder doesn't reload the old sessions — `sessions.json`
+  /// on the bridge is authoritative; the app only caches it.
+  ///
+  /// **This is destructive beyond the metadata.** The host reclaims the
+  /// project's managed checkouts before erasing the stores that name them, which
+  /// force-removes each isolated session's working directory and everything
+  /// uncommitted in it. It has to happen in that order — afterwards nothing on
+  /// the machine records which directories were ours — so there is no variant of
+  /// this verb that forgets the project but keeps the workspaces. Branches are
+  /// left alone, so committed work survives on its `antgrid/*` ref.
+  ///
+  /// Callers must have said so first: `removeLocalProjectBody` in
+  /// `widgets/drawer_entry_row.dart` is where that consequence is disclosed.
   Future<void> projectForget(String projectId) async {
     await _post({'type': 'project:forget', 'projectId': projectId});
   }
