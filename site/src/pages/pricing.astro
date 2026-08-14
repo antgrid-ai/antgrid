@@ -3,14 +3,15 @@ import { Icon } from "astro-icon/components";
 import Base from "../layouts/Base.astro";
 import PricingHeader from "../components/pricing/PricingHeader.astro";
 import PlanCard from "../components/pricing/PlanCard.astro";
+import PricingFaq from "../components/pricing/PricingFaq.astro";
 import { BETA_FREE, free, trial, proYearly, TRIAL_DAYS, YEARLY_OFFER_USD, FREE_WORKERS, PRO_WORKERS } from "../data/pricing";
 import { links } from "../config";
 ---
 <Base
   title="Pricing — antgrid"
   description={BETA_FREE
-    ? `Free while in beta — every feature included. At launch: free forever on up to ${FREE_WORKERS} machines, and Pro adds the Handler AI assistant and up to ${PRO_WORKERS} machines for $${YEARLY_OFFER_USD}/year.`
-    : `Free forever on up to ${FREE_WORKERS} machines, remote control included. Pro adds the Handler AI assistant and up to ${PRO_WORKERS} machines — $${YEARLY_OFFER_USD}/year with a ${TRIAL_DAYS}-day free trial.`}
+    ? `Free while in beta — every feature included. At launch: free forever on ${FREE_WORKERS} machine, and Pro is $${YEARLY_OFFER_USD} per seat per year with the Handler AI assistant and ${PRO_WORKERS} machines for every person on the team.`
+    : `Free forever on ${FREE_WORKERS} machine, remote control included. Pro adds the Handler AI assistant and ${PRO_WORKERS} machines per person — $${YEARLY_OFFER_USD} per seat / year with a ${TRIAL_DAYS}-day free trial.`}
   path="/pricing"
 >
   <main class="mx-auto max-w-shell px-6 py-16">
@@ -29,13 +30,13 @@ import { links } from "../config";
     <div class="mt-3.5 flex flex-wrap items-center justify-between gap-4 rounded-lg border border-edge bg-panel px-5 py-4.5">
       <div class="min-w-0">
         <div class="mb-1 flex items-baseline gap-2.5">
-          <span class="font-mono text-base font-medium text-ink">Team</span>
-          <span class="rounded border border-edge px-1.5 py-px font-mono text-[9px] text-faint">soon</span>
+          <span class="font-mono text-base font-medium text-ink">Enterprise</span>
         </div>
-        <div class="text-[12.5px] text-muted">Workers pooled across the team · per-seat billing · shared fleet view</div>
+        <div class="text-[12.5px] text-muted">Unlimited seats · SSO, audit log &amp; IP allowlist · invoiced annually</div>
       </div>
       <a href={links.support} class="font-mono text-[12.5px] text-indigo2 hover:text-indigo">Talk to us</a>
     </div>
     <p class="mt-5.5 text-center text-xs text-faint">All plans include end-to-end encryption. The relay never sees your code.</p>
+    <PricingFaq />
   </main>
 </Base>

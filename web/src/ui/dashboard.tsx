@@ -131,9 +131,10 @@ export function DashboardPage(props: DashboardPageProps) {
 }
 
 /**
- * `Workers` is the paid axis (machines running an agent, `kind:"agent"` device
- * rows); `Active devices` is the flat fair-use registration ceiling across every
- * device kind. They are counted separately and only the first can be raised.
+ * `Machines` is the paid axis (machines running an agent, `kind:"agent"` device
+ * rows), counted per person rather than pooled across the account; `App devices`
+ * is the flat fair-use registration ceiling across every device kind. They are
+ * counted separately and only the first can be raised.
  */
 function MeterStat({ label, used, limit }: { label: string; used: number; limit: number }) {
   return (
@@ -187,7 +188,7 @@ function SubscriptionCard({
             <span class="badge badge-ghost font-mono text-xs capitalize">{FREE_TIER}</span>
           </div>
           <div class="stats stats-horizontal mt-4 border border-base-300">
-            <MeterStat label="Workers" used={activeWorkers} limit={workerLimit} />
+            <MeterStat label="Machines" used={activeWorkers} limit={workerLimit} />
             <MeterStat label="App devices" used={activeAppDevices} limit={appDeviceLimit} />
           </div>
         </div>
@@ -207,7 +208,7 @@ function SubscriptionCard({
               <p class="text-sm text-base-content/70 mt-1 max-w-md">
                 Remote control is included, capped at {workerLimit} worker
                 {workerLimit === 1 ? " machine" : " machines"}. Pro raises the
-                cap.
+                cap and is billed per seat, so you can bring your team along.
               </p>
             </div>
             <a class="btn btn-primary" href="/pricing">
@@ -215,7 +216,7 @@ function SubscriptionCard({
             </a>
           </div>
           <div class="stats stats-horizontal mt-4 border border-base-300">
-            <MeterStat label="Workers" used={activeWorkers} limit={workerLimit} />
+            <MeterStat label="Machines" used={activeWorkers} limit={workerLimit} />
             <MeterStat label="App devices" used={activeAppDevices} limit={appDeviceLimit} />
           </div>
         </div>
@@ -236,7 +237,7 @@ function SubscriptionCard({
           )}
         </div>
         <div class="stats stats-horizontal mt-2 border border-base-300">
-          <MeterStat label="Workers" used={activeWorkers} limit={workerLimit} />
+          <MeterStat label="Machines" used={activeWorkers} limit={workerLimit} />
           <MeterStat label="App devices" used={activeAppDevices} limit={appDeviceLimit} />
           <div class="stat">
             <div class="stat-title">Started</div>

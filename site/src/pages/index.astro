@@ -3,19 +3,21 @@ import Base from "../layouts/Base.astro";
 import Hero from "../components/sections/Hero.astro";
 import Phases from "../components/sections/Phases.astro";
 import Fleet from "../components/sections/Fleet.astro";
+import Reach from "../components/sections/Reach.astro";
 import Worktrees from "../components/sections/Worktrees.astro";
 import Privacy from "../components/sections/Privacy.astro";
 import CrossAgent from "../components/sections/CrossAgent.astro";
 import ClosingCta from "../components/sections/ClosingCta.astro";
 ---
 <Base
-  title="antgrid — make your coding agents prove they're done"
-  description="Run Claude Code, Codex and Cursor on your own machine, then watch and steer them from your phone. Handler marks nothing done without test output, exit codes or a diff. End-to-end encrypted."
+  title="antgrid — remote dev for concurrent coding agents"
+  description="Claude Code, Codex and Cursor run on your own machines. antgrid sequences the work, refuses completion without evidence, and reaches every machine you own — no VPN, no port forwarding. End-to-end encrypted."
   path="/"
 >
   <Hero />
   <Phases />
   <Fleet />
+  <Reach />
   <Worktrees />
   <Privacy />
   <CrossAgent />

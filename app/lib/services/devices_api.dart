@@ -245,9 +245,13 @@ DeviceCapInfo _deviceCapFromBody(
   }
   final message = switch ((kind, limit)) {
     (DeviceCapKind.worker, null) =>
-      'You are using all of your workers — sign one out to add this machine.',
+      'You are using all of your worker machines — sign one out to add this one.',
+    // Free allows exactly one machine, so the singular is the case a buyer
+    // actually meets — "all 1 worker machines" is the copy they would see.
+    (DeviceCapKind.worker, 1) =>
+      'You are using your only worker machine — sign it out to add this one.',
     (DeviceCapKind.worker, final l) =>
-      'You are using all $l workers — sign one out to add this machine.',
+      'You are using all $l worker machines — sign one out to add this one.',
     (DeviceCapKind.appDevice, null) =>
       'Device limit reached. Remove a device to register this one.',
     (DeviceCapKind.appDevice, final l) =>

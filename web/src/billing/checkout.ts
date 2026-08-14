@@ -106,8 +106,10 @@ export const MAX_CHECKOUT_SEATS = 1000;
 /**
  * Format a gateway amount for display. Fixed to `en-US` rather than the
  * request's locale so the string a server renders and the string an API client
- * receives are the same one; the currency is the gateway's, not ours, because
- * Razorpay plans are INR-denominated and Paddle's are not.
+ * receives are the same one; the currency is whatever the gateway reported
+ * rather than a constant, even though both gateways bill USD today. Hardcoding
+ * it would be right until the day a plan is redenominated, and what ships then
+ * is a price in the wrong currency — a number a buyer has no reason to doubt.
  */
 export function formatMoneyMinor(amount: number, currency: string): string {
   const major = amount / 100;

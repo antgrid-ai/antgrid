@@ -31,23 +31,23 @@ const offerPct = Math.round((1 - YEARLY_OFFER_USD / YEARLY_LIST_USD) * 100);
             class="mb-5 inline-flex items-center gap-2 rounded-full border border-indigodeep2 bg-indigodeep/40 px-3 py-1 font-mono text-[11px] text-indigo2 transition-colors hover:border-indigobtn hover:text-indigo3"
           >
             <span class="rounded-full bg-indigobtn px-1.5 py-px text-[9.5px] font-medium text-white">{offerPct}% off</span>
-            Launch offer — Pro ${YEARLY_OFFER_USD}/year
+            Launch offer — Pro ${YEARLY_OFFER_USD} per seat / year
             <Icon name="tabler:arrow-right" width="12" height="12" />
           </a>
         )}
         <h1 class="mb-5 font-medium leading-[1.1] tracking-tight text-ink">
-          <span class="mb-2 block text-xl leading-snug text-muted md:text-2xl">Your agent says it's done.</span>
-          <span class="block text-5xl md:text-6xl">Make it prove it.</span>
+          <span class="mb-2 block text-xl leading-snug text-muted md:text-2xl">Your agent finishes a phase at 2am and waits.</span>
+          <span class="block text-5xl md:text-6xl">antgrid checks the work.<br />Then starts the next one.</span>
         </h1>
         <p class="mb-8 max-w-xl text-base leading-relaxed text-muted">
-          Stack next steps in plain text — antgrid's Handler answers the agent for you, and nothing counts as done without test output, exit codes or a diff.
+          Claude Code, Codex and Cursor on your own machines — your repos, your branches, your existing subscriptions. Hand antgrid the sequence in plain text: it reads each result, refuses a "done" that arrives with no test output, exit code or diff, and moves to the next phase — across every machine you own.
         </p>
         <div class="flex flex-wrap items-center gap-3">
           <Button href={links.startFree} variant="primary">Start free<Icon name="tabler:arrow-right" width="16" height="16" /></Button>
           <Button href={links.getStarted} variant="outline">Setup guide</Button>
         </div>
         <p class="mt-4 text-[12.5px] text-muted2">
-          Desktop out now · End-to-end encrypted · iOS &amp; Android coming to the App Store &amp; Play.
+          No VPN or port forwarding · End-to-end encrypted · Desktop out now, iOS &amp; Android coming to the App Store &amp; Play.
         </p>
       </div>
       {/* min-w-0 for the same reason as the Worktrees card — see the comment there. */}

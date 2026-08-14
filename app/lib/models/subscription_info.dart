@@ -117,6 +117,7 @@ class PricingPlan {
     required this.slug,
     required this.label,
     required this.workerLimit,
+    this.maxSeats,
     this.priceDisplay,
     required this.recurring,
     required this.trial,
@@ -125,8 +126,14 @@ class PricingPlan {
   final String slug;
   final String label;
 
-  /// How many machines the plan may run an agent on.
+  /// How many machines the plan may run an agent on. Counted per person, so a
+  /// team does not pool them.
   final int workerLimit;
+
+  /// Seats the plan may be bought for, or null for a plan whose seat count is
+  /// a contract term (Enterprise) — and null too on a server that predates the
+  /// field, which is why nothing may read it as a real ceiling of zero.
+  final int? maxSeats;
   final String? priceDisplay;
   final bool recurring;
   final bool trial;
@@ -140,6 +147,7 @@ class PricingPlan {
       slug: json['slug'] as String,
       label: json['label'] as String,
       workerLimit: (limit as num).toInt(),
+      maxSeats: _asCount(json['max_seats']),
       priceDisplay: json['price_display'] as String?,
       recurring: json['recurring'] as bool? ?? false,
       trial: json['trial'] as bool? ?? false,

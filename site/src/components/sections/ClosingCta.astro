@@ -3,7 +3,7 @@ import { Icon } from "astro-icon/components";
 import Eyebrow from "../ui/Eyebrow.astro";
 import Button from "../ui/Button.astro";
 import { links } from "../../config";
-import { BETA_FREE, FREE_WORKERS } from "../../data/pricing";
+import { BETA_FREE, FREE_WORKERS, PRO_WORKERS, YEARLY_OFFER_USD } from "../../data/pricing";
 
 const stores = [
   { icon: "tabler:brand-apple", label: "App Store" },
@@ -21,9 +21,9 @@ const stores = [
     </h2>
     <p class="mx-auto mb-7 max-w-md text-base leading-relaxed text-muted">
       {BETA_FREE ? (
-        <>Set up antgrid in a couple of minutes. <span class="text-ink2">Free while in beta — every feature included.</span> When plans arrive, you pay only to add machines and Handler, the built-in AI assistant.</>
+        <>Set up antgrid in a couple of minutes. <span class="text-ink2">Free while in beta — every feature included.</span> When plans arrive, Pro is priced per seat — one per person — and brings Handler, the built-in AI assistant.</>
       ) : (
-        <>Set up antgrid in a couple of minutes. <span class="text-ink2">Free on {FREE_WORKERS} machines</span>, remote control included — you pay only to add machines and Handler, the built-in AI assistant.</>
+        <>Set up antgrid in a couple of minutes. <span class="text-ink2">Free on {FREE_WORKERS} machine</span>, remote control included — Pro is ${YEARLY_OFFER_USD} per seat / year and adds Handler, the built-in AI assistant, plus {PRO_WORKERS} machines for everyone on it.</>
       )}
     </p>
     <div class="mb-3.5 flex flex-wrap items-center justify-center gap-3">

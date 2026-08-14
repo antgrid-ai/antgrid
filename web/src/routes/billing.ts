@@ -163,6 +163,7 @@ export function billingRoutes(deps: {
             worker_limit: p.workerLimit,
             session_limit: p.workerLimit,
             app_device_limit: p.appDeviceLimit,
+            max_seats: p.maxSeats,
             recurring: p.recurring,
             trial: p.trial,
             list_price_cents: null,
@@ -190,6 +191,9 @@ export function billingRoutes(deps: {
           // web/src/routes once no pre-rename app build is still in the field.
           session_limit: p.workerLimit,
           app_device_limit: p.appDeviceLimit,
+          // NULL is how the catalog says "unlimited", so it travels as null
+          // rather than a sentinel number the app would render as a ceiling.
+          max_seats: p.maxSeats,
           recurring: p.recurring,
           trial: p.trial,
           list_price_cents: pricing.listPriceCents,

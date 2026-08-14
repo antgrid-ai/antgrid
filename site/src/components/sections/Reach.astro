@@ -1,0 +1,79 @@
+---
+import { Icon } from "astro-icon/components";
+import Eyebrow from "../ui/Eyebrow.astro";
+import Chip from "../ui/Chip.astro";
+
+// This section owns REACH — where the code lives, and what crossing the network
+// normally costs. It deliberately does not argue encryption: Privacy.astro owns
+// who can read the stream, and the two sit close enough together that repeating
+// the claim here would read as padding. The relay is named only as the reason
+// there is no inbound port to open.
+const usual = [
+  "a static IP, or dynamic DNS",
+  "a router port forward",
+  "a VPN client on every device",
+  "SSH keys on every device",
+  "a firewall exception",
+];
+const ours = ["install antgrid on the machine", "sign in"];
+---
+<section id="reach" class="reveal mx-auto max-w-shell px-6 py-20">
+  <div class="grid items-center gap-12 md:grid-cols-2">
+    <div>
+      <Eyebrow class="mb-4">Your machines</Eyebrow>
+      <h2 class="mb-3.5 text-3xl font-medium tracking-tight text-ink">Run agents where your code already is.</h2>
+      <p class="mb-3.5 max-w-xl text-base leading-relaxed text-muted">
+        The repo that matters is on the machine under your desk — with its uncommitted branches, its <span class="font-mono text-[14px] text-ink2">.env</span>, its local database, the migration you half-applied on Friday. An agent in someone else's cloud gets a copy of none of that. antgrid runs the agent on the machine itself.
+      </p>
+      <p class="mb-5 max-w-xl text-base leading-relaxed text-muted">
+        Getting back to that machine is the part that normally costs you an afternoon. antgrid needs no inbound port: the machine dials out, your app dials out, and they meet at the relay. Corporate NAT, hotel wifi, a phone on cellular — <span class="text-ink2">it's the same connection every time</span>.
+      </p>
+      <div class="flex flex-wrap gap-2">
+        <Chip>no VPN</Chip>
+        <Chip>no port forwarding</Chip>
+        <Chip>no SSH config</Chip>
+        <Chip>no inbound ports</Chip>
+      </div>
+    </div>
+
+    <div class="card-lit min-w-0 rounded-lg border border-edge bg-panel p-5">
+      <div class="mb-4 flex items-center justify-between">
+        <span class="font-mono text-[11px] text-muted2">reaching studio-workstation</span>
+        <span class="flex items-center gap-1.5 rounded border border-edge px-2 py-0.5 font-mono text-[10px] text-ok">
+          <Icon name="tabler:plug-connected" width="11" height="11" />connected
+        </span>
+      </div>
+
+      <div class="grid gap-2.5 sm:grid-cols-2">
+        <div class="rounded border border-edge-inner bg-chrome px-3.5 py-3">
+          <div class="mb-2.5 font-mono text-[10.5px] uppercase tracking-[0.14em] text-faint">the usual way</div>
+          <div class="flex flex-col gap-1.5">
+            {usual.map((item) => (
+              <div class="flex items-start gap-2 font-mono text-[11.5px] leading-relaxed text-muted2">
+                <Icon name="tabler:x" class="mt-0.5 shrink-0 text-faint" width="12" height="12" />
+                <span>{item}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div class="rounded border border-indigodeep2 bg-indigodeep/25 px-3.5 py-3">
+          <div class="mb-2.5 font-mono text-[10.5px] uppercase tracking-[0.14em] text-indigo2">with antgrid</div>
+          <div class="flex flex-col gap-1.5">
+            {ours.map((item) => (
+              <div class="flex items-start gap-2 font-mono text-[11.5px] leading-relaxed text-ink2">
+                <Icon name="tabler:check" class="mt-0.5 shrink-0 text-ok" width="12" height="12" />
+                <span>{item}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div class="mt-3.5 flex items-start gap-2 border-t border-edge-inner pt-3 font-mono text-[11px] leading-relaxed text-muted2">
+        <Icon name="tabler:arrows-left-right" class="mt-0.5 shrink-0 text-faint" width="13" height="13" />
+        <span>both ends dial out — <span class="text-ink2">nothing listens</span> on your network</span>
+      </div>
+    </div>
+  </div>
+</section>

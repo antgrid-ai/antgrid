@@ -64,7 +64,7 @@ test("charging plans render a disabled button, never a live CTA", async ({ page 
 
   // Any card carrying `comingSoon` (pricing.ts) must swap its checkout link for a
   // disabled button. Asserted by state, not by label — the label is BETA_FREE-gated.
-  const yearlyCard = page.locator("span.font-mono", { hasText: /^Pro Yearly$/ }).locator("..").locator("..");
+  const yearlyCard = page.locator("span.font-mono", { hasText: /^Pro$/ }).locator("..").locator("..");
   await expect(yearlyCard.locator("button[disabled]")).toHaveCount(1);
   await expect(yearlyCard.locator("a[href]")).toHaveCount(0);
 

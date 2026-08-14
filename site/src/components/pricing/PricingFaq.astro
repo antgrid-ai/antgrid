@@ -1,0 +1,28 @@
+---
+import { faq } from "../../data/pricing";
+
+// FAQPage schema lives with the questions rather than in Base's <head>, so the
+// two can never answer differently. Body placement is valid — search engines
+// read ld+json wherever it sits in the document.
+const schema = {
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  mainEntity: faq.map((item) => ({
+    "@type": "Question",
+    name: item.q,
+    acceptedAnswer: { "@type": "Answer", text: item.a },
+  })),
+};
+---
+<section class="mt-14">
+  <h2 class="mb-5 text-center font-mono text-[13px] uppercase tracking-[0.16em] text-faint">Questions</h2>
+  <div class="grid gap-3.5 md:grid-cols-2">
+    {faq.map((item) => (
+      <div class="rounded-lg border border-edge bg-panel p-5">
+        <h3 class="mb-1.5 font-mono text-[13.5px] font-medium text-ink">{item.q}</h3>
+        <p class="text-[12.5px] leading-relaxed text-muted">{item.a}</p>
+      </div>
+    ))}
+  </div>
+  <script type="application/ld+json" set:html={JSON.stringify(schema)} is:inline />
+</section>

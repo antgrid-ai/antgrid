@@ -84,7 +84,7 @@ void main() {
             .having((e) => e.code, 'code', 'WORKER_CAP')
             .having((e) => e.cap?.kind, 'cap.kind', DeviceCapKind.worker)
             .having((e) => e.cap?.limit, 'cap.limit', 1)
-            .having((e) => e.message, 'message', contains('workers')),
+            .having((e) => e.message, 'message', contains('worker machine')),
       ),
     );
   });

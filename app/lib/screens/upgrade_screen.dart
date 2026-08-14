@@ -19,13 +19,25 @@ import '../providers/subscription.dart';
 import '../dialogs/remote_upgrade_dialog.dart';
 
 const _proYearlyFeatures = [
-  'Up to {workers} workers',
+  'Up to {workers} — per person',
+  'Invite your team, {seats}',
   'Unlimited terminal sessions',
   'File explorer & git viewer',
   'Browser preview tunneling',
   'E2E encrypted — zero-knowledge relay',
   'Priority support',
 ];
+
+/// The machine count sits mid-sentence, so it has to agree with its noun —
+/// Free is 1, and "1 machines" is the kind of thing a buyer notices.
+String _machines(int n) => '$n machine${n == 1 ? '' : 's'}';
+
+/// Null `maxSeats` is a plan whose seat count is a contract term, and also what
+/// a server predating the field sends — neither can be stated as a ceiling.
+String _seatCeiling(int? maxSeats) {
+  if (maxSeats == null) return 'billed per seat';
+  return 'up to $maxSeats seat${maxSeats == 1 ? '' : 's'}';
+}
 
 class UpgradeScreen extends ConsumerStatefulWidget {
   const UpgradeScreen({super.key, this.onClose});
@@ -223,8 +235,9 @@ class _PricingHeader extends StatelessWidget {
         ),
         const SizedBox(height: AbTokens.space12),
         Text(
-          'Monitor and control your AI coding agents from anywhere. '
-          'E2E encrypted, zero-knowledge relay.',
+          'Monitor and control your AI coding agents from anywhere, on your '
+          'own machines. Pro is billed per seat — one per person on your '
+          'team. E2E encrypted, zero-knowledge relay.',
           textAlign: TextAlign.center,
           style: AbTokens.sansStyle(
             fontSize: AbTokens.fontSm,
@@ -286,7 +299,8 @@ class _FreeTrialBanner extends StatelessWidget {
             ),
             const SizedBox(height: AbTokens.space8),
             Text(
-              '${catalog.trialDays}-day free trial, then $yearlyDisplay/year',
+              '${catalog.trialDays}-day free trial, then $yearlyDisplay '
+              'per seat / year',
               style: AbTokens.sansStyle(
                 fontSize: AbTokens.fontLg,
                 fontWeight: FontWeight.w600,
@@ -295,10 +309,11 @@ class _FreeTrialBanner extends StatelessWidget {
             ),
             const SizedBox(height: AbTokens.space6),
             Text(
-              'Add your card to start. Up to ${trialPlan.workerLimit} workers '
-              'during the trial. Your card won\'t be charged until ${_firstChargeDate()} '
-              '— cancel anytime before then to avoid the $yearlyDisplay/year charge. '
-              'Subscription renews automatically unless canceled.',
+              'Add your card to start. Up to ${_machines(trialPlan.workerLimit)} '
+              'during the trial, on one seat — invite your team once it converts. '
+              'Your card won\'t be charged until ${_firstChargeDate()} — cancel '
+              'anytime before then to avoid the $yearlyDisplay per seat / year '
+              'charge. Subscription renews automatically unless canceled.',
               style: AbTokens.sansStyle(
                 fontSize: AbTokens.fontSm,
                 color: antgrid.textSecondary,
@@ -354,10 +369,11 @@ class _ProYearlyCard extends StatelessWidget {
     return _PlanCard(
       title: plan.label,
       price: price,
-      priceSuffix: '/ year',
-      priceNote: 'Renews annually.',
+      priceSuffix: '/ seat / year',
+      priceNote: 'Billed yearly, per seat.',
       features: _proYearlyFeatures,
       workers: plan.workerLimit,
+      maxSeats: plan.maxSeats,
     );
   }
 }
@@ -370,6 +386,7 @@ class _PlanCard extends StatelessWidget {
     required this.priceNote,
     required this.features,
     required this.workers,
+    this.maxSeats,
   });
 
   final String title;
@@ -378,6 +395,7 @@ class _PlanCard extends StatelessWidget {
   final String priceNote;
   final List<String> features;
   final int workers;
+  final int? maxSeats;
 
   @override
   Widget build(BuildContext context) {
@@ -434,7 +452,11 @@ class _PlanCard extends StatelessWidget {
                 color: antgrid.textMuted,
               ),
             ),
-            _FeatureList(items: features, workers: workers),
+            _FeatureList(
+              items: features,
+              workers: workers,
+              maxSeats: maxSeats,
+            ),
             const SizedBox(height: AbTokens.space24),
             const _PricingCta(label: 'Coming soon'),
           ],
@@ -445,10 +467,15 @@ class _PlanCard extends StatelessWidget {
 }
 
 class _FeatureList extends StatelessWidget {
-  const _FeatureList({required this.items, required this.workers});
+  const _FeatureList({
+    required this.items,
+    required this.workers,
+    this.maxSeats,
+  });
 
   final List<String> items;
   final int workers;
+  final int? maxSeats;
 
   @override
   Widget build(BuildContext context) {
@@ -468,7 +495,9 @@ class _FeatureList extends StatelessWidget {
                 const SizedBox(width: AbTokens.space10),
                 Expanded(
                   child: Text(
-                    item.replaceAll('{workers}', workers.toString()),
+                    item
+                        .replaceAll('{workers}', _machines(workers))
+                        .replaceAll('{seats}', _seatCeiling(maxSeats)),
                     style: AbTokens.sansStyle(
                       fontSize: AbTokens.fontSm,
                       color: antgrid.textSecondary,

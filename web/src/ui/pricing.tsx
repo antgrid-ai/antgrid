@@ -16,8 +16,12 @@ export type PricingPageProps = {
 
 const COMING_SOON_LABEL = "Coming soon";
 
+/** Sales address for the contract-only plan. */
+const ENTERPRISE_MAILTO = "mailto:contact@radhaai.com";
+
 const FREE_FEATURES = [
-  "Run agents on up to {workers} machines",
+  "Run agents on {workers}",
+  "1 seat — just you",
   "Remote control from your phone",
   "Unlimited terminal sessions",
   "File explorer & git viewer",
@@ -25,13 +29,35 @@ const FREE_FEATURES = [
 ] as const;
 
 const PRO_YEARLY_FEATURES = [
-  "Run agents on up to {workers} machines",
+  "Run agents on up to {workers} — per person",
+  "Invite your team, {seats}",
   "Unlimited terminal sessions",
   "File explorer & git viewer",
   "Browser preview tunneling",
   "E2E encrypted — zero-knowledge relay",
   "Priority support",
 ] as const;
+
+const ENTERPRISE_FEATURES = [
+  "Unlimited seats",
+  "Run agents on up to {workers} — per person",
+  "SSO, audit log & IP allowlist",
+  "Invoiced annually",
+] as const;
+
+/** The machine cap reads as a count in the middle of a sentence, so it has to
+ *  agree with its noun — Free is 1, and "1 machines" is the kind of thing a
+ *  buyer notices. */
+function machines(n: number): string {
+  return `${n} machine${n === 1 ? "" : "s"}`;
+}
+
+/** `maxSeats` is NULL for a plan sold by contract, which is how the catalog
+ *  says unlimited. */
+function seatCeilingLabel(maxSeats: number | null): string {
+  if (maxSeats === null) return "unlimited seats";
+  return `up to ${maxSeats} seat${maxSeats === 1 ? "" : "s"}`;
+}
 
 function CheckIcon() {
   return (
@@ -52,13 +78,25 @@ function CheckIcon() {
   );
 }
 
-function FeatureList({ items, workers }: { items: readonly string[]; workers: number }) {
+function FeatureList({
+  items,
+  workers,
+  maxSeats,
+}: {
+  items: readonly string[];
+  workers: number;
+  maxSeats?: number | null;
+}) {
   return (
     <ul class="mt-5 space-y-2.5">
       {items.map((item) => (
         <li class="flex items-start gap-2.5 text-sm text-base-content/70">
           <CheckIcon />
-          <span>{item.replace("{workers}", String(workers))}</span>
+          <span>
+            {item
+              .replace("{workers}", machines(workers))
+              .replace("{seats}", seatCeilingLabel(maxSeats ?? null))}
+          </span>
         </li>
       ))}
     </ul>
@@ -82,14 +120,15 @@ export function PricingPage(props: PricingPageProps) {
   const yearlyPrice = displayPriceCents("pro_yearly", props.env);
   const trialPlan = props.plans.find((p) => p.slug === "trial");
   const yearlyPlan = props.plans.find((p) => p.slug === "pro_yearly");
+  const enterprisePlan = props.plans.find((p) => p.slug === "enterprise");
 
   return (
     <Layout title="Pricing" user={props.user}>
       <div class="text-center mb-10">
         <h1 class="font-mono text-3xl font-bold tracking-tight">Simple, honest pricing</h1>
         <p class="text-sm text-base-content/60 mt-3 max-w-lg mx-auto">
-          Monitor and control your AI coding agents from anywhere. E2E encrypted,
-          zero-knowledge relay.
+          Monitor and control your AI coding agents from anywhere. Pro is billed per
+          seat — one per person on your team. E2E encrypted, zero-knowledge relay.
         </p>
       </div>
 
@@ -103,6 +142,8 @@ export function PricingPage(props: PricingPageProps) {
         <FreeCard workers={FREE_WORKER_LIMIT} />
         {yearlyPlan && <ProYearlyCard plan={yearlyPlan} price={yearlyPrice} />}
       </div>
+
+      {enterprisePlan && <EnterpriseCard plan={enterprisePlan} />}
     </Layout>
   );
 }
@@ -129,15 +170,15 @@ function FreeTrialBanner({
           <span class="text-xs text-base-content/50 font-mono">{TRIAL_DAYS}-day trial</span>
         </div>
         <h2 class="font-mono text-lg font-semibold">
-          {TRIAL_DAYS}-day free trial, then {formatUsd(yearlyPrice)}/year
+          {TRIAL_DAYS}-day free trial, then {formatUsd(yearlyPrice)} per seat / year
         </h2>
         <p class="text-sm text-base-content/60 mt-1.5 max-w-2xl">
           Add your card to start. Run agents on up to{" "}
-          <strong class="text-base-content/80">{trialWorkers} machines</strong> during the
-          trial. Your card won't be charged until{" "}
-          <strong class="text-base-content/80">{firstCharge}</strong> — cancel anytime before then
-          to avoid the {formatUsd(yearlyPrice)}/year charge. Subscription renews automatically
-          unless canceled.
+          <strong class="text-base-content/80">{machines(trialWorkers)}</strong> during the
+          trial, on one seat — invite your team once it converts. Your card won't be charged
+          until <strong class="text-base-content/80">{firstCharge}</strong> — cancel anytime
+          before then to avoid the {formatUsd(yearlyPrice)} per seat / year charge.
+          Subscription renews automatically unless canceled.
         </p>
       </div>
       <button type="button" class="btn btn-disabled font-mono shrink-0" disabled>
@@ -181,13 +222,41 @@ function ProYearlyCard({ plan, price }: { plan: PlanRow; price: number }) {
 
         <div class="mt-3 font-mono min-h-[4.75rem]">
           <span class="text-4xl font-bold">{formatUsd(price)}</span>
-          <span class="text-sm text-base-content/50 ml-1">/ year</span>
-          <p class="text-xs text-base-content/50 font-mono mt-1.5">Renews annually.</p>
+          <span class="text-sm text-base-content/50 ml-1">/ seat / year</span>
+          <p class="text-xs text-base-content/50 font-mono mt-1.5">Billed yearly, per seat.</p>
         </div>
 
-        <FeatureList items={PRO_YEARLY_FEATURES} workers={plan.workerLimit} />
+        <FeatureList
+          items={PRO_YEARLY_FEATURES}
+          workers={plan.workerLimit}
+          maxSeats={plan.maxSeats}
+        />
 
-        <ComingSoonCta footer={`${formatUsd(price)}/year · Renews automatically · Cancel anytime`} />
+        <ComingSoonCta
+          footer={`${formatUsd(price)} per seat / year · Renews automatically · Cancel anytime`}
+        />
+      </div>
+    </div>
+  );
+}
+
+function EnterpriseCard({ plan }: { plan: PlanRow }) {
+  return (
+    <div class="card bg-base-100 border border-base-300 mt-6">
+      <div class="card-body">
+        <h2 class="font-mono text-xl font-bold">{plan.label}</h2>
+        <p class="text-sm text-base-content/60 mt-1.5">
+          For teams that outgrow Pro's seat ceiling, or that need their own answers on
+          sign-in and access. Sold by contract.
+        </p>
+
+        <FeatureList items={ENTERPRISE_FEATURES} workers={plan.workerLimit} />
+
+        <div class="pt-6">
+          <a href={ENTERPRISE_MAILTO} class="btn btn-outline font-mono w-full">
+            Talk to us
+          </a>
+        </div>
       </div>
     </div>
   );

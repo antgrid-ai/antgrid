@@ -61,10 +61,10 @@ class _DeviceCapDialogState extends ConsumerState<DeviceCapDialog> {
   Future<void> _remove(CappedDevice d) async {
     final confirmed = await AbConfirmDialog.show(
       context: context,
-      title: _isWorker ? 'Sign out worker?' : 'Remove device?',
+      title: _isWorker ? 'Sign out machine?' : 'Remove device?',
       body: _isWorker
           ? '"${d.displayName}" will stop running agents remotely until it '
-                'registers again. This frees a worker so this machine can '
+                'registers again. This frees a machine slot so this one can '
                 'register.'
           : '"${d.displayName}" will lose remote access until it registers '
                 'again. This frees a slot so this machine can register.',
@@ -144,7 +144,7 @@ class _DeviceCapDialogState extends ConsumerState<DeviceCapDialog> {
                   Expanded(
                     child: Text(
                       _isWorker
-                          ? 'Worker limit reached'
+                          ? 'Machine limit reached'
                           : 'Device limit reached',
                       style: AbTokens.sansStyle(
                         fontSize: AbTokens.fontBody,
