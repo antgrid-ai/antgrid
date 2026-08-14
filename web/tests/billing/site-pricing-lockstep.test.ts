@@ -63,19 +63,28 @@ describe("site marketing constants track the shipped catalog", () => {
   });
 
   test("the advertised seat ceiling is the one checkout enforces", async () => {
-    const pro = await pg.db.plan.findUniqueOrThrow({ where: { slug: "pro_yearly" } });
+    const { maxSeats } = await pg.db.plan.findUniqueOrThrow({ where: { slug: "pro_yearly" } });
 
-    expect(siteConstant("PRO_MAX_SEATS")).toBe(pro.maxSeats);
+    // `plans.max_seats` is nullable so a row can be uncapped. The site quotes a
+    // ceiling, so an uncapped Pro is a false advert rather than a mismatched
+    // number, and deserves to fail saying that.
+    if (maxSeats === null) throw new Error("pro_yearly is uncapped, but the site advertises PRO_MAX_SEATS");
+
+    expect(siteConstant("PRO_MAX_SEATS")).toBe(maxSeats);
   });
 
   test("both yearly prices match, in the units each side states them in", () => {
+    const { listPriceCents, offerPriceCents } = PRICING.pro_yearly;
+
+    // `offerPriceCents` is optional — a plan may carry list price only. The site
+    // renders the offer struck through against the list, so its absence breaks
+    // the card outright; compare only once there is something to compare.
+    if (offerPriceCents === undefined) throw new Error("pro_yearly carries no offer price, but the site quotes one");
+
     expect({
       list: siteConstant("YEARLY_LIST_USD") * 100,
       offer: siteConstant("YEARLY_OFFER_USD") * 100,
-    }).toEqual({
-      list: PRICING.pro_yearly.listPriceCents,
-      offer: PRICING.pro_yearly.offerPriceCents,
-    });
+    }).toEqual({ list: listPriceCents, offer: offerPriceCents });
   });
 
   test("the advertised trial length is the one billing grants", () => {
