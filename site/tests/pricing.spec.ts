@@ -20,12 +20,12 @@ test("plan cards carry the real prices, machine allowances and seat ceiling", as
   const freeCard = page.locator("span.font-mono", { hasText: /^Free$/ }).locator("..").locator("..");
   const yearlyCard = page.locator("span.font-mono", { hasText: /^Pro$/ }).locator("..").locator("..");
 
-  await expect(freeCard.locator("span.text-3xl", { hasText: "$0" })).toBeVisible();
+  await expect(freeCard.locator("[data-price]", { hasText: "$0" })).toBeVisible();
   await expect(freeCard.getByText("1 worker machine")).toBeVisible();
 
-  // Yearly card: $49 offer price (the large price span) + $99 struck list price, both
+  // Yearly card: $49 offer price (the headline figure) + $99 struck list price, both
   // per seat — the unit is the claim, so it is asserted beside the number.
-  await expect(yearlyCard.locator("span.text-3xl", { hasText: "$49" })).toBeVisible();
+  await expect(yearlyCard.locator("[data-price]", { hasText: "$49" })).toBeVisible();
   await expect(yearlyCard.locator("span.line-through", { hasText: "$99" })).toBeVisible();
   await expect(yearlyCard.getByText("/ seat / year")).toBeVisible();
   await expect(yearlyCard.getByText("Up to 10 worker machines per person")).toBeVisible();

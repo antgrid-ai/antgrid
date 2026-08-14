@@ -644,18 +644,38 @@ jobs:
       #   --build-windows false: package the folder we already built above (with the
       #     bridge copied in). Letting msix re-run `flutter build windows` would
       #     drop antgrid-bridge.exe.
+      # This is msix:build → patch → msix:pack rather than one msix:create because
+      # the generated manifest declares only the Flutter app, and Windows refuses an
+      # external CreateProcess on a packaged binary no <Application> declares — which
+      # leaves every agent hook dead in the field. See scripts/patch-msix-manifest.ps1.
       # NOTE: this MSIX is NOT attached to the public GitHub Release — Windows ships
       # through the Microsoft Store only; the publish job carries just macOS + Linux.
-      - name: Package MSIX (Microsoft Store)
+      - name: Build MSIX files (Microsoft Store)
         if: ${{ env.BUILD_MODE == 'release' && steps.build.outcome == 'success' }}
         shell: pwsh
         working-directory: app
-        run: dart run msix:create --store --build-windows false --version ${{ needs.version.outputs.msix }} --output-path "$env:GITHUB_WORKSPACE" --output-name antgrid-store
+        run: dart run msix:build --store --build-windows false --version ${{ needs.version.outputs.msix }} --output-path "$env:GITHUB_WORKSPACE" --output-name antgrid-store
+
+      - name: Declare bridge as a launchable Application
+        if: ${{ env.BUILD_MODE == 'release' && steps.build.outcome == 'success' }}
+        shell: pwsh
+        run: ./scripts/patch-msix-manifest.ps1 -ManifestPath "app/build/windows/x64/runner/$env:DEST/AppxManifest.xml"
+
+      - name: Pack MSIX (Microsoft Store)
+        if: ${{ env.BUILD_MODE == 'release' && steps.build.outcome == 'success' }}
+        shell: pwsh
+        working-directory: app
+        run: dart run msix:pack --store --build-windows false --version ${{ needs.version.outputs.msix }} --output-path "$env:GITHUB_WORKSPACE" --output-name antgrid-store
 
       - name: Verify MSIX protocol activation
         if: ${{ env.BUILD_MODE == 'release' && steps.build.outcome == 'success' }}
         shell: pwsh
         run: ./scripts/verify-msix-protocol.ps1 -Path antgrid-store.msix -Protocol antgrid
+
+      - name: Verify bridge is launchable from the package
+        if: ${{ env.BUILD_MODE == 'release' && steps.build.outcome == 'success' }}
+        shell: pwsh
+        run: ./scripts/verify-msix-executables.ps1 -Path antgrid-store.msix -Executable antgrid-bridge.exe
 
       - uses: actions/upload-artifact@v7
         if: ${{ env.BUILD_MODE == 'release' && steps.build.outcome == 'success' }}

@@ -155,8 +155,8 @@ function SubscriptionShell(props: CheckoutPageProps) {
   return (
     <div class="flex flex-col lg:flex-row gap-8 min-h-[60vh]">
       <aside class="lg:w-52 shrink-0">
-        <h1 class="font-mono text-2xl font-semibold mb-4">Account</h1>
-        <ul class="menu menu-sm bg-base-100 border border-base-300 rounded-lg p-1 w-full font-mono">
+        <h1 class="text-2xl font-semibold mb-4">Account</h1>
+        <ul class="menu menu-sm bg-panel border border-edge rounded-lg p-1 w-full">
           {SETTINGS_NAV.map((item) => (
             <li>
               {item.href ? (
@@ -170,25 +170,25 @@ function SubscriptionShell(props: CheckoutPageProps) {
       </aside>
 
       <section class="flex-1 min-w-0">
-        <h2 class="font-mono text-xl font-semibold">Subscription</h2>
-        <p class="text-sm text-base-content/60 mt-1 max-w-xl">
+        <h2 class="text-xl font-semibold">Subscription</h2>
+        <p class="text-sm text-muted mt-1 max-w-xl">
           Upgrade to {plan.label} to give everyone on your team full remote access and up to{" "}
           {plan.workerLimit} machines of their own.
         </p>
-        <div class="card bg-base-100 border border-base-300 mt-6">
+        <div class="card bg-panel border border-edge mt-6">
           <div class="card-body">
-            <p class="text-xs font-mono text-base-content/50 uppercase tracking-wider">
+            <p class="text-xs font-mono text-muted2 uppercase tracking-wider">
               Selected plan
             </p>
-            <h3 class="font-mono text-lg font-semibold mt-1">{plan.label}</h3>
-            <p class="text-sm text-base-content/60 mt-1">{billingCadence(plan)}</p>
-            <div class="stats stats-horizontal mt-4 border border-base-300">
+            <h3 class="text-lg font-semibold mt-1">{plan.label}</h3>
+            <p class="text-sm text-muted mt-1">{billingCadence(plan)}</p>
+            <div class="stats stats-horizontal mt-4 border border-edge">
               <div class="stat py-3">
-                <div class="stat-title font-mono text-xs">Machines per seat</div>
+                <div class="stat-title text-xs">Machines per seat</div>
                 <div class="stat-value text-xl font-mono">up to {plan.workerLimit}</div>
               </div>
               <div class="stat py-3">
-                <div class="stat-title font-mono text-xs">Per seat</div>
+                <div class="stat-title text-xs">Per seat</div>
                 <div class="stat-value text-xl font-mono">{formatUsd(plan.chargePrice)}</div>
               </div>
             </div>
@@ -224,13 +224,13 @@ export function CheckoutPage(props: CheckoutPageProps) {
 
       <div id="checkout-modal" class="modal modal-open">
         <div class="modal-box w-full max-w-none sm:max-w-4xl p-0 overflow-hidden flex flex-col rounded-none sm:rounded-2xl h-auto max-h-[92dvh]">
-          <div class="flex items-stretch border-b border-base-300 shrink-0">
+          <div class="flex items-stretch border-b border-edge shrink-0">
             <div class="flex-1 py-4 text-sm font-mono font-medium text-primary flex items-center justify-center">
               Billing
             </div>
             <a
               href="/pricing"
-              class="px-5 text-base-content/40 hover:text-base-content transition-colors text-lg flex items-center"
+              class="px-5 text-faint hover:text-base-content transition-colors text-lg flex items-center"
               aria-label="Close"
             >
               ✕
@@ -239,14 +239,14 @@ export function CheckoutPage(props: CheckoutPageProps) {
 
           <div class="overflow-y-auto p-4 sm:p-6">
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
-              <div class="border border-base-300 rounded-xl p-5 h-fit">
-                <h3 class="font-mono font-semibold">Billing address</h3>
-                <p class="text-sm text-base-content/60 mt-0.5">
+              <div class="border border-edge rounded-xl p-5 h-fit">
+                <h3 class="font-semibold">Billing address</h3>
+                <p class="text-sm text-muted mt-0.5">
                   Used for tax calculation and invoicing
                 </p>
                 <div class="form-control mt-4">
                   <label class="label py-1" for="billing-country">
-                    <span class="label-text font-mono text-sm">Country</span>
+                    <span class="label-text text-sm">Country</span>
                   </label>
                   <select
                     id="billing-country"
@@ -268,13 +268,13 @@ export function CheckoutPage(props: CheckoutPageProps) {
                 </span>
               </div>
 
-              <div class="border border-base-300 rounded-xl p-5 space-y-3 h-fit">
-                <p class="text-xs font-mono font-semibold text-base-content/50 uppercase tracking-wider">
+              <div class="border border-edge rounded-xl p-5 space-y-3 h-fit">
+                <p class="text-xs font-mono font-semibold text-muted2 uppercase tracking-wider">
                   Your order
                 </p>
                 <div>
-                  <h1 class="font-mono text-lg font-semibold">{plan.label}</h1>
-                  <p class="text-sm text-base-content/60 mt-1">{billingCadence(plan)}</p>
+                  <h1 class="text-lg font-semibold">{plan.label}</h1>
+                  <p class="text-sm text-muted mt-1">{billingCadence(plan)}</p>
                   {plan.discountLabel && (
                     <p class="text-xs text-success font-mono mt-2">{plan.discountLabel}</p>
                   )}
@@ -291,7 +291,7 @@ export function CheckoutPage(props: CheckoutPageProps) {
                   method="post"
                   action={`/ui/checkout/seats?planId=${encodeURIComponent(plan.id)}`}
                   id="seat-form"
-                  class="space-y-3 border-t border-base-300 pt-3"
+                  class="space-y-3 border-t border-edge pt-3"
                 >
                   {/* The country control lives in the panel beside this one, so
                       it is mirrored here — the form must still carry a country
@@ -303,14 +303,14 @@ export function CheckoutPage(props: CheckoutPageProps) {
                     value={props.detectedCountry ?? ""}
                   />
                   <div class="flex items-center justify-between gap-3">
-                    <label class="text-sm font-mono text-base-content/60" for="seats-input">
+                    <label class="text-sm text-muted" for="seats-input">
                       Seats
                     </label>
                     <div class="join">
                       <button
                         type="button"
                         id="seats-dec"
-                        class="btn btn-sm join-item font-mono"
+                        class="btn btn-sm join-item"
                         aria-label="One fewer seat"
                       >
                         −
@@ -329,14 +329,14 @@ export function CheckoutPage(props: CheckoutPageProps) {
                       <button
                         type="button"
                         id="seats-inc"
-                        class="btn btn-sm join-item font-mono"
+                        class="btn btn-sm join-item"
                         aria-label="One more seat"
                       >
                         +
                       </button>
                     </div>
                   </div>
-                  <p id="seat-limit-note" class="text-xs font-mono text-base-content/50">
+                  <p id="seat-limit-note" class="text-xs text-muted2">
                     {props.maxSeats === null
                       ? "Add as many seats as you need."
                       : `Up to ${props.maxSeats} seat${props.maxSeats === 1 ? "" : "s"} on this plan.`}
@@ -344,31 +344,31 @@ export function CheckoutPage(props: CheckoutPageProps) {
                   <button
                     type="submit"
                     id="btn-review"
-                    class="btn btn-sm btn-outline font-mono w-full"
+                    class="btn btn-quiet btn-sm w-full"
                     disabled={!props.checkoutAvailable}
                   >
                     {props.order ? "Update total" : "Review order"}
                   </button>
                 </form>
 
-                <div class="space-y-1.5 text-sm font-mono border-t border-base-300 pt-3">
+                <div class="space-y-1.5 text-sm font-mono border-t border-edge pt-3">
                   <div class="flex justify-between">
-                    <span class="text-base-content/60">Machines per seat</span>
+                    <span class="text-muted">Machines per seat</span>
                     <span id="summary-workers">up to {plan.workerLimit}</span>
                   </div>
                   <div class="flex justify-between">
-                    <span class="text-base-content/60">Due today</span>
+                    <span class="text-muted">Due today</span>
                     <span id="summary-due" class="font-semibold">
                       {due}
                     </span>
                   </div>
                 </div>
-                <p id="summary-total-note" class="text-xs font-mono text-base-content/50">
+                <p id="summary-total-note" class="text-xs text-muted2">
                   {totalNote(props)}
                 </p>
                 <p
                   id="summary-disclosure"
-                  class="text-xs text-base-content/50 font-mono leading-relaxed"
+                  class="text-xs text-muted2 leading-relaxed"
                 >
                   {billingDisclosure(plan)}
                 </p>
@@ -377,7 +377,7 @@ export function CheckoutPage(props: CheckoutPageProps) {
 
             {props.notice && (
               <div id="checkout-notice" class="alert alert-warning mt-4">
-                <span class="font-mono text-sm">{props.notice}</span>
+                <span class="text-sm">{props.notice}</span>
               </div>
             )}
 
@@ -410,12 +410,12 @@ export function CheckoutPage(props: CheckoutPageProps) {
                     id="checkout-spinner"
                     class="loading loading-spinner loading-sm text-primary shrink-0"
                   />
-                  <p id="checkout-status-text" class="font-mono text-sm text-base-content/70" />
+                  <p id="checkout-status-text" class="text-sm text-muted" />
                 </div>
                 <button
                   type="button"
                   id="checkout-retry"
-                  class="btn btn-primary btn-sm font-mono mt-3 hidden"
+                  class="btn btn-primary btn-sm mt-3 hidden"
                 >
                   Retry payment
                 </button>
@@ -423,8 +423,8 @@ export function CheckoutPage(props: CheckoutPageProps) {
             </div>
           </div>
 
-          <div class="shrink-0 border-t border-base-300 px-4 sm:px-6 py-3 sm:py-4 flex flex-wrap items-center justify-between gap-y-2 bg-base-100">
-            <span class="text-sm font-mono text-base-content/60">
+          <div class="shrink-0 border-t border-edge px-4 sm:px-6 py-3 sm:py-4 flex flex-wrap items-center justify-between gap-y-2 bg-panel">
+            <span class="text-sm font-mono text-muted">
               Due today{" "}
               <strong id="footer-due" class={plan.trial ? "text-success" : "text-base-content"}>
                 {due}
@@ -433,7 +433,7 @@ export function CheckoutPage(props: CheckoutPageProps) {
             <button
               type="button"
               id="btn-pay"
-              class={`btn btn-sm font-mono gap-1 ${plan.trial ? "btn-success" : "btn-primary"}`}
+              class={`btn btn-sm gap-1 ${plan.trial ? "btn-success" : "btn-primary"}`}
               // No order means no transaction to open and no quoted total. The
               // button that spends money stays shut until both exist.
               disabled={!props.checkoutAvailable || !props.order}

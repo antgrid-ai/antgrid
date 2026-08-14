@@ -2,6 +2,258 @@
 @source "./**/*.tsx";
 @source "../**/*.tsx";
 
+/* Only `dark`. The light theme was declared but never reachable — layout.tsx
+   pins `data-theme="dark"` — so it was shipping a second copy of every
+   component rule for nobody. */
 @plugin "daisyui" {
-  themes: dark --default, light;
+  themes: dark --default;
+}
+
+/* ---- Faces -------------------------------------------------------------
+   The same three the marketing site uses, from the same @fontsource-variable
+   packages, latin subset only. Someone signing in crosses from antgrid.ai into
+   this service mid-flow, so a different typeface here reads as a different
+   product — or a phishing page.
+
+   Declared by hand rather than through Astro's Fonts API, which this service
+   does not have. The `fallback:` faces below are the metric-matched stand-ins
+   that API generates, copied verbatim from the site's build output so both
+   sides substitute identically. To refresh them after a font-package bump:
+   build the site and read the @font-face rules out of `site/dist/index.html`.
+
+   Vite fingerprints and emits the woff2 into public/build/ from these URLs. */
+@font-face {
+  font-family: "Archivo Variable";
+  src: url("../../node_modules/@fontsource-variable/archivo/files/archivo-latin-wght-normal.woff2") format("woff2");
+  font-display: swap;
+  font-weight: 100 900;
+  font-style: normal;
+}
+@font-face {
+  font-family: "Archivo fallback: Segoe UI";
+  src: local("Segoe UI");
+  font-display: swap;
+  font-weight: 100 900;
+  font-style: normal;
+  size-adjust: 102.8511%;
+  ascent-override: 85.3661%;
+  descent-override: 20.4179%;
+}
+@font-face {
+  font-family: "Archivo fallback: BlinkMacSystemFont";
+  src: local("BlinkMacSystemFont");
+  font-display: swap;
+  font-weight: 100 900;
+  font-style: normal;
+  size-adjust: 109.4828%;
+  ascent-override: 80.1953%;
+  descent-override: 19.1811%;
+}
+@font-face {
+  font-family: "Archivo fallback: Roboto";
+  src: local("Roboto");
+  font-display: swap;
+  font-weight: 100 900;
+  font-style: normal;
+  size-adjust: 102.5124%;
+  ascent-override: 85.6482%;
+  descent-override: 20.4853%;
+}
+@font-face {
+  font-family: "Archivo fallback: Arial";
+  src: local("Arial");
+  font-display: swap;
+  font-weight: 100 900;
+  font-style: normal;
+  size-adjust: 102.2878%;
+  ascent-override: 85.8362%;
+  descent-override: 20.5303%;
+  line-gap-override: 0%;
+}
+
+@font-face {
+  font-family: "Inter Variable";
+  src: url("../../node_modules/@fontsource-variable/inter/files/inter-latin-wght-normal.woff2") format("woff2");
+  font-display: swap;
+  font-weight: 100 900;
+  font-style: normal;
+}
+@font-face {
+  font-family: "Inter fallback: Segoe UI";
+  src: local("Segoe UI");
+  font-display: swap;
+  font-weight: 100 900;
+  font-style: normal;
+  size-adjust: 107.7093%;
+  ascent-override: 89.9412%;
+  descent-override: 22.3946%;
+}
+@font-face {
+  font-family: "Inter fallback: BlinkMacSystemFont";
+  src: local("BlinkMacSystemFont");
+  font-display: swap;
+  font-weight: 100 900;
+  font-style: normal;
+  size-adjust: 114.6542%;
+  ascent-override: 84.4932%;
+  descent-override: 21.0381%;
+}
+@font-face {
+  font-family: "Inter fallback: Roboto";
+  src: local("Roboto");
+  font-display: swap;
+  font-weight: 100 900;
+  font-style: normal;
+  size-adjust: 107.3546%;
+  ascent-override: 90.2384%;
+  descent-override: 22.4686%;
+}
+@font-face {
+  font-family: "Inter fallback: Arial";
+  src: local("Arial");
+  font-display: swap;
+  font-weight: 100 900;
+  font-style: normal;
+  size-adjust: 107.1194%;
+  ascent-override: 90.4365%;
+  descent-override: 22.518%;
+  line-gap-override: 0%;
+}
+
+/* No metric-matched fallback, matching the site: both CSS mono generics map to
+   Courier New, and a thin typewriter face standing in for JetBrains Mono is a
+   harsher swap than an unmatched Consolas/SF Mono at the sizes mono is used. */
+@font-face {
+  font-family: "JetBrains Mono Variable";
+  src: url("../../node_modules/@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2") format("woff2");
+  font-display: swap;
+  font-weight: 100 800;
+  font-style: normal;
+}
+
+/* ---- Tokens ------------------------------------------------------------
+   Surfaces, ink ramp and accents are the marketing site's values verbatim
+   (site/src/styles/global.css) — the two are one product and a user crosses
+   between them mid sign-in. The rationale for each value lives there; keep
+   them in lockstep rather than re-deriving.
+
+   Three faces, three jobs, no overlap: display carries the voice, sans carries
+   the reading, mono carries anything a machine produced (device names,
+   timestamps, counts, prices, identifiers). Never set Archivo below ~1.5rem —
+   it has none of Inter's small-size tuning. */
+@theme {
+  --color-page: #101015;
+  --color-group: #17171d;
+  --color-panel: #1d1d24;
+  --color-chrome: #23232b;
+
+  --color-edge: #2f2f38;
+  --color-edge-inner: #26262e;
+  --color-edge-emph: #474751;
+
+  --color-ink: #f2f2f5;
+  --color-ink2: #d4d4d8;
+  --color-muted: #a1a1aa;
+  --color-muted2: #7d7d86;
+  --color-faint: #5f5f68;
+
+  --color-indigo: #818cf8;
+  --color-indigo2: #a5b4fc;
+  --color-indigobtn: #6366f1;
+  --color-indigodeep: #1e1b4b;
+
+  --color-amber: #fbbf24;
+  --color-ok: #4ade80;
+  --color-danger: #f87171;
+
+  --font-display: "Archivo Variable", "Archivo fallback: Segoe UI",
+    "Archivo fallback: BlinkMacSystemFont", "Archivo fallback: Roboto",
+    "Archivo fallback: Arial", sans-serif;
+  --font-sans: "Inter Variable", "Inter fallback: Segoe UI",
+    "Inter fallback: BlinkMacSystemFont", "Inter fallback: Roboto",
+    "Inter fallback: Arial", sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo,
+    Consolas, "Liberation Mono", "DejaVu Sans Mono";
+}
+
+/* daisyUI reads these, so every `btn-primary`, `alert-error`, `badge-success`
+   and `bg-base-*` already in the markup lands on an Antgrid value without
+   being rewritten. The names are daisyUI's; the values are ours.
+
+   base-100 is the CARD surface and base-200 the page, which is the inverse of
+   daisyUI's own ramp — the markup was written that way (`body` is base-200,
+   every card is base-100) and following it is what keeps cards raised. */
+[data-theme="dark"] {
+  --color-base-100: var(--color-panel);
+  --color-base-200: var(--color-page);
+  --color-base-300: var(--color-edge);
+  --color-base-content: var(--color-ink);
+
+  --color-primary: var(--color-indigobtn);
+  --color-primary-content: #ffffff;
+  --color-secondary: var(--color-indigodeep);
+  --color-secondary-content: var(--color-indigo2);
+  --color-accent: var(--color-indigo);
+  --color-accent-content: var(--color-page);
+  --color-neutral: var(--color-chrome);
+  --color-neutral-content: var(--color-muted);
+
+  --color-info: var(--color-indigo);
+  --color-info-content: var(--color-page);
+  --color-success: var(--color-ok);
+  --color-success-content: var(--color-page);
+  --color-warning: var(--color-amber);
+  --color-warning-content: var(--color-page);
+  --color-error: var(--color-danger);
+  --color-error-content: var(--color-page);
+
+  --radius-selector: 0.5rem;
+  --radius-field: 0.375rem;
+  --radius-box: 0.625rem;
+  --border: 1px;
+}
+
+html {
+  color-scheme: dark;
+  background-color: var(--color-page);
+}
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* One global ring rather than per-component ones, so nothing keyboard-reachable
+   can be added later without a visible focus state. Matches the site's. */
+:focus-visible {
+  outline: 2px solid var(--color-indigo2);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* The secondary button. daisyUI's uncolored `btn-outline` takes its border from
+   base-content, so it draws near-white on these surfaces and fills solid white
+   on hover — three of them stacked under the sign-in form outshouted the form.
+   Colored variants (`btn-outline btn-error`) are correct as they are and keep
+   using daisyUI's. */
+.btn.btn-quiet {
+  background-color: transparent;
+  border-color: var(--color-edge);
+  color: var(--color-ink);
+}
+.btn.btn-quiet:hover {
+  background-color: var(--color-chrome);
+  border-color: var(--color-edge-emph);
+  color: var(--color-ink);
+}
+
+/* daisyUI draws a field's focus ring in `currentColor` — near-white against
+   these surfaces, and the one accent on the sign-in card that isn't the brand's. */
+.input:focus,
+.input:focus-within,
+.textarea:focus,
+.textarea:focus-within,
+.select:focus,
+.select:focus-within {
+  outline: 2px solid var(--color-indigo2);
+  outline-offset: 2px;
 }

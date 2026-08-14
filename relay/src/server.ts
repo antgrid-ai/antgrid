@@ -85,7 +85,8 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
 
   const connections = new Connections();
   const replayCache = new ReplayCache({ ttlMs: config.replayTtlMs });
-  const rateLimiter = new MessageRateLimiter(config.rateLimitMsgPerSec);
+  const routeRateLimiter = new TokenBucketRateLimiter(config.rateLimitMsgPerSec, config.rateLimitMsgBurst);
+  const pushRateLimiter = new MessageRateLimiter(config.pushRateLimitPerSec);
   const jsonRateLimiter = new TokenBucketRateLimiter(config.jsonRateLimitPerSec, config.jsonRateLimitBurst);
   const licenseCache = deps.licenseCache ?? new LicenseCache({ maxEntries: config.licenseCacheMaxEntries });
   const licenseGate: LicenseGate = deps.licenseGate ?? createLicenseGate({
@@ -135,6 +136,37 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       messageTimes.splice(0, msgHead);
       msgHead = 0;
     }
+  }
+
+  // A drop is reported to the SENDER alone, so neither peer can see the other
+  // direction's loss and neither can size a page load's real damage. The relay
+  // is the one vantage point that sees both directions, which is why the count
+  // lives here rather than in the bridge's or the app's own drop handler.
+  // Coalesced: an overrun arrives as a burst, and a line per frame would be the
+  // flood rather than the diagnosis.
+  const DROP_LOG_WINDOW_MS = 1000;
+  const droppedByBucket = new Map<string, number>();
+  let dropFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function recordDroppedFrame(bucket: string): void {
+    droppedByBucket.set(bucket, (droppedByBucket.get(bucket) ?? 0) + 1);
+    if (dropFlushTimer) return;
+    dropFlushTimer = setTimeout(() => {
+      dropFlushTimer = null;
+      let total = 0;
+      const buckets: Record<string, number> = {};
+      for (const [k, n] of droppedByBucket) {
+        total += n;
+        buckets[k] = n;
+      }
+      droppedByBucket.clear();
+      logger.warn("Routed frames dropped (rate limit)", {
+        total,
+        windowMs: DROP_LOG_WINDOW_MS,
+        buckets,
+      });
+    }, DROP_LOG_WINDOW_MS);
+    dropFlushTimer.unref?.();
   }
 
   function sendJson(ws: ServerWebSocket<WsData>, data: unknown): void {
@@ -459,7 +491,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
           return;
         }
         // Per-agent throttle (bounded cardinality; not keyed by pushToken).
-        if (!rateLimiter.allow(`push:${conn.deviceId}`)) {
+        if (!pushRateLimiter.allow(`push:${conn.deviceId}`)) {
           sendError(ws, "MESSAGE_RATE_LIMITED", "Push delivery rate limit exceeded", true);
           return;
         }
@@ -527,8 +559,14 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       return;
     }
 
-    const key = pairKey(sender.deviceId, header.to);
-    if (!rateLimiter.allow(key)) {
+    // Keyed per (pair, channel), not per pair: `pairKey` sorts, so one bucket
+    // per pair is shared by BOTH directions and every channel — a preview page
+    // load and the terminal output arriving beside it draw on the same budget
+    // and starve each other. The channel is in the cleartext route header, so
+    // this costs no visibility into the sealed payload.
+    const key = `${pairKey(sender.deviceId, header.to)}|${header.channel}`;
+    if (!routeRateLimiter.allow(key)) {
+      recordDroppedFrame(key);
       sendError(ws, "MESSAGE_RATE_LIMITED", "Message rate limit exceeded", true);
       return;
     }
@@ -695,9 +733,12 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       if (pingInterval) clearInterval(pingInterval);
       for (const t of helloTimers.values()) clearTimeout(t);
       helloTimers.clear();
+      if (dropFlushTimer) clearTimeout(dropFlushTimer);
+      dropFlushTimer = null;
       connections.clear();
       replayCache.destroy();
-      rateLimiter.destroy();
+      routeRateLimiter.destroy();
+      pushRateLimiter.destroy();
       jsonRateLimiter.destroy();
       licenseCache.destroy();
       server.stop();

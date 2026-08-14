@@ -2,32 +2,30 @@
 import { Icon } from "astro-icon/components";
 import Eyebrow from "../ui/Eyebrow.astro";
 import Chip from "../ui/Chip.astro";
+import Readout from "../ui/Readout.astro";
 
 const cipher = ["k7Vd2+Rm9pQ1fX0aZ", "hN8wYc4Lbe6Tj/Ou2", "gP5sKi0nDqWx3Hr+M", "zA9vCt7Bf1Ul6Ey4o", "Js2Rn8Xa0Pd5Mk3Iq", "4Wb7Lz1Tv9Co6Ge+H"];
 ---
-<section class="reveal border-y border-edge-inner bg-group/60">
-  <div class="mx-auto max-w-shell px-6 py-20">
-  <Eyebrow class="mb-4 flex items-center gap-2"><Icon name="tabler:lock" width="14" height="14" />End-to-end encrypted</Eyebrow>
-  <h2 class="mb-3.5 text-3xl font-medium tracking-tight text-ink">The relay can't read a byte.</h2>
-  <p class="mb-2.5 max-w-xl text-base leading-relaxed text-muted">
+<section class="reveal border-y border-edge-inner bg-well">
+  <div class="mx-auto max-w-shell px-6 py-24">
+  <Eyebrow class="mb-5">End-to-end encrypted</Eyebrow>
+  <h2 class="mb-5 font-display text-title font-semibold text-ink">The relay can't read a byte.</h2>
+  <p class="mb-3 max-w-xl text-lede text-muted">
     Everything you just saw — terminal output, your prompts, the files, every approval — is sealed on your machine and only opens on your phone. The server in the middle just forwards blobs it can never decrypt.
   </p>
-  <p class="mb-7 max-w-xl text-[14px] leading-relaxed text-muted2">
+  <p class="mb-10 max-w-xl text-note text-muted2">
     The alternative is letting someone else's machine hold your code. <span class="text-ink2">antgrid runs the agent on yours</span> — and the relay in between is built so it can't read what passes through.
   </p>
 
-  <div class="mb-6 grid items-stretch gap-0 md:grid-cols-[1fr_44px_1fr]">
-    <div class="overflow-hidden rounded-lg border border-edge bg-panel">
-      <div class="flex items-center justify-between border-b border-edge-inner bg-chrome px-3 py-2.5">
-        <span class="flex items-center gap-1.5 text-xs text-ink2"><Icon name="tabler:eye" class="text-indigo" width="15" height="15" />What you see</span>
-        <span class="rounded border border-[#26432f] bg-[#131f18] px-1.5 py-0.5 font-mono text-[10px] text-ok">decrypted</span>
-      </div>
-      <pre class="overflow-hidden p-3 font-mono text-[11.5px] leading-relaxed text-ink2"><span class="text-faint">studio-workstation · </span><span class="text-indigo">Claude Code</span>
+  {/* The same stream, twice: the pane on the right is what the wire carries. */}
+  <div class="mb-7 grid items-stretch gap-0 md:grid-cols-[1fr_44px_1fr]">
+    <Readout source="What you see" state="readable" label="decrypted">
+      <pre class="overflow-x-auto p-3.5 font-mono text-row text-ink2"><span class="text-faint">studio-workstation · </span><span class="text-indigo">Claude Code</span>
 <span class="text-muted2">02:14</span>  Editing <span class="text-indigo2">auth/session.ts</span>
        <span class="text-ok">+</span> verifyPairApproval(sig, uuid)
 <span class="text-ok">✓</span> 142 files typechecked
 <span class="text-amber">?</span> approve destructive migration?</pre>
-    </div>
+    </Readout>
 
     <div class="flex items-center justify-center py-2">
       <div class="flex size-8 items-center justify-center rounded-full border border-indigodeep2 bg-indigodeep">
@@ -35,13 +33,9 @@ const cipher = ["k7Vd2+Rm9pQ1fX0aZ", "hN8wYc4Lbe6Tj/Ou2", "gP5sKi0nDqWx3Hr+M", "
       </div>
     </div>
 
-    <div class="overflow-hidden rounded-lg border border-edge bg-group">
-      <div class="flex items-center justify-between border-b border-edge-inner bg-[#202027] px-3 py-2.5">
-        <span class="flex items-center gap-1.5 text-xs text-muted"><Icon name="tabler:lock" class="text-muted2" width="15" height="15" />What the relay sees</span>
-        <span class="rounded border border-edge bg-[#0E0E10] px-1.5 py-0.5 font-mono text-[10px] text-muted2">ciphertext</span>
-      </div>
-      <pre class="relative max-h-36 overflow-hidden break-all p-3 font-mono text-[11.5px] leading-relaxed text-edge-emph"><span class="cipher-scroll block">{cipher.join("\n") + "\n" + cipher.join("\n") + "\n"}</span></pre>
-    </div>
+    <Readout source="What the relay sees" state="sealed" label="ciphertext" tone="well">
+      <pre class="relative max-h-40 overflow-hidden break-all p-3.5 font-mono text-row text-edge-emph"><span class="cipher-scroll block">{cipher.join("\n") + "\n" + cipher.join("\n") + "\n"}</span></pre>
+    </Readout>
   </div>
 
   <div class="flex flex-wrap gap-2">

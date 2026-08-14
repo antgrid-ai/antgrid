@@ -10,6 +10,7 @@ import '../models/preview_models.dart';
 import '../models/ab_message.dart';
 import '../project/project_message_classification.dart';
 import '../project/project_session.dart';
+import '../util/ab_log.dart';
 import 'pending_reply.dart';
 import 'preview_proxy_server.dart';
 
@@ -39,8 +40,25 @@ class PreviewService {
   final _stateController = StreamController<PreviewState>.broadcast();
   PreviewState _state = const PreviewState();
 
-  final Map<String, PendingReply<TunnelHttpResponse>> _pendingRequests = {};
+  /// In-flight tunnel requests, held WITH the request so a frame the relay
+  /// dropped can be re-sent. Re-sending reuses the original `requestId`, which
+  /// is what lets the bridge replay a response it already produced instead of
+  /// running the upstream request twice (see TunnelManager's outbox).
+  final Map<String, _InFlightRequest> _pendingRequests = {};
   final Map<String, StreamSubscription> _activeWsTunnels = {};
+
+  StreamSubscription<void>? _dropSub;
+  Timer? _retrySweep;
+
+  /// Grace period between learning a frame was dropped and re-sending. It is
+  /// also the discriminator: the relay names no frame, so anything still
+  /// in-flight after a normal round trip is the plausible casualty, while
+  /// healthy requests have already answered and are gone from the map.
+  static const _retryGrace = Duration(milliseconds: 600);
+
+  /// Bounds amplification — a re-send costs frames on a link that just proved
+  /// it has none to spare.
+  static const _maxRetries = 2;
 
   PreviewProxyServer? _proxyServer;
 
@@ -53,6 +71,7 @@ class PreviewService {
     _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
     _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
     _txSub = session.transport.messages.listen(_onTransportMessage);
+    _dropSub = session.transport.droppedFrames.listen((_) => _onFramesDropped());
   }
 
   void _setState(PreviewState state) {
@@ -128,7 +147,88 @@ class PreviewService {
   }
 
   void _handleTunnelResponse(TunnelHttpResponse response) {
-    _pendingRequests.remove(response.requestId)?.complete(response);
+    final entry = _pendingRequests.remove(response.requestId);
+    if (entry == null) return;
+    entry.reply.complete(response);
+    _statsCompleted++;
+    _logIfSettled();
+  }
+
+  // --- Tunnel instrumentation ---
+  //
+  // The denominator for a drop count: a drop is only meaningful against the
+  // number of requests the load actually issued, and nothing else on either
+  // side of the tunnel counts them. A "window" is one settling of the in-flight
+  // map, which for a preview is one page load and its subresources.
+
+  int _statsIssued = 0;
+  int _statsCompleted = 0;
+  int _statsRetried = 0;
+  int _statsTimedOut = 0;
+  DateTime? _statsWindowStart;
+
+  void _logIfSettled() {
+    if (_pendingRequests.isNotEmpty) return;
+    final start = _statsWindowStart;
+    if (start == null) return;
+    AbLog.info(
+      'preview',
+      'tunnel window settled',
+      fields: {
+        'requests': _statsIssued,
+        'completed': _statsCompleted,
+        'retried': _statsRetried,
+        'timedOut': _statsTimedOut,
+        'elapsedMs': DateTime.now().difference(start).inMilliseconds,
+      },
+    );
+    _statsWindowStart = null;
+    _statsIssued = 0;
+    _statsCompleted = 0;
+    _statsRetried = 0;
+    _statsTimedOut = 0;
+  }
+
+  // --- Dropped-frame recovery ---
+
+  /// The relay dropped a routed frame. It identifies neither the frame nor the
+  /// direction, so a request whose reply never arrives is indistinguishable
+  /// from one that is merely slow — hence [_retryGrace] before acting, and
+  /// GET/HEAD only. A re-send that is not safe to repeat is worse than the 30s
+  /// timeout it would save.
+  void _onFramesDropped() {
+    // A burst of drops arrives as a burst of errors; one sweep covers them all.
+    _retrySweep ??= Timer(_retryGrace, () {
+      _retrySweep = null;
+      _resendStalledRequests();
+    });
+  }
+
+  void _resendStalledRequests() {
+    if (_disposed) return;
+    final now = DateTime.now();
+    for (final entry in _pendingRequests.values.toList()) {
+      final method = entry.request.method.toUpperCase();
+      if (method != 'GET' && method != 'HEAD') continue;
+      if (entry.attempts >= _maxRetries) continue;
+      // The sweep is scheduled off the DROP, not off any one request, so
+      // without this the map's youngest entries — a page load keeps adding
+      // them — are duplicated while still well inside a normal round trip.
+      if (now.difference(entry.sentAt) < _retryGrace) continue;
+      entry.attempts++;
+      entry.sentAt = now;
+      _statsRetried++;
+      _sendTunnelRequest(entry.request);
+    }
+  }
+
+  void _sendTunnelRequest(TunnelHttpRequest request) {
+    unawaited(
+      session.transport.send(
+        {...request.toJson(), 'checkoutId': checkoutId},
+        channel: 'preview',
+      ),
+    );
   }
 
   // --- Public methods ---
@@ -142,17 +242,18 @@ class PreviewService {
   }) {
     final pending = PendingReply<TunnelHttpResponse>(
       timeout: timeout,
-      onTimeout: () => _pendingRequests.remove(request.requestId),
+      onTimeout: () {
+        _pendingRequests.remove(request.requestId);
+        _statsTimedOut++;
+        _logIfSettled();
+      },
       timeoutError: () => TimeoutException('Request timed out', timeout),
     );
-    _pendingRequests[request.requestId] = pending;
+    _pendingRequests[request.requestId] = _InFlightRequest(request, pending);
+    _statsWindowStart ??= DateTime.now();
+    _statsIssued++;
 
-    unawaited(
-      session.transport.send(
-        {...request.toJson(), 'checkoutId': checkoutId},
-        channel: 'preview',
-      ),
-    );
+    _sendTunnelRequest(request);
 
     return pending.future;
   }
@@ -320,8 +421,11 @@ class PreviewService {
     await _proxyServer?.stop();
     _proxyServer = null;
 
-    for (final pending in _pendingRequests.values) {
-      pending.fail(TimeoutException('Service disposed'));
+    _retrySweep?.cancel();
+    _retrySweep = null;
+
+    for (final entry in _pendingRequests.values) {
+      entry.reply.fail(TimeoutException('Service disposed'));
     }
     _pendingRequests.clear();
 
@@ -336,7 +440,20 @@ class PreviewService {
     _statusSub = null;
     await _txSub?.cancel();
     _txSub = null;
+    await _dropSub?.cancel();
+    _dropSub = null;
 
     await _stateController.close();
   }
+}
+
+class _InFlightRequest {
+  final TunnelHttpRequest request;
+  final PendingReply<TunnelHttpResponse> reply;
+  int attempts = 0;
+
+  /// When the latest attempt went out — the age the retry sweep judges against.
+  DateTime sentAt = DateTime.now();
+
+  _InFlightRequest(this.request, this.reply);
 }

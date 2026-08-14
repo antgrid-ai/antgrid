@@ -55,24 +55,44 @@ jobs:
       # three ABIs' worth of native compilation nothing in the diff can reach.
       #
       # Anything that is not a pull_request — push to main above — always builds
-      # the full AAB; so does an unreadable base, since a skipped gate must never
-      # be the reason a release build went unverified.
+      # the full AAB, and so does any case this step cannot resolve: a gate that
+      # gave up must never be the reason a release build went unverified.
       - name: Does this change touch the native surface?
         id: native
         run: |
           set -euo pipefail
-          base='${{ github.event.pull_request.base.sha }}'
-          if [ "${{ github.event_name }}" != pull_request ] || [ -z "$base" ] \
-             || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if git diff --quiet "$base" HEAD -- \
-               app/android app/pubspec.yaml app/pubspec.lock \
-               .github/actions/setup-android .github/workflows/ci-android.yml; then
+          # -f disables globbing so NATIVE_PATHS word-splits into pathspecs git
+          # matches itself, instead of bash first expanding them against the
+          # workspace. Nothing below is a glob today; this is what keeps adding
+          # one later from silently narrowing the gate.
+          set -f
+          NATIVE_PATHS='app/android app/pubspec.yaml app/pubspec.lock
+            .github/actions/setup-android .github/workflows/ci-android.yml'
+
+          full() { echo "$1 — building the full AAB."; echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0; }
+
+          [ "${GITHUB_EVENT_NAME}" = pull_request ] || full "Not a pull request"
+          [ -n "${GITHUB_BASE_REF:-}" ] || full "Event carries no base ref"
+
+          # The fork point, deliberately NOT github.event.pull_request.base.sha:
+          # that is the base tip recorded when the PR was OPENED and it never
+          # advances, so diffing from it also picks up everything merged into the
+          # base branch since. One commit touching a path above and every PR open
+          # at the time builds the full AAB for the rest of its life — which is
+          # exactly what this gate shipped doing.
+          git rev-parse --verify --quiet "origin/${GITHUB_BASE_REF}^{commit}" >/dev/null \
+            || git fetch --quiet origin "${GITHUB_BASE_REF}:refs/remotes/origin/${GITHUB_BASE_REF}" \
+            || full "Cannot reach origin/${GITHUB_BASE_REF}"
+          base=$(git merge-base "origin/${GITHUB_BASE_REF}" HEAD) \
+            || full "No merge base with origin/${GITHUB_BASE_REF}"
+          echo "Fork point: ${base}"
+
+          touched=$(git diff --name-only "$base" HEAD -- $NATIVE_PATHS)
+          if [ -z "$touched" ]; then
             echo "Native surface untouched — skipping the release AAB build."
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
+            echo "$touched" | awk 'NR<=20'
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 

@@ -11,6 +11,16 @@ export const FREE_TIER = "free";
  *  CATALOG_PLANS and with `plans.worker_limit` in the migrations. */
 export const FREE_WORKER_LIMIT = 1;
 
+/** TEMP-PROMO: whether the PRODUCT is in beta — the nav badge and the pricing
+ *  CTAs that cannot be bought yet. Distinct from a subscription's
+ *  `promotional` flag, which answers whether THIS ACCOUNT is on the beta
+ *  grant: signed-out pages have no account and still have to say it, and the
+ *  first person to buy Pro during a running beta must keep the badge on the
+ *  nav while losing it on their plan card. Keep in lockstep with BETA_FREE in
+ *  site/src/data/pricing.ts — separate deploys, so the two cannot be one
+ *  const, and packages/antgrid-wire is Apache-2.0 and must not absorb it. */
+export const BETA = true;
+
 export interface PlanPricing {
   listPriceCents: number;
   offerPriceCents?: number;

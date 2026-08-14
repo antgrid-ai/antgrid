@@ -26,6 +26,12 @@ abstract class BufferedAgentTransport implements AgentTransport {
 
   final stateController = StreamController<TransportState>.broadcast();
 
+  /// Fires [droppedFrames]. Only a relay-backed transport ever adds to it.
+  final droppedFrameController = StreamController<void>.broadcast();
+
+  @override
+  Stream<void> get droppedFrames => droppedFrameController.stream;
+
   /// In-flight RPCs keyed by `requestId`, completed by [dispatchDecoded].
   final pending = <String, Completer<Map<String, dynamic>>>{};
 

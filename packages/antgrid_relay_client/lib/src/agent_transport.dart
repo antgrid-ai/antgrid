@@ -31,6 +31,18 @@ abstract class AgentTransport {
   /// Stream of state transitions. Emits each time [currentState] changes.
   Stream<TransportState> get stateChanges;
 
+  /// Emits when the relay reports that it DROPPED a frame on this transport's
+  /// socket (`MESSAGE_RATE_LIMITED`).
+  ///
+  /// The relay tells only the SENDER and identifies no frame — the route header
+  /// carries no message id — so a listener learns that something in flight died,
+  /// never which one. It is therefore a hint to re-issue work that is safe to
+  /// repeat, not a per-request failure: a service that cannot re-issue safely
+  /// must ignore it. Recovering here is what keeps a dropped frame from costing
+  /// a full request timeout. Never fires on a local transport — no relay, so
+  /// nothing to drop.
+  Stream<void> get droppedFrames;
+
   /// Latest known state (synchronous snapshot).
   TransportState get currentState;
 

@@ -31,10 +31,10 @@ export function SignUpPage({
 }: SignUpPageProps) {
   return (
     <Layout title="Create an account">
-      <div class="max-w-md mx-auto mt-16 card bg-base-100 shadow-xl">
+      <div class="max-w-md mx-auto mt-16 card bg-panel shadow-xl">
         <div class="card-body">
-          <h1 class="card-title font-mono">Create an account</h1>
-          <p class="text-sm text-base-content/70">
+          <h1 class="card-title">Create an account</h1>
+          <p class="text-sm text-muted">
             We'll email you a link to confirm the address before you can sign
             in.
           </p>
@@ -50,7 +50,7 @@ export function SignUpPage({
               never seen. The `email` prop is a deliberate hand-off from step 2. */}
           <form method="post" action="/ui/signup" class="mt-4 space-y-3">
             <fieldset class="fieldset">
-              <label class="fieldset-legend font-mono" for="signup-email">
+              <label class="fieldset-legend" for="signup-email">
                 Email
               </label>
               <input
@@ -66,7 +66,7 @@ export function SignUpPage({
               />
             </fieldset>
             <fieldset class="fieldset">
-              <label class="fieldset-legend font-mono" for="signup-password">
+              <label class="fieldset-legend" for="signup-password">
                 Password
               </label>
               <input
@@ -86,7 +86,7 @@ export function SignUpPage({
             {/* A typo here would otherwise only surface at the first sign-in,
                 by which point the reset flow is the only way back in. */}
             <fieldset class="fieldset">
-              <label class="fieldset-legend font-mono" for="signup-confirm">
+              <label class="fieldset-legend" for="signup-confirm">
                 Confirm password
               </label>
               <input
@@ -113,7 +113,7 @@ export function SignUpPage({
             </button>
           </form>
 
-          <p class="text-xs text-base-content/60 mt-4 text-center">
+          <p class="text-xs text-muted mt-4 text-center">
             Already have an account?{" "}
             <a
               class="link"

@@ -17,10 +17,10 @@ export function ResetPasswordPage({
 }: ResetPasswordPageProps) {
   return (
     <Layout title="Choose a password">
-      <div class="max-w-md mx-auto mt-16 card bg-base-100 shadow-xl">
+      <div class="max-w-md mx-auto mt-16 card bg-panel shadow-xl">
         <div class="card-body">
-          <h1 class="card-title font-mono">Choose a new password</h1>
-          <p class="text-sm text-base-content/70">
+          <h1 class="card-title">Choose a new password</h1>
+          <p class="text-sm text-muted">
             Saving signs you out everywhere, including here — you'll sign back
             in with the new password.
           </p>
@@ -44,7 +44,7 @@ export function ResetPasswordPage({
             {/* `label for=` rather than `legend`: a legend names the fieldset,
                 not the control, leaving both fields announced identically. */}
             <fieldset class="fieldset">
-              <label class="fieldset-legend font-mono" for="reset-password">
+              <label class="fieldset-legend" for="reset-password">
                 New password
               </label>
               <input
@@ -62,7 +62,7 @@ export function ResetPasswordPage({
               </p>
             </fieldset>
             <fieldset class="fieldset">
-              <label class="fieldset-legend font-mono" for="reset-confirm">
+              <label class="fieldset-legend" for="reset-confirm">
                 Confirm password
               </label>
               <input
@@ -91,10 +91,10 @@ export function ResetPasswordPage({
 export function ResetLinkInvalidPage() {
   return (
     <Layout title="Reset link expired">
-      <div class="max-w-md mx-auto mt-16 card bg-base-100 border border-base-300">
+      <div class="max-w-md mx-auto mt-16 card bg-panel border border-edge">
         <div class="card-body items-center text-center">
-          <h1 class="card-title font-mono">Reset link expired</h1>
-          <p class="text-sm text-base-content/70">
+          <h1 class="card-title">Reset link expired</h1>
+          <p class="text-sm text-muted">
             That link is no longer valid. Reset links last one hour and can only
             be used once.
           </p>

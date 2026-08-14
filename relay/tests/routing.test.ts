@@ -22,6 +22,33 @@ function frame(to: string, text: string, kind: FrameKind = FrameKind.sealed): Ui
   return encodeRouteFrame({ type: "message", to, channel: "control" }, new TextEncoder().encode(text), kind);
 }
 
+function previewFrame(to: string, text: string): Uint8Array {
+  return encodeRouteFrame(
+    { type: "message", to, channel: "preview" },
+    new TextEncoder().encode(text),
+    FrameKind.sealed,
+  );
+}
+
+/** Two same-account peers, so `mayRoute` permits and only the budget is in play. */
+async function connectPair(relayServer: RelayServer, prefix: string) {
+  const sharedToken = `${prefix}-token`;
+  const agent = await connectHello(relayServer, {
+    deviceId: `${prefix}-agent`,
+    licenseToken: sharedToken,
+  });
+  const app = await connectHello(relayServer, {
+    deviceId: `${prefix}-app`,
+    deviceType: "app",
+    licenseToken: sharedToken,
+  });
+  return { agent, app, agentId: `${prefix}-agent` };
+}
+
+function sameAccountGate(prefix: string) {
+  return makeFakeLicenseGate({ agentUid: () => `user-app-${prefix}-token` });
+}
+
 // mayRoute is the ONLY routing authority — there is no pairing or grant step
 // left to skip. These two pin the property directly.
 test("same-account routing needs no grant", async () => {
@@ -271,3 +298,60 @@ test("a hand-rolled pair-request frame is rejected INVALID_MESSAGE, forwards not
   expect(agentSawMessage).toBe(false);
   expect(app.ws.readyState).toBe(WebSocket.OPEN);
 });
+
+// The routed-frame budget is a token bucket, not a fixed window: a page load
+// legitimately arrives as a burst, and a fixed window rejects it purely on
+// shape. Over budget the frame is DROPPED and the socket kept — the app is the
+// only thing that can recover it (see PreviewService's rate-limit retry).
+test("routed-frame flood -> MESSAGE_RATE_LIMITED (retryable); bucket refills and routing resumes", async () => {
+  relay = startServer(
+    { ...defaultConfig, rateLimitMsgPerSec: 2, rateLimitMsgBurst: 2 },
+    { licenseGate: sameAccountGate("bucket") },
+  );
+  const { agent, app, agentId } = await connectPair(relay, "bucket");
+
+  for (let i = 0; i < 2; i++) {
+    const received = waitForType(agent.ws, "message");
+    app.ws.send(frame(agentId, `burst-${i}`));
+    expect((await received).payload).toBe(`burst-${i}`);
+  }
+
+  const limited = waitForType(app.ws, "error");
+  app.ws.send(frame(agentId, "over-budget"));
+  expect(await limited).toMatchObject({ code: "MESSAGE_RATE_LIMITED", retryable: true });
+  expect(app.ws.readyState).toBe(WebSocket.OPEN);
+
+  // Refilling at 2/s, so a full second restores the whole burst allowance.
+  await new Promise((r) => setTimeout(r, 1_100));
+  const afterRefill = waitForType(agent.ws, "message");
+  app.ws.send(frame(agentId, "after-refill"));
+  expect((await afterRefill).payload).toBe("after-refill");
+}, 8_000);
+
+// The regression this keying exists for: `pairKey` sorts, so a single per-pair
+// bucket is shared by both directions AND every channel — a preview page load
+// would rate-limit the terminal output arriving beside it.
+test("a preview-channel flood does not rate-limit the control channel", async () => {
+  relay = startServer(
+    { ...defaultConfig, rateLimitMsgPerSec: 2, rateLimitMsgBurst: 2 },
+    { licenseGate: sameAccountGate("chan") },
+  );
+  const { agent, app, agentId } = await connectPair(relay, "chan");
+
+  for (let i = 0; i < 2; i++) {
+    const received = waitForType(agent.ws, "message");
+    app.ws.send(previewFrame(agentId, `preview-${i}`));
+    expect((await received).channel).toBe("preview");
+  }
+
+  const limited = waitForType(app.ws, "error");
+  app.ws.send(previewFrame(agentId, "preview-over"));
+  expect(await limited).toMatchObject({ code: "MESSAGE_RATE_LIMITED", retryable: true });
+
+  // Control has its own bucket and is untouched by the preview flood.
+  const onControl = waitForType(agent.ws, "message");
+  app.ws.send(frame(agentId, "control-unaffected"));
+  const routed = await onControl;
+  expect(routed.channel).toBe("control");
+  expect(routed.payload).toBe("control-unaffected");
+}, 8_000);

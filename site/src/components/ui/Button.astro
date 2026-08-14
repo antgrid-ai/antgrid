@@ -2,7 +2,7 @@
 interface Props { href: string; variant?: "primary" | "outline"; class?: string }
 const { href, variant = "primary", class: cls = "" } = Astro.props;
 const base =
-  "inline-flex items-center gap-2 rounded-md px-6 py-3 text-sm font-medium transition-all duration-200 motion-reduce:transition-none";
+  "inline-flex items-center gap-2 rounded-md px-6 py-3 text-note font-medium transition-all duration-200 motion-reduce:transition-none";
 const styles =
   variant === "primary"
     ? "bg-indigobtn text-white shadow-[0_0_16px_rgba(99,102,241,0.25)] hover:bg-indigo hover:shadow-[0_0_28px_rgba(99,102,241,0.45)] hover:-translate-y-px"

@@ -69,6 +69,8 @@ const RELAY_CONFIG = {
   maxConnections: 100,
   rateLimitConnPerIp: 10,
   rateLimitMsgPerSec: 100,
+  rateLimitMsgBurst: 200,
+  pushRateLimitPerSec: 100,
   jsonRateLimitPerSec: 100,
   maxStreamsPerConnection: 1024,
   jsonRateLimitBurst: 200,

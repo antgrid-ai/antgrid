@@ -44,7 +44,7 @@ PricingCatalog _catalog() => PricingCatalog(
 
 void main() {
   testWidgets(
-    'shows plan cards all marked Coming soon, with no current-plan or promo reveal',
+    'shows plan cards all marked unbuyable, with no current-plan or promo reveal',
     (tester) async {
       // Tall viewport so the ListView builds every card without scrolling.
       tester.view.physicalSize = const Size(800, 2400);
@@ -64,8 +64,12 @@ void main() {
 
       // Plans are visible (not hidden)...
       expect(find.text('Pro Yearly'), findsOneWidget);
-      // ...but every CTA is a static "Coming soon", never a live checkout button.
-      expect(find.text('Coming soon'), findsNWidgets(2));
+      // ...but every CTA is static and unbuyable, never a live checkout button.
+      // The label names the beta rather than saying "Coming soon": the user
+      // arrived from a site that told them the beta is free, and an unexplained
+      // disabled button reads as half-built instead.
+      expect(find.text('Available after beta'), findsNWidgets(2));
+      expect(find.text('Coming soon'), findsNothing);
       expect(find.text('Get Pro Yearly'), findsNothing);
       // No indication of the account's actual (promotional) entitlement.
       expect(find.text('Current plan'), findsNothing);

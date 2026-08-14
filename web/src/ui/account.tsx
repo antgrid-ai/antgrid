@@ -1,4 +1,4 @@
-import { Layout } from "./layout.js";
+import { Layout, PageHead } from "./layout.js";
 import { AUTH_MEMORY_SCRIPT } from "./auth-memory.js";
 
 export type AccountPageProps = {
@@ -20,17 +20,16 @@ export function AccountPage(props: AccountPageProps) {
   return (
     <Layout title="Account" user={props.user}>
       <div class="max-w-xl mx-auto mt-10">
-        <h1 class="font-mono text-2xl font-semibold mb-1">Account</h1>
-        <p class="text-sm text-base-content/60 mb-8">
-          Signed in as <span class="font-mono">{props.user.email}</span>.
-        </p>
+        <PageHead title="Account">
+          Signed in as <span class="font-mono text-ink2">{props.user.email}</span>.
+        </PageHead>
 
         <PasswordCard {...props} />
 
-        <div class="card bg-base-100 border border-error/40 mt-6">
+        <div class="card bg-panel border border-error/40 mt-6">
           <div class="card-body">
-            <h2 class="card-title font-mono text-error">Delete account</h2>
-            <p class="text-sm text-base-content/70">
+            <h2 class="card-title text-error">Delete account</h2>
+            <p class="text-sm text-muted">
               This permanently deletes your account, sessions, connected devices,
               and sign-in credentials. This cannot be undone. Billing records
               required for tax compliance are retained but detached from your
@@ -38,14 +37,14 @@ export function AccountPage(props: AccountPageProps) {
             </p>
 
             {props.blockedByTeam ? (
-              <div class="alert alert-warning font-mono text-sm mt-2" role="status">
+              <div class="alert alert-warning text-sm mt-2" role="status">
                 <span>
                   Your account still has team members. Remove them, or contact
                   support to transfer ownership, before deleting your account.
                 </span>
               </div>
             ) : props.blockedBySubscription ? (
-              <div class="alert alert-warning font-mono text-sm mt-2" role="status">
+              <div class="alert alert-warning text-sm mt-2" role="status">
                 <span>
                   You have an active subscription. Cancel it on your{" "}
                   <a class="link" href="/dashboard">dashboard</a> before deleting
@@ -54,7 +53,7 @@ export function AccountPage(props: AccountPageProps) {
               </div>
             ) : (
               <form method="post" action="/ui/account/delete" class="mt-4">
-                <label class="text-xs text-base-content/60 font-mono" for="confirm-input">
+                <label class="text-xs text-muted" for="confirm-input">
                   Type <span class="font-bold">DELETE</span> to confirm:
                 </label>
                 <input
@@ -68,7 +67,7 @@ export function AccountPage(props: AccountPageProps) {
                 <button
                   type="submit"
                   id="delete-submit"
-                  class="btn btn-error font-mono mt-3"
+                  class="btn btn-error mt-3"
                   disabled
                 >
                   Delete my account
@@ -100,12 +99,12 @@ function PasswordCard(props: AccountPageProps) {
     passwordError,
   } = props;
   return (
-    <div class="card bg-base-100 border border-base-300">
+    <div class="card bg-panel border border-edge">
       <div class="card-body">
-        <h2 class="card-title font-mono">
+        <h2 class="card-title">
           {hasPassword ? "Change password" : "Set a password"}
         </h2>
-        <p class="text-sm text-base-content/70">
+        <p class="text-sm text-muted">
           {hasPassword
             ? "Your account can sign in with a password. Changing it signs you out of your other browser sessions."
             : "Your account signs in with a magic link or GitHub/Google. Adding a password gives you a second way in — the existing ones keep working. Saving signs you out of your other browser sessions."}
@@ -120,7 +119,7 @@ function PasswordCard(props: AccountPageProps) {
           // asked for one — nothing else writes this hint but a password
           // sign-in, which needs the hint to be reachable at all.
           <div
-            class="alert alert-success font-mono text-sm mt-2"
+            class="alert alert-success text-sm mt-2"
             role="status"
             data-ab-remember-now="password"
             data-ab-email={props.user.email ?? ""}
@@ -129,7 +128,7 @@ function PasswordCard(props: AccountPageProps) {
           </div>
         )}
         {passwordError && (
-          <div class="alert alert-error font-mono text-sm mt-2" role="alert">
+          <div class="alert alert-error text-sm mt-2" role="alert">
             <span>{passwordError}</span>
           </div>
         )}
@@ -160,7 +159,7 @@ function PasswordCard(props: AccountPageProps) {
               Matches the delete form below. */}
           {hasPassword && (
             <fieldset class="fieldset">
-              <label class="fieldset-legend font-mono" for="account-current-password">
+              <label class="fieldset-legend" for="account-current-password">
                 Current password
               </label>
               <input
@@ -174,7 +173,7 @@ function PasswordCard(props: AccountPageProps) {
             </fieldset>
           )}
           <fieldset class="fieldset">
-            <label class="fieldset-legend font-mono" for="account-new-password">
+            <label class="fieldset-legend" for="account-new-password">
               {hasPassword ? "New password" : "Password"}
             </label>
             <input
@@ -192,7 +191,7 @@ function PasswordCard(props: AccountPageProps) {
             </p>
           </fieldset>
           <fieldset class="fieldset">
-            <label class="fieldset-legend font-mono" for="account-confirm-password">
+            <label class="fieldset-legend" for="account-confirm-password">
               Confirm password
             </label>
             <input
@@ -206,7 +205,7 @@ function PasswordCard(props: AccountPageProps) {
               class="input input-bordered font-mono w-full"
             />
           </fieldset>
-          <button type="submit" class="btn btn-primary font-mono">
+          <button type="submit" class="btn btn-primary">
             {hasPassword ? "Change password" : "Set password"}
           </button>
         </form>
@@ -218,10 +217,10 @@ function PasswordCard(props: AccountPageProps) {
 export function AccountDeletedPage() {
   return (
     <Layout title="Account deleted">
-      <div class="max-w-md mx-auto mt-16 card bg-base-100 border border-base-300">
+      <div class="max-w-md mx-auto mt-16 card bg-panel border border-edge">
         <div class="card-body items-center text-center">
-          <h1 class="card-title font-mono">Account deleted</h1>
-          <p class="text-sm text-base-content/70">
+          <h1 class="card-title">Account deleted</h1>
+          <p class="text-sm text-muted">
             Your account has been permanently deleted. You can close this tab.
           </p>
         </div>

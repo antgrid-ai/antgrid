@@ -1,6 +1,13 @@
 @import "tailwindcss";
-@import "@fontsource-variable/inter";
-@import "@fontsource-variable/jetbrains-mono";
+
+/* The three faces are declared in astro.config.mjs and emitted by <Font> in
+   Base.astro — deliberately NOT @import-ed from @fontsource here. Going through
+   the Fonts API is what generates the metric-matched fallback @font-face for
+   each family, and that is load-bearing: Fontsource ships every face
+   font-display: swap, so body text paints in the system fallback and re-lays out
+   on arrival. Inter is ~7% wider than Segoe UI and Arial at the same px, so
+   before this the paragraphs rewrapped to more lines and the document grew
+   ~146px under the reader after load. */
 
 @theme {
   /* Surface ramp, dark → light: page < group < panel < chrome. Perceived
@@ -12,6 +19,10 @@
   --color-panel: #1d1d24;
   --color-chrome: #23232b;
   --color-group: #17171d;
+  /* The one surface BELOW page, for full-bleed bands that should read as inset
+     rather than raised. Held above the #000 floor for the same glare reason as
+     page — ink lands on it at ~18.9:1, just inside the ceiling noted above. */
+  --color-well: #0c0c10;
 
   --color-edge: #2f2f38;
   --color-edge-inner: #26262e;
@@ -40,8 +51,57 @@
   --color-amberbg2: #302719;
   --color-ok: #4ade80;
 
-  --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Code", Menlo, Consolas, monospace;
+  /* Three faces, three jobs, no overlap. Display carries the voice, sans carries
+     the reading, mono carries anything a machine produced. Archivo is the only
+     one that changed: at display sizes its signage proportions read as industrial
+     authority, which is the argument the page is making — Inter at 64px reads as
+     no argument at all. Never set Archivo below --text-title; it has none of
+     Inter's small-size tuning. */
+  /* Each --font-* here is the family plus its generated metric-matched fallback,
+     already assembled by the Fonts API — so the tail of system faces that used to
+     be spelled out lives in the `fallbacks` array in astro.config.mjs instead.
+     Keep these pointing at the cssVariable names declared there. */
+  --font-display: var(--font-archivo);
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-jetbrains);
+
+  /* Type scale. Every size on the page comes from here — the previous spread of
+     one-off `text-[12.5px]` literals is what kept the page from reading as a
+     system. The three display steps are fluid, so mobile steps down on its own
+     rather than needing a second set of breakpoint classes. */
+  --text-display: clamp(2.5rem, 1.5rem + 4.4vw, 4.25rem);
+  --text-display--line-height: 1.02;
+  --text-display--letter-spacing: -0.032em;
+
+  --text-title: clamp(1.6875rem, 1.28rem + 1.75vw, 2.375rem);
+  --text-title--line-height: 1.1;
+  --text-title--letter-spacing: -0.026em;
+
+  --text-kicker: clamp(1.0625rem, 0.95rem + 0.5vw, 1.3125rem);
+  --text-kicker--line-height: 1.35;
+  --text-kicker--letter-spacing: -0.012em;
+
+  --text-lede: 1.0625rem;
+  --text-lede--line-height: 1.62;
+
+  --text-note: 0.875rem;
+  --text-note--line-height: 1.6;
+
+  /* Machine register: rows in a readout, then meta, then the state markers and
+     eyebrows. Nothing on the page sits between these and --text-note. */
+  --text-row: 0.8125rem;
+  --text-row--line-height: 1.5;
+
+  --text-meta: 0.75rem;
+  --text-meta--line-height: 1.5;
+
+  --text-marker: 0.6875rem;
+  --text-marker--line-height: 1.45;
+
+  /* Floor of the scale: the pills that ride alongside a label ("beta", "soon",
+     "RECOMMENDED"). Nothing that has to be read as a sentence goes here. */
+  --text-pip: 0.59375rem;
+  --text-pip--line-height: 1.4;
 
   /* Page shell (`max-w-shell`) — nav, footer and every landing section share it,
      so they can't drift apart. Prose caps (max-w-xl/2xl) are deliberately NOT
@@ -61,6 +121,14 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* One global focus ring rather than per-component rings, so nothing keyboard-
+   reachable can be added later without one. */
+:focus-visible {
+  outline: 2px solid var(--color-indigo2);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
 /* ---- Atmosphere -------------------------------------------------------- */
 
 /* Indigo radial glow — position with inset utilities on an absolute wrapper. */
@@ -68,11 +136,41 @@ body {
   background: radial-gradient(closest-side, rgba(99, 102, 241, 0.16), transparent 70%);
 }
 
-/* Faint dot grid, masked so it fades out toward the bottom. */
-.bg-dotgrid {
-  background-image: radial-gradient(circle, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
-  background-size: 26px 26px;
-  mask-image: linear-gradient(to bottom, black 20%, transparent 90%);
+/* The namesake, made literal. Ruled lines at one pitch (square cells at any
+   zoom) plus a scattered handful of filled cells: a rack where most machines are
+   idle and a few are working, which is the picture the page is selling before a
+   word of it is read. Cells sit at two alphas so the field has depth rather than
+   one flat scatter; the machines that are actually LIVE are the indigo ones, and
+   they live in .live-cells below because they move. The 960px tile is
+   deliberately much larger than the 32px pitch so the repeat is not spottable. */
+.bg-gridfield {
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='960' height='960'%3E%3Cg fill='rgba(255,255,255,0.022)'%3E%3Crect x='32' y='64' width='64' height='32'/%3E%3Crect x='256' y='32' width='32' height='32'/%3E%3Crect x='512' y='128' width='96' height='32'/%3E%3Crect x='800' y='64' width='32' height='32'/%3E%3Crect x='128' y='224' width='32' height='32'/%3E%3Crect x='416' y='256' width='64' height='32'/%3E%3Crect x='672' y='192' width='32' height='32'/%3E%3Crect x='896' y='288' width='64' height='32'/%3E%3Crect x='192' y='416' width='96' height='32'/%3E%3Crect x='544' y='480' width='32' height='32'/%3E%3Crect x='320' y='544' width='64' height='32'/%3E%3Crect x='736' y='512' width='96' height='32'/%3E%3Crect x='64' y='672' width='64' height='32'/%3E%3Crect x='448' y='704' width='32' height='32'/%3E%3Crect x='864' y='640' width='32' height='32'/%3E%3Crect x='224' y='800' width='64' height='32'/%3E%3Crect x='608' y='864' width='96' height='32'/%3E%3Crect x='384' y='928' width='32' height='32'/%3E%3C/g%3E%3Cg fill='rgba(255,255,255,0.04)'%3E%3Crect x='352' y='160' width='32' height='32'/%3E%3Crect x='704' y='352' width='64' height='32'/%3E%3Crect x='128' y='576' width='32' height='32'/%3E%3Crect x='832' y='736' width='64' height='32'/%3E%3Crect x='288' y='672' width='96' height='32'/%3E%3Crect x='576' y='256' width='32' height='32'/%3E%3Crect x='640' y='96' width='32' height='32'/%3E%3Crect x='96' y='320' width='64' height='32'/%3E%3Crect x='768' y='608' width='32' height='32'/%3E%3Crect x='416' y='832' width='64' height='32'/%3E%3C/g%3E%3C/svg%3E"),
+    linear-gradient(to right, rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+  background-size: 960px 960px, 32px 32px, 32px 32px;
+  mask-image: radial-gradient(130% 85% at 50% 8%, black 8%, transparent 72%);
+}
+
+/* The only motion in the hero background, and it is ambient rather than
+   interactive on purpose: a cursor-reactive field would argue the opposite of
+   the product, which is that the fleet works while you are asleep. Cells hold
+   for ~5s of a 24s cycle on staggered delays, so roughly three are lit at once
+   and the rack has quietly rearranged itself if you look back a minute later.
+   Rects are placed in raw px because they must land on the same 32px pitch the
+   background tiles from — percentages would drift off the grid. */
+.live-cells {
+  mask-image: radial-gradient(130% 85% at 50% 8%, black 8%, transparent 72%);
+}
+.live-cells rect {
+  fill: rgba(99, 102, 241, 0.14);
+  opacity: 0;
+  animation: cell-wake 24s ease-in-out infinite;
+}
+@keyframes cell-wake {
+  0%, 100% { opacity: 0; }
+  4%, 18% { opacity: 1; }
+  24% { opacity: 0; }
 }
 
 /* Card elevation: soft drop shadow + a brighter top edge, as if lit from above. */
@@ -165,6 +263,14 @@ html.js .reveal.in {
   .cipher-scroll,
   .pc-caret::after {
     animation: none;
+  }
+  /* Not opacity:1 on every cell — that lights the whole rack, which reads as
+     a different design rather than the same one held still. */
+  .live-cells rect {
+    animation: none;
+  }
+  .live-cells rect:nth-child(4n + 1) {
+    opacity: 1;
   }
   /* The loop script never starts under reduced motion, but if the preference
      flips mid-session the rows must not keep transitioning. */

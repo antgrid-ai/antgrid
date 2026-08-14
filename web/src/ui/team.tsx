@@ -1,4 +1,5 @@
-import { Layout } from "./layout.js";
+import { Layout, PageHead } from "./layout.js";
+import { CellMeter } from "./cell-meter.js";
 import type { AccountMemberRole } from "../models/account-member.js";
 import type { TeamNotice } from "./team-notice.js";
 
@@ -128,25 +129,34 @@ function plural(n: number, word: string): string {
   return n === 1 ? word : `${word}s`;
 }
 
+/** Only the owner is tinted. Every other row is `member`, and a table where
+ *  every pill shouts marks nothing. */
 function RoleBadge({ role }: { role: AccountMemberRole | null }) {
-  return <span class="badge badge-outline">{role ?? "unknown"}</span>;
+  return (
+    <span
+      class={
+        role === "owner"
+          ? "badge badge-sm border-indigo/50 bg-indigodeep/40 text-indigo2"
+          : "badge badge-sm border-edge text-muted"
+      }
+    >
+      {role ?? "unknown"}
+    </span>
+  );
 }
 
 export function TeamPage(props: TeamPageProps) {
   const notice = props.notice ? NOTICE[props.notice] : null;
   return (
-    <Layout title="Team" user={props.user}>
-      <div class="mb-6">
-        <h1 class="font-mono text-2xl font-semibold">Team</h1>
-        <p class="text-sm text-base-content/60 mt-1">
-          Everyone on one account shares its plan and limits. Devices and
-          machines stay with the person who registered them.
-        </p>
-      </div>
+    <Layout title="Team" user={props.user} section="team">
+      <PageHead title="Team">
+        Everyone on one account shares its plan and limits. Devices and
+        machines stay with the person who registered them.
+      </PageHead>
 
       {notice && (
         <div
-          class={`alert ${ALERT_CLASS[notice.tone]} font-mono text-sm mb-6`}
+          class={`alert ${ALERT_CLASS[notice.tone]} text-sm mb-6`}
           role={notice.tone === "error" ? "alert" : "status"}
         >
           <span>{notice.text}</span>
@@ -171,17 +181,17 @@ export function TeamPage(props: TeamPageProps) {
  */
 function LeaveCard() {
   return (
-    <div class="card bg-base-100 border border-base-300 mt-6">
+    <div class="card bg-panel border border-edge mt-6">
       <div class="card-body">
-        <h2 class="card-title font-mono">Leave this team</h2>
-        <p class="text-sm text-base-content/70">
+        <h2 class="card-title">Leave this team</h2>
+        <p class="text-sm text-muted">
           You go back to your own account and its plan. The subscription
           cancelled when you joined does not come back, and your devices stay
           registered to you — but they sign out now and reconnect on your own
           entitlement.
         </p>
         <form method="post" action="/ui/team/leave" class="mt-2">
-          <button type="submit" class="btn btn-outline btn-error btn-sm font-mono">
+          <button type="submit" class="btn btn-outline btn-error btn-sm">
             Leave team
           </button>
         </form>
@@ -199,43 +209,55 @@ function OwnerView({ view }: { view: Extract<TeamView, { kind: "owner" }> }) {
 
   return (
     <>
-      <div class="card bg-base-100 border border-base-300">
+      <div class="card bg-panel border border-edge">
         <div class="card-body">
-          <h2 class="card-title font-mono">Seats</h2>
-          <p class="text-sm text-base-content/70">
+          <h2 class="card-title">Seats</h2>
+          <p class="text-sm text-muted">
             A seat is a person on this account's bill. Removing someone frees
             their seat; it never lowers the invoice.
           </p>
-          <div class="stats stats-horizontal mt-2 border border-base-300">
-            <div class="stat">
-              <div class="stat-title">Seats used</div>
-              <div class="stat-value text-2xl font-mono">
-                {seatsUsed}
-                <span class="text-base-content/40">
-                  {" / "}
-                  {seatsPurchased ?? "—"}
-                </span>
+          <div class="mt-5 grid grid-cols-2 gap-x-8 gap-y-6 rounded-box border border-edge bg-page/40 p-5">
+            {/* No contract, no seat count to meter — the invite form below says
+                so in words rather than implying a ceiling of zero. */}
+            {seatsPurchased === null ? (
+              <div>
+                <div class="text-[0.6875rem] font-medium uppercase tracking-[0.12em] text-muted2">
+                  Seats used
+                </div>
+                <div class="mt-1 font-mono text-2xl leading-none">
+                  {seatsUsed}
+                  <span class="text-faint"> / —</span>
+                </div>
               </div>
-            </div>
-            <div class="stat">
-              <div class="stat-title">Pending invites</div>
-              <div class="stat-value text-2xl font-mono">{invites.length}</div>
+            ) : (
+              <CellMeter
+                label="Seats used"
+                used={seatsUsed}
+                limit={seatsPurchased}
+                unit="seats"
+              />
+            )}
+            <div>
+              <div class="text-[0.6875rem] font-medium uppercase tracking-[0.12em] text-muted2">
+                Pending invites
+              </div>
+              <div class="mt-1 font-mono text-2xl leading-none">{invites.length}</div>
             </div>
           </div>
         </div>
       </div>
 
-      <div class="card bg-base-100 border border-base-300 mt-6">
+      <div class="card bg-panel border border-edge mt-6">
         <div class="card-body">
-          <h2 class="card-title font-mono">Invite someone</h2>
-          <p class="text-sm text-base-content/70">
+          <h2 class="card-title">Invite someone</h2>
+          <p class="text-sm text-muted">
             They move onto this account's plan and limits when they accept, and
             the subscription they hold today is cancelled — including a free Pro
             grant they were never charged for.
           </p>
 
           {overSubscribed && (
-            <div class="alert alert-warning font-mono text-sm mt-2" role="status">
+            <div class="alert alert-warning text-sm mt-2" role="status">
               <span>
                 This account has {seatsUsed} {plural(seatsUsed, "member")} on{" "}
                 {seatsPurchased} {plural(seatsPurchased ?? 0, "seat")}. Buy seats
@@ -244,7 +266,7 @@ function OwnerView({ view }: { view: Extract<TeamView, { kind: "owner" }> }) {
             </div>
           )}
           {seatsPurchased === null && (
-            <div class="alert alert-warning font-mono text-sm mt-2" role="status">
+            <div class="alert alert-warning text-sm mt-2" role="status">
               <span>
                 This account has no active subscription, so it has no seat to
                 give.
@@ -262,31 +284,36 @@ function OwnerView({ view }: { view: Extract<TeamView, { kind: "owner" }> }) {
                 one, but a second owner can cancel the contract, and there is no
                 ownership transfer to undo it with. */}
             <fieldset class="fieldset" disabled={overSubscribed || seatsPurchased === null}>
-              <label class="fieldset-legend font-mono" for="invite-email">
+              <label class="fieldset-legend" for="invite-email">
                 Email address
               </label>
-              <input
-                type="email"
-                id="invite-email"
-                name="email"
-                required
-                autocomplete="off"
-                placeholder="teammate@example.com"
-                class="input input-bordered font-mono w-full"
-              />
-              <button type="submit" class="btn btn-primary font-mono mt-3">
-                Send invitation
-              </button>
+              {/* Row, not stacked: `.fieldset` lays its children out full-width,
+                  which turned one ordinary form action into the loudest object
+                  on the page. */}
+              <div class="flex flex-col gap-2 sm:flex-row">
+                <input
+                  type="email"
+                  id="invite-email"
+                  name="email"
+                  required
+                  autocomplete="off"
+                  placeholder="teammate@example.com"
+                  class="input input-bordered font-mono w-full sm:flex-1"
+                />
+                <button type="submit" class="btn btn-primary sm:w-auto">
+                  Send invitation
+                </button>
+              </div>
             </fieldset>
           </form>
         </div>
       </div>
 
-      <h2 class="font-mono text-lg font-semibold mt-8 mb-2">Members</h2>
-      <div class="card bg-base-100 border border-base-300 overflow-x-auto">
+      <h2 class="text-lg font-semibold mt-8 mb-2">Members</h2>
+      <div class="card bg-panel border border-edge overflow-x-auto">
         <table class="table">
           <thead>
-            <tr class="text-xs uppercase tracking-wide text-base-content/60">
+            <tr class="text-xs uppercase tracking-wide text-muted">
               <th>Member</th>
               <th>Role</th>
               <th>Joined</th>
@@ -298,12 +325,12 @@ function OwnerView({ view }: { view: Extract<TeamView, { kind: "owner" }> }) {
               <tr class="font-mono text-sm">
                 <td>
                   {m.email}
-                  {m.isSelf && <span class="text-base-content/50"> (you)</span>}
+                  {m.isSelf && <span class="text-muted2"> (you)</span>}
                 </td>
                 <td>
                   <RoleBadge role={m.role} />
                 </td>
-                <td class="text-base-content/60">{formatDate(m.joinedAt)}</td>
+                <td class="text-muted">{formatDate(m.joinedAt)}</td>
                 <td class="text-right whitespace-nowrap">
                   {m.removable && (
                     <form
@@ -325,21 +352,21 @@ function OwnerView({ view }: { view: Extract<TeamView, { kind: "owner" }> }) {
 
       {canLeave && <LeaveCard />}
 
-      <h2 class="font-mono text-lg font-semibold mt-8 mb-2">Pending invitations</h2>
+      <h2 class="text-lg font-semibold mt-8 mb-2">Pending invitations</h2>
       {invites.length === 0 ? (
-        <div class="card bg-base-100 border border-base-300">
+        <div class="card bg-panel border border-edge">
           <div class="card-body">
-            <p class="text-sm text-base-content/60">
+            <p class="text-sm text-muted">
               Nobody is waiting on an invitation. A pending one holds a seat
               until it is accepted, withdrawn, or expires.
             </p>
           </div>
         </div>
       ) : (
-        <div class="card bg-base-100 border border-base-300 overflow-x-auto">
+        <div class="card bg-panel border border-edge overflow-x-auto">
           <table class="table">
             <thead>
-              <tr class="text-xs uppercase tracking-wide text-base-content/60">
+              <tr class="text-xs uppercase tracking-wide text-muted">
                 <th>Invited</th>
                 <th>Role</th>
                 <th>Expires</th>
@@ -354,12 +381,12 @@ function OwnerView({ view }: { view: Extract<TeamView, { kind: "owner" }> }) {
                   <td>
                     <RoleBadge role={i.role} />
                   </td>
-                  <td class="text-base-content/60">{formatDate(i.expiresAt)}</td>
+                  <td class="text-muted">{formatDate(i.expiresAt)}</td>
                   <td>
                     {i.bounced ? (
                       <span class="badge badge-error badge-outline">bounced</span>
                     ) : (
-                      <span class="text-base-content/40">—</span>
+                      <span class="text-faint">—</span>
                     )}
                   </td>
                   <td class="text-right whitespace-nowrap">
@@ -395,22 +422,22 @@ function OwnerView({ view }: { view: Extract<TeamView, { kind: "owner" }> }) {
 function MemberView({ view }: { view: Extract<TeamView, { kind: "member" }> }) {
   return (
     <>
-      <div class="card bg-base-100 border border-base-300">
+      <div class="card bg-panel border border-edge">
         <div class="card-body">
-          <h2 class="card-title font-mono">Your billing</h2>
-          <p class="text-sm text-base-content/70">
+          <h2 class="card-title">Your billing</h2>
+          <p class="text-sm text-muted">
             Your plan, limits and invoice come from the account owned by{" "}
             <span class="font-mono">{view.ownerEmail ?? "the account owner"}</span>
             . Your own subscription was cancelled when you joined, and leaving
             does not bring it back.
           </p>
-          <div class="stats stats-horizontal mt-2 border border-base-300 w-fit">
+          <div class="stats stats-horizontal mt-2 border border-edge w-fit">
             <div class="stat">
               <div class="stat-title">Your role</div>
               <div class="stat-value text-base font-mono">{view.role ?? "unknown"}</div>
             </div>
           </div>
-          <p class="text-xs text-base-content/60 mt-2">
+          <p class="text-xs text-muted mt-2">
             Only the owner can change the subscription, buy seats, or invite
             people.
           </p>

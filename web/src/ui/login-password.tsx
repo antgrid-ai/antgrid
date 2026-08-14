@@ -18,9 +18,9 @@ export type LoginPasswordPageProps = {
 export function LoginPasswordPage({ email, error }: LoginPasswordPageProps) {
   return (
     <Layout title="Sign in">
-      <div class="max-w-md mx-auto mt-16 card bg-base-100 shadow-xl">
+      <div class="max-w-md mx-auto mt-16 card bg-panel shadow-xl">
         <div class="card-body">
-          <h1 class="card-title font-mono">Enter your password</h1>
+          <h1 class="card-title">Enter your password</h1>
 
           <div class="flex items-center gap-2 text-sm">
             <span class="font-mono break-all">{email}</span>
@@ -44,7 +44,7 @@ export function LoginPasswordPage({ email, error }: LoginPasswordPageProps) {
           >
             <input type="hidden" name="email" value={email} />
             <fieldset class="fieldset">
-              <label class="fieldset-legend font-mono" for="login-password">
+              <label class="fieldset-legend" for="login-password">
                 Password
               </label>
               <input
@@ -96,14 +96,14 @@ export function LoginPasswordPage({ email, error }: LoginPasswordPageProps) {
             <input type="hidden" name="email" value={email} />
             <button
               type="submit"
-              class="btn btn-outline w-full"
+              class="btn btn-quiet w-full"
               data-ab-once="Sending…"
             >
               Email me a link instead
             </button>
           </form>
 
-          <p class="text-xs text-base-content/60 mt-4 text-center">
+          <p class="text-xs text-muted mt-4 text-center">
             No password on this account? The link above signs you in — and
             creates the account if you don't have one yet.
           </p>
@@ -113,7 +113,7 @@ export function LoginPasswordPage({ email, error }: LoginPasswordPageProps) {
               for someone who has never had one the form above is a dead end.
               Step 1 deliberately does not carry it — a sign-up link there would
               re-open the sign-in/sign-up decision that step exists to remove. */}
-          <p class="text-xs text-base-content/60 mt-2 text-center">
+          <p class="text-xs text-muted mt-2 text-center">
             No account yet?{" "}
             <a class="link" href={`/signup?email=${encodeURIComponent(email)}`}>
               Create one with a password

@@ -48,7 +48,7 @@ export type InvitePageProps = {
  *  lose is usually one nobody charged them for. */
 function CostWarning() {
   return (
-    <div class="alert alert-warning font-mono text-sm mt-4" role="status">
+    <div class="alert alert-warning text-sm mt-4" role="status">
       <span>
         Accepting moves your account onto this team's subscription and cancels
         the subscription you hold today — including a free Pro grant you were
@@ -62,23 +62,23 @@ export function InvitePage(p: InvitePageProps) {
   return (
     <Layout title="Team invitation" user={p.user}>
       <div class="max-w-xl mx-auto mt-10">
-        <h1 class="font-mono text-2xl font-semibold mb-1">Team invitation</h1>
-        <p class="text-sm text-base-content/60 mb-8">
+        <h1 class="text-2xl font-semibold mb-1">Team invitation</h1>
+        <p class="text-sm text-muted mb-8">
           <span class="font-mono">{p.invitedBy}</span> invited{" "}
           <span class="font-mono">{p.invitedEmail}</span> to join their team on
           Antgrid.
         </p>
 
-        <div class="card bg-base-100 border border-base-300">
+        <div class="card bg-panel border border-edge">
           <div class="card-body">
-            <h2 class="card-title font-mono">Join this team</h2>
-            <p class="text-sm text-base-content/70">
+            <h2 class="card-title">Join this team</h2>
+            <p class="text-sm text-muted">
               Your machines and devices stay yours. Your plan, limits and
               billing move to the team owner.
             </p>
 
             {p.notice && (
-              <div class="alert alert-error font-mono text-sm mt-2" role="alert">
+              <div class="alert alert-error text-sm mt-2" role="alert">
                 <span>{NOTICE_TEXT[p.notice]}</span>
               </div>
             )}
@@ -94,26 +94,26 @@ export function InvitePage(p: InvitePageProps) {
               >
                 <input type="hidden" name="id" value={p.inviteId} />
                 <input type="hidden" name="token" value={p.token} />
-                <button type="submit" class="btn btn-primary font-mono">
+                <button type="submit" class="btn btn-primary">
                   Accept and join
                 </button>
               </form>
             ) : p.state === "signed-out" ? (
               <>
-                <div class="alert alert-info font-mono text-sm mt-2" role="status">
+                <div class="alert alert-info text-sm mt-2" role="status">
                   <span>
                     Sign in as {p.invitedEmail}, then open this link again.
                     Accepting an invitation never signs you in and never
                     confirms an address on its own.
                   </span>
                 </div>
-                <a href="/login" class="btn btn-primary font-mono mt-4 w-fit">
+                <a href="/login" class="btn btn-primary mt-4 w-fit">
                   Sign in
                 </a>
               </>
             ) : (
               <>
-                <div class="alert alert-error font-mono text-sm mt-2" role="alert">
+                <div class="alert alert-error text-sm mt-2" role="alert">
                   <span>
                     You are signed in as {p.signedInAs}. This invitation was
                     sent to {p.invitedEmail} and only that account can accept
@@ -121,7 +121,7 @@ export function InvitePage(p: InvitePageProps) {
                   </span>
                 </div>
                 <form method="post" action="/logout" class="mt-4">
-                  <button type="submit" class="btn btn-ghost font-mono">
+                  <button type="submit" class="btn btn-ghost">
                     Sign out
                   </button>
                 </form>
@@ -138,14 +138,14 @@ export function InviteInvalidPage(props: { user: { email?: string | null } | nul
   return (
     <Layout title="Team invitation" user={props.user}>
       <div class="max-w-xl mx-auto mt-10">
-        <h1 class="font-mono text-2xl font-semibold mb-1">
+        <h1 class="text-2xl font-semibold mb-1">
           This invitation is no longer valid
         </h1>
-        <p class="text-sm text-base-content/60 mb-8">
+        <p class="text-sm text-muted mb-8">
           It may have expired, been withdrawn, or already been accepted. Ask the
           team owner to send a new one.
         </p>
-        <a href="/dashboard" class="btn btn-ghost font-mono">
+        <a href="/dashboard" class="btn btn-ghost">
           Back to dashboard
         </a>
       </div>

@@ -71,6 +71,8 @@ export const defaultConfig: RelayConfig = {
   maxConnections: 100,
   rateLimitConnPerIp: 10,
   rateLimitMsgPerSec: 100,
+  rateLimitMsgBurst: 100,
+  pushRateLimitPerSec: 100,
   jsonRateLimitPerSec: 10,
   jsonRateLimitBurst: 30,
   maxStreamsPerConnection: 1024,

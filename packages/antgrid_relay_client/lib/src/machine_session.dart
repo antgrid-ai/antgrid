@@ -363,6 +363,17 @@ class MachineSession {
 
   void removeStream(String streamId) => _streams.remove(streamId);
 
+  /// The relay dropped a routed frame on this socket (`MESSAGE_RATE_LIMITED`).
+  ///
+  /// Fanned out to every attached stream because the error names no frame and
+  /// no stream — the drop happens before the relay ever sees the sealed
+  /// envelope, so it cannot know which stream the frame belonged to.
+  void noteFramesDropped() {
+    for (final s in _streams.values) {
+      s.noteFramesDropped();
+    }
+  }
+
   // --- socket / presence transitions ---------------------------------------
 
   /// Session keys are per-CONNECTION, so only the socket dying invalidates
@@ -824,6 +835,10 @@ class StreamTransport extends BufferedAgentTransport {
   /// Called by [MachineSession] only, which owns the `_streams` re-keying.
   void _retarget(String newStreamId) => streamId = newStreamId;
 
+  void noteFramesDropped() {
+    if (!droppedFrameController.isClosed) droppedFrameController.add(null);
+  }
+
   @override
   bool get isLocal => false;
 
@@ -926,5 +941,6 @@ class StreamTransport extends BufferedAgentTransport {
     session.removeStream(streamId);
     await outbound.close();
     await stateController.close();
+    await droppedFrameController.close();
   }
 }

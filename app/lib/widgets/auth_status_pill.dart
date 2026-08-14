@@ -6,7 +6,7 @@ import '../services/auth_service.dart';
 
 /// Small status chip rendered via `AccountFooter` in the drawer, showing the
 /// app user's subscription tier:
-///   - promotional grant (unpurchased) → amber "FREE", regardless of tier
+///   - promotional grant (unpurchased) → amber "BETA", regardless of tier
 ///   - `tier == 'pro'` (real subscription) → accent "PRO"
 ///   - else (trial / unknown) → amber tier label, defaulting to "TRIAL"
 class AuthStatusPill extends StatelessWidget {
@@ -20,8 +20,12 @@ class AuthStatusPill extends StatelessWidget {
     // temporary, unpurchased grant — grep "TEMP-PROMO" repo-wide for every
     // related spot. Delete this branch (and CurrentUser.promotional) once
     // payment integration ships.
+    //
+    // "BETA", not "FREE": the grant carries Pro entitlement, so the Free
+    // allowances this chip used to name are not the ones in force. Amber (not
+    // the accent PRO wears) keeps an unpurchased grant visually distinct.
     if (user!.promotional) {
-      return AbChip.system(label: 'FREE', color: Colors.amber.shade400);
+      return AbChip.system(label: 'BETA', color: Colors.amber.shade400);
     }
     final label = user!.tier?.toUpperCase() ?? 'TRIAL';
     final color = user!.tier == 'pro'

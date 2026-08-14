@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
+import { rejection } from "../helpers/rejection.js";
 import { createTestUser } from "../helpers/fixtures.js";
 import { ensureProductAccount } from "../../src/models/product-account.js";
 import {
@@ -51,6 +52,12 @@ async function invite(
     secret: SECRET,
   });
   return { id: row.id, token };
+}
+
+/** Prisma's error code for the invite this call was refused, e.g. "P2002". */
+async function inviteErrorCode(t: Team, email: string): Promise<string | undefined> {
+  const err = await rejection(invite(t, email));
+  return (err as { code?: string }).code;
 }
 
 async function backdate(id: string): Promise<void> {
@@ -206,7 +213,9 @@ describe("account_invites constraints", () => {
 
     // CITEXT plus the partial unique: re-inviting the same human under a
     // different capitalisation must not buy a second seat's worth of pending.
-    await expect(invite(t, "ada@TEST.local")).rejects.toThrow();
+    // P2002 rather than any error, so a column rename or a dropped NOT NULL
+    // cannot pass this by failing for an unrelated reason.
+    expect(await inviteErrorCode(t, "ada@TEST.local")).toBe("P2002");
   });
 
   test("the rejection is the partial index, not a plain unique", async () => {
@@ -216,18 +225,15 @@ describe("account_invites constraints", () => {
     // Raw insert so the assertion can name the index — Prisma normalizes a 23505
     // into a field list and buries the constraint name in adapter internals, and
     // the name is the only evidence the raw-SQL DDL shipped.
-    const err = await pg.db
-      .$executeRawUnsafe(
+    const err = await rejection(
+      pg.db.$executeRawUnsafe(
         `INSERT INTO account_invites (account_id, email, role, status, token_hash, created_by, expires_at)
          VALUES ($1::uuid, $2, 'member', 'pending', '\\x00'::bytea, $3, now() + interval '1 day')`,
         t.accountId,
         "ADA@test.local",
         t.ownerId
       )
-      .then(
-        () => null,
-        (e: unknown) => e
-      );
+    );
     expect(String(err)).toContain("account_invites_one_pending_per_email_idx");
   });
 
@@ -250,7 +256,7 @@ describe("account_invites constraints", () => {
     // A lapsed invite is invisible to every read and still owns the address:
     // the partial predicate cannot reference now(), so without the sweep the
     // re-invite an owner is entitled to send fails on 23505.
-    await expect(invite(t, "ada@test.local")).rejects.toThrow();
+    expect(await inviteErrorCode(t, "ada@test.local")).toBe("P2002");
 
     expect(await expireStalePendingInvites(pg.db, t.accountId)).toBe(1);
     expect(

@@ -74,7 +74,7 @@ class CurrentUser {
   final String? tier;
 
   /// True when [tier] is a temporary, unpurchased promo grant rather than a
-  /// real subscription — surfaced in the UI as free, not pro.
+  /// real subscription — surfaced in the UI as the beta grant, not as [tier].
   final bool promotional;
 }
 

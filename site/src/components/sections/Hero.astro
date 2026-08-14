@@ -8,52 +8,93 @@ import { BETA_FREE, OFFER_ACTIVE, YEARLY_OFFER_USD, YEARLY_LIST_USD } from "../.
 
 const offerPct = Math.round((1 - YEARLY_OFFER_USD / YEARLY_LIST_USD) * 100);
 ---
-<section class="relative overflow-hidden">
-  <div class="pointer-events-none absolute inset-0 bg-dotgrid" aria-hidden="true"></div>
-  <div class="pointer-events-none absolute -top-40 right-[-10%] h-[560px] w-[720px] glow-indigo" aria-hidden="true"></div>
+{/* The proof loop is the argument, so it gets the stage rather than a column:
+    full shell width under the headline, which also puts it just below the fold
+    on a phone instead of a screen and a half down. */}
+<section class="relative overflow-hidden border-b border-edge-inner">
+  <div class="pointer-events-none absolute inset-0 bg-gridfield" aria-hidden="true"></div>
+  {/* The live machines. Delays are shuffled rather than sequential — stepping
+      through them in reading order makes the rack sweep like a wave, which reads
+      as choreography; scattered, it reads as unrelated jobs starting. Positions
+      stop around 1568px because past the shell the mask has faded the field out
+      anyway, and the life belongs where the content is. */}
+  <svg class="live-cells pointer-events-none absolute inset-0 h-full w-full" aria-hidden="true">
+    <rect x="96" y="128" width="64" height="32" style="animation-delay:0s" />
+    <rect x="352" y="96" width="32" height="32" style="animation-delay:12.8s" />
+    <rect x="640" y="160" width="32" height="32" style="animation-delay:4.8s" />
+    <rect x="960" y="128" width="64" height="32" style="animation-delay:19.2s" />
+    <rect x="1280" y="96" width="32" height="32" style="animation-delay:8s" />
+    <rect x="1536" y="192" width="32" height="32" style="animation-delay:22.4s" />
+    <rect x="160" y="320" width="32" height="32" style="animation-delay:3.2s" />
+    <rect x="512" y="352" width="64" height="32" style="animation-delay:16s" />
+    <rect x="832" y="288" width="32" height="32" style="animation-delay:9.6s" />
+    <rect x="1152" y="384" width="64" height="32" style="animation-delay:1.6s" />
+    <rect x="1440" y="320" width="32" height="32" style="animation-delay:14.4s" />
+    <rect x="288" y="480" width="64" height="32" style="animation-delay:6.4s" />
+    <rect x="704" y="512" width="32" height="32" style="animation-delay:20.8s" />
+    <rect x="1024" y="448" width="32" height="32" style="animation-delay:11.2s" />
+    <rect x="1376" y="512" width="64" height="32" style="animation-delay:17.6s" />
+  </svg>
+  <div class="pointer-events-none absolute -top-56 left-1/2 h-[620px] w-[980px] -translate-x-1/2 glow-indigo" aria-hidden="true"></div>
 
-  <div class="relative mx-auto max-w-shell px-6 pb-20 pt-16">
-    <div class="grid items-center gap-12 md:grid-cols-2">
+  <div class="relative mx-auto max-w-shell px-6 pt-12 md:pt-18">
+    <div class="mb-7 flex flex-wrap items-center gap-x-5 gap-y-3">
+      <Eyebrow>Claude Code · Codex · Cursor</Eyebrow>
+      {BETA_FREE ? (
+        <a
+          href={links.pricing}
+          class="inline-flex items-center gap-2 rounded-full border border-indigodeep2 bg-indigodeep/40 px-3 py-1 font-mono text-marker text-indigo2 transition-colors hover:border-indigobtn hover:text-indigo3"
+        >
+          {/* No lozenge on this branch, unlike the offer below: the nav badge
+              already marks the beta a few rows up, and two markers in one
+              viewport read as an announcement repeated rather than a status.
+              This pill carries the value statement instead. */}
+          Free during beta — all Pro features included
+          <Icon name="tabler:arrow-right" width="12" height="12" />
+        </a>
+      ) : OFFER_ACTIVE && (
+        <a
+          href={links.pricing}
+          class="inline-flex items-center gap-2 rounded-full border border-indigodeep2 bg-indigodeep/40 px-3 py-1 font-mono text-marker text-indigo2 transition-colors hover:border-indigobtn hover:text-indigo3"
+        >
+          <span class="rounded-full bg-indigobtn px-1.5 py-px text-pip font-medium text-white">{offerPct}% off</span>
+          Launch offer — Pro ${YEARLY_OFFER_USD} per seat / year
+          <Icon name="tabler:arrow-right" width="12" height="12" />
+        </a>
+      )}
+    </div>
+
+    <h1 class="mb-8">
+      <span class="mb-3 block max-w-2xl text-kicker text-muted">Your agent finishes a phase at 2am and waits.</span>
+      <span class="block font-display text-display font-semibold text-ink">antgrid checks the work.<br />Then starts the next one.</span>
+    </h1>
+
+    {/* Argument left, action right. The two columns are sized to sit adjacent
+        rather than pinned to the shell's edges — pushed apart, the buttons read
+        as stranded rather than as a deliberate second column. */}
+    <div class="grid gap-x-12 gap-y-7 md:grid-cols-[minmax(0,35rem)_minmax(0,21rem)]">
+      {/* Opens on "your agents", not on the three product names — the eyebrow
+          directly above already names them, and repeating them cost a line of a
+          paragraph that runs long on a phone. */}
+      <p class="text-lede text-muted">
+        Your agents run on your own machines — your repos, your branches, your existing subscriptions. Hand antgrid the sequence in plain text: it reads every result, refuses a "done" that arrives with no test output, exit code or diff, and moves to the next phase.
+      </p>
       <div>
-        <Eyebrow class="mb-4">Claude Code · Codex · Cursor</Eyebrow>
-        {BETA_FREE ? (
-          <a
-            href={links.pricing}
-            class="mb-5 inline-flex items-center gap-2 rounded-full border border-indigodeep2 bg-indigodeep/40 px-3 py-1 font-mono text-[11px] text-indigo2 transition-colors hover:border-indigobtn hover:text-indigo3"
-          >
-            <span class="rounded-full bg-indigobtn px-1.5 py-px text-[9.5px] font-medium text-white">beta</span>
-            Free during beta — all Pro features included
-            <Icon name="tabler:arrow-right" width="12" height="12" />
-          </a>
-        ) : OFFER_ACTIVE && (
-          <a
-            href={links.pricing}
-            class="mb-5 inline-flex items-center gap-2 rounded-full border border-indigodeep2 bg-indigodeep/40 px-3 py-1 font-mono text-[11px] text-indigo2 transition-colors hover:border-indigobtn hover:text-indigo3"
-          >
-            <span class="rounded-full bg-indigobtn px-1.5 py-px text-[9.5px] font-medium text-white">{offerPct}% off</span>
-            Launch offer — Pro ${YEARLY_OFFER_USD} per seat / year
-            <Icon name="tabler:arrow-right" width="12" height="12" />
-          </a>
-        )}
-        <h1 class="mb-5 font-medium leading-[1.1] tracking-tight text-ink">
-          <span class="mb-2 block text-xl leading-snug text-muted md:text-2xl">Your agent finishes a phase at 2am and waits.</span>
-          <span class="block text-5xl md:text-6xl">antgrid checks the work.<br />Then starts the next one.</span>
-        </h1>
-        <p class="mb-8 max-w-xl text-base leading-relaxed text-muted">
-          Claude Code, Codex and Cursor on your own machines — your repos, your branches, your existing subscriptions. Hand antgrid the sequence in plain text: it reads each result, refuses a "done" that arrives with no test output, exit code or diff, and moves to the next phase — across every machine you own.
-        </p>
         <div class="flex flex-wrap items-center gap-3">
           <Button href={links.startFree} variant="primary">Start free<Icon name="tabler:arrow-right" width="16" height="16" /></Button>
           <Button href={links.getStarted} variant="outline">Setup guide</Button>
         </div>
-        <p class="mt-4 text-[12.5px] text-muted2">
+        <p class="mt-4.5 text-meta leading-relaxed text-muted2">
           No VPN or port forwarding · End-to-end encrypted · Desktop out now, iOS &amp; Android coming to the App Store &amp; Play.
         </p>
       </div>
-      {/* min-w-0 for the same reason as the Worktrees card — see the comment there. */}
-      <div class="pc-animate min-w-0">
-        <ProofCard />
-      </div>
+    </div>
+  </div>
+
+  <div class="relative mx-auto max-w-shell px-6 pb-16 pt-10 md:pt-12">
+    {/* min-w-0 for the same reason as the Worktrees card — see the comment there. */}
+    <div class="pc-animate min-w-0">
+      <ProofCard />
     </div>
   </div>
 </section>

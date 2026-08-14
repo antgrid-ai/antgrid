@@ -31,7 +31,7 @@ export function PollingIndicator({
   return (
     <div
       id="poll"
-      class="mt-6 text-xs text-base-content/50 font-mono"
+      class="mt-6 text-xs text-muted2"
       hx-get={`/ui/login/poll/${pendingId}`}
       hx-trigger={`${firstPaint ? "load delay:2s, " : ""}every 3s, visibilitychange[document.visibilityState=='visible'] from:document`}
       hx-swap="outerHTML"
@@ -46,19 +46,19 @@ export function PendingPage({ email, pendingId }: PendingPageProps) {
     <Layout title="Check your email">
       {/* Marks the page as waiting on this address — see auth-signal.ts. */}
       <div
-        class="max-w-md mx-auto mt-16 card bg-base-100 border border-base-300"
+        class="max-w-md mx-auto mt-16 card bg-panel border border-edge"
         data-ab-wake={email}
       >
         <div class="card-body items-center text-center">
-          <h1 class="card-title font-mono">Check your email</h1>
-          <p class="text-sm text-base-content/70">
+          <h1 class="card-title">Check your email</h1>
+          <p class="text-sm text-muted">
             We sent a sign-in link to <span class="font-mono">{email}</span>.
           </p>
           {/* Same-device is the common case and now the short one: the link
               signs that browser straight in. The approval step is what a link
               opened somewhere else gets, and the copy leads with the case the
               reader is actually in. */}
-          <p class="text-xs text-base-content/60 mt-2">
+          <p class="text-xs text-muted mt-2">
             Open it in this browser and you're signed in. On another device,
             tap <strong>Approve</strong> and this page follows along. The link
             expires in {EXPIRY_MINUTES} minutes.
@@ -86,12 +86,12 @@ export function PendingPage({ email, pendingId }: PendingPageProps) {
             data-ab-cooldown-arm
           >
             <input type="hidden" name="email" value={email} />
-            <button type="submit" class="btn btn-outline btn-sm font-mono">
+            <button type="submit" class="btn btn-quiet btn-sm">
               Resend the link
             </button>
           </form>
 
-          <p class="text-xs text-base-content/60 mt-6">
+          <p class="text-xs text-muted mt-6">
             Wrong address?{" "}
             <a class="link" href="/login">
               Start over

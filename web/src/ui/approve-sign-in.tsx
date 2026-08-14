@@ -23,23 +23,23 @@ function shortUa(ua: string | null): string {
 export function ApproveSignInPage(p: ApproveSignInProps) {
   return (
     <Layout title="Approve sign-in">
-      <div class="max-w-md mx-auto mt-16 card bg-base-100 border border-base-300">
+      <div class="max-w-md mx-auto mt-16 card bg-panel border border-edge">
         <div class="card-body">
-          <h1 class="card-title font-mono">Approve sign-in</h1>
-          <p class="text-sm text-base-content/70">
+          <h1 class="card-title">Approve sign-in</h1>
+          <p class="text-sm text-muted">
             Someone is trying to sign in to Antgrid as <span class="font-mono">{p.email}</span>.
           </p>
           <dl class="mt-4 text-xs font-mono space-y-1">
             <div class="flex justify-between gap-4">
-              <dt class="text-base-content/50">Device</dt>
+              <dt class="text-muted2">Device</dt>
               <dd class="text-right">{shortUa(p.requesterUa)}</dd>
             </div>
             <div class="flex justify-between gap-4">
-              <dt class="text-base-content/50">IP</dt>
+              <dt class="text-muted2">IP</dt>
               <dd class="text-right">{p.requesterIp ?? "hidden"}</dd>
             </div>
             <div class="flex justify-between gap-4">
-              <dt class="text-base-content/50">Requested</dt>
+              <dt class="text-muted2">Requested</dt>
               <dd class="text-right">{p.requestedAt.toISOString().slice(0, 16).replace("T", " ")}Z</dd>
             </div>
           </dl>
@@ -58,7 +58,7 @@ export function ApproveSignInPage(p: ApproveSignInProps) {
               Approve sign-in
             </button>
           </form>
-          <p class="text-xs text-base-content/50 mt-3">
+          <p class="text-xs text-muted2 mt-3">
             If this wasn't you, close this tab. The sign-in won't proceed
             without approval and the link expires in 10 minutes.
           </p>

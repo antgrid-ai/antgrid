@@ -1,23 +1,43 @@
 ---
 import "../styles/global.css";
+import { Font } from "astro:assets";
 import ProofCard from "../components/sections/ProofCard.astro";
 ---
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="robots" content="noindex" />
+    {/* This page does not use Base, and the @font-face rules now come from the
+        Fonts API rather than a CSS @import — so without these the card would
+        screenshot in the system fallback. preload because the shot is taken as
+        soon as the page settles and a swapped-in face would land too late. */}
+    <Font cssVariable="--font-archivo" preload />
+    <Font cssVariable="--font-inter" preload />
+    <Font cssVariable="--font-jetbrains" preload />
   </head>
   <body class="bg-page">
-    <div id="og" style="width:1200px;height:630px" class="flex flex-col justify-center gap-6 bg-page px-20">
+    {/* justify-start with a measured top pad, not justify-center: the content is
+        close enough to 630px that centering clips BOTH edges, and the one row
+        that must never be cut is the amber wake at the card's bottom. */}
+    <div id="og" style="width:1200px;height:630px" class="flex flex-col items-center justify-start gap-4 bg-page pt-7">
+      {/* Type and card share one 39rem column so the composition stays centred —
+          left-anchoring the way the hero does leaves a third of this canvas dead,
+          which reads as overflow rather than intent at thumbnail size. */}
       {/* A compression of the hero headline, not a copy: the card is a fixed
           1200x630 and the hero's second line would push the ProofCard past the
           bottom edge. Keep the claim identical and the line count at two. */}
-      <div>
-        <p class="mb-3 font-mono text-lg uppercase tracking-[0.18em] text-indigo">antgrid</p>
-        <p class="mb-2 max-w-3xl text-3xl font-medium leading-tight text-muted">Your agent finishes a phase at 2am and waits.</p>
-        <p class="max-w-3xl text-5xl font-medium leading-tight text-ink">antgrid starts the next one.</p>
+      <div class="w-[39rem]">
+        {/* Sizes stay explicit here rather than using the fluid display scale —
+            this canvas is a fixed 1200x630, so there is no viewport for it to
+            respond to. */}
+        <p class="mb-2.5 font-mono text-base uppercase tracking-[0.18em] text-indigo">antgrid</p>
+        <p class="mb-1.5 text-2xl font-medium leading-tight text-muted">Your agent finishes a phase at 2am and waits.</p>
+        <p class="font-display text-[3rem] font-semibold leading-[1.05] tracking-[-0.032em] text-ink">antgrid starts the next one.</p>
       </div>
-      <div class="max-w-xl"><ProofCard /></div>
+      {/* 39rem, not max-w-xl: wide enough that the snapshot row stops wrapping to
+          two lines (which pushed the amber wake past the bottom edge) and still
+          under the card's 42rem two-column container query, which would split it. */}
+      <div class="w-[39rem]"><ProofCard /></div>
     </div>
   </body>
 </html>

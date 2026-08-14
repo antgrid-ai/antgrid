@@ -352,8 +352,10 @@ export async function startRelay(opts: {
    *  JSON-flood test lowers it to force MESSAGE_RATE_LIMITED). */
   jsonRateLimitPerSec?: number;
   jsonRateLimitBurst?: number;
-  /** Per-pair binary/message frame rate (default generous). */
+  /** Per-(pair, channel) binary/message frame rate (default generous). */
   rateLimitMsgPerSec?: number;
+  /** Burst allowance over [rateLimitMsgPerSec] (default generous). */
+  rateLimitMsgBurst?: number;
 }): Promise<RelayHandle> {
   // Static specifier, not `import(resolve(ROOT, ...))`: a computed specifier
   // types `startServer` as `any`, which silently stops type-checking BOTH the
@@ -365,6 +367,8 @@ export async function startRelay(opts: {
     maxConnections: 100,
     rateLimitConnPerIp: 10,
     rateLimitMsgPerSec: opts.rateLimitMsgPerSec ?? 100,
+    rateLimitMsgBurst: opts.rateLimitMsgBurst ?? 200,
+    pushRateLimitPerSec: 100,
     jsonRateLimitPerSec: opts.jsonRateLimitPerSec ?? 100,
     jsonRateLimitBurst: opts.jsonRateLimitBurst ?? 200,
     maxStreamsPerConnection: 1024,

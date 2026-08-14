@@ -28,6 +28,14 @@ const _proYearlyFeatures = [
   'Priority support',
 ];
 
+/// TEMP-PROMO: why the plan can't be bought, said in the CTA itself. "Coming
+/// soon" reads as half-built to someone who arrived from a site that told them
+/// the beta is free. Same wording as web's `UNAVAILABLE_CTA_LABEL` and the
+/// marketing site's `PlanCard.astro`. Carries no beta flag of its own: the
+/// whole static block this belongs to is deleted when checkout opens — see the
+/// TEMP-PROMO marker at the foot of this file.
+const _unavailableCtaLabel = 'Available after beta';
+
 /// The machine count sits mid-sentence, so it has to agree with its noun —
 /// Free is 1, and "1 machines" is the kind of thing a buyer notices.
 String _machines(int n) => '$n machine${n == 1 ? '' : 's'}';
@@ -321,7 +329,7 @@ class _FreeTrialBanner extends StatelessWidget {
               ),
             ),
             const SizedBox(height: AbTokens.space16),
-            const _PricingCta(label: 'Coming soon'),
+            const _PricingCta(label: _unavailableCtaLabel),
           ],
         ),
       ),
@@ -458,7 +466,7 @@ class _PlanCard extends StatelessWidget {
               maxSeats: maxSeats,
             ),
             const SizedBox(height: AbTokens.space24),
-            const _PricingCta(label: 'Coming soon'),
+            const _PricingCta(label: _unavailableCtaLabel),
           ],
         ),
       ),

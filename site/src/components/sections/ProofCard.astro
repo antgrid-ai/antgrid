@@ -1,5 +1,6 @@
 ---
 import { Icon } from "astro-icon/components";
+import Readout from "../ui/Readout.astro";
 
 // Illustrative, not a mirror of any app widget — it shows the mechanism rather
 // than the shipped layout. One typed sentence becomes tracked backlog items; an
@@ -19,6 +20,12 @@ import { Icon } from "astro-icon/components";
 //   final frame of every cycle. Every string the script writes is read back
 //   from this markup, so copy edits cannot drift the two modes apart —
 //   structural edits (adding a row) must also update the schedule below.
+//
+// The two-column split is a CONTAINER query, not a viewport one: this card is
+// full-shell width in the hero but boxed to max-w-xl in the 1200px-wide OG
+// shot, so a `md:` variant would split the OG card into two cramped columns.
+// Wrapping rows in columns is safe for the script — it reads `.pc-row` in
+// document order, which nesting doesn't change.
 const backlog = [
   { icon: "tabler:check", tone: "text-ok", item: "auth suite", evidence: "142 passed · exit 0", active: "running…" },
   { icon: "tabler:minus", tone: "text-faint", item: "fix lint", evidence: "skipped — already clean" },
@@ -26,60 +33,69 @@ const backlog = [
 ];
 const instruction = "get tests green, fix lint if broken, then open a PR";
 ---
-<div class="card-lit rounded-lg border border-edge bg-panel p-5" data-proofcard>
-  <div class="mb-3.5 flex items-center justify-between">
-    <span class="font-mono text-[11px] text-muted2">macbook-pro · api</span>
-    <span class="flex items-center gap-1.5 rounded border border-edge px-2 py-0.5 font-mono text-[10px] text-indigo">
-      <span class="size-1.5 rounded-full bg-indigo animate-pulse-dot"></span>watching
-    </span>
-  </div>
+<Readout source="macbook-pro · api" state="watching" class="@container">
+  <div class="grid gap-x-7 gap-y-5 p-4 @2xl:grid-cols-[minmax(0,1fr)_minmax(0,0.92fr)] @2xl:p-5" data-proofcard>
+    <div class="min-w-0">
+      <div class="mb-3 text-note font-medium text-ink">Migrate auth to session tokens</div>
 
-  <div class="mb-2.5 text-sm font-medium text-ink">Migrate auth to session tokens</div>
-
-  <div class="pc-row mb-3.5 flex items-start gap-2 rounded border border-edge-inner bg-chrome px-2.5 py-1.5 font-mono text-[11px] leading-relaxed" style="--pc-delay: 0.1s">
-    <Icon name="tabler:message-2" class="mt-0.5 shrink-0 text-indigo" width="13" height="13" />
-    <span class="shrink-0 text-muted2">you · 02:58</span>
-    <span class="relative">
-      {/* Invisible ghost holds the chip's final size so typing never reflows the card. */}
-      <span class="invisible" aria-hidden="true">{instruction}</span>
-      <span class="absolute inset-0 text-ink2" data-instr>{instruction}</span>
-    </span>
-  </div>
-
-  <div class="mb-2.5 flex items-baseline justify-between border-t border-edge-inner pt-3">
-    <span class="text-[11px] text-muted2" data-count>2 of 3 resolved — on evidence, never say-so</span>
-    <span class="font-mono text-[10px] uppercase tracking-[0.14em] text-faint">evidence</span>
-  </div>
-
-  <div class="mb-3.5 flex flex-col gap-1.5 font-mono text-[11.5px]">
-    {backlog.map((r, i) => (
-      <div class="pc-row flex items-center gap-2" style={`--pc-delay: ${0.3 + i * 0.15}s`} data-item data-active={r.active}>
-        <span class="flex w-3.5 shrink-0 items-center justify-center">
-          <Icon name={r.icon} class={`shrink-0 ${r.tone}`} width="13" height="13" data-ic="final" />
-          <Icon name="tabler:circle-dashed" class="hidden shrink-0 text-faint" width="13" height="13" data-ic="queued" />
-          <span class="hidden size-2 rounded-full bg-indigo animate-pulse-dot" data-ic="active"></span>
+      <div class="pc-row mb-4 flex items-start gap-2 rounded border border-edge-inner bg-chrome px-2.5 py-1.5 font-mono text-marker" style="--pc-delay: 0.1s">
+        <Icon name="tabler:message-2" class="mt-0.5 shrink-0 text-indigo" width="13" height="13" />
+        <span class="shrink-0 text-muted2">you · 02:58</span>
+        <span class="relative">
+          {/* Invisible ghost holds the chip's final size so typing never reflows the card. */}
+          <span class="invisible" aria-hidden="true">{instruction}</span>
+          <span class="absolute inset-0 text-ink2" data-instr>{instruction}</span>
         </span>
-        <span class="shrink-0 text-ink2">{r.item}</span>
-        <span class="flex-1 truncate text-right text-muted2" data-ev>{r.evidence}</span>
       </div>
-    ))}
-  </div>
 
-  <div class="pc-row mb-2 flex gap-2.5 rounded border-l-2 border-edge bg-group px-3 py-2 font-mono text-[11.5px] text-muted" style="--pc-delay: 0.85s">
-    <Icon name="tabler:arrow-back-up" class="shrink-0 text-muted2" width="15" height="15" />
-    <span><span class="text-muted2">03:04</span> agent said <span class="text-ink2">done</span> — no test output, sent back</span>
-  </div>
+      <div class="mb-3 flex items-baseline justify-between gap-3 border-t border-edge-inner pt-3">
+        <span class="text-marker text-muted2" data-count>2 of 3 resolved — on evidence, never say-so</span>
+        {/* Dropped on a phone: the count wraps into it, and every row below
+            already carries its evidence. */}
+        <span class="hidden shrink-0 font-mono text-marker uppercase tracking-[0.14em] text-faint @sm:inline">evidence</span>
+      </div>
 
-  <div class="pc-row mb-2 flex gap-2.5 rounded border-l-2 border-edge bg-group px-3 py-2 font-mono text-[11.5px] text-muted" style="--pc-delay: 1.05s">
-    <Icon name="tabler:camera" class="shrink-0 text-muted2" width="15" height="15" />
-    <span><span class="text-muted2">03:12</span> flagged <span class="text-ink2">git reset --hard</span> — snapshot taken, undo is one tap</span>
-  </div>
+      <div class="flex flex-col gap-2 font-mono text-row">
+        {backlog.map((r, i) => (
+          <div class="pc-row flex items-center gap-2" style={`--pc-delay: ${0.3 + i * 0.15}s`} data-item data-active={r.active}>
+            <span class="flex w-3.5 shrink-0 items-center justify-center">
+              <Icon name={r.icon} class={`shrink-0 ${r.tone}`} width="13" height="13" data-ic="final" />
+              <Icon name="tabler:circle-dashed" class="hidden shrink-0 text-faint" width="13" height="13" data-ic="queued" />
+              <span class="hidden size-2 rounded-full bg-indigo animate-pulse-dot" data-ic="active"></span>
+            </span>
+            <span class="shrink-0 text-ink2">{r.item}</span>
+            <span class="flex-1 truncate text-right text-muted2" data-ev>{r.evidence}</span>
+          </div>
+        ))}
+      </div>
+    </div>
 
-  <div class="pc-row flex gap-2.5 rounded border-l-2 border-amber bg-amberbg px-3 py-2 font-mono text-[11.5px] text-amber2" style="--pc-delay: 1.25s">
-    <Icon name="tabler:alert-triangle" class="shrink-0 text-amber" width="15" height="15" />
-    <span><span class="text-amber/70">03:40</span> woke you — the migration drops a column, needs your call</span>
+    <div class="flex min-w-0 flex-col gap-2 self-start @2xl:border-l @2xl:border-edge-inner @2xl:pl-7">
+      {/* Deliberately NOT a .pc-row: the column has to stay labelled through the
+          part of the loop where it holds nothing, or it reads as a dead half of
+          the card rather than a log waiting for entries. */}
+      <div class="mb-1 flex items-baseline justify-between gap-3 border-b border-edge-inner pb-3">
+        <span class="text-marker text-muted2">While you slept</span>
+        <span class="shrink-0 font-mono text-marker uppercase tracking-[0.14em] text-faint">02:58 — 03:40</span>
+      </div>
+
+      <div class="pc-row flex gap-2.5 rounded border-l-2 border-edge bg-group px-3 py-2 font-mono text-row text-muted" style="--pc-delay: 0.85s">
+        <Icon name="tabler:arrow-back-up" class="mt-px shrink-0 text-muted2" width="15" height="15" />
+        <span><span class="text-muted2">03:04</span> agent said <span class="text-ink2">done</span> — no test output, sent back</span>
+      </div>
+
+      <div class="pc-row flex gap-2.5 rounded border-l-2 border-edge bg-group px-3 py-2 font-mono text-row text-muted" style="--pc-delay: 1.05s">
+        <Icon name="tabler:camera" class="mt-px shrink-0 text-muted2" width="15" height="15" />
+        <span><span class="text-muted2">03:12</span> flagged <span class="text-ink2">git reset --hard</span> — snapshot taken, undo is one tap</span>
+      </div>
+
+      <div class="pc-row flex gap-2.5 rounded border-l-2 border-amber bg-amberbg px-3 py-2 font-mono text-row text-amber2" style="--pc-delay: 1.25s">
+        <Icon name="tabler:alert-triangle" class="mt-px shrink-0 text-amber" width="15" height="15" />
+        <span><span class="text-amber/70">03:40</span> woke you — the migration drops a column, needs your call</span>
+      </div>
+    </div>
   </div>
-</div>
+</Readout>
 
 <script>
   // Story loop. Runs only when the card sits inside .pc-animate (the hero) and

@@ -9,6 +9,11 @@ import { resolve } from "node:path";
 export default defineConfig({
   plugins: [tailwindcss()],
   publicDir: false,
+  // Only affects URLs Vite writes INTO the bundles — the `url()` a stylesheet
+  // uses to reach a font it pulled in. Those resolve against the site root, not
+  // the stylesheet, so without this a font emitted to `public/build/` is asked
+  // for at `/`. `asset()` builds its own hrefs off the manifest and is unaffected.
+  base: "/build/",
   build: {
     outDir: "public/build",
     emptyOutDir: true,

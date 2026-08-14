@@ -1,6 +1,7 @@
 ---
 import { Icon } from "astro-icon/components";
 import Eyebrow from "../ui/Eyebrow.astro";
+import Readout from "../ui/Readout.astro";
 
 type Row = { name: string; agent: string; task: string; time: string; state: "working" | "needs" | "done" };
 type Machine = { host: string; tag?: string; rows: Row[] };
@@ -25,40 +26,36 @@ const needsCount = allRows.filter((r) => r.state === "needs").length;
 const workingCount = allRows.filter((r) => r.state === "working").length;
 const doneCount = allRows.filter((r) => r.state === "done").length;
 ---
-<section id="fleet" class="reveal mx-auto max-w-shell px-6 py-20">
-  <Eyebrow class="mb-4">Fleet view</Eyebrow>
-  <h2 class="mb-3 text-3xl font-medium tracking-tight text-ink">Every agent. Every machine. One screen.</h2>
-  <p class="mb-8 max-w-2xl text-base leading-relaxed text-muted">
-    Your laptop, your workstation, a cloud box — every agent you're running, grouped by the machine it's on, with the ones that need you floated to the top.
-  </p>
+{/* The band the page is widest at — this is the "one screen" claim, so the
+    readout gets the full shell and an inset floor to sit on. */}
+<section id="fleet" class="reveal border-y border-edge-inner bg-well">
+  <div class="mx-auto max-w-shell px-6 py-24">
+    <Eyebrow class="mb-5">Fleet view</Eyebrow>
+    <h2 class="mb-4 font-display text-title font-semibold text-ink">Every agent. Every machine. One screen.</h2>
+    <p class="mb-10 max-w-2xl text-lede text-muted">
+      Your laptop, your workstation, a cloud box — every agent you're running, grouped by the machine it's on, with the ones that need you floated to the top.
+    </p>
 
-  <div class="card-lit overflow-hidden rounded-lg border border-edge bg-panel">
-    <div class="flex items-center justify-between border-b border-edge-inner bg-chrome px-4 py-2.5">
-      <span class="font-mono text-xs text-muted">Agents · {totalCount} total</span>
-      <div class="flex gap-2 font-mono text-[10.5px]">
-        <span class="rounded border border-amberbg2 bg-amberbg px-2 py-0.5 text-amber2">{needsCount} needs you</span>
-        <span class="rounded border border-edge px-2 py-0.5 text-indigo">{workingCount} working</span>
-        <span class="rounded border border-edge px-2 py-0.5 text-muted2">{doneCount} done</span>
-      </div>
-    </div>
-
-    {machines.map((m) => (
-      <div class="border-b border-edge-inner last:border-b-0">
-        <div class="bg-group px-4 py-1.5 font-mono text-[11px] text-muted2">
-          {m.host}{m.tag && <span class="text-faint"> · {m.tag}</span>}
-        </div>
-        {m.rows.map((r) => (
-          <div class={`flex items-center gap-3 px-4 py-2.5 ${r.state === "needs" ? "border-l-2 border-amber bg-amberbg/40" : ""}`}>
-            {r.state === "done"
-              ? <Icon name="tabler:circle-check" class="shrink-0 text-ok" width="14" height="14" />
-              : <span class={`size-2 shrink-0 rounded-full ${r.state === "needs" ? "bg-amber" : "bg-indigo animate-pulse-dot"}`} />}
-            <span class="font-mono text-[13px] text-ink">{r.name}</span>
-            <span class="rounded border border-edge px-1.5 py-0.5 text-[10.5px] text-muted2">{r.agent}</span>
-            <span class={`flex-1 truncate text-[12.5px] ${r.state === "needs" ? "text-amber2" : "text-muted"}`}>{r.task}</span>
-            <span class="shrink-0 font-mono text-[11px] text-faint">{r.time}</span>
+    <Readout source={`${totalCount} agents · ${machines.length} machines`} state="attention" label={`${needsCount} needs you`}>
+      {machines.map((m) => (
+        <div class="border-b border-edge-inner last:border-b-0">
+          <div class="bg-group px-4 py-1.5 font-mono text-marker text-muted2">
+            {m.host}{m.tag && <span class="text-faint"> · {m.tag}</span>}
           </div>
-        ))}
-      </div>
-    ))}
+          {m.rows.map((r) => (
+            <div class={`flex items-center gap-3 px-4 py-2.5 ${r.state === "needs" ? "border-l-2 border-amber bg-amberbg/40" : ""}`}>
+              {r.state === "done"
+                ? <Icon name="tabler:circle-check" class="shrink-0 text-ok" width="14" height="14" />
+                : <span class={`size-2 shrink-0 rounded-full ${r.state === "needs" ? "bg-amber" : "bg-indigo animate-pulse-dot"}`} />}
+              <span class="font-mono text-row text-ink">{r.name}</span>
+              <span class="rounded border border-edge px-1.5 py-0.5 text-marker text-muted2">{r.agent}</span>
+              <span class={`flex-1 truncate text-meta ${r.state === "needs" ? "text-amber2" : "text-muted"}`}>{r.task}</span>
+              <span class="shrink-0 font-mono text-marker text-faint">{r.time}</span>
+            </div>
+          ))}
+        </div>
+      ))}
+      <Fragment slot="foot">{workingCount} working · {doneCount} done · sorted so the one that needs you is never below the fold</Fragment>
+    </Readout>
   </div>
 </section>

@@ -17,6 +17,37 @@ final hostControlClientProvider = FutureProvider<HostControlClient>((
   return client;
 });
 
+/// Runs [op] against the loopback client, dropping the cached client when the
+/// POST could not reach the host at all.
+///
+/// [hostRestartRebindProvider] already invalidates on a host this app saw
+/// replaced; this covers what that cannot see — a host swapped out from under
+/// us, or an `up` whose generation never moved. Without it the panel's Retry
+/// rebuilds the failing provider around the SAME dead client, so a stale port
+/// is unrecoverable short of an app restart.
+Future<T> _viaHost<T>(
+  Ref ref,
+  Future<T> Function(HostControlClient c) op,
+) async {
+  final HostControlClient client;
+  try {
+    client = await ref.read(hostControlClientProvider.future);
+  } catch (_) {
+    // `ensureHost` threw, and Riverpod caches that AsyncError: rebuilding THIS
+    // provider re-reads the same failure, so the panel's Retry would be dead
+    // for the rest of the launch — the exact state the invalidate below exists
+    // to prevent, one layer up.
+    ref.invalidate(hostControlClientProvider);
+    rethrow;
+  }
+  try {
+    return await op(client);
+  } on HostControlException catch (e) {
+    if (e.code == 'TRANSPORT') ref.invalidate(hostControlClientProvider);
+    rethrow;
+  }
+}
+
 /// Loads the roster of devices that have connected to this machine and mutates
 /// it over the loopback control plane (the bridge is the single writer). Every
 /// mutation refreshes from the bridge so the UI reflects the authoritative
@@ -27,11 +58,8 @@ final remoteDevicesProvider =
     );
 
 class RemoteDevicesNotifier extends AsyncNotifier<PhonesList> {
-  Future<HostControlClient> get _client =>
-      ref.read(hostControlClientProvider.future);
-
   @override
-  Future<PhonesList> build() async => (await _client).phonesList();
+  Future<PhonesList> build() async => _viaHost(ref, (c) => c.phonesList());
 
   Future<void> _mutate(Future<void> Function(HostControlClient c) op) async {
     // Retain the current data under the loading flag so a toggle/refresh does
@@ -40,9 +68,12 @@ class RemoteDevicesNotifier extends AsyncNotifier<PhonesList> {
     // ignore: invalid_use_of_internal_member — retain prior AsyncValue during imperative mutation; v3 auto-retention only covers build() reloads, not manual state sets. Rewrite deferred (final-review triage).
     state = const AsyncLoading<PhonesList>().copyWithPrevious(state);
     try {
-      final c = await _client;
-      await op(c);
-      state = AsyncData(await c.phonesList());
+      state = AsyncData(
+        await _viaHost(ref, (c) async {
+          await op(c);
+          return c.phonesList();
+        }),
+      );
     } catch (e, st) {
       // Retain the last-known list under the error too: `hasError` still fires
       // the hub screen's `when(error:)`, but consumers that render from
@@ -80,11 +111,9 @@ final remoteAccessPolicyProvider =
     );
 
 class RemoteAccessPolicyNotifier extends AsyncNotifier<RemoteAccessPolicy> {
-  Future<HostControlClient> get _client =>
-      ref.read(hostControlClientProvider.future);
-
   @override
-  Future<RemoteAccessPolicy> build() async => (await _client).remoteAccessGet();
+  Future<RemoteAccessPolicy> build() async =>
+      _viaHost(ref, (c) => c.remoteAccessGet());
 
   Future<void> _mutate(
     Future<RemoteAccessPolicy> Function(HostControlClient c) op,
@@ -92,8 +121,7 @@ class RemoteAccessPolicyNotifier extends AsyncNotifier<RemoteAccessPolicy> {
     // ignore: invalid_use_of_internal_member — retain prior AsyncValue during imperative mutation; v3 auto-retention only covers build() reloads, not manual state sets. Rewrite deferred (final-review triage).
     state = const AsyncLoading<RemoteAccessPolicy>().copyWithPrevious(state);
     try {
-      final c = await _client;
-      state = AsyncData(await op(c));
+      state = AsyncData(await _viaHost(ref, op));
     } catch (e, st) {
       // ignore: invalid_use_of_internal_member — retain prior AsyncValue during imperative mutation; v3 auto-retention only covers build() reloads, not manual state sets. Rewrite deferred (final-review triage).
       state = AsyncError<RemoteAccessPolicy>(e, st).copyWithPrevious(state);

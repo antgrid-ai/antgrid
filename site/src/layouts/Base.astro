@@ -1,5 +1,6 @@
 ---
 import "../styles/global.css";
+import { Font } from "astro:assets";
 import Seo from "../components/Seo.astro";
 import Nav from "../components/Nav.astro";
 import Footer from "../components/Footer.astro";
@@ -13,6 +14,16 @@ const { title, description, ogImage, path } = Astro.props;
 ---
 <html lang="en">
   <head>
+    {/* preload on all three because all three are in the first viewport: Archivo
+        in the headline, Inter in the lede and nav, mono in the eyebrow, beta pill
+        and ProofCard. Without it a font is not even requested until the
+        render-blocking CSS has parsed — HTML, then CSS, then woff2, three serial
+        round trips — which is why the swap used to land long after the page
+        looked finished. <Font> emits the @font-face, the metric-matched fallback
+        and the correctly-formed preload link together, so these stay in step. */}
+    <Font cssVariable="--font-archivo" preload />
+    <Font cssVariable="--font-inter" preload />
+    <Font cssVariable="--font-jetbrains" preload />
     <Seo title={title} description={description} ogImage={ogImage} path={path} />
   </head>
   <body class="bg-page text-ink font-sans">

@@ -7,11 +7,19 @@ interface WindowEntry {
   windowStart: number;
 }
 
-/** Cap on distinct live keys. removePair() cleans pair keys on unpair, but other
- *  key families (e.g. per-device push) have no explicit removal, so bound the map
- *  defensively: when it overflows, drop windows already past their 1s span. */
+/** Cap on distinct live keys. No key family has explicit removal — a pair key
+ *  outlives the disconnect that ended the pair, and per-device push keys are
+ *  never cleaned — so both limiters bound their map defensively, evicting
+ *  entries indistinguishable from a fresh one when it overflows. */
 const MAX_KEYS = 10_000;
 
+/**
+ * Fixed 1-second window. Guards push delivery, where the budget is a flat
+ * per-agent ceiling and burst tolerance would only widen a fan-out to
+ * third-party providers. Traffic with a bursty shape (routed frames) uses
+ * [TokenBucketRateLimiter] instead — a fixed window cannot absorb a burst
+ * that is legitimate in aggregate.
+ */
 export class MessageRateLimiter {
   private windows = new Map<string, WindowEntry>();
   private maxPerSec: number;
@@ -51,10 +59,6 @@ export class MessageRateLimiter {
     }
   }
 
-  removePair(key: string): void {
-    this.windows.delete(key);
-  }
-
   destroy(): void {
     this.windows.clear();
   }
@@ -66,11 +70,11 @@ interface Bucket {
 }
 
 /**
- * Per-key token bucket for JSON control messages: a sustained
- * `refillPerSec` with a `burst` allowance so a legitimate pairing burst of a
- * few messages never trips, while a flood is throttled. The v2 fixed-window
- * `MessageRateLimiter` still guards binary route frames; this covers the JSON
- * channel it never did.
+ * Per-key token bucket: a sustained `refillPerSec` with a `burst` allowance, so
+ * traffic that is bursty by nature never trips on its shape alone while a
+ * sustained flood is still throttled. Guards both JSON control messages
+ * (keyed per connection) and routed binary frames (keyed per device pair AND
+ * channel, so a preview page load cannot starve terminal output or vice versa).
  */
 export class TokenBucketRateLimiter {
   private readonly buckets = new Map<string, Bucket>();

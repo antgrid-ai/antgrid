@@ -5,6 +5,16 @@ import { createMessage, type AbMessage, type PortInfo, type PreviewUrlEntry } fr
 import type { TunnelHttpRequest } from "./tunnel-protocol";
 import type { ConnState } from "./conn-state";
 
+/** How long a sent response stays replayable. Must outlive the app's 30s tunnel
+ *  timeout so a retry issued just before it gives up still finds the entry. */
+const OUTBOX_TTL_MS = 35_000;
+/** Bodies past this are not retained. A retry for one re-fetches, which is safe
+ *  in the case that produces them — a large GET is a static asset. The requests
+ *  where re-execution actually bites (a dev API route behind a GET) are small,
+ *  and those are exactly the ones this keeps. */
+const OUTBOX_MAX_ENTRY_BYTES = 2 * 1024 * 1024;
+const OUTBOX_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
+
 export class TunnelManager {
   private projectId: string;
   private portLabels: Map<number, string>;
@@ -17,6 +27,18 @@ export class TunnelManager {
   /** Ports whose current entry was recorded while the stream was suppressed and
    *  so never reached the phone. Cleared on the send that delivers them. */
   private undelivered = new Set<number>();
+  /** Responses already emitted, keyed by requestId, so a retry replays rather
+   *  than re-runs. The relay drops a routed frame when the pair/channel budget
+   *  is exhausted and tells only the SENDER, so neither end can tell whether the
+   *  request or the response died — the app therefore retries with the original
+   *  requestId and this is what makes that safe. Insertion-ordered: the oldest
+   *  entry is the first eviction candidate. */
+  private outbox = new Map<string, { response: object; bytes: number; expiresAt: number }>();
+  private outboxBytes = 0;
+  /** Requests currently being fetched. A retry can arrive while the original is
+   *  still upstream (the app cannot see that), and awaiting it here is what
+   *  stops the duplicate from becoming a second upstream request. */
+  private inflight = new Map<string, Promise<void>>();
 
   constructor(opts: {
     projectId: string;
@@ -103,6 +125,26 @@ export class TunnelManager {
   }
 
   async onHttpRequest(msg: TunnelHttpRequest): Promise<void> {
+    // Outbox first, before anything can reach the dev server: this is the whole
+    // safety property of the app's retry.
+    const inflight = this.inflight.get(msg.requestId);
+    if (inflight) await inflight.catch(() => {});
+    const stored = this.readOutbox(msg.requestId);
+    if (stored) {
+      this.sendTunnel(stored);
+      return;
+    }
+
+    const run = this.fetchAndRespond(msg);
+    this.inflight.set(msg.requestId, run);
+    try {
+      await run;
+    } finally {
+      this.inflight.delete(msg.requestId);
+    }
+  }
+
+  private async fetchAndRespond(msg: TunnelHttpRequest): Promise<void> {
     const safePath = msg.path.startsWith("/") ? msg.path : `/${msg.path}`;
     const url = `${msg.scheme ?? "http"}://localhost:${msg.port}${safePath}`;
     try {
@@ -114,7 +156,7 @@ export class TunnelManager {
         acceptEncodings: msg.acceptEncodings,
       });
 
-      this.sendTunnel({
+      this.emitResponse(msg.requestId, result.body, {
         type: "tunnel:http-response" as const,
         requestId: msg.requestId,
         status: result.status,
@@ -125,19 +167,60 @@ export class TunnelManager {
         checkoutId: msg.checkoutId,
       });
     } catch (err) {
-      this.sendTunnel({
+      const body = `Proxy error: ${err instanceof Error ? err.message : String(err)}`;
+      this.emitResponse(msg.requestId, body, {
         type: "tunnel:http-response" as const,
         requestId: msg.requestId,
         status: 502,
         headers: {},
-        body: `Proxy error: ${err instanceof Error ? err.message : String(err)}`,
+        body,
         bodyEncoding: "utf8" as const,
         checkoutId: msg.checkoutId,
       });
     }
   }
 
+  /** Send a response and retain it for replay. */
+  private emitResponse(requestId: string, body: string, response: object): void {
+    const bytes = Buffer.byteLength(body);
+    if (bytes <= OUTBOX_MAX_ENTRY_BYTES) {
+      this.evictOutbox(bytes);
+      this.outbox.set(requestId, { response, bytes, expiresAt: Date.now() + OUTBOX_TTL_MS });
+      this.outboxBytes += bytes;
+    }
+    this.sendTunnel(response);
+  }
+
+  private readOutbox(requestId: string): object | undefined {
+    const entry = this.outbox.get(requestId);
+    if (!entry) return undefined;
+    if (entry.expiresAt <= Date.now()) {
+      this.outbox.delete(requestId);
+      this.outboxBytes -= entry.bytes;
+      return undefined;
+    }
+    return entry.response;
+  }
+
+  /** Drop expired entries, then the oldest, until [incoming] fits. */
+  private evictOutbox(incoming: number): void {
+    const now = Date.now();
+    for (const [id, entry] of this.outbox) {
+      if (entry.expiresAt > now) break; // insertion order == expiry order
+      this.outbox.delete(id);
+      this.outboxBytes -= entry.bytes;
+    }
+    for (const [id, entry] of this.outbox) {
+      if (this.outboxBytes + incoming <= OUTBOX_MAX_TOTAL_BYTES) break;
+      this.outbox.delete(id);
+      this.outboxBytes -= entry.bytes;
+    }
+  }
+
   stop(): void {
     this.sentUrlDetails.clear();
+    this.outbox.clear();
+    this.outboxBytes = 0;
+    this.inflight.clear();
   }
 }

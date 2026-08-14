@@ -25,10 +25,10 @@ export type LoginPageProps = {
 export function LoginPage({ error, notice, email }: LoginPageProps) {
   return (
     <Layout title="Sign in">
-      <div class="max-w-md mx-auto mt-16 card bg-base-100 shadow-xl">
+      <div class="max-w-md mx-auto mt-16 card bg-panel shadow-xl">
         <div class="card-body">
-          <h1 class="card-title font-mono">Sign in or create an account</h1>
-          <p class="text-sm text-base-content/70">
+          <h1 class="card-title">Sign in or create an account</h1>
+          <p class="text-sm text-muted">
             Enter your email — we'll take it from there.
           </p>
 
@@ -54,7 +54,7 @@ export function LoginPage({ error, notice, email }: LoginPageProps) {
                 and routes to the magic link — with JS off it always is. */}
             <input type="hidden" name="method" value="" />
             <fieldset class="fieldset">
-              <label class="fieldset-legend font-mono" for="login-email">
+              <label class="fieldset-legend" for="login-email">
                 Email
               </label>
               <input
@@ -89,14 +89,14 @@ export function LoginPage({ error, notice, email }: LoginPageProps) {
           <div class="space-y-2">
             <a
               href="/oauth/start?provider=github&callbackURL=/dashboard"
-              class="btn btn-outline w-full"
+              class="btn btn-quiet w-full"
               data-ab-remember="github"
             >
               Continue with GitHub
             </a>
             <a
               href="/oauth/start?provider=google&callbackURL=/dashboard"
-              class="btn btn-outline w-full"
+              class="btn btn-quiet w-full"
               data-ab-remember="google"
             >
               Continue with Google
@@ -127,7 +127,7 @@ export function LoginPage({ error, notice, email }: LoginPageProps) {
               form="login-form"
               name="fallback"
               value="password"
-              class="btn btn-outline w-full"
+              class="btn btn-quiet w-full"
             >
               Continue with a password
             </button>
@@ -138,7 +138,7 @@ export function LoginPage({ error, notice, email }: LoginPageProps) {
               last address this browser remembered, so coming back to a fresh
               load would silently restore a different address than the one being
               typed. */}
-          <p class="text-xs text-base-content/60 mt-4 text-center">
+          <p class="text-xs text-muted mt-4 text-center">
             By continuing you agree to the{" "}
             <a class="link" href={SITE_TERMS_URL} target="_blank" rel="noopener noreferrer">
               Terms

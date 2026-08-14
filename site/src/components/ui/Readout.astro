@@ -1,0 +1,53 @@
+---
+import { Icon } from "astro-icon/components";
+
+// The page's one repeated frame: everything the product does is shown as a live
+// readout off a real machine, sourced on the left and stated on the right.
+//
+// Amber on this site means exactly one thing — a human is needed — and it appears
+// only on the row that needs them and in the marker where a readout declares it.
+// That scarcity is the point: scrolling gives a column of quiet indigo/green
+// readouts broken by two amber moments, which is the product's promise (mostly it
+// handles the work, occasionally it wakes you) rendered as rhythm rather than
+// asserted in a paragraph. Amber used decoratively, or an `attention` readout that
+// isn't really about a human decision, spends the only signal the page has.
+interface Props {
+  source: string;
+  state: keyof typeof marks;
+  label?: string;
+  tone?: "panel" | "well";
+  class?: string;
+}
+
+const marks = {
+  watching: { dot: true, icon: "", text: "text-indigo", chip: "border-edge" },
+  connected: { dot: false, icon: "tabler:plug-connected", text: "text-ok", chip: "border-edge" },
+  clean: { dot: false, icon: "tabler:git-branch", text: "text-ok", chip: "border-edge" },
+  proven: { dot: false, icon: "tabler:circle-check", text: "text-ok", chip: "border-edge" },
+  readable: { dot: false, icon: "tabler:eye", text: "text-ok", chip: "border-edge" },
+  sealed: { dot: false, icon: "tabler:lock", text: "text-muted2", chip: "border-edge" },
+  attention: { dot: false, icon: "tabler:alert-triangle", text: "text-amber2", chip: "border-amberbg2 bg-amberbg" },
+} as const;
+
+const { source, state, label, tone = "panel", class: cls = "" } = Astro.props;
+const mark = marks[state];
+const surface = tone === "well" ? "bg-group" : "bg-panel";
+const strip = tone === "well" ? "bg-[#202027]" : "bg-chrome";
+---
+<div class={`card-lit overflow-hidden rounded-lg border border-edge ${surface} ${cls}`}>
+  <div class={`flex items-center justify-between gap-3 border-b border-edge-inner ${strip} px-4 py-2.5`}>
+    <span class="min-w-0 truncate font-mono text-marker text-muted2">{source}</span>
+    <span class={`flex shrink-0 items-center gap-1.5 rounded border px-2 py-0.5 font-mono text-marker ${mark.chip} ${mark.text}`}>
+      {mark.dot
+        ? <span class="size-1.5 rounded-full bg-indigo animate-pulse-dot"></span>
+        : <Icon name={mark.icon} width="11" height="11" />}
+      {label ?? state}
+    </span>
+  </div>
+  <slot />
+  {Astro.slots.has("foot") && (
+    <div class="border-t border-edge-inner px-4 py-2.5 font-mono text-marker leading-relaxed text-muted2">
+      <slot name="foot" />
+    </div>
+  )}
+</div>

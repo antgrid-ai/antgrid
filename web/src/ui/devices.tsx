@@ -1,4 +1,4 @@
-import { Layout } from "./layout.js";
+import { Layout, PageHead } from "./layout.js";
 import { asset } from "./asset.js";
 import { DownloadCard } from "./download-card.js";
 import type { DeviceRow } from "../models/device.js";
@@ -8,15 +8,16 @@ export function DevicesPage(props: {
   devices: DeviceRow[];
 }) {
   return (
-    <Layout title="Devices" user={props.user}>
-      <div class="mb-6">
-        <h1 class="font-mono text-2xl font-semibold">Devices</h1>
-        <p class="text-sm text-base-content/60 mt-1">
-          Agents and apps signed into your account. A row is created when you
-          sign in on a device and it provisions via{" "}
-          <code class="px-1 bg-base-200 rounded">POST /account/devices</code>.
-        </p>
-      </div>
+    <Layout title="Devices" user={props.user} section="devices">
+      {/* Named for what the reader controls. The endpoint that creates the row
+          was the old subtitle, and nobody signing in on a phone is looking for
+          it — what they need to know is that a device lands here by itself and
+          that revoking is how it leaves. */}
+      <PageHead title="Devices">
+        Every machine and phone signed in to your account. Each one appears
+        here on its own the first time it connects; revoke a device to cut it
+        off.
+      </PageHead>
       <DevicesTable devices={props.devices} />
       {props.devices.length > 0 && <RevokeDeviceModal />}
       <script src={asset("devices")} defer />
@@ -31,8 +32,8 @@ function RevokeDeviceModal() {
   return (
     <div id="revoke-device-modal" class="modal" role="dialog" aria-modal="true">
       <div class="modal-box max-w-md">
-        <h3 class="font-mono text-lg font-semibold">Revoke device?</h3>
-        <p class="text-sm text-base-content/70 mt-2">
+        <h3 class="text-lg font-semibold">Revoke device?</h3>
+        <p class="text-sm text-muted mt-2">
           <span id="revoke-device-name" class="font-mono">This device</span> will
           be signed out and loses access to every machine on your account. Signing
           in again on that device registers it anew.
@@ -42,18 +43,18 @@ function RevokeDeviceModal() {
             user which one they are about to cut off. */}
         <p
           id="revoke-device-meta"
-          class="font-mono text-xs text-base-content/50 mt-2"
+          class="font-mono text-xs text-muted2 mt-2"
         />
         <p
           id="revoke-device-error"
-          class="alert alert-error font-mono text-xs mt-3 hidden"
+          class="alert alert-error text-xs mt-3 hidden"
           role="alert"
         />
         <div class="modal-action mt-4">
-          <button type="button" class="btn btn-ghost font-mono" data-revoke-dismiss>
+          <button type="button" class="btn btn-ghost" data-revoke-dismiss>
             Cancel
           </button>
-          <button type="button" id="revoke-device-confirm" class="btn btn-error font-mono">
+          <button type="button" id="revoke-device-confirm" class="btn btn-error">
             Revoke
           </button>
         </div>
@@ -70,10 +71,10 @@ export function DevicesTable({ devices }: { devices: DeviceRow[] }) {
     return <DownloadCard />;
   }
   return (
-    <div class="card bg-base-100 border border-base-300 overflow-x-auto">
+    <div class="card bg-panel border border-edge overflow-x-auto">
       <table class="table">
         <thead>
-          <tr class="text-xs uppercase tracking-wide text-base-content/60">
+          <tr class="text-xs uppercase tracking-wide text-muted">
             <th>Name</th>
             <th>Kind</th>
             <th>Platform</th>
@@ -104,10 +105,21 @@ export function DeviceRowView({ device }: { device: DeviceRow }) {
     <tr id={`device-${device.id}`} class="font-mono text-sm">
       <td>{device.displayName}</td>
       <td>
-        <span class="badge badge-outline">{device.kind}</span>
+        {/* The one distinction in this table that costs money: an `agent` row is
+            a machine counted against the plan's worker limit, an `app` row is
+            not. Tinted accordingly rather than left as one uniform outline. */}
+        <span
+          class={
+            device.kind === "agent"
+              ? "badge badge-sm border-indigo/50 bg-indigodeep/40 text-indigo2"
+              : "badge badge-sm border-edge text-muted"
+          }
+        >
+          {device.kind}
+        </span>
       </td>
       <td>{device.platform}</td>
-      <td class="text-base-content/60">{lastSeenLabel(device)}</td>
+      <td class="text-muted">{lastSeenLabel(device)}</td>
       <td class="text-right">
         <button
           type="button"

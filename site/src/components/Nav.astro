@@ -2,17 +2,28 @@
 import { Icon } from "astro-icon/components";
 import { links } from "../config";
 import Button from "./ui/Button.astro";
+import Wordmark from "./ui/Wordmark.astro";
+import { BETA_FREE } from "../data/pricing";
 ---
 <header class="sticky top-0 z-50 border-b border-edge-inner bg-page/90 backdrop-blur">
   <nav class="mx-auto flex max-w-shell items-center justify-between px-6 py-3.5">
-    <a href="/" class="flex items-center">
-      <img src="/logo/antgrid-wordmark.svg" alt="antgrid" class="h-10 w-auto" />
+    {/* Inside the home link, and a span rather than an anchor: nested anchors
+        are invalid, and the hero's beta pill is already the one that LINKS (to
+        pricing). This one is a status marker on the lockup, which is why it can
+        share a viewport with that pill without reading as a second
+        announcement — and it is the only beta signal on /get-started, /support
+        and the legal pages. Keep in lockstep with web's Layout header. */}
+    <a href="/" class="flex items-center gap-2">
+      <Wordmark class="h-7 w-auto" />
+      {BETA_FREE && (
+        <span class="rounded-full bg-indigobtn px-1.5 py-px text-pip font-medium text-white">beta</span>
+      )}
     </a>
     <div class="hidden items-center gap-7 md:flex">
-      <a href={links.features} class="text-sm text-muted hover:text-ink">Features</a>
-      <a href={links.getStarted} class="text-sm text-muted hover:text-ink">Get started</a>
-      <a href={links.pricing} class="text-sm text-muted hover:text-ink">Pricing</a>
-      <a href={links.signIn} class="text-sm text-muted hover:text-ink">Sign in</a>
+      <a href={links.features} class="text-note text-muted transition-colors hover:text-ink">Features</a>
+      <a href={links.getStarted} class="text-note text-muted transition-colors hover:text-ink">Get started</a>
+      <a href={links.pricing} class="text-note text-muted transition-colors hover:text-ink">Pricing</a>
+      <a href={links.signIn} class="text-note text-muted transition-colors hover:text-ink">Sign in</a>
       <Button href={links.startFree} variant="primary" class="px-4 py-2">Start free</Button>
     </div>
     <button id="navToggle" class="text-ink2 md:hidden" aria-label="Open menu" aria-expanded="false">
@@ -21,10 +32,10 @@ import Button from "./ui/Button.astro";
   </nav>
   <div id="navMenu" class="hidden border-t border-edge-inner px-6 py-4 md:hidden">
     <div class="flex flex-col gap-4">
-      <a href={links.features} class="text-sm text-muted">Features</a>
-      <a href={links.getStarted} class="text-sm text-muted">Get started</a>
-      <a href={links.pricing} class="text-sm text-muted">Pricing</a>
-      <a href={links.signIn} class="text-sm text-muted">Sign in</a>
+      <a href={links.features} class="text-note text-muted">Features</a>
+      <a href={links.getStarted} class="text-note text-muted">Get started</a>
+      <a href={links.pricing} class="text-note text-muted">Pricing</a>
+      <a href={links.signIn} class="text-note text-muted">Sign in</a>
       <Button href={links.startFree} variant="primary">Start free</Button>
     </div>
   </div>

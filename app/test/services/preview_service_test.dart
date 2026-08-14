@@ -322,6 +322,136 @@ void main() {
       await expectation;
     });
   });
+
+  group('PreviewService dropped-frame recovery', () {
+    /// Longer than [PreviewService]'s 600ms retry grace, which is real elapsed
+    /// time (a wall-clock Timer, not a fake async zone).
+    const pastGrace = Duration(milliseconds: 750);
+
+    List<Map<String, dynamic>> tunnelSends(FakeAgentTransport t, String id) => t
+        .sent
+        .where(
+          (m) => m['type'] == 'tunnel:http-request' && m['requestId'] == id,
+        )
+        .toList();
+
+    void respond(FakeAgentTransport t, String id) {
+      t.emitJson({
+        'type': 'tunnel:http-response',
+        'requestId': id,
+        'status': 200,
+        'headers': const <String, dynamic>{},
+        'body': 'ok',
+        'bodyEncoding': 'utf8',
+      }, channel: 'preview');
+    }
+
+    test('re-sends a stalled GET under its original requestId', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = session.previewService;
+
+      final future = svc.proxyRequest(
+        TunnelHttpRequest(
+          requestId: 'req-drop',
+          port: 3000,
+          method: 'GET',
+          path: '/app.js',
+          headers: {},
+        ),
+      );
+      expect(tunnelSends(t, 'req-drop'), hasLength(1));
+
+      t.emitDroppedFrame();
+      await Future<void>.delayed(pastGrace);
+
+      // Same id, so the bridge replays from its outbox instead of re-fetching.
+      expect(tunnelSends(t, 'req-drop'), hasLength(2));
+
+      respond(t, 'req-drop');
+      expect((await future).status, 200);
+      await session.close();
+    });
+
+    test('does not re-send a non-idempotent method', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = session.previewService;
+
+      final future = svc.proxyRequest(
+        TunnelHttpRequest(
+          requestId: 'req-post',
+          port: 3000,
+          method: 'POST',
+          path: '/api/save',
+          headers: {},
+          body: '{}',
+        ),
+      );
+
+      t.emitDroppedFrame();
+      await Future<void>.delayed(pastGrace);
+
+      expect(tunnelSends(t, 'req-post'), hasLength(1));
+
+      respond(t, 'req-post');
+      await future;
+      await session.close();
+    });
+
+    test('stops re-sending after the retry cap', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = session.previewService;
+
+      final future = svc.proxyRequest(
+        TunnelHttpRequest(
+          requestId: 'req-cap',
+          port: 3000,
+          method: 'GET',
+          path: '/chunk.js',
+          headers: {},
+        ),
+      );
+
+      for (var i = 0; i < 3; i++) {
+        t.emitDroppedFrame();
+        await Future<void>.delayed(pastGrace);
+      }
+
+      // Original + 2 retries. A link that keeps dropping frames must not be
+      // handed an unbounded amplification of the same request.
+      expect(tunnelSends(t, 'req-cap'), hasLength(3));
+
+      respond(t, 'req-cap');
+      await future;
+      await session.close();
+    });
+
+    test('does not re-send a request that already answered', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = session.previewService;
+
+      final future = svc.proxyRequest(
+        TunnelHttpRequest(
+          requestId: 'req-done',
+          port: 3000,
+          method: 'GET',
+          path: '/index.html',
+          headers: {},
+        ),
+      );
+      respond(t, 'req-done');
+      await future;
+
+      t.emitDroppedFrame();
+      await Future<void>.delayed(pastGrace);
+
+      expect(tunnelSends(t, 'req-done'), hasLength(1));
+      await session.close();
+    });
+  });
 }
 
 /// Local-mode fake transport variant for testing the `isLocal` branch in

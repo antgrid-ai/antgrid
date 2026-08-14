@@ -20,16 +20,22 @@ const { frontmatter } = Astro.props;
     line-height: 1.7;
     color: var(--color-muted);
   }
+  /* Display face on the page title only — h2 and below are set in the body face,
+     which reads better at document sizes and keeps these pages feeling like
+     documentation rather than more landing page. */
   .legal-prose h1 {
-    font-size: 30px;
-    font-weight: 500;
-    letter-spacing: -0.02em;
+    font-family: var(--font-display);
+    font-size: 34px;
+    font-weight: 600;
+    letter-spacing: -0.028em;
+    line-height: 1.12;
     color: var(--color-ink);
     margin-bottom: 0.75rem;
   }
   .legal-prose h2 {
     font-size: 18px;
-    font-weight: 500;
+    font-weight: 600;
+    letter-spacing: -0.012em;
     color: var(--color-ink);
     margin-top: 2.5rem;
     margin-bottom: 0.85rem;
@@ -96,11 +102,19 @@ const { frontmatter } = Astro.props;
     color: var(--color-ink2);
     font-weight: 500;
   }
-  /* "Last updated" line — the first paragraph after the H1 */
+  /* The paragraph after the H1 is a lede on the guide pages and a "Last updated"
+     stamp on the policy ones. The stamp always opens with a bold label and the
+     ledes open with prose, so that structural difference separates them without
+     a per-page class — get-started and support were reading as faint 12px mono. */
   .legal-prose h1 + p {
+    font-size: 16px;
+    line-height: 1.65;
+    color: var(--color-muted);
+    margin-bottom: 2rem;
+  }
+  .legal-prose h1 + p:has(> strong:first-child) {
     color: var(--color-faint);
     font-family: var(--font-mono);
     font-size: 12px;
-    margin-bottom: 2rem;
   }
 </style>

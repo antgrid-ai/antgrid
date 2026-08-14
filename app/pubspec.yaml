@@ -56,15 +56,16 @@ dependencies:
   ghostty_vte_flutter: ^0.1.3
   shelf: ^1.4.2
   shelf_web_socket: ^3.0.0
-  # Preview webview. webview_flutter is the app-facing API (WebViewController/
-  # WebViewWidget); webview_all federates the platform impls — official
-  # webview_flutter_android/_wkwebview on mobile, its own WebView2 (Windows),
-  # WKWebView (macOS) and WebKitGTK 4.1 (Linux) backends on desktop. Linux is a
-  # native GtkOverlay (see linux/runner/my_application.cc) so the webview draws
-  # on top of Flutter widgets over the preview rect — expected, WebKitGTK can't
+  # Preview webview: both the app-facing API (WebViewController/WebViewWidget)
+  # and every platform impl — WebView2 (Windows), WKWebView (macOS/iOS),
+  # WebKitGTK 4.1 (Linux), Android. Since 1.3.0 it vendors its own
+  # `webview_platform_interface` rather than federating webview_flutter's, so
+  # the two packages' WebViewControllers are unrelated classes: adding
+  # webview_flutter alongside it buys nothing and mixing their types won't
+  # compile. Linux draws into a native GtkOverlay (linux/runner/my_application.cc)
+  # over the preview rect, on top of Flutter widgets — expected, WebKitGTK can't
   # render offscreen-to-texture.
-  webview_flutter: ^4.13.1
-  webview_all: ^1.2.1
+  webview_all: ^1.3.5
   re_editor: ^0.9.0
   re_highlight: ^0.0.3
   path_provider: ^2.1.5

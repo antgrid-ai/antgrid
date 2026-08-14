@@ -11,15 +11,15 @@ const stores = [
   { icon: "tabler:brand-apple", label: "Mac App Store" },
 ];
 ---
-<section id="download" class="reveal mx-auto max-w-shell px-6 py-16">
-  <div class="card-lit relative overflow-hidden rounded-xl border border-indigodeep2 bg-[#17171e] px-9 py-12 text-center">
+<section id="download" class="reveal mx-auto max-w-shell px-6 py-20">
+  <div class="card-lit relative overflow-hidden rounded-xl border border-indigodeep2 bg-[#17171e] px-9 py-14 text-center">
     <div class="pointer-events-none absolute -top-48 left-1/2 h-[420px] w-[640px] -translate-x-1/2 glow-indigo" aria-hidden="true"></div>
     <div class="relative">
-    <Eyebrow class="mb-4.5">Get started</Eyebrow>
-    <h2 class="mb-3.5 text-3xl font-medium leading-tight tracking-tight text-ink md:text-4xl">
+    <Eyebrow class="mb-5 justify-center">Get started</Eyebrow>
+    <h2 class="mb-5 font-display text-title font-semibold text-ink">
       Let your agents run.<br />Check in when it matters.
     </h2>
-    <p class="mx-auto mb-7 max-w-md text-base leading-relaxed text-muted">
+    <p class="mx-auto mb-8 max-w-md text-lede text-muted">
       {BETA_FREE ? (
         <>Set up antgrid in a couple of minutes. <span class="text-ink2">Free while in beta — every feature included.</span> When plans arrive, Pro is priced per seat — one per person — and brings Handler, the built-in AI assistant.</>
       ) : (
@@ -30,23 +30,23 @@ const stores = [
       <Button href={links.getStarted} variant="primary">Setup guide<Icon name="tabler:arrow-right" width="16" height="16" /></Button>
       <Button href={links.pricing} variant="outline">See pricing</Button>
     </div>
-    <p class="mb-7 text-[12.5px] text-muted2">No card required · remote control on the free plan</p>
+    <p class="mb-8 text-meta text-muted2">No card required · remote control on the free plan</p>
 
-    <div class="mx-auto mb-5 h-px max-w-sm bg-edge"></div>
-    <p class="mb-4 font-mono text-[10.5px] uppercase tracking-[0.16em] text-faint">Download the desktop app</p>
+    <div class="mx-auto mb-6 h-px max-w-sm bg-edge"></div>
+    <p class="mb-4 font-mono text-marker uppercase tracking-[0.16em] text-faint">Download the desktop app</p>
     <div class="mb-3.5 flex flex-wrap items-center justify-center gap-3">
       <Button href={links.downloadMacos} variant="outline"><Icon name="tabler:brand-apple" width="16" height="16" />Download for macOS</Button>
       <Button href={links.downloadWindows} variant="outline"><Icon name="tabler:brand-windows" width="16" height="16" />Download for Windows</Button>
       <Button href={links.downloadLinux} variant="outline"><Icon name="tabler:brand-open-source" width="16" height="16" />Download for Linux</Button>
     </div>
-    <p class="mb-7 text-[12.5px] text-muted2">First time? The <a href={links.getStarted} class="text-indigo2 hover:text-indigo">setup guide</a> walks you from install to your phone.</p>
+    <p class="mb-8 text-meta text-muted2">First time? The <a href={links.getStarted} class="text-indigo2 hover:text-indigo">setup guide</a> walks you from install to your phone.</p>
 
-    <p class="mb-4 font-mono text-[10.5px] uppercase tracking-[0.16em] text-faint">App stores coming soon</p>
-    <div class="mb-3.5 flex flex-wrap justify-center gap-2">
+    <p class="mb-4 font-mono text-marker uppercase tracking-[0.16em] text-faint">App stores coming soon</p>
+    <div class="flex flex-wrap justify-center gap-2">
       {stores.map((s) => (
-        <span class="inline-flex items-center gap-1.5 rounded-md border border-edge bg-panel px-3 py-2 text-xs text-muted">
+        <span class="inline-flex items-center gap-1.5 rounded-md border border-edge bg-panel px-3 py-2 text-meta text-muted">
           <Icon name={s.icon} class="text-muted2" width="16" height="16" />{s.label}
-          <span class="rounded border border-edge px-1.5 py-px font-mono text-[9px] text-faint">soon</span>
+          <span class="rounded border border-edge px-1.5 py-px font-mono text-pip text-faint">soon</span>
         </span>
       ))}
     </div>

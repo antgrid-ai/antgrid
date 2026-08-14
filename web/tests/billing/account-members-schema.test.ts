@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import { startTestPg, type PgHandle } from "../helpers/pg.js";
+import { rejection } from "../helpers/rejection.js";
 import { createTestUser, createTestSubscription } from "../helpers/fixtures.js";
 import { seedPlans, PLAN_UUID, PLAN_SLUG_FREE } from "../../src/models/plan.js";
 
@@ -61,9 +62,9 @@ describe("account_members constraints", () => {
     // allow multi-account membership". With two active rows a resolver's
     // findFirst picks by physical row order and the same user gets different
     // entitlements on different requests.
-    await expect(
-      insertMember(teamB, joiner.id, "member", "active")
-    ).rejects.toThrow(/account_members_one_active_per_user_idx/);
+    expect(
+      String(await rejection(insertMember(teamB, joiner.id, "member", "active")))
+    ).toContain("account_members_one_active_per_user_idx");
   });
 
   test("a closed membership does not block joining another account", async () => {
@@ -95,8 +96,8 @@ describe("account_members constraints", () => {
     await pg.db.accountMember.create({
       data: { accountId: team, userId: owner.id, role: "owner", status: "active" },
     });
-    await expect(insertMember(team, owner.id, "member", "left")).rejects.toThrow(
-      /account_members_account_user_key/
+    expect(String(await rejection(insertMember(team, owner.id, "member", "left")))).toContain(
+      "account_members_account_user_key"
     );
   });
 

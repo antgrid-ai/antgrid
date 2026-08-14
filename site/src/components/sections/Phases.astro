@@ -1,6 +1,7 @@
 ---
 import { Icon } from "astro-icon/components";
 import Eyebrow from "../ui/Eyebrow.astro";
+import Readout from "../ui/Readout.astro";
 
 // The phase-gated workflow (research → validate → plan → implement, a human
 // checkpoint between each) is the industry-standard agent loop — Anthropic's
@@ -16,36 +17,40 @@ const phases = [
   { n: "04", name: "implement", state: "queued", note: "starts when you pick" },
 ];
 ---
-<section id="handler" class="reveal mx-auto max-w-shell px-6 py-20">
-  <Eyebrow class="mb-4">Hand over the follow-ups</Eyebrow>
-  <h2 class="mb-3.5 text-3xl font-medium tracking-tight text-ink">Every phase has a checkpoint.<br />It doesn't have to be you.</h2>
-  <p class="mb-3.5 max-w-2xl text-base leading-relaxed text-muted">
-    Research, validate, plan, implement — serious agent work moves in phases, and between each one someone reads the response, judges whether it's deep enough, and writes the next prompt. Usually that someone is you, on a thirty-minute delay.
-  </p>
-  <p class="mb-8 max-w-2xl text-base leading-relaxed text-muted">
-    Arm Handler with the sequence instead — in plain text, mid-session, after you've driven as much as you want to drive. It reads each response, pushes back when the answer is shallow, advances a phase only when its condition holds, and wakes you when the call is genuinely yours.
-  </p>
-
-  <div class="card-lit rounded-lg border border-edge bg-panel p-5">
-    <div class="mb-4 flex items-start gap-2 rounded border border-edge-inner bg-chrome px-2.5 py-1.5 font-mono text-[11px] leading-relaxed">
-      <Icon name="tabler:message-2" class="mt-0.5 shrink-0 text-indigo" width="13" height="13" />
-      <span class="shrink-0 text-muted2">you · armed</span>
-      <span class="text-ink2">research the provider swap; validate it against our rate limits; plan it — give me options before implementing</span>
-    </div>
-
-    <div class="grid gap-2.5 md:grid-cols-4">
-      {phases.map((p) => (
-        <div class={`rounded border px-3.5 py-3 ${p.state === "needs" ? "border-amberbg2 bg-amberbg/40" : "border-edge-inner bg-chrome"}`}>
-          <div class="mb-2 flex items-center justify-between">
-            <span class="font-mono text-[10px] text-faint">{p.n}</span>
-            {p.state === "done" && <Icon name="tabler:circle-check" class="text-ok" width="14" height="14" />}
-            {p.state === "needs" && <Icon name="tabler:alert-triangle" class="text-amber" width="14" height="14" />}
-            {p.state === "queued" && <Icon name="tabler:circle-dashed" class="text-faint" width="14" height="14" />}
-          </div>
-          <div class="mb-1.5 font-mono text-[13px] text-ink">{p.name}</div>
-          <div class={`text-[12px] leading-relaxed ${p.state === "needs" ? "text-amber2" : "text-muted2"}`}>{p.note}</div>
-        </div>
-      ))}
-    </div>
+<section id="handler" class="reveal mx-auto max-w-shell px-6 py-24">
+  <Eyebrow class="mb-5">Hand over the follow-ups</Eyebrow>
+  <h2 class="mb-5 max-w-3xl font-display text-title font-semibold text-ink">Every phase has a checkpoint.<br />It doesn't have to be you.</h2>
+  <div class="mb-10 grid max-w-4xl gap-x-10 gap-y-4 md:grid-cols-2">
+    <p class="text-lede text-muted">
+      Research, validate, plan, implement — serious agent work moves in phases, and between each one someone reads the response, judges whether it's deep enough, and writes the next prompt. Usually that someone is you, on a thirty-minute delay.
+    </p>
+    <p class="text-lede text-muted">
+      Arm Handler with the sequence instead — in plain text, mid-session, after you've driven as much as you want to drive. It reads each response, pushes back when the answer is shallow, advances a phase only when its condition holds, and wakes you when the call is genuinely yours.
+    </p>
   </div>
+
+  <Readout source="studio-workstation · api · handler armed" state="attention" label="needs you">
+    <div class="p-4 md:p-5">
+      <div class="mb-4 flex items-start gap-2 rounded border border-edge-inner bg-chrome px-2.5 py-1.5 font-mono text-marker leading-relaxed">
+        <Icon name="tabler:message-2" class="mt-0.5 shrink-0 text-indigo" width="13" height="13" />
+        <span class="shrink-0 text-muted2">you · armed</span>
+        <span class="text-ink2">research the provider swap; validate it against our rate limits; plan it — give me options before implementing</span>
+      </div>
+
+      <div class="grid gap-2.5 md:grid-cols-4">
+        {phases.map((p) => (
+          <div class={`rounded border px-3.5 py-3 ${p.state === "needs" ? "border-amberbg2 bg-amberbg/40" : "border-edge-inner bg-chrome"}`}>
+            <div class="mb-2 flex items-center justify-between">
+              <span class="font-mono text-marker text-faint">{p.n}</span>
+              {p.state === "done" && <Icon name="tabler:circle-check" class="text-ok" width="14" height="14" />}
+              {p.state === "needs" && <Icon name="tabler:alert-triangle" class="text-amber" width="14" height="14" />}
+              {p.state === "queued" && <Icon name="tabler:circle-dashed" class="text-faint" width="14" height="14" />}
+            </div>
+            <div class="mb-1.5 font-mono text-row text-ink">{p.name}</div>
+            <div class={`text-meta leading-relaxed ${p.state === "needs" ? "text-amber2" : "text-muted2"}`}>{p.note}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </Readout>
 </section>

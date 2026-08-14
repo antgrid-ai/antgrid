@@ -100,7 +100,7 @@ test("push:deliver surfaces unregistered/error reasons from the FCM sender", asy
 });
 
 test("push:deliver is rate-limited per (agent, token)", async () => {
-  const r = startServer({ ...defaultConfig, rateLimitMsgPerSec: 2 }, { fcmSender });
+  const r = startServer({ ...defaultConfig, pushRateLimitPerSec: 2 }, { fcmSender });
   const { ws } = await connectHello(r, { deviceId: "push-agent-rl" });
 
   // Send the first two (within the limit) sequentially, waiting for each

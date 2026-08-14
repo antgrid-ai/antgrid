@@ -10,10 +10,10 @@ export type ForgotPasswordPageProps = {
 export function ForgotPasswordPage({ error, email }: ForgotPasswordPageProps) {
   return (
     <Layout title="Reset password">
-      <div class="max-w-md mx-auto mt-16 card bg-base-100 shadow-xl">
+      <div class="max-w-md mx-auto mt-16 card bg-panel shadow-xl">
         <div class="card-body">
-          <h1 class="card-title font-mono">Reset your password</h1>
-          <p class="text-sm text-base-content/70">
+          <h1 class="card-title">Reset your password</h1>
+          <p class="text-sm text-muted">
             Enter your email and we'll send a reset link. This also works if you
             signed up with a magic link or GitHub/Google and never had a
             password — it sets one.
@@ -32,7 +32,7 @@ export function ForgotPasswordPage({ error, email }: ForgotPasswordPageProps) {
             onsubmit="this.querySelector('button[type=submit]').disabled=true;this.querySelector('button[type=submit]').textContent='Sending…';"
           >
             <fieldset class="fieldset">
-              <legend class="fieldset-legend font-mono">Email</legend>
+              <legend class="fieldset-legend">Email</legend>
               <input
                 type="email"
                 name="email"
@@ -48,7 +48,7 @@ export function ForgotPasswordPage({ error, email }: ForgotPasswordPageProps) {
             </button>
           </form>
 
-          <p class="text-sm text-base-content/70 mt-4 text-center">
+          <p class="text-sm text-muted mt-4 text-center">
             <a class="link" href="/login">
               Back to sign in
             </a>

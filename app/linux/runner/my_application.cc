@@ -70,8 +70,10 @@ static void my_application_activate(GApplication* application) {
 
   // webview_all_linux embeds WebKitGTK as a native GtkOverlay child (it can't
   // render offscreen-to-texture), so the FlView must live inside a GtkOverlay
-  // rather than being added to the window directly. Required by webview_all's
-  // Linux platform setup.
+  // rather than being added to the window directly. The plugin installs one
+  // itself since 1.3.0, but only if it wins the race to run before FlView is
+  // realized — wrapping it here cannot lose that race, and the plugin's
+  // ensure_overlay() detects this parent and reuses it instead of double-wrapping.
   GtkWidget* overlay = gtk_overlay_new();
   gtk_widget_set_hexpand(overlay, TRUE);
   gtk_widget_set_vexpand(overlay, TRUE);

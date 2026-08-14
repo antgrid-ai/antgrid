@@ -1,5 +1,6 @@
-import { Layout } from "./layout.js";
+import { Layout, PageHead } from "./layout.js";
 import { asset } from "./asset.js";
+import { CellMeter } from "./cell-meter.js";
 import { ActiveSessionsCard } from "./active-sessions.js";
 import { DownloadCard } from "./download-card.js";
 import type { UserSession } from "../services/sessions.js";
@@ -28,11 +29,14 @@ function formatDate(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
+/** `active` is what a reader sees every visit, so it is tinted rather than
+ *  filled — a solid green slab spent the page's loudest colour on its least
+ *  actionable fact. The states that need the reader to do something keep it. */
 const STATUS_BADGE: Record<SubscriptionRow["status"], string> = {
-  active: "badge-success",
-  past_due: "badge-warning",
-  canceled: "badge-neutral",
-  expired: "badge-error",
+  active: "badge-sm border-ok/40 bg-ok/10 text-ok",
+  past_due: "badge-sm badge-warning",
+  canceled: "badge-sm border-edge text-muted",
+  expired: "badge-sm badge-error",
 };
 
 export function DashboardPage(props: DashboardPageProps) {
@@ -48,17 +52,15 @@ export function DashboardPage(props: DashboardPageProps) {
   });
 
   return (
-    <Layout title="Dashboard" user={props.user}>
-      <div class="mb-6">
-        <h1 class="font-mono text-2xl font-semibold">Dashboard</h1>
-        <p class="text-sm text-base-content/60 mt-1">
-          Manage your subscription and connected devices.
-        </p>
-      </div>
+    <Layout title="Dashboard" user={props.user} section="dashboard">
+      <PageHead title="Dashboard">
+        Your plan, how much of it you are using, and which machines are
+        connected right now.
+      </PageHead>
 
       <div
         id="purchase-status-banner"
-        class={`alert alert-success mb-6 font-mono text-sm ${props.purchaseSuccess ? "" : "hidden"}`}
+        class={`alert alert-success mb-6 text-sm ${props.purchaseSuccess ? "" : "hidden"}`}
         role="status"
       >
         <span
@@ -81,12 +83,12 @@ export function DashboardPage(props: DashboardPageProps) {
       </div>
 
       {props.cancelNotice === "immediate" ? (
-        <div class="alert alert-info mb-6 font-mono text-sm" role="status">
+        <div class="alert alert-info mb-6 text-sm" role="status">
           Subscription canceled — you are back on the free plan.
         </div>
       ) : null}
       {props.cancelNotice === "pending" ? (
-        <div class="alert alert-info mb-6 font-mono text-sm" role="status">
+        <div class="alert alert-info mb-6 text-sm" role="status">
           Subscription will end on{" "}
           {formatDate(
             new Date(
@@ -97,17 +99,17 @@ export function DashboardPage(props: DashboardPageProps) {
         </div>
       ) : null}
       {props.cancelNotice === "failed" ? (
-        <div class="alert alert-error mb-6 font-mono text-sm" role="status">
+        <div class="alert alert-error mb-6 text-sm" role="status">
           Could not cancel subscription. Try again or contact support.
         </div>
       ) : null}
       {props.resumeNotice === "success" ? (
-        <div class="alert alert-success mb-6 font-mono text-sm" role="status">
+        <div class="alert alert-success mb-6 text-sm" role="status">
           Subscription resumed — your plan will renew as normal.
         </div>
       ) : null}
       {props.resumeNotice === "failed" ? (
-        <div class="alert alert-error mb-6 font-mono text-sm" role="status">
+        <div class="alert alert-error mb-6 text-sm" role="status">
           Could not resume subscription. Try again or contact support.
         </div>
       ) : null}
@@ -136,17 +138,41 @@ export function DashboardPage(props: DashboardPageProps) {
  * is the flat fair-use registration ceiling across every device kind. They are
  * counted separately and only the first can be raised.
  */
-function MeterStat({ label, used, limit }: { label: string; used: number; limit: number }) {
+function CapacityRow({
+  activeWorkers,
+  workerLimit,
+  activeAppDevices,
+  appDeviceLimit,
+  children,
+}: {
+  activeWorkers: number;
+  workerLimit: number;
+  activeAppDevices: number;
+  appDeviceLimit: number;
+  children?: unknown;
+}) {
   return (
-    <div class="stat">
-      <div class="stat-title">{label}</div>
-      <div class="stat-value text-2xl font-mono">
-        {used}
-        <span class="text-base-content/40">
-          {" / "}
-          {limit}
-        </span>
+    <div class="mt-5 grid grid-cols-2 gap-x-8 gap-y-6 rounded-box border border-edge bg-page/40 p-5 sm:grid-cols-4">
+      <CellMeter label="Machines" used={activeWorkers} limit={workerLimit} unit="machines" />
+      <CellMeter
+        label="App devices"
+        used={activeAppDevices}
+        limit={appDeviceLimit}
+        unit="app devices"
+      />
+      {children}
+    </div>
+  );
+}
+
+/** A dated fact alongside the meters — same label register, no meter. */
+function Fact({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div class="text-[0.6875rem] font-medium uppercase tracking-[0.12em] text-muted2">
+        {label}
       </div>
+      <div class="mt-1 font-mono text-base leading-none text-ink2">{value}</div>
     </div>
   );
 }
@@ -182,15 +208,17 @@ function SubscriptionCard({
   // `promotional` rows are reconciled.
   if (subscription.promotional) {
     return (
-      <div class="card bg-base-100 border border-base-300">
+      <div class="card bg-panel border border-edge">
         <div class="card-body">
-          <div class="flex items-center gap-2 mb-1">
-            <span class="badge badge-ghost font-mono text-xs capitalize">{FREE_TIER}</span>
+          <div class="flex items-center gap-2">
+            <span class="badge badge-ghost text-xs capitalize">{FREE_TIER}</span>
           </div>
-          <div class="stats stats-horizontal mt-4 border border-base-300">
-            <MeterStat label="Machines" used={activeWorkers} limit={workerLimit} />
-            <MeterStat label="App devices" used={activeAppDevices} limit={appDeviceLimit} />
-          </div>
+          <CapacityRow
+            activeWorkers={activeWorkers}
+            workerLimit={workerLimit}
+            activeAppDevices={activeAppDevices}
+            appDeviceLimit={appDeviceLimit}
+          />
         </div>
       </div>
     );
@@ -198,14 +226,14 @@ function SubscriptionCard({
 
   if (tier === FREE_TIER) {
     return (
-      <div class="card bg-base-100 border border-base-300">
+      <div class="card bg-panel border border-edge">
         <div class="card-body">
           <div class="flex items-start justify-between gap-6 flex-wrap">
             <div class="flex-1 min-w-0">
               <div class="flex items-center gap-2 mb-1">
-                <span class="badge badge-ghost font-mono text-xs capitalize">{FREE_TIER}</span>
+                <span class="badge badge-ghost text-xs capitalize">{FREE_TIER}</span>
               </div>
-              <p class="text-sm text-base-content/70 mt-1 max-w-md">
+              <p class="text-sm text-muted mt-1 max-w-md">
                 Remote control is included, capped at {workerLimit} worker
                 {workerLimit === 1 ? " machine" : " machines"}. Pro raises the
                 cap and is billed per seat, so you can bring your team along.
@@ -215,58 +243,54 @@ function SubscriptionCard({
               View pricing
             </a>
           </div>
-          <div class="stats stats-horizontal mt-4 border border-base-300">
-            <MeterStat label="Machines" used={activeWorkers} limit={workerLimit} />
-            <MeterStat label="App devices" used={activeAppDevices} limit={appDeviceLimit} />
-          </div>
+          <CapacityRow
+            activeWorkers={activeWorkers}
+            workerLimit={workerLimit}
+            activeAppDevices={activeAppDevices}
+            appDeviceLimit={appDeviceLimit}
+          />
         </div>
       </div>
     );
   }
   return (
-    <div class="card bg-base-100 border border-base-300">
+    <div class="card bg-panel border border-edge">
       <div class="card-body">
         <div class="flex items-center gap-2">
-          <h2 class="card-title font-mono">{plan.label}</h2>
+          <h2 class="card-title font-display text-xl tracking-[-0.02em]">{plan.label}</h2>
           {pendingCancel ? (
-            <span class="badge badge-warning font-mono text-xs">ending</span>
+            <span class="badge badge-warning text-xs">ending</span>
           ) : (
             <span class={`badge ${STATUS_BADGE[subscription.status]}`}>
               {subscription.status}
             </span>
           )}
         </div>
-        <div class="stats stats-horizontal mt-2 border border-base-300">
-          <MeterStat label="Machines" used={activeWorkers} limit={workerLimit} />
-          <MeterStat label="App devices" used={activeAppDevices} limit={appDeviceLimit} />
-          <div class="stat">
-            <div class="stat-title">Started</div>
-            <div class="stat-value text-base font-mono">
-              {formatDate(
-                new Date(subscription.trialStartedAt ?? subscription.createdAt)
-              )}
-            </div>
-          </div>
+        <CapacityRow
+          activeWorkers={activeWorkers}
+          workerLimit={workerLimit}
+          activeAppDevices={activeAppDevices}
+          appDeviceLimit={appDeviceLimit}
+        >
+          <Fact
+            label="Started"
+            value={formatDate(
+              new Date(subscription.trialStartedAt ?? subscription.createdAt)
+            )}
+          />
           {plan.trial && subscription.trialEndsAt ? (
-            <div class="stat">
-              <div class="stat-title">First charge</div>
-              <div class="stat-value text-base font-mono">
-                {formatDate(new Date(subscription.trialEndsAt))}
-              </div>
-            </div>
+            <Fact label="First charge" value={formatDate(new Date(subscription.trialEndsAt))} />
           ) : plan.recurring && periodEndDate ? (
-            <div class="stat">
-              <div class="stat-title">{pendingCancel ? "Ends" : "Renews"}</div>
-              <div class="stat-value text-base font-mono">
-                {formatDate(new Date(periodEndDate))}
-              </div>
-            </div>
+            <Fact
+              label={pendingCancel ? "Ends" : "Renews"}
+              value={formatDate(new Date(periodEndDate))}
+            />
           ) : null}
-        </div>
+        </CapacityRow>
         {canResume ? (
           <>
-            <div class="mt-4 pt-4 border-t border-base-300 flex flex-wrap items-center justify-between gap-3">
-              <p class="text-xs text-base-content/60 max-w-lg">
+            <div class="mt-4 pt-4 border-t border-edge flex flex-wrap items-center justify-between gap-3">
+              <p class="text-xs text-muted max-w-lg">
                 Your subscription ends on{" "}
                 {formatDate(new Date(subscription.cancelledAt ?? Date.now()))}. Resume to keep Pro
                 and renew at period end.
@@ -274,24 +298,24 @@ function SubscriptionCard({
               <button
                 type="button"
                 id="resume-subscription-btn"
-                class="btn btn-outline btn-primary btn-sm font-mono"
+                class="btn btn-outline btn-primary btn-sm"
               >
                 Resume subscription
               </button>
             </div>
             <div id="resume-subscription-modal" class="modal">
               <div class="modal-box max-w-md">
-                <h3 class="font-mono text-lg font-semibold">Resume subscription?</h3>
-                <p class="text-sm text-base-content/70 mt-2">
+                <h3 class="text-lg font-semibold">Resume subscription?</h3>
+                <p class="text-sm text-muted mt-2">
                   Your plan will continue and renew on{" "}
                   {formatDate(new Date(subscription.currentPeriodEnd ?? Date.now()))}.
                 </p>
                 <div class="modal-action mt-4">
-                  <button type="button" class="btn btn-ghost font-mono" data-resume-dismiss>
+                  <button type="button" class="btn btn-ghost" data-resume-dismiss>
                     Keep cancellation
                   </button>
                   <form method="post" action="/ui/subscription/resume">
-                    <button type="submit" class="btn btn-primary font-mono">
+                    <button type="submit" class="btn btn-primary">
                       Yes, resume
                     </button>
                   </form>
@@ -308,8 +332,8 @@ function SubscriptionCard({
         ) : null}
         {canCancel ? (
           <>
-            <div class="mt-4 pt-4 border-t border-base-300 flex flex-wrap items-center justify-between gap-3">
-              <p class="text-xs text-base-content/60 max-w-lg">
+            <div class="mt-4 pt-4 border-t border-edge flex flex-wrap items-center justify-between gap-3">
+              <p class="text-xs text-muted max-w-lg">
                 {plan.trial
                   ? "Cancel before your first charge to avoid billing. Access ends immediately."
                   : "Cancel at period end — you keep Pro until your renewal date, then revert to free."}
@@ -317,25 +341,25 @@ function SubscriptionCard({
               <button
                 type="button"
                 id="cancel-subscription-btn"
-                class="btn btn-outline btn-error btn-sm font-mono"
+                class="btn btn-outline btn-error btn-sm"
               >
                 Cancel subscription
               </button>
             </div>
             <div id="cancel-subscription-modal" class="modal">
               <div class="modal-box max-w-md">
-                <h3 class="font-mono text-lg font-semibold">Cancel subscription?</h3>
-                <p class="text-sm text-base-content/70 mt-2">
+                <h3 class="text-lg font-semibold">Cancel subscription?</h3>
+                <p class="text-sm text-muted mt-2">
                   {plan.trial
                     ? "You will lose Pro access immediately and your card will not be charged."
                     : "You keep Pro access until the end of your billing period, then revert to free."}
                 </p>
                 <div class="modal-action mt-4">
-                  <button type="button" class="btn btn-ghost font-mono" data-cancel-dismiss>
+                  <button type="button" class="btn btn-ghost" data-cancel-dismiss>
                     Keep subscription
                   </button>
                   <form method="post" action="/ui/subscription/cancel">
-                    <button type="submit" class="btn btn-error font-mono">
+                    <button type="submit" class="btn btn-error">
                       Yes, cancel
                     </button>
                   </form>

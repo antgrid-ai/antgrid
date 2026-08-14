@@ -1,24 +1,25 @@
 ---
 import { Icon } from "astro-icon/components";
 import { links } from "../config";
+import Wordmark from "./ui/Wordmark.astro";
 ---
 <footer class="border-t border-edge-inner">
   <div class="mx-auto max-w-shell px-6 pb-8 pt-12">
     <div class="grid grid-cols-2 gap-8 md:grid-cols-[1.7fr_1fr_1fr_1fr]">
       <div>
         <div class="mb-2.5">
-          <img src="/logo/antgrid-wordmark.svg" alt="antgrid" class="h-6 w-auto" />
+          <Wordmark class="h-6 w-auto" />
         </div>
-        <p class="mb-3.5 max-w-[230px] text-[12.5px] leading-relaxed text-muted">
+        <p class="mb-3.5 max-w-[230px] text-meta leading-relaxed text-muted">
           Run your coding agents on your machine, steer them from your phone — and nothing counts as done without evidence.
         </p>
-        <span class="inline-flex items-center gap-1.5 rounded border border-edge px-2.5 py-1 font-mono text-[10.5px] text-muted2">
+        <span class="inline-flex items-center gap-1.5 rounded border border-edge px-2.5 py-1 font-mono text-marker text-muted2">
           <Icon name="tabler:lock" class="text-indigo" width="12" height="12" />end-to-end encrypted · zero-knowledge relay
         </span>
       </div>
       <div>
-        <p class="mb-3 text-[11px] font-medium uppercase tracking-wide text-faint">Product</p>
-        <div class="flex flex-col gap-2.5 text-[13px] text-muted">
+        <p class="mb-3 text-marker font-medium uppercase tracking-[0.14em] text-faint">Product</p>
+        <div class="flex flex-col gap-2.5 text-note text-muted">
           <a href={links.features} class="hover:text-ink">Features</a>
           <a href={links.pricing} class="hover:text-ink">Pricing</a>
           <a href={links.download} class="hover:text-ink">Download</a>
@@ -27,21 +28,21 @@ import { links } from "../config";
         </div>
       </div>
       <div>
-        <p class="mb-3 text-[11px] font-medium uppercase tracking-wide text-faint">Account</p>
-        <div class="flex flex-col gap-2.5 text-[13px] text-muted">
+        <p class="mb-3 text-marker font-medium uppercase tracking-[0.14em] text-faint">Account</p>
+        <div class="flex flex-col gap-2.5 text-note text-muted">
           <a href={links.signIn} class="hover:text-ink">Sign in</a>
         </div>
       </div>
       <div>
-        <p class="mb-3 text-[11px] font-medium uppercase tracking-wide text-faint">Legal</p>
-        <div class="flex flex-col gap-2.5 text-[13px] text-muted">
+        <p class="mb-3 text-marker font-medium uppercase tracking-[0.14em] text-faint">Legal</p>
+        <div class="flex flex-col gap-2.5 text-note text-muted">
           <a href={links.privacy} class="hover:text-ink">Privacy</a>
           <a href={links.terms} class="hover:text-ink">Terms</a>
           <a href={links.refunds} class="hover:text-ink">Refunds</a>
         </div>
       </div>
     </div>
-    <div class="mt-7 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-edge-inner pt-4.5 font-mono text-[11.5px] text-faint">
+    <div class="mt-7 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-edge-inner pt-4.5 font-mono text-marker text-faint">
       <span>© 2026 antgrid</span>
       <span aria-hidden="true">·</span>
       <a href={links.company} class="group inline-flex items-center gap-1.5 text-muted hover:text-ink">

@@ -14,13 +14,13 @@ const schema = {
   })),
 };
 ---
-<section class="mt-14">
-  <h2 class="mb-5 text-center font-mono text-[13px] uppercase tracking-[0.16em] text-faint">Questions</h2>
+<section class="mt-16">
+  <h2 class="mb-6 text-center font-mono text-marker uppercase tracking-[0.16em] text-faint">Questions</h2>
   <div class="grid gap-3.5 md:grid-cols-2">
     {faq.map((item) => (
       <div class="rounded-lg border border-edge bg-panel p-5">
-        <h3 class="mb-1.5 font-mono text-[13.5px] font-medium text-ink">{item.q}</h3>
-        <p class="text-[12.5px] leading-relaxed text-muted">{item.a}</p>
+        <h3 class="mb-2 font-mono text-row font-medium text-ink">{item.q}</h3>
+        <p class="text-note text-muted">{item.a}</p>
       </div>
     ))}
   </div>

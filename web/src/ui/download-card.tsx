@@ -5,12 +5,12 @@ const SITE_GET_STARTED_URL = "https://antgrid.ai/get-started";
 
 export function DownloadCard() {
   return (
-    <div class="card bg-base-100 border border-base-300 mt-6">
+    <div class="card bg-panel border border-edge mt-6">
       <div class="card-body">
         <div class="flex items-start justify-between gap-6 flex-wrap">
           <div class="flex-1 min-w-0">
-            <h2 class="card-title font-mono text-lg">Download the desktop app</h2>
-            <p class="text-sm text-base-content/70 mt-1 max-w-md">
+            <h2 class="card-title text-lg">Download the desktop app</h2>
+            <p class="text-sm text-muted mt-1 max-w-md">
               Your coding agents run inside the Antgrid desktop app on your
               computer. Install it and sign in with this account — your machine
               shows up here automatically, no pairing step.
@@ -18,7 +18,7 @@ export function DownloadCard() {
           </div>
           <div class="flex items-center gap-2">
             <a
-              class="btn btn-primary btn-sm font-mono"
+              class="btn btn-primary btn-sm"
               href={SITE_DOWNLOAD_URL}
               target="_blank"
               rel="noopener"
@@ -26,7 +26,7 @@ export function DownloadCard() {
               Download
             </a>
             <a
-              class="btn btn-ghost btn-sm font-mono"
+              class="btn btn-ghost btn-sm"
               href={SITE_GET_STARTED_URL}
               target="_blank"
               rel="noopener"

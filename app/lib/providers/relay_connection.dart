@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../connection/connection_supervisor.dart';
 import '../connection/relay_mechanisms.dart';
 import '../connection/supervisor_state.dart';
+import '../util/ab_log.dart';
 import '../util/device_id.dart';
 import 'device_revocation.dart';
 import 'providers.dart';
@@ -40,6 +41,10 @@ class RelayConnection {
   ConnectionSupervisor? _supervisor;
   final List<StreamSubscription<dynamic>> _subs = [];
   bool _disposed = false;
+
+  int _droppedFrames = 0;
+  int _droppedFramesTotal = 0;
+  Timer? _dropLogBurst;
 
   final StreamController<SupervisorStatus?> _statuses =
       StreamController<SupervisorStatus?>.broadcast();
@@ -144,6 +149,13 @@ class RelayConnection {
       relay.errorStream.listen((e) {
         _noteAuthCode(e.code);
         supervisor.noteRelayError(e.code, retryable: e.retryable);
+        // A dropped frame is not a connection fault — the socket stays open and
+        // the ladder is unaffected. It reaches the session so services holding
+        // re-issuable work can recover it instead of waiting out a timeout.
+        if (e.code == 'MESSAGE_RATE_LIMITED') {
+          _noteDroppedFrame();
+          mechanisms.session?.noteFramesDropped();
+        }
       }),
     );
     // One listener, mechanism first: the supervisor re-derives the ladder
@@ -212,6 +224,30 @@ class RelayConnection {
   /// now instead of waiting out a timer the OS may have frozen.
   void noteResume() => _supervisor?.noteResume();
 
+  /// The relay reports a drop to the SENDER only, so this counts the frames
+  /// *we* lost — outbound requests. Dropped responses are the bridge's to
+  /// report (`Relay rate limit:` in its log), and the two must be read together
+  /// to size a page load's real loss.
+  void _noteDroppedFrame() {
+    _droppedFrames++;
+    _droppedFramesTotal++;
+    // Drops arrive in bursts (a page load overruns the bucket for as long as it
+    // takes to issue its subresources); one line per frame buries the count.
+    _dropLogBurst ??= Timer(const Duration(seconds: 1), () {
+      _dropLogBurst = null;
+      AbLog.warn(
+        'relay',
+        'relay dropped outbound frames',
+        fields: {
+          'machine': machineDeviceId,
+          'frames': _droppedFrames,
+          'total': _droppedFramesTotal,
+        },
+      );
+      _droppedFrames = 0;
+    });
+  }
+
   /// Terminal teardown: disposes the [MachineSession] (which fails its pending
   /// RPCs, cancels subscriptions, zeroizes keys) and the underlying
   /// [RelayService]. Only called when dropping a machine for good.
@@ -225,6 +261,8 @@ class RelayConnection {
   /// it is really gone has to await it.
   Future<void> dispose() {
     _disposed = true;
+    _dropLogBurst?.cancel();
+    _dropLogBurst = null;
     for (final sub in _subs) {
       unawaited(sub.cancel());
     }

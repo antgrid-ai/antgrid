@@ -98,9 +98,9 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   WebViewController _buildController(String initialUrl, Color background) {
     return WebViewController()
       // Without this the webview paints white during page load/navigation — a
-      // hard flash in a near-black UI. webview_all silently no-ops this on
-      // macOS (native overlay platform view); the ColoredBox underlay in
-      // _buildPreviewView covers that gap.
+      // hard flash in a near-black UI. macOS honours it only where its WKWebView
+      // version exposes a public background-color API; the ColoredBox underlay
+      // in _buildPreviewView covers the versions where it no-ops.
       ..setBackgroundColor(background)
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setNavigationDelegate(

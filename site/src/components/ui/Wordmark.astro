@@ -1,0 +1,19 @@
+---
+// Rendered inline rather than as <img src="/logo/...">: as an external file the
+// wordmark is a second round trip that cannot start until the HTML is parsed, so
+// on a slow connection the nav painted with a hole where the logo goes. Inline it
+// arrives with the first frame. (It was never a layout-shift bug — measured CLS
+// is identical either way, since the flex row around it is sized by the beta pill.)
+//
+// Astro inlines .svg imports as components natively (5.7+), which is why this is
+// a plain import and not ?raw + set:html. The file stays in public/ so the URL
+// handed out for external brand use keeps resolving to the same bytes the site
+// renders — importing it from there is what keeps the two from drifting.
+import Wordmark from "../../../public/logo/antgrid-wordmark.svg";
+
+interface Props {
+  class?: string;
+}
+const { class: className } = Astro.props;
+---
+<Wordmark class={className} />

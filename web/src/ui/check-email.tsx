@@ -38,17 +38,17 @@ export function CheckEmailPage({
       : {};
   return (
     <Layout title="Check your email">
-      <div class="max-w-md mx-auto mt-16 card bg-base-100 border border-base-300">
+      <div class="max-w-md mx-auto mt-16 card bg-panel border border-edge">
         <div class="card-body items-center text-center">
-          <h1 class="card-title font-mono">Check your email</h1>
+          <h1 class="card-title">Check your email</h1>
           {isVerify ? (
-            <p class="text-sm text-base-content/70" {...remember}>
+            <p class="text-sm text-muted" {...remember}>
               We sent a verification link to{" "}
               <span class="font-mono">{email}</span>. Open it to finish creating
               your account — you can't sign in until you do.
             </p>
           ) : (
-            <p class="text-sm text-base-content/70">
+            <p class="text-sm text-muted">
               If that address has an Antgrid account, a password reset link is
               on its way. The link expires in one hour.
             </p>
@@ -84,7 +84,7 @@ export function CheckEmailPage({
               data-ab-cooldown-arm
               data-ab-email={email}
             >
-              <button type="submit" class="btn btn-outline btn-sm font-mono">
+              <button type="submit" class="btn btn-quiet btn-sm">
                 Resend the link
               </button>
             </form>
@@ -97,7 +97,7 @@ export function CheckEmailPage({
               and the resend button is a no-op for them too. Say so without
               claiming which case they are in. */}
           {isVerify && (
-            <p class="text-xs text-base-content/60 mt-6">
+            <p class="text-xs text-muted mt-6">
               Already had an account with this address? Nothing was sent — sign
               in with your magic link, GitHub or Google, or{" "}
               <a class="link" href="/forgot-password">
@@ -107,7 +107,7 @@ export function CheckEmailPage({
             </p>
           )}
 
-          <p class="text-xs text-base-content/60 mt-6">
+          <p class="text-xs text-muted mt-6">
             <a class="link" href="/login">
               Back to sign in
             </a>
@@ -125,10 +125,10 @@ export function CheckEmailPage({
 export function VerifyEmailFailedPage() {
   return (
     <Layout title="Verification link expired">
-      <div class="max-w-md mx-auto mt-16 card bg-base-100 border border-base-300">
+      <div class="max-w-md mx-auto mt-16 card bg-panel border border-edge">
         <div class="card-body items-center text-center">
-          <h1 class="card-title font-mono">Verification link expired</h1>
-          <p class="text-sm text-base-content/70">
+          <h1 class="card-title">Verification link expired</h1>
+          <p class="text-sm text-muted">
             That link is no longer valid. Verification links last one hour.
             Signing in again sends a fresh one.
           </p>

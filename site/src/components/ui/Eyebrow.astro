@@ -1,6 +1,11 @@
 ---
+// Deliberately colourless. These sat in indigo on all eight sections, which made
+// the accent read as "a heading starts here" and left nothing to distinguish the
+// places indigo means "the system is live". The leading rule does the wayfinding
+// colour used to do, and it reads as a label struck onto an instrument.
 const { class: cls = "" } = Astro.props;
 ---
-<p class={`font-mono text-[11px] uppercase tracking-[0.18em] text-indigo ${cls}`}>
+<p class={`flex items-center gap-2.5 font-mono text-marker uppercase tracking-[0.2em] text-muted2 ${cls}`}>
+  <span class="h-px w-6 shrink-0 bg-edge-emph" aria-hidden="true"></span>
   <slot />
 </p>
