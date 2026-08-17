@@ -4,6 +4,7 @@ import 'package:collection/collection.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../design/widgets/ab_snack_bar.dart';
 import '../models/recent_session_row.dart';
 import '../services/account_agents_api.dart';
 import '../services/control_plane_client.dart';
@@ -326,6 +327,15 @@ Future<void> openRecentSession(
   }
   if (!ok) {
     ref.read(pendingActiveSessionIdProvider.notifier).set(null);
+    // Most failure branches inside activateDrawerEntryById already show their
+    // own snackbar (cold-remote connect failure, InventoryAgentEntry connect
+    // failure). The one that doesn't: a Recent/Search row's registrationId
+    // resolves to no live drawer entry AND isn't a compound remote id — its
+    // project is gone from the local list and there's no machine to cold-open
+    // it on. Left unmessaged, that was a tap that does nothing forever.
+    if (context.mounted) {
+      showAbSnackBar(context, 'Could not open "${row.session.name}" — its project is no longer available.');
+    }
     return;
   }
   // Mirror session_row.dart's `_showFocusedSessionSurface`: workspace surface,

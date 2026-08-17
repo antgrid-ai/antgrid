@@ -35,11 +35,12 @@ double get titleBarLeftInset {
   return defaultTargetPlatform == TargetPlatform.macOS ? 78.0 : 0.0;
 }
 
-double get titleBarHeight => AbTokens.rowHeightSm;
-
-/// Below this width the handler control and mobile/host chip are hidden
-/// entirely. Neither has another entry point, so between the 640px window
-/// minimum and this threshold Handler config and the mobile-access toggle are
-/// unreachable — decide whether to drop the threshold or give them a drawer
-/// home alongside the deferred 1000px icon-only tier.
-const double kTitleBarTierIconOnly = 700;
+/// Sized off the search field it centres, not the shared dense-row token: the
+/// field ([AbTokens.rowHeightXs], the floor its own clear button needs) gets a
+/// symmetric [AbTokens.space6] margin top and bottom — deliberately more than
+/// the bar's icon buttons sit at, because a 4px margin here read as no margin
+/// at all once the field's own border and fill were in the picture. VS Code's
+/// command box floats with visibly dark bar showing above and below it; this
+/// is what makes that margin actually read at a glance instead of only
+/// measuring correctly.
+double get titleBarHeight => AbTokens.rowHeightXs + AbTokens.space6 * 2;

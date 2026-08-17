@@ -13,7 +13,6 @@ import '../../design/widgets/ab_list_row.dart';
 import '../../design/widgets/ab_menu.dart';
 import '../../design/widgets/ab_section_header.dart';
 import '../../design/widgets/ab_state_chip.dart';
-import '../../design/widgets/ab_toolbar.dart';
 import '../../design/widgets/ab_tooltip.dart';
 import '../../models/handler_state.dart';
 import '../../providers/providers.dart';
@@ -36,15 +35,7 @@ class HandlerScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final state = ref.watch(handlerStateProvider).value;
-    return Column(
-      children: [
-        // Every other workspace tab opens with an AbToolbar (Files, Git,
-        // Terminals, Preview). Handler opening straight into its list left it a
-        // row out of step with all of them across the resizable divider.
-        const AbToolbar.panel(title: 'Handler'),
-        Expanded(child: _body(context, ref, state)),
-      ],
-    );
+    return _body(context, ref, state);
   }
 
   Widget _body(BuildContext context, WidgetRef ref, HandlerState? state) {

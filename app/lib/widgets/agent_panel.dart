@@ -88,7 +88,12 @@ class AgentPanel extends ConsumerWidget {
               ),
               const SizedBox(width: AbTokens.space6),
               const SessionAgentMark(),
-              const SizedBox(width: AbTokens.space8),
+              // space12, not space8: the work-status badge overhangs the mark
+              // by 2px (see AgentWorkStatusBadge's Positioned offset in
+              // SessionAgentMark) and needs the wider gap to actually clear
+              // the breadcrumb — same convention as _SessionMark's use of
+              // space12 in recent_session_row_widget.dart.
+              const SizedBox(width: AbTokens.space12),
               const Expanded(child: TitleBarBreadcrumb()),
               const SizedBox(width: AbTokens.space6),
               const SessionModeControl(),
@@ -130,24 +135,43 @@ class AgentPanel extends ConsumerWidget {
 /// than above the whole window.
 ///
 /// Carries none of the pane-resizing controls, unlike the workspace side: the
-/// agent is the PRIMARY view, so every panel mode either shows it or leaves a
-/// tappable collapsed strip in its place, and every affordance that resizes a
+/// agent is the PRIMARY view, so every panel mode either shows it or shows
+/// only the workspace panel full width, and every affordance that resizes a
 /// pane already lives on a surface that stays mounted in every mode — the
 /// workspace tab bar, and the window title bar's sidebar and panel controls.
 ///
-/// The one exception is [WorkspaceMenuButton], which selects a view rather than
-/// sizing a pane: it is a shortcut into the context panel's five tabs from the
-/// bar the user is already looking at, and it stays reachable in the panel modes
-/// where the tab strip is off screen.
-class AgentBar extends StatelessWidget {
+/// The one exception is [WorkspaceMenuButton]. It selects a view rather than
+/// sizing a pane: a shortcut into the context panel's five tabs from the bar
+/// the user is already looking at, staying reachable in the panel modes where
+/// the tab strip is off screen — same popup on a touch tablet as on a mouse
+/// desktop, since the tablet's context panel is a docked pane beside the
+/// agent (`WorkspaceShellState._buildTabletTouch`), not an overlay covering
+/// it. Touch only differs while that pane is closed, where a tap opens it
+/// directly (see `WorkspaceMenuButton`'s own doc) — alongside a leading
+/// "Projects" button this bar grows only on a touch platform, opening the
+/// same kind of docked sidebar pane on a tablet (`open by default`, unlike
+/// the context pane) or the swiped-in `Scaffold.drawer` overlay on phone
+/// width. A mouse desktop keeps opening/closing the projects drawer from the
+/// window title bar instead, so it never needs that button.
+class AgentBar extends ConsumerWidget {
   const AgentBar({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     return AbToolbar.custom(
       children: [
+        if (isMobilePlatform) ...[
+          AbIconButton(
+            icon: AbIcons.menu,
+            tooltip: 'Projects',
+            onTap: ref.watch(openDrawerProvider),
+          ),
+          const SizedBox(width: AbTokens.space6),
+        ],
         const SessionAgentMark(),
-        const SizedBox(width: AbTokens.space8),
+        // space12, not space8 — see the matching comment in AgentPanel's
+        // mobile header above.
+        const SizedBox(width: AbTokens.space12),
         const Expanded(child: TitleBarBreadcrumb()),
         const SizedBox(width: AbTokens.space6),
         const SessionModeControl(),

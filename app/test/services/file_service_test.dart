@@ -199,6 +199,7 @@ void main() {
 
     expect(svc.currentState.gitFileStatuses['lib/main.dart'], 'M');
     expect(svc.currentState.gitFileStatuses['lib/new.dart'], 'A');
+    expect(svc.currentState.gitFileEntries.length, 2);
 
     await svc.dispose();
     await session.close();
@@ -303,18 +304,85 @@ void main() {
     },
   );
 
-  test('commit sends git:commit with message and files', () async {
+  test('commit sends git:commit with message, no file list', () async {
     final t = FakeAgentTransport();
     final session = await _newSession(t);
     final svc = FileService.fromSession(session);
 
-    svc.commit('msg', ['a.dart']);
+    svc.commit('msg');
     await Future<void>.delayed(Duration.zero);
 
     final msg = t.sent.firstWhere((m) => m['type'] == 'git:commit');
     expect(msg['projectId'], 'p');
     expect(msg['message'], 'msg');
+    expect(msg.containsKey('files'), isFalse);
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('stageFiles sends git:stage with files', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    svc.stageFiles(['a.dart']);
+    await Future<void>.delayed(Duration.zero);
+
+    final msg = t.sent.firstWhere((m) => m['type'] == 'git:stage');
+    expect(msg['projectId'], 'p');
     expect(msg['files'], ['a.dart']);
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('unstageFiles sends git:unstage with files', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    svc.unstageFiles(['a.dart']);
+    await Future<void>.delayed(Duration.zero);
+
+    final msg = t.sent.firstWhere((m) => m['type'] == 'git:unstage');
+    expect(msg['projectId'], 'p');
+    expect(msg['files'], ['a.dart']);
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('git:stage-result failure surfaces gitOpFeedback', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    t.emit('git:stage-result', {
+      'projectId': 'p',
+      'success': false,
+      'files': ['a.dart'],
+      'error': 'boom',
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.currentState.gitOpFeedback, 'boom');
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('git:stage-result success stays silent (no toast)', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    t.emit('git:stage-result', {
+      'projectId': 'p',
+      'success': true,
+      'files': ['a.dart'],
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.currentState.gitOpFeedback, isNull);
 
     await svc.dispose();
     await session.close();

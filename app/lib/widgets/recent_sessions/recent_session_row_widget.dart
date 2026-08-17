@@ -218,6 +218,20 @@ class _RecentSessionRowWidgetState
 /// past the leading mark + gap (mirrors Fleet.astro `pl-5` under the dot row).
 const double _mobileProjectIndent = _leadingSize + AbTokens.space12;
 
+/// Fixed width of the desktop rail's trailing time slot — wide enough for the
+/// longest [relativeTime] string, "11 months ago" (13 chars) in mono
+/// [AbTokens.fontXs]. Without this, a row's project label shares the leftover
+/// space with the time string right next to it, so a shorter/longer relative
+/// time ("1 week ago" vs "25 mins ago") shifts the project label's trailing
+/// edge and the whole rail reads as raggedly spaced row to row.
+const double _railTimeWidth = 96;
+
+/// Fixed width of the desktop rail's project slot — matches the previous cap,
+/// now applied as the slot's actual size (not just a max) so every row's
+/// project text starts at the same x instead of trailing the name column by a
+/// variable amount.
+const double _railProjectWidth = 220;
+
 /// Desktop: mark · name · project · time on one line.
 class _DesktopLayout extends StatelessWidget {
   const _DesktopLayout({
@@ -272,10 +286,13 @@ class _DesktopLayout extends StatelessWidget {
               ],
             ),
           ),
-          // Fixed cap (no flex) keeps a huge remote path from eating the name
-          // column; the < 560px compact fallback above owns the too-narrow case.
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 220),
+          // Fixed width (not just a cap) keeps a huge remote path from eating
+          // the name column AND makes this a true left-aligned column: every
+          // row's project text starts at the same x, rather than sliding with
+          // however much space the Expanded left for it. The
+          // < 560px compact fallback above owns the too-narrow case.
+          SizedBox(
+            width: _railProjectWidth,
             child: _ProjectLabel(name: _projectDisplayText(row.origin)),
           ),
           if (command != null) ...[
@@ -289,31 +306,39 @@ class _DesktopLayout extends StatelessWidget {
             _CommandLabel(label: command),
           ],
           const SizedBox(width: AbTokens.space12),
-          // Delete swaps IN PLACE of the time on hover (cross-fade in a
-          // right-aligned Stack) instead of reserving a trailing slot — the
-          // times stay truly flush with the row's right edge, and the rail
-          // never shifts because the Stack's width is the wider of the two.
-          Stack(
-            alignment: Alignment.centerRight,
-            children: [
-              AnimatedOpacity(
-                duration: AbTokens.motionSnap,
-                opacity: showDelete ? 0 : 1,
-                child: _TimeLabel(label: relTime),
-              ),
-              AnimatedOpacity(
-                duration: AbTokens.motionSnap,
-                opacity: showDelete ? 1 : 0,
-                child: IgnorePointer(
-                  ignoring: !showDelete,
-                  child: AbIconButton(
-                    icon: AbIcons.trash,
-                    tooltip: 'Delete session',
-                    onTap: onDelete,
+          // Fixed-width slot (fits the longest relative-time string, "11
+          // months ago"), left-aligned so every row's time starts at the same
+          // x right after the project column — instead of each row's string
+          // length shifting where the project label's trailing edge lands.
+          // Delete swaps IN PLACE of the time on hover (cross-fade) at that
+          // same leading edge, rather than reserving its own trailing slot.
+          SizedBox(
+            width: _railTimeWidth,
+            child: Stack(
+              alignment: Alignment.centerLeft,
+              children: [
+                AnimatedOpacity(
+                  duration: AbTokens.motionSnap,
+                  opacity: showDelete ? 0 : 1,
+                  child: _TimeLabel(label: relTime),
+                ),
+                AnimatedOpacity(
+                  duration: AbTokens.motionSnap,
+                  opacity: showDelete ? 1 : 0,
+                  child: IgnorePointer(
+                    ignoring: !showDelete,
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: AbIconButton(
+                        icon: AbIcons.trash,
+                        tooltip: 'Delete session',
+                        onTap: onDelete,
+                      ),
+                    ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ],
       ),

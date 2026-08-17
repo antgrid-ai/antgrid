@@ -87,7 +87,7 @@ describe("MessageBus", () => {
 
     test("keeps only the latest per type in cache", () => {
       const bus = new MessageBus();
-      const oldGit = createMessage("git:status", { projectId: "p1", files: [{ path: "a.ts", status: "M" as const }] });
+      const oldGit = createMessage("git:status", { projectId: "p1", files: [{ path: "a.ts", status: "M" as const, staged: true }] });
       bus.publish(oldGit, "control");
       bus.publish(gitMsg, "control"); // overwrites — same type
       const a = makeSub();
@@ -112,7 +112,7 @@ describe("MessageBus", () => {
       const a = makeSub();
       bus.subscribe(a);
       const gitV1 = createMessage("git:status", { projectId: "p1", files: [] });
-      const gitV2 = createMessage("git:status", { projectId: "p1", files: [{ path: "a.ts", status: "M" as const }] });
+      const gitV2 = createMessage("git:status", { projectId: "p1", files: [{ path: "a.ts", status: "M" as const, staged: true }] });
       bus.publish(gitV1, "control");
       bus.publish(gitV2, "control");
       expect(a.sent).toHaveLength(2);

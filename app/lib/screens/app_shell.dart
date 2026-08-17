@@ -25,7 +25,9 @@ import '../storage/cached_sessions_store.dart';
 import '../launcher/host_control_client.dart';
 import '../navigation/back_intent.dart';
 import '../util/ab_log.dart';
+import '../design/widgets/ab_window_controls.dart';
 import '../widgets/window_title_bar.dart';
+import '../window/window_capabilities.dart';
 import 'new_session_screen.dart';
 import 'workspace_shell.dart';
 
@@ -185,22 +187,33 @@ class _AppShellState extends ConsumerState<AppShell> {
     // Nothing may take vertical space above it on macOS: AppKit positions the
     // traffic lights in window coordinates and they do not move with Flutter
     // layout.
-    if (MediaQuery.sizeOf(context).width < kCompactBreakpoint) return routed;
-    // Touch devices take this branch too — an iPad is >=600px wide, and so is
-    // any phone in landscape — and there the bar is the topmost, widest thing
-    // on screen: uninset it renders under the status bar in portrait and under
-    // the side cutout in landscape, where the system also swallows taps on the
-    // brand mark and the back/forward buttons.
+    // Touch platform (Android/iOS) never gets this bar, at ANY width — a real
+    // tablet stays a tablet at 1024px (same rationale as _defaultPanelMode in
+    // workspace_shell.dart), and there is no mouse to drive the back/forward
+    // chevrons or the inline search field with. WorkspaceShell and
+    // NewSessionScreen give touch devices swipeable Drawer/endDrawer overlays
+    // for the sidebar and context panel instead of this row's toggle icons.
     //
-    // Consuming those insets here also strips them from the MediaQuery the
-    // routes below inherit, which is load-bearing: WorkspaceShell and
-    // NewSessionScreen each wrap themselves in SafeArea, and left to see the
-    // full padding they would inset a second time and leave a dead gap under
-    // the bar. Their content lands in the same place either way — this only
-    // moves the same inset up one level so the bar is covered too.
+    // A narrow DESKTOP window (mouse-driven, < kMediumBreakpoint) drops the
+    // bar's CONTENTS — WorkspaceShell and NewSessionScreen keep their own
+    // persistent-sidebar desktop layout there (that split stays at
+    // kCompactBreakpoint) and reach nav/search their own way — but it must
+    // still get the bar itself wherever we own the window chrome, for the
+    // reason stated at the top of this comment: the OS bar is hidden
+    // process-wide and `AbWindowControls` and the drag region live nowhere
+    // else, so returning the bare route would leave a window that cannot be
+    // moved or closed. 640x400 is the enforced minimum size
+    // (`initDesktopWindowChrome`), well inside this band, so it is reachable
+    // by an ordinary resize. Same chrome-only bar the auth splash uses.
     //
-    // Bottom is theirs: it is the gesture inset, and nothing here sits on it.
-    // No-op on desktop, where every system inset is zero.
+    // Each route wraps its own content in SafeArea, so touch insets are still
+    // consumed either way.
+    if (isMobilePlatform) return routed;
+    final narrow = MediaQuery.sizeOf(context).width < kMediumBreakpoint;
+    if (narrow && !appOwnsWindowChrome) return routed;
+    // Non-touch desktop platform from here down — system insets are always
+    // zero here (no OS status bar or cutout to clear on Windows/macOS/Linux),
+    // so nothing below needs to consume any.
     return ColoredBox(
       // The inset strips fall outside the bar's own Container, so without this
       // the bare route background shows through them.
@@ -209,7 +222,11 @@ class _AppShellState extends ConsumerState<AppShell> {
         bottom: false,
         child: Column(
           children: [
-            const WindowTitleBar(child: WindowTitleBarContents()),
+            WindowTitleBar(
+              child: narrow
+                  ? const Row(children: [Spacer(), AbWindowControls()])
+                  : const WindowTitleBarContents(),
+            ),
             Expanded(child: routed),
           ],
         ),

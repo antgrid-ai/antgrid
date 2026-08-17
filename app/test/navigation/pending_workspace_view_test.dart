@@ -10,9 +10,9 @@ import 'package:antgrid/models/workspace_view.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/providers/visible_surface.dart';
-import 'package:antgrid/screens/workspace_view_surface.dart';
 import 'package:antgrid/widgets/agent_panel.dart';
 import 'package:antgrid/widgets/mobile_bottom_nav.dart';
+import 'package:antgrid/widgets/workspace_panel.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -90,21 +90,23 @@ PendingNav<WorkspaceView> _pending(WorkspaceView view) =>
     (target: null, value: view);
 
 void main() {
-  testWidgets('a view pending on desktop opens the workbench surface', (
+  testWidgets('a view pending on desktop docks it beside the agent', (
     tester,
   ) async {
     await _withDesktopShell(tester, (container) async {
-      expect(find.byType(WorkspaceViewSurface), findsNothing);
+      expect(find.byType(AgentPanel), findsOneWidget);
+      expect(find.byType(WorkspacePanel), findsOneWidget);
+      expect(container.read(visibleWorkspaceViewProvider), WorkspaceView.files);
 
       container
           .read(pendingWorkspaceViewProvider.notifier)
           .set(_pending(WorkspaceView.git));
       await _settle(tester);
 
-      final surface = tester.widget<WorkspaceViewSurface>(
-        find.byType(WorkspaceViewSurface),
-      );
-      expect(surface.view, WorkspaceView.git);
+      // Still side-by-side with the agent — a pending nav docks the view the
+      // same way the workspace menu does, it does not take the whole route.
+      expect(find.byType(AgentPanel), findsOneWidget);
+      expect(find.byType(WorkspacePanel), findsOneWidget);
       expect(container.read(visibleWorkspaceViewProvider), WorkspaceView.git);
       // Spent on consumption, so a later mount can't replay the link.
       expect(container.read(pendingWorkspaceViewProvider), isNull);
@@ -124,10 +126,12 @@ void main() {
         ),
       ],
       (container) async {
-        final surface = tester.widget<WorkspaceViewSurface>(
-          find.byType(WorkspaceViewSurface),
+        expect(find.byType(AgentPanel), findsOneWidget);
+        expect(find.byType(WorkspacePanel), findsOneWidget);
+        expect(
+          container.read(visibleWorkspaceViewProvider),
+          WorkspaceView.terminals,
         );
-        expect(surface.view, WorkspaceView.terminals);
         expect(container.read(pendingWorkspaceViewProvider), isNull);
       },
     );
@@ -206,7 +210,8 @@ void main() {
         ),
       ],
       (container) async {
-        expect(find.byType(WorkspaceViewSurface), findsNothing);
+        // Never docked: the panel stays on its default view, not git.
+        expect(container.read(visibleWorkspaceViewProvider), WorkspaceView.files);
         expect(container.read(pendingWorkspaceViewProvider), isNull);
       },
     );
@@ -219,8 +224,9 @@ void main() {
       container.read(pendingWorkspaceViewProvider.notifier).set(null);
       await _settle(tester);
 
-      expect(find.byType(WorkspaceViewSurface), findsNothing);
+      expect(container.read(visibleWorkspaceViewProvider), WorkspaceView.files);
       expect(find.byType(AgentPanel), findsOneWidget);
+      expect(find.byType(WorkspacePanel), findsOneWidget);
     });
   });
 

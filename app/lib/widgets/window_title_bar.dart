@@ -24,7 +24,6 @@ import '../utils/platform_utils.dart';
 import '../window/window_capabilities.dart';
 import '../window/window_chrome.dart';
 import 'agent_panel.dart';
-import 'session_agent_mark.dart';
 import 'session_isolation_badge.dart';
 import 'session_mode_control.dart';
 import 'session_search_field.dart';
@@ -154,8 +153,8 @@ class _DragRegion extends ConsumerWidget {
 /// Footprint of one icon-button slot in the bar's leading cluster.
 ///
 /// [AbIconButton] scales its box with the ambient text scaler, and on a touch
-/// platform [AbTapTarget] floors it at [AbTokens.tapTargetMin] — the bar mounts
-/// on an iPad and in phone landscape too (see `app_shell.dart`). Both the
+/// platform [AbTapTarget] floors it at [AbTokens.tapTargetMin] — the bar can
+/// still mount on a large tablet in landscape (see `app_shell.dart`). Both the
 /// placeholder that holds an unpublished slot open and
 /// [WindowTitleBarContents._searchGutter]'s reserve measure it from here, so
 /// neither can disagree with what the buttons actually occupy.
@@ -185,18 +184,8 @@ class _PaneSlotPlaceholder extends StatelessWidget {
 class WindowTitleBarContents extends ConsumerWidget {
   const WindowTitleBarContents({super.key});
 
-  /// Sits immediately before [modeSlotKey], on a tighter gap than the rest of
-  /// the trailing row: the mark and the mode control describe the same session,
-  /// and spacing them like siblings is what stops the mark reading as one more
-  /// unrelated header chip.
-  @visibleForTesting
-  static const agentSlotKey = Key('window-title-bar-agent');
-
   @visibleForTesting
   static const modeSlotKey = Key('window-title-bar-mode');
-
-  @visibleForTesting
-  static const handlerSlotKey = Key('window-title-bar-handler');
 
   @visibleForTesting
   static const chipSlotKey = Key('window-title-bar-chip');
@@ -212,25 +201,19 @@ class WindowTitleBarContents extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final width = MediaQuery.sizeOf(context).width;
-    final showTrailing = width >= kTitleBarTierIconOnly;
     final panel = ref.watch(contextPanelControlProvider);
     final sidebar = ref.watch(sidebarControlProvider);
     // The agent bar owns the session controls whenever it is up; duplicating
     // them one row higher would say the same thing twice about one session.
-    // Two other arrangements must also NOT take them back, even though
-    // neither mounts an AgentPanel: a workspace view surface (Preview/Files/
-    // Git/…) has its own header with its own way out, and the New
-    // Session/Recent screen (`WorkbenchSurface.newSession`, or no project
-    // focused at all) has no live session for the controls to describe yet.
+    // The New Session/Recent screen (`WorkbenchSurface.newSession`, or no
+    // project focused at all) also must not take them back — it has no live
+    // session for the controls to describe yet.
     final noProjectFocused = ref.watch(selectedRegistrationIdProvider) == null;
     final onNewSessionScreen =
         noProjectFocused ||
         ref.watch(workbenchSurfaceProvider) == WorkbenchSurface.newSession;
     final showSession =
-        !ref.watch(agentBarMountedProvider) &&
-        !ref.watch(workspaceViewSurfaceActiveProvider) &&
-        !onNewSessionScreen;
+        !ref.watch(agentBarMountedProvider) && !onNewSessionScreen;
 
     final nav = ref.watch(navControllerProvider);
     final navNotifier = ref.read(navControllerProvider.notifier);
@@ -256,6 +239,18 @@ class WindowTitleBarContents extends ConsumerWidget {
           double.infinity,
         );
         final gutter = _searchGutter(context, centerWidth);
+        final region = centerWidth - gutter * 2;
+        final button = iconSlotExtent(context);
+        // Back/forward travel WITH the search box, not with the leading
+        // cluster — VS Code centres its ⟵⟶ immediately beside the command
+        // box, so the two must move as one unit for the bar to read the same
+        // way. [_searchGutter] reserves this cluster's full width, not just
+        // the box's, so it never overlaps the sidebar toggle.
+        final searchFloor = math.min(AbTokens.sessionSearchPopupMinWidth, region);
+        final searchWidth = math.min(
+          math.max(region - button * 2 - AbTokens.space6, searchFloor),
+          AbTokens.sessionSearchWidth,
+        );
         return Stack(
           children: [
             // Under the row, not over it: an overlap the gutter can't prevent
@@ -266,38 +261,66 @@ class WindowTitleBarContents extends ConsumerWidget {
               left: gutter,
               top: 0,
               bottom: 0,
-              width: centerWidth - gutter * 2,
+              width: region,
               child: Align(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(
-                    maxWidth: AbTokens.sessionSearchWidth,
-                  ),
-                  child: const KeyedSubtree(
-                    key: searchSlotKey,
-                    child: SessionSearchField(),
-                  ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Enabled by history OR by a handler that has something to
+                    // unwind, so the chevron lights up with a file open and no
+                    // history yet — and stays dark when the mounted-but-idle
+                    // tabs are all a press would find. `revision` is bumped
+                    // out of band by the registry (registration happens
+                    // mid-build), which is why this listens rather than
+                    // watching a provider.
+                    ListenableBuilder(
+                      listenable: ref
+                          .watch(backHandlerRegistryProvider)
+                          .revision,
+                      builder: (context, _) {
+                        final hasActive = ref
+                            .read(backHandlerRegistryProvider)
+                            .hasActive;
+                        return AbIconButton(
+                          icon: AbIcons.chevronLeft,
+                          tooltip: 'Back',
+                          onTap: nav.canBack || hasActive
+                              ? () => resolveBackIntent(
+                                  ref.container,
+                                  allowExit: false,
+                                )
+                              : null,
+                        );
+                      },
+                    ),
+                    AbIconButton(
+                      icon: AbIcons.chevronRight,
+                      tooltip: 'Forward',
+                      onTap: nav.canForward ? navNotifier.forward : null,
+                    ),
+                    const SizedBox(width: AbTokens.space6),
+                    SizedBox(
+                      width: searchWidth,
+                      child: const KeyedSubtree(
+                        key: searchSlotKey,
+                        child: SessionSearchField(),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
-            _titleBarRow(
-              ref: ref,
-              nav: nav,
-              navNotifier: navNotifier,
-              showTrailing: showTrailing,
-              showSession: showSession,
-              sidebar: sidebar,
-              panel: panel,
-            ),
+            _titleBarRow(ref: ref, showSession: showSession, sidebar: sidebar, panel: panel),
           ],
         );
       },
     );
   }
 
-  /// Width held back on EACH side of the centred search box so it cannot cover
-  /// the row's own controls.
+  /// Width held back on EACH side of the centred search cluster (back +
+  /// forward + box) so it cannot cover the row's own controls.
   ///
-  /// One width for both sides because the box is centred: reserving
+  /// One width for both sides because the cluster is centred: reserving
   /// asymmetrically would shift it off the centre the whole arrangement is
   /// built on. The leading cluster is the wider of the two and its every term
   /// is known without measuring ([iconSlotExtent] covers the text scaler and
@@ -305,9 +328,9 @@ class WindowTitleBarContents extends ConsumerWidget {
   /// its elastic middle; the side of the region facing the trailing row holds
   /// only the context-panel slot.
   ///
-  /// Yields to the box once the free middle falls below the popup's own floor:
-  /// at that window width (or that text scale) no arrangement both clears the
-  /// clusters and leaves a legible box, and the row sits above the box for
+  /// Yields to the cluster once the free middle falls below its own floor: at
+  /// that window width (or that text scale) no arrangement both clears the
+  /// clusters and leaves a legible box, and the row sits above the cluster for
   /// exactly that case.
   static double _searchGutter(BuildContext context, double centerWidth) {
     final button = iconSlotExtent(context);
@@ -315,23 +338,19 @@ class WindowTitleBarContents extends ConsumerWidget {
         AbTokens.space8 +
         AbBrandMark.iconHeight +
         AbTokens.space12 +
-        button + // sidebar slot
+        button; // sidebar slot
+    final clusterFloor =
+        button * 2 + // back + forward
         AbTokens.space6 +
-        button * 2; // back + forward
+        AbTokens.sessionSearchPopupMinWidth;
     return math.max(
       0.0,
-      math.min(
-        leading,
-        (centerWidth - AbTokens.sessionSearchPopupMinWidth) / 2,
-      ),
+      math.min(leading, (centerWidth - clusterFloor) / 2),
     );
   }
 
   Widget _titleBarRow({
     required WidgetRef ref,
-    required NavState nav,
-    required NavController navNotifier,
-    required bool showTrailing,
     required bool showSession,
     required ({bool hidden, VoidCallback toggle})? sidebar,
     required ({bool hidden, VoidCallback toggle})? panel,
@@ -341,16 +360,19 @@ class WindowTitleBarContents extends ConsumerWidget {
         const SizedBox(width: AbTokens.space8),
         const AbBrandMark.icon(),
         const SizedBox(width: AbTokens.space12),
-        // Ahead of back/forward, not beside the panel control at the far right:
-        // this governs the leftmost zone on screen, and the two pane toggles
-        // sitting at the two edges is what makes each one read as belonging to
-        // the pane it opens.
-        // Slot always occupies its space, even when no route publishes a
-        // control (New Session/settings, which show the drawer unconditionally
-        // and so have nothing for this to toggle) — a widget that appears and
-        // disappears here changes how much room the centred search field below
-        // has on the left, and it visibly hops sideways between routes as a
-        // result (see [contextPanelSlotKey], the same fix on the other side).
+        // Not beside the panel control at the far right: this governs the
+        // leftmost zone on screen, and the two pane toggles sitting at the two
+        // edges is what makes each one read as belonging to the pane it opens.
+        // Slot always occupies its space even while no control is published
+        // yet — both desktop routes (WorkspaceShell and NewSessionScreen)
+        // publish one, but only from a post-frame callback, so the very first
+        // frame after either mounts is briefly null — a widget that appears
+        // and disappears here changes how much room the centred search field
+        // below has on the left, and it visibly hops sideways between routes
+        // as a result. Unlike [contextPanelSlotKey], `sidebar` is null only in
+        // that brief window (every desktop route publishes a real one once
+        // mounted), so a same-footprint placeholder is enough here — there's
+        // no route where this button should read as permanently disabled.
         KeyedSubtree(
           key: sidebarSlotKey,
           child: sidebar == null
@@ -366,31 +388,6 @@ class WindowTitleBarContents extends ConsumerWidget {
                   onTap: sidebar.toggle,
                 ),
         ),
-        const SizedBox(width: AbTokens.space6),
-        // Enabled by history OR by a handler that has something to unwind, so
-        // the chevron lights up with a file open and no history yet — and stays
-        // dark when the mounted-but-idle tabs are all a press would find.
-        // `revision` is bumped out of band by the registry (registration
-        // happens mid-build), which is why this listens rather than watching a
-        // provider.
-        ListenableBuilder(
-          listenable: ref.watch(backHandlerRegistryProvider).revision,
-          builder: (context, _) {
-            final hasActive = ref.read(backHandlerRegistryProvider).hasActive;
-            return AbIconButton(
-              icon: AbIcons.chevronLeft,
-              tooltip: 'Back',
-              onTap: nav.canBack || hasActive
-                  ? () => resolveBackIntent(ref.container, allowExit: false)
-                  : null,
-            );
-          },
-        ),
-        AbIconButton(
-          icon: AbIcons.chevronRight,
-          tooltip: 'Forward',
-          onTap: nav.canForward ? navNotifier.forward : null,
-        ),
         // No breadcrumb here, by design: the session's name belongs above the
         // transcript it names, and the agent bar carries it. Rendering it here
         // too meant a project id appeared in this row on focus and was replaced
@@ -403,54 +400,49 @@ class WindowTitleBarContents extends ConsumerWidget {
         // trailing clusters apart and gives the drag region room either side
         // of the search box.
         const Expanded(child: SizedBox.shrink()),
-        if (showTrailing) ...[
-          if (showSession) ...[
-            const KeyedSubtree(key: agentSlotKey, child: SessionAgentMark()),
-            const SizedBox(width: AbTokens.space6),
-            const KeyedSubtree(key: modeSlotKey, child: SessionModeControl()),
-            const SizedBox(width: AbTokens.space8),
-            const KeyedSubtree(
-              key: handlerSlotKey,
-              child: HandlerHeaderControl(),
-            ),
-            const SizedBox(width: AbTokens.space8),
-          ],
-          KeyedSubtree(
-            key: chipSlotKey,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: titleBarProjectActions(ref),
-            ),
-          ),
+        // The bar only ever mounts at >= kMediumBreakpoint (app_shell.dart),
+        // comfortably above the old icon-only tier's floor, so this trailing
+        // cluster always fits and no width gate is needed here any more.
+        if (showSession) ...[
+          const KeyedSubtree(key: modeSlotKey, child: SessionModeControl()),
           const SizedBox(width: AbTokens.space8),
         ],
-        // Outside the trailing tier deliberately: hidden is the DEFAULT panel
+        KeyedSubtree(
+          key: chipSlotKey,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: titleBarProjectActions(ref),
+          ),
+        ),
+        const SizedBox(width: AbTokens.space8),
+        // Always shown, unlike the cluster above: hidden is the DEFAULT panel
         // mode on tablets and phone landscape, and dropping this control at
         // narrow widths would strand exactly those users with no way to bring
         // the context panel back.
         //
-        // Slot always occupies its space, even on routes with no context panel
-        // to toggle (New Session/settings) — omitting the widget there instead
-        // of just disabling it shrinks the bar's right-hand chrome, which
-        // shifts the centred search field and everything after it (the remote
-        // switch included) sideways when navigating to and from those routes.
+        // Slot always renders the SAME button, even on routes with no context
+        // panel to toggle (New Session/settings) — `onTap: panel?.toggle`
+        // falls into AbIconButton's own disabled styling (opacity 0.4, no
+        // hover/focus) rather than the button disappearing, which both keeps
+        // the bar's right-hand chrome from shifting the centred search field
+        // sideways when navigating to and from those routes AND keeps the
+        // control visible so it reads as "unavailable here", not missing.
         KeyedSubtree(
           key: contextPanelSlotKey,
-          child: panel == null
-              ? const _PaneSlotPlaceholder()
-              : AbIconButton(
-                  icon: panel.hidden
-                      ? AbIcons.layoutSidebarRightOff
-                      : AbIcons.layoutSidebarRight,
-                  // Same emphasis in both states: while hidden this button is
-                  // the ONLY way back (there is no collapsed strip), so
-                  // dimming it would make the sole recovery affordance the
-                  // faintest thing in the bar.
-                  tooltip: panel.hidden
-                      ? 'Show context panel'
-                      : 'Hide context panel',
-                  onTap: panel.toggle,
-                ),
+          child: AbIconButton(
+            icon: (panel?.hidden ?? true)
+                ? AbIcons.layoutSidebarRightOff
+                : AbIcons.layoutSidebarRight,
+            // Same emphasis in both live states: while hidden this button is
+            // the ONLY way back (there is no collapsed strip), so dimming it
+            // would make the sole recovery affordance the faintest thing in
+            // the bar. Omit the tooltip while disabled — there's no action
+            // for it to describe.
+            tooltip: panel == null
+                ? null
+                : (panel.hidden ? 'Show context panel' : 'Hide context panel'),
+            onTap: panel?.toggle,
+          ),
         ),
         const SizedBox(width: AbTokens.space8),
         const AbWindowControls(),

@@ -200,7 +200,17 @@ const AgentStatusMessage = BaseMessage.extend({
 
 const GitFileStatus = z.object({
   path: z.string(),
-  status: z.enum(["M", "A", "D", "?"]),
+  status: z.enum(["M", "A", "D", "R", "U", "!"]),
+  staged: z.boolean(),
+  // Pre-rename path, populated only for status "R" (the tree only has a node
+  // for the new path, so this is what a future "renamed from X" tooltip needs).
+  oldPath: z.string().optional(),
+  // Line-level diff stat vs HEAD (combined staged+unstaged); 0/0 for a merge
+  // conflict or a binary file. Optional so a hand-built fixture (or an older
+  // sender) that omits them still validates — absence reads as "unknown", the
+  // app already treats it as 0.
+  additions: z.number().int().nonnegative().optional(),
+  deletions: z.number().int().nonnegative().optional(),
 });
 
 const GitStatusMessage = BaseMessage.extend({
@@ -261,7 +271,6 @@ const GitCommitMessage = BaseMessage.extend({
   type: z.literal("git:commit"),
   projectId: z.string(),
   message: z.string(),
-  files: z.array(z.string()),
   ...CheckoutScoped,
 });
 
@@ -283,6 +292,38 @@ const GitDiscardMessage = BaseMessage.extend({
 
 const GitDiscardResultMessage = BaseMessage.extend({
   type: z.literal("git:discard-result"),
+  projectId: z.string(),
+  success: z.boolean(),
+  files: z.array(z.string()),
+  error: z.string().optional(),
+  ...CheckoutScoped,
+});
+
+const GitStageMessage = BaseMessage.extend({
+  type: z.literal("git:stage"),
+  projectId: z.string(),
+  files: z.array(z.string()),
+  ...CheckoutScoped,
+});
+
+const GitStageResultMessage = BaseMessage.extend({
+  type: z.literal("git:stage-result"),
+  projectId: z.string(),
+  success: z.boolean(),
+  files: z.array(z.string()),
+  error: z.string().optional(),
+  ...CheckoutScoped,
+});
+
+const GitUnstageMessage = BaseMessage.extend({
+  type: z.literal("git:unstage"),
+  projectId: z.string(),
+  files: z.array(z.string()),
+  ...CheckoutScoped,
+});
+
+const GitUnstageResultMessage = BaseMessage.extend({
+  type: z.literal("git:unstage-result"),
   projectId: z.string(),
   success: z.boolean(),
   files: z.array(z.string()),
@@ -1690,6 +1731,10 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   GitCommitResultMessage,
   GitDiscardMessage,
   GitDiscardResultMessage,
+  GitStageMessage,
+  GitStageResultMessage,
+  GitUnstageMessage,
+  GitUnstageResultMessage,
   AgentEnableRelayMessage,
   AgentDisableRelayMessage,
   AgentActivationPendingMessage,
@@ -1808,6 +1853,10 @@ export type GitCommit = z.infer<typeof GitCommitMessage>;
 export type GitCommitResult = z.infer<typeof GitCommitResultMessage>;
 export type GitDiscard = z.infer<typeof GitDiscardMessage>;
 export type GitDiscardResult = z.infer<typeof GitDiscardResultMessage>;
+export type GitStage = z.infer<typeof GitStageMessage>;
+export type GitStageResult = z.infer<typeof GitStageResultMessage>;
+export type GitUnstage = z.infer<typeof GitUnstageMessage>;
+export type GitUnstageResult = z.infer<typeof GitUnstageResultMessage>;
 export type FileSearch = z.infer<typeof FileSearchMessage>;
 export type FileSearchCancel = z.infer<typeof FileSearchCancelMessage>;
 export type SearchMatch = z.infer<typeof SearchMatchSchema>;
@@ -1901,6 +1950,7 @@ export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
   "file:upload-start", "file:upload-ready", "file:upload-chunk", "file:upload-ack", "file:upload-done", "file:upload-result",
   "git:status", "git:diff", "git:diff-content", "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",
   "git:commit", "git:commit-result", "git:discard", "git:discard-result",
+  "git:stage", "git:stage-result", "git:unstage", "git:unstage-result",
   "command:run", "command:output", "command:done",
   "config:read", "config:read-result", "config:write", "config:write-result", "config:changed", "config:detect-tools", "config:detect-tools-result",
   "ports:update", "port:detected", "preview:url", "file:tree:snapshot:request", "file:tree:snapshot", "preview:snapshot:request", "preview:snapshot",
@@ -1974,6 +2024,7 @@ const KNOWN_TYPES = new Set<string>([
   "git:status", "git:diff", "git:diff-content",
   "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",
   "git:commit", "git:commit-result", "git:discard", "git:discard-result",
+  "git:stage", "git:stage-result", "git:unstage", "git:unstage-result",
   "file:search", "file:search-cancel", "file:search-result", "file:search-done",
   "file:upload-start", "file:upload-ready", "file:upload-chunk",
   "file:upload-ack", "file:upload-done", "file:upload-result",

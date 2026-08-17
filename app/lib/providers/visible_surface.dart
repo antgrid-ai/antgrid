@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/pending_nav.dart';
@@ -109,6 +110,14 @@ typedef WorkspaceMenuControl = ({
   /// floating card — so the menu can mark it. Null when none is up.
   WorkspaceView? active,
   void Function(WorkspaceView) reveal,
+
+  /// Un-hides the context panel on whichever view it already carries, with no
+  /// view change. Used directly by `WorkspaceMenuButton` only on a touch
+  /// tablet, and only while the panel is closed — there, opening is the same
+  /// gesture as swiping, and the panel's own [WorkspaceTabBar] is what picks
+  /// a view once it's up, so nothing here should force one. Every other
+  /// caller reaches it indirectly through `reveal`.
+  VoidCallback open,
 });
 
 final workspaceMenuControlProvider =
@@ -117,9 +126,16 @@ final workspaceMenuControlProvider =
       WorkspaceMenuControl?
     >(() => ValueController(null));
 
-/// Whether the agent bar's workspace menu is up. Defaults to OPEN: the five
-/// views are on screen the moment a session is, and the icon is the only thing
-/// that takes them away.
+/// Whether the agent bar's workspace menu POPUP is up. Shared by a mouse
+/// desktop and a touch tablet — the tablet's context panel is a docked pane
+/// beside the agent (`WorkspaceShellState._buildTabletTouch`), not an overlay
+/// covering it, so the popup and the panel's own [WorkspaceTabBar] no longer
+/// compete for the same screen space the way they did when the panel was a
+/// full-width overlay. (Mobile phone width never reads this at all —
+/// `WorkspaceMenuButton` renders nothing there; see [workspaceMenuControlProvider].)
+///
+/// Defaults to OPEN: the five views are on screen the moment a session is, and
+/// the icon is the only thing that takes them away.
 ///
 /// App state rather than the button's own `State` because the button does not
 /// survive the thing its menu does. Revealing a view replaces the agent panel,

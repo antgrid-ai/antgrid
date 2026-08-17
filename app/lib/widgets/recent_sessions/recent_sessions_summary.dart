@@ -4,9 +4,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../design/ab_colors.dart';
 import '../../design/ab_status_tone.dart';
 import '../../design/ab_tokens.dart';
+import '../../design/widgets/ab_chip.dart';
 import '../../design/widgets/ab_status_dot.dart';
 import '../../providers/project_work_status.dart';
 import '../../providers/recent_sessions.dart';
+import '../../providers/value_controller.dart';
 import '../../services/control_plane_client.dart';
 import '../agent_work_status_dot.dart';
 
@@ -31,10 +33,11 @@ String workStatusLabel(AgentWorkStatus s) => switch (s) {
 
 /// `Sessions · N total` and the per-state summary badges on one line.
 ///
-/// Lives apart from the list so mobile can hoist it onto the canvas's top bar
-/// (beside the drawer button) rather than spend a row on it inside the scroll
-/// view, where it scrolls out of reach. Reads its own numbers, so the two mount
-/// points can never disagree about the count.
+/// Phone-width only ([_TopBar] in `new_session_content.dart` picks this over
+/// the tablet/desktop title+chips+badges arrangement below
+/// `kCompactBreakpoint`) — there's no room on a phone for the group-by chips
+/// too, so this keeps the old two-piece layout instead of squeezing a third
+/// element into the row.
 class RecentSessionsSummaryLine extends StatelessWidget {
   const RecentSessionsSummaryLine({super.key});
 
@@ -67,8 +70,11 @@ class RecentSessionsSummaryLine extends StatelessWidget {
   }
 }
 
-/// `Sessions · N total` on its own, for surfaces that place the badges
-/// themselves (the desktop header puts the filter chips between the two).
+/// `Sessions · N total` on its own — every mount point that places the chips
+/// and badges around it itself (the canvas's fixed top bar on tablet/narrow
+/// desktop, `_SessionsHeader` on a wide mouse desktop), since the arrangement
+/// differs (chips between title and badges, plus a drawer button and search
+/// icon at the outer edges on tablet/narrow).
 class RecentSessionsTitle extends ConsumerWidget {
   const RecentSessionsTitle({super.key});
 
@@ -147,15 +153,100 @@ class _SummaryBadge extends StatelessWidget {
           ),
           const SizedBox(width: AbTokens.space6),
         ],
-        Text(
-          label,
-          style: AbTokens.sansStyle(
-            fontSize: AbTokens.fontXs,
-            color: statusTone.color(context),
-            fontWeight: FontWeight.w500,
+        // A Wrap wraps BETWEEN badges but still bounds each one to its own
+        // maxWidth, so a badge narrower than its label has to shrink itself —
+        // and it can get that narrow wherever an inflexible neighbour splits
+        // the row first (`_SessionsHeader`'s group-by chips between two
+        // Expandeds). Degrades the way [RecentSessionsTitle] already does.
+        Flexible(
+          child: Text(
+            label,
+            maxLines: 1,
+            softWrap: false,
+            overflow: TextOverflow.ellipsis,
+            style: AbTokens.sansStyle(
+              fontSize: AbTokens.fontXs,
+              color: statusTone.color(context),
+              fontWeight: FontWeight.w500,
+            ),
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Which axis groups the Recent list. Shared state, not a ctor param: the
+/// chips ([RecentGroupByChips]) and the list that reads them
+/// ([RecentSessionsTab]) mount in different subtrees of the canvas (the
+/// former in the fixed top bar on touch/narrow, the latter in the scroll
+/// view below it), so there is no shared ancestor State to prop-drill
+/// through.
+enum RecentGroupBy { machine, project, status }
+
+final recentGroupByProvider =
+    NotifierProvider<ValueController<RecentGroupBy>, RecentGroupBy>(
+      () => ValueController(RecentGroupBy.machine),
+    );
+
+/// The Machine / Project / Status toggle chips. Hides itself while there are
+/// no recent sessions to group — [RecentSessionsTab] never builds its group
+/// headers in that state either, so a live chip row would toggle a grouping
+/// nothing on screen obeys.
+class RecentGroupByChips extends ConsumerWidget {
+  const RecentGroupByChips({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    if (ref.watch(recentSessionsProvider).isEmpty) {
+      return const SizedBox.shrink();
+    }
+    final groupBy = ref.watch(recentGroupByProvider);
+    void select(RecentGroupBy g) =>
+        ref.read(recentGroupByProvider.notifier).set(g);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _GroupChip(
+          label: 'Machine',
+          selected: groupBy == RecentGroupBy.machine,
+          onTap: () => select(RecentGroupBy.machine),
+        ),
+        const SizedBox(width: AbTokens.space6),
+        _GroupChip(
+          label: 'Project',
+          selected: groupBy == RecentGroupBy.project,
+          onTap: () => select(RecentGroupBy.project),
+        ),
+        const SizedBox(width: AbTokens.space6),
+        _GroupChip(
+          label: 'Status',
+          selected: groupBy == RecentGroupBy.status,
+          onTap: () => select(RecentGroupBy.status),
+        ),
+      ],
+    );
+  }
+}
+
+class _GroupChip extends StatelessWidget {
+  const _GroupChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return AbChip.toggle(
+      label: label,
+      selected: selected,
+      onTap: onTap,
+      color: selected ? context.antgrid.accent : null,
     );
   }
 }

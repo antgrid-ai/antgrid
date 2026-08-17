@@ -1,5 +1,5 @@
-import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/widgets/window_title_bar.dart';
+import 'package:antgrid/window/window_capabilities.dart';
 import 'package:antgrid/window/window_chrome.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
@@ -19,13 +19,13 @@ Widget _host(FakeWindowChrome fake) {
 }
 
 void main() {
-  testWidgets('is 32px tall', (tester) async {
+  testWidgets('matches titleBarHeight', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.windows;
     try {
       await tester.pumpWidget(_host(FakeWindowChrome()));
       expect(
         tester.getSize(find.byType(WindowTitleBar)).height,
-        AbTokens.rowHeightSm,
+        titleBarHeight,
       );
     } finally {
       debugDefaultTargetPlatformOverride = null;

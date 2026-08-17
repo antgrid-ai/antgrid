@@ -97,6 +97,13 @@ void main() {
 
   testWidgets('lists rows when sessions exist', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    // Wide enough that `_SessionsHeader` renders its combined title/chips/
+    // badges row — below kMediumBreakpoint even a mouse desktop gets the
+    // canvas's own top bar instead (see `new_session_screen.dart`), and this
+    // standalone pump has no canvas above it to carry the title.
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
     final row = RecentSessionRow(
       session: const SessionEntry(
         id: 's1',
@@ -133,8 +140,11 @@ void main() {
     tester,
   ) async {
     // Mobile's search is an icon in the canvas top bar opening a full-screen
-    // modal — an inline field here cost a row of a phone screen and, sharing it
-    // with the three group chips, was too narrow to read a session name in.
+    // modal — an inline field here cost a row of a phone screen. The group
+    // chips live in that same canvas top bar now too (new_session_content.dart),
+    // which is what `showHeader: false` says here: on a phone the canvas
+    // hoists the whole title/chips/badges row, so this list renders none of
+    // its own. Mirrors what `NewSessionContent` passes at this width.
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
     tester.view.physicalSize = const Size(390, 844);
     tester.view.devicePixelRatio = 1.0;
@@ -163,13 +173,12 @@ void main() {
         overrides: [
           recentSessionsProvider.overrideWithValue([row]),
         ],
-        child: _wrap(const RecentSessionsTab()),
+        child: _wrap(const RecentSessionsTab(showHeader: false)),
       ),
     );
     await tester.pump();
 
     expect(find.byType(SessionSearchField), findsNothing);
-    expect(find.text('MACHINE'), findsOneWidget);
 
     debugDefaultTargetPlatformOverride = null;
   });
@@ -178,6 +187,11 @@ void main() {
     tester,
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    // Wide enough that `_SessionsHeader` renders the badges this test reads —
+    // see the comment on the same lines above.
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
     final row = RecentSessionRow(
       session: const SessionEntry(
         id: 's1',
@@ -225,6 +239,9 @@ void main() {
     // Two sessions on ONE project, one blocked: the summary must read "1 needs
     // you · 1 working", not paint both with the project rollup.
     debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
     const origin = RecentOrigin(
       isLocal: false,
       registrationId: 'uuidA.projA',
@@ -284,6 +301,9 @@ void main() {
     // running:false (the store strips it on load), which masked every dot — the
     // whole list read "done" after a restart while an agent sat blocked.
     debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
     final row = RecentSessionRow(
       session: const SessionEntry(
         id: 's1',

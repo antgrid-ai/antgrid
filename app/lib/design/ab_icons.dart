@@ -56,6 +56,10 @@ abstract final class AbIcons {
   static const link = Codicon.link;
   static const add = Codicon.add;
   static const trash = Codicon.trash;
+  // Alias mirroring `add`; semantic for git's stage-changes action.
+  static const gitStage = Codicon.add;
+  // VS Code's own codicon name for its unstage/"−" action.
+  static const gitUnstage = Codicon.remove;
   static const menu = Codicon.menu;
   static const more = Codicon.kebab_vertical;
   static const list = Codicon.list_unordered;

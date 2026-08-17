@@ -49,6 +49,8 @@ const _antgrid = AbColors(
   error: Color(0xFFE5746A),
   warning: Color(0xFFE5A055),
   signalMut: Color(0xFFE2C792),
+  gitUntracked: Color(0xFF6FC2B0),
+  gitConflict: Color(0xFFE56A96),
 );
 
 /// Default: neutral grayscale terminal palette.
@@ -90,6 +92,8 @@ const _zinc = AbColors(
   error: Color(0xFFF87171),
   warning: Color(0xFFFACC15),
   signalMut: Color(0xFFC6C6C6),
+  gitUntracked: Color(0xFF2DD4BF),
+  gitConflict: Color(0xFFFB7185),
 );
 
 /// Cooler blue-tinted grays.
@@ -124,6 +128,8 @@ const _slate = AbColors(
   error: Color(0xFFF87171),
   warning: Color(0xFFFACC15),
   signalMut: Color(0xFFC084FC),
+  gitUntracked: Color(0xFF2DD4BF),
+  gitConflict: Color(0xFFFB7185),
 );
 
 /// Near-black, high-contrast.
@@ -157,6 +163,8 @@ const _onyx = AbColors(
   error: Color(0xFFF87171),
   warning: Color(0xFFFACC15),
   signalMut: Color(0xFFC084FC),
+  gitUntracked: Color(0xFF2DD4BF),
+  gitConflict: Color(0xFFFB7185),
 );
 
 /// Deep blue night.
@@ -190,6 +198,8 @@ const _midnight = AbColors(
   error: Color(0xFFF87171),
   warning: Color(0xFFFACC15),
   signalMut: Color(0xFFC084FC),
+  gitUntracked: Color(0xFF2DD4BF),
+  gitConflict: Color(0xFFFB7185),
 );
 
 /// Light theme — bright background, dark text. Single light preset for v1.
@@ -225,6 +235,8 @@ const _light = AbColors(
   error: Color(0xFFDC2626),
   warning: Color(0xFFA16207),
   signalMut: Color(0xFF9333EA),
+  gitUntracked: Color(0xFF0F766E),
+  gitConflict: Color(0xFFBE123C),
 );
 
 const Map<AbThemePreset, AbColors> kPresets = {
@@ -294,6 +306,11 @@ AbColors derivePalette({
     error: const Color(0xFFF87171),
     warning: const Color(0xFFFACC15),
     signalMut: primary,
+    // Semantic, not brand-derived — same reasoning as the other status
+    // colors above: a fixed default rather than something HSL-derived from
+    // bg/primary/accent.
+    gitUntracked: const Color(0xFF2DD4BF),
+    gitConflict: const Color(0xFFFB7185),
   );
 }
 

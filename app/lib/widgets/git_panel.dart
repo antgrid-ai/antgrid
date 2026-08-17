@@ -13,6 +13,7 @@ import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_tap_target.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_separator.dart';
+import '../models/ab_message.dart' show GitFileStatusEntry;
 import '../models/file_tree_models.dart';
 import '../navigation/back_intent.dart';
 import '../providers/analytics.dart';
@@ -53,8 +54,7 @@ class _GitPanelState extends ConsumerState<GitPanel> {
       return const AbLoading(message: 'loading changes...');
     }
     final treeStateAsync = ref.watch(fileTreeStateProvider);
-    final statuses =
-        treeStateAsync.value?.gitFileStatuses ?? const <String, String>{};
+    final counts = _GitHeaderCounts.of(treeStateAsync.value?.gitFileEntries);
     final git = treeStateAsync.value?.git;
     // watch, not the `ref.read` in [_backFromViewer]: the `active` flag has to
     // be recomputed when this tab goes on or off screen.
@@ -70,12 +70,12 @@ class _GitPanelState extends ConsumerState<GitPanel> {
       onBack: _backFromViewer,
       child: treeStateAsync.when(
         loading: () => _GitPanelScaffold(
-          statuses: statuses,
+          counts: counts,
           fileService: fileService,
           body: const AbLoading(message: 'loading changes...'),
         ),
         error: (error, _) => _GitPanelScaffold(
-          statuses: statuses,
+          counts: counts,
           fileService: fileService,
           body: Center(
             child: Text(
@@ -120,19 +120,50 @@ class _GitPanelState extends ConsumerState<GitPanel> {
   }
 }
 
+/// What the header's Stage All / Discard All / Commit actions operate on,
+/// derived from the raw entry list in ONE place.
+///
+/// Every branch of the panel (loading, error, data) renders the same header,
+/// and each used to re-derive these itself — so a change to what counts as
+/// unstaged reached only whichever copies were remembered.
+class _GitHeaderCounts {
+  const _GitHeaderCounts({
+    required this.stagedCount,
+    required this.unstagedPaths,
+  });
+
+  /// Conflicts ("!") are in neither: there is nothing safe to stage or discard
+  /// on one, and resolving it is not a restore to HEAD.
+  factory _GitHeaderCounts.of(List<GitFileStatusEntry>? entries) {
+    if (entries == null) {
+      return const _GitHeaderCounts(stagedCount: 0, unstagedPaths: []);
+    }
+    return _GitHeaderCounts(
+      stagedCount: entries.where((e) => e.staged).length,
+      unstagedPaths: [
+        for (final e in entries)
+          if (e.status != '!' && !e.staged) e.path,
+      ],
+    );
+  }
+
+  final int stagedCount;
+  final List<String> unstagedPaths;
+}
+
 /// The shared git-panel chrome: header + separator + expanded body, defined
 /// once so the loading/error/data branches can't drift in how they wrap the
 /// header. [onBack] is forwarded to the header (only the compact diff-viewing
 /// data branch supplies it).
 class _GitPanelScaffold extends StatelessWidget {
   const _GitPanelScaffold({
-    required this.statuses,
+    required this.counts,
     required this.fileService,
     required this.body,
     this.onBack,
   });
 
-  final Map<String, String> statuses;
+  final _GitHeaderCounts counts;
   final FileService fileService;
   final Widget body;
   final VoidCallback? onBack;
@@ -142,7 +173,7 @@ class _GitPanelScaffold extends StatelessWidget {
     return Column(
       children: [
         _GitChangesHeader(
-          statuses: statuses,
+          counts: counts,
           fileService: fileService,
           onBack: onBack,
         ),
@@ -161,14 +192,30 @@ class _GitPanelScaffold extends StatelessWidget {
 /// so the user never sees two headers.
 class _GitChangesHeader extends StatelessWidget {
   const _GitChangesHeader({
-    required this.statuses,
+    required this.counts,
     required this.fileService,
     this.onBack,
   });
 
-  final Map<String, String> statuses;
+  final _GitHeaderCounts counts;
   final FileService fileService;
   final VoidCallback? onBack;
+
+  Future<void> _discardAll(BuildContext context) async {
+    final unstagedPaths = counts.unstagedPaths;
+    if (unstagedPaths.isEmpty) return;
+    final count = unstagedPaths.length;
+    final confirmed = await AbConfirmDialog.show(
+      context: context,
+      title: 'Discard all changes',
+      body:
+          'Discard all changes to $count unstaged file${count == 1 ? '' : 's'}? '
+          'New files are deleted. This cannot be undone.',
+      confirmLabel: 'Discard All',
+      destructive: true,
+    );
+    if (confirmed) fileService.discard(unstagedPaths);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -195,10 +242,24 @@ class _GitChangesHeader extends StatelessWidget {
               style: AbTokens.sansStyle(color: context.antgrid.textMuted),
             ),
             const Spacer(),
+            if (counts.unstagedPaths.isNotEmpty) ...[
+              AbIconButton(
+                icon: AbIcons.revert,
+                onTap: () => _discardAll(context),
+                tooltip: 'Discard All Changes',
+              ),
+              const SizedBox(width: AbTokens.space4),
+              AbIconButton(
+                icon: AbIcons.gitStage,
+                onTap: () => fileService.stageFiles(counts.unstagedPaths),
+                tooltip: 'Stage All Changes',
+              ),
+              const SizedBox(width: AbTokens.space8),
+            ],
             AbButton(
-              label: statuses.isEmpty
+              label: counts.stagedCount == 0
                   ? 'Commit'
-                  : 'Commit (${statuses.length})',
+                  : 'Commit (${counts.stagedCount})',
               leading: AbIcon(
                 AbIcons.gitCommit,
                 size: AbTokens.iconButtonGlyph,
@@ -206,11 +267,10 @@ class _GitChangesHeader extends StatelessWidget {
                 color: context.antgrid.accentForeground,
               ),
               variant: AbButtonVariant.primary,
-              onTap: statuses.isEmpty
+              onTap: counts.stagedCount == 0
                   ? null
                   : () => GitCommitSheet.show(
                       context: context,
-                      changedFiles: statuses,
                       onCommit: fileService.commit,
                     ),
             ),
@@ -240,7 +300,7 @@ class _GitPanelBody extends StatelessWidget {
         final showBack = !showSideBySide && isViewing;
 
         return _GitPanelScaffold(
-          statuses: state.gitFileStatuses,
+          counts: _GitHeaderCounts.of(state.gitFileEntries),
           fileService: fileService,
           onBack: showBack
               ? () {
@@ -284,17 +344,10 @@ class _GitPanelBody extends StatelessWidget {
     return _buildFileList(context);
   }
 
+  // Same tree shape as the Files tab, decorated AND pruned down to changed
+  // files and their ancestor folders — FileTreeView's [changesOnly] hides
+  // everything else rather than just leaving it undecorated.
   Widget _buildFileList(BuildContext context) {
-    final changedFiles = state.gitFileStatuses;
-    if (changedFiles.isEmpty) {
-      return Center(
-        child: Text(
-          'No changed files',
-          style: TextStyle(color: context.antgrid.textMuted),
-        ),
-      );
-    }
-
     return RefreshIndicator(
       onRefresh: () async {
         fileService.requestFullTree();
@@ -305,23 +358,41 @@ class _GitPanelBody extends StatelessWidget {
         expandedPaths: state.expandedPaths,
         selectedFilePath: state.git.diffPath ?? state.git.viewingPath,
         filterQuery: null,
-        gitFileStatuses: state.gitFileStatuses,
-        showChangedOnly: true,
+        gitFileEntries: state.gitFileEntries,
+        changesOnly: true,
         onToggleExpanded: (path) => fileService.toggleExpanded(path),
         onFileSelected: (path) => fileService.requestDiff(path),
+        onStage: (path) => fileService.stageFiles([path]),
+        onUnstage: (path) => fileService.unstageFiles([path]),
         onDiscard: (path) => _confirmDiscard(context, path),
       ),
     );
   }
 
   Future<void> _confirmDiscard(BuildContext context, String path) async {
-    final isUntracked = state.gitFileStatuses[path] == '?';
+    // Read the per-entry list, not the deduped `gitFileStatuses` map: a path
+    // with BOTH a staged and an unstaged change collapses to one letter there,
+    // which cannot answer the question the copy below turns on. The bridge
+    // discards via `git restore`, which restores from the INDEX — so with
+    // something staged for this path, only the edits made after staging go,
+    // and promising a revert to the last commit overstates it.
+    final entries = state.gitFileEntries.where((e) => e.path == path);
+    final isUntracked = entries.any((e) => e.status == 'U');
+    final hasStaged = entries.any((e) => e.staged);
+    final String body;
+    if (isUntracked) {
+      body = 'Permanently delete the new file "$path"? This cannot be undone.';
+    } else if (hasStaged) {
+      body =
+          'Discard the unstaged changes to "$path"? Its staged changes are '
+          'kept. This cannot be undone.';
+    } else {
+      body = 'Discard all changes to "$path"? This cannot be undone.';
+    }
     final confirmed = await AbConfirmDialog.show(
       context: context,
       title: 'Discard changes',
-      body: isUntracked
-          ? 'Permanently delete the new file "$path"? This cannot be undone.'
-          : 'Discard all changes to "$path"? This cannot be undone.',
+      body: body,
       confirmLabel: isUntracked ? 'Delete' : 'Discard',
       destructive: true,
     );

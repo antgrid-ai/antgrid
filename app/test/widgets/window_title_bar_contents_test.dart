@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:antgrid/constants/breakpoints.dart';
 import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/design/widgets/ab_brand_mark.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
@@ -106,16 +107,17 @@ void main() {
     await tester.pump();
   }
 
-  /// Pumps with a sidebar control published, at the NARROW tier on purpose:
-  /// that control is the only way back to a hidden drawer, so it must survive
-  /// the width that drops the trailing row.
+  /// Pumps with a sidebar control published, at the bar's narrowest realistic
+  /// mount width (`kMediumBreakpoint` — the wrapping `app_shell.dart` never
+  /// mounts this widget below it): that control is the only way back to a
+  /// hidden drawer, so it must survive there.
   Future<void> pumpSidebar(
     WidgetTester tester, {
     required bool hidden,
     required VoidCallback toggle,
   }) => pumpAt(
     tester,
-    650,
+    kMediumBreakpoint,
     extraOverrides: [
       sidebarControlProvider.overrideWith(
         () => ValueController((hidden: hidden, toggle: toggle)),
@@ -156,44 +158,25 @@ void main() {
     }
   });
 
-  testWidgets('at >=700px the handler control is present', (tester) async {
-    try {
-      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-      await pumpAt(tester, 1200);
-      expect(find.byKey(WindowTitleBarContents.handlerSlotKey), findsOneWidget);
-    } finally {
-      debugDefaultTargetPlatformOverride = null;
-    }
-  });
-
+  // There used to be a separate, narrower icon-only tier (kTitleBarTierIconOnly
+  // = 700px) that hid the mode control and chip below it. That tier is gone
+  // now that app_shell.dart never mounts this bar below kMediumBreakpoint
+  // (840px) in the first place — comfortably above the old 700px floor — so
+  // the trailing cluster is unconditional. This guards against a regression
+  // at the bar's own narrowest realistic width.
   testWidgets(
-    'at exactly 700px the handler control is present (>= is inclusive)',
+    'at the bar\'s minimum mount width the mode control and chip are present',
     (tester) async {
       try {
         debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-        await pumpAt(tester, 700);
-        expect(
-          find.byKey(WindowTitleBarContents.handlerSlotKey),
-          findsOneWidget,
-        );
+        await pumpAt(tester, kMediumBreakpoint);
+        expect(find.byKey(WindowTitleBarContents.modeSlotKey), findsOneWidget);
+        expect(find.byKey(WindowTitleBarContents.chipSlotKey), findsOneWidget);
       } finally {
         debugDefaultTargetPlatformOverride = null;
       }
     },
   );
-
-  testWidgets('below 700px the handler control and chip are hidden', (
-    tester,
-  ) async {
-    try {
-      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-      await pumpAt(tester, 650);
-      expect(find.byKey(WindowTitleBarContents.handlerSlotKey), findsNothing);
-      expect(find.byKey(WindowTitleBarContents.chipSlotKey), findsNothing);
-    } finally {
-      debugDefaultTargetPlatformOverride = null;
-    }
-  });
 
   // The session's name lives in the agent bar and NOWHERE else — rendering it
   // here too made a project id flash in this row before the name settled one
@@ -209,9 +192,11 @@ void main() {
     }
   });
 
-  // Unlike the name, these are controls: the modes that mount no agent bar
-  // would otherwise leave the session with no mode switch and no handler. The
-  // chip is machine-scoped, so it is deliberately NOT part of the handover.
+  // Unlike the name, this is a control: the modes that mount no agent bar
+  // would otherwise leave the session with no mode switch. The title bar
+  // carries no fallback for the agent mark or the handler shield — those
+  // live only in the agent bar, mounted or not. The chip is machine-scoped,
+  // so it is deliberately NOT part of the handover.
   testWidgets('the session controls yield to a mounted agent bar', (
     tester,
   ) async {
@@ -224,9 +209,7 @@ void main() {
           agentBarMountedProvider.overrideWith(() => ValueController(true)),
         ],
       );
-      expect(find.byKey(WindowTitleBarContents.agentSlotKey), findsNothing);
       expect(find.byKey(WindowTitleBarContents.modeSlotKey), findsNothing);
-      expect(find.byKey(WindowTitleBarContents.handlerSlotKey), findsNothing);
       expect(find.byKey(WindowTitleBarContents.chipSlotKey), findsOneWidget);
       // Still no name, even in the state that hands the controls over.
       expect(find.byType(TitleBarBreadcrumb), findsNothing);
@@ -235,13 +218,12 @@ void main() {
     }
   });
 
-  testWidgets('the session controls return with no agent bar mounted', (
+  testWidgets('the mode control returns with no agent bar mounted', (
     tester,
   ) async {
     try {
       debugDefaultTargetPlatformOverride = TargetPlatform.windows;
       await pumpAt(tester, 1400);
-      expect(find.byKey(WindowTitleBarContents.agentSlotKey), findsOneWidget);
       expect(find.byKey(WindowTitleBarContents.modeSlotKey), findsOneWidget);
     } finally {
       debugDefaultTargetPlatformOverride = null;
@@ -249,8 +231,8 @@ void main() {
   });
 
   // The other side of the gate every session-control test leans on: with
-  // nothing focused there is no session for an agent/mode/handler control to
-  // speak for, and offering them would be offering controls over nothing. The
+  // nothing focused there is no session for a mode control to speak for, and
+  // offering one would be offering a control over nothing. The
   // route-independent parts of the bar stay.
   testWidgets('the New Session row carries no session controls', (
     tester,
@@ -258,9 +240,7 @@ void main() {
     try {
       debugDefaultTargetPlatformOverride = TargetPlatform.windows;
       await pumpAt(tester, 1400, projectId: null);
-      expect(find.byKey(WindowTitleBarContents.agentSlotKey), findsNothing);
       expect(find.byKey(WindowTitleBarContents.modeSlotKey), findsNothing);
-      expect(find.byKey(WindowTitleBarContents.handlerSlotKey), findsNothing);
       expect(find.byKey(WindowTitleBarContents.searchSlotKey), findsOneWidget);
       expect(find.byType(AbBrandMark), findsOneWidget);
     } finally {
@@ -283,17 +263,18 @@ void main() {
   });
 
   // The gutter, measured rather than recomputed: the search box is centred on
-  // the whole bar, so at a tablet width it reaches back over the nav cluster
+  // the whole bar, so at a narrow width it reaches back over the nav cluster
   // unless the reserve holds it off. Paint order alone wouldn't save the taps —
-  // the field would still cover the buttons, just underneath them. 650px is the
-  // tightest tier that still mounts the bar, which is where the reserve is
-  // closest to yielding to the popup's own floor.
-  testWidgets('the search box clears the nav cluster at the narrow tier', (
+  // the field would still cover the buttons, just underneath them.
+  // kMediumBreakpoint is the narrowest width the bar ever mounts at (see
+  // app_shell.dart), which is where the reserve is closest to yielding to the
+  // popup's own floor.
+  testWidgets('the search box clears the nav cluster at the narrowest width', (
     tester,
   ) async {
     try {
       debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-      await pumpAt(tester, 650);
+      await pumpAt(tester, kMediumBreakpoint);
       final forward = tester.getRect(
         find.ancestor(
           of: find.byTooltip('Forward'),
@@ -389,53 +370,60 @@ void main() {
     }
   });
 
-  testWidgets('the brand mark survives every tier', (tester) async {
+  testWidgets('the brand mark is present at the bar\'s minimum width', (
+    tester,
+  ) async {
     try {
       debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-      await pumpAt(tester, 650);
+      await pumpAt(tester, kMediumBreakpoint);
       expect(find.byType(AbBrandMark), findsOneWidget);
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }
   });
 
-  // Same as the sidebar slot on the other edge: reserved space, no button.
-  testWidgets('no context panel control while no workspace is mounted', (
-    tester,
-  ) async {
-    try {
-      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-      await pumpAt(tester, 1400);
-      expect(
-        find.descendant(
-          of: find.byKey(WindowTitleBarContents.contextPanelSlotKey),
-          matching: find.byType(AbIconButton),
-        ),
-        findsNothing,
-      );
-      expect(
-        tester
-            .getSize(find.byKey(WindowTitleBarContents.contextPanelSlotKey))
-            .width,
-        AbTokens.iconButtonBox,
-      );
-    } finally {
-      debugDefaultTargetPlatformOverride = null;
-    }
-  });
+  // Unlike the sidebar slot on the other edge (which is null only for one
+  // transient frame), the panel slot is null for a whole route's lifetime
+  // (New Session, settings) — so it renders a disabled button, not nothing,
+  // to read as "unavailable here" rather than missing.
+  testWidgets(
+    'context panel control is disabled, not absent, while no workspace is mounted',
+    (tester) async {
+      try {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        await pumpAt(tester, 1400);
+        final button = tester.widget<AbIconButton>(
+          find.descendant(
+            of: find.byKey(WindowTitleBarContents.contextPanelSlotKey),
+            matching: find.byType(AbIconButton),
+          ),
+        );
+        expect(button.onTap, isNull);
+        expect(
+          tester
+              .getSize(find.byKey(WindowTitleBarContents.contextPanelSlotKey))
+              .width,
+          AbTokens.iconButtonBox,
+        );
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
 
   testWidgets(
-    'the context panel control survives the narrow tier and toggles',
+    'the context panel control survives the bar\'s minimum width and toggles',
     (tester) async {
       try {
         debugDefaultTargetPlatformOverride = TargetPlatform.windows;
         var toggled = 0;
-        // 650px is below the 700px trailing tier — and hidden is the DEFAULT
-        // panel mode at these widths, so dropping the control here would leave
-        // no way to bring the context panel back.
+        // kMediumBreakpoint is the bar's narrowest realistic mount width — and
+        // hidden is the DEFAULT panel mode on tablets and phone landscape, so
+        // dropping the control here would leave no way to bring the context
+        // panel back.
         await pumpAt(
           tester,
-          650,
+          kMediumBreakpoint,
           extraOverrides: [
             contextPanelControlProvider.overrideWith(
               () => ValueController((hidden: true, toggle: () => toggled++)),

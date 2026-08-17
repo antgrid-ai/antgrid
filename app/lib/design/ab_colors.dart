@@ -39,6 +39,8 @@ class AbColors extends ThemeExtension<AbColors> {
     required this.error,
     required this.warning,
     required this.signalMut,
+    required this.gitUntracked,
+    required this.gitConflict,
   });
 
   final Color bgDeepest;
@@ -87,6 +89,14 @@ class AbColors extends ThemeExtension<AbColors> {
   final Color warning;
   final Color signalMut;
 
+  /// Git status badge color shared by Untracked ("U") and Renamed ("R") —
+  /// VS Code gives both the same green, distinct from Added's [success].
+  final Color gitUntracked;
+
+  /// Git status badge color for a merge conflict ("!") — distinct from
+  /// Deleted's [error]; VS Code uses a different red for the two.
+  final Color gitConflict;
+
   @override
   AbColors copyWith({
     Color? bgDeepest,
@@ -117,6 +127,8 @@ class AbColors extends ThemeExtension<AbColors> {
     Color? error,
     Color? warning,
     Color? signalMut,
+    Color? gitUntracked,
+    Color? gitConflict,
   }) {
     return AbColors(
       bgDeepest: bgDeepest ?? this.bgDeepest,
@@ -147,6 +159,8 @@ class AbColors extends ThemeExtension<AbColors> {
       error: error ?? this.error,
       warning: warning ?? this.warning,
       signalMut: signalMut ?? this.signalMut,
+      gitUntracked: gitUntracked ?? this.gitUntracked,
+      gitConflict: gitConflict ?? this.gitConflict,
     );
   }
 
@@ -186,6 +200,8 @@ class AbColors extends ThemeExtension<AbColors> {
       error: Color.lerp(error, other.error, t)!,
       warning: Color.lerp(warning, other.warning, t)!,
       signalMut: Color.lerp(signalMut, other.signalMut, t)!,
+      gitUntracked: Color.lerp(gitUntracked, other.gitUntracked, t)!,
+      gitConflict: Color.lerp(gitConflict, other.gitConflict, t)!,
     );
   }
 }
@@ -227,4 +243,6 @@ const _zincFallback = AbColors(
   error: Color(0xFFF87171),
   warning: Color(0xFFFACC15),
   signalMut: Color(0xFFC084FC),
+  gitUntracked: Color(0xFF2DD4BF),
+  gitConflict: Color(0xFFFB7185),
 );

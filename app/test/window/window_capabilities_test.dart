@@ -56,7 +56,7 @@ void main() {
     });
   });
 
-  test('titleBarHeight is the shared dense-row token', () {
-    expect(titleBarHeight, AbTokens.rowHeightSm);
+  test('titleBarHeight margins the search field by space6 on top and bottom', () {
+    expect(titleBarHeight, AbTokens.rowHeightXs + AbTokens.space6 * 2);
   });
 }

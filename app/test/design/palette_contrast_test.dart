@@ -123,6 +123,8 @@ void main() {
         ('success', p.success),
         ('error', p.error),
         ('accent', p.accent),
+        ('gitUntracked', p.gitUntracked),
+        ('gitConflict', p.gitConflict),
       ]) {
         _expectAA(color, p.bgSurface, 'light $name on bgSurface');
       }

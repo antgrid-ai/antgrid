@@ -219,6 +219,12 @@ abstract final class AbTokens {
   static const bottomNavHeight = 56.0;
   static const collapsedStripWidth = 36.0;
 
+  /// Width of a slide-in projects pane, matching the width a `Scaffold.drawer`
+  /// gives the same content. Shared by every hand-rolled docked pane that
+  /// stands in for one (`workspace_shell.dart`, `new_session_screen.dart`) so
+  /// the drawer reads the same size wherever it shows.
+  static const drawerPaneWidth = 304.0;
+
   /// Ceiling for the centred session-search field AND the result popup hung
   /// under it. The field shrinks below this on a narrow window; the cap stops a
   /// wide one turning a search box into the widest thing in the title bar. The
@@ -289,6 +295,15 @@ abstract final class AbTokens {
   static const motionSnap = Duration(milliseconds: 80);
   static const motionDefault = Duration(milliseconds: 160);
   static const motionSettle = Duration(milliseconds: 320);
+
+  /// A docked side pane sliding in or out. Longer than [motionDefault]: the
+  /// travel is a whole pane width, not a state change in place.
+  ///
+  /// Shared rather than per-call so a pane's own [AnimatedSlide] and the
+  /// [AnimatedPadding] reserving space for it beside the agent cannot fall out
+  /// of step — they animate different properties of the same movement, and
+  /// they only read as one movement while both run on this.
+  static const motionPane = Duration(milliseconds: 220);
 
   // ── Helpers ──
   /// Logical weight offset applied to helper-built text styles. Set once per

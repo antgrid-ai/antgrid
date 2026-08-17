@@ -2,11 +2,9 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../connection/supervisor_state.dart';
-import '../../constants/breakpoints.dart';
 import '../../design/ab_colors.dart';
 import '../../design/ab_status_tone.dart';
 import '../../design/ab_tokens.dart';
-import '../../design/widgets/ab_chip.dart';
 import '../../design/widgets/ab_empty_state.dart';
 import '../../design/widgets/ab_section_header.dart';
 import '../../design/widgets/ab_separator.dart';
@@ -23,8 +21,6 @@ import '../ab_status_helpers.dart';
 import '../first_run_checklist.dart';
 import 'recent_session_row_widget.dart';
 import 'recent_sessions_summary.dart';
-
-enum _RecentGroupBy { machine, project, status }
 
 class _SessionGroup {
   const _SessionGroup({
@@ -55,15 +51,25 @@ class _SessionGroup {
 /// docs on that function for why eagerly auto-connecting every ever-paired
 /// machine was removed.
 class RecentSessionsTab extends ConsumerStatefulWidget {
-  const RecentSessionsTab({super.key});
+  const RecentSessionsTab({super.key, this.showHeader = true});
+
+  /// Whether to render [_SessionsHeader] (title + group-by chips + badges) as
+  /// the list's first sliver. Passed DOWN from the screen that decides whether
+  /// the canvas mounts its own fixed top bar carrying that same arrangement
+  /// (`_TopBar` in `new_session_content.dart`) rather than re-derived from
+  /// platform+width here — exactly one of the two may mount, and only the
+  /// screen knows which.
+  ///
+  /// On by default, opt out to suppress — same shape as
+  /// `WorkspacePanel.showTabBar`: the header belongs to this list, and a host
+  /// that has hoisted it into its own chrome is the one that has to say so.
+  final bool showHeader;
 
   @override
   ConsumerState<RecentSessionsTab> createState() => _RecentSessionsTabState();
 }
 
 class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
-  _RecentGroupBy _groupBy = _RecentGroupBy.machine;
-
   @override
   Widget build(BuildContext context) {
     final rows = ref.watch(recentSessionsProvider);
@@ -120,16 +126,13 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
             AgentWorkStatus.done,
     };
 
-    final groups = _groupSessions(rows, _groupBy, statusFor);
+    final groupBy = ref.watch(recentGroupByProvider);
+    final groups = _groupSessions(rows, groupBy, statusFor);
 
     return CustomScrollView(
       slivers: [
-        SliverToBoxAdapter(
-          child: _SessionsHeader(
-            groupBy: _groupBy,
-            onGroupBy: (g) => setState(() => _groupBy = g),
-          ),
-        ),
+        if (widget.showHeader)
+          const SliverToBoxAdapter(child: _SessionsHeader()),
         for (var i = 0; i < groups.length; i++) ...[
           SliverToBoxAdapter(
             child: _GroupHeader(
@@ -158,7 +161,7 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
 
 List<_SessionGroup> _groupSessions(
   List<RecentSessionRow> rows,
-  _RecentGroupBy groupBy,
+  RecentGroupBy groupBy,
   Map<RecentSessionRow, AgentWorkStatus> statusFor,
 ) {
   // Bucket by a STABLE identity (machineUuid / registrationId), never by a
@@ -171,13 +174,13 @@ List<_SessionGroup> _groupSessions(
     final String key;
     final String label;
     switch (groupBy) {
-      case _RecentGroupBy.machine:
+      case RecentGroupBy.machine:
         key = row.origin.machineUuid ?? 'local';
         label = row.origin.deviceName;
-      case _RecentGroupBy.project:
+      case RecentGroupBy.project:
         key = row.origin.registrationId;
         label = row.origin.projectName;
-      case _RecentGroupBy.status:
+      case RecentGroupBy.status:
         final s = statusFor[row] ?? AgentWorkStatus.done;
         key = s.name;
         label = workStatusLabel(s);
@@ -186,7 +189,7 @@ List<_SessionGroup> _groupSessions(
     labels[key] = label;
   }
 
-  final keys = groupBy == _RecentGroupBy.status
+  final keys = groupBy == RecentGroupBy.status
       ? [
           for (final s in kWorkStatusOrder) s.name,
         ].where(buckets.containsKey).toList()
@@ -203,109 +206,56 @@ List<_SessionGroup> _groupSessions(
         // Machine-grouped bucket keys ARE the machineUuid (or 'local'); a
         // remote group's rows all share one machineUuid, so the first row's
         // origin gives it directly.
-        machineUuid: groupBy == _RecentGroupBy.machine
+        machineUuid: groupBy == RecentGroupBy.machine
             ? buckets[key]!.first.origin.machineUuid
             : null,
       ),
   ];
 }
 
-/// Group-by filter chips, plus (on desktop only) the title and summary badges.
+/// The title, group-by chips, and summary badges, scrolling with the list.
 ///
-/// On mobile those two live in the canvas's top bar instead
-/// ([RecentSessionsSummaryLine]) — sharing the drawer button's row rather than
-/// spending one of their own, and staying put while the list scrolls.
+/// Mounted only where the canvas has no fixed top bar of its own carrying the
+/// same arrangement — which is a real wide mouse desktop, and is decided by
+/// [RecentSessionsTab.showHeader] rather than re-derived here: see that field.
 class _SessionsHeader extends StatelessWidget {
-  const _SessionsHeader({required this.groupBy, required this.onGroupBy});
-
-  final _RecentGroupBy groupBy;
-  final ValueChanged<_RecentGroupBy> onGroupBy;
+  const _SessionsHeader();
 
   @override
   Widget build(BuildContext context) {
-    final chips = [
-      _GroupChip(
-        label: 'Machine',
-        selected: groupBy == _RecentGroupBy.machine,
-        onTap: () => onGroupBy(_RecentGroupBy.machine),
-      ),
-      const SizedBox(width: AbTokens.space6),
-      _GroupChip(
-        label: 'Project',
-        selected: groupBy == _RecentGroupBy.project,
-        onTap: () => onGroupBy(_RecentGroupBy.project),
-      ),
-      const SizedBox(width: AbTokens.space6),
-      _GroupChip(
-        label: 'Status',
-        selected: groupBy == _RecentGroupBy.status,
-        onTap: () => onGroupBy(_RecentGroupBy.status),
-      ),
-    ];
-
-    final isNarrow = MediaQuery.sizeOf(context).width < kCompactBreakpoint;
-
-    return Padding(
+    return const Padding(
       padding: EdgeInsets.fromLTRB(
         AbTokens.space16,
-        isNarrow ? AbTokens.space4 : AbTokens.space12,
+        AbTokens.space12,
         AbTokens.space16,
         AbTokens.space8,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (isNarrow)
-            // No search here: on mobile it is an icon in the canvas's top bar
-            // (see SessionSearchButton), which stays put while this list
-            // scrolls and costs the list no row of its own.
-            Row(mainAxisAlignment: MainAxisAlignment.end, children: chips)
-          else
-            Row(
-              children: [
-                const Expanded(
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: RecentSessionsTitle(),
-                  ),
+          Row(
+            children: [
+              Expanded(
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: RecentSessionsTitle(),
                 ),
-                const SizedBox(width: AbTokens.space10),
-                ...chips,
-                const SizedBox(width: AbTokens.space10),
-                const Expanded(
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    child: RecentSessionsSummaryBadges(),
-                  ),
+              ),
+              SizedBox(width: AbTokens.space10),
+              RecentGroupByChips(),
+              SizedBox(width: AbTokens.space10),
+              Expanded(
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: RecentSessionsSummaryBadges(),
                 ),
-              ],
-            ),
-          const SizedBox(height: AbTokens.space8),
-          const AbSeparator.horizontal(),
+              ),
+            ],
+          ),
+          SizedBox(height: AbTokens.space8),
+          AbSeparator.horizontal(),
         ],
       ),
-    );
-  }
-}
-
-class _GroupChip extends StatelessWidget {
-  const _GroupChip({
-    required this.label,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return AbChip.toggle(
-      label: label,
-      selected: selected,
-      onTap: onTap,
-      color: selected ? context.antgrid.accent : null,
     );
   }
 }

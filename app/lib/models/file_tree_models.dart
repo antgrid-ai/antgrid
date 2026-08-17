@@ -1,3 +1,5 @@
+import 'ab_message.dart' show GitFileStatusEntry;
+
 enum FileNodeType { file, directory }
 
 class FileNode {
@@ -199,7 +201,10 @@ class FileTreeState {
   final Set<String> expandedPaths;
   final String? filterQuery;
   final String? projectId;
-  final Map<String, String> gitFileStatuses; // path → M/A/D/?
+  final Map<String, String> gitFileStatuses; // path → M/A/D/R/U/! (deduped)
+  /// Raw per-entry list (a path can appear twice — once staged, once
+  /// unstaged) backing the Git tab's sectioned Staged/Changes/Merge view.
+  final List<GitFileStatusEntry> gitFileEntries;
   final bool showChangedOnly;
   final FilesPaneState files;
   final GitPaneState git;
@@ -218,6 +223,7 @@ class FileTreeState {
     this.filterQuery,
     this.projectId,
     this.gitFileStatuses = const {},
+    this.gitFileEntries = const [],
     this.showChangedOnly = false,
     this.files = FilesPaneState.empty,
     this.git = GitPaneState.empty,
@@ -232,6 +238,7 @@ class FileTreeState {
     bool clearFilterQuery = false,
     String? projectId,
     Map<String, String>? gitFileStatuses,
+    List<GitFileStatusEntry>? gitFileEntries,
     bool? showChangedOnly,
     FilesPaneState? files,
     GitPaneState? git,
@@ -244,6 +251,7 @@ class FileTreeState {
       filterQuery: clearFilterQuery ? null : (filterQuery ?? this.filterQuery),
       projectId: projectId ?? this.projectId,
       gitFileStatuses: gitFileStatuses ?? this.gitFileStatuses,
+      gitFileEntries: gitFileEntries ?? this.gitFileEntries,
       showChangedOnly: showChangedOnly ?? this.showChangedOnly,
       files: files ?? this.files,
       git: git ?? this.git,

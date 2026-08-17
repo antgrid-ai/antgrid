@@ -329,10 +329,11 @@ void main() {
 
     expect(opacityOf(timeFinder).opacity, 0);
     expect(opacityOf(deleteFinder).opacity, 1);
-    // Same spot: the swap must not shift the right rail.
+    // Same spot: the swap must not shift the rail. The slot is left-aligned,
+    // so it's the leading edge (not the trailing one) that must line up.
     expect(
-      tester.getBottomRight(deleteFinder.first).dx,
-      lessThanOrEqualTo(tester.getBottomRight(timeFinder).dx + 1),
+      tester.getTopLeft(deleteFinder.first).dx,
+      closeTo(tester.getTopLeft(timeFinder).dx, 1),
     );
 
     debugDefaultTargetPlatformOverride = null;

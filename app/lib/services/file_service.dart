@@ -134,6 +134,17 @@ class FileService {
       );
       return;
     }
+    // Stage/unstage are silent on success (like VS Code — the follow-up
+    // git:status refresh is what moves the UI); only a failure needs
+    // surfacing, since nothing else would explain it.
+    if (parsed is GitStageResultMessage) {
+      if (!parsed.success) _emitOpFeedback(parsed.error ?? 'Stage failed');
+      return;
+    }
+    if (parsed is GitUnstageResultMessage) {
+      if (!parsed.success) _emitOpFeedback(parsed.error ?? 'Unstage failed');
+      return;
+    }
   }
 
   /// Surface a one-shot git op result. Bumping the seq makes each result a
@@ -213,6 +224,11 @@ class FileService {
   }
 
   void _handleGitStatus(GitStatusMessage msg) {
+    // Folded in wire order (conflicts, renames/staged, then unstaged, then
+    // untracked — see getGitStatus's doc comment on the bridge) so a later
+    // duplicate for the same path (unstaged) overwrites an earlier one
+    // (staged): "worktree status wins", matching VS Code's own Explorer
+    // dedup rule, for free.
     final statuses = <String, String>{};
     for (final f in msg.files) {
       statuses[f.path] = f.status;
@@ -222,6 +238,7 @@ class FileService {
     _setState(
       _state.copyWith(
         gitFileStatuses: statuses,
+        gitFileEntries: msg.files,
         git: clearStaleGit
             ? _state.git.copyWith(clearDiff: true, clearViewing: true)
             : _state.git,
@@ -475,15 +492,16 @@ class FileService {
     session.unhydrateCheckout(checkoutId, 'file:selected');
   }
 
-  /// Stage [files] and commit them with [message]. Result (success or error)
-  /// arrives as git:commit-result and is surfaced via [gitOpFeedback]; the
-  /// changed-file list refreshes automatically from the bridge's git:status.
-  void commit(String message, List<String> files) {
+  /// Commit whatever is currently staged, with [message]. Result (success or
+  /// error) arrives as git:commit-result and is surfaced via [gitOpFeedback];
+  /// the changed-file list refreshes automatically from the bridge's
+  /// git:status. Which files land in the commit is decided by prior
+  /// [stageFiles]/[unstageFiles] calls, not by this one.
+  void commit(String message) {
     session.sendForCheckout(checkoutId,
       createAbMessage('git:commit', {
         'projectId': projectId,
         'message': message,
-        'files': files,
       }),
     );
   }
@@ -493,6 +511,20 @@ class FileService {
   void discard(List<String> files) {
     session.sendForCheckout(checkoutId,
       createAbMessage('git:discard', {'projectId': projectId, 'files': files}),
+    );
+  }
+
+  /// Stage [files] (`git add`) so they're included in the next [commit].
+  void stageFiles(List<String> files) {
+    session.sendForCheckout(checkoutId,
+      createAbMessage('git:stage', {'projectId': projectId, 'files': files}),
+    );
+  }
+
+  /// Unstage [files] (`git reset`) — working tree untouched.
+  void unstageFiles(List<String> files) {
+    session.sendForCheckout(checkoutId,
+      createAbMessage('git:unstage', {'projectId': projectId, 'files': files}),
     );
   }
 

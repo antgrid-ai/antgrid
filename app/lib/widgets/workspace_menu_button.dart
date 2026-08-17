@@ -6,6 +6,7 @@ import '../design/ab_tokens.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_menu.dart';
 import '../providers/visible_surface.dart';
+import '../utils/platform_utils.dart';
 // The shared popup-panel chrome (section header + hover/focus row) that the
 // composer's environment and branch pickers already use, so every grouped popup
 // in the app reads as one control.
@@ -13,21 +14,28 @@ import 'new_session/environment_menu.dart' show PanelRow, PanelSectionHeader;
 import 'workspace_tab_bar.dart';
 
 /// The agent bar's way into the workspace views: a dropdown naming all five,
-/// anchored under the icon.
+/// anchored under the icon (see the popup doc below) — the SAME popup on a
+/// touch tablet as on a mouse desktop, since the touch tablet's context panel
+/// is now a docked pane beside the agent (see `WorkspaceShellState._buildTabletTouch`),
+/// not an overlay covering it, so the two no longer compete for the same
+/// screen space. (Mobile phone width never reaches this widget at all —
+/// [workspaceMenuControlProvider] is always null there, since the workspace
+/// is a swiped-to page, not a docked panel with a menu into it.)
 ///
-/// Reaches them from the surface the user is already looking at, and stays
-/// reachable in the panel modes that put the context panel's own tab strip off
-/// screen — where picking one brings the panel back on that tab rather than
-/// selecting a tab nothing renders.
+/// The one platform-specific wrinkle: on a touch tablet, a tap while the
+/// context pane is CLOSED opens it directly ([WorkspaceMenuControl.open])
+/// instead of toggling the popup — there is nothing useful to anchor a "pick
+/// a view" menu to while the pane it would reveal a view IN isn't even on
+/// screen. Once the pane is open, a tap behaves exactly like desktop.
 ///
-/// **The menu is pinned, not modal, and it starts open.** It hangs in the
+/// **The popup is pinned, not modal, and it starts open.** It hangs in the
 /// overlay with no barrier, so it survives every click that lands elsewhere —
-/// including the ones that drive the agent underneath it — and the icon is the
-/// only thing that shuts it. That is why it cannot be a [showAbPanel] route: a
-/// [PopupRoute] both closes on the first outside click and swallows that click
-/// on the way. The trade is that a pinned popup is invisible in the icon's
-/// resting look, so the icon latches on ([AbIconButton.selected]) for as long as
-/// the menu is up.
+/// including the ones that drive the agent underneath it — and the icon is
+/// the only thing that shuts it. That is why it cannot be a [showAbPanel]
+/// route: a [PopupRoute] both closes on the first outside click and swallows
+/// that click on the way. The trade is that a pinned popup is invisible in
+/// the icon's resting look, so the icon latches on ([AbIconButton.selected])
+/// for as long as the menu is up.
 ///
 /// Open/closed is [workspaceMenuOpenProvider], not local state — see there for
 /// why the button cannot be trusted to remember it.
@@ -53,12 +61,14 @@ class _WorkspaceMenuButtonState extends ConsumerState<WorkspaceMenuButton> {
   @override
   void initState() {
     super.initState();
-    // The controller is still detached here, so this is a queued show that the
-    // OverlayPortal below picks up when it mounts. That queueing is what brings
-    // the menu back with the button after a workspace surface took the agent
-    // bar down — and what opens it on the first session of the launch, with no
-    // click at all.
-    if (ref.read(workspaceMenuOpenProvider)) _portal.show();
+    // The controller is detached here otherwise, so this is a queued show
+    // that the OverlayPortal below picks up when it mounts. That queueing is
+    // what brings the menu back with the button after a workspace surface
+    // took the agent bar down — and what opens it on the first session of the
+    // launch, with no click at all.
+    if (ref.read(workspaceMenuOpenProvider)) {
+      _portal.show();
+    }
   }
 
   /// Guarded rather than a bare show/hide: hiding an already-hidden controller
@@ -72,9 +82,10 @@ class _WorkspaceMenuButtonState extends ConsumerState<WorkspaceMenuButton> {
   @override
   Widget build(BuildContext context) {
     final control = ref.watch(workspaceMenuControlProvider);
+    if (control == null) return const SizedBox.shrink();
+
     final open = ref.watch(workspaceMenuOpenProvider);
     ref.listen(workspaceMenuOpenProvider, (_, next) => _sync(next));
-    if (control == null) return const SizedBox.shrink();
     // The portal can also fall out of step without the flag moving: a workbench
     // surface covering the route unmounts it while THIS State survives, so
     // initState never re-runs to re-queue the show. Repaired after the frame
@@ -114,8 +125,19 @@ class _WorkspaceMenuButtonState extends ConsumerState<WorkspaceMenuButton> {
           icon: AbIcons.workspace,
           selected: open,
           tooltip: 'Workspace',
-          onTap: () =>
-              ref.read(workspaceMenuOpenProvider.notifier).set(!open),
+          onTap: () {
+            // Touch tablet, pane currently closed: there's nothing to anchor
+            // a view-picker to yet, so open the pane directly — the same
+            // outcome a swipe would produce — rather than toggling a popup
+            // over a panel that isn't on screen. Once the pane is open this
+            // never fires again; every other tap falls through to the same
+            // toggle desktop uses.
+            if (isMobilePlatform && control.active == null) {
+              control.open();
+              return;
+            }
+            ref.read(workspaceMenuOpenProvider.notifier).set(!open);
+          },
         ),
       ),
     );
@@ -127,10 +149,9 @@ class _WorkspaceMenuButtonState extends ConsumerState<WorkspaceMenuButton> {
 /// arriving updates the counts while the menu is open.
 ///
 /// Picking a view does not close the menu — only the icon does — so the check
-/// mark moving to the row just tapped is the confirmation. On desktop the view
-/// is revealed by replacing the agent panel, which takes the button off screen
-/// with it, and the menu goes too; it comes back with the button, still open,
-/// because the flag it reads outlives both.
+/// mark moving to the row just tapped is the confirmation. Picking a view
+/// un-hides the docked context panel if the user had it closed, then selects
+/// that view there, alongside the agent.
 class WorkspaceMenuPanel extends ConsumerWidget {
   const WorkspaceMenuPanel({super.key});
 

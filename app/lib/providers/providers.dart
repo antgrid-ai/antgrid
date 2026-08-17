@@ -750,12 +750,12 @@ final contextPanelControlProvider =
 
 /// The desktop projects drawer's visibility plus the callback that flips it.
 ///
-/// Published by WorkspaceShell and rendered by the window title bar for exactly
-/// the reason [contextPanelControlProvider] is: the bar mounts above every route
-/// and cannot reach that State. Null on mobile, whose drawer is a slide-in
-/// overlay with no persistent visibility to toggle, and on the New Session
-/// route, which always shows the drawer — a toggle there would claim to govern
-/// something it doesn't.
+/// Published by whichever desktop route is mounted — WorkspaceShell or
+/// `NewSessionScreen`, both backing the same `sidebarHidden` app setting — and
+/// rendered by the window title bar for exactly the reason
+/// [contextPanelControlProvider] is: the bar mounts above every route and
+/// cannot reach either State. Null on mobile, whose drawer is a slide-in
+/// overlay with no persistent visibility to toggle.
 final sidebarControlProvider =
     NotifierProvider<
       ValueController<({bool hidden, VoidCallback toggle})?>,
@@ -766,28 +766,17 @@ final sidebarControlProvider =
 /// same way as [contextPanelControlProvider].
 ///
 /// That bar owns the session controls — agent mark, mode control, handler
-/// shield — so the window title bar must drop its copies while it is up, and
-/// take them back when it isn't: the New Session route, the settings overlay,
-/// and the collapsed-agent panel mode all render without it and would otherwise
-/// leave the session with no mode switch and no handler at all.
+/// shield. The window title bar carries no fallback for the mark or the
+/// handler shield (they live only in the agent bar); it drops and restores
+/// only its copy of the mode control while this flag flips: the New Session
+/// route and the settings overlay render without an agent bar and would
+/// otherwise leave the session with no mode switch at all.
 ///
 /// The session's NAME is deliberately not part of this handover — it lives only
 /// in the agent bar, above the transcript it names (see `TitleBarBreadcrumb`).
 final agentBarMountedProvider = NotifierProvider<ValueController<bool>, bool>(
   () => ValueController(false),
 );
-
-/// Whether a desktop [WorkspaceViewSurface] (Preview/Files/Git/Terminals/
-/// Handler opened full-workbench, replacing the agent/context split) is on
-/// screen, published by WorkspaceShell alongside [agentBarMountedProvider].
-///
-/// The surface brings its own header (back/close) naming the view, so unlike
-/// the New Session route or the settings overlay it must NOT have the window
-/// title bar hand the session controls back — that duplicated the agent mark,
-/// mode control and handler chip one row above a view whose own chrome already
-/// has a way back to them.
-final workspaceViewSurfaceActiveProvider =
-    NotifierProvider<ValueController<bool>, bool>(() => ValueController(false));
 
 /// Callback to reveal the Handler workspace tab (desktop: select the sidebar
 /// view; mobile: also swipe to the workspace page). Set by WorkspaceShell —

@@ -229,9 +229,10 @@ void main() {
     },
   );
 
-  // Desktop's window title bar never mounts below kCompactBreakpoint, so the
-  // mobile agent page needs its own drawer button and breadcrumb — see
-  // AgentPanel.build's mobile-only header.
+  // The window title bar never mounts below kMediumBreakpoint, so the mobile
+  // agent page needs its own drawer button and breadcrumb — see
+  // AgentPanel.build's mobile-only header (still split at kCompactBreakpoint,
+  // unaffected by the title bar's own, higher, mount threshold).
   testWidgets(
     'at a narrow width AgentPanel shows the drawer button and breadcrumb',
     (tester) async {

@@ -391,15 +391,33 @@ class CommandDoneMessage {
 
 class GitFileStatusEntry {
   final String path;
-  final String status; // "M", "A", "D", "?"
+  final String status; // "M", "A", "D", "R", "U", "!"
+  final bool staged;
+  final String? oldPath; // pre-rename path, set only when status is "R"
+  final int additions; // lines added vs HEAD, combined staged+unstaged
+  final int deletions; // lines removed vs HEAD, combined staged+unstaged
 
-  const GitFileStatusEntry({required this.path, required this.status});
+  const GitFileStatusEntry({
+    required this.path,
+    required this.status,
+    required this.staged,
+    this.oldPath,
+    this.additions = 0,
+    this.deletions = 0,
+  });
 
   static GitFileStatusEntry? fromJson(Map<String, dynamic> json) {
     final path = json['path'];
     final status = json['status'];
     if (path is! String || status is! String) return null;
-    return GitFileStatusEntry(path: path, status: status);
+    return GitFileStatusEntry(
+      path: path,
+      status: status,
+      staged: json['staged'] as bool? ?? false,
+      oldPath: json['oldPath'] as String?,
+      additions: (json['additions'] as num?)?.toInt() ?? 0,
+      deletions: (json['deletions'] as num?)?.toInt() ?? 0,
+    );
   }
 }
 
@@ -498,6 +516,42 @@ class GitDiscardResultMessage {
   final String? error;
 
   const GitDiscardResultMessage({
+    required this.id,
+    required this.timestamp,
+    required this.projectId,
+    required this.success,
+    required this.files,
+    this.error,
+  });
+}
+
+class GitStageResultMessage {
+  final String id;
+  final int timestamp;
+  final String projectId;
+  final bool success;
+  final List<String> files;
+  final String? error;
+
+  const GitStageResultMessage({
+    required this.id,
+    required this.timestamp,
+    required this.projectId,
+    required this.success,
+    required this.files,
+    this.error,
+  });
+}
+
+class GitUnstageResultMessage {
+  final String id;
+  final int timestamp;
+  final String projectId;
+  final bool success;
+  final List<String> files;
+  final String? error;
+
+  const GitUnstageResultMessage({
     required this.id,
     required this.timestamp,
     required this.projectId,
@@ -1108,6 +1162,46 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         projectId: projectId,
         success: success,
         files: files,
+        error: json['error'] as String?,
+      );
+
+    case 'git:stage-result':
+      final stageProjectId = json['projectId'];
+      final stageSuccess = json['success'];
+      if (stageProjectId is! String || stageSuccess is! bool) return null;
+      final stageFilesJson = json['files'];
+      final stageFiles = <String>[];
+      if (stageFilesJson is List) {
+        for (final f in stageFilesJson) {
+          if (f is String) stageFiles.add(f);
+        }
+      }
+      return GitStageResultMessage(
+        id: id,
+        timestamp: timestamp,
+        projectId: stageProjectId,
+        success: stageSuccess,
+        files: stageFiles,
+        error: json['error'] as String?,
+      );
+
+    case 'git:unstage-result':
+      final unstageProjectId = json['projectId'];
+      final unstageSuccess = json['success'];
+      if (unstageProjectId is! String || unstageSuccess is! bool) return null;
+      final unstageFilesJson = json['files'];
+      final unstageFiles = <String>[];
+      if (unstageFilesJson is List) {
+        for (final f in unstageFilesJson) {
+          if (f is String) unstageFiles.add(f);
+        }
+      }
+      return GitUnstageResultMessage(
+        id: id,
+        timestamp: timestamp,
+        projectId: unstageProjectId,
+        success: unstageSuccess,
+        files: unstageFiles,
         error: json['error'] as String?,
       );
 

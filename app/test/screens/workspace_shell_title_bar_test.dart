@@ -1,6 +1,5 @@
 import 'package:antgrid/widgets/ab_banner.dart';
 import 'package:antgrid/widgets/window_title_bar.dart';
-import 'package:antgrid/window/window_capabilities.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -48,41 +47,42 @@ void main() {
     }
   });
 
-  // A touch device is >=600px wide too — an iPad always, a phone in landscape —
-  // so it takes the same branch as a desktop window while having system insets
-  // a window never has. Only a view padding exposes this: on the desktop
-  // platforms the whole geometry collapses back to the dy == 0 cases above, so
-  // nothing a developer runs locally can catch it. The left inset stands in for
-  // a landscape cutout, which sits beside the bar's brand mark and back button.
-  testWidgets('system insets clear the bar without gapping under it', (
-    tester,
-  ) async {
-    try {
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-      tester.view.physicalSize = const Size(1024, 1366);
-      tester.view.devicePixelRatio = 1.0;
-      tester.view.padding = const FakeViewPadding(
-        top: 24,
-        left: 59,
-        bottom: 20,
-      );
-      addTearDown(tester.view.reset);
+  // A touch device (Android/iOS) never mounts the title bar, at ANY width —
+  // even a large tablet in landscape, e.g. this 1024px iPad, which used to
+  // take the same title-bar branch as a desktop window (that was the bug: a
+  // wide Android tablet still showing the desktop chrome). Unlike a mouse
+  // desktop window, which has no system insets to clear, a touch device's own
+  // status bar/cutout still needs to be consumed by SOMETHING — with no title
+  // bar to do it (app_shell.dart's `routed` branch skips straight past),
+  // WorkspaceShell's own SafeArea is what's left holding that job. Only a view
+  // padding exposes this: on desktop platforms every inset is already zero, so
+  // nothing a developer runs locally can catch a regression here. The left
+  // inset stands in for a landscape cutout — set here (exercising the layout
+  // under it) even though only the top inset is asserted below.
+  testWidgets(
+    'a touch tablet gets no title bar, and its own SafeArea clears system insets',
+    (tester) async {
+      try {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        tester.view.physicalSize = const Size(1024, 1366);
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.padding = const FakeViewPadding(
+          top: 24,
+          left: 59,
+          bottom: 20,
+        );
+        addTearDown(tester.view.reset);
 
-      await pumpWorkspaceShell(tester);
+        await pumpWorkspaceShell(tester);
 
-      final bar = find.byType(WindowTitleBar);
-      final barBottom = tester.getBottomLeft(bar).dy;
-
-      // Below the status bar and clear of the cutout, not under either.
-      expect(tester.getTopLeft(bar).dy, 24.0);
-      expect(tester.getTopLeft(bar).dx, 59.0);
-      expect(barBottom, 24.0 + titleBarHeight);
-      // Flush against the bar. WorkspaceShell wraps itself in its own SafeArea,
-      // so if the shell's inset stops being consumed from the MediaQuery it
-      // hands down, this re-inserts the full top inset as a dead gap.
-      expect(tester.getTopLeft(find.byType(AbBanner)).dy, barBottom);
-    } finally {
-      debugDefaultTargetPlatformOverride = null;
-    }
-  });
+        expect(find.byType(WindowTitleBar), findsNothing);
+        // Below the status bar, not under it — WorkspaceShell's own SafeArea
+        // is what consumes the top inset here; a regression would leave this
+        // flush at 0.0 (under the status bar) instead.
+        expect(tester.getTopLeft(find.byType(AbBanner)).dy, 24.0);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
 }

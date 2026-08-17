@@ -49,7 +49,7 @@ import { createStructuredAdapter } from "./handler/structured-adapter";
 import { dispatchRpc } from "./rpc/methods";
 import { StructuredAgentManager } from "./structured/structured-manager";
 import { TOOL_UPDATE_SPECS, createToolUpdateChecker, execToolUpdate, execToolVersion, parseAgentVersion, runAgentUpdate, updateSpecFor } from "./update/specs";
-import { getGitStatus, gitCommit, gitDiscard, type GitFileEntry } from "./git";
+import { getGitStatus, gitCommit, gitDiscard, gitStage, gitUnstage, type GitFileEntry } from "./git";
 import { listLocalBranches, checkoutLocalBranch } from "./git-branches";
 import { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
 
@@ -879,7 +879,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "git:commit": {
-        handleGitCommit(runtime, msg.projectId, msg.message, msg.files).catch((err) =>
+        handleGitCommit(runtime, msg.projectId, msg.message).catch((err) =>
           log.error("git:commit handler failed: %s", err)
         );
         break;
@@ -887,6 +887,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       case "git:discard": {
         handleGitDiscard(runtime, msg.projectId, msg.files).catch((err) =>
           log.error("git:discard handler failed: %s", err)
+        );
+        break;
+      }
+      case "git:stage": {
+        handleGitStage(runtime, msg.projectId, msg.files).catch((err) =>
+          log.error("git:stage handler failed: %s", err)
+        );
+        break;
+      }
+      case "git:unstage": {
+        handleGitUnstage(runtime, msg.projectId, msg.files).catch((err) =>
+          log.error("git:unstage handler failed: %s", err)
         );
         break;
       }
@@ -1377,8 +1389,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
   }
 
-  async function handleGitCommit(runtime: CheckoutRuntime, projectId: string, message: string, files: string[]) {
-    const result = await gitCommit(runtime.checkout.path, message, files);
+  async function handleGitCommit(runtime: CheckoutRuntime, projectId: string, message: string) {
+    const result = await gitCommit(runtime.checkout.path, message);
     sendFromRuntime(runtime, createMessage("git:commit-result", {
       projectId,
       success: result.success,
@@ -1409,15 +1421,45 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
   }
 
+  async function handleGitStage(runtime: CheckoutRuntime, projectId: string, files: string[]) {
+    const result = await gitStage(runtime.checkout.path, files);
+    sendFromRuntime(runtime, createMessage("git:stage-result", {
+      projectId,
+      success: result.success,
+      files,
+      ...(result.error ? { error: result.error } : {}),
+    }));
+    if (result.success) {
+      await refreshGitStatus(runtime);
+      sendGitStatus(runtime);
+      sendStatus(runtime);
+    }
+  }
+
+  async function handleGitUnstage(runtime: CheckoutRuntime, projectId: string, files: string[]) {
+    const result = await gitUnstage(runtime.checkout.path, files);
+    sendFromRuntime(runtime, createMessage("git:unstage-result", {
+      projectId,
+      success: result.success,
+      files,
+      ...(result.error ? { error: result.error } : {}),
+    }));
+    if (result.success) {
+      await refreshGitStatus(runtime);
+      sendGitStatus(runtime);
+      sendStatus(runtime);
+    }
+  }
+
   async function handleGitDiffRequest(runtime: CheckoutRuntime, projectId: string, path: string) {
     try {
       // `git diff HEAD` emits nothing for untracked files (they're in neither
-      // HEAD nor the index), so a tapped "?" file would render a blank diff.
+      // HEAD nor the index), so a tapped "U" file would render a blank diff.
       // Diff it against /dev/null via `--no-index` to show its full content as
       // additions. (`--no-index` exits 1 when files differ — normal for a new
       // file — so treat 0 and 1 as success.)
       const isUntracked = runtime.cachedGitFiles.some(
-        (f) => f.path === path && f.status === "?",
+        (f) => f.path === path && f.status === "U",
       );
       const args = isUntracked
         ? ["diff", "--no-index", "--", "/dev/null", path]

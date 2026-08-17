@@ -278,8 +278,6 @@ class _FileExplorerBody extends ConsumerWidget {
         expandedPaths: state.expandedPaths,
         selectedFilePath: state.files.selectedFilePath,
         filterQuery: null,
-        gitFileStatuses: state.gitFileStatuses,
-        showChangedOnly: false,
         onToggleExpanded: (path) => fileService.toggleExpanded(path),
         onFileSelected: (path) => fileService.selectFile(path),
       ),

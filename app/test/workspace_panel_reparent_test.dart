@@ -11,7 +11,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/widgets/resizable_pane.dart';
 
 enum _PanelMode { normal, contextHidden, contextExpanded }
@@ -99,7 +98,6 @@ class _HarnessState extends State<_Harness> {
         ];
       case _PanelMode.contextExpanded:
         return [
-          const SizedBox(width: AbTokens.collapsedStripWidth),
           Expanded(
             child: _Panel(
               key: _contextPanelKey,

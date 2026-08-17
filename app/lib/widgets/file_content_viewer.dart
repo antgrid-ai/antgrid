@@ -317,15 +317,11 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
     setState(() {
       _showSearch = !_showSearch;
       if (_showSearch) {
-        // If there's selected text, prefill the search field.
-        // Setting findInputController.text is enough — CodeFindController
-        // already listens to its own input controller and triggers search.
-        final selected = _controller?.selectedText;
-        if (selected != null &&
-            selected.isNotEmpty &&
-            !selected.contains('\n')) {
-          _findController?.findInputController.text = selected;
-        }
+        // findMode() seeds a non-null CodeFindValue (and autofills from a
+        // single-line selection); without it, CodeFindController.value stays
+        // null and its findInputController listener no-ops on every
+        // keystroke, so typing into the field never actually searched.
+        _findController?.findMode();
         WidgetsBinding.instance.addPostFrameCallback((_) {
           _searchFocusNode.requestFocus();
         });
@@ -444,7 +440,7 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _buildHeader(fileName, content.size),
+        _buildHeader(fileName),
         if (_showSearch) _buildSearchBar(),
         if (widget.fileWasModified)
           ViewerModifiedBanner(onRefresh: widget.onRefreshContent),
@@ -521,29 +517,21 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
     );
   }
 
-  Widget _buildHeader(String fileName, int size) {
-    return AbToolbar.custom(
-      children: [
-        Expanded(
-          child: Row(
-            children: [
-              Text(
-                fileName,
-                style: AbTokens.monoStyle(
-                  fontWeight: FontWeight.w600,
-                  fontSize: AbTokens.fontMd,
-                ),
-              ),
-              const SizedBox(width: AbTokens.space8),
-              Text(
-                formatFileSize(size),
-                style: AbTokens.monoStyle(color: context.antgrid.textMuted),
-              ),
-            ],
-          ),
+  Widget _buildHeader(String fileName) {
+    return AbToolbar.actions(
+      center: Text(
+        fileName,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: AbTokens.monoStyle(
+          fontWeight: FontWeight.w600,
+          fontSize: AbTokens.fontMd,
         ),
+      ),
+      trailing: [
         AbIconButton(
           icon: AbIcons.search,
+          tone: _showSearch ? AbIconButtonTone.accent : AbIconButtonTone.normal,
           onTap: _toggleSearch,
           tooltip: 'Search in file',
         ),
@@ -553,7 +541,6 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
             onTap: widget.onShowPreview,
             tooltip: 'Show preview',
           ),
-        const SizedBox(width: AbTokens.space4),
         AbIconButton(
           icon: AbIcons.close,
           onTap: widget.onClose,

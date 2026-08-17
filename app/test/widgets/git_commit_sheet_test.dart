@@ -4,20 +4,16 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/widgets/git_commit_sheet.dart';
 
 void main() {
-  testWidgets('commit button disabled until message and a file are present',
-      (tester) async {
+  testWidgets('commit button disabled until a message is present', (
+    tester,
+  ) async {
     String? committedMessage;
-    List<String>? committedFiles;
 
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
           body: GitCommitSheet(
-            changedFiles: const {'a.dart': 'M', 'b.dart': '?'},
-            onCommit: (m, f) {
-              committedMessage = m;
-              committedFiles = f;
-            },
+            onCommit: (m) => committedMessage = m,
           ),
         ),
       ),
@@ -28,75 +24,55 @@ void main() {
     await tester.pump();
     expect(committedMessage, isNull);
 
-    // Enter a message -> commit fires with all files selected by default.
+    // Enter a message -> commit fires with just the message; there's no
+    // file checklist to select — staging already decided what's included.
     await tester.enterText(find.byType(TextField), 'my commit');
     await tester.pump();
     await tester.tap(find.text('Commit'));
     await tester.pump();
 
     expect(committedMessage, 'my commit');
-    expect(committedFiles, containsAll(<String>['a.dart', 'b.dart']));
   });
 
-  testWidgets('deselect all files disables Commit', (tester) async {
+  testWidgets('whitespace-only message keeps Commit disabled', (
+    tester,
+  ) async {
     String? committedMessage;
 
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
           body: GitCommitSheet(
-            changedFiles: const {'a.dart': 'M', 'b.dart': '?'},
-            onCommit: (m, f) {
-              committedMessage = m;
-            },
+            onCommit: (m) => committedMessage = m,
           ),
+        ),
+      ),
+    );
+
+    await tester.enterText(find.byType(TextField), '   ');
+    await tester.pump();
+
+    await tester.tap(find.text('Commit'));
+    await tester.pump();
+    expect(committedMessage, isNull);
+  });
+
+  testWidgets('Cancel dismisses without committing', (tester) async {
+    var committed = false;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: GitCommitSheet(onCommit: (_) => committed = true),
         ),
       ),
     );
 
     await tester.enterText(find.byType(TextField), 'msg');
     await tester.pump();
-
-    // Deselect both files by tapping each row (the path Text sits inside the
-    // row's GestureDetector, so tapping it toggles selection).
-    await tester.tap(find.text('a.dart'));
-    await tester.pump();
-    await tester.tap(find.text('b.dart'));
+    await tester.tap(find.text('Cancel'));
     await tester.pump();
 
-    // Message present but no file selected -> Commit stays disabled.
-    await tester.tap(find.text('Commit'));
-    await tester.pump();
-    expect(committedMessage, isNull);
-  });
-
-  testWidgets('partial selection commits only selected files', (tester) async {
-    List<String>? committedFiles;
-
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: GitCommitSheet(
-            changedFiles: const {'a.dart': 'M', 'b.dart': '?'},
-            onCommit: (m, f) {
-              committedFiles = f;
-            },
-          ),
-        ),
-      ),
-    );
-
-    await tester.enterText(find.byType(TextField), 'partial');
-    await tester.pump();
-
-    // Deselect only b.dart, leaving a.dart selected.
-    await tester.tap(find.text('b.dart'));
-    await tester.pump();
-
-    await tester.tap(find.text('Commit'));
-    await tester.pump();
-
-    expect(committedFiles, equals(<String>['a.dart']));
-    expect(committedFiles, isNot(contains('b.dart')));
+    expect(committed, isFalse);
   });
 }

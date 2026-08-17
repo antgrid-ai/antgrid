@@ -67,7 +67,6 @@ import '../navigation/back_intent.dart';
 import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
 import 'app_settings_screen.dart';
-import 'workspace_view_surface.dart';
 
 /// Mobile page order. The drawer is NOT a page — it stays a `Scaffold.drawer`
 /// so it slides in as a panel over the content rather than replacing it — but
@@ -97,9 +96,18 @@ enum _PanelMode { normal, contextHidden, contextExpanded }
 
 /// Root layout orchestrator.
 ///
-/// Mobile (< 600px): two-page [PageView] — agent page | workspace page.
-/// Desktop (>= 600px): projects drawer + agent panel + context panel with
-/// collapsible strips and a resizable divider.
+/// Mobile (< kCompactBreakpoint): two-page [PageView] — agent page | workspace
+/// page, with the projects drawer a true swipeable `Scaffold.drawer` overlay.
+/// Desktop/tablet (>= kCompactBreakpoint): projects drawer + agent panel +
+/// context panel. On a MOUSE desktop that's a resizable split with
+/// collapsible strips ([_buildDesktop]), toggled from the window title bar,
+/// which only mounts at >= kMediumBreakpoint (see app_shell.dart). On any
+/// touch platform (Android/iOS) that title bar never mounts at all, at any
+/// width — [_buildTabletTouch] gives the SAME docked split as the mouse
+/// desktop for both side panes (sidebar open by default, context pane closed
+/// until the user asks for it), animated open/closed by swipe or the agent
+/// bar's own buttons instead of a title-bar click, since there's no toggle
+/// to click there.
 class WorkspaceShell extends ConsumerStatefulWidget {
   const WorkspaceShell({super.key});
 
@@ -113,11 +121,6 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   WorkspaceView _selectedView = WorkspaceView.files;
   double _splitRatio = 0.5;
 
-  /// The view the agent bar's workspace menu has opened over the workbench, or
-  /// null when the ordinary agent/context split is showing. Desktop only —
-  /// mobile reaches its views by swiping to the workspace page.
-  WorkspaceView? _surfaceView;
-
   /// Null until the user picks a mode (or a stored pref supplies one), so
   /// [_effectivePanelMode] can keep re-deriving the viewport default. Resolving
   /// lazily rather than freezing a value at prefs-apply time is what makes a
@@ -127,13 +130,46 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   bool _prefsApplied = false;
   final _mobileScaffoldKey = GlobalKey<ScaffoldState>();
 
+  /// Desktop-shaped layout, touch platform only: both the projects sidebar
+  /// and the context panel are docked panes like the mouse desktop's Row
+  /// (see [_buildDesktop]), just animated open/closed by swipe rather than a
+  /// title-bar toggle that isn't mounted here.
+  ///
+  /// Whether the touch tablet's docked sidebar pane is open. Starts true —
+  /// a session opens with the sidebar already alongside the agent, matching
+  /// the mouse desktop's own always-on rail, rather than mobile's swiped-in
+  /// overlay. Swiping and the agent bar's "Projects" button both flip this
+  /// same flag (see [_openDrawer]), so either one puts the other in sync.
+  bool _tabletDrawerOpen = true;
+
+  /// Whether the touch tablet's docked context pane is open. Starts false —
+  /// a session opens on the agent alone, full width; the pane only appears
+  /// once the user actually asks for it, by swiping, tapping the agent bar's
+  /// workspace button while the pane is closed, or picking a view from its
+  /// popup menu (see [_openContextPanel], `WorkspaceMenuButton`, and
+  /// [_revealWorkspaceView]) — all three flip this same flag, so any one puts
+  /// the others in sync.
+  bool _tabletEndDrawerOpen = false;
+
+  /// The touch tablet endDrawer's own expand toggle — mirrors the mouse
+  /// desktop's [_PanelMode.contextExpanded] but as a width change rather than
+  /// a mode, since the panel is already an overlay, not a pane to trade space
+  /// with the agent panel.
+  bool _tabletContextPanelExpanded = false;
+
   /// Accumulated leading-edge overscroll past the agent page.
   double _backOverscroll = 0;
   bool _exitPromptOpen = false;
 
   /// The exact callback published to [openDrawerProvider], held so [deactivate]
   /// can retract ITS OWN and never the next route's (see that provider's doc).
-  late final VoidCallback _publishedOpenDrawer = openMobileDrawer;
+  late final VoidCallback _publishedOpenDrawer = _openDrawer;
+
+  /// Same identity-retraction need as [_publishedOpenDrawer], for the record
+  /// published to [sidebarControlProvider] — see the mirrored field's doc in
+  /// `new_session_screen.dart`, the other route that publishes this same
+  /// provider.
+  late final VoidCallback _publishedToggleSidebar = _toggleSidebar;
 
   /// Identity for the two desktop panels ACROSS [_PanelMode] changes. Each mode
   /// builds a structurally different Row (see [_buildPanels]), so without these
@@ -253,18 +289,15 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // Same lifetime: the title bar outlives this route, so a stale panel
     // control would leave a dead toggle on the New Session page.
     final panelNotifier = ref.read(contextPanelControlProvider.notifier);
-    // Same lifetime again: the New Session route always shows the drawer, so a
-    // stale control would leave a toggle there that hides nothing.
+    // Same lifetime again: the New Session route publishes its own control on
+    // mount (same pattern, see `new_session_screen.dart`), so a stale one left
+    // here would fight it. Retracted by identity too — see
+    // _publishedToggleSidebar's doc.
     final sidebarNotifier = ref.read(sidebarControlProvider.notifier);
     // Same lifetime once more: a stale `true` here would leave the title bar
     // withholding the session controls on a route with no agent bar to show
     // them.
     final agentBarNotifier = ref.read(agentBarMountedProvider.notifier);
-    // Same lifetime as agentBarNotifier: a stale `true` here would leave the
-    // title bar withholding the session controls after this surface is gone.
-    final viewSurfaceNotifier = ref.read(
-      workspaceViewSurfaceActiveProvider.notifier,
-    );
     // The reveal callback closes over this State (setState + _pageController),
     // so leaving it published would let the agent header's NEEDS YOU pill call
     // into a disposed shell after a project switch.
@@ -272,8 +305,8 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // Same lifetime again: a stale tab left published here would let a back
     // press dispatch into handlers this route no longer has.
     final visibleViewNotifier = ref.read(visibleWorkspaceViewProvider.notifier);
-    // Closes over this State via `_openViewSurface`, so the same rule as the
-    // reveal callback above: left published, the agent bar's workspace menu
+    // Closes over this State via `_revealWorkspaceView`, so the same rule as
+    // the reveal callback above: left published, the agent bar's workspace menu
     // would call setState on a disposed shell.
     final menuNotifier = ref.read(workspaceMenuControlProvider.notifier);
     // Closes over _pageController too, so the same rule: NewSessionScreen
@@ -292,9 +325,13 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       try {
         notifier.set(null);
         panelNotifier.set(null);
-        sidebarNotifier.set(null);
+        if (identical(
+          container.read(sidebarControlProvider)?.toggle,
+          _publishedToggleSidebar,
+        )) {
+          sidebarNotifier.set(null);
+        }
         agentBarNotifier.set(false);
-        viewSurfaceNotifier.set(false);
         revealNotifier.set(null);
         visibleViewNotifier.set(null);
         menuNotifier.set(null);
@@ -626,24 +663,8 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   /// first if the user had it closed — a pill that selected a tab nobody can
   /// see would answer a call to action with nothing at all. Mobile: also swipes
   /// to the workspace page.
-  ///
-  /// Deliberately the docked tab, not [_openViewSurface]: this fires while the
-  /// user is reading the transcript the escalation came from, and taking the
-  /// whole workbench for it would bury the thing they need to answer it.
   void revealHandlerTab() {
-    if (!_isMobileLayout &&
-        (_effectivePanelMode == _PanelMode.contextHidden ||
-            _surfaceView != null)) {
-      setState(() {
-        if (_effectivePanelMode == _PanelMode.contextHidden) {
-          _panelMode = _PanelMode.normal;
-        }
-        // A workbench view surface covers the whole route, including the
-        // docked panel `_selectView` below switches — close it first or
-        // Handler stays hidden behind whatever the surface was showing.
-        _surfaceView = null;
-      });
-    }
+    _openContextPanel();
     _selectView(WorkspaceView.handler);
     _goToPage(_MobilePage.workspace);
   }
@@ -653,6 +674,20 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   void openMobileDrawer() {
     final scaffold = _mobileScaffoldKey.currentState;
     if (scaffold != null && !scaffold.isDrawerOpen) scaffold.openDrawer();
+  }
+
+  /// Opens the projects drawer regardless of which layout is live, so
+  /// [openDrawerProvider]'s one published callback works whether the window is
+  /// phone width ([openMobileDrawer]'s [_mobileScaffoldKey]) or a touch
+  /// tablet (the docked sidebar pane, see [_buildTabletTouch]). A mouse
+  /// desktop publishes no callback at all — its drawer opens from the window
+  /// title bar instead — so this is never called there.
+  void _openDrawer() {
+    if (_isMobileLayout) {
+      openMobileDrawer();
+      return;
+    }
+    if (!_tabletDrawerOpen) setState(() => _tabletDrawerOpen = true);
   }
 
   void _goToPage(int page) {
@@ -841,12 +876,6 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
     final width = MediaQuery.sizeOf(context).width;
     final isMobile = width < kCompactBreakpoint;
-    // _surfaceView is desktop-only state (mobile reaches views by swiping to
-    // the workspace page); clear it on a resize into mobile so a later resize
-    // back to desktop can't resurrect a surface the user never reopened.
-    if (isMobile && _surfaceView != null) {
-      _surfaceView = null;
-    }
 
     // Resolved here rather than per-layout so the desktop visibility gate below
     // sees it: an overlay surface replaces the panels entirely, and publishing a
@@ -858,41 +887,70 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // PageView's onPageChanged (and the mobile initializer), so only force-true
     // here on desktop to avoid clobbering the mobile page state.
     if (!isMobile) {
-      final control = (
-        hidden: _effectivePanelMode == _PanelMode.contextHidden,
-        toggle: _toggleContextPanel,
-      );
-      final sidebar = (
-        hidden: ref.watch(appSettingsServiceProvider).sidebarHidden,
-        toggle: _toggleSidebar,
-      );
-      // Which workspace view is genuinely on screen: the surface's while one is
-      // up, the docked tab otherwise, and nothing at all behind a workbench
-      // surface or a hidden panel. Shared by the back-handler gate and the
-      // menu's check mark so the two can never disagree.
+      // Two entirely different mechanisms drive these, branching on platform:
+      // a mouse desktop's [_PanelMode] (toggled from the window title bar) vs.
+      // a touch tablet's own docked-pane open state (toggled by swipe or a
+      // button in AgentBar — see [_buildDesktop]/[_buildTabletTouch]). Both
+      // still feed the SAME providers below, so nothing downstream needs to
+      // know which layout produced them.
+      final touch = isMobilePlatform;
+      // contextPanelControlProvider/sidebarControlProvider feed ONLY the
+      // window title bar's pane-toggle icons, which never mount on a touch
+      // platform (see app_shell.dart) — published null there, same as the
+      // isMobile (phone-width) case above skips this whole block.
+      final control = touch
+          ? null
+          : (
+              hidden: _effectivePanelMode == _PanelMode.contextHidden,
+              toggle: _toggleContextPanel,
+            );
+      // Below the title bar's own mount floor there is no toggle to restore
+      // it with, so the drawer can never actually be hidden there — see the
+      // same gate in [_buildDesktop].
+      final sidebar = touch
+          ? null
+          : (
+              hidden:
+                  width >= kMediumBreakpoint &&
+                  ref.watch(appSettingsServiceProvider).sidebarHidden,
+              toggle: _publishedToggleSidebar,
+            );
+      // Which workspace view is genuinely on screen: the docked tab (mouse
+      // desktop) or the open endDrawer's tab (touch tablet), or nothing at all
+      // behind a workbench surface or a hidden/closed panel. Shared by the
+      // back-handler gate and the menu's check mark so the two can never
+      // disagree.
       final visibleView = surfaceChild != null
           ? null
-          : _surfaceView ??
-                (_effectivePanelMode == _PanelMode.contextHidden
-                    ? null
-                    : _selectedView);
+          : touch
+                ? (_tabletEndDrawerOpen ? _selectedView : null)
+                : (_effectivePanelMode == _PanelMode.contextHidden
+                      ? null
+                      : _selectedView);
       final menu = surfaceChild != null
           ? null
-          : (active: visibleView, reveal: _openViewSurface);
-      // Whether [_agentPanel] is actually mounted: false behind a workbench
-      // surface (settings/new-session), behind the new full-workbench
-      // [_surfaceView], and in [_PanelMode.contextExpanded] (only the
-      // collapsed strip renders there, not the transcript). Shared by
-      // [agentBarMountedProvider] (the title bar's "does a route below me own
-      // the session controls" gate) and [agentSurfaceVisibleProvider] (whether
-      // the transcript is on screen for notification-suppression purposes) so
-      // the two can never disagree — they used to: agentSurfaceVisibleProvider
-      // was unconditionally forced true here, so opening a view surface left
-      // escalations for the now-hidden session silently unsurfaced.
+          : (
+              active: visibleView,
+              reveal: _revealWorkspaceView,
+              open: _openContextPanel,
+            );
+      // Whether [_agentPanel] is actually mounted/on screen: false behind a
+      // workbench surface (settings/new-session); on a mouse desktop, also
+      // false in [_PanelMode.contextExpanded] (only the workspace panel
+      // renders there, full width); on a touch tablet, also false only while
+      // the context pane is BOTH open and expanded — the sidebar and the
+      // context pane's normal open states are docks, not overlays, so either
+      // (or both) being open still leaves the agent genuinely on screen
+      // beside them, same as the mouse desktop's [_PanelMode.normal]. Shared
+      // by [agentBarMountedProvider] (the title bar's "does a route below me
+      // own the session controls" gate) and [agentSurfaceVisibleProvider]
+      // (whether the transcript is on screen for notification-suppression
+      // purposes) so the two can never disagree.
       final agentPanelVisible =
           surfaceChild == null &&
-          _surfaceView == null &&
-          _effectivePanelMode != _PanelMode.contextExpanded;
+          (touch
+              ? !(_tabletEndDrawerOpen && _tabletContextPanelExpanded)
+              : _effectivePanelMode != _PanelMode.contextExpanded);
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         if (ref.read(agentSurfaceVisibleProvider) != agentPanelVisible) {
@@ -913,9 +971,6 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
         // window title bar has to take the session controls back (see the
         // provider).
         ref.read(agentBarMountedProvider.notifier).set(agentPanelVisible);
-        ref
-            .read(workspaceViewSurfaceActiveProvider.notifier)
-            .set(surfaceChild == null && _surfaceView != null);
         // A hidden context panel — or an overlay surface covering the whole
         // route — means no workspace tab is on screen at all, so nothing in it
         // may consume a back press.
@@ -973,10 +1028,13 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   /// provider-owned because that field mounts above this route.
   ///
   /// A narrow window has no title-bar field to focus — its search is a modal —
-  /// so the binding opens that instead. Rare (a keyboard on a phone-width
-  /// window) but it must not be a silent no-op.
+  /// so the binding opens that instead. Below kMediumBreakpoint there's no
+  /// title bar at all (mobile and tablet alike — see app_shell.dart); a touch
+  /// platform has none EITHER, at any width — a keyboard is rare but not
+  /// impossible on a tablet, and this must not be a silent no-op against a
+  /// field that was never mounted.
   void _focusSessionSearch() {
-    if (MediaQuery.sizeOf(context).width < kCompactBreakpoint) {
+    if (isMobilePlatform || MediaQuery.sizeOf(context).width < kMediumBreakpoint) {
       showSessionSearch(context);
       return;
     }
@@ -1050,7 +1108,8 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           child: SafeArea(
             // A rightward fling with the drawer already open is the end of the
             // chain — nothing left to unwind.
-            child: _RightFlingDetector(
+            child: _HorizontalFlingDetector(
+              towards: AxisDirection.right,
               onFling: _confirmExitFling,
               child: const ProjectsDrawer(),
             ),
@@ -1075,7 +1134,8 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
                     // busiest. A fling on top gives this page the same
                     // flick-right-for-the-drawer the New Session route has,
                     // from anywhere on it.
-                    _RightFlingDetector(
+                    _HorizontalFlingDetector(
+                      towards: AxisDirection.right,
                       onFling: _flingOpenDrawer,
                       child: AgentPanel(),
                     ),
@@ -1208,38 +1268,37 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     ref.read(visibleWorkspaceViewProvider.notifier).set(view);
   }
 
-  /// Put [view] in front of the user, wherever this route currently keeps the
-  /// workspace: in the docked context panel when the user has one up, and in
-  /// the floating card otherwise — which, since the panel now starts closed, is
-  /// the ordinary case.
-  ///
-  /// Deliberately does NOT dock the panel to honour the request. Splitting the
-  /// route in half is a layout decision the user makes once, from the title
-  /// bar; asking to see the git status is not the same thing as asking for that.
-  ///
-  /// The entry point for every caller that names a view from outside the tab
-  /// strip: the agent bar's workspace menu, and the NEEDS YOU pill.
-  /// The agent bar's workspace menu: give [view] the whole workbench area.
-  ///
-  /// A surface rather than a tab switch because the menu is reachable from
-  /// panel modes where the context panel is off screen entirely — and because
-  /// naming a view from the agent bar reads as "take me to it", not "change
-  /// what the pane beside me is showing".
-  ///
-  /// Mobile never gets here (the menu is desktop-only, see
-  /// [workspaceMenuControlProvider]), but falls back to the tab it would have
-  /// switched rather than opening a surface the PageView has no room for.
-  void _openViewSurface(WorkspaceView view) {
-    if (_isMobileLayout) {
-      _selectView(view);
+  /// Un-hides the context panel so a revealed view is actually visible,
+  /// through whichever mechanism the live layout offers: opening the touch
+  /// tablet's docked context pane ([_buildTabletTouch]), or restoring
+  /// [_PanelMode.normal] on a mouse desktop. No-op on the mobile PageView
+  /// layout, which has no docked panel to reveal — callers there fall back to
+  /// the ordinary tab switch / page swipe.
+  void _openContextPanel() {
+    if (_isMobileLayout) return;
+    if (isMobilePlatform) {
+      if (!_tabletEndDrawerOpen) setState(() => _tabletEndDrawerOpen = true);
       return;
     }
-    setState(() => _surfaceView = view);
-    ref.read(visibleWorkspaceViewProvider.notifier).set(view);
+    if (_effectivePanelMode == _PanelMode.contextHidden) {
+      setState(() => _panelMode = _PanelMode.normal);
+    }
   }
 
-  void _closeViewSurface() {
-    setState(() => _surfaceView = null);
+  /// Put [view] in front of the user in the docked context panel, un-hiding it
+  /// first if the user had it closed — the same recovery [revealHandlerTab]
+  /// gives the NEEDS YOU pill, since the menu is reachable from panel modes
+  /// where the context panel is off screen entirely.
+  ///
+  /// The entry point for every caller that names a view from outside the tab
+  /// strip: the agent bar's workspace menu.
+  ///
+  /// Mobile never gets here (the menu is desktop-only, see
+  /// [workspaceMenuControlProvider]), but falls back to the ordinary tab
+  /// switch, which is a no-op past the guard above.
+  void _revealWorkspaceView(WorkspaceView view) {
+    _openContextPanel();
+    _selectView(view);
   }
 
   /// Show the view a navigation left in [pendingWorkspaceViewProvider].
@@ -1263,17 +1322,16 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     if (mobile && !_pageController.hasClients) return;
     notifier.set(null);
     if (mobile) {
-      // [_openViewSurface] already degrades to the tab here, but leaves the
-      // PageView on the agent page.
+      // [_revealWorkspaceView] already degrades to the tab here, but leaves
+      // the PageView on the agent page.
       _selectView(pending.value);
       _goToPage(_MobilePage.workspace);
       return;
     }
-    // Desktop takes the whole workbench, which is what naming a destination
-    // reads as. The surface registers its own back handler, so a back press
-    // unwinds it before nav history moves — it is the newest layer on the
-    // route, and every other dismissible surface unwinds in that order too.
-    _openViewSurface(pending.value);
+    // Desktop un-hides the docked context panel and selects the view there —
+    // same recovery [revealHandlerTab] gives the NEEDS YOU pill, since a
+    // navigation can land while the panel is off screen entirely.
+    _revealWorkspaceView(pending.value);
   }
 
   bool get _isMobileLayout =>
@@ -1299,32 +1357,229 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   // ── Desktop / Tablet ─────────────────────────────────────────────────
 
   Widget _buildDesktop(Widget? surfaceChild) {
+    if (isMobilePlatform) return _buildTabletTouch(surfaceChild);
+    // The setting is shared with the New Session route (see
+    // `new_session_screen.dart`, which publishes its own sidebarControlProvider
+    // the same way), so hiding the drawer here also hides it there and vice
+    // versa — one restore button, reachable from both. Below kMediumBreakpoint
+    // that restore button doesn't even mount (no title bar there — see
+    // app_shell.dart), so the drawer stays forced visible the whole way down
+    // to kCompactBreakpoint.
+    final sidebarHidden =
+        MediaQuery.sizeOf(context).width >= kMediumBreakpoint &&
+        ref.watch(appSettingsServiceProvider).sidebarHidden;
     return Row(
       children: [
-        // Hidden only here, never on the New Session route: the restore button
-        // is published from this route (see sidebarControlProvider), so hiding
-        // the drawer on a route that publishes none would be a trap with no way
-        // back to any project.
-        if (!ref.watch(appSettingsServiceProvider).sidebarHidden)
-          const ProjectsDrawer(),
+        if (!sidebarHidden) const ProjectsDrawer(),
         if (surfaceChild != null)
           Expanded(child: surfaceChild)
-        else if (_surfaceView != null)
-          Expanded(
-            // The docked panel's own key: the surface replaces the panels, so
-            // the two are never mounted together and sharing it reparents the
-            // live preview WebView and terminals rather than rebuilding them
-            // (see [_contextPanelKey]).
-            child: WorkspaceViewSurface(
-              view: _surfaceView!,
-              panelKey: _contextPanelKey,
-              onClose: _closeViewSurface,
-            ),
-          )
         else
           ..._buildPanels(),
       ],
     );
+  }
+
+  /// Touch-platform counterpart to [_buildDesktop]'s mouse `Row`: the same
+  /// sidebar+agent+context split, both side panes docked rather than
+  /// overlays — the sidebar open by default (matching the mouse desktop's
+  /// always-on rail), the context pane closed until the user asks for it
+  /// (see [_tabletEndDrawerOpen]'s doc for the three ways in). There is no
+  /// title bar here to toggle either from (app_shell.dart never mounts one
+  /// on a touch platform), so swiping and the agent bar's own buttons
+  /// (`WorkspaceMenuButton`, the leading "Projects" button) are the only
+  /// paths in either side.
+  ///
+  /// Neither pane's WIDTH ever changes during its open/close animation —
+  /// only an [AnimatedSlide] offset does, so neither [ProjectsDrawer] nor
+  /// [WorkspacePanel] is ever laid out at an intermediate width where a tab
+  /// bar or row could overflow mid-swipe. The agent pane's reserved space on
+  /// both sides animates instead, via one [AnimatedPadding] on the SAME
+  /// duration/curve as both slides, so all three move in lockstep and the
+  /// agent bar's buttons visibly slide with whichever panel is animating
+  /// rather than sitting still underneath it.
+  ///
+  /// Neither pane is a real `Scaffold.drawer`/`endDrawer`: Flutter's
+  /// `DrawerController` drops its child from the tree entirely while closed
+  /// (`_buildDrawer`'s `if (_controller.isDismissed) return
+  /// SizedBox.shrink()`), which would dispose [WorkspacePanel]'s
+  /// `PreviewScreen` WebView and terminal on every swipe-close of the context
+  /// pane — the exact regression the [_agentPanelKey]/[_contextPanelKey]
+  /// GlobalKeys elsewhere in this file exist to prevent (see their doc). So
+  /// both hand-roll a slide-in pane that stays permanently mounted, just
+  /// animated off-screen via [AnimatedSlide] rather than removed. The
+  /// sidebar itself ([ProjectsDrawer]) carries no such disposable state, but
+  /// gets the same treatment for the shared lockstep animation.
+  Widget _buildTabletTouch(Widget? surfaceChild) {
+    // A workbench surface (settings/devices) takes the whole route, exactly as
+    // it does on the mouse desktop, where [_buildDesktop] swaps it in for
+    // `_buildPanels()` outright. The panes here are Stack children painted
+    // ABOVE the surface, so leaving the context one up would drop it across
+    // the settings screen's right-hand side; dropping it from the tree while a
+    // surface covers the route is also what disposes its WebView, matching the
+    // desktop's own behaviour in that mode.
+    final showContextPane = surfaceChild == null && _tabletEndDrawerOpen;
+    return BackHandler(
+      priority: BackPriority.drawer,
+      onBack: _closeTabletDrawers,
+      child: Scaffold(
+        backgroundColor: context.antgrid.bgDeepest,
+        body: Stack(
+          children: [
+            // Leftward fling opens the context panel, rightward fling opens
+            // the sidebar — both watch raw pointers independently (see
+            // [_HorizontalFlingDetector]'s own doc), so nesting them over the
+            // same agent pane never has one steal the other's gesture, or
+            // either one steal from the agent's own scrollables (terminal,
+            // transcript).
+            _HorizontalFlingDetector(
+              towards: AxisDirection.left,
+              onFling: () {
+                if (!_tabletEndDrawerOpen) {
+                  setState(() => _tabletEndDrawerOpen = true);
+                }
+              },
+              child: _HorizontalFlingDetector(
+                towards: AxisDirection.right,
+                onFling: () {
+                  if (!_tabletDrawerOpen) {
+                    setState(() => _tabletDrawerOpen = true);
+                  }
+                },
+                // Padded, not resized: the agent's own content already
+                // reflows across arbitrary widths (the mouse desktop's
+                // [ResizablePane] drag does the same thing continuously), so
+                // animating this side is safe where animating either panel's
+                // width would not be.
+                child: AnimatedPadding(
+                  duration: AbTokens.motionPane,
+                  curve: Curves.easeOut,
+                  padding: EdgeInsets.only(
+                    left: _tabletDrawerOpen ? AbTokens.drawerPaneWidth : 0,
+                    right: showContextPane
+                        ? _tabletContextPanelWidth(context)
+                        : 0,
+                  ),
+                  // Stays mounted even at zero readable width (both panes
+                  // open): swapping it out for a placeholder at this same
+                  // GlobalKey'd slot — mirroring how desktop's
+                  // [_PanelMode.contextExpanded] drops [_agentPanel] from
+                  // [_buildPanels]'s list — corrupted the element tree here
+                  // instead (this slot sits under an [AnimatedPadding], not a
+                  // plain list, and swapping widget types under it blanked
+                  // the whole screen). [WorkspaceMenuButton]'s popup is left
+                  // alone here too: it stays open across this squeeze by
+                  // design — only the icon itself closes it, expand/collapse
+                  // included — see the button's own "pinned, not modal" doc.
+                  child: surfaceChild ?? _agentPanel(),
+                ),
+              ),
+            ),
+            Positioned(
+              top: 0,
+              bottom: 0,
+              left: 0,
+              width: AbTokens.drawerPaneWidth,
+              child: AnimatedSlide(
+                duration: AbTokens.motionPane,
+                curve: Curves.easeOut,
+                offset: _tabletDrawerOpen
+                    ? Offset.zero
+                    : const Offset(-1, 0),
+                // Leftward fling on the sidebar itself closes it — the
+                // mirror image of the context panel's own rightward-closes
+                // gesture below.
+                child: _HorizontalFlingDetector(
+                  towards: AxisDirection.left,
+                  onFling: () {
+                    if (_tabletDrawerOpen) {
+                      setState(() => _tabletDrawerOpen = false);
+                    }
+                  },
+                  child: ColoredBox(
+                    color: context.antgrid.bgDeep,
+                    child: SafeArea(child: const ProjectsDrawer()),
+                  ),
+                ),
+              ),
+            ),
+            if (surfaceChild == null)
+              Positioned(
+                top: 0,
+                bottom: 0,
+                right: 0,
+                width: _tabletContextPanelWidth(context),
+                child: AnimatedSlide(
+                  duration: AbTokens.motionPane,
+                  curve: Curves.easeOut,
+                  offset: showContextPane
+                      ? Offset.zero
+                      : const Offset(1, 0),
+                  // Rightward fling on the panel itself closes it — the same
+                  // direction/gesture the mobile drawer already uses, reused
+                  // verbatim here.
+                  child: _HorizontalFlingDetector(
+                    towards: AxisDirection.right,
+                    onFling: () {
+                      if (_tabletEndDrawerOpen) {
+                        setState(() => _tabletEndDrawerOpen = false);
+                      }
+                    },
+                    child: ColoredBox(
+                      color: context.antgrid.bgDeep,
+                      child: WorkspacePanel(
+                        key: _contextPanelKey,
+                        selectedView: _selectedView,
+                        onViewSelected: _selectView,
+                        viewBadges: _workspaceBadges(),
+                        isExpanded: _tabletContextPanelExpanded,
+                        onToggleExpand: () => setState(
+                          () => _tabletContextPanelExpanded =
+                              !_tabletContextPanelExpanded,
+                        ),
+                        onClose: () =>
+                            setState(() => _tabletEndDrawerOpen = false),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Width of the touch tablet's docked context pane: wide enough to usefully
+  /// show a file diff or terminal, narrower than the full screen so the agent
+  /// pane still reads as on screen alongside it, not buried underneath —
+  /// [_tabletContextPanelExpanded] (the tab bar's expand button, mirroring the
+  /// mouse desktop's [_PanelMode.contextExpanded]) goes fully edge-to-edge
+  /// instead, same as that mode leaving no agent pane visible at all.
+  double _tabletContextPanelWidth(BuildContext context) {
+    final width = MediaQuery.sizeOf(context).width;
+    if (_tabletContextPanelExpanded) return width;
+    return (width * 0.85).clamp(0.0, 560.0);
+  }
+
+  /// Closes whichever of the touch tablet's sidebar/context pane is open —
+  /// the `BackPriority.drawer` handler for [_buildTabletTouch], mirroring
+  /// [_closeMobileDrawer]'s bool-return contract. The context pane takes
+  /// priority: it is the one more likely to be mid-read (a file, a diff) when
+  /// back is pressed.
+  ///
+  /// Neither pane is a real Scaffold drawer/endDrawer (see
+  /// [_buildTabletTouch]), so both close via their own state flag rather than
+  /// a ScaffoldState call.
+  bool _closeTabletDrawers() {
+    if (_tabletEndDrawerOpen) {
+      setState(() => _tabletEndDrawerOpen = false);
+      return true;
+    }
+    if (_tabletDrawerOpen) {
+      setState(() => _tabletDrawerOpen = false);
+      return true;
+    }
+    return false;
   }
 
   void _toggleSidebar() {
@@ -1449,14 +1704,13 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       case _PanelMode.contextHidden:
         return [Expanded(child: _agentPanel())];
 
+      // No collapsed agent stub here either: the title bar's context-panel
+      // control (see [_toggleContextPanel]) is the only way back, same as
+      // [_PanelMode.contextHidden] below — a tappable strip duplicated that
+      // recovery path for no benefit and cost every expanded panel a sliver
+      // of width.
       case _PanelMode.contextExpanded:
         return [
-          _buildCollapsedAgentStrip(
-            onTap: () => setState(() {
-              _panelMode = _PanelMode.normal;
-              _updatePrefs();
-            }),
-          ),
           Expanded(
             child: WorkspacePanel(
               key: _contextPanelKey,
@@ -1475,45 +1729,23 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     }
   }
 
-  // ── Collapsed strip ──────────────────────────────────────────────────
-
-  /// The agent side's collapsed stub, shown only in
-  /// [_PanelMode.contextExpanded]. The context side has no equivalent — see
-  /// the comment on that case in [_buildPanels].
-  Widget _buildCollapsedAgentStrip({required VoidCallback onTap}) {
-    return GestureDetector(
-      onTap: onTap,
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        child: Container(
-          width: AbTokens.collapsedStripWidth,
-          color: context.antgrid.bgDeep,
-          child: Center(
-            child: RotatedBox(
-              quarterTurns: 1,
-              child: Text(
-                'Agent',
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontXs,
-                  color: context.antgrid.accent,
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
   // ── Helpers ──────────────────────────────────────────────────────────
 }
 
-/// Fires [onFling] on a decisive rightward fling over its child.
+/// Fires [onFling] on a decisive horizontal fling over its child, in the
+/// [towards] direction ([AxisDirection.left] or [AxisDirection.right]).
+///
+/// One detector for both directions, not a pair of mirrored ones: every term
+/// below — the thresholds, the axis-dominance guard, the raw-pointer wiring —
+/// is direction-independent, and the two halves drifting apart is what makes
+/// swipe-open and swipe-close feel different in the same pane.
 ///
 /// Stands in for the PageView's leading overscroll wherever that can't report
 /// "one more step back": inside the open drawer, which covers the PageView
 /// entirely, and over the agent page, whose horizontal scrollables absorb the
-/// drag while they still have room.
+/// drag while they still have room. On a touch tablet it also opens and closes
+/// both docked panes ([WorkspaceShellState._buildTabletTouch]) — fling from
+/// anywhere over the pane, not just from an edge.
 ///
 /// Velocity-gated rather than distance-gated: both hosts are full of vertical
 /// lists a slow horizontal drag more likely belongs to, so a deliberate flick is
@@ -1524,18 +1756,29 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 /// hosts here have drags of their own that must keep working: the open drawer's
 /// swipe-to-close (a GestureDetector consumed the leftward drag too, stranding
 /// the drawer open) and the agent page's terminal and PageView. Observing raw
-/// pointers takes nothing from them.
-class _RightFlingDetector extends StatefulWidget {
-  const _RightFlingDetector({required this.onFling, required this.child});
+/// pointers takes nothing from them. It also means two of these can be nested
+/// over the same child, one per direction, without either stealing from the
+/// other.
+class _HorizontalFlingDetector extends StatefulWidget {
+  const _HorizontalFlingDetector({
+    required this.towards,
+    required this.onFling,
+    required this.child,
+  }) : assert(
+         towards == AxisDirection.left || towards == AxisDirection.right,
+         'horizontal only',
+       );
 
+  final AxisDirection towards;
   final VoidCallback onFling;
   final Widget child;
 
   @override
-  State<_RightFlingDetector> createState() => _RightFlingDetectorState();
+  State<_HorizontalFlingDetector> createState() =>
+      _HorizontalFlingDetectorState();
 }
 
-class _RightFlingDetectorState extends State<_RightFlingDetector> {
+class _HorizontalFlingDetectorState extends State<_HorizontalFlingDetector> {
   static const double _minFlingVelocity = 700.0;
 
   /// Guards against a fast vertical scroll with a little sideways drift.
@@ -1544,6 +1787,10 @@ class _RightFlingDetectorState extends State<_RightFlingDetector> {
   VelocityTracker? _tracker;
   Offset _origin = Offset.zero;
   Offset _latest = Offset.zero;
+
+  /// +1 rightward, -1 leftward — folds the direction into the two comparisons
+  /// that actually depend on it, so nothing else has to branch.
+  double get _sign => widget.towards == AxisDirection.right ? 1.0 : -1.0;
 
   void _onDown(PointerDownEvent event) {
     _tracker = VelocityTracker.withKind(event.kind)
@@ -1561,9 +1808,9 @@ class _RightFlingDetectorState extends State<_RightFlingDetector> {
     _tracker = null;
     if (tracker == null) return;
     final travel = _latest - _origin;
-    if (travel.dx < _minDistance) return;
+    if (travel.dx * _sign < _minDistance) return;
     if (travel.dx.abs() <= travel.dy.abs()) return;
-    if (tracker.getVelocity().pixelsPerSecond.dx > _minFlingVelocity) {
+    if (tracker.getVelocity().pixelsPerSecond.dx * _sign > _minFlingVelocity) {
       widget.onFling();
     }
   }
