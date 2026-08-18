@@ -135,9 +135,9 @@ dev_dependencies:
 # platform applies its own corner mask without double-rounding. Regenerate
 # with:
 #   dart run flutter_launcher_icons
-# Windows is EXCLUDED: windows/runner/resources/app_icon.ico is hand-built
-# (tileless dark-scheme monogram, explicit 16/24/32/48/256 layers — recipe in
-# web/public/logo/README.md); a regen must not clobber it.
+# Windows is EXCLUDED: windows/runner/resources/app_icon.ico comes from
+# `npm run gen:icons` instead (tiled monogram, explicit 16/24/32/48/256
+# layers — see web/public/logo/README.md); a regen must not clobber it.
 flutter_launcher_icons:
   image_path: "assets/icon/antgrid-icon-1024.png"
   android: "ic_launcher"
@@ -209,11 +209,14 @@ msix_config:
   # package version does not strictly increase, and installed apps never see
   # such a release as an update.
   msix_version: 1.0.7.0
-  # Same tileless monogram the old Inno installer + the exe/taskbar use
-  # (windows/runner/resources/app_icon.ico), rendered transparent and square from
-  # antgrid-icon-square.svg. trim_logo MUST stay false: the monogram's artwork is
-  # portrait (tall antennae), so the msix package's default trim-then-fit-to-square
-  # would crop the antenna dots and the base of the "a" on every square tile.
+  # Same tiled monogram the old Inno installer + the exe/taskbar use
+  # (windows/runner/resources/app_icon.ico), full-bleed and square, written by
+  # `npm run gen:icons`. Tiled because the Store and the Start menu paint it onto
+  # a background we don't pick, and the tileless mark went invisible on the light
+  # ones (web/public/logo/README.md). trim_logo MUST stay false: the artwork is
+  # portrait (tall antennae), so should the source ever go transparent again, the
+  # msix package's default trim-then-fit-to-square would crop the antenna dots and
+  # the base of the "a" on every square tile.
   logo_path: assets/icon/antgrid-store-logo.png
   trim_logo: false
   architecture: x64

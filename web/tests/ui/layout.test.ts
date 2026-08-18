@@ -63,3 +63,45 @@ describe("Layout", () => {
     expect(html).toContain('href="/team"');
   });
 });
+
+describe("Layout account menu", () => {
+  const html = () =>
+    Layout({
+      title: "Test",
+      user: { email: "gita@example.com" },
+      children: "x",
+    }).toString();
+
+  test("prints the signed-in address exactly once", () => {
+    // The trigger used to repeat the address the menu already shows, so the
+    // same string appeared twice within ~40px of itself on desktop.
+    const hits = html().split("gita@example.com").length - 1;
+    expect(hits).toBe(1);
+  });
+
+  test("carries the address on phones, where the trigger is the avatar alone", () => {
+    // Regression guard for moving identity into the menu: the address must not
+    // be behind a `sm:` breakpoint, or a phone user cannot tell which account
+    // they are about to sign out of.
+    const markup = html();
+    const block = markup.slice(markup.indexOf("Signed in as"));
+    expect(block).toContain("gita@example.com");
+    expect(block.slice(0, block.indexOf("gita@example.com"))).not.toContain("sm:");
+  });
+
+  test("opens as a disclosure rather than daisyUI's focus-within dropdown", () => {
+    // `.dropdown` opens on :focus-within, so clicking an open trigger re-focuses
+    // instead of closing it, and its `.menu` list centres a <button> child while
+    // left-aligning an <a> — the sign-out row never lined up with Account.
+    const markup = html();
+    expect(markup).toContain("<details");
+    expect(markup).toContain("<summary");
+    expect(markup).not.toContain("dropdown");
+  });
+
+  test("does not ship the menu's dismiss script to signed-out pages", () => {
+    expect(Layout({ title: "Test", children: "x" }).toString()).not.toContain(
+      "data-account-menu"
+    );
+  });
+});

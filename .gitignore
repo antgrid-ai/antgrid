@@ -122,3 +122,6 @@ docs/superpowers/specs/
 # committable the moment that file left with the directory.
 /infra/
 /deploy/
+
+# Contact sheets from `npm run gen:icons -- --preview`.
+.icon-preview/

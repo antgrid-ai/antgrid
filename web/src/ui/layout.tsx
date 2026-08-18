@@ -99,38 +99,7 @@ export function Layout({ title, user, section, children }: LayoutProps) {
             )}
             <div class="flex-1" />
             {user ? (
-              <div class="dropdown dropdown-end">
-                <div
-                  tabindex={0}
-                  role="button"
-                  class="flex items-center gap-2 px-2 py-1 rounded hover:bg-chrome"
-                >
-                  <div class="avatar avatar-placeholder">
-                    <div class="w-7 h-7 rounded-full bg-indigodeep text-indigo2 text-xs font-mono flex items-center justify-center">
-                      <span>{initials(user.email)}</span>
-                    </div>
-                  </div>
-                  <span class="font-mono text-sm text-muted hidden sm:inline">
-                    {user.email}
-                  </span>
-                </div>
-                <ul
-                  tabindex={0}
-                  class="dropdown-content menu menu-sm bg-panel border border-edge rounded-box shadow-lg mt-2 w-52 p-1 z-10"
-                >
-                  <li class="menu-title font-mono text-xs px-3 py-2 text-muted2 break-all">
-                    {user.email}
-                  </li>
-                  <li>
-                    <a href="/account">Account</a>
-                  </li>
-                  <li>
-                    <form method="post" action="/logout" class="contents">
-                      <button type="submit" class="text-danger">Sign out</button>
-                    </form>
-                  </li>
-                </ul>
-              </div>
+              <AccountMenu email={user.email} />
             ) : user === null ? (
               // `null` = a product page being read signed out, where this is the
               // way in. `undefined` = an auth page, which IS the way in — there
@@ -143,10 +112,147 @@ export function Layout({ title, user, section, children }: LayoutProps) {
           </div>
         </header>
         <main class="max-w-5xl mx-auto p-6">{children}</main>
+        {user && (
+          <script dangerouslySetInnerHTML={{ __html: ACCOUNT_MENU_SCRIPT }} />
+        )}
       </body>
     </html>
   );
 }
+
+/**
+ * The account menu, a native `<details>` rather than daisyUI's `.dropdown`.
+ *
+ * daisyUI's variant opens on `:focus-within`, so clicking the trigger while the
+ * menu is open re-focuses it instead of closing, and its `.menu` list styling
+ * centres a `<button>` child while left-aligning an `<a>` — the sign-out row and
+ * the account row did not line up. A disclosure has neither problem and
+ * announces its own expanded state without an `aria-expanded` we would have to
+ * maintain in script.
+ *
+ * The address appears here and NOT in the trigger: it is one string, and the
+ * header showing it beside a menu that repeats it verbatim was the same fact
+ * twice. Here it is also on phones, where the trigger has always been the
+ * avatar alone.
+ */
+function AccountMenu({ email }: { email?: string | null }) {
+  return (
+    <details class="group relative shrink-0" data-account-menu>
+      <summary
+        class="flex cursor-pointer list-none items-center gap-1 rounded-field p-1 hover:bg-chrome group-open:bg-chrome [&::-webkit-details-marker]:hidden"
+        aria-label="Account menu"
+      >
+        <span class="flex h-7 w-7 items-center justify-center rounded-full bg-indigodeep font-mono text-xs text-indigo2 ring-1 ring-indigo/25">
+          {initials(email)}
+        </span>
+        <ChevronIcon />
+      </summary>
+      <div class="absolute right-0 top-full z-20 mt-2 w-64 overflow-hidden rounded-box border border-edge bg-panel shadow-lg shadow-black/40">
+        <div class="border-b border-edge-inner px-3.5 py-2.5">
+          <div class="text-[0.6875rem] font-medium uppercase tracking-[0.12em] text-muted2">
+            Signed in as
+          </div>
+          {/* `break-all`, not `truncate`: the address is what tells you WHICH
+              account you are about to sign out of, so a long one wraps rather
+              than losing its domain to an ellipsis. */}
+          <div class="mt-0.5 break-all font-mono text-[0.8125rem] leading-snug text-ink2">
+            {email}
+          </div>
+        </div>
+        <div class="p-1">
+          <a
+            href="/account"
+            class="flex items-center gap-2.5 rounded-field px-2.5 py-2 text-sm text-ink2 hover:bg-chrome hover:text-ink"
+          >
+            <PersonIcon />
+            Account
+          </a>
+        </div>
+        <form method="post" action="/logout" class="border-t border-edge-inner p-1">
+          {/* Not permanently red. Signing out is routine and reversible; danger
+              on hover marks it as the row that ends the session without the
+              menu shouting one of its two items at every open. */}
+          <button
+            type="submit"
+            class="flex w-full items-center gap-2.5 rounded-field px-2.5 py-2 text-sm text-muted hover:bg-danger/10 hover:text-danger"
+          >
+            <SignOutIcon />
+            Sign out
+          </button>
+        </form>
+      </div>
+    </details>
+  );
+}
+
+/** 16-unit box, 1.5 stroke, round caps — the icon metrics pricing.tsx set. */
+function ChevronIcon() {
+  return (
+    <svg
+      class="h-3.5 w-3.5 shrink-0 text-muted2 transition-transform duration-150 group-open:rotate-180"
+      viewBox="0 0 16 16"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M4 6.5l4 4 4-4"
+        stroke="currentColor"
+        stroke-width="1.5"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      />
+    </svg>
+  );
+}
+
+function PersonIcon() {
+  return (
+    <svg class="h-4 w-4 shrink-0 text-muted2" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="8" cy="5.25" r="2.5" stroke="currentColor" stroke-width="1.5" />
+      <path
+        d="M2.75 13.5a5.25 5.25 0 0110.5 0"
+        stroke="currentColor"
+        stroke-width="1.5"
+        stroke-linecap="round"
+      />
+    </svg>
+  );
+}
+
+function SignOutIcon() {
+  return (
+    <svg class="h-4 w-4 shrink-0" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M6 14H3.25A1.25 1.25 0 012 12.75V3.25A1.25 1.25 0 013.25 2H6M10.5 11L14 8l-3.5-3M14 8H6"
+        stroke="currentColor"
+        stroke-width="1.5"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * A `<details>` closes on its own summary but not on a click elsewhere or on
+ * Escape, which is what makes the difference between a disclosure and a menu.
+ * Rendered only for signed-in pages, where the menu exists.
+ */
+const ACCOUNT_MENU_SCRIPT = `
+document.addEventListener("click", function (e) {
+  document.querySelectorAll("details[data-account-menu][open]").forEach(function (d) {
+    if (!d.contains(e.target)) d.open = false;
+  });
+});
+document.addEventListener("keydown", function (e) {
+  if (e.key !== "Escape") return;
+  document.querySelectorAll("details[data-account-menu][open]").forEach(function (d) {
+    d.open = false;
+    var s = d.querySelector("summary");
+    if (s) s.focus();
+  });
+});
+`;
 
 /**
  * Page title plus its one-line answer to "what is this page for".
