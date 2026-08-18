@@ -1,15 +1,29 @@
 import { describe, test, expect } from "bun:test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { Layout } from "../../src/ui/layout.js";
 import { BETA } from "../../src/billing/plans.js";
 
 describe("Layout", () => {
   test("renders the wordmark in the header", () => {
     const html = Layout({ title: "Test", children: "x" }).toString();
-    // The brand must be surfaced as a visible <img> in the header, not only as
-    // a <link rel="icon"> in <head> — that's what brands the visible page.
-    expect(html).toContain('<img src="/logo/antgrid-wordmark.svg"');
-    // alt text keeps the lockup readable to screen readers / broken loads.
-    expect(html).toContain('alt="antgrid"');
+    // The brand must be surfaced visibly in the header, not only as a
+    // <link rel="icon"> in <head> — that's what brands the visible page.
+    // Inline, not an <img>: an <img> sized `h-7 w-auto` reserves no width until
+    // the file loads, and the nav is the only item in that row that gives up
+    // width — so the lockup landing late scrolls Devices out of a phone header.
+    expect(html).not.toContain("<img");
+    // Byte-identical to the file public/logo/antgrid-wordmark.svg hands out for
+    // external brand use — everything past the root tag, so the class the header
+    // injects is the only permitted difference. Hand-copying the markup into
+    // wordmark.tsx instead of importing it passes every other assertion here.
+    const master = readFileSync(
+      resolve(import.meta.dir, "../../public/logo/antgrid-wordmark.svg"),
+      "utf8"
+    );
+    expect(html).toContain(master.slice(master.indexOf(">") + 1).trimEnd());
+    // The label keeps the lockup readable to screen readers.
+    expect(html).toContain('aria-label="Antgrid"');
   });
 
   test("marks the product as beta inside the header lockup", () => {

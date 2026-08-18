@@ -1,6 +1,7 @@
 import type { Child } from "hono/jsx";
 import { asset } from "./asset.js";
 import { BETA } from "../billing/plans.js";
+import { Wordmark } from "./wordmark.js";
 
 /** Which nav entry the current page IS, so it can be marked. Pages without an
  *  entry of their own (account, sign-in, checkout) pass nothing. */
@@ -61,11 +62,7 @@ export function Layout({ title, user, section, children }: LayoutProps) {
                 an anchor here would nest, which is invalid, and a status
                 marker is not a navigation target. */}
             <a href="/" class="flex shrink-0 items-center gap-2">
-              <img
-                src="/logo/antgrid-wordmark.svg"
-                alt="antgrid"
-                class="h-7 w-auto"
-              />
+              <Wordmark />
               {BETA && (
                 <span class="rounded-full bg-indigobtn px-1.5 py-px text-[0.59375rem] font-medium text-white">
                   beta
@@ -76,7 +73,11 @@ export function Layout({ title, user, section, children }: LayoutProps) {
               // `min-w-0` + `overflow-x-auto`: four labels plus the wordmark and
               // the avatar do not fit a phone, and without this the nav pushes
               // the whole document wider than the viewport rather than scrolling
-              // inside itself.
+              // inside itself. The corollary is that nothing else in this row may
+              // size late — the nav is the only item here that gives up width, so
+              // a sibling that grows after first paint takes it out of the
+              // labels. That is measured: the wordmark as an <img> left Devices
+              // visible at 414px until the file landed, then scrolled it out.
               <nav class="flex min-w-0 items-center gap-1 overflow-x-auto text-sm [scrollbar-width:none]">
                 {NAV.map((item) => {
                   const here = item.section === section;
