@@ -157,10 +157,15 @@
   --color-muted2: #7d7d86;
   --color-faint: #5f5f68;
 
-  --color-indigo: #818cf8;
-  --color-indigo2: #a5b4fc;
-  --color-indigobtn: #6366f1;
-  --color-indigodeep: #1e1b4b;
+  /* Signal, the brand accent. `signal` is the TEXT tier — it clears 4.5:1 on
+     page, panel and chrome, which pure #d2542a does not (3.75:1 on chrome).
+     `signalbtn` is the pure brand orange and is a FILL only: white on it is
+     4.16:1, under AA, so its label is page ink at 4.55:1. Lighten signalbtn and
+     that pairing breaks silently. */
+  --color-signal: #db6f4b;
+  --color-signal2: #ea997f;
+  --color-signalbtn: #d2542a;
+  --color-signaldeep: #401405;
 
   --color-amber: #fbbf24;
   --color-ok: #4ade80;
@@ -189,16 +194,18 @@
   --color-base-300: var(--color-edge);
   --color-base-content: var(--color-ink);
 
-  --color-primary: var(--color-indigobtn);
-  --color-primary-content: #ffffff;
-  --color-secondary: var(--color-indigodeep);
-  --color-secondary-content: var(--color-indigo2);
-  --color-accent: var(--color-indigo);
+  --color-primary: var(--color-signalbtn);
+  /* Near-black, not white: the Signal fill is light enough that white
+     lands at 4.16:1, under AA. Page ink on it is 4.55:1. */
+  --color-primary-content: var(--color-page);
+  --color-secondary: var(--color-signaldeep);
+  --color-secondary-content: var(--color-signal2);
+  --color-accent: var(--color-signal);
   --color-accent-content: var(--color-page);
   --color-neutral: var(--color-chrome);
   --color-neutral-content: var(--color-muted);
 
-  --color-info: var(--color-indigo);
+  --color-info: var(--color-signal);
   --color-info-content: var(--color-page);
   --color-success: var(--color-ok);
   --color-success-content: var(--color-page);
@@ -225,7 +232,7 @@ body {
 /* One global ring rather than per-component ones, so nothing keyboard-reachable
    can be added later without a visible focus state. Matches the site's. */
 :focus-visible {
-  outline: 2px solid var(--color-indigo2);
+  outline: 2px solid var(--color-signal2);
   outline-offset: 2px;
   border-radius: 3px;
 }
@@ -254,6 +261,6 @@ body {
 .textarea:focus-within,
 .select:focus,
 .select:focus-within {
-  outline: 2px solid var(--color-indigo2);
+  outline: 2px solid var(--color-signal2);
   outline-offset: 2px;
 }

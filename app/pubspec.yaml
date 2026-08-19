@@ -141,16 +141,16 @@ dev_dependencies:
 flutter_launcher_icons:
   image_path: "assets/icon/antgrid-icon-1024.png"
   android: "ic_launcher"
-  adaptive_icon_background: "#18181B"
+  adaptive_icon_background: "#101418"
   adaptive_icon_foreground: "assets/icon/antgrid-icon-1024.png"
   ios: true
   remove_alpha_ios: true
-  background_color_ios: "#18181B"
+  background_color_ios: "#101418"
   web:
     generate: true
     image_path: "assets/icon/antgrid-icon-1024.png"
-    background_color: "#18181B"
-    theme_color: "#18181B"
+    background_color: "#101418"
+    theme_color: "#101418"
   windows:
     generate: false
   macos:
@@ -159,7 +159,7 @@ flutter_launcher_icons:
 
 # Cold-start splash across Android (incl. 12+) and iOS. Regenerate with:
 #   dart run flutter_native_splash:create
-# The general image is the full antgrid wordmark. Android 12+ needs a square
+# The general image is the horizontal lockup. Android 12+ needs a square
 # canvas whose artwork stays inside the platform's adaptive-icon safe circle.
 flutter_native_splash:
   color: "#08090A"

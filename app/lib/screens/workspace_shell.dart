@@ -1829,7 +1829,7 @@ class _HorizontalFlingDetectorState extends State<_HorizontalFlingDetector> {
 
 /// Boot-log style status panel rendered while the workspace is coming up.
 /// Each phase is one line with a leading glyph (`▸` running, `✓` done, `×`
-/// failed); the running phase pulses indigo. When `agent link` flips to
+/// failed); the running phase pulses in the accent. When `agent link` flips to
 /// failed (PAIR_TIMEOUT), an inline retry control replaces the
 /// indeterminate spinner UX of the previous implementation.
 class _WorkspaceBootStatus extends ConsumerStatefulWidget {

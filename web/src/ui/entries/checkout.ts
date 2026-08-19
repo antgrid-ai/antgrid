@@ -287,7 +287,7 @@ function initCheckout(data: WizardData, session: CheckoutSession | null) {
       name: "antgrid",
       description: rzpSession.planId || plan.id,
       prefill: { email: data.email },
-      theme: { color: "#818CF8" },
+      theme: { color: "#D2542A" },
       config: RAZORPAY_CARD_ONLY_CONFIG,
       redirect: false,
       ...(rzpSession.callbackUrl ? { callback_url: rzpSession.callbackUrl } : {}),

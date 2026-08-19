@@ -6,7 +6,7 @@ import { Icon } from "astro-icon/components";
 //
 // Amber on this site means exactly one thing — a human is needed — and it appears
 // only on the row that needs them and in the marker where a readout declares it.
-// That scarcity is the point: scrolling gives a column of quiet indigo/green
+// That scarcity is the point: scrolling gives a column of quiet signal/green
 // readouts broken by two amber moments, which is the product's promise (mostly it
 // handles the work, occasionally it wakes you) rendered as rhythm rather than
 // asserted in a paragraph. Amber used decoratively, or an `attention` readout that
@@ -20,7 +20,7 @@ interface Props {
 }
 
 const marks = {
-  watching: { dot: true, icon: "", text: "text-indigo", chip: "border-edge" },
+  watching: { dot: true, icon: "", text: "text-signal", chip: "border-edge" },
   connected: { dot: false, icon: "tabler:plug-connected", text: "text-ok", chip: "border-edge" },
   clean: { dot: false, icon: "tabler:git-branch", text: "text-ok", chip: "border-edge" },
   proven: { dot: false, icon: "tabler:circle-check", text: "text-ok", chip: "border-edge" },
@@ -39,7 +39,7 @@ const strip = tone === "well" ? "bg-[#202027]" : "bg-chrome";
     <span class="min-w-0 truncate font-mono text-marker text-muted2">{source}</span>
     <span class={`flex shrink-0 items-center gap-1.5 rounded border px-2 py-0.5 font-mono text-marker ${mark.chip} ${mark.text}`}>
       {mark.dot
-        ? <span class="size-1.5 rounded-full bg-indigo animate-pulse-dot"></span>
+        ? <span class="size-1.5 rounded-full bg-signal animate-pulse-dot"></span>
         : <Icon name={mark.icon} width="11" height="11" />}
       {label ?? state}
     </span>

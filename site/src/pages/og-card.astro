@@ -2,6 +2,7 @@
 import "../styles/global.css";
 import { Font } from "astro:assets";
 import ProofCard from "../components/sections/ProofCard.astro";
+import Wordmark from "../components/ui/Wordmark.astro";
 ---
 <html lang="en">
   <head>
@@ -30,7 +31,13 @@ import ProofCard from "../components/sections/ProofCard.astro";
         {/* Sizes stay explicit here rather than using the fluid display scale —
             this canvas is a fixed 1200x630, so there is no viewport for it to
             respond to. */}
-        <p class="mb-2.5 font-mono text-base uppercase tracking-[0.18em] text-indigo">antgrid</p>
+        {/* The real wordmark, not letterspaced mono standing in for it — a link
+            preview is the one place the brand is seen before the site is. Bare
+            wordmark rather than the lockup because the reduction rule wants ~40px
+            before the four chevrons separate, and h-6 keeps this line the same
+            height the type it replaced occupied (the composition below has no
+            slack: the amber wake sits on the bottom edge). */}
+        <Wordmark class="mb-2.5 h-6 w-auto text-signal" />
         <p class="mb-1.5 text-2xl font-medium leading-tight text-muted">Your agent finishes a phase at 2am and waits.</p>
         <p class="font-display text-[3rem] font-semibold leading-[1.05] tracking-[-0.032em] text-ink">antgrid starts the next one.</p>
       </div>

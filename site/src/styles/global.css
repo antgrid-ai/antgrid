@@ -36,12 +36,17 @@
   --color-muted2: #7d7d86;
   --color-faint: #5f5f68;
 
-  --color-indigo: #818cf8;
-  --color-indigo2: #a5b4fc;
-  --color-indigo3: #c7d2fe;
-  --color-indigobtn: #6366f1;
-  --color-indigodeep: #1e1b4b;
-  --color-indigodeep2: #312e81;
+  /* Signal, the brand accent. `signal` is the TEXT tier — it clears 4.5:1 on
+     page, panel and chrome, which pure #d2542a does not (3.75:1 on chrome).
+     `signalbtn` is the pure brand orange and is a FILL only: white on it is
+     4.16:1, under AA, so its label is page ink at 4.55:1. Lighten signalbtn and
+     that pairing breaks silently. */
+  --color-signal: #db6f4b;
+  --color-signal2: #ea997f;
+  --color-signal3: #eec6b9;
+  --color-signalbtn: #d2542a;
+  --color-signaldeep: #401405;
+  --color-signaldeep2: #6a2109;
 
   --color-amber: #fbbf24;
   --color-amber2: #fcd34d;
@@ -124,23 +129,23 @@ body {
 /* One global focus ring rather than per-component rings, so nothing keyboard-
    reachable can be added later without one. */
 :focus-visible {
-  outline: 2px solid var(--color-indigo2);
+  outline: 2px solid var(--color-signal2);
   outline-offset: 2px;
   border-radius: 3px;
 }
 
 /* ---- Atmosphere -------------------------------------------------------- */
 
-/* Indigo radial glow — position with inset utilities on an absolute wrapper. */
-.glow-indigo {
-  background: radial-gradient(closest-side, rgba(99, 102, 241, 0.16), transparent 70%);
+/* Signal radial glow — position with inset utilities on an absolute wrapper. */
+.glow-signal {
+  background: radial-gradient(closest-side, rgba(210, 84, 42, 0.16), transparent 70%);
 }
 
 /* The namesake, made literal. Ruled lines at one pitch (square cells at any
    zoom) plus a scattered handful of filled cells: a rack where most machines are
    idle and a few are working, which is the picture the page is selling before a
    word of it is read. Cells sit at two alphas so the field has depth rather than
-   one flat scatter; the machines that are actually LIVE are the indigo ones, and
+   one flat scatter; the machines that are actually LIVE are the signal ones, and
    they live in .live-cells below because they move. The 960px tile is
    deliberately much larger than the 32px pitch so the repeat is not spottable. */
 .bg-gridfield {
@@ -163,7 +168,7 @@ body {
   mask-image: radial-gradient(130% 85% at 50% 8%, black 8%, transparent 72%);
 }
 .live-cells rect {
-  fill: rgba(99, 102, 241, 0.14);
+  fill: rgba(210, 84, 42, 0.14);
   opacity: 0;
   animation: cell-wake 24s ease-in-out infinite;
 }
@@ -227,7 +232,7 @@ html.js .reveal.in {
 .pc-caret::after {
   content: "▍";
   margin-left: 1px;
-  color: var(--color-indigo);
+  color: var(--color-signal);
   animation: caret-blink 0.9s step-end infinite;
 }
 

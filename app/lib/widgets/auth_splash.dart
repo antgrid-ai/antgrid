@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_svg/flutter_svg.dart';
 
 import '../design/ab_tokens.dart';
+import '../design/widgets/ab_brand_mark.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_window_controls.dart';
 import '../window/window_capabilities.dart';
@@ -32,11 +32,7 @@ class AuthSplash extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            SvgPicture.asset(
-              'assets/logo/antgrid-wordmark.svg',
-              height: AbTokens.space16 * 4.5,
-              semanticsLabel: 'antgrid',
-            ),
+            const AbBrandMark.lockup(height: AbTokens.space16 * 5.5),
             const SizedBox(height: AbTokens.space16),
             const AbLoading(),
           ],

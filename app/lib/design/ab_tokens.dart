@@ -61,19 +61,19 @@ abstract final class AbTokens {
   )
   static const textDisabled = Color(0xFF52525B);
 
-  // ── Accent (indigo/purple) ──
+  // ── Accent (Signal) ──
   @Deprecated(
     'Use context.antgrid.accent — AbTokens colors bypass the active theme.',
   )
-  static const accent = Color(0xFF818CF8);
+  static const accent = Color(0xFFDB6F4B);
   @Deprecated(
     'Use context.antgrid.accentHighlight — AbTokens colors bypass the active theme.',
   )
-  static const accentHighlight = Color(0xFFA78BFA);
+  static const accentHighlight = Color(0xFFEA997F);
   @Deprecated(
     'Use context.antgrid.accentMuted — AbTokens colors bypass the active theme.',
   )
-  static const accentMuted = Color(0xFF4F46E5);
+  static const accentMuted = Color(0xFFD2542A);
 
   // ── Semantic ──
   @Deprecated(

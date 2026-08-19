@@ -105,9 +105,14 @@ foreach ($attribute in @('BackgroundColor', 'Square150x150Logo', 'Square44x44Log
   }
   $visual.SetAttribute($attribute, $value)
 }
-# Keeps the helper out of the Start menu and the app list. At least one
-# Application must stay visible; the primary one does.
-$visual.SetAttribute('AppListEntry', 'none')
+# NOT hidden with AppListEntry="none", tempting as it is for a background
+# helper: Store ingestion rejects a package containing ANY such Application as
+# a headless app ("InvalidParameterValue - Package acceptance validation error
+# ... specifies a headless app") unless the product carries Microsoft's
+# HeadlessAppBypass waiver, and a visible primary Application does not exempt
+# it. That rejection lands at submission commit, minutes after a full upload,
+# so nothing local catches it. Restore the hide only once the waiver is granted
+# for this product (storeops@microsoft.com).
 $visual.SetAttribute('DisplayName', $DisplayName)
 $visual.SetAttribute('Description', $Description)
 $application.AppendChild($visual) | Out-Null

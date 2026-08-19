@@ -5,7 +5,7 @@
 /// same path as every other icon in the app — one tinting rule, no asset
 /// manifest to keep in sync, no load-time failure mode.
 ///
-/// Deliberately colourless: the app is a zinc UI where indigo means "selected"
+/// Deliberately colourless: the app is a zinc UI where the accent means "selected"
 /// and amber/green mean "the agent is doing something". Eight brand palettes in
 /// the header would out-shout both. The mark identifies; it never signals.
 ///

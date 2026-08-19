@@ -35,7 +35,7 @@ const offerPct = Math.round((1 - YEARLY_OFFER_USD / YEARLY_LIST_USD) * 100);
     <rect x="1024" y="448" width="32" height="32" style="animation-delay:11.2s" />
     <rect x="1376" y="512" width="64" height="32" style="animation-delay:17.6s" />
   </svg>
-  <div class="pointer-events-none absolute -top-56 left-1/2 h-[620px] w-[980px] -translate-x-1/2 glow-indigo" aria-hidden="true"></div>
+  <div class="pointer-events-none absolute -top-56 left-1/2 h-[620px] w-[980px] -translate-x-1/2 glow-signal" aria-hidden="true"></div>
 
   <div class="relative mx-auto max-w-shell px-6 pt-12 md:pt-18">
     <div class="mb-7 flex flex-wrap items-center gap-x-5 gap-y-3">
@@ -43,7 +43,7 @@ const offerPct = Math.round((1 - YEARLY_OFFER_USD / YEARLY_LIST_USD) * 100);
       {BETA_FREE ? (
         <a
           href={links.pricing}
-          class="inline-flex items-center gap-2 rounded-full border border-indigodeep2 bg-indigodeep/40 px-3 py-1 font-mono text-marker text-indigo2 transition-colors hover:border-indigobtn hover:text-indigo3"
+          class="inline-flex items-center gap-2 rounded-full border border-signaldeep2 bg-signaldeep/40 px-3 py-1 font-mono text-marker text-signal2 transition-colors hover:border-signalbtn hover:text-signal3"
         >
           {/* No lozenge on this branch, unlike the offer below: the nav badge
               already marks the beta a few rows up, and two markers in one
@@ -55,9 +55,9 @@ const offerPct = Math.round((1 - YEARLY_OFFER_USD / YEARLY_LIST_USD) * 100);
       ) : OFFER_ACTIVE && (
         <a
           href={links.pricing}
-          class="inline-flex items-center gap-2 rounded-full border border-indigodeep2 bg-indigodeep/40 px-3 py-1 font-mono text-marker text-indigo2 transition-colors hover:border-indigobtn hover:text-indigo3"
+          class="inline-flex items-center gap-2 rounded-full border border-signaldeep2 bg-signaldeep/40 px-3 py-1 font-mono text-marker text-signal2 transition-colors hover:border-signalbtn hover:text-signal3"
         >
-          <span class="rounded-full bg-indigobtn px-1.5 py-px text-pip font-medium text-white">{offerPct}% off</span>
+          <span class="rounded-full bg-signalbtn px-1.5 py-px text-pip font-medium text-page">{offerPct}% off</span>
           Launch offer — Pro ${YEARLY_OFFER_USD} per seat / year
           <Icon name="tabler:arrow-right" width="12" height="12" />
         </a>

@@ -39,7 +39,7 @@ const instruction = "get tests green, fix lint if broken, then open a PR";
       <div class="mb-3 text-note font-medium text-ink">Migrate auth to session tokens</div>
 
       <div class="pc-row mb-4 flex items-start gap-2 rounded border border-edge-inner bg-chrome px-2.5 py-1.5 font-mono text-marker" style="--pc-delay: 0.1s">
-        <Icon name="tabler:message-2" class="mt-0.5 shrink-0 text-indigo" width="13" height="13" />
+        <Icon name="tabler:message-2" class="mt-0.5 shrink-0 text-signal" width="13" height="13" />
         <span class="shrink-0 text-muted2">you · 02:58</span>
         <span class="relative">
           {/* Invisible ghost holds the chip's final size so typing never reflows the card. */}
@@ -61,7 +61,7 @@ const instruction = "get tests green, fix lint if broken, then open a PR";
             <span class="flex w-3.5 shrink-0 items-center justify-center">
               <Icon name={r.icon} class={`shrink-0 ${r.tone}`} width="13" height="13" data-ic="final" />
               <Icon name="tabler:circle-dashed" class="hidden shrink-0 text-faint" width="13" height="13" data-ic="queued" />
-              <span class="hidden size-2 rounded-full bg-indigo animate-pulse-dot" data-ic="active"></span>
+              <span class="hidden size-2 rounded-full bg-signal animate-pulse-dot" data-ic="active"></span>
             </span>
             <span class="shrink-0 text-ink2">{r.item}</span>
             <span class="flex-1 truncate text-right text-muted2" data-ev>{r.evidence}</span>

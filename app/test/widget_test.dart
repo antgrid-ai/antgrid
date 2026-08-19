@@ -91,11 +91,11 @@ void main() {
           w.bytesLoader is SvgAssetLoader &&
           (w.bytesLoader as SvgAssetLoader).assetName == name;
 
-      // The wordmark is the sole brand element on sign-in; the tile mark
+      // The lockup is the sole brand element on sign-in; the tile mark
       // (launcher/splash identity) must not double-brand the screen.
       expect(
         find.byWidgetPredicate(
-          (w) => hasAsset(w, 'assets/logo/antgrid-wordmark.svg'),
+          (w) => hasAsset(w, 'assets/logo/antgrid-lockup.svg'),
         ),
         findsOneWidget,
       );

@@ -223,9 +223,9 @@ const _light = AbColors(
   textDisabled: Color(0xFFA1A1AA),
   // Accent + semantics sit one shade darker than the dark presets' hues so
   // they clear WCAG AA (>= 4.5:1) as text on white — see palette_contrast_test.
-  accent: Color(0xFF4F46E5),
-  accentHighlight: Color(0xFF6366F1),
-  accentMuted: Color(0xFF4338CA),
+  accent: Color(0xFFBD4B25),
+  accentHighlight: Color(0xFFD2542A),
+  accentMuted: Color(0xFFA03E1F),
   accentForeground: Color(0xFFFFFFFF),
   statusIdle: Color(0xFF61656D),
   statusThinking: Color(0xFFE2C792),

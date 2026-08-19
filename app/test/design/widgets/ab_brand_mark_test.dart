@@ -4,7 +4,7 @@ import 'package:antgrid/design/widgets/ab_brand_mark.dart';
 import '../test_harness.dart';
 
 void main() {
-  testWidgets('AbBrandMark renders the antennae wordmark asset', (
+  testWidgets('AbBrandMark renders the wordmark asset', (
     tester,
   ) async {
     await pumpAntgrid(tester, const AbBrandMark());

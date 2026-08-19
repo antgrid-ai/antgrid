@@ -111,7 +111,7 @@ export function DeviceRowView({ device }: { device: DeviceRow }) {
         <span
           class={
             device.kind === "agent"
-              ? "badge badge-sm border-indigo/50 bg-indigodeep/40 text-indigo2"
+              ? "badge badge-sm border-signal/50 bg-signaldeep/40 text-signal2"
               : "badge badge-sm border-edge text-muted"
           }
         >

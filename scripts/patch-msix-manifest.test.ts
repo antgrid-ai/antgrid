@@ -89,12 +89,17 @@ testOnWindows("declares the bridge as a launchable Application", () => {
   expect(manifest).toContain('Id="antgrid"');
 });
 
-testOnWindows("keeps the helper out of the app list and inherits branding", () => {
+testOnWindows("leaves the helper in the app list and inherits branding", () => {
   const folder = createPackage();
   runScript(folder);
 
   const manifest = readManifest(folder);
-  expect(manifest).toContain('AppListEntry="none"');
+  // Hiding the helper is what a background process wants, and it is exactly
+  // what the Store refuses: any AppListEntry="none" makes the whole package a
+  // headless app, rejected at submission commit unless the product holds the
+  // HeadlessAppBypass waiver. The rejection costs a full build-and-upload
+  // round trip to discover, so guard the absence here.
+  expect(manifest).not.toContain("AppListEntry");
   // Hardcoding Images\* would break silently if msix renamed its generated
   // assets, so the logos must come from the primary application.
   expect(manifest).toContain('Square150x150Logo="Images\\Square150x150Logo.png"');

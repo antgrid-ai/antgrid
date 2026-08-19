@@ -64,7 +64,7 @@ export function Layout({ title, user, section, children }: LayoutProps) {
             <a href="/" class="flex shrink-0 items-center gap-2">
               <Wordmark />
               {BETA && (
-                <span class="rounded-full bg-indigobtn px-1.5 py-px text-[0.59375rem] font-medium text-white">
+                <span class="rounded-full bg-signalbtn px-1.5 py-px text-[0.59375rem] font-medium text-page">
                   beta
                 </span>
               )}
@@ -143,7 +143,7 @@ function AccountMenu({ email }: { email?: string | null }) {
         class="flex cursor-pointer list-none items-center gap-1 rounded-field p-1 hover:bg-chrome group-open:bg-chrome [&::-webkit-details-marker]:hidden"
         aria-label="Account menu"
       >
-        <span class="flex h-7 w-7 items-center justify-center rounded-full bg-indigodeep font-mono text-xs text-indigo2 ring-1 ring-indigo/25">
+        <span class="flex h-7 w-7 items-center justify-center rounded-full bg-signaldeep font-mono text-xs text-signal2 ring-1 ring-signal/25">
           {initials(email)}
         </span>
         <ChevronIcon />

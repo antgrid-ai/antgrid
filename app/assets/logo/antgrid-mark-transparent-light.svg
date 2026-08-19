@@ -1,0 +1,9 @@
+<svg width="512" height="512" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Antgrid">
+  <g fill="none" stroke="#101418" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M18 5 L24 11.5 L30 5"/>
+    <path d="M18 43 L24 36.5 L30 43"/>
+    <path d="M5 18 L11.5 24 L5 30"/>
+    <path d="M43 18 L36.5 24 L43 30"/>
+  </g>
+  <circle cx="24" cy="24" r="4" fill="#D2542A"/>
+</svg>

@@ -116,6 +116,27 @@ void main() {
       });
     }
 
+    // The accent is the brand's Signal, and it carries text (link-ish labels,
+    // counts, the focused-project pill) on every preset — so it is held to the
+    // text floor, not the non-text one. accentHighlight is the hover/emphasis
+    // step above it and is only ever a mark or a fill, hence 3:1.
+    for (final entry in kPresets.entries) {
+      test('${entry.key} accent tier clears its floor on core surfaces', () {
+        final p = entry.value;
+        for (final s in [
+          ('bgDeepest', p.bgDeepest),
+          ('bgSurface', p.bgSurface),
+        ]) {
+          _expectAA(p.accent, s.$2, '${entry.key} accent on ${s.$1}');
+          _expectNonText(
+            p.accentHighlight,
+            s.$2,
+            '${entry.key} accentHighlight on ${s.$1}',
+          );
+        }
+      });
+    }
+
     test('light preset semantic colors >= 4.5:1 on its surface', () {
       final p = kPresets[AbThemePreset.light]!;
       for (final (name, color) in [

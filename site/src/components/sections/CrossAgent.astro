@@ -24,7 +24,7 @@ const steps = [
 
   <div class="mb-14 flex flex-wrap gap-2">
     {agents.map((a) => (
-      <Chip class="px-3 py-1.5 text-meta text-ink2"><Icon name="tabler:terminal-2" class="text-indigo" width="14" height="14" />{a}</Chip>
+      <Chip class="px-3 py-1.5 text-meta text-ink2"><Icon name="tabler:terminal-2" class="text-signal" width="14" height="14" />{a}</Chip>
     ))}
     <Chip variant="dashed" class="px-3 py-1.5 text-meta"><Icon name="tabler:plus" width="13" height="13" />any terminal agent</Chip>
   </div>
@@ -39,7 +39,7 @@ const steps = [
         <div class="mb-4 flex items-center gap-3">
           <span class="font-mono text-marker text-faint">0{s.n}</span>
           <span class="h-px flex-1 bg-edge-inner" aria-hidden="true"></span>
-          <Icon name={s.icon} class={s.accent ? "text-indigo" : "text-muted2"} width="18" height="18" />
+          <Icon name={s.icon} class={s.accent ? "text-signal" : "text-muted2"} width="18" height="18" />
         </div>
         <div class="mb-2 text-note font-medium text-ink">{s.title}</div>
         <div class="text-note leading-relaxed text-muted">{s.body}</div>

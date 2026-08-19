@@ -53,7 +53,7 @@ export function CellMeter({ label, used, limit, unit }: CellMeterProps) {
         {limit > 0 && limit <= MAX_CELLS && used <= MAX_CELLS ? (
           <div class="flex flex-wrap gap-1" aria-hidden="true">
             {Array.from({ length: filled }, (_, i) => (
-              <span key={`f${i}`} class="h-2.5 w-2.5 rounded-[2px] bg-indigo" />
+              <span key={`f${i}`} class="h-2.5 w-2.5 rounded-[2px] bg-signal" />
             ))}
             {Array.from({ length: over }, (_, i) => (
               <span key={`o${i}`} class="h-2.5 w-2.5 rounded-[2px] bg-amber" />
@@ -68,7 +68,7 @@ export function CellMeter({ label, used, limit, unit }: CellMeterProps) {
         ) : (
           <div class="h-2.5 w-full max-w-40 overflow-hidden rounded-[2px] bg-chrome" aria-hidden="true">
             <div
-              class={`h-full ${over > 0 ? "bg-amber" : "bg-indigo"}`}
+              class={`h-full ${over > 0 ? "bg-amber" : "bg-signal"}`}
               style={`width:${limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0}%`}
             />
           </div>

@@ -46,7 +46,7 @@ const doneCount = allRows.filter((r) => r.state === "done").length;
             <div class={`flex items-center gap-3 px-4 py-2.5 ${r.state === "needs" ? "border-l-2 border-amber bg-amberbg/40" : ""}`}>
               {r.state === "done"
                 ? <Icon name="tabler:circle-check" class="shrink-0 text-ok" width="14" height="14" />
-                : <span class={`size-2 shrink-0 rounded-full ${r.state === "needs" ? "bg-amber" : "bg-indigo animate-pulse-dot"}`} />}
+                : <span class={`size-2 shrink-0 rounded-full ${r.state === "needs" ? "bg-amber" : "bg-signal animate-pulse-dot"}`} />}
               <span class="font-mono text-row text-ink">{r.name}</span>
               <span class="rounded border border-edge px-1.5 py-0.5 text-marker text-muted2">{r.agent}</span>
               <span class={`flex-1 truncate text-meta ${r.state === "needs" ? "text-amber2" : "text-muted"}`}>{r.task}</span>

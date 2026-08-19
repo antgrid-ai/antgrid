@@ -7,10 +7,10 @@ interface Props { plan: PlanCardData }
 const { plan } = Astro.props;
 const discountPct = plan.listUsd ? Math.round((1 - plan.priceUsd / plan.listUsd) * 100) : null;
 ---
-<div class={`flex flex-col rounded-lg border bg-panel p-5.5 ${plan.recommended ? "border-indigobtn" : "border-edge"}`}>
+<div class={`flex flex-col rounded-lg border bg-panel p-5.5 ${plan.recommended ? "border-signalbtn" : "border-edge"}`}>
   <div class="mb-3 flex items-center gap-2">
     <span class="font-mono text-note font-medium text-ink">{plan.name}</span>
-    {plan.recommended && <span class="rounded bg-indigobtn px-1.5 py-0.5 font-mono text-pip font-medium text-white">RECOMMENDED</span>}
+    {plan.recommended && <span class="rounded bg-signalbtn px-1.5 py-0.5 font-mono text-pip font-medium text-page">RECOMMENDED</span>}
   </div>
   <div class="mb-1">
     {/* data-price is the headline figure's stable hook — pricing.spec.ts used to
@@ -18,12 +18,12 @@ const discountPct = plan.listUsd ? Math.round((1 - plan.priceUsd / plan.listUsd)
     <span data-price class="font-display text-[2.125rem] font-semibold tracking-[-0.03em] text-ink">${plan.priceUsd}</span>
     <span class="text-row text-muted2"> {plan.unit}</span>
     {plan.listUsd && <span class="ml-2 text-note text-faint line-through">${plan.listUsd}</span>}
-    {discountPct && <span class="ml-1.5 rounded border border-indigodeep2 bg-indigodeep px-1.5 py-0.5 align-middle font-mono text-pip text-indigo2">{discountPct}% off launch</span>}
+    {discountPct && <span class="ml-1.5 rounded border border-signaldeep2 bg-signaldeep px-1.5 py-0.5 align-middle font-mono text-pip text-signal2">{discountPct}% off launch</span>}
   </div>
   <div class="mb-5 text-meta text-muted2">{plan.note}</div>
   <div class="mb-6 flex flex-col gap-2.5 text-row text-ink2">
     {plan.features.map((f) => (
-      <span class="flex gap-2"><Icon name="tabler:check" class="shrink-0 text-indigo" width="15" height="15" />{f}</span>
+      <span class="flex gap-2"><Icon name="tabler:check" class="shrink-0 text-signal" width="15" height="15" />{f}</span>
     ))}
   </div>
   <div class="mt-auto">

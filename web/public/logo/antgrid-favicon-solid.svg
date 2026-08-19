@@ -1,14 +1,10 @@
-<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Antgrid">
-  <rect width="512" height="512" rx="112" fill="#18181B"/>
-  <g transform="translate(144.2782,451.8754) scale(6.039)">
-    <path d="M36.72 0L24.84 0.31L24.13-9.50L24-13.81L24-20.28Q24-22.94 21.73-24.17Q19.47-25.41 15-25.53L6.53-25.75L7.16-33.44L14.38-33.34Q23.38-33.22 27.75-29.80Q32.13-26.37 32.13-19.81L32.13-7.56L36.72-6.87L36.72 0M13.63 0.63Q8.34 0.63 5.41-1.97Q2.47-4.56 2.47-9.34Q2.47-14.91 6.31-17.87Q10.16-20.84 17.22-20.84Q19.94-20.84 21.92-20.56Q23.91-20.28 25.94-19.69L24.56-13.09Q22.56-13.56 20.97-13.64Q19.38-13.72 17.63-13.72Q11.06-13.72 11.06-9.97Q11.06-8.28 12.25-7.39Q13.44-6.50 15.72-6.50Q18.47-6.50 20.31-7.53Q22.16-8.56 23.08-10.16Q24-11.75 24-13.44L24-15.50L25.19-7L22.53-7L23.63-8Q23.53-5.12 22.31-3.20Q21.09-1.28 18.89-0.33Q16.69 0.63 13.63 0.63" fill="#FAFAFA"/>
-    <g fill="none" stroke="#818CF8" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M11 -45 L2 -54"/>
-      <path d="M26.5 -45 L35 -54"/>
+<svg width="512" height="512" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Antgrid">
+  <rect width="48" height="48" rx="10.5" fill="#101418"/>
+  <g transform="translate(3.4849,3.4849) scale(0.8548)">
+    <g fill="none" stroke="#F2EFE9" stroke-width="5.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M15 5 L24 14 L33 5"/>
+      <path d="M15 43 L24 34 L33 43"/>
     </g>
-    <rect x="7" y="-45" width="8" height="9" fill="#818CF8"/>
-    <path d="m29.6657 -44.7-.0813 11.4578c0 0-.8566-.4773-1.3296-.6786-.5575-.2373-1.1493-.4465-1.7651-.6184-1.0252-.2862-1.9543-.4396-3.1875-.6805l.0246-9.4841z" fill="#818CF8" stroke="#818CF8" stroke-width="1.69"/>
-    <circle cx="-1.5" cy="-57.5" r="8" fill="#818CF8"/>
-    <circle cx="38.5" cy="-57.5" r="8" fill="#818CF8"/>
+    <circle cx="24" cy="24" r="6" fill="#D2542A"/>
   </g>
 </svg>

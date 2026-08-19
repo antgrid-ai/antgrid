@@ -3,10 +3,10 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show TextInput;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_svg/flutter_svg.dart';
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
+import '../design/widgets/ab_brand_mark.dart';
 import '../design/widgets/ab_focus_ring.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_loading.dart';
@@ -735,11 +735,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      SvgPicture.asset(
-                        'assets/logo/antgrid-wordmark.svg',
-                        height: AbTokens.space16 * 4,
-                        semanticsLabel: 'antgrid',
-                      ),
+                      const AbBrandMark.lockup(height: AbTokens.space16 * 5),
                       const SizedBox(height: AbTokens.space12),
                       switch (_phase) {
                         _Phase.pending => _pendingBody(context),
