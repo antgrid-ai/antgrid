@@ -25,6 +25,11 @@ jobs:
     steps:
       - name: Configure Microsoft Store CLI
         uses: microsoft/microsoft-store-apppublisher@v1.3
+        with:
+          # Keep in lockstep with build-desktop.yml — a smoke test that exercises
+          # a different CLI version than the release does is worth nothing. See
+          # the pin rationale there (microsoft/msstore-cli#154).
+          version: v0.3.9
 
       - name: Verify credentials reach the configured app
         shell: pwsh
@@ -37,16 +42,20 @@ jobs:
             }
           }
 
+          # --verbose on every call: the CLI logs at Critical by default, so a
+          # rejection surfaces as a bare exit code with no reason attached —
+          # which defeats the point of a credential smoke test.
           msstore reconfigure `
             --tenantId $env:MSSTORE_TENANT_ID `
             --sellerId $env:MSSTORE_SELLER_ID `
             --clientId $env:MSSTORE_CLIENT_ID `
-            --clientSecret $env:MSSTORE_CLIENT_SECRET
+            --clientSecret $env:MSSTORE_CLIENT_SECRET `
+            --verbose
           # ErrorActionPreference doesn't apply to native exes, so gate on the
           # exit code explicitly here and after every msstore call below.
           if ($LASTEXITCODE -ne 0) { throw "msstore reconfigure failed ($LASTEXITCODE)" }
 
-          $apps = msstore apps list | Out-String
+          $apps = msstore apps list --verbose | Out-String
           if ($LASTEXITCODE -ne 0) { throw "msstore apps list failed ($LASTEXITCODE). Credentials rejected by Partner Center." }
           Write-Host $apps
 

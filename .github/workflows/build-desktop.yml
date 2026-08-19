@@ -705,6 +705,15 @@ jobs:
       - name: Configure Microsoft Store CLI
         if: ${{ ((github.event_name == 'push' && github.ref_type == 'tag') || inputs.release) && env.MSSTORE_CLIENT_ID != '' && env.MSSTORE_APP_ID != '' && steps.build.outcome == 'success' }}
         uses: microsoft/microsoft-store-apppublisher@v1.3
+        with:
+          # PINNED — the action defaults to `latest`, which silently moves the
+          # publish toolchain under a release that only ever runs on a tag. CLI
+          # v0.4.0 (2026-08-18) turned on AOT + trimming + single-file and broke
+          # `publish` at the Azure blob upload; it took out the first release cut
+          # after it shipped. See microsoft/msstore-cli#154. Keep this in lockstep
+          # with store-smoke.yml, and only unpin once a release past v0.4.0
+          # carries the fix (msstore-cli#155).
+          version: v0.3.9
 
       - name: Publish to Microsoft Store
         if: ${{ ((github.event_name == 'push' && github.ref_type == 'tag') || inputs.release) && env.MSSTORE_CLIENT_ID != '' && env.MSSTORE_APP_ID != '' && steps.build.outcome == 'success' }}
@@ -720,7 +729,13 @@ jobs:
             --sellerId $env:MSSTORE_SELLER_ID `
             --clientId $env:MSSTORE_CLIENT_ID `
             --clientSecret $env:MSSTORE_CLIENT_SECRET
-          msstore publish "$env:GITHUB_WORKSPACE/antgrid-store.msix" -id $env:MSSTORE_APP_ID
+          # --verbose is load-bearing on failure: the CLI's minimum log level is
+          # Critical, so the broad catch around the blob upload swallows the real
+          # exception and prints only "Error while uploading the application
+          # package". Verbose drops it to Information and the actual Azure error
+          # survives. Cost: it also logs the submission's FileUploadUrl, which is
+          # a write-capable SAS for the pending submission's blob.
+          msstore publish "$env:GITHUB_WORKSPACE/antgrid-store.msix" -id $env:MSSTORE_APP_ID --verbose
 
   linux:
     if: ${{ github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'linux' }}
