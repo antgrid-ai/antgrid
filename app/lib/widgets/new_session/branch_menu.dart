@@ -20,7 +20,7 @@ class BranchChip extends ConsumerWidget {
     if (target == null) return const SizedBox.shrink();
 
     final catalogAsync = ref.watch(newSessionBranchCatalogProvider);
-    final selection = ref.watch(newSessionBranchSelectionProvider);
+    final effective = ref.watch(newSessionEffectiveBranchProvider);
     final isolated = ref.watch(newSessionIsolatedProvider);
 
     String label = 'Loading branches...';
@@ -34,17 +34,12 @@ class BranchChip extends ConsumerWidget {
         } else if (!catalog.isRepository) {
           label = 'No Git repository';
           disabled = true;
+        } else if (effective != null) {
+          // Resolved centrally so the chip and the remote advisory below it can
+          // never name different branches.
+          label = isolated ? 'Base: $effective' : effective;
         } else {
-          final isExplicitValid = selection != null &&
-              selection.targetId == target.id &&
-              catalog.branches.contains(selection.branch);
-          if (isExplicitValid) {
-            label = isolated ? 'Base: ${selection.branch}' : selection.branch;
-          } else if (catalog.current != null) {
-            label = isolated ? 'Base: ${catalog.current!}' : catalog.current!;
-          } else {
-            label = 'Detached HEAD';
-          }
+          label = 'Detached HEAD';
         }
       },
       error: (err, _) {

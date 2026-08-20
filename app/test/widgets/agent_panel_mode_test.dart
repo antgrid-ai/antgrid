@@ -2,6 +2,7 @@
 // transcript based on the active session's mode (Task 10).
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/providers/sessions.dart';
+import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/screens/terminal_screen.dart';
 import 'package:antgrid/widgets/agent_panel.dart';
 import 'package:antgrid/widgets/agent_transcript_view.dart';
@@ -40,6 +41,12 @@ void main() {
         overrides: [
           ...stores.overrides,
           activeSessionProvider.overrideWithValue(_session(mode: 'chat')),
+          // The row alone is not the focus: the panel keys the transcript
+          // by the focused id, and a row without one is state production
+          // cannot reach (`activeSessionProvider` derives from this id).
+          activeSessionIdProvider.overrideWith(
+            () => ValueController('session-1'),
+          ),
         ],
         child: const MaterialApp(home: Scaffold(body: AgentPanel())),
       ),
@@ -64,6 +71,9 @@ void main() {
         overrides: [
           ...stores.overrides,
           activeSessionProvider.overrideWithValue(_session(mode: 'terminal')),
+          activeSessionIdProvider.overrideWith(
+            () => ValueController('session-1'),
+          ),
         ],
         child: const MaterialApp(home: Scaffold(body: AgentPanel())),
       ),

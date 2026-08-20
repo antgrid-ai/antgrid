@@ -337,6 +337,14 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // the reveal callback above: left published, the agent bar's workspace menu
     // would call setState on a disposed shell.
     final menuNotifier = ref.read(workspaceMenuControlProvider.notifier);
+    // Left published, a stale `true` tells the focus binder the agent terminal
+    // is still on screen while the New Session canvas is up — it keeps the
+    // PREVIOUS session's terminal marked as viewed, and notifications for it
+    // stay suppressed. Both halves of the layout re-publish the real value from
+    // their own post-frame callback on remount.
+    final agentSurfaceNotifier = ref.read(
+      agentSurfaceVisibleProvider.notifier,
+    );
     // Closes over _pageController too, so the same rule: NewSessionScreen
     // republishes its own on mount, and a stale one would animate a dead route.
     // Retracted by identity, not unconditionally — see openDrawerProvider's doc:
@@ -363,6 +371,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
         revealNotifier.set(null);
         visibleViewNotifier.set(null);
         menuNotifier.set(null);
+        agentSurfaceNotifier.set(false);
         if (identical(
           container.read(openDrawerProvider),
           _publishedToggleDrawer,
@@ -517,9 +526,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   /// Fetch the agent's session list. On empty: route to the New Session page
   /// so the user picks an agent (no auto cold-start) — unless a
   /// `startNewSession` is already in flight, in which case that path owns
-  /// session creation. On non-empty: select the most-recently-used session
-  /// and auto-start it if stopped, then `focus` to bump server-side
-  /// `lastUsedAt` so a second app connecting later sees matching recency.
+  /// session creation. On non-empty: keep the session already focused if this
+  /// project still has it, else select the most-recently-used one; auto-start
+  /// the pick if it is stopped, then `focus` it.
   ///
   /// Project-switch race guard: capture the project id at entry and re-check
   /// after every await. If the user switches A → B mid-flight, the stale A
@@ -635,8 +644,20 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       return;
     } else {
       if (ref.read(selectedRegistrationIdProvider) != triggeredFor) return;
-      ref.read(activeSessionIdProvider.notifier).set(active.first.id);
-      final session = active.first;
+      // Keep the session already focused when this project still has it. The
+      // bridge orders by `lastUsedAt`, which records ACTIVITY (a keystroke, an
+      // agent notification) rather than what the user last opened — and
+      // `session:focus` does not bump it — so re-deriving from `active.first`
+      // discards a deliberate selection whenever a sibling session happened to
+      // be busy. Every remount runs this bootstrap (a surface swap unmounts the
+      // whole shell), so `active.first` is for the case it is actually an
+      // answer to: opening a project with nothing chosen yet.
+      final current = ref.read(activeSessionIdProvider);
+      final session = active.firstWhere(
+        (s) => s.id == current,
+        orElse: () => active.first,
+      );
+      ref.read(activeSessionIdProvider.notifier).set(session.id);
       if (!session.running) {
         await _startBestEffort(svc, session.id);
         if (!mounted) return;
@@ -644,8 +665,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       }
       // Transcript hydration is driven by AgentTranscriptView.initState (the
       // single per-session chokepoint), not here — see hydrateAttachedChatIfNeeded.
-      // Bump server-side lastUsedAt so a second app connecting later sees
-      // the actual recency (parity with manual tap in session_row.dart).
+      // Announce the pick for parity with the manual tap in session_row.dart.
+      // `SessionManager.focus()` is a no-op on the current bridge, so nothing
+      // here may depend on it moving server-side recency — see the pick above.
       svc.focus(session.id);
     }
   }

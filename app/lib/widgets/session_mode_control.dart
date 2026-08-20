@@ -19,12 +19,12 @@ import 'session_agent_mark.dart';
 
 /// Switches the focused session between terminal and chat.
 ///
-/// The same [ModeSegmented] the create-time picker uses, at header density:
-/// both options visible, the live one accented, labels demoted to tooltips. A
-/// single destination glyph would be narrower still, but a header that also
-/// carries a [SessionAgentMark] can't afford a second unlabelled glyph whose
-/// meaning is "the thing you are NOT looking at" — and the box, divider and
-/// accent fill are what make a two-state choice legible without a caption.
+/// [ModeSegmented] at header density: both options visible, the live one
+/// accented, labels demoted to tooltips. A single destination glyph would be
+/// narrower still, but a header that also carries a [SessionAgentMark] can't
+/// afford a second unlabelled glyph whose meaning is "the thing you are NOT
+/// looking at" — and the box, divider and accent fill are what make a
+/// two-state choice legible without a caption.
 ///
 /// The two ways this can be unavailable are answered differently on purpose.
 /// A conversation that can no longer be resumed

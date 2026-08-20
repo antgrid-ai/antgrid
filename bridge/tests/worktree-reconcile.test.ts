@@ -172,4 +172,53 @@ describe("WorktreeManager reconciliation", () => {
       .toMatchObject({ pruned: 1 });
     expect(await new CheckoutStore(abDir, projectId).list()).toEqual([]);
   });
+  /** The wreckage a `worktree remove` leaves when it dies partway: Git deletes
+   *  the `.git` link early in its sweep, aborts on a directory something holds
+   *  open, and a later prune reaps the registration the link pointed at. */
+  async function strandCheckout(path: string): Promise<void> {
+    rmSync(join(path, ".git"), { force: true });
+    await git(repo, ["worktree", "prune"]);
+  }
+
+  test("reclaims a checkout Git no longer registers and whose `.git` link is gone", async () => {
+    const instance = manager();
+    const stranded = await instance.prepareForSession({ projectId, repoPath: repo, sessionId: "session-one", sessionName: "One" });
+    const kept = await instance.prepareForSession({ projectId, repoPath: repo, sessionId: "session-two", sessionName: "Two" });
+    await strandCheckout(stranded.path);
+
+    // Counted as live before this arm existed, purely because the directory was
+    // still there — which left its session deletable by no route at all.
+    expect(await agedManager().reconcile(projectId, repo)).toMatchObject({ pruned: 1, reclaimed: 1 });
+
+    expect(existsSync(stranded.path)).toBe(false);
+    expect((await new CheckoutStore(abDir, projectId).list()).map((record) => record.id)).toEqual([kept.id]);
+    expect(existsSync(kept.path)).toBe(true);
+  });
+
+  test("leaves an unregistered checkout alone while it still has a `.git` link", async () => {
+    // Both signals are required. A directory that still claims a Git checkout
+    // may hold work, whatever the repository's registration says about it.
+    const instance = manager();
+    const checkout = await instance.prepareForSession({ projectId, repoPath: repo, sessionId: "session-one" });
+    rmSync(join(repo, ".git", "worktrees"), { recursive: true, force: true });
+
+    expect(await agedManager().reconcile(projectId, repo)).toMatchObject({ pruned: 0, reclaimed: 0 });
+
+    expect(existsSync(checkout.path)).toBe(true);
+    expect((await new CheckoutStore(abDir, projectId).list()).map((record) => record.id)).toEqual([checkout.id]);
+  });
+
+  test("treats every checkout as live when Git cannot be asked at all", async () => {
+    // An empty listing and an unanswered question look identical, and only one
+    // of them means the checkouts are gone.
+    const instance = manager();
+    const checkout = await instance.prepareForSession({ projectId, repoPath: repo, sessionId: "session-one" });
+    await strandCheckout(checkout.path);
+    const failing = agedManager({ git: async () => ({ exitCode: 128, stdout: "", stderr: "not a repository" }) });
+
+    expect(await failing.reconcile(projectId, repo)).toMatchObject({ pruned: 0, reclaimed: 0 });
+
+    expect(existsSync(checkout.path)).toBe(true);
+    expect((await new CheckoutStore(abDir, projectId).list()).map((record) => record.id)).toEqual([checkout.id]);
+  });
 });

@@ -6,6 +6,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { logger } from "./logger";
 const log = logger.child({ component: "agent-core" });
 import { TerminalManager } from "./terminal-manager";
+import { killProcessTree, processGroupSpawn } from "./terminal-session";
 import { createConnState, type ConnState } from "./conn-state";
 import { FileWatcher } from "./file-watcher";
 import { FileUploadManager } from "./file-upload";
@@ -948,11 +949,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
         // Commands are defined in the local config file, not supplied by remote clients.
         // shell: true is safe here because command strings come from antgrid.yaml.
+        // That wrapper is also why the spawn must lead its own process group:
+        // the handle below is the shell, and teardown has to reach past it to
+        // the command actually sitting in the checkout.
         const proc = spawn(cmdConfig.command, args, {
           cwd,
           env,
           shell: true,
           stdio: ["ignore", "pipe", "pipe"],
+          ...processGroupSpawn(),
         });
 
         const cmdKey = `${msg.projectId}:${msg.commandName}`;
@@ -1241,7 +1246,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   function teardownServices() {
     for (const runtime of checkoutRuntimes.values()) {
-      for (const proc of runtime.runningCommands.values()) proc.kill();
+      for (const proc of runtime.runningCommands.values()) {
+        // Tree first: `command:run` spawns with `shell: true`, so the handle
+        // here is the `cmd.exe` wrapper and the real command lives under it
+        // with its cwd inside the checkout. Killing the wrapper alone leaves
+        // that child holding the very directory `git worktree remove` is
+        // about to delete — the same orphan `killProcessTree` exists for.
+        if (proc.pid !== undefined) killProcessTree(proc.pid);
+        proc.kill();
+      }
       runtime.runningCommands.clear();
       runtime.configController.stopWatch();
       runtime.fileWatcher?.stop();
@@ -1861,7 +1874,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   async function teardownCheckoutRuntime(checkoutId: string): Promise<void> {
     const runtime = checkoutRuntimes.runtime(checkoutId);
     if (!runtime || checkoutId === "main") return;
-    for (const proc of runtime.runningCommands.values()) proc.kill();
+    for (const proc of runtime.runningCommands.values()) {
+      // Tree first: `command:run` spawns with `shell: true`, so the handle
+      // here is the `cmd.exe` wrapper and the real command lives under it
+      // with its cwd inside the checkout. Killing the wrapper alone leaves
+      // that child holding the very directory `git worktree remove` is
+      // about to delete — the same orphan `killProcessTree` exists for.
+      if (proc.pid !== undefined) killProcessTree(proc.pid);
+      proc.kill();
+    }
     runtime.runningCommands.clear();
     for (const internalId of runtime.configuredTerminalIds.values()) manager?.kill(internalId);
     runtime.configController.stopWatch();

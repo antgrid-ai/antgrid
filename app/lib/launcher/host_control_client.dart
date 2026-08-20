@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import '../services/control_plane_client.dart'
     show AgentWorkStatus, parseAgentDescriptors, parseSessionStatuses;
 import '../models/agent_descriptor.dart';
+import '../models/branch_remote_status.dart';
 import '../models/git_branch.dart';
 
 /// Loopback data-plane connect info from a `project:open` response.
@@ -457,6 +458,32 @@ class HostControlClient {
       return GitBranchCatalog.fromJson(m);
     } catch (e) {
       throw HostControlException('BAD_RESPONSE', 'malformed git:branches response: $e');
+    }
+  }
+
+  /// Reaches the network on the bridge side (`git ls-remote`), so it carries a
+  /// longer timeout than the other git verbs. Advisory: callers render nothing
+  /// on failure rather than surfacing an error.
+  Future<BranchRemoteStatus> gitRemoteState({
+    required String projectId,
+    required String projectPath,
+    required String branch,
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
+    final m = await _post({
+      'type': 'git:remote-state',
+      'projectId': projectId,
+      'projectPath': projectPath,
+      'branch': branch,
+    }, timeout: timeout);
+    final status = m['status'];
+    if (status is! Map) {
+      throw HostControlException('BAD_RESPONSE', 'malformed git:remote-state response');
+    }
+    try {
+      return BranchRemoteStatus.fromJson(Map<String, dynamic>.from(status));
+    } catch (e) {
+      throw HostControlException('BAD_RESPONSE', 'malformed git:remote-state response: $e');
     }
   }
 

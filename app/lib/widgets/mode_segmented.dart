@@ -4,16 +4,16 @@ import '../design/ab_icons.dart';
 import '../design/widgets/ab_segmented.dart';
 
 /// Session-mode segmented control ([ CHAT | TERMINAL ]): both options always
-/// visible, the selected cell accented.
+/// visible, the selected cell accented. Used by the in-session switch
+/// (`session_mode_control.dart`), where the session already exists and the mode
+/// is a state to flip rather than a choice to make.
 ///
-/// Shared by the create-time picker and the in-session switch, deliberately as
-/// ONE widget: picking the mode for a session about to exist and changing it on
-/// one that already does are the same decision, and two idioms for it would mean
-/// learning the control twice. The surfaces differ only in density — create-time
-/// has a form's width for labels, the header has [iconOnly].
+/// The create-time picker uses a dropdown instead: there, Terminal is the
+/// default for every agent and Chat is alpha, so the two are not equals worth
+/// the row of a segmented control.
 ///
-/// A greyed cell is how "this agent can't do chat" gets said, in both places;
-/// that reason has nowhere to live in a control that shows only one option.
+/// A greyed cell is how "this agent can't do chat" gets said here; the
+/// dropdown says it with a greyed row.
 class ModeSegmented extends StatelessWidget {
   const ModeSegmented({
     super.key,
@@ -23,15 +23,11 @@ class ModeSegmented extends StatelessWidget {
     this.chatEnabled = true,
     this.chatDisabledReason,
     this.enabled = true,
-    this.showIcons = true,
     this.iconOnly = false,
-  }) : assert(
-         !iconOnly || showIcons,
-         'iconOnly with showIcons:false would paint nothing',
-       );
+  });
 
-  /// Prefix for the cell keys (`<prefix>-chip` / `-chat` / `-terminal`) so the
-  /// two mount points stay separately addressable.
+  /// Prefix for the cell keys (`<prefix>-chip` / `-chat` / `-terminal`) so any
+  /// mount point stays separately addressable.
   final String keyPrefix;
 
   /// Displayed selection: `'chat'` or `'terminal'`.
@@ -50,9 +46,6 @@ class ModeSegmented extends StatelessWidget {
   /// can't queue a second flip. Carries no reason — the user just tapped.
   final bool enabled;
 
-  /// Icons are garnish (labels always render); tight rows drop them first.
-  final bool showIcons;
-
   /// Header density: glyphs only, the labels demoted to tooltips. See
   /// [AbSegmented.iconOnly].
   final bool iconOnly;
@@ -67,7 +60,7 @@ class ModeSegmented extends StatelessWidget {
           key: Key('$keyPrefix-chat'),
           value: 'chat',
           label: 'Chat',
-          icon: showIcons ? AbIcons.comment : null,
+          icon: AbIcons.comment,
           enabled: enabled && chatEnabled,
           disabledReason: chatEnabled ? null : chatDisabledReason,
         ),
@@ -75,7 +68,7 @@ class ModeSegmented extends StatelessWidget {
           key: Key('$keyPrefix-terminal'),
           value: 'terminal',
           label: 'Terminal',
-          icon: showIcons ? AbIcons.terminal : null,
+          icon: AbIcons.terminal,
           enabled: enabled,
         ),
       ],

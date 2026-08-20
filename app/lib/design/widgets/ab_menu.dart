@@ -3,7 +3,10 @@ import 'package:flutter/services.dart';
 
 import '../ab_colors.dart';
 import '../ab_tokens.dart';
+import '../widgets/ab_chip.dart';
 import '../widgets/ab_icon.dart';
+import '../widgets/ab_snack_bar.dart';
+import '../widgets/ab_tooltip.dart';
 
 abstract class AbMenuEntry {
   const AbMenuEntry();
@@ -11,20 +14,42 @@ abstract class AbMenuEntry {
 
 class AbMenuItem extends AbMenuEntry {
   const AbMenuItem({
+    this.key,
     required this.label,
     this.onTap,
     this.value,
     this.icon,
     this.shortcut,
     this.danger = false,
+    this.badge,
+    this.badgeColor,
+    this.enabled = true,
+    this.disabledReason,
   }) : assert(
          onTap != null || value != null,
          'AbMenuItem needs onTap (inline action) or value (returned by showAbMenu)',
        );
+  /// Key applied to the rendered row — the only handle a caller has on an
+  /// entry that is data, not a widget.
+  final Key? key;
+
   final String label;
   final String? icon;
   final String? shortcut;
   final bool danger;
+
+  /// Trailing system chip (e.g. `ALPHA`) qualifying the row's maturity or
+  /// tier. Never the place for prose — it renders mono-uppercase and tiny.
+  final String? badge;
+
+  final Color? badgeColor;
+
+  /// False greys the row and blocks selection. The row still hit-tests so
+  /// [disabledReason] can surface (tooltip + snack bar) — a greyed option
+  /// raises the more urgent question of WHY, same contract as `AbSegmented`.
+  final bool enabled;
+
+  final String? disabledReason;
 
   /// Inline tap handler. Used when the menu is rendered directly (no
   /// [showAbMenu] route). Optional when [value] is provided — the
@@ -106,9 +131,16 @@ class AbMenu extends StatelessWidget {
                   else if (entry is AbMenuItem)
                     Builder(
                       builder: (_) {
-                        final autofocus = !didAutofocus;
-                        didAutofocus = true;
-                        return _MenuItemTile(item: entry, autofocus: autofocus);
+                        // Skip disabled rows: landing the keyboard on one that
+                        // can only answer with its reason costs the user an
+                        // arrow press before anything is pickable.
+                        final autofocus = !didAutofocus && entry.enabled;
+                        didAutofocus |= autofocus;
+                        return _MenuItemTile(
+                          key: entry.key,
+                          item: entry,
+                          autofocus: autofocus,
+                        );
                       },
                     ),
               ],
@@ -431,10 +463,15 @@ class _AbMenuRoute<T> extends PopupRoute<T> {
       .map<AbMenuEntry>((e) {
         if (e is! AbMenuItem) return e;
         return AbMenuItem(
+          key: e.key,
           label: e.label,
           icon: e.icon,
           shortcut: e.shortcut,
           danger: e.danger,
+          badge: e.badge,
+          badgeColor: e.badgeColor,
+          enabled: e.enabled,
+          disabledReason: e.disabledReason,
           value: e.value,
           onTap: () {
             // Pop FIRST so the menu route is no longer at the top of
@@ -588,7 +625,11 @@ class _AbMenuLayoutDelegate extends SingleChildLayoutDelegate {
 }
 
 class _MenuItemTile extends StatefulWidget {
-  const _MenuItemTile({required this.item, this.autofocus = false});
+  const _MenuItemTile({
+    super.key,
+    required this.item,
+    this.autofocus = false,
+  });
   final AbMenuItem item;
   final bool autofocus;
 
@@ -600,6 +641,16 @@ class _MenuItemTileState extends State<_MenuItemTile> {
   bool _hover = false;
   bool _focused = false;
 
+  void _activate() {
+    final i = widget.item;
+    if (!i.enabled) {
+      final reason = i.disabledReason;
+      if (reason != null) showAbSnackBar(context, reason);
+      return;
+    }
+    i.onTap?.call();
+  }
+
   @override
   Widget build(BuildContext context) {
     final p = context.antgrid;
@@ -608,12 +659,24 @@ class _MenuItemTileState extends State<_MenuItemTile> {
     // highlight — a single "active row" state for either input mode.
     final active = _hover || _focused;
     // Label tone: fg-1 → fg-0 on hover/focus (per Antgrid menu spec).
-    final fg = i.danger ? p.error : (active ? p.textPrimary : p.textSecondary);
+    final fg = !i.enabled
+        ? p.textDisabled
+        : i.danger
+        ? p.error
+        : (active ? p.textPrimary : p.textSecondary);
     // Icon tone is one step dimmer than the label (fg-2 → fg-0 on hover/focus).
-    final iconFg = i.danger ? p.error : (active ? p.textPrimary : p.textMuted);
-    return FocusableActionDetector(
+    final iconFg = !i.enabled
+        ? p.textDisabled
+        : i.danger
+        ? p.error
+        : (active ? p.textPrimary : p.textMuted);
+    final tile = FocusableActionDetector(
       autofocus: widget.autofocus,
-      mouseCursor: SystemMouseCursors.click,
+      // Disabled rows keep hit-testing (so the reason can surface) but must not
+      // promise a pick with the cursor — same split as AbSegmented's cells.
+      mouseCursor: i.enabled
+          ? SystemMouseCursors.click
+          : SystemMouseCursors.basic,
       onShowHoverHighlight: (v) {
         if (_hover != v) setState(() => _hover = v);
       },
@@ -630,13 +693,13 @@ class _MenuItemTileState extends State<_MenuItemTile> {
       actions: {
         ActivateIntent: CallbackAction<ActivateIntent>(
           onInvoke: (_) {
-            i.onTap?.call();
+            _activate();
             return null;
           },
         ),
       },
       child: GestureDetector(
-        onTap: i.onTap,
+        onTap: _activate,
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
           decoration: BoxDecoration(
@@ -656,6 +719,14 @@ class _MenuItemTileState extends State<_MenuItemTile> {
                   style: TextStyle(fontSize: AbTokens.fontSm, color: fg),
                 ),
               ),
+              if (i.badge != null)
+                Padding(
+                  padding: const EdgeInsets.only(left: 6),
+                  child: AbChip.system(
+                    label: i.badge!,
+                    color: i.enabled ? i.badgeColor : p.textDisabled,
+                  ),
+                ),
               if (i.shortcut != null)
                 Text(
                   i.shortcut!,
@@ -670,5 +741,8 @@ class _MenuItemTileState extends State<_MenuItemTile> {
         ),
       ),
     );
+    final reason = i.enabled ? null : i.disabledReason;
+    if (reason == null) return tile;
+    return AbTooltip(message: reason, child: tile);
   }
 }

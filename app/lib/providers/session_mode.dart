@@ -37,7 +37,10 @@ final pendingSessionModeProvider =
 /// target while a flip is pending, else the acked entry value. Null when no
 /// session is focused.
 final activeSessionModeProvider = Provider<String?>((ref) {
-  final active = ref.watch(activeSessionProvider);
+  // Cache-backed: a session's mode is fixed until a flip acks, and null here is
+  // read downstream as "not chat" — which rendered the terminal view for a chat
+  // session every time the live row was still re-resolving.
+  final active = ref.watch(activeSessionOrCachedProvider);
   if (active == null) return null;
   final pending = ref.watch(pendingSessionModeProvider);
   return pending != null && pending.sessionId == active.id

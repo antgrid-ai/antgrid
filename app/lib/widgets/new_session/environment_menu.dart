@@ -274,6 +274,8 @@ class _ComposerToggleChipState extends State<ComposerToggleChip> {
   Widget build(BuildContext context) {
     final p = context.antgrid;
     final enabled = widget.onChanged != null;
+    // Only the glyph carries the on/off state; the chip's frame and label stay
+    // neutral so a toggled chip doesn't read as a pressed button.
     final fg = !enabled
         ? p.textDisabled
         : widget.value
@@ -282,7 +284,7 @@ class _ComposerToggleChipState extends State<ComposerToggleChip> {
 
     final labelStyle = AbTokens.monoStyle(
       fontSize: AbTokens.fontSm,
-      color: fg,
+      color: enabled ? p.textSecondary : p.textDisabled,
     );
 
     Widget chip = LayoutBuilder(
@@ -306,16 +308,8 @@ class _ComposerToggleChipState extends State<ComposerToggleChip> {
             vertical: AbTokens.space4,
           ),
           decoration: BoxDecoration(
-            // Same accent-at-alpha-40 fill the segmented control uses for
-            // its selected cell, so "on" reads the same wherever it
-            // appears.
-            color: widget.value ? p.accent.withAlpha(40) : null,
             border: Border.all(
-              color: !enabled
-                  ? p.borderSubtle
-                  : widget.value
-                  ? p.accent
-                  : p.borderDefault,
+              color: enabled ? p.borderDefault : p.borderSubtle,
             ),
             borderRadius: AbTokens.borderRadius3,
           ),

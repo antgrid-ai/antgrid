@@ -5,6 +5,7 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import '../models/ab_message.dart';
 import '../models/agent_descriptor.dart';
 import '../models/agent_work_status.dart';
+import '../models/branch_remote_status.dart';
 import '../models/git_branch.dart';
 import '../models/session_entry.dart';
 
@@ -455,6 +456,22 @@ class ControlPlaneClient {
       return GitBranchCatalog.fromJson(res);
     } catch (e) {
       throw RpcException('BAD_RESPONSE', 'malformed git.branches response: $e');
+    }
+  }
+
+  /// See [HostControlClient.gitRemoteState] — same verb over the relay.
+  Future<BranchRemoteStatus> gitRemoteState({
+    required String projectId,
+    required String branch,
+  }) async {
+    final res = await transport.request(
+      'git.remote-state',
+      params: {'projectId': projectId, 'branch': branch},
+    );
+    try {
+      return BranchRemoteStatus.fromJson(res);
+    } catch (e) {
+      throw RpcException('BAD_RESPONSE', 'malformed git.remote-state response: $e');
     }
   }
 

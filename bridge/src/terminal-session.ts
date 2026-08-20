@@ -45,6 +45,73 @@ function logPtyChunk(terminalId: string, data: string): void {
 }
 
 /**
+ * Spawn options that put a child where `killProcessTree` can reach past it.
+ *
+ * POSIX kills a process GROUP, which exists only if the child leads one, and
+ * `detached` is what makes it lead one — so this is not a preference, it is the
+ * precondition for the POSIX half of `killProcessTree` doing anything at all.
+ * Windows walks parent links instead and needs no such setup, where `detached`
+ * would only cost a console window. Keep the two in lockstep.
+ *
+ * A PTY child needs none of this: its own `setsid` already made it a session
+ * leader.
+ */
+export function processGroupSpawn(platform: NodeJS.Platform = process.platform): { detached: boolean } {
+  return { detached: platform !== "win32" };
+}
+
+/**
+ * Kill `pid` and everything it started.
+ *
+ * `IPty.kill()` and `ChildProcess.kill()` each signal one process, and it is
+ * the survivors that matter. On Windows every one of them holds its working
+ * directory open — a shell's children, and the headless `conhost.exe` each
+ * console child gets — and a single orphan is enough to make
+ * `git worktree remove` abort mid-tree, which strands an isolated session in a
+ * state no retry can clear (Git deletes `.git` early in that sweep, a later
+ * prune reaps the registration, and what is left is a directory Git will not
+ * touch again). POSIX unlinks a directory out from under a running process
+ * quite happily, so there an orphan blocks no delete — but it is still a
+ * process nobody will ever reap, holding whatever it held.
+ *
+ * The two platforms are reached differently and fail differently. Windows walks
+ * parent links, so the tree must die BEFORE the leader: once the leader exits
+ * its children are re-parented out of reach. POSIX names the process group,
+ * which needs no ordering — but a pid that leads no group names no group, and
+ * the signal is then a harmless ESRCH that quietly reaches nothing. That is why
+ * callers spawning outside a PTY must pass `processGroupSpawn()`.
+ *
+ * Synchronous on Windows because the session delete that awaits teardown has to
+ * see the handles actually released, not merely requested.
+ *
+ * Exported because PTYs are not the only thing a checkout's runtime leaves
+ * running: `command:run` children are spawned through a shell, so killing the
+ * process handle alone reaches the wrapper and nothing under it.
+ */
+export function killProcessTree(pid: number): void {
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      // No group carries this id, so there is nothing here that the caller's
+      // own kill of the leader does not already reach.
+    }
+    return;
+  }
+  try {
+    execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)], {
+      timeout: 5_000,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+  } catch {
+    // Already gone, never started, or refused: `kill()` still signals the
+    // leader afterwards, and a delete that goes on to fail reports why.
+  }
+}
+
+/**
  * Builds the env record for a spawned PTY. Merges caller keys first so
  * ANTGRID_TERMINAL_ID and ANTGRID_API_PORT always win for their own slots,
  * while unrelated caller keys are preserved. ANTGRID_API_PORT is omitted when
@@ -658,6 +725,8 @@ export class TerminalSession {
   kill(): void {
     this._running = false;
     this.flushBatch();
+    const pid = this.pty?.pid;
+    if (pid !== undefined) killProcessTree(pid);
     this.pty?.kill();
   }
 }

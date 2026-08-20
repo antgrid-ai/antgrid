@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
 import { SessionManager } from "../src/session-manager";
+import { projectRootName } from "../src/worktrees/checkout-names";
 import { resolveProject } from "../src/worktrees/project-resolver";
 import { WorktreeManager } from "../src/worktrees/worktree-manager";
 
@@ -80,7 +81,7 @@ test("forget() reclaims managed worktrees before the metadata naming them is del
 
   // Reclamation reads `agents/<id>/checkouts.json`, which the store deletion
   // destroys — so this passing is the ordering proof, not just a disk check.
-  expect(existsSync(join(abDir!, "wt", projectId))).toBe(false);
+  expect(existsSync(join(abDir!, "wt", projectRootName(folder, projectId)))).toBe(false);
   expect(existsSync(join(abDir!, "agents", projectId))).toBe(false);
   expect((await git(folder, ["worktree", "list", "--porcelain"])).match(/^worktree /gm)?.length).toBe(1);
   // Committed work survives forgetting a project: only the branch's checkout
@@ -102,7 +103,7 @@ test("forget() still erases the stores when the project folder is gone", async (
   // Reclamation is best-effort by contract: a Git or fs failure must never
   // strand the store deletion or the catalog update that follow it.
   expect(existsSync(join(abDir!, "agents", projectId))).toBe(false);
-  expect(existsSync(join(abDir!, "wt", projectId))).toBe(false);
+  expect(existsSync(join(abDir!, "wt", projectRootName(folder, projectId)))).toBe(false);
   const seen = JSON.parse(readFileSync(join(abDir!, "agents", "projects.json"), "utf8"));
   expect(seen.projects[projectId]).toBeUndefined();
 });

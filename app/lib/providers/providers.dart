@@ -27,7 +27,7 @@ import 'relay_connection.dart';
 import 'seeded_stream.dart';
 import 'supervisor_status.dart';
 import 'recent_agents.dart';
-import 'sessions.dart' show focusedCheckoutIdProvider;
+import 'sessions.dart' show activeSessionIdProvider, focusedCheckoutIdProvider;
 import '../models/file_tree_models.dart';
 import '../models/preview_models.dart';
 import '../services/file_service.dart';
@@ -238,13 +238,25 @@ final handlerEscalationsProvider = StreamProvider<HandlerEscalation>((ref) {
   return controller.stream;
 });
 
+/// The agent terminal the workspace is showing: the focused session's own tab.
+///
+/// Falls back to "first running agent tab" only when no session is focused —
+/// that fallback predates the session model, and with a session focused it
+/// names another session's terminal, which the focus binder then marks as
+/// viewed (keeping the PREVIOUS session alive and its notifications
+/// suppressed) while the user looks at the new one.
 final agentTerminalProvider = Provider<TerminalTab?>((ref) {
   final state = ref.watch(terminalStateProvider).value;
   if (state == null) return null;
+  bool live(TerminalTab tab) =>
+      tab.isAgent && tab.sessionState == TerminalSessionState.running;
+  final activeId = ref.watch(activeSessionIdProvider);
+  if (activeId != null) {
+    final tab = state.tabs[activeId];
+    return tab != null && live(tab) ? tab : null;
+  }
   try {
-    return state.tabs.values.firstWhere(
-      (tab) => tab.isAgent && tab.sessionState == TerminalSessionState.running,
-    );
+    return state.tabs.values.firstWhere(live);
   } on StateError {
     return null;
   }

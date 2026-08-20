@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { CheckoutStore } from "../src/worktrees/checkout-store";
+import { projectRootName } from "../src/worktrees/checkout-names";
 import { WorktreeManager } from "../src/worktrees/worktree-manager";
 
 async function git(cwd: string, args: string[]): Promise<string> {
@@ -42,7 +43,7 @@ describe("WorktreeManager.reclaimForgottenProject", () => {
   }
 
   function worktreeRoot(): string {
-    return join(abDir, "wt", projectId);
+    return join(abDir, "wt", projectRootName(repo, projectId));
   }
 
   test("removes every managed worktree and its registration while keeping the branch", async () => {
@@ -100,6 +101,51 @@ describe("WorktreeManager.reclaimForgottenProject", () => {
     // later prune could ever clear.
     expect(await instance.reclaimForgottenProject(projectId)).toMatchObject({ reclaimed: 1, stranded: 0 });
     expect((await git(repo, ["worktree", "list", "--porcelain"])).match(/^worktree /gm)?.length).toBe(1);
+  });
+
+  test("a session that renamed its branch away is still deletable", async () => {
+    const instance = manager();
+    const checkout = await instance.prepareForSession({ projectId, repoPath: repo, sessionId: "abcdefgh" });
+    await git(checkout.path, ["switch", "-c", "the-agent-renamed-this"]);
+    await git(repo, ["branch", "-D", checkout.branch!]);
+
+    // Everything after `git worktree remove` runs past the point of no return.
+    // A branch delete that fails there used to throw, which left the store row
+    // behind with no directory under it and made the session undeletable.
+    await instance.remove({ checkoutId: checkout.id, force: true, deleteBranch: true });
+    expect(existsSync(checkout.path)).toBe(false);
+    expect(await new CheckoutStore(abDir, projectId).get(checkout.id)).toBeUndefined();
+  });
+
+  test("a branch the user checked out elsewhere is kept, and the session still goes", async () => {
+    const instance = manager();
+    const checkout = await instance.prepareForSession({ projectId, repoPath: repo, sessionId: "abcdefgh" });
+    await git(checkout.path, ["switch", "-c", "elsewhere"]);
+    await git(repo, ["switch", checkout.branch!]);
+
+    // Git refuses to delete a branch another worktree holds, and here that
+    // worktree is the user's own main checkout. Their tree is not ours to
+    // rearrange, so the branch stays and the deletion still completes.
+    await instance.remove({ checkoutId: checkout.id, force: true, deleteBranch: true });
+    expect(await new CheckoutStore(abDir, projectId).get(checkout.id)).toBeUndefined();
+    expect(await git(repo, ["branch", "--list", checkout.branch!])).toContain(checkout.branch!);
+  });
+
+  test("a branch renamed out from under us loses nothing, so the delete proceeds", async () => {
+    const instance = manager();
+    const checkout = await instance.prepareForSession({ projectId, repoPath: repo, sessionId: "abcdefgh" });
+    await git(checkout.path, ["switch", "-c", "moved-on"]);
+    await git(checkout.path, ["commit", "--allow-empty", "-m", "work"]);
+    await git(repo, ["branch", "-m", checkout.branch!, "user-renamed-it"]);
+
+    // rev-list answers a vanished branch with exit 128 and an EMPTY stdout,
+    // byte-identical to "nothing unpushed" — so the guard reads the exit code
+    // and then asks whether the ref is actually gone. Gone is the one failure
+    // that really means nothing is at risk: the commits live on the name the
+    // user chose, which this delete never touches. Any OTHER rev-list failure
+    // is an unknown and must refuse instead.
+    await instance.remove({ checkoutId: checkout.id, force: false, deleteBranch: false });
+    expect(await git(repo, ["branch", "--list", "user-renamed-it"])).toContain("user-renamed-it");
   });
 
   test("refuses a project id that would point the recursive delete outside the worktree root", async () => {

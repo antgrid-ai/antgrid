@@ -1,8 +1,9 @@
 import 'package:flutter/widgets.dart';
 
 import '../design/ab_colors.dart';
+import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
-import '../design/widgets/ab_chip.dart';
+import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../models/session_entry.dart';
 
@@ -37,6 +38,11 @@ SessionCheckoutHealth sessionCheckoutHealth(String? state) => switch (state) {
 /// unconditionally and none of them re-derives what "isolated" means. Its copy
 /// names no mechanism: the same badge stands for every non-`main` kind, so a
 /// word like "worktree" would be a guess about which backend this session runs.
+///
+/// A glyph rather than a word: it sits beside a session NAME in rows that are
+/// already tight, and the name is what the user scans for. The tooltip — hover
+/// on a pointer, tap on touch — carries the whole explanation, so nothing the
+/// badge means depends on reading the icon.
 class SessionIsolationBadge extends StatelessWidget {
   const SessionIsolationBadge({super.key, required this.session});
 
@@ -66,8 +72,17 @@ class SessionIsolationBadge extends StatelessWidget {
       padding: const EdgeInsets.only(left: AbTokens.space6),
       child: AbTooltip(
         message: tip,
-        child: AbChip.system(label: 'ISOLATED', color: color),
+        triggerMode: TooltipTriggerMode.tap,
+        child: AbIcon(
+          AbIcons.isolated,
+          size: _glyphSize,
+          color: color ?? context.antgrid.textMuted,
+        ),
       ),
     );
   }
 }
+
+/// Matched to the row text beside it rather than to [AbTokens.iconButtonGlyph]:
+/// this glyph is a marker on a line of text, not a control.
+const double _glyphSize = AbTokens.fontSm;

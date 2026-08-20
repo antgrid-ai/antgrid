@@ -29,6 +29,7 @@ import '../models/capability_catalog.dart';
 import '../models/file_tree_models.dart';
 import '../providers/agent_transport.dart';
 import '../providers/capability_catalog.dart';
+import '../providers/chat_composer_drafts.dart';
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
 import '../services/agent_session_service.dart';
@@ -79,7 +80,7 @@ class AgentTranscriptView extends ConsumerStatefulWidget {
 }
 
 class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
-  final _input = ComposerController();
+  late final ComposerController _input;
   final _scroll = ScrollController();
   final _panelFocus = FocusNode();
   final _selection = TranscriptSelectionController();
@@ -128,9 +129,16 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
   AgentSessionService? _hydratedOn;
   bool _armScheduled = false;
 
+  late final ChatComposerDrafts _drafts;
+
   @override
   void initState() {
     super.initState();
+    // Pinned, not re-read in dispose: at app teardown the ProviderScope above
+    // is disposed before this State is, and reading a provider from a dead
+    // container throws.
+    _drafts = ref.read(chatComposerDraftsProvider);
+    _input = _drafts.forSession(widget.sessionId);
     _input.addListener(_onInputChanged);
     _inputFocus.addListener(_onInputFocusChanged);
   }
@@ -195,9 +203,12 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
     // when the user navigates off / switches to another session.
     _hydratedOn?.stopHydrating(widget.sessionId);
     _input.removeListener(_onInputChanged);
+    // Hands the draft back to the cache, which owns it: an ordinary remount
+    // keeps it, and a session retired while this view was on screen is what
+    // makes the cache dispose it here rather than under a live editor.
+    _drafts.release(widget.sessionId);
     _inputFocus.removeListener(_onInputFocusChanged);
     _inputFocus.dispose();
-    _input.dispose();
     _scroll.dispose();
     _panelFocus.dispose();
     super.dispose();

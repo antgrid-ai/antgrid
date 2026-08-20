@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/ab_project.dart';
 import '../models/agent_descriptor.dart';
+import '../models/branch_remote_status.dart';
 import '../models/git_branch.dart';
 import '../models/session_entry.dart';
 import '../models/session_target.dart';
@@ -393,9 +396,8 @@ Set<String>? chatCapableSetOrNull(Iterable<(String, bool?)> entries) {
 // -- Ephemeral New Session form state --
 //
 // These hold the visible session-config selections (agent, custom command, CLI
-// args, name). They are consumed by [startNewSession] when Start is pressed,
-// then reset to defaults on every exit via [resetNewSessionForm] /
-// [leaveNewSession] so a stale value never carries into the next session.
+// args, name). They survive navigation away from the canvas so a draft can be
+// resumed, and reset only after a session starts successfully.
 
 /// The agent chosen for the new session: either a bridge registry key, or
 /// `custom`, which reveals a free-form command field
@@ -655,6 +657,96 @@ final newSessionBranchCatalogProvider =
   return await client.gitBranches(projectId: target.projectId ?? target.id);
 });
 
+/// The branch this session will actually use: the explicit pick when it is
+/// still valid for the selected target, else the project's current branch.
+/// Single source of truth for that fallback — the chip label and the
+/// remote-state advisory must never disagree about which branch they describe.
+final newSessionEffectiveBranchProvider = Provider.autoDispose<String?>((ref) {
+  final target = ref.watch(selectedTargetProjectProvider);
+  final catalog = ref.watch(newSessionBranchCatalogProvider).value;
+  if (target == null || catalog == null || !catalog.isRepository) return null;
+  final selection = ref.watch(newSessionBranchSelectionProvider);
+  if (selection != null &&
+      selection.targetId == target.id &&
+      catalog.branches.contains(selection.branch)) {
+    return selection.branch;
+  }
+  return catalog.current;
+});
+
+/// Advisory only: whether the branch this session starts from has fallen behind
+/// the remote. NEVER gates Start — [startNewSession] does not read it, and the
+/// composer hides it once a start is in flight, so a late answer cannot argue
+/// with a session that already launched.
+///
+/// Unlike every other git call in the picker this one reaches the network
+/// (~1.6s against GitHub, measured), because the cheap local answer —
+/// `refs/remotes/*` — only moves on fetch and reports "in sync" against an
+/// arbitrarily old snapshot. Hence the debounce (arrowing through the branch
+/// list must not fire a request per row), the family key (one answer per
+/// branch, so re-picking a branch reuses it while the composer is open), and
+/// the failure contract: any error resolves to null and renders nothing rather
+/// than surfacing as an error state.
+///
+/// Nothing here outlives its watcher — no keepAlive, and the debounce is a
+/// cancellable Timer rather than a `Future.delayed`. A verdict is only ever
+/// wanted by the composer that is on screen, and a pending timer that survives
+/// the tree is a leak the widget tests fail on.
+final newSessionBranchRemoteStatusProvider = FutureProvider.autoDispose
+    .family<BranchRemoteStatus?, ({String targetId, String branch})>((
+  ref,
+  key,
+) async {
+  final target = ref.watch(selectedTargetProjectProvider);
+  if (target == null || target.id != key.targetId) return null;
+
+  // Settles only after the user stops moving through branches. Disposal during
+  // the wait — composer closed, start pressed, branch changed again — cancels
+  // the timer and releases the gate, so the request never reaches the network
+  // and no timer is left pending behind the tree.
+  var cancelled = false;
+  final gate = Completer<void>();
+  final debounce = Timer(
+    const Duration(milliseconds: 250),
+    () => gate.isCompleted ? null : gate.complete(),
+  );
+  ref.onDispose(() {
+    cancelled = true;
+    debounce.cancel();
+    if (!gate.isCompleted) gate.complete();
+  });
+  await gate.future;
+  if (cancelled) return null;
+
+  try {
+    if (target.isLocal) {
+      final host = await ref.watch(hostControllerProvider).ensureHost();
+      final client = HostControlClient(port: host.controlPort, token: host.token);
+      try {
+        return await client.gitRemoteState(
+          projectId: target.id,
+          projectPath: target.detail,
+          branch: key.branch,
+        );
+      } finally {
+        client.close();
+      }
+    }
+    final machineUuid = target.machineUuid ?? baseDeviceUuid(target.id);
+    final client =
+        await ref.watch(controlPlaneClientForProvider(machineUuid).future);
+    if (client == null) return null;
+    return await client.gitRemoteState(
+      projectId: target.projectId ?? target.id,
+      branch: key.branch,
+    );
+  } catch (_) {
+    // Offline, credentials needed, bridge too old to know the verb — all of it
+    // is "we cannot say", and an advisory that cannot say anything says nothing.
+    return null;
+  }
+});
+
 final newSessionBranchSelectionProvider = NotifierProvider<
     ValueController<NewSessionBranchSelection?>,
     NewSessionBranchSelection?>(
@@ -678,9 +770,7 @@ final newSessionIsolationReadyProvider = Provider<bool>((ref) {
       catalog.worktreeSessionsSupported;
 });
 
-/// Reset the ephemeral New Session form + selection to defaults. Called on every
-/// exit (Start success / Cancel / Esc) so reopening the page starts clean and a
-/// stale name never attaches to the next session.
+/// Reset the New Session form + selection to defaults after a successful start.
 ///
 /// Takes the container, not a `WidgetRef`: the session-activation callers reach
 /// here after an await, by which point the row that started it may be gone.
@@ -699,18 +789,15 @@ void resetNewSessionForm(ProviderContainer ref) {
   ref.read(newSessionIsolatedProvider.notifier).set(false);
 }
 
-/// Leave the New Session page: reset the form, clear new-session mode, and
-/// record the return to workspace. Callers are the genuine "exit New Session"
-/// sites (Cancel / Esc / back).
+/// Leave the New Session page while preserving its draft, then record the
+/// return to workspace. Callers are the genuine "exit New Session" sites
+/// (Cancel / Esc / back).
 void leaveNewSession(ProviderContainer ref) {
   // Record a history entry ONLY when we were actually on the New Session
-  // surface. The read happens before resetNewSessionForm, which never touches
-  // workbenchSurfaceProvider, so the captured value reflects the entry surface.
-  // (A session tap that dismisses the page lands in workspace and records its
-  // own session entry — it resets the form directly instead of calling this.)
+  // surface. A session tap that dismisses the page records its own precise
+  // session entry rather than calling this helper.
   final wasNewSession =
       ref.read(workbenchSurfaceProvider) == WorkbenchSurface.newSession;
-  resetNewSessionForm(ref);
   ref.read(workbenchSurfaceProvider.notifier).set(WorkbenchSurface.workspace);
   if (wasNewSession) {
     ref
@@ -804,7 +891,6 @@ void enterNewSessionForRemoteProject(
   required String machineUuid,
   required AdvertisedProject project,
 }) {
-  resetNewSessionForm(ref);
   ref.read(workbenchSurfaceProvider.notifier).set(WorkbenchSurface.newSession);
 
   final regId = RemoteProject(
@@ -821,6 +907,12 @@ void enterNewSessionForRemoteProject(
     projectId: project.projectId,
     running: project.running,
   );
+  // This shortcut can change the target while the composer is unmounted, so
+  // its target listener cannot clear state that belongs only to the old folder.
+  if (ref.read(selectedTargetProjectProvider)?.id != target.id) {
+    ref.read(newSessionBranchSelectionProvider.notifier).set(null);
+    ref.read(newSessionIsolatedProvider.notifier).set(false);
+  }
   ref.read(selectedSourceIdProvider.notifier).set('machine:$machineUuid');
   ref.read(selectedTargetProjectProvider.notifier).set(target);
   seedNewSessionAgentForTarget(ref, target);
@@ -845,12 +937,31 @@ void enterNewSessionForRemoteProject(
 /// Matching mirrors the id namespaces the picker uses: local targets key by
 /// `projectId` (direct), remote targets key by the compound registration id
 /// `<deviceUuid>.<projectId>` (matches the focus id directly).
-void enterNewSession(ProviderContainer ref) {
-  resetNewSessionForm(ref);
+///
+/// [retarget] is for entry points that just ACTIVATED a specific project on the
+/// user's behalf (a drawer row's `+`): there the focused project is the stated
+/// intent and must win over a draft left pointing at the project they came
+/// from, or Start creates the session in the wrong folder. Plain navigation
+/// back to the canvas leaves it false so the draft keeps its own target.
+void enterNewSession(ProviderContainer ref, {bool retarget = false}) {
   ref.read(workbenchSurfaceProvider.notifier).set(WorkbenchSurface.newSession);
 
+  // A returned draft owns its target. Only seed from the workspace focus for a
+  // genuinely blank form, otherwise moving between the canvas and a session
+  // would silently replace the folder and branch the user had selected.
+  final draftTarget = ref.read(selectedTargetProjectProvider);
   final focusId = ref.read(selectedRegistrationIdProvider);
-  if (focusId != null) {
+  final hasDraftTarget =
+      draftTarget != null &&
+      (!retarget || pickerMatchesFocus(draftTarget, focusId));
+  // Dropped BEFORE the seed attempt, not left for it to overwrite: a retarget
+  // whose focus resolves to no picker row (a machine still connecting) would
+  // otherwise leave the previous project selected. An empty picker is a prompt;
+  // a stale one is a session started in the folder the user tapped away from.
+  if (!hasDraftTarget && draftTarget != null) {
+    ref.read(selectedTargetProjectProvider.notifier).set(null);
+  }
+  if (!hasDraftTarget && focusId != null) {
     final localMatch = ref
         .read(pickerSourcesProvider)
         .where((s) => s.isLocal)
@@ -901,12 +1012,21 @@ void enterNewSession(ProviderContainer ref) {
   // (it's only set above when it matched the focus id), so the active session
   // belongs to it. With no active session, fall back to the project's configured
   // default (agent:hello).
-  final target = ref.read(selectedTargetProjectProvider);
-  final active = ref.read(activeSessionProvider);
-  if (target != null && active != null) {
-    seedNewSessionAgentFromSession(ref, active);
-  } else {
-    seedNewSessionAgentForTarget(ref, target);
+  if (!hasDraftTarget) {
+    final target = ref.read(selectedTargetProjectProvider);
+    // Same rule as enterNewSessionForRemoteProject: this can replace the target
+    // while the composer is unmounted, so its own target listener is not there
+    // to clear the branch and isolation that belonged to the old folder.
+    if (target?.id != draftTarget?.id) {
+      ref.read(newSessionBranchSelectionProvider.notifier).set(null);
+      ref.read(newSessionIsolatedProvider.notifier).set(false);
+    }
+    final active = ref.read(activeSessionProvider);
+    if (target != null && active != null) {
+      seedNewSessionAgentFromSession(ref, active);
+    } else {
+      seedNewSessionAgentForTarget(ref, target);
+    }
   }
 
   ref

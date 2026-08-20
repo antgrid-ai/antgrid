@@ -136,6 +136,50 @@ describe("git-branches helper", () => {
     }
   });
 
+  it("refuses a branch name Git would read as an option", async () => {
+    await run(dir, ["init"]);
+    await run(dir, ["config", "user.email", "test@antgrid.local"]);
+    await run(dir, ["config", "user.name", "Test"]);
+    writeFileSync(join(dir, "init.txt"), "v1\n");
+    await run(dir, ["add", "."]);
+    await run(dir, ["commit", "-m", "initial"]);
+    await run(dir, ["branch", "dev"]);
+    await run(dir, ["switch", "dev"]);
+    await run(dir, ["switch", "-"]);
+    const before = (await listLocalBranches(dir)).current;
+
+    // Both of these exit 0 and move HEAD if they reach argv: `-` is @{-1} and
+    // `--detach` detaches. The tree must be exactly where it was.
+    for (const name of ["-", "--detach"]) {
+      await expect(checkoutLocalBranch(dir, name)).rejects.toMatchObject({ code: "UNKNOWN_BRANCH" });
+      expect((await listLocalBranches(dir)).current).toBe(before);
+    }
+  });
+
+  it("checks out a branch that exists only on the remote", async () => {
+    // The local-heads catalog is advisory: `git switch` DWIMs origin/<name>
+    // into a tracking branch, and refusing before Git sees the name is an
+    // Antgrid limit on top of Git's own.
+    const origin = mkdtempSync(join(tmpdir(), "antgrid-branches-origin-"));
+    try {
+      await run(origin, ["init"]);
+      await run(origin, ["config", "user.email", "test@antgrid.local"]);
+      await run(origin, ["config", "user.name", "Test"]);
+      writeFileSync(join(origin, "init.txt"), "seed");
+      await run(origin, ["add", "."]);
+      await run(origin, ["commit", "-m", "initial"]);
+      await run(origin, ["branch", "remote-only"]);
+
+      rmSync(dir, { recursive: true, force: true });
+      await run(tmpdir(), ["clone", origin, dir]);
+      expect((await listLocalBranches(dir)).branches).not.toContain("remote-only");
+
+      expect(await checkoutLocalBranch(dir, "remote-only")).toEqual({ current: "remote-only" });
+    } finally {
+      rmSync(origin, { recursive: true, force: true });
+    }
+  });
+
   it("throws CHECKOUT_FAILED on conflicting dirty working tree", async () => {
     await run(dir, ["init"]);
     await run(dir, ["config", "user.email", "test@antgrid.local"]);

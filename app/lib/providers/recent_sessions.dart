@@ -15,9 +15,9 @@ import '../project/project_session_registry.dart';
 import '../widgets/drawer_entry_row.dart' show activateDrawerEntryById;
 import 'account_agents.dart';
 import 'cached_sessions.dart';
+import 'chat_composer_drafts.dart';
 import 'control_plane.dart';
 import 'device_provisioning.dart';
-import 'new_session_picker.dart';
 import 'projects.dart';
 import 'recent_agents.dart';
 import 'sessions.dart';
@@ -338,10 +338,9 @@ Future<void> openRecentSession(
     }
     return;
   }
-  // Mirror session_row.dart's `_showFocusedSessionSurface`: workspace surface,
-  // reset any half-filled New Session form, and record the precise nav entry.
+  // Mirror session_row.dart's `_showFocusedSessionSurface`: workspace surface
+  // and the precise nav entry. The New Session draft survives this navigation.
   ref.read(workbenchSurfaceProvider.notifier).set(WorkbenchSurface.workspace);
-  resetNewSessionForm(ref);
   ref
       .read(navControllerProvider.notifier)
       .commit(
@@ -401,6 +400,7 @@ Future<RecentSessionDeleteOutcome> deleteRecentSession(
         force: force,
         deleteBranch: deleteBranch,
       );
+      if (ok) clearChatComposerDraft(ref, row.session.id);
       return ok
           ? RecentSessionDeleteOutcome.deleted
           : RecentSessionDeleteOutcome.failed;
@@ -449,6 +449,7 @@ Future<RecentSessionDeleteOutcome> deleteRecentSession(
       .toList();
   await store.put(o.registrationId, next);
   await store.flushNow();
+  clearChatComposerDraft(ref, row.session.id);
   return RecentSessionDeleteOutcome.deleted;
 }
 

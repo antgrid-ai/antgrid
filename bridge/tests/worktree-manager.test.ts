@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { basename, join, relative, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { CheckoutStore } from "../src/worktrees/checkout-store";
 import { WorktreeError, WorktreeManager } from "../src/worktrees/worktree-manager";
@@ -44,7 +44,10 @@ describe("WorktreeManager", () => {
   test("creates from an explicit local branch and stores a verified checkout", async () => {
     await git(repo, ["branch", "base"]);
     const result = await manager().prepareForSession({ projectId, repoPath: repo, sessionId: "123456789", sessionName: "My feature", baseBranch: "base" });
-    expect(result).toMatchObject({ kind: "managed-worktree", branch: "antgrid/my-feature-12345678", baseRef: "base", sessionId: "123456789" });
+    expect(result).toMatchObject({ kind: "managed-worktree", baseRef: "base", sessionId: "123456789" });
+    // Name first for reading, then the word pair the checkout directory carries
+    // — the two names have to be greppable to each other.
+    expect(result.branch).toBe(`antgrid/my-feature-${basename(result.path).split("-").slice(0, 2).join("-")}`);
     expect(existsSync(result.path)).toBe(true);
     expect(await git(result.path, ["rev-parse", "--abbrev-ref", "HEAD"])).toBe(result.branch!);
     expect((await new CheckoutStore(abDir, projectId).get(result.id))?.path).toBe(result.path);
@@ -53,12 +56,41 @@ describe("WorktreeManager", () => {
   test("spends few enough path characters to leave a Windows repo room", async () => {
     // The default id generator, not the injected one: a managed checkout's path
     // is a PREFIX to every file the agent will ever touch inside it, and
-    // Windows still resolves most APIs against a 260-char MAX_PATH. A UUID plus
-    // a `worktrees/` root cost 44 characters that node_modules needs.
-    const result = await manager({ newCheckoutId: undefined })
-      .prepareForSession({ projectId, repoPath: repo, sessionId: "abcdefgh" });
+    // Windows still resolves most APIs against a 260-char MAX_PATH. The
+    // readable segments are capped so this bound holds however long the
+    // repository folder and the session name are.
+    const result = await manager({ newCheckoutId: undefined }).prepareForSession({
+      projectId, repoPath: repo, sessionId: "abcdefgh",
+      sessionName: "A session named at considerable and unreasonable length",
+    });
     expect(result.id).toMatch(/^[0-9a-f]{10}$/);
-    expect(relative(abDir, result.path).length).toBeLessThanOrEqual(32);
+    expect(relative(abDir, result.path).length).toBeLessThanOrEqual(45);
+  });
+
+  test("names both path segments for a human reading them", async () => {
+    // The path is what shows up in a shell prompt, a terminal title and
+    // `git worktree list` — an opaque hash in both segments made every isolated
+    // session look the same.
+    const result = await manager({ newCheckoutId: undefined })
+      .prepareForSession({ projectId, repoPath: repo, sessionId: "abcdefgh", sessionName: "Fix auth" });
+    const [root, leaf] = relative(abDir, result.path).split(sep).slice(1);
+    expect(root).toBe(`${basename(repo).slice(0, 16)}-proj`);
+    expect(leaf).toMatch(/^[a-z]+-[a-z]+-[0-9a-f]{4}$/);
+  });
+
+  test("gives one session the same words every time and two sessions different ones", async () => {
+    // Seeded from the session, so a directory a user has learned to recognise
+    // survives a bridge restart; the checkout tail is what separates two
+    // sessions that seeded the same.
+    const instance = manager();
+    const one = await instance.prepareForSession({ projectId, repoPath: repo, sessionId: "seed-one" });
+    await instance.remove({ checkoutId: one.id, force: true, deleteBranch: true });
+    const again = await instance.prepareForSession({ projectId, repoPath: repo, sessionId: "seed-one" });
+    const other = await instance.prepareForSession({ projectId, repoPath: repo, sessionId: "seed-two" });
+
+    const words = (path: string) => basename(path).split("-").slice(0, 2).join("-");
+    expect(words(again.path)).toBe(words(one.path));
+    expect(words(other.path)).not.toBe(words(one.path));
   });
 
   test("uses the main checkout HEAD when no base branch is selected", async () => {
@@ -81,7 +113,24 @@ describe("WorktreeManager", () => {
       instance.prepareForSession({ projectId, repoPath: repo, sessionId: "same-id", sessionName: "Session" }),
     ]);
     expect(one.branch).not.toBe(two.branch);
-    expect([one.branch, two.branch].sort()).toEqual(["antgrid/session-sameid", "antgrid/session-sameid-2"]);
+    expect([one.branch, two.branch].sort()).toEqual([one.branch!, `${one.branch}-2`].sort());
+  });
+
+  test("survives a session name Git would refuse as a ref", async () => {
+    // `..` is invalid in a ref and no suffix can ever fix it, so deciding
+    // validity inside the uniqueness loop meant 9999 git spawns — minutes, under
+    // the project lock — before failing outright.
+    const started = Date.now();
+    const result = await manager()
+      .prepareForSession({ projectId, repoPath: repo, sessionId: "abcdefgh", sessionName: "v1..2" });
+    expect(result.branch).toBe(`antgrid/v1-2-${basename(result.path).split("-").slice(0, 2).join("-")}`);
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
+  test("falls back to the word pair when a name transliterates to nothing", async () => {
+    const result = await manager()
+      .prepareForSession({ projectId, repoPath: repo, sessionId: "abcdefgh", sessionName: "プロジェクト" });
+    expect(result.branch).toBe(`antgrid/${basename(result.path).split("-").slice(0, 2).join("-")}`);
   });
 
   test("rolls back only its own worktree and branch when metadata persistence fails", async () => {

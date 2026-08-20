@@ -567,6 +567,10 @@ export class SessionManager {
       this.assertSafeWorkingDir(checkout.path, checkoutSpec.workingDir);
       entry.checkoutId = checkout.id;
       entry.checkoutKind = checkout.kind;
+      // Provenance, not state: the branch Antgrid CREATED for this session. The
+      // agent and the user are free to switch the checkout afterwards, and
+      // nothing refreshes this — the live branch is a Git read against the
+      // checkout path (`cachedGitBranch`), which is what the UI renders.
       entry.checkoutBranch = checkout.branch;
       entry.checkoutState = "ready";
       this.entries.set(entry.id, entry);

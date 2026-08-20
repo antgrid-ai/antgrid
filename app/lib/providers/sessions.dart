@@ -40,10 +40,16 @@ final freshSessionsStateProvider = Provider<SessionsState?>((ref) {
 });
 
 /// All non-archived sessions for the active project, sorted by lastUsedAt desc.
+///
+/// Sorted here rather than trusted from the wire: the bridge orders its own
+/// `session:list`, but this list is also served from the persisted cache, whose
+/// order is whatever was written last — and `reconcileActiveSession` picks
+/// `first` from it.
 final activeSessionsProvider = Provider<List<SessionEntry>>((ref) {
   final state = ref.watch(freshSessionsStateProvider);
   if (state == null) return const [];
-  return state.sessions.where((s) => !s.archived).toList();
+  return state.sessions.where((s) => !s.archived).toList()
+    ..sort((a, b) => b.lastUsedAt.compareTo(a.lastUsedAt));
 });
 
 /// Archived sessions (for the optional "Archived (n)" expander in the drawer).
@@ -66,9 +72,11 @@ final sessionsForEntryProvider = Provider.family<List<SessionEntry>, String>((
   return ref.watch(cachedSessionsProvider(entryId));
 });
 
-/// Which session is currently in focus in the workspace. App-local — NOT
-/// pushed to the agent except via the fire-and-forget `session:focus` ping
-/// (which only bumps lastUsedAt).
+/// Which session is currently in focus in the workspace. App-local, and it
+/// stays that way: the fire-and-forget `session:focus` ping is a no-op on the
+/// current bridge (`SessionManager.focus`), so the agent's own `lastUsedAt`
+/// ordering records ACTIVITY and never learns what the user is looking at.
+/// Nothing may re-derive a deliberate focus from that ordering.
 final activeSessionIdProvider =
     NotifierProvider<ValueController<String?>, String?>(
       () => ValueController(null),
@@ -97,10 +105,37 @@ final activeSessionProvider = Provider<SessionEntry?>((ref) {
   return null;
 });
 
+/// The focused session's row, falling back to the persisted cache while the
+/// live stream is absent or re-subscribing (see [freshSessionsStateProvider],
+/// which reports null through that whole window).
+///
+/// **Read only fields that are fixed for the life of a session** — id, mode,
+/// checkoutId, tool. The cache loads `running` as false and carries no work
+/// status, so anything branching on live state must keep using
+/// [activeSessionProvider] and treat null as "not known yet".
+final activeSessionOrCachedProvider = Provider<SessionEntry?>((ref) {
+  final fresh = ref.watch(activeSessionProvider);
+  if (fresh != null) return fresh;
+  final id = ref.watch(activeSessionIdProvider);
+  final entryId = ref.watch(selectedRegistrationIdProvider);
+  if (id == null || entryId == null) return null;
+  for (final s in ref.watch(sessionsForEntryProvider(entryId))) {
+    if (s.id == id) return s;
+  }
+  return null;
+});
+
 /// Filesystem checkout currently represented by the active session. Old or
 /// not-yet-decoded sessions remain safely bound to main.
+///
+/// Resolved through [activeSessionOrCachedProvider] because the fallback is not
+/// neutral: every checkout-scoped service (files, tree, search, git, commands,
+/// terminals) routes off this, so answering `main` for an isolated session
+/// while its row re-resolves points the whole workspace at the wrong worktree.
+/// A checkout binding never changes for a given session, so the cached row is
+/// as good as the live one here.
 final focusedCheckoutIdProvider = Provider<String>((ref) {
-  return ref.watch(activeSessionProvider)?.checkoutId ?? 'main';
+  return ref.watch(activeSessionOrCachedProvider)?.checkoutId ?? 'main';
 });
 
 /// Side-effect listener: keep `activeSessionIdProvider` valid as the session

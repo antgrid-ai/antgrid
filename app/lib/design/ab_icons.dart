@@ -96,4 +96,8 @@ abstract final class AbIcons {
   // it is showing (tap to hide) — the convention every password manager uses.
   static const eye = Codicon.eye;
   static const eyeClosed = Codicon.eye_closed;
+  // A session running off its own workspace. The fork glyph reads as "split
+  // off from the main line" without naming a backend — the marker stands for
+  // every non-`main` checkout kind, not for worktrees specifically.
+  static const isolated = Codicon.repo_forked;
 }

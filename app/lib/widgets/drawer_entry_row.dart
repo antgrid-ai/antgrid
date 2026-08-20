@@ -697,8 +697,10 @@ class _NewSessionButtonState extends ConsumerState<_NewSessionButton> {
 
       // Route to the New Session page with this project preselected (it is the
       // current focus, so enterNewSession reverse-looks-it-up as the target and
-      // seeds the agent dropdown from its agent:hello).
-      enterNewSession(container);
+      // seeds the agent dropdown from its agent:hello). `retarget` because this
+      // row NAMES a project: a draft left over from another one must not keep
+      // the target the user just tapped past.
+      enterNewSession(container, retarget: true);
     } catch (e) {
       if (mounted) {
         showAbSnackBar(context, 'New session failed: $e');

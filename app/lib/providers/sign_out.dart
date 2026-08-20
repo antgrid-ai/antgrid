@@ -6,6 +6,7 @@ import '../services/devices_api.dart';
 import '../services/push_identity.dart';
 import '../services/sign_out_service.dart';
 import 'auth.dart';
+import 'chat_composer_drafts.dart';
 import 'connection_identity.dart';
 import 'device_provisioning.dart';
 import 'entry_cleanup.dart';
@@ -79,6 +80,7 @@ final signOutServiceProvider = Provider<SignOutService>((ref) {
 /// would throw on a disposed element anyway.
 Future<void> performHardSignOut(ProviderContainer ref) async {
   await ref.read(signOutServiceProvider).hardSignOut();
+  ref.read(chatComposerDraftsProvider).clear();
   ref.invalidate(licenseTokenMinterProvider);
   ref.invalidate(connectionTokenMinterProvider);
   ref.invalidate(currentUserProvider);

@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/design/ab_icons.dart';
 import 'package:antgrid/design/theme_presets.dart';
+import 'package:antgrid/design/widgets/ab_icon.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/widgets/session_isolation_badge.dart';
 
@@ -25,17 +27,21 @@ Widget _wrap(SessionEntry session) => MaterialApp(
   home: Scaffold(body: Center(child: SessionIsolationBadge(session: session))),
 );
 
+Finder _badgeGlyph() => find.byWidgetPredicate(
+  (w) => w is AbIcon && w.icon == AbIcons.isolated,
+);
+
 void main() {
   testWidgets('a session on the shared tree wears no badge', (tester) async {
     await tester.pumpWidget(_wrap(_session()));
-    expect(find.text('ISOLATED'), findsNothing);
+    expect(_badgeGlyph(), findsNothing);
   });
 
   testWidgets('a managed worktree is badged and named without its mechanism', (
     tester,
   ) async {
     await tester.pumpWidget(_wrap(_session(checkoutKind: 'managed-worktree')));
-    expect(find.text('ISOLATED'), findsOneWidget);
+    expect(_badgeGlyph(), findsOneWidget);
     // The badge stands for isolation, not for the backend delivering it, so its
     // copy must survive a second backend landing beside worktrees.
     expect(find.textContaining('worktree'), findsNothing);
@@ -54,10 +60,10 @@ void main() {
     tester,
   ) async {
     await tester.pumpWidget(_wrap(_session(checkoutKind: 'external-worktree')));
-    expect(find.text('ISOLATED'), findsOneWidget);
+    expect(_badgeGlyph(), findsOneWidget);
 
     await tester.pumpWidget(_wrap(_session(checkoutKind: 'dev-container')));
-    expect(find.text('ISOLATED'), findsOneWidget);
+    expect(_badgeGlyph(), findsOneWidget);
   });
 
   testWidgets('an unrecognised checkout state degrades to the weakest claim', (
@@ -68,7 +74,7 @@ void main() {
         _session(checkoutKind: 'managed-worktree', checkoutState: 'pulling'),
       ),
     );
-    expect(find.text('ISOLATED'), findsOneWidget);
+    expect(_badgeGlyph(), findsOneWidget);
     // Neither healthy nor broken — the bridge owns this vocabulary and the row
     // must not guess which side of it an unknown value falls on.
     expect(find.byTooltip('Isolated session.'), findsOneWidget);
@@ -87,5 +93,20 @@ void main() {
         reason: 'checkoutState "$state" must read as unavailable',
       );
     }
+  });
+
+  // The badge is a bare glyph, so the tooltip is its ONLY explanation — and on
+  // touch a long-press (Material's default trigger) is not discoverable enough
+  // to be that. Tap must open it.
+  testWidgets('a tap on the glyph opens the tooltip', (tester) async {
+    await tester.pumpWidget(_wrap(_session(checkoutKind: 'managed-worktree')));
+    await tester.tap(_badgeGlyph());
+    await tester.pumpAndSettle();
+    expect(
+      find.text(
+        'Isolated session — its own workspace, separate from your main tree.',
+      ),
+      findsOneWidget,
+    );
   });
 }

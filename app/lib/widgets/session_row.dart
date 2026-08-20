@@ -20,7 +20,7 @@ import '../navigation/nav_location.dart';
 import '../project/limits.dart';
 import '../project/project_session_registry.dart';
 import '../providers/agent_transport.dart';
-import '../providers/new_session_picker.dart';
+import '../providers/chat_composer_drafts.dart';
 import '../providers/open_checkout.dart';
 import '../providers/project_work_status.dart';
 import '../providers/providers.dart';
@@ -384,12 +384,6 @@ class _SessionRowState extends ConsumerState<SessionRow> {
 
   void _showFocusedSessionSurface(ProviderContainer ref) {
     ref.read(workbenchSurfaceProvider.notifier).set(WorkbenchSurface.workspace);
-    // Clear any half-filled New Session form (the user may have been on that
-    // page). We reset the form directly rather than calling leaveNewSession:
-    // its history commit is for genuine New-Session exits, and this path records
-    // its own precise session entry just below. Calling leaveNewSession here
-    // would couple correctness to the order of the two writes above.
-    resetNewSessionForm(ref);
     ref
         .read(navControllerProvider.notifier)
         .commit(
@@ -645,7 +639,10 @@ class _SessionMenu extends ConsumerWidget {
             await svc.rename(session.id, name.trim());
           }
         case _SessionAction.archive:
-          await svc.archive(session.id);
+          final archived = await svc.archive(session.id);
+          if (archived != null) {
+            clearChatComposerDraft(ref, session.id);
+          }
           _disconnectIfEmpty(ref);
         case _SessionAction.delete:
           await _deleteSession(anchor, ref, svc);
@@ -675,7 +672,10 @@ class _SessionMenu extends ConsumerWidget {
       delete: ({force, deleteBranch}) =>
           service.delete(capturedId, force: force, deleteBranch: deleteBranch),
     );
-    if (result == SessionDeleteResult.deleted) _disconnectIfEmpty(ref);
+    if (result == SessionDeleteResult.deleted) {
+      clearChatComposerDraft(ref, capturedId);
+      _disconnectIfEmpty(ref);
+    }
   }
 
   /// Wired here (call site) instead of as a listener on

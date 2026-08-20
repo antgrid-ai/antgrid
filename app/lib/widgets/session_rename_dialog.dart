@@ -28,9 +28,16 @@ class _SessionRenameDialog extends StatefulWidget {
 }
 
 class _SessionRenameDialogState extends State<_SessionRenameDialog> {
-  late final TextEditingController _controller = TextEditingController(
-    text: widget.current,
-  );
+  late final TextEditingController _controller =
+      TextEditingController.fromValue(
+        TextEditingValue(
+          text: widget.current,
+          selection: TextSelection(
+            baseOffset: 0,
+            extentOffset: widget.current.length,
+          ),
+        ),
+      );
 
   @override
   void dispose() {

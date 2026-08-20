@@ -8,7 +8,9 @@ import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_composer_send_button.dart';
+import '../../design/widgets/ab_chip.dart';
 import '../../design/widgets/ab_confirm_dialog.dart';
+import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_kbd.dart';
 import '../../design/widgets/ab_menu.dart';
@@ -27,8 +29,8 @@ import '../../screens/upgrade_screen.dart';
 import '../../services/sessions_service.dart' show SessionOperationException;
 import '../../utils/platform_utils.dart';
 import '../ab_status_helpers.dart' show sessionRefusalCopy;
-import '../mode_segmented.dart';
 import 'branch_menu.dart';
+import 'branch_remote_advisory.dart';
 import 'environment_menu.dart';
 import 'project_menu.dart';
 
@@ -57,10 +59,9 @@ bool newSessionCanStart({
 /// before the Enter-to-start hint is worth rendering at all.
 const double _enterHintMinWidth = 96;
 
-/// Bottom-row width below which the controls degrade: the mode segmented
-/// control drops its cell icons and the agent selector's slot absorbs the
-/// row slack (ellipsizing its label) instead of the desktop Enter-hint slot.
-/// Degradation order is icons → hint → label; the labels never drop.
+/// Bottom-row width below which the controls degrade: the agent selector's
+/// slot absorbs the row slack (ellipsizing its label) instead of the desktop
+/// Enter-hint slot. Degradation order is hint → label; the labels never drop.
 const double _composerRowRoomyMinWidth = 460;
 
 /// Share of the context row a single picker label may claim before it starts
@@ -141,9 +142,12 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     setState(() => _promptFocused = _promptFocus.hasFocus);
   }
 
-  /// Default mode to Chat when [agent] is KNOWN to support it, else force
-  /// Terminal. An unanswered capability defaults to Terminal, the mode every
-  /// agent can run. Ported from `_SessionConfigState._applyModeDefault`.
+  /// Terminal is the default for EVERY agent — the mode all of them can run,
+  /// and the one chat (still alpha) has to be chosen over deliberately. A
+  /// chat-capable agent no longer opts the session into chat behind the user.
+  ///
+  /// A pick already made survives an agent change unless the new agent can't
+  /// do chat, in which case it is forced back to Terminal.
   void _applyModeDefault(NewSessionAgent agent) {
     final key = newSessionAgentToolKey(agent);
     final supports = agentSupportsChatResolved(
@@ -151,9 +155,8 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
       wireChatCapable: ref.read(newSessionChatCapableToolsProvider).value,
       descriptor: key == null ? null : ref.read(agentCatalogProvider)[key],
     );
-    ref
-        .read(newSessionModeProvider.notifier)
-        .set(supports == true ? 'chat' : 'terminal');
+    if (supports == true) return;
+    ref.read(newSessionModeProvider.notifier).set('terminal');
   }
 
   /// Enter submits; Shift+Enter inserts a newline at the caret. Esc is left
@@ -478,6 +481,10 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                 },
               ),
             ),
+            // Advisory about the branch named on the row above. Sits between
+            // the two because it explains that row, not the prompt; it is
+            // absent (zero height) in every state but a stale base.
+            const BranchRemoteAdvisory(),
             Padding(
               padding: const EdgeInsets.fromLTRB(
                 AbTokens.space12,
@@ -533,17 +540,13 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
               child: LayoutBuilder(
                 builder: (context, rowConstraints) {
                   // Tight rows (phones, narrow desktop panes) degrade before
-                  // overflowing: the segmented control drops its cell icons
-                  // and the agent selector's slot takes the row slack so its
-                  // label ellipsizes (see _composerRowRoomyMinWidth).
+                  // overflowing: the agent selector's slot takes the row slack
+                  // so its label ellipsizes (see _composerRowRoomyMinWidth).
                   final roomy =
                       rowConstraints.maxWidth >= _composerRowRoomyMinWidth;
                   return Row(
                     children: [
-                      _ModeSegmented(
-                        supportsChat: supportsChat,
-                        showIcons: roomy,
-                      ),
+                      _ModeSelector(supportsChat: supportsChat),
                       const SizedBox(width: AbTokens.space8),
                       Builder(
                         builder: (gearContext) => AbIconButton(
@@ -742,15 +745,20 @@ class _IsolationChip extends ConsumerWidget {
   }
 }
 
-class _ModeSegmented extends ConsumerWidget {
-  const _ModeSegmented({required this.supportsChat, this.showIcons = true});
+/// Session-mode dropdown ([ Terminal v ]) — Terminal is the default for every
+/// agent and Chat is opened into deliberately, so the control shows the current
+/// mode and hides the alternative behind a tap rather than presenting both as
+/// equals (the in-session switch keeps `ModeSegmented`).
+///
+/// "This agent can't do chat" is still said in place: the Chat row renders
+/// greyed WITH its reason instead of vanishing, so a missing option and an
+/// unsupported one never look alike.
+class _ModeSelector extends ConsumerWidget {
+  const _ModeSelector({required this.supportsChat});
 
   /// Null when neither the target machine nor the persisted catalog has
   /// described the selected agent — a third state, not a `false`.
   final bool? supportsChat;
-
-  /// Icons are garnish (labels always render); tight rows drop them first.
-  final bool showIcons;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -761,30 +769,133 @@ class _ModeSegmented extends ConsumerWidget {
       ref.watch(newSessionDetectedToolsProvider).value,
       ref.watch(agentCatalogProvider),
     );
-    final enabled = supportsChat == true;
+    final chatEnabled = supportsChat == true;
     // Pin the DISPLAYED selection to Terminal whenever chat isn't supported,
     // rather than trusting `mode` to already carry 'terminal' — detection
     // (newSessionChatCapableToolsProvider) can resolve a frame after the
     // agent-default heuristic runs, so `mode` briefly lags the true support
     // state. The provider itself still gets corrected by the agent listener.
-    final displayMode = enabled ? mode : 'terminal';
-    return ModeSegmented(
-      keyPrefix: 'new-session-mode',
-      mode: displayMode,
-      chatEnabled: enabled,
-      // Longer than the mid-session toggle's "Not supported": at create time
-      // the agent is still being chosen, so the string has to name it. An
-      // unanswered capability says so instead of blaming the agent — and it
-      // names both ways it can be unanswered, because the same null covers the
-      // ordinary wait for a target's first advert and a bridge too old to send
-      // one, and only the second is the user's to fix.
-      chatDisabledReason: supportsChat == null
-          ? "This machine hasn't said whether $label supports chat sessions — "
-                'it may still be connecting, or its bridge may be too old to '
-                'answer'
-          : "$label doesn't support chat sessions",
-      showIcons: showIcons,
-      onChanged: (m) => ref.read(newSessionModeProvider.notifier).set(m),
+    final displayMode = chatEnabled ? mode : 'terminal';
+    final isChat = displayMode == 'chat';
+    // Longer than the mid-session toggle's "Not supported": at create time the
+    // agent is still being chosen, so the string has to name it. An unanswered
+    // capability says so instead of blaming the agent — and it names both ways
+    // it can be unanswered, because the same null covers the ordinary wait for
+    // a target's first advert and a bridge too old to send one, and only the
+    // second is the user's to fix.
+    final chatDisabledReason = supportsChat == null
+        ? "This machine hasn't said whether $label supports chat sessions — "
+              'it may still be connecting, or its bridge may be too old to '
+              'answer'
+        : "$label doesn't support chat sessions";
+
+    return _ModeChip(
+      key: const Key('new-session-mode-chip'),
+      icon: isChat ? AbIcons.comment : AbIcons.terminal,
+      label: isChat ? 'Chat' : 'Terminal',
+      alpha: isChat,
+      onTap: (ctx) async {
+        final anchor = abMenuAnchorRect(ctx);
+        if (anchor == null) return;
+        final picked = await showAbMenu<String>(
+          context: ctx,
+          preferred: AbMenuPlacement.above,
+          anchorRect: anchor,
+          bounds: MenuBoundsScope.maybeOf(ctx),
+          width: 220,
+          entries: [
+            AbMenuItem(
+              key: const Key('new-session-mode-terminal'),
+              label: 'Terminal',
+              value: 'terminal',
+              icon: displayMode == 'terminal' ? AbIcons.check : null,
+            ),
+            AbMenuItem(
+              key: const Key('new-session-mode-chat'),
+              label: 'Chat',
+              value: 'chat',
+              icon: displayMode == 'chat' ? AbIcons.check : null,
+              badge: 'Alpha',
+              badgeColor: context.antgrid.warning,
+              enabled: chatEnabled,
+              disabledReason: chatEnabled ? null : chatDisabledReason,
+            ),
+          ],
+        );
+        if (picked == null || picked == displayMode) return;
+        ref.read(newSessionModeProvider.notifier).set(picked);
+      },
+    );
+  }
+}
+
+/// Trigger for [_ModeSelector]: [ComposerChip]'s chrome at an intrinsic width.
+///
+/// Not [ComposerChip] itself — that one ellipsizes inside a bounded flex slot,
+/// and this chip sits as a bare Row child whose two labels ('Chat',
+/// 'Terminal') are fixed strings that never need shedding.
+class _ModeChip extends StatelessWidget {
+  const _ModeChip({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.alpha,
+    required this.onTap,
+  });
+
+  final String icon;
+  final String label;
+
+  /// Carry the ALPHA marker on the trigger too, not only on the menu row: once
+  /// the menu is closed the chip is the only thing still saying which mode the
+  /// session will start in.
+  final bool alpha;
+
+  final void Function(BuildContext anchorContext) onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: Builder(
+        builder: (ctx) {
+          final p = ctx.antgrid;
+          return GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => onTap(ctx),
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: AbTokens.space8,
+                vertical: AbTokens.space4,
+              ),
+              decoration: BoxDecoration(
+                border: Border.all(color: p.borderDefault),
+                borderRadius: AbTokens.borderRadius3,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  AbIcon(icon, size: 12, color: p.textPrimary),
+                  const SizedBox(width: AbTokens.space6),
+                  Text(
+                    label,
+                    style: AbTokens.sansStyle(
+                      fontSize: AbTokens.fontSm,
+                      color: p.textPrimary,
+                    ),
+                  ),
+                  if (alpha) ...[
+                    const SizedBox(width: AbTokens.space6),
+                    AbChip.system(label: 'Alpha', color: p.warning),
+                  ],
+                  const SizedBox(width: AbTokens.space6),
+                  AbIcon(AbIcons.chevronDown, size: 10, color: p.textMuted),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
     );
   }
 }

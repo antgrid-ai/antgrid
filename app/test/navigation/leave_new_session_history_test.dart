@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:antgrid/models/git_branch.dart';
 import 'package:antgrid/navigation/nav_controller.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
@@ -95,4 +96,40 @@ void main() {
       expect(capturedRef.read(navControllerProvider).current, isNull);
     },
   );
+
+  testWidgets('leaveNewSession preserves the in-progress form', (tester) async {
+    late WidgetRef capturedRef;
+
+    await tester.pumpWidget(
+      ProviderScope(
+        child: Consumer(
+          builder: (context, ref, _) {
+            capturedRef = ref;
+            return const SizedBox.shrink();
+          },
+        ),
+      ),
+    );
+
+    capturedRef
+        .read(workbenchSurfaceProvider.notifier)
+        .set(WorkbenchSurface.newSession);
+    capturedRef.read(newSessionPromptProvider.notifier).set('finish the fix');
+    capturedRef.read(newSessionNameProvider.notifier).set('draft session');
+    capturedRef
+        .read(newSessionBranchSelectionProvider.notifier)
+        .set(
+          const NewSessionBranchSelection(targetId: 'project-a', branch: 'dev'),
+        );
+
+    leaveNewSession(capturedRef.container);
+    await tester.pump();
+
+    expect(capturedRef.read(newSessionPromptProvider), 'finish the fix');
+    expect(capturedRef.read(newSessionNameProvider), 'draft session');
+    expect(
+      capturedRef.read(newSessionBranchSelectionProvider),
+      const NewSessionBranchSelection(targetId: 'project-a', branch: 'dev'),
+    );
+  });
 }

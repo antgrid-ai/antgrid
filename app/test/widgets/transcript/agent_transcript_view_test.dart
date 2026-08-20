@@ -168,6 +168,23 @@ Future<void> _typeIntoComposer(WidgetTester tester, String text) async {
     selection: TextSelection.collapsed(offset: text.length),
   );
   await tester.pump();
+  await _settleComposerHistory(tester);
+}
+
+/// Past Fleather's 500ms history throttle. The composer controller is cached
+/// per session now, so unmounting the view no longer disposes it — and the
+/// throttle timer that disposal used to cancel is still armed at teardown,
+/// which flutter_test fails as a pending timer. Nothing in the composer
+/// debounces, so settling it moves nothing any test asserts on.
+Future<void> _settleComposerHistory(WidgetTester tester) =>
+    tester.pump(const Duration(milliseconds: 600));
+
+/// Unmounts the tree the way every test here ends, then settles the throttle
+/// re-armed by any edit made after [_typeIntoComposer] — see
+/// [_settleComposerHistory].
+Future<void> _disposeTree(WidgetTester tester) async {
+  await tester.pumpWidget(const SizedBox());
+  await _settleComposerHistory(tester);
 }
 
 Future<void> _pump(WidgetTester tester, AgentSessionState state) {
@@ -200,7 +217,7 @@ void main() {
       expect(find.byType(WorkingRow), findsOneWidget);
       expect(find.byType(ToolCallCard), findsOneWidget);
 
-      await tester.pumpWidget(const SizedBox());
+      await _disposeTree(tester);
     },
   );
 
@@ -216,7 +233,7 @@ void main() {
       // Composer is still present.
       expect(find.byType(ComposerSendButton), findsOneWidget);
 
-      await tester.pumpWidget(const SizedBox());
+      await _disposeTree(tester);
     },
   );
 
@@ -241,7 +258,7 @@ void main() {
       expect(find.text('Send a message to start'), findsNothing);
       expect(find.byType(ComposerSendButton), findsOneWidget);
 
-      await tester.pumpWidget(const SizedBox());
+      await _disposeTree(tester);
     },
   );
 
@@ -255,7 +272,7 @@ void main() {
       expect(find.text('Send a message to start'), findsNothing);
       expect(find.byType(ComposerSendButton), findsOneWidget);
 
-      await tester.pumpWidget(const SizedBox());
+      await _disposeTree(tester);
     },
   );
 
@@ -269,7 +286,7 @@ void main() {
       expect(find.text('Retry'), findsOneWidget);
       expect(find.text('Send a message to start'), findsNothing);
 
-      await tester.pumpWidget(const SizedBox());
+      await _disposeTree(tester);
     },
   );
 
@@ -305,7 +322,7 @@ void main() {
         isNotEmpty,
       );
 
-      await tester.pumpWidget(const SizedBox());
+      await _disposeTree(tester);
     },
   );
 
@@ -325,7 +342,7 @@ void main() {
     expect(t.requests.last.method, 'session.transcriptSnapshot');
     expect(t.requests.last.params, {'sessionId': _sessionId});
 
-    await tester.pumpWidget(const SizedBox());
+    await _disposeTree(tester);
   });
 
   testWidgets('tapping a user message revert button sends revert action', (
@@ -363,7 +380,7 @@ void main() {
     expect(msg['messageId'], 'm1');
     expect(msg['partId'], 'p1');
 
-    await tester.pumpWidget(const SizedBox());
+    await _disposeTree(tester);
   });
 
   testWidgets('tapping a prompt marker focuses the pinned panel field', (
@@ -396,7 +413,7 @@ void main() {
 
     expect(tester.widget<EditableText>(panelField).focusNode.hasFocus, isTrue);
 
-    await tester.pumpWidget(const SizedBox());
+    await _disposeTree(tester);
   });
 
   group('jump to latest pill', () {
@@ -424,7 +441,7 @@ void main() {
       final controller = listView.controller!;
       expect(controller.offset, controller.position.maxScrollExtent);
 
-      await tester.pumpWidget(const SizedBox());
+      await _disposeTree(tester);
     });
   });
 
@@ -459,7 +476,7 @@ void main() {
         lessThanOrEqualTo(tester.getTopLeft(selectors).dx),
       );
 
-      await tester.pumpWidget(const SizedBox());
+      await _disposeTree(tester);
     });
 
     testWidgets('typing /re filters the suggestion panel', (tester) async {
@@ -467,7 +484,47 @@ void main() {
       await _typeIntoComposer(tester, '/re');
       expect(find.text('/review'), findsOneWidget);
       expect(find.text('/compact'), findsNothing);
-      await tester.pumpWidget(const SizedBox());
+      await _disposeTree(tester);
+    });
+
+    testWidgets('keeps an unsent draft when the chat view remounts', (
+      tester,
+    ) async {
+      final (_, session, svc) = await _serviceFixture();
+      final container = ProviderContainer(
+        overrides: [
+          agentSessionStateProvider.overrideWith(
+            (ref, sessionId) => Stream.value(const AgentSessionState()),
+          ),
+          selectedRegistrationIdProvider.overrideWithValue('p'),
+          projectSessionProvider.overrideWith((ref, id) async => session),
+          agentSessionServiceProvider.overrideWithValue(svc),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(projectSessionProvider('p').future);
+
+      Widget view() => UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: Scaffold(body: AgentTranscriptView(sessionId: _sessionId)),
+        ),
+      );
+
+      await tester.pumpWidget(view());
+      await tester.pump();
+      await _typeIntoComposer(tester, 'keep this draft');
+
+      await _disposeTree(tester);
+      await tester.pump();
+      await tester.pumpWidget(view());
+      await tester.pump();
+
+      final composer = tester.widget<RichComposer>(find.byType(RichComposer));
+      expect(
+        composer.controller.fleather.document.toPlainText(),
+        'keep this draft\n',
+      );
     });
 
     testWidgets('tapping a suggestion completes the token', (tester) async {
@@ -481,7 +538,7 @@ void main() {
       // instead, matching composer_controller_test's convention.
       final composer = tester.widget<RichComposer>(find.byType(RichComposer));
       expect(composer.controller.fleather.document.toPlainText(), '/review \n');
-      await tester.pumpWidget(const SizedBox());
+      await _disposeTree(tester);
     });
 
     testWidgets('submitting /review args sends commandId + stripped text', (
@@ -494,7 +551,14 @@ void main() {
       final prompt = t.sent.lastWhere((m) => m['type'] == 'agent:prompt');
       expect(prompt['commandId'], 'cmd:review');
       expect(prompt['text'], 'src/');
-      await tester.pumpWidget(const SizedBox());
+      expect(
+        tester
+            .widget<RichComposer>(find.byType(RichComposer))
+            .controller
+            .isEmpty,
+        isTrue,
+      );
+      await _disposeTree(tester);
     });
 
     testWidgets('unknown /token submits verbatim without commandId', (
@@ -507,7 +571,7 @@ void main() {
       final prompt = t.sent.lastWhere((m) => m['type'] == 'agent:prompt');
       expect(prompt.containsKey('commandId'), isFalse);
       expect(prompt['text'], '/nonesuch hi');
-      await tester.pumpWidget(const SizedBox());
+      await _disposeTree(tester);
     });
 
     testWidgets('model pill opens a menu and picking sends set-config', (
@@ -522,7 +586,7 @@ void main() {
       final msg = t.sent.lastWhere((m) => m['type'] == 'agent:set-config');
       expect(msg['key'], 'model');
       expect(msg['value'], 'gpt-5.2-mini');
-      await tester.pumpWidget(const SizedBox());
+      await _disposeTree(tester);
     });
   });
 
@@ -580,7 +644,7 @@ void main() {
       expect(find.text('README.md'), findsOneWidget);
       expect(find.text('lib/main.dart'), findsOneWidget);
       expect(find.text('lib/'), findsOneWidget); // dir marker
-      await tester.pumpWidget(const SizedBox());
+      await _disposeTree(tester);
     });
 
     testWidgets('typing @ut filters to matching paths', (tester) async {
@@ -592,7 +656,7 @@ void main() {
       await _typeIntoComposer(tester, '@ut');
       expect(find.text('lib/src/util.dart'), findsOneWidget);
       expect(find.text('README.md'), findsNothing);
-      await tester.pumpWidget(const SizedBox());
+      await _disposeTree(tester);
     });
 
     testWidgets('tapping a file row inserts the mention', (tester) async {
@@ -606,7 +670,7 @@ void main() {
       await tester.pump();
       expect(composerText(tester), '@lib/main.dart \n');
       expect(find.text('lib/main.dart'), findsNothing); // panel closed
-      await tester.pumpWidget(const SizedBox());
+      await _disposeTree(tester);
     });
 
     testWidgets('tapping a dir row inserts a trailing-slash mention', (
@@ -621,7 +685,7 @@ void main() {
       await tester.tap(find.text('lib/'));
       await tester.pump();
       expect(composerText(tester), '@lib/ \n');
-      await tester.pumpWidget(const SizedBox());
+      await _disposeTree(tester);
     });
 
     testWidgets('arrow down + enter accepts the second entry; Esc closes '
@@ -668,7 +732,7 @@ void main() {
       );
       await tester.pump();
       expect(find.text('README.md'), findsOneWidget);
-      await tester.pumpWidget(const SizedBox());
+      await _disposeTree(tester);
     });
 
     testWidgets('@ after a slash command shows mentions, not slash rows', (
@@ -682,7 +746,7 @@ void main() {
       await _typeIntoComposer(tester, '/review @ut');
       expect(find.text('lib/src/util.dart'), findsOneWidget);
       expect(find.text('/review'), findsNothing);
-      await tester.pumpWidget(const SizedBox());
+      await _disposeTree(tester);
     });
 
     testWidgets('email-like a@b shows no panel', (tester) async {
@@ -694,7 +758,7 @@ void main() {
       await _typeIntoComposer(tester, 'a@b');
       expect(find.text('README.md'), findsNothing);
       expect(find.text('lib/main.dart'), findsNothing);
-      await tester.pumpWidget(const SizedBox());
+      await _disposeTree(tester);
     });
   });
 }

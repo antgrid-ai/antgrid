@@ -62,7 +62,11 @@ class AgentPanel extends ConsumerWidget {
       );
     });
 
-    final active = ref.watch(activeSessionProvider);
+    // The transcript is addressed by id alone, and the LIVE row
+    // (activeSessionProvider) is null for the whole window in which the session
+    // list re-resolves — reading the id from there is what made a chat session
+    // render the previous session's terminal instead.
+    final activeId = ref.watch(activeSessionIdProvider);
     // The in-flight target while a mode flip is pending, so the panel swaps to
     // the view the user asked for on tap rather than when the bridge acks —
     // holding the old view up for the whole teardown reads as an ignored tap.
@@ -104,13 +108,13 @@ class AgentPanel extends ConsumerWidget {
         else
           const AgentBar(),
         Expanded(
-          child: isChat
+          child: isChat && activeId != null
               // Keyed by session so switching sessions rebuilds the State —
               // composer draft, expansion/dismiss sets, and scroll position
               // must not leak from one session into another.
               ? AgentTranscriptView(
-                  key: ValueKey(active!.id),
-                  sessionId: active.id,
+                  key: ValueKey(activeId),
+                  sessionId: activeId,
                 )
               // Overlay is terminal-only; it must never paint over the transcript.
               : const Stack(

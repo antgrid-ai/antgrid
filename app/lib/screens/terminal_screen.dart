@@ -45,7 +45,10 @@ class TerminalScreen extends ConsumerWidget {
         .servicesForCheckout(ref.watch(focusedCheckoutIdProvider))
         .terminalService;
     final activeSession = ref.watch(activeSessionProvider);
-    final activeSessionId = activeSession?.id;
+    // The id, not the live row's id: the row is null for the whole window in
+    // which the session list re-resolves, and a null id here opens the legacy
+    // fallback below onto whatever terminal happens to be first.
+    final activeSessionId = ref.watch(activeSessionIdProvider);
 
     final terminalState = terminalAsync.value ?? const TerminalState();
 
@@ -67,13 +70,14 @@ class TerminalScreen extends ConsumerWidget {
             );
     }
 
-    // Prefer the tab keyed by the active session id; fall back to the
-    // legacy "first agent-typed tab" lookup before sessions are wired up.
-    final TerminalTab? agentTab =
-        (activeSessionId != null
-            ? terminalState.tabs[activeSessionId]
-            : null) ??
-        terminalState.tabs.values.where((t) => t.type == 'agent').firstOrNull;
+    // The tab keyed by the active session id. The legacy "first agent-typed
+    // tab" lookup answers a wire with no session model at all, so it is reached
+    // ONLY when no session is focused: with one focused it renders a DIFFERENT
+    // session's terminal, which is what a chat session (never has a tab of its
+    // own) and a just-started one (tab not here yet) both hit.
+    final TerminalTab? agentTab = activeSessionId != null
+        ? terminalState.tabs[activeSessionId]
+        : terminalState.tabs.values.where((t) => t.type == 'agent').firstOrNull;
 
     if (agentTab == null) {
       // No active session AND no agent-typed tab. The normal path is for

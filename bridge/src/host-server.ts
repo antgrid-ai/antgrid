@@ -33,7 +33,8 @@ import type { AbMessage, ProjectAdvertEntry, RpcRequest } from "./protocol";
 import { z } from "zod";
 import { SessionManager } from "./session-manager";
 import { isSafeProjectId } from "./project-id";
-import { listLocalBranches, checkoutLocalBranch } from "./git-branches";
+import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote } from "./git-branches";
+import type { BranchRemoteStatus } from "./git-branches";
 import { resolveProject } from "./worktrees/project-resolver";
 import { WorktreeError, WorktreeManager } from "./worktrees/worktree-manager";
 import { CheckoutStore } from "./worktrees/checkout-store";
@@ -57,6 +58,20 @@ const SessionsDeleteParams = z.object({
 const GitBranchesParams = z.object({
   projectId: z.string(),
 });
+
+const GitRemoteStateParams = z.object({
+  projectId: z.string(),
+  branch: z.string().min(1),
+});
+
+/** `detail` is the raw git stderr behind an `unreachable` verdict — the only
+ *  record of WHY the advisory went quiet (offline, auth, timeout). The app
+ *  deliberately renders none of it, so this machine's log is where it has to
+ *  land or it is lost. */
+function logRemoteStateDetail(projectPath: string, status: BranchRemoteStatus): void {
+  if (!status.detail) return;
+  log.debug("git remote-state %s for %s#%s: %s", status.state, projectPath, status.branch, status.detail);
+}
 
 const GitCheckoutParams = z.object({
   projectId: z.string(),
@@ -637,6 +652,12 @@ export class HostServer {
           .catch((err) => log.warn("git.branches handler threw: %s", err));
         return;
       }
+      if (msg.method === "git.remote-state") {
+        void this.handleGitRemoteStateRpc(msg)
+          .then((res) => bus.publish(res, channel))
+          .catch((err) => log.warn("git.remote-state handler threw: %s", err));
+        return;
+      }
       if (msg.method === "git.checkout") {
         void this.handleGitCheckoutRpc(msg)
           .then((res) => bus.publish(res, channel))
@@ -885,6 +906,54 @@ export class HostServer {
           worktreeSessionsSupported: catalog.isRepository && WORKTREE_SESSIONS_SUPPORTED,
         },
       });
+    } catch (err: any) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: err.code || "UNKNOWN_ERROR", message: err.message || String(err) },
+      });
+    }
+  }
+
+  /** Reaches the network (`ls-remote`), unlike every other git RPC here. Bounded
+   *  and non-prompting inside checkBranchAgainstRemote; advisory only, so a
+   *  failure resolves to an `unreachable` status rather than an error. */
+  async handleGitRemoteStateRpc(req: RpcRequest): Promise<AbMessage> {
+    const parsed = GitRemoteStateParams.safeParse(req.params ?? {});
+    if (!parsed.success) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: "E_BAD_PARAMS", message: parsed.error.issues.map((i) => i.message).join("; ") },
+      });
+    }
+    const { projectId, branch } = parsed.data;
+    if (!isSafeProjectId(projectId)) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: "E_BAD_PARAMS", message: "invalid projectId" },
+      });
+    }
+    if (!this.remoteAccessPolicy.isEnabled()) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: "NOT_ALLOWED", message: "mobile access is disabled on this machine" },
+      });
+    }
+    const seen = this.seenProjects.get(projectId);
+    if (!seen || !seen.path) {
+      return createMessage("response", {
+        requestId: req.requestId,
+        ok: false,
+        error: { code: "UNKNOWN_PROJECT", message: "no such project on this machine" },
+      });
+    }
+    try {
+      const status = await checkBranchAgainstRemote(seen.path, branch);
+      logRemoteStateDetail(seen.path, status);
+      return createMessage("response", { requestId: req.requestId, ok: true, result: status });
     } catch (err: any) {
       return createMessage("response", {
         requestId: req.requestId,
@@ -1234,6 +1303,19 @@ export class HostServer {
             branches: catalog.branches,
             worktreeSessionsSupported: catalog.isRepository && WORKTREE_SESSIONS_SUPPORTED,
           };
+        } catch (err: any) {
+          return {
+            id: req.id,
+            ok: false,
+            error: { code: err.code || "UNKNOWN_ERROR", message: err.message || String(err) },
+          };
+        }
+      }
+      case "git:remote-state": {
+        try {
+          const status = await checkBranchAgainstRemote(req.projectPath, req.branch);
+          logRemoteStateDetail(req.projectPath, status);
+          return { id: req.id, ok: true, type: "git:remote-state", status };
         } catch (err: any) {
           return {
             id: req.id,

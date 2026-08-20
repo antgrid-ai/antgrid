@@ -299,3 +299,88 @@ test("active session guard does not warn if checking out same current branch", a
   expect(res.ok).toBe(true);
   expect(res.result.current).toBe(currentBranch);
 });
+
+test("loopback git:remote-state answers without creating a core", async () => {
+  const h = host!;
+  const res = (await (h as any).handleControl({
+    id: "req1",
+    type: "git:remote-state",
+    projectId: "p1",
+    projectPath: gitDir,
+    branch: "dev",
+  })) as any;
+
+  expect(res.ok).toBe(true);
+  // The fixture repo has no remote, which is a verdict, not a failure — the
+  // advisory renders nothing and Start is never held up.
+  expect(res.status.state).toBe("no-remote");
+  expect(h.get("p1")).toBeNull();
+});
+
+test("loopback git:remote-state fails cleanly for an unknown branch", async () => {
+  const h = host!;
+  const res = (await (h as any).handleControl({
+    id: "req1",
+    type: "git:remote-state",
+    projectId: "p1",
+    projectPath: gitDir,
+    branch: "no-such-branch",
+  })) as any;
+
+  expect(res.ok).toBe(false);
+  expect(res.error.code).toBe("UNKNOWN_BRANCH");
+});
+
+test("remote RPC git.remote-state returns NOT_ALLOWED when mobile access is off", async () => {
+  const h = host!;
+  seedCatalog(h, "p1", gitDir);
+  await setMobileAccess(h, false);
+
+  const res = (await h.handleGitRemoteStateRpc({
+    id: "msg1",
+    timestamp: 0,
+    type: "request",
+    requestId: "r1",
+    method: "git.remote-state",
+    params: { projectId: "p1", branch: "dev" },
+  } as any)) as any;
+
+  expect(res.ok).toBe(false);
+  expect(res.error.code).toBe("NOT_ALLOWED");
+});
+
+test("remote RPC git.remote-state returns UNKNOWN_PROJECT for unseeded project", async () => {
+  const h = host!;
+  await setMobileAccess(h, true);
+
+  const res = (await h.handleGitRemoteStateRpc({
+    id: "msg1",
+    timestamp: 0,
+    type: "request",
+    requestId: "r1",
+    method: "git.remote-state",
+    params: { projectId: "unknown", branch: "dev" },
+  } as any)) as any;
+
+  expect(res.ok).toBe(false);
+  expect(res.error.code).toBe("UNKNOWN_PROJECT");
+});
+
+test("remote RPC git.remote-state succeeds for seeded project", async () => {
+  const h = host!;
+  seedCatalog(h, "p1", gitDir);
+  await setMobileAccess(h, true);
+
+  const res = (await h.handleGitRemoteStateRpc({
+    id: "msg1",
+    timestamp: 0,
+    type: "request",
+    requestId: "r1",
+    method: "git.remote-state",
+    params: { projectId: "p1", branch: "dev" },
+  } as any)) as any;
+
+  expect(res.ok).toBe(true);
+  expect(res.result.branch).toBe("dev");
+  expect(res.result.state).toBe("no-remote");
+});

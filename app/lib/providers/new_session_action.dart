@@ -262,8 +262,17 @@ Future<void> startNewSession(
             props: {'surface': isMobilePlatform ? 'mobile' : 'desktop'},
           );
 
-      // 4. Leave new-session mode (and reset the form) so the workspace renders
-      // the new session.
+      // 4. A successful start consumes the draft. Navigation itself preserves
+      // drafts, so failures and a later return to this canvas remain editable.
+      resetNewSessionForm(ref);
+      // Leaving the canvas REMOUNTS WorkspaceShell (AppShell swaps the whole
+      // route), and its bootstrap re-derives the active session from the
+      // bridge's `lastUsedAt` ranking. Name the session we just started so that
+      // bootstrap adopts it instead of re-deriving: `lastUsedAt` measures
+      // ACTIVITY, so a keystroke or an agent notification in another session
+      // between `session:start` and the list reply outranks this one and steals
+      // the focus the user just asked for.
+      ref.read(pendingActiveSessionIdProvider.notifier).set(created.id);
       leaveNewSession(ref);
     } on TimeoutException {
       // A dropped/late reply is retryable. Typed bridge failures intentionally

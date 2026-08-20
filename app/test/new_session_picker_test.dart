@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/models/ab_project.dart';
+import 'package:antgrid/models/git_branch.dart';
 import 'package:antgrid/models/session_target.dart';
+import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/services/control_plane_client.dart';
@@ -283,5 +285,140 @@ void main() {
     await tester.pump();
 
     expect(ref.read(newSessionPromptProvider), '');
+  });
+
+  testWidgets('project shortcut clears branch and isolation from another target', (
+    tester,
+  ) async {
+    late WidgetRef ref;
+
+    await tester.pumpWidget(
+      ProviderScope(
+        child: Consumer(
+          builder: (context, r, _) {
+            ref = r;
+            return const SizedBox.shrink();
+          },
+        ),
+      ),
+    );
+
+    ref.read(selectedTargetProjectProvider.notifier).set(
+      const PickerProject(
+        id: 'local-a',
+        name: 'A',
+        detail: '/a',
+        isLocal: true,
+      ),
+    );
+    ref
+        .read(newSessionBranchSelectionProvider.notifier)
+        .set(const NewSessionBranchSelection(targetId: 'local-a', branch: 'dev'));
+    ref.read(newSessionIsolatedProvider.notifier).set(true);
+
+    enterNewSessionForRemoteProject(
+      ref.container,
+      machineUuid: 'machine-b',
+      project: const AdvertisedProject(projectId: 'project-b', running: false),
+    );
+    await tester.pump();
+
+    expect(ref.read(selectedTargetProjectProvider)?.id, 'machine-b.project-b');
+    expect(ref.read(newSessionBranchSelectionProvider), isNull);
+    expect(ref.read(newSessionIsolatedProvider), isFalse);
+  });
+
+  // A drawer row's `+` activates its own project first, so the focus IS the
+  // stated intent; a draft left pointing at the project the user came from must
+  // not survive it, or Start creates the session in the wrong folder.
+  testWidgets('retargeting adopts the focused project over a stale draft', (
+    tester,
+  ) async {
+    late WidgetRef ref;
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          pickerSourcesProvider.overrideWith(
+            (ref) => const [
+              PickerSource(
+                id: 'local',
+                label: 'Local',
+                isLocal: true,
+                projects: [
+                  PickerProject(
+                    id: 'local-b',
+                    name: 'B',
+                    detail: '/b',
+                    isLocal: true,
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ],
+        child: Consumer(
+          builder: (context, r, _) {
+            ref = r;
+            return const SizedBox.shrink();
+          },
+        ),
+      ),
+    );
+
+    ref.read(selectedTargetProvider.notifier).set(const LocalProject('local-b'));
+    ref.read(selectedTargetProjectProvider.notifier).set(
+      const PickerProject(
+        id: 'local-a',
+        name: 'A',
+        detail: '/a',
+        isLocal: true,
+      ),
+    );
+    ref
+        .read(newSessionBranchSelectionProvider.notifier)
+        .set(const NewSessionBranchSelection(targetId: 'local-a', branch: 'dev'));
+    ref.read(newSessionIsolatedProvider.notifier).set(true);
+
+    enterNewSession(ref.container, retarget: true);
+    await tester.pump();
+
+    expect(ref.read(selectedTargetProjectProvider)?.id, 'local-b');
+    expect(ref.read(newSessionBranchSelectionProvider), isNull);
+    expect(ref.read(newSessionIsolatedProvider), isFalse);
+  });
+
+  // The other half of the same rule: plain navigation back to the canvas is not
+  // a project pick, so the draft keeps the folder the user chose.
+  testWidgets('entering without retarget keeps the draft target', (
+    tester,
+  ) async {
+    late WidgetRef ref;
+
+    await tester.pumpWidget(
+      ProviderScope(
+        child: Consumer(
+          builder: (context, r, _) {
+            ref = r;
+            return const SizedBox.shrink();
+          },
+        ),
+      ),
+    );
+
+    ref.read(selectedTargetProvider.notifier).set(const LocalProject('local-b'));
+    ref.read(selectedTargetProjectProvider.notifier).set(
+      const PickerProject(
+        id: 'local-a',
+        name: 'A',
+        detail: '/a',
+        isLocal: true,
+      ),
+    );
+
+    enterNewSession(ref.container);
+    await tester.pump();
+
+    expect(ref.read(selectedTargetProjectProvider)?.id, 'local-a');
   });
 }

@@ -12,6 +12,7 @@ import { join, resolve } from "node:path";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
 import { MessageBus } from "../src/message-bus";
 import { computeProjectId, isSafeProjectId } from "../src/project-id";
+import { projectRootName } from "../src/worktrees/checkout-names";
 import { WorktreeManager } from "../src/worktrees/worktree-manager";
 
 function fakeRemoteConfig(): HostRemoteConfig {
@@ -133,15 +134,20 @@ describe("remote isolated-session security", () => {
 
   test("gate 4: the worktree path is derived host-side and cannot leave the Antgrid root", async () => {
     const projectId = "project-test";
+    const root = resolve(abDir, "wt", projectRootName(repo, projectId));
     // A checkout id is host-generated; model a compromised generator to prove
-    // the containment check is real and not merely implied by the id's shape.
+    // containment holds. Neither segment is the id any more — the directory is
+    // built from a slugged word pair and a slugged tail — so the traversal
+    // cannot be spelled at all, and the `pathBelow` guard behind that is the
+    // second line rather than the only one.
     const escaping = new WorktreeManager({ abDir, newCheckoutId: () => join("..", "..", "escape") });
-    await expect(escaping.prepareForSession({ projectId, repoPath: repo, sessionId: "s1" }))
-      .rejects.toMatchObject({ code: "WORKTREE_CONFLICT" });
+    const contained = await escaping.prepareForSession({
+      projectId, repoPath: repo, sessionId: "s1", sessionName: join("..", "..", "escape"),
+    });
+    expect(contained.path.toLowerCase().startsWith(root.toLowerCase())).toBe(true);
 
     const honest = new WorktreeManager({ abDir, newCheckoutId: () => "checkout-1" });
-    const record = await honest.prepareForSession({ projectId, repoPath: repo, sessionId: "s1" });
-    const root = resolve(abDir, "wt", projectId);
+    const record = await honest.prepareForSession({ projectId, repoPath: repo, sessionId: "s2" });
     expect(record.path.toLowerCase().startsWith(root.toLowerCase())).toBe(true);
     // The branch is generated too — the request carries no branch name at all.
     expect(record.branch).toMatch(/^antgrid\//);
