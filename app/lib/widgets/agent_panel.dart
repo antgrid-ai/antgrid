@@ -158,6 +158,23 @@ class AgentBar extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // The window title bar only mounts its contents on a non-touch desktop at
+    // >= kMediumBreakpoint (app_shell.dart); below that, nothing else hosts
+    // its trailing project actions (Remote Access chip + remote host pill) —
+    // unlike the sidebar and context panel, which get forced-visible
+    // fallbacks in that band. Without this, a narrow mouse-desktop window
+    // (well above the 640px minimum window size) has no way to reach Remote
+    // Access at all.
+    final titleBarMounted =
+        !isMobilePlatform &&
+        MediaQuery.sizeOf(context).width >= kMediumBreakpoint;
+    // Resolved before the list so the separator below can be gated on the
+    // actions rather than on the band: the list is empty on every touch
+    // platform and on a desktop whose local uuid hasn't resolved yet, and a
+    // spacer emitted for nothing ends the bar with a gap.
+    final projectActions = titleBarMounted
+        ? const <Widget>[]
+        : titleBarProjectActions(ref);
     return AbToolbar.custom(
       children: [
         if (isMobilePlatform) ...[
@@ -179,6 +196,10 @@ class AgentBar extends ConsumerWidget {
         const HandlerHeaderControl(),
         const SizedBox(width: AbTokens.space6),
         const WorkspaceMenuButton(),
+        if (projectActions.isNotEmpty) ...[
+          const SizedBox(width: AbTokens.space6),
+          ...projectActions,
+        ],
       ],
     );
   }

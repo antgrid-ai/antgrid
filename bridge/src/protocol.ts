@@ -287,6 +287,9 @@ const GitDiscardMessage = BaseMessage.extend({
   type: z.literal("git:discard"),
   projectId: z.string(),
   files: z.array(z.string()),
+  /** Revert each path all the way to HEAD, staged content included. Absent
+   * from an older app, which discards worktree edits only — see [gitDiscard]. */
+  includeStaged: z.boolean().optional(),
   ...CheckoutScoped,
 });
 

@@ -1,4 +1,5 @@
 import 'package:antgrid/widgets/workspace_tab_bar.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../design/test_harness.dart';
@@ -74,5 +75,49 @@ void main() {
     await tester.tap(find.bySemanticsLabel('Files'));
     expect(picked, WorkspaceView.files);
     handle.dispose();
+  });
+
+  // The strip holds five tabs in a pane that fits three (the touch tablet's
+  // context pane is a quarter of the window), so a selection made from
+  // WorkspaceMenuButton's popup can land off the right edge — the body
+  // switched while every visible tab stayed unselected.
+  group('WorkspaceTabBar overflow', () {
+    Future<void> pumpNarrow(WidgetTester tester, WorkspaceView selected) =>
+        pumpAntgrid(
+          tester,
+          SizedBox(
+            width: 240,
+            child: WorkspaceTabBar(selected: selected, onSelected: (_) {}),
+          ),
+        );
+
+    bool tabIsOnScreen(WidgetTester tester, String label) {
+      final strip = tester.getRect(find.byType(WorkspaceTabBar));
+      final tab = tester.getRect(find.text(label));
+      return tab.left >= strip.left && tab.right <= strip.right;
+    }
+
+    testWidgets('the selected tab is scrolled into view on the first frame', (
+      tester,
+    ) async {
+      await pumpNarrow(tester, WorkspaceView.handler);
+      await tester.pumpAndSettle();
+
+      expect(tabIsOnScreen(tester, 'Handler'), isTrue);
+      expect(tabIsOnScreen(tester, 'Preview'), isFalse);
+    });
+
+    testWidgets('changing the selection scrolls the new tab into view', (
+      tester,
+    ) async {
+      await pumpNarrow(tester, WorkspaceView.preview);
+      await tester.pumpAndSettle();
+      expect(tabIsOnScreen(tester, 'Terminals'), isFalse);
+
+      await pumpNarrow(tester, WorkspaceView.terminals);
+      await tester.pumpAndSettle();
+
+      expect(tabIsOnScreen(tester, 'Terminals'), isTrue);
+    });
   });
 }

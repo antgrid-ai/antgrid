@@ -1,33 +1,9 @@
 import 'dart:async';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:re_editor/re_editor.dart';
-import 'package:re_highlight/re_highlight.dart';
-import 'package:re_highlight/languages/bash.dart';
-import 'package:re_highlight/languages/c.dart';
-import 'package:re_highlight/languages/cpp.dart';
-import 'package:re_highlight/languages/csharp.dart';
-import 'package:re_highlight/languages/css.dart';
-import 'package:re_highlight/languages/dart.dart';
-import 'package:re_highlight/languages/dockerfile.dart';
-import 'package:re_highlight/languages/go.dart';
-import 'package:re_highlight/languages/gradle.dart';
-import 'package:re_highlight/languages/ini.dart';
-import 'package:re_highlight/languages/java.dart';
-import 'package:re_highlight/languages/javascript.dart';
-import 'package:re_highlight/languages/json.dart';
-import 'package:re_highlight/languages/kotlin.dart';
-import 'package:re_highlight/languages/markdown.dart';
-import 'package:re_highlight/languages/python.dart';
-import 'package:re_highlight/languages/ruby.dart';
-import 'package:re_highlight/languages/rust.dart';
-import 'package:re_highlight/languages/scss.dart';
-import 'package:re_highlight/languages/sql.dart';
-import 'package:re_highlight/languages/swift.dart';
-import 'package:re_highlight/languages/typescript.dart';
-import 'package:re_highlight/languages/xml.dart';
-import 'package:re_highlight/languages/yaml.dart';
 import 'package:re_highlight/styles/vs2015.dart';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -42,58 +18,10 @@ import '../design/widgets/ab_search_field.dart';
 import '../design/widgets/ab_toolbar.dart';
 import '../models/file_tree_models.dart';
 import '../providers/providers.dart';
+import 'code_syntax.dart';
 import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
 import 'viewer_support.dart';
-
-const _kFontSize = 12.0;
-const _kFontHeight = 1.4;
-const _kLineHeight = _kFontSize * _kFontHeight;
-
-final _langModes = <String, ({String key, Mode mode})>{
-  'dart': (key: 'dart', mode: langDart),
-  'js': (key: 'javascript', mode: langJavascript),
-  'jsx': (key: 'javascript', mode: langJavascript),
-  'ts': (key: 'typescript', mode: langTypescript),
-  'tsx': (key: 'typescript', mode: langTypescript),
-  'py': (key: 'python', mode: langPython),
-  'rb': (key: 'ruby', mode: langRuby),
-  'java': (key: 'java', mode: langJava),
-  'kt': (key: 'kotlin', mode: langKotlin),
-  'swift': (key: 'swift', mode: langSwift),
-  'go': (key: 'go', mode: langGo),
-  'rs': (key: 'rust', mode: langRust),
-  'c': (key: 'c', mode: langC),
-  'cpp': (key: 'cpp', mode: langCpp),
-  'cc': (key: 'cpp', mode: langCpp),
-  'cxx': (key: 'cpp', mode: langCpp),
-  'h': (key: 'cpp', mode: langCpp),
-  'hpp': (key: 'cpp', mode: langCpp),
-  'cs': (key: 'csharp', mode: langCsharp),
-  'html': (key: 'xml', mode: langXml),
-  'htm': (key: 'xml', mode: langXml),
-  'xml': (key: 'xml', mode: langXml),
-  'css': (key: 'css', mode: langCss),
-  'scss': (key: 'scss', mode: langScss),
-  'json': (key: 'json', mode: langJson),
-  'yaml': (key: 'yaml', mode: langYaml),
-  'yml': (key: 'yaml', mode: langYaml),
-  'md': (key: 'markdown', mode: langMarkdown),
-  'sql': (key: 'sql', mode: langSql),
-  'sh': (key: 'bash', mode: langBash),
-  'bash': (key: 'bash', mode: langBash),
-  'zsh': (key: 'bash', mode: langBash),
-  'dockerfile': (key: 'dockerfile', mode: langDockerfile),
-  'toml': (key: 'ini', mode: langIni),
-  'gradle': (key: 'gradle', mode: langGradle),
-};
-
-({String key, Mode mode})? _langForPath(String? path) {
-  if (path == null) return null;
-  final name = viewerBasename(path);
-  final ext = name.contains('.') ? name.split('.').last : null;
-  return ext != null ? _langModes[ext] : null;
-}
 
 /// A widget that displays file content with syntax highlighting,
 /// loading states, and error handling.
@@ -147,6 +75,7 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
   late final Ticker _scrollTicker;
   Duration _lastTick = Duration.zero;
   Offset? _dragPosition;
+  CodeLineSelection? _dragStartSelection;
   Size _editorSize = Size.zero;
   static const _edgeZone = 40.0;
   static const _maxSpeed = 1200.0; // px/s at edge
@@ -207,7 +136,7 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
     // Fallback timeout ensures the editor is always revealed even if the
     // spanBuilder never sees highlighted children (e.g. empty files).
     _editorReady =
-        text == null || _langForPath(widget.fileContent?.path) == null;
+        text == null || codeLanguageForPath(widget.fileContent?.path) == null;
     _editorReadyScheduled = false;
     if (!_editorReady) {
       final generation = ++_syncGeneration;
@@ -254,7 +183,7 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
       if (sc == null || !sc.hasClients) return;
       final viewportHeight = sc.position.viewportDimension;
       final offset =
-          (line - 1) * _kLineHeight - (viewportHeight / 2) + _kLineHeight;
+          (line - 1) * kCodeLineHeight - (viewportHeight / 2) + kCodeLineHeight;
       sc.animateTo(
         offset.clamp(sc.position.minScrollExtent, sc.position.maxScrollExtent),
         duration: const Duration(milliseconds: 300),
@@ -282,7 +211,10 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
     // the comment dialog holds this open indefinitely, and a reconnect or LRU
     // evict in that window makes the façade throw — into a fire-and-forget
     // button callback, so unhandled.
-    final svc = focusedCheckoutServiceOrNull(ref.container, (s) => s.terminalService);
+    final svc = focusedCheckoutServiceOrNull(
+      ref.container,
+      (s) => s.terminalService,
+    );
     if (svc == null) return;
     svc.sendToAgentTerminal(message);
     controller.cancelSelection();
@@ -343,13 +275,56 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
     super.dispose();
   }
 
+  /// Sends a sideways-dominant scroll to the horizontal axis, whatever it
+  /// landed on. A pointer signal goes to the FIRST interested registrant in
+  /// hit-test order (innermost out), so this only works from a node below the
+  /// scrollable it is taking the event away from.
+  void _claimSidewaysScroll(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent) return;
+    final delta = event.scrollDelta;
+    if (delta.dx.abs() <= delta.dy.abs()) return;
+    final scroller = _scrollController?.horizontalScroller;
+    if (scroller == null || !scroller.hasClients) return;
+    GestureBinding.instance.pointerSignalResolver.register(event, (_) {
+      final position = scroller.position;
+      scroller.jumpTo(
+        (position.pixels + delta.dx).clamp(
+          position.minScrollExtent,
+          position.maxScrollExtent,
+        ),
+      );
+    });
+  }
+
+  void _onPointerDown(PointerDownEvent event) {
+    _dragStartSelection = _controller?.selection;
+  }
+
   void _onPointerMove(PointerMoveEvent event) {
     if (!event.down || event.buttons == 0) return;
+    // Edge auto-scroll is for a SELECTION drag reaching past the viewport —
+    // never for a plain pan. Reading a long line means dragging sideways
+    // across it, and near the top or bottom that put the drag inside the edge
+    // zone: the file scrolled vertically under a gesture that asked to go
+    // sideways. A selection drag is the one that CHANGES the selection, so
+    // that (not merely having one, which survives from an earlier select) is
+    // what arms this.
+    if (!_isSelectionDrag) {
+      _onPointerUp(event);
+      return;
+    }
     _dragPosition = event.localPosition;
     if (!_scrollTicker.isActive) {
       _lastTick = Duration.zero;
       _scrollTicker.start();
     }
+  }
+
+  bool get _isSelectionDrag {
+    final selection = _controller?.selection;
+    return selection != null &&
+        !selection.isCollapsed &&
+        selection != _dragStartSelection;
   }
 
   void _onPointerUp(PointerEvent event) {
@@ -435,7 +410,7 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
     }
 
     final fileName = viewerBasename(content.path);
-    final lang = _langForPath(content.path);
+    final lang = codeLanguageForPath(content.path);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -458,6 +433,7 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
                     maintainAnimation: true,
                     maintainSize: true,
                     child: Listener(
+                      onPointerDown: _onPointerDown,
                       onPointerMove: _onPointerMove,
                       onPointerUp: _onPointerUp,
                       onPointerCancel: _onPointerUp,
@@ -469,10 +445,10 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
                         wordWrap: false,
                         showCursorWhenReadOnly: true,
                         style: CodeEditorStyle(
-                          fontSize: _kFontSize,
+                          fontSize: kCodeFontSize,
                           fontFamily: AbTokens.fontMono,
                           fontFamilyFallback: AbTokens.fontMonoFallbacks,
-                          fontHeight: _kFontHeight,
+                          fontHeight: kCodeFontHeight,
                           backgroundColor: context.antgrid.bgDeepest,
                           codeTheme: lang != null
                               ? CodeHighlightTheme(
@@ -492,9 +468,20 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
                               chunkController,
                               notifier,
                             ) {
-                              return DefaultCodeLineNumber(
-                                controller: editingController,
-                                notifier: notifier,
+                              // The gutter is built inside the editor's
+                              // VERTICAL scrollable but outside its
+                              // horizontal one, so a sideways scroll landing
+                              // on it has only the vertical axis to go to
+                              // and drags the file up or down instead. This
+                              // listener is a descendant of that scrollable,
+                              // which is the only place a pointer signal can
+                              // be taken from it — see [_claimSidewaysScroll].
+                              return Listener(
+                                onPointerSignal: _claimSidewaysScroll,
+                                child: DefaultCodeLineNumber(
+                                  controller: editingController,
+                                  notifier: notifier,
+                                ),
                               );
                             },
                         chunkAnalyzer: const DefaultCodeChunkAnalyzer(),
@@ -649,7 +636,10 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
           children: [
             Text(
               '!',
-              style: TextStyle(fontSize: AbTokens.fontDisplayMd, color: context.antgrid.error),
+              style: TextStyle(
+                fontSize: AbTokens.fontDisplayMd,
+                color: context.antgrid.error,
+              ),
             ),
             const SizedBox(height: AbTokens.space12),
             Text(

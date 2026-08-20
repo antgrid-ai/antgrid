@@ -558,9 +558,19 @@ class FileService {
 
   /// Discard working-tree changes for [files] (tracked -> restore, untracked ->
   /// clean). Unrecoverable -- callers must confirm first.
-  void discard(List<String> files) {
+  ///
+  /// [includeStaged] reverts each path all the way to HEAD instead, dropping
+  /// its staged content too; without it a fully staged file survives untouched
+  /// (the bridge restores the worktree FROM the index). Every Discard/Revert
+  /// affordance in the UI passes it — the flag exists so an older bridge, which
+  /// ignores it, still does the narrower thing rather than misfiring.
+  void discard(List<String> files, {bool includeStaged = false}) {
     session.sendForCheckout(checkoutId,
-      createAbMessage('git:discard', {'projectId': projectId, 'files': files}),
+      createAbMessage('git:discard', {
+        'projectId': projectId,
+        'files': files,
+        if (includeStaged) 'includeStaged': true,
+      }),
     );
   }
 

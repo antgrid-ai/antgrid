@@ -3,10 +3,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
+import '../design/widgets/ab_diff_stat.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_menu.dart';
 import '../providers/visible_surface.dart';
-import '../utils/platform_utils.dart';
 // The shared popup-panel chrome (section header + hover/focus row) that the
 // composer's environment and branch pickers already use, so every grouped popup
 // in the app reads as one control.
@@ -22,11 +22,16 @@ import 'workspace_tab_bar.dart';
 /// [workspaceMenuControlProvider] is always null there, since the workspace
 /// is a swiped-to page, not a docked panel with a menu into it.)
 ///
-/// The one platform-specific wrinkle: on a touch tablet, a tap while the
-/// context pane is CLOSED opens it directly ([WorkspaceMenuControl.open])
-/// instead of toggling the popup — there is nothing useful to anchor a "pick
-/// a view" menu to while the pane it would reveal a view IN isn't even on
-/// screen. Once the pane is open, a tap behaves exactly like desktop.
+/// A tap ALWAYS just toggles the popup — on every platform, regardless of
+/// whether the touch tablet's docked context pane happens to be open or
+/// closed. It used to also open the pane directly on a touch tablet when the
+/// pane was closed (skipping the popup on the theory that there was nothing
+/// to anchor a "pick a view" menu to yet), but that meant a tap could dock
+/// the context pane instead of showing the popup the icon is for — the icon
+/// must only ever show/hide its own popup, never take a side-effecting
+/// shortcut on the pane. Opening the pane is still one tap away: pick any row
+/// in the (now visible) popup, which un-hides it — see
+/// [WorkspaceMenuPanel]'s doc.
 ///
 /// **The popup is pinned, not modal, and it starts open.** It hangs in the
 /// overlay with no barrier, so it survives every click that lands elsewhere —
@@ -125,19 +130,8 @@ class _WorkspaceMenuButtonState extends ConsumerState<WorkspaceMenuButton> {
           icon: AbIcons.workspace,
           selected: open,
           tooltip: 'Workspace',
-          onTap: () {
-            // Touch tablet, pane currently closed: there's nothing to anchor
-            // a view-picker to yet, so open the pane directly — the same
-            // outcome a swipe would produce — rather than toggling a popup
-            // over a panel that isn't on screen. Once the pane is open this
-            // never fires again; every other tap falls through to the same
-            // toggle desktop uses.
-            if (isMobilePlatform && control.active == null) {
-              control.open();
-              return;
-            }
-            ref.read(workspaceMenuOpenProvider.notifier).set(!open);
-          },
+          onTap: () =>
+              ref.read(workspaceMenuOpenProvider.notifier).set(!open),
         ),
       ),
     );
@@ -159,6 +153,7 @@ class WorkspaceMenuPanel extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final control = ref.watch(workspaceMenuControlProvider);
     final badges = ref.watch(workspaceBadgesProvider);
+    final gitStat = ref.watch(gitDiffTotalsProvider);
     if (control == null) return const SizedBox.shrink();
 
     return Column(
@@ -172,15 +167,37 @@ class WorkspaceMenuPanel extends ConsumerWidget {
             label: view.label,
             selected: view == control.active,
             mono: false,
-            trailing: badges[view] == null
-                ? null
-                : WorkspaceViewBadge(
-                    count: badges[view]!,
-                    active: view == control.active,
-                  ),
+            // The Git row trades its file count for the worktree's +/-: how
+            // much changed is what the row is read for, and one trailing
+            // figure is all it has room for. The tab strip deliberately
+            // keeps its plain count: five tabs on one scrolling row have no
+            // space for a figure this wide.
+            trailing: _viewTrailing(
+              view: view,
+              badge: badges[view],
+              gitStat: gitStat,
+              active: view == control.active,
+            ),
             onTap: () => control.reveal(view),
           ),
       ],
     );
+  }
+
+  Widget? _viewTrailing({
+    required WorkspaceView view,
+    required int? badge,
+    required GitDiffTotals gitStat,
+    required bool active,
+  }) {
+    if (view == WorkspaceView.git &&
+        (gitStat.additions > 0 || gitStat.deletions > 0)) {
+      return AbDiffStat(
+        additions: gitStat.additions,
+        deletions: gitStat.deletions,
+      );
+    }
+    if (badge == null) return null;
+    return WorkspaceViewBadge(count: badge, active: active);
   }
 }

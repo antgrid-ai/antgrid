@@ -34,7 +34,14 @@ extension WorkspaceViewUI on WorkspaceView {
 /// the previous vertical 48px `SidebarRail`. Height matches
 /// [AbTokens.statusHeaderHeight] so it sits flush with the agent panel
 /// header across the resizable divider.
-class WorkspaceTabBar extends StatelessWidget {
+///
+/// Stateful for the strip's scroll position: the tabs outgrow the bar well
+/// before the panel reaches its narrowest (the touch tablet's docked context
+/// pane is a quarter of the window), so the last tabs sit off the right edge
+/// and the selected one has to be scrolled back to whenever it changes —
+/// picking Terminals from `WorkspaceMenuButton`'s popup otherwise swapped the
+/// body while every visible tab stayed unselected.
+class WorkspaceTabBar extends StatefulWidget {
   const WorkspaceTabBar({
     super.key,
     required this.selected,
@@ -51,6 +58,51 @@ class WorkspaceTabBar extends StatelessWidget {
   final bool isExpanded;
   final VoidCallback? onToggleExpand;
   final VoidCallback? onClose;
+
+  @override
+  State<WorkspaceTabBar> createState() => _WorkspaceTabBarState();
+}
+
+class _WorkspaceTabBarState extends State<WorkspaceTabBar> {
+  final _tabKeys = {for (final view in WorkspaceView.values) view: GlobalKey()};
+
+  @override
+  void initState() {
+    super.initState();
+    // The pane can open onto a tab that was never on screen (the popup selects
+    // while the pane is closed), so the first layout needs the same reveal a
+    // later selection change gets.
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _revealSelected(animate: false),
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant WorkspaceTabBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.selected != widget.selected) {
+      // After the frame: the newly selected tab has to be laid out before
+      // ensureVisible can measure where to scroll it.
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _revealSelected(animate: true),
+      );
+    }
+  }
+
+  void _revealSelected({required bool animate}) {
+    if (!mounted) return;
+    final tabContext = _tabKeys[widget.selected]?.currentContext;
+    if (tabContext == null) return;
+    Scrollable.ensureVisible(
+      tabContext,
+      // Centred rather than nudged to the nearest edge: the strip holds five
+      // tabs in a pane that fits three, so centring keeps a neighbour visible
+      // on either side and makes it obvious the rest scroll.
+      alignment: 0.5,
+      duration: animate ? AbTokens.motionDefault : Duration.zero,
+      curve: Curves.easeOut,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -74,35 +126,38 @@ class WorkspaceTabBar extends StatelessWidget {
                 children: [
                   for (final view in WorkspaceView.values)
                     _TabItem(
+                      key: _tabKeys[view],
                       view: view,
-                      isActive: view == selected,
-                      onTap: () => onSelected(view),
-                      badgeCount: badges[view] ?? 0,
+                      isActive: view == widget.selected,
+                      onTap: () => widget.onSelected(view),
+                      badgeCount: widget.badges[view] ?? 0,
                     ),
                 ],
               ),
             ),
           ),
-          if (onToggleExpand != null || onClose != null)
+          if (widget.onToggleExpand != null || widget.onClose != null)
             Padding(
               padding: const EdgeInsets.only(right: AbTokens.space6),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 spacing: AbTokens.space2,
                 children: [
-                  if (onToggleExpand != null)
+                  if (widget.onToggleExpand != null)
                     AbIconButton(
-                      icon: isExpanded ? AbIcons.collapse : AbIcons.expand,
-                      tooltip: isExpanded ? 'Restore' : 'Expand',
-                      onTap: onToggleExpand,
+                      icon: widget.isExpanded
+                          ? AbIcons.collapse
+                          : AbIcons.expand,
+                      tooltip: widget.isExpanded ? 'Restore' : 'Expand',
+                      onTap: widget.onToggleExpand,
                     ),
                   // Hides the panel outright (not a collapse to a strip); the
                   // window title bar's panel control is the way back.
-                  if (onClose != null)
+                  if (widget.onClose != null)
                     AbIconButton(
                       icon: AbIcons.close,
                       tooltip: 'Hide panel',
-                      onTap: onClose,
+                      onTap: widget.onClose,
                     ),
                 ],
               ),
@@ -120,7 +175,11 @@ class WorkspaceTabBar extends StatelessWidget {
 /// dim-unless-selected foreground in both places rather than two widgets that
 /// could quietly diverge.
 class WorkspaceViewBadge extends StatelessWidget {
-  const WorkspaceViewBadge({super.key, required this.count, this.active = false});
+  const WorkspaceViewBadge({
+    super.key,
+    required this.count,
+    this.active = false,
+  });
 
   final int count;
   final bool active;
@@ -151,6 +210,7 @@ class WorkspaceViewBadge extends StatelessWidget {
 
 class _TabItem extends StatefulWidget {
   const _TabItem({
+    super.key,
     required this.view,
     required this.isActive,
     required this.onTap,

@@ -7,7 +7,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
-import '../design/widgets/ab_brand_mark.dart';
 import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_disclosure_chevron.dart';
 import '../design/widgets/ab_docked_column.dart';
@@ -98,12 +97,12 @@ class ProjectsDrawer extends ConsumerWidget {
 }
 
 /// Fixed chrome above the project list. One slot because [AbDockedColumn]
-/// budgets per slot and none of these three may be compressed — the New Session
+/// budgets per slot and neither of these may be compressed — the New Session
 /// button is the drawer's primary action.
 ///
 /// This is the header slot, which is never budgeted at all, so it outranks even
 /// the pinned rows: on a panel too short for it the account footer is already
-/// gone while these three still paint whole, and the drawer's clip is what
+/// gone while both still paint whole, and the drawer's clip is what
 /// keeps them off the workspace.
 class _TopChrome extends StatelessWidget {
   const _TopChrome({required this.count});
@@ -116,7 +115,6 @@ class _TopChrome extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const _Header(),
         const _NavActions(),
         _GroupLabel(label: 'PROJECTS', count: count),
       ],
@@ -161,24 +159,6 @@ void closeDrawerIfOverlay(BuildContext context) {
   final scaffold = Scaffold.maybeOf(context);
   if (scaffold?.hasDrawer == true && scaffold!.isDrawerOpen) {
     Navigator.of(context).pop();
-  }
-}
-
-class _Header extends StatelessWidget {
-  const _Header();
-
-  @override
-  Widget build(BuildContext context) {
-    // Brand mark is mobile-only; desktop drops the header entirely.
-    if (!isMobilePlatform) return const SizedBox.shrink();
-    return Container(
-      height: 44,
-      padding: const EdgeInsets.symmetric(horizontal: AbTokens.drawerGutter),
-      decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: context.antgrid.borderSubtle)),
-      ),
-      child: const Row(children: [AbBrandMark()]),
-    );
   }
 }
 

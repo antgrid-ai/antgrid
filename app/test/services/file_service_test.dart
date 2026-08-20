@@ -276,6 +276,25 @@ void main() {
     final msg = t.sent.firstWhere((m) => m['type'] == 'git:discard');
     expect(msg['projectId'], 'p');
     expect(msg['files'], ['a.dart']);
+    // Omitted, not false: an older bridge reads the absence as the narrower
+    // worktree-only discard, which is what an unflagged call asked for.
+    expect(msg.containsKey('includeStaged'), isFalse);
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('discard(includeStaged: true) flags the revert-to-HEAD form', () async {
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = FileService.fromSession(session);
+
+    svc.discard(['a.dart'], includeStaged: true);
+    await Future<void>.delayed(Duration.zero);
+
+    final msg = t.sent.firstWhere((m) => m['type'] == 'git:discard');
+    expect(msg['files'], ['a.dart']);
+    expect(msg['includeStaged'], isTrue);
 
     await svc.dispose();
     await session.close();

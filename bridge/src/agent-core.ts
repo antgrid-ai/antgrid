@@ -76,6 +76,14 @@ interface CheckoutRuntime {
   cachedGitBranch: string | null;
   cachedGitFiles: GitFileEntry[];
   gitBranchInterval: ReturnType<typeof setInterval> | null;
+  gitRefreshTimer: ReturnType<typeof setTimeout> | null;
+  /** Fire-and-forget `git status` reads still running against this checkout —
+   * see [trackGitRefresh] for why teardown has to wait them out. */
+  pendingGitRefreshes: Set<Promise<unknown>>;
+  /** Start-order tickets for [refreshGitStatus]; `gitStatusApplied` is the
+   * highest whose result reached `cachedGitFiles`. */
+  gitStatusSeq: number;
+  gitStatusApplied: number;
   configuredTerminalIds: Map<string, string>;
   started: boolean;
 }
@@ -532,6 +540,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       cachedGitBranch: null,
       cachedGitFiles: [],
       gitBranchInterval: null,
+      gitRefreshTimer: null,
+      pendingGitRefreshes: new Set(),
+      gitStatusSeq: 0,
+      gitStatusApplied: 0,
       configuredTerminalIds: new Map(),
       started: false,
     };
@@ -885,7 +897,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "git:discard": {
-        handleGitDiscard(runtime, msg.projectId, msg.files).catch((err) =>
+        handleGitDiscard(runtime, msg.projectId, msg.files, msg.includeStaged === true).catch((err) =>
           log.error("git:discard handler failed: %s", err)
         );
         break;
@@ -1177,6 +1189,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (!fw) break;
         const { tree, seq } = fw.getTreeSnapshot();
         sendFromRuntime(runtime, createMessage("file:tree:snapshot", { tree, seq }));
+        // The app asks for this on every (re)connect and on a pull-to-refresh,
+        // and the git decorations belong to the same picture as the tree —
+        // answering with a tree alone left the changes list showing whatever
+        // the replay cache last held. Sent unconditionally rather than only on
+        // change: the request means the app has reason to doubt what it has.
+        trackGitRefresh(
+          runtime,
+          refreshGitStatus(runtime)
+            .then(() => sendGitStatus(runtime))
+            .catch(() => {}),
+        );
         break;
       }
       case "preview:snapshot:request": {
@@ -1227,6 +1250,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       runtime.tunnelManager?.stop();
       if (runtime.gitBranchInterval) clearInterval(runtime.gitBranchInterval);
       runtime.gitBranchInterval = null;
+      if (runtime.gitRefreshTimer) clearTimeout(runtime.gitRefreshTimer);
+      runtime.gitRefreshTimer = null;
       runtime.started = false;
     }
     manager?.killAll();
@@ -1337,8 +1362,74 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
   }
 
+  // Results are applied in START order, never arrival order. Four triggers can
+  // now overlap on one checkout (the 10s backstop poll, the watcher debounce,
+  // a tree-snapshot request and a post-mutation refresh), and a slower earlier
+  // `git status` finishing last would otherwise overwrite the newer snapshot —
+  // and get pushed and cached for replay as if it were current.
   async function refreshGitStatus(runtime: CheckoutRuntime = mainRuntime): Promise<void> {
-    runtime.cachedGitFiles = await getGitStatus(runtime.checkout.path);
+    const ticket = ++runtime.gitStatusSeq;
+    const files = await getGitStatus(runtime.checkout.path);
+    if (ticket < runtime.gitStatusApplied) return;
+    runtime.gitStatusApplied = ticket;
+    runtime.cachedGitFiles = files;
+  }
+
+  // Coalescing window for a watcher-driven git refresh. Long enough that a
+  // save storm (an agent rewriting a dozen files, a formatter sweeping the
+  // tree) costs one `git status` rather than a dozen, short enough that the
+  // Git view moves while the user is still looking at what caused it.
+  const GIT_REFRESH_DEBOUNCE_MS = 250;
+
+  // Every git refresh below is fire-and-forget, so teardown has to be able to
+  // find the ones still running: `git status` is a child process holding the
+  // checkout as its cwd, and on Windows that handle keeps the directory locked
+  // after the core has otherwise stopped — an isolated session's worktree
+  // cannot be removed while one is in flight.
+  //
+  // Tracked PER RUNTIME, not once for the core: deleting a session tears down
+  // only that checkout while the rest of the process keeps running, so a
+  // core-wide set would leave [teardownCheckoutRuntime] with nothing it could
+  // wait on that wasn't also every other checkout's traffic.
+  //
+  // Settled either way, so a rejected refresh is neither leaked from the set
+  // nor reported as an unhandled rejection by the tracking itself.
+  function trackGitRefresh(runtime: CheckoutRuntime, work: Promise<unknown>): void {
+    runtime.pendingGitRefreshes.add(work);
+    const forget = () => void runtime.pendingGitRefreshes.delete(work);
+    void work.then(forget, forget);
+  }
+
+  function awaitGitRefreshes(runtime: CheckoutRuntime): Promise<unknown> {
+    return Promise.allSettled([...runtime.pendingGitRefreshes]);
+  }
+
+  // Re-reads git status after the file watcher saw the tree move, and pushes
+  // it only if it actually changed.
+  ///
+  // The 10s poll below is a BACKSTOP, not the mechanism: it exists for the
+  // changes no watcher sees (a `git add` or `git stash` run in another
+  // terminal touches only `.git/`, which the ignore rules exclude). Leaving
+  // the poll as the only trigger is what made a diff take up to ten seconds
+  // to appear after the agent finished writing — worst on a phone or tablet,
+  // where the Git view is opened deliberately, right after the agent stops.
+  function scheduleGitRefresh(runtime: CheckoutRuntime) {
+    if (runtime.gitRefreshTimer) return;
+    runtime.gitRefreshTimer = setTimeout(() => {
+      runtime.gitRefreshTimer = null;
+      trackGitRefresh(
+        runtime,
+        (async () => {
+          const before = JSON.stringify(runtime.cachedGitFiles);
+          try {
+            await refreshGitStatus(runtime);
+          } catch {
+            return;
+          }
+          if (JSON.stringify(runtime.cachedGitFiles) !== before) sendGitStatus(runtime);
+        })(),
+      );
+    }, GIT_REFRESH_DEBOUNCE_MS);
   }
 
   function sendGitStatus(runtime: CheckoutRuntime = mainRuntime) {
@@ -1404,21 +1495,30 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
   }
 
-  async function handleGitDiscard(runtime: CheckoutRuntime, projectId: string, files: string[]) {
+  async function handleGitDiscard(
+    runtime: CheckoutRuntime,
+    projectId: string,
+    files: string[],
+    includeStaged: boolean,
+  ) {
     // gitDiscard classifies tracked vs untracked from live git state itself —
     // don't thread a (possibly stale) cachedGitFiles snapshot through.
-    const result = await gitDiscard(runtime.checkout.path, files);
+    const result = await gitDiscard(runtime.checkout.path, files, { includeStaged });
     sendFromRuntime(runtime, createMessage("git:discard-result", {
       projectId,
       success: result.success,
       files,
       ...(result.error ? { error: result.error } : {}),
     }));
-    if (result.success) {
-      await refreshGitStatus(runtime);
-      sendGitStatus(runtime);
-      sendStatus(runtime);
-    }
+    // Refreshed on BOTH outcomes, unlike the single-command stage/unstage
+    // handlers below: a discard is several git invocations and the later ones
+    // can fail after the index has already been reset, so a failed one still
+    // moves the tree. Nothing else would correct the view — an index-only
+    // mutation touches `.git/`, which the watcher ignores, leaving the 10s
+    // backstop poll to show the user files that are no longer staged.
+    await refreshGitStatus(runtime);
+    sendGitStatus(runtime);
+    sendStatus(runtime);
   }
 
   async function handleGitStage(runtime: CheckoutRuntime, projectId: string, files: string[]) {
@@ -1584,14 +1684,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     for (const runtime of checkoutRuntimes.values()) {
       sendStatus(runtime);
       sendGitStatus(runtime);
-      void Promise.all([refreshGitBranch(runtime), refreshGitStatus(runtime)])
-        .then(() => {
-          sendStatus(runtime);
-          sendGitStatus(runtime);
-        })
-      // refreshGit* swallow internally today, but guard against a future
-      // edit that lets an exception escape silently breaking the re-emit.
-        .catch(() => {});
+      trackGitRefresh(
+        runtime,
+        Promise.all([refreshGitBranch(runtime), refreshGitStatus(runtime)])
+          .then(() => {
+            sendStatus(runtime);
+            sendGitStatus(runtime);
+          })
+        // refreshGit* swallow internally today, but guard against a future
+        // edit that lets an exception escape silently breaking the re-emit.
+          .catch(() => {}),
+      );
     }
 
     // Re-send file tree
@@ -1661,6 +1764,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       { id: project.id, path: runtime.checkout.path, name: project.name },
       send,
       connState,
+      () => scheduleGitRefresh(runtime),
     );
     runtime.fileWatcher = fw;
     runtime.fileSearcher = new FileSearcher(runtime.checkout.path, project.id, send, [abDir]);
@@ -1725,12 +1829,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     await Promise.all([refreshGitBranch(runtime), refreshGitStatus(runtime)]);
     sendStatus(runtime);
     sendGitStatus(runtime);
-    runtime.gitBranchInterval = setInterval(async () => {
+    runtime.gitBranchInterval = setInterval(() => {
       const branch = runtime.cachedGitBranch;
       const files = JSON.stringify(runtime.cachedGitFiles);
-      await Promise.all([refreshGitBranch(runtime), refreshGitStatus(runtime)]);
-      if (runtime.cachedGitBranch !== branch) sendStatus(runtime);
-      if (JSON.stringify(runtime.cachedGitFiles) !== files) sendGitStatus(runtime);
+      trackGitRefresh(
+        runtime,
+        Promise.all([refreshGitBranch(runtime), refreshGitStatus(runtime)])
+          .then(() => {
+            if (runtime.cachedGitBranch !== branch) sendStatus(runtime);
+            if (JSON.stringify(runtime.cachedGitFiles) !== files) sendGitStatus(runtime);
+          })
+          .catch(() => {}),
+      );
     }, 10_000);
   }
 
@@ -1760,6 +1870,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     runtime.portDetector?.stop();
     runtime.tunnelManager?.stop();
     if (runtime.gitBranchInterval) clearInterval(runtime.gitBranchInterval);
+    if (runtime.gitRefreshTimer) clearTimeout(runtime.gitRefreshTimer);
+    runtime.gitRefreshTimer = null;
+    // After the timer is cleared, so nothing new can be scheduled behind this.
+    // The caller removes the worktree directly after us, and an abandoned
+    // `git status` still holding it as its cwd is what fails that removal on
+    // Windows — see [trackGitRefresh].
+    await awaitGitRefreshes(runtime);
     dropCheckoutReplay(checkoutId);
     await checkoutRuntimes.remove(checkoutId);
   }
@@ -2201,23 +2318,39 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // re-send when it lands.
     sendStatus();
     sendGitStatus();
-    void Promise.all([refreshGitBranch(), refreshGitStatus()])
-      .then(() => {
-        sendStatus();
-        sendGitStatus();
-      })
-      .catch(() => {});
+    trackGitRefresh(
+      mainRuntime,
+      Promise.all([refreshGitBranch(), refreshGitStatus()])
+        .then(() => {
+          sendStatus();
+          sendGitStatus();
+        })
+        .catch(() => {}),
+    );
 
     // Refresh git branch every 10s and re-send status if it changed
-    mainRuntime.gitBranchInterval = setInterval(async () => {
+    mainRuntime.gitBranchInterval = setInterval(() => {
       const prevBranch = mainRuntime.cachedGitBranch;
       const prevFiles = JSON.stringify(mainRuntime.cachedGitFiles);
-      await Promise.all([refreshGitBranch(mainRuntime), refreshGitStatus(mainRuntime)]);
-      if (mainRuntime.cachedGitBranch !== prevBranch) sendStatus(mainRuntime);
-      if (JSON.stringify(mainRuntime.cachedGitFiles) !== prevFiles) sendGitStatus(mainRuntime);
+      trackGitRefresh(
+        mainRuntime,
+        Promise.all([refreshGitBranch(mainRuntime), refreshGitStatus(mainRuntime)])
+          .then(() => {
+            if (mainRuntime.cachedGitBranch !== prevBranch) sendStatus(mainRuntime);
+            if (JSON.stringify(mainRuntime.cachedGitFiles) !== prevFiles) {
+              sendGitStatus(mainRuntime);
+            }
+          })
+          .catch(() => {}),
+      );
     }, 10_000);
 
-    const fw = new FileWatcher(project, (msg: AbMessage) => sendAb(msg), connState);
+    const fw = new FileWatcher(
+      project,
+      (msg: AbMessage) => sendAb(msg),
+      connState,
+      () => scheduleGitRefresh(mainRuntime),
+    );
     fileWatchers.set(project.id, fw);
     mainRuntime.fileWatcher = fw;
     uploadManager = new FileUploadManager({
@@ -2459,6 +2592,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
       apiServer?.stop();
       teardownServices();
+      // After the timers are cleared, so nothing new can be scheduled behind
+      // this — see [trackGitRefresh] for why an in-flight one has to be
+      // waited out rather than abandoned.
+      await Promise.all([...checkoutRuntimes.values()].map(awaitGitRefreshes));
       const closed = manager ? await manager.killAllGracefully(5000) : 0;
 
       log.info("Antgrid Agent stopped. %d terminal(s) closed.", closed);

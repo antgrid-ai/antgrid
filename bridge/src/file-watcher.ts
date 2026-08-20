@@ -31,6 +31,7 @@ export class FileWatcher {
   private sendMessage: (msg: AbMessage) => void;
   private connState: ConnState;
   private watcher: FSWatcher | null = null;
+  private onFilesChanged?: () => void;
   private nativeWatcher: NodeFSWatcher | null = null;
   private ig: ReturnType<typeof loadIgnoreRules>;
   private pending: PendingChanges = {
@@ -44,11 +45,13 @@ export class FileWatcher {
     project: ProjectInfo,
     sendMessage: (msg: AbMessage) => void,
     connState: ConnState,
+    onFilesChanged?: () => void,
   ) {
     this.projectRoot = project.path;
     this.projectId = project.id;
     this.sendMessage = sendMessage;
     this.connState = connState;
+    this.onFilesChanged = onFilesChanged;
     this.ig = loadIgnoreRules(this.projectRoot, []);
   }
 
@@ -279,6 +282,12 @@ export class FileWatcher {
     this.pending.removed.clear();
 
     if (added.length === 0 && modified.length === 0 && removed.length === 0) return;
+
+    // Ahead of the suppression gate below, and not gated by it: git status is
+    // not a heavy-stream frame, and its cache is what a reconnecting app is
+    // replayed from — a backgrounded phone must not come back to a snapshot
+    // taken before the agent's last edit.
+    this.onFilesChanged?.();
 
     const seq = this.connState.bumpFileSeq();
     if (this.connState.suppressed) {

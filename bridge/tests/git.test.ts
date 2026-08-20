@@ -1,9 +1,15 @@
 // bridge/tests/git.test.ts
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { getGitStatus, gitCommit, gitDiscard, gitStage, gitUnstage } from "../src/git";
+
+/** Content with line endings normalized — a checkout on Windows honours
+ * core.autocrlf, so what git restores is CRLF while the fixture wrote LF. */
+function readText(cwd: string, file: string) {
+  return readFileSync(join(cwd, file), "utf8").replace(/\r\n/g, "\n");
+}
 
 async function run(cwd: string, args: string[]) {
   const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
@@ -150,6 +156,123 @@ describe("git helpers", () => {
     const res = await gitDiscard(dir, ["new.txt"]);
     expect(res.success).toBe(true);
     expect(await getGitStatus(dir)).toEqual([]);
+  });
+
+  it("leaves staged content alone without includeStaged", async () => {
+    // `restore` restores the worktree FROM the index, so the staged version is
+    // what survives — the narrow reading an older app asked for, kept intact.
+    writeFileSync(join(dir, "tracked.txt"), "v2\n");
+    await gitStage(dir, ["tracked.txt"]);
+    const res = await gitDiscard(dir, ["tracked.txt"]);
+    expect(res.success).toBe(true);
+    expect(await getGitStatus(dir)).toEqual([
+      { path: "tracked.txt", status: "M", staged: true, additions: 1, deletions: 1 },
+    ]);
+  });
+
+  it("includeStaged reverts a staged modification all the way to HEAD", async () => {
+    writeFileSync(join(dir, "tracked.txt"), "v2\n");
+    await gitStage(dir, ["tracked.txt"]);
+    const res = await gitDiscard(dir, ["tracked.txt"], { includeStaged: true });
+    expect(res.success).toBe(true);
+    expect(await getGitStatus(dir)).toEqual([]);
+    expect(readText(dir, "tracked.txt")).toBe("v1\n");
+  });
+
+  it("includeStaged deletes a file that only exists in the index", async () => {
+    // Nothing at HEAD to restore it to: the reset drops the index entry, which
+    // leaves the file untracked for `clean` to remove.
+    writeFileSync(join(dir, "new.txt"), "new\n");
+    await gitStage(dir, ["new.txt"]);
+    const res = await gitDiscard(dir, ["new.txt"], { includeStaged: true });
+    expect(res.success).toBe(true);
+    expect(await getGitStatus(dir)).toEqual([]);
+    expect(existsSync(join(dir, "new.txt"))).toBe(false);
+  });
+
+  it("includeStaged restores a staged deletion", async () => {
+    await run(dir, ["rm", "tracked.txt"]);
+    const res = await gitDiscard(dir, ["tracked.txt"], { includeStaged: true });
+    expect(res.success).toBe(true);
+    expect(await getGitStatus(dir)).toEqual([]);
+    expect(readText(dir, "tracked.txt")).toBe("v1\n");
+  });
+
+  it("includeStaged reverts both halves of a stage-then-edit-again file", async () => {
+    writeFileSync(join(dir, "tracked.txt"), "v2\n");
+    await gitStage(dir, ["tracked.txt"]);
+    writeFileSync(join(dir, "tracked.txt"), "v3\n");
+    const res = await gitDiscard(dir, ["tracked.txt"], { includeStaged: true });
+    expect(res.success).toBe(true);
+    expect(await getGitStatus(dir)).toEqual([]);
+    expect(readText(dir, "tracked.txt")).toBe("v1\n");
+  });
+
+  it("includeStaged tolerates a staged-add whose file is already gone", async () => {
+    // Porcelain "AD" — an agent adds a file, stages it, then deletes it. After
+    // the reset it is in neither the index nor the worktree, so it belongs to
+    // neither `restore` nor `clean`. Naming it to either aborts the command on
+    // an unmatched pathspec, taking every OTHER path in the batch with it.
+    writeFileSync(join(dir, "gone.txt"), "x\n");
+    await gitStage(dir, ["gone.txt"]);
+    rmSync(join(dir, "gone.txt"));
+    writeFileSync(join(dir, "tracked.txt"), "v2\n");
+    const res = await gitDiscard(dir, ["gone.txt", "tracked.txt"], {
+      includeStaged: true,
+    });
+    expect(res.success).toBe(true);
+    expect(await getGitStatus(dir)).toEqual([]);
+    expect(readText(dir, "tracked.txt")).toBe("v1\n");
+  });
+
+  it("includeStaged reverts a force-added ignored file", async () => {
+    // Ignored again the moment the reset drops it from the index, which hides
+    // it from `clean` without -x — and from `--exclude-standard` entirely, so
+    // classifying by that would have sent it to `restore` and failed the batch.
+    writeFileSync(join(dir, ".gitignore"), "*.log\n");
+    await run(dir, ["add", ".gitignore"]);
+    await run(dir, ["commit", "-m", "ignore logs"]);
+    writeFileSync(join(dir, "a.log"), "noise\n");
+    await run(dir, ["add", "-f", "a.log"]);
+    writeFileSync(join(dir, "tracked.txt"), "v2\n");
+    const res = await gitDiscard(dir, ["a.log", "tracked.txt"], {
+      includeStaged: true,
+    });
+    expect(res.success).toBe(true);
+    expect(existsSync(join(dir, "a.log"))).toBe(false);
+    expect(await getGitStatus(dir)).toEqual([]);
+    expect(readText(dir, "tracked.txt")).toBe("v1\n");
+  });
+
+  it("includeStaged fails loudly when git status is unreadable", async () => {
+    // The whole staged half is derived from one `git status`, so an unreadable
+    // one used to make `includeStaged` a silent no-op that still reported
+    // success — the user was promised a revert to HEAD and kept every staged
+    // change. An invalid `status.showUntrackedFiles` breaks exactly that one
+    // command (reset/ls-files/restore still work), which is the shape a
+    // concurrent `index.lock` takes in the field.
+    writeFileSync(join(dir, "tracked.txt"), "v2\n");
+    await gitStage(dir, ["tracked.txt"]);
+    await run(dir, ["config", "status.showUntrackedFiles", "bogus"]);
+    const res = await gitDiscard(dir, ["tracked.txt"], { includeStaged: true });
+    expect(res.success).toBe(false);
+    await run(dir, ["config", "--unset", "status.showUntrackedFiles"]);
+    // Nothing was reverted behind the failure, so the staged change is intact
+    // for a retry rather than half-applied.
+    expect(await getGitStatus(dir)).toEqual([
+      { path: "tracked.txt", status: "M", staged: true, additions: 1, deletions: 1 },
+    ]);
+  });
+
+  it("discards without includeStaged even when git status is unreadable", async () => {
+    // The narrow reading never consulted the porcelain for anything but rename
+    // pairing, so it must not inherit the guard above.
+    writeFileSync(join(dir, "tracked.txt"), "v2\n");
+    await run(dir, ["config", "status.showUntrackedFiles", "bogus"]);
+    const res = await gitDiscard(dir, ["tracked.txt"]);
+    await run(dir, ["config", "--unset", "status.showUntrackedFiles"]);
+    expect(res.success).toBe(true);
+    expect(readText(dir, "tracked.txt")).toBe("v1\n");
   });
 
   it("classifies tracked vs untracked from live git, not a passed snapshot", async () => {

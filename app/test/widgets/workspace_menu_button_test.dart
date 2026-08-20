@@ -5,16 +5,16 @@
 // shell's end of that contract is covered in
 // test/screens/workspace_floating_card_test.dart.
 //
-// A mouse desktop and a touch tablet share the SAME popup (see the button's
-// own doc) — the tablet's context panel is a docked pane beside the agent,
-// not an overlay covering it, so the two no longer compete for space. Touch
-// only differs while the panel is closed (`control.active == null`), where a
-// tap opens it directly instead of toggling the popup. Flutter's test
-// binding defaults defaultTargetPlatform to android with no override, so the
-// desktop-popup tests below pin `windows` explicitly — they are about the
+// A mouse desktop and a touch tablet share the SAME popup, with the SAME tap
+// behaviour (see the button's own doc) — the tablet's context panel is a
+// docked pane beside the agent, not an overlay covering it, so the two no
+// longer compete for space, and a tap never takes a side-effecting shortcut
+// on the pane; it only ever shows/hides the popup, on every platform. Flutter's
+// test binding defaults defaultTargetPlatform to android with no override, so
+// the desktop-popup tests below pin `windows` explicitly — they are about the
 // POPUP's mechanics, not the platform default — and the touch group at the
-// bottom exercises the unpinned (touch) default deliberately, including the
-// one behavior that's actually different there.
+// bottom exercises the unpinned (touch) default deliberately, to confirm
+// there is no platform-specific path left to regress.
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/providers/visible_surface.dart';
@@ -30,12 +30,14 @@ Future<ProviderContainer> _pump(
   WidgetTester tester, {
   required WorkspaceMenuControl? control,
   Map<WorkspaceView, int> badges = const {},
+  GitDiffTotals gitTotals = (additions: 0, deletions: 0),
   Widget? behind,
 }) async {
   final container = ProviderContainer(
     overrides: [
       workspaceMenuControlProvider.overrideWith(() => ValueController(control)),
       workspaceBadgesProvider.overrideWith((ref) => badges),
+      gitDiffTotalsProvider.overrideWith((ref) => gitTotals),
       workspaceMenuOpenProvider.overrideWith(() => ValueController(true)),
     ],
   );
@@ -65,13 +67,12 @@ Future<ProviderContainer> _pump(
 AbIconButton _button(WidgetTester tester) =>
     tester.widget<AbIconButton>(find.byKey(WorkspaceMenuButton.buttonKey));
 
-/// A no-op `reveal`/`open`-carrying control, so every desktop-popup test below
-/// only has to name the field it actually cares about.
+/// A no-op `reveal`-carrying control, so every test below only has to name
+/// the field it actually cares about.
 WorkspaceMenuControl _control({
   WorkspaceView? active,
   void Function(WorkspaceView)? reveal,
-  VoidCallback? open,
-}) => (active: active, reveal: reveal ?? (_) {}, open: open ?? () {});
+}) => (active: active, reveal: reveal ?? (_) {});
 
 void main() {
   // ── Mouse desktop: the popup ──────────────────────────────────────────
@@ -257,9 +258,45 @@ void main() {
         expect(find.text('99+'), findsOneWidget);
       });
     });
+
+    // How much changed is what the Git row is read for, and the row has space
+    // for one trailing figure — so the +/- takes the count's slot rather than
+    // sitting beside it.
+    testWidgets('the Git row trades its count for the worktree +/-', (
+      tester,
+    ) async {
+      await runDesktop(tester, () async {
+        await _pump(
+          tester,
+          control: _control(),
+          badges: const {WorkspaceView.git: 3, WorkspaceView.handler: 2},
+          gitTotals: (additions: 2728, deletions: 494),
+        );
+
+        expect(find.text('+2,728'), findsOneWidget);
+        expect(find.text('-494'), findsOneWidget);
+        expect(find.text('3'), findsNothing);
+        // Every other view keeps its plain count.
+        expect(find.text('2'), findsOneWidget);
+      });
+    });
+
+    testWidgets('a rename-only tree keeps the file count', (tester) async {
+      // Files changed, no lines did: a Git row with nothing after it would
+      // read as a clean worktree.
+      await runDesktop(tester, () async {
+        await _pump(
+          tester,
+          control: _control(),
+          badges: const {WorkspaceView.git: 3},
+        );
+
+        expect(find.text('3'), findsOneWidget);
+      });
+    });
   });
 
-  // ── Touch tablet: same popup as desktop, plus one extra tap path ──────
+  // ── Touch tablet: same popup as desktop, no special-cased tap path ────
   group('touch tablet', () {
     Future<void> runTouch(
       WidgetTester tester,
@@ -273,27 +310,47 @@ void main() {
       }
     }
 
-    // The context pane is closed (no view on screen) — there is nothing to
-    // anchor a "pick a view" popup to, so a tap opens the pane directly
-    // instead of toggling the (already-open, by default) popup.
+    // The popup starts open (see workspaceMenuOpenProvider's default) even
+    // though the panel is closed — a tap must close IT, never skip past it
+    // to force the panel open instead.
     testWidgets(
-      'a tap while the panel is closed opens it directly, leaving the popup alone',
+      'a tap while the popup is open closes it, even with the panel closed',
       (tester) async {
         await runTouch(tester, () async {
-          var opens = 0;
-          await _pump(
-            tester,
-            control: _control(active: null, open: () => opens++),
-          );
+          await _pump(tester, control: _control(active: null));
 
           expect(find.text('Terminals'), findsOneWidget);
 
           await tester.tap(find.byKey(WorkspaceMenuButton.buttonKey));
-          await tester.pump();
+          await tester.pumpAndSettle();
 
-          expect(opens, 1);
-          // Untouched, not toggled off by the same tap.
+          expect(find.text('Terminals'), findsNothing);
+          expect(_button(tester).selected, isFalse);
+        });
+      },
+    );
+
+    // Even with both the popup and the panel closed, a tap only ever
+    // reopens the POPUP — it never takes the pane-opening shortcut the
+    // button used to have. Picking a row from the (now visible) popup is
+    // what un-hides the pane; the icon itself never does.
+    testWidgets(
+      'a tap while both the popup and the panel are closed just reopens the popup',
+      (tester) async {
+        await runTouch(tester, () async {
+          final container = await _pump(
+            tester,
+            control: _control(active: null),
+          );
+          container.read(workspaceMenuOpenProvider.notifier).set(false);
+          await tester.pumpAndSettle();
+          expect(find.text('Terminals'), findsNothing);
+
+          await tester.tap(find.byKey(WorkspaceMenuButton.buttonKey));
+          await tester.pumpAndSettle();
+
           expect(find.text('Terminals'), findsOneWidget);
+          expect(_button(tester).selected, isTrue);
         });
       },
     );
@@ -304,11 +361,7 @@ void main() {
       tester,
     ) async {
       await runTouch(tester, () async {
-        var opens = 0;
-        await _pump(
-          tester,
-          control: _control(active: WorkspaceView.preview, open: () => opens++),
-        );
+        await _pump(tester, control: _control(active: WorkspaceView.preview));
 
         expect(find.text('Terminals'), findsOneWidget);
 
@@ -316,7 +369,6 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(find.text('Terminals'), findsNothing);
-        expect(opens, 0);
 
         await tester.tap(find.byKey(WorkspaceMenuButton.buttonKey));
         await tester.pumpAndSettle();
@@ -326,8 +378,8 @@ void main() {
     });
 
     // `selected` mirrors the popup, exactly as on desktop — not whether a
-    // view happens to be on screen, which is why it stays true here even
-    // with no active view: the popup is open regardless.
+    // view happens to be on screen: it starts true with no active view, and
+    // a tap closes the popup (and flips it false) exactly like desktop.
     testWidgets('selected tracks the popup, not the active view', (
       tester,
     ) async {
@@ -335,11 +387,9 @@ void main() {
         await _pump(tester, control: _control(active: null));
         expect(_button(tester).selected, isTrue);
 
-        // The button's own tap while closed takes the open() branch, not the
-        // popup toggle, so the popup — and `selected` — stay unchanged.
         await tester.tap(find.byKey(WorkspaceMenuButton.buttonKey));
         await tester.pumpAndSettle();
-        expect(_button(tester).selected, isTrue);
+        expect(_button(tester).selected, isFalse);
       });
     });
   });

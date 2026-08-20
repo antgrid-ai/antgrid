@@ -178,6 +178,31 @@ describe("FileWatcher pause", () => {
     fw.stop();
   });
 
+  // The Git view used to move only on a 10s poll, so a change the agent had
+  // just made could sit invisible for that long. The watcher is what tells the
+  // core to re-read git status, and it must do so even while the heavy stream
+  // is paused: git:status is not gated by suppression, and its cached frame is
+  // what a reconnecting app is replayed from.
+  it("reports file changes even while paused, for the git refresh", async () => {
+    const connState = createConnState();
+    let changes = 0;
+    const fw = new FileWatcher(
+      { path: tempDir, id: "p1" },
+      () => {},
+      connState,
+      () => changes++,
+    );
+    fw.startWatching();
+    await new Promise((r) => setTimeout(r, 500));
+    connState.appFocusPaused = true;
+
+    writeFileSync(join(tempDir, "new-file.txt"), "x");
+    await new Promise((r) => setTimeout(r, 500));
+
+    expect(changes).toBeGreaterThan(0);
+    fw.stop();
+  });
+
   it("getTreeSnapshot returns current tree + fileSeq", () => {
     const connState = createConnState();
     const fw = new FileWatcher(

@@ -50,19 +50,21 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
   /// Whether the touch TABLET's docked sidebar pane is open — phone width
   /// keeps the real `Scaffold.drawer` above ([_scaffoldKey]) instead. Starts
   /// true, matching the mouse desktop's always-on rail and
-  /// `WorkspaceShellState._tabletDrawerOpen`'s own default; swiping and the
-  /// canvas's own hamburger both flip this same flag (see [_openDrawer]).
+  /// `WorkspaceShellState._tabletDrawerOpen`'s own default; swiping
+  /// ([_openDrawer]/[_closeDrawer]) and the canvas's own hamburger
+  /// ([_toggleDrawer]) all flip this same flag, so any one puts the others in
+  /// sync.
   bool _tabletSidebarOpen = true;
 
   /// The exact callback published to [openDrawerProvider], held so [deactivate]
   /// can retract ITS OWN and never the next route's (see that provider's doc).
-  late final VoidCallback _publishedOpenDrawer = _openDrawer;
+  late final VoidCallback _publishedToggleDrawer = _toggleDrawer;
 
-  /// Same identity-retraction need as [_publishedOpenDrawer], for the record
+  /// Same identity-retraction need as [_publishedToggleDrawer], for the record
   /// published to [sidebarControlProvider]: a tear-off (`_toggleSidebar`)
   /// evaluated fresh each build is never `identical` to itself across builds,
   /// so [deactivate] captures ONE stable reference here and compares against
-  /// it — the same fix `_publishedOpenDrawer` already applies to
+  /// it — the same fix `_publishedToggleDrawer` already applies to
   /// [openDrawerProvider], now also applied to the sidebar control that was
   /// missing it (unconditional retraction raced WorkspaceShell's own publish
   /// and could leave the title bar's sidebar toggle hidden after switching
@@ -77,7 +79,7 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       ref.read(visibleWorkspaceViewProvider.notifier).set(null);
-      ref.read(openDrawerProvider.notifier).set(_publishedOpenDrawer);
+      ref.read(openDrawerProvider.notifier).set(_publishedToggleDrawer);
     });
   }
 
@@ -98,7 +100,7 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
       try {
         if (identical(
           container.read(openDrawerProvider),
-          _publishedOpenDrawer,
+          _publishedToggleDrawer,
         )) {
           notifier.set(null);
         }
@@ -118,6 +120,9 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
   /// Opens the sidebar regardless of which touch layout is live: a real
   /// `Scaffold.drawer` at phone width ([_scaffoldKey], only ever attached
   /// there) or the touch tablet's docked pane otherwise ([_tabletSidebarOpen]).
+  /// A one-way reveal for the canvas's rightward-swipe gesture, which must
+  /// never close what a leftward swipe already handles — the hamburger wants
+  /// open-or-close instead, see [_toggleDrawer].
   void _openDrawer() {
     final scaffold = _scaffoldKey.currentState;
     if (scaffold != null) {
@@ -125,6 +130,20 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
       return;
     }
     if (!_tabletSidebarOpen) setState(() => _tabletSidebarOpen = true);
+  }
+
+  /// Toggles the sidebar open/closed — the canvas's own hamburger button,
+  /// published through [openDrawerProvider]. Unlike [_openDrawer], this one
+  /// is meant to close it too: a hamburger the user just used to open the
+  /// drawer should close it again on a second tap, not sit there doing
+  /// nothing until a swipe or the back gesture closes it instead.
+  void _toggleDrawer() {
+    final scaffold = _scaffoldKey.currentState;
+    if (scaffold != null) {
+      scaffold.isDrawerOpen ? scaffold.closeDrawer() : scaffold.openDrawer();
+      return;
+    }
+    setState(() => _tabletSidebarOpen = !_tabletSidebarOpen);
   }
 
   bool _closeDrawer() {
@@ -189,7 +208,7 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
                     final v = details.primaryVelocity;
                     if (v != null && v > _kDrawerFlingVelocity) _openDrawer();
                   },
-                  child: NewSessionCanvas(onOpenDrawer: _openDrawer),
+                  child: NewSessionCanvas(onOpenDrawer: _toggleDrawer),
                 ),
           ),
         ),
@@ -238,7 +257,7 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
                     ),
                     child:
                         surfaceChild ??
-                        NewSessionCanvas(onOpenDrawer: _openDrawer),
+                        NewSessionCanvas(onOpenDrawer: _toggleDrawer),
                   ),
                 ),
                 Positioned(

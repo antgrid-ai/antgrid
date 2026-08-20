@@ -10,6 +10,7 @@ import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/providers/visible_surface.dart';
 import 'package:antgrid/widgets/agent_panel.dart';
+import 'package:antgrid/widgets/mobile_bottom_nav.dart';
 import 'package:antgrid/widgets/projects_drawer.dart';
 import 'package:antgrid/widgets/workspace_tab_bar.dart';
 import 'package:flutter/foundation.dart';
@@ -215,20 +216,19 @@ void main() {
     });
   });
 
-  testWidgets('the bottom nav menu button jumps straight to the drawer', (
+  // MobileBottomNav used to carry its own leading hamburger into the drawer,
+  // redundant with the agent header's one page over — removed entirely
+  // (no `onOpenDrawer` parameter left to wire back up). Pinned so a future
+  // change doesn't quietly reintroduce it.
+  testWidgets('the workspace page bottom nav carries no menu button', (
     tester,
   ) async {
     await onAndroid(() async {
-      final c = await pumpMobile(tester);
+      await pumpMobile(tester);
 
       await swipeLeft(tester);
-      expect(c.read(visibleWorkspaceViewProvider), isNotNull);
-
-      // Skips the intermediate agent page, unlike the swipe.
-      await tester.tap(find.byTooltip('Projects'));
-      await settle(tester);
-
-      expect(find.byType(ProjectsDrawer), findsOneWidget);
+      expect(find.byType(MobileBottomNav), findsOneWidget);
+      expect(find.byTooltip('Projects'), findsNothing);
     });
   });
 
@@ -246,6 +246,25 @@ void main() {
       await settle(tester);
 
       expect(find.byType(ProjectsDrawer), findsOneWidget);
+    });
+  });
+
+  // The header hamburger is a TOGGLE, not a one-way reveal: a second tap
+  // while the drawer is already open must close it again, not sit there
+  // doing nothing until a swipe or the back gesture closes it instead.
+  testWidgets('the agent header menu button closes the drawer too', (
+    tester,
+  ) async {
+    await onAndroid(() async {
+      final c = await pumpMobile(tester);
+
+      c.read(openDrawerProvider)!();
+      await settle(tester);
+      expect(find.byType(ProjectsDrawer), findsOneWidget);
+
+      c.read(openDrawerProvider)!();
+      await settle(tester);
+      expect(find.byType(ProjectsDrawer), findsNothing);
     });
   });
 

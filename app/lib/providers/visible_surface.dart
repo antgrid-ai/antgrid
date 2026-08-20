@@ -1,6 +1,6 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../models/ab_message.dart' show GitFileStatusEntry;
 import '../models/pending_nav.dart';
 import '../models/workspace_view.dart';
 import 'providers.dart';
@@ -92,6 +92,42 @@ final workspaceBadgesProvider = Provider<Map<WorkspaceView, int>>((ref) {
   };
 });
 
+/// Lines added and removed across the whole worktree vs HEAD.
+///
+/// A record, not a class, so the `.select` below compares by VALUE — a fresh
+/// object per emission would notify on every file-tree message, the same churn
+/// [workspaceBadgesProvider] documents.
+typedef GitDiffTotals = ({int additions, int deletions});
+
+/// The worktree's total +/-, for the workspace menu's Git row (the tab strip
+/// keeps its file count) and, recomputed from the same rule, the git panel's
+/// changes header.
+///
+/// Sums over DISTINCT paths: a file changed on both sides has a staged and an
+/// unstaged entry carrying the SAME combined-vs-HEAD counts (the bridge
+/// computes one diff per path), so summing entries doubles it.
+final gitDiffTotalsProvider = Provider<GitDiffTotals>((ref) {
+  return ref.watch(
+    fileTreeStateProvider.select((s) {
+      final entries = s.value?.gitFileEntries;
+      if (entries == null || entries.isEmpty) {
+        return (additions: 0, deletions: 0);
+      }
+      final perPath = <String, GitFileStatusEntry>{};
+      for (final e in entries) {
+        perPath.putIfAbsent(e.path, () => e);
+      }
+      var additions = 0;
+      var deletions = 0;
+      for (final e in perPath.values) {
+        additions += e.additions;
+        deletions += e.deletions;
+      }
+      return (additions: additions, deletions: deletions);
+    }),
+  );
+});
+
 /// What the agent bar's workspace menu needs to render and act, or null when
 /// this route has no workspace to reveal (the New Session route, or a workbench
 /// surface covering it) — which is what hides the control there.
@@ -110,14 +146,6 @@ typedef WorkspaceMenuControl = ({
   /// floating card — so the menu can mark it. Null when none is up.
   WorkspaceView? active,
   void Function(WorkspaceView) reveal,
-
-  /// Un-hides the context panel on whichever view it already carries, with no
-  /// view change. Used directly by `WorkspaceMenuButton` only on a touch
-  /// tablet, and only while the panel is closed — there, opening is the same
-  /// gesture as swiping, and the panel's own [WorkspaceTabBar] is what picks
-  /// a view once it's up, so nothing here should force one. Every other
-  /// caller reaches it indirectly through `reveal`.
-  VoidCallback open,
 });
 
 final workspaceMenuControlProvider =

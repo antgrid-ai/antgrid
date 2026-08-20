@@ -1,4 +1,5 @@
 // bridge/src/git.ts
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 export type GitFileStatusCode = "M" | "A" | "D" | "R" | "U" | "!";
@@ -390,10 +391,18 @@ export async function gitCommit(
  * path deleted. Conflicted (status "!") files are deliberately not handled
  * here — resolving a conflict isn't a safe "restore to HEAD", callers must
  * not offer Discard on one.
+ *
+ * `includeStaged` widens this from "drop the worktree edits" into a true
+ * revert to HEAD. Without it a path's STAGED content survives — `restore`
+ * restores the worktree from the index — so discarding a fully staged file
+ * reads as a no-op to whoever asked for it. It stays opt-in because it is the
+ * more destructive of the two readings, and an app that promised its user the
+ * narrower one must keep getting it.
  */
 export async function gitDiscard(
   cwd: string,
   files: string[],
+  opts: { includeStaged?: boolean } = {},
 ): Promise<GitOpResult> {
   if (files.length === 0) return { success: true };
 
@@ -402,7 +411,17 @@ export async function gitDiscard(
   // record collapses to a plain "A" — confirmed empirically, not a
   // hypothetical. [readPorcelain] narrows to this project AFTER git has
   // paired, for that reason.
-  const renames = (await readPorcelain(cwd))?.renames ?? new Map<string, string>();
+  const porcelain = await readPorcelain(cwd);
+  // `includeStaged` is derived ENTIRELY from this read, so an unreadable status
+  // (a concurrent `index.lock` is enough) would leave `stagedPaths` empty, skip
+  // the reset, and let `restore` copy the index straight back over the worktree
+  // — reporting success for a discard that reverted nothing the user was
+  // promised. The narrower reading fails loudly rather than being substituted
+  // silently for the one they asked for.
+  if (opts.includeStaged && porcelain === null) {
+    return { success: false, error: "Could not read git status" };
+  }
+  const renames = porcelain?.renames ?? new Map<string, string>();
   const renamedNewPaths = files.filter((f) => renames.has(f));
 
   if (renamedNewPaths.length) {
@@ -425,20 +444,45 @@ export async function gitDiscard(
   }
 
   const remaining = files.filter((f) => !renames.has(f));
-  const others = await runGit(cwd, [
-    "ls-files",
-    "--others",
-    "--exclude-standard",
-    "--",
-    ...remaining,
-  ]);
-  const untrackedSet = new Set(
-    others.exitCode === 0
-      ? others.stdout.trim().split("\n").map((l) => l.trim()).filter(Boolean)
-      : [],
+
+  // Drop the index entry FIRST: `restore` below copies the index back over the
+  // worktree, so a staged path would otherwise come out unchanged. Resetting
+  // here (rather than after) also lets the index sweep below see a staged-new
+  // file as the untracked file it has just become, so `clean` deletes it —
+  // which is what reverting an added-to-index file to HEAD means.
+  if (opts.includeStaged) {
+    const stagedPaths = remaining.filter((f) => porcelain?.staged.has(f));
+    if (stagedPaths.length) {
+      const r = await runGit(cwd, ["reset", "--", ...stagedPaths]);
+      if (r.exitCode !== 0) {
+        return { success: false, error: r.stderr.trim() || "Discard failed" };
+      }
+    }
+  }
+
+  // INDEX MEMBERSHIP decides how a path is undone, not `ls-files --others`,
+  // and the reset above is why. A path can leave the index and appear in
+  // NEITHER list: a staged-added file since deleted from the worktree is gone
+  // from both, and a force-added ignored one is invisible to
+  // `--exclude-standard`. Either falls through to `restore`, whose unmatched
+  // pathspec aborts the WHOLE batch — every other file named in the same
+  // Revert All silently left dirty, index entries already dropped. `-z` for
+  // the same path-quoting reason [readPorcelain] uses it.
+  const cached = await runGit(cwd, ["ls-files", "--cached", "-z", "--", ...remaining]);
+  // Never guessed at: with the classification inverted, an unreadable index
+  // would route every path to `clean` instead of `restore`.
+  if (cached.exitCode !== 0) {
+    return { success: false, error: cached.stderr.trim() || "Discard failed" };
+  }
+  const indexed = new Set(cached.stdout.split("\0").filter(Boolean));
+  const tracked = remaining.filter((f) => indexed.has(f));
+  // Reverting a path HEAD doesn't have means removing it — so a path that left
+  // the index is worth cleaning only while it still exists on disk, and one
+  // that exists nowhere is already at HEAD (dropped from both lists rather
+  // than handed to a command that would reject the pathspec).
+  const untracked = remaining.filter(
+    (f) => !indexed.has(f) && existsSync(join(cwd, f)),
   );
-  const tracked = remaining.filter((f) => !untrackedSet.has(f));
-  const untracked = remaining.filter((f) => untrackedSet.has(f));
 
   if (tracked.length) {
     let r = await runGit(cwd, ["restore", "--", ...tracked]);
@@ -451,7 +495,11 @@ export async function gitDiscard(
   }
 
   if (untracked.length) {
-    const r = await runGit(cwd, ["clean", "-f", "--", ...untracked]);
+    // `-x`: every path here is explicitly named and no longer in the index, so
+    // the only way one of them is ignored is a force-add being reverted. Plain
+    // `clean` skips exactly that file and still reports success — the silent
+    // no-op `includeStaged` exists to end.
+    const r = await runGit(cwd, ["clean", "-f", "-x", "--", ...untracked]);
     if (r.exitCode !== 0) {
       return { success: false, error: r.stderr.trim() || "Discard failed" };
     }

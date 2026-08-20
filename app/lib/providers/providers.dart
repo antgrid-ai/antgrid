@@ -715,8 +715,9 @@ final switchToAgentProvider =
       () => ValueController(null),
     );
 
-/// Callback that reveals the projects drawer. Set by whichever mobile route is
-/// mounted (WorkspaceShell or NewSessionScreen).
+/// Callback that toggles the projects drawer open/closed — the agent bar's
+/// hamburger button. Set by whichever mobile route is mounted (WorkspaceShell
+/// or NewSessionScreen).
 ///
 /// A provider rather than `Scaffold.of(context).openDrawer()` because the
 /// drawer is a PageView page on mobile, not a `Scaffold.drawer` — there is no
