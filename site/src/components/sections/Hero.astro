@@ -65,19 +65,35 @@ const offerPct = Math.round((1 - YEARLY_OFFER_USD / YEARLY_LIST_USD) * 100);
     </div>
 
     <h1 class="mb-8">
-      <span class="mb-3 block max-w-2xl text-kicker text-muted">Your agent finishes a phase at 2am and waits.</span>
-      <span class="block font-display text-display font-semibold text-ink">antgrid checks the work.<br />Then starts the next one.</span>
+      {/* inline-block per sentence, here and in the headline below, so a line can
+          only ever break BETWEEN sentences. Both are short-sentence copy at large
+          type, where the default wrap strands a two-word tail ("stuck since 2am.",
+          "machine.") on its own line at some widths and not others. A hard <br />
+          fixes the one width you tested and makes narrow viewports worse. */}
+      <span class="mb-3 block max-w-2xl text-kicker text-muted">
+        <span class="inline-block">Agents on your laptop, your workstation, a cloud box.</span>{" "}
+        <span class="inline-block">One's been stuck since 2am.</span>
+      </span>
+      {/* The headline claims the overview, so the tension has to sit in the kicker
+          above it — on its own "One screen." is a watching claim, and the product
+          acts. The stuck agent is what the lede's proof loop then answers. */}
+      <span class="block font-display text-display font-semibold text-ink">
+        <span class="inline-block">Every agent.</span>{" "}
+        <span class="inline-block">Every machine.</span>{" "}
+        <span class="inline-block">One screen.</span>
+      </span>
     </h1>
 
     {/* Argument left, action right. The two columns are sized to sit adjacent
         rather than pinned to the shell's edges — pushed apart, the buttons read
         as stranded rather than as a deliberate second column. */}
     <div class="grid gap-x-12 gap-y-7 md:grid-cols-[minmax(0,35rem)_minmax(0,21rem)]">
-      {/* Opens on "your agents", not on the three product names — the eyebrow
-          directly above already names them, and repeating them cost a line of a
-          paragraph that runs long on a phone. */}
+      {/* Carries the proof loop, because the headline no longer does — it claims
+          the overview instead. Does not re-open on "your agents run on your own
+          machines": the kicker and headline directly above have just said that,
+          and the paragraph runs long on a phone as it is. */}
       <p class="text-lede text-muted">
-        Your agents run on your own machines — your repos, your branches, your existing subscriptions. Hand antgrid the sequence in plain text: it reads every result, refuses a "done" that arrives with no test output, exit code or diff, and moves to the next phase.
+        They run on your own machines — your repos, your branches, your existing subscriptions. Hand antgrid the sequence in plain text: it reads every result, refuses a "done" that arrives with no test output, exit code or diff, and moves to the next phase.
       </p>
       <div>
         <div class="flex flex-wrap items-center gap-3">

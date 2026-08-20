@@ -18,6 +18,7 @@ import '../navigation/back_intent.dart';
 import '../navigation/nav_controller.dart';
 import '../providers/agent_transport.dart';
 import '../providers/providers.dart';
+import '../providers/recent_sessions.dart';
 import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
 import '../utils/platform_utils.dart';
@@ -463,9 +464,17 @@ class TitleBarBreadcrumb extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final terminalState = ref.watch(terminalStateProvider).value;
     final activeId = ref.watch(selectedRegistrationIdProvider);
+    // `agent:status` is pushed per checkout and never replayed, so an ISOLATED
+    // session's bundle can miss the only frame that carries the name: the
+    // worktree runtime emits it while being prepared, before the session is
+    // announced and the app has built that checkout's TerminalService. Falling
+    // straight through to the id then renders a 16-char hash as the project.
     final agentName =
         terminalState?.agentInfo?.name ??
-        (activeId != null ? projectNameFromId(activeId) : 'Antgrid');
+        (activeId == null
+            ? 'Antgrid'
+            : ref.watch(projectDisplayNameProvider(activeId)) ??
+                  projectNameFromId(activeId));
     final gitBranch = terminalState?.gitBranch;
     final active = ref.watch(activeSessionProvider);
     // Leaf slot must exist for the '/' separator + leafOverride to render; the

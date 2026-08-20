@@ -28,6 +28,14 @@ const RENDERABLE_BINARY_MIME: Record<string, string> = {
   ".pdf": "application/pdf",
 };
 
+/// The mime a staged/read file would be transported as, or undefined when the
+/// app has no viewer for it. Exported so the upload path can answer
+/// "is this previewable" from the SAME table `readFile` uses — an app-side
+/// extension list would drift from it silently.
+export function renderableBinaryMime(path: string): string | undefined {
+  return RENDERABLE_BINARY_MIME[extname(path).toLowerCase()];
+}
+
 const DEFAULT_IGNORES = [
   ".git",
   ".antgrid",

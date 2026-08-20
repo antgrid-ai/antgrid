@@ -14,15 +14,20 @@ import '../design/ab_colors.dart';
 import '../design/ansi_palette.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../models/terminal_models.dart';
+import '../project/project_session.dart';
 import '../providers/client_id.dart';
 import '../providers/providers.dart';
 import '../services/app_settings_service.dart';
 import '../services/terminal_service.dart';
-import '../services/upload_service.dart';
+import '../util/detached.dart';
+import 'clipboard_image.dart';
 import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
+import 'terminal_attachment_uploader.dart';
+import 'terminal_drop_target.dart';
 import 'terminal_quick_actions_bar.dart';
 import 'terminal_upload_button.dart';
+import 'terminal_upload_strip.dart';
 
 /// True on desktop platforms (not web) where a physical keyboard is guaranteed.
 final bool _hasPhysicalKeyboard =
@@ -39,10 +44,16 @@ class TerminalViewWrapper extends ConsumerStatefulWidget {
   final TerminalTab tab;
   final TerminalService terminalService;
 
+  /// The clipboard's image side, injected so the paste chord is testable
+  /// without a platform clipboard — under `flutter_test` a real read throws
+  /// `NoSuchChannelException` rather than answering "no image".
+  final Future<ClipboardImage?> Function() readImage;
+
   const TerminalViewWrapper({
     super.key,
     required this.tab,
     required this.terminalService,
+    this.readImage = readClipboardImage,
   });
 
   @override
@@ -143,18 +154,54 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         .setTerminalZoom(current + delta);
   }
 
+  /// The one pipeline every attach gesture goes through. Its upload service is
+  /// resolved from THIS terminal's own session and checkout rather than from a
+  /// focused-* provider: the file has to be staged into the tree the terminal
+  /// writes to, and focus can move during a multi-second upload.
+  late final TerminalAttachmentUploader _uploader;
+
   @override
   void initState() {
     super.initState();
-    HardwareKeyboard.instance.addHandler(_handleHardwareKey);
+    _uploader = TerminalAttachmentUploader(
+      // `existingServicesForCheckout`, not `servicesForCheckout` — the latter
+      // creates and broadcasts a bundle as a side effect.
+      resolveUpload: () {
+        final service = widget.terminalService.session
+            .existingServicesForCheckout(widget.terminalService.checkoutId)
+            ?.uploadService;
+        if (service == null) return null;
+        // Adapted rather than torn off: the terminal types the absolute path
+        // and nothing else, while the rest of [UploadResult] exists for the
+        // preview surface, which has no consumer on this path.
+        return ({
+          required fileName,
+          required bytes,
+          mimeType,
+          onProgress,
+        }) async => (await service.upload(
+          fileName: fileName,
+          bytes: bytes,
+          mimeType: mimeType,
+          onProgress: onProgress,
+        )).path;
+      },
+      insert: (text) =>
+          widget.terminalService.sendInput(widget.tab.terminalId, text),
+      onError: (message) {
+        if (mounted) showAbSnackBar(context, message);
+      },
+    );
+    FocusManager.instance.addEarlyKeyEventHandler(_handleEarlyKey);
     _focusScope.addListener(_onFocusChange);
   }
 
   @override
   void dispose() {
-    HardwareKeyboard.instance.removeHandler(_handleHardwareKey);
+    FocusManager.instance.removeEarlyKeyEventHandler(_handleEarlyKey);
     _focusScope.removeListener(_onFocusChange);
     _focusScope.dispose();
+    _uploader.dispose();
     super.dispose();
   }
 
@@ -179,52 +226,79 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     });
   }
 
-  /// Intercepts Ctrl+V (paste) and Ctrl+C (copy / agent-SIGINT shield)
-  /// before Ghostty consumes them as control characters. Without this,
-  /// Ctrl+V is invisible to the user (they expect Windows Terminal-style
-  /// paste, not literal-next), and Ctrl+C in the agent terminal would
-  /// SIGINT-kill the running agent (Claude Code, etc.).
+  /// Intercepts the paste chord and Ctrl+C (copy / agent-SIGINT shield)
+  /// before Ghostty consumes them as control characters, and encodes the
+  /// `Alt+<printable>` chords Ghostty's Dart shim drops on the floor.
   ///
-  /// Why `HardwareKeyboard` instead of a `Shortcuts` wrapper: Flutter's
-  /// focus tree dispatches keys to the focused descendant first; Ghostty
-  /// returns `handled` for Ctrl+V/Ctrl+C (sends `^V` / `^C`), so an
-  /// ancestor `Focus` / `Shortcuts` widget never sees the event.
-  /// `HardwareKeyboard` runs before focus dispatch and can preempt.
+  /// Why an EARLY focus-manager handler and not `Shortcuts` or
+  /// `HardwareKeyboard.addHandler`: the focus tree dispatches to the focused
+  /// descendant first and Ghostty returns `handled` for these chords, so an
+  /// ancestor `Focus` / `Shortcuts` never sees them — and a `HardwareKeyboard`
+  /// handler cannot preempt either, because Flutter invokes every one of those
+  /// "in order regardless of their return value" and then dispatches to the
+  /// focus tree anyway (its `true` only suppresses add-to-app native
+  /// propagation). Under that mechanism an intercepted Ctrl+V pasted the
+  /// clipboard AND sent `^V`. An early handler returning
+  /// [KeyEventResult.handled] is the only one that stops the focus tree.
   ///
   /// Why `writeBytes` not `controller.write`: Ghostty's built-in paste
   /// path passes `sanitizePaste: true`, which silently drops multi-line
   /// or control-char-bearing payloads. Pasting raw bytes preserves them.
-  bool _handleHardwareKey(KeyEvent event) {
-    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
-    if (!_focusScope.hasFocus) return false;
+  KeyEventResult _handleEarlyKey(KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    if (!_focusScope.hasFocus) return KeyEventResult.ignored;
     _requestUserClaim();
 
-    final keys = HardwareKeyboard.instance.logicalKeysPressed;
-    final ctrl =
-        keys.contains(LogicalKeyboardKey.controlLeft) ||
-        keys.contains(LogicalKeyboardKey.controlRight);
-    final meta =
-        keys.contains(LogicalKeyboardKey.metaLeft) ||
-        keys.contains(LogicalKeyboardKey.metaRight);
-    // AltGr surfaces as Ctrl+Alt on Win/Linux — exclude so AltGr+C (→ ć on
-    // some intl layouts) reaches the PTY untouched.
-    final alt =
-        keys.contains(LogicalKeyboardKey.altLeft) ||
-        keys.contains(LogicalKeyboardKey.altRight);
-    final hasPasteModifier =
-        (Platform.isMacOS && meta) || (!Platform.isMacOS && ctrl);
+    final keyboard = HardwareKeyboard.instance;
+    final ctrl = keyboard.isControlPressed;
+    final meta = keyboard.isMetaPressed;
+    final shift = keyboard.isShiftPressed;
+    // AltGr surfaces as Ctrl+Alt on Windows — the `!ctrl` guards below are what
+    // keep AltGr+C (→ ć on some intl layouts) reaching the PTY untouched.
+    final alt = keyboard.isAltPressed;
 
-    if (event.logicalKey == LogicalKeyboardKey.keyV &&
-        hasPasteModifier &&
-        !alt) {
-      // Read the clipboard and inject the result. Fire-and-forget — by the
-      // time the future resolves the keypress has long since dispatched.
-      Clipboard.getData(Clipboard.kTextPlain).then((data) {
-        final text = data?.text;
-        if (text == null || text.isEmpty) return;
-        widget.tab.ghostty.writeBytes(utf8.encode(_sanitizePaste(text)));
-      });
-      return true; // consume so Ghostty doesn't also send `^V`
+    // The paste chord per platform, matching what each one's terminals use:
+    // Cmd+V on macOS/iOS, Ctrl+V on Windows, Ctrl+Shift+V on Linux (GNOME
+    // Terminal / Konsole / Ghostty). Linux must leave BARE Ctrl+V to the PTY —
+    // agent CLIs bind it themselves, and Claude Code's paste-image shortcut is
+    // ctrl+v on every platform except Windows/WSL, where it is alt+v (which
+    // the meta-chord branch below now delivers). Shift+Insert is intercepted
+    // alongside so every paste chord takes the non-lossy `writeBytes` path
+    // rather than Ghostty's `sanitizePaste`.
+    final pasteModifier = switch (defaultTargetPlatform) {
+      // iPadOS keyboards paste with Cmd+V exactly as macOS does, and Ghostty's
+      // own matcher only recognizes Cmd+V on macOS — so without iOS here, an
+      // iPad's paste chord reaches nothing at all.
+      TargetPlatform.macOS || TargetPlatform.iOS => meta,
+      TargetPlatform.linux => ctrl && shift,
+      _ => ctrl,
+    };
+    final isPasteChord =
+        (event.logicalKey == LogicalKeyboardKey.keyV && pasteModifier) ||
+        (event.logicalKey == LogicalKeyboardKey.insert &&
+            shift &&
+            defaultTargetPlatform != TargetPlatform.macOS);
+
+    if (isPasteChord && !alt) {
+      // Auto-repeat is swallowed, not acted on. A held chord repeats ~30x/s;
+      // each repeat would re-read the clipboard (on Windows, re-synthesizing a
+      // multi-megabyte PNG from CF_DIB per repeat) and then lose the uploader's
+      // single-flight race, and `showAbSnackBar` queues its 4s bars serially —
+      // so one second of held key buys a minute of unclearable BUSY toasts.
+      // Still `handled`: returning `ignored` would hand Ghostty a `^V`.
+      if (event is KeyRepeatEvent) return KeyEventResult.handled;
+      // Detached, not a bare `.then`: a clipboard read can reject (no clipboard
+      // owner on a headless/Wayland session), and from this callback the
+      // discarded future would land on `PlatformDispatcher.onError` as a fatal.
+      detached('TerminalView', 'clipboard paste failed', _paste);
+      // Consume unconditionally, before knowing WHAT is on the clipboard: the
+      // decision needs an async read and this must answer now, so the whole
+      // image-or-text choice moves inside `_paste`. Letting the chord through
+      // to decide later would hand Ghostty a `^V` alongside whatever we then
+      // pasted ourselves.
+      return KeyEventResult.handled;
     }
 
     // Ctrl+C (Ctrl-gated on every platform; Cmd+C stays with Ghostty's
@@ -235,16 +309,113 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     if (event.logicalKey == LogicalKeyboardKey.keyC && ctrl && !alt) {
       final selection = _selectedText;
       if (selection != null && selection.isNotEmpty) {
-        Clipboard.setData(ClipboardData(text: selection));
-        return true;
+        detached(
+          'TerminalView',
+          'clipboard copy failed',
+          () => Clipboard.setData(ClipboardData(text: selection)),
+        );
+        return KeyEventResult.handled;
       }
       final agentRunning =
           widget.tab.isAgent &&
           widget.tab.sessionState != TerminalSessionState.exited;
-      if (agentRunning) return true;
+      if (agentRunning) return KeyEventResult.handled;
     }
 
-    return false;
+    // Alt+<printable> as an ESC-prefixed chord ("meta sends escape", DEC 1036).
+    // Ghostty's engine encodes these correctly, but its Dart shim never hands
+    // them over: `ghosttyTerminalLogicalKeyMap` holds only special keys, so a
+    // letter resolves to no key enum, and both fallbacks (printable text,
+    // control char) bail out the moment Alt is down — the chord reaches the PTY
+    // as nothing at all. That silently costs every alt binding an agent CLI
+    // has, including Claude Code's alt+v paste-image on Windows.
+    //
+    // Special keys are excluded via the same map, because Alt+Enter and friends
+    // DO reach the engine and are already encoded there; re-encoding them here
+    // would double up. Only Windows and Linux opt in: Option+<letter> composes
+    // real characters on macOS AND iPadOS (√, ç) — which is why Ghostty's own
+    // `macos-option-as-alt` defaults to off — and on Android the Alt layer and
+    // the IME already own those keys, so encoding here would double-type them.
+    final altChordPlatform =
+        defaultTargetPlatform == TargetPlatform.windows ||
+        defaultTargetPlatform == TargetPlatform.linux;
+    if (alt && !ctrl && !meta && altChordPlatform) {
+      final chord = _altChordText(event, shift: shift);
+      if (chord != null) {
+        widget.tab.ghostty.writeBytes([0x1B, ...utf8.encode(chord)]);
+        return KeyEventResult.handled;
+      }
+    }
+
+    return KeyEventResult.ignored;
+  }
+
+  /// Serves one paste chord: an image on the clipboard is uploaded and its
+  /// host path typed; anything else pastes as text, exactly as it always has.
+  ///
+  /// The image probe is scoped to RELAY sessions because intercepting a local
+  /// one would be a downgrade: every agent CLI reads the host clipboard itself
+  /// and turns the image into a native in-conversation attachment, which beats
+  /// a file path it has to open with a read tool. Only when the clipboard and
+  /// the agent are on different machines does the image have no way across.
+  Future<void> _paste() async {
+    if (widget.terminalService.session.mode == ProjectSessionMode.relay) {
+      final image = await widget.readImage();
+      if (!mounted) return;
+      if (image != null) {
+        await _uploader.attach(
+          bytes: image.bytes,
+          fileName: image.fileName,
+          mimeType: image.mimeType,
+        );
+        return;
+      }
+    }
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text;
+    if (!mounted || text == null || text.isEmpty) return;
+    widget.tab.ghostty.writeBytes(utf8.encode(_sanitizePaste(text)));
+  }
+
+  /// Text an Alt-modified key should carry after the ESC prefix, or null when
+  /// the key has no single-character form (modifiers, F-keys) or is a special
+  /// key the Ghostty engine already encodes itself.
+  ///
+  /// Prefers the platform-reported character so shifted symbols land as typed
+  /// (Alt+Shift+1 → `!`), and falls back to the key label for layouts that omit
+  /// character metadata under Alt.
+  ///
+  /// Deliberately ASCII-only. Every binding this exists for (agent CLI alt
+  /// chords, `meta sends escape` readline words) is ASCII, while a non-ASCII
+  /// character under Alt is the signature of a composed AltGr glyph on a layout
+  /// where the platform reports AltGr as a bare right-Alt rather than Ctrl+Alt
+  /// — emitting `ESC €` for a plain `€` would corrupt the input. Control
+  /// characters are rejected for the same reason: a character-bearing Enter or
+  /// Tab would otherwise be encoded twice.
+  String? _altChordText(KeyEvent event, {required bool shift}) {
+    if (ghosttyTerminalLogicalKey(event.logicalKey) != null) return null;
+
+    final character = event.character ?? '';
+    if (character.isNotEmpty) {
+      // The platform already resolved this chord to text, so the label fallback
+      // must not second-guess it: a composed glyph rejected here has to stay
+      // un-intercepted, not be re-derived as the bare key it was typed on.
+      if (character.runes.length != 1) return null;
+      final code = character.runes.first;
+      return (code >= 0x20 && code < 0x7F) ? character : null;
+    }
+
+    final label = event.logicalKey.keyLabel;
+    if (label.runes.length != 1) return null;
+    final code = label.runes.first;
+    if (code < 0x20 || code >= 0x7F) return null;
+    if (!shift) return label.toLowerCase();
+    // Under Shift the label is the UNSHIFTED key, so only letters (whose label
+    // is already the shifted form) can be answered from it. Guessing `1` for
+    // Alt+Shift+1 would send the wrong byte; sending nothing at least leaves
+    // the chord inert rather than corrupting the agent's input.
+    final isLetter = code >= 0x41 && code <= 0x5A;
+    return isLetter ? label : null;
   }
 
   /// Normalizes clipboard text for terminal injection.
@@ -301,7 +472,11 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         ),
 
         // Quick-action buttons — only on mobile/web (no physical keyboard)
-        if (!_hasPhysicalKeyboard && !showStoppedView) _buildQuickActions(),
+        if (!_hasPhysicalKeyboard && !showStoppedView)
+          ValueListenableBuilder<AttachProgress?>(
+            valueListenable: _uploader.progress,
+            builder: (context, attach, _) => _buildQuickActions(attach != null),
+          ),
       ],
     );
   }
@@ -330,6 +505,12 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   Widget _buildTerminal(BuildContext context) {
     final agentTab = ref.watch(agentTerminalProvider);
     final showSendButton = _hasSelection && agentTab != null;
+    // Desktop's only attach route. Mobile already has one in the quick-actions
+    // bar, and a LOCAL session needs none: the agent reads the user's own disk,
+    // so a path typed by hand or dropped by the OS already works.
+    final showAttachButton =
+        _hasPhysicalKeyboard &&
+        widget.terminalService.session.mode == ProjectSessionMode.relay;
     final myClientId = ref.watch(clientIdProvider).value;
 
     final tab = widget.tab;
@@ -444,53 +625,98 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     return Listener(
       behavior: HitTestBehavior.translucent,
       onPointerDown: (_) => _requestUserClaim(),
-      child: ColoredBox(
-        color: context.antgrid.bgDeepest,
-        child: FocusScope(
-          node: _focusScope,
-          child: Stack(
-            children: [
-              LayoutBuilder(
-                builder: (context, constraints) {
-                  _maybeSendResize(
-                    tab.terminalId,
-                    constraints,
-                    amDriver,
-                    tab.driverClientId,
-                  );
-
-                  // Driver (or metrics not yet known) → fill the viewport. Pin
-                  // the grid to the last settled width via `_TerminalGridFreeze`
-                  // so transient resizes (e.g. dragging the agent/workspace
-                  // divider) don't spam Ghostty grid resizes —
-                  // `ghostty_vte_flutter` doesn't reflow soft-wrapped lines, and
-                  // Ink-style TUI redraws (Claude Code) leak stale fragments
-                  // when the grid changes underneath them.
-                  final charWidth = _charWidth;
-                  if (amDriver || charWidth == null || charWidth <= 0) {
-                    return _TerminalGridFreeze(
-                      onSettled: _onRenderWidthSettled,
-                      child: terminalView,
+      // Below the Listener so `_requestUserClaim` still fires (it is
+      // translucent and joins the hit path regardless of the child), and above
+      // everything else so the whole panel — letterbox margins and sub-cell
+      // padding strip included — is a valid drop target. Both session modes
+      // accept: unlike the paste chord this displaces no native behaviour,
+      // because a drop on the terminal does nothing at all today.
+      child: TerminalDropTarget(
+        attach: _uploader.attach,
+        onError: (m) {
+          if (mounted) showAbSnackBar(context, m);
+        },
+        child: ColoredBox(
+          color: context.antgrid.bgDeepest,
+          child: FocusScope(
+            node: _focusScope,
+            child: Stack(
+              children: [
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    _maybeSendResize(
+                      tab.terminalId,
+                      constraints,
+                      amDriver,
+                      tab.driverClientId,
                     );
-                  }
 
-                  // Non-driver → size the grid to the driver's authoritative
-                  // cols so wrapping matches exactly. Letterbox (center) when it
-                  // fits; horizontal-scroll when the driver is wider than this
-                  // viewport. No `_TerminalGridFreeze` here — a viewer must
-                  // track the authoritative width, not pin a local one.
-                  final authWidth = tab.cols * charWidth + _hPad;
-                  final grid = SizedBox(width: authWidth, child: terminalView);
-                  return authWidth <= constraints.maxWidth
-                      ? Align(alignment: Alignment.center, child: grid)
-                      : SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          child: grid,
-                        );
-                },
-              ),
-              if (showSendButton) SendToAgentButton(onPressed: _onSendToAgent),
-            ],
+                    // Driver (or metrics not yet known) → fill the viewport. Pin
+                    // the grid to the last settled width via `_TerminalGridFreeze`
+                    // so transient resizes (e.g. dragging the agent/workspace
+                    // divider) don't spam Ghostty grid resizes —
+                    // `ghostty_vte_flutter` doesn't reflow soft-wrapped lines, and
+                    // Ink-style TUI redraws (Claude Code) leak stale fragments
+                    // when the grid changes underneath them.
+                    final charWidth = _charWidth;
+                    if (amDriver || charWidth == null || charWidth <= 0) {
+                      return _TerminalGridFreeze(
+                        onSettled: _onRenderWidthSettled,
+                        child: terminalView,
+                      );
+                    }
+
+                    // Non-driver → size the grid to the driver's authoritative
+                    // cols so wrapping matches exactly. Letterbox (center) when it
+                    // fits; horizontal-scroll when the driver is wider than this
+                    // viewport. No `_TerminalGridFreeze` here — a viewer must
+                    // track the authoritative width, not pin a local one.
+                    final authWidth = tab.cols * charWidth + _hPad;
+                    final grid = SizedBox(width: authWidth, child: terminalView);
+                    return authWidth <= constraints.maxWidth
+                        ? Align(alignment: Alignment.center, child: grid)
+                        : SingleChildScrollView(
+                            scrollDirection: Axis.horizontal,
+                            child: grid,
+                          );
+                  },
+                ),
+                // Top-LEFT, deliberately: `SendToAgentButton` owns top-right and
+                // both can be live at once, while the bottom edge is where the
+                // prompt — and the path this types into it — lands.
+                Positioned(
+                  top: AbTokens.space8,
+                  left: AbTokens.space8,
+                  child: ValueListenableBuilder<AttachProgress?>(
+                    valueListenable: _uploader.progress,
+                    builder: (context, attach, _) => Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (showAttachButton)
+                          TerminalAttachOverlayButton(
+                            pick: pickUploadFile,
+                            onPicked: (picked) => _uploader.attach(
+                              bytes: picked.bytes,
+                              fileName: picked.name,
+                            ),
+                            busy: attach != null,
+                            onError: (m) {
+                              if (mounted) showAbSnackBar(context, m);
+                            },
+                          ),
+                        if (attach != null) ...[
+                          if (showAttachButton)
+                            const SizedBox(height: AbTokens.space6),
+                          TerminalUploadStrip(progress: attach),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+                if (showSendButton) SendToAgentButton(onPressed: _onSendToAgent),
+              ],
+            ),
           ),
         ),
       ),
@@ -597,19 +823,13 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     );
   }
 
-  Widget _buildQuickActions() {
+  Widget _buildQuickActions(bool uploadBusy) {
     return TerminalQuickActionsBar(
       softKeyboardController: _softKeyboardController,
       onPick: pickUploadFile,
-      onUpload: (name, bytes) {
-        final svc = serviceWhenReady(ref, uploadServiceProvider);
-        if (svc == null) {
-          throw const UploadException('OFFLINE', 'Not connected');
-        }
-        return svc.upload(fileName: name, bytes: bytes);
-      },
-      onInsertPath: (path) =>
-          widget.terminalService.sendInput(widget.tab.terminalId, '"$path" '),
+      onPicked: (picked) =>
+          _uploader.attach(bytes: picked.bytes, fileName: picked.name),
+      uploadBusy: uploadBusy,
       onUploadError: (m) {
         if (mounted) showAbSnackBar(context, m);
       },

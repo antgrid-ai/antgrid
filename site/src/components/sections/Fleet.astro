@@ -31,9 +31,14 @@ const doneCount = allRows.filter((r) => r.state === "done").length;
 <section id="fleet" class="reveal border-y border-edge-inner bg-well">
   <div class="mx-auto max-w-shell px-6 py-24">
     <Eyebrow class="mb-5">Fleet view</Eyebrow>
-    <h2 class="mb-4 font-display text-title font-semibold text-ink">Every agent. Every machine. One screen.</h2>
+    {/* The hero carries "every agent, every machine, one screen" now, so this
+        section takes the narrower claim it is the actual evidence for. Keep the
+        needs-you line in exactly one place here — heading, lede and the readout's
+        foot all stated it before, which read as padding around the one screenshot
+        that proves it. */}
+    <h2 class="mb-4 font-display text-title font-semibold text-ink">The one that needs you is never below the fold.</h2>
     <p class="mb-10 max-w-2xl text-lede text-muted">
-      Your laptop, your workstation, a cloud box — every agent you're running, grouped by the machine it's on, with the ones that need you floated to the top.
+      Your laptop, your workstation, a cloud box — every agent you're running, grouped by the machine it's on, sorted so the one that's blocked is never the one you have to go looking for.
     </p>
 
     <Readout source={`${totalCount} agents · ${machines.length} machines`} state="attention" label={`${needsCount} needs you`}>
@@ -55,7 +60,7 @@ const doneCount = allRows.filter((r) => r.state === "done").length;
           ))}
         </div>
       ))}
-      <Fragment slot="foot">{workingCount} working · {doneCount} done · sorted so the one that needs you is never below the fold</Fragment>
+      <Fragment slot="foot">{workingCount} working · {doneCount} done</Fragment>
     </Readout>
   </div>
 </section>

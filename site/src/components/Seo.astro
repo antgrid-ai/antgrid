@@ -4,12 +4,20 @@ interface Props {
   title: string;
   description: string;
   ogImage?: string;
+  ogImageAlt?: string;
   path?: string;
 }
+// The two defaults describe the same file — a page overriding one must override
+// the other, or the card ships someone else's alt text. The filename tracks the
+// card's claim on purpose: scrapers cache og:image by URL and re-shooting in
+// place leaves the superseded card in previews for as long as they hold it, so a
+// recut that changes what the card SAYS gets a new name. Keep it in step with
+// scripts/shoot-og.mjs, which writes it.
 const {
   title,
   description,
-  ogImage = "/og/prove-its-done.png",
+  ogImage = "/og/one-screen.png",
+  ogImageAlt = "Every agent. Every machine. One screen. Below, antgrid checking an agent's work against test output while you slept.",
   path = "/",
 } = Astro.props;
 const canonical = new URL(path, SITE_URL).href;
@@ -31,6 +39,12 @@ const ogUrl = new URL(ogImage, SITE_URL).href;
 <meta property="og:description" content={description} />
 <meta property="og:url" content={canonical} />
 <meta property="og:image" content={ogUrl} />
+{/* Declared so a client can reserve the card's box before the PNG lands, rather
+    than reflowing the preview around it. Every card here is shot at this size
+    by scripts/shoot-og.mjs — keep the three in step. */}
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:image:alt" content={ogImageAlt} />
 <meta name="twitter:card" content="summary_large_image" />
 <meta name="twitter:title" content={title} />
 <meta name="twitter:description" content={description} />

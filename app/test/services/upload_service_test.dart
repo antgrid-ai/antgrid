@@ -80,9 +80,16 @@ void main() {
         'uploadId': 'u1',
         'ok': true,
         'path': '/proj/.antgrid/uploads/u1-data.bin',
+        'relPath': '.antgrid/uploads/u1-data.bin',
       });
 
-      expect(await future, '/proj/.antgrid/uploads/u1-data.bin');
+      final result = await future;
+      expect(result.path, '/proj/.antgrid/uploads/u1-data.bin');
+      expect(result.relPath, '.antgrid/uploads/u1-data.bin');
+      // No mimeType in the result: the bridge has no viewer for a .bin, which
+      // is what withholds the preview affordance.
+      expect(result.mimeType, isNull);
+      expect(result.isPreviewable, isFalse);
       expect(progress.last, bytes.length);
 
       await svc.dispose();

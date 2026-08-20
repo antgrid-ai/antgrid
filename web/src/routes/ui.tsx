@@ -846,7 +846,10 @@ export function uiRoutes(deps: {
       asResponse: true,
     });
     forwardSetCookies(c, res);
-    const body = (await res.json()) as { status?: string };
+    // A non-JSON body (a plugin 5xx, a proxy error page) must not 500 the
+    // approval screen: the session-cookie fallback below still answers, and
+    // this is the browser that just clicked its own link.
+    const body = (await res.json().catch(() => ({}))) as { status?: string };
     if (body.status === "ready") return true;
     return (await signedInAs(c)) === email.toLowerCase();
   }

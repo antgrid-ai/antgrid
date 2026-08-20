@@ -219,8 +219,15 @@ class FileService {
     final git = msg.path == _state.git.viewingPath
         ? _state.git.copyWith(viewingFile: content, viewingLoading: false)
         : _state.git;
-    if (identical(files, _state.files) && identical(git, _state.git)) return;
-    _setState(_state.copyWith(files: files, git: git));
+    final preview = msg.path == _state.preview.path
+        ? _state.preview.copyWith(content: content, isLoading: false)
+        : _state.preview;
+    if (identical(files, _state.files) &&
+        identical(git, _state.git) &&
+        identical(preview, _state.preview)) {
+      return;
+    }
+    _setState(_state.copyWith(files: files, git: git, preview: preview));
   }
 
   void _handleGitStatus(GitStatusMessage msg) {
@@ -290,8 +297,15 @@ class FileService {
     final git = path == _state.git.viewingPath
         ? _state.git.copyWith(viewingFile: errored, viewingLoading: false)
         : _state.git;
-    if (identical(files, _state.files) && identical(git, _state.git)) return;
-    _setState(_state.copyWith(files: files, git: git));
+    final preview = path == _state.preview.path
+        ? _state.preview.copyWith(content: errored, isLoading: false)
+        : _state.preview;
+    if (identical(files, _state.files) &&
+        identical(git, _state.git) &&
+        identical(preview, _state.preview)) {
+      return;
+    }
+    _setState(_state.copyWith(files: files, git: git, preview: preview));
   }
 
   void _failDiff(String path) {
@@ -461,6 +475,42 @@ class FileService {
     final selected = _state.files.selectedFilePath;
     if (selected == null) return;
     requestFileContent(selected);
+  }
+
+  /// Opens the attachment-preview overlay on a project-relative [path].
+  ///
+  /// Deliberately NOT [selectFile]: a preview must leave the Files tab's own
+  /// selection (and its persisted preference) untouched, and it is not a
+  /// user-opened file, so it files no `fileOpened` analytics event.
+  void openPreview(String path, {String? displayName}) {
+    _setState(
+      _state.copyWith(
+        preview: PreviewPaneState(
+          path: path,
+          displayName: displayName,
+          isLoading: true,
+        ),
+      ),
+    );
+    // Registered, not sent inline, for the same reason as [_hydrateSelectedFile]
+    // — a preview opened during a session-down window would otherwise strand
+    // the overlay on its spinner forever.
+    session.hydrateCheckout(checkoutId, 'file:preview', _hydratePreview);
+  }
+
+  void closePreview() {
+    if (!_state.preview.isOpen) return;
+    _setState(_state.copyWith(preview: PreviewPaneState.empty));
+  }
+
+  /// Tier-3 hydrator for the preview overlay. Reads the path from `_state` so a
+  /// re-register always pulls whatever is CURRENTLY open, and no-ops once the
+  /// overlay is closed — which is what retires it without an unregister.
+  Future<void> _hydratePreview() async {
+    if (_disposed) return;
+    final path = _state.preview.path;
+    if (path == null) return;
+    requestFileContent(path);
   }
 
   void requestFullTree() {

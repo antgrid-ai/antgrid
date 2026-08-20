@@ -11,6 +11,7 @@ import '../../design/widgets/ab_empty_state.dart';
 import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_list_row.dart';
 import '../../design/widgets/ab_menu.dart';
+import '../../design/widgets/ab_progress_rule.dart';
 import '../../design/widgets/ab_section_header.dart';
 import '../../design/widgets/ab_state_chip.dart';
 import '../../design/widgets/ab_tooltip.dart';
@@ -621,10 +622,10 @@ class _BacklogSummary extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             const SizedBox(height: AbTokens.space8),
-            _ProgressRule(
-              done: session.backlogDone,
-              total: session.backlogTotal,
-              p: p,
+            AbProgressRule(
+              fraction: session.backlogTotal == 0
+                  ? 0
+                  : session.backlogDone / session.backlogTotal,
             ),
             const SizedBox(height: AbTokens.space6),
             Row(
@@ -659,42 +660,6 @@ class _BacklogSummary extends StatelessWidget {
             ],
           ],
         ),
-      ),
-    );
-  }
-}
-
-/// Completion as a rule rather than only as a sentence — "3 of 7" has to be
-/// read, and this card is scanned past far more often than it is read.
-///
-/// The track is [AbColors.bgElevated] rather than a border tint, because at 0%
-/// done — every session's first minutes — the track is the whole widget, and a
-/// hairline in a border colour is indistinguishable from the row dividers
-/// around it.
-class _ProgressRule extends StatelessWidget {
-  const _ProgressRule({
-    required this.done,
-    required this.total,
-    required this.p,
-  });
-  final int done;
-  final int total;
-  final AbColors p;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: 3,
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          ColoredBox(color: p.bgElevated),
-          FractionallySizedBox(
-            alignment: Alignment.centerLeft,
-            widthFactor: total == 0 ? 0 : (done / total).clamp(0.0, 1.0),
-            child: ColoredBox(color: p.accent),
-          ),
-        ],
       ),
     );
   }

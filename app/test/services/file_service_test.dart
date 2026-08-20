@@ -424,6 +424,108 @@ void main() {
     await session.close();
   });
 
+  group('attachment preview', () {
+    // The preview is a THIRD file:content consumer beside the Files and Git
+    // panes. It shares the verb and the viewers, but not the slot — routing it
+    // through the Files pane would evict the file the user has open there.
+    test('openPreview reads without disturbing the Files pane', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      svc.selectFile('src/main.dart');
+      await Future<void>.delayed(Duration.zero);
+      svc.openPreview('.antgrid/uploads/u1-shot.png', displayName: 'shot.png');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        t.sent.where(
+          (m) =>
+              m['type'] == 'file:read' &&
+              m['path'] == '.antgrid/uploads/u1-shot.png',
+        ),
+        hasLength(1),
+      );
+      expect(svc.currentState.files.selectedFilePath, 'src/main.dart');
+      expect(svc.currentState.preview.isLoading, isTrue);
+      expect(svc.currentState.preview.displayName, 'shot.png');
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('file:content routes by path — neither slot sees the other', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      svc.selectFile('src/main.dart');
+      svc.openPreview('.antgrid/uploads/u1-shot.png');
+      await Future<void>.delayed(Duration.zero);
+
+      t.emit('file:content', {
+        'projectId': 'p',
+        'path': '.antgrid/uploads/u1-shot.png',
+        'content': 'AAAA',
+        'size': 3,
+        'encoding': 'base64',
+        'mimeType': 'image/png',
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.preview.content?.mimeType, 'image/png');
+      expect(svc.currentState.preview.isLoading, isFalse);
+      // The staged upload must not have landed in the Files pane, which is
+      // still waiting on its own read.
+      expect(svc.currentState.files.viewingFile, isNull);
+      expect(svc.currentState.files.isLoading, isTrue);
+
+      t.emit('file:content', {
+        'projectId': 'p',
+        'path': 'src/main.dart',
+        'content': 'void main() {}',
+        'size': 14,
+        'encoding': 'utf8',
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.files.viewingFile?.content, 'void main() {}');
+      expect(svc.currentState.preview.content?.mimeType, 'image/png');
+
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('a read landing after close cannot reopen the overlay', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = FileService.fromSession(session);
+
+      svc.openPreview('.antgrid/uploads/u1-shot.png');
+      await Future<void>.delayed(Duration.zero);
+      svc.closePreview();
+      expect(svc.currentState.preview.isOpen, isFalse);
+
+      // The in-flight read still answers; with the slot cleared its path
+      // matches nothing, which is what keeps a dismissed dialog dismissed.
+      t.emit('file:content', {
+        'projectId': 'p',
+        'path': '.antgrid/uploads/u1-shot.png',
+        'content': 'AAAA',
+        'size': 3,
+        'encoding': 'base64',
+        'mimeType': 'image/png',
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.preview.isOpen, isFalse);
+      expect(svc.currentState.preview.content, isNull);
+
+      await svc.dispose();
+      await session.close();
+    });
+  });
+
   test('double-dispose is idempotent', () async {
     final t = FakeAgentTransport();
     final session = await _newSession(t);

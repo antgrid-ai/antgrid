@@ -2,6 +2,8 @@ import type { Child } from "hono/jsx";
 import { asset } from "./asset.js";
 import { BETA } from "../billing/plans.js";
 import { Wordmark } from "./wordmark.js";
+import { Mark } from "./mark.js";
+import { absoluteUrl } from "./origin.js";
 
 /** Which nav entry the current page IS, so it can be marked. Pages without an
  *  entry of their own (account, sign-in, checkout) pass nothing. */
@@ -19,6 +21,10 @@ function initials(email: string | null | undefined): string {
   const local = email.split("@")[0] ?? email;
   return local.slice(0, 2).toUpperCase();
 }
+
+/** One line for the whole service — see the og: block in <head>. */
+const OG_DESCRIPTION =
+  "Account, devices and billing for Antgrid, the command centre for your coding agents.";
 
 const NAV: { section: NavSection; href: string; label: string }[] = [
   { section: "dashboard", href: "/dashboard", label: "Dashboard" },
@@ -43,6 +49,22 @@ export function Layout({ title, user, section, children }: LayoutProps) {
         <link rel="icon" href="/logo/favicon.ico" sizes="any" />
         <link rel="icon" type="image/svg+xml" href="/logo/antgrid-favicon.svg" />
         <link rel="apple-touch-icon" href="/logo/apple-touch-icon-180.png" />
+        {/* Link previews. Every page here is behind a session or a sign-in
+            door, so a scraper only ever sees the shell — there is nothing
+            page-specific worth describing, and one card for the service is
+            honest rather than lazy. The image must be absolute: a scraper
+            fetches it with no page to resolve a relative path against. */}
+        <meta property="og:type" content="website" />
+        <meta property="og:site_name" content="Antgrid" />
+        <meta property="og:title" content={`${title} · Antgrid`} />
+        <meta property="og:description" content={OG_DESCRIPTION} />
+        <meta property="og:image" content={absoluteUrl("/og/antgrid-card.png")} />
+        <meta property="og:image:width" content="1200" />
+        <meta property="og:image:height" content="630" />
+        <meta name="twitter:card" content="summary_large_image" />
+        <meta name="twitter:title" content={`${title} · Antgrid`} />
+        <meta name="twitter:description" content={OG_DESCRIPTION} />
+        <meta name="twitter:image" content={absoluteUrl("/og/antgrid-card.png")} />
         {/* Both are in the first viewport on every page (Archivo in the page
             title, Inter in the nav and body), and without a preload neither is
             even requested until the render-blocking CSS has parsed — HTML, then
@@ -62,6 +84,7 @@ export function Layout({ title, user, section, children }: LayoutProps) {
                 an anchor here would nest, which is invalid, and a status
                 marker is not a navigation target. */}
             <a href="/" class="flex shrink-0 items-center gap-2">
+              <Mark />
               <Wordmark />
               {BETA && (
                 <span class="rounded-full bg-signalbtn px-1.5 py-px text-[0.59375rem] font-medium text-page">

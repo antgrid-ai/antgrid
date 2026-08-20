@@ -26,6 +26,8 @@ const ROOT = join(import.meta.dir, "..");
 
 const INK = "#101418";
 const PAPER = "#F2EFE9";
+/** web's `--color-page`, the ground the social card is painted on. */
+const PAGE = "#101015";
 const SIGNAL = "#D2542A";
 
 /**
@@ -42,7 +44,12 @@ type Tier = {
   ext: [number, number, number, number];
 };
 
-/** Full four-agent mark. Holds down to 40px. */
+/**
+ * Full four-agent mark. Holds down to ~36px inlined on a UI ground, which is
+ * where both site headers set it. `tierFor` still cuts over at 40 because it
+ * feeds OS-drawn rasters: those are squeezed further by the tile's fill factor
+ * and rescaled by someone else's sampler, so they get the conservative bound.
+ */
 const TIER_FULL: Tier = {
   stroke: 3.2,
   dotR: 4,
@@ -56,8 +63,9 @@ const TIER_FULL: Tier = {
 };
 
 /**
- * Below 40px the side agents close into the target and the whole thing reads as
- * a blob. Drop to two agents and thicken, per the kit's reduction rule.
+ * Small enough and the side agents close into the target and the whole thing
+ * reads as a blob. Drop to two agents and thicken, per the kit's reduction
+ * rule. See TIER_FULL for where that boundary actually sits.
  */
 const TIER_TWO: Tier = {
   stroke: 4.6,
@@ -295,6 +303,26 @@ async function fitPng(svg: string, width: number, height: number, inset = 0): Pr
 }
 
 /**
+ * Art centred on an OPAQUE ground, for social cards.
+ *
+ * The ground is the point: several link-preview clients composite a
+ * transparent PNG onto white, and this art is paper ink — it would disappear
+ * exactly where the brand is supposed to land.
+ */
+async function ogCardPng(
+  svg: string,
+  width: number,
+  height: number,
+  inset: number,
+  bg: string,
+): Promise<Buffer> {
+  return sharp({ create: { width, height, channels: 4, background: bg } })
+    .composite([{ input: await fitPng(svg, width, height, inset) }])
+    .png({ compressionLevel: 9 })
+    .toBuffer();
+}
+
+/**
  * Packs an ICO. Sizes up to 48 go in as 32-bit BGRA DIBs (the encoding Explorer
  * has always taken) and 256 as PNG, which is the only way it fits.
  */
@@ -432,6 +460,14 @@ if (process.argv.includes("--preview")) {
   for (const pub of PUBLIC) {
     put(`${pub}/logo/antgrid-mark.svg`, tiledMark);
     put(`${pub}/logo/antgrid-mark-transparent.svg`, adaptiveMarkSvg(TIER_FULL));
+    // The four-agent mark for INLINING, which is what both headers carry. Same
+    // art as the transparent cut, but inheriting `currentColor` instead of
+    // carrying a `<style>` block: that block keys off the reader's OS scheme,
+    // and both sites force dark, so an on-page copy flips the wrong way for a
+    // light-OS visitor.
+    put(`${pub}/logo/antgrid-mark-full.svg`, markSvg(TIER_FULL, INHERIT, 48));
+    // Its reduction, for chrome with no room to hold four agents.
+    put(`${pub}/logo/antgrid-mark-small.svg`, markSvg(TIER_TWO, INHERIT, 48));
     put(`${pub}/logo/antgrid-icon-512.png`, await render(512, TILE_RX));
     put(`${pub}/logo/apple-touch-icon-180.png`, await render(180, TILE_RX));
   }
@@ -447,6 +483,12 @@ if (process.argv.includes("--preview")) {
     put(`${pub}/logo/antgrid-wordmark.svg`, wordmarkSvg(INHERIT));
     put(`${pub}/logo/antgrid-lockup.svg`, lockupSvg(INHERIT));
   }
+
+  // Social card for the licensing service. The marketing site shoots its own
+  // from a real page (site/scripts/shoot-og.mjs); this service has no page worth
+  // photographing and no per-page art direction, so a centred lockup on the page
+  // colour is the honest version rather than a staged screenshot.
+  put("web/public/og/antgrid-card.png", await ogCardPng(lockupSvg(PAPER), 1200, 630, 0.55, PAGE));
 
   // Splash art. Both land on the near-black splash colour, so both knock out.
   put("app/assets/icon/splash-mark.png", await fitPng(lockupSvg(PAPER), 880, 306));

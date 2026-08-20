@@ -94,6 +94,10 @@ dependencies:
       ref: bf4f22f0c2763416265a02268e3b071ab1767885
   markdown: ^7.3.1
   super_clipboard: ^0.9.0
+  # Drag-and-drop onto the terminal. Pure Dart: its native half is
+  # super_native_extensions, already linked for super_clipboard, so this
+  # adds no platform code on any of the six targets.
+  super_drag_and_drop: ^0.9.1
   in_app_update: ^4.2.3
   device_info_plus: ^11.5.0
   window_manager: ^0.5.2

@@ -33,8 +33,12 @@ import '../providers/providers.dart';
 import '../providers/sessions.dart';
 import '../services/agent_session_service.dart';
 import '../services/attach_hydration.dart';
+import '../services/clipboard_image_reader.dart';
 import '../services/upload_service.dart';
+import 'attachment_preview_dialog.dart';
 import '../util/ab_log.dart';
+import '../util/detached.dart';
+import '../util/image_thumbnail.dart';
 import '../utils/platform_utils.dart';
 import 'transcript/background_tasks_strip.dart';
 import 'transcript/composer/composer_attachments.dart';
@@ -314,17 +318,67 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
       if (mounted) showAbSnackBar(context, uploadErrorText(e, file.name));
       return;
     }
+    await _attachBytes(fileName: file.name, bytes: bytes);
+  }
+
+  /// Shared tail of every attach route (file picker, clipboard paste): caps,
+  /// shows the chip, then uploads.
+  Future<void> _attachBytes({
+    required String fileName,
+    required Uint8List bytes,
+    String? mimeType,
+  }) async {
     if (!mounted) return;
     if (bytes.length > UploadService.kMaxUploadBytes) {
       showAbSnackBar(
         context,
-        uploadErrorText(const UploadException('TOO_LARGE', ''), file.name),
+        uploadErrorText(const UploadException('TOO_LARGE', ''), fileName),
       );
       return;
     }
-    final attachment = ComposerAttachment(fileName: file.name, bytes: bytes);
+    final attachment = ComposerAttachment(
+      fileName: fileName,
+      bytes: bytes,
+      mimeType: mimeType,
+    );
     setState(() => _attachments.add(attachment));
+    // Decoded from the payload we still hold — _runUpload releases it on
+    // success. Detached so the chip and the upload both start immediately
+    // rather than queueing behind an image decode.
+    detached('AgentTranscriptView', 'decode attachment thumbnail', () async {
+      final thumbnail = await decodeThumbnail(bytes);
+      if (thumbnail == null || !mounted) return;
+      setState(() => attachment.thumbnail = thumbnail);
+    });
     await _runUpload(attachment);
+  }
+
+  /// Fleather hands the pasted image over from a void callback, so the upload
+  /// is started detached rather than left to reject unobserved.
+  void _onImagePasted(PastedImage image) {
+    detached('AgentTranscriptView', 'attach pasted image', () async {
+      await _attachBytes(
+        fileName: image.fileName,
+        bytes: image.bytes,
+        mimeType: image.mimeType,
+      );
+    });
+  }
+
+  void _onPreviewAttachment(ComposerAttachment attachment) {
+    final relPath = attachment.relPath;
+    if (relPath == null) return;
+    // The container, not the ref: this chip is disposed by a project switch,
+    // and the dialog outlives the tap.
+    final container = ref.container;
+    detached('AgentTranscriptView', 'preview attachment', () async {
+      await showAttachmentPreview(
+        context,
+        container,
+        relPath: relPath,
+        displayName: attachment.fileName,
+      );
+    });
   }
 
   Future<void> _runUpload(ComposerAttachment attachment) async {
@@ -347,9 +401,10 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
       attachment.progress = 0;
     });
     try {
-      final path = await service.upload(
+      final result = await service.upload(
         fileName: attachment.fileName,
         bytes: attachment.bytes!,
+        mimeType: attachment.mimeType,
         onProgress: (sent, total) {
           if (mounted) setState(() => attachment.progress = sent / total);
         },
@@ -358,7 +413,9 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
       setState(() {
         attachment
           ..status = AttachmentStatus.done
-          ..path = path
+          ..path = result.path
+          ..relPath = result.relPath
+          ..previewMimeType = result.mimeType
           ..bytes = null;
       });
     } catch (e) {
@@ -923,6 +980,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
                       hintText: 'Send a message…',
                       keyEventPrelude: _onComposerKey,
                       onSend: _submit,
+                      onImagePasted: _onImagePasted,
                     ),
                   ),
                 ],
@@ -932,6 +990,7 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
               attachments: _attachments,
               onRemove: (a) => setState(() => _attachments.remove(a)),
               onRetry: _runUpload,
+              onPreview: _onPreviewAttachment,
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(

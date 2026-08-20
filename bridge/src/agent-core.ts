@@ -1954,6 +1954,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       worktreeManager,
       isGitRepository,
       prepareCheckoutRuntime: async (checkout) => { await prepareCheckoutRuntime(checkout); },
+      announceCheckoutRuntime: (checkoutId) => {
+        const runtime = checkoutRuntimes.runtime(checkoutId);
+        if (!runtime) return;
+        sendStatus(runtime);
+        sendGitStatus(runtime);
+      },
       teardownCheckoutRuntime,
       resolveCheckout: async (checkoutId) => {
         const checkout = await checkoutRuntimes.resolve(checkoutId);

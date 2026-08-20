@@ -4,7 +4,10 @@ import 'package:flutter/widgets.dart';
 
 import '../../../design/ab_colors.dart';
 import '../../../design/ab_tokens.dart';
+import '../../../services/clipboard_image_reader.dart';
+import '../../../util/ab_log.dart';
 import 'composer_controller.dart';
+import 'composer_paste.dart';
 import 'composer_theme.dart';
 import 'smart_enter.dart';
 
@@ -21,6 +24,7 @@ class RichComposer extends StatefulWidget {
     this.focusNode,
     this.hintText,
     this.keyEventPrelude,
+    this.onImagePasted,
   });
 
   final ComposerController controller;
@@ -32,6 +36,10 @@ class RichComposer extends StatefulWidget {
   /// non-ignored result consumes the key.
   final KeyEventResult Function(FocusNode, KeyEvent)? keyEventPrelude;
 
+  /// Receives an image pasted into the editor. Null leaves paste entirely on
+  /// Fleather's default plain-text path.
+  final void Function(PastedImage)? onImagePasted;
+
   @override
   State<RichComposer> createState() => _RichComposerState();
 }
@@ -42,6 +50,44 @@ class _RichComposerState extends State<RichComposer> {
 
   // ≈8 body lines incl. line spacing + vertical padding; scrolls beyond.
   static const _maxEditorHeight = 176.0;
+
+  /// Built once so the editor never sees a new manager identity on rebuild;
+  /// the closures read `widget` lazily, which State keeps current.
+  ///
+  /// The clipboard manager is the ONLY seam that catches every paste. An
+  /// `Actions` override of `PasteTextIntent` catches the keyboard shortcut but
+  /// NOT the selection toolbar's Paste — `contextMenuButtonItems` calls
+  /// `pasteText()` on the editor state directly, bypassing Actions — and that
+  /// button is the primary paste gesture on touch platforms. Both paths funnel
+  /// through `clipboardManager.getData()`.
+  late final _clipboardManager = FleatherCustomClipboardManager(
+    getData: _getClipboardData,
+    setData: _setClipboardData,
+  );
+
+  /// Mirrors [PlainTextClipboardManager.setData] — supplying a custom manager
+  /// replaces copy as well as paste, and the composer's copy stays plain text.
+  Future<void> _setClipboardData(FleatherClipboardData data) async {
+    if (data.hasPlainText) {
+      await Clipboard.setData(ClipboardData(text: data.plainText!));
+    }
+  }
+
+  Future<FleatherClipboardData?> _getClipboardData() {
+    const clipboard = PlainTextClipboardManager();
+    final onImagePasted = widget.onImagePasted;
+    if (onImagePasted == null) return clipboard.getData();
+    return resolveComposerPaste(
+      readImage: readClipboardImage,
+      onImagePasted: onImagePasted,
+      readText: clipboard.getData,
+      onImageReadError: (error, stack) => AbLog.error(
+        'RichComposer',
+        'clipboard image read failed',
+        fields: {'error': '$error', 'stack': '$stack'},
+      ),
+    );
+  }
 
   @override
   void initState() {
@@ -133,6 +179,7 @@ class _RichComposerState extends State<RichComposer> {
           child: FleatherEditor(
             controller: widget.controller.fleather,
             focusNode: _focus,
+            clipboardManager: _clipboardManager,
             // Horizontal insets come from the parent surface; keeping them
             // here would double the gap after the ❯ prompt marker.
             padding: const EdgeInsets.symmetric(vertical: AbTokens.space8),

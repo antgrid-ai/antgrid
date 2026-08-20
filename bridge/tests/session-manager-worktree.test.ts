@@ -60,6 +60,40 @@ describe("isolated SessionManager creation", () => {
     }
   });
 
+  it("re-pushes the checkout's workspace state after the session is announced", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "antgrid-worktree-session-"));
+    const order: string[] = [];
+    const manager = {
+      prepareForSession: async (args: { sessionId: string }): Promise<CheckoutRecord> => ({
+        id: "checkout-1", projectId: "p", kind: "managed-worktree", path: join(dir, "wt"),
+        branch: "antgrid/session-1", baseRef: "main", managed: true,
+        sessionId: args.sessionId, createdAt: 1,
+      }),
+      rollbackPrepared: async () => {},
+      recordFor: async () => ({ id: "checkout-1" } as CheckoutRecord),
+      inspect: async () => ({ exists: true, registered: true, dirty: false, unpushedCommits: false, locked: false }),
+      remove: async () => {},
+    } as unknown as WorktreeManager;
+    try {
+      const sm = new SessionManager({
+        projectId: "p", storeDir: dir, projectPath: dir, terminalManager: fakeTerminal() as any,
+        agentSpec: { command: "claude", name: "claude-code" }, sendMessage: () => {},
+        worktreeSessionsSupported: true, isGitRepository: async () => true, worktreeManager: manager,
+        prepareCheckoutRuntime: async () => { order.push("prepare"); },
+        announceCheckoutRuntime: (id) => { order.push(`announce:${id}`); },
+        resolveAgentSpec: async () => ({ command: "claude", name: "claude-code" }),
+      });
+      sm.onChange(() => order.push(`sessions:${sm.list().length}`));
+      await sm.create("Isolated", { isolation: "worktree" });
+      // The re-push must trail the session list: an app learns the checkout
+      // exists from that list and only then subscribes to its stream, so a
+      // status frame sent any earlier has no subscriber and is never replayed.
+      expect(order).toEqual(["prepare", "sessions:1", "announce:checkout-1"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rolls back the prepared checkout when its working directory is unsafe", async () => {
     const dir = mkdtempSync(join(tmpdir(), "antgrid-worktree-session-"));
     let rolledBack = false;

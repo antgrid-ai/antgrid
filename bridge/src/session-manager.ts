@@ -119,6 +119,13 @@ export interface SessionManagerOpts {
   worktreeManager?: WorktreeManager;
   /** Construct the checkout-scoped runtime before a session can commit. */
   prepareCheckoutRuntime?: (checkout: CheckoutRecord) => Promise<void>;
+  /** Re-push the checkout's workspace state AFTER the session is announced.
+   *  `prepareCheckoutRuntime` emits it too, but nothing replays a push frame
+   *  and at that point no app knows the checkout exists — so its subscriber
+   *  does not exist either, and the state (project name, git branch, commands)
+   *  is lost until an unrelated event happens to re-emit. A terminal session
+   *  hides that behind its own traffic; a chat session never does. */
+  announceCheckoutRuntime?: (checkoutId: string) => void;
   teardownCheckoutRuntime?: (checkoutId: string) => Promise<void>;
   /** Resolves persisted IDs on every start; explicit unknown IDs never main-fallback. */
   resolveCheckout?: (checkoutId: string) => Promise<CheckoutRecord | undefined>;
@@ -565,6 +572,10 @@ export class SessionManager {
       this.entries.set(entry.id, entry);
       await this.flushNowOrThrow();
       this.notifyObservers();
+      // Strictly after the announce: the app builds this checkout's service
+      // bundle from the session list, so anything pushed earlier lands with no
+      // subscriber. Never fatal — the session itself is already committed.
+      try { this.opts.announceCheckoutRuntime?.(checkout.id); } catch { /* state re-push is best-effort */ }
       return this.toWire(entry);
     } catch (error) {
       this.entries.delete(entry.id);

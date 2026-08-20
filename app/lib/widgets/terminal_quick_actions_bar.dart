@@ -1,5 +1,3 @@
-import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
 import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 
@@ -22,8 +20,8 @@ class TerminalQuickActionsBar extends StatelessWidget {
     super.key,
     required this.softKeyboardController,
     required this.onPick,
-    required this.onUpload,
-    required this.onInsertPath,
+    required this.onPicked,
+    required this.uploadBusy,
     required this.onUploadError,
     required this.onSendInput,
     required this.onZoomOut,
@@ -33,8 +31,11 @@ class TerminalQuickActionsBar extends StatelessWidget {
 
   final GhosttyTerminalSoftKeyboardController softKeyboardController;
   final Future<PickedUpload?> Function() onPick;
-  final Future<String> Function(String fileName, Uint8List bytes) onUpload;
-  final void Function(String path) onInsertPath;
+  final Future<void> Function(PickedUpload picked) onPicked;
+
+  /// True while the shared attachment pipeline is busy with ANY gesture, so a
+  /// paste or drop already in flight disables the bar's attach key too.
+  final bool uploadBusy;
   final void Function(String message) onUploadError;
   final void Function(String data) onSendInput;
 
@@ -61,11 +62,8 @@ class TerminalQuickActionsBar extends StatelessWidget {
                 children: [
                   TerminalUploadButton(
                     pick: onPick,
-                    upload: onUpload,
-                    // Double-quoted + trailing space: paste-a-path semantics
-                    // identical to desktop drag-drop; quotes survive spaces in
-                    // both PowerShell and POSIX shells.
-                    onInsertPath: onInsertPath,
+                    onPicked: onPicked,
+                    busy: uploadBusy,
                     onError: onUploadError,
                   ),
                   _zoomButton(

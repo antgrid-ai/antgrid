@@ -432,12 +432,19 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   }
 
   void _goToStep(_Step step) {
+    // The cooldown belongs to the send that armed it, and the periodic timer
+    // self-cancels the moment the phase leaves pending/verifyEmail — so a
+    // counter left standing here can never tick back down, and would disable
+    // the resend on the next visit for the rest of the app's life.
+    _cooldownTimer?.cancel();
+    _cooldownTimer = null;
     setState(() {
       _flowGeneration++;
       _step = step;
       _phase = _Phase.form;
       _error = null;
       _notice = null;
+      _resendSecondsLeft = 0;
     });
   }
 

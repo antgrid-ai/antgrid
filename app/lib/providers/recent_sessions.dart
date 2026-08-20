@@ -522,3 +522,21 @@ Future<void> pullToRefreshRecentSessions(
   if (!refreshRef.mounted) return;
   await refreshRecentSessions(ref);
 }
+
+/// Human name for the project behind a drawer entryId (a bare `<projectId>`
+/// for a local project, `<uuid>.<projectId>` for a remote one), by the SAME
+/// rules [buildRecentSessions] names its rows: the stored display name for a
+/// local project, else the live control-plane advert label.
+///
+/// Null — never the raw projectId — when neither is known, so a caller holding
+/// a better source of its own can prefer it and only fall back to a hash as a
+/// genuine last resort.
+final projectDisplayNameProvider = Provider.family<String?, String>((
+  ref,
+  entryId,
+) {
+  for (final project in ref.watch(projectsProvider)) {
+    if (project.projectId == entryId) return project.displayName;
+  }
+  return ref.watch(remoteProjectLabelsProvider)[entryId];
+});

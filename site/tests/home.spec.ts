@@ -29,7 +29,7 @@ test("hero has a single non-empty h1 and leads with the E2E claim", async ({ pag
 test("fleet groups by machine and floats needs-you", async ({ page }) => {
   await page.goto("/#fleet");
   const fleet = page.locator("#fleet");
-  await expect(fleet.getByRole("heading", { name: /every agent\. every machine\. one screen\./i })).toBeVisible();
+  await expect(fleet.getByRole("heading", { name: /never below the fold\./i })).toBeVisible();
   await expect(fleet).toContainText("studio-workstation");
   await expect(fleet).toContainText("Needs you — which migration strategy?");
 });

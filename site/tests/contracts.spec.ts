@@ -82,3 +82,29 @@ for (const path of ["/pricing", "/terms", "/refunds", "/support"]) {
     await expect(page.locator("body")).not.toContainText(/lifetime/i);
   });
 }
+
+// Indexed pages. og-card is excluded on purpose: it is the screenshot source for
+// the social card, already noindex and filtered out of the sitemap.
+const INDEXED = ["/", "/pricing", "/get-started", "/support", "/privacy", "/terms", "/refunds"];
+
+test("every indexed page ships a description search engines will show whole", async ({ page }) => {
+  // 155 is where Google starts truncating. Social previews cut earlier — mobile
+  // link cards show roughly 125 — so pages people actually share are written
+  // tighter than this; the gate is the hard bound, not the target.
+  for (const path of INDEXED) {
+    await page.goto(path);
+    const description = await page.locator('meta[name="description"]').getAttribute("content");
+    expect(description, `${path} has no meta description`).toBeTruthy();
+    expect(description!.length, `${path} description is ${description!.length} chars`).toBeLessThanOrEqual(155);
+  }
+});
+
+test("the social card declares its dimensions so previews reserve the box", async ({ page }) => {
+  // Without these a client fetches the PNG before it can size the card, and the
+  // preview reflows around it — or renders the link bare while it waits.
+  await page.goto("/");
+  await expect(page.locator('meta[property="og:image:width"]')).toHaveAttribute("content", "1200");
+  await expect(page.locator('meta[property="og:image:height"]')).toHaveAttribute("content", "630");
+  const alt = await page.locator('meta[property="og:image:alt"]').getAttribute("content");
+  expect(alt, "the card carries no alt text").toBeTruthy();
+});

@@ -1,7 +1,8 @@
 import { describe, test, expect } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Layout } from "../../src/ui/layout.js";
+import { setPublicOrigin } from "../../src/ui/origin.js";
 import { BETA } from "../../src/billing/plans.js";
 
 describe("Layout", () => {
@@ -75,6 +76,110 @@ describe("Layout", () => {
       children: "x",
     }).toString();
     expect(html).toContain('href="/team"');
+  });
+});
+
+describe("Layout brand mark", () => {
+  const html = () => Layout({ title: "Test", children: "x" }).toString();
+
+  test("inlines the four-agent mark beside the wordmark", () => {
+    // Byte-identical to the file /logo/* hands out, same rule as the wordmark.
+    const master = readFileSync(
+      resolve(import.meta.dir, "../../public/logo/antgrid-mark-full.svg"),
+      "utf8"
+    );
+    expect(html()).toContain(master.slice(master.indexOf(">") + 1).trimEnd());
+  });
+
+  test("sets the mark at the size four agents need to separate", () => {
+    // h-9 is both the kit's lockup proportion against an h-7 wordmark and the
+    // measured floor for the full tier — the reduction cut exists for chrome
+    // that cannot afford this, and a header that quietly shrank back to h-7
+    // would put four thin chevrons on top of the target.
+    const markup = html();
+    const svg = markup.slice(markup.indexOf("<svg"));
+    expect(svg.slice(0, svg.indexOf(">"))).toContain("h-9");
+  });
+
+  test("hides the mark on phones, where the nav has no width to give", () => {
+    // Measured, not stylistic: four nav labels plus the wordmark and the avatar
+    // already overflow a 414px header, and the nav is the only item in that row
+    // that gives up width.
+    const markup = html();
+    const svg = markup.slice(markup.indexOf("<svg"));
+    expect(svg.slice(0, svg.indexOf(">"))).toContain("hidden");
+    expect(svg.slice(0, svg.indexOf(">"))).toContain("sm:block");
+  });
+
+  test("keeps the home link announcing the brand once", () => {
+    // Both cuts ship role="img" aria-label="Antgrid" for standalone use, so the
+    // decorative one must be hidden or the link reads as "Antgrid Antgrid".
+    const markup = html();
+    const link = markup.slice(markup.indexOf('<a href="/"'), markup.indexOf("</a>"));
+    const labels = link.split('aria-label="Antgrid"').length - 1;
+    const hidden = link.split('aria-hidden="true"').length - 1;
+    expect(labels - hidden).toBe(1);
+  });
+});
+
+describe("Layout social card", () => {
+  const html = () => Layout({ title: "Test", children: "x" }).toString();
+
+  test("carries an image a scraper can actually fetch", () => {
+    // og:image is fetched out of band, with no page to resolve a relative path
+    // against, so this one must come out absolute once the origin is known.
+    setPublicOrigin("https://accounts.antgrid.ai/");
+    try {
+      const markup = html();
+      expect(markup).toContain(
+        'content="https://accounts.antgrid.ai/og/antgrid-card.png"'
+      );
+      expect(markup).toContain('name="twitter:card" content="summary_large_image"');
+      // Declared dimensions let a client reserve the card before the PNG lands.
+      expect(markup).toContain('property="og:image:width" content="1200"');
+      expect(markup).toContain('property="og:image:height" content="630"');
+    } finally {
+      setPublicOrigin(undefined);
+    }
+  });
+
+  test("drops a path the deploy URL happens to carry", () => {
+    // BETTER_AUTH_URL is only validated as a URL, so a deploy behind a subpath
+    // can legitimately set one. Prefixing that path onto a root-relative asset
+    // points the scraper at a 404, and nothing in the page would show it.
+    setPublicOrigin("https://accounts.antgrid.ai/auth/");
+    try {
+      expect(html()).toContain(
+        'content="https://accounts.antgrid.ai/og/antgrid-card.png"'
+      );
+    } finally {
+      setPublicOrigin(undefined);
+    }
+  });
+
+  test("a value that is not a URL degrades instead of throwing", () => {
+    // Parsing happens at app boot, one import away from every route — a throw
+    // here would be a startup crash, not a bad card.
+    setPublicOrigin("not a url");
+    try {
+      expect(html()).toContain('content="/og/antgrid-card.png"');
+    } finally {
+      setPublicOrigin(undefined);
+    }
+  });
+
+  test("degrades to a usable path rather than throwing when unset", () => {
+    // Components are rendered in unit tests without an app to push the origin
+    // in; a missing social image must never be able to take a page down.
+    expect(html()).toContain('content="/og/antgrid-card.png"');
+  });
+
+  test("the card the tags point at is actually shipped", () => {
+    // flutter_svg-style late failure: the tag is valid markup either way, so
+    // nothing catches a card that was never generated.
+    expect(
+      existsSync(resolve(import.meta.dir, "../../public/og/antgrid-card.png"))
+    ).toBe(true);
   });
 });
 

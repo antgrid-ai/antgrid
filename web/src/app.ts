@@ -15,6 +15,7 @@ import { oauthHandoffRoutes } from "./routes/oauth-handoff.js";
 import { oauthStartRoutes } from "./routes/oauth-start.js";
 import { eventsRoutes } from "./routes/events.js";
 import { uiRoutes } from "./routes/ui.js";
+import { setPublicOrigin } from "./ui/origin.js";
 import type { DB } from "./db/index.js";
 import type { Auth } from "./auth/better-auth.js";
 import type { Env } from "./env.js";
@@ -37,6 +38,9 @@ export type AppDeps = {
 export function buildApp(deps: AppDeps) {
   const app = new Hono();
   const clientIp = makeClientIpResolver(deps.env.TRUSTED_PROXY_IPS);
+  // Layout renders og:image, which a scraper fetches with no page to resolve a
+  // relative URL against. This is the one place that knows the public origin.
+  setPublicOrigin(deps.env.BETTER_AUTH_URL);
 
   // The ZeptoMail webhook authenticates via a secret in its URL path
   // (/webhooks/zeptomail/:key). Hono's logger prints the full path, so redact
@@ -85,6 +89,11 @@ export function buildApp(deps: AppDeps) {
   // Brand/logo assets (favicons, app icons). Served from public/logo at the
   // /logo/* path — referenced by the favicon <link> tags in ui/layout.tsx.
   app.use("/logo/*", serveStatic({ root: "./public" }));
+
+  // The social card, on its own path rather than under /logo: a link-preview
+  // scraper is an anonymous, unauthenticated fetch, and this is the only asset
+  // here meant for one.
+  app.use("/og/*", serveStatic({ root: "./public" }));
 
   // Better-Auth gets the request with X-Forwarded-For already collapsed to the
   // resolved client, so its handlers (the cross-device plugin's requester IP,

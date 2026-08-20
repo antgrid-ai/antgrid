@@ -10,6 +10,13 @@ const page = await browser.newPage({ viewport: { width: 1200, height: 630 } });
 await page.goto(url, { waitUntil: "networkidle" });
 // Settle the self-hosted webfonts so the shot never captures fallback metrics.
 await page.evaluate(() => document.fonts.ready);
-await page.locator("#og").screenshot({ path: "public/og/prove-its-done.png" });
+// animations: "disabled" or the shot is not reproducible -- the readout's
+// "watching" dot pulses forever, so two runs of an unchanged card differ by a few
+// bytes and every recut lands as a noisy binary diff. It also fast-forwards the
+// ProofCard's finite reveals to their end state, which is the state worth
+// shipping: the card should show the run resolved, not caught mid-populate.
+await page
+  .locator("#og")
+  .screenshot({ path: "public/og/one-screen.png", animations: "disabled" });
 await browser.close();
-console.log("wrote public/og/prove-its-done.png");
+console.log("wrote public/og/one-screen.png");

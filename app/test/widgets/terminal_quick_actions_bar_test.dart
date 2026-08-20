@@ -22,8 +22,8 @@ Widget _harness(
         child: TerminalQuickActionsBar(
           softKeyboardController: controller,
           onPick: () async => null,
-          onUpload: (name, bytes) async => '',
-          onInsertPath: (_) {},
+          onPicked: (_) async {},
+          uploadBusy: false,
           onUploadError: (_) {},
           onSendInput: (_) {},
           onZoomOut: onZoomOut ?? () {},

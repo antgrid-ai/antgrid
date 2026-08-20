@@ -632,6 +632,13 @@ const FileUploadResultMessage = BaseMessage.extend({
   uploadId: z.string().optional(),
   ok: z.boolean(),
   path: z.string().optional(), // absolute path on the bridge machine
+  // Project-relative twin of `path`, the only form `file:read` accepts — the
+  // app never learns the checkout root, so it cannot derive this itself.
+  relPath: z.string().optional(),
+  // Set only when the staged file is one the app can render (same table as
+  // file:read's own), so a client can offer a preview without duplicating the
+  // allowlist. Absent = no viewer for it.
+  mimeType: z.string().optional(),
   error: z.string().optional(), // machine code: TOO_LARGE | INVALID_NAME | WRITE_FAILED | UPLOAD_NOT_FOUND | BAD_SEQUENCE | SIZE_MISMATCH | TIMEOUT | BUSY
   message: z.string().optional(), // human-readable detail
   ...CheckoutScoped,

@@ -45,6 +45,31 @@ String uploadErrorText(Object error, String fileName) {
   return 'Upload of "$fileName" failed';
 }
 
+/// A file staged on the bridge, as reported by `file:upload-result`.
+class UploadResult {
+  const UploadResult({required this.path, this.relPath, this.mimeType});
+
+  /// Absolute on the bridge machine — what goes into the prompt text, since
+  /// that is the form every agent CLI can open.
+  final String path;
+
+  /// Project-relative twin of [path], the only form `file:read` accepts. The
+  /// app never learns the checkout root, so it cannot derive this itself.
+  /// Null from a bridge predating the field — such an attachment simply
+  /// offers no preview rather than guessing a path.
+  final String? relPath;
+
+  /// Set only when the bridge can render this type (its own
+  /// `RENDERABLE_BINARY_MIME` table, the same one `file:read` answers from).
+  /// Null means there is no viewer for it — which is exactly the
+  /// "supported files only" gate, without an app-side allowlist to drift.
+  final String? mimeType;
+
+  /// Whether a preview can be offered at all: the bridge both named a
+  /// readable path and admitted to having a viewer for it.
+  bool get isPreviewable => relPath != null && mimeType != null;
+}
+
 /// Chunked file upload to the bridge's project-local staging dir.
 ///
 /// One ack per chunk, next chunk sent only after the ack: every wire message
@@ -121,9 +146,9 @@ class UploadService {
     }
   }
 
-  /// Uploads [bytes] and returns the absolute path of the staged file on the
-  /// bridge machine. Throws [UploadException] on any failure.
-  Future<String> upload({
+  /// Uploads [bytes] and returns where the bridge staged it. Throws
+  /// [UploadException] on any failure.
+  Future<UploadResult> upload({
     required String fileName,
     required Uint8List bytes,
     String? mimeType,
@@ -163,7 +188,7 @@ class UploadService {
     }
   }
 
-  Future<String> _streamChunksAndFinish({
+  Future<UploadResult> _streamChunksAndFinish({
     required String uploadId,
     required String requestId,
     required Uint8List bytes,
@@ -191,7 +216,11 @@ class UploadService {
     );
     final result = await resultF;
     _throwIfError(result);
-    return result['path'] as String;
+    return UploadResult(
+      path: result['path'] as String,
+      relPath: result['relPath'] as String?,
+      mimeType: result['mimeType'] as String?,
+    );
   }
 
   Future<void> dispose() async {

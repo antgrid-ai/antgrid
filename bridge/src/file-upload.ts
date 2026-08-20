@@ -2,11 +2,12 @@ import {
   mkdirSync, existsSync, writeFileSync, openSync, writeSync, closeSync,
   renameSync, rmSync, readdirSync, statSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import {
   createMessage, type AbMessage,
   type FileUploadStart, type FileUploadChunk, type FileUploadDone,
 } from "./protocol";
+import { renderableBinaryMime } from "./file-tree";
 import { logger } from "./logger";
 const log = logger.child({ component: "file-upload" });
 
@@ -70,7 +71,8 @@ export class FileUploadManager {
   }
 
   private sendResult(requestId: string, fields: {
-    uploadId?: string; ok: boolean; path?: string; error?: string; message?: string;
+    uploadId?: string; ok: boolean; path?: string; relPath?: string;
+    mimeType?: string; error?: string; message?: string;
   }): void {
     this.opts.send(createMessage("file:upload-result", { requestId, ...fields }));
   }
@@ -209,7 +211,13 @@ export class FileUploadManager {
       this.sendResult(u.requestId, { uploadId: u.uploadId, ok: false, error: "WRITE_FAILED", message: "Could not finalize upload" });
       return;
     }
-    this.sendResult(u.requestId, { uploadId: u.uploadId, ok: true, path: finalPath });
+    this.sendResult(u.requestId, {
+      uploadId: u.uploadId,
+      ok: true,
+      path: finalPath,
+      relPath: relative(this.opts.projectPath, finalPath),
+      mimeType: renderableBinaryMime(finalPath),
+    });
   }
 
   // Sweep once now and then on an interval: a long-lived bridge that never

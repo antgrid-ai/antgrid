@@ -8,10 +8,17 @@ import Worktrees from "../components/sections/Worktrees.astro";
 import Privacy from "../components/sections/Privacy.astro";
 import CrossAgent from "../components/sections/CrossAgent.astro";
 import ClosingCta from "../components/sections/ClosingCta.astro";
+
+// Under ~125 characters so a mobile link preview shows it whole — Google's
+// ~155 is the looser bound, and this is the page people actually share. It has
+// to keep the end-to-end claim through any rewrite: that is the positioning the
+// product is sold on, and home.spec.ts asserts it for exactly that reason.
+const DESCRIPTION =
+  "Claude Code, Codex and Cursor on your own machines. antgrid sequences the work and proves it's done. End-to-end encrypted.";
 ---
 <Base
   title="antgrid — remote dev for concurrent coding agents"
-  description="Claude Code, Codex and Cursor run on your own machines. antgrid sequences the work, refuses completion without evidence, and reaches every machine you own — no VPN, no port forwarding. End-to-end encrypted."
+  description={DESCRIPTION}
   path="/"
 >
   <Hero />

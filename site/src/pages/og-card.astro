@@ -24,9 +24,16 @@ import Wordmark from "../components/ui/Wordmark.astro";
       {/* Type and card share one 39rem column so the composition stays centred —
           left-anchoring the way the hero does leaves a third of this canvas dead,
           which reads as overflow rather than intent at thumbnail size. */}
-      {/* A compression of the hero headline, not a copy: the card is a fixed
-          1200x630 and the hero's second line would push the ProofCard past the
-          bottom edge. Keep the claim identical and the line count at two. */}
+      {/* The hero headline, and unlike the copy it replaced it stands on its own:
+          "antgrid starts the next one." needed a setup line above it to mean
+          anything, which is why this card used to carry one. It does not need one
+          now, and the ProofCard below already supplies the 2am story that line was
+          telling — it timestamps 02:58 and says "While you slept".
+
+          Two text lines is the budget, not a preference: the card is a fixed
+          1200x630 and the ProofCard's amber wake sits on the bottom edge with no
+          slack, so a third line clips it. Dropping the setup line is what buys the
+          headline its second. */}
       <div class="w-[39rem]">
         {/* Sizes stay explicit here rather than using the fluid display scale —
             this canvas is a fixed 1200x630, so there is no viewport for it to
@@ -38,8 +45,15 @@ import Wordmark from "../components/ui/Wordmark.astro";
             height the type it replaced occupied (the composition below has no
             slack: the amber wake sits on the bottom edge). */}
         <Wordmark class="mb-2.5 h-6 w-auto text-signal" />
-        <p class="mb-1.5 text-2xl font-medium leading-tight text-muted">Your agent finishes a phase at 2am and waits.</p>
-        <p class="font-display text-[3rem] font-semibold leading-[1.05] tracking-[-0.032em] text-ink">antgrid starts the next one.</p>
+        {/* inline-block per sentence, as in the hero, so the two lines break
+            between sentences rather than wherever 39rem happens to fall. 2.75rem
+            rather than the hero's fluid scale: "Every agent. Every machine." has
+            to clear this column on one line, and at 3rem it does not. */}
+        <p class="font-display text-[2.75rem] font-semibold leading-[1.05] tracking-[-0.032em] text-ink">
+          <span class="inline-block">Every agent.</span>{" "}
+          <span class="inline-block">Every machine.</span>{" "}
+          <span class="inline-block">One screen.</span>
+        </p>
       </div>
       {/* 39rem, not max-w-xl: wide enough that the snapshot row stops wrapping to
           two lines (which pushed the amber wake past the bottom edge) and still

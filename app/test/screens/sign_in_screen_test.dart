@@ -853,6 +853,47 @@ void main() {
       expect(paths.where((p) => p == sendPath), hasLength(2));
     });
 
+    testWidgets('stepping off the verification screen clears its cooldown', (
+      tester,
+    ) async {
+      // The second send fails at the transport, which is the only way the
+      // arrival stops re-arming the cooldown for us — an HTTP error status is
+      // swallowed by design, for enumeration-safety.
+      var sends = 0;
+      await _openPasswordStep(
+        tester,
+        store: seeded(),
+        respond: (req) async {
+          if (req.url.path == sendPath) {
+            sends++;
+            if (sends > 1) throw http.ClientException('offline');
+            return http.Response(jsonEncode({'status': true}), 200);
+          }
+          return http.Response(jsonEncode({'code': 'EMAIL_NOT_VERIFIED'}), 403);
+        },
+      );
+      await reachVerifyScreen(tester);
+      await tester.pump(const Duration(seconds: 6));
+      expect(find.text('Resend the link (39s)'), findsOneWidget);
+
+      // Round trip: back to the password step and straight onto the same
+      // unverified verdict, which lands here again.
+      await tester.tap(find.text("I've verified — sign in"));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      // The failed send leaves the cooldown exactly as it found it, and the
+      // ticker self-cancelled the moment the phase left this screen — so a
+      // counter carried across the step can never reach zero again, and the
+      // resend it disables is the only retry the screen offers.
+      expect(
+        find.text('Resend the link'),
+        findsOneWidget,
+        reason: 'a carried-over cooldown has no timer left to tick it down',
+      );
+    });
+
     testWidgets('a resend landing after the flow was abandoned is dropped', (
       tester,
     ) async {

@@ -196,6 +196,54 @@ class GitPaneState {
   }
 }
 
+/// Right-pane state for the attachment preview overlay.
+///
+/// A THIRD `file:content` consumer beside [FilesPaneState] and [GitPaneState],
+/// deliberately given its own slot rather than borrowing the Files tab's: a
+/// preview must not evict the file the user has open in the context panel, and
+/// the staged upload it reads lives under `.antgrid/`, which the tree hides.
+///
+/// Mutated only by openPreview/closePreview. Reading these fields from either
+/// tab is a leak.
+class PreviewPaneState {
+  /// Project-relative, as `file:read` requires — the same key [content] is
+  /// matched on when the response lands.
+  final String? path;
+
+  /// Shown in the overlay's header while [content] is still in flight, so the
+  /// dialog can title itself without waiting for the read.
+  final String? displayName;
+  final FileContent? content;
+  final bool isLoading;
+
+  const PreviewPaneState({
+    this.path,
+    this.displayName,
+    this.content,
+    this.isLoading = false,
+  });
+
+  static const empty = PreviewPaneState();
+
+  bool get isOpen => path != null;
+
+  PreviewPaneState copyWith({
+    String? path,
+    String? displayName,
+    FileContent? content,
+    bool? isLoading,
+    bool clear = false,
+  }) {
+    if (clear) return empty;
+    return PreviewPaneState(
+      path: path ?? this.path,
+      displayName: displayName ?? this.displayName,
+      content: content ?? this.content,
+      isLoading: isLoading ?? this.isLoading,
+    );
+  }
+}
+
 class FileTreeState {
   final FileNode? root;
   final Set<String> expandedPaths;
@@ -208,6 +256,7 @@ class FileTreeState {
   final bool showChangedOnly;
   final FilesPaneState files;
   final GitPaneState git;
+  final PreviewPaneState preview;
 
   /// Last git commit/discard result message. Paired with [gitOpFeedbackSeq]:
   /// it's a one-shot *event*, not durable state. The message string may repeat
@@ -227,6 +276,7 @@ class FileTreeState {
     this.showChangedOnly = false,
     this.files = FilesPaneState.empty,
     this.git = GitPaneState.empty,
+    this.preview = PreviewPaneState.empty,
     this.gitOpFeedback,
     this.gitOpFeedbackSeq = 0,
   });
@@ -242,6 +292,7 @@ class FileTreeState {
     bool? showChangedOnly,
     FilesPaneState? files,
     GitPaneState? git,
+    PreviewPaneState? preview,
     String? gitOpFeedback,
     int? gitOpFeedbackSeq,
   }) {
@@ -255,6 +306,7 @@ class FileTreeState {
       showChangedOnly: showChangedOnly ?? this.showChangedOnly,
       files: files ?? this.files,
       git: git ?? this.git,
+      preview: preview ?? this.preview,
       gitOpFeedback: gitOpFeedback ?? this.gitOpFeedback,
       gitOpFeedbackSeq: gitOpFeedbackSeq ?? this.gitOpFeedbackSeq,
     );
