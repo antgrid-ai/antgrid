@@ -54,6 +54,15 @@ import { getGitStatus, gitCommit, gitDiscard, gitStage, gitUnstage, type GitFile
 import { listLocalBranches, checkoutLocalBranch } from "./git-branches";
 import { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
 
+/** Hand the event loop one full turn. `setImmediate` fires in libuv's check
+ *  phase, i.e. AFTER poll, so pending loopback accepts and reads are serviced
+ *  before we resume — a microtask (`await Promise.resolve()`) would not be.
+ *  Placed before each checkout's synchronous file-tree walk: bun runs one JS
+ *  thread, a project open walks the repo AND every managed worktree, and back
+ *  to back those walks outlast the app's 2s `project:list` liveness ping, which
+ *  reaps a healthy host mid-open (see file-watcher.ts's startWatching note). */
+const yieldToEventLoop = () => new Promise<void>((r) => setImmediate(r));
+
 type CheckoutAgentSpec = {
   command: string;
   name: string;
@@ -1760,7 +1769,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Re-send the file tree. Forced for the same reason as the status/git pair
     // above: an idle project's tree is byte-identical to the cached one, so the
     // ordinary dedup would drop the very re-push this resync exists to perform.
-    for (const runtime of checkoutRuntimes.values()) runtime.fileWatcher?.sendFullTree({ force: true });
+    for (const runtime of checkoutRuntimes.values()) {
+      await yieldToEventLoop();
+      runtime.fileWatcher?.sendFullTree({ force: true });
+    }
 
     // Re-emit the detected-port list. ports:update is only pushed on change,
     // so a phone that binds after detection would otherwise never see ports
@@ -1836,6 +1848,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       send,
     });
     runtime.uploadManager.startSweeper();
+    await yieldToEventLoop();
     fw.sendFullTree();
     fw.startWatching();
 
@@ -2435,6 +2448,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     });
     uploadManager.startSweeper();
     mainRuntime.uploadManager = uploadManager;
+    await yieldToEventLoop();
     fw.sendFullTree();
     fw.startWatching();
 

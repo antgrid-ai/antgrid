@@ -216,6 +216,86 @@ void main() {
   );
 
   test(
+    'REGRESSION: a host that answers a LATER ping is never reaped',
+    () async {
+      // The bridge is one JS thread: a project open walks the file tree of the
+      // repo AND every managed worktree, which stops it answering the control
+      // plane for as long as the walk runs. Reaping on the first missed ping
+      // killed a healthy host mid-open, and the respawn tore down the very
+      // session the user was starting ("SessionsService disposed").
+      var pings = 0;
+      var spawns = 0;
+      final treeKilled = <int>[];
+      final c = HostController(
+        readHost: () async => _host(pid: 100, port: 6000),
+        pidAlive: (pid) async => true,
+        ping: (h) async => ++pings > 2, // blocked for two attempts, then back
+        devMode: () => false,
+        terminateTree: (pid) async => treeKilled.add(pid),
+        delay: (_) async {}, // no real grace sleep in tests
+        spawnHost: () async {
+          spawns++;
+          return _host(port: 8888);
+        },
+      );
+      final h = await c.ensureHost();
+      expect(h.controlPort, 6000, reason: 'attached to the original host');
+      expect(pings, 3);
+      expect(spawns, 0);
+      expect(treeKilled, isEmpty);
+    },
+  );
+
+  test(
+    'a host that misses every ping in the grace window is still reaped',
+    () async {
+      var pings = 0;
+      var spawns = 0;
+      final treeKilled = <int>[];
+      final c = HostController(
+        readHost: () async => _host(pid: 100),
+        pidAlive: (pid) async => true,
+        ping: (h) async {
+          pings++;
+          return false;
+        },
+        devMode: () => false,
+        terminateTree: (pid) async => treeKilled.add(pid),
+        delay: (_) async {},
+        spawnHost: () async {
+          spawns++;
+          return _host(port: 8888);
+        },
+      );
+      final h = await c.ensureHost();
+      expect(h.controlPort, 8888);
+      expect(spawns, 1);
+      expect(treeKilled, [100]);
+      // Bounded: the grace window must not turn into an unbounded retry loop.
+      expect(pings, 3);
+    },
+  );
+
+  test('a dead PID spends no grace window on retries', () async {
+    var pings = 0;
+    final c = HostController(
+      readHost: () async => _host(pid: 1),
+      pidAlive: (pid) async => false,
+      ping: (h) async {
+        pings++;
+        return false;
+      },
+      delay: (_) async {},
+      spawnHost: () async => _host(port: 7777),
+    );
+    final h = await c.ensureHost();
+    expect(h.controlPort, 7777);
+    // One ping, then the PID probe ends it — a corpse will never answer, and
+    // waiting on it only delays the respawn that IS the recovery.
+    expect(pings, 1);
+  });
+
+  test(
     'dev mode respawns a healthy prior-run host (stale bridge code)',
     () async {
       var spawns = 0;

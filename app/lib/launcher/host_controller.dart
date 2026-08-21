@@ -172,6 +172,20 @@ class HostController {
   DateTime? _verifiedAt;
   static const _verifyTtl = Duration(seconds: 3);
 
+  /// How many CONSECUTIVE failed liveness pings condemn a host whose process is
+  /// still alive, and how long to wait between them. One failed ping does not
+  /// mean wedged: the bridge is a single-threaded bun process, so any burst of
+  /// synchronous work on its event loop (a project open walks the file tree of
+  /// the repo AND every managed worktree) stops it accept()ing on the loopback
+  /// control plane for as long as the burst runs. Reaping on the first miss
+  /// killed a HEALTHY host mid-open, and the respawn tore down the very session
+  /// the user was starting — it failed with "SessionsService disposed" via
+  /// hostRestartRebindProvider. Cheap to be patient: this only runs once the
+  /// PID is known alive, and every attempt is bounded by projectList's own 2s
+  /// timeout, so a genuinely wedged host still dies inside the grace window.
+  static const _wedgeConfirmations = 3;
+  static const _wedgeRetryDelay = Duration(milliseconds: 500);
+
   // --- Supervision -------------------------------------------------------
   // A host we spawned can die on its own (bridge crash, OOM, user kills it in
   // Task Manager). Without supervision that is silent to the desktop user until
@@ -293,6 +307,22 @@ class HostController {
     if (disc == null) return null;
     if (!await _ping(disc)) return null;
     return disc;
+  }
+
+  /// [_ping] with the [_wedgeConfirmations] grace window: true as soon as any
+  /// attempt answers. Only [_ensureHostInner] uses it — the verdict there is
+  /// "kill this process tree", so it has to be sure. [peekHost] stays a single
+  /// ping (best-effort, nothing dies on a false) and so does the spawn
+  /// readiness poll (already its own loop under a deadline).
+  Future<bool> _pingWithGrace(HostFile host) async {
+    for (var attempt = 1; ; attempt++) {
+      if (await _ping(host)) return true;
+      if (attempt >= _wedgeConfirmations) return false;
+      // A dead process will never answer, so spending the window on it would
+      // only delay the respawn that IS the recovery.
+      if (!await _pidAlive(host.pid)) return false;
+      await _delay(_wedgeRetryDelay);
+    }
   }
 
   /// Drop the verified-host cache so the next [ensureHost] re-probes (and
@@ -521,7 +551,9 @@ class HostController {
       // Ping first: a token-authenticated answer proves the host is alive AND
       // ours (the token gates `/control`), so we attach without the ~50-200ms
       // Windows `tasklist` probe — which now runs only on the ping-fail path.
-      if (await _ping(disc)) {
+      // A healthy host answers on the first attempt, so the grace window costs
+      // this path nothing.
+      if (await _pingWithGrace(disc)) {
         // A host stamped with a different build than ours belongs to another
         // install of the app — on Windows, the overwhelmingly common way to get
         // one is a Store update that replaced the app while its host survived
@@ -585,10 +617,14 @@ class HostController {
         _setStatus(HostStatus(HostPhase.up, generation: _spawnGeneration));
         return _markVerified(disc);
       }
-      // Ping failed: probe the PID to tell a wedged host (alive → reap before
-      // respawn) from a stale dead one.
+      // Every ping in the grace window failed: probe the PID to tell a wedged
+      // host (alive → reap before respawn) from a stale dead one.
       if (await _pidAlive(disc.pid)) {
-        _log('unhealthy host pid=${disc.pid}; terminating before respawn');
+        _log(
+          'unhealthy host pid=${disc.pid} '
+          '($_wedgeConfirmations consecutive failed pings); '
+          'terminating before respawn',
+        );
         // Reaping our own wedged host is a deliberate exit — the respawn below
         // IS the recovery, so supervision must not schedule a second one. Keep
         // any pending restart alive: this ensureHost may BE that restart.

@@ -1,5 +1,5 @@
 import chokidar, { type FSWatcher } from "chokidar";
-import { relative, extname, basename, join } from "node:path";
+import { relative, extname, basename, join, isAbsolute } from "node:path";
 import { statSync, watch as fsWatch, type FSWatcher as NodeFSWatcher } from "node:fs";
 import { logger } from "./logger";
 const log = logger.child({ component: "file-watcher" });
@@ -90,18 +90,23 @@ export class FileWatcher {
   }
 
   startWatching(): void {
-    // macOS: chokidar v5 watches each directory with its own non-recursive
-    // fs.watch() call, and on macOS every fs.watch() is a distinct libuv
-    // FSEventStream. On a large repo that storm of per-directory FSEventStream
-    // create/start/stop calls saturates the CoreServices FSEvents thread and
-    // contends the allocator lock with bun's main JS thread, freezing the host
-    // event loop for tens of seconds — long enough that the loopback control
-    // socket is never accept()ed and the app's first project open times out
-    // (the macOS cold-open hang). Node's recursive fs.watch uses a SINGLE
-    // recursive FSEventStream regardless of tree size, sidestepping the storm.
+    // chokidar v5 watches each directory with its own non-recursive fs.watch(),
+    // and on both macOS and Windows that per-directory call is expensive enough
+    // that the walk freezes bun's single JS thread for tens of seconds on a
+    // large repo: on macOS every fs.watch() is a distinct libuv FSEventStream,
+    // so the create/start/stop storm saturates the CoreServices FSEvents thread
+    // and contends the allocator lock; on Windows each opens its own directory
+    // handle and ReadDirectoryChangesW subscription. A project open starts one
+    // watcher per checkout — the repo plus every managed worktree — so the cost
+    // multiplies. Measured on Windows over one repo + five worktrees: ~10.9s of
+    // uninterrupted block, against the 2s `project:list` liveness ping in
+    // HostController — so the app reaps a HEALTHY host mid-open and the session
+    // start that triggered the open dies with "SessionsService disposed".
+    // Node's recursive fs.watch uses a SINGLE OS-level subscription regardless
+    // of tree size (~15ms for those same six roots), sidestepping the storm.
     // Recursive mode is supported only on macOS and Windows; Linux keeps
     // chokidar (its inotify-per-dir backend doesn't have this cost).
-    if (process.platform === "darwin") {
+    if (process.platform === "darwin" || process.platform === "win32") {
       this.startNativeRecursiveWatch();
       return;
     }
@@ -146,13 +151,23 @@ export class FileWatcher {
         { recursive: true, persistent: true },
         (_event, filename) => {
           if (filename == null) return;
-          // filename is relative to projectRoot (string under the default
-          // encoding; String() also covers a Buffer if the platform yields one).
-          const rel = String(filename).replace(/\\/g, "/");
-          if (!rel || rel === ".") return;
-          // The recursive stream sees the whole tree (FSEvents can't prune at
-          // the OS level); apply the same ignore rules chokidar's `ignored`
-          // would, so node_modules/build/etc. churn is dropped cheaply here.
+          // Usually relative to projectRoot (String() also covers a Buffer if
+          // the platform yields one) — but Windows also delivers the ABSOLUTE
+          // watched root for events on the directory itself, so re-derive
+          // rather than trust it.
+          const raw = String(filename);
+          const rel = (isAbsolute(raw) ? relative(this.projectRoot, raw) : raw)
+            .replace(/\\/g, "/");
+          // `ignore` THROWS on a path that isn't root-relative instead of
+          // answering, and this callback runs on a libuv event with no caller
+          // to catch it — an unhandled RangeError that takes the watcher down
+          // (the chokidar path guards the same way for the same reason). The
+          // root itself and anything above it are honestly "not ignored", but
+          // there is also nothing under them to report.
+          if (!rel || rel === "." || rel === ".." || rel.startsWith("../")) return;
+          // The recursive stream sees the whole tree (the OS can't prune at the
+          // subscription level); apply the same ignore rules chokidar's
+          // `ignored` would, so node_modules/build/etc. churn is dropped here.
           if (this.ig.ignores(rel)) return;
           this.onNativeChange(join(this.projectRoot, rel));
         },
