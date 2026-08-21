@@ -98,7 +98,7 @@ describe("session:* messages", () => {
       requestId: "r1",
       sessions: [{
         id: "s1", name: "Session 1",
-        createdAt: 1, lastUsedAt: 2, archived: false, running: true, mode: "terminal" as const,
+        createdAt: 1, lastUsedAt: 2, archived: false, running: true, deleting: false, mode: "terminal" as const,
         agentSessionResumable: true,
         checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const,
       }],
@@ -129,10 +129,10 @@ describe("session:* messages", () => {
   it("session:result and session:updated roundtrip", () => {
     const result = createMessage("session:result", {
       requestId: "r", ok: true,
-      session: { id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, mode: "terminal" as const, agentSessionResumable: true, checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const },
+      session: { id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, deleting: false, mode: "terminal" as const, agentSessionResumable: true, checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const },
     });
     const updated = createMessage("session:updated", {
-      sessions: [{ id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, mode: "terminal" as const, agentSessionResumable: true, checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const }],
+      sessions: [{ id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, deleting: false, mode: "terminal" as const, agentSessionResumable: true, checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const }],
     });
     expect(AbMessageSchema.safeParse(JSON.parse(JSON.stringify(result))).success).toBe(true);
     expect(AbMessageSchema.safeParse(JSON.parse(JSON.stringify(updated))).success).toBe(true);
@@ -163,7 +163,7 @@ describe("session:* messages", () => {
   it("session entry schema accepts an optional command", () => {
     const entry = {
       id: "s1", name: "n", createdAt: 1, lastUsedAt: 1,
-      archived: false, running: false, command: "my-agent --serve", mode: "terminal" as const,
+      archived: false, running: false, deleting: false, command: "my-agent --serve", mode: "terminal" as const,
       agentSessionResumable: true,
       checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const,
     };
@@ -178,7 +178,7 @@ describe("session:* messages", () => {
   it("session entry schema accepts optional native agent metadata", () => {
     const entry = {
       id: "s1", name: "n", createdAt: 1, lastUsedAt: 1,
-      archived: false, running: false, mode: "terminal" as const,
+      archived: false, running: false, deleting: false, mode: "terminal" as const,
       agentSessionResumable: true,
       agentSessionId: "cop-1",
       agentTranscriptPath: "/tmp/copilot-transcript.json",
@@ -227,6 +227,38 @@ describe("session:* messages", () => {
     if (parsed?.type === "session:list:result") {
       expect(parsed.sessions[0]?.agentSessionResumable).toBe(true);
     }
+  });
+
+  // An older bridge omits the field entirely. Reading that as "not deleting" is
+  // the only safe direction: the opposite leaves every row from such a bridge
+  // showing a pending affordance nothing will ever clear.
+  it("deleting defaults to false when absent", () => {
+    const entry = {
+      id: "s1", name: "n", createdAt: 1, lastUsedAt: 1,
+      archived: false, running: false, mode: "terminal" as const,
+    };
+    const raw = {
+      id: "0f4b2a1c-9d3e-4f7a-8b6c-1e2d3f4a5b6c", timestamp: Date.now(),
+      type: "session:list:result", requestId: "r", sessions: [entry],
+    };
+    const parsed = parseMessage(JSON.stringify(raw));
+    expect(parsed?.type).toBe("session:list:result");
+    if (parsed?.type === "session:list:result") {
+      expect(parsed.sessions[0]?.deleting).toBe(false);
+    }
+  });
+
+  it("deleting survives the roundtrip when the bridge sets it", () => {
+    const entry = {
+      id: "s1", name: "n", createdAt: 1, lastUsedAt: 1,
+      archived: false, running: false, deleting: true, mode: "terminal" as const,
+      agentSessionResumable: true,
+      checkoutId: "c1", checkoutKind: "managed-worktree" as const, checkoutState: "ready" as const,
+    };
+    const msg = createMessage("session:list:result", { requestId: "r", sessions: [entry] });
+    const parsed = parseMessage(JSON.stringify(msg));
+    if (parsed?.type !== "session:list:result") throw new Error("expected session:list:result");
+    expect(parsed.sessions[0]?.deleting).toBe(true);
   });
 });
 

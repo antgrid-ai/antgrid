@@ -50,7 +50,13 @@ export type WorktreeErrorCode =
   | "WORKTREE_MISSING"
   | "WORKTREE_DIRTY"
   | "WORKTREE_UNPUSHED"
-  | "WORKTREE_DELETE_FAILED";
+  | "WORKTREE_DELETE_FAILED"
+  // Raised by SessionManager, not this file: the delete flag's lifetime must be
+  // exactly one operation, so a second delete (or a start) against a session
+  // already being removed is refused rather than allowed to race it. The app has
+  // no copy arm for this code and falls through to `error.message`, so the text
+  // must read as a sentence to the user.
+  | "WORKTREE_DELETE_IN_PROGRESS";
 
 export class WorktreeError extends Error {
   constructor(readonly code: WorktreeErrorCode, message: string) {

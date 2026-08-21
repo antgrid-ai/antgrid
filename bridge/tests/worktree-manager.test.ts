@@ -234,7 +234,7 @@ describe("WorktreeManager", () => {
     expect(await restarted.inspect(two.id)).toMatchObject({ exists: true, registered: true, dirty: true });
     await restarted.remove({ checkoutId: one.id, force: true, deleteBranch: false });
     await restarted.remove({ checkoutId: two.id, force: true, deleteBranch: false });
-  });
+  }, 30000);
 
   test("reports missing and locked worktrees without auto-unlocking", async () => {
     const instance = manager();

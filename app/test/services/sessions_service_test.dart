@@ -1,4 +1,7 @@
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import 'package:antgrid/services/session_delete_policy.dart';
 
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/sessions_service.dart';
@@ -282,7 +285,7 @@ void main() {
     });
   });
 
-  test('delete completes true on success', () async {
+  test('delete completes deleted on success', () async {
     final t = FakeAgentTransport();
     final session = await makeSession(t);
     final cache = await CachedSessionsStore.open();
@@ -293,7 +296,7 @@ void main() {
     final sent = t.sent.firstWhere((m) => m['type'] == 'session:delete');
     t.emit('session:result', {'requestId': sent['requestId'], 'ok': true});
 
-    expect(await future, isTrue);
+    expect(await future, SessionDeleteAck.deleted);
 
     await svc.dispose();
     await session.close();
@@ -381,20 +384,26 @@ void main() {
     }
 
     test('replays the last declared focus', () async {
-      expect(await focusIdsAfter((svc) {
-        svc.focus('sess-1');
-        svc.resyncFocus();
-      }), ['sess-1', 'sess-1']);
+      expect(
+        await focusIdsAfter((svc) {
+          svc.focus('sess-1');
+          svc.resyncFocus();
+        }),
+        ['sess-1', 'sess-1'],
+      );
     });
 
     test('replays the CURRENT focus, not the first one', () async {
       // A reconnect owes the bridge what is on screen now, not the session the
       // user opened when the project was first warmed.
-      expect(await focusIdsAfter((svc) {
-        svc.focus('sess-1');
-        svc.focus('sess-2');
-        svc.resyncFocus();
-      }), ['sess-1', 'sess-2', 'sess-2']);
+      expect(
+        await focusIdsAfter((svc) {
+          svc.focus('sess-1');
+          svc.focus('sess-2');
+          svc.resyncFocus();
+        }),
+        ['sess-1', 'sess-2', 'sess-2'],
+      );
     });
 
     test('says nothing when this client never named a session', () async {
@@ -403,4 +412,63 @@ void main() {
       expect(await focusIdsAfter((svc) => svc.resyncFocus()), isEmpty);
     });
   });
+
+  // The bridge's removal work is unbounded (measured 12.5s and 14.2s), so
+  // silence cannot mean failure — and must not be called one at 15s, which a
+  // successful delete routinely outlives.
+  test('an unanswered delete is accepted, and stays silent past 15s', () async {
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    final cache = await CachedSessionsStore.open();
+    final svc = SessionsService.fromSession(session, cache: cache);
+
+    fakeAsync((async) {
+      Object? outcome;
+      svc
+          .delete('sess-1')
+          .then<void>((v) => outcome = v, onError: (Object e) => outcome = e);
+
+      async.elapse(const Duration(seconds: 20));
+      async.flushMicrotasks();
+      expect(
+        outcome,
+        isNull,
+        reason: 'a delete this slow is still in progress',
+      );
+
+      async.elapse(kSessionDeleteAckTimeout);
+      async.flushMicrotasks();
+      expect(outcome, SessionDeleteAck.accepted);
+    });
+
+    await svc.dispose();
+    await session.close();
+  });
+
+  // The backstop de-registers the pending entry, which is why a late refusal
+  // has no future left to fail. It still has to reach the user: _handleResult
+  // writes the reason onto the state before it looks the entry up, and
+  // OperationalErrorToaster listens there.
+  test(
+    'a refusal with no pending entry left still lands on the state',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final cache = await CachedSessionsStore.open();
+      final svc = SessionsService.fromSession(session, cache: cache);
+
+      t.emit('session:result', {
+        'requestId': 'long-gone',
+        'ok': false,
+        'errorCode': 'WORKTREE_DELETE_FAILED',
+        'error': 'Could not remove the worktree.',
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.error, 'Could not remove the worktree.');
+
+      await svc.dispose();
+      await session.close();
+    },
+  );
 }

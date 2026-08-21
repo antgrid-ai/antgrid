@@ -55,11 +55,31 @@ describe("TerminalManager", () => {
     manager.spawn({ terminalId: "t1" });
     await new Promise((r) => setTimeout(r, 100));
 
-    manager.kill("t1");
+    // Fire-and-forget: callers signal from message handlers and must not be
+    // made to wait on the reaping. Also the proof that the deferred handle
+    // kill still lands — the PTY exits without anyone awaiting anything.
+    expect(manager.kill("t1")).toBeUndefined();
     await new Promise((r) => setTimeout(r, 500));
 
     const exited = messages.find((m) => m.type === "terminal:exited");
     expect(exited).toBeDefined();
+  });
+
+  test("killAndAwaitTree is a no-op for an unknown terminal", async () => {
+    await expect(manager.killAndAwaitTree("nope")).resolves.toBeUndefined();
+  });
+
+  test("a killed session's exit cannot evict its same-id replacement", async () => {
+    manager.spawn({ terminalId: "t1" });
+    await new Promise((r) => setTimeout(r, 100));
+
+    manager.kill("t1");
+    manager.spawn({ terminalId: "t1" });
+    // Long enough for the dead PTY's exit to land on the new session's slot.
+    await new Promise((r) => setTimeout(r, 800));
+
+    expect(manager.has("t1")).toBe(true);
+    manager.killAll();
   });
 
   test("multiple terminals run independently", async () => {

@@ -1,6 +1,6 @@
 import { spawn as ptySpawn } from "bun-pty";
 import type { IPty, IDisposable } from "bun-pty";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { delimiter, dirname, extname } from "node:path";
 import { logger } from "./logger";
@@ -82,15 +82,27 @@ export function processGroupSpawn(platform: NodeJS.Platform = process.platform):
  * the signal is then a harmless ESRCH that quietly reaches nothing. That is why
  * callers spawning outside a PTY must pass `processGroupSpawn()`.
  *
- * Synchronous on Windows because the session delete that awaits teardown has to
- * see the handles actually released, not merely requested.
+ * The kill is issued synchronously on both platforms; only the WAITING is
+ * deferred. The promise resolves once taskkill has exited, so a caller that
+ * needs the handles actually released before Git sweeps the directory awaits
+ * it, while a caller that only needs the signal issued ignores it and leaves
+ * the event loop free — which is the difference between a delete that streams
+ * progress and one that goes dark for seconds. The Windows ordering survives
+ * that because the ordering is between the two KILLS, not between the waits:
+ * whoever kills the leader chains onto this promise rather than firing beside
+ * it. The exit-waiter path is likewise unaffected — `taskkill /T` takes the
+ * leader too, so the PTY's exit handler fires from taskkill's own kill and the
+ * chained handle kill is only a fallback.
+ *
+ * It never rejects. Most callers fire and forget, and a rejection there is an
+ * unhandled rejection for every ordinary terminal close.
  *
  * Exported because PTYs are not the only thing a checkout's runtime leaves
  * running: `command:run` children are spawned through a shell, so killing the
  * process handle alone reaches the wrapper and nothing under it.
  */
-export function killProcessTree(pid: number): void {
-  if (!Number.isInteger(pid) || pid <= 0) return;
+export function killProcessTree(pid: number): Promise<void> {
+  if (!Number.isInteger(pid) || pid <= 0) return Promise.resolve();
   if (process.platform !== "win32") {
     try {
       process.kill(-pid, "SIGKILL");
@@ -98,18 +110,53 @@ export function killProcessTree(pid: number): void {
       // No group carries this id, so there is nothing here that the caller's
       // own kill of the leader does not already reach.
     }
-    return;
+    return Promise.resolve();
   }
-  try {
-    execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)], {
-      timeout: 5_000,
-      stdio: "ignore",
-      windowsHide: true,
-    });
-  } catch {
-    // Already gone, never started, or refused: `kill()` still signals the
-    // leader afterwards, and a delete that goes on to fail reports why.
+  return new Promise<void>((resolve) => {
+    // Resolves on success, failure and timeout alike: already gone, never
+    // started, or refused all leave the caller's own kill of the leader as the
+    // next step, and a delete that goes on to fail reports why.
+    execFile(
+      "taskkill",
+      ["/F", "/T", "/PID", String(pid)],
+      { timeout: 5_000, windowsHide: true },
+      () => resolve(),
+    );
+  });
+}
+
+/** A spawned child reachable by `killChildTree`: `ChildProcess` satisfies it. */
+export interface KillableChild {
+  readonly pid?: number;
+  kill(): unknown;
+}
+
+/**
+ * Kill a spawned command and everything under it, handle last.
+ *
+ * `command:run` spawns with `shell: true`, so the handle a caller holds is the
+ * `cmd.exe`/`sh` wrapper and the real command lives beneath it with its cwd
+ * inside the checkout. Killing the wrapper alone leaves that child holding the
+ * very directory `git worktree remove` is about to delete.
+ */
+export function killChildTree(proc: KillableChild): Promise<void> {
+  if (proc.pid === undefined) {
+    try {
+      proc.kill();
+    } catch {
+      // Same contract as the chained branch below: callers collect these into
+      // a Promise.all and a throw here would abort the loop that is still
+      // issuing the remaining kills.
+    }
+    return Promise.resolve();
   }
+  return killProcessTree(proc.pid).then(() => {
+    try {
+      proc.kill();
+    } catch {
+      // The tree kill usually took this handle too; it is a fallback.
+    }
+  });
 }
 
 /**
@@ -338,6 +385,7 @@ export class TerminalSession {
 
   private pty: IPty | null = null;
   private disposables: IDisposable[] = [];
+  private treeKilledPromise: Promise<void> = Promise.resolve();
 
   // Output batching — collect chunks, join on flush
   private batchChunks: string[] = [];
@@ -661,11 +709,28 @@ export class TerminalSession {
     }
   }
 
+  /** Resolves once this session's process tree is gone — see `killProcessTree`
+   *  for who needs to wait and why. Already-resolved before any `kill()`. */
+  get treeKilled(): Promise<void> {
+    return this.treeKilledPromise;
+  }
+
   kill(): void {
+    // Stays void: nearly every caller fires this from a message handler and the
+    // signal, not the reaping, is what they are asking for.
     this._running = false;
     this.flushBatch();
-    const pid = this.pty?.pid;
-    if (pid !== undefined) killProcessTree(pid);
-    this.pty?.kill();
+    // Captured before the chain so a later respawn reassigning `this.pty`
+    // cannot redirect the deferred handle kill at the new PTY.
+    const pty = this.pty;
+    if (!pty) return;
+    this.treeKilledPromise = killProcessTree(pty.pid).then(() => {
+      try {
+        pty.kill();
+      } catch {
+        // On Windows `taskkill /T` normally reaped the leader already, so this
+        // lands on a dead handle by design rather than by accident.
+      }
+    });
   }
 }

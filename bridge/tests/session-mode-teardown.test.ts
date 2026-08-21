@@ -48,6 +48,7 @@ function makeCore(dir: string, opts: CoreOpts = {}) {
       return cfg.terminalId!;
     },
     kill: (_id: string) => { order.push("pty-kill"); },
+    treeKilled: () => Promise.resolve(),
     has: (id: string) => live.has(id),
   };
 

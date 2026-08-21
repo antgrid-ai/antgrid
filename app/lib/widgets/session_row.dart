@@ -11,6 +11,7 @@ import '../design/ab_status_tone.dart';
 import '../design/ab_tokens.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
+import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_status_dot.dart';
@@ -24,6 +25,7 @@ import '../providers/chat_composer_drafts.dart';
 import '../providers/open_checkout.dart';
 import '../providers/project_work_status.dart';
 import '../providers/providers.dart';
+import '../providers/session_delete_pending.dart';
 import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
 import '../services/control_plane_client.dart';
@@ -33,6 +35,7 @@ import '../util/external_open_target.dart';
 import 'agent_work_status_dot.dart';
 import 'drawer_entry_row.dart' show activateDrawerEntryById, ensureRemoteOnline;
 import 'session_delete_flow.dart';
+import 'session_deleting_badge.dart';
 import 'session_isolation_badge.dart';
 import 'session_rename_dialog.dart';
 import 'session_start_refusal.dart';
@@ -144,10 +147,11 @@ class _SessionRowState extends ConsumerState<SessionRow> {
     }
   }
 
-  /// The leading indicator. Work status owns the slot whenever the agent has
-  /// something to say about THIS session (working / needs you / error /
-  /// unread) — it is the same dot the Recent list shows, so one session's state
-  /// reads identically wherever it surfaces.
+  /// The leading indicator. A delete in flight owns the slot outright; then
+  /// work status owns it whenever the agent has something to say about THIS
+  /// session (working / needs you / error / unread) — it is the same dot the
+  /// Recent list shows, so one session's state reads identically wherever it
+  /// surfaces.
   ///
   /// At rest the dot says nothing at all: the same hollow idle ring whether the
   /// session is running or stopped. Running used to fill it in the accent, which
@@ -156,8 +160,19 @@ class _SessionRowState extends ConsumerState<SessionRow> {
   /// dot in the sidebar was the one you were already looking at. Liveness is not
   /// a status: what the row exists to report is what the agent wants from you,
   /// and a session at rest wants nothing.
-  Widget _leadingDot(AgentWorkStatus work) {
+  Widget _leadingDot(AgentWorkStatus work, {required bool deleting}) {
     final key = ValueKey('session-status-dot-${session.id}');
+    // Outranks both arms below: work status is about what a live agent is
+    // doing, and this one is being taken apart.
+    if (deleting) {
+      return AbLoadingDot(
+        key: ValueKey('session-deleting-dot-${session.id}'),
+        // One step up from the status dot it replaces: the pulse spends most of
+        // its cycle smaller than its nominal size, so matching dotSizeSm would
+        // read as a fainter indicator than the one it took over from.
+        size: AbTokens.dotSizeMd,
+      );
+    }
     if (work != AgentWorkStatus.done) {
       return AgentWorkStatusDot(key: key, status: work);
     }
@@ -205,6 +220,17 @@ class _SessionRowState extends ConsumerState<SessionRow> {
         session.running &&
         ref.watch(projectSessionRegistryProvider).contains(widget.entryId);
 
+    final deleting = sessionDeleteInFlight(ref, widget.entryId, session);
+    if (deleting && _editing) {
+      // The rename target is going away. Leave edit mode after this frame (a
+      // setState during build is illegal) and render the plain title now;
+      // `_commitEdit`'s `!_editing` guard is what stops the resulting focus loss
+      // from sending a rename at a dead session.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _exitEdit();
+      });
+    }
+
     // Split the gutter: half on the outer Padding (still keeps L/R strips
     // non-hover-reactive), half inside the row as horizontalPadding so the
     // selection fill gets breathing room before the status dot without
@@ -227,13 +253,13 @@ class _SessionRowState extends ConsumerState<SessionRow> {
             // centre of the text.
             child: Align(
               alignment: const Alignment(0, _dotOpticalYBias),
-              child: _leadingDot(work),
+              child: _leadingDot(work, deleting: deleting),
             ),
           ),
           // Row height is anchored by the always-reserved kebab slot (taller
           // than the text line), so swapping the title for the field doesn't
           // change the height; the field expands to the full title width.
-          title: _editing
+          title: (_editing && !deleting)
               ? _buildEditor()
               : Row(
                   children: [
@@ -245,19 +271,25 @@ class _SessionRowState extends ConsumerState<SessionRow> {
                       ),
                     ),
                     SessionIsolationBadge(session: session),
+                    SessionDeletingBadge(deleting: deleting),
                   ],
                 ),
           // Hover-only kebab kept in the tree (and its size reserved) so the
           // row height never jitters — including while editing, when it's
           // hidden but its slot still anchors the row's height.
+          // Hidden entirely while deleting rather than partly disabled: every
+          // item on it (start/stop/rename/archive/delete, and the
+          // working-directory rows pointing into a checkout that is going away)
+          // acts on a session being removed.
           trailing: Visibility(
-            visible: _hovered && !_editing,
+            visible: _hovered && !_editing && !deleting,
             maintainState: true,
             maintainAnimation: true,
             maintainSize: true,
             child: _SessionMenu(entryId: widget.entryId, session: session),
           ),
           selected: selected,
+          enabled: !deleting,
           selectionStyle: AbRowSelection.surface,
           hoverable: true,
           density: AbRowDensity.sm,
@@ -266,7 +298,7 @@ class _SessionRowState extends ConsumerState<SessionRow> {
           // Small vertical margin so adjacent rows don't touch.
           margin: const EdgeInsets.symmetric(vertical: 1),
           // Disable activation while editing so taps stay in the field.
-          onTap: _editing
+          onTap: (_editing || deleting)
               ? null
               : () => detached(
                   'SessionRow',
@@ -276,7 +308,7 @@ class _SessionRowState extends ConsumerState<SessionRow> {
           // Desktop: double-tap a running session (in any warm project) to
           // rename it inline. The row's SerialTap recognizer keeps single-tap
           // selection instant, so wiring this on many rows costs no latency.
-          onDoubleTap: (isMobilePlatform || _editing || !canRename)
+          onDoubleTap: (isMobilePlatform || _editing || deleting || !canRename)
               ? null
               : _enterEdit,
         ),
@@ -663,6 +695,7 @@ class _SessionMenu extends ConsumerWidget {
     SessionsService service,
   ) async {
     final capturedId = session.id;
+    final markKey = sessionDeleteKey(entryId, capturedId);
     final result = await confirmAndDeleteSession(
       context: context,
       sessionName: session.name,
@@ -671,6 +704,14 @@ class _SessionMenu extends ConsumerWidget {
           'This permanently deletes "${session.name}" and terminates its agent process.',
       delete: ({force, deleteBranch}) =>
           service.delete(capturedId, force: force, deleteBranch: deleteBranch),
+      onInFlight: (inFlight) {
+        final marks = ref.read(sessionDeleteRequestsProvider.notifier);
+        if (inFlight) {
+          marks.arm(markKey);
+        } else {
+          marks.disarm(markKey);
+        }
+      },
     );
     if (result == SessionDeleteResult.deleted) {
       clearChatComposerDraft(ref, capturedId);

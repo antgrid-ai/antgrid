@@ -10,8 +10,11 @@ class FakeAgentTransport implements AgentTransport {
   final _dropCtrl = StreamController<void>.broadcast();
   final List<Map<String, dynamic>> sent = [];
 
-  /// Recorded RPCs issued via [request], in order.
-  final List<({String method, Map<String, dynamic>? params})> requests = [];
+  /// Recorded RPCs issued via [request], in order. [timeout] is recorded too:
+  /// a verb that must override the transport default (sessions.delete) is only
+  /// testable from the caller's side.
+  final List<({String method, Map<String, dynamic>? params, Duration timeout})>
+  requests = [];
 
   /// Optional responder for [request]. When null, `request` throws
   /// `UnimplementedError` (preserving the prior default). Set it to simulate a
@@ -114,7 +117,7 @@ class FakeAgentTransport implements AgentTransport {
     Map<String, dynamic>? params,
     Duration timeout = const Duration(seconds: 10),
   }) async {
-    requests.add((method: method, params: params));
+    requests.add((method: method, params: params, timeout: timeout));
     final handler = requestHandler;
     if (handler == null) {
       throw UnimplementedError('FakeAgentTransport.request not implemented');

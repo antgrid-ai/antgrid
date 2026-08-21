@@ -7,6 +7,9 @@ import '../models/ab_message.dart';
 import '../project/project_session.dart';
 import '../storage/cached_sessions_store.dart';
 import 'pending_reply.dart';
+import 'session_delete_policy.dart';
+
+export 'session_delete_policy.dart' show SessionDeleteAck;
 
 /// Reply timeout for any pending `session:*` request. The agent should answer
 /// within milliseconds locally and ≤1 RTT over the relay; 15s is comfortably
@@ -102,7 +105,7 @@ class SessionsService {
   final Map<String, PendingReply<SessionEntry?>> _pendingRefusableMutations =
       {};
   final Map<String, PendingReply<SessionEntry?>> _pendingCreates = {};
-  final Map<String, PendingReply<bool>> _pendingDeletes = {};
+  final Map<String, PendingReply<SessionDeleteAck>> _pendingDeletes = {};
   final Map<String, PendingReply<SessionModeResult>> _pendingModeChanges = {};
 
   Stream<SessionsState> get stateStream => _stateController.stream;
@@ -218,7 +221,7 @@ class SessionsService {
     final deletePending = _pendingDeletes.remove(requestId);
     if (deletePending != null) {
       if (ok) {
-        deletePending.complete(true);
+        deletePending.complete(SessionDeleteAck.deleted);
       } else {
         deletePending.fail(SessionOperationException(errorCode, error));
       }
@@ -378,14 +381,32 @@ class SessionsService {
     return pending.future;
   }
 
-  Future<bool> delete(
+  /// Delete [id]. Three-way, and none of the three is "failed":
+  /// a bridge refusal raises [SessionOperationException] (the confirm ladder's
+  /// input), an `ok` reply completes [SessionDeleteAck.deleted], and no reply
+  /// at all completes [SessionDeleteAck.accepted] — see
+  /// [kSessionDeleteAckTimeout] for why silence cannot mean failure here.
+  ///
+  /// The lapse is converted at this call site rather than by teaching
+  /// [PendingReply] a second completion mode, so a disposal `StateError` from
+  /// [_failPending] still propagates: that transport is genuinely gone.
+  ///
+  /// [PendingReply.onTimeout] still de-registers the entry, and deliberately so
+  /// — a late `ok:false` is not lost by it. [_handleResult] writes the reason
+  /// onto [SessionsState.error] BEFORE it looks the pending entry up, and
+  /// `OperationalErrorToaster` toasts that for the focused project. What
+  /// de-registering drops is only the dead future.
+  Future<SessionDeleteAck> delete(
     String id, {
     bool? force,
     bool? removeCheckout,
     bool? deleteBranch,
   }) {
     final requestId = _newRequestId();
-    final pending = _newPending<bool>(() => _pendingDeletes.remove(requestId));
+    final pending = _newPending<SessionDeleteAck>(
+      () => _pendingDeletes.remove(requestId),
+      timeout: kSessionDeleteAckTimeout,
+    );
     _pendingDeletes[requestId] = pending;
     unawaited(
       _send(
@@ -398,7 +419,13 @@ class SessionsService {
         }),
       ),
     );
-    return pending.future;
+    return pending.future.catchError(
+      (_) => SessionDeleteAck.accepted,
+      // StateError alongside the lapse: `dispose()` fails everything pending,
+      // and a project switch mid-delete would otherwise surface as a generic
+      // "couldn't delete" toast for a removal the bridge is still running.
+      test: (e) => e is TimeoutException || e is StateError,
+    );
   }
 
   void focus(String id) {

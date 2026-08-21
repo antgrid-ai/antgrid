@@ -6,7 +6,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { logger } from "./logger";
 const log = logger.child({ component: "agent-core" });
 import { TerminalManager } from "./terminal-manager";
-import { killProcessTree, processGroupSpawn } from "./terminal-session";
+import { killChildTree, processGroupSpawn } from "./terminal-session";
 import { createConnState, type ConnState } from "./conn-state";
 import { FileWatcher } from "./file-watcher";
 import { FileUploadManager } from "./file-upload";
@@ -1285,16 +1285,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
   }
 
-  function teardownServices() {
+  async function teardownServices() {
+    const pending: Promise<void>[] = [];
     for (const runtime of checkoutRuntimes.values()) {
       for (const proc of runtime.runningCommands.values()) {
-        // Tree first: `command:run` spawns with `shell: true`, so the handle
-        // here is the `cmd.exe` wrapper and the real command lives under it
-        // with its cwd inside the checkout. Killing the wrapper alone leaves
-        // that child holding the very directory `git worktree remove` is
-        // about to delete — the same orphan `killProcessTree` exists for.
-        if (proc.pid !== undefined) killProcessTree(proc.pid);
-        proc.kill();
+        pending.push(killChildTree(proc));
       }
       runtime.runningCommands.clear();
       runtime.configController.stopWatch();
@@ -1326,6 +1321,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     antigravityTitleWatcher = null;
     void structured?.disposeAll();
     structured = null;
+    await Promise.all(pending);
   }
 
   // Outbound senders — initially no-op until a transport is attached.
@@ -1927,17 +1923,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   async function teardownCheckoutRuntime(checkoutId: string): Promise<void> {
     const runtime = checkoutRuntimes.runtime(checkoutId);
     if (!runtime || checkoutId === "main") return;
+    const pending: Promise<void>[] = [];
     for (const proc of runtime.runningCommands.values()) {
-      // Tree first: `command:run` spawns with `shell: true`, so the handle
-      // here is the `cmd.exe` wrapper and the real command lives under it
-      // with its cwd inside the checkout. Killing the wrapper alone leaves
-      // that child holding the very directory `git worktree remove` is
-      // about to delete — the same orphan `killProcessTree` exists for.
-      if (proc.pid !== undefined) killProcessTree(proc.pid);
-      proc.kill();
+      pending.push(killChildTree(proc));
     }
     runtime.runningCommands.clear();
-    for (const internalId of runtime.configuredTerminalIds.values()) manager?.kill(internalId);
+    for (const internalId of runtime.configuredTerminalIds.values()) {
+      if (manager) pending.push(manager.killAndAwaitTree(internalId));
+    }
+    // Synchronous stops run while the kills are in flight — they are the only
+    // holders left once the trees are gone.
     runtime.configController.stopWatch();
     runtime.fileWatcher?.stop();
     runtime.uploadManager?.stop();
@@ -1946,11 +1941,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     if (runtime.gitBranchInterval) clearInterval(runtime.gitBranchInterval);
     if (runtime.gitRefreshTimer) clearTimeout(runtime.gitRefreshTimer);
     runtime.gitRefreshTimer = null;
-    // After the timer is cleared, so nothing new can be scheduled behind this.
-    // The caller removes the worktree directly after us, and an abandoned
-    // `git status` still holding it as its cwd is what fails that removal on
-    // Windows — see [trackGitRefresh].
-    await awaitGitRefreshes(runtime);
+    // Both waits guard the same sweep, and both are placed after the timers are
+    // cleared so nothing new can be scheduled behind them: `deleteManaged` runs
+    // `git worktree remove` the moment this resolves, and on Windows either an
+    // abandoned `git status` still holding the checkout as its cwd (see
+    // [trackGitRefresh]) or a single surviving child of a killed terminal is
+    // enough to abort that sweep mid-tree and strand the session undeletable.
+    // This is the one place a tree kill must be WAITED on rather than issued.
+    await Promise.all([...pending, awaitGitRefreshes(runtime)]);
     dropCheckoutReplay(checkoutId);
     await checkoutRuntimes.remove(checkoutId);
   }
@@ -2637,16 +2635,40 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // lookup also covers a resumed managed session after an agent restart.
       if (CHECKOUT_VARIABLE_MESSAGE_TYPES.has(msg.type)) {
         const checkoutId = (msg as { checkoutId?: string }).checkoutId ?? "main";
+        // A checkout-scoped verb cannot simply skip its prepare while the
+        // checkout is being deleted: `runtimeFor` ends in `?? mainRuntime`, so a
+        // skipped prepare answers the request out of MAIN's working tree —
+        // reading, and for the write verbs editing, the wrong repository. It is
+        // refused instead, per frame like the UNKNOWN_CHECKOUT arm below, and
+        // logged: a silent refusal leaves a failed delete with no trace of what
+        // held the directory. Loopback is NOT exempt — a desktop driving its own
+        // machine is exactly what opened the watcher that broke the removal.
+        const refuseDeleting = (): boolean => {
+          if (sessions?.isCheckoutDeleting(checkoutId) !== true) return false;
+          log.warn("Refusing %s for checkout %s: its delete is in flight (project %s)", msg.type, checkoutId, project.id);
+          bus.publish(createMessage("control:result", {
+            ok: false,
+            verb: msg.type,
+            error: { code: "CHECKOUT_DELETING", message: "This session's workspace is being deleted." },
+            checkoutId,
+          }), channel);
+          return true;
+        };
+        if (refuseDeleting()) return;
         void checkoutRuntimes.resolve(checkoutId).then(async (checkout) => {
           if (!checkout) {
             log.warn("Rejecting %s for unknown checkout %s (project %s)", msg.type, checkoutId, project.id);
             bus.publish(createMessage("control:result", {
               ok: false,
+              verb: msg.type,
               error: { code: "UNKNOWN_CHECKOUT", message: "The requested checkout is not available." },
               checkoutId,
             }), channel);
             return;
           }
+          // Re-checked after the store lookup: a delete that started during that
+          // await would otherwise have its checkout re-prepared right here.
+          if (refuseDeleting()) return;
           if (checkoutId !== "main") await prepareCheckoutRuntime(checkout);
           handleAbMessage({ ...msg, checkoutId } as AbMessage, source);
         }).catch((error) => log.warn("Checkout lookup failed for %s: %s", checkoutId, error));
@@ -2669,12 +2691,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       isShuttingDown = true;
 
       apiServer?.stop();
+      // Before teardownServices, which force-kills through `killAll()` and then
+      // nulls `manager` — sequenced after it this could only ever see an empty
+      // map, so no session was ever asked to exit on its own and the line below
+      // reported 0 for a machine that had just killed a dozen agents.
+      const closed = manager ? await manager.killAllGracefully(5000) : 0;
       teardownServices();
       // After the timers are cleared, so nothing new can be scheduled behind
       // this — see [trackGitRefresh] for why an in-flight one has to be
       // waited out rather than abandoned.
       await Promise.all([...checkoutRuntimes.values()].map(awaitGitRefreshes));
-      const closed = manager ? await manager.killAllGracefully(5000) : 0;
 
       log.info("Antgrid Agent stopped. %d terminal(s) closed.", closed);
       return closed;

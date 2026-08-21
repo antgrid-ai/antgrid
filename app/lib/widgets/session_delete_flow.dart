@@ -5,13 +5,16 @@ import '../design/widgets/ab_snack_bar.dart';
 import '../services/sessions_service.dart';
 import 'ab_status_helpers.dart' show sessionRefusalCopy;
 
-/// Performs one delete attempt. Returns whether the session was deleted, and
-/// raises [SessionOperationException] for a typed refusal — that refusal is the
-/// confirm ladder's input, not a failure to report.
+/// Performs one delete attempt. Raises [SessionOperationException] for a typed
+/// refusal — that refusal is the confirm ladder's input, not a failure to
+/// report.
 typedef SessionDeleter =
-    Future<bool> Function({bool? force, bool? deleteBranch});
+    Future<SessionDeleteAck> Function({bool? force, bool? deleteBranch});
 
-enum SessionDeleteResult { deleted, cancelled, failed }
+/// [pending] is the bridge accepting the request without answering it yet. It
+/// is deliberately not [failed]: the removal is very likely still running, and
+/// the row's own pending state is the feedback the user gets.
+enum SessionDeleteResult { deleted, cancelled, failed, pending }
 
 /// The delete confirmation ladder, shared by every surface that deletes a
 /// session (the drawer kebab, the Recent list) so the same session can never be
@@ -28,6 +31,12 @@ enum SessionDeleteResult { deleted, cancelled, failed }
 /// about different consequences. It states consequences only: the ladder ends
 /// every arm on the same irreversibility sentence so no surface can forget it.
 ///
+/// [onInFlight] is called `true` immediately before each attempt and `false`
+/// when that attempt settles — EXCEPT for [SessionDeleteAck.accepted], where
+/// the mark must stay armed: an unanswered delete is still running, and the
+/// surface that armed it may be the only one that can show so (the Recent
+/// list's remote rows never receive the bridge's own flag).
+///
 /// [context] governs the DIALOGS and TOASTS only, never the outcome. Once the
 /// user has confirmed, the delete runs and its result is reported whether or not
 /// the calling row survived the await — a row rebuilt away mid-dialog is the
@@ -39,6 +48,7 @@ Future<SessionDeleteResult> confirmAndDeleteSession({
   required String checkoutKind,
   required String sharedBody,
   required SessionDeleter delete,
+  void Function(bool inFlight)? onInFlight,
 }) async {
   final (String title, String consequence) = switch (checkoutKind) {
     'main' => ('Delete session?', sharedBody),
@@ -69,10 +79,12 @@ Future<SessionDeleteResult> confirmAndDeleteSession({
   // uncommitted and unpushed work before removing anything.
   final String blockedBy;
   try {
-    return await delete()
-        ? SessionDeleteResult.deleted
-        : SessionDeleteResult.failed;
+    onInFlight?.call(true);
+    final ack = await delete();
+    if (ack == SessionDeleteAck.deleted) onInFlight?.call(false);
+    return _resultFor(ack);
   } on SessionOperationException catch (error) {
+    onInFlight?.call(false);
     final code = error.errorCode;
     if (code != 'WORKTREE_DIRTY' && code != 'WORKTREE_UNPUSHED') {
       if (context.mounted) _report(context, code, error.message);
@@ -80,10 +92,12 @@ Future<SessionDeleteResult> confirmAndDeleteSession({
     }
     blockedBy = code!;
   } catch (_) {
-    // A transport timeout or a disposed service is neither a refusal to ask
-    // about nor something to leave as an unhandled async error: this is the one
-    // place every surface's delete errors land, so the generic message belongs
-    // here rather than being re-solved per call site.
+    // A disposed service or a dead transport. A lapsed reply does not land
+    // here — it comes back as an ack. Neither a refusal to ask about nor
+    // something to leave as an unhandled async error: this is the one place
+    // delete errors land, so the generic message belongs here rather than being
+    // re-solved per call site.
+    onInFlight?.call(false);
     if (context.mounted) _report(context, null, null);
     return SessionDeleteResult.failed;
   }
@@ -115,17 +129,27 @@ Future<SessionDeleteResult> confirmAndDeleteSession({
 
   // Exactly one retry.
   try {
-    return await delete(force: true, deleteBranch: choice.optionSelected)
-        ? SessionDeleteResult.deleted
-        : SessionDeleteResult.failed;
+    onInFlight?.call(true);
+    final ack = await delete(force: true, deleteBranch: choice.optionSelected);
+    if (ack == SessionDeleteAck.deleted) onInFlight?.call(false);
+    return _resultFor(ack);
   } on SessionOperationException catch (error) {
+    onInFlight?.call(false);
     if (context.mounted) _report(context, error.errorCode, error.message);
     return SessionDeleteResult.failed;
   } catch (_) {
+    onInFlight?.call(false);
     if (context.mounted) _report(context, null, null);
     return SessionDeleteResult.failed;
   }
 }
+
+/// No toast for [SessionDeleteAck.accepted]: nothing failed, and the copy must
+/// never claim otherwise. The row's pending state is the whole report.
+SessionDeleteResult _resultFor(SessionDeleteAck ack) => switch (ack) {
+  SessionDeleteAck.deleted => SessionDeleteResult.deleted,
+  SessionDeleteAck.accepted => SessionDeleteResult.pending,
+};
 
 /// Guarded by a literal `context.mounted` at every call site rather than once in
 /// here: the analyzer recognises only the literal form, and folding the check

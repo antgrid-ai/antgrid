@@ -11,18 +11,19 @@ import 'package:antgrid/widgets/session_delete_flow.dart';
 typedef _Attempt = ({bool? force, bool? deleteBranch});
 
 /// A deleter that answers each attempt from [answers] in order and records what
-/// it was asked. An answer is either `true`/`false` or an exception to raise.
+/// it was asked. An answer is either a [SessionDeleteAck] or an exception to
+/// raise.
 class _Deleter {
   _Deleter(this.answers);
 
   final List<Object> answers;
   final attempts = <_Attempt>[];
 
-  Future<bool> call({bool? force, bool? deleteBranch}) async {
+  Future<SessionDeleteAck> call({bool? force, bool? deleteBranch}) async {
     attempts.add((force: force, deleteBranch: deleteBranch));
     final answer = answers[attempts.length - 1];
     if (answer is Exception) throw answer;
-    return answer as bool;
+    return answer as SessionDeleteAck;
   }
 }
 
@@ -52,6 +53,7 @@ Future<SessionDeleteResult> _run(
   required String checkoutKind,
   required _Deleter deleter,
   Future<void> Function(WidgetTester tester)? drive,
+  void Function(bool inFlight)? onInFlight,
 }) async {
   final result = confirmAndDeleteSession(
     context: context,
@@ -59,6 +61,7 @@ Future<SessionDeleteResult> _run(
     checkoutKind: checkoutKind,
     sharedBody: 'Shared-surface body.',
     delete: deleter.call,
+    onInFlight: onInFlight,
   );
   await tester.pumpAndSettle();
   if (drive != null) await drive(tester);
@@ -87,7 +90,7 @@ void main() {
     tester,
   ) async {
     final ctx = await _pumpHost(tester);
-    final deleter = _Deleter([true]);
+    final deleter = _Deleter([SessionDeleteAck.deleted]);
     final result = await _run(
       tester,
       ctx,
@@ -113,7 +116,7 @@ void main() {
       tester,
       ctx,
       checkoutKind: 'managed-worktree',
-      deleter: _Deleter([true]),
+      deleter: _Deleter([SessionDeleteAck.deleted]),
       drive: (t) async {
         expect(find.text('Delete isolated session?'), findsOneWidget);
         // The surface's own body survives verbatim — this arm may only ADD what
@@ -141,7 +144,7 @@ void main() {
       tester,
       ctx,
       checkoutKind: 'dev-container',
-      deleter: _Deleter([true]),
+      deleter: _Deleter([SessionDeleteAck.deleted]),
       drive: (t) async {
         expect(find.text('Delete isolated session?'), findsOneWidget);
         expect(
@@ -161,7 +164,7 @@ void main() {
     final ctx = await _pumpHost(tester);
     final deleter = _Deleter([
       const SessionOperationException('WORKTREE_DIRTY', 'dirty'),
-      true,
+      SessionDeleteAck.deleted,
     ]);
     final result = await _run(
       tester,
@@ -196,7 +199,7 @@ void main() {
     final ctx = await _pumpHost(tester);
     final deleter = _Deleter([
       const SessionOperationException('WORKTREE_UNPUSHED', 'unpushed'),
-      true,
+      SessionDeleteAck.deleted,
     ]);
     final result = await _run(
       tester,
@@ -299,7 +302,7 @@ void main() {
     tester,
   ) async {
     final ctx = await _pumpHost(tester);
-    final deleter = _Deleter([true]);
+    final deleter = _Deleter([SessionDeleteAck.deleted]);
     final result = await _run(
       tester,
       ctx,
@@ -309,5 +312,72 @@ void main() {
     );
     expect(result, SessionDeleteResult.cancelled);
     expect(deleter.attempts, isEmpty);
+  });
+
+  // An unanswered delete is still running on the bridge, so the ladder reports
+  // nothing and leaves the row's own pending state as the only feedback.
+  testWidgets('an accepted delete is pending, reported by nothing', (
+    tester,
+  ) async {
+    final ctx = await _pumpHost(tester);
+    final marks = <bool>[];
+    final result = await _run(
+      tester,
+      ctx,
+      checkoutKind: 'managed-worktree',
+      deleter: _Deleter([SessionDeleteAck.accepted]),
+      onInFlight: marks.add,
+      drive: (t) async => _tap(t, 'Delete'),
+    );
+    expect(result, SessionDeleteResult.pending);
+    expect(find.byType(SnackBar), findsNothing);
+    // Left armed on purpose: the Recent list's remote rows never receive the
+    // bridge's own flag, so this mark is their only pending signal.
+    expect(marks, [true]);
+  });
+
+  testWidgets('the in-flight mark is released by every settled outcome', (
+    tester,
+  ) async {
+    for (final answer in <Object>[
+      SessionDeleteAck.deleted,
+      const SessionOperationException('WORKTREE_MISSING', 'gone'),
+      Exception('transport gone'),
+    ]) {
+      final ctx = await _pumpHost(tester);
+      final marks = <bool>[];
+      await _run(
+        tester,
+        ctx,
+        checkoutKind: 'managed-worktree',
+        deleter: _Deleter([answer]),
+        onInFlight: marks.add,
+        drive: (t) async => _tap(t, 'Delete'),
+      );
+      expect(marks, [true, false], reason: '$answer');
+      await _dismissToast(tester);
+    }
+  });
+
+  testWidgets('cancelling the force question leaves nothing armed', (
+    tester,
+  ) async {
+    final ctx = await _pumpHost(tester);
+    final marks = <bool>[];
+    final result = await _run(
+      tester,
+      ctx,
+      checkoutKind: 'managed-worktree',
+      deleter: _Deleter([
+        const SessionOperationException('WORKTREE_DIRTY', 'dirty'),
+      ]),
+      onInFlight: marks.add,
+      drive: (t) async {
+        await _tap(t, 'Delete');
+        await _tap(t, 'Cancel');
+      },
+    );
+    expect(result, SessionDeleteResult.cancelled);
+    expect(marks, [true, false]);
   });
 }

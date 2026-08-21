@@ -223,7 +223,11 @@ const PersistedEntrySchema = z
       agentTranscriptPath: s.agentTranscriptPath,
       config: s.config,
       checkoutId: s.checkoutId ?? "main",
-      checkoutKind: s.checkoutKind ?? "main",
+      // Resolved together: a row whose checkoutId was lost (truncated write,
+      // hand edit) but whose kind survived would otherwise claim to be a
+      // managed worktree living in the primary tree, and the delete path would
+      // route it to deleteManaged with `main` as the checkout to reclaim.
+      checkoutKind: s.checkoutId ? (s.checkoutKind ?? "main") : "main",
       checkoutBranch: s.checkoutBranch,
       checkoutState: s.checkoutState ?? "ready",
     };
@@ -329,6 +333,15 @@ export class SessionManager {
    *  flips in flight on one session at once, so the first one to finish must not
    *  clear the protection the second is still relying on. */
   private flipping = new Map<string, number>();
+  /** Sessions whose managed delete is in flight, mapped to the checkout being
+   *  removed. Transient and in-memory: it never reaches `toPersisted`, so a
+   *  bridge that dies mid-delete comes back with an ordinary, deletable row
+   *  rather than one permanently pending. It is the single source for BOTH the
+   *  `deleting` wire flag and `isCheckoutDeleting` — one set, one lifetime, so
+   *  the flag an app saw and the refusal it then gets can never disagree.
+   *  Populated only by `deleteManaged`; any future checkout-removal path outside
+   *  this class must flag itself here or it goes unguarded. */
+  private readonly deleting = new Map<string, string>();
   // Memoized sessionResumable() answers, keyed by session id and tagged with the
   // agentSessionId they were computed for. toWire() runs per entry on every
   // changed() emit and the real check does existsSync + a bun:sqlite query, so
@@ -381,6 +394,24 @@ export class SessionManager {
     return false;
   }
 
+  /** Whether a delete is currently tearing this checkout down. The ONLY read
+   *  path for agent-core's dispatch guard: a checkout-variable verb answered
+   *  while its worktree is being removed either races the removal for the
+   *  directory (a sharing violation on Windows) or — worse — gets served from
+   *  main's tree by `runtimeFor`'s fallback. `main` can never be flagged: only
+   *  managed checkouts are deletable. */
+  isCheckoutDeleting(checkoutId: string): boolean {
+    // Asserted, not assumed: a row that answers `main` here would refuse every
+    // checkout-variable verb in the project — file reads, git, keystrokes —
+    // loopback included, for as long as the delete ran.
+    if (checkoutId === "main") return false;
+    if (this.deleting.size === 0) return false;
+    for (const id of this.deleting.values()) {
+      if (id === checkoutId) return true;
+    }
+    return false;
+  }
+
   /** Whether a work-status key belongs to the main checkout — i.e. whether a
    *  main-checkout branch switch can disturb it. An unknown key is main: the
    *  work reduction also files config `terminals:` slots and a project-wide
@@ -419,6 +450,9 @@ export class SessionManager {
       out.push({
         id: e.id, name: e.name, createdAt: e.createdAt, lastUsedAt: e.lastUsedAt,
         archived: e.archived, running: false,
+        // Like `running` above: the flag is in-memory on the warm core that owns
+        // the delete, and this peek has no core to ask.
+        deleting: false,
         tool: e.tool, command: e.command, args: e.args, mode: e.mode,
         // Optimistic, like `running: false` above: the peek has no live core,
         // and the real check needs the agent-store overrides only an instance
@@ -722,9 +756,31 @@ export class SessionManager {
     return true;
   }
 
+  /** Flag a session's delete as in flight and announce it. Emits without
+   *  persisting — `deleting` is runtime state that must never dirty
+   *  sessions.json — which is also why this is not `changed()`. */
+  private markDeleting(entry: PersistedEntry): void {
+    this.deleting.set(entry.id, entry.checkoutId);
+    this.notifyObservers();
+  }
+
+  /** Drop the flag, reporting whether it was actually set so the caller can
+   *  decide whether an emit is owed. Never emits itself: the success path rides
+   *  the emit that already follows the flush, while the failure paths need the
+   *  clear to land BEFORE they do anything else. */
+  private clearDeleting(sessionId: string): boolean {
+    return this.deleting.delete(sessionId);
+  }
+
   private async deleteManaged(entry: PersistedEntry, options: DeleteSessionOptions): Promise<boolean> {
     if (options.removeCheckout === false) {
       throw new WorktreeError("WORKTREE_CONFLICT", "An isolated session cannot be deleted without its managed worktree.");
+    }
+    // The flag has to cover exactly one operation. Two deletes racing on one
+    // session would have the first to finish clear it — re-opening the dispatch
+    // guard while the second is still tearing the directory down.
+    if (this.deleting.has(entry.id)) {
+      throw new WorktreeError("WORKTREE_DELETE_IN_PROGRESS", "This isolated session is already being deleted.");
     }
     const manager = this.opts.worktreeManager;
     if (!manager) throw new WorktreeError("WORKTREE_MISSING", "The isolated worktree manager is unavailable.");
@@ -734,15 +790,30 @@ export class SessionManager {
       // row is the only trace. Refusing here — which `inspect`'s
       // WORKTREE_MISSING would — makes that row permanently undeletable.
       if (this.tm.has(entry.id)) this.tm.kill(entry.id);
-      // Still torn down even though there is no worktree left to unlock: the
-      // checkout's `services:` PTYs, watcher and port detector outlive it, and
-      // once this row is gone nothing on the machine can name that checkoutId
-      // again. A no-op when no runtime was ever prepared.
-      await this.opts.teardownCheckoutRuntime?.(entry.checkoutId);
+      this.markDeleting(entry);
+      try {
+        // Still torn down even though there is no worktree left to unlock: the
+        // checkout's `services:` PTYs, watcher and port detector outlive it, and
+        // once this row is gone nothing on the machine can name that checkoutId
+        // again. A no-op when no runtime was ever prepared.
+        await this.opts.teardownCheckoutRuntime?.(entry.checkoutId);
+      } catch (error) {
+        if (this.clearDeleting(entry.id)) this.notifyObservers();
+        throw error;
+      }
       this.entries.delete(entry.id);
       this.resumableCache.delete(entry.id);
-      await this.flushNowOrThrow();
-      this.notifyObservers();
+      this.clearDeleting(entry.id);
+      // In a finally: the row is already gone from memory and the flag already
+      // cleared, so a flush that throws must not leave the app holding the
+      // `deleting: true` push as its newest view of a session the bridge has
+      // forgotten — that row is inert on every surface with nothing left to
+      // clear it.
+      try {
+        await this.flushNowOrThrow();
+      } finally {
+        this.notifyObservers();
+      }
       return true;
     }
     // First preflight gives the UI a non-destructive refusal. Kept in lockstep
@@ -755,34 +826,58 @@ export class SessionManager {
     if (state.unpushedCommits && !options.force) {
       throw new WorktreeError("WORKTREE_UNPUSHED", "The isolated worktree's branch has unpushed commits.");
     }
-    if (!await this.stopAndAwait(entry.id)) {
-      throw new WorktreeError("WORKTREE_DELETE_FAILED", "The session did not stop before its worktree could be removed.");
+    // Re-checked, not just checked on entry: the preflight above awaits two Git
+    // calls, and a second delete for the same session can arrive and mark
+    // during them. Nothing may await between here and markDeleting.
+    if (this.deleting.has(entry.id)) {
+      throw new WorktreeError("WORKTREE_DELETE_IN_PROGRESS", "This isolated session is already being deleted.");
     }
-    // BEFORE the removal, not after: the checkout's runtime holds the very
-    // directory Git is about to delete — auto-started `services:` PTYs run with
-    // their cwd inside it, and the file watcher keeps handles open. On Windows
-    // that turns `git worktree remove` into a sharing violation and the session
-    // becomes permanently undeletable. The runtime is rebuilt if Git refuses.
-    await this.opts.teardownCheckoutRuntime?.(entry.checkoutId);
+    // Flagged only past the preflight: those two refusals destroy nothing and
+    // the user can still answer them, so the row must not blink through a
+    // pending state on the way to a dialog.
+    this.markDeleting(entry);
     try {
-      // WorktreeManager repeats its Git-backed dirty/lock and registration checks
-      // immediately before removal, closing the race after the preflight.
-      await manager.remove({
-        checkoutId: entry.checkoutId,
-        force: options.force ?? false,
-        deleteBranch: options.deleteBranch ?? false,
-      });
-    } catch (error) {
-      const checkout = await this.opts.resolveCheckout?.(entry.checkoutId).catch(() => undefined);
-      if (checkout) {
-        try { await this.opts.prepareCheckoutRuntime?.(checkout); } catch { /* preserve original error */ }
+      if (!await this.stopAndAwait(entry.id)) {
+        throw new WorktreeError("WORKTREE_DELETE_FAILED", "The session did not stop before its worktree could be removed.");
       }
+      // BEFORE the removal, not after: the checkout's runtime holds the very
+      // directory Git is about to delete — auto-started `services:` PTYs run with
+      // their cwd inside it, and the file watcher keeps handles open. On Windows
+      // that turns `git worktree remove` into a sharing violation and the session
+      // becomes permanently undeletable. The runtime is rebuilt if Git refuses.
+      await this.opts.teardownCheckoutRuntime?.(entry.checkoutId);
+      try {
+        // WorktreeManager repeats its Git-backed dirty/lock and registration checks
+        // immediately before removal, closing the race after the preflight.
+        await manager.remove({
+          checkoutId: entry.checkoutId,
+          force: options.force ?? false,
+          deleteBranch: options.deleteBranch ?? false,
+        });
+      } catch (error) {
+        // Cleared before the rebuild, never in a `finally` after it: from here on
+        // the checkout is being RESTORED, and everything the rebuilt runtime
+        // serves would be refused by a guard that still reads it as dying.
+        if (this.clearDeleting(entry.id)) this.notifyObservers();
+        const checkout = await this.opts.resolveCheckout?.(entry.checkoutId).catch(() => undefined);
+        if (checkout) {
+          try { await this.opts.prepareCheckoutRuntime?.(checkout); } catch { /* preserve original error */ }
+        }
+        throw error;
+      }
+    } catch (error) {
+      if (this.clearDeleting(entry.id)) this.notifyObservers();
       throw error;
     }
     this.entries.delete(entry.id);
     this.resumableCache.delete(entry.id);
-    await this.flushNowOrThrow();
-    this.notifyObservers();
+    this.clearDeleting(entry.id);
+    // See the sibling tail above: the emit is owed even when the flush fails.
+    try {
+      await this.flushNowOrThrow();
+    } finally {
+      this.notifyObservers();
+    }
     return true;
   }
 
@@ -875,6 +970,15 @@ export class SessionManager {
 
   start(id: string, initialPrompt?: string): void | Promise<void> {
     const entry = this.entries.get(id);
+    // The second door into a dying checkout's runtime: startCheckout would
+    // re-prepare it and spawn a PTY cwd'd inside the directory the delete is
+    // about to remove.
+    if (entry && this.deleting.has(entry.id)) {
+      return Promise.reject(new WorktreeError(
+        "WORKTREE_DELETE_IN_PROGRESS",
+        "This isolated session is being deleted.",
+      ));
+    }
     if (!entry || entry.checkoutId === "main") return this.startNow(id, initialPrompt);
     return this.startCheckout(id, initialPrompt, entry.checkoutId);
   }
@@ -1235,7 +1339,20 @@ export class SessionManager {
     const timeoutMs = this.opts.teardownTimeoutMs ?? TEARDOWN_TIMEOUT_MS;
     const wasChat = this.entries.get(id)?.mode === "chat";
     const torndown = this.stop(id);
-    if (!wasChat) return this.awaitTerminalExit(id, timeoutMs);
+    if (!wasChat) {
+      // Both signals, not just the exit. `taskkill /T` runs off the event loop
+      // now, so the leader can die — and its exit be delivered — while the kill
+      // is still walking the rest of the tree; back when the kill was
+      // synchronous the exit could not be observed until the tree was gone.
+      // `deleteManaged` sweeps the checkout directory the moment this resolves,
+      // and one surviving grandchild is a Windows sharing violation.
+      // Read before the await: the exit handler drops the session from the map.
+      const treeKilled = this.tm.treeKilled(id);
+      return this.awaitTerminalExit(id, timeoutMs).then(async (exited) => {
+        await treeKilled;
+        return exited;
+      });
+    }
     // No chat bridge wired (or nothing to dispose): there is no later signal.
     if (!torndown) return Promise.resolve(true);
     return new Promise<boolean>((resolve, reject) => {
@@ -1365,6 +1482,7 @@ export class SessionManager {
       lastUsedAt: e.lastUsedAt,
       archived: e.archived,
       running: this.isRunning(e),
+      deleting: this.deleting.has(e.id),
       tool: e.tool,
       command: e.command,
       args: e.args,

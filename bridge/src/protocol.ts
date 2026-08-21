@@ -1139,6 +1139,14 @@ const SessionEntrySchema = z.object({
   lastUsedAt: z.number(),
   archived: z.boolean(),
   running: z.boolean(),
+  // True only while this session's own delete is between its preflight and the
+  // row disappearing — seconds of real work (worktree teardown, `git worktree
+  // remove`) the app otherwise has no signal for. In-memory on the bridge and
+  // deliberately absent from sessions.json: a persisted flag would survive a
+  // crash mid-delete as a row that is permanently pending and undeletable.
+  // `default(false)` is the safe read of an older bridge's omission — a row
+  // that never shows pending beats one stuck pending forever.
+  deleting: z.boolean().default(false),
   tool: z.string().optional(),
   command: z.string().optional(),
   // Raw, shell-interpreted CLI-args string passed verbatim (not an argv array).

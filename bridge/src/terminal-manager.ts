@@ -133,13 +133,21 @@ export class TerminalManager {
           this.sendMessage({ ...msg, seq });
           return;
         }
-        this.sendMessage(msg);
-
-        if (msg.type === "terminal:notification") {
-          this.callbacks.onTerminalNotification?.(terminalId);
-        }
-
         if (msg.type === "terminal:exited") {
+          // A killed session's exit lands after its tree is reaped, which is
+          // long enough for a same-id respawn (`servicesModified`, spawn()'s
+          // duplicate path) to have taken the slot. Ungated, the dead
+          // session's exit would delete the LIVE one from the map and leave a
+          // terminal `has()`/`kill()` can no longer find. An empty slot is not
+          // a collision — `killAll` clears the map, and those exits still owe
+          // their bookkeeping.
+          //
+          // The gate covers the SEND too, not just the bookkeeping: an exit
+          // frame for a slot a live session now holds tells the app a running
+          // terminal is dead, and nothing later corrects it.
+          const current = this.sessions.get(terminalId);
+          if (current !== undefined && current !== session) return;
+          this.sendMessage(msg);
           // Preserve metadata so the tab stays visible in status
           this.stoppedTerminals.set(terminalId, {
             name: session.name,
@@ -152,6 +160,13 @@ export class TerminalManager {
           this.modeTrackers.delete(terminalId);
           this.connState.clearTerminal(terminalId);
           this.callbacks.onTerminalExited?.(terminalId);
+          return;
+        }
+
+        this.sendMessage(msg);
+
+        if (msg.type === "terminal:notification") {
+          this.callbacks.onTerminalNotification?.(terminalId);
         }
       },
     });
@@ -178,6 +193,30 @@ export class TerminalManager {
     // Session removal happens in the onMessage exit handler
   }
 
+  /**
+   * Same signal as `kill()`; the only difference is that the caller can wait
+   * for the tree to actually be gone — for callers that must see the
+   * checkout's directory free before Git sweeps it. Waiting for the PTY's
+   * *exit* is a different question, answered by `SessionManager.awaitTerminalExit`.
+   *
+   * `treeKilled()` is the same wait for a session someone else already killed:
+   * the promise lives on the session, so it has to be read while the id is
+   * still in the map — the exit handler drops it.
+   */
+  treeKilled(terminalId: string): Promise<void> {
+    return this.sessions.get(terminalId)?.treeKilled ?? Promise.resolve();
+  }
+
+  killAndAwaitTree(terminalId: string): Promise<void> {
+    const session = this.sessions.get(terminalId);
+    if (!session) {
+      log.warn(`Terminal "${terminalId}" not found`);
+      return Promise.resolve();
+    }
+    session.kill();
+    return session.treeKilled;
+  }
+
   killAll(): void {
     for (const session of this.sessions.values()) {
       session.kill();
@@ -189,11 +228,28 @@ export class TerminalManager {
   }
 
   async killAllGracefully(timeoutMs = 5000): Promise<number> {
-    const count = this.sessions.size;
+    const all = [...this.sessions.values()];
+    const count = all.length;
     if (count === 0) return 0;
 
+    // Windows gets no graceful phase, because it has none to give: node maps
+    // every signal to TerminateProcess, so `killGracefully` takes the leader
+    // ALONE — and `killProcessTree` walks parent links, so the children it
+    // would have reaped are re-parented out of reach the instant that leader
+    // exits (the tree must die BEFORE the leader; see killProcessTree's doc).
+    // Asking nicely first would therefore COST the sweep rather than soften
+    // it, stranding the conhost/agent orphans whose open handles abort
+    // `git worktree remove` — which is the one thing shutdown sweeps trees to
+    // prevent. POSIX names a process group, which outlives its leader, so
+    // there the ordering is free and the graceful path below is real.
+    if (process.platform === "win32") {
+      this.killAll();
+      await Promise.all(all.map((s) => s.treeKilled));
+      return count;
+    }
+
     // Send SIGTERM to all sessions
-    for (const session of this.sessions.values()) {
+    for (const session of all) {
       session.killGracefully();
     }
 
@@ -206,7 +262,11 @@ export class TerminalManager {
     // Force-kill survivors
     if (this.sessions.size > 0) {
       log.warn("Force-killing %d surviving terminal(s)", this.sessions.size);
+      // Snapshotted before killAll clears the map: shutdown reports "%d
+      // terminal(s) closed" off this return, and the trees are still dying.
+      const survivors = [...this.sessions.values()];
       this.killAll();
+      await Promise.all(survivors.map((s) => s.treeKilled));
     }
 
     return count;

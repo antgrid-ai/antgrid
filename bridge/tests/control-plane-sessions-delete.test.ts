@@ -199,3 +199,92 @@ test("a non-string sessionId is rejected E_BAD_PARAMS", async () => {
   expect(res.ok).toBe(false);
   expect(res.error.code).toBe("E_BAD_PARAMS");
 });
+
+// --- cold-path serialization -------------------------------------------------
+// The warm path holds `SessionManager.deleting` for the whole removal; the cold
+// path has no core to hold anything, so the host holds it instead. Everything
+// below is about that window: sessions.json still lists the session (the row is
+// persisted LAST, on purpose) while its checkout is being torn down.
+
+test("a second cold delete of the same session is refused while the first runs", async () => {
+  const h = host!;
+  seedSessions("projA", [{ id: "a", name: "A", createdAt: 1, lastUsedAt: 10, archived: false }]);
+  seedCatalog(h, "projA");
+  await setMobileAccess(h, true);
+
+  // Gate the cold path at its first await so both requests are genuinely in
+  // flight — a real removal takes seconds, and there is no faster way to hold
+  // one open without spawning a worktree.
+  const original = SessionManager.readPersisted;
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let calls = 0;
+  (SessionManager as any).readPersisted = async (...args: unknown[]) => {
+    if (++calls === 1) await gate;
+    return (original as any).apply(SessionManager, args);
+  };
+  try {
+    const first = h.handleSessionsDeleteRpc(delReq("projA", "a")) as Promise<any>;
+    const second = (await h.handleSessionsDeleteRpc(delReq("projA", "a"))) as any;
+    expect(second.ok).toBe(false);
+    expect(second.error.code).toBe("WORKTREE_DELETE_IN_PROGRESS");
+
+    release();
+    const res = await first;
+    expect(res.ok).toBe(true);
+    expect(res.result.deleted).toBe(true);
+  } finally {
+    (SessionManager as any).readPersisted = original;
+  }
+
+  // And the guard's life is exactly one operation: a retry afterwards runs.
+  const again = (await h.handleSessionsDeleteRpc(delReq("projA", "a"))) as any;
+  expect(again.ok).toBe(true);
+  expect(again.result.deleted).toBe(false); // already gone
+});
+
+test("a delete arriving during an in-flight open is handed to the core that open builds", async () => {
+  // The one ordering `awaitColdDeletes` cannot cover: the delete picks its
+  // branch off `cores`, which an open in flight has not filled yet. Deleting
+  // from disk here would tear the row out from under a core that is about to
+  // `start()` that very session.
+  const h = host!;
+  seedSessions("projA", [{ id: "a", name: "A", createdAt: 1, lastUsedAt: 10, archived: false }]);
+  seedCatalog(h, "projA");
+  await setMobileAccess(h, true);
+
+  const captured: { id: string | null } = { id: null };
+  let finishOpen: () => void = () => {};
+  const opening = new Promise<void>((resolve) => { finishOpen = resolve; }).then(() => {
+    (h as any).cores.set("projA", {
+      core: { deleteSession: (id: string) => { captured.id = id; return true; }, shutdown: async () => {} },
+      path: "/p", mode: "local", lastFocusedMs: 0,
+    });
+  });
+  (h as any).opening.set("projA", opening);
+
+  const pending = h.handleSessionsDeleteRpc(delReq("projA", "a")) as Promise<any>;
+  finishOpen();
+  const res = await pending;
+
+  expect(res.ok).toBe(true);
+  expect(captured.id).toBe("a"); // the core owns it now
+  const left = await SessionManager.readPersisted(abDir!, "projA", true);
+  expect(left.map((s: any) => s.id)).toEqual(["a"]); // disk untouched by the host
+});
+
+test("awaitColdDeletes drains this project's deletes and only this project's", async () => {
+  // `open()` calls this above its warm-core check, so a core is never built off
+  // a row whose checkout Git is still removing.
+  const h = host!;
+  let mineSettled = false;
+  let otherSettled = false;
+  const map = (h as any).coldDeletes as Map<string, Promise<unknown>>;
+  map.set("projA/a", new Promise<void>((r) => setTimeout(() => { mineSettled = true; r(); }, 20)));
+  map.set("projB/a", new Promise<void>((r) => setTimeout(() => { otherSettled = true; r(); }, 200)));
+
+  await (h as any).awaitColdDeletes("projA");
+  expect(mineSettled).toBe(true);
+  expect(otherSettled).toBe(false);
+  map.clear();
+});

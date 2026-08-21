@@ -345,3 +345,78 @@ test("a configured terminal in a managed checkout is attributed to that checkout
     "checkoutId" in message && message.checkoutId === "main",
   )).toBe(true);
 });
+
+/** Dispatch `fire` from inside the very delivery of the first `session:updated`
+ *  that carries `deleting: true`, then run the isolated session's delete to
+ *  completion. Dispatching from the subscriber removes the scheduler gap, so the
+ *  in-flight window is hit deterministically instead of racing a real
+ *  `git worktree remove`. */
+async function duringIsolatedDelete(
+  fixture: IsolatedFixture,
+  fire: () => void,
+): Promise<void> {
+  const { bus, sent, checkoutId } = fixture;
+  let fired = false;
+  const unsubscribe = bus.subscribe({
+    deliver: (message) => {
+      if (fired) return;
+      if (message.type !== "session:updated") return;
+      if (!message.sessions.some((s) => s.checkoutId === checkoutId && s.deleting)) return;
+      fired = true;
+      fire();
+    },
+  });
+  const requestId = crypto.randomUUID();
+  const session = await waitFor(sent, (m) =>
+    m.type === "session:updated" && m.sessions.some((s) => s.checkoutId === checkoutId),
+  );
+  if (session.type !== "session:updated") throw new Error("no session list");
+  const sessionId = session.sessions.find((s) => s.checkoutId === checkoutId)!.id;
+  sent.length = 0;
+  bus.dispatchInbound(createMessage("session:delete", { requestId, sessionId }), "control", "loopback");
+  const result = await waitFor(sent, (m) => m.type === "session:result" && m.requestId === requestId, 20000);
+  expect(result).toMatchObject({ type: "session:result", ok: true });
+  expect(fired).toBe(true);
+  unsubscribe();
+}
+
+test("a checkout-variable message for a checkout whose delete is in flight is refused, not served from main", async () => {
+  writeFileSync(join(root, "same.txt"), "main\n");
+  await initRepo();
+  const fixture = await startWithIsolatedSession();
+  const { bus, sent, checkoutId } = fixture;
+
+  await duringIsolatedDelete(fixture, () => {
+    bus.dispatchInbound(createMessage("file:read", {
+      projectId: core!.projectId, path: "same.txt", checkoutId,
+    }), "control", "loopback");
+  });
+
+  expect(sent.find((m) => m.type === "control:result" && m.checkoutId === checkoutId)).toMatchObject({
+    ok: false,
+    verb: "file:read",
+    error: { code: "CHECKOUT_DELETING" },
+  });
+  // The trap this second assertion pins: `runtimeFor` falls back to
+  // `mainRuntime`, so a guard that merely skipped the prepare would have
+  // answered out of MAIN's working tree — the wrong repository, silently.
+  expect(sent.filter((m) => m.type === "file:content" && m.checkoutId === checkoutId)).toEqual([]);
+});
+
+test("main is unaffected while another checkout's delete is in flight", async () => {
+  writeFileSync(join(root, "same.txt"), "main\n");
+  await initRepo();
+  const fixture = await startWithIsolatedSession();
+  const { bus, sent } = fixture;
+
+  await duringIsolatedDelete(fixture, () => {
+    bus.dispatchInbound(createMessage("file:read", {
+      projectId: core!.projectId, path: "same.txt", checkoutId: "main",
+    }), "control", "loopback");
+  });
+
+  // The guard is per-checkout, never a stop-the-world.
+  const frame = await waitFor(sent, (m) => m.type === "file:content" && m.checkoutId === "main");
+  expect(frame).toMatchObject({ type: "file:content", content: "main\n" });
+  expect(sent.filter((m) => m.type === "control:result" && m.checkoutId === "main")).toEqual([]);
+});

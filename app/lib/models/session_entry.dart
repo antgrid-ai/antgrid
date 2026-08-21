@@ -7,6 +7,18 @@ class SessionEntry {
   final int lastUsedAt;
   final bool archived;
   final bool running;
+
+  /// True from the moment the bridge's delete for this session passes its
+  /// dirty/unpushed preflight until the row is removed — the 3–15s window of
+  /// PTY teardown and `git worktree remove` the app otherwise has no signal
+  /// for. A refused delete never sets it, so it is safe to act on: a row that
+  /// carries it is already being taken apart.
+  ///
+  /// Transient live state, never durable metadata: the bridge does not persist
+  /// it, and [CachedSessionsStore] strips it both entering the cache and on the
+  /// way to disk. Only the live session list carries it. A restored `true`
+  /// would be a row stuck pending with nothing left alive to clear it.
+  final bool deleting;
   final String? tool;
   final String? command;
   final String? args;
@@ -42,6 +54,7 @@ class SessionEntry {
     required this.lastUsedAt,
     required this.archived,
     required this.running,
+    this.deleting = false,
     this.tool,
     this.command,
     this.args,
@@ -62,6 +75,9 @@ class SessionEntry {
     'lastUsedAt': lastUsedAt,
     'archived': archived,
     'running': running,
+    // Emitted only when true, matching the other optional fields: it is
+    // transient, so an explicit `false` would be noise on every row.
+    if (deleting) 'deleting': true,
     if (tool != null) 'tool': tool,
     if (command != null) 'command': command,
     if (args != null) 'args': args,
@@ -85,6 +101,10 @@ class SessionEntry {
     // control-plane peek and the persisted cache both omit/strip it); default
     // false rather than throwing.
     running: j['running'] as bool? ?? false,
+    // False on absence, and that direction is deliberate: every disk-only
+    // source (the cache, the control-plane peek) and any bridge predating the
+    // flag say nothing, while a wrong `true` strands the row inert forever.
+    deleting: j['deleting'] as bool? ?? false,
     tool: j['tool'] as String?,
     command: j['command'] as String?,
     args: j['args'] as String?,
@@ -116,6 +136,7 @@ class SessionEntry {
     int? lastUsedAt,
     bool? archived,
     bool? running,
+    bool? deleting,
   }) => SessionEntry(
     id: id,
     name: name ?? this.name,
@@ -123,6 +144,7 @@ class SessionEntry {
     lastUsedAt: lastUsedAt ?? this.lastUsedAt,
     archived: archived ?? this.archived,
     running: running ?? this.running,
+    deleting: deleting ?? this.deleting,
     tool: tool,
     command: command,
     args: args,
@@ -146,6 +168,7 @@ class SessionEntry {
           other.lastUsedAt == lastUsedAt &&
           other.archived == archived &&
           other.running == running &&
+          other.deleting == deleting &&
           other.tool == tool &&
           other.command == command &&
           other.args == args &&
@@ -166,6 +189,7 @@ class SessionEntry {
     lastUsedAt,
     archived,
     running,
+    deleting,
     tool,
     command,
     args,

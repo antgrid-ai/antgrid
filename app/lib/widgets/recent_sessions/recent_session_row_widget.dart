@@ -9,6 +9,7 @@ import '../../design/widgets/ab_agent_mark.dart';
 import '../../design/widgets/ab_cross_fade.dart';
 import '../../design/widgets/ab_focus_ring.dart';
 import '../../design/widgets/ab_icon_button.dart';
+import '../../design/widgets/ab_loading.dart';
 import '../../design/widgets/ab_tap_target.dart';
 import '../../design/widgets/ab_tooltip.dart';
 import '../../models/recent_session_row.dart';
@@ -17,12 +18,15 @@ import '../../providers/new_session_picker.dart';
 import '../../providers/now_ticker.dart';
 import '../../providers/project_work_status.dart';
 import '../../providers/recent_sessions.dart';
+import '../../providers/session_delete_pending.dart';
 import '../../services/control_plane_client.dart';
+import '../../services/session_delete_policy.dart';
 import '../../services/sessions_service.dart' show SessionOperationException;
 import '../../util/detached.dart';
 import '../../util/relative_time.dart';
 import '../agent_work_status_dot.dart';
 import '../session_delete_flow.dart';
+import '../session_deleting_badge.dart';
 import '../session_isolation_badge.dart';
 
 /// One row in the Recent tab: agent mark (status-badged) · session name ·
@@ -75,6 +79,11 @@ class _RecentSessionRowWidgetState
       ref.watch(agentCatalogProvider),
     );
     final relTime = relativeTime(when, now: now);
+    final deleting = sessionDeleteInFlight(
+      ref,
+      row.origin.registrationId,
+      row.session,
+    );
     // Tracks the hover swap below: an unhovered row paints nothing of its own,
     // so the badge's ring has to be the SURFACE colour, but a hovered one
     // paints bgHover over it. Pinning either would show as a halo in the other
@@ -129,6 +138,7 @@ class _RecentSessionRowWidgetState
                   agentLabel: agentLabel,
                   relTime: relTime,
                   rowBg: rowBg,
+                  deleting: deleting,
                   onDelete: () => _deleteDetached(context, ref),
                 )
               : _DesktopLayout(
@@ -137,7 +147,10 @@ class _RecentSessionRowWidgetState
                   agentLabel: agentLabel,
                   relTime: relTime,
                   rowBg: rowBg,
-                  showDelete: _hovered || _focused,
+                  deleting: deleting,
+                  // Suppressed while deleting so the time label stays put
+                  // rather than cross-fading to a control that does nothing.
+                  showDelete: (_hovered || _focused) && !deleting,
                   onDelete: () => _deleteDetached(context, ref),
                 );
         },
@@ -148,6 +161,9 @@ class _RecentSessionRowWidgetState
     // keyboard users can Tab to a row and activate it with Enter/Space,
     // mirroring AbListRow's interactive path.
     return FocusableActionDetector(
+      // A session being removed is neither focusable nor activatable: opening
+      // it would attach the workspace to a checkout that is going away.
+      enabled: !deleting,
       mouseCursor: SystemMouseCursors.click,
       onShowFocusHighlight: (v) => setState(() => _focused = v),
       onShowHoverHighlight: isMobile
@@ -162,7 +178,7 @@ class _RecentSessionRowWidgetState
         ),
       },
       child: GestureDetector(
-        onTap: onTap,
+        onTap: deleting ? null : onTap,
         behavior: HitTestBehavior.opaque,
         child: AbFocusRing(focused: _focused, child: content),
       ),
@@ -181,6 +197,7 @@ class _RecentSessionRowWidgetState
     // Captured before the dialog await: a confirmed delete must still run if
     // this row was rebuilt away while the dialog was open.
     final container = ref.container;
+    final markKey = sessionDeleteKey(row.origin.registrationId, row.session.id);
     final result = await confirmAndDeleteSession(
       context: context,
       sessionName: row.session.name,
@@ -199,7 +216,8 @@ class _RecentSessionRowWidgetState
         // the two non-refusal outcomes are raised as one too — a bare `false`
         // would leave the offline case, the only one a user can act on, unsaid.
         return switch (outcome) {
-          RecentSessionDeleteOutcome.deleted => true,
+          RecentSessionDeleteOutcome.deleted => SessionDeleteAck.deleted,
+          RecentSessionDeleteOutcome.accepted => SessionDeleteAck.accepted,
           RecentSessionDeleteOutcome.offline => throw SessionOperationException(
             null,
             '${row.origin.deviceName} is offline — connect to delete.',
@@ -209,6 +227,14 @@ class _RecentSessionRowWidgetState
             'Could not delete "${row.session.name}".',
           ),
         };
+      },
+      onInFlight: (inFlight) {
+        final marks = container.read(sessionDeleteRequestsProvider.notifier);
+        if (inFlight) {
+          marks.arm(markKey);
+        } else {
+          marks.disarm(markKey);
+        }
       },
     );
     if (result == SessionDeleteResult.deleted) widget.onDeleted?.call();
@@ -241,6 +267,7 @@ class _DesktopLayout extends StatelessWidget {
     required this.agentLabel,
     required this.relTime,
     required this.rowBg,
+    required this.deleting,
     required this.showDelete,
     required this.onDelete,
   });
@@ -250,6 +277,7 @@ class _DesktopLayout extends StatelessWidget {
   final String agentLabel;
   final String relTime;
   final Color rowBg;
+  final bool deleting;
   final bool showDelete;
   final VoidCallback onDelete;
 
@@ -269,6 +297,7 @@ class _DesktopLayout extends StatelessWidget {
             toolKey: row.session.tool,
             label: agentLabel,
             ringColor: rowBg,
+            deleting: deleting,
           ),
           const SizedBox(width: AbTokens.space12),
           // Name + slack share the row's ONLY flexible child. A loose Flexible
@@ -280,9 +309,11 @@ class _DesktopLayout extends StatelessWidget {
             child: Row(
               children: [
                 Flexible(child: _SessionName(name: row.session.name)),
-                // Non-flex, so the badge is measured before the name and a long
-                // name ellipsizes around it rather than pushing it off the row.
+                // Non-flex, so the badges are measured before the name and a
+                // long name ellipsizes around them rather than pushing them off
+                // the row.
                 SessionIsolationBadge(session: row.session),
+                SessionDeletingBadge(deleting: deleting),
                 const SizedBox(width: AbTokens.space12),
               ],
             ),
@@ -356,6 +387,7 @@ class _MobileLayout extends StatelessWidget {
     required this.agentLabel,
     required this.relTime,
     required this.rowBg,
+    required this.deleting,
     required this.onDelete,
   });
 
@@ -364,6 +396,7 @@ class _MobileLayout extends StatelessWidget {
   final String agentLabel;
   final String relTime;
   final Color rowBg;
+  final bool deleting;
 
   /// Always-visible trash button — mobile has no hover to reveal the desktop
   /// layout's in-place delete, and a hidden swipe gesture proved
@@ -386,10 +419,12 @@ class _MobileLayout extends StatelessWidget {
                 toolKey: row.session.tool,
                 label: agentLabel,
                 ringColor: rowBg,
+                deleting: deleting,
               ),
               const SizedBox(width: AbTokens.space12),
               Expanded(child: _SessionName(name: row.session.name)),
               SessionIsolationBadge(session: row.session),
+              SessionDeletingBadge(deleting: deleting),
               const SizedBox(width: AbTokens.space8),
               // Only a custom launch command belongs on this line: an agent
               // with a mark is already named at the row's left edge, and
@@ -399,12 +434,16 @@ class _MobileLayout extends StatelessWidget {
                 const SizedBox(width: AbTokens.space8),
               ],
               _TimeLabel(label: relTime),
-              const SizedBox(width: AbTokens.space4),
-              AbIconButton(
-                icon: AbIcons.trash,
-                tooltip: 'Delete session',
-                onTap: onDelete,
-              ),
+              // Dropped while deleting: mobile has no hover state to fade it
+              // out of, so the only honest option is not to offer it.
+              if (!deleting) ...[
+                const SizedBox(width: AbTokens.space4),
+                AbIconButton(
+                  icon: AbIcons.trash,
+                  tooltip: 'Delete session',
+                  onTap: onDelete,
+                ),
+              ],
             ],
           ),
         ),
@@ -526,17 +565,30 @@ class _SessionMark extends StatelessWidget {
     required this.toolKey,
     required this.label,
     required this.ringColor,
+    required this.deleting,
   });
 
   final AgentWorkStatus status;
   final String? toolKey;
   final String label;
 
+  /// Takes over the whole glyph: identity and work status both describe an
+  /// agent that is about to stop existing.
+  final bool deleting;
+
   /// The row's own background — see [AgentWorkStatusBadge.ringColor].
   final Color ringColor;
 
   @override
   Widget build(BuildContext context) {
+    if (deleting) {
+      // Centred in the same box as every other leading glyph so the name column
+      // keeps starting at the same x.
+      return const SizedBox.square(
+        dimension: _leadingSize,
+        child: Center(child: AbLoadingDot(size: AbTokens.dotSizeMd)),
+      );
+    }
     final tool = toolKey;
     if (!_hasMark(tool)) {
       return SizedBox.square(

@@ -8,7 +8,9 @@ import '../design/widgets/ab_snack_bar.dart';
 import '../models/recent_session_row.dart';
 import '../services/account_agents_api.dart';
 import '../services/control_plane_client.dart';
+import '../services/session_delete_policy.dart';
 import '../services/sessions_service.dart' show SessionOperationException;
+import '../util/detached.dart';
 import '../navigation/nav_controller.dart';
 import '../navigation/nav_location.dart';
 import '../project/project_session_registry.dart';
@@ -364,15 +366,33 @@ Future<void> openRecentSession(
 }
 
 /// Outcome of a [deleteRecentSession] call — distinguishes an offline machine
-/// (block, don't delete locally, reconcile on reconnect) from an outright
-/// failure, so the caller can message each case accurately.
-enum RecentSessionDeleteOutcome { deleted, offline, failed }
+/// (block, don't delete locally, reconcile on reconnect) and an accepted but
+/// unanswered request from an outright failure, so the caller can message each
+/// case accurately.
+enum RecentSessionDeleteOutcome { deleted, accepted, offline, failed }
 
 /// The codes `BufferedAgentTransport` mints for itself when a request never
 /// reaches the bridge or never comes back. Everything else on an `RpcException`
 /// came from the bridge's own error frame — this is the only place the two
 /// vocabularies can be told apart, since both arrive as one exception type.
-const _kTransportRpcCodes = {'E_TIMEOUT', 'E_SEND_FAILED', 'E_UNKNOWN'};
+///
+/// They do not answer alike. `E_TIMEOUT` means the request left and the answer
+/// did not come back, which against an unbounded removal is not a failure, so
+/// it is handled on its own above this set rather than listed in it.
+///
+/// What the members share is having no useful second act: `E_SEND_FAILED` and
+/// `E_UNKNOWN` never left the device, `E_SESSION_DOWN` and `E_DISPOSED` lost
+/// the machine mid-request. All four collapse to a plain failure the user can
+/// retry. The last two are here because a two-minute delete window makes an
+/// ordinary reconnect land inside one, and unclassified they reach the refusal
+/// ladder, which prints their developer strings ("relay session down") at the
+/// user as though the bridge had answered.
+const _kTransportRpcCodes = {
+  'E_SEND_FAILED',
+  'E_UNKNOWN',
+  'E_SESSION_DOWN',
+  'E_DISPOSED',
+};
 
 /// Delete a recent session.
 ///
@@ -406,15 +426,22 @@ Future<RecentSessionDeleteOutcome> deleteRecentSession(
       final session = await ref.read(
         projectSessionProvider(o.registrationId).future,
       );
-      final ok = await session.sessionsService.delete(
+      final ack = await session.sessionsService.delete(
         row.session.id,
         force: force,
         deleteBranch: deleteBranch,
       );
-      if (ok) clearChatComposerDraft(ref, row.session.id);
-      return ok
-          ? RecentSessionDeleteOutcome.deleted
-          : RecentSessionDeleteOutcome.failed;
+      // Only a CONFIRMED removal drops the draft. An accepted-but-unanswered
+      // delete can still fail at the bridge, and a draft discarded for a
+      // session that survives is not recoverable — a draft left behind for one
+      // that does not is merely stale under an id that never comes back.
+      if (ack == SessionDeleteAck.deleted) {
+        clearChatComposerDraft(ref, row.session.id);
+      }
+      return switch (ack) {
+        SessionDeleteAck.deleted => RecentSessionDeleteOutcome.deleted,
+        SessionDeleteAck.accepted => RecentSessionDeleteOutcome.accepted,
+      };
     } on SessionOperationException {
       rethrow;
     } catch (_) {
@@ -437,8 +464,17 @@ Future<RecentSessionDeleteOutcome> deleteRecentSession(
   } on RpcException catch (e) {
     // Transport failures carry no bridge code and their message is a developer
     // string ("request sessions.delete timed out", or an exception dump), while
-    // the ladder falls back to printing `message` verbatim — so they stay an
-    // untyped failure and get the surface's own copy.
+    // the ladder falls back to printing `message` verbatim — so they never
+    // reach the user as themselves.
+    if (e.code == 'E_TIMEOUT') {
+      // We lost the answer, not the request. Reconcile by an idempotent read
+      // instead of guessing: if the bridge really did remove it, the re-peek's
+      // write-through prunes the row; if it did not, the row stays and is still
+      // deletable. Detached because nothing here may wait out a delete that has
+      // already outlived its own reply.
+      _repeekRemoteSessions(ref, o.machineUuid!, o.projectId, o.registrationId);
+      return RecentSessionDeleteOutcome.accepted;
+    }
     if (_kTransportRpcCodes.contains(e.code)) {
       return RecentSessionDeleteOutcome.failed;
     }
@@ -463,6 +499,23 @@ Future<RecentSessionDeleteOutcome> deleteRecentSession(
   clearChatComposerDraft(ref, row.session.id);
   return RecentSessionDeleteOutcome.deleted;
 }
+
+/// Re-read one remote project's session list into the cache. The reconciliation
+/// half of an accepted-but-unanswered delete: the row disappears because the
+/// bridge stopped listing it, never because the app assumed it had.
+void _repeekRemoteSessions(
+  ProviderContainer ref,
+  String machineUuid,
+  String projectId,
+  String registrationId,
+) => detached('RecentSessions', 're-peek after accepted delete', () async {
+  final cp = await ref.read(controlPlaneClientForProvider(machineUuid).future);
+  if (cp == null) return;
+  final sessions = await cp.listSessions(projectId);
+  final store = ref.read(cachedSessionsStoreProvider);
+  await store.put(registrationId, sessions);
+  await store.flushNow();
+});
 
 /// Best-effort background refresh: re-peek the session list for every remote
 /// machine that ALREADY has a live control-plane client (never force-pairs —

@@ -10,12 +10,12 @@
 // child was spawned to lead one, so each has its own case here and neither can
 // stand in for the other.
 import { describe, test, expect } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { TerminalManager } from "../src/terminal-manager";
-import { killProcessTree, processGroupSpawn } from "../src/terminal-session";
+import { killChildTree, killProcessTree, processGroupSpawn } from "../src/terminal-session";
 import { createConnState } from "../src/conn-state";
 import type { AbMessage } from "../src/protocol";
 
@@ -59,6 +59,20 @@ async function waitFor<T>(probe: () => T | undefined, timeoutMs: number): Promis
   return undefined;
 }
 
+/* The pid file becomes visible before it is readable: on Windows Set-Content
+ * still holds it exclusively, so an eager read throws EBUSY, and on either
+ * platform the create can be seen before the content lands. Both mean the
+ * writer has not finished, which is the poll loop's "not yet". */
+function readPidFile(pidFile: string): string | undefined {
+  let text: string;
+  try {
+    text = readFileSync(pidFile, "utf8").trim();
+  } catch {
+    return undefined;
+  }
+  return text.length > 0 ? text : undefined;
+}
+
 describe("TerminalManager.kill", () => {
   // Windows-only because the gap is Windows-only: there is no process group to
   // signal in the leader's place, so the tree has to be walked explicitly.
@@ -84,7 +98,7 @@ describe("TerminalManager.kill", () => {
         ].join(" ")],
       });
 
-      const raw = await waitFor(() => (existsSync(pidFile) ? readFileSync(pidFile, "utf8").trim() : undefined), 30_000);
+      const raw = await waitFor(() => readPidFile(pidFile), 30_000);
       expect(raw).toBeDefined();
       childPid = Number(raw);
       expect(Number.isInteger(childPid)).toBe(true);
@@ -96,6 +110,71 @@ describe("TerminalManager.kill", () => {
       manager.kill("t1");
 
       expect(await waitFor(() => (alive(childPid!) ? undefined : true), 15_000)).toBe(true);
+    } finally {
+      manager.killAll();
+      if (childPid !== undefined && alive(childPid)) {
+        try { process.kill(childPid, "SIGKILL"); } catch { /* already gone */ }
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  // The property `git worktree remove` leans on, and the only direct test of
+  // what teardown's await buys: no polling, the grandchild is already gone.
+  test.skipIf(process.platform !== "win32")("killAndAwaitTree resolves only once the grandchild is gone", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "antgrid-kill-await-"));
+    const pidFile = join(dir, "child.pid");
+    const manager = new TerminalManager(() => {}, undefined, createConnState());
+    let childPid: number | undefined;
+    try {
+      manager.spawn({
+        terminalId: "t1",
+        command: "powershell.exe",
+        args: ["-NoProfile", "-NonInteractive", "-Command", [
+          "$c = Start-Process -PassThru -FilePath powershell",
+          "-ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 120';",
+          `Set-Content -Encoding ascii -Path '${pidFile}' -Value $c.Id;`,
+          "Start-Sleep -Seconds 120",
+        ].join(" ")],
+      });
+
+      const raw = await waitFor(() => readPidFile(pidFile), 30_000);
+      expect(raw).toBeDefined();
+      childPid = Number(raw);
+      expect(alive(childPid)).toBe(true);
+
+      await manager.killAndAwaitTree("t1");
+
+      expect(alive(childPid)).toBe(false);
+    } finally {
+      manager.killAll();
+      if (childPid !== undefined && alive(childPid)) {
+        try { process.kill(childPid, "SIGKILL"); } catch { /* already gone */ }
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  // The POSIX half of the same guarantee, so CI — ubuntu-only — actually gates
+  // it. The bound is tight rather than zero because SIGKILL returns before the
+  // target has finished exiting; what is being ruled out is a promise that
+  // resolved while the tree still had 120 seconds to live.
+  test.skipIf(process.platform === "win32")("killAndAwaitTree resolves only once the terminal's group is gone", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "antgrid-kill-await-posix-"));
+    const pidFile = join(dir, "child.pid");
+    const manager = new TerminalManager(() => {}, undefined, createConnState());
+    let childPid: number | undefined;
+    try {
+      manager.spawn({ terminalId: "t1", command: `sleep 120 & echo $! > ${pidFile}; wait` });
+
+      const raw = await waitFor(() => readPidFile(pidFile), 30_000);
+      expect(raw).toBeDefined();
+      childPid = Number(raw);
+      expect(alive(childPid)).toBe(true);
+
+      await manager.killAndAwaitTree("t1");
+
+      expect(await waitFor(() => (alive(childPid!) ? undefined : true), 2_000)).toBe(true);
     } finally {
       manager.killAll();
       if (childPid !== undefined && alive(childPid)) {
@@ -128,11 +207,7 @@ describe("killProcessTree on POSIX", () => {
       ...processGroupSpawn(),
     });
     try {
-      const raw = await waitFor(() => {
-        if (!existsSync(pidFile)) return undefined;
-        const text = readFileSync(pidFile, "utf8").trim();
-        return text.length > 0 ? text : undefined;
-      }, 30_000);
+      const raw = await waitFor(() => readPidFile(pidFile), 30_000);
       expect(raw).toBeDefined();
       childPid = Number(raw);
       expect(Number.isInteger(childPid)).toBe(true);
@@ -140,7 +215,7 @@ describe("killProcessTree on POSIX", () => {
       // The shell must still be up, or a dead group would prove nothing.
       expect(proc.exitCode).toBeNull();
 
-      killProcessTree(proc.pid!);
+      await killProcessTree(proc.pid!);
 
       expect(await waitFor(() => (alive(childPid!) ? undefined : true), 15_000)).toBe(true);
     } finally {
@@ -148,6 +223,167 @@ describe("killProcessTree on POSIX", () => {
         try { process.kill(childPid, "SIGKILL"); } catch { /* already gone */ }
       }
       try { proc.kill("SIGKILL"); } catch { /* already gone */ }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+});
+
+describe("killProcessTree contract", () => {
+  // Nearly every caller fires this from a message handler and discards the
+  // result, so a rejection would surface as an unhandled rejection on an
+  // ordinary terminal close rather than at the site that caused it.
+  const NO_SUCH_PID = 2_147_483_646;
+
+  test("never rejects, whatever it is handed", async () => {
+    await expect(killProcessTree(NO_SUCH_PID)).resolves.toBeUndefined();
+    await expect(killProcessTree(0)).resolves.toBeUndefined();
+    await expect(killProcessTree(-1)).resolves.toBeUndefined();
+    await expect(killProcessTree(1.5)).resolves.toBeUndefined();
+    await expect(killProcessTree(Number.NaN)).resolves.toBeUndefined();
+  });
+
+  test("hands back something awaitable on every platform", () => {
+    const result = killProcessTree(0);
+    expect(typeof result.then).toBe("function");
+  });
+
+  // CI runs the bridge suite on ubuntu only, so the Windows branch — the whole
+  // reason this function is async — never executes there. This reads the source
+  // instead: without it, a revert to a blocking exec ships green.
+  test("issues the Windows kill without blocking the event loop", () => {
+    const source = readFileSync(join(import.meta.dir, "../src/terminal-session.ts"), "utf8");
+    const marker = "export function killProcessTree(";
+    const start = source.indexOf(marker);
+    expect(start).toBeGreaterThan(-1);
+    let depth = 0;
+    let end = -1;
+    for (let i = source.indexOf("{", start); i < source.length; i++) {
+      if (source[i] === "{") depth++;
+      else if (source[i] === "}" && --depth === 0) {
+        end = i;
+        break;
+      }
+    }
+    expect(end).toBeGreaterThan(start);
+    const body = source.slice(start, end);
+    expect(body).not.toContain("execFileSync");
+    expect(body).not.toContain("spawnSync");
+  });
+
+  // Windows-only by construction: POSIX never blocked here, so only a developer
+  // machine can prove the taskkill wait yields.
+  test.skipIf(process.platform !== "win32")("does not block the event loop while the tree dies", async () => {
+    const proc = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 30"], {
+      stdio: "ignore",
+      windowsHide: true,
+      ...processGroupSpawn(),
+    });
+    let ticks = 0;
+    const timer = setInterval(() => { ticks++; }, 10);
+    try {
+      await killProcessTree(proc.pid!);
+    } finally {
+      clearInterval(timer);
+      try { proc.kill(); } catch { /* already gone */ }
+    }
+    expect(ticks).toBeGreaterThan(0);
+  }, 30_000);
+});
+
+describe("killChildTree", () => {
+  // The shape `teardownCheckoutRuntime` uses: `command:run` children spawned
+  // through a shell, killed as a batch, with the checkout directory freed by
+  // the time the composite promise resolves.
+  test.skipIf(process.platform === "win32")("kills every child's tree before it resolves", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "antgrid-kill-children-"));
+    const procs = [0, 1].map((n) =>
+      spawn("sh", ["-c", `sleep 120 & echo $! > ${join(dir, `child${n}.pid`)}; wait`], {
+        stdio: ["ignore", "pipe", "pipe"],
+        ...processGroupSpawn(),
+      }),
+    );
+    const pids: number[] = [];
+    // Counted through a wrapper rather than read off `ChildProcess.killed`:
+    // the tree kill has usually left the handle a zombie by then, and whether
+    // that second signal is accepted is a reaping race, not the contract.
+    let handleKills = 0;
+    try {
+      for (const n of [0, 1]) {
+        const file = join(dir, `child${n}.pid`);
+        const raw = await waitFor(() => readPidFile(file), 30_000);
+        expect(raw).toBeDefined();
+        pids.push(Number(raw));
+      }
+      for (const pid of pids) expect(alive(pid)).toBe(true);
+      for (const proc of procs) expect(proc.exitCode).toBeNull();
+
+      await Promise.all(procs.map((proc) =>
+        killChildTree({ pid: proc.pid, kill: () => { handleKills++; return proc.kill("SIGKILL"); } }),
+      ));
+
+      // Every handle kill is chained behind its own tree kill, so a composite
+      // that resolved early would show up here as a missing one.
+      expect(handleKills).toBe(procs.length);
+      // Tight rather than zero: SIGKILL returns before the target has finished
+      // exiting. What it rules out is a resolve while the trees still had 120
+      // seconds to live — the delete this shape serves runs `git worktree
+      // remove` the instant the await returns.
+      for (const pid of pids) {
+        expect(await waitFor(() => (alive(pid) ? undefined : true), 2_000)).toBe(true);
+      }
+    } finally {
+      for (const pid of pids) {
+        if (alive(pid)) { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } }
+      }
+      for (const proc of procs) { try { proc.kill("SIGKILL"); } catch { /* already gone */ } }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("still kills the handle when the child never got a pid", async () => {
+    let killed = 0;
+    await killChildTree({ pid: undefined, kill: () => { killed++; return true; } });
+    expect(killed).toBe(1);
+  });
+});
+
+// Shutdown's graceful phase is where the sweep is easiest to lose without
+// noticing: every session exits, the map empties, and the force-kill branch
+// that does the sweeping is skipped as unnecessary. On Windows that is the
+// broken case, not the happy one — the leader dying is precisely what puts its
+// children beyond reach. Asserted with no polling: the tree is a precondition
+// of `git worktree remove`, so it has to be gone when this resolves.
+describe("TerminalManager.killAllGracefully", () => {
+  test.skipIf(process.platform !== "win32")("takes the grandchild with it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "antgrid-kill-graceful-"));
+    const pidFile = join(dir, "child.pid");
+    const manager = new TerminalManager(() => {}, undefined, createConnState());
+    let childPid: number | undefined;
+    try {
+      manager.spawn({
+        terminalId: "t1",
+        command: "powershell.exe",
+        args: ["-NoProfile", "-NonInteractive", "-Command", [
+          "$c = Start-Process -PassThru -FilePath powershell",
+          "-ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 120';",
+          `Set-Content -Encoding ascii -Path '${pidFile}' -Value $c.Id;`,
+          "Start-Sleep -Seconds 120",
+        ].join(" ")],
+      });
+
+      const raw = await waitFor(() => readPidFile(pidFile), 30_000);
+      expect(raw).toBeDefined();
+      childPid = Number(raw);
+      expect(alive(childPid)).toBe(true);
+
+      expect(await manager.killAllGracefully(5_000)).toBe(1);
+
+      expect(alive(childPid)).toBe(false);
+    } finally {
+      manager.killAll();
+      if (childPid !== undefined && alive(childPid)) {
+        try { process.kill(childPid, "SIGKILL"); } catch { /* already gone */ }
+      }
       rmSync(dir, { recursive: true, force: true });
     }
   }, 60_000);

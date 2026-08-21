@@ -174,6 +174,16 @@ export class HostServer {
   // In-flight open() promises keyed by projectId, so concurrent opens of the
   // same not-yet-open project share one core instead of each starting their own.
   private readonly opening = new Map<string, Promise<OpenResult>>();
+  // Cold deletes in flight, keyed `projectId/sessionId`. A cold delete persists
+  // its row LAST — deliberately, so a failed removal leaves something to retry
+  // rather than a directory with no row — which means that for the whole of
+  // `manager.remove` sessions.json still lists a session whose checkout is
+  // being torn down. Two readers act on that stale row: a second delete for it,
+  // and `open()`, whose fresh core would `start()` the session and re-prepare
+  // the very checkout Git is removing. A warm core holds `SessionManager.deleting`
+  // across exactly this window; with no core there is nowhere to put that, so
+  // the host holds it instead.
+  private readonly coldDeletes = new Map<string, Promise<unknown>>();
   private nowCounter = 0; // monotonic stand-in for focus ordering
   private remoteRuntime: RemoteRuntime | null = null;
   // In-flight build of the machine OAuth runtime. Concurrent first-remote-opens
@@ -1430,10 +1440,16 @@ export class HostServer {
    *  coalesces concurrent opens of the same not-yet-open project. */
   async open(projectId: string, projectPath: string, mode: "local" | "remote"): Promise<OpenResult> {
     const resolved = await resolveProject(projectPath);
-    // AFTER the resolve, not before: the resolve is a git spawn, and a caller
-    // that started before this one may have finished its whole core startup
-    // (and cleared `opening`) while we were suspended here. Checking `cores`
-    // only on the way in would send that late caller on to start a second core.
+    // Before any core is built: a cold delete leaves its row in sessions.json
+    // until Git confirms the removal, and a core started off that row would
+    // `start()` the session straight back into the checkout being removed.
+    // Above the warm-core check so ONE check covers both awaits.
+    await this.awaitColdDeletes(projectId);
+    // AFTER those awaits, not before: each is a suspension point (a git spawn,
+    // a whole worktree removal), and a caller that started before this one may
+    // have finished its entire core startup — and cleared `opening` — while we
+    // were parked. Checking `cores` only on the way in would send that late
+    // caller on to start a second core.
     const existing = this.cores.get(projectId);
     if (existing) {
       existing.lastFocusedMs = this.tick();
@@ -1805,6 +1821,51 @@ export class HostServer {
     sessionId: string,
     options: { force?: boolean; removeCheckout?: boolean; deleteBranch?: boolean },
   ): Promise<boolean> {
+    const key = `${projectId}/${sessionId}`;
+    if (this.coldDeletes.has(key)) {
+      throw new WorktreeError("WORKTREE_DELETE_IN_PROGRESS", "This session is already being deleted.");
+    }
+    // Registered synchronously: the call below runs its body only up to its
+    // first await before handing back a promise, and nothing else can be
+    // scheduled in that window — so a second caller cannot slip past the check
+    // above the way the warm path's first attempt at this could.
+    const run = this.runColdDelete(projectId, sessionId, options);
+    this.coldDeletes.set(key, run.catch(() => {}));
+    try {
+      return await run;
+    } finally {
+      this.coldDeletes.delete(key);
+    }
+  }
+
+  /** Settle every cold delete in flight for [projectId]. Failures are waited
+   *  out, not rethrown: the caller is opening a project, and a delete that
+   *  failed has already put its own error in front of whoever asked for it. */
+  private async awaitColdDeletes(projectId: string): Promise<void> {
+    const prefix = `${projectId}/`;
+    const pending = [...this.coldDeletes]
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([, promise]) => promise);
+    if (pending.length > 0) await Promise.allSettled(pending);
+  }
+
+  private async runColdDelete(
+    projectId: string,
+    sessionId: string,
+    options: { force?: boolean; removeCheckout?: boolean; deleteBranch?: boolean },
+  ): Promise<boolean> {
+    // An open already in flight means this project is BECOMING warm, and the
+    // core it builds will `start()` sessions off the very row about to be
+    // removed. Hand the delete to it: `SessionManager.deleting` covers the
+    // window from the other side, and it covers it better — it also refuses the
+    // checkout-variable verbs. No cycle with `open()`'s own wait on this map:
+    // that wait completes before `opening` is ever set.
+    const opening = this.opening.get(projectId);
+    if (opening) {
+      await opening.catch(() => {});
+      const warm = this.cores.get(projectId);
+      if (warm) return warm.core.deleteSession(sessionId, options);
+    }
     const persisted = await SessionManager.readPersisted(resolveAbDir(), projectId, true);
     const session = persisted.find((entry) => entry.id === sessionId);
     if (!session) return false;

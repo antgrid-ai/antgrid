@@ -73,10 +73,20 @@ class CachedSessionsStore {
   /// Replace the cached list for [entryId]. No-ops if the encoded list is
   /// identical to the in-memory one. Writes are debounced; [changes] still
   /// emits on the next microtask so listeners can react synchronously.
+  ///
+  /// `deleting` is dropped on the way IN, not just on the way to disk. The
+  /// cache is what every surface falls back to the moment the live stream stops
+  /// matching an entry, and nothing here is subscribed to the push that would
+  /// clear the flag — so a connection lost inside the delete window would leave
+  /// the row inert, unopenable and undeletable, for the rest of the app run.
+  /// The live list keeps carrying it; only the fallback copy is neutralised.
   Future<void> put(String entryId, List<SessionEntry> sessions) async {
+    final next = [
+      for (final s in sessions) s.deleting ? s.copyWith(deleting: false) : s,
+    ];
     final prev = _mem[entryId];
-    if (prev != null && _listsEqual(prev, sessions)) return;
-    _mem[entryId] = List.unmodifiable(sessions);
+    if (prev != null && _listsEqual(prev, next)) return;
+    _mem[entryId] = List.unmodifiable(next);
     _entriesDirty = true;
     if (!_changes.isClosed) _changes.add(entryId);
     _scheduleFlush();
@@ -194,10 +204,17 @@ class CachedSessionsStore {
             for (final item in v) {
               if (item is Map<String, dynamic>) {
                 try {
-                  // `running` is in-memory state only — even if an older build
-                  // persisted it, force false on load so a fresh launch never
-                  // resurrects a stale green status dot.
-                  list.add(SessionEntry.fromJson({...item, 'running': false}));
+                  // `running` and `deleting` are in-memory state only — even if
+                  // an older build persisted them, force false on load so a
+                  // fresh launch never resurrects a stale green status dot, or
+                  // a pending row with nothing left alive to clear it.
+                  list.add(
+                    SessionEntry.fromJson({
+                      ...item,
+                      'running': false,
+                      'deleting': false,
+                    }),
+                  );
                 } catch (_) {
                   /* skip malformed */
                 }
@@ -258,11 +275,13 @@ class CachedSessionsStore {
   Future<void> _flush() async {
     if (_entriesDirty) {
       _entriesDirty = false;
-      // Strip `running` and `workStatus` before persisting: both are
-      // process-lifetime state owned by SessionsService, not durable metadata.
-      // A restored `running` renders sessions as live before the agent reports;
-      // a restored `attention` claims an agent is blocked on a prompt that died
-      // with the process.
+      // Strip `running`, `workStatus` and `deleting` before persisting: all
+      // three are process-lifetime state owned by SessionsService, not durable
+      // metadata. A restored `running` renders sessions as live before the
+      // agent reports; a restored `attention` claims an agent is blocked on a
+      // prompt that died with the process; a restored `deleting` is worse
+      // still, because a delete interrupted by the process dying leaves nothing
+      // behind that could ever clear it — the row comes back permanently inert.
       final encoded = jsonEncode({
         'version': 1,
         'entries': _mem.map(
@@ -272,6 +291,7 @@ class CachedSessionsStore {
               // Non-mutating copy: don't assume `toJson()` returns a fresh map.
               final j = {...s.toJson(), 'running': false};
               j.remove('workStatus');
+              j.remove('deleting');
               return j;
             }).toList(),
           ),

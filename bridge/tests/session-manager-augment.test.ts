@@ -10,7 +10,7 @@ afterEach(() => { for (const d of dirs.splice(0)) try { rmSync(d, { recursive: t
 
 function captureTm() {
   const spawns: any[] = [];
-  return { spawns, has: () => false, kill: () => {}, spawn: (cfg: any) => { spawns.push(cfg); return cfg.terminalId; } } as any;
+  return { spawns, has: () => false, kill: () => {}, treeKilled: () => Promise.resolve(), spawn: (cfg: any) => { spawns.push(cfg); return cfg.terminalId; } } as any;
 }
 
 test("starting a codex tool session injects the notify -c override", () => {

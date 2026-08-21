@@ -8,6 +8,7 @@ import '../models/agent_work_status.dart';
 import '../models/branch_remote_status.dart';
 import '../models/git_branch.dart';
 import '../models/session_entry.dart';
+import 'session_delete_policy.dart';
 
 export '../models/agent_work_status.dart' show AgentWorkStatus;
 
@@ -427,6 +428,14 @@ class ControlPlaneClient {
   /// to state. `removeCheckout` is deliberately never sent at all: whether an
   /// isolated workspace is removed follows from the session's checkout kind,
   /// which is the bridge's to read and not a phone's to assert.
+  ///
+  /// The only verb here that overrides the transport's 10s default: removing an
+  /// isolated checkout is unbounded work on the bridge (see
+  /// [kSessionDeleteAckTimeout]), so inheriting a fast-read default made every
+  /// slow-but-successful delete arrive as a timeout. The return type stays a
+  /// bool — a lapse still surfaces as `RpcException('E_TIMEOUT')`, and telling
+  /// an accepted delete from a failed one belongs where the transport's own
+  /// codes are already separated from the bridge's.
   Future<bool> deleteSession(
     String projectId,
     String sessionId, {
@@ -441,6 +450,7 @@ class ControlPlaneClient {
         'force': ?force,
         'deleteBranch': ?deleteBranch,
       },
+      timeout: kSessionDeleteAckTimeout,
     );
     return res['deleted'] == true;
   }

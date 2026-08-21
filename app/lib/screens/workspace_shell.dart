@@ -583,8 +583,10 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     final pendingId = ref.read(pendingActiveSessionIdProvider);
     if (pendingId != null) {
       ref.read(pendingActiveSessionIdProvider.notifier).set(null);
+      // `!s.deleting` on both filters below: a cross-project tap or a cold open
+      // must not land on a session the bridge is already removing.
       final desired = list
-          .where((s) => s.id == pendingId && !s.archived)
+          .where((s) => s.id == pendingId && !s.archived && !s.deleting)
           .firstOrNull;
       if (desired != null) {
         ref.read(activeSessionIdProvider.notifier).set(desired.id);
@@ -611,7 +613,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     }
 
     // 2. Default behaviour (unchanged from before).
-    final active = list.where((s) => !s.archived).toList()
+    final active = list.where((s) => !s.archived && !s.deleting).toList()
       ..sort((a, b) => b.lastUsedAt.compareTo(a.lastUsedAt));
 
     if (active.isEmpty) {
@@ -796,11 +798,13 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // call sites (session_row.dart) — NOT here — because `_stopAllServices()`
     // empties the session list synchronously during a project switch (see
     // `PairedAgentNotifier.selectAgent`), which would race a listener-based
-    // disconnect and partially undo the in-flight switch.
-    ref.listen<List<SessionEntry>>(activeSessionsProvider, (_, _) {
+    // disconnect and partially undo the in-flight switch. The FILTERED list is
+    // what the selection follows, so a session the bridge is already removing
+    // is stepped off the moment it says so rather than 3-15s later.
+    ref.listen<List<SessionEntry>>(selectableSessionsProvider, (_, _) {
       Future.microtask(() {
         if (!mounted) return;
-        reconcileActiveSession(ref, ref.read(activeSessionsProvider));
+        reconcileActiveSession(ref, ref.read(selectableSessionsProvider));
       });
     });
 

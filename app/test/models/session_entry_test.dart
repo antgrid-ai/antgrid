@@ -137,4 +137,55 @@ void main() {
     expect(entry.toJson().containsKey('path'), isFalse);
     expect(SessionEntry.fromJson(entry.toJson()), entry);
   });
+
+  group('deleting', () {
+    Map<String, dynamic> base() => {
+      'id': 'a',
+      'name': 'n',
+      'createdAt': 1,
+      'lastUsedAt': 1,
+      'archived': false,
+      'running': false,
+    };
+
+    // Absence has to be false in both directions: an older bridge omits it, and
+    // so does every disk-only source. A wrong `true` would strand the row.
+    test('is false when the bridge says nothing', () {
+      expect(SessionEntry.fromJson(base()).deleting, isFalse);
+    });
+
+    test('round-trips true and is omitted when false', () {
+      final flagged = SessionEntry.fromJson({...base(), 'deleting': true});
+      expect(flagged.deleting, isTrue);
+      expect(SessionEntry.fromJson(flagged.toJson()).deleting, isTrue);
+      expect(
+        SessionEntry.fromJson(base()).toJson().containsKey('deleting'),
+        isFalse,
+      );
+    });
+
+    test('copyWith flips only the flag', () {
+      final entry = SessionEntry.fromJson({
+        ...base(),
+        'running': true,
+        'workStatus': 'attention',
+        'checkoutId': 'worktree-1',
+        'checkoutKind': 'managed-worktree',
+        'checkoutBranch': 'antgrid/session-a',
+        'checkoutState': 'ready',
+      });
+      final flagged = entry.copyWith(deleting: true);
+      expect(flagged.deleting, isTrue);
+      expect(flagged.copyWith(deleting: false), entry);
+    });
+
+    // This is what makes the flag observable through SessionsState's equality
+    // and the no-op dedup in _handleUpdated — without it the push is dropped.
+    test('two entries differing only in the flag are not equal', () {
+      final plain = SessionEntry.fromJson(base());
+      final flagged = plain.copyWith(deleting: true);
+      expect(flagged, isNot(plain));
+      expect(flagged.hashCode, isNot(plain.hashCode));
+    });
+  });
 }

@@ -52,6 +52,19 @@ final activeSessionsProvider = Provider<List<SessionEntry>>((ref) {
     ..sort((a, b) => b.lastUsedAt.compareTo(a.lastUsedAt));
 });
 
+/// [activeSessionsProvider] minus the sessions the bridge is already removing.
+///
+/// A deleting session stays VISIBLE in the drawer — that is the whole point of
+/// the pending state — but it must never be the selection target. Excluding it
+/// here is what stops keystrokes routing into a session whose PTY is being torn
+/// down, which surfaced as a run of `Terminal "…" not found for write`.
+///
+/// [activeSessionsProvider] deliberately stays unfiltered: `_disconnectIfEmpty`
+/// reads it, and a project whose only session is mid-delete is not yet empty.
+final selectableSessionsProvider = Provider<List<SessionEntry>>((ref) {
+  return ref.watch(activeSessionsProvider).where((s) => !s.deleting).toList();
+});
+
 /// Archived sessions (for the optional "Archived (n)" expander in the drawer).
 final archivedSessionsProvider = Provider<List<SessionEntry>>((ref) {
   final state = ref.watch(freshSessionsStateProvider);
@@ -78,10 +91,47 @@ final sessionsForEntryProvider = Provider.family<List<SessionEntry>, String>((
 /// never `lastUsedAt`, whose ordering records ACTIVITY and so still cannot say
 /// what the user is looking at. Nothing may re-derive a deliberate focus from
 /// that ordering.
+///
+/// Declared as the base [ValueController] rather than [ActiveSessionId] so a
+/// test can override this with a pre-seeded controller; [ActiveSessionId.set]
+/// is virtual, so production still gets the guard either way.
 final activeSessionIdProvider =
-    NotifierProvider<ValueController<String?>, String?>(
-      () => ValueController(null),
-    );
+    NotifierProvider<ValueController<String?>, String?>(ActiveSessionId.new);
+
+/// The active-session id, refusing any session the bridge is already deleting.
+///
+/// The guard lives on the WRITE rather than at the call sites because there are
+/// eight of them and only some are reachable from a drawer row: a Back press
+/// replaying nav history, a deep link naming the session, and the handler
+/// screen's in-session escalation all write the id directly.
+/// [reconcileActiveSession] cannot cover those — it is registered on
+/// [selectableSessionsProvider], so it fires when the LIST changes, and an
+/// id-only write into an unchanged list never wakes it.
+///
+/// Only a session this app can SEE as deleting is refused; an id it does not
+/// recognise is written through untouched. That is the ordinary bootstrap case
+/// — the id is chosen before the project's session list has landed — and a
+/// guard demanding presence would drop every one of those.
+///
+/// Keyed on the wire flag alone, never the app-local mark: that mark is armed
+/// on the user's confirm, and the bridge can still refuse the delete at its
+/// preflight, so letting it drive selection would step off a session that is
+/// not being deleted while the user is still answering the second dialog.
+class ActiveSessionId extends ValueController<String?> {
+  ActiveSessionId() : super(null);
+
+  @override
+  void set(String? value) {
+    if (value != null) {
+      for (final s
+          in ref.read(freshSessionsStateProvider)?.sessions ??
+              const <SessionEntry>[]) {
+        if (s.id == value && s.deleting) return;
+      }
+    }
+    super.set(value);
+  }
+}
 
 /// Carries the user's intended active-session id across a project switch
 /// initiated by clicking a session row in an inactive panel. Consumed (and
@@ -143,6 +193,11 @@ final focusedCheckoutIdProvider = Provider<String>((ref) {
 /// list churns. If the active session is deleted or archived, advance to the
 /// most-recently-used non-archived sibling. If the list is empty, clear the
 /// active id so the workspace falls back to the "+ new session" empty state.
+///
+/// Fed [selectableSessionsProvider], so the advance fires the moment the
+/// `deleting` flag ARRIVES rather than at the very end of a 3–15s delete when
+/// the list identity finally changes. The bridge only sets that flag past its
+/// preflight, so a delete that is still refusable can never navigate.
 ///
 /// Must be registered via `ref.listen` in a top-level widget (WorkspaceShell)
 /// so it runs for the lifetime of a project open. Not a provider value — just
