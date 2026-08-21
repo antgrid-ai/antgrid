@@ -187,17 +187,17 @@ dependency_overrides:
     git:
       url: https://github.com/bharathm03/dart_terminal.git
       path: pkgs/vte/ghostty_vte_flutter
-      ref: 0f5d7afb14af83f78c33895d780edd0f9de94a58
+      ref: a98455fc9b8e931f7e6d95cf2bd2f9494d177a62
   ghostty_vte:
     git:
       url: https://github.com/bharathm03/dart_terminal.git
       path: pkgs/vte/ghostty_vte
-      ref: 0f5d7afb14af83f78c33895d780edd0f9de94a58
+      ref: a98455fc9b8e931f7e6d95cf2bd2f9494d177a62
   portable_pty:
     git:
       url: https://github.com/bharathm03/dart_terminal.git
       path: pkgs/pty/portable_pty
-      ref: 0f5d7afb14af83f78c33895d780edd0f9de94a58
+      ref: a98455fc9b8e931f7e6d95cf2bd2f9494d177a62
 
 # Microsoft Store packaging (MSIX). The Store signs the package itself, so no
 # code-signing cert is used on this path (unlike the Inno Setup installer in

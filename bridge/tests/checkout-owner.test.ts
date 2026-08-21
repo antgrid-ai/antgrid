@@ -17,8 +17,12 @@ describe("readCheckoutOwner", () => {
   }
 
   test("names the repository an absolute pointer belongs to", () => {
-    expect(readCheckoutOwner(checkout("gitdir: C:/dev/api/.git/worktrees/one\n")))
-      .toEqual({ kind: "worktree", commonDir: resolve("C:/dev/api/.git") });
+    // Spelled for the host, because "absolute" is what is under test: a
+    // drive-letter path is absolute only on Windows, so on POSIX this fed the
+    // relative branch and the two sides resolved against different bases.
+    const repo = process.platform === "win32" ? "C:/dev/api" : "/dev/api";
+    expect(readCheckoutOwner(checkout(`gitdir: ${repo}/.git/worktrees/one\n`)))
+      .toEqual({ kind: "worktree", commonDir: resolve(`${repo}/.git`) });
   });
 
   test("resolves a relative pointer against the checkout", () => {

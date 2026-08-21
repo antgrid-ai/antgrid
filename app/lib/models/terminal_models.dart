@@ -41,6 +41,13 @@ class TerminalTab {
              initialCols: cols,
              initialRows: rows,
              maxLines: 10000,
+             // Rows, not bytes: at an agent-sized 202 columns a 10k-row
+             // history is roughly 17 MB, so the ceiling is generous enough
+             // that the row budget is what actually binds. Sizing this in
+             // bytes instead would retain ~2.5x fewer rows on a wide terminal
+             // than a narrow one.
+             maxScrollback: 64 << 20,
+             maxScrollbackLines: 10000,
            );
 
   bool get isAgent => type == 'agent';
