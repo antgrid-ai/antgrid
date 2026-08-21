@@ -6,6 +6,7 @@ import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_agent_mark.dart';
+import '../../design/widgets/ab_cross_fade.dart';
 import '../../design/widgets/ab_focus_ring.dart';
 import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_tap_target.dart';
@@ -317,14 +318,14 @@ class _DesktopLayout extends StatelessWidget {
             child: Stack(
               alignment: Alignment.centerLeft,
               children: [
-                AnimatedOpacity(
+                AbCrossFade(
                   duration: AbTokens.motionSnap,
-                  opacity: showDelete ? 0 : 1,
+                  visible: !showDelete,
                   child: _TimeLabel(label: relTime),
                 ),
-                AnimatedOpacity(
+                AbCrossFade(
                   duration: AbTokens.motionSnap,
-                  opacity: showDelete ? 1 : 0,
+                  visible: showDelete,
                   child: IgnorePointer(
                     ignoring: !showDelete,
                     child: Align(

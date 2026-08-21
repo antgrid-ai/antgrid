@@ -93,7 +93,14 @@ class _AbIconButtonState extends State<AbIconButton> {
     final p = context.antgrid;
     final disabled = widget.onTap == null;
     final on = widget.selected && !disabled;
-    final glyphColor = widget.color ?? (on ? p.accent : _toneColor());
+    final baseGlyph = widget.color ?? (on ? p.accent : _toneColor());
+    // Disabled dims by tinting the glyph rather than wrapping the button in
+    // `Opacity`, which would composite a layer to reach the same pixels. `on` is
+    // false whenever disabled, so the box background is already fully
+    // transparent here and the glyph is the only thing the dim has to reach.
+    final glyphColor = disabled
+        ? baseGlyph.withValues(alpha: baseGlyph.a * 0.4)
+        : baseGlyph;
     // Selected outranks hover: the pointer resting on an already-lit button
     // must not read as a second, different state.
     final background = on
@@ -128,7 +135,7 @@ class _AbIconButtonState extends State<AbIconButton> {
     if (disabled) {
       // Same AbTapTarget footprint as the enabled state so rows don't shift
       // when a button toggles disabled on mobile.
-      button = AbTapTarget(child: Opacity(opacity: 0.4, child: visual));
+      button = AbTapTarget(child: visual);
     } else {
       button = FocusableActionDetector(
         mouseCursor: SystemMouseCursors.click,

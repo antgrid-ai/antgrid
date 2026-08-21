@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_agent_mark.dart';
+import 'package:antgrid/design/widgets/ab_cross_fade.dart';
 import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/recent_session_row.dart';
 import 'package:antgrid/models/session_entry.dart';
@@ -313,13 +314,26 @@ void main() {
 
     // At rest: time visible, delete transparent (it overlays the time in a
     // Stack rather than reserving a trailing slot).
-    AnimatedOpacity opacityOf(Finder descendant) => tester.widget(
-      find.ancestor(of: descendant, matching: find.byType(AnimatedOpacity)),
-    );
+    // Reads the alpha actually painted, not a target the widget is heading
+    // towards: AbCrossFade drives a plain Opacity precisely so that the settled
+    // endpoints leave no composited layer behind.
+    double opacityOf(Finder descendant) => tester
+        .widget<Opacity>(
+          find
+              .descendant(
+                of: find.ancestor(
+                  of: descendant,
+                  matching: find.byType(AbCrossFade),
+                ),
+                matching: find.byType(Opacity),
+              )
+              .first,
+        )
+        .opacity;
     final timeFinder = find.textContaining('ago');
     final deleteFinder = find.byTooltip('Delete session');
-    expect(opacityOf(timeFinder).opacity, 1);
-    expect(opacityOf(deleteFinder).opacity, 0);
+    expect(opacityOf(timeFinder), 1);
+    expect(opacityOf(deleteFinder), 0);
 
     final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
     await gesture.addPointer(location: Offset.zero);
@@ -327,8 +341,8 @@ void main() {
     await gesture.moveTo(tester.getCenter(find.text('Hover target')));
     await tester.pumpAndSettle();
 
-    expect(opacityOf(timeFinder).opacity, 0);
-    expect(opacityOf(deleteFinder).opacity, 1);
+    expect(opacityOf(timeFinder), 0);
+    expect(opacityOf(deleteFinder), 1);
     // Same spot: the swap must not shift the rail. The slot is left-aligned,
     // so it's the leading edge (not the trailing one) that must line up.
     expect(

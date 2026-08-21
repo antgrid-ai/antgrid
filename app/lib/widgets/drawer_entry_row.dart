@@ -198,23 +198,23 @@ class _DrawerEntryRowState extends ConsumerState<DrawerEntryRow> {
       builder: (context, hovered) => AbListRow(
         // Folder by default; chevron on hover. Both sit in the same pinned slot
         // so the glyph swap doesn't shift the title.
-        leading: Opacity(
-          opacity: isWarm ? 1.0 : 0.6,
-          child: hovered
-              ? AbDisclosureChevron(expanded: expanded)
-              : SizedBox(
-                  width: AbTokens.drawerLeadingSlot,
-                  height: AbTokens.drawerLeadingSlot,
-                  child: Center(
-                    child: AbIcon(
-                      AbIcons.folder,
-                      // Match chevron size so the glyph doesn't shrink on hover.
-                      size: 10,
-                      color: context.antgrid.textMuted,
-                    ),
+        leading: hovered
+            ? AbDisclosureChevron(
+                expanded: expanded,
+                color: _leadingTint(context, isWarm),
+              )
+            : SizedBox(
+                width: AbTokens.drawerLeadingSlot,
+                height: AbTokens.drawerLeadingSlot,
+                child: Center(
+                  child: AbIcon(
+                    AbIcons.folder,
+                    // Match chevron size so the glyph doesn't shrink on hover.
+                    size: 10,
+                    color: _leadingTint(context, isWarm),
                   ),
                 ),
-        ),
+              ),
         title: Text(
           entry.displayName,
           style: AbTokens.sansStyle(
@@ -232,6 +232,16 @@ class _DrawerEntryRowState extends ConsumerState<DrawerEntryRow> {
       ),
     );
   }
+}
+
+/// Leading-glyph tint for a drawer row, dimmed while the project holds no open
+/// session.
+///
+/// Baked into the colour rather than applied with `Opacity`, which would
+/// composite a layer per row to reach the same pixels.
+Color _leadingTint(BuildContext context, bool isWarm) {
+  final muted = context.antgrid.textMuted;
+  return isWarm ? muted : muted.withValues(alpha: muted.a * 0.6);
 }
 
 /// Right-hand affordances of a drawer row: config error, running command,
@@ -748,8 +758,7 @@ class _MachineAggregateDot extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final expanded =
-        ref.watch(expandedDrawerIdsProvider).contains(machineUuid);
+    final expanded = ref.watch(expandedDrawerIdsProvider).contains(machineUuid);
     if (expanded) return const SizedBox.shrink();
     final status = ref.watch(machineWorkStatusProvider(machineUuid));
     if (status == null ||

@@ -11,6 +11,7 @@ import '../../design/widgets/ab_composer_send_button.dart';
 import '../../design/widgets/ab_chip.dart';
 import '../../design/widgets/ab_confirm_dialog.dart';
 import '../../design/widgets/ab_icon.dart';
+import '../../design/widgets/ab_cross_fade.dart';
 import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_kbd.dart';
 import '../../design/widgets/ab_menu.dart';
@@ -34,10 +35,8 @@ import 'branch_remote_advisory.dart';
 import 'environment_menu.dart';
 import 'project_menu.dart';
 
-typedef StartNewSessionCallback = Future<void> Function(
-  ProviderContainer ref, {
-  bool allowActiveSessions,
-});
+typedef StartNewSessionCallback =
+    Future<void> Function(ProviderContainer ref, {bool allowActiveSessions});
 
 /// Whether the Start/Send affordance is enabled. Single source of truth for
 /// both the reactive `canSend` (built from watched values in `build`) and the
@@ -50,7 +49,8 @@ bool newSessionCanStart({
   required String customCmd,
   bool isolated = false,
   bool isolationReady = false,
-}) => !starting &&
+}) =>
+    !starting &&
     hasValidTarget &&
     (!isCustom || customCmd.trim().isNotEmpty) &&
     (!isolated || isolationReady);
@@ -575,16 +575,14 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                                   padding: const EdgeInsets.only(
                                     right: AbTokens.space12,
                                   ),
-                                  child: AnimatedOpacity(
+                                  child: AbCrossFade(
                                     duration: AbTokens.motionDefault,
-                                    opacity: _promptFocused && canSend ? 1 : 0,
+                                    visible: _promptFocused && canSend,
                                     child: Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
                                         const AbKbd('⏎'),
-                                        const SizedBox(
-                                          width: AbTokens.space6,
-                                        ),
+                                        const SizedBox(width: AbTokens.space6),
                                         Text(
                                           'to start',
                                           style: AbTokens.sansStyle(

@@ -4,6 +4,7 @@ import 'dart:convert';
 import '../analytics/events.dart';
 import '../models/terminal_models.dart';
 import '../models/ab_message.dart';
+import '../project/perf_recorder.dart';
 import '../project/project_session.dart';
 import '../utils/terminal_bell.dart';
 import 'reply_latch.dart';
@@ -115,7 +116,8 @@ class TerminalService {
   }
 
   void _requestTerminalSnapshot(String terminalId) {
-    session.sendForCheckout(checkoutId,
+    session.sendForCheckout(
+      checkoutId,
       createAbMessage('terminal:snapshot:request', {'terminalId': terminalId}),
     );
   }
@@ -161,6 +163,13 @@ class TerminalService {
   void _handleTerminalOutput(TerminalOutputMessage msg) {
     final tab = _state.tabs[msg.terminalId];
     if (tab == null) return;
+    // Only the live output path closes an echo timer. Snapshots are a
+    // reconnect artifact, not a response to anything the user typed.
+    perfRecorder.noteTerminalOutput(
+      projectId: session.projectId,
+      checkoutId: checkoutId,
+      terminalId: msg.terminalId,
+    );
     tab.ghostty.appendOutputBytes(utf8.encode(msg.data));
   }
 
@@ -400,6 +409,11 @@ class TerminalService {
       _trackedUse = true;
       session.analytics?.track(AnalyticsEvents.terminalUsed);
     }
+    perfRecorder.noteTerminalInput(
+      projectId: session.projectId,
+      checkoutId: checkoutId,
+      terminalId: terminalId,
+    );
     _send(
       createAbMessage('terminal:input', {
         'terminalId': terminalId,

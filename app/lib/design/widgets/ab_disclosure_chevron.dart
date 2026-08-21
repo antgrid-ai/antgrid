@@ -12,10 +12,15 @@ import 'ab_icon.dart';
 /// duration have to agree down the whole column or the sidebar reads as ragged,
 /// and four hand-rolled copies had already started to drift.
 class AbDisclosureChevron extends StatelessWidget {
-  const AbDisclosureChevron({super.key, required this.expanded});
+  const AbDisclosureChevron({super.key, required this.expanded, this.color});
 
   /// Points down when true, right when false.
   final bool expanded;
+
+  /// Overrides the default muted tint. A caller wanting a dimmed chevron passes
+  /// a pre-dimmed colour rather than wrapping this in `Opacity`, which would
+  /// composite a layer to reach the same pixels.
+  final Color? color;
 
   @override
   Widget build(BuildContext context) {
@@ -29,7 +34,7 @@ class AbDisclosureChevron extends StatelessWidget {
           child: AbIcon(
             AbIcons.chevronRight,
             size: 10,
-            color: context.antgrid.textMuted,
+            color: color ?? context.antgrid.textMuted,
           ),
         ),
       ),
