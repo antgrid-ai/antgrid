@@ -31,6 +31,26 @@ describe("TerminalManager", () => {
     manager.killAll();
   });
 
+  test("replay snapshot extends the raw scrollback, never replaces it", async () => {
+    manager.spawn({ terminalId: "t1" });
+    await new Promise((r) => setTimeout(r, 800));
+
+    // Taken replay-first: anything the shell emits between the two calls would
+    // grow `raw` past `replay` and fail the suffix check rather than pass it.
+    const replay = manager.getReplaySnapshot("t1");
+    const raw = manager.getScrollback("t1");
+    expect(replay).not.toBeNull();
+    expect(raw).not.toBeNull();
+    expect(replay!.text.endsWith(raw!.text)).toBe(true);
+    expect(replay!.seq).toBe(raw!.seq);
+
+    manager.killAll();
+  });
+
+  test("replay snapshot is null for an unknown terminal", () => {
+    expect(manager.getReplaySnapshot("nope")).toBeNull();
+  });
+
   test("kill terminal emits terminal:exited", async () => {
     manager.spawn({ terminalId: "t1" });
     await new Promise((r) => setTimeout(r, 100));

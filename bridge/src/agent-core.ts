@@ -1178,7 +1178,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "terminal:snapshot:request": {
-        const snap = manager.getScrollback(internalTerminalId(runtime, msg.terminalId));
+        const snap = manager.getReplaySnapshot(internalTerminalId(runtime, msg.terminalId));
         if (!snap) {
           log.warn("snapshot requested for unknown terminal %s", msg.terminalId);
           break;
@@ -1754,7 +1754,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Re-send terminal scrollback so the app has current output
     if (manager) {
       for (const t of manager.getStatus()) {
-        const snap = manager.getScrollback(t.terminalId);
+        const snap = manager.getReplaySnapshot(t.terminalId);
         if (snap && snap.text) {
           sendTerminalFrame(createMessage("terminal:output", {
             terminalId: terminalOwner(t.terminalId).externalId,

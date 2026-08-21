@@ -108,15 +108,16 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   int? _lastSentCols;
   int? _lastSentRows;
 
-  /// Width the driver's grid is actually rendered at, reported by
-  /// `_TerminalGridFreeze`. The PTY's authoritative `cols` is derived from this
-  /// (not the live viewport width) so the size sent to the PTY lands in lockstep
-  /// with the locally-rendered grid — see `_TerminalGridFreeze.onSettled`.
-  double? _renderWidth;
+  /// Size the driver's grid is actually rendered at, reported by
+  /// `_TerminalGridFreeze`. The PTY's authoritative `cols`/`rows` are derived
+  /// from this (not the live viewport) so the size sent to the PTY lands in
+  /// lockstep with the locally-rendered grid — see
+  /// `_TerminalGridFreeze.onSettled`.
+  Size? _renderSize;
 
-  void _onRenderWidthSettled(double width) {
-    if (!mounted || _renderWidth == width) return;
-    setState(() => _renderWidth = width);
+  void _onRenderSizeSettled(Size size) {
+    if (!mounted || _renderSize == size) return;
+    setState(() => _renderSize = size);
   }
 
   bool get _hasSelection => (_selectedText ?? '').isNotEmpty;
@@ -664,7 +665,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                     final charWidth = _charWidth;
                     if (amDriver || charWidth == null || charWidth <= 0) {
                       return _TerminalGridFreeze(
-                        onSettled: _onRenderWidthSettled,
+                        onSettled: _onRenderSizeSettled,
                         child: terminalView,
                       );
                     }
@@ -753,23 +754,28 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     // covers the vertical case too — omitting it would send one extra row vs
     // the driver's own render, reintroducing the sent-vs-rendered mismatch this
     // feature exists to eliminate.
-    // Cols come from the driver's *rendered* (settled) width so the PTY tracks
-    // the grid the engine is actually showing — not the live viewport, which
-    // would race ahead of the pinned grid (`_renderWidth` via
+    // BOTH axes come from the driver's *rendered* (settled) size so the PTY
+    // tracks the grid the engine is actually showing — not the live viewport,
+    // which would race ahead of the pinned grid (`_renderSize` via
     // `_TerminalGridFreeze.onSettled`). A claiming view that isn't yet the
-    // driver (focus takeover) has no settled width, so it falls back to the
-    // live width to resize the PTY to its own viewport. Rows are never frozen,
-    // so they always track the live height.
-    final widthForCols = (amDriver && _renderWidth != null)
-        ? _renderWidth!
-        : constraints.maxWidth;
+    // driver (focus takeover) has no settled size, so it falls back to the
+    // live viewport to resize the PTY to its own window.
+    //
+    // Rows matter as much as cols. A line-oriented TUI only scrolls when the
+    // row count moves, which is why rows used to track the live height — but a
+    // fullscreen one addresses rows absolutely, so every row the PTY and the
+    // local grid disagree on is a line drawn in the wrong place for as long as
+    // the disagreement lasts.
+    final renderSize = amDriver ? _renderSize : null;
+    final widthForCols = renderSize?.width ?? constraints.maxWidth;
+    final heightForRows = renderSize?.height ?? constraints.maxHeight;
     final nativeCols = math.max(
       1,
       ((widthForCols - _hPad) / charWidth).floor(),
     );
     final nativeRows = math.max(
       1,
-      ((constraints.maxHeight - _hPad) / lineHeightPx).floor(),
+      ((heightForRows - _hPad) / lineHeightPx).floor(),
     );
 
     // Claims fire only on becoming locally-active — a view built without focus
@@ -850,29 +856,30 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   }
 }
 
-/// Pins its child to the most recently *settled* width. While the incoming
-/// width is changing every frame (e.g. an active divider drag), the child
-/// stays laid out at the last width that held still long enough; once the
-/// width is stable for [_settleDelay], the pinned width snaps to the new
-/// value and the child relayouts once.
+/// Pins its child to the most recently *settled* size. While the incoming
+/// constraints change every frame (e.g. an active divider drag), the child
+/// stays laid out at the last size that held still long enough; once the size
+/// is stable for [_settleDelay], the pinned size snaps to the new value and
+/// the child relayouts once.
 ///
-/// Height passes through live — only width is pinned, which is what matters
-/// for terminal soft-wrap / Ink redraw correctness. The grid-centering
-/// concern (floor-rounded cell remainder distributed on all four sides) is
-/// owned by `GhosttyTerminalView.cellAlignment` and configured at the
-/// callsite above.
+/// Both axes are pinned. Width is what soft-wrap and Ink-style redraws depend
+/// on, but a fullscreen TUI addresses rows absolutely, so a height that passes
+/// through live moves the local grid under a frame the guest composed against
+/// the old row count. The grid-centering concern (floor-rounded cell remainder
+/// distributed on all four sides) is owned by
+/// `GhosttyTerminalView.cellAlignment` and configured at the callsite above.
 class _TerminalGridFreeze extends StatefulWidget {
   final Widget child;
 
-  /// Fires (post-frame) with the width the child is actually rendered at, both
+  /// Fires (post-frame) with the size the child is actually rendered at, both
   /// on the initial instant pin and after each settle. The driver sources the
-  /// PTY's authoritative `cols` from this — NOT from the live viewport width —
+  /// PTY's authoritative `cols`/`rows` from this — NOT from the live viewport —
   /// so the size sent to the PTY always matches the grid the engine is
-  /// rendering. Sending from the live width instead lets the PTY (and the
-  /// agent's SIGWINCH redraw) move to the new width while this pinned grid is
-  /// still at the old one, corrupting the redraw until a focus round-trip
+  /// rendering. Sending from the live size instead lets the PTY (and the
+  /// agent's SIGWINCH redraw) move to the new geometry while this pinned grid
+  /// is still at the old one, corrupting the redraw until a focus round-trip
   /// re-triggers it.
-  final ValueChanged<double>? onSettled;
+  final ValueChanged<Size>? onSettled;
 
   const _TerminalGridFreeze({required this.child, this.onSettled});
 
@@ -883,7 +890,7 @@ class _TerminalGridFreeze extends StatefulWidget {
 class _TerminalGridFreezeState extends State<_TerminalGridFreeze> {
   static const _settleDelay = Duration(milliseconds: 150);
 
-  double? _pinnedWidth;
+  Size? _pinnedSize;
   Timer? _settleTimer;
 
   @override
@@ -892,22 +899,22 @@ class _TerminalGridFreezeState extends State<_TerminalGridFreeze> {
     super.dispose();
   }
 
-  /// Notify the parent of the rendered width without mutating state during
+  /// Notify the parent of the rendered size without mutating state during
   /// layout (the immediate pin happens inside `build`): defer to post-frame.
-  void _notifySettled(double width) {
+  void _notifySettled(Size size) {
     final cb = widget.onSettled;
     if (cb == null) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) cb(width);
+      if (mounted) cb(size);
     });
   }
 
-  void _scheduleSettle(double width) {
+  void _scheduleSettle(Size size) {
     _settleTimer?.cancel();
     _settleTimer = Timer(_settleDelay, () {
       if (!mounted) return;
-      setState(() => _pinnedWidth = width);
-      _notifySettled(width);
+      setState(() => _pinnedSize = size);
+      _notifySettled(size);
     });
   }
 
@@ -915,22 +922,24 @@ class _TerminalGridFreezeState extends State<_TerminalGridFreeze> {
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final live = constraints.maxWidth;
-        // Adopt the first observed width instantly so the initial layout
+        final live = Size(constraints.maxWidth, constraints.maxHeight);
+        // Adopt the first observed size instantly so the initial layout
         // doesn't show a 150ms blank flash.
-        if (_pinnedWidth == null) {
-          _pinnedWidth = live;
+        if (_pinnedSize == null) {
+          _pinnedSize = live;
           _notifySettled(live);
         }
-        if (_pinnedWidth != live) {
+        if (_pinnedSize != live) {
           _scheduleSettle(live);
         }
-        final inner = _pinnedWidth!;
+        final inner = _pinnedSize!;
         return ClipRect(
           child: OverflowBox(
-            minWidth: inner,
-            maxWidth: inner,
-            alignment: Alignment.centerLeft,
+            minWidth: inner.width,
+            maxWidth: inner.width,
+            minHeight: inner.height,
+            maxHeight: inner.height,
+            alignment: Alignment.topLeft,
             child: widget.child,
           ),
         );

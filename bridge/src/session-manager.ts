@@ -558,7 +558,7 @@ export class SessionManager {
         projectId: this.opts.projectId,
         repoPath: this.projectPath,
         sessionId: entry.id,
-        sessionName: entry.name,
+        sessionName: undefined, // new session won't have a name
         baseBranch: spec.baseBranch,
       });
       await this.opts.prepareCheckoutRuntime?.(checkout);
@@ -1098,21 +1098,19 @@ export class SessionManager {
         : [...promptArgs]
       : [...baseArgs, ...resumeArgs, ...promptArgs];
 
-    // Spawn at default 80x24. The app's first `terminal:resize` (sent by the
-    // viewed terminal once its cell metrics settle and it claims driver)
-    // corrects the geometry within a frame or two — TUI agents (claude-code,
-    // codex…) handle the SIGWINCH transparently. Earlier revisions deferred the
-    // spawn until terminal:resize arrived, but that produced a chicken-and-egg
-    // deadlock: the tab never mounts without a PTY, so the resize never
-    // fires, so the PTY never spawns.
+    // Geometry is left to TerminalManager, which spawns at whatever size the
+    // pane's driver last reported (80x24 only for the first terminal of a
+    // fresh host). The app's `terminal:resize` still corrects it once the
+    // viewed terminal's cell metrics settle. Do NOT defer the spawn until that
+    // resize arrives: the tab never mounts without a PTY, so the resize never
+    // fires, so the PTY never spawns — an earlier revision deadlocked exactly
+    // there.
     this.tm.spawn({
       terminalId: id,
       name: entry.name,
       command,
       args: spawnArgs, // [] when args were folded into `command`; default flags otherwise
       cwd: sessionAgentSpec.workingDir ? resolve(checkoutPath, sessionAgentSpec.workingDir) : checkoutPath,
-      cols: 80,
-      rows: 24,
       type: "agent",
       env: Object.keys(launchEnv).length ? launchEnv : undefined,
       // Spec intent AND this spawn's injection outcome, both decided in

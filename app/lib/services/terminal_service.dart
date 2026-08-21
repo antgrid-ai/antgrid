@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import '../analytics/events.dart';
 import '../models/terminal_models.dart';
@@ -108,10 +109,24 @@ class TerminalService {
     }
   }
 
+  /// Erase scrollback (`CSI 3 J`), erase the screen (`CSI 2 J`) and home the
+  /// cursor — everything `clear()` would do to the CONTENT, and nothing it
+  /// would do to the modes.
+  static final Uint8List _snapshotErase = Uint8List.fromList(
+    utf8.encode('\x1b[3J\x1b[2J\x1b[H'),
+  );
+
   void _applySnapshot(TerminalSnapshotMessage msg) {
     final tab = _state.tabs[msg.terminalId];
     if (tab == null) return;
-    tab.ghostty.clear();
+    // Deliberately NOT `clear()`. That resets the engine, and a reset takes
+    // the guest's MODES with it — alt screen, bracketed paste, focus events,
+    // mouse tracking, synchronised output. A fullscreen TUI sets those once at
+    // startup and never sends them again, and they are far outside the byte
+    // tail this snapshot carries, so nothing here can put them back: the
+    // engine would sit on the primary screen with mouse off while the guest
+    // draws into an alt screen, until the agent itself is restarted.
+    tab.ghostty.appendOutputBytes(_snapshotErase);
     tab.ghostty.appendOutputBytes(utf8.encode(msg.scrollback));
   }
 
@@ -368,12 +383,21 @@ class TerminalService {
     );
 
     // Wire the Ghostty controller's user-input path back to the agent.
+    //
+    // The bridge fronts the PTY and answers the guest's capability queries
+    // itself (`vt-capability-responder.ts`) — it has to, since a session with
+    // no viewer attached has no engine to answer for it. The engine answers
+    // DA1/DA2/DA3/XTVERSION/DSR/DECRQM/kitty on its own too, so forwarding
+    // those made the guest see two answers to one question, ours a relay
+    // round-trip late. Terminal query protocols are FIFO, so the late one is
+    // matched against whichever query is pending by the time it lands.
     tab.ghostty.attachExternalTransport(
       writeBytes: (bytes) {
         sendInput(terminalId, utf8.decode(bytes, allowMalformed: true));
         return true;
       },
       onResize: null,
+      forwardGuestQueryReplies: false,
     );
     // A bare BEL rings audibly like a native terminal — it is deliberately not a
     // desktop notification (only OSC 9/777 raise those, via terminal:notification).

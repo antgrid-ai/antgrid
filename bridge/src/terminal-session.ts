@@ -8,6 +8,7 @@ const log = logger.child({ component: "terminal-session" });
 import { createMessage, type AbMessage } from "./protocol";
 import { findOnPath } from "./tool-detector";
 import { TerminalNotificationScanner, type NotificationEvent } from "./notification-scanner";
+import { VtCapabilityResponder } from "./vt-capability-responder";
 
 /**
  * When ANTGRID_DEBUG_PTY_LOG is set, every PTY output chunk is appended to that
@@ -625,89 +626,27 @@ export class TerminalSession {
   }
 
   /**
-   * Detect VT capability queries that the spawned process (e.g. opencode)
-   * emits at startup, and write canned responses back into the PTY so the
-   * process believes it is talking to a fully-featured terminal.
+   * Answer the VT capability queries the spawned process emits at startup.
+   * The responder is stateful (it carries a query split across PTY chunks and
+   * follows the guest's own mode changes), so it must live for the whole
+   * session — see `vt-capability-responder.ts` for why this side answers at
+   * all and why it is the only side that does.
    *
-   * Without responses, modern TUIs like opencode time out and fall back to
-   * a "diff/economy" rendering strategy that uses ECH + cursor-skip and
-   * leaks popup-bg attributes into cells the popup vacated (the muted
-   * "open" half of the opencode banner reproduces this).
-   *
-   * Pattern matching is per-chunk, so a query split across two PTY chunks
-   * will be missed. In practice opencode batches these queries into a
-   * single startup write, so this is fine for the common case. Revisit
-   * with a small parser-state machine if we hit fragmentation.
-   *
-   * Modes claimed "set" match the WT capability handshake we observed in
-   * the trace diff (`opencode-wt-trace.bin`).
+   * The colours are Antgrid's design tokens and must stay in lockstep with
+   * `AbColors` (`app/lib/design/ab_colors.dart`): they are what the guest
+   * picks its own contrast against.
    */
+  private capabilityResponder = new VtCapabilityResponder({
+    foreground: "rgb:fafa/fafa/fafa", // ≈ textPrimary
+    background: "rgb:0909/0909/0b0b", // ≈ bgDeepest
+    cursor: "rgb:8181/8c8c/f8f8", //     ≈ accent indigo
+  });
+
   private respondToCapabilityQueries(data: string): void {
-    if (!data.includes("\x1b")) return; // fast path: no escape sequences
-    const replies: string[] = [];
-
-    // OSC 10/11/12 — default fg/bg/cursor color queries. Match either ST
-    // (\E\\) or BEL (\x07) terminator. Respond with Antgrid's design tokens.
-    const oscQuery = /\x1b\][\d]+;\?(?:\x07|\x1b\\)/g;
-    for (const m of data.matchAll(oscQuery)) {
-      const which = m[0].slice(2, m[0].indexOf(";"));
-      const term = m[0].includes("\x07") ? "\x07" : "\x1b\\";
-      // 8-bit-per-channel rgb format expected by xterm OSC color responses
-      // (rgb:RRRR/GGGG/BBBB or rgb:RR/GG/BB; xterm accepts both).
-      const colors: Record<string, string> = {
-        "10": "rgb:fafa/fafa/fafa", // default fg ≈ Antgrid textPrimary
-        "11": "rgb:0909/0909/0b0b", // default bg ≈ Antgrid bgDeepest
-        "12": "rgb:8181/8c8c/f8f8", // cursor    ≈ Antgrid accent indigo
-      };
-      const rgb = colors[which];
-      if (rgb) replies.push(`\x1b]${which};${rgb}${term}`);
-    }
-
-    // CSI 6 n — Device Status Report (cursor position). Respond with 1;1
-    // — opencode uses this at startup as a sync probe; exact position
-    // doesn't matter for capability detection.
-    if (/\x1b\[6n/.test(data)) replies.push("\x1b[1;1R");
-
-    // CSI > 0 q  /  CSI > q — XTVERSION. Identify ourselves so opencode
-    // sees a known terminal. Some TUIs match on the name string.
-    if (/\x1b\[>0?q/.test(data)) replies.push("\x1bP>|antgrid(1.0)\x1b\\");
-
-    // CSI c  or  CSI 0 c — DA1 (Primary Device Attributes). Advertise the
-    // xterm VT420 feature set including ANSI color (22) — same as a
-    // modern xterm.
-    if (/\x1b\[(?:0)?c/.test(data) && !/\x1b\[>(?:0)?c/.test(data)) {
-      replies.push("\x1b[?64;1;2;6;9;15;18;21;22c");
-    }
-
-    // CSI > c  or  CSI > 0 c — DA2 (Secondary). xterm-style
-    // (terminal id 1, version 1000, no cartridge ROM).
-    if (/\x1b\[>(?:0)?c/.test(data)) replies.push("\x1b[>1;1000;0c");
-
-    // DECRQM — CSI ? n $ p — query DEC private mode state.
-    // 0 = not recognised, 1 = set, 2 = reset, 3 = perm-set, 4 = perm-reset.
-    // Modes we claim supported match what WT reported in the trace diff.
-    const claimedSet = new Set([
-      1004, // focus in/out events
-      2004, // bracketed paste
-      2026, // synchronised output
-      2027, // grapheme-cluster width
-      2031, // color-scheme change notifications
-    ]);
-    const decrqm = /\x1b\[\?(\d+)\$p/g;
-    for (const m of data.matchAll(decrqm)) {
-      const mode = Number(m[1]);
-      const state = claimedSet.has(mode) ? 1 : 2;
-      replies.push(`\x1b[?${mode};${state}$y`);
-    }
-
-    // CSI ? u — Kitty keyboard protocol flags query. We don't implement
-    // Kitty kbd yet, so report 0 (no flags). Avoids opencode treating us
-    // as a non-responsive terminal.
-    if (/\x1b\[\?u/.test(data)) replies.push("\x1b[?0u");
-
-    if (replies.length === 0) return;
+    const replies = this.capabilityResponder.feed(data);
+    if (replies === "") return;
     try {
-      this.pty?.write(replies.join(""));
+      this.pty?.write(replies);
     } catch {
       // PTY may have already exited
     }

@@ -1,5 +1,6 @@
 import { TerminalSession, buildSpawnEnv } from "./terminal-session";
 import { ScrollbackBuffer } from "./scrollback";
+import { TerminalModeTracker } from "./terminal-modes";
 import { logger } from "./logger";
 const log = logger.child({ component: "terminal-manager" });
 import { createMessage, type AbMessage } from "./protocol";
@@ -37,6 +38,8 @@ export interface TerminalManagerCallbacks {
 export class TerminalManager {
   private sessions = new Map<string, TerminalSession>();
   private scrollbacks = new Map<string, ScrollbackBuffer>();
+  /** Paired 1:1 with `scrollbacks` — the tail alone cannot carry mode state. */
+  private modeTrackers = new Map<string, TerminalModeTracker>();
   private terminalTypes = new Map<string, "agent" | "service">();
   /** Metadata for exited terminals so they remain visible in status. */
   private stoppedTerminals = new Map<string, StoppedTerminalInfo>();
@@ -45,6 +48,12 @@ export class TerminalManager {
   private connState: ConnState;
   private getApiPort: (() => number | null) | undefined;
   private sessionObservers = new Set<(s: TerminalSession) => void>();
+  /**
+   * Geometry the current driver last reported. Every terminal in a project
+   * renders in the same agent pane, so it is also the size the NEXT one will
+   * be shown at — see `spawn`.
+   */
+  private lastDriverGeometry: { cols: number; rows: number } | null = null;
 
   constructor(
     sendMessage: (msg: AbMessage) => void,
@@ -82,6 +91,8 @@ export class TerminalManager {
 
     const scrollback = new ScrollbackBuffer();
     this.scrollbacks.set(terminalId, scrollback);
+    const modes = new TerminalModeTracker();
+    this.modeTrackers.set(terminalId, modes);
 
     // Stamp this core's api-server port AND the terminal id into the spawned
     // shell. Hooks/plugins echo ANTGRID_TERMINAL_ID back to /session-title for
@@ -98,8 +109,13 @@ export class TerminalManager {
       args: config.args,
       cwd: config.cwd,
       env,
-      cols: config.cols,
-      rows: config.rows,
+      // Spawn at the size the pane is ALREADY showing rather than at 80x24.
+      // A fullscreen TUI positions absolutely from its first frame, so every
+      // frame it draws before `terminal:resize` round-trips lands against the
+      // wrong grid — visible tearing, and worse on a host restart, where the
+      // agent boots into a pane whose real size has been known all along.
+      cols: config.cols ?? this.lastDriverGeometry?.cols,
+      rows: config.rows ?? this.lastDriverGeometry?.rows,
       type: config.type,
       suppressOscNotifications: config.suppressOscNotifications,
       suppressOscTitle: config.suppressOscTitle,
@@ -108,6 +124,7 @@ export class TerminalManager {
       onMessage: (msg: AbMessage) => {
         if (msg.type === "terminal:output") {
           scrollback.append(msg.data);
+          modes.feed(msg.data);
           this.callbacks.onTerminalOutput?.(terminalId, msg.data);
           const seq = this.connState.bumpTerminalSeq(terminalId);
           if (this.connState.suppressed) {
@@ -132,6 +149,7 @@ export class TerminalManager {
           });
           this.sessions.delete(terminalId);
           this.scrollbacks.delete(terminalId);
+          this.modeTrackers.delete(terminalId);
           this.connState.clearTerminal(terminalId);
           this.callbacks.onTerminalExited?.(terminalId);
         }
@@ -232,6 +250,7 @@ export class TerminalManager {
       return;
     }
     session.resize(clientId, cols, rows);
+    this.lastDriverGeometry = { cols: session.cols, rows: session.rows };
     this.sendMessage(
       createMessage("terminal:size", {
         terminalId,
@@ -251,10 +270,31 @@ export class TerminalManager {
     session.write(data);
   }
 
+  /**
+   * Raw scrollback tail, for readers that want the program's OUTPUT — the
+   * handler's LLM context and the local API. Anything replayed INTO an app's
+   * terminal emulator wants `getReplaySnapshot` instead.
+   */
   getScrollback(terminalId: string): { text: string; seq: number } | null {
     const buf = this.scrollbacks.get(terminalId);
     if (!buf) return null;
     return { text: buf.getContents(), seq: this.connState.terminalSeq(terminalId) };
+  }
+
+  /**
+   * What a (re)attaching app must be fed: latched DEC private modes first, then
+   * the scrollback tail.
+   *
+   * The app rebuilds its VT engine per attach and this blob is its ONLY input,
+   * so a mode the tail no longer carries is a mode the app does not have —
+   * which is how mouse reporting, set once at TUI startup, went missing and
+   * took every click with it. Never hand an app plain `getScrollback` output.
+   */
+  getReplaySnapshot(terminalId: string): { text: string; seq: number } | null {
+    const snap = this.getScrollback(terminalId);
+    if (!snap) return null;
+    const prelude = this.modeTrackers.get(terminalId)?.prelude() ?? "";
+    return { ...snap, text: prelude + snap.text };
   }
 
   getStatus(): Array<{

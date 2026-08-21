@@ -682,18 +682,18 @@ packages:
     dependency: "direct overridden"
     description:
       path: "pkgs/vte/ghostty_vte"
-      ref: a98455fc9b8e931f7e6d95cf2bd2f9494d177a62
-      resolved-ref: a98455fc9b8e931f7e6d95cf2bd2f9494d177a62
-      url: "https://github.com/bharathm03/dart_terminal.git"
+      ref: a4f96a834bf9a43b76433311678e194812afc7cf
+      resolved-ref: a4f96a834bf9a43b76433311678e194812afc7cf
+      url: "https://github.com/antgrid-ai/dart_terminal.git"
     source: git
     version: "0.1.4+antgrid.1"
   ghostty_vte_flutter:
     dependency: "direct main"
     description:
       path: "pkgs/vte/ghostty_vte_flutter"
-      ref: a98455fc9b8e931f7e6d95cf2bd2f9494d177a62
-      resolved-ref: a98455fc9b8e931f7e6d95cf2bd2f9494d177a62
-      url: "https://github.com/bharathm03/dart_terminal.git"
+      ref: a4f96a834bf9a43b76433311678e194812afc7cf
+      resolved-ref: a4f96a834bf9a43b76433311678e194812afc7cf
+      url: "https://github.com/antgrid-ai/dart_terminal.git"
     source: git
     version: "0.1.4+antgrid.1"
   glob:
@@ -996,10 +996,10 @@ packages:
     dependency: transitive
     description:
       name: native_prebuilt
-      sha256: "45b79da417e3c51e3a65e8ec28dc5aaddc9685a30592dc9af65e40a265af51b1"
+      sha256: "3464f88ba5062c84399aa1721cb838150e45d94c39ab2402fa9fd74b6588ad79"
       url: "https://pub.dev"
     source: hosted
-    version: "0.3.2"
+    version: "0.4.0"
   node_preamble:
     dependency: transitive
     description:
@@ -1204,9 +1204,9 @@ packages:
     dependency: "direct overridden"
     description:
       path: "pkgs/pty/portable_pty"
-      ref: a98455fc9b8e931f7e6d95cf2bd2f9494d177a62
-      resolved-ref: a98455fc9b8e931f7e6d95cf2bd2f9494d177a62
-      url: "https://github.com/bharathm03/dart_terminal.git"
+      ref: a4f96a834bf9a43b76433311678e194812afc7cf
+      resolved-ref: a4f96a834bf9a43b76433311678e194812afc7cf
+      url: "https://github.com/antgrid-ai/dart_terminal.git"
     source: git
     version: "0.0.6+antgrid.2"
   posix:
