@@ -50,6 +50,10 @@ permissions:
 jobs:
   # Both images are independent — build them concurrently via a matrix.
   build:
+    # Only the repo that owns the GHCR packages publishes. The image path is
+    # derived from the OWNER, not the repo name, so a second repo in this org
+    # would push to the very tags the ops rollout pulls.
+    if: vars.RELEASE_REPO == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:

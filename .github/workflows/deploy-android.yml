@@ -31,6 +31,7 @@ jobs:
   # Restores the `paths:` filter the push trigger provided — a scheduled event
   # carries none. See .github/actions/deploy-gate.
   gate:
+    if: vars.RELEASE_REPO == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -51,7 +52,10 @@ jobs:
     needs: gate
     # Only an explicit 'false' stops a build — see deploy-ios.yml for why a
     # dead gate job must still deploy.
-    if: ${{ !cancelled() && needs.gate.outputs.go != 'false' }}
+    # RELEASE_REPO is repeated here on purpose: a SKIPPED `gate` leaves
+    # needs.gate.outputs.go empty, which satisfies `!= 'false'`, so gating the
+    # gate alone would still deploy.
+    if: ${{ vars.RELEASE_REPO == 'true' && !cancelled() && needs.gate.outputs.go != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:

@@ -63,6 +63,7 @@ jobs:
   # event carries none. Cheap ubuntu job so the 10x macOS runner never boots on a
   # night when nothing under app/ or packages/ moved.
   gate:
+    if: vars.RELEASE_REPO == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -86,7 +87,10 @@ jobs:
     # nothing to do, which is the fail-closed outcome the gate is written to
     # avoid. Only an explicit 'false' — the gate having looked and found nothing
     # — stops a build. `!cancelled()` keeps a cancelled workflow from deploying.
-    if: ${{ !cancelled() && needs.gate.outputs.go != 'false' }}
+    # RELEASE_REPO is repeated here on purpose: a SKIPPED `gate` leaves
+    # needs.gate.outputs.go empty, which satisfies `!= 'false'`, so gating the
+    # gate alone would still deploy.
+    if: ${{ vars.RELEASE_REPO == 'true' && !cancelled() && needs.gate.outputs.go != 'false' }}
     # macos-26 defaults to Xcode 26 / iOS 26 SDK. App Store Connect now hard-
     # rejects anything built with an older SDK (ITMS-90725), and macos-15 still
     # defaults to Xcode 16.4 (iOS 18.5 SDK) — so the runner label is load-bearing.
