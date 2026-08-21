@@ -73,10 +73,11 @@ final sessionsForEntryProvider = Provider.family<List<SessionEntry>, String>((
 });
 
 /// Which session is currently in focus in the workspace. App-local, and it
-/// stays that way: the fire-and-forget `session:focus` ping is a no-op on the
-/// current bridge (`SessionManager.focus`), so the agent's own `lastUsedAt`
-/// ordering records ACTIVITY and never learns what the user is looking at.
-/// Nothing may re-derive a deliberate focus from that ordering.
+/// stays that way: the fire-and-forget `session:focus` ping feeds the bridge's
+/// READ state only (unread vs done — see `sessionFocus` in work-status.ts) and
+/// never `lastUsedAt`, whose ordering records ACTIVITY and so still cannot say
+/// what the user is looking at. Nothing may re-derive a deliberate focus from
+/// that ordering.
 final activeSessionIdProvider =
     NotifierProvider<ValueController<String?>, String?>(
       () => ValueController(null),

@@ -376,8 +376,16 @@ const AgentDisconnectingMessage = BaseMessage.extend({
 // slot"): `attention` is the call-to-action (agent blocked on a permission/
 // prompt). Optional on the wire — an older bridge omits it and the app falls
 // back to `running`; an older app ignores it. Precedence when a project has
-// multiple live signals: attention > error > working > done.
-export const WorkStatusSchema = z.enum(["working", "attention", "done", "error"]);
+// multiple live signals: attention > error > working > unread > done.
+//
+// `unread` is the read-state half: the agent finished and nobody has visited
+// the session since (work-status.ts owns the rule). It is per-session state
+// that only the BRIDGE can answer — it sees every turn end and every
+// `session:focus` from every client — so the app renders what it is told here
+// and never derives or persists a read state of its own. An older app parses it
+// as an unknown string and falls back to its own "no status" branch, which is
+// why it ranks just above `done`: a stale reading of "idle" is the harmless one.
+export const WorkStatusSchema = z.enum(["working", "attention", "unread", "done", "error"]);
 export type WorkStatus = z.infer<typeof WorkStatusSchema>;
 
 // Outbound agent→app: the always-on control plane advertises which of the
@@ -1244,6 +1252,10 @@ const SessionSetModeMessage = BaseMessage.extend({
   mode: z.enum(["terminal", "chat"]),
 });
 
+// App→agent: this session is what the user is looking at, sent on every focus
+// change. Fire-and-forget (no requestId, no reply) — it feeds the work-status
+// read state (`sessionFocus` in work-status.ts), which is advisory, so a
+// dropped one costs a blue dot that clears on the next visit.
 const SessionFocusMessage = BaseMessage.extend({
   type: z.literal("session:focus"),
   sessionId: z.string(),

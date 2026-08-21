@@ -14,11 +14,14 @@ import '../agent_work_status_dot.dart';
 
 /// Status ordering used everywhere the Recent list speaks about states: the two
 /// call-to-action states first (a blocked or errored agent is what the user
-/// opened Recent to find), then working, then done.
+/// opened Recent to find), then working, then the answers waiting to be read,
+/// then done. Mirrors the bridge's rollup rank (`RANK` in work-status.ts) — the
+/// buckets and the project dot must not disagree about which state is louder.
 const kWorkStatusOrder = [
   AgentWorkStatus.attention,
   AgentWorkStatus.error,
   AgentWorkStatus.working,
+  AgentWorkStatus.unread,
   AgentWorkStatus.done,
 ];
 
@@ -28,6 +31,7 @@ String workStatusLabel(AgentWorkStatus s) => switch (s) {
   AgentWorkStatus.attention => 'Needs you',
   AgentWorkStatus.error => 'Error',
   AgentWorkStatus.working => 'Working',
+  AgentWorkStatus.unread => 'Unread',
   AgentWorkStatus.done => 'Done',
 };
 

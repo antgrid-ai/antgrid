@@ -1,5 +1,11 @@
 import { test, expect } from "bun:test";
-import { answerRequest, closeTurn, initialWorkStatus, reduceWorkStatus, turnStart, userReply, type WorkStatusState } from "../src/work-status";
+import { answerRequest, clientFocusState, clientGone, closeTurn, initialWorkStatus, reduceWorkStatus, sessionFocus, turnStart, userReply, type WorkStatusState } from "../src/work-status";
+import type { InboundSource } from "../src/message-bus";
+
+/** The two client classes the read state distinguishes: the phone reaches a core
+ *  over the relay, the desktop over its loopback socket. */
+const APP: InboundSource = "relay";
+const DESKTOP: InboundSource = "loopback";
 import type { AbMessage } from "../src/protocol";
 
 function push(notificationType: string, sessionId?: string): AbMessage {
@@ -720,4 +726,164 @@ test("a session's own notification still wins over that fallback", () => {
   ]);
   expect(s.sessionStatuses.get("r0")).toBe("error");
   expect(s.sessionStatuses.get("r1")).toBe("done");
+});
+
+// ── Unread (read state) ─────────────────────────────────────────────────────
+//
+// The whole point of `readTracking`: nothing below turns blue until a client
+// has said what it is looking at, which is why every test above still reads
+// "done" after a turn ends.
+
+test("a finished turn is plain done until a client declares its focus", () => {
+  // A bare agent, an eval, a desktop driven from its own terminal: nobody has
+  // told us what the user can see, so nothing may be called unseen.
+  const s = fold([sessions(2), turnStartFrame("r0"), turnEndFrame("r0")]);
+  expect(s.sessionStatuses.get("r0")).toBe("done");
+  expect(s.readTracking).toBe(false);
+});
+
+test("a turn that ends on a session the user is not looking at is unread", () => {
+  const watching = sessionFocus(fold([sessions(2)]), "r1", APP);
+  const s = fold([turnStartFrame("r0"), turnEndFrame("r0")], watching);
+  expect(s.sessionStatuses.get("r0")).toBe("unread");
+  expect(s.status).toBe("unread");
+});
+
+test("a turn that ends on the session ON SCREEN is never unread", () => {
+  const watching = sessionFocus(fold([sessions(2)]), "r0", APP);
+  const s = fold([turnStartFrame("r0"), turnEndFrame("r0")], watching);
+  expect(s.sessionStatuses.get("r0")).toBe("done");
+  expect(s.status).toBe("done");
+});
+
+test("visiting an unread session clears it", () => {
+  const watching = sessionFocus(fold([sessions(2)]), "r1", APP);
+  const unread = fold([turnStartFrame("r0"), turnEndFrame("r0")], watching);
+  expect(unread.sessionStatuses.get("r0")).toBe("unread");
+  const read = sessionFocus(unread, "r0", APP);
+  expect(read.sessionStatuses.get("r0")).toBe("done");
+  expect(read.unreadSessions.has("r0")).toBe(false);
+});
+
+test("a hook-reported task_complete marks unread the same way a turn-end does", () => {
+  // Terminal-mode sessions have no turn-end frame — the notification IS the
+  // signal, so it has to reach the same transition.
+  const watching = sessionFocus(fold([sessions(2)]), "r1", APP);
+  const s = fold([turnStartFrame("r0"), push("task_complete", "r0")], watching);
+  expect(s.sessionStatuses.get("r0")).toBe("unread");
+});
+
+test("unread never outranks a live state, on the session or on the rollup", () => {
+  const watching = sessionFocus(fold([sessions(2)]), "r1", APP);
+  const unread = fold([turnStartFrame("r0"), turnEndFrame("r0")], watching);
+  // r1 blocks: the project must read "needs you", not "unread".
+  const blocked = reduceWorkStatus(unread, question("r1"));
+  expect(blocked.status).toBe("attention");
+  expect(blocked.sessionStatuses.get("r0")).toBe("unread");
+});
+
+test("a new turn supersedes the unread mark and re-earns it on the next end", () => {
+  const watching = sessionFocus(fold([sessions(2)]), "r1", APP);
+  const unread = fold([turnStartFrame("r0"), turnEndFrame("r0")], watching);
+  const working = reduceWorkStatus(unread, turnStartFrame("r0"));
+  expect(working.sessionStatuses.get("r0")).toBe("working");
+  expect(working.unreadSessions.has("r0")).toBe(false);
+  const again = reduceWorkStatus(working, turnEndFrame("r0"));
+  expect(again.sessionStatuses.get("r0")).toBe("unread");
+});
+
+test("an Esc interrupt on the focused session does not leave it unread", () => {
+  // closeTurn reaches the same transition a real turn-end does, so the "user is
+  // right here" case has to be excluded by focus rather than by the caller.
+  const watching = sessionFocus(fold([sessions(1), turnStartFrame("r0")]), "r0", APP);
+  expect(closeTurn(watching, "r0").sessionStatuses.get("r0")).toBe("done");
+});
+
+test("backgrounding releases the focus, so the next answer lands unread", () => {
+  const watching = sessionFocus(fold([sessions(1), turnStartFrame("r0")]), "r0", APP);
+  const away = clientFocusState(watching, true, APP);
+  expect(away.focusedSessions.get(APP)).toBeUndefined();
+  expect(reduceWorkStatus(away, turnEndFrame("r0")).sessionStatuses.get("r0")).toBe("unread");
+});
+
+test("a client that only declared its lifecycle still gets unread", () => {
+  // Sitting on the sessions list names no session, but it is still a reader.
+  const attached = clientFocusState(fold([sessions(1)]), false, APP);
+  const s = fold([turnStartFrame("r0"), turnEndFrame("r0")], attached);
+  expect(s.sessionStatuses.get("r0")).toBe("unread");
+});
+
+test("an unread mark dies with its session", () => {
+  const watching = sessionFocus(fold([sessions(2)]), "r1", APP);
+  const unread = fold([turnStartFrame("r0"), turnEndFrame("r0")], watching);
+  expect(unread.unreadSessions.has("r0")).toBe(true);
+  // r0 stops: nothing running carries a status, so nothing carries an unread.
+  const gone = reduceWorkStatus(unread, sessionsOf(entry("r1")));
+  expect(gone.unreadSessions.has("r0")).toBe(false);
+  expect(gone.status).toBe("done");
+});
+
+test("focus is accepted before the session's first session:updated", () => {
+  // Same race turnStart holds pendingTurns for: dropping the focus would let the
+  // session's first answer come back blue under the user's nose.
+  const early = sessionFocus(initialWorkStatus, "r0", APP);
+  const s = fold([sessions(1), turnStartFrame("r0"), turnEndFrame("r0")], early);
+  expect(s.sessionStatuses.get("r0")).toBe("done");
+});
+
+test("focus and blur are no-ops when nothing moves", () => {
+  const watching = sessionFocus(fold([sessions(1)]), "r0", APP);
+  expect(sessionFocus(watching, "r0", APP)).toBe(watching);
+  const away = clientFocusState(watching, true, APP);
+  expect(clientFocusState(away, true, APP)).toBe(away);
+});
+
+test("one client's focus does not take another's dot down or put one up", () => {
+  // The single-slot version let the last client to speak steal the focus, so a
+  // phone opening r1 put a blue dot on r0 under the desktop's cursor.
+  let s = fold([sessions(2)]);
+  s = sessionFocus(s, "r0", DESKTOP);
+  s = sessionFocus(s, "r1", APP);
+  s = fold([turnStartFrame("r0"), turnEndFrame("r0")], s);
+  expect(s.sessionStatuses.get("r0")).toBe("done");
+  s = fold([turnStartFrame("r1"), turnEndFrame("r1")], s);
+  expect(s.sessionStatuses.get("r1")).toBe("done");
+});
+
+test("a session nobody is on is unread even with two clients connected", () => {
+  let s = fold([sessions(3)]);
+  s = sessionFocus(s, "r0", DESKTOP);
+  s = sessionFocus(s, "r1", APP);
+  s = fold([turnStartFrame("r2"), turnEndFrame("r2")], s);
+  expect(s.sessionStatuses.get("r2")).toBe("unread");
+});
+
+test("one client backgrounding leaves the other's session read", () => {
+  let s = fold([sessions(2)]);
+  s = sessionFocus(s, "r0", DESKTOP);
+  s = sessionFocus(s, "r0", APP);
+  s = clientFocusState(s, true, APP);
+  s = fold([turnStartFrame("r0"), turnEndFrame("r0")], s);
+  expect(s.sessionStatuses.get("r0")).toBe("done");
+});
+
+test("a client that disconnects stops vouching for its session", () => {
+  // Otherwise a desktop that quit would keep one session permanently exempt.
+  let s = sessionFocus(fold([sessions(2)]), "r0", DESKTOP);
+  s = clientGone(s, DESKTOP);
+  expect(s.focusedSessions.size).toBe(0);
+  s = fold([turnStartFrame("r0"), turnEndFrame("r0")], s);
+  expect(s.sessionStatuses.get("r0")).toBe("unread");
+});
+
+test("a disconnect does not disarm read tracking", () => {
+  // The project still HAS a reader; clearing the flag would replay everything
+  // it missed as plain "done" when it reconnects.
+  const s = clientGone(sessionFocus(fold([sessions(1)]), "r0", APP), APP);
+  expect(s.readTracking).toBe(true);
+});
+
+test("clientGone is a no-op for a client that had nothing on screen", () => {
+  const s = sessionFocus(fold([sessions(1)]), "r0", APP);
+  expect(clientGone(s, DESKTOP)).toBe(s);
 });

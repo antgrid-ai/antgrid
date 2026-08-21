@@ -88,9 +88,11 @@ class RemoteProjectStatusController
     // Only those two are seeded: "working" means a prompt is in flight
     // RIGHT NOW, which a cached value from a previous launch cannot possibly
     // know — seeding it would paint a live-activity pulse on a machine we
-    // aren't even connected to. attention/error are durable ("this project
-    // needs you") and self-heal the moment the socket dials (the advert
-    // overwrites the whole machine).
+    // aren't even connected to. "unread" never reaches the cache at all (see
+    // the write in app_shell.dart): it is the bridge's read state, and a
+    // replayed copy would show blue for an answer already opened elsewhere.
+    // attention/error are durable ("this project needs you") and self-heal the
+    // moment the socket dials (the advert overwrites the whole machine).
     //
     // Guarded: a widget/provider test that never touches cached sessions won't
     // override cachedSessionsStoreProvider (which throws by contract when

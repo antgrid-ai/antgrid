@@ -7,7 +7,7 @@ import 'ab_colors.dart';
 /// domain enums map to tones in their own adapters, never directly to colors.
 ///
 /// Two families live here. [neutral]/[info]/[success]/[warning]/[danger]/
-/// [muted]/[disabled] are generic UI semantics (bright, and they shift per theme
+/// [unread]/[muted]/[disabled] are generic UI semantics (bright, and they shift per theme
 /// preset). [agentIdle]/[agentThinking]/[agentRunning]/[agentAttention] describe
 /// what an agent is *doing* and resolve to the warm theme-invariant `status*`
 /// palette.
@@ -32,6 +32,10 @@ enum AbStatusTone {
   success,
   warning,
   danger,
+  /// Something finished and nobody has looked at it yet. Not [info] (that is
+  /// live activity) and not [success] (nothing was won) — the blue "new" a
+  /// message list uses.
+  unread,
   muted,
   disabled,
   agentIdle,
@@ -49,6 +53,7 @@ extension AbStatusToneColor on AbStatusTone {
       AbStatusTone.success => palette.success,
       AbStatusTone.warning => palette.warning,
       AbStatusTone.danger => palette.error,
+      AbStatusTone.unread => palette.unread,
       AbStatusTone.muted => palette.textMuted,
       // Every current consumer is a dot/glyph (AbStatusDot or a leading
       // icon), never body text — iconMuted's 3:1 floor is the right bar, not

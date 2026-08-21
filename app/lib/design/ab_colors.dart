@@ -39,6 +39,7 @@ class AbColors extends ThemeExtension<AbColors> {
     required this.error,
     required this.warning,
     required this.signalMut,
+    required this.unread,
     required this.gitUntracked,
     required this.gitConflict,
   });
@@ -89,6 +90,16 @@ class AbColors extends ThemeExtension<AbColors> {
   final Color warning;
   final Color signalMut;
 
+  /// An answer waiting to be read. Its own token rather than a reuse of
+  /// [accent] or [signalMut]: unread is the one status that is neither activity
+  /// nor a warning, and both of those already speak for something else on a
+  /// session row. Sky blue in every preset for the same reason it is blue
+  /// everywhere else — it is the colour "new, not yet seen" already has —
+  /// pitched into each palette's own register (muted on antgrid, darkened on
+  /// light so it carries on white) and stepped off [accent] on slate, whose
+  /// accent is itself a sky blue.
+  final Color unread;
+
   /// Git status badge color shared by Untracked ("U") and Renamed ("R") —
   /// VS Code gives both the same green, distinct from Added's [success].
   final Color gitUntracked;
@@ -127,6 +138,7 @@ class AbColors extends ThemeExtension<AbColors> {
     Color? error,
     Color? warning,
     Color? signalMut,
+    Color? unread,
     Color? gitUntracked,
     Color? gitConflict,
   }) {
@@ -159,6 +171,7 @@ class AbColors extends ThemeExtension<AbColors> {
       error: error ?? this.error,
       warning: warning ?? this.warning,
       signalMut: signalMut ?? this.signalMut,
+      unread: unread ?? this.unread,
       gitUntracked: gitUntracked ?? this.gitUntracked,
       gitConflict: gitConflict ?? this.gitConflict,
     );
@@ -200,6 +213,7 @@ class AbColors extends ThemeExtension<AbColors> {
       error: Color.lerp(error, other.error, t)!,
       warning: Color.lerp(warning, other.warning, t)!,
       signalMut: Color.lerp(signalMut, other.signalMut, t)!,
+      unread: Color.lerp(unread, other.unread, t)!,
       gitUntracked: Color.lerp(gitUntracked, other.gitUntracked, t)!,
       gitConflict: Color.lerp(gitConflict, other.gitConflict, t)!,
     );
@@ -242,6 +256,7 @@ const _zincFallback = AbColors(
   error: Color(0xFFF87171),
   warning: Color(0xFFFACC15),
   signalMut: Color(0xFFC084FC),
+  unread: Color(0xFF38BDF8),
   gitUntracked: Color(0xFF2DD4BF),
   gitConflict: Color(0xFFFB7185),
 );

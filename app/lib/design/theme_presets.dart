@@ -49,6 +49,7 @@ const _antgrid = AbColors(
   error: Color(0xFFE5746A),
   warning: Color(0xFFE5A055),
   signalMut: Color(0xFFE2C792),
+  unread: Color(0xFF6FC5E8),
   gitUntracked: Color(0xFF6FC2B0),
   gitConflict: Color(0xFFE56A96),
 );
@@ -92,6 +93,7 @@ const _zinc = AbColors(
   error: Color(0xFFF87171),
   warning: Color(0xFFFACC15),
   signalMut: Color(0xFFC6C6C6),
+  unread: Color(0xFF38BDF8),
   gitUntracked: Color(0xFF2DD4BF),
   gitConflict: Color(0xFFFB7185),
 );
@@ -128,6 +130,10 @@ const _slate = AbColors(
   error: Color(0xFFF87171),
   warning: Color(0xFFFACC15),
   signalMut: Color(0xFFC084FC),
+  // Sky-500, not the sky-400 this preset uses as its accent: `working`
+  // already wears the accent, and two blues one shade apart on a 6px dot is
+  // not a distinction anyone can make.
+  unread: Color(0xFF0EA5E9),
   gitUntracked: Color(0xFF2DD4BF),
   gitConflict: Color(0xFFFB7185),
 );
@@ -163,6 +169,7 @@ const _onyx = AbColors(
   error: Color(0xFFF87171),
   warning: Color(0xFFFACC15),
   signalMut: Color(0xFFC084FC),
+  unread: Color(0xFF38BDF8),
   gitUntracked: Color(0xFF2DD4BF),
   gitConflict: Color(0xFFFB7185),
 );
@@ -198,6 +205,7 @@ const _midnight = AbColors(
   error: Color(0xFFF87171),
   warning: Color(0xFFFACC15),
   signalMut: Color(0xFFC084FC),
+  unread: Color(0xFF38BDF8),
   gitUntracked: Color(0xFF2DD4BF),
   gitConflict: Color(0xFFFB7185),
 );
@@ -235,6 +243,7 @@ const _light = AbColors(
   error: Color(0xFFDC2626),
   warning: Color(0xFFA16207),
   signalMut: Color(0xFF9333EA),
+  unread: Color(0xFF0369A1),
   gitUntracked: Color(0xFF0F766E),
   gitConflict: Color(0xFFBE123C),
 );
@@ -306,6 +315,7 @@ AbColors derivePalette({
     error: const Color(0xFFF87171),
     warning: const Color(0xFFFACC15),
     signalMut: primary,
+    unread: const Color(0xFF38BDF8),
     // Semantic, not brand-derived — same reasoning as the other status
     // colors above: a fixed default rather than something HSL-derived from
     // bg/primary/accent.

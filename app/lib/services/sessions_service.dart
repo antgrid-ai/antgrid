@@ -91,6 +91,12 @@ class SessionsService {
   SessionsState _state;
   bool _disposed = false;
 
+  /// The last session this app declared as on screen for this project, replayed
+  /// by [resyncFocus] after a reconnect. Null until the app names one — the
+  /// bridge treats "no client has said" and "the client says nothing is on
+  /// screen" the same way, so an empty declaration is nothing to restate.
+  String? _focused;
+
   final Map<String, PendingReply<List<SessionEntry>>> _pendingList = {};
   final Map<String, PendingReply<SessionEntry?>> _pendingMutations = {};
   final Map<String, PendingReply<SessionEntry?>> _pendingRefusableMutations =
@@ -397,7 +403,27 @@ class SessionsService {
 
   void focus(String id) {
     // Fire-and-forget; no requestId, no reply.
+    _focused = id;
     _send(createAbMessage('session:focus', {'sessionId': id}));
+  }
+
+  /// Re-declare the focused session to an agent that has just become reachable.
+  ///
+  /// The bridge drops a client's focus entry the moment its socket closes
+  /// (`clientGone` in work-status.ts) — it has to, or a client that quit would
+  /// keep one session permanently exempt from unread. But the reconnecting app
+  /// is still showing whatever it was showing, and `client:focus-state` (the
+  /// other half of the resync, in [MessageRouter.resyncFocusState]) re-ARMS read
+  /// tracking without naming a session. Without this the first turn to finish
+  /// after a reconnect paints an unread dot on the session the user is sitting
+  /// on, and only navigating away and back clears it.
+  ///
+  /// Restores the state the bridge would still have had if the socket had never
+  /// dropped, so it re-sends the last focus this app declared and nothing else;
+  /// a client that has named no session stays silent.
+  void resyncFocus() {
+    final id = _focused;
+    if (id != null) focus(id);
   }
 
   Future<SessionEntry?> _mutate(

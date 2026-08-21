@@ -144,22 +144,18 @@ class _SessionRowState extends ConsumerState<SessionRow> {
     }
   }
 
-  AbStatusTone _tone() {
-    if (session.archived) return AbStatusTone.disabled;
-    if (session.running) return AbStatusTone.info;
-    // Stopped: the agent-at-rest gray, dimmer than `neutral` (textSecondary),
-    // so the hollow ring recedes instead of reading as a lit indicator. Not
-    // `muted` — an idle agent is a lifecycle state, not de-emphasized text.
-    return AbStatusTone.agentIdle;
-  }
-
   /// The leading indicator. Work status owns the slot whenever the agent has
-  /// something to say about THIS session (working / needs you / error) — it is
-  /// the same dot the Recent list shows, so one session's state reads
-  /// identically wherever it surfaces. Otherwise the slot
-  /// falls back to plain liveness: filled = running, hollow ring = idle. The
-  /// fill/outline contrast reads "on vs off" faster than a colour shift between
-  /// two filled dots, so only a running session gets a solid dot.
+  /// something to say about THIS session (working / needs you / error /
+  /// unread) — it is the same dot the Recent list shows, so one session's state
+  /// reads identically wherever it surfaces.
+  ///
+  /// At rest the dot says nothing at all: the same hollow idle ring whether the
+  /// session is running or stopped. Running used to fill it in the accent, which
+  /// on the default preset is off-white — so merely OPENING a session lit it up
+  /// brighter than a session that was actually doing something, and the brightest
+  /// dot in the sidebar was the one you were already looking at. Liveness is not
+  /// a status: what the row exists to report is what the agent wants from you,
+  /// and a session at rest wants nothing.
   Widget _leadingDot(AgentWorkStatus work) {
     final key = ValueKey('session-status-dot-${session.id}');
     if (work != AgentWorkStatus.done) {
@@ -167,9 +163,13 @@ class _SessionRowState extends ConsumerState<SessionRow> {
     }
     return AbStatusDot(
       key: key,
-      tone: _tone(),
+      // Archived is the one at-rest distinction worth drawing: it is a
+      // lifecycle end, not a pause. Otherwise the agent-at-rest gray, dimmer
+      // than `neutral` (textSecondary) so the ring recedes instead of reading
+      // as a lit indicator — not `muted`, which is de-emphasized TEXT.
+      tone: session.archived ? AbStatusTone.disabled : AbStatusTone.agentIdle,
       size: AbDotSize.sm,
-      style: session.running ? AbDotStyle.filled : AbDotStyle.hollow,
+      style: AbDotStyle.hollow,
     );
   }
 

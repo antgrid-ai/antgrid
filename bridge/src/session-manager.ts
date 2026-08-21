@@ -786,6 +786,11 @@ export class SessionManager {
     return true;
   }
 
+  /** Deliberately inert. `session:focus` DOES have a reader — the work-status
+   *  read state, which agent-core routes straight to the owning ProjectCore —
+   *  but nothing here may move: bumping `lastUsedAt` on a look would make the
+   *  drawer's ACTIVITY ordering re-sort itself under the user's cursor every
+   *  time they switched sessions. */
   focus(_id: string): void {}
 
   /**

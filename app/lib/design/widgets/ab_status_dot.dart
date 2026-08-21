@@ -43,6 +43,10 @@ class AbStatusDot extends StatelessWidget {
             : null,
       ),
     );
-    return pulse ? PulsingOpacity(child: dot) : dot;
+    // Shrinks as well as dims: the fade alone is only as visible as the tone is
+    // bright, so it read as a blink on one preset and as static on another. Size
+    // says "alive" at any hue. 0.7 is the floor that still leaves a 6px dot
+    // legible at the bottom of the cycle.
+    return pulse ? PulsingOpacity(minScale: 0.7, child: dot) : dot;
   }
 }

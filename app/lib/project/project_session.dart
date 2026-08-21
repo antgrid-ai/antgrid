@@ -128,9 +128,19 @@ class ProjectSession {
       // on every (re)establish (see AgentSessionService.hydrateIfNeeded).
       // Matched on wireProjectId: streamReadyEvents carries the BARE id the
       // bridge advertises in `agent:projects`, not the compound registrationId.
+      //
+      // BOTH halves of the focus declaration have to be restated, and the
+      // lifecycle one alone is worse than neither: the bridge drops this
+      // client's focused SESSION when the socket closes but keeps read tracking
+      // armed, so re-arming it without re-naming the session is exactly the
+      // state in which the next turn-end paints an unread dot on whatever the
+      // user is currently looking at.
       _streamReadySub = session.streamReadyEvents
           .where((e) => e.projectId == wireProjectId)
-          .listen((_) => _router.resyncFocusState());
+          .listen((_) {
+            _router.resyncFocusState();
+            sessionsService.resyncFocus();
+          });
     }
   }
 

@@ -30,6 +30,14 @@ import '../services/control_plane_client.dart';
     style: AbDotStyle.filled,
     pulse: false,
   ),
+  // Solid but still: an answer is sitting there, which is a fact rather than an
+  // event. Pulsing it would put it in the same register as a working agent and
+  // make the one state you can safely ignore the loudest thing on the list.
+  AgentWorkStatus.unread => (
+    tone: AbStatusTone.unread,
+    style: AbDotStyle.filled,
+    pulse: false,
+  ),
   AgentWorkStatus.done => (
     tone: AbStatusTone.agentIdle,
     style: AbDotStyle.hollow,
@@ -40,12 +48,16 @@ import '../services/control_plane_client.dart';
 /// Canonical indicator for an [AgentWorkStatus], shared by the Recent list and
 /// the sidebar so the four states read identically everywhere:
 /// working (pulsing accent) · attention (yellow pulse — needs you) ·
-/// error (red) · done (hollow idle grey).
+/// error (red) · unread (blue — answered, not yet opened) · done (hollow idle
+/// grey).
 ///
 /// Only states that want something from you carry colour. `done` is deliberately
 /// the same hollow grey as a session that never ran: once the agent is finished
-/// there is nothing to act on, so it reads as idle rather than as an outcome —
-/// which is why it carries no check glyph and no success colour.
+/// AND you have seen the answer there is nothing to act on, so it reads as idle
+/// rather than as an outcome — which is why it carries no check glyph and no
+/// success colour. Opening a session is therefore the only thing that turns a
+/// dot off, and `unread` is what fills the gap that left: an answer you have not
+/// come back to is not the same as one you have read.
 class AgentWorkStatusDot extends StatelessWidget {
   const AgentWorkStatusDot({super.key, required this.status});
 

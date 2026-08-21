@@ -19,6 +19,7 @@ import '../providers/device_revocation.dart';
 import '../providers/recent_sessions.dart';
 import '../providers/connection_identity.dart';
 import '../providers/relay_connection.dart';
+import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
 import '../services/control_plane_client.dart';
 import '../storage/cached_sessions_store.dart';
@@ -105,11 +106,27 @@ class _AppShellState extends ConsumerState<AppShell> {
   /// Only called for ids the registry lists as open, which the session provider
   /// populates itself — so this read is a cache hit and never builds a session
   /// as a side effect of a lifecycle transition.
+  ///
+  /// Resuming also RESTATES which session is on screen. Backgrounding releases
+  /// the bridge's focus (that is what lets a turn finishing in your pocket come
+  /// back unread — see `clientFocusState` in work-status.ts), and the bridge
+  /// deliberately doesn't restore it on its own: only the app knows whether the
+  /// session it left on screen is still the one on screen. Without the restate,
+  /// the very session the user is looking at when they come back would wear the
+  /// unread dot it earned while they were away, and nothing short of navigating
+  /// away and back would clear it.
   void _setFocusPaused(String projectId, {required bool paused}) {
-    ref
-        .read(projectSessionProvider(projectId))
-        .value
-        ?.setLifecyclePaused(paused);
+    final session = ref.read(projectSessionProvider(projectId)).value;
+    session?.setLifecyclePaused(paused);
+    if (paused || session == null) return;
+    if (ref.read(selectedRegistrationIdProvider) != projectId) return;
+    // `activeSessionIdProvider` is the last session PICKED, not the thing on
+    // screen: it survives a walk over to New Session or Settings, so restating
+    // it from those surfaces would vouch for a session the user cannot see and
+    // silently exempt it from unread.
+    if (ref.read(workbenchSurfaceProvider) != WorkbenchSurface.workspace) return;
+    final active = ref.read(activeSessionIdProvider);
+    if (active != null) session.sessionsService.focus(active);
   }
 
   void _reconnectRelay() {
@@ -520,8 +537,16 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
     // the first advert arrives. Only projects in the current advert are written;
     // projects dropped from the advert are cleared via clearStatusesForMachine
     // before writing so the cache never grows with stale entries.
+    //
+    // `unread` is never written. It is READ STATE, and the bridge is the only
+    // thing that holds it (see work-status.ts) — writing a copy here would give
+    // the app a second, authoritative-looking answer that goes stale the moment
+    // someone opens the session from another device, and a restart would replay
+    // blue dots for answers already read. A dropped `unread` costs nothing: the
+    // advert restates it within a tick of the socket dialing.
     store.clearStatusesForMachine('$uuid.');
     for (final e in statuses.entries) {
+      if (e.value == AgentWorkStatus.unread) continue;
       store.putStatus(e.key, e.value.name);
     }
     // Peeked (never dialed) from the transport this advert already came from —

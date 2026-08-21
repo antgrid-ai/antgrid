@@ -1,12 +1,12 @@
 import { randomBytes } from "node:crypto";
 import { buildAgentCore, type AgentCore, type BuildAgentCoreOptions } from "./agent-core";
-import { MessageBus } from "./message-bus";
+import { MessageBus, type InboundSource } from "./message-bus";
 import { LocalListener } from "./local-listener";
 import { createRelayPromotion, type RelayPromotionController, type RelayPromotionDeps } from "./relay-promotion";
 import type { AttachStreamOpts, StreamHandle } from "./stream-mux";
 import { createMessage, type AbMessage, type SessionEntry, type WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
-import { answerRequest, closeTurn, initialWorkStatus, reduceWorkStatus, turnStart, userReply, type WorkStatusState } from "./work-status";
+import { answerRequest, clientFocusState, clientGone, closeTurn, initialWorkStatus, reduceWorkStatus, sessionFocus, turnStart, userReply, type WorkStatusState } from "./work-status";
 import { logger } from "./logger";
 const log = logger.child({ component: "project-core" });
 import { createPushDispatcher } from "./push/push-dispatcher";
@@ -208,6 +208,29 @@ export class ProjectCore {
     this.commitWork(answerRequest(this._work, sessionId, requestId));
   }
 
+  /** [client] is looking at [sessionId] (`session:focus`) — clear its unread
+   *  mark and record it as on screen, so an answer that lands while the user
+   *  sits here is never called unseen. See {@link sessionFocus}. */
+  noteSessionFocus(sessionId: string, client: InboundSource): void {
+    this.commitWork(sessionFocus(this._work, sessionId, client));
+  }
+
+  /** [client] declared whether it can render this project (`client:focus-state`).
+   *  Paused releases what that client had on screen, which is what makes a turn
+   *  finishing while the app is backgrounded come back unread. See
+   *  {@link clientFocusState}. */
+  noteClientFocusState(paused: boolean, client: InboundSource): void {
+    this.commitWork(clientFocusState(this._work, paused, client));
+  }
+
+  /** [client]'s socket closed — it stops vouching for whatever it had on screen.
+   *  Without this a desktop that quit, or a phone that dropped off the relay,
+   *  would keep one session permanently exempt from unread. See
+   *  {@link clientGone}. */
+  noteClientGone(client: InboundSource): void {
+    this.commitWork(clientGone(this._work, client));
+  }
+
   /** The user pressed a bare Esc into [sessionId]'s PTY — close its turn now
    *  rather than wait on a Stop hook the CLI may never fire for a manual
    *  interrupt. See {@link closeTurn}. */
@@ -270,6 +293,8 @@ export class ProjectCore {
       onUserReply: (sessionId, replyOpts) => this.noteUserReply(sessionId, replyOpts),
       onAnswer: (sessionId, requestId) => this.noteAnswer(sessionId, requestId),
       onInterrupt: (sessionId) => this.noteInterrupt(sessionId),
+      onSessionFocus: (sessionId, client) => this.noteSessionFocus(sessionId, client),
+      onClientFocusState: (paused, client) => this.noteClientFocusState(paused, client),
       // The single source of per-session work status: SessionManager stamps it
       // onto `session:updated` from THIS reduction rather than keeping a second
       // one of its own. Read lazily — the fold that answers it runs after the
@@ -317,6 +342,10 @@ export class ProjectCore {
         core.connState.peerOnline = true;
         core.onHandshakeComplete();
       },
+      // The desktop app quit (or its socket dropped): it stops vouching for the
+      // session it had on screen, so a turn ending afterwards is unread by the
+      // time it comes back.
+      onOwnerDisconnected: () => this.noteClientGone("loopback"),
     });
     await listener.start();
     this.listener = listener;
@@ -419,6 +448,10 @@ export class ProjectCore {
         // keeps the DESKTOP's stream live, it doesn't make the phone reachable
         // in-band. Leaving this set would mute push on every promoted core.
         peerConnected = false;
+        // Unlike the stream gate, the read state is per-client: the phone has
+        // left whether or not a desktop owner is still here, so it must stop
+        // vouching for the session it had on screen before the early return.
+        this.noteClientGone("relay");
         if (this.listener?.hasOwner) return;
         core.connState.peerOnline = false;
       },

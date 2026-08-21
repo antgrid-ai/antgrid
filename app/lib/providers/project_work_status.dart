@@ -174,12 +174,24 @@ final recentSessionStatusCountsProvider = Provider<Map<AgentWorkStatus, int>>((
 });
 
 /// Aggregate work status for a machine: the most severe status across ALL of
-/// its projects in the live advert map (attention > error > working > done).
+/// its projects in the live advert map (attention > error > working > unread >
+/// done).
 /// Returns null when no advert status is available for any project on this
 /// machine (older bridge, all sockets closed, no projects running).
 ///
 /// Used by the drawer machine header to show a single indicator when the
 /// machine row is collapsed and individual project rows aren't visible.
+/// Severity rank for the machine rollup. Mirrors the bridge's `RANK`; kept as a
+/// switch rather than the enum's own index so reordering [AgentWorkStatus] —
+/// whose order is the WIRE's, not a severity — cannot silently re-rank machines.
+int _machineRank(AgentWorkStatus s) => switch (s) {
+  AgentWorkStatus.attention => 4,
+  AgentWorkStatus.error => 3,
+  AgentWorkStatus.working => 2,
+  AgentWorkStatus.unread => 1,
+  AgentWorkStatus.done => 0,
+};
+
 final machineWorkStatusProvider = Provider.family<AgentWorkStatus?, String>((
   ref,
   machineUuid,
@@ -192,20 +204,15 @@ final machineWorkStatusProvider = Provider.family<AgentWorkStatus?, String>((
   // status change.
   return ref.watch(
     remoteProjectStatusProvider.select((m) {
-      // Precedence: attention > error > working > done. Null = no matching keys.
+      // Precedence: attention > error > working > unread > done, the same rank
+      // the bridge rolls a project up by (`RANK` in work-status.ts). Null = no
+      // matching keys.
       AgentWorkStatus? best;
       for (final e in m.entries) {
         if (!e.key.startsWith(prefix)) continue;
         final s = e.value;
         if (s == AgentWorkStatus.attention) return AgentWorkStatus.attention;
-        if (s == AgentWorkStatus.error) {
-          best = AgentWorkStatus.error;
-        } else if (s == AgentWorkStatus.working &&
-            (best == null || best == AgentWorkStatus.done)) {
-          best = AgentWorkStatus.working;
-        } else {
-          best ??= AgentWorkStatus.done;
-        }
+        if (best == null || _machineRank(s) > _machineRank(best)) best = s;
       }
       return best;
     }),

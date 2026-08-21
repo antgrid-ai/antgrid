@@ -23,7 +23,7 @@ import { augmentAgentLaunch } from "./agent-launch-augmenter";
 import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, HandlerInstructWire, HandlerUndoWire, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle, type SessionTitleBody } from "./api-server";
-import { MessageBus } from "./message-bus";
+import { MessageBus, type InboundSource } from "./message-bus";
 import { resolveAbDir } from "./antgrid-dir";
 import { computeProjectId } from "./project-id";
 import { loadPairedPhones, type PairedPhonesStore } from "./paired-phones";
@@ -300,6 +300,19 @@ export interface BuildAgentCoreOptions {
    *  it. A later real turn-end/notification for the same turn is harmless
    *  (closeTurn is idempotent on an already-closed turn). */
   onInterrupt?: (sessionId: string) => void;
+  /** Fired when a client says [sessionId] is on screen (`session:focus`), so the
+   *  owning ProjectCore can clear its unread mark and record where that client
+   *  is looking. [client] is the inbound source — the desktop over loopback vs
+   *  the phone over the relay — and the read state is per-client, so the two
+   *  never take each other's dots down. Bridge-internal — never surfaces to the
+   *  app. */
+  onSessionFocus?: (sessionId: string, client: InboundSource) => void;
+  /** Fired when a client declares whether it can render this project at all
+   *  (`client:focus-state`), so the owning ProjectCore knows THAT client is
+   *  looking at nothing here and a turn ending now is unseen by it. Separate
+   *  from {@link ConnectionState.appFocusPaused}, which gates the heavy stream
+   *  and the fallback push: this one only feeds the work-status read state. */
+  onClientFocusState?: (paused: boolean, client: InboundSource) => void;
   /** This session's status in the owner's work reduction, stamped onto each
    *  `session:updated` entry so the app has a per-session status on the LIVE
    *  session stream rather than only on the advert. The owner must call
@@ -660,7 +673,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
   }
 
-  function handleAbMessage(msg: AbMessage) {
+  // [client] is who sent this frame — needed only by the work-status read state,
+  // which tracks what each client has on screen separately. Everything else in
+  // here is authorized at the bus handler and does not care.
+  function handleAbMessage(msg: AbMessage, client: InboundSource) {
     switch (msg.type) {
       case "agent:prompt":
       case "agent:permission-resolve":
@@ -1168,12 +1184,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       }
       case "session:focus": {
         // No requestId on session:focus — silent break is correct.
+        // The work-status read state is told FIRST and unconditionally: it is
+        // keyed by session id across the whole project, so it must not be lost
+        // to a runtime that has no session manager (or has not built one yet).
+        opts.onSessionFocus?.(msg.sessionId, client);
         if (!sessions) break;
         sessions.focus(msg.sessionId);
         break;
       }
       case "client:focus-state": {
         connState.appFocusPaused = msg.paused;
+        opts.onClientFocusState?.(msg.paused, client);
         log.info("focus-state: paused=%s", msg.paused);
         break;
       }
@@ -2627,11 +2648,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
             return;
           }
           if (checkoutId !== "main") await prepareCheckoutRuntime(checkout);
-          handleAbMessage({ ...msg, checkoutId } as AbMessage);
+          handleAbMessage({ ...msg, checkoutId } as AbMessage, source);
         }).catch((error) => log.warn("Checkout lookup failed for %s: %s", checkoutId, error));
         return;
       }
-      handleAbMessage(msg);
+      handleAbMessage(msg, source);
     });
   }
 

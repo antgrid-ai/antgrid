@@ -352,4 +352,55 @@ void main() {
     await svc.dispose();
     await session.close();
   });
+
+  // The bridge drops a client's focused session the moment its socket closes
+  // (`clientGone` in work-status.ts) while leaving read tracking armed, and the
+  // reconnect restates `client:focus-state` on its own — so without a matching
+  // focus restate the first turn to finish after a reconnect paints an unread
+  // dot on the session the user is sitting on.
+  group('resyncFocus', () {
+    Future<List<String>> focusIdsAfter(
+      void Function(SessionsService svc) drive,
+    ) async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final cache = await CachedSessionsStore.open();
+      final svc = SessionsService.fromSession(session, cache: cache);
+
+      drive(svc);
+      await Future<void>.delayed(Duration.zero);
+
+      final ids = t.sent
+          .where((m) => m['type'] == 'session:focus')
+          .map((m) => m['sessionId'] as String)
+          .toList();
+
+      await svc.dispose();
+      await session.close();
+      return ids;
+    }
+
+    test('replays the last declared focus', () async {
+      expect(await focusIdsAfter((svc) {
+        svc.focus('sess-1');
+        svc.resyncFocus();
+      }), ['sess-1', 'sess-1']);
+    });
+
+    test('replays the CURRENT focus, not the first one', () async {
+      // A reconnect owes the bridge what is on screen now, not the session the
+      // user opened when the project was first warmed.
+      expect(await focusIdsAfter((svc) {
+        svc.focus('sess-1');
+        svc.focus('sess-2');
+        svc.resyncFocus();
+      }), ['sess-1', 'sess-2', 'sess-2']);
+    });
+
+    test('says nothing when this client never named a session', () async {
+      // "No client has said" and "the client says nothing is on screen" are the
+      // same state to the bridge, so an empty declaration is nothing to restate.
+      expect(await focusIdsAfter((svc) => svc.resyncFocus()), isEmpty);
+    });
+  });
 }

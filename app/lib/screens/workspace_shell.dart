@@ -663,9 +663,11 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       }
       // Transcript hydration is driven by AgentTranscriptView.initState (the
       // single per-session chokepoint), not here — see hydrateAttachedChatIfNeeded.
-      // Announce the pick for parity with the manual tap in session_row.dart.
-      // `SessionManager.focus()` is a no-op on the current bridge, so nothing
-      // here may depend on it moving server-side recency — see the pick above.
+      // Announce the pick for parity with the manual tap in session_row.dart:
+      // it is what clears this session's unread dot, and what keeps an answer
+      // landing while the user sits here from being called unseen. It does NOT
+      // move server-side recency (`SessionManager.focus` is still a no-op), so
+      // nothing here may depend on it reordering the list — see the pick above.
       svc.focus(session.id);
     }
   }
@@ -1499,80 +1501,99 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           onPointerMove: _onTabletFlingMove,
           onPointerUp: _onTabletFlingUp,
           onPointerCancel: (_) => _tabletFlingTracker = null,
-          child: Stack(
-            children: [
-              // Padded, not resized: the agent's own content already
-              // reflows across arbitrary widths (the mouse desktop's
-              // [ResizablePane] drag does the same thing continuously), so
-              // animating this side is safe where animating either panel's
-              // width would not be.
-              AnimatedPadding(
-                duration: AbTokens.motionPane,
-                curve: Curves.easeOut,
-                padding: EdgeInsets.only(
-                  left: _tabletDrawerOpen ? AbTokens.drawerPaneWidth : 0,
-                  right: showContextPane
-                      ? _tabletContextPanelWidth(context)
-                      : 0,
-                ),
-                // Stays mounted even at zero readable width (both panes
-                // open): swapping it out for a placeholder at this same
-                // GlobalKey'd slot — mirroring how desktop's
-                // [_PanelMode.contextExpanded] drops [_agentPanel] from
-                // [_buildPanels]'s list — corrupted the element tree here
-                // instead (this slot sits under an [AnimatedPadding], not a
-                // plain list, and swapping widget types under it blanked
-                // the whole screen). [WorkspaceMenuButton]'s popup survives
-                // an ordinary squeeze (sidebar open, pane open but not
-                // expanded) untouched — it only gets forced shut at FULL
-                // zero width (pane expanded, see [_tabletContextPanelWidth]),
-                // via [_setTabletContextExpanded]/[_openTabletContextPanel]/
-                // [_closeTabletContextPanel], not the icon alone; see those
-                // methods' docs.
-                child: surfaceChild ?? _agentPanel(),
-              ),
-              Positioned(
-                top: 0,
-                bottom: 0,
-                left: 0,
-                width: AbTokens.drawerPaneWidth,
-                child: AnimatedSlide(
+          // RenderStack's own `clipBehavior` only actually clips when its
+          // LAYOUT-time overflow check trips — and a closed pane's
+          // [Positioned] box (declared `left: 0, width: drawerPaneWidth`,
+          // fully inside the Stack's bounds) never overflows at layout time;
+          // it only leaves those bounds via the [AnimatedSlide]'d
+          // FractionalTranslation applied at PAINT time, which
+          // RenderStack.performLayout has no visibility into. So Stack's
+          // "hardEdge" default was a no-op here, and a closed pane painted
+          // straight through into whatever the ancestor SafeArea (in
+          // `build()`) had reserved as a gutter — a landscape phone's camera
+          // cutout among them — instead of being cut off at the Stack's own
+          // edge. An explicit ClipRect clips unconditionally, with no such
+          // heuristic to defeat it.
+          child: ClipRect(
+            child: Stack(
+              children: [
+                // Padded, not resized: the agent's own content already
+                // reflows across arbitrary widths (the mouse desktop's
+                // [ResizablePane] drag does the same thing continuously), so
+                // animating this side is safe where animating either panel's
+                // width would not be.
+                AnimatedPadding(
                   duration: AbTokens.motionPane,
                   curve: Curves.easeOut,
-                  offset: _tabletDrawerOpen ? Offset.zero : const Offset(-1, 0),
-                  child: ColoredBox(
-                    color: context.antgrid.bgDeep,
-                    child: SafeArea(child: const ProjectsDrawer()),
+                  padding: EdgeInsets.only(
+                    left: _tabletDrawerOpen ? AbTokens.drawerPaneWidth : 0,
+                    right: showContextPane
+                        ? _tabletContextPanelWidth(context)
+                        : 0,
                   ),
+                  // Stays mounted even at zero readable width (both panes
+                  // open): swapping it out for a placeholder at this same
+                  // GlobalKey'd slot — mirroring how desktop's
+                  // [_PanelMode.contextExpanded] drops [_agentPanel] from
+                  // [_buildPanels]'s list — corrupted the element tree here
+                  // instead (this slot sits under an [AnimatedPadding], not a
+                  // plain list, and swapping widget types under it blanked
+                  // the whole screen). [WorkspaceMenuButton]'s popup survives
+                  // an ordinary squeeze (sidebar open, pane open but not
+                  // expanded) untouched — it only gets forced shut at FULL
+                  // zero width (pane expanded, see [_tabletContextPanelWidth]),
+                  // via [_setTabletContextExpanded]/[_openTabletContextPanel]/
+                  // [_closeTabletContextPanel], not the icon alone; see those
+                  // methods' docs.
+                  child: surfaceChild ?? _agentPanel(),
                 ),
-              ),
-              if (surfaceChild == null)
                 Positioned(
                   top: 0,
                   bottom: 0,
-                  right: 0,
-                  width: _tabletContextPanelWidth(context),
+                  left: 0,
+                  width: AbTokens.drawerPaneWidth,
                   child: AnimatedSlide(
                     duration: AbTokens.motionPane,
                     curve: Curves.easeOut,
-                    offset: showContextPane ? Offset.zero : const Offset(1, 0),
+                    offset: _tabletDrawerOpen
+                        ? Offset.zero
+                        : const Offset(-1, 0),
                     child: ColoredBox(
                       color: context.antgrid.bgDeep,
-                      child: WorkspacePanel(
-                        key: _contextPanelKey,
-                        selectedView: _selectedView,
-                        onViewSelected: _selectView,
-                        viewBadges: _workspaceBadges(),
-                        isExpanded: _tabletContextPanelExpanded,
-                        onToggleExpand: () => _setTabletContextExpanded(
-                          !_tabletContextPanelExpanded,
-                        ),
-                        onClose: _closeTabletContextPanel,
-                      ),
+                      child: SafeArea(child: const ProjectsDrawer()),
                     ),
                   ),
                 ),
-            ],
+                if (surfaceChild == null)
+                  Positioned(
+                    top: 0,
+                    bottom: 0,
+                    right: 0,
+                    width: _tabletContextPanelWidth(context),
+                    child: AnimatedSlide(
+                      duration: AbTokens.motionPane,
+                      curve: Curves.easeOut,
+                      offset: showContextPane
+                          ? Offset.zero
+                          : const Offset(1, 0),
+                      child: ColoredBox(
+                        color: context.antgrid.bgDeep,
+                        child: WorkspacePanel(
+                          key: _contextPanelKey,
+                          selectedView: _selectedView,
+                          onViewSelected: _selectView,
+                          viewBadges: _workspaceBadges(),
+                          isExpanded: _tabletContextPanelExpanded,
+                          onToggleExpand: () => _setTabletContextExpanded(
+                            !_tabletContextPanelExpanded,
+                          ),
+                          onClose: _closeTabletContextPanel,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
           ),
         ),
       ),
@@ -1607,7 +1628,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // only the pane on its own side, so a swipe can never reach across the
     // window to the pane the user is not touching. See [_tabletFlingLeftward].
     final localX = event.localPosition.dx;
-    final width = MediaQuery.sizeOf(context).width;
+    final width = _tabletAvailableWidth(context);
     final agentLeft = _tabletDrawerOpen ? AbTokens.drawerPaneWidth : 0.0;
     final contextVisible = _tabletContextPaneVisible;
     final agentRight = contextVisible
@@ -1697,11 +1718,26 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   /// sidebar's own width or the two panes' padding overflows past the
   /// window's edge instead of meeting at zero, unlike desktop.
   double _tabletContextPanelWidth(BuildContext context) {
-    final width = MediaQuery.sizeOf(context).width;
+    final width = _tabletAvailableWidth(context);
     if (_tabletContextPanelExpanded) {
       return _tabletDrawerOpen ? width - AbTokens.drawerPaneWidth : width;
     }
     return width / 4;
+  }
+
+  /// The Stack's actual width in [_buildTabletTouch] — screen width minus the
+  /// SIDES the ancestor [SafeArea] (`build()`, above this route) pads away,
+  /// notably a landscape phone's camera cutout. [MediaQuery.sizeOf] alone is
+  /// the raw device width and doesn't know about that inset, so sizing the
+  /// context pane's [Positioned] box off it directly overshot the Stack's own
+  /// bounds and got clipped on the inset side — the pane rendered a slice
+  /// short instead of picking up right after the cutout. `context` here is
+  /// always `State.context` (every caller passes it through unchanged), which
+  /// sits ABOVE that SafeArea, so its padding is still the untouched full
+  /// inset rather than the zero a context from inside the Stack would see.
+  double _tabletAvailableWidth(BuildContext context) {
+    final mq = MediaQuery.of(context);
+    return mq.size.width - mq.padding.horizontal;
   }
 
   /// [WorkspaceMenuButton]'s popup is "pinned" (see its own doc) and normally

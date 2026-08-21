@@ -747,10 +747,12 @@ class _MachineOnlineDot extends ConsumerWidget {
 }
 
 /// Aggregate work-status dot for a collapsed machine header: shows only the
-/// call-to-action states (attention/error) across ALL projects on [machineUuid].
-/// Hidden when expanded — the machine's projects are on screen then, and their
-/// session rows carry the dots — and hidden when status is working/done, keeping
-/// idle machine headers clean.
+/// states that want the user to come and look (attention/error/unread) across
+/// ALL projects on [machineUuid]. Hidden when expanded — the machine's projects
+/// are on screen then, and their session rows carry the dots — and hidden when
+/// status is working/done, keeping idle machine headers clean. `working` is
+/// excluded for the same reason `unread` is not: a busy agent will finish on its
+/// own, an unread answer stays unread until someone opens it.
 class _MachineAggregateDot extends ConsumerWidget {
   const _MachineAggregateDot({required this.machineUuid});
 

@@ -230,61 +230,77 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
         child: Scaffold(
           backgroundColor: context.antgrid.bgDeepest,
           body: SafeArea(
-            child: Stack(
-              children: [
-                GestureDetector(
-                  // Translucent so the canvas keeps every tap and every
-                  // vertical scroll; only a horizontal drag lands here.
-                  // Rightward opens, leftward closes — the mirror image of
-                  // the sidebar's own closing gesture below.
-                  behavior: HitTestBehavior.translucent,
-                  onHorizontalDragEnd: (details) {
-                    final v = details.primaryVelocity;
-                    if (v == null) return;
-                    if (v > _kDrawerFlingVelocity) {
-                      _openDrawer();
-                    } else if (v < -_kDrawerFlingVelocity) {
-                      _closeDrawer();
-                    }
-                  },
-                  child: AnimatedPadding(
-                    duration: AbTokens.motionPane,
-                    curve: Curves.easeOut,
-                    padding: EdgeInsets.only(
-                      left: _tabletSidebarOpen ? AbTokens.drawerPaneWidth : 0,
+            // RenderStack's own `clipBehavior` only clips when its LAYOUT-time
+            // overflow check trips, and a closed sidebar's Positioned box
+            // (`left: 0, width: drawerPaneWidth`, fully inside the Stack)
+            // never overflows at layout time — it only leaves those bounds via
+            // the AnimatedSlide's paint-time FractionalTranslation, which
+            // RenderStack's overflow check can't see. So Stack's "hardEdge"
+            // default was a no-op here, and a closed sidebar painted straight
+            // through into whatever this SafeArea reserved as a gutter — a
+            // landscape phone's camera cutout among them — instead of being
+            // cut off at the Stack's own edge (see the matching fix in
+            // WorkspaceShellState._buildTabletTouch). ClipRect clips
+            // unconditionally, with no such heuristic to defeat it.
+            child: ClipRect(
+              child: Stack(
+                children: [
+                  GestureDetector(
+                    // Translucent so the canvas keeps every tap and every
+                    // vertical scroll; only a horizontal drag lands here.
+                    // Rightward opens, leftward closes — the mirror image of
+                    // the sidebar's own closing gesture below.
+                    behavior: HitTestBehavior.translucent,
+                    onHorizontalDragEnd: (details) {
+                      final v = details.primaryVelocity;
+                      if (v == null) return;
+                      if (v > _kDrawerFlingVelocity) {
+                        _openDrawer();
+                      } else if (v < -_kDrawerFlingVelocity) {
+                        _closeDrawer();
+                      }
+                    },
+                    child: AnimatedPadding(
+                      duration: AbTokens.motionPane,
+                      curve: Curves.easeOut,
+                      padding: EdgeInsets.only(
+                        left: _tabletSidebarOpen
+                            ? AbTokens.drawerPaneWidth
+                            : 0,
+                      ),
+                      child:
+                          surfaceChild ??
+                          NewSessionCanvas(onOpenDrawer: _toggleDrawer),
                     ),
-                    child:
-                        surfaceChild ??
-                        NewSessionCanvas(onOpenDrawer: _toggleDrawer),
                   ),
-                ),
-                Positioned(
-                  top: 0,
-                  bottom: 0,
-                  left: 0,
-                  width: AbTokens.drawerPaneWidth,
-                  child: AnimatedSlide(
-                    duration: AbTokens.motionPane,
-                    curve: Curves.easeOut,
-                    offset: _tabletSidebarOpen
-                        ? Offset.zero
-                        : const Offset(-1, 0),
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.translucent,
-                      onHorizontalDragEnd: (details) {
-                        final v = details.primaryVelocity;
-                        if (v != null && v < -_kDrawerFlingVelocity) {
-                          _closeDrawer();
-                        }
-                      },
-                      child: ColoredBox(
-                        color: context.antgrid.bgDeep,
-                        child: const ProjectsDrawer(),
+                  Positioned(
+                    top: 0,
+                    bottom: 0,
+                    left: 0,
+                    width: AbTokens.drawerPaneWidth,
+                    child: AnimatedSlide(
+                      duration: AbTokens.motionPane,
+                      curve: Curves.easeOut,
+                      offset: _tabletSidebarOpen
+                          ? Offset.zero
+                          : const Offset(-1, 0),
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.translucent,
+                        onHorizontalDragEnd: (details) {
+                          final v = details.primaryVelocity;
+                          if (v != null && v < -_kDrawerFlingVelocity) {
+                            _closeDrawer();
+                          }
+                        },
+                        child: ColoredBox(
+                          color: context.antgrid.bgDeep,
+                          child: const ProjectsDrawer(),
+                        ),
                       ),
                     ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),

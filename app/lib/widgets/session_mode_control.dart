@@ -126,7 +126,12 @@ String? _modeSwitchWarning(AgentWorkStatus? status, String agent) =>
       AgentWorkStatus.working =>
         '$agent is still replying. Switching restarts it, so that reply is '
             'lost. Everything before it carries over.',
-      AgentWorkStatus.done || AgentWorkStatus.error || null => null,
+      // Unread is a read state, not work in flight: whatever the switch would
+      // restart, the turn behind it already finished.
+      AgentWorkStatus.done ||
+      AgentWorkStatus.unread ||
+      AgentWorkStatus.error ||
+      null => null,
     };
 
 Future<void> _switchMode(

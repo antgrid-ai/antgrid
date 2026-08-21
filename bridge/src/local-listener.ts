@@ -21,6 +21,12 @@ export interface LocalListenerOptions {
    * owner. Used by the agent to replay cached state to late joiners.
    */
   onOwnerConnected?: () => void;
+  /**
+   * Invoked when the promoted owner's socket closes. NOT fired when an owner is
+   * superseded by a replacement — {@link ownerSocket} has already moved on by
+   * then, and the new owner announces its own state.
+   */
+  onOwnerDisconnected?: () => void;
 }
 
 const CLOSE_UNAUTHORIZED = 4401;
@@ -104,6 +110,7 @@ export class LocalListener implements TransportSubscriber {
             this.ownerSocket = null;
             this.busUnsubscribe?.();
             this.busUnsubscribe = null;
+            this.opts.onOwnerDisconnected?.();
           }
         },
       },
