@@ -97,9 +97,7 @@ class _OperationalErrorToasterState
       (_, next) => _announce(_lastBranchesError, next.$1, next.$2, (e) => e),
     );
     ref.listen(
-      sessionsStateProvider.select(
-        (s) => (s.value?.projectId, s.value?.error),
-      ),
+      sessionsStateProvider.select((s) => (s.value?.projectId, s.value?.error)),
       (_, next) => _announce(
         _lastSessionError,
         next.$1,

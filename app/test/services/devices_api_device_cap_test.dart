@@ -114,7 +114,11 @@ void main() {
     await expectLater(
       _create(api),
       throwsA(
-        isA<ProvisioningException>().having((e) => e.code, 'code', 'WORKER_CAP'),
+        isA<ProvisioningException>().having(
+          (e) => e.code,
+          'code',
+          'WORKER_CAP',
+        ),
       ),
     );
   });

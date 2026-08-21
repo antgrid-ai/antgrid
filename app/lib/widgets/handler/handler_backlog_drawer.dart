@@ -341,10 +341,7 @@ List<HandlerInstructionItem> _withoutDependency(
   String dependencyId,
 ) => [
   for (final i in backlog)
-    if (i.id != itemId)
-      i
-    else
-      _itemWithoutDependency(i, dependencyId),
+    if (i.id != itemId) i else _itemWithoutDependency(i, dependencyId),
 ];
 
 HandlerInstructionItem _itemWithoutDependency(

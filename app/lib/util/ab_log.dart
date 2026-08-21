@@ -19,14 +19,26 @@ class AbLog {
   static _AbLogWriter? _writer;
   static _AbLogWriter _w() => _writer ??= _AbLogWriter('${hostDir()}/app.log');
 
-  static void debug(String component, String msg, {Map<String, Object?>? fields}) =>
-      _w().log(20, component, msg, fields);
-  static void info(String component, String msg, {Map<String, Object?>? fields}) =>
-      _w().log(30, component, msg, fields);
-  static void warn(String component, String msg, {Map<String, Object?>? fields}) =>
-      _w().log(40, component, msg, fields);
-  static void error(String component, String msg, {Map<String, Object?>? fields}) =>
-      _w().log(50, component, msg, fields);
+  static void debug(
+    String component,
+    String msg, {
+    Map<String, Object?>? fields,
+  }) => _w().log(20, component, msg, fields);
+  static void info(
+    String component,
+    String msg, {
+    Map<String, Object?>? fields,
+  }) => _w().log(30, component, msg, fields);
+  static void warn(
+    String component,
+    String msg, {
+    Map<String, Object?>? fields,
+  }) => _w().log(40, component, msg, fields);
+  static void error(
+    String component,
+    String msg, {
+    Map<String, Object?>? fields,
+  }) => _w().log(50, component, msg, fields);
 
   /// Test seam: redirect output to [path] and force [mirror] on/off (bypassing
   /// the kDebugMode default) so mirroring is assertable in any build mode.
@@ -66,9 +78,16 @@ class _AbLogWriter {
   // Tests drain explicitly with AbLog.flush(), so skip the timer entirely there
   // and nothing dangles. FLUTTER_TEST is a process env var set by the harness,
   // so a runtime lookup (not `bool.fromEnvironment`, which is compile-time) sees it.
-  static final bool _underTest = Platform.environment.containsKey('FLUTTER_TEST');
+  static final bool _underTest = Platform.environment.containsKey(
+    'FLUTTER_TEST',
+  );
 
-  void log(int level, String component, String msg, Map<String, Object?>? fields) {
+  void log(
+    int level,
+    String component,
+    String msg,
+    Map<String, Object?>? fields,
+  ) {
     _queue.add(_encode(level, component, msg, fields));
     if (_mirror) debugPrint('[$component] $msg');
     if (_queue.length >= _flushAt) {
@@ -81,7 +100,12 @@ class _AbLogWriter {
     }
   }
 
-  String _encode(int level, String component, String msg, Map<String, Object?>? fields) {
+  String _encode(
+    int level,
+    String component,
+    String msg,
+    Map<String, Object?>? fields,
+  ) {
     try {
       final line = <String, Object?>{
         'level': level,
@@ -103,7 +127,8 @@ class _AbLogWriter {
           'pid': pid,
           'component': component,
           'msg': msg,
-          if (fields != null) 'fields': fields.map((k, v) => MapEntry(k, _safeString(v))),
+          if (fields != null)
+            'fields': fields.map((k, v) => MapEntry(k, _safeString(v))),
         });
       } catch (_) {
         return jsonEncode(<String, Object?>{
@@ -150,7 +175,9 @@ class _AbLogWriter {
         for (final l in batch) {
           buf.writeln(l);
         }
-        await File(path).writeAsString(buf.toString(), mode: FileMode.append, flush: false);
+        await File(
+          path,
+        ).writeAsString(buf.toString(), mode: FileMode.append, flush: false);
       }
     } catch (_) {
       // Fail-open: never let logging crash a caller.

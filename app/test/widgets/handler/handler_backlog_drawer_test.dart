@@ -97,7 +97,9 @@ List<String> _sentIds(ProjectSession session) {
     session,
   ).sent.where((m) => m['type'] == 'handler:configure').toList();
   expect(sent, hasLength(1));
-  return [for (final i in sent.single['backlog'] as List) (i as Map)['id'] as String];
+  return [
+    for (final i in sent.single['backlog'] as List) (i as Map)['id'] as String,
+  ];
 }
 
 Map<String, dynamic> _sentConfigure(ProjectSession session) => _transportOf(

@@ -7,14 +7,14 @@ AgentCapabilities _caps({
   List<AgentCapabilityModel> models = const [],
   String? currentModelId,
 }) => AgentCapabilities(
-      sessionId: 's1',
-      ready: ready,
-      models: models,
-      modes: const [AgentCapabilityMode(id: 'plan', name: 'Plan')],
-      commands: const [AgentCapabilityCommand(id: 'init', name: '/init')],
-      currentModelId: currentModelId,
-      currentEffortId: 'high',
-    );
+  sessionId: 's1',
+  ready: ready,
+  models: models,
+  modes: const [AgentCapabilityMode(id: 'plan', name: 'Plan')],
+  commands: const [AgentCapabilityCommand(id: 'init', name: '/init')],
+  currentModelId: currentModelId,
+  currentEffortId: 'high',
+);
 
 const _model = AgentCapabilityModel(
   id: 'opus',
@@ -38,10 +38,7 @@ void main() {
 
     test('isEmpty is true only with no models, modes, commands', () {
       expect(const CapabilityCatalog().isEmpty, isTrue);
-      expect(
-        const CapabilityCatalog(models: [_model]).isEmpty,
-        isFalse,
-      );
+      expect(const CapabilityCatalog(models: [_model]).isEmpty, isFalse);
     });
 
     test('toJson/fromJson round-trip preserves efforts', () {
@@ -60,15 +57,20 @@ void main() {
       expect(cat.isEmpty, isTrue);
     });
 
-    test('fromJson parses Map<dynamic,dynamic> entries, not just typed maps', () {
-      // A list carrying an untyped map (e.g. from a test fixture or a non-
-      // jsonDecode source) must still be parsed, not silently dropped.
-      final raw = <String, dynamic>{
-        'models': <dynamic>[<dynamic, dynamic>{'id': 'opus', 'name': 'Opus'}],
-      };
-      final cat = CapabilityCatalog.fromJson(raw);
-      expect(cat.models.single.id, 'opus');
-    });
+    test(
+      'fromJson parses Map<dynamic,dynamic> entries, not just typed maps',
+      () {
+        // A list carrying an untyped map (e.g. from a test fixture or a non-
+        // jsonDecode source) must still be parsed, not silently dropped.
+        final raw = <String, dynamic>{
+          'models': <dynamic>[
+            <dynamic, dynamic>{'id': 'opus', 'name': 'Opus'},
+          ],
+        };
+        final cat = CapabilityCatalog.fromJson(raw);
+        expect(cat.models.single.id, 'opus');
+      },
+    );
   });
 
   group('resolveComposerCapabilities', () {
@@ -95,7 +97,11 @@ void main() {
     });
 
     test('live loading + cache → merged, ready, live current ids retained', () {
-      final live = _caps(ready: false, models: const [], currentModelId: 'opus');
+      final live = _caps(
+        ready: false,
+        models: const [],
+        currentModelId: 'opus',
+      );
       final merged = resolveComposerCapabilities(live: live, cached: cached)!;
       expect(merged.ready, isTrue);
       expect(merged.models.single.id, 'opus');

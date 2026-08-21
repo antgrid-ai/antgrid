@@ -48,7 +48,9 @@ class AbControlBox extends StatelessWidget {
         color: fillColor ?? context.antgrid.bgSurface,
         borderRadius: AbTokens.borderRadius5,
         border: Border.all(
-          color: focused ? context.antgrid.accent : context.antgrid.borderDefault,
+          color: focused
+              ? context.antgrid.accent
+              : context.antgrid.borderDefault,
         ),
       ),
       child: child,

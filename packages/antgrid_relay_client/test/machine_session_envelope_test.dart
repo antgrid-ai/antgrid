@@ -48,24 +48,27 @@ void main() {
   });
 
   group('outbound envelope', () {
-    test('sendOnStream wraps as sealed {s, m} addressed to the machine',
-        () async {
-      await session.sendOnStream('proj-1', {'type': 'ping'}, 'control');
-      expect(relay.sent, hasLength(1));
-      final frame = relay.sent.single;
-      expect(frame.to, 'machine-1');
-      expect(frame.kind, FrameKind.sealed);
+    test(
+      'sendOnStream wraps as sealed {s, m} addressed to the machine',
+      () async {
+        await session.sendOnStream('proj-1', {'type': 'ping'}, 'control');
+        expect(relay.sent, hasLength(1));
+        final frame = relay.sent.single;
+        expect(frame.to, 'machine-1');
+        expect(frame.kind, FrameKind.sealed);
 
-      final plaintext = await _openFromPhone(keys, frame.payload);
-      expect(plaintext, isNotNull);
-      final json = jsonDecode(plaintext!) as Map<String, dynamic>;
-      expect(json['s'], 'proj-1');
-      expect(json['m'], {'type': 'ping'});
-    });
+        final plaintext = await _openFromPhone(keys, frame.payload);
+        expect(plaintext, isNotNull);
+        final json = jsonDecode(plaintext!) as Map<String, dynamic>;
+        expect(json['s'], 'proj-1');
+        expect(json['m'], {'type': 'ping'});
+      },
+    );
 
     test('the control stream ("0") omits `s` entirely', () async {
-      await session.sendOnStream(
-          kControlStreamId, {'type': 'project:list'}, 'control');
+      await session.sendOnStream(kControlStreamId, {
+        'type': 'project:list',
+      }, 'control');
       final plaintext = await _openFromPhone(keys, relay.sent.single.payload);
       final json = jsonDecode(plaintext!) as Map<String, dynamic>;
       expect(json.containsKey('s'), isFalse);
@@ -83,8 +86,11 @@ void main() {
       };
       await session.sendOnStream('proj-1', message, 'control');
 
-      expect(relay.sent.length, greaterThan(1),
-          reason: 'a >1.4MB envelope must fragment');
+      expect(
+        relay.sent.length,
+        greaterThan(1),
+        reason: 'a >1.4MB envelope must fragment',
+      );
       for (final f in relay.sent) {
         expect(f.kind, FrameKind.sealed);
       }
@@ -104,8 +110,11 @@ void main() {
 
       expect(joined, hasLength(1));
       final envelope = jsonDecode(joined.single) as Map<String, dynamic>;
-      expect(envelope['s'], 'proj-1',
-          reason: 'the streamId must survive fragmentation intact');
+      expect(
+        envelope['s'],
+        'proj-1',
+        reason: 'the streamId must survive fragmentation intact',
+      );
       expect(envelope['m'], message);
     });
   });
@@ -121,20 +130,34 @@ void main() {
       final sub1 = s1.messages.listen((m) => seen1.add(m.json));
       final sub2 = s2.messages.listen((m) => seen2.add(m.json));
 
-      relay.inject(IncomingRouteMessage(
-        from: 'machine-1',
-        channel: 'control',
-        kind: FrameKind.sealed,
-        payload: await _sealFromAgent(
-            keys, jsonEncode({'s': 'proj-1', 'm': {'type': 'a'}})),
-      ));
-      relay.inject(IncomingRouteMessage(
-        from: 'machine-1',
-        channel: 'control',
-        kind: FrameKind.sealed,
-        payload: await _sealFromAgent(
-            keys, jsonEncode({'s': 'proj-2', 'm': {'type': 'b'}})),
-      ));
+      relay.inject(
+        IncomingRouteMessage(
+          from: 'machine-1',
+          channel: 'control',
+          kind: FrameKind.sealed,
+          payload: await _sealFromAgent(
+            keys,
+            jsonEncode({
+              's': 'proj-1',
+              'm': {'type': 'a'},
+            }),
+          ),
+        ),
+      );
+      relay.inject(
+        IncomingRouteMessage(
+          from: 'machine-1',
+          channel: 'control',
+          kind: FrameKind.sealed,
+          payload: await _sealFromAgent(
+            keys,
+            jsonEncode({
+              's': 'proj-2',
+              'm': {'type': 'b'},
+            }),
+          ),
+        ),
+      );
 
       await Future<void>.delayed(const Duration(milliseconds: 20));
 
@@ -145,115 +168,135 @@ void main() {
       await sub2.cancel();
     });
 
-    test(
-      'a control-plane envelope with `s` absent (or "0") routes to the '
-      'control stream, not a project stream',
-      () async {
-        final control = session.streamFor(kControlStreamId);
-        final seen = <Map<String, dynamic>>[];
-        final sub = control.messages.listen((m) => seen.add(m.json));
+    test('a control-plane envelope with `s` absent (or "0") routes to the '
+        'control stream, not a project stream', () async {
+      final control = session.streamFor(kControlStreamId);
+      final seen = <Map<String, dynamic>>[];
+      final sub = control.messages.listen((m) => seen.add(m.json));
 
-        // `s` absent entirely.
-        relay.inject(IncomingRouteMessage(
+      // `s` absent entirely.
+      relay.inject(
+        IncomingRouteMessage(
           from: 'machine-1',
           channel: 'control',
           kind: FrameKind.sealed,
           payload: await _sealFromAgent(
-              keys, jsonEncode({'m': {'type': 'agent:projects'}})),
-        ));
-        // `s` explicitly "0".
-        relay.inject(IncomingRouteMessage(
+            keys,
+            jsonEncode({
+              'm': {'type': 'agent:projects'},
+            }),
+          ),
+        ),
+      );
+      // `s` explicitly "0".
+      relay.inject(
+        IncomingRouteMessage(
           from: 'machine-1',
           channel: 'control',
           kind: FrameKind.sealed,
-          payload: await _sealFromAgent(keys,
-              jsonEncode({'s': '0', 'm': {'type': 'agent:tools'}})),
-        ));
-
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-        expect(seen.map((j) => j['type']),
-            ['agent:projects', 'agent:tools']);
-        await sub.cancel();
-      },
-    );
-  });
-
-  group('inbound fragment reassembly (replaces relay_transport_frag_test.dart)',
-      () {
-    test('a fragmented inbound envelope is reassembled and dispatched whole '
-        'to the addressed stream', () async {
-      final stream = session.streamFor('proj-1');
-      final seen = <Map<String, dynamic>>[];
-      final sub = stream.messages.listen((m) => seen.add(m.json));
-
-      final bigContent = List.filled(2000000, 'y').join();
-      final envelopeJson = jsonEncode({
-        's': 'proj-1',
-        'm': {'type': 'file:content', 'path': 'b.png', 'content': bigContent},
-      });
-      final fragments = buildFragments(
-          envelopeJson, 'transfer-1', const FragHint('file:content', 'b.png'));
-      expect(fragments.length, greaterThan(1));
-
-      for (final frag in fragments) {
-        relay.inject(IncomingRouteMessage(
-          from: 'machine-1',
-          channel: 'control',
-          kind: FrameKind.sealed,
-          payload: await _sealFromAgent(keys, frag),
-        ));
-      }
-
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-      expect(seen, hasLength(1));
-      expect(seen.single['type'], 'file:content');
-      expect(seen.single['content'], bigContent);
-
-      await sub.cancel();
-    });
-
-    test('a mismatched fragment count aborts the transfer and surfaces the '
-        'hint on fragmentAborts', () async {
-      final aborts = <FragHint?>[];
-      final sub = session.fragmentAborts.listen(aborts.add);
-
-      const id = 'transfer-bad';
-      final hint = const FragHint('file:content', 'c.png');
-      final frame0 = jsonEncode({
-        '__frag': {
-          'id': id,
-          'i': 0,
-          'n': 2,
-          'hint': {'type': hint.type, 'key': hint.key},
-        },
-        'data': 'part-a',
-      });
-      // Second fragment claims a DIFFERENT total `n` for the same id — the
-      // reassembler discards the whole transfer and reports the hint.
-      final frame1 = jsonEncode({
-        '__frag': {'id': id, 'i': 0, 'n': 3},
-        'data': 'part-b',
-      });
-
-      relay.inject(IncomingRouteMessage(
-        from: 'machine-1',
-        channel: 'control',
-        kind: FrameKind.sealed,
-        payload: await _sealFromAgent(keys, frame0),
-      ));
-      relay.inject(IncomingRouteMessage(
-        from: 'machine-1',
-        channel: 'control',
-        kind: FrameKind.sealed,
-        payload: await _sealFromAgent(keys, frame1),
-      ));
+          payload: await _sealFromAgent(
+            keys,
+            jsonEncode({
+              's': '0',
+              'm': {'type': 'agent:tools'},
+            }),
+          ),
+        ),
+      );
 
       await Future<void>.delayed(const Duration(milliseconds: 20));
-      expect(aborts, hasLength(1));
-      expect(aborts.single?.type, hint.type);
-      expect(aborts.single?.key, hint.key);
-
+      expect(seen.map((j) => j['type']), ['agent:projects', 'agent:tools']);
       await sub.cancel();
     });
   });
+
+  group(
+    'inbound fragment reassembly (replaces relay_transport_frag_test.dart)',
+    () {
+      test('a fragmented inbound envelope is reassembled and dispatched whole '
+          'to the addressed stream', () async {
+        final stream = session.streamFor('proj-1');
+        final seen = <Map<String, dynamic>>[];
+        final sub = stream.messages.listen((m) => seen.add(m.json));
+
+        final bigContent = List.filled(2000000, 'y').join();
+        final envelopeJson = jsonEncode({
+          's': 'proj-1',
+          'm': {'type': 'file:content', 'path': 'b.png', 'content': bigContent},
+        });
+        final fragments = buildFragments(
+          envelopeJson,
+          'transfer-1',
+          const FragHint('file:content', 'b.png'),
+        );
+        expect(fragments.length, greaterThan(1));
+
+        for (final frag in fragments) {
+          relay.inject(
+            IncomingRouteMessage(
+              from: 'machine-1',
+              channel: 'control',
+              kind: FrameKind.sealed,
+              payload: await _sealFromAgent(keys, frag),
+            ),
+          );
+        }
+
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        expect(seen, hasLength(1));
+        expect(seen.single['type'], 'file:content');
+        expect(seen.single['content'], bigContent);
+
+        await sub.cancel();
+      });
+
+      test('a mismatched fragment count aborts the transfer and surfaces the '
+          'hint on fragmentAborts', () async {
+        final aborts = <FragHint?>[];
+        final sub = session.fragmentAborts.listen(aborts.add);
+
+        const id = 'transfer-bad';
+        final hint = const FragHint('file:content', 'c.png');
+        final frame0 = jsonEncode({
+          '__frag': {
+            'id': id,
+            'i': 0,
+            'n': 2,
+            'hint': {'type': hint.type, 'key': hint.key},
+          },
+          'data': 'part-a',
+        });
+        // Second fragment claims a DIFFERENT total `n` for the same id — the
+        // reassembler discards the whole transfer and reports the hint.
+        final frame1 = jsonEncode({
+          '__frag': {'id': id, 'i': 0, 'n': 3},
+          'data': 'part-b',
+        });
+
+        relay.inject(
+          IncomingRouteMessage(
+            from: 'machine-1',
+            channel: 'control',
+            kind: FrameKind.sealed,
+            payload: await _sealFromAgent(keys, frame0),
+          ),
+        );
+        relay.inject(
+          IncomingRouteMessage(
+            from: 'machine-1',
+            channel: 'control',
+            kind: FrameKind.sealed,
+            payload: await _sealFromAgent(keys, frame1),
+          ),
+        );
+
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(aborts, hasLength(1));
+        expect(aborts.single?.type, hint.type);
+        expect(aborts.single?.key, hint.key);
+
+        await sub.cancel();
+      });
+    },
+  );
 }

@@ -13,15 +13,22 @@ void main() {
     final seed = AppSettings.fromPrefs(prefs);
     expect(seed.telemetryEnabled, isTrue);
 
-    final container = ProviderContainer(overrides: [
-      appSettingsServiceProvider.overrideWith(
-        () => AppSettingsService(prefs, seed),
-      ),
-    ]);
+    final container = ProviderContainer(
+      overrides: [
+        appSettingsServiceProvider.overrideWith(
+          () => AppSettingsService(prefs, seed),
+        ),
+      ],
+    );
     addTearDown(container.dispose);
 
-    await container.read(appSettingsServiceProvider.notifier).setTelemetryEnabled(false);
-    expect(container.read(appSettingsServiceProvider).telemetryEnabled, isFalse);
+    await container
+        .read(appSettingsServiceProvider.notifier)
+        .setTelemetryEnabled(false);
+    expect(
+      container.read(appSettingsServiceProvider).telemetryEnabled,
+      isFalse,
+    );
 
     // A fresh read of prefs reflects the persisted value.
     expect(AppSettings.fromPrefs(prefs).telemetryEnabled, isFalse);

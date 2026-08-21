@@ -39,9 +39,9 @@ Widget _wrap(Widget child, {required List<Override> overrides}) {
 /// Collapse [id]. Collapsing used to be what made a project row show a rollup
 /// dot, so the no-dot assertions below sweep both states.
 Future<void> _collapse(WidgetTester tester, String id) async {
-  ProviderScope.containerOf(tester.element(find.byType(DrawerEntryRow)))
-      .read(collapsedDrawerIdsProvider.notifier)
-      .toggle(id);
+  ProviderScope.containerOf(
+    tester.element(find.byType(DrawerEntryRow)),
+  ).read(collapsedDrawerIdsProvider.notifier).toggle(id);
   await tester.pump();
 }
 
@@ -112,18 +112,26 @@ void main() {
         final container = ProviderScope.containerOf(
           tester.element(find.byType(DrawerEntryRow)),
         );
-        container
-            .read(remoteProjectStatusProvider.notifier)
-            .setLocalStatuses({'p1': status});
-        container.read(remoteSessionStatusProvider.notifier).setLocalSessionStatuses({
-          'p1': {'s1': status},
+        container.read(remoteProjectStatusProvider.notifier).setLocalStatuses({
+          'p1': status,
         });
+        container
+            .read(remoteSessionStatusProvider.notifier)
+            .setLocalSessionStatuses({
+              'p1': {'s1': status},
+            });
         await tester.pump();
 
-        expect(find.byKey(const ValueKey('drawer-status-dot-p1')), findsNothing);
+        expect(
+          find.byKey(const ValueKey('drawer-status-dot-p1')),
+          findsNothing,
+        );
 
         await _collapse(tester, 'p1');
-        expect(find.byKey(const ValueKey('drawer-status-dot-p1')), findsNothing);
+        expect(
+          find.byKey(const ValueKey('drawer-status-dot-p1')),
+          findsNothing,
+        );
       });
     }
 

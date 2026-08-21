@@ -29,39 +29,39 @@ final hostControllerProvider = Provider<HostController>(
 /// can be built (unknown/offline target). Lazily built on first watch; the
 /// client is disposed on teardown, the transport is owned by the transport
 /// provider.
-final controlPlaneClientForProvider = FutureProvider.family<ControlPlaneClient?, String>(
-  (ref, bareDeviceUuid) async {
-    final transport = await ref.watch(
-      agentTransportForProvider(bareDeviceUuid).future,
-    );
-    if (transport == null) return null;
-    // Reactive offline: the relay transport never emits a disconnect, so feed
-    // the client the machine socket's peer-presence. In v3 the phone's socket is
-    // NOT cascade-closed when the agent drops — the relay sends
-    // `peer-offline` (which keeps the socket `paired`), so presence must key on
-    // the peer-presence stream, not the connection state. `RelayService` emits
-    // false on both `peer-offline` and a raw socket drop, so a `false` here
-    // means the agent is unreachable either way and the client clears its stale
-    // advert (picker/drawer flip to offline WITHOUT a manual refresh); the live
-    // stream repopulates it when the agent re-adverts.
-    //
-    // peek (not connectionFor): the transport above already materialized this
-    // connection; a null peek just means no live socket → no presence to feed.
-    final conn = ref.read(relayConnectionManagerProvider).peek(bareDeviceUuid);
-    final presence = conn?.relay.peerPresenceStream;
-    final client = ControlPlaneClient(
-      transport: transport,
-      peerPresence: presence,
-    );
-    ref.onDispose(client.dispose);
-    return client;
-    // retry: an offline/mid-reconnect target throws while resolving its
-    // transport above; that error must reject `.future` so the refresh helpers
-    // catch it and force a fresh attempt — Riverpod 3's default would instead
-    // retry silently and leave `.future` pending. See provider_retry.dart.
-  },
-  retry: noProviderRetry,
-);
+final controlPlaneClientForProvider = FutureProvider.family<ControlPlaneClient?, String>((
+  ref,
+  bareDeviceUuid,
+) async {
+  final transport = await ref.watch(
+    agentTransportForProvider(bareDeviceUuid).future,
+  );
+  if (transport == null) return null;
+  // Reactive offline: the relay transport never emits a disconnect, so feed
+  // the client the machine socket's peer-presence. In v3 the phone's socket is
+  // NOT cascade-closed when the agent drops — the relay sends
+  // `peer-offline` (which keeps the socket `paired`), so presence must key on
+  // the peer-presence stream, not the connection state. `RelayService` emits
+  // false on both `peer-offline` and a raw socket drop, so a `false` here
+  // means the agent is unreachable either way and the client clears its stale
+  // advert (picker/drawer flip to offline WITHOUT a manual refresh); the live
+  // stream repopulates it when the agent re-adverts.
+  //
+  // peek (not connectionFor): the transport above already materialized this
+  // connection; a null peek just means no live socket → no presence to feed.
+  final conn = ref.read(relayConnectionManagerProvider).peek(bareDeviceUuid);
+  final presence = conn?.relay.peerPresenceStream;
+  final client = ControlPlaneClient(
+    transport: transport,
+    peerPresence: presence,
+  );
+  ref.onDispose(client.dispose);
+  return client;
+  // retry: an offline/mid-reconnect target throws while resolving its
+  // transport above; that error must reject `.future` so the refresh helpers
+  // catch it and force a fresh attempt — Riverpod 3's default would instead
+  // retry silently and leave `.future` pending. See provider_retry.dart.
+}, retry: noProviderRetry);
 
 /// The live [ControlPlaneState] stream for [bareDeviceUuid] (projects + tools),
 /// so consumers rebuild as `agent:tools` / `agent:projects` arrive. Emits the
@@ -243,10 +243,9 @@ Future<void> refreshMachineInventoryAndControlPlanes(
         relayManager.release(uuid);
       }
       invalidateControlPlaneProviders(ref, uuid);
-      await refreshControlPlanes(
-        ref,
-        [uuid],
-      ).timeout(_kRefreshDialWait, onTimeout: () {});
+      await refreshControlPlanes(ref, [
+        uuid,
+      ]).timeout(_kRefreshDialWait, onTimeout: () {});
     }),
   );
 }

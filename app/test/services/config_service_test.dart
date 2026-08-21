@@ -77,77 +77,71 @@ void main() {
     },
   );
 
-  test(
-    'read() throws with an error state when the reply never comes — '
-    'never hangs forever, never looks like an empty config',
-    () async {
-      final t = FakeAgentTransport();
-      final session = await newSession(t);
-      final svc = ConfigService.fromSession(
-        session,
-        requestTimeout: const Duration(milliseconds: 50),
-      );
+  test('read() throws with an error state when the reply never comes — '
+      'never hangs forever, never looks like an empty config', () async {
+    final t = FakeAgentTransport();
+    final session = await newSession(t);
+    final svc = ConfigService.fromSession(
+      session,
+      requestTimeout: const Duration(milliseconds: 50),
+    );
 
-      // No config:read-result is ever emitted. The outer guard is the test's
-      // hang detector: before the fix this future never completed. Resolving to
-      // null would be worse than hanging — the settings screen reads null as
-      // "no config yet" and Save would overwrite the project's real
-      // antgrid.yaml with an empty draft.
-      await expectLater(
-        svc.read().timeout(const Duration(seconds: 2)),
-        throwsA(isA<TimeoutException>()),
-      );
-      expect(svc.currentState.loading, isFalse,
-          reason: 'a timed-out read must not leave the UI spinner on');
-      expect(svc.currentState.error, isNotNull);
+    // No config:read-result is ever emitted. The outer guard is the test's
+    // hang detector: before the fix this future never completed. Resolving to
+    // null would be worse than hanging — the settings screen reads null as
+    // "no config yet" and Save would overwrite the project's real
+    // antgrid.yaml with an empty draft.
+    await expectLater(
+      svc.read().timeout(const Duration(seconds: 2)),
+      throwsA(isA<TimeoutException>()),
+    );
+    expect(
+      svc.currentState.loading,
+      isFalse,
+      reason: 'a timed-out read must not leave the UI spinner on',
+    );
+    expect(svc.currentState.error, isNotNull);
 
-      await svc.dispose();
-      await session.close();
-    },
-  );
+    await svc.dispose();
+    await session.close();
+  });
 
-  test(
-    'save() throws when the reply never comes',
-    () async {
-      final t = FakeAgentTransport();
-      final session = await newSession(t);
-      final svc = ConfigService.fromSession(
-        session,
-        requestTimeout: const Duration(milliseconds: 50),
-      );
+  test('save() throws when the reply never comes', () async {
+    final t = FakeAgentTransport();
+    final session = await newSession(t);
+    final svc = ConfigService.fromSession(
+      session,
+      requestTimeout: const Duration(milliseconds: 50),
+    );
 
-      // null means success and a non-empty list means the agent rejected the
-      // write; a lost reply is neither, so it must not resolve at all.
-      await expectLater(
-        svc.save(const AbConfig()).timeout(const Duration(seconds: 2)),
-        throwsA(isA<TimeoutException>()),
-      );
+    // null means success and a non-empty list means the agent rejected the
+    // write; a lost reply is neither, so it must not resolve at all.
+    await expectLater(
+      svc.save(const AbConfig()).timeout(const Duration(seconds: 2)),
+      throwsA(isA<TimeoutException>()),
+    );
 
-      await svc.dispose();
-      await session.close();
-    },
-  );
+    await svc.dispose();
+    await session.close();
+  });
 
-  test(
-    'detectTools() throws when the reply never comes — an empty list means '
-    'the agent answered "none installed"',
-    () async {
-      final t = FakeAgentTransport();
-      final session = await newSession(t);
-      final svc = ConfigService.fromSession(
-        session,
-        requestTimeout: const Duration(milliseconds: 50),
-      );
+  test('detectTools() throws when the reply never comes — an empty list means '
+      'the agent answered "none installed"', () async {
+    final t = FakeAgentTransport();
+    final session = await newSession(t);
+    final svc = ConfigService.fromSession(
+      session,
+      requestTimeout: const Duration(milliseconds: 50),
+    );
 
-      await expectLater(
-        svc.detectTools().timeout(const Duration(seconds: 2)),
-        throwsA(isA<TimeoutException>()),
-      );
+    await expectLater(
+      svc.detectTools().timeout(const Duration(seconds: 2)),
+      throwsA(isA<TimeoutException>()),
+    );
 
-      await svc.dispose();
-      await session.close();
-    },
-  );
+    await svc.dispose();
+    await session.close();
+  });
 
   test('dispose is idempotent and fails pending requests', () async {
     final t = FakeAgentTransport();

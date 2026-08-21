@@ -44,8 +44,7 @@ class _ServicesListViewState extends ConsumerState<ServicesListView> {
           );
 
     if (_viewingLogsId != null) {
-      final tabs =
-          ref.watch(terminalStateProvider).value?.tabs ?? const {};
+      final tabs = ref.watch(terminalStateProvider).value?.tabs ?? const {};
       final tab = tabs[_viewingLogsId];
       if (tab == null) {
         WidgetsBinding.instance.addPostFrameCallback(

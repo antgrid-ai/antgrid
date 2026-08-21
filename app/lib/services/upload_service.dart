@@ -163,7 +163,8 @@ class UploadService {
 
     final requestId = const Uuid().v4();
     final startReplyF = _await('start:$requestId');
-    await session.sendForCheckout(checkoutId,
+    await session.sendForCheckout(
+      checkoutId,
       createAbMessage('file:upload-start', {
         'projectId': session.projectId,
         'requestId': requestId,
@@ -198,7 +199,8 @@ class UploadService {
     for (var off = 0; off < bytes.length; off += kChunkBytes) {
       final end = math.min(off + kChunkBytes, bytes.length);
       final ackF = _await('ack:$uploadId:$seq');
-      await session.sendForCheckout(checkoutId,
+      await session.sendForCheckout(
+        checkoutId,
         createAbMessage('file:upload-chunk', {
           'uploadId': uploadId,
           'seq': seq,
@@ -211,7 +213,8 @@ class UploadService {
     }
 
     final resultF = _await('done:$requestId');
-    await session.sendForCheckout(checkoutId,
+    await session.sendForCheckout(
+      checkoutId,
       createAbMessage('file:upload-done', {'uploadId': uploadId}),
     );
     final result = await resultF;

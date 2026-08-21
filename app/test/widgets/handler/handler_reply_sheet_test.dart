@@ -5,10 +5,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 const _esc = HandlerEscalation(
-  escalationId: 'e1', terminalId: 't1',
+  escalationId: 'e1',
+  terminalId: 't1',
   question: 'bun or vitest for the new package?',
   reasoning: 'Affects CI wiring and the lockfile.',
-  draftReply: 'use bun', urgency: 'high', at: 1,
+  draftReply: 'use bun',
+  urgency: 'high',
+  at: 1,
 );
 
 Future<String?> _open(WidgetTester tester) async {
@@ -34,7 +37,9 @@ Future<String?> _open(WidgetTester tester) async {
 }
 
 void main() {
-  testWidgets('shows question + reasoning and the draft prefilled', (tester) async {
+  testWidgets('shows question + reasoning and the draft prefilled', (
+    tester,
+  ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
     await _open(tester);
     expect(find.textContaining('bun or vitest'), findsOneWidget);
@@ -72,12 +77,19 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
-  testWidgets('Approve & send is disabled while the field is empty',
-      (tester) async {
+  testWidgets('Approve & send is disabled while the field is empty', (
+    tester,
+  ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
     const escNoDraft = HandlerEscalation(
-      escalationId: 'e1', terminalId: 't1', question: 'q',
-      reasoning: 'r', draftReply: '', urgency: 'normal', at: 1);
+      escalationId: 'e1',
+      terminalId: 't1',
+      question: 'q',
+      reasoning: 'r',
+      draftReply: '',
+      urgency: 'normal',
+      at: 1,
+    );
     String? captured = 'sentinel';
     await tester.pumpWidget(
       MaterialApp(

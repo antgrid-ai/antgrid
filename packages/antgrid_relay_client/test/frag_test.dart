@@ -126,7 +126,11 @@ void main() {
           '\ud800\ud800', // high followed by another high
           '😀', // a REAL pair — must stay 4 bytes, not 6
         ]) {
-          expect(utf8ByteLength(s), utf8.encode(s).length, reason: s.codeUnits.toString());
+          expect(
+            utf8ByteLength(s),
+            utf8.encode(s).length,
+            reason: s.codeUnits.toString(),
+          );
         }
       });
     });

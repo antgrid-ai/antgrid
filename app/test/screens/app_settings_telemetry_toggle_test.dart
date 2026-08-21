@@ -1,4 +1,5 @@
-import 'package:flutter/foundation.dart' show debugDefaultTargetPlatformOverride;
+import 'package:flutter/foundation.dart'
+    show debugDefaultTargetPlatformOverride;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -38,9 +39,7 @@ void main() {
 
     await tester.pumpWidget(
       ProviderScope(
-        overrides: [
-          appSettingsServiceProvider.overrideWith(() => service),
-        ],
+        overrides: [appSettingsServiceProvider.overrideWith(() => service)],
         child: MaterialApp(
           theme: buildAbTheme(),
           home: const AppSettingsScreen(),
@@ -69,9 +68,7 @@ void main() {
     late ProviderContainer container;
     await tester.pumpWidget(
       ProviderScope(
-        overrides: [
-          appSettingsServiceProvider.overrideWith(() => service),
-        ],
+        overrides: [appSettingsServiceProvider.overrideWith(() => service)],
         child: Consumer(
           builder: (context, ref, _) {
             container = ProviderScope.containerOf(context);
@@ -93,7 +90,10 @@ void main() {
     await tester.pumpAndSettle();
 
     // Provider state must have flipped.
-    expect(container.read(appSettingsServiceProvider).telemetryEnabled, isFalse);
+    expect(
+      container.read(appSettingsServiceProvider).telemetryEnabled,
+      isFalse,
+    );
 
     // Persisted prefs must also reflect the change.
     expect(AppSettings.fromPrefs(prefs).telemetryEnabled, isFalse);
@@ -111,9 +111,7 @@ void main() {
       late ProviderContainer container;
       await tester.pumpWidget(
         ProviderScope(
-          overrides: [
-            appSettingsServiceProvider.overrideWith(() => service),
-          ],
+          overrides: [appSettingsServiceProvider.overrideWith(() => service)],
           child: Consumer(
             builder: (context, ref, _) {
               container = ProviderScope.containerOf(context);

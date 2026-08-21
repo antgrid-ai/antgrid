@@ -287,46 +287,57 @@ void main() {
     expect(ref.read(newSessionPromptProvider), '');
   });
 
-  testWidgets('project shortcut clears branch and isolation from another target', (
-    tester,
-  ) async {
-    late WidgetRef ref;
+  testWidgets(
+    'project shortcut clears branch and isolation from another target',
+    (tester) async {
+      late WidgetRef ref;
 
-    await tester.pumpWidget(
-      ProviderScope(
-        child: Consumer(
-          builder: (context, r, _) {
-            ref = r;
-            return const SizedBox.shrink();
-          },
+      await tester.pumpWidget(
+        ProviderScope(
+          child: Consumer(
+            builder: (context, r, _) {
+              ref = r;
+              return const SizedBox.shrink();
+            },
+          ),
         ),
-      ),
-    );
+      );
 
-    ref.read(selectedTargetProjectProvider.notifier).set(
-      const PickerProject(
-        id: 'local-a',
-        name: 'A',
-        detail: '/a',
-        isLocal: true,
-      ),
-    );
-    ref
-        .read(newSessionBranchSelectionProvider.notifier)
-        .set(const NewSessionBranchSelection(targetId: 'local-a', branch: 'dev'));
-    ref.read(newSessionIsolatedProvider.notifier).set(true);
+      ref
+          .read(selectedTargetProjectProvider.notifier)
+          .set(
+            const PickerProject(
+              id: 'local-a',
+              name: 'A',
+              detail: '/a',
+              isLocal: true,
+            ),
+          );
+      ref
+          .read(newSessionBranchSelectionProvider.notifier)
+          .set(
+            const NewSessionBranchSelection(targetId: 'local-a', branch: 'dev'),
+          );
+      ref.read(newSessionIsolatedProvider.notifier).set(true);
 
-    enterNewSessionForRemoteProject(
-      ref.container,
-      machineUuid: 'machine-b',
-      project: const AdvertisedProject(projectId: 'project-b', running: false),
-    );
-    await tester.pump();
+      enterNewSessionForRemoteProject(
+        ref.container,
+        machineUuid: 'machine-b',
+        project: const AdvertisedProject(
+          projectId: 'project-b',
+          running: false,
+        ),
+      );
+      await tester.pump();
 
-    expect(ref.read(selectedTargetProjectProvider)?.id, 'machine-b.project-b');
-    expect(ref.read(newSessionBranchSelectionProvider), isNull);
-    expect(ref.read(newSessionIsolatedProvider), isFalse);
-  });
+      expect(
+        ref.read(selectedTargetProjectProvider)?.id,
+        'machine-b.project-b',
+      );
+      expect(ref.read(newSessionBranchSelectionProvider), isNull);
+      expect(ref.read(newSessionIsolatedProvider), isFalse);
+    },
+  );
 
   // A drawer row's `+` activates its own project first, so the focus IS the
   // stated intent; a draft left pointing at the project the user came from must
@@ -366,18 +377,24 @@ void main() {
       ),
     );
 
-    ref.read(selectedTargetProvider.notifier).set(const LocalProject('local-b'));
-    ref.read(selectedTargetProjectProvider.notifier).set(
-      const PickerProject(
-        id: 'local-a',
-        name: 'A',
-        detail: '/a',
-        isLocal: true,
-      ),
-    );
+    ref
+        .read(selectedTargetProvider.notifier)
+        .set(const LocalProject('local-b'));
+    ref
+        .read(selectedTargetProjectProvider.notifier)
+        .set(
+          const PickerProject(
+            id: 'local-a',
+            name: 'A',
+            detail: '/a',
+            isLocal: true,
+          ),
+        );
     ref
         .read(newSessionBranchSelectionProvider.notifier)
-        .set(const NewSessionBranchSelection(targetId: 'local-a', branch: 'dev'));
+        .set(
+          const NewSessionBranchSelection(targetId: 'local-a', branch: 'dev'),
+        );
     ref.read(newSessionIsolatedProvider.notifier).set(true);
 
     enterNewSession(ref.container, retarget: true);
@@ -406,15 +423,19 @@ void main() {
       ),
     );
 
-    ref.read(selectedTargetProvider.notifier).set(const LocalProject('local-b'));
-    ref.read(selectedTargetProjectProvider.notifier).set(
-      const PickerProject(
-        id: 'local-a',
-        name: 'A',
-        detail: '/a',
-        isLocal: true,
-      ),
-    );
+    ref
+        .read(selectedTargetProvider.notifier)
+        .set(const LocalProject('local-b'));
+    ref
+        .read(selectedTargetProjectProvider.notifier)
+        .set(
+          const PickerProject(
+            id: 'local-a',
+            name: 'A',
+            detail: '/a',
+            isLocal: true,
+          ),
+        );
 
     enterNewSession(ref.container);
     await tester.pump();

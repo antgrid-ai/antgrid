@@ -47,7 +47,9 @@ void main() {
     final container = ProviderContainer(
       overrides: [
         hostStatusProvider.overrideWith((ref) => status.stream),
-        hostControlClientProvider.overrideWith((ref) async => _client(++builds)),
+        hostControlClientProvider.overrideWith(
+          (ref) async => _client(++builds),
+        ),
       ],
     );
     addTearDown(container.dispose);
@@ -61,7 +63,11 @@ void main() {
     status.add(const HostStatus(HostPhase.up, generation: 1));
     await _settle();
     await container.read(hostControlClientProvider.future);
-    expect(builds, 1, reason: 'same process, so the cached client is still live');
+    expect(
+      builds,
+      1,
+      reason: 'same process, so the cached client is still live',
+    );
 
     // The process was REPLACED: the respawn binds a fresh port under a fresh
     // token, so a client cached against the old pair posts into a closed
@@ -83,7 +89,9 @@ void main() {
     final container = ProviderContainer(
       overrides: [
         hostStatusProvider.overrideWith((ref) => status.stream),
-        hostControlClientProvider.overrideWith((ref) async => _client(++builds)),
+        hostControlClientProvider.overrideWith(
+          (ref) async => _client(++builds),
+        ),
       ],
     );
     addTearDown(container.dispose);

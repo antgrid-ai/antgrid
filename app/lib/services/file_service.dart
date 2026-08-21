@@ -417,7 +417,11 @@ class FileService {
       ),
     );
     if (selected != null) {
-      session.hydrateCheckout(checkoutId, 'file:selected', _hydrateSelectedFile);
+      session.hydrateCheckout(
+        checkoutId,
+        'file:selected',
+        _hydrateSelectedFile,
+      );
     } else {
       session.unhydrateCheckout(checkoutId, 'file:selected');
     }
@@ -458,7 +462,8 @@ class FileService {
   }
 
   void requestFileContent(String path) {
-    session.sendForCheckout(checkoutId,
+    session.sendForCheckout(
+      checkoutId,
       createAbMessage('file:read', {'projectId': projectId, 'path': path}),
     );
   }
@@ -548,7 +553,8 @@ class FileService {
   /// git:status. Which files land in the commit is decided by prior
   /// [stageFiles]/[unstageFiles] calls, not by this one.
   void commit(String message) {
-    session.sendForCheckout(checkoutId,
+    session.sendForCheckout(
+      checkoutId,
       createAbMessage('git:commit', {
         'projectId': projectId,
         'message': message,
@@ -565,7 +571,8 @@ class FileService {
   /// affordance in the UI passes it — the flag exists so an older bridge, which
   /// ignores it, still does the narrower thing rather than misfiring.
   void discard(List<String> files, {bool includeStaged = false}) {
-    session.sendForCheckout(checkoutId,
+    session.sendForCheckout(
+      checkoutId,
       createAbMessage('git:discard', {
         'projectId': projectId,
         'files': files,
@@ -576,14 +583,16 @@ class FileService {
 
   /// Stage [files] (`git add`) so they're included in the next [commit].
   void stageFiles(List<String> files) {
-    session.sendForCheckout(checkoutId,
+    session.sendForCheckout(
+      checkoutId,
       createAbMessage('git:stage', {'projectId': projectId, 'files': files}),
     );
   }
 
   /// Unstage [files] (`git reset`) — working tree untouched.
   void unstageFiles(List<String> files) {
-    session.sendForCheckout(checkoutId,
+    session.sendForCheckout(
+      checkoutId,
       createAbMessage('git:unstage', {'projectId': projectId, 'files': files}),
     );
   }
@@ -604,7 +613,8 @@ class FileService {
     // timeout. The frag-abort backstop still handles mid-transfer aborts.
     _diffLatch?.settle();
     final latch = _diffLatch = ReplyLatch();
-    session.sendForCheckout(checkoutId,
+    session.sendForCheckout(
+      checkoutId,
       createAbMessage('git:diff', {'projectId': projectId, 'path': path}),
     );
     unawaited(

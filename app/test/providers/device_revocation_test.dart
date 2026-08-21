@@ -119,9 +119,8 @@ class _ErrorOnlyRelay extends RelayService {
   @override
   Stream<ErrorMessage> get errorStream => _errors.stream;
 
-  void emit(String code) => _errors.add(
-    ErrorMessage(code: code, message: code, retryable: false),
-  );
+  void emit(String code) =>
+      _errors.add(ErrorMessage(code: code, message: code, retryable: false));
 
   @override
   void dispose() => unawaited(closeStreams());
@@ -147,9 +146,7 @@ void main() {
 
   late _CountingSignOut signOut;
 
-  Future<ProviderContainer> containerWith({
-    LicenseTokenMinter? minter,
-  }) async {
+  Future<ProviderContainer> containerWith({LicenseTokenMinter? minter}) async {
     useInMemoryPrefs();
     signOut = _CountingSignOut(await RecentAgentsStore.open());
     final container = ProviderContainer(

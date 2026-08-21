@@ -63,7 +63,9 @@ void main() {
   });
 
   test('returns false on network error', () async {
-    final client = MockClient((req) async => throw Exception('network failure'));
+    final client = MockClient(
+      (req) async => throw Exception('network failure'),
+    );
     final ok = await sendAccountHeartbeat(
       licenseApiUrl: 'https://api.antgrid.test',
       token: 'tok',

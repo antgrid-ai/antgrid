@@ -180,34 +180,32 @@ void main() {
           ),
         );
 
-    testWidgets(
-      'inside a compact row the target grows with the text scale',
-      (tester) async {
-        Future<Size> targetAt(double scale) async {
-          await pumpScaled(
-            tester,
-            scale,
-            AbListRow(
-              title: const Text('project-name'),
-              trailing: AbIconButton(icon: AbIcons.trash, onTap: () {}),
-              density: AbRowDensity.sm,
-              horizontalPadding: 0,
-              onTap: () {},
-            ),
-          );
-          await tester.pumpAndSettle();
-          return tester.getSize(find.byType(AbIconButton));
-        }
+    testWidgets('inside a compact row the target grows with the text scale', (
+      tester,
+    ) async {
+      Future<Size> targetAt(double scale) async {
+        await pumpScaled(
+          tester,
+          scale,
+          AbListRow(
+            title: const Text('project-name'),
+            trailing: AbIconButton(icon: AbIcons.trash, onTap: () {}),
+            density: AbRowDensity.sm,
+            horizontalPadding: 0,
+            onTap: () {},
+          ),
+        );
+        await tester.pumpAndSettle();
+        return tester.getSize(find.byType(AbIconButton));
+      }
 
-        // The compact scope drops the flat 44px height floor, so the box IS
-        // the target height here — it must track the type beside it or a
-        // large-text user gets a target that never grows.
-        expect((await targetAt(1.0)).height, AbTokens.iconButtonBox);
-        expect((await targetAt(1.3)).height, closeTo(31.2, 0.01));
-        expect((await targetAt(2.0)).height, AbTokens.iconButtonBox * 2);
-      },
-      variant: _mobile,
-    );
+      // The compact scope drops the flat 44px height floor, so the box IS
+      // the target height here — it must track the type beside it or a
+      // large-text user gets a target that never grows.
+      expect((await targetAt(1.0)).height, AbTokens.iconButtonBox);
+      expect((await targetAt(1.3)).height, closeTo(31.2, 0.01));
+      expect((await targetAt(2.0)).height, AbTokens.iconButtonBox * 2);
+    }, variant: _mobile);
 
     testWidgets(
       'standalone keeps the 44px floor until the scaled box exceeds it',

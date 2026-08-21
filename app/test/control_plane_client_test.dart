@@ -128,30 +128,33 @@ void main() {
       expect(client.currentState.remoteAccessEnabled, isTrue);
     });
 
-    test('absent key → null, and a keyless advert resets a stale flag', () async {
-      final t = FakeAgentTransport();
-      final client = ControlPlaneClient(transport: t);
-      addTearDown(client.dispose);
+    test(
+      'absent key → null, and a keyless advert resets a stale flag',
+      () async {
+        final t = FakeAgentTransport();
+        final client = ControlPlaneClient(transport: t);
+        addTearDown(client.dispose);
 
-      // Older bridge: no key at all → unknown, never assumed off.
-      t.emit('agent:projects', {'projects': <Object>[]});
-      await Future<void>.delayed(Duration.zero);
-      expect(client.currentState.remoteAccessEnabled, isNull);
+        // Older bridge: no key at all → unknown, never assumed off.
+        t.emit('agent:projects', {'projects': <Object>[]});
+        await Future<void>.delayed(Duration.zero);
+        expect(client.currentState.remoteAccessEnabled, isNull);
 
-      // A new-bridge advert sets the flag…
-      t.emit('agent:projects', {
-        'projects': <Object>[],
-        'remoteAccessEnabled': false,
-      });
-      await Future<void>.delayed(Duration.zero);
-      expect(client.currentState.remoteAccessEnabled, isFalse);
+        // A new-bridge advert sets the flag…
+        t.emit('agent:projects', {
+          'projects': <Object>[],
+          'remoteAccessEnabled': false,
+        });
+        await Future<void>.delayed(Duration.zero);
+        expect(client.currentState.remoteAccessEnabled, isFalse);
 
-      // …and a subsequent keyless advert (bridge downgrade / mixed replay)
-      // clears it back to unknown rather than leaving the stale flag.
-      t.emit('agent:projects', {'projects': <Object>[]});
-      await Future<void>.delayed(Duration.zero);
-      expect(client.currentState.remoteAccessEnabled, isNull);
-    });
+        // …and a subsequent keyless advert (bridge downgrade / mixed replay)
+        // clears it back to unknown rather than leaving the stale flag.
+        t.emit('agent:projects', {'projects': <Object>[]});
+        await Future<void>.delayed(Duration.zero);
+        expect(client.currentState.remoteAccessEnabled, isNull);
+      },
+    );
 
     test('clearAdvert() resets the flag to unknown', () async {
       final t = FakeAgentTransport();
@@ -211,13 +214,19 @@ void main() {
     t.emitJson({
       'type': 'project:start',
       'ok': false,
-      'error': {'code': 'NOT_ALLOWED', 'message': 'mobile access is disabled on this machine'},
+      'error': {
+        'code': 'NOT_ALLOWED',
+        'message': 'mobile access is disabled on this machine',
+      },
     });
     await Future<void>.delayed(Duration.zero);
 
     expect(client.currentState.lastError, isNotNull);
     expect(client.currentState.lastError!.code, 'NOT_ALLOWED');
-    expect(client.currentState.lastError!.message, 'mobile access is disabled on this machine');
+    expect(
+      client.currentState.lastError!.message,
+      'mobile access is disabled on this machine',
+    );
 
     await client.dispose();
   });
@@ -472,10 +481,10 @@ void main() {
       addTearDown(client.dispose);
 
       t.requestHandler = (method, params) => {
-            'isRepository': true,
-            'current': 'main',
-            'branches': ['main', 'dev'],
-          };
+        'isRepository': true,
+        'current': 'main',
+        'branches': ['main', 'dev'],
+      };
 
       final catalog = await client.gitBranches(projectId: 'p1');
       expect(catalog.isRepository, isTrue);
@@ -485,25 +494,28 @@ void main() {
       expect(t.requests.single.params, {'projectId': 'p1'});
     });
 
-    test('gitCheckout sends git.checkout RPC with allowActiveSessions', () async {
-      final t = FakeAgentTransport();
-      final client = ControlPlaneClient(transport: t);
-      addTearDown(client.dispose);
+    test(
+      'gitCheckout sends git.checkout RPC with allowActiveSessions',
+      () async {
+        final t = FakeAgentTransport();
+        final client = ControlPlaneClient(transport: t);
+        addTearDown(client.dispose);
 
-      t.requestHandler = (method, params) => {'current': 'dev'};
+        t.requestHandler = (method, params) => {'current': 'dev'};
 
-      final current = await client.gitCheckout(
-        projectId: 'p1',
-        branch: 'dev',
-        allowActiveSessions: true,
-      );
-      expect(current, 'dev');
-      expect(t.requests.single.method, 'git.checkout');
-      expect(t.requests.single.params, {
-        'projectId': 'p1',
-        'branch': 'dev',
-        'allowActiveSessions': true,
-      });
-    });
+        final current = await client.gitCheckout(
+          projectId: 'p1',
+          branch: 'dev',
+          allowActiveSessions: true,
+        );
+        expect(current, 'dev');
+        expect(t.requests.single.method, 'git.checkout');
+        expect(t.requests.single.params, {
+          'projectId': 'p1',
+          'branch': 'dev',
+          'allowActiveSessions': true,
+        });
+      },
+    );
   });
 }

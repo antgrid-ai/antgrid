@@ -42,9 +42,9 @@ class BootstrapPayload {
     this.licenseApiUrl,
     this.relayUrl,
     this.ownerPid,
-  })  : projectId = null,
-        projectPath = null,
-        mode = 'local';
+  }) : projectId = null,
+       projectPath = null,
+       mode = 'local';
 
   final String? projectId;
   final String? projectPath;
@@ -151,13 +151,16 @@ class LocalAgentLauncher {
     // linked worktree into its primary checkout. Older hosts predate this
     // loopback verb, where the old path hash remains safe for shared sessions.
     _host.bootstrapBuilder ??= () => BootstrapPayload.machineOnly(
-          device: device,
-          licenseApiUrl: licenseApiUrl,
-          relayUrl: relayUrl,
-          ownerPid: pid,
-        );
+      device: device,
+      licenseApiUrl: licenseApiUrl,
+      relayUrl: relayUrl,
+      ownerPid: pid,
+    );
     final host = await _host.ensureHost();
-    final resolveClient = HostControlClient(port: host.controlPort, token: host.token);
+    final resolveClient = HostControlClient(
+      port: host.controlPort,
+      token: host.token,
+    );
     String projectId;
     String repoPath;
     try {
@@ -176,7 +179,13 @@ class LocalAgentLauncher {
       _log('openProject: projectId=$projectId — coalescing with in-flight');
       return existing;
     }
-    final fut = _openInner(repoPath, projectId, device, licenseApiUrl, relayUrl);
+    final fut = _openInner(
+      repoPath,
+      projectId,
+      device,
+      licenseApiUrl,
+      relayUrl,
+    );
     _inFlight[projectId] = fut;
     try {
       return await fut;
@@ -210,11 +219,11 @@ class LocalAgentLauncher {
     bool forceRespawn = false,
   }) async {
     _host.bootstrapBuilder = () => BootstrapPayload.machineOnly(
-          device: device,
-          licenseApiUrl: licenseApiUrl,
-          relayUrl: relayUrl,
-          ownerPid: pid,
-        );
+      device: device,
+      licenseApiUrl: licenseApiUrl,
+      relayUrl: relayUrl,
+      ownerPid: pid,
+    );
     if (forceRespawn) {
       // Let any concurrent spawn settle first so the teardown+respawn below
       // doesn't kill a half-born host and then get joined to that same dying
@@ -241,22 +250,23 @@ class LocalAgentLauncher {
     // A stale (or machine-less) block is reconciled only by the sign-in
     // force-respawn in `local_host_warmup.dart`.
     _host.bootstrapBuilder ??= () => BootstrapPayload(
-          projectId: projectId,
-          projectPath: folder,
-          device: device,
-          licenseApiUrl: licenseApiUrl,
-          relayUrl: relayUrl,
-          // dart:io `pid` — this app process; the host watches it and self-exits
-          // when we die, so it can't outlive the app on any exit path.
-          ownerPid: pid,
-        );
+      projectId: projectId,
+      projectPath: folder,
+      device: device,
+      licenseApiUrl: licenseApiUrl,
+      relayUrl: relayUrl,
+      // dart:io `pid` — this app process; the host watches it and self-exits
+      // when we die, so it can't outlive the app on any exit path.
+      ownerPid: pid,
+    );
 
     final host = await _host.ensureHost();
-    final client =
-        HostControlClient(port: host.controlPort, token: host.token);
+    final client = HostControlClient(port: host.controlPort, token: host.token);
     try {
-      final res =
-          await client.projectOpen(projectId: projectId, projectPath: folder);
+      final res = await client.projectOpen(
+        projectId: projectId,
+        projectPath: folder,
+      );
       final connect = res.connect;
       if (connect == null) {
         throw StateError(

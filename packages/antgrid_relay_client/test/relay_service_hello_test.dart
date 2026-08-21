@@ -50,12 +50,14 @@ void main() {
     test('an error frame missing the required `retryable` field is dropped '
         '(ErrorMessage.fromJson returns null — the error contract is law)', () {
       final before = relay.currentState;
-      relay.debugHandleFrame(jsonEncode({
-        'type': 'error',
-        'code': 'PROTOCOL_VIOLATION',
-        'message': 'First frame must be a valid v3 hello',
-        // no `retryable` — malformed per the v3 contract.
-      }));
+      relay.debugHandleFrame(
+        jsonEncode({
+          'type': 'error',
+          'code': 'PROTOCOL_VIOLATION',
+          'message': 'First frame must be a valid v3 hello',
+          // no `retryable` — malformed per the v3 contract.
+        }),
+      );
       // Silently ignored: state is untouched, no errorStream emission.
       expect(relay.currentState.connectionState, before.connectionState);
       expect(relay.currentState.errorCode, isNull);
@@ -68,20 +70,26 @@ void main() {
 
     test('a welcome frame missing `epoch` is dropped (WelcomeMessage.fromJson '
         'requires it)', () {
-      relay.debugHandleFrame(jsonEncode({
-        'type': 'welcome',
-        'deviceId': 'phone-1',
-        'serverTime': '2026-01-01T00:00:00.000Z',
-        // no `epoch`
-      }));
-      expect(relay.currentState.connectionState,
-          isNot(RelayConnectionState.authenticated));
+      relay.debugHandleFrame(
+        jsonEncode({
+          'type': 'welcome',
+          'deviceId': 'phone-1',
+          'serverTime': '2026-01-01T00:00:00.000Z',
+          // no `epoch`
+        }),
+      );
+      expect(
+        relay.currentState.connectionState,
+        isNot(RelayConnectionState.authenticated),
+      );
     });
 
     test('non-JSON text is ignored without throwing', () {
       expect(() => relay.debugHandleFrame('not json'), returnsNormally);
-      expect(relay.currentState.connectionState,
-          RelayConnectionState.disconnected);
+      expect(
+        relay.currentState.connectionState,
+        RelayConnectionState.disconnected,
+      );
     });
   });
 
@@ -89,23 +97,29 @@ void main() {
     test('a valid welcome transitions to authenticated and resets backoff '
         'markers (errorCode clears via copyWith not preserving it)', () {
       final relay = RelayService(crypto: CryptoService());
-      relay.debugHandleFrame(jsonEncode({
-        'type': 'error',
-        'code': 'AGENT_OFFLINE',
-        'message': 'not yet',
-        'retryable': true,
-      }));
+      relay.debugHandleFrame(
+        jsonEncode({
+          'type': 'error',
+          'code': 'AGENT_OFFLINE',
+          'message': 'not yet',
+          'retryable': true,
+        }),
+      );
       expect(relay.currentState.errorCode, 'AGENT_OFFLINE');
 
-      relay.debugHandleFrame(jsonEncode({
-        'type': 'welcome',
-        'deviceId': 'phone-1',
-        'epoch': 7,
-        'serverTime': DateTime.now().toUtc().toIso8601String(),
-      }));
+      relay.debugHandleFrame(
+        jsonEncode({
+          'type': 'welcome',
+          'deviceId': 'phone-1',
+          'epoch': 7,
+          'serverTime': DateTime.now().toUtc().toIso8601String(),
+        }),
+      );
 
-      expect(relay.currentState.connectionState,
-          RelayConnectionState.authenticated);
+      expect(
+        relay.currentState.connectionState,
+        RelayConnectionState.authenticated,
+      );
       expect(relay.currentState.errorCode, isNull);
     });
   });

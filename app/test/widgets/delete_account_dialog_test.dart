@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart' show debugDefaultTargetPlatformOverride;
+import 'package:flutter/foundation.dart'
+    show debugDefaultTargetPlatformOverride;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/widgets/delete_account_dialog.dart';
@@ -59,7 +60,8 @@ void main() {
           builder: (context) => Scaffold(
             body: Center(
               child: ElevatedButton(
-                onPressed: () async => result = await DeleteAccountDialog.show(context),
+                onPressed: () async =>
+                    result = await DeleteAccountDialog.show(context),
                 child: const Text('open'),
               ),
             ),

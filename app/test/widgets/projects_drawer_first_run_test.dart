@@ -110,10 +110,7 @@ void main() {
     // update is pending, so it is not part of the contract.
     final section = tester.getTopLeft(find.byType(FirstRunSetupSection)).dy;
     expect(section, greaterThan(tester.getTopLeft(find.byType(ListView)).dy));
-    expect(
-      section,
-      lessThan(tester.getTopLeft(find.byType(AccountFooter)).dy),
-    );
+    expect(section, lessThan(tester.getTopLeft(find.byType(AccountFooter)).dy));
     debugDefaultTargetPlatformOverride = null;
   });
 

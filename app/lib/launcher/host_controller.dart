@@ -99,15 +99,15 @@ class HostController {
     bool Function()? devMode,
     bool Function(String startedAtIso)? bridgeStale,
     Future<void> Function(Duration d)? delay,
-  })  : _readHost = readHost ?? _defaultReadHost,
-        _pidAlive = pidAlive ?? isPidAlive,
-        _ping = ping ?? _defaultPing,
-        _terminate = terminate ?? terminatePid,
-        _now = now ?? DateTime.now,
-        _devMode = devMode ?? _defaultDevMode,
-        _bridgeStale = bridgeStale ?? _defaultBridgeStale,
-        _delay = delay ?? Future<void>.delayed,
-        _spawnHost = spawnHost {
+  }) : _readHost = readHost ?? _defaultReadHost,
+       _pidAlive = pidAlive ?? isPidAlive,
+       _ping = ping ?? _defaultPing,
+       _terminate = terminate ?? terminatePid,
+       _now = now ?? DateTime.now,
+       _devMode = devMode ?? _defaultDevMode,
+       _bridgeStale = bridgeStale ?? _defaultBridgeStale,
+       _delay = delay ?? Future<void>.delayed,
+       _spawnHost = spawnHost {
     // _spawnHost defaults to the real spawn only when not injected. We can't
     // reference an instance method in an initializer, so bind it here.
     _spawnHostFn = _spawnHost ?? _realSpawnHost;
@@ -144,7 +144,8 @@ class HostController {
       if (started == null) return true;
       final exeDir = File(Platform.resolvedExecutable).parent.path;
       final entry = _findRepoBridgeEntry(exeDir); // <repo>/bridge/src/index.ts
-      if (entry == null) return true; // bundled/installed build — shouldn't reach here
+      if (entry == null)
+        return true; // bundled/installed build — shouldn't reach here
       final srcDir = File(entry).parent; // <repo>/bridge/src
       for (final f in srcDir.listSync(recursive: true, followLinks: false)) {
         if (f is! File) continue;
@@ -364,7 +365,8 @@ class HostController {
       _setStatus(
         HostStatus(
           HostPhase.failed,
-          detail: 'The local bridge exited $_maxRestartsPerWindow times in a '
+          detail:
+              'The local bridge exited $_maxRestartsPerWindow times in a '
               'row (last exit code $exitCode). Automatic restart is paused.',
         ),
       );
@@ -458,7 +460,10 @@ class HostController {
     // Only act if the running host IS the one we own (pid match) — never kill a
     // host another run spawned, even if discovery now points at it.
     if (disc != null && disc.pid == owned) {
-      final client = HostControlClient(port: disc.controlPort, token: disc.token);
+      final client = HostControlClient(
+        port: disc.controlPort,
+        token: disc.token,
+      );
       try {
         await client.hostShutdown().timeout(const Duration(seconds: 2));
       } catch (_) {
@@ -507,13 +512,19 @@ class HostController {
         // unconditional respawn cost ~1s bun boot + a starved readiness poll on
         // every launch. `ownedHostPid == null` avoids churning a host we just
         // spawned during in-session project switches.
-        if (_devMode() && ownedHostPid == null && _bridgeStale(disc.startedAt)) {
-          _log('dev mode: bridge changed since host start — '
-              'terminating pid=${disc.pid} for fresh code');
+        if (_devMode() &&
+            ownedHostPid == null &&
+            _bridgeStale(disc.startedAt)) {
+          _log(
+            'dev mode: bridge changed since host start — '
+            'terminating pid=${disc.pid} for fresh code',
+          );
           await _terminate(disc.pid);
           return _markVerified(await _spawn());
         }
-        _log('attached to running host pid=${disc.pid} port=${disc.controlPort}');
+        _log(
+          'attached to running host pid=${disc.pid} port=${disc.controlPort}',
+        );
         _setStatus(HostStatus(HostPhase.up, generation: _spawnGeneration));
         return _markVerified(disc);
       }
@@ -592,10 +603,12 @@ class HostController {
 
     // Local flag scoped to THIS spawn so a prior exit never poisons a retry.
     var exited = false;
-    unawaited(proc.exitCode.then((code) {
-      exited = true;
-      handleHostExit(generation: generation, pid: proc.pid, exitCode: code);
-    }));
+    unawaited(
+      proc.exitCode.then((code) {
+        exited = true;
+        handleHostExit(generation: generation, pid: proc.pid, exitCode: code);
+      }),
+    );
 
     const intervalMs = 100;
     final spawnedAt = _now();
@@ -607,8 +620,10 @@ class HostController {
       if (exited) break;
       final h = await readHostFile(hostFilePath());
       if (h != null && await _ping(h)) {
-        _log('host ready after '
-            '${_now().difference(spawnedAt).inMilliseconds}ms (port ${h.controlPort})');
+        _log(
+          'host ready after '
+          '${_now().difference(spawnedAt).inMilliseconds}ms (port ${h.controlPort})',
+        );
         return h;
       }
       // Wake on the ready announcement or the interval, whichever is first. Once
@@ -809,7 +824,9 @@ HostCommand resolveHostCommand({
     return (binary: binEnv, preargs: const <String>[]);
   }
 
-  final bundled = isWindows ? '$exeDir/antgrid-bridge.exe' : '$exeDir/antgrid-bridge';
+  final bundled = isWindows
+      ? '$exeDir/antgrid-bridge.exe'
+      : '$exeDir/antgrid-bridge';
   if (exists(bundled)) {
     return (binary: bundled, preargs: const <String>[]);
   }
@@ -871,9 +888,12 @@ String? _findRepoBridgeEntry(String startDir) {
 /// Resolve `bun`: prefer the default install (`~/.bun/bin`), else bare `bun` on
 /// PATH. Safe to PATH-resolve — `bun` has no name collision with the app.
 String _resolveBun() {
-  final home = Platform.environment['USERPROFILE'] ?? Platform.environment['HOME'];
+  final home =
+      Platform.environment['USERPROFILE'] ?? Platform.environment['HOME'];
   if (home != null) {
-    final p = Platform.isWindows ? '$home/.bun/bin/bun.exe' : '$home/.bun/bin/bun';
+    final p = Platform.isWindows
+        ? '$home/.bun/bin/bun.exe'
+        : '$home/.bun/bin/bun';
     if (File(p).existsSync()) return p;
   }
   return Platform.isWindows ? 'bun.exe' : 'bun';
@@ -952,7 +972,11 @@ Future<Process> spawnHostProcess(BootstrapPayload payload) async {
       // No workingDirectory — the host is machine-level, not per-project.
     );
   } catch (e, st) {
-    AbLog.error('HostController', 'Process.start threw', fields: {'error': '$e', 'stack': '$st'});
+    AbLog.error(
+      'HostController',
+      'Process.start threw',
+      fields: {'error': '$e', 'stack': '$st'},
+    );
     rethrow;
   }
   AbLog.info('HostController', 'spawned host', fields: {'pid': proc.pid});
@@ -964,7 +988,11 @@ Future<Process> spawnHostProcess(BootstrapPayload payload) async {
     await proc.stdin.flush();
     await proc.stdin.close();
   } catch (e) {
-    AbLog.error('HostController', 'stdin write failed', fields: {'error': '$e'});
+    AbLog.error(
+      'HostController',
+      'stdin write failed',
+      fields: {'error': '$e'},
+    );
     proc.kill();
     rethrow;
   }

@@ -18,7 +18,8 @@
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/providers/visible_surface.dart';
-import 'package:antgrid/widgets/new_session/environment_menu.dart' show PanelRow;
+import 'package:antgrid/widgets/new_session/environment_menu.dart'
+    show PanelRow;
 import 'package:antgrid/widgets/workspace_menu_button.dart';
 import 'package:antgrid/widgets/workspace_tab_bar.dart';
 import 'package:flutter/foundation.dart';
@@ -357,25 +358,26 @@ void main() {
 
     // Once a view is on screen, the button is the exact same popup as
     // desktop — the docked pane and the popup no longer share screen space.
-    testWidgets('a tap while the panel is open toggles the popup, like desktop', (
-      tester,
-    ) async {
-      await runTouch(tester, () async {
-        await _pump(tester, control: _control(active: WorkspaceView.preview));
+    testWidgets(
+      'a tap while the panel is open toggles the popup, like desktop',
+      (tester) async {
+        await runTouch(tester, () async {
+          await _pump(tester, control: _control(active: WorkspaceView.preview));
 
-        expect(find.text('Terminals'), findsOneWidget);
+          expect(find.text('Terminals'), findsOneWidget);
 
-        await tester.tap(find.byKey(WorkspaceMenuButton.buttonKey));
-        await tester.pumpAndSettle();
+          await tester.tap(find.byKey(WorkspaceMenuButton.buttonKey));
+          await tester.pumpAndSettle();
 
-        expect(find.text('Terminals'), findsNothing);
+          expect(find.text('Terminals'), findsNothing);
 
-        await tester.tap(find.byKey(WorkspaceMenuButton.buttonKey));
-        await tester.pumpAndSettle();
+          await tester.tap(find.byKey(WorkspaceMenuButton.buttonKey));
+          await tester.pumpAndSettle();
 
-        expect(find.text('Terminals'), findsOneWidget);
-      });
-    });
+          expect(find.text('Terminals'), findsOneWidget);
+        });
+      },
+    );
 
     // `selected` mirrors the popup, exactly as on desktop — not whether a
     // view happens to be on screen: it starts true with no active view, and

@@ -34,7 +34,7 @@ void main() {
             'ed25519Pub': 'base64pubkey==',
             'relayUrl': 'wss://relay.example.com',
             'lastSeenAt': '2026-05-28T10:00:00.000Z',
-          }
+          },
         ],
       });
 
@@ -60,10 +60,7 @@ void main() {
 
       await api.listAgents();
 
-      expect(
-        capturedRequest!.headers['cookie'],
-        equals(sessionCookie),
-      );
+      expect(capturedRequest!.headers['cookie'], equals(sessionCookie));
     });
 
     test('listAgents parses InventoryAgent list correctly', () async {

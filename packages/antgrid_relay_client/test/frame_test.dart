@@ -38,8 +38,13 @@ void main() {
       };
       expect(
         () => encodeRouteFrame(header, Uint8List(0), FrameKind.sealed),
-        throwsA(isA<FrameException>()
-            .having((e) => e.reason, 'reason', FrameErrorReason.headerTooLarge)),
+        throwsA(
+          isA<FrameException>().having(
+            (e) => e.reason,
+            'reason',
+            FrameErrorReason.headerTooLarge,
+          ),
+        ),
       );
     });
   });
@@ -70,24 +75,39 @@ void main() {
     test('rejects frame shorter than 4 bytes', () {
       expect(
         () => decodeRouteFrame(Uint8List.fromList([0x02, 0x00, 0x00])),
-        throwsA(isA<FrameException>()
-            .having((e) => e.reason, 'reason', FrameErrorReason.truncated)),
+        throwsA(
+          isA<FrameException>().having(
+            (e) => e.reason,
+            'reason',
+            FrameErrorReason.truncated,
+          ),
+        ),
       );
     });
 
     test('rejects old v1 version byte (0x01) with badVersion', () {
       expect(
         () => decodeRouteFrame(Uint8List.fromList([0x01, 0x00, 0x00, 0x00])),
-        throwsA(isA<FrameException>()
-            .having((e) => e.reason, 'reason', FrameErrorReason.badVersion)),
+        throwsA(
+          isA<FrameException>().having(
+            (e) => e.reason,
+            'reason',
+            FrameErrorReason.badVersion,
+          ),
+        ),
       );
     });
 
     test('rejects unknown kind byte with badKind', () {
       expect(
         () => decodeRouteFrame(Uint8List.fromList([0x02, 0x7f, 0x00, 0x00])),
-        throwsA(isA<FrameException>()
-            .having((e) => e.reason, 'reason', FrameErrorReason.badKind)),
+        throwsA(
+          isA<FrameException>().having(
+            (e) => e.reason,
+            'reason',
+            FrameErrorReason.badKind,
+          ),
+        ),
       );
     });
 
@@ -96,8 +116,13 @@ void main() {
       final buf = Uint8List.fromList([0x02, 0x00, 0x04, 0x01]);
       expect(
         () => decodeRouteFrame(buf),
-        throwsA(isA<FrameException>()
-            .having((e) => e.reason, 'reason', FrameErrorReason.headerTooLarge)),
+        throwsA(
+          isA<FrameException>().having(
+            (e) => e.reason,
+            'reason',
+            FrameErrorReason.headerTooLarge,
+          ),
+        ),
       );
     });
   });

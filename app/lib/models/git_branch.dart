@@ -17,7 +17,9 @@ class GitBranchCatalog {
   factory GitBranchCatalog.fromJson(Map<String, dynamic> json) {
     final isRepo = json['isRepository'];
     if (isRepo is! bool) {
-      throw const FormatException('Invalid or missing isRepository in GitBranchCatalog');
+      throw const FormatException(
+        'Invalid or missing isRepository in GitBranchCatalog',
+      );
     }
 
     final currentVal = json['current'];
@@ -27,7 +29,9 @@ class GitBranchCatalog {
 
     final branchesVal = json['branches'];
     if (branchesVal is! List) {
-      throw const FormatException('Invalid or missing branches in GitBranchCatalog');
+      throw const FormatException(
+        'Invalid or missing branches in GitBranchCatalog',
+      );
     }
 
     final branchesList = <String>[];
@@ -57,7 +61,12 @@ class GitBranchCatalog {
           listEquals(branches, other.branches);
 
   @override
-  int get hashCode => Object.hash(isRepository, current, worktreeSessionsSupported, Object.hashAll(branches));
+  int get hashCode => Object.hash(
+    isRepository,
+    current,
+    worktreeSessionsSupported,
+    Object.hashAll(branches),
+  );
 }
 
 @immutable

@@ -106,23 +106,26 @@ class _Harness {
 
 void main() {
   group('performTerminalDrop', () {
-    test('uploads the dropped bytes and types the returned host path', () async {
-      final h = _Harness();
-      addTearDown(h.uploader.dispose);
+    test(
+      'uploads the dropped bytes and types the returned host path',
+      () async {
+        final h = _Harness();
+        addTearDown(h.uploader.dispose);
 
-      await h.drop([
-        _FakeDropped(
-          name: 'shot.png',
-          imageHint: ('png', 'image/png'),
-          bytes: Uint8List.fromList([9, 9, 9, 9]),
-        ),
-      ]);
+        await h.drop([
+          _FakeDropped(
+            name: 'shot.png',
+            imageHint: ('png', 'image/png'),
+            bytes: Uint8List.fromList([9, 9, 9, 9]),
+          ),
+        ]);
 
-      // The bytes went up; nothing about the user's own path did.
-      expect(h.staged, [('shot.png', 4, 'image/png')]);
-      expect(h.inserted, ['"/staged/shot.png" ']);
-      expect(h.errors, isEmpty);
-    });
+        // The bytes went up; nothing about the user's own path did.
+        expect(h.staged, [('shot.png', 4, 'image/png')]);
+        expect(h.inserted, ['"/staged/shot.png" ']);
+        expect(h.errors, isEmpty);
+      },
+    );
 
     test('an oversize item is refused and never reaches the uploader', () async {
       final h = _Harness();
@@ -209,50 +212,59 @@ void main() {
       expect(h.staged.map((s) => s.$1), ['a.png', 'b.png']);
     });
 
-    test('a read that fails while another file uploads is still reported', () async {
-      final h = _Harness();
-      addTearDown(h.uploader.dispose);
-      final gate = Completer<void>();
+    test(
+      'a read that fails while another file uploads is still reported',
+      () async {
+        final h = _Harness();
+        addTearDown(h.uploader.dispose);
+        final gate = Completer<void>();
 
-      final run = h.drop([
-        _FakeDropped(name: 'a.png', gate: gate),
-        _FakeDropped(
-          name: 'b.png',
-          readError: const UploadException('TOO_LARGE', ''),
-        ),
-      ]);
-      // b.png rejects here, long before anything awaits it — with no handler
-      // attached at that moment it would be an unhandled async error.
-      await pumpEventQueue();
-      gate.complete();
-      await run;
+        final run = h.drop([
+          _FakeDropped(name: 'a.png', gate: gate),
+          _FakeDropped(
+            name: 'b.png',
+            readError: const UploadException('TOO_LARGE', ''),
+          ),
+        ]);
+        // b.png rejects here, long before anything awaits it — with no handler
+        // attached at that moment it would be an unhandled async error.
+        await pumpEventQueue();
+        gate.complete();
+        await run;
 
-      expect(h.staged.map((s) => s.$1), ['a.png']);
-      expect(h.errors.single, contains('b.png'));
-    });
+        expect(h.staged.map((s) => s.$1), ['a.png']);
+        expect(h.errors.single, contains('b.png'));
+      },
+    );
 
-    test('a reader that throws synchronously loses one file, not the drop', () async {
-      final h = _Harness();
-      addTearDown(h.uploader.dispose);
+    test(
+      'a reader that throws synchronously loses one file, not the drop',
+      () async {
+        final h = _Harness();
+        addTearDown(h.uploader.dispose);
 
-      await h.drop([_SyncThrowingDropped(), _FakeDropped(name: 'b.png')]);
+        await h.drop([_SyncThrowingDropped(), _FakeDropped(name: 'b.png')]);
 
-      // The throw lands while the started-list is still being built, before any
-      // per-file handler exists — unfolded it would abandon every later file
-      // with nothing on screen to say so.
-      expect(h.errors.single, contains('boom.png'));
-      expect(h.staged.map((s) => s.$1), ['b.png']);
-    });
+        // The throw lands while the started-list is still being built, before any
+        // per-file handler exists — unfolded it would abandon every later file
+        // with nothing on screen to say so.
+        expect(h.errors.single, contains('boom.png'));
+        expect(h.staged.map((s) => s.$1), ['b.png']);
+      },
+    );
 
-    test('an item that turns out to carry nothing is reported, not skipped', () async {
-      final h = _Harness();
-      addTearDown(h.uploader.dispose);
+    test(
+      'an item that turns out to carry nothing is reported, not skipped',
+      () async {
+        final h = _Harness();
+        addTearDown(h.uploader.dispose);
 
-      await h.drop([_FakeDropped(name: 'ghost.png', readsNothing: true)]);
+        await h.drop([_FakeDropped(name: 'ghost.png', readsNothing: true)]);
 
-      expect(h.staged, isEmpty);
-      expect(h.errors.single, contains('ghost.png'));
-    });
+        expect(h.staged, isEmpty);
+        expect(h.errors.single, contains('ghost.png'));
+      },
+    );
   });
 
   // The cap that keeps a 2 GB drop from being buffered into app memory just to
@@ -281,8 +293,9 @@ void main() {
           },
           limit: 8,
         ),
-        throwsA(isA<UploadException>().having((e) => e.code, 'code',
-            'TOO_LARGE')),
+        throwsA(
+          isA<UploadException>().having((e) => e.code, 'code', 'TOO_LARGE'),
+        ),
       );
       expect(opened, isFalse);
     });
@@ -295,15 +308,15 @@ void main() {
       await expectLater(
         readCapped(
           declaredSize: null,
-          stream: () =>
-              Stream.fromIterable(List.filled(100, 4)).map((size) {
-                delivered += size;
-                return Uint8List(size);
-              }),
+          stream: () => Stream.fromIterable(List.filled(100, 4)).map((size) {
+            delivered += size;
+            return Uint8List(size);
+          }),
           limit: 8,
         ),
-        throwsA(isA<UploadException>().having((e) => e.code, 'code',
-            'TOO_LARGE')),
+        throwsA(
+          isA<UploadException>().having((e) => e.code, 'code', 'TOO_LARGE'),
+        ),
       );
       // Abandoned as soon as the count passed the limit, not after the whole
       // 400 bytes had been buffered.
@@ -312,11 +325,7 @@ void main() {
 
     test('a declared size at the limit exactly is allowed through', () async {
       expect(
-        await readCapped(
-          declaredSize: 8,
-          stream: () => chunks([8]),
-          limit: 8,
-        ),
+        await readCapped(declaredSize: 8, stream: () => chunks([8]), limit: 8),
         hasLength(8),
       );
     });
@@ -332,8 +341,10 @@ void main() {
     });
 
     test('reduces a name to the alphabet the bridge sanitizer keeps', () {
-      expect(droppedFileName(r'C:\shots\my shot#1.png', null, now: at),
-          'my shot_1.png');
+      expect(
+        droppedFileName(r'C:\shots\my shot#1.png', null, now: at),
+        'my shot_1.png',
+      );
       expect(droppedFileName('.hidden.txt', null, now: at), 'hidden.txt');
     });
 
@@ -344,8 +355,14 @@ void main() {
 
     test('synthesizes a name for raw dragged bytes', () {
       // Raw image data reports no name on any platform.
-      expect(droppedFileName(null, 'png', now: at), 'dropped-20260819-141233.png');
-      expect(droppedFileName('///', null, now: at), 'dropped-20260819-141233.bin');
+      expect(
+        droppedFileName(null, 'png', now: at),
+        'dropped-20260819-141233.png',
+      );
+      expect(
+        droppedFileName('///', null, now: at),
+        'dropped-20260819-141233.bin',
+      );
     });
   });
 }

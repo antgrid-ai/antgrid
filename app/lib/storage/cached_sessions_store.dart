@@ -29,8 +29,7 @@ class CachedSessionsStore {
   // right now, which a value from a previous launch cannot know (see
   // remoteProjectStatusProvider.build). Cleared per machine
   // on socket close so an offline machine doesn't re-seed on the next boot.
-  static final _statusKey =
-      scopedStorageKey('antgrid.session_cache.status.v1');
+  static final _statusKey = scopedStorageKey('antgrid.session_cache.status.v1');
   static const _flushDebounce = Duration(milliseconds: 200);
 
   final SharedPreferencesWithCache _prefs;
@@ -51,8 +50,9 @@ class CachedSessionsStore {
     _loadFromDisk();
   }
 
-  static Future<CachedSessionsStore> open() async =>
-      CachedSessionsStore._(await openScopedPrefs({_key, _labelsKey, _statusKey}));
+  static Future<CachedSessionsStore> open() async => CachedSessionsStore._(
+    await openScopedPrefs({_key, _labelsKey, _statusKey}),
+  );
 
   /// Returns an unmodifiable view of the cached sessions for [entryId], or
   /// `const []` if nothing is cached.

@@ -43,18 +43,21 @@ void main() {
         ],
       });
 
-  test('newer listing → true, and the listing URL is cached for the row', () async {
-    final client = MockClient((req) async {
-      expect(req.url.host, IosAppStoreUpdateService.lookupAuthority);
-      expect(req.url.path, IosAppStoreUpdateService.lookupPath);
-      expect(req.url.queryParameters['bundleId'], 'ai.radhaai.antgrid');
-      return http.Response(lookupBody(), 200);
-    });
-    final s = service(client);
-    expect(s.listingUrl, isNull);
-    expect(await s.isUpdateAvailable(), isTrue);
-    expect(s.listingUrl, 'https://apps.apple.com/app/id123');
-  });
+  test(
+    'newer listing → true, and the listing URL is cached for the row',
+    () async {
+      final client = MockClient((req) async {
+        expect(req.url.host, IosAppStoreUpdateService.lookupAuthority);
+        expect(req.url.path, IosAppStoreUpdateService.lookupPath);
+        expect(req.url.queryParameters['bundleId'], 'ai.radhaai.antgrid');
+        return http.Response(lookupBody(), 200);
+      });
+      final s = service(client);
+      expect(s.listingUrl, isNull);
+      expect(await s.isUpdateAvailable(), isTrue);
+      expect(s.listingUrl, 'https://apps.apple.com/app/id123');
+    },
+  );
 
   test('same version → false, listing URL stays unset', () async {
     final client = MockClient(

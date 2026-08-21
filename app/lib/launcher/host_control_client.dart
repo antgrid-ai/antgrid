@@ -46,8 +46,14 @@ class ResolvedLocalProject {
     final repoPath = json['repoPath'];
     final selectedPath = json['selectedPath'];
     final label = json['label'];
-    if (projectId is! String || repoPath is! String || selectedPath is! String || label is! String) {
-      throw HostControlException('BAD_RESPONSE', 'malformed project:resolve response: $json');
+    if (projectId is! String ||
+        repoPath is! String ||
+        selectedPath is! String ||
+        label is! String) {
+      throw HostControlException(
+        'BAD_RESPONSE',
+        'malformed project:resolve response: $json',
+      );
     }
     return ResolvedLocalProject(
       projectId: projectId,
@@ -105,7 +111,10 @@ class PairedPhoneSummary {
         phoneDeviceId is! String ||
         pairedAt is! String ||
         lastSeenAt is! String) {
-      throw HostControlException('BAD_RESPONSE', 'malformed phone fields: $json');
+      throw HostControlException(
+        'BAD_RESPONSE',
+        'malformed phone fields: $json',
+      );
     }
     return PairedPhoneSummary(
       phonePubkey: phonePubkey,
@@ -133,7 +142,10 @@ class KnownProject {
   factory KnownProject.fromJson(Map<String, dynamic> json) {
     final projectId = json['projectId'];
     if (projectId is! String) {
-      throw HostControlException('BAD_RESPONSE', 'malformed project fields: $json');
+      throw HostControlException(
+        'BAD_RESPONSE',
+        'malformed project fields: $json',
+      );
     }
     return KnownProject(
       projectId: projectId,
@@ -154,14 +166,23 @@ class PhonesList {
     final rawPhones = (json['phones'] as List?) ?? const [];
     final rawProjects = (json['knownProjects'] as List?) ?? const [];
     return PhonesList(
-      phones: rawPhones.map((e) {
-        if (e is! Map) throw HostControlException('BAD_RESPONSE', 'malformed phone: $e');
-        return PairedPhoneSummary.fromJson(e.cast<String, dynamic>());
-      }).toList(growable: false),
-      knownProjects: rawProjects.map((e) {
-        if (e is! Map) throw HostControlException('BAD_RESPONSE', 'malformed project: $e');
-        return KnownProject.fromJson(e.cast<String, dynamic>());
-      }).toList(growable: false),
+      phones: rawPhones
+          .map((e) {
+            if (e is! Map)
+              throw HostControlException('BAD_RESPONSE', 'malformed phone: $e');
+            return PairedPhoneSummary.fromJson(e.cast<String, dynamic>());
+          })
+          .toList(growable: false),
+      knownProjects: rawProjects
+          .map((e) {
+            if (e is! Map)
+              throw HostControlException(
+                'BAD_RESPONSE',
+                'malformed project: $e',
+              );
+            return KnownProject.fromJson(e.cast<String, dynamic>());
+          })
+          .toList(growable: false),
     );
   }
 }
@@ -327,7 +348,10 @@ class HostControlClient {
     String folder, {
     Duration timeout = const Duration(seconds: 5),
   }) async {
-    final m = await _post({'type': 'project:resolve', 'folder': folder}, timeout: timeout);
+    final m = await _post({
+      'type': 'project:resolve',
+      'folder': folder,
+    }, timeout: timeout);
     return ResolvedLocalProject.fromJson(m);
   }
 
@@ -338,27 +362,33 @@ class HostControlClient {
   }) async {
     final m = await _post({'type': 'project:list'}, timeout: timeout);
     final raw = (m['projects'] as List?) ?? const [];
-    return raw.map((e) {
-      if (e is! Map) {
-        throw HostControlException(
-            'BAD_RESPONSE', 'malformed project entry: $e');
-      }
-      final id = e['projectId'];
-      final path = e['path'];
-      final mode = e['mode'];
-      if (id is! String || path is! String || mode is! String) {
-        throw HostControlException(
-            'BAD_RESPONSE', 'malformed project fields: $e');
-      }
-      return ProjectSummary(
-        projectId: id,
-        path: path,
-        running: e['running'] == true,
-        mode: mode,
-        workStatus: e['workStatus'] as String?,
-        sessionStatuses: parseSessionStatuses(e['sessionStatuses']),
-      );
-    }).toList(growable: false);
+    return raw
+        .map((e) {
+          if (e is! Map) {
+            throw HostControlException(
+              'BAD_RESPONSE',
+              'malformed project entry: $e',
+            );
+          }
+          final id = e['projectId'];
+          final path = e['path'];
+          final mode = e['mode'];
+          if (id is! String || path is! String || mode is! String) {
+            throw HostControlException(
+              'BAD_RESPONSE',
+              'malformed project fields: $e',
+            );
+          }
+          return ProjectSummary(
+            projectId: id,
+            path: path,
+            running: e['running'] == true,
+            mode: mode,
+            workStatus: e['workStatus'] as String?,
+            sessionStatuses: parseSessionStatuses(e['sessionStatuses']),
+          );
+        })
+        .toList(growable: false);
   }
 
   Future<ToolsList> toolsList({
@@ -366,26 +396,31 @@ class HostControlClient {
   }) async {
     final m = await _post({'type': 'tools:list'}, timeout: timeout);
     final raw = (m['tools'] as List?) ?? const [];
-    final tools = raw.map((e) {
-      if (e is! Map) {
-        throw HostControlException('BAD_RESPONSE', 'malformed tool entry: $e');
-      }
-      final tool = e['tool'];
-      final path = e['path'];
-      if (tool is! String || path is! String) {
-        throw HostControlException('BAD_RESPONSE', 'malformed tool fields: $e');
-      }
-      return ToolSummary(
-        tool: tool,
-        path: path,
-        chatCapable: e['chatCapable'] as bool?,
-        label: e['label'] as String?,
-      );
-    }).toList(growable: false);
-    return ToolsList(
-      tools: tools,
-      agents: parseAgentDescriptors(m['agents']),
-    );
+    final tools = raw
+        .map((e) {
+          if (e is! Map) {
+            throw HostControlException(
+              'BAD_RESPONSE',
+              'malformed tool entry: $e',
+            );
+          }
+          final tool = e['tool'];
+          final path = e['path'];
+          if (tool is! String || path is! String) {
+            throw HostControlException(
+              'BAD_RESPONSE',
+              'malformed tool fields: $e',
+            );
+          }
+          return ToolSummary(
+            tool: tool,
+            path: path,
+            chatCapable: e['chatCapable'] as bool?,
+            label: e['label'] as String?,
+          );
+        })
+        .toList(growable: false);
+    return ToolsList(tools: tools, agents: parseAgentDescriptors(m['agents']));
   }
 
   Future<void> projectStop(String projectId) async {
@@ -418,7 +453,9 @@ class HostControlClient {
     await _post({'type': 'host:shutdown'});
   }
 
-  Future<PhonesList> phonesList({Duration timeout = const Duration(seconds: 3)}) async {
+  Future<PhonesList> phonesList({
+    Duration timeout = const Duration(seconds: 3),
+  }) async {
     final m = await _post({'type': 'phones:list'}, timeout: timeout);
     return PhonesList.fromJson(m);
   }
@@ -457,7 +494,10 @@ class HostControlClient {
     try {
       return GitBranchCatalog.fromJson(m);
     } catch (e) {
-      throw HostControlException('BAD_RESPONSE', 'malformed git:branches response: $e');
+      throw HostControlException(
+        'BAD_RESPONSE',
+        'malformed git:branches response: $e',
+      );
     }
   }
 
@@ -478,12 +518,18 @@ class HostControlClient {
     }, timeout: timeout);
     final status = m['status'];
     if (status is! Map) {
-      throw HostControlException('BAD_RESPONSE', 'malformed git:remote-state response');
+      throw HostControlException(
+        'BAD_RESPONSE',
+        'malformed git:remote-state response',
+      );
     }
     try {
       return BranchRemoteStatus.fromJson(Map<String, dynamic>.from(status));
     } catch (e) {
-      throw HostControlException('BAD_RESPONSE', 'malformed git:remote-state response: $e');
+      throw HostControlException(
+        'BAD_RESPONSE',
+        'malformed git:remote-state response: $e',
+      );
     }
   }
 
@@ -503,7 +549,10 @@ class HostControlClient {
     }, timeout: timeout);
     final current = m['current'];
     if (current is! String) {
-      throw HostControlException('BAD_RESPONSE', 'malformed git:checkout current: $m');
+      throw HostControlException(
+        'BAD_RESPONSE',
+        'malformed git:checkout current: $m',
+      );
     }
     return current;
   }
@@ -525,7 +574,10 @@ class HostControlClient {
     }, timeout: timeout);
     final path = m['path'];
     if (path is! String || path.isEmpty) {
-      throw HostControlException('BAD_RESPONSE', 'malformed checkout:path response: $m');
+      throw HostControlException(
+        'BAD_RESPONSE',
+        'malformed checkout:path response: $m',
+      );
     }
     return path;
   }

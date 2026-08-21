@@ -23,7 +23,9 @@ import '../util/ab_log.dart';
 /// before `_WidgetsAppState.initState` adds its own observer.
 class PlatformRouteGuard extends WidgetsBindingObserver {
   @override
-  Future<bool> didPushRouteInformation(RouteInformation routeInformation) async {
+  Future<bool> didPushRouteInformation(
+    RouteInformation routeInformation,
+  ) async {
     final uri = routeInformation.uri;
     // Path only, never the query: the auth callback's token is a credential and
     // this log line lands in a file on disk.

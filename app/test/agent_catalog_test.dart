@@ -93,7 +93,10 @@ void main() {
       final noHandler = _wire('codex')..remove('handler');
       expect(AgentDescriptor.fromJson(noHandler), isNull);
       expect(
-        AgentDescriptor.fromJson({..._wire('codex'), 'handler': {'chat': true}}),
+        AgentDescriptor.fromJson({
+          ..._wire('codex'),
+          'handler': {'chat': true},
+        }),
         isNull,
       );
     });
@@ -129,7 +132,10 @@ void main() {
       final notifier = container.read(agentCatalogProvider.notifier);
 
       notifier.merge([_d('codex', label: 'Codex')]);
-      notifier.merge([_d('kilo', label: 'Kilo'), _d('codex', label: 'Codex 2')]);
+      notifier.merge([
+        _d('kilo', label: 'Kilo'),
+        _d('codex', label: 'Codex 2'),
+      ]);
 
       expect(container.read(agentCatalogProvider).keys, ['codex', 'kilo']);
       expect(container.read(agentCatalogProvider)['codex']!.label, 'Codex 2');
@@ -163,49 +169,53 @@ void main() {
       expect(second.read(agentCatalogProvider)['kilo']?.label, 'Kilo');
     });
 
-    test('a live advert outranks the disk read that was still in flight',
-        () async {
-      await AgentCatalogStore().write({'codex': _d('codex', label: 'stale')});
+    test(
+      'a live advert outranks the disk read that was still in flight',
+      () async {
+        await AgentCatalogStore().write({'codex': _d('codex', label: 'stale')});
 
-      final container = ProviderContainer();
-      addTearDown(container.dispose);
-      // Build, then merge before the hydration future completes.
-      container.read(agentCatalogProvider);
-      container.read(agentCatalogProvider.notifier).merge([
-        _d('codex', label: 'fresh'),
-      ]);
-      await _settle();
+        final container = ProviderContainer();
+        addTearDown(container.dispose);
+        // Build, then merge before the hydration future completes.
+        container.read(agentCatalogProvider);
+        container.read(agentCatalogProvider.notifier).merge([
+          _d('codex', label: 'fresh'),
+        ]);
+        await _settle();
 
-      expect(container.read(agentCatalogProvider)['codex']!.label, 'fresh');
-    });
+        expect(container.read(agentCatalogProvider)['codex']!.label, 'fresh');
+      },
+    );
 
-    test('an advert that beats the disk read still leaves the cache on disk',
-        () async {
-      // The store REPLACES the blob, so an advert persisting from pre-hydration
-      // state would drop every previously cached agent — and the union the
-      // hydrate then builds in memory would never reach disk, making the loss
-      // permanent across restarts.
-      await AgentCatalogStore().write({'kilo': _d('kilo', label: 'Kilo')});
+    test(
+      'an advert that beats the disk read still leaves the cache on disk',
+      () async {
+        // The store REPLACES the blob, so an advert persisting from pre-hydration
+        // state would drop every previously cached agent — and the union the
+        // hydrate then builds in memory would never reach disk, making the loss
+        // permanent across restarts.
+        await AgentCatalogStore().write({'kilo': _d('kilo', label: 'Kilo')});
 
-      final first = ProviderContainer();
-      first.read(agentCatalogProvider);
-      first.read(agentCatalogProvider.notifier).merge([
-        _d('codex', label: 'Codex'),
-      ]);
-      await _settle();
-      first.dispose();
+        final first = ProviderContainer();
+        first.read(agentCatalogProvider);
+        first.read(agentCatalogProvider.notifier).merge([
+          _d('codex', label: 'Codex'),
+        ]);
+        await _settle();
+        first.dispose();
 
-      expect((await AgentCatalogStore().read()).keys, contains('kilo'));
+        expect((await AgentCatalogStore().read()).keys, contains('kilo'));
 
-      final second = ProviderContainer();
-      addTearDown(second.dispose);
-      second.read(agentCatalogProvider);
-      await _settle();
-      expect(
-        second.read(agentCatalogProvider).keys,
-        unorderedEquals(['kilo', 'codex']),
-      );
-    });
+        final second = ProviderContainer();
+        addTearDown(second.dispose);
+        second.read(agentCatalogProvider);
+        await _settle();
+        expect(
+          second.read(agentCatalogProvider).keys,
+          unorderedEquals(['kilo', 'codex']),
+        );
+      },
+    );
   });
 
   group('judgeCapableToolsProvider', () {
@@ -264,7 +274,10 @@ void main() {
     test('an undescribed or unnamed agent is unknown, not unwatchable', () {
       // The whole point of the catalog: a false here would tell the user a
       // working agent cannot be watched, purely because nobody described it.
-      expect(handlerObservableFromCatalog(catalog, 'kilo', chat: false), isNull);
+      expect(
+        handlerObservableFromCatalog(catalog, 'kilo', chat: false),
+        isNull,
+      );
       expect(handlerObservableFromCatalog(catalog, null, chat: false), isNull);
       expect(
         handlerObservableFromCatalog(const {}, 'opencode', chat: false),
@@ -286,7 +299,10 @@ void main() {
     test('an agent nothing has described renders its raw key', () {
       // Honesty over a guess: the app-side enum this replaced showed such an
       // agent as "Claude Code".
-      expect(sessionAgentDisplayLabel(_session(tool: 'kilo'), const {}), 'kilo');
+      expect(
+        sessionAgentDisplayLabel(_session(tool: 'kilo'), const {}),
+        'kilo',
+      );
     });
 
     test('a custom launch command shows the command itself', () {

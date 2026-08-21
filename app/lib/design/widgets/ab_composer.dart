@@ -67,7 +67,10 @@ class _AbComposerState extends State<AbComposer> {
             children: [
               Text(
                 '@${widget.agentTag}',
-                style: AbTokens.sansStyle(fontSize: AbTokens.fontXs, color: p.statusThinking),
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontXs,
+                  color: p.statusThinking,
+                ),
               ),
               const SizedBox(width: 8),
               Expanded(
@@ -88,7 +91,10 @@ class _AbComposerState extends State<AbComposer> {
                     contentPadding: EdgeInsets.zero,
                     border: InputBorder.none,
                     hintText: widget.placeholder,
-                    hintStyle: TextStyle(color: p.textMuted, fontSize: AbTokens.fontMd),
+                    hintStyle: TextStyle(
+                      color: p.textMuted,
+                      fontSize: AbTokens.fontMd,
+                    ),
                   ),
                   onSubmitted: (_) => _submit(),
                 ),
@@ -116,7 +122,10 @@ class _AbComposerState extends State<AbComposer> {
                 const Spacer(),
                 Text(
                   '${widget.attachments.length} file${widget.attachments.length == 1 ? '' : 's'}',
-                  style: AbTokens.sansStyle(fontSize: AbTokens.fontXs, color: p.textMuted),
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: p.textMuted,
+                  ),
                 ),
                 const SizedBox(width: 8),
                 _SendButton(onTap: _submit),
@@ -150,7 +159,10 @@ class _Chip extends StatelessWidget {
         children: [
           Text(
             label,
-            style: AbTokens.sansStyle(fontSize: AbTokens.fontXs, color: p.textMuted),
+            style: AbTokens.sansStyle(
+              fontSize: AbTokens.fontXs,
+              color: p.textMuted,
+            ),
           ),
           const SizedBox(width: 5),
           GestureDetector(

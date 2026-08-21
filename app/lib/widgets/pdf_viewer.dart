@@ -40,10 +40,7 @@ class FilePdfViewer extends StatelessWidget {
                         style: AbTokens.sansStyle(color: c.textMuted),
                       ),
                     )
-                  : PdfViewer.data(
-                      bytes,
-                      sourceName: content.path,
-                    ),
+                  : PdfViewer.data(bytes, sourceName: content.path),
             ),
           ),
         ),

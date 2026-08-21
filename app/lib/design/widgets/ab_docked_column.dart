@@ -99,7 +99,8 @@ class _PinnedSlot {
   final int index;
 
   @override
-  bool operator ==(Object other) => other is _PinnedSlot && other.index == index;
+  bool operator ==(Object other) =>
+      other is _PinnedSlot && other.index == index;
 
   @override
   int get hashCode => index;

@@ -3,7 +3,6 @@ import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 
 class CryptoService {
-
   /// Generate an Ed25519 keypair for relay authentication.
   /// Returns (privateKeyBytes, publicKeyBytes).
   Future<(Uint8List, Uint8List)> generateEd25519KeyPair() async {
@@ -18,7 +17,11 @@ class CryptoService {
   }
 
   /// Sign data with an Ed25519 private key.
-  Future<Uint8List> ed25519Sign(Uint8List data, Uint8List privateKeyBytes, Uint8List publicKeyBytes) async {
+  Future<Uint8List> ed25519Sign(
+    Uint8List data,
+    Uint8List privateKeyBytes,
+    Uint8List publicKeyBytes,
+  ) async {
     final algorithm = Ed25519();
     final keyPair = SimpleKeyPairData(
       privateKeyBytes,

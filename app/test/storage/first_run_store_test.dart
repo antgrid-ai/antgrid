@@ -60,7 +60,9 @@ void main() {
   });
 
   test('non-map JSON degrades to defaults', () async {
-    useInMemoryPrefs({_key: jsonEncode(['a', 'b'])});
+    useInMemoryPrefs({
+      _key: jsonEncode(['a', 'b']),
+    });
     final store = await FirstRunStore.open();
     expect(store.read().checklistDismissed, isFalse);
   });

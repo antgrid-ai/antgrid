@@ -18,9 +18,7 @@ void main() {
   // the frame right after a re-pump still carries the outgoing palette.
   Widget underPreset(AbThemePreset preset, Widget child) => MaterialApp(
     themeAnimationDuration: Duration.zero,
-    theme: ThemeData(
-      extensions: <ThemeExtension<dynamic>>[kPresets[preset]!],
-    ),
+    theme: ThemeData(extensions: <ThemeExtension<dynamic>>[kPresets[preset]!]),
     home: child,
   );
 
@@ -84,9 +82,9 @@ void main() {
   // Every asset the widget can name must actually ship, or the flip is a blank
   // slot in the field — flutter_svg fails at load, not at compile.
   test('every resolvable asset is declared in pubspec assets/logo/', () {
-    final declared = Directory('assets/logo').listSync().map(
-      (e) => 'assets/logo/${e.uri.pathSegments.last}',
-    );
+    final declared = Directory(
+      'assets/logo',
+    ).listSync().map((e) => 'assets/logo/${e.uri.pathSegments.last}');
     for (final preset in [AbThemePreset.light, AbThemePreset.zinc]) {
       final palette = kPresets[preset]!;
       for (final (cut, height) in const [

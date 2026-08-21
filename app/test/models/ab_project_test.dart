@@ -26,77 +26,85 @@ void main() {
       expect(restored.lastOpenedAt, now);
     });
 
-    test('toJson / fromJson roundtrip preserves hostMachineName empty string',
-        () {
-      final project = AbProject(
-        projectId: 'proj-2',
-        folder: '/home/user/other',
-        displayName: 'Other',
-        hostDeviceUuid: 'device-xyz',
-        hostMachineName: '',
-        lastOpenedAt: now,
-      );
+    test(
+      'toJson / fromJson roundtrip preserves hostMachineName empty string',
+      () {
+        final project = AbProject(
+          projectId: 'proj-2',
+          folder: '/home/user/other',
+          displayName: 'Other',
+          hostDeviceUuid: 'device-xyz',
+          hostMachineName: '',
+          lastOpenedAt: now,
+        );
 
-      final restored = AbProject.fromJson(project.toJson());
-      expect(restored.hostMachineName, '');
-    });
+        final restored = AbProject.fromJson(project.toJson());
+        expect(restored.hostMachineName, '');
+      },
+    );
 
-    test('stray mobileAccessEnabled key in JSON deserializes without error',
-        () {
-      // Forward-compat: JSON written by an older build that still emits
-      // mobileAccessEnabled must load silently (the field is simply ignored).
-      final json = <String, dynamic>{
-        'projectId': 'proj-stray',
-        'folder': '/stray/folder',
-        'displayName': 'Stray',
-        'hostDeviceUuid': 'device-stray',
-        'hostMachineName': 'my-machine',
-        'mobileAccessEnabled': true, // stray legacy key
-        'lastOpenedAt': now.toIso8601String(),
-      };
+    test(
+      'stray mobileAccessEnabled key in JSON deserializes without error',
+      () {
+        // Forward-compat: JSON written by an older build that still emits
+        // mobileAccessEnabled must load silently (the field is simply ignored).
+        final json = <String, dynamic>{
+          'projectId': 'proj-stray',
+          'folder': '/stray/folder',
+          'displayName': 'Stray',
+          'hostDeviceUuid': 'device-stray',
+          'hostMachineName': 'my-machine',
+          'mobileAccessEnabled': true, // stray legacy key
+          'lastOpenedAt': now.toIso8601String(),
+        };
 
-      final project = AbProject.fromJson(json);
+        final project = AbProject.fromJson(json);
 
-      expect(project.projectId, 'proj-stray');
-      expect(project.hostDeviceUuid, 'device-stray');
-    });
+        expect(project.projectId, 'proj-stray');
+        expect(project.hostDeviceUuid, 'device-stray');
+      },
+    );
 
     group('legacy migration', () {
-      test('pre-v2 JSON without hostDeviceUuid migrates to hostDeviceUuid: null',
-          () {
-        final legacy = <String, dynamic>{
-          'projectId': 'proj-old',
-          'folder': '/old/folder',
-          'displayName': 'Old Project',
-          'mode': 'mobileEnabled',
-          'agentDeviceId': 'device-foo',
-          'lastOpenedAt': now.toIso8601String(),
-        };
+      test(
+        'pre-v2 JSON without hostDeviceUuid migrates to hostDeviceUuid: null',
+        () {
+          final legacy = <String, dynamic>{
+            'projectId': 'proj-old',
+            'folder': '/old/folder',
+            'displayName': 'Old Project',
+            'mode': 'mobileEnabled',
+            'agentDeviceId': 'device-foo',
+            'lastOpenedAt': now.toIso8601String(),
+          };
 
-        final project = AbProject.fromJson(legacy);
+          final project = AbProject.fromJson(legacy);
 
-        expect(project.projectId, 'proj-old');
-        // Pre-v2 agentDeviceId was the agent's identity (per-project or
-        // per-host), NOT this device's UUID — we leave hostDeviceUuid null
-        // and let isLocalFor treat the project as local-here.
-        expect(project.hostDeviceUuid, isNull);
-      });
+          expect(project.projectId, 'proj-old');
+          // Pre-v2 agentDeviceId was the agent's identity (per-project or
+          // per-host), NOT this device's UUID — we leave hostDeviceUuid null
+          // and let isLocalFor treat the project as local-here.
+          expect(project.hostDeviceUuid, isNull);
+        },
+      );
 
-      test('legacy projects round-trip through toJson without inventing a UUID',
-          () {
-        final legacy = <String, dynamic>{
-          'projectId': 'proj-fallback',
-          'folder': '/fb/folder',
-          'displayName': 'Fallback',
-          'mode': 'mobileEnabled',
-          'lastOpenedAt': now.toIso8601String(),
-        };
+      test(
+        'legacy projects round-trip through toJson without inventing a UUID',
+        () {
+          final legacy = <String, dynamic>{
+            'projectId': 'proj-fallback',
+            'folder': '/fb/folder',
+            'displayName': 'Fallback',
+            'mode': 'mobileEnabled',
+            'lastOpenedAt': now.toIso8601String(),
+          };
 
-        final project = AbProject.fromJson(legacy);
-        // The toJson encoding omits hostDeviceUuid entirely when null, so the
-        // legacy shape is preserved until the project is explicitly upserted.
-        expect(project.toJson().containsKey('hostDeviceUuid'), isFalse);
-      });
+          final project = AbProject.fromJson(legacy);
+          // The toJson encoding omits hostDeviceUuid entirely when null, so the
+          // legacy shape is preserved until the project is explicitly upserted.
+          expect(project.toJson().containsKey('hostDeviceUuid'), isFalse);
+        },
+      );
     });
 
     group('isLocalFor', () {

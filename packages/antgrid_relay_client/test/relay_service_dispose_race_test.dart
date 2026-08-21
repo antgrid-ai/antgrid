@@ -23,11 +23,11 @@ DeviceIdentity _identity() => DeviceIdentity(
 );
 
 void main() {
-  test('dispose() during an in-flight dial does not throw when the dial fails',
-      () async {
-    final errors = <Object>[];
-    await runZonedGuarded(
-      () async {
+  test(
+    'dispose() during an in-flight dial does not throw when the dial fails',
+    () async {
+      final errors = <Object>[];
+      await runZonedGuarded(() async {
         final relay = RelayService(crypto: CryptoService());
         // Unroutable host, so the dial is guaranteed to still be resolving when
         // dispose lands and to fail some time after it.
@@ -41,12 +41,15 @@ void main() {
         relay.dispose();
         // Long enough for the DNS failure to surface into `_doConnect`'s catch.
         await Future<void>.delayed(const Duration(seconds: 2));
-      },
-      (e, _) => errors.add(e),
-    );
+      }, (e, _) => errors.add(e));
 
-    expect(errors, isEmpty, reason: 'a post-dispose dial failure must be inert');
-  });
+      expect(
+        errors,
+        isEmpty,
+        reason: 'a post-dispose dial failure must be inert',
+      );
+    },
+  );
 
   test('currentState still tracks the failure after dispose', () {
     final relay = RelayService(crypto: CryptoService());

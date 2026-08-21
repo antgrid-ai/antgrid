@@ -12,12 +12,12 @@ const _catalog = CapabilityCatalog(
 );
 
 ProviderContainer _container(String root) => ProviderContainer(
-      overrides: [
-        capabilityCatalogCacheProvider.overrideWithValue(
-          CapabilityCatalogCache.testInstance(root: root),
-        ),
-      ],
-    );
+  overrides: [
+    capabilityCatalogCacheProvider.overrideWithValue(
+      CapabilityCatalogCache.testInstance(root: root),
+    ),
+  ],
+);
 
 // `remember` writes to disk fire-and-forget (unawaited), so the file lands
 // asynchronously. Poll rather than sleep a fixed interval — returns as soon as
@@ -72,30 +72,43 @@ void main() {
       addTearDown(c.dispose);
       c.read(capabilityCatalogProvider.notifier).remember('local__x', _catalog);
       // In-memory update is synchronous — assert it immediately.
-      expect(c.read(capabilityCatalogProvider)['local__x']!.models.single.id,
-          'opus');
+      expect(
+        c.read(capabilityCatalogProvider)['local__x']!.models.single.id,
+        'opus',
+      );
       // A fresh cache instance reads it back off disk (poll for the async write).
       final onDisk = await _readWithRetry(
-          CapabilityCatalogCache.testInstance(root: tmp.path), 'local__x');
+        CapabilityCatalogCache.testInstance(root: tmp.path),
+        'local__x',
+      );
       expect(onDisk!.models.single.id, 'opus');
     });
 
     test('remember ignores empty catalog', () async {
       final c = _container(tmp.path);
       addTearDown(c.dispose);
-      c.read(capabilityCatalogProvider.notifier)
+      c
+          .read(capabilityCatalogProvider.notifier)
           .remember('local__x', const CapabilityCatalog());
-      expect(c.read(capabilityCatalogProvider).containsKey('local__x'), isFalse);
+      expect(
+        c.read(capabilityCatalogProvider).containsKey('local__x'),
+        isFalse,
+      );
     });
 
     test('ensureHydrated loads a disk catalog into state', () async {
-      await CapabilityCatalogCache.testInstance(root: tmp.path)
-          .write('local__y', _catalog);
+      await CapabilityCatalogCache.testInstance(
+        root: tmp.path,
+      ).write('local__y', _catalog);
       final c = _container(tmp.path);
       addTearDown(c.dispose);
-      await c.read(capabilityCatalogProvider.notifier).ensureHydrated('local__y');
-      expect(c.read(capabilityCatalogProvider)['local__y']!.models.single.id,
-          'opus');
+      await c
+          .read(capabilityCatalogProvider.notifier)
+          .ensureHydrated('local__y');
+      expect(
+        c.read(capabilityCatalogProvider)['local__y']!.models.single.id,
+        'opus',
+      );
     });
 
     test('ensureHydrated latches after a confirmed-absent read', () async {
@@ -104,15 +117,22 @@ void main() {
       final notifier = c.read(capabilityCatalogProvider.notifier);
       // No file on disk → confirmed absent, key stays out of state.
       await notifier.ensureHydrated('local__z');
-      expect(c.read(capabilityCatalogProvider).containsKey('local__z'), isFalse);
+      expect(
+        c.read(capabilityCatalogProvider).containsKey('local__z'),
+        isFalse,
+      );
       // A file appears out-of-band (NOT via remember, which sets state directly).
-      await CapabilityCatalogCache.testInstance(root: tmp.path)
-          .write('local__z', _catalog);
+      await CapabilityCatalogCache.testInstance(
+        root: tmp.path,
+      ).write('local__z', _catalog);
       // The completed read is latched, so ensureHydrated no longer touches disk;
       // the out-of-band file is deliberately not picked up. This is what stops
       // the per-rebuild disk re-read for a key that has never been cached.
       await notifier.ensureHydrated('local__z');
-      expect(c.read(capabilityCatalogProvider).containsKey('local__z'), isFalse);
+      expect(
+        c.read(capabilityCatalogProvider).containsKey('local__z'),
+        isFalse,
+      );
     });
   });
 }

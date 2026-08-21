@@ -208,10 +208,7 @@ bool _isAppDeviceCapBody(String body) {
 /// Parse a 402 cap body into [DeviceCapInfo]. Defensive: a body that doesn't
 /// parse (or lacks the fields) still yields a usable generic cap notice rather
 /// than masking the 402 as an opaque failure.
-DeviceCapInfo _deviceCapFromBody(
-  String body, {
-  required DeviceCapKind kind,
-}) {
+DeviceCapInfo _deviceCapFromBody(String body, {required DeviceCapKind kind}) {
   int? limit;
   var devices = const <CappedDevice>[];
   try {

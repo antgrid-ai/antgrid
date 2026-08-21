@@ -65,71 +65,77 @@ void main() {
     expect(spawns, 1);
   });
 
-  test('reaps an alive-but-unhealthy host before respawning (no zombie)',
-      () async {
-    var spawns = 0;
-    final terminated = <int>[];
-    final c = HostController(
-      readHost: () async => _host(pid: 100),
-      pidAlive: (pid) async => true,
-      ping: (h) async => false, // PID alive but control plane unreachable
-      devMode: () => false,
-      terminate: (pid) async => terminated.add(pid),
-      spawnHost: () async {
-        spawns++;
-        return _host(port: 8888);
-      },
-    );
-    final h = await c.ensureHost();
-    expect(h.controlPort, 8888);
-    expect(spawns, 1);
-    // The unhealthy host's PID must be terminated before the fresh spawn.
-    expect(terminated, [100]);
-  });
+  test(
+    'reaps an alive-but-unhealthy host before respawning (no zombie)',
+    () async {
+      var spawns = 0;
+      final terminated = <int>[];
+      final c = HostController(
+        readHost: () async => _host(pid: 100),
+        pidAlive: (pid) async => true,
+        ping: (h) async => false, // PID alive but control plane unreachable
+        devMode: () => false,
+        terminate: (pid) async => terminated.add(pid),
+        spawnHost: () async {
+          spawns++;
+          return _host(port: 8888);
+        },
+      );
+      final h = await c.ensureHost();
+      expect(h.controlPort, 8888);
+      expect(spawns, 1);
+      // The unhealthy host's PID must be terminated before the fresh spawn.
+      expect(terminated, [100]);
+    },
+  );
 
-  test('dev mode respawns a healthy prior-run host (stale bridge code)',
-      () async {
-    var spawns = 0;
-    final terminated = <int>[];
-    final c = HostController(
-      readHost: () async => _host(pid: 100),
-      pidAlive: (pid) async => true,
-      ping: (h) async => true, // healthy — but dev wants fresh code
-      devMode: () => true,
-      bridgeStale: (_) => true, // edited bridge code since host start
-      terminate: (pid) async => terminated.add(pid),
-      spawnHost: () async {
-        spawns++;
-        return _host(port: 8500);
-      },
-    );
-    final h = await c.ensureHost();
-    expect(h.controlPort, 8500);
-    expect(spawns, 1);
-    expect(terminated, [100]); // prior-run host killed for fresh code
-  });
+  test(
+    'dev mode respawns a healthy prior-run host (stale bridge code)',
+    () async {
+      var spawns = 0;
+      final terminated = <int>[];
+      final c = HostController(
+        readHost: () async => _host(pid: 100),
+        pidAlive: (pid) async => true,
+        ping: (h) async => true, // healthy — but dev wants fresh code
+        devMode: () => true,
+        bridgeStale: (_) => true, // edited bridge code since host start
+        terminate: (pid) async => terminated.add(pid),
+        spawnHost: () async {
+          spawns++;
+          return _host(port: 8500);
+        },
+      );
+      final h = await c.ensureHost();
+      expect(h.controlPort, 8500);
+      expect(spawns, 1);
+      expect(terminated, [100]); // prior-run host killed for fresh code
+    },
+  );
 
-  test('dev mode attaches to a warm host when bridge code is unchanged',
-      () async {
-    var spawns = 0;
-    final terminated = <int>[];
-    final c = HostController(
-      readHost: () async => _host(pid: 100, port: 6000),
-      pidAlive: (pid) async => true,
-      ping: (h) async => true, // healthy prior-run host
-      devMode: () => true,
-      bridgeStale: (_) => false, // nothing changed since host start
-      terminate: (pid) async => terminated.add(pid),
-      spawnHost: () async {
-        spawns++;
-        return _host(port: 8500);
-      },
-    );
-    final h = await c.ensureHost();
-    expect(h.controlPort, 6000); // attached to the warm host, not a respawn
-    expect(spawns, 0);
-    expect(terminated, isEmpty);
-  });
+  test(
+    'dev mode attaches to a warm host when bridge code is unchanged',
+    () async {
+      var spawns = 0;
+      final terminated = <int>[];
+      final c = HostController(
+        readHost: () async => _host(pid: 100, port: 6000),
+        pidAlive: (pid) async => true,
+        ping: (h) async => true, // healthy prior-run host
+        devMode: () => true,
+        bridgeStale: (_) => false, // nothing changed since host start
+        terminate: (pid) async => terminated.add(pid),
+        spawnHost: () async {
+          spawns++;
+          return _host(port: 8500);
+        },
+      );
+      final h = await c.ensureHost();
+      expect(h.controlPort, 6000); // attached to the warm host, not a respawn
+      expect(spawns, 0);
+      expect(terminated, isEmpty);
+    },
+  );
 
   test('reuses a host verified within the TTL without re-probing', () async {
     var reads = 0;
@@ -158,26 +164,32 @@ void main() {
     expect(pings, 1);
   });
 
-  test('single-flight: concurrent cold starts spawn exactly one host', () async {
-    var spawns = 0;
-    final c = HostController(
-      readHost: () async => null,
-      pidAlive: (pid) async => true,
-      ping: (h) async => true,
-      devMode: () => false,
-      spawnHost: () async {
-        spawns++;
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-        return _host(port: 9100);
-      },
-    );
-    final results = await Future.wait([c.ensureHost(), c.ensureHost(), c.ensureHost()]);
-    expect(spawns, 1);
-    expect(results.every((h) => h.controlPort == 9100), isTrue);
-  });
-
   test(
-      'default dev-mode (no override) respawns a healthy prior-run host in a '
+    'single-flight: concurrent cold starts spawn exactly one host',
+    () async {
+      var spawns = 0;
+      final c = HostController(
+        readHost: () async => null,
+        pidAlive: (pid) async => true,
+        ping: (h) async => true,
+        devMode: () => false,
+        spawnHost: () async {
+          spawns++;
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+          return _host(port: 9100);
+        },
+      );
+      final results = await Future.wait([
+        c.ensureHost(),
+        c.ensureHost(),
+        c.ensureHost(),
+      ]);
+      expect(spawns, 1);
+      expect(results.every((h) => h.controlPort == 9100), isTrue);
+    },
+  );
+
+  test('default dev-mode (no override) respawns a healthy prior-run host in a '
       'non-release build, even without ANTGRID_AGENT_PREARGS', () async {
     // Regression: the debug repo-bridge-via-bun fallback sets no
     // ANTGRID_AGENT_PREARGS, so dev-mode must key on kReleaseMode (false under
@@ -331,11 +343,7 @@ void main() {
       // downgrade the failed verdict to stopped (that would hide the banner
       // and its retry affordance).
       await c.shutdownOwnedHost();
-      c.handleHostExit(
-        generation: c.spawnGeneration,
-        pid: 500,
-        exitCode: 1,
-      );
+      c.handleHostExit(generation: c.spawnGeneration, pid: 500, exitCode: 1);
       await settle();
       expect(c.status.phase, HostPhase.failed);
     });
@@ -418,16 +426,15 @@ void main() {
       String bun = r'C:\Users\me\.bun\bin\bun.exe',
       bool isWindows = true,
       bool isRelease = false,
-    }) =>
-        resolveHostCommand(
-          env: env,
-          exeDir: exeDir,
-          exists: present.contains,
-          findBridgeEntry: () => bridgeEntry,
-          resolveBun: () => bun,
-          isWindows: isWindows,
-          isRelease: isRelease,
-        );
+    }) => resolveHostCommand(
+      env: env,
+      exeDir: exeDir,
+      exists: present.contains,
+      findBridgeEntry: () => bridgeEntry,
+      resolveBun: () => bun,
+      isWindows: isWindows,
+      isRelease: isRelease,
+    );
 
     test('ANTGRID_AGENT_BIN wins when it exists (no preargs)', () {
       final cmd = resolve(
@@ -440,7 +447,8 @@ void main() {
 
     test('falls through a stale ANTGRID_AGENT_BIN to the bundled sibling', () {
       // The resolver joins with `/` onto exeDir (see resolveHostCommand).
-      const bundled = r'C:\app\build\windows\x64\runner\Debug/antgrid-bridge.exe';
+      const bundled =
+          r'C:\app\build\windows\x64\runner\Debug/antgrid-bridge.exe';
       final cmd = resolve(
         env: {'ANTGRID_AGENT_BIN': r'C:\gone.exe'}, // set but absent
         present: {bundled},
@@ -456,8 +464,7 @@ void main() {
       expect(cmd.preargs, [entry]);
     });
 
-    test(
-        'REGRESSION: Windows refuses the bare "antgrid" fallback (would '
+    test('REGRESSION: Windows refuses the bare "antgrid" fallback (would '
         'self-spawn the app)', () {
       // No env, no bundled sibling, no repo entry found (e.g. installed app or
       // IDE launch where the walk fails) → must throw, never return "antgrid".

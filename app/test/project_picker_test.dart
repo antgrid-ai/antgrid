@@ -107,7 +107,10 @@ void main() {
     t.emitJson({
       'type': 'control:result',
       'ok': false,
-      'error': {'code': 'NOT_ALLOWED', 'message': 'mobile access is disabled on this machine'},
+      'error': {
+        'code': 'NOT_ALLOWED',
+        'message': 'mobile access is disabled on this machine',
+      },
     });
     await tester.pump();
 

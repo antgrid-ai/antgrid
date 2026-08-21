@@ -10,15 +10,21 @@ const _svg =
 
 void main() {
   testWidgets('renders an SvgPicture in preview mode', (tester) async {
-    await tester.pumpWidget(ProviderScope(
-      child: MaterialApp(
-        home: Scaffold(
-          body: SvgPreview(
-            content: const FileContent(path: 'a.svg', content: _svg, size: 80),
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          home: Scaffold(
+            body: SvgPreview(
+              content: const FileContent(
+                path: 'a.svg',
+                content: _svg,
+                size: 80,
+              ),
+            ),
           ),
         ),
       ),
-    ));
+    );
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('svg-content')), findsOneWidget);
   });

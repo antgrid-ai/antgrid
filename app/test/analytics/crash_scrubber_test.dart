@@ -3,19 +3,23 @@ import 'package:sentry_flutter/sentry_flutter.dart';
 import 'package:antgrid/analytics/crash_reporting.dart';
 
 void main() {
-  test('scrubber removes file paths and prompt-like content from the message',
-      () {
-    final event = SentryEvent(
-      message: SentryMessage('Failed reading C:/Users/me/project/secret.dart'),
-      breadcrumbs: [Breadcrumb(message: 'opened /home/me/repo/notes.md')],
-    );
-    final scrubbed = scrubCrashEvent(event)!;
-    expect(scrubbed.message?.formatted ?? '', isNot(contains('secret.dart')));
-    expect(scrubbed.message?.formatted ?? '', isNot(contains('C:/Users')));
-    final crumbs =
-        scrubbed.breadcrumbs?.map((b) => b.message ?? '').join() ?? '';
-    expect(crumbs, isNot(contains('notes.md')));
-  });
+  test(
+    'scrubber removes file paths and prompt-like content from the message',
+    () {
+      final event = SentryEvent(
+        message: SentryMessage(
+          'Failed reading C:/Users/me/project/secret.dart',
+        ),
+        breadcrumbs: [Breadcrumb(message: 'opened /home/me/repo/notes.md')],
+      );
+      final scrubbed = scrubCrashEvent(event)!;
+      expect(scrubbed.message?.formatted ?? '', isNot(contains('secret.dart')));
+      expect(scrubbed.message?.formatted ?? '', isNot(contains('C:/Users')));
+      final crumbs =
+          scrubbed.breadcrumbs?.map((b) => b.message ?? '').join() ?? '';
+      expect(crumbs, isNot(contains('notes.md')));
+    },
+  );
 
   // C1: exception .value is a primary leak vector (e.g. FileSystemException
   // carrying a full path in its message).
@@ -39,26 +43,25 @@ void main() {
 
   // C2: breadcrumb .data map — string values are redacted, non-string
   // values (e.g. ints) are left untouched.
-  test('scrubber redacts string values in breadcrumb data, preserves non-strings (C2)',
-      () {
-    final event = SentryEvent(
-      breadcrumbs: [
-        Breadcrumb(
-          message: 'nav',
-          data: {
-            'route': '/home/me/repo/notes.md',
-            'count': 3,
-          },
-        ),
-      ],
-    );
-    final scrubbed = scrubCrashEvent(event)!;
-    final data = scrubbed.breadcrumbs!.first.data!;
-    expect(data['route'], isNot(contains('/home/me/repo')));
-    expect(data['route'], contains('<redacted-path>'));
-    // Non-string value must survive intact.
-    expect(data['count'], equals(3));
-  });
+  test(
+    'scrubber redacts string values in breadcrumb data, preserves non-strings (C2)',
+    () {
+      final event = SentryEvent(
+        breadcrumbs: [
+          Breadcrumb(
+            message: 'nav',
+            data: {'route': '/home/me/repo/notes.md', 'count': 3},
+          ),
+        ],
+      );
+      final scrubbed = scrubCrashEvent(event)!;
+      final data = scrubbed.breadcrumbs!.first.data!;
+      expect(data['route'], isNot(contains('/home/me/repo')));
+      expect(data['route'], contains('<redacted-path>'));
+      // Non-string value must survive intact.
+      expect(data['count'], equals(3));
+    },
+  );
 
   // I1: stack-frame absPath can expose the machine/user path prefix.
   test('scrubber redacts absPath on stack frames (I1)', () {
@@ -92,50 +95,53 @@ void main() {
   });
 
   // M1: a breadcrumb with a null message must stay null, not become "".
-  test('scrubber preserves null breadcrumb message as null, not empty string (M1)',
-      () {
-    final event = SentryEvent(
-      breadcrumbs: [
-        Breadcrumb(message: null, category: 'navigation'),
-      ],
-    );
-    final scrubbed = scrubCrashEvent(event)!;
-    expect(scrubbed.breadcrumbs!.first.message, isNull);
-  });
+  test(
+    'scrubber preserves null breadcrumb message as null, not empty string (M1)',
+    () {
+      final event = SentryEvent(
+        breadcrumbs: [Breadcrumb(message: null, category: 'navigation')],
+      );
+      final scrubbed = scrubCrashEvent(event)!;
+      expect(scrubbed.breadcrumbs!.first.message, isNull);
+    },
+  );
 
   // The crashing isolate is attached as a THREAD before beforeSend runs; its
   // stacktrace carries the same paths/source as exceptions and must be scrubbed.
-  test('scrubber redacts thread stacktrace paths and drops source snippets', () {
-    final event = SentryEvent(
-      threads: [
-        SentryThread(
-          id: 1,
-          crashed: true,
-          stacktrace: SentryStackTrace(
-            frames: [
-              SentryStackFrame(
-                absPath: 'C:/Users/me/project/lib/secret.dart',
-                fileName: 'secret.dart',
-                contextLine: 'final key = loadFrom("/home/me/secret");',
-                preContext: ['above /home/me/a.dart'],
-                postContext: ['below'],
-                lineNo: 7,
-              ),
-            ],
+  test(
+    'scrubber redacts thread stacktrace paths and drops source snippets',
+    () {
+      final event = SentryEvent(
+        threads: [
+          SentryThread(
+            id: 1,
+            crashed: true,
+            stacktrace: SentryStackTrace(
+              frames: [
+                SentryStackFrame(
+                  absPath: 'C:/Users/me/project/lib/secret.dart',
+                  fileName: 'secret.dart',
+                  contextLine: 'final key = loadFrom("/home/me/secret");',
+                  preContext: ['above /home/me/a.dart'],
+                  postContext: ['below'],
+                  lineNo: 7,
+                ),
+              ],
+            ),
           ),
-        ),
-      ],
-    );
-    final scrubbed = scrubCrashEvent(event)!;
-    final frame = scrubbed.threads!.first.stacktrace!.frames.first;
-    expect(frame.absPath, contains('<redacted-path>'));
-    expect(frame.absPath, isNot(contains('C:/Users/me')));
-    // Raw source snippets are dropped entirely, not redacted.
-    expect(frame.contextLine, isNull);
-    expect(frame.preContext, isEmpty);
-    expect(frame.postContext, isEmpty);
-    expect(frame.fileName, equals('secret.dart'));
-  });
+        ],
+      );
+      final scrubbed = scrubCrashEvent(event)!;
+      final frame = scrubbed.threads!.first.stacktrace!.frames.first;
+      expect(frame.absPath, contains('<redacted-path>'));
+      expect(frame.absPath, isNot(contains('C:/Users/me')));
+      // Raw source snippets are dropped entirely, not redacted.
+      expect(frame.contextLine, isNull);
+      expect(frame.preContext, isEmpty);
+      expect(frame.postContext, isEmpty);
+      expect(frame.fileName, equals('secret.dart'));
+    },
+  );
 
   // Even on the scrubbed exceptions path, source snippets must be dropped.
   test('scrubber drops contextLine/pre/postContext on exception frames', () {
@@ -158,8 +164,9 @@ void main() {
         ),
       ],
     );
-    final frame =
-        scrubCrashEvent(event)!.exceptions!.first.stackTrace!.frames.first;
+    final frame = scrubCrashEvent(
+      event,
+    )!.exceptions!.first.stackTrace!.frames.first;
     expect(frame.contextLine, isNull);
     expect(frame.preContext, isEmpty);
     expect(frame.postContext, isEmpty);
@@ -185,13 +192,9 @@ void main() {
         ),
       ],
     );
-    final json = scrubCrashEvent(event)!
-        .exceptions!
-        .first
-        .stackTrace!
-        .frames
-        .first
-        .toJson();
+    final json = scrubCrashEvent(
+      event,
+    )!.exceptions!.first.stackTrace!.frames.first.toJson();
     expect(json.containsKey('vars'), isFalse);
   });
 

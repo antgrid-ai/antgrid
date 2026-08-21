@@ -55,18 +55,21 @@ void main() {
   });
 
   group('eagerControlPlaneTargetsProvider', () {
-    test('empty when disabled (desktop), without touching the recents store', () {
-      final c = ProviderContainer(
-        overrides: [
-          eagerControlPlanesEnabledProvider.overrideWithValue(false),
-          // recentAgentsStoreProvider is NOT overridden: reading recents here
-          // would throw its StateError, so an empty result also proves the
-          // disabled path never reaches the store.
-        ],
-      );
-      addTearDown(c.dispose);
-      expect(c.read(eagerControlPlaneTargetsProvider), isEmpty);
-    });
+    test(
+      'empty when disabled (desktop), without touching the recents store',
+      () {
+        final c = ProviderContainer(
+          overrides: [
+            eagerControlPlanesEnabledProvider.overrideWithValue(false),
+            // recentAgentsStoreProvider is NOT overridden: reading recents here
+            // would throw its StateError, so an empty result also proves the
+            // disabled path never reaches the store.
+          ],
+        );
+        addTearDown(c.dispose);
+        expect(c.read(eagerControlPlaneTargetsProvider), isEmpty);
+      },
+    );
 
     test('derives capped bare uuids from recents when enabled', () {
       final c = ProviderContainer(
@@ -121,37 +124,40 @@ void main() {
   });
 
   group('kickEagerControlPlaneDials', () {
-    test('dials targets without a connection, skips machines with one', () async {
-      final manager = RelayConnectionManager(crypto: CryptoService());
-      addTearDown(manager.disposeAll);
-      // M already has a connection (however unhealthy): its supervisor owns
-      // recovery, so the kick must not dial it again.
-      final existing = manager.connectionFor('M');
+    test(
+      'dials targets without a connection, skips machines with one',
+      () async {
+        final manager = RelayConnectionManager(crypto: CryptoService());
+        addTearDown(manager.disposeAll);
+        // M already has a connection (however unhealthy): its supervisor owns
+        // recovery, so the kick must not dial it again.
+        final existing = manager.connectionFor('M');
 
-      final dialed = <String>[];
-      final c = ProviderContainer(
-        overrides: [
-          eagerControlPlanesEnabledProvider.overrideWithValue(true),
-          recentAgentsProvider.overrideWith(
-            () => _FixedRecentAgents([
-              _recent('M', DateTime(2026, 1, 2)),
-              _recent('K', DateTime(2026, 1, 1)),
-            ]),
-          ),
-          relayConnectionManagerProvider.overrideWithValue(manager),
-          controlPlaneClientForProvider.overrideWith((ref, uuid) async {
-            dialed.add(uuid);
-            return null;
-          }),
-        ],
-      );
-      addTearDown(c.dispose);
+        final dialed = <String>[];
+        final c = ProviderContainer(
+          overrides: [
+            eagerControlPlanesEnabledProvider.overrideWithValue(true),
+            recentAgentsProvider.overrideWith(
+              () => _FixedRecentAgents([
+                _recent('M', DateTime(2026, 1, 2)),
+                _recent('K', DateTime(2026, 1, 1)),
+              ]),
+            ),
+            relayConnectionManagerProvider.overrideWithValue(manager),
+            controlPlaneClientForProvider.overrideWith((ref, uuid) async {
+              dialed.add(uuid);
+              return null;
+            }),
+          ],
+        );
+        addTearDown(c.dispose);
 
-      await kickEagerControlPlaneDials(RefreshRef.ofContainer(c));
+        await kickEagerControlPlaneDials(RefreshRef.ofContainer(c));
 
-      expect(dialed, ['K']);
-      expect(manager.peek('M'), same(existing));
-    });
+        expect(dialed, ['K']);
+        expect(manager.peek('M'), same(existing));
+      },
+    );
 
     test('no-op when disabled (desktop)', () async {
       final manager = RelayConnectionManager(crypto: CryptoService());

@@ -235,11 +235,9 @@ void main() {
         container.read(agentTransportForProvider(_remoteUuid));
         await pumpUntilDial(container);
 
-        expect(
-          relay.dialedUrls,
-          [_inventoryUrl],
-          reason: 'a first-time inventory hit is dialled from the inventory',
-        );
+        expect(relay.dialedUrls, [
+          _inventoryUrl,
+        ], reason: 'a first-time inventory hit is dialled from the inventory');
       },
       timeout: const Timeout(Duration(seconds: 15)),
     );

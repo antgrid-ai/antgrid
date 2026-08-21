@@ -25,12 +25,12 @@ FleatherThemeData buildComposerTheme(BuildContext context) {
       );
 
   TextBlockTheme heading(double size) => block(
-        AbTokens.sansStyle(
-          fontSize: size,
-          fontWeight: FontWeight.w600,
-          color: colors.textPrimary,
-        ),
-      );
+    AbTokens.sansStyle(
+      fontSize: size,
+      fontWeight: FontWeight.w600,
+      color: colors.textPrimary,
+    ),
+  );
 
   return FleatherThemeData(
     bold: body.copyWith(fontWeight: FontWeight.w600),

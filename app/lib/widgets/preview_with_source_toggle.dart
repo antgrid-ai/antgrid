@@ -48,7 +48,8 @@ class _PreviewWithSourceToggleState extends State<PreviewWithSourceToggle> {
     // A new search target can arrive while the file is already open (same path
     // → same State, so the field initializer above won't re-run). Jump to source
     // so the match can be scrolled to, which the rendered preview can't do.
-    if (widget.searchLine != null && widget.searchLine != oldWidget.searchLine) {
+    if (widget.searchLine != null &&
+        widget.searchLine != oldWidget.searchLine) {
       _showSource = true;
     }
   }

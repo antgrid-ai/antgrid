@@ -42,13 +42,15 @@ class _StubControlServer {
 void main() {
   test('projectOpen sends bearer token + mode and parses connect', () async {
     final stub = _StubControlServer();
-    await stub.start(handler: (req) => {
-          'id': req['id'],
-          'ok': true,
-          'type': 'project:open',
-          'running': true,
-          'connect': {'port': 55001, 'token': 'loop-tok'},
-        });
+    await stub.start(
+      handler: (req) => {
+        'id': req['id'],
+        'ok': true,
+        'type': 'project:open',
+        'running': true,
+        'connect': {'port': 55001, 'token': 'loop-tok'},
+      },
+    );
     addTearDown(stub.close);
 
     final client = HostControlClient(port: stub.port, token: 'secret');
@@ -66,9 +68,12 @@ void main() {
     expect(res.connect!.token, 'loop-tok');
   });
 
-  test('projectResolve validates and parses host-owned repository identity', () async {
-    final stub = _StubControlServer();
-    await stub.start(handler: (req) => {
+  test(
+    'projectResolve validates and parses host-owned repository identity',
+    () async {
+      final stub = _StubControlServer();
+      await stub.start(
+        handler: (req) => {
           'id': req['id'],
           'ok': true,
           'type': 'project:resolve',
@@ -77,40 +82,60 @@ void main() {
           'selectedPath': '/repo/linked',
           'label': 'repo',
           'isGitRepository': true,
-        });
-    addTearDown(stub.close);
+        },
+      );
+      addTearDown(stub.close);
 
-    final result = await HostControlClient(port: stub.port, token: 't')
-        .projectResolve('/repo/linked');
-    expect(stub.lastBody!['type'], 'project:resolve');
-    expect(result.projectId, 'primary-id');
-    expect(result.repoPath, '/repo');
-    expect(result.isGitRepository, isTrue);
-  });
+      final result = await HostControlClient(
+        port: stub.port,
+        token: 't',
+      ).projectResolve('/repo/linked');
+      expect(stub.lastBody!['type'], 'project:resolve');
+      expect(result.projectId, 'primary-id');
+      expect(result.repoPath, '/repo');
+      expect(result.isGitRepository, isTrue);
+    },
+  );
 
   test('projectResolve rejects malformed responses', () async {
     final stub = _StubControlServer();
-    await stub.start(handler: (req) => {
-          'id': req['id'], 'ok': true, 'type': 'project:resolve', 'projectId': 12,
-        });
+    await stub.start(
+      handler: (req) => {
+        'id': req['id'],
+        'ok': true,
+        'type': 'project:resolve',
+        'projectId': 12,
+      },
+    );
     addTearDown(stub.close);
 
     await expectLater(
-      () => HostControlClient(port: stub.port, token: 't').projectResolve('/repo'),
-      throwsA(isA<HostControlException>().having((e) => e.code, 'code', 'BAD_RESPONSE')),
+      () => HostControlClient(
+        port: stub.port,
+        token: 't',
+      ).projectResolve('/repo'),
+      throwsA(
+        isA<HostControlException>().having(
+          (e) => e.code,
+          'code',
+          'BAD_RESPONSE',
+        ),
+      ),
     );
   });
 
   test('projectList parses summaries', () async {
     final stub = _StubControlServer();
-    await stub.start(handler: (req) => {
-          'id': req['id'],
-          'ok': true,
-          'type': 'project:list',
-          'projects': [
-            {'projectId': 'a', 'path': '/a', 'running': true, 'mode': 'local'},
-          ],
-        });
+    await stub.start(
+      handler: (req) => {
+        'id': req['id'],
+        'ok': true,
+        'type': 'project:list',
+        'projects': [
+          {'projectId': 'a', 'path': '/a', 'running': true, 'mode': 'local'},
+        ],
+      },
+    );
     addTearDown(stub.close);
 
     final client = HostControlClient(port: stub.port, token: 't');
@@ -122,23 +147,25 @@ void main() {
 
   test('toolsList parses the tool catalog and the agent descriptors', () async {
     final stub = _StubControlServer();
-    await stub.start(handler: (req) => {
-          'id': req['id'],
-          'ok': true,
-          'type': 'tools:list',
-          'tools': [
-            {'tool': 'claude-code', 'path': '/usr/bin/claude'},
-          ],
-          'agents': [
-            {
-              'tool': 'kilo',
-              'label': 'Kilo',
-              'chatCapable': false,
-              'judgeCapable': false,
-              'handler': {'terminal': false, 'chat': false},
-            },
-          ],
-        });
+    await stub.start(
+      handler: (req) => {
+        'id': req['id'],
+        'ok': true,
+        'type': 'tools:list',
+        'tools': [
+          {'tool': 'claude-code', 'path': '/usr/bin/claude'},
+        ],
+        'agents': [
+          {
+            'tool': 'kilo',
+            'label': 'Kilo',
+            'chatCapable': false,
+            'judgeCapable': false,
+            'handler': {'terminal': false, 'chat': false},
+          },
+        ],
+      },
+    );
     addTearDown(stub.close);
 
     final client = HostControlClient(port: stub.port, token: 't');
@@ -148,89 +175,104 @@ void main() {
     expect(listed.agents.single.label, 'Kilo');
   });
 
-  test('a bridge predating the descriptor yields no agents, not a guess',
-      () async {
-    final stub = _StubControlServer();
-    await stub.start(handler: (req) => {
+  test(
+    'a bridge predating the descriptor yields no agents, not a guess',
+    () async {
+      final stub = _StubControlServer();
+      await stub.start(
+        handler: (req) => {
           'id': req['id'],
           'ok': true,
           'type': 'tools:list',
           'tools': [
             {'tool': 'claude-code', 'path': '/usr/bin/claude'},
           ],
-        });
-    addTearDown(stub.close);
+        },
+      );
+      addTearDown(stub.close);
 
-    final client = HostControlClient(port: stub.port, token: 't');
-    expect((await client.toolsList()).agents, isEmpty);
-  });
+      final client = HostControlClient(port: stub.port, token: 't');
+      expect((await client.toolsList()).agents, isEmpty);
+    },
+  );
 
   test('ok:false throws HostControlException with code', () async {
     final stub = _StubControlServer();
-    await stub.start(handler: (req) => {
-          'id': req['id'],
-          'ok': false,
-          'error': {'code': 'NO_FOLDER', 'message': 'missing folder'},
-        });
+    await stub.start(
+      handler: (req) => {
+        'id': req['id'],
+        'ok': false,
+        'error': {'code': 'NO_FOLDER', 'message': 'missing folder'},
+      },
+    );
     addTearDown(stub.close);
 
     final client = HostControlClient(port: stub.port, token: 't');
     expect(
       () => client.projectOpen(projectId: 'p', projectPath: '/nope'),
-      throwsA(isA<HostControlException>()
-          .having((e) => e.code, 'code', 'NO_FOLDER')),
+      throwsA(
+        isA<HostControlException>().having((e) => e.code, 'code', 'NO_FOLDER'),
+      ),
     );
   });
 
-  test('a wedged host (no response) times out as HostControlException(TRANSPORT)',
-      () async {
-    final stub = _StubControlServer();
-    await stub.start(
-      responseDelay: const Duration(seconds: 30), // host accepts but never answers
-      handler: (req) => {'id': req['id'], 'ok': true, 'projects': []},
-    );
-    addTearDown(stub.close);
+  test(
+    'a wedged host (no response) times out as HostControlException(TRANSPORT)',
+    () async {
+      final stub = _StubControlServer();
+      await stub.start(
+        responseDelay: const Duration(
+          seconds: 30,
+        ), // host accepts but never answers
+        handler: (req) => {'id': req['id'], 'ok': true, 'projects': []},
+      );
+      addTearDown(stub.close);
 
-    final client = HostControlClient(port: stub.port, token: 't');
-    // Short timeout keeps the test fast; the TimeoutException must surface as
-    // HostControlException('TRANSPORT').
-    await expectLater(
-      () => client.projectList(timeout: const Duration(milliseconds: 150)),
-      throwsA(isA<HostControlException>()
-          .having((e) => e.code, 'code', 'TRANSPORT')),
-    );
-  });
+      final client = HostControlClient(port: stub.port, token: 't');
+      // Short timeout keeps the test fast; the TimeoutException must surface as
+      // HostControlException('TRANSPORT').
+      await expectLater(
+        () => client.projectList(timeout: const Duration(milliseconds: 150)),
+        throwsA(
+          isA<HostControlException>().having(
+            (e) => e.code,
+            'code',
+            'TRANSPORT',
+          ),
+        ),
+      );
+    },
+  );
 
   test('non-200 (e.g. 401) throws HostControlException', () async {
     final stub = _StubControlServer();
-    await stub.start(
-      status: 401,
-      handler: (req) => {'error': 'unauthorized'},
-    );
+    await stub.start(status: 401, handler: (req) => {'error': 'unauthorized'});
     addTearDown(stub.close);
 
     final client = HostControlClient(port: stub.port, token: 'wrong');
-    expect(
-      () => client.projectList(),
-      throwsA(isA<HostControlException>()),
-    );
+    expect(() => client.projectList(), throwsA(isA<HostControlException>()));
   });
 
   test('gitBranches parses branch catalog', () async {
     final stub = _StubControlServer();
-    await stub.start(handler: (req) => {
-          'id': req['id'],
-          'ok': true,
-          'type': 'git:branches',
-          'isRepository': true,
-          'current': 'main',
-          'branches': ['main', 'dev'],
-          'worktreeSessionsSupported': true,
-        });
+    await stub.start(
+      handler: (req) => {
+        'id': req['id'],
+        'ok': true,
+        'type': 'git:branches',
+        'isRepository': true,
+        'current': 'main',
+        'branches': ['main', 'dev'],
+        'worktreeSessionsSupported': true,
+      },
+    );
     addTearDown(stub.close);
 
     final client = HostControlClient(port: stub.port, token: 't');
-    final catalog = await client.gitBranches(projectId: 'p1', projectPath: '/path');
+    final catalog = await client.gitBranches(
+      projectId: 'p1',
+      projectPath: '/path',
+    );
     expect(catalog.isRepository, isTrue);
     expect(catalog.current, 'main');
     expect(catalog.branches, ['main', 'dev']);
@@ -239,12 +281,14 @@ void main() {
 
   test('gitCheckout returns checked out current branch', () async {
     final stub = _StubControlServer();
-    await stub.start(handler: (req) => {
-          'id': req['id'],
-          'ok': true,
-          'type': 'git:checkout',
-          'current': 'dev',
-        });
+    await stub.start(
+      handler: (req) => {
+        'id': req['id'],
+        'ok': true,
+        'type': 'git:checkout',
+        'current': 'dev',
+      },
+    );
     addTearDown(stub.close);
 
     final client = HostControlClient(port: stub.port, token: 't');

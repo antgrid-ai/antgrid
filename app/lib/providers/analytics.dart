@@ -17,14 +17,13 @@ AnalyticsService buildAnalyticsService({
   required String plausibleUrl,
   required String plausibleDomain,
   required String eventsApiUrl,
-}) =>
-    AnalyticsService(
-      client: client,
-      plausibleUrl: plausibleUrl,
-      plausibleDomain: plausibleDomain,
-      eventsApiUrl: eventsApiUrl,
-      installId: installId,
-      platform: platform,
-      appVersion: appVersion,
-      enabled: enabled,
-    );
+}) => AnalyticsService(
+  client: client,
+  plausibleUrl: plausibleUrl,
+  plausibleDomain: plausibleDomain,
+  eventsApiUrl: eventsApiUrl,
+  installId: installId,
+  platform: platform,
+  appVersion: appVersion,
+  enabled: enabled,
+);

@@ -136,7 +136,8 @@ class CommandService {
       ),
     );
 
-    session.sendForCheckout(checkoutId,
+    session.sendForCheckout(
+      checkoutId,
       createAbMessage('command:run', {
         'projectId': projectId,
         'commandName': commandName,

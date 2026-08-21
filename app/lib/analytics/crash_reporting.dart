@@ -36,29 +36,28 @@ Object? _redactDeep(Object? value) {
 // preContext/postContext/vars stay getter-only, so a frame is the one object
 // here that assignment alone can't neutralize.
 SentryStackFrame _scrubFrame(SentryStackFrame f) => SentryStackFrame(
-      absPath: _redactNullable(f.absPath),
-      fileName: f.fileName,
-      function: f.function,
-      module: f.module,
-      lineNo: f.lineNo,
-      colNo: f.colNo,
-      inApp: f.inApp,
-      package: f.package,
-      native: f.native,
-      platform: f.platform,
-      imageAddr: f.imageAddr,
-      symbolAddr: f.symbolAddr,
-      instructionAddr: f.instructionAddr,
-      rawFunction: f.rawFunction,
-      stackStart: f.stackStart,
-      symbol: f.symbol,
-      framesOmitted:
-          f.framesOmitted.isEmpty ? null : List.of(f.framesOmitted),
-      // Raw user source/locals — dropped, not redacted.
-      contextLine: null,
-      preContext: null,
-      postContext: null,
-    );
+  absPath: _redactNullable(f.absPath),
+  fileName: f.fileName,
+  function: f.function,
+  module: f.module,
+  lineNo: f.lineNo,
+  colNo: f.colNo,
+  inApp: f.inApp,
+  package: f.package,
+  native: f.native,
+  platform: f.platform,
+  imageAddr: f.imageAddr,
+  symbolAddr: f.symbolAddr,
+  instructionAddr: f.instructionAddr,
+  rawFunction: f.rawFunction,
+  stackStart: f.stackStart,
+  symbol: f.symbol,
+  framesOmitted: f.framesOmitted.isEmpty ? null : List.of(f.framesOmitted),
+  // Raw user source/locals — dropped, not redacted.
+  contextLine: null,
+  preContext: null,
+  postContext: null,
+);
 
 // `copyWith` (deprecated in 9.x) is kept here deliberately over the public
 // constructor: it round-trips the @internal symbolication fields
@@ -146,15 +145,12 @@ Future<void> initCrashReporting({
     await runApp();
     return;
   }
-  await SentryFlutter.init(
-    (options) {
-      options.dsn = dsn;
-      options.sendDefaultPii = false;
-      options.attachScreenshot = false;
-      // attachViewHierarchy is @experimental and defaults to false; no explicit
-      // set needed.
-      options.beforeSend = (event, hint) => scrubCrashEvent(event);
-    },
-    appRunner: runApp,
-  );
+  await SentryFlutter.init((options) {
+    options.dsn = dsn;
+    options.sendDefaultPii = false;
+    options.attachScreenshot = false;
+    // attachViewHierarchy is @experimental and defaults to false; no explicit
+    // set needed.
+    options.beforeSend = (event, hint) => scrubCrashEvent(event);
+  }, appRunner: runApp);
 }

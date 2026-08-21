@@ -14,8 +14,9 @@ import 'value_controller.dart';
 /// Cleared by [clearRevokedNotice] on a fresh sign-in. That clear is
 /// load-bearing, not cosmetic: while this is set the root pins itself to the
 /// sign-in screen, so nothing else can retire it.
-final revokedNoticeProvider =
-    NotifierProvider<ValueController<bool>, bool>(() => ValueController(false));
+final revokedNoticeProvider = NotifierProvider<ValueController<bool>, bool>(
+  () => ValueController(false),
+);
 
 /// Minimum spacing between [checkDeviceRevoked] network probes. Launch and
 /// every resume call it; without this a foreground/background flap would mint a

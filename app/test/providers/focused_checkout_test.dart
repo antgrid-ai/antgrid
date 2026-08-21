@@ -16,17 +16,17 @@ void main() {
       checkoutKind: 'managed-worktree',
       checkoutBranch: 'antgrid/session-1',
     );
-    final container = ProviderContainer(overrides: [
-      activeSessionProvider.overrideWithValue(entry),
-    ]);
+    final container = ProviderContainer(
+      overrides: [activeSessionProvider.overrideWithValue(entry)],
+    );
     addTearDown(container.dispose);
     expect(container.read(focusedCheckoutIdProvider), 'checkout-1');
   });
 
   test('focused checkout defaults to main without an active session', () {
-    final container = ProviderContainer(overrides: [
-      activeSessionProvider.overrideWithValue(null),
-    ]);
+    final container = ProviderContainer(
+      overrides: [activeSessionProvider.overrideWithValue(null)],
+    );
     addTearDown(container.dispose);
     expect(container.read(focusedCheckoutIdProvider), 'main');
   });

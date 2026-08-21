@@ -72,5 +72,5 @@ class CapabilityCatalogNotifier
 
 final capabilityCatalogProvider =
     NotifierProvider<CapabilityCatalogNotifier, Map<String, CapabilityCatalog>>(
-  CapabilityCatalogNotifier.new,
-);
+      CapabilityCatalogNotifier.new,
+    );

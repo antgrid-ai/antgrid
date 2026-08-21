@@ -122,9 +122,8 @@ void main() {
       ),
     );
 
-    AbColors effective() => Theme.of(
-      tester.element(find.byKey(_probeKey)),
-    ).extension<AbColors>()!;
+    AbColors effective() =>
+        Theme.of(tester.element(find.byKey(_probeKey))).extension<AbColors>()!;
 
     final zinc = kPresets[AbThemePreset.zinc]!;
     final light = kPresets[AbThemePreset.light]!;

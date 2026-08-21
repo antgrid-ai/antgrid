@@ -90,40 +90,46 @@ void main() {
   });
 
   group('WindowsStoreStrategy', () {
-    test('mandatory: lights the row QUIETLY, auto-launches once, then goes quiet', () async {
-      final store = _FakeStore(StoreUpdateCheck.mandatory);
-      final s = WindowsStoreStrategy(service: store);
+    test(
+      'mandatory: lights the row QUIETLY, auto-launches once, then goes quiet',
+      () async {
+        final store = _FakeStore(StoreUpdateCheck.mandatory);
+        final s = WindowsStoreStrategy(service: store);
 
-      // Quiet outcome: the auto-launched Store dialog IS the announcement —
-      // an updateAvailable here would stack the gate's toast on top of it.
-      expect(
-        await s.check(rowAlreadyLit: false),
-        UpdateCheckOutcome.updateAvailableQuiet,
-      );
-      expect(store.installs, 1);
+        // Quiet outcome: the auto-launched Store dialog IS the announcement —
+        // an updateAvailable here would stack the gate's toast on top of it.
+        expect(
+          await s.check(rowAlreadyLit: false),
+          UpdateCheckOutcome.updateAvailableQuiet,
+        );
+        expect(store.installs, 1);
 
-      // Latch spent: no further Store round-trips, no dialog re-pop.
-      expect(await s.check(rowAlreadyLit: true), UpdateCheckOutcome.none);
-      expect(store.checks, 1);
-      expect(store.installs, 1);
-    });
+        // Latch spent: no further Store round-trips, no dialog re-pop.
+        expect(await s.check(rowAlreadyLit: true), UpdateCheckOutcome.none);
+        expect(store.checks, 1);
+        expect(store.installs, 1);
+      },
+    );
 
-    test('optional: keeps checking so a mandatory escalation is caught', () async {
-      final store = _FakeStore(StoreUpdateCheck.optional);
-      final s = WindowsStoreStrategy(service: store);
+    test(
+      'optional: keeps checking so a mandatory escalation is caught',
+      () async {
+        final store = _FakeStore(StoreUpdateCheck.optional);
+        final s = WindowsStoreStrategy(service: store);
 
-      expect(
-        await s.check(rowAlreadyLit: false),
-        UpdateCheckOutcome.updateAvailable,
-      );
-      expect(
-        await s.check(rowAlreadyLit: true),
-        UpdateCheckOutcome.updateAvailable,
-        reason: 'a lit row must not stop optional-tier re-checks',
-      );
-      expect(store.checks, 2);
-      expect(store.installs, 0);
-    });
+        expect(
+          await s.check(rowAlreadyLit: false),
+          UpdateCheckOutcome.updateAvailable,
+        );
+        expect(
+          await s.check(rowAlreadyLit: true),
+          UpdateCheckOutcome.updateAvailable,
+          reason: 'a lit row must not stop optional-tier re-checks',
+        );
+        expect(store.checks, 2);
+        expect(store.installs, 0);
+      },
+    );
   });
 
   group('LinuxBrowserStrategy', () {
@@ -197,19 +203,22 @@ void main() {
       expect(s.rowActionLabel, 'Restart');
     });
 
-    test('flexibleReady maps to the restart prompt, everything else to none', () async {
-      expect(
-        await PlayUpdateStrategy(
-          service: const _FakePlay(UpdateDecision.flexibleReady),
-        ).check(rowAlreadyLit: false),
-        UpdateCheckOutcome.restartReady,
-      );
-      expect(
-        await PlayUpdateStrategy(
-          service: const _FakePlay(UpdateDecision.none),
-        ).check(rowAlreadyLit: false),
-        UpdateCheckOutcome.none,
-      );
-    });
+    test(
+      'flexibleReady maps to the restart prompt, everything else to none',
+      () async {
+        expect(
+          await PlayUpdateStrategy(
+            service: const _FakePlay(UpdateDecision.flexibleReady),
+          ).check(rowAlreadyLit: false),
+          UpdateCheckOutcome.restartReady,
+        );
+        expect(
+          await PlayUpdateStrategy(
+            service: const _FakePlay(UpdateDecision.none),
+          ).check(rowAlreadyLit: false),
+          UpdateCheckOutcome.none,
+        );
+      },
+    );
   });
 }

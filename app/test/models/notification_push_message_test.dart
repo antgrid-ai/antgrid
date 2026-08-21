@@ -21,7 +21,11 @@ void main() {
   });
 
   test('returns null when notificationType missing', () {
-    final msg = parseAbMessage({'type': 'notification:push', 'id': 'm2', 'timestamp': 0});
+    final msg = parseAbMessage({
+      'type': 'notification:push',
+      'id': 'm2',
+      'timestamp': 0,
+    });
     expect(msg, isNull);
   });
 }

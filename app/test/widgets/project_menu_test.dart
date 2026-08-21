@@ -250,11 +250,9 @@ void main() {
       _host(
         sources: const [_remoteSource],
         extraOverrides: [
-          controlPlaneStateProvider(
-            'u1',
-          ).overrideWith((ref) => Stream<ControlPlaneState>.error(
-            StateError('unreachable'),
-          )),
+          controlPlaneStateProvider('u1').overrideWith(
+            (ref) => Stream<ControlPlaneState>.error(StateError('unreachable')),
+          ),
         ],
       ),
     );

@@ -286,17 +286,30 @@ class CheckoutServices {
 
   CheckoutServices(ProjectSession session, this.checkoutId) {
     fileService = FileService.fromSession(session, checkoutId: checkoutId);
-    terminalService = TerminalService.fromSession(session, checkoutId: checkoutId);
+    terminalService = TerminalService.fromSession(
+      session,
+      checkoutId: checkoutId,
+    );
     configService = ConfigService.fromSession(session, checkoutId: checkoutId);
     searchService = SearchService.fromSession(session, checkoutId: checkoutId);
-    commandService = CommandService.fromSession(session, checkoutId: checkoutId);
-    previewService = PreviewService.fromSession(session, checkoutId: checkoutId);
+    commandService = CommandService.fromSession(
+      session,
+      checkoutId: checkoutId,
+    );
+    previewService = PreviewService.fromSession(
+      session,
+      checkoutId: checkoutId,
+    );
     uploadService = UploadService.fromSession(session, checkoutId: checkoutId);
   }
 
   Future<void> dispose() => Future.wait([
-    terminalService.dispose(), fileService.dispose(), configService.dispose(),
-    searchService.dispose(), commandService.dispose(), previewService.dispose(),
+    terminalService.dispose(),
+    fileService.dispose(),
+    configService.dispose(),
+    searchService.dispose(),
+    commandService.dispose(),
+    previewService.dispose(),
     uploadService.dispose(),
   ]);
 }

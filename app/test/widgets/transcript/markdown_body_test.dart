@@ -11,17 +11,20 @@ void main() {
     VisibilityDetectorController.instance.updateInterval = Duration.zero;
   });
 
-  testWidgets('renders prose text and gives code fences a copy button',
-      (tester) async {
-    await tester.pumpWidget(const MaterialApp(
-      home: Scaffold(
-        body: SingleChildScrollView(
-          child: TranscriptMarkdown(
-            data: 'hi **bold**\n\n```dart\nfinal x = 1;\n```',
+  testWidgets('renders prose text and gives code fences a copy button', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: TranscriptMarkdown(
+              data: 'hi **bold**\n\n```dart\nfinal x = 1;\n```',
+            ),
           ),
         ),
       ),
-    ));
+    );
     await tester.pumpAndSettle();
 
     expect(find.textContaining('hi', findRichText: true), findsWidgets);

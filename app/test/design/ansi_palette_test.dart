@@ -10,8 +10,9 @@ import 'package:antgrid/design/theme_presets.dart';
 /// [Color.computeLuminance] so the assertion doesn't inherit a framework
 /// regression — same reasoning as palette_contrast_test.dart.
 double _relativeLuminance(Color c) {
-  double linearize(double ch) =>
-      ch <= 0.03928 ? ch / 12.92 : math.pow((ch + 0.055) / 1.055, 2.4) as double;
+  double linearize(double ch) => ch <= 0.03928
+      ? ch / 12.92
+      : math.pow((ch + 0.055) / 1.055, 2.4) as double;
   return 0.2126 * linearize(c.r) +
       0.7152 * linearize(c.g) +
       0.0722 * linearize(c.b);
@@ -25,8 +26,9 @@ double _contrast(Color a, Color b) {
 
 /// CIELAB (D65). Only used as the input to [_deltaE].
 List<double> _lab(Color c) {
-  double linearize(double ch) =>
-      ch <= 0.03928 ? ch / 12.92 : math.pow((ch + 0.055) / 1.055, 2.4) as double;
+  double linearize(double ch) => ch <= 0.03928
+      ? ch / 12.92
+      : math.pow((ch + 0.055) / 1.055, 2.4) as double;
   final r = linearize(c.r), g = linearize(c.g), b = linearize(c.b);
   final x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047;
   final y = 0.2126 * r + 0.7152 * g + 0.0722 * b;

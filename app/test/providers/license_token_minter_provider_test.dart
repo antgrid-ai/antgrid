@@ -135,102 +135,97 @@ void main() {
   // tokens. (This assertion previously rode `PairingService.tokenProvider`,
   // deleted in Task 10 — same guarantee, re-anchored on the surviving carrier:
   // the mechanisms the transport builder hands the connection.)
-  test(
-    'the connection mints from the CONNECTION-scoped minter',
-    () async {
-      LicenseTokenMinter minterYielding(String prefix, void Function() onMint) {
-        var n = 0;
-        return LicenseTokenMinter(
-          licenseApiUrl: 'https://api.antgrid.test',
-          clientId: 'cid',
-          clientSecret: 'csec',
-          httpClient: MockClient((req) async {
-            n++;
-            onMint();
-            return http.Response(
-              jsonEncode({'access_token': '$prefix-$n', 'expires_in': 3600}),
-              200,
-              headers: {'content-type': 'application/json'},
-            );
-          }),
-        );
-      }
+  test('the connection mints from the CONNECTION-scoped minter', () async {
+    LicenseTokenMinter minterYielding(String prefix, void Function() onMint) {
+      var n = 0;
+      return LicenseTokenMinter(
+        licenseApiUrl: 'https://api.antgrid.test',
+        clientId: 'cid',
+        clientSecret: 'csec',
+        httpClient: MockClient((req) async {
+          n++;
+          onMint();
+          return http.Response(
+            jsonEncode({'access_token': '$prefix-$n', 'expires_in': 3600}),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }),
+      );
+    }
 
-      var connectionMints = 0;
-      var mainRecordMints = 0;
-      final connectionMinter = minterYielding('CONN', () => connectionMints++);
-      final mainMinter = minterYielding('MAIN', () => mainRecordMints++);
+    var connectionMints = 0;
+    var mainRecordMints = 0;
+    final connectionMinter = minterYielding('CONN', () => connectionMints++);
+    final mainMinter = minterYielding('MAIN', () => mainRecordMints++);
 
-      useInMemoryPrefs();
-      final recentStore = await RecentAgentsStore.open();
-      addTearDown(recentStore.close);
-      final now = DateTime.now();
-      await recentStore.upsert(
-        RecentAgent(
-          agentDeviceId: 'M',
-          agentLabel: 'M',
-          agentEd25519Pubkey: base64Encode(List<int>.filled(32, 7)),
-          relayUrl: 'wss://relay.example/ws',
-          pairedAt: now,
-          lastConnectedAt: now,
+    useInMemoryPrefs();
+    final recentStore = await RecentAgentsStore.open();
+    addTearDown(recentStore.close);
+    final now = DateTime.now();
+    await recentStore.upsert(
+      RecentAgent(
+        agentDeviceId: 'M',
+        agentLabel: 'M',
+        agentEd25519Pubkey: base64Encode(List<int>.filled(32, 7)),
+        relayUrl: 'wss://relay.example/ws',
+        pairedAt: now,
+        lastConnectedAt: now,
+      ),
+    );
+
+    final conn = _CapturingConnection();
+    addTearDown(conn.dispose);
+
+    final container = ProviderContainer(
+      overrides: [
+        keychainDeviceStoreProvider.overrideWithValue(
+          KeychainDeviceStore(storage: _MemStorage()),
         ),
-      );
+        licenseApiUrlProvider.overrideWithValue('https://api.antgrid.test'),
+        connectionTokenMinterProvider.overrideWith(
+          (ref) async => connectionMinter,
+        ),
+        licenseTokenMinterProvider.overrideWith((ref) async => mainMinter),
+        recentAgentsStoreProvider.overrideWithValue(recentStore),
+        // The record the socket authenticates AS — a different deviceUuid from the
+        // main record, so a mix-up is a different DEVICE IDENTITY, not just a
+        // different object.
+        connectionDeviceRecordProvider.overrideWith(
+          (_) async => _record('controller-uuid'),
+        ),
+        accountAgentsProvider.overrideWith(
+          (_) async => const <InventoryAgent>[],
+        ),
+        relayConnectionManagerProvider.overrideWithValue(
+          _CapturingManager(conn),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
 
-      final conn = _CapturingConnection();
-      addTearDown(conn.dispose);
+    // The builder throws once it reaches `awaitSession` (this connection never
+    // starts a supervisor), which is fine — the mechanisms are captured before
+    // then. Listen so the rejection lands on a subscriber, not unhandled.
+    final sub = container.listen(
+      agentTransportForProvider('M'),
+      (_, _) {},
+      onError: (_, _) {},
+    );
+    addTearDown(sub.close);
+    final mech = await conn.firstMechanisms.timeout(
+      const Duration(seconds: 5),
+      onTimeout: () => throw TestFailure('the relay path must have been built'),
+    );
 
-      final container = ProviderContainer(
-        overrides: [
-          keychainDeviceStoreProvider.overrideWithValue(
-            KeychainDeviceStore(storage: _MemStorage()),
-          ),
-          licenseApiUrlProvider.overrideWithValue('https://api.antgrid.test'),
-          connectionTokenMinterProvider.overrideWith(
-            (ref) async => connectionMinter,
-          ),
-          licenseTokenMinterProvider.overrideWith((ref) async => mainMinter),
-          recentAgentsStoreProvider.overrideWithValue(recentStore),
-          // The record the socket authenticates AS — a different deviceUuid from the
-          // main record, so a mix-up is a different DEVICE IDENTITY, not just a
-          // different object.
-          connectionDeviceRecordProvider.overrideWith(
-            (_) async => _record('controller-uuid'),
-          ),
-          accountAgentsProvider.overrideWith(
-            (_) async => const <InventoryAgent>[],
-          ),
-          relayConnectionManagerProvider.overrideWithValue(
-            _CapturingManager(conn),
-          ),
-        ],
-      );
-      addTearDown(container.dispose);
+    expect(await mech.mintToken(), 'CONN-1');
+    expect(connectionMints, 1);
+    expect(mainRecordMints, 0, reason: 'the MAIN record must not be used');
 
-      // The builder throws once it reaches `awaitSession` (this connection never
-      // starts a supervisor), which is fine — the mechanisms are captured before
-      // then. Listen so the rejection lands on a subscriber, not unhandled.
-      final sub = container.listen(
-        agentTransportForProvider('M'),
-        (_, _) {},
-        onError: (_, _) {},
-      );
-      addTearDown(sub.close);
-      final mech = await conn.firstMechanisms.timeout(
-        const Duration(seconds: 5),
-        onTimeout: () =>
-            throw TestFailure('the relay path must have been built'),
-      );
-
-      expect(await mech.mintToken(), 'CONN-1');
-      expect(connectionMints, 1);
-      expect(mainRecordMints, 0, reason: 'the MAIN record must not be used');
-
-      // Fresh per attempt, never a cached token: one minted before a long backoff
-      // is already expired by the time its dial runs.
-      expect(await mech.mintToken(), 'CONN-2');
-      expect(connectionMints, 2);
-      expect(mainRecordMints, 0);
-    },
-    timeout: const Timeout(Duration(seconds: 30)),
-  );
+    // Fresh per attempt, never a cached token: one minted before a long backoff
+    // is already expired by the time its dial runs.
+    expect(await mech.mintToken(), 'CONN-2');
+    expect(connectionMints, 2);
+    expect(mainRecordMints, 0);
+  }, timeout: const Timeout(Duration(seconds: 30)));
 }

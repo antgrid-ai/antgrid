@@ -30,7 +30,9 @@ class _TabItemState extends State<TabItem> {
 
   @override
   Widget build(BuildContext context) {
-    final fg = widget.isActive ? context.antgrid.accent : context.antgrid.textMuted;
+    final fg = widget.isActive
+        ? context.antgrid.accent
+        : context.antgrid.textMuted;
     final bg = _hovered && !widget.isActive
         ? context.antgrid.bgSurface
         : context.antgrid.bgDeep;
@@ -49,7 +51,9 @@ class _TabItemState extends State<TabItem> {
             color: bg,
             border: Border(
               bottom: BorderSide(
-                color: widget.isActive ? context.antgrid.accent : Colors.transparent,
+                color: widget.isActive
+                    ? context.antgrid.accent
+                    : Colors.transparent,
                 width: 2,
               ),
             ),

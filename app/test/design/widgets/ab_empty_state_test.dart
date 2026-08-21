@@ -4,8 +4,9 @@ import 'package:antgrid/design/widgets/ab_brand_mark.dart';
 import '../test_harness.dart';
 
 void main() {
-  testWidgets('AbEmptyState shows the brand mark when showBrand is true',
-      (tester) async {
+  testWidgets('AbEmptyState shows the brand mark when showBrand is true', (
+    tester,
+  ) async {
     await pumpAntgrid(
       tester,
       const AbEmptyState(title: 'Nothing here', showBrand: true),

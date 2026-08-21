@@ -108,7 +108,9 @@ void main() {
   group('HandlerHeaderControl shield form', () {
     List<Override> overrides(FirstRunStore store) => [
       firstRunStoreProvider.overrideWithValue(store),
-      activeSessionIdProvider.overrideWith(() => ValueController<String?>('t1')),
+      activeSessionIdProvider.overrideWith(
+        () => ValueController<String?>('t1'),
+      ),
       activeSessionProvider.overrideWith((_) => null),
       handlerStateProvider.overrideWith(
         (_) => Stream.value(const HandlerState.initial()),

@@ -13,9 +13,13 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:test/test.dart';
 
 void main() {
-  final v = jsonDecode(
-    File('../../evals/fixtures/relay-envelope-vectors.json').readAsStringSync(),
-  ) as Map<String, dynamic>;
+  final v =
+      jsonDecode(
+            File(
+              '../../evals/fixtures/relay-envelope-vectors.json',
+            ).readAsStringSync(),
+          )
+          as Map<String, dynamic>;
 
   final server = (v['server'] as List).cast<Map<String, dynamic>>();
   final client = (v['client'] as List).cast<Map<String, dynamic>>();
@@ -42,9 +46,15 @@ void main() {
             expect(m.epoch, json['epoch']);
             expect(m.serverTime, json['serverTime']);
           case 'stream-opened':
-            expect((parsed as StreamOpenedMessage?)!.streamId, json['streamId']);
+            expect(
+              (parsed as StreamOpenedMessage?)!.streamId,
+              json['streamId'],
+            );
           case 'stream-closed':
-            expect((parsed as StreamClosedMessage?)!.streamId, json['streamId']);
+            expect(
+              (parsed as StreamClosedMessage?)!.streamId,
+              json['streamId'],
+            );
           case 'error':
             final m = parsed as ErrorMessage?;
             expect(m!.code, json['code']);
@@ -57,8 +67,10 @@ void main() {
           case 'peer-offline':
             expect((parsed as PeerOfflineMessage?)!.peerId, json['peerId']);
           default:
-            fail('vector $name marked parsed but has no field assertions — '
-                'add a case when mirroring a new server frame');
+            fail(
+              'vector $name marked parsed but has no field assertions — '
+              'add a case when mirroring a new server frame',
+            );
         }
       });
     }
@@ -72,22 +84,26 @@ void main() {
       test('$name emitted byte-identical', () {
         final Map<String, dynamic> emitted = switch (json['type'] as String) {
           'hello' => HelloMessage(
-              deviceType: json['deviceType'] as String,
-              deviceId: json['deviceId'] as String,
-              name: json['name'] as String,
-              publicKey: json['publicKey'] as String,
-              epoch: json['epoch'] as int,
-              licenseToken: json['licenseToken'] as String,
-              ts: json['ts'] as String,
-              nonce: json['nonce'] as String,
-              sig: json['sig'] as String,
-            ).toJson(),
-          'stream-open' =>
-            StreamOpenMessage(streamId: json['streamId'] as String).toJson(),
-          'stream-close' =>
-            StreamCloseMessage(streamId: json['streamId'] as String).toJson(),
-          _ => fail('vector $name marked dartEmits but has no constructor '
-              'case — add one when the Dart client learns to send it'),
+            deviceType: json['deviceType'] as String,
+            deviceId: json['deviceId'] as String,
+            name: json['name'] as String,
+            publicKey: json['publicKey'] as String,
+            epoch: json['epoch'] as int,
+            licenseToken: json['licenseToken'] as String,
+            ts: json['ts'] as String,
+            nonce: json['nonce'] as String,
+            sig: json['sig'] as String,
+          ).toJson(),
+          'stream-open' => StreamOpenMessage(
+            streamId: json['streamId'] as String,
+          ).toJson(),
+          'stream-close' => StreamCloseMessage(
+            streamId: json['streamId'] as String,
+          ).toJson(),
+          _ => fail(
+            'vector $name marked dartEmits but has no constructor '
+            'case — add one when the Dart client learns to send it',
+          ),
         };
         expect(emitted, equals(json));
       });

@@ -33,15 +33,15 @@ class FileViewerRouter extends StatelessWidget {
   });
 
   Widget _source() => FileContentViewer(
-        fileContent: fileContent,
-        isLoading: isLoading,
-        selectedFilePath: selectedFilePath,
-        fileWasModified: fileWasModified,
-        onRefreshContent: onRefreshContent,
-        onClose: onClose,
-        searchLine: searchLine,
-        searchQuery: searchQuery,
-      );
+    fileContent: fileContent,
+    isLoading: isLoading,
+    selectedFilePath: selectedFilePath,
+    fileWasModified: fileWasModified,
+    onRefreshContent: onRefreshContent,
+    onClose: onClose,
+    searchLine: searchLine,
+    searchQuery: searchQuery,
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -70,9 +70,17 @@ class FileViewerRouter extends StatelessWidget {
           searchQuery: searchQuery,
         );
       case FileViewerKind.image:
-        return ImageViewer(key: ValueKey(fc.path), content: fc, onClose: onClose);
+        return ImageViewer(
+          key: ValueKey(fc.path),
+          content: fc,
+          onClose: onClose,
+        );
       case FileViewerKind.pdf:
-        return FilePdfViewer(key: ValueKey(fc.path), content: fc, onClose: onClose);
+        return FilePdfViewer(
+          key: ValueKey(fc.path),
+          content: fc,
+          onClose: onClose,
+        );
       case FileViewerKind.code:
         return _source();
     }

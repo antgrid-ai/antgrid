@@ -16,6 +16,7 @@ class ProjectPreferences {
   final Set<String> expandedPaths;
   final String? selectedFilePath;
   final bool showChangedOnly;
+
   /// Persisted `_PanelMode` NAME (`normal` / `contextHidden` /
   /// `contextExpanded`), or null when the user has never chosen — which is NOT
   /// the same as choosing `normal`: the shell derives a viewport-dependent

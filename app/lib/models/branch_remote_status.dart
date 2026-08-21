@@ -21,18 +21,18 @@ enum BranchRemoteState {
   unreachable;
 
   static BranchRemoteState fromWire(String raw) => switch (raw) {
-        'no-remote' => BranchRemoteState.noRemote,
-        'no-upstream' => BranchRemoteState.noUpstream,
-        'gone' => BranchRemoteState.gone,
-        'in-sync' => BranchRemoteState.inSync,
-        'behind' => BranchRemoteState.behind,
-        'ahead' => BranchRemoteState.ahead,
-        'diverged' => BranchRemoteState.diverged,
-        'differs' => BranchRemoteState.differs,
-        // An unknown state is a newer bridge, not a broken one. Treating it as
-        // unreachable renders nothing, which is the safe end of an advisory.
-        _ => BranchRemoteState.unreachable,
-      };
+    'no-remote' => BranchRemoteState.noRemote,
+    'no-upstream' => BranchRemoteState.noUpstream,
+    'gone' => BranchRemoteState.gone,
+    'in-sync' => BranchRemoteState.inSync,
+    'behind' => BranchRemoteState.behind,
+    'ahead' => BranchRemoteState.ahead,
+    'diverged' => BranchRemoteState.diverged,
+    'differs' => BranchRemoteState.differs,
+    // An unknown state is a newer bridge, not a broken one. Treating it as
+    // unreachable renders nothing, which is the safe end of an advisory.
+    _ => BranchRemoteState.unreachable,
+  };
 }
 
 @immutable
@@ -73,18 +73,24 @@ class BranchRemoteStatus {
   factory BranchRemoteStatus.fromJson(Map<String, dynamic> json) {
     final branch = json['branch'];
     if (branch is! String || branch.isEmpty) {
-      throw const FormatException('Invalid or missing branch in BranchRemoteStatus');
+      throw const FormatException(
+        'Invalid or missing branch in BranchRemoteStatus',
+      );
     }
     final state = json['state'];
     if (state is! String) {
-      throw const FormatException('Invalid or missing state in BranchRemoteStatus');
+      throw const FormatException(
+        'Invalid or missing state in BranchRemoteStatus',
+      );
     }
     int? count(Object? v) => v is int ? v : (v is num ? v.toInt() : null);
     return BranchRemoteStatus(
       branch: branch,
       state: BranchRemoteState.fromWire(state),
       remote: json['remote'] is String ? json['remote'] as String : null,
-      remoteBranch: json['remoteBranch'] is String ? json['remoteBranch'] as String : null,
+      remoteBranch: json['remoteBranch'] is String
+          ? json['remoteBranch'] as String
+          : null,
       behind: count(json['behind']),
       ahead: count(json['ahead']),
     );
@@ -103,5 +109,6 @@ class BranchRemoteStatus {
           ahead == other.ahead;
 
   @override
-  int get hashCode => Object.hash(branch, state, remote, remoteBranch, behind, ahead);
+  int get hashCode =>
+      Object.hash(branch, state, remote, remoteBranch, behind, ahead);
 }

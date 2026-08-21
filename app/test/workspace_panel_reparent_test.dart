@@ -123,7 +123,9 @@ void main() {
     context_ = _Tally();
     await tester.pumpWidget(
       MaterialApp(
-        home: Scaffold(body: _Harness(agent: agent, context_: context_)),
+        home: Scaffold(
+          body: _Harness(agent: agent, context_: context_),
+        ),
       ),
     );
   }
@@ -160,7 +162,11 @@ void main() {
     expect(agent.inits, 1);
 
     await setMode(tester, _PanelMode.contextHidden);
-    expect(agent.inits, 1, reason: 'hiding the context panel must not remount the agent');
+    expect(
+      agent.inits,
+      1,
+      reason: 'hiding the context panel must not remount the agent',
+    );
     expect(agent.disposes, 0);
 
     await setMode(tester, _PanelMode.normal);

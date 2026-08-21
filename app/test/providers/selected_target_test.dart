@@ -11,10 +11,9 @@ void main() {
 
     expect(c.read(selectedRegistrationIdProvider), isNull);
 
-    c.read(selectedTargetProvider.notifier).set(const RemoteProject(
-      machineUuid: 'u',
-      projectId: 'p',
-    ));
+    c
+        .read(selectedTargetProvider.notifier)
+        .set(const RemoteProject(machineUuid: 'u', projectId: 'p'));
     expect(c.read(selectedRegistrationIdProvider), 'u.p');
 
     c.read(selectedTargetProvider.notifier).set(null);
@@ -43,9 +42,9 @@ void main() {
     c.read(selectedTargetProvider.notifier).set(const LocalProject('typed'));
     expect(c.read(selectedRegistrationIdProvider), 'typed');
 
-    c.read(selectedTargetProvider.notifier).set(const RemoteTarget.legacy(
-      'agent.project',
-    ));
+    c
+        .read(selectedTargetProvider.notifier)
+        .set(const RemoteTarget.legacy('agent.project'));
     expect(c.read(selectedRegistrationIdProvider), 'agent.project');
   });
 
@@ -95,9 +94,9 @@ void main() {
     addTearDown(c.dispose);
 
     selectProjectInContainer(c, 'local-proj');
-    c.read(selectedTargetProvider.notifier).set(const RemoteTarget.legacy(
-      'agent.project',
-    ));
+    c
+        .read(selectedTargetProvider.notifier)
+        .set(const RemoteTarget.legacy('agent.project'));
 
     expect(c.read(selectedRegistrationIdProvider), 'agent.project');
   });

@@ -102,7 +102,10 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
     if (message == null || !mounted) return;
     // The comment dialog holds this open indefinitely, so `mounted` alone
     // doesn't mean the focused project still has a resolved session.
-    final svc = focusedCheckoutServiceOrNull(ref.container, (s) => s.terminalService);
+    final svc = focusedCheckoutServiceOrNull(
+      ref.container,
+      (s) => s.terminalService,
+    );
     if (svc == null) return;
     svc.sendToAgentTerminal(message);
     ref.read(switchToAgentProvider)?.call();
@@ -131,10 +134,7 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
   @override
   Widget build(BuildContext context) {
     ref.listen(commandStateProvider, (prev, next) {
-      _onCommandStateChanged(
-        prev?.value,
-        next.value ?? const CommandState(),
-      );
+      _onCommandStateChanged(prev?.value, next.value ?? const CommandState());
     });
 
     final current = ref.watch(commandStateProvider).value?.current;

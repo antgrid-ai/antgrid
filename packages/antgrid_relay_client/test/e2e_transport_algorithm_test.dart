@@ -61,21 +61,26 @@ class _CountingAesGcm extends AesGcm {
 
 void main() {
   final key = Uint8List.fromList(List<int>.generate(32, (i) => i));
-  E2eTransportDart transport() =>
-      E2eTransportDart(sendKey: Uint8List.fromList(key), recvKey: Uint8List.fromList(key));
+  E2eTransportDart transport() => E2eTransportDart(
+    sendKey: Uint8List.fromList(key),
+    recvKey: Uint8List.fromList(key),
+  );
 
   tearDown(() => E2eTransportDart.useAlgorithm(AesGcm.with256bits()));
 
-  test('useAlgorithm routes seal and open through the installed cipher', () async {
-    final counting = _CountingAesGcm();
-    E2eTransportDart.useAlgorithm(counting);
+  test(
+    'useAlgorithm routes seal and open through the installed cipher',
+    () async {
+      final counting = _CountingAesGcm();
+      E2eTransportDart.useAlgorithm(counting);
 
-    final t = transport();
-    final sealed = await t.seal('hello');
-    expect(await t.open(sealed), 'hello');
-    expect(counting.encrypts, 1);
-    expect(counting.decrypts, 1);
-  });
+      final t = transport();
+      final sealed = await t.seal('hello');
+      expect(await t.open(sealed), 'hello');
+      expect(counting.encrypts, 1);
+      expect(counting.decrypts, 1);
+    },
+  );
 
   // The bridge half is node:crypto's aes-256-gcm and never learns which
   // implementation the app installed, so an installed cipher that isn't

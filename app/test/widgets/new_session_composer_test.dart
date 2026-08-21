@@ -844,51 +844,56 @@ void main() {
   });
 
   group('Branch switch confirmation dialog', () {
-    testWidgets('shows AbConfirmDialog on ActiveSessionsBranchSwitchException and retries when confirmed', (tester) async {
-      var submitCalls = <bool>[];
-      await tester.pumpWidget(
-        _host(
-          overrides: [
-            ..._baseOverrides(target: _project),
-            newSessionBranchSelectionProvider.overrideWith(
-              () => ValueController(const NewSessionBranchSelection(
-                targetId: 'p-my-repo',
-                branch: 'dev',
-              )),
-            ),
-          ],
-          submit: (ref, {allowActiveSessions = false}) async {
-            submitCalls.add(allowActiveSessions);
-            if (!allowActiveSessions) {
-              throw ActiveSessionsBranchSwitchException(
-                targetId: _project.id,
-                branch: 'dev',
-              );
-            }
-          },
-        ),
-      );
-      await tester.pumpAndSettle();
+    testWidgets(
+      'shows AbConfirmDialog on ActiveSessionsBranchSwitchException and retries when confirmed',
+      (tester) async {
+        var submitCalls = <bool>[];
+        await tester.pumpWidget(
+          _host(
+            overrides: [
+              ..._baseOverrides(target: _project),
+              newSessionBranchSelectionProvider.overrideWith(
+                () => ValueController(
+                  const NewSessionBranchSelection(
+                    targetId: 'p-my-repo',
+                    branch: 'dev',
+                  ),
+                ),
+              ),
+            ],
+            submit: (ref, {allowActiveSessions = false}) async {
+              submitCalls.add(allowActiveSessions);
+              if (!allowActiveSessions) {
+                throw ActiveSessionsBranchSwitchException(
+                  targetId: _project.id,
+                  branch: 'dev',
+                );
+              }
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
 
-      await tester.enterText(
-        find.byKey(const Key('new-session-prompt-field')),
-        'start session',
-      );
-      await tester.pump();
+        await tester.enterText(
+          find.byKey(const Key('new-session-prompt-field')),
+          'start session',
+        );
+        await tester.pump();
 
-      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
 
-      expect(submitCalls, [false]);
-      expect(find.text('Switch branch?'), findsOneWidget);
+        expect(submitCalls, [false]);
+        expect(find.text('Switch branch?'), findsOneWidget);
 
-      await tester.tap(find.text('Switch & start'));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
+        await tester.tap(find.text('Switch & start'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
 
-      expect(submitCalls, [false, true]);
-    });
+        expect(submitCalls, [false, true]);
+      },
+    );
 
     testWidgets('surfaces an error when the confirmed retry fails', (
       tester,

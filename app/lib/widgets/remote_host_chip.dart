@@ -56,7 +56,10 @@ class RemoteHostChip extends StatelessWidget {
             const SizedBox(width: AbTokens.space4),
             Text(
               label,
-              style: AbTokens.monoStyle(fontSize: AbTokens.fontXs, color: antgrid.textSecondary),
+              style: AbTokens.monoStyle(
+                fontSize: AbTokens.fontXs,
+                color: antgrid.textSecondary,
+              ),
             ),
           ],
         ),

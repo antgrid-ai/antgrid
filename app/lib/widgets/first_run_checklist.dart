@@ -180,8 +180,9 @@ class FirstRunSetupSection extends ConsumerWidget {
                 onTap: () =>
                     ref.read(firstRunProvider.notifier).dismissChecklist(),
               ),
-              onTap: () =>
-                  ref.read(firstRunProvider.notifier).toggleChecklistCollapsed(),
+              onTap: () => ref
+                  .read(firstRunProvider.notifier)
+                  .toggleChecklistCollapsed(),
             ),
           ),
           if (!collapsed)

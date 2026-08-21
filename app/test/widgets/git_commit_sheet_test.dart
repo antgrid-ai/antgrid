@@ -12,9 +12,7 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: GitCommitSheet(
-            onCommit: (m) => committedMessage = m,
-          ),
+          body: GitCommitSheet(onCommit: (m) => committedMessage = m),
         ),
       ),
     );
@@ -34,17 +32,13 @@ void main() {
     expect(committedMessage, 'my commit');
   });
 
-  testWidgets('whitespace-only message keeps Commit disabled', (
-    tester,
-  ) async {
+  testWidgets('whitespace-only message keeps Commit disabled', (tester) async {
     String? committedMessage;
 
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
-          body: GitCommitSheet(
-            onCommit: (m) => committedMessage = m,
-          ),
+          body: GitCommitSheet(onCommit: (m) => committedMessage = m),
         ),
       ),
     );
@@ -62,9 +56,7 @@ void main() {
 
     await tester.pumpWidget(
       MaterialApp(
-        home: Scaffold(
-          body: GitCommitSheet(onCommit: (_) => committed = true),
-        ),
+        home: Scaffold(body: GitCommitSheet(onCommit: (_) => committed = true)),
       ),
     );
 

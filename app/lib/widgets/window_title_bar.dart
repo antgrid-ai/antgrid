@@ -247,7 +247,10 @@ class WindowTitleBarContents extends ConsumerWidget {
         // box, so the two must move as one unit for the bar to read the same
         // way. [_searchGutter] reserves this cluster's full width, not just
         // the box's, so it never overlaps the sidebar toggle.
-        final searchFloor = math.min(AbTokens.sessionSearchPopupMinWidth, region);
+        final searchFloor = math.min(
+          AbTokens.sessionSearchPopupMinWidth,
+          region,
+        );
         final searchWidth = math.min(
           math.max(region - button * 2 - AbTokens.space6, searchFloor),
           AbTokens.sessionSearchWidth,
@@ -311,7 +314,12 @@ class WindowTitleBarContents extends ConsumerWidget {
                 ),
               ),
             ),
-            _titleBarRow(ref: ref, showSession: showSession, sidebar: sidebar, panel: panel),
+            _titleBarRow(
+              ref: ref,
+              showSession: showSession,
+              sidebar: sidebar,
+              panel: panel,
+            ),
           ],
         );
       },
@@ -344,10 +352,7 @@ class WindowTitleBarContents extends ConsumerWidget {
         button * 2 + // back + forward
         AbTokens.space6 +
         AbTokens.sessionSearchPopupMinWidth;
-    return math.max(
-      0.0,
-      math.min(leading, (centerWidth - clusterFloor) / 2),
-    );
+    return math.max(0.0, math.min(leading, (centerWidth - clusterFloor) / 2));
   }
 
   Widget _titleBarRow({

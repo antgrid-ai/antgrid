@@ -211,7 +211,10 @@ void main() {
       ],
       (container) async {
         // Never docked: the panel stays on its default view, not git.
-        expect(container.read(visibleWorkspaceViewProvider), WorkspaceView.files);
+        expect(
+          container.read(visibleWorkspaceViewProvider),
+          WorkspaceView.files,
+        );
         expect(container.read(pendingWorkspaceViewProvider), isNull);
       },
     );

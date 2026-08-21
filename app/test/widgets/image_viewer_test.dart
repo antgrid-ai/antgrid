@@ -9,36 +9,40 @@ const _png =
 
 void main() {
   testWidgets('decodes base64 and shows an Image', (tester) async {
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: ImageViewer(
-          content: const FileContent(
-            path: 'a.png',
-            content: _png,
-            size: 70,
-            encoding: 'base64',
-            mimeType: 'image/png',
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ImageViewer(
+            content: const FileContent(
+              path: 'a.png',
+              content: _png,
+              size: 70,
+              encoding: 'base64',
+              mimeType: 'image/png',
+            ),
           ),
         ),
       ),
-    ));
+    );
     await tester.pump();
     expect(find.byType(Image), findsOneWidget);
   });
 
   testWidgets('shows fallback on bad base64', (tester) async {
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: ImageViewer(
-          content: const FileContent(
-            path: 'a.png',
-            content: '!!!not-base64!!!',
-            size: 5,
-            encoding: 'base64',
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ImageViewer(
+            content: const FileContent(
+              path: 'a.png',
+              content: '!!!not-base64!!!',
+              size: 5,
+              encoding: 'base64',
+            ),
           ),
         ),
       ),
-    ));
+    );
     await tester.pump();
     expect(find.textContaining("Couldn't render"), findsOneWidget);
   });

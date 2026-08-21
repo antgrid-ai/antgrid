@@ -117,9 +117,8 @@ void main() {
     test('a second attach while one is in flight is refused as BUSY', () async {
       final gate = Completer<String>();
       final h = _Harness(
-        runner:
-            ({required fileName, required bytes, mimeType, onProgress}) =>
-                gate.future,
+        runner: ({required fileName, required bytes, mimeType, onProgress}) =>
+            gate.future,
       );
       addTearDown(h.uploader.dispose);
 
@@ -136,11 +135,10 @@ void main() {
       final gate = Completer<String>();
       void Function(int, int)? tick;
       final h = _Harness(
-        runner:
-            ({required fileName, required bytes, mimeType, onProgress}) {
-              tick = onProgress;
-              return gate.future;
-            },
+        runner: ({required fileName, required bytes, mimeType, onProgress}) {
+          tick = onProgress;
+          return gate.future;
+        },
       );
       addTearDown(h.uploader.dispose);
 

@@ -93,7 +93,8 @@ class SearchService {
       ),
     );
 
-    session.sendForCheckout(checkoutId,
+    session.sendForCheckout(
+      checkoutId,
       createAbMessage('file:search', {
         'projectId': projectId,
         'query': query,
@@ -197,7 +198,8 @@ class SearchService {
     _searchGuard = null;
     final requestId = _state.currentRequestId;
     if (requestId != null && _state.isSearching) {
-      session.sendForCheckout(checkoutId,
+      session.sendForCheckout(
+        checkoutId,
         createAbMessage('file:search-cancel', {
           'projectId': projectId,
           'requestId': requestId,

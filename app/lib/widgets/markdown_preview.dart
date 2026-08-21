@@ -43,92 +43,94 @@ class MarkdownPreview extends StatelessWidget {
           child: MarkdownWidget(
             data: content.content ?? '',
             padding: const EdgeInsets.all(AbTokens.space4),
-            config: MarkdownConfig(configs: [
-              // Prose leading, not the font's default (~1.2) — matches the
-              // transcript's PConfig. Inline code tracks it so a code run
-              // shares the surrounding paragraph's line box.
-              PConfig(
-                textStyle: AbTokens.sansStyle(
-                  color: c.textPrimary,
-                  height: 1.55,
+            config: MarkdownConfig(
+              configs: [
+                // Prose leading, not the font's default (~1.2) — matches the
+                // transcript's PConfig. Inline code tracks it so a code run
+                // shares the surrounding paragraph's line box.
+                PConfig(
+                  textStyle: AbTokens.sansStyle(
+                    color: c.textPrimary,
+                    height: 1.55,
+                  ),
                 ),
-              ),
-              // Underline-only links, matching the transcript — see
-              // markdown_body.dart for why the package default is unusable.
-              LinkConfig(
-                style: AbTokens.sansStyle(
-                  color: c.textPrimary,
-                  height: 1.55,
-                ).copyWith(decoration: TextDecoration.underline),
-              ),
-              CodeConfig(
-                style: AbTokens.monoStyle(color: c.textPrimary, height: 1.55),
-              ),
-              PreConfig(
-                // textStyle controls the inline code font; decoration supplies the block bg.
-                textStyle: AbTokens.monoStyle(
-                  color: c.textPrimary,
-                  height: 1.5,
+                // Underline-only links, matching the transcript — see
+                // markdown_body.dart for why the package default is unusable.
+                LinkConfig(
+                  style: AbTokens.sansStyle(
+                    color: c.textPrimary,
+                    height: 1.55,
+                  ).copyWith(decoration: TextDecoration.underline),
                 ),
-                decoration: BoxDecoration(color: c.bgElevated),
-                padding: const EdgeInsets.all(AbTokens.space4),
-              ),
-              // Document scale (this is a full-file view, so more hierarchy
-              // than the chat transcript): explicit sizes + weight, and all six
-              // levels pinned so H4-H6 don't fall back to the package's large
-              // defaults. Default sansStyle() is fontBody (14) with no weight,
-              // which left headings indistinguishable from body text. Headings
-              // use textSecondary (body is textPrimary) so tone plus weight,
-              // not size alone, sets them apart.
-              H1ConfigNoRule(
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontXl,
-                  color: c.textSecondary,
-                  fontWeight: FontWeight.w700,
-                  height: 1.3,
+                CodeConfig(
+                  style: AbTokens.monoStyle(color: c.textPrimary, height: 1.55),
                 ),
-              ),
-              H2ConfigNoRule(
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontLg,
-                  color: c.textSecondary,
-                  fontWeight: FontWeight.w700,
-                  height: 1.3,
+                PreConfig(
+                  // textStyle controls the inline code font; decoration supplies the block bg.
+                  textStyle: AbTokens.monoStyle(
+                    color: c.textPrimary,
+                    height: 1.5,
+                  ),
+                  decoration: BoxDecoration(color: c.bgElevated),
+                  padding: const EdgeInsets.all(AbTokens.space4),
                 ),
-              ),
-              H3ConfigNoRule(
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontBody,
-                  color: c.textSecondary,
-                  fontWeight: FontWeight.w600,
-                  height: 1.35,
+                // Document scale (this is a full-file view, so more hierarchy
+                // than the chat transcript): explicit sizes + weight, and all six
+                // levels pinned so H4-H6 don't fall back to the package's large
+                // defaults. Default sansStyle() is fontBody (14) with no weight,
+                // which left headings indistinguishable from body text. Headings
+                // use textSecondary (body is textPrimary) so tone plus weight,
+                // not size alone, sets them apart.
+                H1ConfigNoRule(
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXl,
+                    color: c.textSecondary,
+                    fontWeight: FontWeight.w700,
+                    height: 1.3,
+                  ),
                 ),
-              ),
-              H4Config(
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontMd,
-                  color: c.textSecondary,
-                  fontWeight: FontWeight.w600,
-                  height: 1.35,
+                H2ConfigNoRule(
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontLg,
+                    color: c.textSecondary,
+                    fontWeight: FontWeight.w700,
+                    height: 1.3,
+                  ),
                 ),
-              ),
-              H5Config(
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontSm,
-                  color: c.textSecondary,
-                  fontWeight: FontWeight.w600,
-                  height: 1.35,
+                H3ConfigNoRule(
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontBody,
+                    color: c.textSecondary,
+                    fontWeight: FontWeight.w600,
+                    height: 1.35,
+                  ),
                 ),
-              ),
-              H6Config(
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontSm,
-                  color: c.textSecondary,
-                  fontWeight: FontWeight.w600,
-                  height: 1.35,
+                H4Config(
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontMd,
+                    color: c.textSecondary,
+                    fontWeight: FontWeight.w600,
+                    height: 1.35,
+                  ),
                 ),
-              ),
-            ]),
+                H5Config(
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontSm,
+                    color: c.textSecondary,
+                    fontWeight: FontWeight.w600,
+                    height: 1.35,
+                  ),
+                ),
+                H6Config(
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontSm,
+                    color: c.textSecondary,
+                    fontWeight: FontWeight.w600,
+                    height: 1.35,
+                  ),
+                ),
+              ],
+            ),
           ),
         );
       },

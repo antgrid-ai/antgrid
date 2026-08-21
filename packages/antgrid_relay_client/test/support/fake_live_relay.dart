@@ -23,8 +23,7 @@ class SentFrame {
 class FakeLiveRelay extends RelayService {
   FakeLiveRelay({
     RelayConnectionState initial = RelayConnectionState.authenticated,
-  })
-      : super(crypto: CryptoService()) {
+  }) : super(crypto: CryptoService()) {
     _current = AppState(connectionState: initial);
   }
 
@@ -101,7 +100,7 @@ class FakeHandshaker implements SessionHandshaker {
 /// `seed` across a2p/p2a/confirm so mistaken key-direction bugs show up as a
 /// decrypt failure rather than an accidental match.
 SessionKeys fixedKeys(int seed) => SessionKeys(
-      a2p: Uint8List(32)..fillRange(0, 32, seed),
-      p2a: Uint8List(32)..fillRange(0, 32, (seed + 50) % 256),
-      confirm: Uint8List(32)..fillRange(0, 32, (seed + 100) % 256),
-    );
+  a2p: Uint8List(32)..fillRange(0, 32, seed),
+  p2a: Uint8List(32)..fillRange(0, 32, (seed + 50) % 256),
+  confirm: Uint8List(32)..fillRange(0, 32, (seed + 100) % 256),
+);

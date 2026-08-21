@@ -38,10 +38,7 @@ void main() {
   });
 
   test('crossing two blocks -> both full, joined', () {
-    final out = resolveCopy(
-      [_sel(0, md1), _sel(1000, md2)],
-      'bold\nSecond',
-    );
+    final out = resolveCopy([_sel(0, md1), _sel(1000, md2)], 'bold\nSecond');
     expect(out.plain, 'bold\nSecond');
     expect(out.markdown, 'Hello **bold**\n\nSecond *para*');
     expect(out.html, contains('<strong>bold</strong>'));

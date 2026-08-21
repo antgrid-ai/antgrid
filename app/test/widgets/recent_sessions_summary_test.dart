@@ -187,9 +187,7 @@ void main() {
     // contract that lets RecentSessionsTab's grouping and a mount point
     // elsewhere in the tree (the canvas top bar) agree on the current axis
     // with no shared ancestor State between them.
-    testWidgets('picking a chip updates recentGroupByProvider', (
-      tester,
-    ) async {
+    testWidgets('picking a chip updates recentGroupByProvider', (tester) async {
       final container = ProviderContainer(
         overrides: [
           recentSessionsProvider.overrideWithValue([_row('s1')]),

@@ -17,8 +17,9 @@ import '../helpers/prefs_test_mock.dart';
 // value once flipped. The point of the test is that serviceWhenReady NEVER
 // reads — let alone `watch`es — this while the session is unresolved, so the
 // throw can't surface as an unhandled exception.
-final _facadeReady =
-    NotifierProvider<ValueController<bool>, bool>(() => ValueController(false));
+final _facadeReady = NotifierProvider<ValueController<bool>, bool>(
+  () => ValueController(false),
+);
 
 final _facadeProvider = Provider<String>((ref) {
   if (!ref.watch(_facadeReady)) {

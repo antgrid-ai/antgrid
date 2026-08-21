@@ -107,8 +107,7 @@ const double _chipChevronSize = 10;
 /// border on each side, and the leading glyph. Also the chip's floor — this
 /// much is what a chip stripped down to its glyph still occupies, so a row
 /// that reserves it can never squeeze a chip into an overflow.
-const double kComposerChipGlyphWidth =
-    AbTokens.space8 * 2 + 2 + _chipGlyphSize;
+const double kComposerChipGlyphWidth = AbTokens.space8 * 2 + 2 + _chipGlyphSize;
 
 /// What the trailing chevron costs on top of [kComposerChipGlyphWidth]: the
 /// gap that separates it from the label, plus its own glyph.
@@ -548,10 +547,11 @@ class _PanelRowState extends State<PanelRow> {
                 child: Text(
                   widget.label,
                   overflow: TextOverflow.ellipsis,
-                  style: (widget.mono ? AbTokens.monoStyle : AbTokens.sansStyle)(
-                    fontSize: AbTokens.fontSm,
-                    color: fg,
-                  ),
+                  style:
+                      (widget.mono ? AbTokens.monoStyle : AbTokens.sansStyle)(
+                        fontSize: AbTokens.fontSm,
+                        color: fg,
+                      ),
                 ),
               ),
               if (widget.trailing != null) widget.trailing!,

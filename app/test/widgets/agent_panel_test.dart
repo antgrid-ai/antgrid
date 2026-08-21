@@ -56,8 +56,10 @@ class _ActionsHarness extends ConsumerWidget {
   const _ActionsHarness();
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) =>
-      Row(mainAxisSize: MainAxisSize.min, children: titleBarProjectActions(ref));
+  Widget build(BuildContext context, WidgetRef ref) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: titleBarProjectActions(ref),
+  );
 }
 
 /// Pumps the harness with [project] seeded into the store and optionally
@@ -88,9 +90,7 @@ Future<void> _pump(
           ),
         ),
       ],
-      child: const MaterialApp(
-        home: Scaffold(body: _ActionsHarness()),
-      ),
+      child: const MaterialApp(home: Scaffold(body: _ActionsHarness())),
     ),
   );
   // Let the localDeviceUuidProvider future resolve. Not pumpAndSettle: a
@@ -105,47 +105,41 @@ void main() {
 
   setUp(useInMemoryPrefs);
 
-  testWidgets(
-    'remote access off reads "Remote off"',
-    (tester) async {
-      final stores = await buildTestStoreOverrides();
-      addTearDown(stores.close);
+  testWidgets('remote access off reads "Remote off"', (tester) async {
+    final stores = await buildTestStoreOverrides();
+    addTearDown(stores.close);
 
-      final project = _localProject();
-      await _pump(
-        tester,
-        stores: stores,
-        project: project,
-        selectedId: project.projectId,
-        mobileAccessEnabled: false,
-      );
+    final project = _localProject();
+    await _pump(
+      tester,
+      stores: stores,
+      project: project,
+      selectedId: project.projectId,
+      mobileAccessEnabled: false,
+    );
 
-      expect(find.byType(AbStateChip), findsOneWidget);
-      expect(find.text('Remote off'), findsOneWidget);
-      expect(find.byType(RemoteHostChip), findsNothing);
-    },
-  );
+    expect(find.byType(AbStateChip), findsOneWidget);
+    expect(find.text('Remote off'), findsOneWidget);
+    expect(find.byType(RemoteHostChip), findsNothing);
+  });
 
-  testWidgets(
-    'remote access on reads "Remote on"',
-    (tester) async {
-      final stores = await buildTestStoreOverrides();
-      addTearDown(stores.close);
+  testWidgets('remote access on reads "Remote on"', (tester) async {
+    final stores = await buildTestStoreOverrides();
+    addTearDown(stores.close);
 
-      final project = _localProject();
-      await _pump(
-        tester,
-        stores: stores,
-        project: project,
-        selectedId: project.projectId,
-        mobileAccessEnabled: true,
-      );
+    final project = _localProject();
+    await _pump(
+      tester,
+      stores: stores,
+      project: project,
+      selectedId: project.projectId,
+      mobileAccessEnabled: true,
+    );
 
-      expect(find.byType(AbStateChip), findsOneWidget);
-      expect(find.text('Remote on'), findsOneWidget);
-      expect(find.byType(RemoteHostChip), findsNothing);
-    },
-  );
+    expect(find.byType(AbStateChip), findsOneWidget);
+    expect(find.text('Remote on'), findsOneWidget);
+    expect(find.byType(RemoteHostChip), findsNothing);
+  });
 
   testWidgets(
     'a focused remote project renders the chip AND keeps the machine switch',
@@ -187,25 +181,22 @@ void main() {
     },
   );
 
-  testWidgets(
-    'no local host uuid renders no switch',
-    (tester) async {
-      // localDeviceUuidProvider is null where there is no local bridge to
-      // govern; withholding the switch there is what keeps it machine-scoped.
-      final stores = await buildTestStoreOverrides();
-      addTearDown(stores.close);
+  testWidgets('no local host uuid renders no switch', (tester) async {
+    // localDeviceUuidProvider is null where there is no local bridge to
+    // govern; withholding the switch there is what keeps it machine-scoped.
+    final stores = await buildTestStoreOverrides();
+    addTearDown(stores.close);
 
-      await _pump(
-        tester,
-        stores: stores,
-        project: _remoteProject(),
-        selectedId: null,
-        localUuid: null,
-      );
+    await _pump(
+      tester,
+      stores: stores,
+      project: _remoteProject(),
+      selectedId: null,
+      localUuid: null,
+    );
 
-      expect(find.byType(AbStateChip), findsNothing);
-    },
-  );
+    expect(find.byType(AbStateChip), findsNothing);
+  });
 
   testWidgets(
     'mobile form factor renders no actions even for a focused remote project',

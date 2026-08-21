@@ -14,10 +14,7 @@ class StreamEnvelope {
 
   const StreamEnvelope({this.s, required this.m});
 
-  Map<String, dynamic> toJson() => {
-    if (s != null) 's': s,
-    'm': m,
-  };
+  Map<String, dynamic> toJson() => {if (s != null) 's': s, 'm': m};
 
   static StreamEnvelope? fromJson(Map<String, dynamic> json) {
     if (!json.containsKey('m')) return null;

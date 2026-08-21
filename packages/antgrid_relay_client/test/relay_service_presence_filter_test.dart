@@ -30,22 +30,24 @@ void main() {
       expect(relay.currentState.error, isNull);
     });
 
-    test('a peer-offline for THIS machine still flips presence/error',
-        () async {
-      final relay = RelayService(crypto: CryptoService())
-        ..debugSetMachineDeviceId('this-machine');
+    test(
+      'a peer-offline for THIS machine still flips presence/error',
+      () async {
+        final relay = RelayService(crypto: CryptoService())
+          ..debugSetMachineDeviceId('this-machine');
 
-      final presenceEvents = <bool>[];
-      relay.peerPresenceStream.listen(presenceEvents.add);
+        final presenceEvents = <bool>[];
+        relay.peerPresenceStream.listen(presenceEvents.add);
 
-      relay.debugHandleFrame(
-        jsonEncode({'type': 'peer-offline', 'peerId': 'this-machine'}),
-      );
-      await Future<void>.delayed(Duration.zero);
+        relay.debugHandleFrame(
+          jsonEncode({'type': 'peer-offline', 'peerId': 'this-machine'}),
+        );
+        await Future<void>.delayed(Duration.zero);
 
-      expect(presenceEvents, [false]);
-      expect(relay.currentState.error, 'Peer offline');
-    });
+        expect(presenceEvents, [false]);
+        expect(relay.currentState.error, 'Peer offline');
+      },
+    );
 
     test('a peer-online for a different machine is ignored', () async {
       final relay = RelayService(crypto: CryptoService())
@@ -60,32 +62,37 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       expect(presenceEvents, isEmpty);
-      expect(relay.currentState.connectionState,
-          RelayConnectionState.disconnected);
-    });
-
-    test('a peer-online for THIS machine flips presence — and ONLY presence',
-        () async {
-      final relay = RelayService(crypto: CryptoService())
-        ..debugSetMachineDeviceId('this-machine');
-
-      final presenceEvents = <bool>[];
-      relay.peerPresenceStream.listen(presenceEvents.add);
-
-      relay.debugHandleFrame(
-        jsonEncode({'type': 'peer-online', 'peerId': 'this-machine'}),
+      expect(
+        relay.currentState.connectionState,
+        RelayConnectionState.disconnected,
       );
-      await Future<void>.delayed(Duration.zero);
-
-      expect(presenceEvents, [true]);
-      // Agent presence is not a socket phase: the connection state tracks OUR
-      // socket only, and a peer showing up must not promote it.
-      expect(relay.currentState.connectionState,
-          RelayConnectionState.disconnected);
     });
 
     test(
-        'no machineDeviceId set: presence is ignored (fail closed) — '
+      'a peer-online for THIS machine flips presence — and ONLY presence',
+      () async {
+        final relay = RelayService(crypto: CryptoService())
+          ..debugSetMachineDeviceId('this-machine');
+
+        final presenceEvents = <bool>[];
+        relay.peerPresenceStream.listen(presenceEvents.add);
+
+        relay.debugHandleFrame(
+          jsonEncode({'type': 'peer-online', 'peerId': 'this-machine'}),
+        );
+        await Future<void>.delayed(Duration.zero);
+
+        expect(presenceEvents, [true]);
+        // Agent presence is not a socket phase: the connection state tracks OUR
+        // socket only, and a peer showing up must not promote it.
+        expect(
+          relay.currentState.connectionState,
+          RelayConnectionState.disconnected,
+        );
+      },
+    );
+
+    test('no machineDeviceId set: presence is ignored (fail closed) — '
         'an unset filter never flips this socket state', () async {
       final relay = RelayService(crypto: CryptoService());
 

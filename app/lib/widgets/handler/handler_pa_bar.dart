@@ -67,16 +67,17 @@ String handlerPaStatusLabel(HandlerSessionState session, {DateTime? now}) {
 /// Nothing is ever blocked. Handler's whole premise is acting while you are
 /// away, so a lock the user has to remember to undo would be left in the wrong
 /// position exactly when it matters.
-String? handlerTypingHint(HandlerSessionState session) =>
-    switch (session.runState) {
-      HandlerRunState.needsYou => _needsYouHint(session),
-      HandlerRunState.parked => _parkedHint(session),
-      HandlerRunState.handling =>
-        'Handler is replying — a message now may cross it',
-      // Watching is the resting state: nothing is being displaced, so a warning
-      // here would be noise on the state the session spends most of its life in.
-      HandlerRunState.watching => null,
-    };
+String? handlerTypingHint(
+  HandlerSessionState session,
+) => switch (session.runState) {
+  HandlerRunState.needsYou => _needsYouHint(session),
+  HandlerRunState.parked => _parkedHint(session),
+  HandlerRunState.handling =>
+    'Handler is replying — a message now may cross it',
+  // Watching is the resting state: nothing is being displaced, so a warning
+  // here would be noise on the state the session spends most of its life in.
+  HandlerRunState.watching => null,
+};
 
 /// An option-based prompt (`kind: 'resolve_in_session'`) is the one row a typed
 /// line neither answers nor clears — only the transcript's permission card or

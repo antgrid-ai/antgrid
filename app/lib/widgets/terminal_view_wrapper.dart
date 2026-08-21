@@ -449,7 +449,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     // the comment dialog holds this open indefinitely, and a reconnect or LRU
     // evict in that window makes the façade throw — into a fire-and-forget
     // button callback, so unhandled.
-    final svc = focusedCheckoutServiceOrNull(ref.container, (s) => s.terminalService);
+    final svc = focusedCheckoutServiceOrNull(
+      ref.container,
+      (s) => s.terminalService,
+    );
     if (svc == null) return;
     svc.sendToAgentTerminal(message);
     ref.read(switchToAgentProvider)?.call();
@@ -672,7 +675,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                     // viewport. No `_TerminalGridFreeze` here — a viewer must
                     // track the authoritative width, not pin a local one.
                     final authWidth = tab.cols * charWidth + _hPad;
-                    final grid = SizedBox(width: authWidth, child: terminalView);
+                    final grid = SizedBox(
+                      width: authWidth,
+                      child: terminalView,
+                    );
                     return authWidth <= constraints.maxWidth
                         ? Align(alignment: Alignment.center, child: grid)
                         : SingleChildScrollView(
@@ -714,7 +720,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                     ),
                   ),
                 ),
-                if (showSendButton) SendToAgentButton(onPressed: _onSendToAgent),
+                if (showSendButton)
+                  SendToAgentButton(onPressed: _onSendToAgent),
               ],
             ),
           ),

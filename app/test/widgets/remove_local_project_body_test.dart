@@ -43,12 +43,15 @@ void main() {
     await stores.close();
   });
 
-  test('a project with no isolated sessions promises only what it keeps', () async {
-    await seed([_session(checkoutKind: 'main')]);
-    final body = removeLocalProjectBody(container, 'proj-1');
-    expect(body, contains('The project folder is not deleted.'));
-    expect(body, isNot(contains('uncommitted')));
-  });
+  test(
+    'a project with no isolated sessions promises only what it keeps',
+    () async {
+      await seed([_session(checkoutKind: 'main')]);
+      final body = removeLocalProjectBody(container, 'proj-1');
+      expect(body, contains('The project folder is not deleted.'));
+      expect(body, isNot(contains('uncommitted')));
+    },
+  );
 
   test('an isolated session makes the destruction explicit', () async {
     await seed([

@@ -25,7 +25,13 @@ enum FrameKind {
   }
 }
 
-enum FrameErrorReason { badVersion, badKind, truncated, headerTooLarge, badJson }
+enum FrameErrorReason {
+  badVersion,
+  badKind,
+  truncated,
+  headerTooLarge,
+  badJson,
+}
 
 class FrameException implements Exception {
   final FrameErrorReason reason;
@@ -66,9 +72,7 @@ Uint8List encodeRouteFrame(
 /// The returned `payload` is a copy (via `sublist`), safe to retain past the
 /// current tick.
 ({Map<String, dynamic> header, Uint8List payload, FrameKind kind})
-    decodeRouteFrame(
-  Uint8List buf,
-) {
+decodeRouteFrame(Uint8List buf) {
   if (buf.length < _fixedPrefix) {
     throw FrameException(
       FrameErrorReason.truncated,

@@ -33,16 +33,19 @@ void main() {
       expect(read!.models.single.id, 'opus');
     });
 
-    test('machine key with ":" sanitizes to one file and round-trips', () async {
-      const key = 'machine:abc-123__codex';
-      await cache.write(key, catalog);
-      expect(await cache.read(key), isNotNull);
-      // Persisted under a filesystem-safe name (no raw ':').
-      final files = Directory(
-        p.join(tmp.path, 'cache', 'capability-catalog'),
-      ).listSync().map((e) => p.basename(e.path)).toList();
-      expect(files.single.contains(':'), isFalse);
-    });
+    test(
+      'machine key with ":" sanitizes to one file and round-trips',
+      () async {
+        const key = 'machine:abc-123__codex';
+        await cache.write(key, catalog);
+        expect(await cache.read(key), isNotNull);
+        // Persisted under a filesystem-safe name (no raw ':').
+        final files = Directory(
+          p.join(tmp.path, 'cache', 'capability-catalog'),
+        ).listSync().map((e) => p.basename(e.path)).toList();
+        expect(files.single.contains(':'), isFalse);
+      },
+    );
 
     test('read returns null for unknown key', () async {
       expect(await cache.read('local__missing'), isNull);

@@ -134,11 +134,7 @@ class TerminalQuickActionsBar extends StatelessWidget {
               borderRadius: AbTokens.borderRadius5,
               border: Border.all(color: p.borderDefault),
             ),
-            child: AbIcon(
-              icon,
-              size: AbTokens.fontLg,
-              color: p.textSecondary,
-            ),
+            child: AbIcon(icon, size: AbTokens.fontLg, color: p.textSecondary),
           ),
         ),
       ),
@@ -246,9 +242,7 @@ class _KeyboardToggleButtonState extends State<_KeyboardToggleButton>
               mainAxisAlignment: MainAxisAlignment.center,
               // Chevron sits above the keyboard when closed (points up/raise),
               // below it when open (points down/dismiss).
-              children: keyboardUp
-                  ? [keyboard, chevron]
-                  : [chevron, keyboard],
+              children: keyboardUp ? [keyboard, chevron] : [chevron, keyboard],
             ),
           ),
         ),

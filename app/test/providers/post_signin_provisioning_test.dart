@@ -143,53 +143,50 @@ void main() {
     },
   );
 
-  test(
-    'an APP_DEVICE_CAP rejection populates deviceCapProvider '
-    '(not a silent failure)',
-    () async {
-      final storage = _MemStorage();
-      final store = KeychainDeviceStore(storage: storage);
-      final cap = DeviceCapInfo(
-        message:
-            'Device limit reached (10/10). Remove a device to register this one.',
-        kind: DeviceCapKind.appDevice,
-        limit: 10,
-        devices: [
-          CappedDevice(id: 'd1', deviceId: 'uuid-1', displayName: 'Old laptop'),
-        ],
-      );
-      final fakeApi = _FakeDevicesApi(
-        fail: ProvisioningException('APP_DEVICE_CAP', cap.message, cap: cap),
-      );
-      CurrentUser? userCtl;
+  test('an APP_DEVICE_CAP rejection populates deviceCapProvider '
+      '(not a silent failure)', () async {
+    final storage = _MemStorage();
+    final store = KeychainDeviceStore(storage: storage);
+    final cap = DeviceCapInfo(
+      message:
+          'Device limit reached (10/10). Remove a device to register this one.',
+      kind: DeviceCapKind.appDevice,
+      limit: 10,
+      devices: [
+        CappedDevice(id: 'd1', deviceId: 'uuid-1', displayName: 'Old laptop'),
+      ],
+    );
+    final fakeApi = _FakeDevicesApi(
+      fail: ProvisioningException('APP_DEVICE_CAP', cap.message, cap: cap),
+    );
+    CurrentUser? userCtl;
 
-      final container = ProviderContainer(
-        overrides: [
-          keychainDeviceStoreProvider.overrideWithValue(store),
-          licenseApiUrlProvider.overrideWithValue('https://api.antgrid.test'),
-          deviceProvisioningProvider.overrideWithValue(
-            DeviceProvisioning(api: fakeApi, store: store, platform: 'linux'),
-          ),
-          currentUserProvider.overrideWith((ref) => userCtl),
-        ],
-      );
-      addTearDown(container.dispose);
-      container.listen(postSignInProvisioningProvider, (_, _) {});
+    final container = ProviderContainer(
+      overrides: [
+        keychainDeviceStoreProvider.overrideWithValue(store),
+        licenseApiUrlProvider.overrideWithValue('https://api.antgrid.test'),
+        deviceProvisioningProvider.overrideWithValue(
+          DeviceProvisioning(api: fakeApi, store: store, platform: 'linux'),
+        ),
+        currentUserProvider.overrideWith((ref) => userCtl),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.listen(postSignInProvisioningProvider, (_, _) {});
 
-      expect(container.read(deviceCapProvider), isNull);
+    expect(container.read(deviceCapProvider), isNull);
 
-      userCtl = CurrentUser(userId: 'u-1', email: 'a@b.test');
-      container.invalidate(currentUserProvider);
-      await Future<void>.delayed(const Duration(milliseconds: 50));
+    userCtl = CurrentUser(userId: 'u-1', email: 'a@b.test');
+    container.invalidate(currentUserProvider);
+    await Future<void>.delayed(const Duration(milliseconds: 50));
 
-      final captured = container.read(deviceCapProvider);
-      expect(captured, isNotNull);
-      expect(captured!.limit, 10);
-      expect(captured.devices.single.displayName, 'Old laptop');
-      // The cap must NOT write a keychain record (provisioning never succeeded).
-      expect(await store.read(), isNull);
-    },
-  );
+    final captured = container.read(deviceCapProvider);
+    expect(captured, isNotNull);
+    expect(captured!.limit, 10);
+    expect(captured.devices.single.displayName, 'Old laptop');
+    // The cap must NOT write a keychain record (provisioning never succeeded).
+    expect(await store.read(), isNull);
+  });
 
   test('a WORKER_CAP rejection populates deviceCapProvider too', () async {
     // Desktop registers its `kind:"agent"` record from this very call, so the
@@ -198,7 +195,8 @@ void main() {
     final storage = _MemStorage();
     final store = KeychainDeviceStore(storage: storage);
     final cap = DeviceCapInfo(
-      message: 'You are using all 1 workers — sign one out to add this machine.',
+      message:
+          'You are using all 1 workers — sign one out to add this machine.',
       kind: DeviceCapKind.worker,
       limit: 1,
       devices: [

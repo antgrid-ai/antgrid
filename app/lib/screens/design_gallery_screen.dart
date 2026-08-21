@@ -153,7 +153,10 @@ class _Masthead extends StatelessWidget {
           const Spacer(),
           Text(
             '20 cards · v0.1',
-            style: AbTokens.sansStyle(fontSize: AbTokens.fontXs, color: p.textMuted),
+            style: AbTokens.sansStyle(
+              fontSize: AbTokens.fontXs,
+              color: p.textMuted,
+            ),
           ),
         ],
       ),
@@ -252,7 +255,13 @@ class _Card extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 14),
-                Text(sub, style: TextStyle(fontSize: AbTokens.fontXs, color: p.textMuted)),
+                Text(
+                  sub,
+                  style: TextStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: p.textMuted,
+                  ),
+                ),
               ],
             ),
           ),
@@ -399,7 +408,10 @@ class _ColorRow extends StatelessWidget {
                 const SizedBox(height: 6),
                 Text(
                   name,
-                  style: AbTokens.sansStyle(fontSize: AbTokens.fontXs, color: p.textMuted),
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: p.textMuted,
+                  ),
                 ),
               ],
             ),
@@ -605,7 +617,10 @@ class _RadiiCard extends StatelessWidget {
                 const SizedBox(height: 6),
                 Text(
                   label,
-                  style: AbTokens.sansStyle(fontSize: AbTokens.fontXs, color: p.textMuted),
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: p.textMuted,
+                  ),
                 ),
               ],
             ),
@@ -651,7 +666,10 @@ class _ElevationCard extends StatelessWidget {
               ),
               child: Text(
                 'elev-$level',
-                style: AbTokens.sansStyle(fontSize: AbTokens.fontXs, color: p.textMuted),
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontXs,
+                  color: p.textMuted,
+                ),
               ),
             ),
         ],
@@ -729,7 +747,10 @@ class _KbdDemo extends StatelessWidget {
                   width: 170,
                   child: Text(
                     label,
-                    style: TextStyle(fontSize: AbTokens.fontMd, color: p.textMuted),
+                    style: TextStyle(
+                      fontSize: AbTokens.fontMd,
+                      color: p.textMuted,
+                    ),
                   ),
                 ),
                 AbKbdGroup(keys),

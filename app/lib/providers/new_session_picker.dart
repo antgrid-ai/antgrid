@@ -630,32 +630,34 @@ final newSessionHasValidTargetProvider = Provider<bool>((ref) {
 
 final newSessionBranchCatalogProvider =
     FutureProvider.autoDispose<GitBranchCatalog?>((ref) async {
-  final target = ref.watch(selectedTargetProjectProvider);
-  if (target == null) return null;
+      final target = ref.watch(selectedTargetProjectProvider);
+      if (target == null) return null;
 
-  if (target.isLocal) {
-    final host = await ref.watch(hostControllerProvider).ensureHost();
-    final client = HostControlClient(
-      port: host.controlPort,
-      token: host.token,
-    );
-    try {
-      return await client.gitBranches(
-        projectId: target.id,
-        projectPath: target.detail,
+      if (target.isLocal) {
+        final host = await ref.watch(hostControllerProvider).ensureHost();
+        final client = HostControlClient(
+          port: host.controlPort,
+          token: host.token,
+        );
+        try {
+          return await client.gitBranches(
+            projectId: target.id,
+            projectPath: target.detail,
+          );
+        } finally {
+          client.close();
+        }
+      }
+
+      final machineUuid = target.machineUuid ?? baseDeviceUuid(target.id);
+      final client = await ref.watch(
+        controlPlaneClientForProvider(machineUuid).future,
       );
-    } finally {
-      client.close();
-    }
-  }
-
-  final machineUuid = target.machineUuid ?? baseDeviceUuid(target.id);
-  final client = await ref.watch(controlPlaneClientForProvider(machineUuid).future);
-  if (client == null) {
-    throw StateError('Machine control plane unavailable');
-  }
-  return await client.gitBranches(projectId: target.projectId ?? target.id);
-});
+      if (client == null) {
+        throw StateError('Machine control plane unavailable');
+      }
+      return await client.gitBranches(projectId: target.projectId ?? target.id);
+    });
 
 /// The branch this session will actually use: the explicit pick when it is
 /// still valid for the selected target, else the project's current branch.
@@ -694,64 +696,68 @@ final newSessionEffectiveBranchProvider = Provider.autoDispose<String?>((ref) {
 /// the tree is a leak the widget tests fail on.
 final newSessionBranchRemoteStatusProvider = FutureProvider.autoDispose
     .family<BranchRemoteStatus?, ({String targetId, String branch})>((
-  ref,
-  key,
-) async {
-  final target = ref.watch(selectedTargetProjectProvider);
-  if (target == null || target.id != key.targetId) return null;
+      ref,
+      key,
+    ) async {
+      final target = ref.watch(selectedTargetProjectProvider);
+      if (target == null || target.id != key.targetId) return null;
 
-  // Settles only after the user stops moving through branches. Disposal during
-  // the wait — composer closed, start pressed, branch changed again — cancels
-  // the timer and releases the gate, so the request never reaches the network
-  // and no timer is left pending behind the tree.
-  var cancelled = false;
-  final gate = Completer<void>();
-  final debounce = Timer(
-    const Duration(milliseconds: 250),
-    () => gate.isCompleted ? null : gate.complete(),
-  );
-  ref.onDispose(() {
-    cancelled = true;
-    debounce.cancel();
-    if (!gate.isCompleted) gate.complete();
-  });
-  await gate.future;
-  if (cancelled) return null;
+      // Settles only after the user stops moving through branches. Disposal during
+      // the wait — composer closed, start pressed, branch changed again — cancels
+      // the timer and releases the gate, so the request never reaches the network
+      // and no timer is left pending behind the tree.
+      var cancelled = false;
+      final gate = Completer<void>();
+      final debounce = Timer(
+        const Duration(milliseconds: 250),
+        () => gate.isCompleted ? null : gate.complete(),
+      );
+      ref.onDispose(() {
+        cancelled = true;
+        debounce.cancel();
+        if (!gate.isCompleted) gate.complete();
+      });
+      await gate.future;
+      if (cancelled) return null;
 
-  try {
-    if (target.isLocal) {
-      final host = await ref.watch(hostControllerProvider).ensureHost();
-      final client = HostControlClient(port: host.controlPort, token: host.token);
       try {
+        if (target.isLocal) {
+          final host = await ref.watch(hostControllerProvider).ensureHost();
+          final client = HostControlClient(
+            port: host.controlPort,
+            token: host.token,
+          );
+          try {
+            return await client.gitRemoteState(
+              projectId: target.id,
+              projectPath: target.detail,
+              branch: key.branch,
+            );
+          } finally {
+            client.close();
+          }
+        }
+        final machineUuid = target.machineUuid ?? baseDeviceUuid(target.id);
+        final client = await ref.watch(
+          controlPlaneClientForProvider(machineUuid).future,
+        );
+        if (client == null) return null;
         return await client.gitRemoteState(
-          projectId: target.id,
-          projectPath: target.detail,
+          projectId: target.projectId ?? target.id,
           branch: key.branch,
         );
-      } finally {
-        client.close();
+      } catch (_) {
+        // Offline, credentials needed, bridge too old to know the verb — all of it
+        // is "we cannot say", and an advisory that cannot say anything says nothing.
+        return null;
       }
-    }
-    final machineUuid = target.machineUuid ?? baseDeviceUuid(target.id);
-    final client =
-        await ref.watch(controlPlaneClientForProvider(machineUuid).future);
-    if (client == null) return null;
-    return await client.gitRemoteState(
-      projectId: target.projectId ?? target.id,
-      branch: key.branch,
-    );
-  } catch (_) {
-    // Offline, credentials needed, bridge too old to know the verb — all of it
-    // is "we cannot say", and an advisory that cannot say anything says nothing.
-    return null;
-  }
-});
+    });
 
-final newSessionBranchSelectionProvider = NotifierProvider<
-    ValueController<NewSessionBranchSelection?>,
-    NewSessionBranchSelection?>(
-  () => ValueController<NewSessionBranchSelection?>(null),
-);
+final newSessionBranchSelectionProvider =
+    NotifierProvider<
+      ValueController<NewSessionBranchSelection?>,
+      NewSessionBranchSelection?
+    >(() => ValueController<NewSessionBranchSelection?>(null));
 
 /// Ephemeral opt-in for a new managed worktree. It is intentionally not a
 /// preference: the capability belongs to the selected host/project and the

@@ -233,7 +233,9 @@ void main() {
     TargetPlatform.linux,
     (tester) async {
       final written = await pumpTerminal(tester, 't-linux-ctrl-v');
-      await chord(tester, [LogicalKeyboardKey.controlLeft], LogicalKeyboardKey.keyV);
+      await chord(tester, [
+        LogicalKeyboardKey.controlLeft,
+      ], LogicalKeyboardKey.keyV);
 
       expect(written, [_ctrlV]);
     },
@@ -248,11 +250,10 @@ void main() {
         't-linux-paste',
         clipboardText: 'hi',
       );
-      await chord(
-        tester,
-        [LogicalKeyboardKey.controlLeft, LogicalKeyboardKey.shiftLeft],
-        LogicalKeyboardKey.keyV,
-      );
+      await chord(tester, [
+        LogicalKeyboardKey.controlLeft,
+        LogicalKeyboardKey.shiftLeft,
+      ], LogicalKeyboardKey.keyV);
 
       expect(String.fromCharCodes(written), 'hi');
     },
@@ -267,7 +268,9 @@ void main() {
         't-win-paste',
         clipboardText: 'hi',
       );
-      await chord(tester, [LogicalKeyboardKey.controlLeft], LogicalKeyboardKey.keyV);
+      await chord(tester, [
+        LogicalKeyboardKey.controlLeft,
+      ], LogicalKeyboardKey.keyV);
 
       expect(String.fromCharCodes(written), 'hi');
       expect(written, isNot(contains(_ctrlV)));
@@ -278,11 +281,9 @@ void main() {
     TargetPlatform.windows,
     (tester) async {
       final written = await pumpTerminal(tester, 't-agent-c', tabType: 'agent');
-      await chord(
-        tester,
-        [LogicalKeyboardKey.controlLeft],
-        LogicalKeyboardKey.keyC,
-      );
+      await chord(tester, [
+        LogicalKeyboardKey.controlLeft,
+      ], LogicalKeyboardKey.keyC);
 
       expect(written, isEmpty);
     },
@@ -293,11 +294,9 @@ void main() {
     TargetPlatform.windows,
     (tester) async {
       final written = await pumpTerminal(tester, 't-shell-c');
-      await chord(
-        tester,
-        [LogicalKeyboardKey.controlLeft],
-        LogicalKeyboardKey.keyC,
-      );
+      await chord(tester, [
+        LogicalKeyboardKey.controlLeft,
+      ], LogicalKeyboardKey.keyC);
 
       expect(written, [0x03]);
     },
@@ -312,11 +311,9 @@ void main() {
         't-ios-paste',
         clipboardText: 'hi',
       );
-      await chord(
-        tester,
-        [LogicalKeyboardKey.metaLeft],
-        LogicalKeyboardKey.keyV,
-      );
+      await chord(tester, [
+        LogicalKeyboardKey.metaLeft,
+      ], LogicalKeyboardKey.keyV);
 
       expect(String.fromCharCodes(written), 'hi');
     },
@@ -357,11 +354,9 @@ void main() {
         readImage: () async => anImage(),
         onTransport: (t) => transport = t,
       );
-      await chord(
-        tester,
-        [LogicalKeyboardKey.controlLeft],
-        LogicalKeyboardKey.keyV,
-      );
+      await chord(tester, [
+        LogicalKeyboardKey.controlLeft,
+      ], LogicalKeyboardKey.keyV);
 
       final start = transport.sent.firstWhere(
         (m) => m['type'] == 'file:upload-start',
@@ -406,11 +401,9 @@ void main() {
         mode: ProjectSessionMode.relay,
         readImage: () async => null,
       );
-      await chord(
-        tester,
-        [LogicalKeyboardKey.controlLeft],
-        LogicalKeyboardKey.keyV,
-      );
+      await chord(tester, [
+        LogicalKeyboardKey.controlLeft,
+      ], LogicalKeyboardKey.keyV);
 
       expect(String.fromCharCodes(written), 'hi');
       expect(written, isNot(contains(_ctrlV)));
@@ -435,11 +428,9 @@ void main() {
         },
         onTransport: (t) => transport = t,
       );
-      await chord(
-        tester,
-        [LogicalKeyboardKey.controlLeft],
-        LogicalKeyboardKey.keyV,
-      );
+      await chord(tester, [
+        LogicalKeyboardKey.controlLeft,
+      ], LogicalKeyboardKey.keyV);
 
       expect(probed, isFalse);
       expect(String.fromCharCodes(written), 'hi');

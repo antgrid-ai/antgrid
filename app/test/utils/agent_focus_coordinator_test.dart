@@ -4,7 +4,8 @@ import 'package:antgrid/utils/agent_focus_coordinator.dart';
 void main() {
   test('focuses the newly viewed terminal and blurs the previous one', () {
     final log = <String>[];
-    void Function(bool) sink(String id) => (focused) => log.add('$id:$focused');
+    void Function(bool) sink(String id) =>
+        (focused) => log.add('$id:$focused');
 
     final c = AgentFocusCoordinator();
     final keyA = Object();
@@ -19,7 +20,8 @@ void main() {
 
   test('null view (app backgrounded / nothing on screen) blurs current', () {
     final log = <String>[];
-    void Function(bool) sink(String id) => (focused) => log.add('$id:$focused');
+    void Function(bool) sink(String id) =>
+        (focused) => log.add('$id:$focused');
 
     final c = AgentFocusCoordinator();
     final keyA = Object();
@@ -39,7 +41,10 @@ void main() {
 
     final c = AgentFocusCoordinator();
     c.setViewed(keyA, (focused) => log.add('a:$focused'));
-    c.setViewed(keyA, (focused) => log.add('a:$focused')); // different closure, same key
+    c.setViewed(
+      keyA,
+      (focused) => log.add('a:$focused'),
+    ); // different closure, same key
     expect(log, ['a:true']);
   });
 }

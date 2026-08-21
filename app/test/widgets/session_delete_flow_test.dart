@@ -148,10 +148,7 @@ void main() {
           find.text('Shared-surface body. This cannot be undone.'),
           findsOneWidget,
         );
-        expect(
-          find.textContaining('isolated working directory'),
-          findsNothing,
-        );
+        expect(find.textContaining('isolated working directory'), findsNothing);
         await _tap(t, 'Delete');
       },
     );

@@ -34,16 +34,18 @@ void main() {
 
   test('a local project resolves to its stored display name', () async {
     final container = await containerFor();
-    await container.read(projectsProvider.notifier).upsert(
-      AbProject(
-        projectId: '6e5c50e5d6f973a8',
-        folder: '/repos/antgrid',
-        displayName: 'antgrid',
-        hostDeviceUuid: 'uuidA',
-        hostMachineName: 'desk',
-        lastOpenedAt: DateTime.now(),
-      ),
-    );
+    await container
+        .read(projectsProvider.notifier)
+        .upsert(
+          AbProject(
+            projectId: '6e5c50e5d6f973a8',
+            folder: '/repos/antgrid',
+            displayName: 'antgrid',
+            hostDeviceUuid: 'uuidA',
+            hostMachineName: 'desk',
+            lastOpenedAt: DateTime.now(),
+          ),
+        );
 
     expect(
       container.read(projectDisplayNameProvider('6e5c50e5d6f973a8')),
@@ -67,6 +69,9 @@ void main() {
     final container = await containerFor();
     // Null is the contract: a caller with a live `agent:status` name must be
     // able to prefer it, and only fall through to the id as a last resort.
-    expect(container.read(projectDisplayNameProvider('6e5c50e5d6f973a8')), isNull);
+    expect(
+      container.read(projectDisplayNameProvider('6e5c50e5d6f973a8')),
+      isNull,
+    );
   });
 }

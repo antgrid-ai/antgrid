@@ -101,10 +101,9 @@ Future<void> main() async {
   // JetBrains Mono NL faces. The asset is the distribution; this makes it
   // reachable from the standard Flutter licence listing.
   LicenseRegistry.addLicense(() async* {
-    yield LicenseEntryWithLineBreaks(
-      const ['JetBrains Mono NL'],
-      await rootBundle.loadString('assets/fonts/OFL.txt'),
-    );
+    yield LicenseEntryWithLineBreaks(const [
+      'JetBrains Mono NL',
+    ], await rootBundle.loadString('assets/fonts/OFL.txt'));
   });
   // Draw behind transparent system bars on mobile so the app's own dark
   // surfaces reach the screen edges (no opaque OS bar bands). Bar icon

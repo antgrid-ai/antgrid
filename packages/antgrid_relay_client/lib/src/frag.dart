@@ -85,7 +85,7 @@ int utf8ByteLength(String s) {
 // points (astral chars as one rune, unpaired surrogates as their raw value), so
 // the UTF-8 length is pure arithmetic — no per-character allocation.
 int _escapedLenForRune(int rune) {
-  if (rune == 0x22 /* " */ || rune == 0x5c /* \ */) return 2;
+  if (rune == 0x22 /* " */ || rune == 0x5c /* \ */ ) return 2;
   if (rune == 0x08 ||
       rune == 0x09 ||
       rune == 0x0a ||

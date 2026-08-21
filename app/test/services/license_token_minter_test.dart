@@ -5,38 +5,48 @@ import 'package:http/testing.dart';
 import 'package:antgrid/services/license_token_minter.dart';
 
 void main() {
-  test('mint() POSTs client_credentials form and returns access_token', () async {
-    late http.Request captured;
-    final client = MockClient((req) async {
-      captured = req;
-      return http.Response(
-        jsonEncode({'access_token': 'tok-abc', 'expires_in': 3600}),
-        200,
-        headers: {'content-type': 'application/json'},
+  test(
+    'mint() POSTs client_credentials form and returns access_token',
+    () async {
+      late http.Request captured;
+      final client = MockClient((req) async {
+        captured = req;
+        return http.Response(
+          jsonEncode({'access_token': 'tok-abc', 'expires_in': 3600}),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      final minter = LicenseTokenMinter(
+        licenseApiUrl: 'https://api.antgrid.test',
+        clientId: 'cid',
+        clientSecret: 'csec',
+        httpClient: client,
       );
-    });
 
-    final minter = LicenseTokenMinter(
-      licenseApiUrl: 'https://api.antgrid.test',
-      clientId: 'cid',
-      clientSecret: 'csec',
-      httpClient: client,
-    );
+      final token = await minter.mint();
 
-    final token = await minter.mint();
-
-    expect(token, 'tok-abc');
-    expect(captured.url.toString(), 'https://api.antgrid.test/api/auth/oauth2/token');
-    expect(captured.method, 'POST');
-    expect(captured.headers['content-type'],
-        contains('application/x-www-form-urlencoded'));
-    expect(captured.headers['authorization'],
-        'Basic ${base64Encode(utf8.encode('cid:csec'))}');
-    final body = Uri.splitQueryString(captured.body);
-    expect(body['grant_type'], 'client_credentials');
-    expect(body['scope'], 'agent');
-    expect(body['resource'], 'https://api.antgrid.test/api/auth');
-  });
+      expect(token, 'tok-abc');
+      expect(
+        captured.url.toString(),
+        'https://api.antgrid.test/api/auth/oauth2/token',
+      );
+      expect(captured.method, 'POST');
+      expect(
+        captured.headers['content-type'],
+        contains('application/x-www-form-urlencoded'),
+      );
+      expect(
+        captured.headers['authorization'],
+        'Basic ${base64Encode(utf8.encode('cid:csec'))}',
+      );
+      final body = Uri.splitQueryString(captured.body);
+      expect(body['grant_type'], 'client_credentials');
+      expect(body['scope'], 'agent');
+      expect(body['resource'], 'https://api.antgrid.test/api/auth');
+    },
+  );
 
   test('mint() throws DeviceRevokedException on 401', () async {
     final client = MockClient((req) async {
@@ -53,8 +63,11 @@ void main() {
 
   test('mint() throws on malformed body (no access_token)', () async {
     final client = MockClient((req) async {
-      return http.Response('{"expires_in":3600}', 200,
-          headers: {'content-type': 'application/json'});
+      return http.Response(
+        '{"expires_in":3600}',
+        200,
+        headers: {'content-type': 'application/json'},
+      );
     });
     final minter = LicenseTokenMinter(
       licenseApiUrl: 'https://api.antgrid.test',
@@ -64,11 +77,13 @@ void main() {
     );
     expect(
       minter.mint(),
-      throwsA(isA<Exception>().having(
-        (e) => e.toString(),
-        'message',
-        contains('malformed'),
-      )),
+      throwsA(
+        isA<Exception>().having(
+          (e) => e.toString(),
+          'message',
+          contains('malformed'),
+        ),
+      ),
     );
   });
 
@@ -125,8 +140,11 @@ void main() {
     expect(minter.getToken(), 'tok-1');
 
     await Future<void>.delayed(const Duration(milliseconds: 1200));
-    expect(callCount, greaterThanOrEqualTo(2),
-        reason: 'minter should have re-minted at ~800ms');
+    expect(
+      callCount,
+      greaterThanOrEqualTo(2),
+      reason: 'minter should have re-minted at ~800ms',
+    );
     minter.stop();
   });
 

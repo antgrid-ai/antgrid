@@ -17,15 +17,17 @@ void main() {
     expect(s.behind, 3);
   });
 
-  test('an unrecognized state degrades to unreachable, which renders nothing',
-      () {
-    final s = BranchRemoteStatus.fromJson(const {
-      'branch': 'main',
-      'state': 'some-future-state',
-    });
-    expect(s.state, BranchRemoteState.unreachable);
-    expect(s.isStaleBase, isFalse);
-  });
+  test(
+    'an unrecognized state degrades to unreachable, which renders nothing',
+    () {
+      final s = BranchRemoteStatus.fromJson(const {
+        'branch': 'main',
+        'state': 'some-future-state',
+      });
+      expect(s.state, BranchRemoteState.unreachable);
+      expect(s.isStaleBase, isFalse);
+    },
+  );
 
   test('only stale-base states warn', () {
     BranchRemoteStatus of(BranchRemoteState st) =>
@@ -53,49 +55,60 @@ void main() {
   });
 
   test('remoteRefLabel never renders a dangling slash', () {
-    const s = BranchRemoteStatus(branch: 'main', state: BranchRemoteState.differs);
+    const s = BranchRemoteStatus(
+      branch: 'main',
+      state: BranchRemoteState.differs,
+    );
     expect(s.remoteRefLabel, 'main');
   });
 
   test('copy pluralizes and omits counts it cannot know', () {
     expect(
-      branchRemoteAdvisoryMessage(const BranchRemoteStatus(
-        branch: 'main',
-        state: BranchRemoteState.behind,
-        remote: 'origin',
-        remoteBranch: 'main',
-        behind: 1,
-      )),
+      branchRemoteAdvisoryMessage(
+        const BranchRemoteStatus(
+          branch: 'main',
+          state: BranchRemoteState.behind,
+          remote: 'origin',
+          remoteBranch: 'main',
+          behind: 1,
+        ),
+      ),
       'main is 1 commit behind origin/main',
     );
     expect(
-      branchRemoteAdvisoryMessage(const BranchRemoteStatus(
-        branch: 'main',
-        state: BranchRemoteState.behind,
-        remote: 'origin',
-        remoteBranch: 'main',
-        behind: 3,
-      )),
+      branchRemoteAdvisoryMessage(
+        const BranchRemoteStatus(
+          branch: 'main',
+          state: BranchRemoteState.behind,
+          remote: 'origin',
+          remoteBranch: 'main',
+          behind: 3,
+        ),
+      ),
       'main is 3 commits behind origin/main',
     );
     expect(
-      branchRemoteAdvisoryMessage(const BranchRemoteStatus(
-        branch: 'main',
-        state: BranchRemoteState.diverged,
-        remote: 'origin',
-        remoteBranch: 'main',
-        behind: 2,
-        ahead: 1,
-      )),
+      branchRemoteAdvisoryMessage(
+        const BranchRemoteStatus(
+          branch: 'main',
+          state: BranchRemoteState.diverged,
+          remote: 'origin',
+          remoteBranch: 'main',
+          behind: 2,
+          ahead: 1,
+        ),
+      ),
       'main has diverged from origin/main — 2 behind, 1 ahead',
     );
     // No fetch, so no counts — and none are invented.
-    final differs = branchRemoteAdvisoryMessage(const BranchRemoteStatus(
-      branch: 'main',
-      state: BranchRemoteState.differs,
-      remote: 'origin',
-      remoteBranch: 'main',
-    ));
+    final differs = branchRemoteAdvisoryMessage(
+      const BranchRemoteStatus(
+        branch: 'main',
+        state: BranchRemoteState.differs,
+        remote: 'origin',
+        remoteBranch: 'main',
+      ),
+    );
     expect(differs, 'origin/main has commits that are not in main');
     expect(differs, isNot(contains('0')));
   });
@@ -105,20 +118,24 @@ void main() {
   // commits behind" or the word "null" inside a warning.
   test('copy never invents a count the wire did not carry', () {
     expect(
-      branchRemoteAdvisoryMessage(const BranchRemoteStatus(
-        branch: 'main',
-        state: BranchRemoteState.behind,
-        remote: 'origin',
-        remoteBranch: 'main',
-      )),
+      branchRemoteAdvisoryMessage(
+        const BranchRemoteStatus(
+          branch: 'main',
+          state: BranchRemoteState.behind,
+          remote: 'origin',
+          remoteBranch: 'main',
+        ),
+      ),
       'origin/main has commits that are not in main',
     );
-    final diverged = branchRemoteAdvisoryMessage(const BranchRemoteStatus(
-      branch: 'main',
-      state: BranchRemoteState.diverged,
-      remote: 'origin',
-      remoteBranch: 'main',
-    ));
+    final diverged = branchRemoteAdvisoryMessage(
+      const BranchRemoteStatus(
+        branch: 'main',
+        state: BranchRemoteState.diverged,
+        remote: 'origin',
+        remoteBranch: 'main',
+      ),
+    );
     expect(diverged, 'main has diverged from origin/main');
     expect(diverged, isNot(contains('null')));
   });

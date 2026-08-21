@@ -24,12 +24,13 @@ Widget _wrap(SessionEntry session) => MaterialApp(
   theme: ThemeData.dark().copyWith(
     extensions: <ThemeExtension<dynamic>>[kDefaultPalette],
   ),
-  home: Scaffold(body: Center(child: SessionIsolationBadge(session: session))),
+  home: Scaffold(
+    body: Center(child: SessionIsolationBadge(session: session)),
+  ),
 );
 
-Finder _badgeGlyph() => find.byWidgetPredicate(
-  (w) => w is AbIcon && w.icon == AbIcons.isolated,
-);
+Finder _badgeGlyph() =>
+    find.byWidgetPredicate((w) => w is AbIcon && w.icon == AbIcons.isolated);
 
 void main() {
   testWidgets('a session on the shared tree wears no badge', (tester) async {
@@ -83,9 +84,7 @@ void main() {
   testWidgets('a checkout the bridge cannot reach says so', (tester) async {
     for (final state in ['missing', 'failed']) {
       await tester.pumpWidget(
-        _wrap(
-          _session(checkoutKind: 'managed-worktree', checkoutState: state),
-        ),
+        _wrap(_session(checkoutKind: 'managed-worktree', checkoutState: state)),
       );
       expect(
         find.byTooltip('This isolated session\'s workspace is unavailable.'),

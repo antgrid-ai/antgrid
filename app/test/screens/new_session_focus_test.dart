@@ -38,7 +38,9 @@ class _BridgeLikeTransport extends FakeAgentTransport {
 
   List<Map<String, dynamic>> _byRecency() {
     final l = [...sessions];
-    l.sort((a, b) => (b['lastUsedAt'] as int).compareTo(a['lastUsedAt'] as int));
+    l.sort(
+      (a, b) => (b['lastUsedAt'] as int).compareTo(a['lastUsedAt'] as int),
+    );
     return l;
   }
 
@@ -135,7 +137,8 @@ void main() {
   testWidgets('the started session keeps focus though a sibling ranks first', (
     tester,
   ) async {
-    final t = _BridgeLikeTransport(bumpOnStart: true)..sessions.add(_oldSession());
+    final t = _BridgeLikeTransport(bumpOnStart: true)
+      ..sessions.add(_oldSession());
     final c = await openProjectThenNewSession(tester, t);
 
     final created = await startFrom(c);
@@ -152,7 +155,9 @@ void main() {
     // recency does not get to answer a question the user already answered.
     expect(t.lastUsedOf('A'), greaterThan(t.lastUsedOf('B')));
     expect(c.read(activeSessionIdProvider), 'B');
-    await tester.pump(const Duration(seconds: 1)); // cache write-through debounce
+    await tester.pump(
+      const Duration(seconds: 1),
+    ); // cache write-through debounce
   });
 
   testWidgets('a focus already made survives a remount that carries no id', (
@@ -160,7 +165,8 @@ void main() {
   ) async {
     // The pending id is a single-use hand-off that every early return in the
     // bootstrap drops, so the default branch has to hold the line on its own.
-    final t = _BridgeLikeTransport(bumpOnStart: true)..sessions.add(_oldSession());
+    final t = _BridgeLikeTransport(bumpOnStart: true)
+      ..sessions.add(_oldSession());
     final c = await openProjectThenNewSession(tester, t);
 
     await startFrom(c);

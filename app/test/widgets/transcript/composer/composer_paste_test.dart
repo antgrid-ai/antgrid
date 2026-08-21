@@ -56,18 +56,20 @@ void main() {
       expect(attached, isEmpty);
     });
 
-    test('reader throws → reported, and paste still falls back to text',
-        () async {
-      final errors = <Object>[];
-      final result = await resolveComposerPaste(
-        readImage: () async => throw const ClipboardImageException('boom'),
-        onImagePasted: (_) => fail('must not attach on a failed read'),
-        readText: () => text('hello'),
-        onImageReadError: (e, _) => errors.add(e),
-      );
-      expect(result?.plainText, 'hello');
-      expect(errors, hasLength(1));
-    });
+    test(
+      'reader throws → reported, and paste still falls back to text',
+      () async {
+        final errors = <Object>[];
+        final result = await resolveComposerPaste(
+          readImage: () async => throw const ClipboardImageException('boom'),
+          onImagePasted: (_) => fail('must not attach on a failed read'),
+          readText: () => text('hello'),
+          onImageReadError: (e, _) => errors.add(e),
+        );
+        expect(result?.plainText, 'hello');
+        expect(errors, hasLength(1));
+      },
+    );
 
     test('empty clipboard stays empty', () async {
       final result = await resolveComposerPaste(
@@ -95,7 +97,11 @@ void main() {
 
     test('an alternate spelling of the extension is left alone', () {
       expect(
-        resolvePastedImageFileName('photo.jpeg', 'jpg', altExts: const ['jpeg']),
+        resolvePastedImageFileName(
+          'photo.jpeg',
+          'jpg',
+          altExts: const ['jpeg'],
+        ),
         'photo.jpeg',
       );
     });

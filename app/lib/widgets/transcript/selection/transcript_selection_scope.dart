@@ -36,7 +36,7 @@ class _TouchedRange {
 /// nothing rebuilds on selection; output is pulled only when a copy action fires.
 class TranscriptSelectionController {
   TranscriptSelectionController({TranscriptClipboardSink? sink})
-      : _sink = sink ?? const SuperClipboardSink();
+    : _sink = sink ?? const SuperClipboardSink();
 
   final TranscriptClipboardSink _sink;
   final _handles = <BlockHandle>{};
@@ -49,8 +49,10 @@ class TranscriptSelectionController {
   // the live ranges would read empty at copy time. We keep the last non-empty
   // snapshot — ranges only, sources built lazily at copy time to keep
   // selection-drag off the source-building path — and fall back to it.
-  ({String nativePlain, List<_TouchedRange> ranges}) _lastNonEmpty =
-      (nativePlain: '', ranges: const []);
+  ({String nativePlain, List<_TouchedRange> ranges}) _lastNonEmpty = (
+    nativePlain: '',
+    ranges: const [],
+  );
 
   /// Records the ambient selection on every change: the native plain text, plus
   /// a snapshot of the touched-block ranges whenever the selection is non-empty.
@@ -131,8 +133,8 @@ class TranscriptSelectionScope extends InheritedWidget {
   final TranscriptSelectionController controller;
 
   static TranscriptSelectionController of(BuildContext context) {
-    final scope =
-        context.dependOnInheritedWidgetOfExactType<TranscriptSelectionScope>();
+    final scope = context
+        .dependOnInheritedWidgetOfExactType<TranscriptSelectionScope>();
     assert(scope != null, 'No TranscriptSelectionScope found in context');
     return scope!.controller;
   }

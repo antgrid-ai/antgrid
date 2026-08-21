@@ -113,14 +113,17 @@ class _BranchPanelState extends ConsumerState<BranchPanel> {
     return catalogAsync.when(
       data: (catalog) {
         if (catalog == null) {
-          return const PanelHint('Branches unavailable. Bridge update required.');
+          return const PanelHint(
+            'Branches unavailable. Bridge update required.',
+          );
         }
         if (!catalog.isRepository) {
           return const PanelHint('No Git repository in this folder');
         }
 
         final currentBranch = catalog.current;
-        final explicitBranch = (selection != null &&
+        final explicitBranch =
+            (selection != null &&
                 selection.targetId == target.id &&
                 catalog.branches.contains(selection.branch))
             ? selection.branch
@@ -201,11 +204,15 @@ class _BranchPanelState extends ConsumerState<BranchPanel> {
                                 : null,
                             onTap: () {
                               ref
-                                  .read(newSessionBranchSelectionProvider.notifier)
-                                  .set(NewSessionBranchSelection(
-                                    targetId: target.id,
-                                    branch: branch,
-                                  ));
+                                  .read(
+                                    newSessionBranchSelectionProvider.notifier,
+                                  )
+                                  .set(
+                                    NewSessionBranchSelection(
+                                      targetId: target.id,
+                                      branch: branch,
+                                    ),
+                                  );
                               Navigator.of(context).pop();
                             },
                           );

@@ -40,7 +40,11 @@ class E2eTransportDart {
       secretKey: SecretKeyData(sendKey),
       nonce: fixedNonce,
     );
-    return Uint8List.fromList([...box.nonce, ...box.cipherText, ...box.mac.bytes]);
+    return Uint8List.fromList([
+      ...box.nonce,
+      ...box.cipherText,
+      ...box.mac.bytes,
+    ]);
   }
 
   Future<String?> open(Uint8List data) async {

@@ -34,7 +34,11 @@ class _AbHostBannerState extends ConsumerState<AbHostBanner> {
     } catch (e) {
       // The failed status the controller publishes carries the reason; nothing
       // to add here.
-      AbLog.warn('AbHostBanner', 'manual retry failed', fields: {'error': '$e'});
+      AbLog.warn(
+        'AbHostBanner',
+        'manual retry failed',
+        fields: {'error': '$e'},
+      );
     } finally {
       if (mounted) setState(() => _retrying = false);
     }
@@ -51,9 +55,8 @@ class _AbHostBannerState extends ConsumerState<AbHostBanner> {
     // phase to `starting` within a microtask, and unmounting on that would
     // hide the banner for the whole (up to 30s) spawn window — reading as
     // "the button did nothing".
-    final visible = _retrying ||
-        phase == HostPhase.restarting ||
-        phase == HostPhase.failed;
+    final visible =
+        _retrying || phase == HostPhase.restarting || phase == HostPhase.failed;
     if (!visible) return const SizedBox.shrink();
 
     final failed = phase == HostPhase.failed && !_retrying;
@@ -61,9 +64,9 @@ class _AbHostBannerState extends ConsumerState<AbHostBanner> {
     final text = _retrying
         ? 'Restarting the local bridge…'
         : failed
-            ? (status?.detail ?? 'The local bridge stopped.')
-            : 'Local bridge stopped — restarting'
-                '${(status?.attempt ?? 0) > 0 ? ' (attempt ${status!.attempt})' : ''}…';
+        ? (status?.detail ?? 'The local bridge stopped.')
+        : 'Local bridge stopped — restarting'
+              '${(status?.attempt ?? 0) > 0 ? ' (attempt ${status!.attempt})' : ''}…';
 
     return AbInlineBanner(
       text: text,

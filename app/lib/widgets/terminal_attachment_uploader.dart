@@ -107,27 +107,30 @@ class TerminalAttachmentUploader {
     _inFlight = true;
     _clearTimer?.cancel();
     final generation = ++_generation;
-    _publish(generation, AttachProgress(
-      fileName: fileName,
-      phase: AttachPhase.staging,
-    ));
+    _publish(
+      generation,
+      AttachProgress(fileName: fileName, phase: AttachPhase.staging),
+    );
     try {
       final path = await run(
         fileName: fileName,
         bytes: bytes,
         mimeType: mimeType,
-        onProgress: (sent, total) => _publish(generation, AttachProgress(
-          fileName: fileName,
-          phase: sent >= total ? AttachPhase.finishing : AttachPhase.sending,
-          sent: sent,
-          total: total,
-        )),
+        onProgress: (sent, total) => _publish(
+          generation,
+          AttachProgress(
+            fileName: fileName,
+            phase: sent >= total ? AttachPhase.finishing : AttachPhase.sending,
+            sent: sent,
+            total: total,
+          ),
+        ),
       );
       insert('"$path" ');
-      _publish(generation, AttachProgress(
-        fileName: fileName,
-        phase: AttachPhase.done,
-      ));
+      _publish(
+        generation,
+        AttachProgress(fileName: fileName, phase: AttachPhase.done),
+      );
       _clearTimer = Timer(kDoneHold, () => _publish(generation, null));
     } catch (error) {
       // The strip has no room for a failure state that a snackbar states

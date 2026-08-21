@@ -69,50 +69,54 @@ void main() {
     expect(body['events'][0]['name'], 'session_opened');
   });
 
-  test('flush honors a runtime opt-out: queued events are dropped, not sent',
-      () async {
-    final sink = <http.Request>[];
-    var enabled = true;
-    final client = MockClient((req) async {
-      sink.add(req);
-      return http.Response('', 202);
-    });
-    final svc = AnalyticsService(
-      client: client,
-      plausibleUrl: 'https://plausible.test',
-      plausibleDomain: 'app.test',
-      eventsApiUrl: 'https://api.test',
-      installId: '11111111-1111-4111-8111-111111111111',
-      platform: 'android',
-      appVersion: '1.0.0',
-      enabled: () => enabled,
-      batchSize: 100, // never auto-flushes — event stays queued
-    );
-    svc.track('session_opened');
-    await Future<void>.delayed(Duration.zero);
-    sink.clear();
-    enabled = false; // user opts out before the queue is flushed
-    await svc.flush();
-    expect(
-      sink.where((r) => r.url.host == 'api.test'),
-      isEmpty,
-      reason: 'opt-out must drop queued events, not transmit them on pause',
-    );
-  });
+  test(
+    'flush honors a runtime opt-out: queued events are dropped, not sent',
+    () async {
+      final sink = <http.Request>[];
+      var enabled = true;
+      final client = MockClient((req) async {
+        sink.add(req);
+        return http.Response('', 202);
+      });
+      final svc = AnalyticsService(
+        client: client,
+        plausibleUrl: 'https://plausible.test',
+        plausibleDomain: 'app.test',
+        eventsApiUrl: 'https://api.test',
+        installId: '11111111-1111-4111-8111-111111111111',
+        platform: 'android',
+        appVersion: '1.0.0',
+        enabled: () => enabled,
+        batchSize: 100, // never auto-flushes — event stays queued
+      );
+      svc.track('session_opened');
+      await Future<void>.delayed(Duration.zero);
+      sink.clear();
+      enabled = false; // user opts out before the queue is flushed
+      await svc.flush();
+      expect(
+        sink.where((r) => r.url.host == 'api.test'),
+        isEmpty,
+        reason: 'opt-out must drop queued events, not transmit them on pause',
+      );
+    },
+  );
 
-  test('prop string values longer than 120 chars are clamped before send',
-      () async {
-    final sink = <http.Request>[];
-    final svc = build(enabled: true, sink: sink, batchSize: 1);
-    svc.track('search_used', props: {'big': 'x' * 200});
-    await Future<void>.delayed(Duration.zero);
-    final ingest = sink.firstWhere((r) => r.url.host == 'api.test');
-    final body = jsonDecode(ingest.body) as Map<String, dynamic>;
-    final props = body['events'][0]['props'] as Map<String, dynamic>;
-    expect((props['big'] as String).length, 120);
-    // Plausible body shares the same clamped map.
-    final plausible = sink.firstWhere((r) => r.url.host == 'plausible.test');
-    final pbody = jsonDecode(plausible.body) as Map<String, dynamic>;
-    expect((pbody['props']['big'] as String).length, 120);
-  });
+  test(
+    'prop string values longer than 120 chars are clamped before send',
+    () async {
+      final sink = <http.Request>[];
+      final svc = build(enabled: true, sink: sink, batchSize: 1);
+      svc.track('search_used', props: {'big': 'x' * 200});
+      await Future<void>.delayed(Duration.zero);
+      final ingest = sink.firstWhere((r) => r.url.host == 'api.test');
+      final body = jsonDecode(ingest.body) as Map<String, dynamic>;
+      final props = body['events'][0]['props'] as Map<String, dynamic>;
+      expect((props['big'] as String).length, 120);
+      // Plausible body shares the same clamped map.
+      final plausible = sink.firstWhere((r) => r.url.host == 'plausible.test');
+      final pbody = jsonDecode(plausible.body) as Map<String, dynamic>;
+      expect((pbody['props']['big'] as String).length, 120);
+    },
+  );
 }

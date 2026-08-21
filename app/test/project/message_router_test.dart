@@ -121,7 +121,8 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     router.setLifecyclePaused(true);
     await Future<void>.delayed(Duration.zero);
-    transport.sent.clear(); // pretend everything so far was dropped pre-handshake
+    transport.sent
+        .clear(); // pretend everything so far was dropped pre-handshake
 
     router.resyncFocusState();
     await Future<void>.delayed(Duration.zero);
@@ -133,14 +134,17 @@ void main() {
     await sub.cancel();
   });
 
-  test('resyncFocusState is a no-op before any focus state is established', () async {
-    // Nothing has been declared yet (no heavy subscriber, no lifecycle call), so
-    // a handshake must not invent a focus claim the app never made.
-    router.resyncFocusState();
-    await Future<void>.delayed(Duration.zero);
+  test(
+    'resyncFocusState is a no-op before any focus state is established',
+    () async {
+      // Nothing has been declared yet (no heavy subscriber, no lifecycle call), so
+      // a handshake must not invent a focus claim the app never made.
+      router.resyncFocusState();
+      await Future<void>.delayed(Duration.zero);
 
-    expect(transport.sent, isEmpty);
-  });
+      expect(transport.sent, isEmpty);
+    },
+  );
 
   test('ignore-tier messages do not reach either stream', () async {
     final statusRx = <Map<String, dynamic>>[];

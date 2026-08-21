@@ -30,13 +30,17 @@ void main() {
     });
 
     test('parses stream-opened and stream-closed', () {
-      final opened =
-          parseRelayMessage({'type': 'stream-opened', 'streamId': 's1'});
+      final opened = parseRelayMessage({
+        'type': 'stream-opened',
+        'streamId': 's1',
+      });
       expect(opened, isA<StreamOpenedMessage>());
       expect((opened as StreamOpenedMessage).streamId, 's1');
 
-      final closed =
-          parseRelayMessage({'type': 'stream-closed', 'streamId': 's1'});
+      final closed = parseRelayMessage({
+        'type': 'stream-closed',
+        'streamId': 's1',
+      });
       expect(closed, isA<StreamClosedMessage>());
       expect((closed as StreamClosedMessage).streamId, 's1');
     });
@@ -82,22 +86,28 @@ void main() {
     });
 
     test('error omits optional ref/serverTime when absent', () {
-      final msg = parseRelayMessage({
-        'type': 'error',
-        'code': 'SUPERSEDED',
-        'message': 'newer connection won',
-        'retryable': false,
-      }) as ErrorMessage;
+      final msg =
+          parseRelayMessage({
+                'type': 'error',
+                'code': 'SUPERSEDED',
+                'message': 'newer connection won',
+                'retryable': false,
+              })
+              as ErrorMessage;
       expect(msg.retryable, isFalse);
       expect(msg.ref, isNull);
       expect(msg.serverTime, isNull);
     });
 
     test('parses peer-online, peer-offline', () {
-      expect(parseRelayMessage({'type': 'peer-online', 'peerId': 'a'}),
-          isA<PeerOnlineMessage>());
-      expect(parseRelayMessage({'type': 'peer-offline', 'peerId': 'a'}),
-          isA<PeerOfflineMessage>());
+      expect(
+        parseRelayMessage({'type': 'peer-online', 'peerId': 'a'}),
+        isA<PeerOnlineMessage>(),
+      );
+      expect(
+        parseRelayMessage({'type': 'peer-offline', 'peerId': 'a'}),
+        isA<PeerOfflineMessage>(),
+      );
     });
 
     test('retired types no longer dispatch', () {
@@ -115,8 +125,11 @@ void main() {
         'grant-revoked',
       ];
       for (final t in retired) {
-        expect(parseRelayMessage({'type': t}), isNull,
-            reason: '$t should not resolve in v3');
+        expect(
+          parseRelayMessage({'type': t}),
+          isNull,
+          reason: '$t should not resolve in v3',
+        );
       }
     });
 
@@ -154,10 +167,14 @@ void main() {
     });
 
     test('StreamOpen/StreamClose toJson', () {
-      expect(const StreamOpenMessage(streamId: 's1').toJson(),
-          {'type': 'stream-open', 'streamId': 's1'});
-      expect(const StreamCloseMessage(streamId: 's1').toJson(),
-          {'type': 'stream-close', 'streamId': 's1'});
+      expect(const StreamOpenMessage(streamId: 's1').toJson(), {
+        'type': 'stream-open',
+        'streamId': 's1',
+      });
+      expect(const StreamCloseMessage(streamId: 's1').toJson(), {
+        'type': 'stream-close',
+        'streamId': 's1',
+      });
     });
   });
 

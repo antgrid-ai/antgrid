@@ -51,10 +51,7 @@ class _CrossPlatformBillingDialog extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              abDialogTitle(
-                title,
-                onClose: () => Navigator.of(context).pop(),
-              ),
+              abDialogTitle(title, onClose: () => Navigator.of(context).pop()),
               const SizedBox(height: AbTokens.space16),
               Text(
                 'You can\'t make changes to your subscription inside this app, '

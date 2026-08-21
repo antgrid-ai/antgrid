@@ -15,16 +15,19 @@ void main() {
       expect(info.planSlug, 'pro_yearly');
     });
 
-    test('retired pro_lifetime UUID resolves to the paid default, not a slug', () {
-      final info = SubscriptionInfo.fromMeJson({
-        'tier': 'pro',
-        'subscription': {
-          'plan_id': '00000000-0000-4000-8000-000000000003',
-          'status': 'active',
-        },
-      });
-      expect(info.planSlug, 'pro_yearly');
-    });
+    test(
+      'retired pro_lifetime UUID resolves to the paid default, not a slug',
+      () {
+        final info = SubscriptionInfo.fromMeJson({
+          'tier': 'pro',
+          'subscription': {
+            'plan_id': '00000000-0000-4000-8000-000000000003',
+            'status': 'active',
+          },
+        });
+        expect(info.planSlug, 'pro_yearly');
+      },
+    );
 
     test('resolves pro_yearly when current_period_end is null', () {
       final info = SubscriptionInfo.fromMeJson({
@@ -183,22 +186,25 @@ void main() {
       expect(info.seatsUsed, 1);
     });
 
-    test('an older server omitting all three parses, leaving the rest intact', () {
-      final info = SubscriptionInfo.fromMeJson(
-        meJson(role: null, seats: null, seatsUsed: null),
-      );
-      // Unreported, not zero and not an assumed role — a server that never
-      // sends `role` must not make every user look like an owner.
-      expect(info.role, isNull);
-      expect(info.seats, isNull);
-      expect(info.seatsUsed, isNull);
-      expect(info.tier, 'pro');
-      expect(info.accountId, 'acct-1');
-      expect(info.provider, 'paddle');
-      expect(info.planSlug, 'pro_yearly');
-      expect(info.promotional, isFalse);
-      expect(info.isPro, isTrue);
-    });
+    test(
+      'an older server omitting all three parses, leaving the rest intact',
+      () {
+        final info = SubscriptionInfo.fromMeJson(
+          meJson(role: null, seats: null, seatsUsed: null),
+        );
+        // Unreported, not zero and not an assumed role — a server that never
+        // sends `role` must not make every user look like an owner.
+        expect(info.role, isNull);
+        expect(info.seats, isNull);
+        expect(info.seatsUsed, isNull);
+        expect(info.tier, 'pro');
+        expect(info.accountId, 'acct-1');
+        expect(info.provider, 'paddle');
+        expect(info.planSlug, 'pro_yearly');
+        expect(info.promotional, isFalse);
+        expect(info.isPro, isTrue);
+      },
+    );
 
     test('an unrecognized role is carried, not rejected', () {
       final info = SubscriptionInfo.fromMeJson(meJson(role: 'billing_admin'));

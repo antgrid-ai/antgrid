@@ -20,10 +20,14 @@ String? _ext(String path) {
 /// bridge-supplied [mimeType] — the single source of truth for which binaries
 /// are renderable (`RENDERABLE_BINARY_MIME` in bridge/src/file-tree.ts) — so the
 /// allowlist isn't duplicated app-side. Anything else falls back to the code view.
-FileViewerKind fileViewerKindFor(String path, String? encoding,
-    [String? mimeType]) {
+FileViewerKind fileViewerKindFor(
+  String path,
+  String? encoding, [
+  String? mimeType,
+]) {
   final ext = _ext(path);
-  if (ext != null && _markdownExts.contains(ext)) return FileViewerKind.markdown;
+  if (ext != null && _markdownExts.contains(ext))
+    return FileViewerKind.markdown;
   if (ext == 'svg') return FileViewerKind.svg;
 
   if (encoding == 'base64' && mimeType != null) {

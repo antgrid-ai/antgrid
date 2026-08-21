@@ -299,37 +299,39 @@ void main() {
     await session.close();
   });
 
-  test('delete surfaces the typed refusal code rather than a bare false',
-      () async {
-    // The managed-worktree delete flow branches on this code to decide which
-    // confirmation to show, so a plain `false` would be unactionable.
-    final t = FakeAgentTransport();
-    final session = await makeSession(t);
-    final cache = await CachedSessionsStore.open();
-    final svc = SessionsService.fromSession(session, cache: cache);
+  test(
+    'delete surfaces the typed refusal code rather than a bare false',
+    () async {
+      // The managed-worktree delete flow branches on this code to decide which
+      // confirmation to show, so a plain `false` would be unactionable.
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      final cache = await CachedSessionsStore.open();
+      final svc = SessionsService.fromSession(session, cache: cache);
 
-    final future = svc.delete('sess-1');
-    await Future<void>.delayed(Duration.zero);
-    final sent = t.sent.firstWhere((m) => m['type'] == 'session:delete');
-    t.emit('session:result', {
-      'requestId': sent['requestId'],
-      'ok': false,
-      'errorCode': 'WORKTREE_UNPUSHED',
-      'error': "The isolated worktree's branch has unpushed commits.",
-    });
+      final future = svc.delete('sess-1');
+      await Future<void>.delayed(Duration.zero);
+      final sent = t.sent.firstWhere((m) => m['type'] == 'session:delete');
+      t.emit('session:result', {
+        'requestId': sent['requestId'],
+        'ok': false,
+        'errorCode': 'WORKTREE_UNPUSHED',
+        'error': "The isolated worktree's branch has unpushed commits.",
+      });
 
-    await expectLater(
-      future,
-      throwsA(
-        isA<SessionOperationException>()
-            .having((e) => e.errorCode, 'errorCode', 'WORKTREE_UNPUSHED')
-            .having((e) => e.message, 'message', contains('unpushed')),
-      ),
-    );
+      await expectLater(
+        future,
+        throwsA(
+          isA<SessionOperationException>()
+              .having((e) => e.errorCode, 'errorCode', 'WORKTREE_UNPUSHED')
+              .having((e) => e.message, 'message', contains('unpushed')),
+        ),
+      );
 
-    await svc.dispose();
-    await session.close();
-  });
+      await svc.dispose();
+      await session.close();
+    },
+  );
 
   test('delete forwards force and deleteBranch only when set', () async {
     final t = FakeAgentTransport();

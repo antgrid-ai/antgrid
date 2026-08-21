@@ -330,8 +330,8 @@ class RelayService {
 
   /// Test-only seam: shorten the dial watchdog so a test can assert the bound
   /// without waiting out the real 15s. Not part of the supported API.
-  void debugSetConnectTimeout(Duration timeout) => _connectTimeoutDuration =
-      timeout;
+  void debugSetConnectTimeout(Duration timeout) =>
+      _connectTimeoutDuration = timeout;
 
   /// Test-only seam: install the channel a subsequent `connect()` will see as
   /// its `prevChannel`, so a test can stand in a socket whose close never

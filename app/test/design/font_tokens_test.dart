@@ -126,27 +126,34 @@ void main() {
       });
     }
 
-    test('the declared regular face is monospaced at JetBrains Mono metrics', () async {
-      const family = 'JetBrainsMonoNLUnderTest';
-      await (FontLoader(family)
-            ..addFont(rootBundle.load(declared.first)))
-          .load();
+    test(
+      'the declared regular face is monospaced at JetBrains Mono metrics',
+      () async {
+        const family = 'JetBrainsMonoNLUnderTest';
+        await (FontLoader(
+          family,
+        )..addFont(rootBundle.load(declared.first))).load();
 
-      const size = 40.0;
-      const style = TextStyle(fontFamily: family, fontSize: size);
-      final advance = _advanceOf(style);
-      // JetBrains Mono advances 600/1000 em. A full em would mean the loader
-      // silently fell through to the test font.
-      expect(advance, closeTo(size * 0.6, 1.0));
+        const size = 40.0;
+        const style = TextStyle(fontFamily: family, fontSize: size);
+        final advance = _advanceOf(style);
+        // JetBrains Mono advances 600/1000 em. A full em would mean the loader
+        // silently fell through to the test font.
+        expect(advance, closeTo(size * 0.6, 1.0));
 
-      for (final glyph in ['i', 'M', '.', '0', '@']) {
-        final painter = TextPainter(
-          text: TextSpan(text: glyph, style: style),
-          textDirection: TextDirection.ltr,
-        )..layout();
-        expect(painter.width, closeTo(advance, 0.01), reason: 'glyph "$glyph"');
-      }
-    });
+        for (final glyph in ['i', 'M', '.', '0', '@']) {
+          final painter = TextPainter(
+            text: TextSpan(text: glyph, style: style),
+            textDirection: TextDirection.ltr,
+          )..layout();
+          expect(
+            painter.width,
+            closeTo(advance, 0.01),
+            reason: 'glyph "$glyph"',
+          );
+        }
+      },
+    );
 
     test('the OFL licence ships with the faces', () async {
       final licence = await rootBundle.loadString('assets/fonts/OFL.txt');

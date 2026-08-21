@@ -4,9 +4,7 @@ import 'package:antgrid/design/widgets/ab_brand_mark.dart';
 import '../test_harness.dart';
 
 void main() {
-  testWidgets('AbBrandMark renders the wordmark asset', (
-    tester,
-  ) async {
+  testWidgets('AbBrandMark renders the wordmark asset', (tester) async {
     await pumpAntgrid(tester, const AbBrandMark());
     final svg = tester.widget<SvgPicture>(find.byType(SvgPicture));
     final loader = svg.bytesLoader as SvgAssetLoader;

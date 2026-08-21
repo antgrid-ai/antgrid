@@ -36,10 +36,7 @@ void main() {
     });
 
     test('missing mandatory key defaults to optional', () {
-      expect(
-        decideStoreUpdate({'updateCount': 1}),
-        StoreUpdateCheck.optional,
-      );
+      expect(decideStoreUpdate({'updateCount': 1}), StoreUpdateCheck.optional);
     });
 
     test('malformed updateCount type → none', () {

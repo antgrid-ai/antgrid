@@ -93,7 +93,8 @@ class SessionsService {
 
   final Map<String, PendingReply<List<SessionEntry>>> _pendingList = {};
   final Map<String, PendingReply<SessionEntry?>> _pendingMutations = {};
-  final Map<String, PendingReply<SessionEntry?>> _pendingRefusableMutations = {};
+  final Map<String, PendingReply<SessionEntry?>> _pendingRefusableMutations =
+      {};
   final Map<String, PendingReply<SessionEntry?>> _pendingCreates = {};
   final Map<String, PendingReply<bool>> _pendingDeletes = {};
   final Map<String, PendingReply<SessionModeResult>> _pendingModeChanges = {};
@@ -299,16 +300,20 @@ class SessionsService {
       () => _pendingCreates.remove(requestId),
     );
     _pendingCreates[requestId] = pending;
-    unawaited(_send(createAbMessage('session:create', {
-      'requestId': requestId,
-      'name': ?name,
-      'tool': ?tool,
-      'command': ?command,
-      'args': ?args,
-      'mode': ?mode,
-      'isolation': isolation,
-      'baseBranch': ?baseBranch,
-    })));
+    unawaited(
+      _send(
+        createAbMessage('session:create', {
+          'requestId': requestId,
+          'name': ?name,
+          'tool': ?tool,
+          'command': ?command,
+          'args': ?args,
+          'mode': ?mode,
+          'isolation': isolation,
+          'baseBranch': ?baseBranch,
+        }),
+      ),
+    );
     return pending.future;
   }
 

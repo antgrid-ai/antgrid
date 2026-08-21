@@ -110,7 +110,10 @@ class _CmdButtonState extends State<_CmdButton> {
         padding: const EdgeInsets.only(left: 6),
         child: Text(
           '$prefix$last',
-          style: AbTokens.sansStyle(fontSize: AbTokens.fontXs, color: lastColor),
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontXs,
+            color: lastColor,
+          ),
         ),
       );
     }
@@ -169,11 +172,17 @@ class _RunChip extends StatelessWidget {
         ),
         child: Row(
           children: [
-            Text(label, style: TextStyle(fontSize: AbTokens.fontXs, color: p.textMuted)),
+            Text(
+              label,
+              style: TextStyle(fontSize: AbTokens.fontXs, color: p.textMuted),
+            ),
             const SizedBox(width: 4),
             Text(
               shortcut,
-              style: AbTokens.sansStyle(fontSize: AbTokens.fontXs, color: p.textMuted),
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXs,
+                color: p.textMuted,
+              ),
             ),
           ],
         ),

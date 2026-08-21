@@ -668,31 +668,28 @@ void main() {
     },
   );
 
-  test(
-    'stopHydrating deregisters the transcript hydrator so a reconnect no '
-    'longer re-pulls that session',
-    () async {
-      final t = FakeAgentTransport();
-      final session = await newRelaySession(t);
-      final svc = AgentSessionService.fromSession(session);
+  test('stopHydrating deregisters the transcript hydrator so a reconnect no '
+      'longer re-pulls that session', () async {
+    final t = FakeAgentTransport();
+    final session = await newRelaySession(t);
+    final svc = AgentSessionService.fromSession(session);
 
-      t.requestHandler = (method, params) => {'frames': <dynamic>[]};
+    t.requestHandler = (method, params) => {'frames': <dynamic>[]};
 
-      // Established: one snapshot pull on the initial hydrate.
-      await svc.hydrateIfNeeded('p');
-      expect(t.requests.length, 1);
+    // Established: one snapshot pull on the initial hydrate.
+    await svc.hydrateIfNeeded('p');
+    expect(t.requests.length, 1);
 
-      // The view is gone. A subsequent (re)establishment must NOT re-pull the
-      // now-unviewed session — otherwise every session ever opened would
-      // re-fetch its transcript on each reconnect.
-      svc.stopHydrating('p');
-      t.setEstablished(false);
-      t.setEstablished(true); // re-drives every STILL-registered hydrator
-      await Future<void>.delayed(Duration.zero);
+    // The view is gone. A subsequent (re)establishment must NOT re-pull the
+    // now-unviewed session — otherwise every session ever opened would
+    // re-fetch its transcript on each reconnect.
+    svc.stopHydrating('p');
+    t.setEstablished(false);
+    t.setEstablished(true); // re-drives every STILL-registered hydrator
+    await Future<void>.delayed(Duration.zero);
 
-      expect(t.requests.length, 1);
-    },
-  );
+    expect(t.requests.length, 1);
+  });
 
   test('hydrateIfNeeded sets hydrationFailed on RPC failure', () async {
     final t = FakeAgentTransport();
@@ -996,7 +993,6 @@ void main() {
     expect(turns.map((t) => t.turnId), ['resumed:0', 'live-1']);
     expect(svc.stateFor('p').openTurn?.turnId, 'live-1');
   });
-
 
   test(
     'cancel names the turn the UI shows as running, so the bridge can close it',

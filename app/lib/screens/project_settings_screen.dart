@@ -45,7 +45,10 @@ class _ProjectSettingsScreenState extends ConsumerState<ProjectSettingsScreen> {
     // be invalidated mid-load (host restart, LRU evict). This runs
     // fire-and-forget from initState, so a throw here lands as an unhandled
     // error instead of the inline failure below.
-    final svc = focusedCheckoutServiceOrNull(ref.container, (s) => s.configService);
+    final svc = focusedCheckoutServiceOrNull(
+      ref.container,
+      (s) => s.configService,
+    );
     if (svc == null) {
       _failLoad('This project is not connected.');
       return;
@@ -87,7 +90,10 @@ class _ProjectSettingsScreenState extends ConsumerState<ProjectSettingsScreen> {
     // value. The finally guarantees `_saving` resets so the Save button can't
     // strand on a disabled "Saving…" state.
     try {
-      final svc = focusedCheckoutServiceOrNull(ref.container, (s) => s.configService);
+      final svc = focusedCheckoutServiceOrNull(
+        ref.container,
+        (s) => s.configService,
+      );
       if (svc == null) {
         setState(() => _saveError = 'This project is not connected.');
         return;
@@ -397,8 +403,9 @@ class _AgentSection extends ConsumerWidget {
     final agent = draft.agent ?? const AbAgentBlock();
     final detectedTools = detected.map((t) => t.tool).toList();
     final tool = agent.tool;
-    final defaultRelay = ref
-        .watch(appSettingsServiceProvider.select((s) => s.defaultRelayUrl));
+    final defaultRelay = ref.watch(
+      appSettingsServiceProvider.select((s) => s.defaultRelayUrl),
+    );
     final relayHint = defaultRelay == null || defaultRelay.isEmpty
         ? 'Relay URL (e.g. wss://relay.example.com)'
         : 'Relay URL (default: $defaultRelay)';

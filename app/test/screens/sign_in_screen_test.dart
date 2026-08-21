@@ -270,7 +270,8 @@ void main() {
       expect(
         find.byType(AbPasswordField),
         findsNothing,
-        reason: 'offering a password here would ask the user a question about '
+        reason:
+            'offering a password here would ask the user a question about '
             'their own account that only this device can answer',
       );
       expect(find.text('Continue'), findsOneWidget);
@@ -310,7 +311,8 @@ void main() {
       expect(
         paths,
         isEmpty,
-        reason: 'the step is chosen from the device hint alone — asking the '
+        reason:
+            'the step is chosen from the device hint alone — asking the '
             'server would hand out an enumeration oracle',
       );
     });
@@ -361,7 +363,8 @@ void main() {
       expect(
         store.memory['user@example.com'],
         AuthMethod.link,
-        reason: 'the escape retires the hint that caused the trap, so the next '
+        reason:
+            'the escape retires the hint that caused the trap, so the next '
             'Continue does not walk back into it',
       );
     });
@@ -382,14 +385,16 @@ void main() {
       expect(
         paths,
         isEmpty,
-        reason: 'the escape is a step change and nothing more — asking the '
+        reason:
+            'the escape is a step change and nothing more — asking the '
             'server whether this address has a password is the oracle the '
             'whole flow is built to avoid',
       );
       expect(
         store.memory,
         isEmpty,
-        reason: 'taking the escape is a guess, not a commitment: a hint '
+        reason:
+            'taking the escape is a guess, not a commitment: a hint '
             'written here would route every later Continue back to a password '
             'the user may not have',
       );
@@ -407,7 +412,8 @@ void main() {
       expect(
         find.byType(AbPasswordField),
         findsNothing,
-        reason: 'step 2 renders the address as settled text with no field to '
+        reason:
+            'step 2 renders the address as settled text with no field to '
             'fix it, so arriving without one is a dead end',
       );
     });
@@ -439,7 +445,8 @@ void main() {
       expect(
         store.memory['user@example.com'],
         AuthMethod.password,
-        reason: 'the escape should be needed once — the hint it seeds is what '
+        reason:
+            'the escape should be needed once — the hint it seeds is what '
             'sends every later Continue straight to step 2',
       );
     });
@@ -470,7 +477,8 @@ void main() {
       expect(
         store.memory,
         isEmpty,
-        reason: 'the address may have no password at all — the server refuses '
+        reason:
+            'the address may have no password at all — the server refuses '
             'to say which, and a hint here would strand the user on a step '
             'that can never work for them',
       );
@@ -503,7 +511,8 @@ void main() {
       expect(
         store.memory,
         isEmpty,
-        reason: 'a hint written before the launch outlives a launch that never '
+        reason:
+            'a hint written before the launch outlives a launch that never '
             'happened, and then sends every later Continue back to a provider '
             'that has never worked',
       );
@@ -533,10 +542,7 @@ void main() {
       expect(find.text('Resend the link (45s)'), findsOneWidget);
       // Disabled means unhittable, not merely styled: the label has no gesture
       // detector behind it while the cooldown runs.
-      await tester.tap(
-        find.text('Resend the link (45s)'),
-        warnIfMissed: false,
-      );
+      await tester.tap(find.text('Resend the link (45s)'), warnIfMissed: false);
       await tester.pump();
       await tester.pump();
       expect(
@@ -575,7 +581,8 @@ void main() {
       expect(
         paths.where((p) => p == _startPath),
         hasLength(2),
-        reason: 'the resend really went out — otherwise the race below is not '
+        reason:
+            'the resend really went out — otherwise the race below is not '
             'the one being tested',
       );
 
@@ -585,14 +592,16 @@ void main() {
       expect(
         storage.pending,
         isNull,
-        reason: 'the abandon discarded the ticket while the resend was still '
+        reason:
+            'the abandon discarded the ticket while the resend was still '
             'in the air, which is the ordering the whole race turns on',
       );
       final pollsWhenAbandoned = paths.where((p) => p == _statusPath).length;
       expect(
         pollsWhenAbandoned,
         greaterThan(0),
-        reason: 'polls land in `paths`, so a flat count below means the timer '
+        reason:
+            'polls land in `paths`, so a flat count below means the timer '
             'stopped — not that polls were never counted',
       );
 
@@ -616,14 +625,16 @@ void main() {
       expect(
         paths.where((p) => p == _statusPath),
         hasLength(pollsWhenAbandoned),
-        reason: 'a restarted poll would snap the user out of the field they '
+        reason:
+            'a restarted poll would snap the user out of the field they '
             'are typing in, and a ready one would sign them into the '
             'abandoned address',
       );
       expect(
         storage.pending,
         isNull,
-        reason: 'the ticket is written inside the send, so it lands after the '
+        reason:
+            'the ticket is written inside the send, so it lands after the '
             'abandon discarded one — left there it strands the user on the '
             'abandoned address at next launch',
       );
@@ -658,7 +669,8 @@ void main() {
       expect(
         store.memory['user@example.com'],
         AuthMethod.password,
-        reason: 'the password was accepted, so the hint stands even though the '
+        reason:
+            'the password was accepted, so the hint stands even though the '
             'address still needs verifying',
       );
     });
@@ -687,7 +699,8 @@ void main() {
         expect(
           store.memory,
           isEmpty,
-          reason: 'nothing was proved about this address, so nothing is '
+          reason:
+              'nothing was proved about this address, so nothing is '
               'recorded about it',
         );
       },
@@ -698,9 +711,7 @@ void main() {
     ) async {
       final paths = await _openPasswordStep(
         tester,
-        store: _FakeAuthMethodStore({
-          'user@example.com': AuthMethod.password,
-        }),
+        store: _FakeAuthMethodStore({'user@example.com': AuthMethod.password}),
         password: '',
       );
 
@@ -742,9 +753,7 @@ void main() {
     ) async {
       final paths = await _openPasswordStep(
         tester,
-        store: _FakeAuthMethodStore({
-          'user@example.com': AuthMethod.password,
-        }),
+        store: _FakeAuthMethodStore({'user@example.com': AuthMethod.password}),
         respond: (req) async =>
             http.Response(jsonEncode({'status': true}), 200),
       );
@@ -769,7 +778,8 @@ void main() {
       expect(
         tester.widget<TextField>(find.byType(TextField)).autofillHints,
         contains(AutofillHints.username),
-        reason: 'the username half of the pair — a field tagged as a bare '
+        reason:
+            'the username half of the pair — a field tagged as a bare '
             'email address gets contact suggestions and saves nothing',
       );
 
@@ -785,7 +795,8 @@ void main() {
       expect(
         find.byType(AutofillGroup),
         findsOneWidget,
-        reason: 'the two fields never coexist on screen, so only a group '
+        reason:
+            'the two fields never coexist on screen, so only a group '
             'spanning both steps can offer them to the manager as one '
             'credential',
       );
@@ -829,7 +840,8 @@ void main() {
       expect(
         find.text('Resend the link (45s)'),
         findsOneWidget,
-        reason: 'the screen itself just sent one, so an instant retry would '
+        reason:
+            'the screen itself just sent one, so an instant retry would '
             'race the mail it is meant to replace',
       );
 
@@ -840,7 +852,8 @@ void main() {
       expect(
         paths.where((p) => p == sendPath),
         hasLength(1),
-        reason: 'one send, however many times the label is tapped — the server '
+        reason:
+            'one send, however many times the label is tapped — the server '
             'bucket behind this is 5 burst, 1 per minute',
       );
 
@@ -919,7 +932,8 @@ void main() {
       expect(
         sends,
         2,
-        reason: 'the resend really went out — otherwise the race below is not '
+        reason:
+            'the resend really went out — otherwise the race below is not '
             'the one being tested',
       );
 

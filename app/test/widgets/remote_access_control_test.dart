@@ -17,14 +17,17 @@ HostControlClient _fakeClient(Map<String, int> calls) {
     final type = body['type'] as String;
     calls[type] = (calls[type] ?? 0) + 1;
     if (type == 'mobile-access:set') enabled = body['enabled'] == true;
-    return http.Response(jsonEncode({
-      'id': body['id'],
-      'ok': true,
-      'type': type,
-      'enabled': enabled,
-      'phones': const [],
-      'knownProjects': const [],
-    }), 200);
+    return http.Response(
+      jsonEncode({
+        'id': body['id'],
+        'ok': true,
+        'type': type,
+        'enabled': enabled,
+        'phones': const [],
+        'knownProjects': const [],
+      }),
+      200,
+    );
   });
   return HostControlClient(port: 1, token: 't', httpClient: mock);
 }
@@ -33,12 +36,14 @@ Future<void> _pump(
   WidgetTester tester,
   Future<HostControlClient> Function() client,
 ) async {
-  await tester.pumpWidget(ProviderScope(
-    overrides: [hostControlClientProvider.overrideWith((ref) => client())],
-    child: const MaterialApp(
-      home: Scaffold(body: Center(child: RemoteAccessControl())),
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: [hostControlClientProvider.overrideWith((ref) => client())],
+      child: const MaterialApp(
+        home: Scaffold(body: Center(child: RemoteAccessControl())),
+      ),
     ),
-  ));
+  );
   await tester.pump();
   await tester.pump();
 }

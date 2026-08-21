@@ -460,11 +460,7 @@ class _PlanCard extends StatelessWidget {
                 color: antgrid.textMuted,
               ),
             ),
-            _FeatureList(
-              items: features,
-              workers: workers,
-              maxSeats: maxSeats,
-            ),
+            _FeatureList(items: features, workers: workers, maxSeats: maxSeats),
             const SizedBox(height: AbTokens.space24),
             const _PricingCta(label: _unavailableCtaLabel),
           ],

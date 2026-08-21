@@ -18,9 +18,13 @@ String hexEncode(List<int> b) =>
     b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
 
 void main() {
-  final v = jsonDecode(
-    File('../../evals/fixtures/e2e-handshake-vectors.json').readAsStringSync(),
-  ) as Map<String, dynamic>;
+  final v =
+      jsonDecode(
+            File(
+              '../../evals/fixtures/e2e-handshake-vectors.json',
+            ).readAsStringSync(),
+          )
+          as Map<String, dynamic>;
 
   final ids = v['ids'] as Map<String, dynamic>;
   final x = v['x25519'] as Map<String, dynamic>;
@@ -28,23 +32,23 @@ void main() {
   final ks = v['keySchedule'] as Map<String, dynamic>;
 
   TranscriptFields phoneFields() => TranscriptFields(
-        registrationId: ids['registrationId'] as String,
-        role: 'phone',
-        agentDeviceId: ids['agentDeviceId'] as String,
-        phoneDeviceId: ids['phoneDeviceId'] as String,
-        agentX25519Pub: Uint8List(0),
-        phoneX25519Pub: base64.decode(x['phonePubB64'] as String),
-        nonce: base64.decode(v['nonceB64'] as String),
-      );
+    registrationId: ids['registrationId'] as String,
+    role: 'phone',
+    agentDeviceId: ids['agentDeviceId'] as String,
+    phoneDeviceId: ids['phoneDeviceId'] as String,
+    agentX25519Pub: Uint8List(0),
+    phoneX25519Pub: base64.decode(x['phonePubB64'] as String),
+    nonce: base64.decode(v['nonceB64'] as String),
+  );
   TranscriptFields agentFields() => TranscriptFields(
-        registrationId: ids['registrationId'] as String,
-        role: 'agent',
-        agentDeviceId: ids['agentDeviceId'] as String,
-        phoneDeviceId: ids['phoneDeviceId'] as String,
-        agentX25519Pub: base64.decode(x['agentPubB64'] as String),
-        phoneX25519Pub: base64.decode(x['phonePubB64'] as String),
-        nonce: base64.decode(v['nonceB64'] as String),
-      );
+    registrationId: ids['registrationId'] as String,
+    role: 'agent',
+    agentDeviceId: ids['agentDeviceId'] as String,
+    phoneDeviceId: ids['phoneDeviceId'] as String,
+    agentX25519Pub: base64.decode(x['agentPubB64'] as String),
+    phoneX25519Pub: base64.decode(x['phonePubB64'] as String),
+    nonce: base64.decode(v['nonceB64'] as String),
+  );
 
   test('transcript bytes match golden vectors', () {
     final t = v['transcripts'] as Map<String, dynamic>;
@@ -72,7 +76,10 @@ void main() {
       privateKey: hexDecode(x['phonePrivHex'] as String),
       peerPublicKey: base64.decode(x['agentPubB64'] as String),
     );
-    final keys = await deriveSessionKeysV2(ss, buildTranscriptV2(agentFields()));
+    final keys = await deriveSessionKeysV2(
+      ss,
+      buildTranscriptV2(agentFields()),
+    );
     expect(hexEncode(keys.a2p), ks['kA2pHex']);
     expect(hexEncode(keys.p2a), ks['kP2aHex']);
     expect(hexEncode(keys.confirm), ks['kConfirmHex']);
@@ -92,7 +99,10 @@ void main() {
     );
     for (final t in (v['transport'] as List).cast<Map<String, dynamic>>()) {
       if (t['dir'] == 'a2p') {
-        expect(await phoneT.open(hexDecode(t['sealedHex'] as String)), t['plaintext']);
+        expect(
+          await phoneT.open(hexDecode(t['sealedHex'] as String)),
+          t['plaintext'],
+        );
       } else {
         final sealed = await phoneT.seal(
           t['plaintext'] as String,
@@ -104,7 +114,9 @@ void main() {
   });
 
   test('constant-time confirm verify rejects tamper', () {
-    final a = hexDecode((v['confirm'] as Map<String, dynamic>)['agentTagHex'] as String);
+    final a = hexDecode(
+      (v['confirm'] as Map<String, dynamic>)['agentTagHex'] as String,
+    );
     final bad = Uint8List.fromList(a)..[0] ^= 1;
     expect(verifyConfirmTagV2(a, a), isTrue);
     expect(verifyConfirmTagV2(a, bad), isFalse);

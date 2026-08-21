@@ -7,14 +7,16 @@ import 'package:antgrid/widgets/transcript/selection/transcript_selection_scope.
 import 'package:antgrid/widgets/transcript/transcript_rows.dart';
 
 Future<void> _pump(WidgetTester tester, Widget child) {
-  return tester.pumpWidget(MaterialApp(
-    home: Scaffold(
-      body: TranscriptSelectionScope(
-        controller: TranscriptSelectionController(),
-        child: SelectionArea(child: child),
+  return tester.pumpWidget(
+    MaterialApp(
+      home: Scaffold(
+        body: TranscriptSelectionScope(
+          controller: TranscriptSelectionController(),
+          child: SelectionArea(child: child),
+        ),
       ),
     ),
-  ));
+  );
 }
 
 void main() {

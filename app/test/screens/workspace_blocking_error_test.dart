@@ -11,7 +11,8 @@
 import 'package:antgrid/connection/relay_mechanisms.dart'
     show ConnectionBlockedException;
 import 'package:antgrid/connection/supervisor_state.dart';
-import 'package:antgrid/screens/workspace_shell.dart' show workspaceBlockingError;
+import 'package:antgrid/screens/workspace_shell.dart'
+    show workspaceBlockingError;
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {

@@ -7,7 +7,10 @@ void main() {
 
   test('rich writes html + plain', () {
     final f = formatsFor(CopyKind.rich, out);
-    expect(f.map((e) => e.format), [ClipboardFormat.html, ClipboardFormat.plain]);
+    expect(f.map((e) => e.format), [
+      ClipboardFormat.html,
+      ClipboardFormat.plain,
+    ]);
     expect(f.map((e) => e.data), ['<p>p</p>', 'p']);
   });
 

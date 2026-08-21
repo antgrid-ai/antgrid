@@ -89,31 +89,27 @@ void main() {
         // Still side-by-side with the agent — the menu never replaces it.
         expect(find.byType(AgentPanel), findsOneWidget);
         expect(find.byType(WorkspacePanel), findsOneWidget);
-        expect(
-          container.read(visibleWorkspaceViewProvider),
-          WorkspaceView.git,
-        );
+        expect(container.read(visibleWorkspaceViewProvider), WorkspaceView.git);
         expect(container.read(agentBarMountedProvider), isTrue);
       });
     },
   );
 
-  testWidgets(
-    'picking a view un-hides the panel when the user had it closed',
-    (tester) async {
-      await _withShell(tester, (container) async {
-        container.read(contextPanelControlProvider)!.toggle();
-        await _settle(tester);
-        expect(find.byType(WorkspacePanel), findsNothing);
+  testWidgets('picking a view un-hides the panel when the user had it closed', (
+    tester,
+  ) async {
+    await _withShell(tester, (container) async {
+      container.read(contextPanelControlProvider)!.toggle();
+      await _settle(tester);
+      expect(find.byType(WorkspacePanel), findsNothing);
 
-        await _pickView(tester, 'Preview');
+      await _pickView(tester, 'Preview');
 
-        expect(find.byType(WorkspacePanel), findsOneWidget);
-        expect(
-          container.read(visibleWorkspaceViewProvider),
-          WorkspaceView.preview,
-        );
-      });
-    },
-  );
+      expect(find.byType(WorkspacePanel), findsOneWidget);
+      expect(
+        container.read(visibleWorkspaceViewProvider),
+        WorkspaceView.preview,
+      );
+    });
+  });
 }

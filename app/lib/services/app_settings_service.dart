@@ -124,8 +124,7 @@ class AppSettings {
       uiScale: prefs.getDouble(_kUiScale) ?? 1.0,
       terminalZoom: prefs.getDouble(_kTerminalZoom) ?? 1.0,
       reduceMotion: prefs.getBool(_kReduceMotion) ?? false,
-      followSystemBrightness:
-          prefs.getBool(_kFollowSystemBrightness) ?? false,
+      followSystemBrightness: prefs.getBool(_kFollowSystemBrightness) ?? false,
       telemetryEnabled: prefs.getBool(_kTelemetryEnabled) ?? true,
       sidebarHidden: prefs.getBool(_kSidebarHidden) ?? false,
     );

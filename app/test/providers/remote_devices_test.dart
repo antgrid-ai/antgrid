@@ -47,27 +47,30 @@ HostControlClient _fakeClient(Map<String, int> calls, {String? failVerb}) {
 }
 
 void main() {
-  test('loads phones, and unpair() re-issues the verb then refreshes', () async {
-    final calls = <String, int>{};
-    final container = ProviderContainer(
-      overrides: [
-        hostControlClientProvider.overrideWith(
-          (ref) async => _fakeClient(calls),
-        ),
-      ],
-    );
-    addTearDown(container.dispose);
+  test(
+    'loads phones, and unpair() re-issues the verb then refreshes',
+    () async {
+      final calls = <String, int>{};
+      final container = ProviderContainer(
+        overrides: [
+          hostControlClientProvider.overrideWith(
+            (ref) async => _fakeClient(calls),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
 
-    final state = await container.read(remoteDevicesProvider.future);
-    expect(state.phones.single.phonePubkey, 'pk-1');
-    expect(calls['phones:list'], 1);
+      final state = await container.read(remoteDevicesProvider.future);
+      expect(state.phones.single.phonePubkey, 'pk-1');
+      expect(calls['phones:list'], 1);
 
-    await container
-        .read(remoteDevicesProvider.notifier)
-        .unpair(phonePubkey: 'pk-1');
-    expect(calls['phones:unpair'], 1);
-    expect(calls['phones:list'], 2); // refreshed after mutation
-  });
+      await container
+          .read(remoteDevicesProvider.notifier)
+          .unpair(phonePubkey: 'pk-1');
+      expect(calls['phones:unpair'], 1);
+      expect(calls['phones:list'], 2); // refreshed after mutation
+    },
+  );
 
   test('a failed mutation verb leaves the notifier in AsyncError', () async {
     final calls = <String, int>{};

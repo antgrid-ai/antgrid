@@ -78,13 +78,19 @@ void main() {
 
   group('absoluteTime', () {
     test('afternoon uses 12-hour PM', () {
-      expect(absoluteTime(DateTime(2026, 7, 3, 14, 45)), 'Jul 3, 2026, 2:45 PM');
+      expect(
+        absoluteTime(DateTime(2026, 7, 3, 14, 45)),
+        'Jul 3, 2026, 2:45 PM',
+      );
     });
     test('after midnight reads 12:xx AM with padded minutes', () {
       expect(absoluteTime(DateTime(2026, 1, 9, 0, 5)), 'Jan 9, 2026, 12:05 AM');
     });
     test('noon reads 12:00 PM', () {
-      expect(absoluteTime(DateTime(2026, 12, 25, 12, 0)), 'Dec 25, 2026, 12:00 PM');
+      expect(
+        absoluteTime(DateTime(2026, 12, 25, 12, 0)),
+        'Dec 25, 2026, 12:00 PM',
+      );
     });
   });
 
@@ -106,11 +112,17 @@ void main() {
     // Same day-of-month, a month apart — a date-only comparison on `day` would
     // call this today.
     test('a month back is not today', () {
-      expect(dayAwareTime(DateTime(2026, 5, 13, 12, 0), now: now), 'May 13 12:00');
+      expect(
+        dayAwareTime(DateTime(2026, 5, 13, 12, 0), now: now),
+        'May 13 12:00',
+      );
     });
 
     test('a year back is not today', () {
-      expect(dayAwareTime(DateTime(2025, 6, 13, 12, 0), now: now), 'Jun 13 12:00');
+      expect(
+        dayAwareTime(DateTime(2025, 6, 13, 12, 0), now: now),
+        'Jun 13 12:00',
+      );
     });
   });
 }

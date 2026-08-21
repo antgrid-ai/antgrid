@@ -321,9 +321,7 @@ void main() {
         findsNothing,
       );
       expect(
-        tester
-            .getSize(find.byKey(WindowTitleBarContents.sidebarSlotKey))
-            .width,
+        tester.getSize(find.byKey(WindowTitleBarContents.sidebarSlotKey)).width,
         AbTokens.iconButtonBox,
       );
     } finally {
@@ -344,9 +342,7 @@ void main() {
       // exactly what the placeholder holds open, so the row's geometry — and
       // the search box centred on it — is the same on both kinds of route.
       expect(
-        tester
-            .getSize(find.byKey(WindowTitleBarContents.sidebarSlotKey))
-            .width,
+        tester.getSize(find.byKey(WindowTitleBarContents.sidebarSlotKey)).width,
         AbTokens.iconButtonBox,
       );
       await tester.tap(find.byKey(WindowTitleBarContents.sidebarSlotKey));

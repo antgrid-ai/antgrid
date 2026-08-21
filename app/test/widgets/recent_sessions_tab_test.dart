@@ -369,10 +369,7 @@ void main() {
     );
     await tester.pump();
     expect(find.text('Connect a machine'), findsOneWidget);
-    expect(
-      find.textContaining('Turn on Remote'),
-      findsOneWidget,
-    );
+    expect(find.textContaining('Turn on Remote'), findsOneWidget);
     expect(find.textContaining('No recent sessions'), findsNothing);
     debugDefaultTargetPlatformOverride = null;
   });

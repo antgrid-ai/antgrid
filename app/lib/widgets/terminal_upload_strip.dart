@@ -78,8 +78,7 @@ String _label(AttachProgress progress) {
   return switch (progress.phase) {
     AttachPhase.staging => '$name · uploading…',
     // Matches the composer's attachment convention character for character.
-    AttachPhase.sending =>
-      '$name ${((progress.fraction ?? 0) * 100).round()}%',
+    AttachPhase.sending => '$name ${((progress.fraction ?? 0) * 100).round()}%',
     AttachPhase.finishing => '$name · finishing…',
     AttachPhase.done => '$name · added',
   };

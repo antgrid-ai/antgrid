@@ -54,12 +54,7 @@ List<Map<String, dynamic>> _historyFrames() => [
     'type': 'agent:item-added',
     'sessionId': _sessionId,
     'turnId': 't1',
-    'item': {
-      'itemId': 'u1',
-      'kind': 'message',
-      'role': 'user',
-      'text': 'hi',
-    },
+    'item': {'itemId': 'u1', 'kind': 'message', 'role': 'user', 'text': 'hi'},
   },
   {
     'id': 'f3',

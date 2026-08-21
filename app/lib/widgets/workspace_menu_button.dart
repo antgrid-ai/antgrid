@@ -130,8 +130,7 @@ class _WorkspaceMenuButtonState extends ConsumerState<WorkspaceMenuButton> {
           icon: AbIcons.workspace,
           selected: open,
           tooltip: 'Workspace',
-          onTap: () =>
-              ref.read(workspaceMenuOpenProvider.notifier).set(!open),
+          onTap: () => ref.read(workspaceMenuOpenProvider.notifier).set(!open),
         ),
       ),
     );

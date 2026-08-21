@@ -218,7 +218,10 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     // re-check it before the fallback rather than acting on a stale service.
     final projectId = ref.read(selectedRegistrationIdProvider);
     try {
-      final svc = focusedCheckoutServiceOrNull(ref.container, (s) => s.previewService);
+      final svc = focusedCheckoutServiceOrNull(
+        ref.container,
+        (s) => s.previewService,
+      );
       if (svc == null) return;
       final result = await svc.selectPort(port, scheme: scheme);
       if (result != SelectPortResult.portInUse) {

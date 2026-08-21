@@ -85,7 +85,9 @@ class AbEmptyState extends StatelessWidget {
               AbIcon(
                 icon!,
                 size: 32,
-                color: _isError ? context.antgrid.error : context.antgrid.textDisabled,
+                color: _isError
+                    ? context.antgrid.error
+                    : context.antgrid.textDisabled,
               ),
               const SizedBox(height: AbTokens.space12),
             ],
@@ -93,7 +95,9 @@ class AbEmptyState extends StatelessWidget {
               title,
               style: AbTokens.sansStyle(
                 fontSize: AbTokens.fontSm,
-                color: _isError ? context.antgrid.textPrimary : context.antgrid.textMuted,
+                color: _isError
+                    ? context.antgrid.textPrimary
+                    : context.antgrid.textMuted,
                 fontWeight: _isError ? FontWeight.w500 : FontWeight.normal,
               ),
               textAlign: TextAlign.center,

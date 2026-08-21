@@ -82,7 +82,10 @@ void main() {
       final firstRunStore = await FirstRunStore.open();
       if (latched.isNotEmpty || handlerArmed) {
         await firstRunStore.write(
-          FirstRunState(completedSteps: latched, handlerArmedOnce: handlerArmed),
+          FirstRunState(
+            completedSteps: latched,
+            handlerArmedOnce: handlerArmed,
+          ),
         );
       }
       final projectStore = await ProjectStore.open();
@@ -111,18 +114,21 @@ void main() {
       return (container, firstRunStore);
     }
 
-    test('all steps start unchecked with no signals, armHandler last', () async {
-      final (container, _) = await build(signedIn: null);
-      final steps = container.read(desktopFirstRunStepsProvider);
-      expect(_doneById(steps), {
-        FirstRunStepIds.signIn: false,
-        FirstRunStepIds.openProject: false,
-        FirstRunStepIds.startSession: false,
-        FirstRunStepIds.connectPhone: false,
-        FirstRunStepIds.armHandler: false,
-      });
-      expect(steps.last.id, FirstRunStepIds.armHandler);
-    });
+    test(
+      'all steps start unchecked with no signals, armHandler last',
+      () async {
+        final (container, _) = await build(signedIn: null);
+        final steps = container.read(desktopFirstRunStepsProvider);
+        expect(_doneById(steps), {
+          FirstRunStepIds.signIn: false,
+          FirstRunStepIds.openProject: false,
+          FirstRunStepIds.startSession: false,
+          FirstRunStepIds.connectPhone: false,
+          FirstRunStepIds.armHandler: false,
+        });
+        expect(steps.last.id, FirstRunStepIds.armHandler);
+      },
+    );
 
     test('steps check off as their live signals arrive', () async {
       final (container, _) = await build(
@@ -141,17 +147,19 @@ void main() {
       expect(done.values, everyElement(isTrue));
     });
 
-    test('a latched step stays checked when its live signal regresses',
-        () async {
-      final (container, _) = await build(
-        signedIn: false,
-        latched: {FirstRunStepIds.signIn, FirstRunStepIds.connectPhone},
-      );
-      final done = _doneById(container.read(desktopFirstRunStepsProvider));
-      expect(done[FirstRunStepIds.signIn], isTrue);
-      expect(done[FirstRunStepIds.connectPhone], isTrue);
-      expect(done[FirstRunStepIds.openProject], isFalse);
-    });
+    test(
+      'a latched step stays checked when its live signal regresses',
+      () async {
+        final (container, _) = await build(
+          signedIn: false,
+          latched: {FirstRunStepIds.signIn, FirstRunStepIds.connectPhone},
+        );
+        final done = _doneById(container.read(desktopFirstRunStepsProvider));
+        expect(done[FirstRunStepIds.signIn], isTrue);
+        expect(done[FirstRunStepIds.connectPhone], isTrue);
+        expect(done[FirstRunStepIds.openProject], isFalse);
+      },
+    );
 
     test('markHandlerArmed flips the armHandler step and persists', () async {
       final (container, _) = await build(signedIn: null);
@@ -181,7 +189,11 @@ void main() {
           devicesApiProvider.overrideWithValue(
             _FakeDevicesApi([
               _device(kind: 'agent', platform: 'windows', name: 'Rig'),
-              _device(kind: 'app', platform: 'windows', name: 'Rig (controller)'),
+              _device(
+                kind: 'app',
+                platform: 'windows',
+                name: 'Rig (controller)',
+              ),
               _device(kind: 'app', platform: 'Android', name: 'Pixel'),
               _device(kind: 'app', platform: 'ios', name: 'iPhone'),
             ]),
@@ -225,62 +237,67 @@ void main() {
       expect(_doneById(sub.read()).values, everyElement(isFalse));
     });
 
-    test('machine inventory, project adverts, and selection drive the steps',
-        () async {
-      final container = await build(
-        agents: [
-          InventoryAgent(
-            deviceUuid: 'm1',
-            displayName: 'Rig',
-            platform: 'windows',
-            ed25519Pub: 'AA==',
-          ),
-        ],
-      );
-      final sub = container.listen(mobileFirstRunStepsProvider, (_, _) {});
-      await container.read(accountAgentsProvider.future);
-      await Future<void>.delayed(Duration.zero);
-      var done = _doneById(sub.read());
-      expect(done[FirstRunStepIds.machineLinked], isTrue);
-      expect(done[FirstRunStepIds.remoteOn], isFalse);
-      expect(done[FirstRunStepIds.openedProject], isFalse);
+    test(
+      'machine inventory, project adverts, and selection drive the steps',
+      () async {
+        final container = await build(
+          agents: [
+            InventoryAgent(
+              deviceUuid: 'm1',
+              displayName: 'Rig',
+              platform: 'windows',
+              ed25519Pub: 'AA==',
+            ),
+          ],
+        );
+        final sub = container.listen(mobileFirstRunStepsProvider, (_, _) {});
+        await container.read(accountAgentsProvider.future);
+        await Future<void>.delayed(Duration.zero);
+        var done = _doneById(sub.read());
+        expect(done[FirstRunStepIds.machineLinked], isTrue);
+        expect(done[FirstRunStepIds.remoteOn], isFalse);
+        expect(done[FirstRunStepIds.openedProject], isFalse);
 
-      // A flag-less advert (older bridge) falls back to the projects-visible
-      // proxy.
-      container
-          .read(machineAdvertisedProjectsProvider.notifier)
-          .setAdvert('m1', (projectCount: 2, remoteAccessEnabled: null));
-      done = _doneById(sub.read());
-      expect(done[FirstRunStepIds.remoteOn], isTrue);
+        // A flag-less advert (older bridge) falls back to the projects-visible
+        // proxy.
+        container.read(machineAdvertisedProjectsProvider.notifier).setAdvert(
+          'm1',
+          (projectCount: 2, remoteAccessEnabled: null),
+        );
+        done = _doneById(sub.read());
+        expect(done[FirstRunStepIds.remoteOn], isTrue);
 
-      // The explicit machine-level flag outranks the proxy in both
-      // directions: remote off with projects visible reads off, remote on
-      // with zero projects reads on.
-      container
-          .read(machineAdvertisedProjectsProvider.notifier)
-          .setAdvert('m1', (projectCount: 2, remoteAccessEnabled: false));
-      done = _doneById(sub.read());
-      expect(done[FirstRunStepIds.remoteOn], isFalse);
-      container
-          .read(machineAdvertisedProjectsProvider.notifier)
-          .setAdvert('m1', (projectCount: 0, remoteAccessEnabled: true));
-      done = _doneById(sub.read());
-      expect(done[FirstRunStepIds.remoteOn], isTrue);
+        // The explicit machine-level flag outranks the proxy in both
+        // directions: remote off with projects visible reads off, remote on
+        // with zero projects reads on.
+        container.read(machineAdvertisedProjectsProvider.notifier).setAdvert(
+          'm1',
+          (projectCount: 2, remoteAccessEnabled: false),
+        );
+        done = _doneById(sub.read());
+        expect(done[FirstRunStepIds.remoteOn], isFalse);
+        container.read(machineAdvertisedProjectsProvider.notifier).setAdvert(
+          'm1',
+          (projectCount: 0, remoteAccessEnabled: true),
+        );
+        done = _doneById(sub.read());
+        expect(done[FirstRunStepIds.remoteOn], isTrue);
 
-      // A machine that disconnects is cleared from the live map, but the
-      // latched step (written by the checklist widget) would keep it checked;
-      // here, unlatched, it honestly regresses.
-      container.read(machineAdvertisedProjectsProvider.notifier).clear('m1');
-      done = _doneById(sub.read());
-      expect(done[FirstRunStepIds.remoteOn], isFalse);
+        // A machine that disconnects is cleared from the live map, but the
+        // latched step (written by the checklist widget) would keep it checked;
+        // here, unlatched, it honestly regresses.
+        container.read(machineAdvertisedProjectsProvider.notifier).clear('m1');
+        done = _doneById(sub.read());
+        expect(done[FirstRunStepIds.remoteOn], isFalse);
 
-      // Opening a project = a selected target.
-      container
-          .read(selectedTargetProvider.notifier)
-          .set(const LocalProject('p1'));
-      done = _doneById(sub.read());
-      expect(done[FirstRunStepIds.openedProject], isTrue);
-    });
+        // Opening a project = a selected target.
+        container
+            .read(selectedTargetProvider.notifier)
+            .set(const LocalProject('p1'));
+        done = _doneById(sub.read());
+        expect(done[FirstRunStepIds.openedProject], isTrue);
+      },
+    );
 
     test('mobile checklist carries no armHandler step', () async {
       final container = await build();
@@ -311,42 +328,44 @@ void main() {
       expect((await FirstRunStore.open()).read().checklistDismissed, isTrue);
     });
 
-    test('completion hides the checklist forever, even when signals regress',
-        () async {
-      useInMemoryPrefs();
-      final store = await FirstRunStore.open();
-      final container = ProviderContainer(
-        overrides: [firstRunStoreProvider.overrideWithValue(store)],
-      );
-      addTearDown(container.dispose);
+    test(
+      'completion hides the checklist forever, even when signals regress',
+      () async {
+        useInMemoryPrefs();
+        final store = await FirstRunStore.open();
+        final container = ProviderContainer(
+          overrides: [firstRunStoreProvider.overrideWithValue(store)],
+        );
+        addTearDown(container.dispose);
 
-      container.read(firstRunProvider.notifier).latchSteps({
-        FirstRunStepIds.signIn,
-        FirstRunStepIds.openProject,
-      });
-      container.read(firstRunProvider.notifier).latchSteps({
-        FirstRunStepIds.startSession,
-        FirstRunStepIds.connectPhone,
-      });
-      container.read(firstRunProvider.notifier).markChecklistCompleted();
-      expect(container.read(firstRunChecklistVisibleProvider), isFalse);
+        container.read(firstRunProvider.notifier).latchSteps({
+          FirstRunStepIds.signIn,
+          FirstRunStepIds.openProject,
+        });
+        container.read(firstRunProvider.notifier).latchSteps({
+          FirstRunStepIds.startSession,
+          FirstRunStepIds.connectPhone,
+        });
+        container.read(firstRunProvider.notifier).markChecklistCompleted();
+        expect(container.read(firstRunChecklistVisibleProvider), isFalse);
 
-      // A fresh container over the same prefs (an app restart) stays hidden
-      // and keeps every latched step.
-      final restarted = ProviderContainer(
-        overrides: [
-          firstRunStoreProvider.overrideWithValue(await FirstRunStore.open()),
-        ],
-      );
-      addTearDown(restarted.dispose);
-      expect(restarted.read(firstRunChecklistVisibleProvider), isFalse);
-      expect(restarted.read(firstRunProvider).completedSteps, {
-        FirstRunStepIds.signIn,
-        FirstRunStepIds.openProject,
-        FirstRunStepIds.startSession,
-        FirstRunStepIds.connectPhone,
-      });
-    });
+        // A fresh container over the same prefs (an app restart) stays hidden
+        // and keeps every latched step.
+        final restarted = ProviderContainer(
+          overrides: [
+            firstRunStoreProvider.overrideWithValue(await FirstRunStore.open()),
+          ],
+        );
+        addTearDown(restarted.dispose);
+        expect(restarted.read(firstRunChecklistVisibleProvider), isFalse);
+        expect(restarted.read(firstRunProvider).completedSteps, {
+          FirstRunStepIds.signIn,
+          FirstRunStepIds.openProject,
+          FirstRunStepIds.startSession,
+          FirstRunStepIds.connectPhone,
+        });
+      },
+    );
 
     test('nudge dismissals persist independently of the checklist', () async {
       useInMemoryPrefs();

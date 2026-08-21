@@ -156,7 +156,10 @@ void main() {
     await _answerStart(tester, transport, ok: true);
 
     expect(find.textContaining('Restore its folder'), findsNothing);
-    expect(container.read(workbenchSurfaceProvider), WorkbenchSurface.workspace);
+    expect(
+      container.read(workbenchSurfaceProvider),
+      WorkbenchSurface.workspace,
+    );
     expect(
       transport.sent.where((m) => m['type'] == 'session:focus'),
       isNotEmpty,

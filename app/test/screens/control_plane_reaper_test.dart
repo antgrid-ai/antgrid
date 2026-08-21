@@ -476,7 +476,8 @@ void main() {
       expect(
         transport.requests.where((r) => r.method == 'sessions.list'),
         hasLength(1),
-        reason: 're-emitting the same advert must not re-request an already-seeded project',
+        reason:
+            're-emitting the same advert must not re-request an already-seeded project',
       );
 
       // Drain the store's debounced flush timer so it doesn't outlive the

@@ -6,7 +6,8 @@ import 'package:antgrid/launcher/host_discovery.dart';
 void main() {
   group('HostFile.tryParse', () {
     test('parses a valid host.json', () {
-      const json = '{"version":1,"pid":4242,"controlPort":51234,'
+      const json =
+          '{"version":1,"pid":4242,"controlPort":51234,'
           '"token":"abc","startedAt":"2026-06-11T00:00:00.000Z",'
           '"agentVersion":"0.1.0"}';
       final h = HostFile.tryParse(json);
@@ -17,7 +18,8 @@ void main() {
     });
 
     test('rejects wrong version', () {
-      const json = '{"version":2,"pid":1,"controlPort":1,"token":"t",'
+      const json =
+          '{"version":2,"pid":1,"controlPort":1,"token":"t",'
           '"startedAt":"x","agentVersion":"v"}';
       expect(HostFile.tryParse(json), isNull);
     });
@@ -42,8 +44,10 @@ void main() {
       final dir = await Directory.systemTemp.createTemp('ab-host-');
       addTearDown(() => dir.delete(recursive: true));
       final path = '${dir.path}/host.json';
-      await File(path).writeAsString('{"version":1,"pid":7,"controlPort":9999,'
-          '"token":"tok","startedAt":"s","agentVersion":"v"}');
+      await File(path).writeAsString(
+        '{"version":1,"pid":7,"controlPort":9999,'
+        '"token":"tok","startedAt":"s","agentVersion":"v"}',
+      );
       final h = await readHostFile(path);
       expect(h!.controlPort, 9999);
       expect(h.token, 'tok');

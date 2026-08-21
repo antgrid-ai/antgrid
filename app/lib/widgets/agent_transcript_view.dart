@@ -875,8 +875,10 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
                     : () => _showUpdateDialog(context, availableUpdate),
                 onRetry: retryTool == null
                     ? null
-                    : () =>
-                          _service()?.requestUpdate(widget.sessionId, retryTool),
+                    : () => _service()?.requestUpdate(
+                        widget.sessionId,
+                        retryTool,
+                      ),
                 onDismissResult: () =>
                     _service()?.dismissUpdateResult(widget.sessionId),
                 onDismissAvailable: availableUpdate == null
@@ -1078,9 +1080,15 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
     void run(CopyKind kind) {
       // Fire-and-forget, but never let a clipboard write reject unobserved: an
       // unhandled async error crashes the debug zone and tells the user nothing.
-      _selection.copy(kind).catchError(
-        (Object e) => AbLog.error('AgentTranscript', 'copy failed', fields: {'error': '$e'}),
-      );
+      _selection
+          .copy(kind)
+          .catchError(
+            (Object e) => AbLog.error(
+              'AgentTranscript',
+              'copy failed',
+              fields: {'error': '$e'},
+            ),
+          );
       state.hideToolbar();
     }
 

@@ -14,7 +14,8 @@ Future<bool> confirmAndHardSignOut(BuildContext context, WidgetRef ref) async {
   final ok = await AbConfirmDialog.show(
     context: context,
     title: 'Sign out and remove this device?',
-    body: 'This signs you out AND removes this device from your account. '
+    body:
+        'This signs you out AND removes this device from your account. '
         'Phones currently paired with this device will be disconnected and '
         'need to be re-paired. You can sign in again anytime.',
     confirmLabel: 'Sign out',

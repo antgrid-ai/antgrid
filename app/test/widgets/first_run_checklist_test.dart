@@ -229,10 +229,7 @@ void main() {
     await tester.pump();
     expect(find.text('SETUP · 1/5'), findsOneWidget);
     expect(find.text('Sign in'), findsNothing);
-    expect(
-      find.text('Open a folder to add your first project.'),
-      findsNothing,
-    );
+    expect(find.text('Open a folder to add your first project.'), findsNothing);
     expect(store.read().checklistCollapsed, isTrue);
     // Collapse is not dismissal: the surface is still live.
     expect(store.read().checklistDismissed, isFalse);

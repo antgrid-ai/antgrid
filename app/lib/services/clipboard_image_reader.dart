@@ -150,20 +150,16 @@ Future<({Uint8List bytes, String? fileName})?> _readFile(
     // Null means no item ended up matching after all, and NEITHER callback will
     // ever run — without this the completer would sit out the whole timeout and
     // paste would appear dead for 15s before falling back to text.
-    final started = reader.getFile(
-      format,
-      (file) async {
-        try {
-          final bytes = await file.readAll();
-          if (!completer.isCompleted) {
-            completer.complete((bytes: bytes, fileName: file.fileName));
-          }
-        } catch (e) {
-          fail(e);
+    final started = reader.getFile(format, (file) async {
+      try {
+        final bytes = await file.readAll();
+        if (!completer.isCompleted) {
+          completer.complete((bytes: bytes, fileName: file.fileName));
         }
-      },
-      onError: fail,
-    );
+      } catch (e) {
+        fail(e);
+      }
+    }, onError: fail);
     if (started == null && !completer.isCompleted) completer.complete(null);
   } catch (e) {
     fail(e);

@@ -108,8 +108,12 @@ void main() {
 
   test('checkout binding defaults to the main checkout for old sessions', () {
     final old = SessionEntry.fromJson({
-      'id': 'a', 'name': 'n', 'createdAt': 1, 'lastUsedAt': 1,
-      'archived': false, 'running': false,
+      'id': 'a',
+      'name': 'n',
+      'createdAt': 1,
+      'lastUsedAt': 1,
+      'archived': false,
+      'running': false,
     });
     expect(old.checkoutId, 'main');
     expect(old.checkoutKind, 'main');
@@ -118,10 +122,16 @@ void main() {
 
   test('checkout binding round-trips without exposing a checkout path', () {
     final entry = SessionEntry.fromJson({
-      'id': 'a', 'name': 'n', 'createdAt': 1, 'lastUsedAt': 1,
-      'archived': false, 'running': false,
-      'checkoutId': 'worktree-1', 'checkoutKind': 'managed-worktree',
-      'checkoutBranch': 'antgrid/session-a', 'checkoutState': 'ready',
+      'id': 'a',
+      'name': 'n',
+      'createdAt': 1,
+      'lastUsedAt': 1,
+      'archived': false,
+      'running': false,
+      'checkoutId': 'worktree-1',
+      'checkoutKind': 'managed-worktree',
+      'checkoutBranch': 'antgrid/session-a',
+      'checkoutState': 'ready',
     });
     expect(entry.toJson()['checkoutBranch'], 'antgrid/session-a');
     expect(entry.toJson().containsKey('path'), isFalse);

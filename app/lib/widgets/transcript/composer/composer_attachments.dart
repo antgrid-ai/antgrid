@@ -133,7 +133,6 @@ class ComposerAttachmentChips extends StatelessWidget {
   }
 }
 
-
 /// The thumbnail + filename half of a chip, tappable only when a preview
 /// actually exists behind it.
 class _AttachmentLabel extends StatelessWidget {

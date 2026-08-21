@@ -35,10 +35,7 @@ void main() {
       await _pump(tester, const UsageFooterRow(usage: partial));
       expect(find.text('100 in · 50 out · 150 tok'), findsOneWidget);
 
-      await _pump(
-        tester,
-        const UsageFooterRow(usage: AgentTokenUsage()),
-      );
+      await _pump(tester, const UsageFooterRow(usage: AgentTokenUsage()));
       expect(find.byType(Text), findsNothing);
     },
   );

@@ -343,4 +343,3 @@ class _ConnectingIndicator extends ConsumerWidget {
     );
   }
 }
-

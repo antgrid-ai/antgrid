@@ -5,13 +5,13 @@ import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 
 SessionEntry s(String id, int last, {bool archived = false}) => SessionEntry(
-      id: id,
-      name: 'name-$id',
-      createdAt: 0,
-      lastUsedAt: last,
-      archived: archived,
-      running: false,
-    );
+  id: id,
+  name: 'name-$id',
+  createdAt: 0,
+  lastUsedAt: last,
+  archived: archived,
+  running: false,
+);
 
 // AbProject requires all fields; hostDeviceUuid is nullable but required.
 AbProject localProject({
@@ -19,13 +19,13 @@ AbProject localProject({
   String folder = '/p',
   String displayName = 'My Local',
 }) => AbProject(
-      projectId: projectId,
-      folder: folder,
-      displayName: displayName,
-      hostDeviceUuid: null,
-      hostMachineName: '',
-      lastOpenedAt: DateTime(2026),
-    );
+  projectId: projectId,
+  folder: folder,
+  displayName: displayName,
+  hostDeviceUuid: null,
+  hostMachineName: '',
+  lastOpenedAt: DateTime(2026),
+);
 
 // RecentAgent requires all fields (many required).
 RecentAgent remoteAgent({
@@ -33,14 +33,14 @@ RecentAgent remoteAgent({
   String agentLabel = 'label',
   String? hostMachineName,
 }) => RecentAgent(
-      agentDeviceId: agentDeviceId,
-      agentLabel: agentLabel,
-      agentEd25519Pubkey: 'pk',
-      relayUrl: 'ws://relay',
-      pairedAt: DateTime(2026),
-      lastConnectedAt: DateTime(2026),
-      hostMachineName: hostMachineName,
-    );
+  agentDeviceId: agentDeviceId,
+  agentLabel: agentLabel,
+  agentEd25519Pubkey: 'pk',
+  relayUrl: 'ws://relay',
+  pairedAt: DateTime(2026),
+  lastConnectedAt: DateTime(2026),
+  hostMachineName: hostMachineName,
+);
 
 void main() {
   test('flattens, drops archived, sorts by lastUsedAt desc', () {
@@ -60,7 +60,9 @@ void main() {
 
   test('resolves local origin: project name + local device label', () {
     final rows = buildRecentSessions(
-      cached: {'projLocal': [s('l1', 10)]},
+      cached: {
+        'projLocal': [s('l1', 10)],
+      },
       locals: [localProject(projectId: 'projLocal', displayName: 'My Local')],
       remotes: const [],
       inventory: const [],
@@ -76,9 +78,13 @@ void main() {
 
   test('resolves remote origin via recent agent host machine name', () {
     final rows = buildRecentSessions(
-      cached: {'uuidA.projRemote': [s('r1', 10)]},
+      cached: {
+        'uuidA.projRemote': [s('r1', 10)],
+      },
       locals: const [],
-      remotes: [remoteAgent(agentDeviceId: 'uuidA', hostMachineName: 'BuildBox')],
+      remotes: [
+        remoteAgent(agentDeviceId: 'uuidA', hostMachineName: 'BuildBox'),
+      ],
       inventory: const [],
       localDeviceLabel: 'This Mac',
     );
@@ -87,6 +93,9 @@ void main() {
     expect(o.machineUuid, 'uuidA');
     expect(o.projectId, 'projRemote');
     expect(o.deviceName, 'BuildBox');
-    expect(o.projectName, 'projRemote'); // no advert offline → projectId fallback
+    expect(
+      o.projectName,
+      'projRemote',
+    ); // no advert offline → projectId fallback
   });
 }

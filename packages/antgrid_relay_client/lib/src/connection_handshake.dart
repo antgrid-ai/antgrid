@@ -102,8 +102,8 @@ class ConnectionHandshake {
     final attemptId = _secureNonceB64();
     final nonceB64 = _secureNonceB64();
     final nonce = base64.decode(nonceB64);
-    final (phoneX25519Priv, phoneX25519Pub) =
-        await _crypto.generateX25519KeyPair();
+    final (phoneX25519Priv, phoneX25519Pub) = await _crypto
+        .generateX25519KeyPair();
     var phoneX25519PrivScrubbed = false;
     final phoneX25519PubB64 = base64.encode(phoneX25519Pub);
     final established = Completer<SessionKeys>();
@@ -310,8 +310,10 @@ class ConnectionHandshake {
     }
 
     unawaited(send());
-    _appReadyTimer =
-        Timer.periodic(_appReadyRetransmit, (_) => unawaited(send()));
+    _appReadyTimer = Timer.periodic(
+      _appReadyRetransmit,
+      (_) => unawaited(send()),
+    );
   }
 
   void _log(

@@ -11,7 +11,9 @@ Future<String> signTranscriptV2({
   required List<int> ed25519Seed,
 }) async {
   if (ed25519Seed.length != 32) {
-    throw ArgumentError('ed25519Seed must be 32 bytes, got ${ed25519Seed.length}');
+    throw ArgumentError(
+      'ed25519Seed must be 32 bytes, got ${ed25519Seed.length}',
+    );
   }
   final kp = await Ed25519().newKeyPairFromSeed(ed25519Seed);
   final sig = await Ed25519().sign(transcript, keyPair: kp);
@@ -35,7 +37,10 @@ Future<bool> verifyTranscriptSigV2({
   try {
     return await Ed25519().verify(
       transcript,
-      signature: Signature(sig, publicKey: SimplePublicKey(pub, type: KeyPairType.ed25519)),
+      signature: Signature(
+        sig,
+        publicKey: SimplePublicKey(pub, type: KeyPairType.ed25519),
+      ),
     );
   } catch (_) {
     return false;

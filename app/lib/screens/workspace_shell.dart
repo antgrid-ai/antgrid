@@ -342,9 +342,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // PREVIOUS session's terminal marked as viewed, and notifications for it
     // stay suppressed. Both halves of the layout re-publish the real value from
     // their own post-frame callback on remount.
-    final agentSurfaceNotifier = ref.read(
-      agentSurfaceVisibleProvider.notifier,
-    );
+    final agentSurfaceNotifier = ref.read(agentSurfaceVisibleProvider.notifier);
     // Closes over _pageController too, so the same rule: NewSessionScreen
     // republishes its own on mount, and a stale one would animate a dead route.
     // Retracted by identity, not unconditionally — see openDrawerProvider's doc:

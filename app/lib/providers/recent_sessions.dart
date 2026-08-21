@@ -126,7 +126,8 @@ class RemoteProjectStatusController
         if (!e.key.startsWith(prefix)) e.key: e.value,
       ...statuses,
     };
-    if (const MapEquality<String, AgentWorkStatus>().equals(state, next)) return;
+    if (const MapEquality<String, AgentWorkStatus>().equals(state, next))
+      return;
     state = next;
   }
 
@@ -140,11 +141,11 @@ class RemoteProjectStatusController
         if (e.key.contains('.')) e.key: e.value,
       ...statuses,
     };
-    if (const MapEquality<String, AgentWorkStatus>().equals(state, next)) return;
+    if (const MapEquality<String, AgentWorkStatus>().equals(state, next))
+      return;
     state = next;
   }
 }
-
 
 /// Live PER-SESSION work status from the same adverts that fill
 /// [remoteProjectStatusProvider], keyed by drawer entryId → (sessionId →
@@ -198,7 +199,9 @@ class RemoteSessionStatusController
       // on the inner Map — a fresh-but-identical instance would rebuild every
       // session row on every advert re-delivery.
       final prev = state[e.key];
-      next[e.key] = prev != null && _sameStatuses(prev, e.value) ? prev : e.value;
+      next[e.key] = prev != null && _sameStatuses(prev, e.value)
+          ? prev
+          : e.value;
     }
     if (const MapEquality<String, Map<String, AgentWorkStatus>>().equals(
       state,
@@ -228,10 +231,11 @@ typedef MachineAdvertSummary = ({int projectCount, bool? remoteAccessEnabled});
 /// derivable from [remoteProjectLabelsProvider]: that map only records
 /// projects with a non-empty label, and labels deliberately persist across
 /// disconnects.
-final machineAdvertisedProjectsProvider = NotifierProvider<
-  MachineAdvertisedProjectsController,
-  Map<String, MachineAdvertSummary>
->(MachineAdvertisedProjectsController.new);
+final machineAdvertisedProjectsProvider =
+    NotifierProvider<
+      MachineAdvertisedProjectsController,
+      Map<String, MachineAdvertSummary>
+    >(MachineAdvertisedProjectsController.new);
 
 class MachineAdvertisedProjectsController
     extends Notifier<Map<String, MachineAdvertSummary>> {
@@ -334,7 +338,10 @@ Future<void> openRecentSession(
     // project is gone from the local list and there's no machine to cold-open
     // it on. Left unmessaged, that was a tap that does nothing forever.
     if (context.mounted) {
-      showAbSnackBar(context, 'Could not open "${row.session.name}" — its project is no longer available.');
+      showAbSnackBar(
+        context,
+        'Could not open "${row.session.name}" — its project is no longer available.',
+      );
     }
     return;
   }

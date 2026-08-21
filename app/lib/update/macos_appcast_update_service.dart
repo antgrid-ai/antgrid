@@ -13,7 +13,10 @@ import 'macos_sparkle_update_service.dart';
 /// up-to-date. Both sides are integers by construction (CI stamps
 /// `--build-number` and `<sparkle:version>` from the same run counter);
 /// anything unparseable resolves to `false`, never a phantom update.
-bool isNewerBuild({required String currentBuild, required String appcastBuild}) {
+bool isNewerBuild({
+  required String currentBuild,
+  required String appcastBuild,
+}) {
   final current = int.tryParse(currentBuild.trim());
   final appcast = int.tryParse(appcastBuild.trim());
   if (current == null || appcast == null) return false;
@@ -52,7 +55,10 @@ class MacosAppcastUpdateService {
     try {
       final info = _packageInfo ??= await PackageInfo.fromPlatform();
       if (info.buildNumber.isEmpty) {
-        AbLog.warn('Update', 'PackageInfo.buildNumber is empty (check skipped)');
+        AbLog.warn(
+          'Update',
+          'PackageInfo.buildNumber is empty (check skipped)',
+        );
         return false;
       }
       final res = await client
@@ -92,9 +98,7 @@ class MacosAppcastUpdateService {
   /// happily read an older entry's build number.
   String? _firstItemVersion(String body) {
     try {
-      final item = XmlDocument.parse(
-        body,
-      ).findAllElements('item').firstOrNull;
+      final item = XmlDocument.parse(body).findAllElements('item').firstOrNull;
       if (item == null) {
         AbLog.warn('Update', 'appcast has no <item> (check skipped)');
         return null;

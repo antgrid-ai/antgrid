@@ -26,10 +26,9 @@ class InventoryAgent {
     platform: j['platform'] as String,
     ed25519Pub: j['ed25519Pub'] as String,
     relayUrl: j['relayUrl'] as String?,
-    lastSeenAt:
-        j['lastSeenAt'] != null
-            ? DateTime.parse(j['lastSeenAt'] as String)
-            : null,
+    lastSeenAt: j['lastSeenAt'] != null
+        ? DateTime.parse(j['lastSeenAt'] as String)
+        : null,
     machineName: j['machineName'] as String?,
   );
 }

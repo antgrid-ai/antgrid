@@ -193,9 +193,7 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
           drawer: Drawer(
             backgroundColor: context.antgrid.bgDeep,
             width: 304,
-            child: SafeArea(
-              child: const ProjectsDrawer(),
-            ),
+            child: SafeArea(child: const ProjectsDrawer()),
           ),
           body: SafeArea(
             child:
@@ -312,9 +310,10 @@ class _NewSessionScreenState extends ConsumerState<NewSessionScreen> {
     // WorkspaceShell's own publish of [sidebarControlProvider].
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      ref
-          .read(sidebarControlProvider.notifier)
-          .set((hidden: sidebarHidden, toggle: _publishedToggleSidebar));
+      ref.read(sidebarControlProvider.notifier).set((
+        hidden: sidebarHidden,
+        toggle: _publishedToggleSidebar,
+      ));
     });
     // SafeArea here, unlike the mobile branch's Scaffold.drawer approach: at
     // a narrow desktop width app_shell no longer consumes system insets above

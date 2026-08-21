@@ -313,36 +313,38 @@ void main() {
 
     supervisor.noteFreshToken();
     await _waitUntil(() => supervisor.status is Connected);
-    expect(
-      relay.dialedTokens,
-      ['token-1', 'token-2'],
-      reason: 'noteFreshToken must redial with a NEWLY minted token',
-    );
+    expect(relay.dialedTokens, [
+      'token-1',
+      'token-2',
+    ], reason: 'noteFreshToken must redial with a NEWLY minted token');
   });
 
-  test('a single SUPERSEDED reaches the supervisor without dead-ending the '
-      'ladder — the app\'s own stale relay entry recovers on the next dial', () async {
-    final mech = climbableMech();
-    final supervisor = wireProduction(mech);
-    await _waitUntil(() => supervisor.status is Connected);
+  test(
+    'a single SUPERSEDED reaches the supervisor without dead-ending the '
+    'ladder — the app\'s own stale relay entry recovers on the next dial',
+    () async {
+      final mech = climbableMech();
+      final supervisor = wireProduction(mech);
+      await _waitUntil(() => supervisor.status is Connected);
 
-    // The phone changed network. The relay still holds the old entry and
-    // rejects the same-epoch redial (the app mints one epoch per launch), then
-    // drops the stale entry on its own liveness sweep — after which the very
-    // same epoch is admitted.
-    relay.pushError(
-      const ErrorMessage(
-        code: 'SUPERSEDED',
-        message: 'a newer or equal connection already holds this deviceId',
-        retryable: false,
-      ),
-    );
+      // The phone changed network. The relay still holds the old entry and
+      // rejects the same-epoch redial (the app mints one epoch per launch), then
+      // drops the stale entry on its own liveness sweep — after which the very
+      // same epoch is admitted.
+      relay.pushError(
+        const ErrorMessage(
+          code: 'SUPERSEDED',
+          message: 'a newer or equal connection already holds this deviceId',
+          retryable: false,
+        ),
+      );
 
-    await _waitUntil(
-      () => relay.dialedTokens.length == 2 && supervisor.status is Connected,
-      reason: 'a stale relay-side entry must not be a sticky dead end',
-    );
-  });
+      await _waitUntil(
+        () => relay.dialedTokens.length == 2 && supervisor.status is Connected,
+        reason: 'a stale relay-side entry must not be a sticky dead end',
+      );
+    },
+  );
 
   test('a SUPERSEDED that keeps repeating blocks the ladder; presence flaps do '
       'NOT clear it; only retry() redials', () async {

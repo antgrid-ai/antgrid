@@ -101,8 +101,7 @@ class _DeviceCapDialogState extends ConsumerState<DeviceCapDialog> {
       if (!mounted) return;
       // Still capped (or transient) — keep the dialog open; the list already
       // reflects the removal so the user can free another slot.
-      final stillCapped =
-          e.code == 'APP_DEVICE_CAP' || e.code == 'WORKER_CAP';
+      final stillCapped = e.code == 'APP_DEVICE_CAP' || e.code == 'WORKER_CAP';
       setState(() {
         // Re-seat on the cap the server just named. Removing a phone can clear
         // APP_DEVICE_CAP and leave WORKER_CAP standing (and vice versa), and

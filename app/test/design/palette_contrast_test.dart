@@ -9,8 +9,9 @@ import 'package:antgrid/design/theme_presets.dart';
 /// Implemented independently of [Color.computeLuminance] so the assertion
 /// doesn't inherit a framework regression.
 double _relativeLuminance(Color c) {
-  double linearize(double ch) =>
-      ch <= 0.03928 ? ch / 12.92 : math.pow((ch + 0.055) / 1.055, 2.4) as double;
+  double linearize(double ch) => ch <= 0.03928
+      ? ch / 12.92
+      : math.pow((ch + 0.055) / 1.055, 2.4) as double;
   return 0.2126 * linearize(c.r) +
       0.7152 * linearize(c.g) +
       0.0722 * linearize(c.b);
@@ -111,7 +112,11 @@ void main() {
           ('bgDeepest', p.bgDeepest),
           ('bgSurface', p.bgSurface),
         ]) {
-          _expectNonText(p.iconMuted, s.$2, '${entry.key} iconMuted on ${s.$1}');
+          _expectNonText(
+            p.iconMuted,
+            s.$2,
+            '${entry.key} iconMuted on ${s.$1}',
+          );
         }
       });
     }
@@ -168,8 +173,14 @@ void main() {
       }
     }
 
-    test('dark custom background', () => check(const Color(0xFF141414), 'dark'));
-    test('light custom background', () => check(const Color(0xFFFFFFFF), 'light'));
+    test(
+      'dark custom background',
+      () => check(const Color(0xFF141414), 'dark'),
+    );
+    test(
+      'light custom background',
+      () => check(const Color(0xFFFFFFFF), 'light'),
+    );
   });
 
   group(
@@ -186,11 +197,7 @@ void main() {
           derived.bgSurface,
           '$label iconMuted on derived surface',
         );
-        _expectNonText(
-          derived.iconMuted,
-          bg,
-          '$label iconMuted on bg',
-        );
+        _expectNonText(derived.iconMuted, bg, '$label iconMuted on bg');
         expect(
           _contrast(derived.iconMuted, derived.bgSurface) <
               _contrast(derived.textMuted, derived.bgSurface),
@@ -207,8 +214,14 @@ void main() {
       // own doc comment already documents that no shade reaches AA on them,
       // and iconMuted is bounded by muted, so it inherits that limit rather
       // than introducing a new one.
-      test('dark custom background', () => check(const Color(0xFF141414), 'dark'));
-      test('light custom background', () => check(const Color(0xFFFFFFFF), 'light'));
+      test(
+        'dark custom background',
+        () => check(const Color(0xFF141414), 'dark'),
+      );
+      test(
+        'light custom background',
+        () => check(const Color(0xFFFFFFFF), 'light'),
+      );
     },
   );
 
@@ -223,24 +236,27 @@ void main() {
   // accepted gap. This test is a tripwire, not a bug report: if it starts
   // failing, either a preset got light enough to close the gap on its own,
   // or someone should look at whether a ceiling is now warranted.
-  group('truecolor output is not ceiling-bound on dark presets (known gap)', () {
-    for (final preset in [
-      AbThemePreset.zinc,
-      AbThemePreset.antgrid,
-      AbThemePreset.slate,
-      AbThemePreset.midnight,
-    ]) {
-      test('$preset: arbitrary truecolor white exceeds the 15:1 ceiling', () {
-        final bg = kPresets[preset]!.bgDeepest;
-        final ratio = _contrast(const Color(0xFFFFFFFF), bg);
-        expect(
-          ratio,
-          greaterThan(15.0),
-          reason:
-              '$preset bgDeepest (${_hex(bg)}) no longer exposes this gap — '
-              'truecolor white now reads ${ratio.toStringAsFixed(1)}:1',
-        );
-      });
-    }
-  });
+  group(
+    'truecolor output is not ceiling-bound on dark presets (known gap)',
+    () {
+      for (final preset in [
+        AbThemePreset.zinc,
+        AbThemePreset.antgrid,
+        AbThemePreset.slate,
+        AbThemePreset.midnight,
+      ]) {
+        test('$preset: arbitrary truecolor white exceeds the 15:1 ceiling', () {
+          final bg = kPresets[preset]!.bgDeepest;
+          final ratio = _contrast(const Color(0xFFFFFFFF), bg);
+          expect(
+            ratio,
+            greaterThan(15.0),
+            reason:
+                '$preset bgDeepest (${_hex(bg)}) no longer exposes this gap — '
+                'truecolor white now reads ${ratio.toStringAsFixed(1)}:1',
+          );
+        });
+      }
+    },
+  );
 }

@@ -512,24 +512,21 @@ void main() {
     await waitUntil(() => sup.status == const Connected());
   });
 
-  test(
-    'repeated socket failures re-resolve the coords instead of dialling a '
-    'dead endpoint forever',
-    () async {
-      // A host that moved relay (or re-provisioned its identity) while this
-      // machine was held warm: the cached coords can never succeed, and with
-      // no producer for noteCoordsChanged() the ladder used to sit on the 30s
-      // socket cap with no Blocked reason and an inert Retry.
-      mech.agentOnlineValue = true;
-      mech.dialFailures = 999;
-      final sup = build(backoffBaseMs: 0);
+  test('repeated socket failures re-resolve the coords instead of dialling a '
+      'dead endpoint forever', () async {
+    // A host that moved relay (or re-provisioned its identity) while this
+    // machine was held warm: the cached coords can never succeed, and with
+    // no producer for noteCoordsChanged() the ladder used to sit on the 30s
+    // socket cap with no Blocked reason and an inert Retry.
+    mech.agentOnlineValue = true;
+    mech.dialFailures = 999;
+    final sup = build(backoffBaseMs: 0);
 
-      sup.setWanted(true);
-      await waitUntil(() => mech.resolveCalls >= 2);
+    sup.setWanted(true);
+    await waitUntil(() => mech.resolveCalls >= 2);
 
-      expect(mech.dialCalls, greaterThanOrEqualTo(kMaxSocketFailuresPerCoords));
-    },
-  );
+    expect(mech.dialCalls, greaterThanOrEqualTo(kMaxSocketFailuresPerCoords));
+  });
 
   test('retry() re-resolves the coords, not just the backoff', () async {
     mech.agentOnlineValue = true;
@@ -760,33 +757,26 @@ void main() {
   // Named for what it can actually observe: after dispose every path out of a
   // surviving timer is already guarded, so "no work happens" is the testable
   // requirement, not "the Timer object was cancelled".
-  test(
-    'dispose closes the stream and no input does work afterwards',
-    () async {
-      mech.agentOnlineValue = true;
-      mech.dialFailures = 99;
-      final sup = ConnectionSupervisor(
-        mech,
-        backoffBaseMs: 4,
-        jitter: (_) => 0,
-      );
-      var done = false;
-      sup.statusStream.listen(null, onDone: () => done = true);
+  test('dispose closes the stream and no input does work afterwards', () async {
+    mech.agentOnlineValue = true;
+    mech.dialFailures = 99;
+    final sup = ConnectionSupervisor(mech, backoffBaseMs: 4, jitter: (_) => 0);
+    var done = false;
+    sup.statusStream.listen(null, onDone: () => done = true);
 
-      sup.setWanted(true);
-      await waitUntil(() => mech.dialCalls >= 2);
+    sup.setWanted(true);
+    await waitUntil(() => mech.dialCalls >= 2);
 
-      await sup.dispose();
-      final dialsAtDispose = mech.dialCalls;
-      await Future<void>.delayed(const Duration(milliseconds: 60));
+    await sup.dispose();
+    final dialsAtDispose = mech.dialCalls;
+    await Future<void>.delayed(const Duration(milliseconds: 60));
 
-      expect(done, isTrue);
-      expect(mech.dialCalls, dialsAtDispose);
+    expect(done, isTrue);
+    expect(mech.dialCalls, dialsAtDispose);
 
-      sup.retry();
-      sup.noteResume();
-      await settle();
-      expect(mech.dialCalls, dialsAtDispose);
-    },
-  );
+    sup.retry();
+    sup.noteResume();
+    await settle();
+    expect(mech.dialCalls, dialsAtDispose);
+  });
 }

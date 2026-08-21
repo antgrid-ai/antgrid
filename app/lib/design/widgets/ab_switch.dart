@@ -100,7 +100,9 @@ class _AbSwitchState extends State<AbSwitch> {
             shape: BoxShape.circle,
             // Dark knob on a lit track: the fill is the signal, and a white
             // knob would compete with it for the eye.
-            color: on ? p.bgDeepest : (_hovered ? p.textSecondary : p.textMuted),
+            color: on
+                ? p.bgDeepest
+                : (_hovered ? p.textSecondary : p.textMuted),
           ),
         ),
       ),

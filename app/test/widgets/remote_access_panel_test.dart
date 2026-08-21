@@ -12,15 +12,25 @@ class _FakeNotifier extends RemoteDevicesNotifier {
   final List<String> unpaired = [];
   @override
   Future<PhonesList> build() async => const PhonesList(
-        // No label, matching the bridge: nothing writes `PairedPhone.label`,
-        // so a readable name can only come from the account join.
-        phones: [PairedPhoneSummary(
-          phonePubkey: 'pk-1', phoneDeviceId: 'ph-1',
-          pairedAt: 'x', lastSeenAt: 'y')],
-        knownProjects: [
-          KnownProject(projectId: 'p1', label: 'Proj One', path: '/p1', running: true),
-        ],
-      );
+    // No label, matching the bridge: nothing writes `PairedPhone.label`,
+    // so a readable name can only come from the account join.
+    phones: [
+      PairedPhoneSummary(
+        phonePubkey: 'pk-1',
+        phoneDeviceId: 'ph-1',
+        pairedAt: 'x',
+        lastSeenAt: 'y',
+      ),
+    ],
+    knownProjects: [
+      KnownProject(
+        projectId: 'p1',
+        label: 'Proj One',
+        path: '/p1',
+        running: true,
+      ),
+    ],
+  );
   @override
   Future<void> unpair({required String phonePubkey}) async {
     unpaired.add(phonePubkey);
@@ -38,7 +48,8 @@ class _FakePolicyNotifier extends RemoteAccessPolicyNotifier {
   final bool _enabled;
   final List<bool> writes = [];
   @override
-  Future<RemoteAccessPolicy> build() async => RemoteAccessPolicy(enabled: _enabled);
+  Future<RemoteAccessPolicy> build() async =>
+      RemoteAccessPolicy(enabled: _enabled);
   @override
   Future<void> setEnabled(bool enabled) async => writes.add(enabled);
 }
@@ -66,25 +77,28 @@ Future<void> _pumpPanel(
   RemoteAccessPolicyNotifier Function()? policy,
   Map<String, DeviceSummary>? accounts,
 }) async {
-  await tester.pumpWidget(ProviderScope(
-    overrides: [
-      remoteDevicesProvider.overrideWith(devices),
-      remoteAccessPolicyProvider.overrideWith(
-        policy ?? () => _FakePolicyNotifier(false),
-      ),
-      accountDevicesByBridgeIdProvider.overrideWith(
-        (ref) async => accounts ?? _accountDevices,
-      ),
-    ],
-    child: const MaterialApp(home: Scaffold(body: RemoteAccessPanel())),
-  ));
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: [
+        remoteDevicesProvider.overrideWith(devices),
+        remoteAccessPolicyProvider.overrideWith(
+          policy ?? () => _FakePolicyNotifier(false),
+        ),
+        accountDevicesByBridgeIdProvider.overrideWith(
+          (ref) async => accounts ?? _accountDevices,
+        ),
+      ],
+      child: const MaterialApp(home: Scaffold(body: RemoteAccessPanel())),
+    ),
+  );
   await tester.pump();
   await tester.pump();
 }
 
 void main() {
-  testWidgets('a device still on the account offers sign-out, not forget',
-      (tester) async {
+  testWidgets('a device still on the account offers sign-out, not forget', (
+    tester,
+  ) async {
     final fake = _FakeNotifier();
     await _pumpPanel(tester, devices: () => fake);
 
@@ -100,8 +114,9 @@ void main() {
     expect(find.byKey(const ValueKey('signout-pk-1')), findsOneWidget);
   });
 
-  testWidgets('a device the account no longer has offers forget instead',
-      (tester) async {
+  testWidgets('a device the account no longer has offers forget instead', (
+    tester,
+  ) async {
     final fake = _FakeNotifier();
     await _pumpPanel(tester, devices: () => fake, accounts: const {});
 
@@ -129,8 +144,9 @@ void main() {
     expect(policy.writes, [false]);
   });
 
-  testWidgets('turning ON is confirmed before anything is written',
-      (tester) async {
+  testWidgets('turning ON is confirmed before anything is written', (
+    tester,
+  ) async {
     final policy = _FakePolicyNotifier(false);
     await _pumpPanel(tester, devices: _FakeNotifier.new, policy: () => policy);
 
@@ -143,8 +159,9 @@ void main() {
     expect(policy.writes, [true]);
   });
 
-  testWidgets('the switch stays reachable when no device has ever connected',
-      (tester) async {
+  testWidgets('the switch stays reachable when no device has ever connected', (
+    tester,
+  ) async {
     // The switch is what grants access, so it must not be gated on the roster
     // being non-empty — otherwise a fresh machine has no way to turn it on.
     await _pumpPanel(tester, devices: _EmptyNotifier.new);

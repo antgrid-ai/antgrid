@@ -96,9 +96,7 @@ void main() {
 
     // Seed the notifier with the persisted collapse, then select that project.
     expect(c.read(collapsedDrawerIdsProvider), {'proj-a'});
-    c.read(selectedTargetProvider.notifier).set(const LocalProject(
-      'proj-a',
-    ));
+    c.read(selectedTargetProvider.notifier).set(const LocalProject('proj-a'));
     // In-memory state shows expanded...
     expect(c.read(collapsedDrawerIdsProvider), isEmpty);
     // ...but the on-disk collapse is preserved (the select side-effect is
@@ -117,9 +115,7 @@ void main() {
     addTearDown(c.dispose);
 
     // proj-a is the active selection, so it renders expanded in-memory.
-    c.read(selectedTargetProvider.notifier).set(const LocalProject(
-      'proj-a',
-    ));
+    c.read(selectedTargetProvider.notifier).set(const LocalProject('proj-a'));
     expect(c.read(collapsedDrawerIdsProvider), isEmpty);
 
     // Collapsing an UNRELATED project triggers a persist. It must write the

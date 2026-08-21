@@ -46,8 +46,9 @@ class _RecordingRelay extends RelayService {
   Future<void> closeStreams() => _messages.close();
 }
 
-Future<(List<int> seed, Uint8List pub)> _agentEd25519Keypair(
-    [int fill = 0xA1]) async {
+Future<(List<int> seed, Uint8List pub)> _agentEd25519Keypair([
+  int fill = 0xA1,
+]) async {
   final seed = List.filled(32, fill);
   final kp = await Ed25519().newKeyPairFromSeed(seed);
   final pub = await kp.extractPublicKey();
@@ -123,62 +124,82 @@ Future<_FakeAgentSession> _runFakeAgentUpToReady(
   bool tamperConfirmTag = false,
 }) async {
   final clientHello = await _waitForHandshakeFrame(
-      relay, 'handshake:client-hello',
-      timeout: timeout, startIndex: startIndex);
+    relay,
+    'handshake:client-hello',
+    timeout: timeout,
+    startIndex: startIndex,
+  );
   final attemptId = clientHello['attemptId'] as String;
   final phoneX25519Pub = base64.decode(clientHello['pubkey'] as String);
   final nonce = base64.decode(clientHello['nonce'] as String);
 
   final agentX25519KP = await X25519().newKeyPair();
-  final agentX25519Priv =
-      Uint8List.fromList(await agentX25519KP.extractPrivateKeyBytes());
-  final agentX25519Pub =
-      Uint8List.fromList((await agentX25519KP.extractPublicKey()).bytes);
+  final agentX25519Priv = Uint8List.fromList(
+    await agentX25519KP.extractPrivateKeyBytes(),
+  );
+  final agentX25519Pub = Uint8List.fromList(
+    (await agentX25519KP.extractPublicKey()).bytes,
+  );
 
-  final agentTranscript = buildTranscriptV2(TranscriptFields(
-    registrationId: machineDeviceId,
-    role: 'agent',
-    agentDeviceId: machineDeviceId,
-    phoneDeviceId: phoneDeviceId,
-    agentX25519Pub: agentX25519Pub,
-    phoneX25519Pub: phoneX25519Pub,
-    nonce: nonce,
-  ));
-  final agentSig =
-      await signTranscriptV2(transcript: agentTranscript, ed25519Seed: agentSeed);
+  final agentTranscript = buildTranscriptV2(
+    TranscriptFields(
+      registrationId: machineDeviceId,
+      role: 'agent',
+      agentDeviceId: machineDeviceId,
+      phoneDeviceId: phoneDeviceId,
+      agentX25519Pub: agentX25519Pub,
+      phoneX25519Pub: phoneX25519Pub,
+      nonce: nonce,
+    ),
+  );
+  final agentSig = await signTranscriptV2(
+    transcript: agentTranscript,
+    ed25519Seed: agentSeed,
+  );
   final ss = await x25519SharedSecret(
-      privateKey: agentX25519Priv, peerPublicKey: phoneX25519Pub);
+    privateKey: agentX25519Priv,
+    peerPublicKey: phoneX25519Pub,
+  );
   final keys = await deriveSessionKeysV2(ss, agentTranscript);
 
-  relay.inject(IncomingRouteMessage(
-    from: machineDeviceId,
-    channel: 'control',
-    kind: FrameKind.handshake,
-    payload: Uint8List.fromList(utf8.encode(jsonEncode({
-      'type': 'handshake:agent-hello',
-      'attemptId': attemptId,
-      'pubkey': base64.encode(agentX25519Pub),
-      'sig': agentSig,
-    }))),
-  ));
+  relay.inject(
+    IncomingRouteMessage(
+      from: machineDeviceId,
+      channel: 'control',
+      kind: FrameKind.handshake,
+      payload: Uint8List.fromList(
+        utf8.encode(
+          jsonEncode({
+            'type': 'handshake:agent-hello',
+            'attemptId': attemptId,
+            'pubkey': base64.encode(agentX25519Pub),
+            'sig': agentSig,
+          }),
+        ),
+      ),
+    ),
+  );
 
   final validTag = await agentConfirmTagV2(keys.confirm);
-  final confirmTag =
-      tamperConfirmTag ? (Uint8List.fromList(validTag)..[0] ^= 0xFF) : validTag;
+  final confirmTag = tamperConfirmTag
+      ? (Uint8List.fromList(validTag)..[0] ^= 0xFF)
+      : validTag;
   final agentReadySealed =
       await E2eTransportDart(sendKey: keys.a2p, recvKey: keys.p2a).seal(
-    jsonEncode({
-      'type': 'handshake:agent-ready',
-      'attemptId': attemptId,
-      'confirm': base64.encode(confirmTag),
-    }),
+        jsonEncode({
+          'type': 'handshake:agent-ready',
+          'attemptId': attemptId,
+          'confirm': base64.encode(confirmTag),
+        }),
+      );
+  relay.inject(
+    IncomingRouteMessage(
+      from: machineDeviceId,
+      channel: 'control',
+      kind: FrameKind.sealed,
+      payload: agentReadySealed,
+    ),
   );
-  relay.inject(IncomingRouteMessage(
-    from: machineDeviceId,
-    channel: 'control',
-    kind: FrameKind.sealed,
-    payload: agentReadySealed,
-  ));
 
   return _FakeAgentSession(keys, attemptId);
 }
@@ -188,14 +209,18 @@ Future<void> _sendEstablished(
   String machineDeviceId,
   _FakeAgentSession fa,
 ) async {
-  final sealed = await E2eTransportDart(sendKey: fa.keys.a2p, recvKey: fa.keys.p2a)
-      .seal(jsonEncode({'type': 'established', 'attemptId': fa.attemptId}));
-  relay.inject(IncomingRouteMessage(
-    from: machineDeviceId,
-    channel: 'control',
-    kind: FrameKind.sealed,
-    payload: sealed,
-  ));
+  final sealed = await E2eTransportDart(
+    sendKey: fa.keys.a2p,
+    recvKey: fa.keys.p2a,
+  ).seal(jsonEncode({'type': 'established', 'attemptId': fa.attemptId}));
+  relay.inject(
+    IncomingRouteMessage(
+      from: machineDeviceId,
+      channel: 'control',
+      kind: FrameKind.sealed,
+      payload: sealed,
+    ),
+  );
 }
 
 const _machineDeviceId = 'machine-1';
@@ -231,9 +256,40 @@ void main() {
       machineDeviceId: _machineDeviceId,
       phoneDeviceId: _phoneDeviceId,
       agentEd25519PubB64: base64.encode(agentPub),
-      phoneEd25519Seed:
-          const [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
-                 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32],
+      phoneEd25519Seed: const [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+      ],
       attemptTimeout: attemptTimeout,
       appReadyRetransmit: appReadyRetransmit,
     );
@@ -258,15 +314,19 @@ void main() {
     for (var i = 0; i < 50 && !appReadySeen; i++) {
       final frames = await _decodeSealedFrames(relay, fa.keys);
       appReadySeen = frames.any((f) => f['type'] == 'app:ready');
-      if (!appReadySeen) await Future<void>.delayed(const Duration(milliseconds: 10));
+      if (!appReadySeen)
+        await Future<void>.delayed(const Duration(milliseconds: 10));
     }
     expect(appReadySeen, isTrue);
 
     var runCompleted = false;
     unawaited(runFuture.then((_) => runCompleted = true));
     await Future<void>.delayed(const Duration(milliseconds: 100));
-    expect(runCompleted, isFalse,
-        reason: 'agent-ready alone must not complete the handshake');
+    expect(
+      runCompleted,
+      isFalse,
+      reason: 'agent-ready alone must not complete the handshake',
+    );
 
     await _sendEstablished(relay, _machineDeviceId, fa);
     final keys = await runFuture;
@@ -301,8 +361,11 @@ void main() {
       if (appReadyFrames.length >= 2) break;
       await Future<void>.delayed(const Duration(milliseconds: 15));
     }
-    expect(appReadyFrames.length, greaterThanOrEqualTo(2),
-        reason: 'app:ready must be retransmitted while established is withheld');
+    expect(
+      appReadyFrames.length,
+      greaterThanOrEqualTo(2),
+      reason: 'app:ready must be retransmitted while established is withheld',
+    );
     // Every retransmit carries the SAME attemptId and a valid confirm tag
     // (re-sealed each time — GCM nonces differ, but the plaintext repeats).
     for (final f in appReadyFrames) {
@@ -359,72 +422,86 @@ void main() {
     expect(keys, isNull);
   });
 
-  test('run() rejects a TAMPERED agent-ready confirm tag — no sealed '
-      'app:ready is ever sent, and the attempt times out with no keys',
-      () async {
-    final hs = buildHandshake(
-      attemptTimeout: const Duration(milliseconds: 300),
-    );
-    final runFuture = hs.run();
+  test(
+    'run() rejects a TAMPERED agent-ready confirm tag — no sealed '
+    'app:ready is ever sent, and the attempt times out with no keys',
+    () async {
+      final hs = buildHandshake(
+        attemptTimeout: const Duration(milliseconds: 300),
+      );
+      final runFuture = hs.run();
 
-    final fa = await _runFakeAgentUpToReady(
-      relay,
-      agentSeed: agentSeed,
-      agentPub: agentPub,
-      machineDeviceId: _machineDeviceId,
-      phoneDeviceId: _phoneDeviceId,
-      tamperConfirmTag: true,
-    );
+      final fa = await _runFakeAgentUpToReady(
+        relay,
+        agentSeed: agentSeed,
+        agentPub: agentPub,
+        machineDeviceId: _machineDeviceId,
+        phoneDeviceId: _phoneDeviceId,
+        tamperConfirmTag: true,
+      );
 
-    final keys = await runFuture;
-    expect(keys, isNull,
-        reason: 'a bad confirm tag must never yield established keys');
+      final keys = await runFuture;
+      expect(
+        keys,
+        isNull,
+        reason: 'a bad confirm tag must never yield established keys',
+      );
 
-    final sealedFrames = await _decodeSealedFrames(relay, fa.keys);
-    expect(sealedFrames.any((f) => f['type'] == 'app:ready'), isFalse,
-        reason: 'app:ready must never be sent on top of an unverified '
-            'agent-ready confirm (possible MITM)');
-  });
+      final sealedFrames = await _decodeSealedFrames(relay, fa.keys);
+      expect(
+        sealedFrames.any((f) => f['type'] == 'app:ready'),
+        isFalse,
+        reason:
+            'app:ready must never be sent on top of an unverified '
+            'agent-ready confirm (possible MITM)',
+      );
+    },
+  );
 
   group('AppSessionHandshaker', () {
-    test('each perform() call runs a FRESH attempt with a new attemptId',
-        () async {
-      final handshaker = AppSessionHandshaker(
-        relay: relay,
-        crypto: CryptoService(),
-        machineDeviceId: _machineDeviceId,
-        phoneDeviceId: _phoneDeviceId,
-        agentEd25519PubB64: base64.encode(agentPub),
-        phoneEd25519Seed: List<int>.filled(32, 7),
-      );
+    test(
+      'each perform() call runs a FRESH attempt with a new attemptId',
+      () async {
+        final handshaker = AppSessionHandshaker(
+          relay: relay,
+          crypto: CryptoService(),
+          machineDeviceId: _machineDeviceId,
+          phoneDeviceId: _phoneDeviceId,
+          agentEd25519PubB64: base64.encode(agentPub),
+          phoneEd25519Seed: List<int>.filled(32, 7),
+        );
 
-      final firstPerform = handshaker.perform();
-      final fa1 = await _runFakeAgentUpToReady(
-        relay,
-        agentSeed: agentSeed,
-        agentPub: agentPub,
-        machineDeviceId: _machineDeviceId,
-        phoneDeviceId: _phoneDeviceId,
-      );
-      await _sendEstablished(relay, _machineDeviceId, fa1);
-      final keys1 = await firstPerform.timeout(const Duration(seconds: 5));
-      expect(keys1, isNotNull);
+        final firstPerform = handshaker.perform();
+        final fa1 = await _runFakeAgentUpToReady(
+          relay,
+          agentSeed: agentSeed,
+          agentPub: agentPub,
+          machineDeviceId: _machineDeviceId,
+          phoneDeviceId: _phoneDeviceId,
+        );
+        await _sendEstablished(relay, _machineDeviceId, fa1);
+        final keys1 = await firstPerform.timeout(const Duration(seconds: 5));
+        expect(keys1, isNotNull);
 
-      final startIndex = relay.sent.length;
-      final secondPerform = handshaker.perform();
-      final fa2 = await _runFakeAgentUpToReady(
-        relay,
-        agentSeed: agentSeed,
-        agentPub: agentPub,
-        machineDeviceId: _machineDeviceId,
-        phoneDeviceId: _phoneDeviceId,
-        startIndex: startIndex,
-      );
-      expect(fa2.attemptId, isNot(fa1.attemptId),
-          reason: 'a rekey (second perform) must mint a fresh attemptId');
-      await _sendEstablished(relay, _machineDeviceId, fa2);
-      final keys2 = await secondPerform.timeout(const Duration(seconds: 5));
-      expect(keys2, isNotNull);
-    });
+        final startIndex = relay.sent.length;
+        final secondPerform = handshaker.perform();
+        final fa2 = await _runFakeAgentUpToReady(
+          relay,
+          agentSeed: agentSeed,
+          agentPub: agentPub,
+          machineDeviceId: _machineDeviceId,
+          phoneDeviceId: _phoneDeviceId,
+          startIndex: startIndex,
+        );
+        expect(
+          fa2.attemptId,
+          isNot(fa1.attemptId),
+          reason: 'a rekey (second perform) must mint a fresh attemptId',
+        );
+        await _sendEstablished(relay, _machineDeviceId, fa2);
+        final keys2 = await secondPerform.timeout(const Duration(seconds: 5));
+        expect(keys2, isNotNull);
+      },
+    );
   });
 }

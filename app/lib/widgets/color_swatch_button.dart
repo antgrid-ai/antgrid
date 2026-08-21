@@ -56,15 +56,9 @@ class ColorSwatchButton extends StatelessWidget {
           AbTokens.space12,
         ),
         actions: [
-          AbButton(
-            label: 'CANCEL',
-            onTap: () => Navigator.of(ctx).pop(),
-          ),
+          AbButton(label: 'CANCEL', onTap: () => Navigator.of(ctx).pop()),
           const SizedBox(width: AbTokens.space8),
-          AbButton(
-            label: 'APPLY',
-            onTap: () => Navigator.of(ctx).pop(picked),
-          ),
+          AbButton(label: 'APPLY', onTap: () => Navigator.of(ctx).pop(picked)),
         ],
       ),
     );

@@ -7,10 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('synthesizes a name when the platform suggests none', () {
-    expect(
-      pastedImageName(null, 'png'),
-      matches(r'^pasted-\d{8}-\d{6}\.png$'),
-    );
+    expect(pastedImageName(null, 'png'), matches(r'^pasted-\d{8}-\d{6}\.png$'));
   });
 
   test('forces the extension of the format that actually matched', () {
@@ -35,8 +32,10 @@ void main() {
         imageFormatHint(available.contains);
 
     test('prefers PNG when several formats are offered', () {
-      expect(hintFor({Formats.tiff, Formats.png, Formats.jpeg}),
-          ('png', 'image/png'));
+      expect(hintFor({Formats.tiff, Formats.png, Formats.jpeg}), (
+        'png',
+        'image/png',
+      ));
     });
 
     test('answers each non-synthesized format Linux and mobile hand over', () {

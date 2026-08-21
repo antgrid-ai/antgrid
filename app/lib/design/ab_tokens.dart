@@ -248,7 +248,8 @@ abstract final class AbTokens {
   static const rowHeightMd =
       38.0; // panel headers (formerly statusHeaderHeight)
   static const rowHeightLg = 44.0; // mobile-friendly hit-target rows
-  static const rowHeightXl = 52.0; // roomy touch bars (mobile terminal quick-actions)
+  static const rowHeightXl =
+      52.0; // roomy touch bars (mobile terminal quick-actions)
 
   /// Deprecated: use [rowHeightMd]. Retained for migration only.
   static const statusHeaderHeight = rowHeightMd;

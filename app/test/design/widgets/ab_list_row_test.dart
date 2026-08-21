@@ -13,10 +13,7 @@ Future<double> _titleHeight(WidgetTester tester, {int? maxLines}) async {
     tester,
     SizedBox(
       width: 300,
-      child: AbListRow(
-        title: const Text(_long),
-        titleMaxLines: maxLines ?? 1,
-      ),
+      child: AbListRow(title: const Text(_long), titleMaxLines: maxLines ?? 1),
     ),
   );
   return tester.getSize(find.text(_long)).height;

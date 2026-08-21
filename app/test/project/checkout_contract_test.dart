@@ -12,19 +12,24 @@ void main() {
     expect(start, isNonNegative);
     expect(end, greaterThan(start));
     final block = source.substring(start, end);
-    final bridgeTypes = RegExp(r'"([a-z][a-z0-9:-]+)"')
-        .allMatches(block)
-        .map((match) => match.group(1)!)
-        .toSet();
+    final bridgeTypes = RegExp(
+      r'"([a-z][a-z0-9:-]+)"',
+    ).allMatches(block).map((match) => match.group(1)!).toSet();
 
     expect(kCheckoutVariableMessageTypes, bridgeTypes);
   });
 
-  test('missing legacy checkoutId defaults to main without rewriting explicit ids', () {
-    expect(checkoutIdForEnvelope({'type': 'tree:full'}), 'main');
-    expect(
-      checkoutIdForEnvelope({'type': 'tree:full', 'checkoutId': 'checkout-1'}),
-      'checkout-1',
-    );
-  });
+  test(
+    'missing legacy checkoutId defaults to main without rewriting explicit ids',
+    () {
+      expect(checkoutIdForEnvelope({'type': 'tree:full'}), 'main');
+      expect(
+        checkoutIdForEnvelope({
+          'type': 'tree:full',
+          'checkoutId': 'checkout-1',
+        }),
+        'checkout-1',
+      );
+    },
+  );
 }

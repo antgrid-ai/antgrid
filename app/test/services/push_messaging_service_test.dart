@@ -116,36 +116,47 @@ void main() {
     await session.close();
   });
 
-  test('a changed push identity re-registers an already-registered session', () async {
-    // Sign-out regenerates the push keypair but reuses the same long-lived
-    // service and device token. The second call carries a NEW identity, so the
-    // agent must be re-told despite projectId 'p' already being in _registered.
-    final t = FakeAgentTransport();
-    final cache = await CachedSessionsStore.open();
-    final session = ProjectSession(
-      projectId: 'p',
-      transport: t,
-      mode: ProjectSessionMode.relay,
-      cachedSessionsStore: cache,
-      onClose: () async => t.dispose(),
-    );
-    session.status.hydrate(_connected); // transport handshaken
-    final svc = PushMessagingService();
-    final first = PushIdentity.inMemory();
-    final second = PushIdentity.inMemory();
-    final firstPub = (await first.ensureKeypair()).pubkeyB64;
-    final secondPub = (await second.ensureKeypair()).pubkeyB64;
-    expect(firstPub, isNot(secondPub)); // distinct identities
+  test(
+    'a changed push identity re-registers an already-registered session',
+    () async {
+      // Sign-out regenerates the push keypair but reuses the same long-lived
+      // service and device token. The second call carries a NEW identity, so the
+      // agent must be re-told despite projectId 'p' already being in _registered.
+      final t = FakeAgentTransport();
+      final cache = await CachedSessionsStore.open();
+      final session = ProjectSession(
+        projectId: 'p',
+        transport: t,
+        mode: ProjectSessionMode.relay,
+        cachedSessionsStore: cache,
+        onClose: () async => t.dispose(),
+      );
+      session.status.hydrate(_connected); // transport handshaken
+      final svc = PushMessagingService();
+      final first = PushIdentity.inMemory();
+      final second = PushIdentity.inMemory();
+      final firstPub = (await first.ensureKeypair()).pubkeyB64;
+      final secondPub = (await second.ensureKeypair()).pubkeyB64;
+      expect(firstPub, isNot(secondPub)); // distinct identities
 
-    await svc.registerToken(token: 'tok', pushIdentity: first, sessions: [session]);
-    await svc.registerToken(token: 'tok', pushIdentity: second, sessions: [session]);
+      await svc.registerToken(
+        token: 'tok',
+        pushIdentity: first,
+        sessions: [session],
+      );
+      await svc.registerToken(
+        token: 'tok',
+        pushIdentity: second,
+        sessions: [session],
+      );
 
-    final sent = t.sent.where((m) => m['type'] == 'push:register').toList();
-    expect(sent, hasLength(2));
-    expect(sent[0]['pushPubkey'], firstPub);
-    expect(sent[1]['pushPubkey'], secondPub);
-    await session.close();
-  });
+      final sent = t.sent.where((m) => m['type'] == 'push:register').toList();
+      expect(sent, hasLength(2));
+      expect(sent[0]['pushPubkey'], firstPub);
+      expect(sent[1]['pushPubkey'], secondPub);
+      await session.close();
+    },
+  );
 
   test('registerToken with apns provider sends provider:apns', () async {
     final t = FakeAgentTransport();

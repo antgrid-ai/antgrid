@@ -117,7 +117,9 @@ class PreferencesService {
   /// [clearAll]: a `_save()` in flight would rewrite entries this is deleting.
   /// [_readAll] guarantees [_allPrefs] holds every project ever saved, not
   /// just the currently loaded one, before the filter runs.
-  Future<void> clearAccountScoped(bool Function(String projectId) isLocal) async {
+  Future<void> clearAccountScoped(
+    bool Function(String projectId) isLocal,
+  ) async {
     _debounceTimer?.cancel();
     _debounceTimer = null;
     await _readAll();

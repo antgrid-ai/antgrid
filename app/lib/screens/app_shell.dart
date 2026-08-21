@@ -389,10 +389,9 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
     // Desktop only: periodically poll the host control plane for local project
     // work status. Mobile has no local host; skip to avoid pointless reads.
     if (!isMobilePlatform) {
-      _hostStatusTimer = Timer.periodic(
-        const Duration(seconds: 2),
-        (_) { if (mounted) _pollLocalProjectStatus(); },
-      );
+      _hostStatusTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+        if (mounted) _pollLocalProjectStatus();
+      });
     }
   }
 
@@ -503,12 +502,10 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
         .setMachineStatuses(uuid, statuses);
     // Advert summary for the mobile first-run checklist's "Remote is on" step
     // — same single-writer discipline as the status maps above.
-    ref
-        .read(machineAdvertisedProjectsProvider.notifier)
-        .setAdvert(uuid, (
-          projectCount: state.projects.length,
-          remoteAccessEnabled: state.remoteAccessEnabled,
-        ));
+    ref.read(machineAdvertisedProjectsProvider.notifier).setAdvert(uuid, (
+      projectCount: state.projects.length,
+      remoteAccessEnabled: state.remoteAccessEnabled,
+    ));
     // Same fold for the per-session map the session rows dot themselves from.
     // Absent (older bridge / cold project) stays absent — that's what tells the
     // rows to fall back to the project status above.
@@ -565,7 +562,9 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
       // (attention/error). Regular working↔done cycling on a cached project never
       // changes session running flags — peeking on every turn boundary causes
       // redundant RPCs and cache writes that rebuild recentSessionsProvider each turn.
-      final statusFlipped = hadStatus && prevStatus != ap.status &&
+      final statusFlipped =
+          hadStatus &&
+          prevStatus != ap.status &&
           (ap.status == AgentWorkStatus.attention ||
               ap.status == AgentWorkStatus.error);
       // Running-session count moved → the session list itself changed (a
@@ -573,9 +572,10 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
       // status filter above is deliberately coarse: a re-prompt cycles
       // working↔done without moving the count, so this never peeks on mere
       // turn boundaries.
-      final sessionCountChanged =
-          hadCount && prevCount != ap.runningSessions;
-      if (neverSynced || runStateFlipped || statusFlipped ||
+      final sessionCountChanged = hadCount && prevCount != ap.runningSessions;
+      if (neverSynced ||
+          runStateFlipped ||
+          statusFlipped ||
           sessionCountChanged) {
         _peekProjectSessions(cp, ap.projectId, entryId, store);
       }
@@ -661,7 +661,9 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
       // closed relay socket applies: retire the live status rather than leave a
       // crashed host's last "working" pulsing until it comes back.
       if (hostFile == null) {
-        ref.read(remoteProjectStatusProvider.notifier).setLocalStatuses(const {});
+        ref
+            .read(remoteProjectStatusProvider.notifier)
+            .setLocalStatuses(const {});
         ref
             .read(remoteSessionStatusProvider.notifier)
             .setLocalSessionStatuses(const {});

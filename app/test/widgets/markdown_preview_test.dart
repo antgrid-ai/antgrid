@@ -16,90 +16,99 @@ void main() {
   });
 
   testWidgets('renders heading text from markdown source', (tester) async {
-    await tester.pumpWidget(ProviderScope(
-      child: MaterialApp(
-        home: Scaffold(
-          body: MarkdownPreview(
-            content: const FileContent(
-              path: 'readme.md',
-              content: '# Hello Antgrid',
-              size: 15,
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          home: Scaffold(
+            body: MarkdownPreview(
+              content: const FileContent(
+                path: 'readme.md',
+                content: '# Hello Antgrid',
+                size: 15,
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
     await tester.pumpAndSettle();
     expect(find.text('Hello Antgrid'), findsOneWidget);
   });
 
   testWidgets('opens in source view when a search line is set', (tester) async {
-    await tester.pumpWidget(ProviderScope(
-      child: MaterialApp(
-        home: Scaffold(
-          body: MarkdownPreview(
-            content: const FileContent(
-              path: 'readme.md',
-              content: '# Hello\n\nworld',
-              size: 14,
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          home: Scaffold(
+            body: MarkdownPreview(
+              content: const FileContent(
+                path: 'readme.md',
+                content: '# Hello\n\nworld',
+                size: 14,
+              ),
+              searchLine: 3,
+              searchQuery: 'world',
             ),
-            searchLine: 3,
-            searchQuery: 'world',
           ),
         ),
       ),
-    ));
+    );
     await tester.pumpAndSettle();
     // Search-to-line can't target a rendered preview, so it must land on source.
     expect(find.byType(FileContentViewer), findsOneWidget);
   });
 
-  testWidgets('switches to source when a search hit lands on an already-open file',
-      (tester) async {
-    Widget host(int? line) => ProviderScope(
-          child: MaterialApp(
-            home: Scaffold(
-              body: MarkdownPreview(
-                key: const ValueKey('readme.md'),
-                content: const FileContent(
-                  path: 'readme.md',
-                  content: '# Hello\n\nworld',
-                  size: 14,
-                ),
-                searchLine: line,
-                searchQuery: line == null ? null : 'world',
+  testWidgets(
+    'switches to source when a search hit lands on an already-open file',
+    (tester) async {
+      Widget host(int? line) => ProviderScope(
+        child: MaterialApp(
+          home: Scaffold(
+            body: MarkdownPreview(
+              key: const ValueKey('readme.md'),
+              content: const FileContent(
+                path: 'readme.md',
+                content: '# Hello\n\nworld',
+                size: 14,
               ),
+              searchLine: line,
+              searchQuery: line == null ? null : 'world',
             ),
           ),
-        );
+        ),
+      );
 
-    // Opened normally (no search) → rendered preview, not source.
-    await tester.pumpWidget(host(null));
-    await tester.pumpAndSettle();
-    expect(find.byType(FileContentViewer), findsNothing);
+      // Opened normally (no search) → rendered preview, not source.
+      await tester.pumpWidget(host(null));
+      await tester.pumpAndSettle();
+      expect(find.byType(FileContentViewer), findsNothing);
 
-    // A search hit arrives for the same already-open path → must jump to source.
-    await tester.pumpWidget(host(3));
-    await tester.pumpAndSettle();
-    expect(find.byType(FileContentViewer), findsOneWidget);
-  });
+      // A search hit arrives for the same already-open path → must jump to source.
+      await tester.pumpWidget(host(3));
+      await tester.pumpAndSettle();
+      expect(find.byType(FileContentViewer), findsOneWidget);
+    },
+  );
 
-  testWidgets('shows the modified banner in rendered preview mode',
-      (tester) async {
-    await tester.pumpWidget(ProviderScope(
-      child: MaterialApp(
-        home: Scaffold(
-          body: MarkdownPreview(
-            content: const FileContent(
-              path: 'readme.md',
-              content: '# Hello',
-              size: 7,
+  testWidgets('shows the modified banner in rendered preview mode', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          home: Scaffold(
+            body: MarkdownPreview(
+              content: const FileContent(
+                path: 'readme.md',
+                content: '# Hello',
+                size: 7,
+              ),
+              fileWasModified: true,
             ),
-            fileWasModified: true,
           ),
         ),
       ),
-    ));
+    );
     await tester.pumpAndSettle();
     expect(find.byType(ViewerModifiedBanner), findsOneWidget);
   });

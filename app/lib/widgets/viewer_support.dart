@@ -105,10 +105,7 @@ class ViewerModifiedBanner extends StatelessWidget {
           ),
           GestureDetector(
             onTap: onRefresh,
-            child: Text(
-              'Refresh',
-              style: AbTokens.sansStyle(color: c.accent),
-            ),
+            child: Text('Refresh', style: AbTokens.sansStyle(color: c.accent)),
           ),
         ],
       ),

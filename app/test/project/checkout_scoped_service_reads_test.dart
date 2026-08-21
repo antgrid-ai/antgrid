@@ -25,10 +25,7 @@ Set<String> _checkoutVariableServices() {
   final start = source.indexOf('class CheckoutServices');
   expect(start, isNonNegative, reason: 'CheckoutServices moved or was renamed');
   final body = source.substring(start);
-  final names = _checkoutField
-      .allMatches(body)
-      .map((m) => m.group(1)!)
-      .toSet();
+  final names = _checkoutField.allMatches(body).map((m) => m.group(1)!).toSet();
   expect(names, contains('fileService'), reason: 'field scrape found nothing');
   return names;
 }
@@ -44,7 +41,8 @@ void main() {
       for (final match in _mainCheckoutRead.allMatches(source)) {
         final service = match.group(1)!;
         if (!checkoutVariable.contains(service)) continue;
-        final line = '\n'.allMatches(source.substring(0, match.start)).length + 1;
+        final line =
+            '\n'.allMatches(source.substring(0, match.start)).length + 1;
         offenders.add('${entity.path}:$line reads $service');
       }
     }

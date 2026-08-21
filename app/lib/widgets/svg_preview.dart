@@ -42,8 +42,11 @@ class SvgPreview extends StatelessWidget {
           padding: const EdgeInsets.all(AbTokens.space4),
           child: svg.isEmpty
               ? const SizedBox.shrink()
-              : SvgPicture.string(svg,
-                  key: const Key('svg-content'), fit: BoxFit.contain),
+              : SvgPicture.string(
+                  svg,
+                  key: const Key('svg-content'),
+                  fit: BoxFit.contain,
+                ),
         );
       },
     );

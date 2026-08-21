@@ -24,12 +24,10 @@ String _appcast({required String build, required String shortVersion}) =>
 </rss>
 ''';
 
-MacosAppcastUpdateService _serviceReturning(
-  String body, {
-  int status = 200,
-}) => MacosAppcastUpdateService(
-  httpClient: MockClient((_) async => http.Response(body, status)),
-);
+MacosAppcastUpdateService _serviceReturning(String body, {int status = 200}) =>
+    MacosAppcastUpdateService(
+      httpClient: MockClient((_) async => http.Response(body, status)),
+    );
 
 void main() {
   setUp(() {
@@ -57,7 +55,10 @@ void main() {
     });
 
     test('surrounding whitespace is tolerated', () {
-      expect(isNewerBuild(currentBuild: ' 40 ', appcastBuild: '\n41\n'), isTrue);
+      expect(
+        isNewerBuild(currentBuild: ' 40 ', appcastBuild: '\n41\n'),
+        isTrue,
+      );
     });
 
     test('unparseable input never lights the row', () {

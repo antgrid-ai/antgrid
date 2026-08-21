@@ -484,7 +484,10 @@ class HandlerEscalation {
       floorRule: floorRule as String?,
       at: at.toInt(),
       kind: kind as String?,
-      choices: HandlerEscalationChoice.listFromWire(json['choices'], kind: kind),
+      choices: HandlerEscalationChoice.listFromWire(
+        json['choices'],
+        kind: kind,
+      ),
     );
   }
 }

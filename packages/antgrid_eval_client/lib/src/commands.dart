@@ -57,10 +57,10 @@ class CommandHandler {
 
   Future<void> _handleInit(Map<String, dynamic> cmd) async {
     _crypto = CryptoService();
-    final (ed25519Private, ed25519Public) =
-        await _crypto!.generateEd25519KeyPair();
-    final (x25519Private, x25519Public) =
-        await _crypto!.generateX25519KeyPair();
+    final (ed25519Private, ed25519Public) = await _crypto!
+        .generateEd25519KeyPair();
+    final (x25519Private, x25519Public) = await _crypto!
+        .generateX25519KeyPair();
 
     final deviceId = const Uuid().v4();
     final name = cmd['name'] as String? ?? 'eval-client';
@@ -230,7 +230,8 @@ class CommandHandler {
     if (session == null || projectId == null) {
       _emit({
         'event': 'error',
-        'message': 'Must complete handshake before project-start, and '
+        'message':
+            'Must complete handshake before project-start, and '
             'projectId is required',
       });
       return;
@@ -259,7 +260,8 @@ class CommandHandler {
     if (session == null || data == null) {
       _emit({
         'event': 'error',
-        'message': 'Must complete handshake before send-encrypted, and data '
+        'message':
+            'Must complete handshake before send-encrypted, and data '
             'is required',
       });
       return;

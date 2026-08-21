@@ -445,9 +445,7 @@ class ControlPlaneClient {
     return res['deleted'] == true;
   }
 
-  Future<GitBranchCatalog> gitBranches({
-    required String projectId,
-  }) async {
+  Future<GitBranchCatalog> gitBranches({required String projectId}) async {
     final res = await transport.request(
       'git.branches',
       params: {'projectId': projectId},
@@ -471,7 +469,10 @@ class ControlPlaneClient {
     try {
       return BranchRemoteStatus.fromJson(res);
     } catch (e) {
-      throw RpcException('BAD_RESPONSE', 'malformed git.remote-state response: $e');
+      throw RpcException(
+        'BAD_RESPONSE',
+        'malformed git.remote-state response: $e',
+      );
     }
   }
 
@@ -490,7 +491,10 @@ class ControlPlaneClient {
     );
     final current = res['current'];
     if (current is! String) {
-      throw RpcException('BAD_RESPONSE', 'malformed git.checkout response: $res');
+      throw RpcException(
+        'BAD_RESPONSE',
+        'malformed git.checkout response: $res',
+      );
     }
     return current;
   }

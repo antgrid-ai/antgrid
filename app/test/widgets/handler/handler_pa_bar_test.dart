@@ -81,7 +81,10 @@ Future<void> _pump(
       child: const MaterialApp(
         home: Scaffold(
           body: Column(
-            children: [Expanded(child: SizedBox.shrink()), HandlerPaBar()],
+            children: [
+              Expanded(child: SizedBox.shrink()),
+              HandlerPaBar(),
+            ],
           ),
         ),
       ),

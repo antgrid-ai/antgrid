@@ -71,7 +71,9 @@ class PreviewService {
     _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
     _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
     _txSub = session.transport.messages.listen(_onTransportMessage);
-    _dropSub = session.transport.droppedFrames.listen((_) => _onFramesDropped());
+    _dropSub = session.transport.droppedFrames.listen(
+      (_) => _onFramesDropped(),
+    );
   }
 
   void _setState(PreviewState state) {
@@ -224,10 +226,10 @@ class PreviewService {
 
   void _sendTunnelRequest(TunnelHttpRequest request) {
     unawaited(
-      session.transport.send(
-        {...request.toJson(), 'checkoutId': checkoutId},
-        channel: 'preview',
-      ),
+      session.transport.send({
+        ...request.toJson(),
+        'checkoutId': checkoutId,
+      }, channel: 'preview'),
     );
   }
 

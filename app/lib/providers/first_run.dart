@@ -62,9 +62,7 @@ class FirstRunController extends Notifier<FirstRunState> {
   /// writes nothing.
   void latchSteps(Set<String> ids) {
     if (ids.every(state.completedSteps.contains)) return;
-    _commit(
-      state.copyWith(completedSteps: {...state.completedSteps, ...ids}),
-    );
+    _commit(state.copyWith(completedSteps: {...state.completedSteps, ...ids}));
   }
 
   void markChecklistCompleted() {
@@ -98,8 +96,9 @@ class FirstRunController extends Notifier<FirstRunState> {
   }
 }
 
-final firstRunProvider =
-    NotifierProvider<FirstRunController, FirstRunState>(FirstRunController.new);
+final firstRunProvider = NotifierProvider<FirstRunController, FirstRunState>(
+  FirstRunController.new,
+);
 
 /// Both the checklist and the remote-access nudge read this: checklist
 /// surfaces show iff true; the nudge suppresses itself while true so the two
@@ -152,104 +151,102 @@ final otherAccountMobileDevicesProvider =
 
 /// Desktop setup steps. autoDispose so the device poll behind step 4 tears
 /// down for good once the checklist is completed or dismissed.
-final desktopFirstRunStepsProvider =
-    Provider.autoDispose<List<FirstRunStep>>((ref) {
-      final latched = ref.watch(
-        firstRunProvider.select((s) => s.completedSteps),
-      );
-      bool done(String id, bool live) => live || latched.contains(id);
-      // `null` (unknown / splash) counts as not-done: the checklist never
-      // claims a step on an unconfirmed signal.
-      final signedIn = ref.watch(signedInProvider) == true;
-      final hasProject = ref.watch(projectsProvider).isNotEmpty;
-      final hasSession = ref.watch(recentSessionsProvider).isNotEmpty;
-      // Short-circuit BEFORE the watch, not inside done(): the latch can never
-      // un-check, so subscribing past it would keep the account-device poll
-      // running for the rest of the session (the sidebar section stays mounted
-      // while step 5 is open) to re-answer a question with no remaining effect.
-      final hasPhone =
-          latched.contains(FirstRunStepIds.connectPhone) ||
-          (ref.watch(otherAccountMobileDevicesProvider).value ?? const [])
-              .isNotEmpty;
-      return [
-        (
-          id: FirstRunStepIds.signIn,
-          label: 'Sign in',
-          done: done(FirstRunStepIds.signIn, signedIn),
-        ),
-        (
-          id: FirstRunStepIds.openProject,
-          label: 'Open a project',
-          done: done(FirstRunStepIds.openProject, hasProject),
-        ),
-        (
-          id: FirstRunStepIds.startSession,
-          label: 'Start a session',
-          done: done(FirstRunStepIds.startSession, hasSession),
-        ),
-        (
-          id: FirstRunStepIds.connectPhone,
-          label: 'Connect your phone',
-          done: done(FirstRunStepIds.connectPhone, hasPhone),
-        ),
-        // Desktop-only step: the mobile checklist's contract is "fill the
-        // Recent canvas's empty slot until the steps that make the rest of the
-        // UI exist are done" — arming happens inside an open session, after
-        // that canvas is gone. The flag is still global, so an arm performed on
-        // mobile checks this step too.
-        (
-          id: FirstRunStepIds.armHandler,
-          label: 'Arm Handler on a session',
-          done: done(
-            FirstRunStepIds.armHandler,
-            ref.watch(firstRunProvider.select((s) => s.handlerArmedOnce)),
-          ),
-        ),
-      ];
-    });
+final desktopFirstRunStepsProvider = Provider.autoDispose<List<FirstRunStep>>((
+  ref,
+) {
+  final latched = ref.watch(firstRunProvider.select((s) => s.completedSteps));
+  bool done(String id, bool live) => live || latched.contains(id);
+  // `null` (unknown / splash) counts as not-done: the checklist never
+  // claims a step on an unconfirmed signal.
+  final signedIn = ref.watch(signedInProvider) == true;
+  final hasProject = ref.watch(projectsProvider).isNotEmpty;
+  final hasSession = ref.watch(recentSessionsProvider).isNotEmpty;
+  // Short-circuit BEFORE the watch, not inside done(): the latch can never
+  // un-check, so subscribing past it would keep the account-device poll
+  // running for the rest of the session (the sidebar section stays mounted
+  // while step 5 is open) to re-answer a question with no remaining effect.
+  final hasPhone =
+      latched.contains(FirstRunStepIds.connectPhone) ||
+      (ref.watch(otherAccountMobileDevicesProvider).value ?? const [])
+          .isNotEmpty;
+  return [
+    (
+      id: FirstRunStepIds.signIn,
+      label: 'Sign in',
+      done: done(FirstRunStepIds.signIn, signedIn),
+    ),
+    (
+      id: FirstRunStepIds.openProject,
+      label: 'Open a project',
+      done: done(FirstRunStepIds.openProject, hasProject),
+    ),
+    (
+      id: FirstRunStepIds.startSession,
+      label: 'Start a session',
+      done: done(FirstRunStepIds.startSession, hasSession),
+    ),
+    (
+      id: FirstRunStepIds.connectPhone,
+      label: 'Connect your phone',
+      done: done(FirstRunStepIds.connectPhone, hasPhone),
+    ),
+    // Desktop-only step: the mobile checklist's contract is "fill the
+    // Recent canvas's empty slot until the steps that make the rest of the
+    // UI exist are done" — arming happens inside an open session, after
+    // that canvas is gone. The flag is still global, so an arm performed on
+    // mobile checks this step too.
+    (
+      id: FirstRunStepIds.armHandler,
+      label: 'Arm Handler on a session',
+      done: done(
+        FirstRunStepIds.armHandler,
+        ref.watch(firstRunProvider.select((s) => s.handlerArmedOnce)),
+      ),
+    ),
+  ];
+});
 
 /// Mobile setup steps. None of these may watch controlPlaneStateProvider —
 /// reading that family member DIALS the machine, and the Recent canvas's
 /// contract is render-from-cache, connect only on explicit pull.
-final mobileFirstRunStepsProvider =
-    Provider.autoDispose<List<FirstRunStep>>((ref) {
-      final latched = ref.watch(
-        firstRunProvider.select((s) => s.completedSteps),
-      );
-      bool done(String id, bool live) => live || latched.contains(id);
-      // `/account/agents` returns only machine (kind:"agent") records, so any
-      // row means a computer signed in. Refreshed by the canvas's existing
-      // pull-to-refresh (refreshMachineInventoryAndControlPlanes invalidates
-      // it).
-      final machineLinked =
-          (ref.watch(accountAgentsProvider).value ?? const []).isNotEmpty;
-      // The explicit machine-level flag when the bridge sent one; a flag-less
-      // older bridge falls back to the projects-visible proxy (remote off
-      // advertises nothing).
-      final remoteOn = ref
-          .watch(machineAdvertisedProjectsProvider)
-          .values
-          .any((a) => a.remoteAccessEnabled ?? (a.projectCount > 0));
-      // Latch-on-event: the selection nulls on sign-out, which is exactly why
-      // the persisted latch carries it. NOT recentAgentsProvider — a
-      // RecentAgent row is upserted on any transport materialization
-      // (including pull-to-refresh), before any project is opened.
-      final openedProject = ref.watch(selectedRegistrationIdProvider) != null;
-      return [
-        (
-          id: FirstRunStepIds.machineLinked,
-          label: 'Install Antgrid on your computer and sign in there',
-          done: done(FirstRunStepIds.machineLinked, machineLinked),
-        ),
-        (
-          id: FirstRunStepIds.remoteOn,
-          label: "Turn on Remote in that computer's title bar",
-          done: done(FirstRunStepIds.remoteOn, remoteOn),
-        ),
-        (
-          id: FirstRunStepIds.openedProject,
-          label: 'Open a project',
-          done: done(FirstRunStepIds.openedProject, openedProject),
-        ),
-      ];
-    });
+final mobileFirstRunStepsProvider = Provider.autoDispose<List<FirstRunStep>>((
+  ref,
+) {
+  final latched = ref.watch(firstRunProvider.select((s) => s.completedSteps));
+  bool done(String id, bool live) => live || latched.contains(id);
+  // `/account/agents` returns only machine (kind:"agent") records, so any
+  // row means a computer signed in. Refreshed by the canvas's existing
+  // pull-to-refresh (refreshMachineInventoryAndControlPlanes invalidates
+  // it).
+  final machineLinked =
+      (ref.watch(accountAgentsProvider).value ?? const []).isNotEmpty;
+  // The explicit machine-level flag when the bridge sent one; a flag-less
+  // older bridge falls back to the projects-visible proxy (remote off
+  // advertises nothing).
+  final remoteOn = ref
+      .watch(machineAdvertisedProjectsProvider)
+      .values
+      .any((a) => a.remoteAccessEnabled ?? (a.projectCount > 0));
+  // Latch-on-event: the selection nulls on sign-out, which is exactly why
+  // the persisted latch carries it. NOT recentAgentsProvider — a
+  // RecentAgent row is upserted on any transport materialization
+  // (including pull-to-refresh), before any project is opened.
+  final openedProject = ref.watch(selectedRegistrationIdProvider) != null;
+  return [
+    (
+      id: FirstRunStepIds.machineLinked,
+      label: 'Install Antgrid on your computer and sign in there',
+      done: done(FirstRunStepIds.machineLinked, machineLinked),
+    ),
+    (
+      id: FirstRunStepIds.remoteOn,
+      label: "Turn on Remote in that computer's title bar",
+      done: done(FirstRunStepIds.remoteOn, remoteOn),
+    ),
+    (
+      id: FirstRunStepIds.openedProject,
+      label: 'Open a project',
+      done: done(FirstRunStepIds.openedProject, openedProject),
+    ),
+  ];
+});

@@ -13,11 +13,13 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('supervisor-classified error codes exist on the wire', () {
-    final fixture = jsonDecode(
-      File(
-        '../evals/fixtures/relay-envelope-vectors.json',
-      ).readAsStringSync(),
-    ) as Map<String, dynamic>;
+    final fixture =
+        jsonDecode(
+              File(
+                '../evals/fixtures/relay-envelope-vectors.json',
+              ).readAsStringSync(),
+            )
+            as Map<String, dynamic>;
 
     final wireCodes = {
       for (final v in (fixture['server'] as List).cast<Map<String, dynamic>>())

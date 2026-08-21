@@ -16,8 +16,10 @@ Future<Uint8List> _tag(List<int> confirmKey, String label) async {
   return Uint8List.fromList(mac.bytes);
 }
 
-Future<Uint8List> agentConfirmTagV2(List<int> confirmKey) => _tag(confirmKey, _agentLabel);
-Future<Uint8List> phoneConfirmTagV2(List<int> confirmKey) => _tag(confirmKey, _phoneLabel);
+Future<Uint8List> agentConfirmTagV2(List<int> confirmKey) =>
+    _tag(confirmKey, _agentLabel);
+Future<Uint8List> phoneConfirmTagV2(List<int> confirmKey) =>
+    _tag(confirmKey, _phoneLabel);
 
 /// Constant-time comparison; false on any length mismatch.
 bool verifyConfirmTagV2(List<int> expected, List<int> presented) {

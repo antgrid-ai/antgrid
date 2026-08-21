@@ -145,8 +145,10 @@ void main() {
     expect(HandlerSessionState.fromWire(wire(null))!.observability, isNull);
     expect(HandlerSessionState.fromWire(wire('partly'))!.observability, isNull);
     expect(HandlerSessionState.fromWire(wire(7))!.observability, isNull);
-    expect(handlerObservabilityFromWire('escalate_only'),
-        HandlerObservability.escalateOnly);
+    expect(
+      handlerObservabilityFromWire('escalate_only'),
+      HandlerObservability.escalateOnly,
+    );
   });
 
   test('HandlerState aggregates pending across sessions', () {

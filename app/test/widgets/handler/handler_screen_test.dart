@@ -500,45 +500,46 @@ void main() {
     expect(sent.single['data'], '$rejectText\r');
   });
 
-  testWidgets('a status frame in flight when the answer went out cannot re-arm the tap', (
-    tester,
-  ) async {
-    // Status is emitted twice per handler event on any session in the project,
-    // so the bridge routinely has one computed before an answer reaches it. The
-    // screen rebuilds its rows wholesale from that frame — the row may come
-    // back, the one-tap must not.
-    final t = await pumpLiveHandlerScreen(tester);
-    final replay = armedStatusJson(
-      escalations: [
-        {
-          'escalationId': 'e9',
-          'question': 'bun or vitest?',
-          'reasoning': 'Affects CI wiring.',
-          'draftReply': 'use bun',
-          'urgency': 'high',
-          'at': 1,
-          'choices': choicesJson(),
-        },
-      ],
-    );
-    t.emit('handler:status', replay);
-    await pumpDelivery(tester);
+  testWidgets(
+    'a status frame in flight when the answer went out cannot re-arm the tap',
+    (tester) async {
+      // Status is emitted twice per handler event on any session in the project,
+      // so the bridge routinely has one computed before an answer reaches it. The
+      // screen rebuilds its rows wholesale from that frame — the row may come
+      // back, the one-tap must not.
+      final t = await pumpLiveHandlerScreen(tester);
+      final replay = armedStatusJson(
+        escalations: [
+          {
+            'escalationId': 'e9',
+            'question': 'bun or vitest?',
+            'reasoning': 'Affects CI wiring.',
+            'draftReply': 'use bun',
+            'urgency': 'high',
+            'at': 1,
+            'choices': choicesJson(),
+          },
+        ],
+      );
+      t.emit('handler:status', replay);
+      await pumpDelivery(tester);
 
-    await tester.tap(find.text('Approve'));
-    await pumpDelivery(tester);
-    expect(t.sent.where((m) => m['type'] == 'terminal:input'), hasLength(1));
+      await tester.tap(find.text('Approve'));
+      await pumpDelivery(tester);
+      expect(t.sent.where((m) => m['type'] == 'terminal:input'), hasLength(1));
 
-    t.emit('handler:status', replay);
-    await pumpDelivery(tester);
+      t.emit('handler:status', replay);
+      await pumpDelivery(tester);
 
-    expect(find.byType(HandlerDecisionCard), findsNothing);
-    expect(find.text('Approve'), findsNothing);
-    // The question is still there and still answerable — only the one-tap left.
-    expect(find.text('bun or vitest?'), findsOneWidget);
-    await tester.tap(find.text('bun or vitest?'));
-    await tester.pumpAndSettle();
-    expect(find.byType(TextField), findsOneWidget);
-  });
+      expect(find.byType(HandlerDecisionCard), findsNothing);
+      expect(find.text('Approve'), findsNothing);
+      // The question is still there and still answerable — only the one-tap left.
+      expect(find.text('bun or vitest?'), findsOneWidget);
+      await tester.tap(find.text('bun or vitest?'));
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsOneWidget);
+    },
+  );
 
   testWidgets('two taps on one choice put a single answer on the wire', (
     tester,
@@ -582,72 +583,78 @@ void main() {
   // scrolling list, three of them inside the "Needs you" section alone. Every
   // row now reserves the same leading slot, so a shield appearing on one row
   // cannot shift the title of the row beneath it.
-  testWidgets('every row title shares one left edge, whatever glyph it carries', (
-    tester,
-  ) async {
-    const plain = HandlerEscalation(
-      escalationId: 'e1',
-      terminalId: 't1',
-      question: 'plain question',
-      reasoning: 'r',
-      draftReply: 'd',
-      urgency: 'normal',
-      at: 1,
-    );
-    const floored = HandlerEscalation(
-      escalationId: 'e2',
-      terminalId: 't1',
-      question: 'floored question',
-      reasoning: 'r',
-      draftReply: 'd',
-      urgency: 'high',
-      at: 2,
-      floorRule: 'no force push',
-    );
-    await pumpHandlerScreen(
-      tester,
-      stateWith(sessions: {'t1': sessionState('t1')}).copyWith(
-        escalations: const [plain, floored],
-        snapshots: const [
-          HandlerSnapshot(
-            snapshotId: 's1',
-            terminalId: 't1',
-            at: 1,
-            action: 'force_push',
-            trigger: 'git push --force',
-            summary: 'pre-push SHA abc1234',
-            state: 'available',
-          ),
-        ],
-        activity: const [
-          HandlerActivityRecord(
-            recordId: 'r1',
-            at: 1,
-            terminalId: 't1',
-            decision: 'armed',
-            reason: '',
-          ),
-        ],
-      ),
-    );
+  testWidgets(
+    'every row title shares one left edge, whatever glyph it carries',
+    (tester) async {
+      const plain = HandlerEscalation(
+        escalationId: 'e1',
+        terminalId: 't1',
+        question: 'plain question',
+        reasoning: 'r',
+        draftReply: 'd',
+        urgency: 'normal',
+        at: 1,
+      );
+      const floored = HandlerEscalation(
+        escalationId: 'e2',
+        terminalId: 't1',
+        question: 'floored question',
+        reasoning: 'r',
+        draftReply: 'd',
+        urgency: 'high',
+        at: 2,
+        floorRule: 'no force push',
+      );
+      await pumpHandlerScreen(
+        tester,
+        stateWith(sessions: {'t1': sessionState('t1')}).copyWith(
+          escalations: const [plain, floored],
+          snapshots: const [
+            HandlerSnapshot(
+              snapshotId: 's1',
+              terminalId: 't1',
+              at: 1,
+              action: 'force_push',
+              trigger: 'git push --force',
+              summary: 'pre-push SHA abc1234',
+              state: 'available',
+            ),
+          ],
+          activity: const [
+            HandlerActivityRecord(
+              recordId: 'r1',
+              at: 1,
+              terminalId: 't1',
+              decision: 'armed',
+              reason: '',
+            ),
+          ],
+        ),
+      );
 
-    double leftOf(String text) => tester.getTopLeft(find.text(text)).dx;
-    // The session card's Armed chip carries this word too, so the activity row
-    // is addressed through the AbListRow only it is built from.
-    double leftOfRow(String text) => tester.getTopLeft(
-      find.descendant(of: find.byType(AbListRow), matching: find.text(text)),
-    ).dx;
-    // 'summary' is the session goal from sessionState().
-    final edges = {
-      leftOf('plain question'), // no leading glyph
-      leftOf('floored question'), // safety-floor shield
-      leftOf('Force push'), // revert glyph
-      leftOfRow('Armed'), // activity-kind glyph
-      leftOf('summary'), // session card, empty rail
-    };
-    expect(edges, hasLength(1), reason: 'ragged left edges: $edges');
-    debugDefaultTargetPlatformOverride = null;
-  });
+      double leftOf(String text) => tester.getTopLeft(find.text(text)).dx;
+      // The session card's Armed chip carries this word too, so the activity row
+      // is addressed through the AbListRow only it is built from.
+      double leftOfRow(String text) => tester
+          .getTopLeft(
+            find.descendant(
+              of: find.byType(AbListRow),
+              matching: find.text(text),
+            ),
+          )
+          .dx;
+      // 'summary' is the session goal from sessionState().
+      final edges = {
+        leftOf('plain question'), // no leading glyph
+        leftOf('floored question'), // safety-floor shield
+        leftOf('Force push'), // revert glyph
+        leftOfRow('Armed'), // activity-kind glyph
+        leftOf('summary'), // session card, empty rail
+      };
+      expect(edges, hasLength(1), reason: 'ragged left edges: $edges');
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
 
   // An escalation question is the thing being decided. Clipped to one line by
   // AbListRow's default it was a decision taken without its subject.
@@ -1018,36 +1025,38 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
-  testWidgets('an escalate-only session reads differently from an unwatchable one', (
-    tester,
-  ) async {
-    // Two distinct facts: this one IS watched and merely has no judge to answer
-    // with. Rendering them the same would hide which one the user is looking at.
-    await pumpHandlerScreen(
-      tester,
-      stateWith(
-        sessions: {
-          't1': sessionState(
-            't1',
-            observability: HandlerObservability.escalateOnly,
-          ),
-        },
-      ),
-    );
-    expect(find.text('ESCALATE ONLY'), findsOneWidget);
-    expect(find.textContaining('Not watched'), findsNothing);
-    debugDefaultTargetPlatformOverride = null;
-  });
+  testWidgets(
+    'an escalate-only session reads differently from an unwatchable one',
+    (tester) async {
+      // Two distinct facts: this one IS watched and merely has no judge to answer
+      // with. Rendering them the same would hide which one the user is looking at.
+      await pumpHandlerScreen(
+        tester,
+        stateWith(
+          sessions: {
+            't1': sessionState(
+              't1',
+              observability: HandlerObservability.escalateOnly,
+            ),
+          },
+        ),
+      );
+      expect(find.text('ESCALATE ONLY'), findsOneWidget);
+      expect(find.textContaining('Not watched'), findsNothing);
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
 
-  testWidgets('a session with no reported observability is marked neither way', (
-    tester,
-  ) async {
-    await pumpHandlerScreen(
-      tester,
-      stateWith(sessions: {'t1': sessionState('t1')}),
-    );
-    expect(find.textContaining('Not watched'), findsNothing);
-    expect(find.text('ESCALATE ONLY'), findsNothing);
-    debugDefaultTargetPlatformOverride = null;
-  });
+  testWidgets(
+    'a session with no reported observability is marked neither way',
+    (tester) async {
+      await pumpHandlerScreen(
+        tester,
+        stateWith(sessions: {'t1': sessionState('t1')}),
+      );
+      expect(find.textContaining('Not watched'), findsNothing);
+      expect(find.text('ESCALATE ONLY'), findsNothing);
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
 }

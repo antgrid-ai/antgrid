@@ -26,12 +26,18 @@ void main() {
     });
 
     test('the file manager target uses the file scheme', () {
-      expect(ExternalOpenTarget.fileManager.uriFor('/home/dev/repo').scheme, 'file');
+      expect(
+        ExternalOpenTarget.fileManager.uriFor('/home/dev/repo').scheme,
+        'file',
+      );
     });
   });
 
-  test('only the file manager is unprobed — every editor declares a scheme', () {
-    final unprobed = ExternalOpenTarget.values.where((t) => t.scheme == null);
-    expect(unprobed, [ExternalOpenTarget.fileManager]);
-  });
+  test(
+    'only the file manager is unprobed — every editor declares a scheme',
+    () {
+      final unprobed = ExternalOpenTarget.values.where((t) => t.scheme == null);
+      expect(unprobed, [ExternalOpenTarget.fileManager]);
+    },
+  );
 }

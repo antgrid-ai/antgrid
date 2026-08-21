@@ -170,7 +170,10 @@ Future<void> _switchMode(
   final projectId = container.read(selectedRegistrationIdProvider);
   final service = projectId == null
       ? null
-      : container.read(projectSessionProvider(projectId)).value?.sessionsService;
+      : container
+            .read(projectSessionProvider(projectId))
+            .value
+            ?.sessionsService;
   if (service == null) {
     if (context.mounted) {
       showAbSnackBar(

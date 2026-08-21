@@ -85,62 +85,68 @@ void main() {
   });
 
   group('handlerAwayAttentionSinceProvider', () {
-    test('sets once on attention, resets on leaving it or switching session',
-        () async {
-      var now = DateTime(2026, 1, 1, 12);
-      final container = ProviderContainer(
-        overrides: [
-          handlerAwayNowFnProvider.overrideWithValue(() => now),
-          activeSessionIdProvider.overrideWith(
-            () => ValueController<String?>(null),
-          ),
-          selectedRegistrationIdProvider.overrideWithValue('p1'),
-          activeSessionProvider.overrideWith((_) => null),
-        ],
-      );
-      addTearDown(container.dispose);
-      final sub = container.listen(
-        handlerAwayAttentionSinceProvider,
-        (_, _) {},
-      );
-      expect(sub.read(), isNull);
+    test(
+      'sets once on attention, resets on leaving it or switching session',
+      () async {
+        var now = DateTime(2026, 1, 1, 12);
+        final container = ProviderContainer(
+          overrides: [
+            handlerAwayNowFnProvider.overrideWithValue(() => now),
+            activeSessionIdProvider.overrideWith(
+              () => ValueController<String?>(null),
+            ),
+            selectedRegistrationIdProvider.overrideWithValue('p1'),
+            activeSessionProvider.overrideWith((_) => null),
+          ],
+        );
+        addTearDown(container.dispose);
+        final sub = container.listen(
+          handlerAwayAttentionSinceProvider,
+          (_, _) {},
+        );
+        expect(sub.read(), isNull);
 
-      // Focus a session, then its status becomes attention → clock starts.
-      container.read(activeSessionIdProvider.notifier).set('s1');
-      container.read(remoteSessionStatusProvider.notifier)
-          .setLocalSessionStatuses({
-        'p1': {'s1': AgentWorkStatus.attention},
-      });
-      final started = DateTime(2026, 1, 1, 12);
-      expect(sub.read(), started);
+        // Focus a session, then its status becomes attention → clock starts.
+        container.read(activeSessionIdProvider.notifier).set('s1');
+        container
+            .read(remoteSessionStatusProvider.notifier)
+            .setLocalSessionStatuses({
+              'p1': {'s1': AgentWorkStatus.attention},
+            });
+        final started = DateTime(2026, 1, 1, 12);
+        expect(sub.read(), started);
 
-      // Repeated attention reads (a sibling's status churns) keep the original
-      // timestamp even as the clock advances.
-      now = DateTime(2026, 1, 1, 12, 3);
-      container.read(remoteSessionStatusProvider.notifier)
-          .setLocalSessionStatuses({
-        'p1': {
-          's1': AgentWorkStatus.attention,
-          's2': AgentWorkStatus.working,
-        },
-      });
-      expect(sub.read(), started);
+        // Repeated attention reads (a sibling's status churns) keep the original
+        // timestamp even as the clock advances.
+        now = DateTime(2026, 1, 1, 12, 3);
+        container
+            .read(remoteSessionStatusProvider.notifier)
+            .setLocalSessionStatuses({
+              'p1': {
+                's1': AgentWorkStatus.attention,
+                's2': AgentWorkStatus.working,
+              },
+            });
+        expect(sub.read(), started);
 
-      // Leaving attention resets.
-      container.read(remoteSessionStatusProvider.notifier)
-          .setLocalSessionStatuses({
-        'p1': {'s1': AgentWorkStatus.working},
-      });
-      expect(sub.read(), isNull);
+        // Leaving attention resets.
+        container
+            .read(remoteSessionStatusProvider.notifier)
+            .setLocalSessionStatuses({
+              'p1': {'s1': AgentWorkStatus.working},
+            });
+        expect(sub.read(), isNull);
 
-      // Back in attention, then focus moves to a non-blocked session → null.
-      container.read(remoteSessionStatusProvider.notifier)
-          .setLocalSessionStatuses({
-        'p1': {'s1': AgentWorkStatus.attention},
-      });
-      expect(sub.read(), DateTime(2026, 1, 1, 12, 3));
-      container.read(activeSessionIdProvider.notifier).set('s2');
-      expect(sub.read(), isNull);
-    });
+        // Back in attention, then focus moves to a non-blocked session → null.
+        container
+            .read(remoteSessionStatusProvider.notifier)
+            .setLocalSessionStatuses({
+              'p1': {'s1': AgentWorkStatus.attention},
+            });
+        expect(sub.read(), DateTime(2026, 1, 1, 12, 3));
+        container.read(activeSessionIdProvider.notifier).set('s2');
+        expect(sub.read(), isNull);
+      },
+    );
   });
 }

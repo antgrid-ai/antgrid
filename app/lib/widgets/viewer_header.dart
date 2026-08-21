@@ -37,8 +37,7 @@ Widget buildViewerHeader({
           ),
         ),
         ...trailing,
-        if (onClose != null)
-          AbIconButton(icon: AbIcons.close, onTap: onClose),
+        if (onClose != null) AbIconButton(icon: AbIcons.close, onTap: onClose),
       ],
     ),
   );

@@ -290,41 +290,40 @@ void main() {
     },
   );
 
-  testWidgets(
-    'mounting for the active chat session with no turns hydrates it',
-    (tester) async {
-      // The single chokepoint: the view is keyed per active session, so its
-      // initState is where EVERY activation path (drill-in, cross-project open,
-      // nav restore) converges. Mounting it must pull the transcript without any
-      // external hydrateAttachedChatIfNeeded call at the activation site.
-      const entry = SessionEntry(
-        id: _sessionId,
-        name: 'Chat',
-        createdAt: 0,
-        lastUsedAt: 0,
-        archived: false,
-        running: true,
-        mode: 'chat',
-        agentSessionId: 'agent-sess-1',
-      );
-      final t = await _pumpWithService(
-        tester,
-        const AgentSessionState(),
-        extraOverrides: [activeSessionProvider.overrideWithValue(entry)],
-      );
-      t.requestHandler = (method, params) => {'frames': <dynamic>[]};
-      // Let the post-frame hydration callback + its async pull run.
-      await tester.pump();
-      await tester.pump();
+  testWidgets('mounting for the active chat session with no turns hydrates it', (
+    tester,
+  ) async {
+    // The single chokepoint: the view is keyed per active session, so its
+    // initState is where EVERY activation path (drill-in, cross-project open,
+    // nav restore) converges. Mounting it must pull the transcript without any
+    // external hydrateAttachedChatIfNeeded call at the activation site.
+    const entry = SessionEntry(
+      id: _sessionId,
+      name: 'Chat',
+      createdAt: 0,
+      lastUsedAt: 0,
+      archived: false,
+      running: true,
+      mode: 'chat',
+      agentSessionId: 'agent-sess-1',
+    );
+    final t = await _pumpWithService(
+      tester,
+      const AgentSessionState(),
+      extraOverrides: [activeSessionProvider.overrideWithValue(entry)],
+    );
+    t.requestHandler = (method, params) => {'frames': <dynamic>[]};
+    // Let the post-frame hydration callback + its async pull run.
+    await tester.pump();
+    await tester.pump();
 
-      expect(
-        t.requests.where((r) => r.method == 'session.transcriptSnapshot'),
-        isNotEmpty,
-      );
+    expect(
+      t.requests.where((r) => r.method == 'session.transcriptSnapshot'),
+      isNotEmpty,
+    );
 
-      await _disposeTree(tester);
-    },
-  );
+    await _disposeTree(tester);
+  });
 
   testWidgets('tapping the retry row calls hydrateIfNeeded for this session', (
     tester,

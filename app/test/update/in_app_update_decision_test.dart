@@ -14,16 +14,15 @@ void main() {
       int stalenessDays = 0,
       bool immediateAllowed = true,
       bool flexibleAllowed = true,
-    }) =>
-        decideUpdateAction(
-          available: available,
-          updateInProgress: updateInProgress,
-          downloaded: downloaded,
-          updatePriority: updatePriority,
-          stalenessDays: stalenessDays,
-          immediateAllowed: immediateAllowed,
-          flexibleAllowed: flexibleAllowed,
-        );
+    }) => decideUpdateAction(
+      available: available,
+      updateInProgress: updateInProgress,
+      downloaded: downloaded,
+      updatePriority: updatePriority,
+      stalenessDays: stalenessDays,
+      immediateAllowed: immediateAllowed,
+      flexibleAllowed: flexibleAllowed,
+    );
 
     test('no update available → none (even if everything else is set)', () {
       expect(
@@ -105,12 +104,15 @@ void main() {
         );
       });
 
-      test('interrupted immediate (in progress, immediate allowed) → resume', () {
-        expect(
-          decide(available: false, updateInProgress: true),
-          UpdateAction.resumeImmediate,
-        );
-      });
+      test(
+        'interrupted immediate (in progress, immediate allowed) → resume',
+        () {
+          expect(
+            decide(available: false, updateInProgress: true),
+            UpdateAction.resumeImmediate,
+          );
+        },
+      );
 
       test('in progress but immediate not allowed → none', () {
         expect(

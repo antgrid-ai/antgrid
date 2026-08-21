@@ -13,15 +13,15 @@ class AnalyticsService {
     required bool Function() enabled,
     DateTime Function()? now,
     this.batchSize = 10,
-  })  : _client = client,
-        _plausibleUrl = plausibleUrl.replaceAll(RegExp(r'/+$'), ''),
-        _plausibleDomain = plausibleDomain,
-        _eventsApiUrl = eventsApiUrl.replaceAll(RegExp(r'/+$'), ''),
-        _installId = installId,
-        _platform = platform,
-        _appVersion = appVersion,
-        _enabled = enabled,
-        _now = now ?? DateTime.now;
+  }) : _client = client,
+       _plausibleUrl = plausibleUrl.replaceAll(RegExp(r'/+$'), ''),
+       _plausibleDomain = plausibleDomain,
+       _eventsApiUrl = eventsApiUrl.replaceAll(RegExp(r'/+$'), ''),
+       _installId = installId,
+       _platform = platform,
+       _appVersion = appVersion,
+       _enabled = enabled,
+       _now = now ?? DateTime.now;
 
   final http.Client _client;
   final String _plausibleUrl;
@@ -46,11 +46,10 @@ class AnalyticsService {
   // The first-party ingest caps prop string values at 120 chars and rejects the
   // WHOLE batch on any overflow. Clamp here so a single oversized value can
   // never 400 an otherwise-valid flush. Non-string values pass through.
-  Map<String, Object?> _clampProps(Map<String, Object?> props) =>
-      props.map((k, v) => MapEntry(
-            k,
-            v is String && v.length > 120 ? v.substring(0, 120) : v,
-          ));
+  Map<String, Object?> _clampProps(Map<String, Object?> props) => props.map(
+    (k, v) =>
+        MapEntry(k, v is String && v.length > 120 ? v.substring(0, 120) : v),
+  );
 
   void _sendToPlausible(String name, Map<String, Object?> props) {
     // Fire-and-forget. A realistic UA avoids Plausible's bot filtering.

@@ -7,10 +7,7 @@ import 'package:antgrid/services/keychain_device_store.dart';
 void main() {
   group('BootstrapPayload.toJsonLine', () {
     test('local-only payload has firstProject and no machine block', () {
-      final p = BootstrapPayload(
-        projectId: 'p1',
-        projectPath: '/tmp/p1',
-      );
+      final p = BootstrapPayload(projectId: 'p1', projectPath: '/tmp/p1');
       final j = jsonDecode(p.toJsonLine().trim()) as Map<String, dynamic>;
       expect(j.containsKey('machine'), isFalse);
       expect(j['firstProject'], {
@@ -52,36 +49,42 @@ void main() {
       expect((m['auth'] as Map).containsKey('userId'), isFalse);
     });
 
-    test('machine-only payload omits firstProject and carries the machine block', () {
-      final device = DeviceRecord(
-        userId: 'u-1',
-        deviceUuid: 'uuid-1',
-        clientId: 'cid',
-        clientSecret: 'csec',
-        ed25519Pub: 'e-pub',
-        ed25519Priv: 'e-priv',
-        x25519Pub: 'x-pub',
-        x25519Priv: 'x-priv',
-      );
-      final p = BootstrapPayload.machineOnly(
-        device: device,
-        licenseApiUrl: 'http://localhost:8787',
-        relayUrl: 'wss://relay.example',
-        ownerPid: 4242,
-      );
-      final j = jsonDecode(p.toJsonLine().trim()) as Map<String, dynamic>;
-      expect(j.containsKey('firstProject'), isFalse);
-      expect(j['ownerPid'], 4242);
-      expect(j['machine']['auth']['deviceUuid'], 'uuid-1');
-      expect(j['machine']['relayUrl'], 'wss://relay.example');
-    });
+    test(
+      'machine-only payload omits firstProject and carries the machine block',
+      () {
+        final device = DeviceRecord(
+          userId: 'u-1',
+          deviceUuid: 'uuid-1',
+          clientId: 'cid',
+          clientSecret: 'csec',
+          ed25519Pub: 'e-pub',
+          ed25519Priv: 'e-priv',
+          x25519Pub: 'x-pub',
+          x25519Priv: 'x-priv',
+        );
+        final p = BootstrapPayload.machineOnly(
+          device: device,
+          licenseApiUrl: 'http://localhost:8787',
+          relayUrl: 'wss://relay.example',
+          ownerPid: 4242,
+        );
+        final j = jsonDecode(p.toJsonLine().trim()) as Map<String, dynamic>;
+        expect(j.containsKey('firstProject'), isFalse);
+        expect(j['ownerPid'], 4242);
+        expect(j['machine']['auth']['deviceUuid'], 'uuid-1');
+        expect(j['machine']['relayUrl'], 'wss://relay.example');
+      },
+    );
 
-    test('machine-only payload with no device omits both firstProject and machine', () {
-      final p = BootstrapPayload.machineOnly(ownerPid: 7);
-      final j = jsonDecode(p.toJsonLine().trim()) as Map<String, dynamic>;
-      expect(j.containsKey('firstProject'), isFalse);
-      expect(j.containsKey('machine'), isFalse);
-      expect(j['ownerPid'], 7);
-    });
+    test(
+      'machine-only payload with no device omits both firstProject and machine',
+      () {
+        final p = BootstrapPayload.machineOnly(ownerPid: 7);
+        final j = jsonDecode(p.toJsonLine().trim()) as Map<String, dynamic>;
+        expect(j.containsKey('firstProject'), isFalse);
+        expect(j.containsKey('machine'), isFalse);
+        expect(j['ownerPid'], 7);
+      },
+    );
   });
 }

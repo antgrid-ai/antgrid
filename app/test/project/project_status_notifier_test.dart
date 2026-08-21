@@ -5,52 +5,49 @@ import 'package:antgrid/project/project_status.dart';
 
 void main() {
   group('ProjectStatusNotifier', () {
-    test(
-      'agent:status updates services',
-      () async {
-        final ctrl = StreamController<Map<String, dynamic>>.broadcast();
-        final notifier = ProjectStatusNotifier(ctrl.stream);
-        ctrl.add({
-          'id': '0',
-          'timestamp': 0,
-          'type': 'agent:status',
-          'projectId': 'p',
-          'terminals': [
-            {
-              'terminalId': 't1',
-              'name': 't1',
-              'running': true,
-              'shell': 'bash',
-              'cols': 80,
-              'rows': 24,
-            },
-            {
-              'terminalId': 't2',
-              'name': 't2',
-              'running': false,
-              'shell': 'bash',
-              'cols': 80,
-              'rows': 24,
-            },
-          ],
-          'services': [
-            {
-              'id': 'svc-1',
-              'name': 'dev',
-              'running': true,
-              'command': 'npm run dev',
-            },
-          ],
-          'commands': [],
-          'proxies': [],
-          'ports': [],
-        });
-        await Future<void>.delayed(Duration.zero);
-        expect(notifier.value.services, hasLength(1));
-        notifier.dispose();
-        await ctrl.close();
-      },
-    );
+    test('agent:status updates services', () async {
+      final ctrl = StreamController<Map<String, dynamic>>.broadcast();
+      final notifier = ProjectStatusNotifier(ctrl.stream);
+      ctrl.add({
+        'id': '0',
+        'timestamp': 0,
+        'type': 'agent:status',
+        'projectId': 'p',
+        'terminals': [
+          {
+            'terminalId': 't1',
+            'name': 't1',
+            'running': true,
+            'shell': 'bash',
+            'cols': 80,
+            'rows': 24,
+          },
+          {
+            'terminalId': 't2',
+            'name': 't2',
+            'running': false,
+            'shell': 'bash',
+            'cols': 80,
+            'rows': 24,
+          },
+        ],
+        'services': [
+          {
+            'id': 'svc-1',
+            'name': 'dev',
+            'running': true,
+            'command': 'npm run dev',
+          },
+        ],
+        'commands': [],
+        'proxies': [],
+        'ports': [],
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(notifier.value.services, hasLength(1));
+      notifier.dispose();
+      await ctrl.close();
+    });
 
     test('ports:update populates detectedPorts', () async {
       final ctrl = StreamController<Map<String, dynamic>>.broadcast();

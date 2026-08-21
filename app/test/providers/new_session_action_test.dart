@@ -277,33 +277,30 @@ void main() {
   });
 
   group('throwProjectStartFailure', () {
-    test(
-      'legacy relay SESSION_LIMIT_EXCEEDED → SessionLimitExceededException, '
-      'surfaced with the legacy-relay copy',
-      () {
-        expect(
-          () => throwProjectStartFailure(
-            'p1',
-            'M',
-            const ControlPlaneError(
-              code: 'SESSION_LIMIT_EXCEEDED',
-              message: 'Concurrent remote agent limit reached (0).',
-            ),
+    test('legacy relay SESSION_LIMIT_EXCEEDED → SessionLimitExceededException, '
+        'surfaced with the legacy-relay copy', () {
+      expect(
+        () => throwProjectStartFailure(
+          'p1',
+          'M',
+          const ControlPlaneError(
+            code: 'SESSION_LIMIT_EXCEEDED',
+            message: 'Concurrent remote agent limit reached (0).',
           ),
-          throwsA(
-            isA<SessionLimitExceededException>()
-                .having((e) => e.message, 'message', contains('limit reached'))
-                // The relay's own string names a cap that no longer exists, so
-                // the UI must never render it verbatim.
-                .having(
-                  (e) => e.userMessage,
-                  'userMessage',
-                  contains('older relay'),
-                ),
-          ),
-        );
-      },
-    );
+        ),
+        throwsA(
+          isA<SessionLimitExceededException>()
+              .having((e) => e.message, 'message', contains('limit reached'))
+              // The relay's own string names a cap that no longer exists, so
+              // the UI must never render it verbatim.
+              .having(
+                (e) => e.userMessage,
+                'userMessage',
+                contains('older relay'),
+              ),
+        ),
+      );
+    });
 
     test('any other control-plane error → generic StateError', () {
       expect(

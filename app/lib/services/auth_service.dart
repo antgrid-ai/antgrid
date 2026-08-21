@@ -219,17 +219,17 @@ class AuthService {
   Stream<String> get oauthFailures => _oauthFailures.stream;
   late final StreamController<String> _oauthFailures =
       StreamController<String>.broadcast(
-    onListen: () {
-      final pending = _pendingOAuthFailure;
-      if (pending == null) return;
-      _pendingOAuthFailure = null;
-      // Microtask: the subscriber that triggered onListen must be fully
-      // registered before the replayed event is dispatched.
-      scheduleMicrotask(() {
-        if (_oauthFailures.hasListener) _oauthFailures.add(pending);
-      });
-    },
-  );
+        onListen: () {
+          final pending = _pendingOAuthFailure;
+          if (pending == null) return;
+          _pendingOAuthFailure = null;
+          // Microtask: the subscriber that triggered onListen must be fully
+          // registered before the replayed event is dispatched.
+          scheduleMicrotask(() {
+            if (_oauthFailures.hasListener) _oauthFailures.add(pending);
+          });
+        },
+      );
   String? _pendingOAuthFailure;
 
   /// Provider of the most recent [startOAuth] in this process, kept only to

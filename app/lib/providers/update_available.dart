@@ -13,5 +13,6 @@ import 'value_controller.dart';
 /// listing only move forward; a downloaded flexible update stays installable
 /// until the restart applies it), and a later failed/transient re-check must
 /// not hide the affordance.
-final updateAvailableProvider =
-    NotifierProvider<ValueController<bool>, bool>(() => ValueController(false));
+final updateAvailableProvider = NotifierProvider<ValueController<bool>, bool>(
+  () => ValueController(false),
+);

@@ -21,41 +21,37 @@ class CapabilityCatalog {
 
   /// Extract the static catalog from a live frame, dropping every `current*` id.
   factory CapabilityCatalog.fromCapabilities(AgentCapabilities c) =>
-      CapabilityCatalog(
-        models: c.models,
-        modes: c.modes,
-        commands: c.commands,
-      );
+      CapabilityCatalog(models: c.models, modes: c.modes, commands: c.commands);
 
   Map<String, dynamic> toJson() => {
-        'models': [
-          for (final m in models)
-            {
-              'id': m.id,
-              'name': m.name,
-              if (m.provider != null) 'provider': m.provider,
-              if (m.efforts.isNotEmpty) 'efforts': m.efforts,
-              if (m.defaultEffort != null) 'defaultEffort': m.defaultEffort,
-            },
-        ],
-        'modes': [
-          for (final m in modes)
-            {
-              'id': m.id,
-              'name': m.name,
-              if (m.description != null) 'description': m.description,
-            },
-        ],
-        'commands': [
-          for (final c in commands)
-            {
-              'id': c.id,
-              'name': c.name,
-              if (c.description != null) 'description': c.description,
-              if (c.argHint != null) 'argHint': c.argHint,
-            },
-        ],
-      };
+    'models': [
+      for (final m in models)
+        {
+          'id': m.id,
+          'name': m.name,
+          if (m.provider != null) 'provider': m.provider,
+          if (m.efforts.isNotEmpty) 'efforts': m.efforts,
+          if (m.defaultEffort != null) 'defaultEffort': m.defaultEffort,
+        },
+    ],
+    'modes': [
+      for (final m in modes)
+        {
+          'id': m.id,
+          'name': m.name,
+          if (m.description != null) 'description': m.description,
+        },
+    ],
+    'commands': [
+      for (final c in commands)
+        {
+          'id': c.id,
+          'name': c.name,
+          if (c.description != null) 'description': c.description,
+          if (c.argHint != null) 'argHint': c.argHint,
+        },
+    ],
+  };
 
   factory CapabilityCatalog.fromJson(Map<String, dynamic> json) =>
       CapabilityCatalog(
@@ -92,14 +88,14 @@ class CapabilityCatalog {
 
   static List<T> _list<T>(Object? raw, T Function(Map<String, dynamic>) f) =>
       raw is List
-          // whereType<Map>() then copy — a Map<dynamic,dynamic> (from test
-          // fixtures or non-jsonDecode sources) would be dropped by a direct
-          // whereType<Map<String,dynamic>>().
-          ? raw
-              .whereType<Map>()
-              .map((e) => f(Map<String, dynamic>.from(e)))
-              .toList()
-          : <T>[];
+      // whereType<Map>() then copy — a Map<dynamic,dynamic> (from test
+      // fixtures or non-jsonDecode sources) would be dropped by a direct
+      // whereType<Map<String,dynamic>>().
+      ? raw
+            .whereType<Map>()
+            .map((e) => f(Map<String, dynamic>.from(e)))
+            .toList()
+      : <T>[];
 }
 
 /// Merge a live capabilities frame with a cached catalog for the composer.

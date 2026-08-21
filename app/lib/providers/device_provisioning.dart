@@ -99,7 +99,11 @@ Future<DeviceRecord?> resolveDeviceRecord(
         fields: {'code': e.code, 'message': e.message},
       );
     } catch (e) {
-      AbLog.warn(logTag, 'skipped machine provisioning', fields: {'error': '$e'});
+      AbLog.warn(
+        logTag,
+        'skipped machine provisioning',
+        fields: {'error': '$e'},
+      );
     }
   }
   return device;

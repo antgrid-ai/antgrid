@@ -20,6 +20,7 @@ class AbToast extends StatelessWidget {
   final String icon;
   final String title;
   final String description;
+
   /// Overrides the icon dot color. Defaults to [AbColors.statusRunning].
   final Color? iconColor;
   final String? actionLabel;
@@ -147,8 +148,10 @@ void showAbToastOverlay(
       // (invalid) constraints.
       child: ConstrainedBox(
         constraints: BoxConstraints(
-          maxWidth: (MediaQuery.sizeOf(ctx).width - AbTokens.space16 * 2)
-              .clamp(0.0, 360.0),
+          maxWidth: (MediaQuery.sizeOf(ctx).width - AbTokens.space16 * 2).clamp(
+            0.0,
+            360.0,
+          ),
         ),
         child: Material(color: Colors.transparent, child: toast),
       ),

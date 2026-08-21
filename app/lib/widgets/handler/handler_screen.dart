@@ -66,8 +66,7 @@ class HandlerScreen extends ConsumerWidget {
     final entries = {
       for (final s in ref.watch(activeSessionsProvider)) s.id: s,
     };
-    String nameOf(String terminalId) =>
-        entries[terminalId]?.name ?? terminalId;
+    String nameOf(String terminalId) => entries[terminalId]?.name ?? terminalId;
     // No catalog prediction here on purpose: every row on this screen is an
     // ARMED session, and the bridge's own per-session observability describes
     // its live mode and judge pick. The pre-arm guess belongs where nothing is
@@ -235,8 +234,10 @@ class HandlerScreen extends ConsumerWidget {
                 snapshot: s,
                 meta: meta(s.terminalId, s.at),
                 pending: state.pendingUndo.contains(s.snapshotId),
-                onUndo: () =>
-                    focusedServiceOrNull(container, (x) => x.handlerService)?.undo(s),
+                onUndo: () => focusedServiceOrNull(
+                  container,
+                  (x) => x.handlerService,
+                )?.undo(s),
                 p: p,
               );
             },

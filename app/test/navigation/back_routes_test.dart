@@ -65,13 +65,15 @@ void main() {
       await pumpScope(tester);
 
       var consumed = 0;
-      c.read(backHandlerRegistryProvider).register(
-        priority: BackPriority.fileViewer,
-        onBack: () {
-          consumed++;
-          return true;
-        },
-      );
+      c
+          .read(backHandlerRegistryProvider)
+          .register(
+            priority: BackPriority.fileViewer,
+            onBack: () {
+              consumed++;
+              return true;
+            },
+          );
 
       await systemBack(tester);
       expect(consumed, 1);

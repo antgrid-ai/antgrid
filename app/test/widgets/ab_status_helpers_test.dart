@@ -32,8 +32,10 @@ void main() {
     });
 
     test('neither a code nor a message falls back to the caller\'s copy', () {
-      expect(sessionRefusalCopy(null, null, 'Could not do that'),
-          'Could not do that');
+      expect(
+        sessionRefusalCopy(null, null, 'Could not do that'),
+        'Could not do that',
+      );
     });
   });
 }

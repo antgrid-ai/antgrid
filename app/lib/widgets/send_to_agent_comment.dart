@@ -274,7 +274,9 @@ class _CommentContentState extends State<_CommentContent> {
                     ),
                     child: Text(
                       'Cancel',
-                      style: AbTokens.sansStyle(color: context.antgrid.textMuted),
+                      style: AbTokens.sansStyle(
+                        color: context.antgrid.textMuted,
+                      ),
                     ),
                   ),
                 ),
@@ -305,7 +307,9 @@ class _CommentContentState extends State<_CommentContent> {
                         const SizedBox(width: AbTokens.space4),
                         Text(
                           'Send',
-                          style: AbTokens.sansStyle(color: context.antgrid.accent),
+                          style: AbTokens.sansStyle(
+                            color: context.antgrid.accent,
+                          ),
                         ),
                       ],
                     ),

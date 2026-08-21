@@ -8,13 +8,13 @@ import 'package:antgrid/launcher/local_agent_launcher.dart';
 import 'package:antgrid/services/keychain_device_store.dart';
 
 HostFile _host({int pid = 100, int port = 6000}) => HostFile(
-      version: 1,
-      pid: pid,
-      controlPort: port,
-      token: 'tok',
-      startedAt: 's',
-      agentVersion: 'v',
-    );
+  version: 1,
+  pid: pid,
+  controlPort: port,
+  token: 'tok',
+  startedAt: 's',
+  agentVersion: 'v',
+);
 
 void main() {
   test('warmHost sets a machine-only bootstrap and spawns the host', () async {
@@ -54,62 +54,71 @@ void main() {
     expect(j['machine']['auth']['deviceUuid'], 'uuid-1');
   });
 
-  test('warmHost with no device spawns a machine-less (local-only) host', () async {
-    var spawns = 0;
-    final controller = HostController(
-      readHost: () async => null,
-      ping: (h) async => true,
-      spawnHost: () async {
-        spawns++;
-        return _host();
-      },
-    );
-    final launcher = LocalAgentLauncher(host: controller);
+  test(
+    'warmHost with no device spawns a machine-less (local-only) host',
+    () async {
+      var spawns = 0;
+      final controller = HostController(
+        readHost: () async => null,
+        ping: (h) async => true,
+        spawnHost: () async {
+          spawns++;
+          return _host();
+        },
+      );
+      final launcher = LocalAgentLauncher(host: controller);
 
-    await launcher.warmHost();
+      await launcher.warmHost();
 
-    expect(spawns, 1);
-    final j = jsonDecode(controller.bootstrapBuilder!().toJsonLine().trim())
-        as Map<String, dynamic>;
-    expect(j.containsKey('firstProject'), isFalse);
-    expect(j.containsKey('machine'), isFalse);
-  });
+      expect(spawns, 1);
+      final j =
+          jsonDecode(controller.bootstrapBuilder!().toJsonLine().trim())
+              as Map<String, dynamic>;
+      expect(j.containsKey('firstProject'), isFalse);
+      expect(j.containsKey('machine'), isFalse);
+    },
+  );
 
-  test('forceRespawn re-arms the builder even when one was already set', () async {
-    var spawns = 0;
-    final controller = HostController(
-      readHost: () async => null, // ownedHostPid stays null → shutdownOwnedHost no-ops
-      ping: (h) async => true,
-      spawnHost: () async {
-        spawns++;
-        return _host();
-      },
-    );
-    final launcher = LocalAgentLauncher(host: controller);
+  test(
+    'forceRespawn re-arms the builder even when one was already set',
+    () async {
+      var spawns = 0;
+      final controller = HostController(
+        readHost: () async =>
+            null, // ownedHostPid stays null → shutdownOwnedHost no-ops
+        ping: (h) async => true,
+        spawnHost: () async {
+          spawns++;
+          return _host();
+        },
+      );
+      final launcher = LocalAgentLauncher(host: controller);
 
-    await launcher.warmHost(); // machine-less first
-    final device = DeviceRecord(
-      userId: 'u-1',
-      deviceUuid: 'uuid-1',
-      clientId: 'cid',
-      clientSecret: 'csec',
-      ed25519Pub: 'e-pub',
-      ed25519Priv: 'e-priv',
-      x25519Pub: 'x-pub',
-      x25519Priv: 'x-priv',
-    );
-    await launcher.warmHost(
-      device: device,
-      licenseApiUrl: 'http://localhost:8787',
-      relayUrl: 'wss://relay.example',
-      forceRespawn: true,
-    );
+      await launcher.warmHost(); // machine-less first
+      final device = DeviceRecord(
+        userId: 'u-1',
+        deviceUuid: 'uuid-1',
+        clientId: 'cid',
+        clientSecret: 'csec',
+        ed25519Pub: 'e-pub',
+        ed25519Priv: 'e-priv',
+        x25519Pub: 'x-pub',
+        x25519Priv: 'x-priv',
+      );
+      await launcher.warmHost(
+        device: device,
+        licenseApiUrl: 'http://localhost:8787',
+        relayUrl: 'wss://relay.example',
+        forceRespawn: true,
+      );
 
-    final j = jsonDecode(controller.bootstrapBuilder!().toJsonLine().trim())
-        as Map<String, dynamic>;
-    expect(j['machine']['auth']['deviceUuid'], 'uuid-1');
-    expect(spawns, 2);
-  });
+      final j =
+          jsonDecode(controller.bootstrapBuilder!().toJsonLine().trim())
+              as Map<String, dynamic>;
+      expect(j['machine']['auth']['deviceUuid'], 'uuid-1');
+      expect(spawns, 2);
+    },
+  );
 
   test('forceRespawn drains an in-flight spawn instead of joining it', () async {
     var spawns = 0;
@@ -157,8 +166,9 @@ void main() {
     // Two distinct spawns — the respawn started fresh rather than returning the
     // first spawn's future — and the device-bearing builder won.
     expect(spawns, 2);
-    final j = jsonDecode(controller.bootstrapBuilder!().toJsonLine().trim())
-        as Map<String, dynamic>;
+    final j =
+        jsonDecode(controller.bootstrapBuilder!().toJsonLine().trim())
+            as Map<String, dynamic>;
     expect(j['machine']['auth']['deviceUuid'], 'uuid-1');
   });
 }

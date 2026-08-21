@@ -266,11 +266,10 @@ void main() {
       () => relay.dialedTokens.length == 2,
       reason: 'the supervisor must re-dial a dead socket on its own',
     );
-    expect(
-      relay.dialedTokens,
-      <String>['token-1', 'token-2'],
-      reason: 'a cached token outlives its TTL across a long backoff',
-    );
+    expect(relay.dialedTokens, <String>[
+      'token-1',
+      'token-2',
+    ], reason: 'a cached token outlives its TTL across a long backoff');
     expect(mintCalls, 2);
   });
 
@@ -342,31 +341,34 @@ void main() {
   );
 
   // ------------------------------------------------------------------ I1
-  test('an E2E session that dies under a live socket is re-established — the '
-      'ladder is told, not left reading a torn-down session as healthy', () async {
-    final conn = connection();
-    final mech = climbable();
-    conn.ensureStarted(mechanisms: mech);
-    await _waitUntil(() => conn.supervisor!.status is Connected);
-    expect(mech.establishCalls, 1);
+  test(
+    'an E2E session that dies under a live socket is re-established — the '
+    'ladder is told, not left reading a torn-down session as healthy',
+    () async {
+      final conn = connection();
+      final mech = climbable();
+      conn.ensureStarted(mechanisms: mech);
+      await _waitUntil(() => conn.supervisor!.status is Connected);
+      expect(mech.establishCalls, 1);
 
-    // A rekey the agent never confirmed: MachineSession tears the session down
-    // and reports it. No socket event fires — the relay socket is fine.
-    mech.killSession();
-    mech.onSessionDown!();
+      // A rekey the agent never confirmed: MachineSession tears the session down
+      // and reports it. No socket event fires — the relay socket is fine.
+      mech.killSession();
+      mech.onSessionDown!();
 
-    await _waitUntil(
-      () => mech.establishCalls == 2 && conn.supervisor!.status is Connected,
-      reason:
-          'without a session-down input nothing re-drives the established '
-          'rung and the UI shows a healthy machine over a dead session',
-    );
-    expect(
-      relay.dialedTokens,
-      hasLength(1),
-      reason: 'the socket never died — only the session above it',
-    );
-  });
+      await _waitUntil(
+        () => mech.establishCalls == 2 && conn.supervisor!.status is Connected,
+        reason:
+            'without a session-down input nothing re-drives the established '
+            'rung and the UI shows a healthy machine over a dead session',
+      );
+      expect(
+        relay.dialedTokens,
+        hasLength(1),
+        reason: 'the socket never died — only the session above it',
+      );
+    },
+  );
 
   // ------------------------------------------------------------------ M1
   test('an agent that comes back climbs immediately instead of paying a '

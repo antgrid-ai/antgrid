@@ -59,10 +59,9 @@ final pendingWorkspaceViewProvider =
 /// Null is a written value, not just an absence — as for the pending view, and
 /// stamped with its project for the same reason.
 final pendingFilePathProvider =
-    NotifierProvider<
-      ValueController<PendingNav<String>?>,
-      PendingNav<String>?
-    >(() => ValueController(null));
+    NotifierProvider<ValueController<PendingNav<String>?>, PendingNav<String>?>(
+      () => ValueController(null),
+    );
 
 /// Counts the workspace views advertise on their tab: unstaged git files, and
 /// escalations the handler is waiting on.
@@ -79,9 +78,7 @@ final workspaceBadgesProvider = Provider<Map<WorkspaceView, int>>((ref) {
   // below is never `==` to the last one and so always notified. Same hazard,
   // same fix as [workspaceMenuControlProvider]'s doc.
   final gitCount = ref.watch(
-    fileTreeStateProvider.select(
-      (s) => s.value?.gitFileStatuses.length ?? 0,
-    ),
+    fileTreeStateProvider.select((s) => s.value?.gitFileStatuses.length ?? 0),
   );
   final pending = ref.watch(
     handlerStateProvider.select((s) => s.value?.pendingEscalations ?? 0),

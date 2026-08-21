@@ -29,6 +29,7 @@ class AbMenuItem extends AbMenuEntry {
          onTap != null || value != null,
          'AbMenuItem needs onTap (inline action) or value (returned by showAbMenu)',
        );
+
   /// Key applied to the rendered row — the only handle a caller has on an
   /// entry that is data, not a widget.
   final Key? key;
@@ -92,65 +93,65 @@ class AbMenu extends StatelessWidget {
         padding: const EdgeInsets.all(5),
         decoration: _popupDecoration(p),
         child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (header != null)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
-              child: Text(
-                header!.toUpperCase(),
-                // Antgrid spec: menu header is mono — the slot is usually
-                // a session/branch/ref identifier ("SESSION · refactor-…").
-                style: AbTokens.monoStyle(
-                  fontSize: AbTokens.fontXs,
-                  letterSpacing: 0.66,
-                  color: p.textMuted,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (header != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
+                child: Text(
+                  header!.toUpperCase(),
+                  // Antgrid spec: menu header is mono — the slot is usually
+                  // a session/branch/ref identifier ("SESSION · refactor-…").
+                  style: AbTokens.monoStyle(
+                    fontSize: AbTokens.fontXs,
+                    letterSpacing: 0.66,
+                    color: p.textMuted,
+                  ),
                 ),
               ),
-            ),
-          // `FocusTraversalGroup` keeps Tab/Shift-Tab cycling inside the
-          // menu rather than escaping to the page beneath while the
-          // popup route is on top.
-          FocusTraversalGroup(
-            policy: OrderedTraversalPolicy(),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                for (final entry in items)
-                  if (entry is AbMenuDivider)
-                    Container(
-                      margin: const EdgeInsets.symmetric(
-                        vertical: 4,
-                        horizontal: 2,
+            // `FocusTraversalGroup` keeps Tab/Shift-Tab cycling inside the
+            // menu rather than escaping to the page beneath while the
+            // popup route is on top.
+            FocusTraversalGroup(
+              policy: OrderedTraversalPolicy(),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final entry in items)
+                    if (entry is AbMenuDivider)
+                      Container(
+                        margin: const EdgeInsets.symmetric(
+                          vertical: 4,
+                          horizontal: 2,
+                        ),
+                        height: 1,
+                        color: p.borderSubtle,
+                      )
+                    else if (entry is AbMenuItem)
+                      Builder(
+                        builder: (_) {
+                          // Skip disabled rows: landing the keyboard on one that
+                          // can only answer with its reason costs the user an
+                          // arrow press before anything is pickable.
+                          final autofocus = !didAutofocus && entry.enabled;
+                          didAutofocus |= autofocus;
+                          return _MenuItemTile(
+                            key: entry.key,
+                            item: entry,
+                            autofocus: autofocus,
+                          );
+                        },
                       ),
-                      height: 1,
-                      color: p.borderSubtle,
-                    )
-                  else if (entry is AbMenuItem)
-                    Builder(
-                      builder: (_) {
-                        // Skip disabled rows: landing the keyboard on one that
-                        // can only answer with its reason costs the user an
-                        // arrow press before anything is pickable.
-                        final autofocus = !didAutofocus && entry.enabled;
-                        didAutofocus |= autofocus;
-                        return _MenuItemTile(
-                          key: entry.key,
-                          item: entry,
-                          autofocus: autofocus,
-                        );
-                      },
-                    ),
-              ],
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
-    ),
-  );
-}
+    );
+  }
 }
 
 /// Shared popup chrome for [AbMenu] and [showAbPanel]: raised surface,
@@ -625,11 +626,7 @@ class _AbMenuLayoutDelegate extends SingleChildLayoutDelegate {
 }
 
 class _MenuItemTile extends StatefulWidget {
-  const _MenuItemTile({
-    super.key,
-    required this.item,
-    this.autofocus = false,
-  });
+  const _MenuItemTile({super.key, required this.item, this.autofocus = false});
   final AbMenuItem item;
   final bool autofocus;
 

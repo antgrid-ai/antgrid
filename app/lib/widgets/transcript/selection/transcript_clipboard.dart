@@ -17,13 +17,13 @@ class ClipboardFragment {
 List<ClipboardFragment> formatsFor(CopyKind kind, CopyOutput out) =>
     switch (kind) {
       CopyKind.rich => [
-          ClipboardFragment(ClipboardFormat.html, out.html),
-          ClipboardFragment(ClipboardFormat.plain, out.plain),
-        ],
+        ClipboardFragment(ClipboardFormat.html, out.html),
+        ClipboardFragment(ClipboardFormat.plain, out.plain),
+      ],
       CopyKind.plain => [ClipboardFragment(ClipboardFormat.plain, out.plain)],
       CopyKind.markdown => [
-          ClipboardFragment(ClipboardFormat.plain, out.markdown),
-        ],
+        ClipboardFragment(ClipboardFormat.plain, out.markdown),
+      ],
     };
 
 /// Plain payload used when [SystemClipboard.instance] is null.

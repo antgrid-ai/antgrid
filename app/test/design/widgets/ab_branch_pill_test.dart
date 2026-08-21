@@ -8,21 +8,15 @@ void main() {
     expect(find.text('feat/auth-flow'), findsOneWidget);
   });
 
-  testWidgets('AbBranchPill renders ahead indicator when provided',
-      (tester) async {
-    await pumpAntgrid(
-      tester,
-      const AbBranchPill(branch: 'main', ahead: 3),
-    );
+  testWidgets('AbBranchPill renders ahead indicator when provided', (
+    tester,
+  ) async {
+    await pumpAntgrid(tester, const AbBranchPill(branch: 'main', ahead: 3));
     expect(find.text('↑3'), findsOneWidget);
   });
 
-  testWidgets('AbBranchPill omits ahead indicator at ahead==0',
-      (tester) async {
-    await pumpAntgrid(
-      tester,
-      const AbBranchPill(branch: 'main', ahead: 0),
-    );
+  testWidgets('AbBranchPill omits ahead indicator at ahead==0', (tester) async {
+    await pumpAntgrid(tester, const AbBranchPill(branch: 'main', ahead: 0));
     expect(find.textContaining('↑'), findsNothing);
   });
 

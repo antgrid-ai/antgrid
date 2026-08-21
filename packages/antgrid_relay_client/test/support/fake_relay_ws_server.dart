@@ -65,8 +65,7 @@ class FakeRelayWsServer {
     }
   }
 
-  String get wsUrl =>
-      'ws://${_server.address.address}:${_server.port}/ws';
+  String get wsUrl => 'ws://${_server.address.address}:${_server.port}/ws';
 
   Future<void> close() async {
     await _connections.close();

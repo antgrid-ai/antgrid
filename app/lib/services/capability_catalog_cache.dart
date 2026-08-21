@@ -15,7 +15,7 @@ class CapabilityCatalogCache {
   final Future<Directory> _rootDir;
 
   CapabilityCatalogCache._({required Future<Directory> rootDir})
-      : _rootDir = rootDir;
+    : _rootDir = rootDir;
 
   factory CapabilityCatalogCache() =>
       CapabilityCatalogCache._(rootDir: getApplicationSupportDirectory());

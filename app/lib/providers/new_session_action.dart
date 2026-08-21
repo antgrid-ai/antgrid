@@ -78,7 +78,8 @@ class ActiveSessionsBranchSwitchException implements Exception {
   });
 
   @override
-  String toString() => 'ActiveSessionsBranchSwitchException($targetId, $branch)';
+  String toString() =>
+      'ActiveSessionsBranchSwitchException($targetId, $branch)';
 }
 
 /// Start action for the New Session page.
@@ -120,6 +121,7 @@ Future<void> startNewSession(
         ref.read(newSessionIsolatedProvider) == isolated &&
         currentBranch == explicitBranch;
   }
+
   // This gate is deliberately checked before doing a shared checkout. An old
   // bridge strips unknown fields, so sending worktree intent without this
   // catalog capability would silently create a shared session.
@@ -195,8 +197,7 @@ Future<void> startNewSession(
     // constructing before reading any per-project service façade — otherwise the
     // sync `ref.read(sessionsServiceProvider)` below races the async factory.
     await ref.read(projectSessionProvider(pid).future);
-    if (ref.read(selectedRegistrationIdProvider) != pid ||
-        !intentIsCurrent()) {
+    if (ref.read(selectedRegistrationIdProvider) != pid || !intentIsCurrent()) {
       return;
     }
 

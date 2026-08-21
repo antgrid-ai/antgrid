@@ -42,7 +42,10 @@ class AbBranchPill extends StatelessWidget {
               maxLines: 1,
               softWrap: false,
               overflow: TextOverflow.ellipsis,
-              style: AbTokens.monoStyle(fontSize: AbTokens.fontXs, color: palette.textMuted),
+              style: AbTokens.monoStyle(
+                fontSize: AbTokens.fontXs,
+                color: palette.textMuted,
+              ),
             ),
           ),
           if (ahead > 0) ...[

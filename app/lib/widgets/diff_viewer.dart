@@ -186,8 +186,8 @@ class _DiffViewerState extends State<DiffViewer> {
   /// and, past ~1.3x, whole glyphs. The height multiplier applies to the SCALED
   /// size, which is why this is not `scale(kCodeLineHeight)` — the two agree
   /// only for a linear scaler, and the app composes its own.
-  double get _rowHeight => _textScaler.scale(kCodeFontSize) * kCodeFontHeight
-      + AbTokens.space4;
+  double get _rowHeight =>
+      _textScaler.scale(kCodeFontSize) * kCodeFontHeight + AbTokens.space4;
 
   /// The gutter and marker hold text too, so their boxes grow with it — a
   /// five-digit line number in an unscaled 40px box is clipped at 130%.

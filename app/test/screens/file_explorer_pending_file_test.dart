@@ -220,7 +220,10 @@ void main() {
     );
 
     expect(
-      session.servicesForCheckout('wt-1').fileService.currentState
+      session
+          .servicesForCheckout('wt-1')
+          .fileService
+          .currentState
           .files
           .selectedFilePath,
       'lib/main.dart',

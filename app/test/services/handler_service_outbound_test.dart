@@ -498,87 +498,93 @@ void main() {
       await session.close();
     });
 
-    test('the suppression lifts once the bridge stops replaying the row', () async {
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = HandlerService.fromSession(session);
-      final sub = session.heavyStream.listen((_) {});
+    test(
+      'the suppression lifts once the bridge stops replaying the row',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = HandlerService.fromSession(session);
+        final sub = session.heavyStream.listen((_) {});
 
-      t.emit('handler:status', statusFrame([replayed()]));
-      await Future<void>.delayed(Duration.zero);
-      svc.answerWithChoice(svc.currentState.escalations.single, 'approve');
+        t.emit('handler:status', statusFrame([replayed()]));
+        await Future<void>.delayed(Duration.zero);
+        svc.answerWithChoice(svc.currentState.escalations.single, 'approve');
 
-      t.emit('handler:status', statusFrame(const []));
-      await Future<void>.delayed(Duration.zero);
-      expect(svc.currentState.escalations, isEmpty);
+        t.emit('handler:status', statusFrame(const []));
+        await Future<void>.delayed(Duration.zero);
+        expect(svc.currentState.escalations, isEmpty);
 
-      // A genuinely new escalation reusing the id is a fresh question, not the
-      // answered one — the suppression must not outlive the row it was for.
-      t.emit('handler:status', statusFrame([replayed()]));
-      await Future<void>.delayed(Duration.zero);
-      expect(svc.currentState.escalations.single.choices, hasLength(2));
+        // A genuinely new escalation reusing the id is a fresh question, not the
+        // answered one — the suppression must not outlive the row it was for.
+        t.emit('handler:status', statusFrame([replayed()]));
+        await Future<void>.delayed(Duration.zero);
+        expect(svc.currentState.escalations.single.choices, hasLength(2));
 
-      await sub.cancel();
-      await svc.dispose();
-      await session.close();
-    });
+        await sub.cancel();
+        await svc.dispose();
+        await session.close();
+      },
+    );
 
-    test('no card survives beside an option-based prompt on its terminal', () async {
-      // Escalations stack per terminal and one submitted line clears them all,
-      // bridge-side too — so a one-tap here retires the permission prompt's row
-      // while answering nothing for it. The bridge withholds the card when it
-      // mints in that order; this is the order it cannot see.
-      final t = FakeAgentTransport();
-      final session = await _newSession(t);
-      final svc = HandlerService.fromSession(session);
-      final sub = session.heavyStream.listen((_) {});
+    test(
+      'no card survives beside an option-based prompt on its terminal',
+      () async {
+        // Escalations stack per terminal and one submitted line clears them all,
+        // bridge-side too — so a one-tap here retires the permission prompt's row
+        // while answering nothing for it. The bridge withholds the card when it
+        // mints in that order; this is the order it cannot see.
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = HandlerService.fromSession(session);
+        final sub = session.heavyStream.listen((_) {});
 
-      t.emit('handler:escalation', escalationFrame());
-      await Future<void>.delayed(Duration.zero);
-      expect(svc.currentState.escalations.single.choices, hasLength(2));
+        t.emit('handler:escalation', escalationFrame());
+        await Future<void>.delayed(Duration.zero);
+        expect(svc.currentState.escalations.single.choices, hasLength(2));
 
-      t.emit('handler:escalation', {
-        ...escalationFrame(withChoices: null),
-        'escalationId': 'e2',
-        'kind': 'resolve_in_session',
-      });
-      await Future<void>.delayed(Duration.zero);
+        t.emit('handler:escalation', {
+          ...escalationFrame(withChoices: null),
+          'escalationId': 'e2',
+          'kind': 'resolve_in_session',
+        });
+        await Future<void>.delayed(Duration.zero);
 
-      final card = svc.currentState.escalations.firstWhere(
-        (e) => e.escalationId == 'e1',
-      );
-      expect(card.choices, isNull);
-      // Even a caller holding the pre-prompt copy cannot tap it through.
-      svc.answerWithChoice(
-        const HandlerEscalation(
-          escalationId: 'e1',
-          terminalId: 't9',
-          question: 'q',
-          reasoning: 'r',
-          draftReply: 'ship it',
-          urgency: 'normal',
-          at: 1,
-          choices: [
-            HandlerEscalationChoice(
-              choiceId: 'approve',
-              label: 'Approve',
-              text: 'ship it',
-            ),
-            HandlerEscalationChoice(
-              choiceId: 'reject',
-              label: 'Reject',
-              text: 'Do not proceed.',
-            ),
-          ],
-        ),
-        'approve',
-      );
-      expect(t.sent.any((m) => m['type'] == 'terminal:input'), isFalse);
+        final card = svc.currentState.escalations.firstWhere(
+          (e) => e.escalationId == 'e1',
+        );
+        expect(card.choices, isNull);
+        // Even a caller holding the pre-prompt copy cannot tap it through.
+        svc.answerWithChoice(
+          const HandlerEscalation(
+            escalationId: 'e1',
+            terminalId: 't9',
+            question: 'q',
+            reasoning: 'r',
+            draftReply: 'ship it',
+            urgency: 'normal',
+            at: 1,
+            choices: [
+              HandlerEscalationChoice(
+                choiceId: 'approve',
+                label: 'Approve',
+                text: 'ship it',
+              ),
+              HandlerEscalationChoice(
+                choiceId: 'reject',
+                label: 'Reject',
+                text: 'Do not proceed.',
+              ),
+            ],
+          ),
+          'approve',
+        );
+        expect(t.sent.any((m) => m['type'] == 'terminal:input'), isFalse);
 
-      await sub.cancel();
-      await svc.dispose();
-      await session.close();
-    });
+        await sub.cancel();
+        await svc.dispose();
+        await session.close();
+      },
+    );
 
     test('a resolve_in_session escalation answers neither way', () async {
       // Built by hand, bypassing the parse-time floor that already strips

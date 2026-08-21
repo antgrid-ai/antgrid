@@ -32,7 +32,9 @@ Future<Uint8List> x25519SharedSecret({
     publicKey: SimplePublicKey(
       // Public key bytes are required by SimpleKeyPairData but unused for ECDH;
       // deriving from the private scalar keeps callers honest.
-      (await (await algorithm.newKeyPairFromSeed(privateKey)).extractPublicKey()).bytes,
+      (await (await algorithm.newKeyPairFromSeed(
+        privateKey,
+      )).extractPublicKey()).bytes,
       type: KeyPairType.x25519,
     ),
     type: KeyPairType.x25519,

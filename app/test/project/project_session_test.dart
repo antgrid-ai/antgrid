@@ -151,67 +151,92 @@ void main() {
       await session.close();
     });
 
-    test('checkout streams isolate late frames and default legacy frames to main', () async {
-      final t = FakeAgentTransport();
-      final cache = await CachedSessionsStore.open();
-      final session = ProjectSession(
-        projectId: 'p',
-        transport: t,
-        mode: ProjectSessionMode.local,
-        cachedSessionsStore: cache,
-        onClose: t.dispose,
-      );
-      final main = <Map<String, dynamic>>[];
-      final isolated = <Map<String, dynamic>>[];
-      final mainSub = session.checkoutHeavyStream('main').listen(main.add);
-      final isolatedSub = session.checkoutHeavyStream('checkout-1').listen(isolated.add);
+    test(
+      'checkout streams isolate late frames and default legacy frames to main',
+      () async {
+        final t = FakeAgentTransport();
+        final cache = await CachedSessionsStore.open();
+        final session = ProjectSession(
+          projectId: 'p',
+          transport: t,
+          mode: ProjectSessionMode.local,
+          cachedSessionsStore: cache,
+          onClose: t.dispose,
+        );
+        final main = <Map<String, dynamic>>[];
+        final isolated = <Map<String, dynamic>>[];
+        final mainSub = session.checkoutHeavyStream('main').listen(main.add);
+        final isolatedSub = session
+            .checkoutHeavyStream('checkout-1')
+            .listen(isolated.add);
 
-      t.emit('tree:update', {
-        'projectId': 'p', 'added': [], 'modified': [], 'removed': [],
-      });
-      t.emit('tree:update', {
-        'projectId': 'p', 'checkoutId': 'checkout-1',
-        'added': [], 'modified': [], 'removed': [],
-      });
-      await Future<void>.delayed(Duration.zero);
+        t.emit('tree:update', {
+          'projectId': 'p',
+          'added': [],
+          'modified': [],
+          'removed': [],
+        });
+        t.emit('tree:update', {
+          'projectId': 'p',
+          'checkoutId': 'checkout-1',
+          'added': [],
+          'modified': [],
+          'removed': [],
+        });
+        await Future<void>.delayed(Duration.zero);
 
-      expect(main, hasLength(1));
-      expect(isolated, hasLength(1));
-      expect(isolated.single['checkoutId'], 'checkout-1');
-      await mainSub.cancel();
-      await isolatedSub.cancel();
-      await session.close();
-    });
+        expect(main, hasLength(1));
+        expect(isolated, hasLength(1));
+        expect(isolated.single['checkoutId'], 'checkout-1');
+        await mainSub.cancel();
+        await isolatedSub.cancel();
+        await session.close();
+      },
+    );
 
-    test('checkout bundles are stable and stamp only checkout-variable sends', () async {
-      final t = FakeAgentTransport();
-      final cache = await CachedSessionsStore.open();
-      final session = ProjectSession(
-        projectId: 'p',
-        transport: t,
-        mode: ProjectSessionMode.local,
-        cachedSessionsStore: cache,
-        onClose: t.dispose,
-      );
-      final added = <CheckoutServices>[];
-      final sub = session.checkoutServiceBundleStream.listen(added.add);
-      final first = session.servicesForCheckout('checkout-1');
-      final second = session.servicesForCheckout('checkout-1');
-      await session.sendForCheckout(
-        'checkout-1',
-        createAbMessage('file:read', {'projectId': 'p', 'path': 'a.txt'}),
-      );
-      await session.sendForCheckout('checkout-1', createAbMessage('ping', {}));
-      await Future<void>.delayed(Duration.zero);
+    test(
+      'checkout bundles are stable and stamp only checkout-variable sends',
+      () async {
+        final t = FakeAgentTransport();
+        final cache = await CachedSessionsStore.open();
+        final session = ProjectSession(
+          projectId: 'p',
+          transport: t,
+          mode: ProjectSessionMode.local,
+          cachedSessionsStore: cache,
+          onClose: t.dispose,
+        );
+        final added = <CheckoutServices>[];
+        final sub = session.checkoutServiceBundleStream.listen(added.add);
+        final first = session.servicesForCheckout('checkout-1');
+        final second = session.servicesForCheckout('checkout-1');
+        await session.sendForCheckout(
+          'checkout-1',
+          createAbMessage('file:read', {'projectId': 'p', 'path': 'a.txt'}),
+        );
+        await session.sendForCheckout(
+          'checkout-1',
+          createAbMessage('ping', {}),
+        );
+        await Future<void>.delayed(Duration.zero);
 
-      expect(identical(first, second), isTrue);
-      expect(first.checkoutId, 'checkout-1');
-      expect(added, [first]);
-      expect(t.sent.firstWhere((m) => m['type'] == 'file:read')['checkoutId'], 'checkout-1');
-      expect(t.sent.firstWhere((m) => m['type'] == 'ping').containsKey('checkoutId'), isFalse);
-      await sub.cancel();
-      await session.close();
-    });
+        expect(identical(first, second), isTrue);
+        expect(first.checkoutId, 'checkout-1');
+        expect(added, [first]);
+        expect(
+          t.sent.firstWhere((m) => m['type'] == 'file:read')['checkoutId'],
+          'checkout-1',
+        );
+        expect(
+          t.sent
+              .firstWhere((m) => m['type'] == 'ping')
+              .containsKey('checkoutId'),
+          isFalse,
+        );
+        await sub.cancel();
+        await session.close();
+      },
+    );
 
     test('close invokes onClose exactly once (idempotent)', () async {
       var closeCount = 0;

@@ -51,10 +51,7 @@ class _AttachmentPreviewDialog extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final colors = context.antgrid;
-    final preview = ref
-        .watch(fileTreeStateProvider)
-        .value
-        ?.preview;
+    final preview = ref.watch(fileTreeStateProvider).value?.preview;
     return Dialog(
       insetPadding: const EdgeInsets.all(AbTokens.space16),
       child: ConstrainedBox(

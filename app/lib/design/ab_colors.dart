@@ -210,8 +210,7 @@ extension AbThemeX on BuildContext {
   /// Live color palette from the current [Theme]. Falls back to the
   /// default-Zinc palette when no [AbColors] extension is attached —
   /// typical in tests that pump bare `MaterialApp()` widgets.
-  AbColors get antgrid =>
-      Theme.of(this).extension<AbColors>() ?? _zincFallback;
+  AbColors get antgrid => Theme.of(this).extension<AbColors>() ?? _zincFallback;
 }
 
 const _zincFallback = AbColors(

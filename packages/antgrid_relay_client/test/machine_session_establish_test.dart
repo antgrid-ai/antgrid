@@ -21,9 +21,7 @@ void main() {
     test(
       'no socket state drives a handshake; ensureEstablished does',
       () async {
-        final relay = FakeLiveRelay(
-          initial: RelayConnectionState.connecting,
-        );
+        final relay = FakeLiveRelay(initial: RelayConnectionState.connecting);
         final handshaker = FakeHandshaker(fixedKeys(1));
         final session = MachineSession(
           relay: relay,
@@ -81,9 +79,7 @@ void main() {
 
     test('ensureEstablished re-establishes after a teardown and only resolves '
         'once isEstablished reads true', () async {
-      final relay = FakeLiveRelay(
-        initial: RelayConnectionState.authenticated,
-      );
+      final relay = FakeLiveRelay(initial: RelayConnectionState.authenticated);
       final handshaker = FakeHandshaker.sequence([fixedKeys(1), fixedKeys(2)])
         ..delayFor = (i) =>
             i == 1 ? const Duration(milliseconds: 150) : Duration.zero;
@@ -128,9 +124,7 @@ void main() {
     });
 
     test('a failed handshake is exactly ONE attempt and throws', () async {
-      final relay = FakeLiveRelay(
-        initial: RelayConnectionState.authenticated,
-      );
+      final relay = FakeLiveRelay(initial: RelayConnectionState.authenticated);
       // A handshaker that never confirms — the peer is there but the attempt
       // fails. The supervisor owns retry, so the session must not loop.
       final handshaker = FakeHandshaker.sequence(<SessionKeys?>[null]);
@@ -157,9 +151,7 @@ void main() {
     });
 
     test('concurrent ensureEstablished calls share one attempt', () async {
-      final relay = FakeLiveRelay(
-        initial: RelayConnectionState.authenticated,
-      );
+      final relay = FakeLiveRelay(initial: RelayConnectionState.authenticated);
       final handshaker = FakeHandshaker.sequence([fixedKeys(1), fixedKeys(2)])
         ..delayFor = (_) => const Duration(milliseconds: 60);
       final session = MachineSession(

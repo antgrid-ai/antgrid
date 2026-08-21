@@ -83,12 +83,13 @@ String handlerRunStateLabel(HandlerRunState state) => switch (state) {
 /// Tone for a run state. Accent is reserved for the two states that mean work
 /// is moving or the user is wanted; watching is deliberately quiet, because it
 /// is the state a session sits in for hours.
-Color handlerRunStateColor(AbColors p, HandlerRunState state) => switch (state) {
-  HandlerRunState.watching => p.textMuted,
-  HandlerRunState.handling => p.accent,
-  HandlerRunState.needsYou => p.accent,
-  HandlerRunState.parked => p.warning,
-};
+Color handlerRunStateColor(AbColors p, HandlerRunState state) =>
+    switch (state) {
+      HandlerRunState.watching => p.textMuted,
+      HandlerRunState.handling => p.accent,
+      HandlerRunState.needsYou => p.accent,
+      HandlerRunState.parked => p.warning,
+    };
 
 /// Copy for the "this session cannot be watched" warning. [agentLabel] is the
 /// agent's display name when the catalog named one; without it the warning

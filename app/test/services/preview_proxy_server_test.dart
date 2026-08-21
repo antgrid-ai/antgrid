@@ -198,32 +198,38 @@ void main() {
     // The bridge only compresses when asked, so dropping this silently reverts
     // every preview to the uncompressed path.
     expect(captured!.acceptEncodings, contains(kTunnelGzipEncoding));
-    expect(captured!.toJson()['acceptEncodings'], contains(kTunnelGzipEncoding));
-  });
-
-  test('inflates a gzip-base64 body before serving it to the WebView', () async {
-    final port = await freePort();
-    const source = 'body { color: red; }\n';
-    final proxy = PreviewProxyServer(
-      targetPort: port,
-      onRequest: (_) async => TunnelHttpResponse(
-        requestId: 'x',
-        status: 200,
-        headers: const {'content-type': 'text/css'},
-        body: base64Encode(gzip.encode(utf8.encode(source))),
-        bodyEncoding: kTunnelGzipEncoding,
-      ),
+    expect(
+      captured!.toJson()['acceptEncodings'],
+      contains(kTunnelGzipEncoding),
     );
-    final bound = await proxy.start();
-    addTearDown(() async => proxy.stop());
-
-    final raw = await _get(bound);
-
-    expect(raw, contains(source));
-    // The WebView is handed plain bytes, so no encoding header may claim
-    // otherwise — a stale content-encoding makes WebKit gunzip twice.
-    expect(raw.toLowerCase(), isNot(contains('content-encoding')));
   });
+
+  test(
+    'inflates a gzip-base64 body before serving it to the WebView',
+    () async {
+      final port = await freePort();
+      const source = 'body { color: red; }\n';
+      final proxy = PreviewProxyServer(
+        targetPort: port,
+        onRequest: (_) async => TunnelHttpResponse(
+          requestId: 'x',
+          status: 200,
+          headers: const {'content-type': 'text/css'},
+          body: base64Encode(gzip.encode(utf8.encode(source))),
+          bodyEncoding: kTunnelGzipEncoding,
+        ),
+      );
+      final bound = await proxy.start();
+      addTearDown(() async => proxy.stop());
+
+      final raw = await _get(bound);
+
+      expect(raw, contains(source));
+      // The WebView is handed plain bytes, so no encoding header may claim
+      // otherwise — a stale content-encoding makes WebKit gunzip twice.
+      expect(raw.toLowerCase(), isNot(contains('content-encoding')));
+    },
+  );
 
   test('keeps the utf-8 charset shelf only stamps for a String body', () async {
     final port = await freePort();
@@ -245,7 +251,10 @@ void main() {
 
     final raw = await _get(bound);
 
-    expect(raw.toLowerCase(), contains('content-type: text/html; charset=utf-8'));
+    expect(
+      raw.toLowerCase(),
+      contains('content-type: text/html; charset=utf-8'),
+    );
     expect(raw, contains(source));
   });
 
@@ -268,7 +277,10 @@ void main() {
 
     final raw = await _get(bound);
 
-    expect(raw.toLowerCase(), contains('content-type: text/html; charset=iso-8859-1'));
+    expect(
+      raw.toLowerCase(),
+      contains('content-type: text/html; charset=iso-8859-1'),
+    );
   });
 
   test('leaves a binary content-type without a charset', () async {
