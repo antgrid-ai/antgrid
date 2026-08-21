@@ -6,11 +6,13 @@ import 'dart:math' show min;
 
 import 'package:flutter/foundation.dart';
 
+import '../config/build_info.dart';
 import '../providers/seeded_stream.dart';
 import 'discovery.dart' show isPidAlive, terminatePid, terminateTree;
 import 'host_control_client.dart';
 import 'host_discovery.dart';
 import 'local_agent_launcher.dart' show BootstrapPayload, AgentEvent;
+import 'windows_job_object.dart' show encloseInAppLifetimeJob;
 import '../util/ab_log.dart';
 import '../util/log_rotation.dart';
 
@@ -95,6 +97,7 @@ class HostController {
     Future<bool> Function(HostFile host)? ping,
     Future<HostFile> Function()? spawnHost,
     Future<void> Function(int pid)? terminate,
+    Future<void> Function(int pid)? terminateTree,
     DateTime Function()? now,
     bool Function()? devMode,
     bool Function(String startedAtIso)? bridgeStale,
@@ -103,6 +106,7 @@ class HostController {
        _pidAlive = pidAlive ?? isPidAlive,
        _ping = ping ?? _defaultPing,
        _terminate = terminate ?? terminatePid,
+       _terminateTree = terminateTree ?? _defaultTerminateTree,
        _now = now ?? DateTime.now,
        _devMode = devMode ?? _defaultDevMode,
        _bridgeStale = bridgeStale ?? _defaultBridgeStale,
@@ -117,6 +121,7 @@ class HostController {
   final Future<bool> Function(int pid) _pidAlive;
   final Future<bool> Function(HostFile host) _ping;
   final Future<void> Function(int pid) _terminate;
+  final Future<void> Function(int pid) _terminateTree;
   final DateTime Function() _now;
   final bool Function() _devMode;
   final bool Function(String startedAtIso) _bridgeStale;
@@ -144,8 +149,9 @@ class HostController {
       if (started == null) return true;
       final exeDir = File(Platform.resolvedExecutable).parent.path;
       final entry = _findRepoBridgeEntry(exeDir); // <repo>/bridge/src/index.ts
-      if (entry == null)
+      if (entry == null) {
         return true; // bundled/installed build — shouldn't reach here
+      }
       final srcDir = File(entry).parent; // <repo>/bridge/src
       for (final f in srcDir.listSync(recursive: true, followLinks: false)) {
         if (f is! File) continue;
@@ -237,6 +243,11 @@ class HostController {
   /// attached to a host left running by a prior app run.
   int? ownedHostPid;
 
+  /// Whether the build-stamp reap in [_ensureHostInner] has already fired. See
+  /// the comment there — it is one-shot to keep two installs from reaping each
+  /// other's replacement in turn.
+  bool _reapedForeignHost = false;
+
   /// Broadcast of structured events parsed from the host's stderr JSON lines
   /// (e.g. `auth_revoked`). Empty stream until/unless this app spawns a host.
   Stream<AgentEvent> get hostEvents => _events.stream;
@@ -246,6 +257,10 @@ class HostController {
   Process? _proc;
 
   static Future<HostFile?> _defaultReadHost() => readHostFile(hostFilePath());
+
+  // Static so the top-level `terminateTree` is reachable: inside the ctor's
+  // initializer list the same name is the (shadowing) parameter.
+  static Future<void> _defaultTerminateTree(int pid) => terminateTree(pid);
 
   static Future<bool> _defaultPing(HostFile host) async {
     final client = HostControlClient(port: host.controlPort, token: host.token);
@@ -483,7 +498,7 @@ class HostController {
       }
       await Future<void>.delayed(const Duration(milliseconds: 150));
     }
-    await terminateTree(owned);
+    await _terminateTree(owned);
     ownedHostPid = null;
   }
 
@@ -507,6 +522,48 @@ class HostController {
       // ours (the token gates `/control`), so we attach without the ~50-200ms
       // Windows `tasklist` probe — which now runs only on the ping-fail path.
       if (await _ping(disc)) {
+        // A host stamped with a different build than ours belongs to another
+        // install of the app — on Windows, the overwhelmingly common way to get
+        // one is a Store update that replaced the app while its host survived
+        // (the update force-kills the app, so no teardown runs, and the
+        // owner-watchdog's ping still answers for seconds afterwards). Attaching
+        // would silently drive the OLD bridge from the new app for the rest of
+        // the session. A null stamp is a host from before this field existed,
+        // which is the same verdict.
+        //
+        // Never a host WE spawned (`ownedHostPid`), whatever it stamped: our
+        // own spawn always carries our build, so a mismatch there can only mean
+        // the bridge binary is too old to echo the field — and reaping it would
+        // kill and respawn our own host every `_verifyTtl` (3s), forever.
+        //
+        // The reap takes the whole TREE: the host being replaced is by
+        // definition one nothing else will clean up (its app is gone, so its
+        // job object — if it even had one — has already closed), and a bare
+        // `taskkill /F` on the host alone orphans its PTY grandchildren, which
+        // are exactly the survivors that keep a destaged MSIX package's silo
+        // populated.
+        //
+        // At most ONCE per app run. Every release build resolves the same
+        // `~/.antgrid` (hostDir() has no install scope in release), so a Store
+        // install and a sideloaded one read each other's stamp as foreign
+        // forever: each reap makes the other's supervisor respawn, which the
+        // first then reaps in turn, until both exhaust `_maxRestartsPerWindow`
+        // and land in HostPhase.failed with no bridge at all — every agent PTY
+        // killed on each pass. Replacing a previous install's host is a
+        // startup-time event, so one reap is all the intent needs; after that
+        // we attach to whatever is there.
+        if (!_reapedForeignHost &&
+            disc.pid != ownedHostPid &&
+            disc.ownerBuild != BuildInfo.summary) {
+          _reapedForeignHost = true;
+          _log(
+            'host pid=${disc.pid} was spawned by a different build '
+            '(${disc.ownerBuild ?? 'unstamped'} != ${BuildInfo.summary}); '
+            'terminating before respawn',
+          );
+          await _terminateTree(disc.pid);
+          return _markVerified(await _spawn());
+        }
         // Dev mode respawns a prior-run host to pick up bridge edits (bun has no
         // hot-reload), but only when bridge/src actually changed — an
         // unconditional respawn cost ~1s bun boot + a starved readiness poll on
@@ -536,7 +593,11 @@ class HostController {
         // IS the recovery, so supervision must not schedule a second one. Keep
         // any pending restart alive: this ensureHost may BE that restart.
         if (disc.pid == ownedHostPid) _expectExitKeepRestart();
-        await _terminate(disc.pid);
+        // Tree, for the same reason the build-stamp reap above takes the tree:
+        // a host that stopped answering its control plane can no longer be
+        // asked to stop anything, so a bare `/F` leaves its PTY grandchildren
+        // running, unreachable, and — under MSIX — still inside the silo.
+        await _terminateTree(disc.pid);
       } else {
         _log('stale host (dead pid=${disc.pid}); respawning');
       }
@@ -980,6 +1041,19 @@ Future<Process> spawnHostProcess(BootstrapPayload payload) async {
     rethrow;
   }
   AbLog.info('HostController', 'spawned host', fields: {'pid': proc.pid});
+
+  // Enclose BEFORE the bootstrap line: the host blocks on that line as its
+  // first act (`readBootstrapPayload()` in bridge/src/index.ts), so it cannot
+  // have spawned anything yet and the job catches the whole tree. Windows-only;
+  // see windows_job_object.dart for why this exists.
+  //
+  // A job only captures processes created AFTER the assignment, so that
+  // reasoning holds exactly while `proc` IS the host. It is not when
+  // `isWindowsScript` sent us through `cmd.exe /c` (a .cmd/.bat
+  // ANTGRID_AGENT_BIN — dev only; release bundles antgrid-bridge.exe): there
+  // the shell's first act is to spawn the real bridge, which can win the race
+  // and land outside the job. Dev keeps the owner-watchdog as its backstop.
+  encloseInAppLifetimeJob(proc.pid);
 
   // Write the bootstrap line, then close stdin. The host reads exactly one
   // line and never expects more input.

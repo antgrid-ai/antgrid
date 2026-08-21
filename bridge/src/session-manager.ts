@@ -579,7 +579,7 @@ export class SessionManager {
       // Strictly after the announce: the app builds this checkout's service
       // bundle from the session list, so anything pushed earlier lands with no
       // subscriber. Never fatal — the session itself is already committed.
-      try { this.opts.announceCheckoutRuntime?.(checkout.id); } catch { /* state re-push is best-effort */ }
+      this.reannounceCheckout(checkout.id);
       return this.toWire(entry);
     } catch (error) {
       this.entries.delete(entry.id);
@@ -933,6 +933,26 @@ export class SessionManager {
     this.startNow(id, initialPrompt, checkout.path, spec);
   }
 
+  /** Re-push a live isolated checkout's runtime state.
+   *
+   *  A start on an ALREADY-running session means the caller has no state for it
+   *  — a reconnected app whose per-checkout view was built after the
+   *  connect-time replay had already gone by. Returning silently left it
+   *  waiting for a frame nobody would send again. `main` needs none of this:
+   *  its view exists before the first frame. */
+  private reannounceCheckout(checkoutId: string): void {
+    if (checkoutId === "main") return;
+    try {
+      this.opts.announceCheckoutRuntime?.(checkoutId);
+    } catch (err) {
+      // Best-effort: a re-push must never fail the start. Logged rather than
+      // swallowed — MessageBus deliberately propagates a throwing deliver() so
+      // a subscriber bug stays visible, and a silent catch here is exactly the
+      // "waiting for agent with no diagnostic" this re-push exists to end.
+      log.warn(`re-announce for checkout ${checkoutId} failed: ${err}`);
+    }
+  }
+
   private startNow(id: string, initialPrompt?: string, checkoutPath = this.projectPath, sessionAgentSpec = this.agentSpec): void {
     const entry = this.entries.get(id);
     if (!entry) throw new Error(`session not found: ${id}`);
@@ -943,6 +963,7 @@ export class SessionManager {
       // sessionID) resumes the prior conversation, through the same liveness
       // pre-flight the PTY path uses. Tool defaults to codex — chat is offered
       // only for chat-capable tools, gated app-side and re-checked in startChat.
+      const chatAlreadyRunning = this.runningChat.has(id);
       this.runningChat.add(id);
       const chatTool = entry.tool ?? "codex";
       this.opts.onStartChat?.({
@@ -954,10 +975,12 @@ export class SessionManager {
       });
       entry.lastUsedAt = Date.now();
       this.changed();
+      if (chatAlreadyRunning) this.reannounceCheckout(entry.checkoutId);
       return;
     }
     if (this.tm.has(id)) {
       log.warn(`session ${id} already running`);
+      this.reannounceCheckout(entry.checkoutId);
       return;
     }
 

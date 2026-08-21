@@ -24,6 +24,30 @@ describe("MessageBus", () => {
     expect(b.sent).toEqual([{ msg: m, channel: "control" }]);
   });
 
+  test("republish delivers an unchanged snapshot the dedup would swallow", () => {
+    const bus = new MessageBus();
+    const a = makeSub();
+    bus.subscribe(a);
+    const payload = {
+      projectId: "p", terminals: [], services: [], checkoutId: "wt1",
+      agent: { version: "1.0.0" },
+    };
+
+    bus.publish(createMessage("agent:status", payload), "control");
+    // Identical payload: the ordinary dedup drops it before any subscriber.
+    bus.publish(createMessage("agent:status", payload), "control");
+    expect(a.sent).toHaveLength(1);
+
+    // The re-sync paths must still reach the wire — this is what an app whose
+    // per-checkout view was built after the replay depends on.
+    bus.republish(createMessage("agent:status", payload), "control");
+    expect(a.sent).toHaveLength(2);
+    expect((a.sent[1]!.msg as any).checkoutId).toBe("wt1");
+
+    const cached = bus.getSnapshot(["agent:status"]);
+    expect(cached).toHaveLength(1);
+  });
+
   test("unsubscribe stops delivery", () => {
     const bus = new MessageBus();
     const a = makeSub();

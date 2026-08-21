@@ -111,6 +111,10 @@ dependencies:
   # Parses the Sparkle appcast macOS detects from (lib/update/). Transitive
   # already; promoted for the same reason as pub_semver above.
   xml: ^6.6.1
+  # Allocator for the kernel32 job-object calls in
+  # lib/launcher/windows_job_object.dart. Transitive already; promoted because
+  # dart:ffi ships no allocator of its own.
+  ffi: ^2.2.0
 
 dev_dependencies:
   flutter_test:

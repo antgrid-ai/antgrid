@@ -26,8 +26,9 @@ FileViewerKind fileViewerKindFor(
   String? mimeType,
 ]) {
   final ext = _ext(path);
-  if (ext != null && _markdownExts.contains(ext))
+  if (ext != null && _markdownExts.contains(ext)) {
     return FileViewerKind.markdown;
+  }
   if (ext == 'svg') return FileViewerKind.svg;
 
   if (encoding == 'base64' && mimeType != null) {

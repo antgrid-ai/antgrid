@@ -70,11 +70,27 @@ class PreviewService {
   PreviewService.fromSession(this.session, {this.checkoutId = 'main'}) {
     _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
     _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
+    // Pull the preview picture rather than wait for a push. `preview:url` and
+    // `ports:update` are both change-driven, and a managed checkout's go out
+    // while its runtime is being prepared — BEFORE the session list that makes
+    // the app build this bundle — so an isolated session's preview and ports
+    // stayed empty until a port happened to open or close. Same reason (and
+    // same shape) as FileService's tree pull. As a hydrator it also re-pulls on
+    // every reconnect; the bridge answers with `preview:snapshot` and re-emits
+    // the detected ports alongside it.
+    session.hydrateCheckout(checkoutId, _snapshotHydratorKey, _hydrateSnapshot);
     _txSub = session.transport.messages.listen(_onTransportMessage);
     _dropSub = session.transport.droppedFrames.listen(
       (_) => _onFramesDropped(),
     );
   }
+
+  static const _snapshotHydratorKey = 'preview:snapshot';
+
+  Future<void> _hydrateSnapshot() => session.sendForCheckout(
+    checkoutId,
+    createAbMessage('preview:snapshot:request', {}),
+  );
 
   void _setState(PreviewState state) {
     if (_disposed) return;
@@ -419,6 +435,11 @@ class PreviewService {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    // Before the first await, like FileService/ConfigService: the awaits below
+    // can throw (and this dispose runs unawaited from _sweepCheckouts), and a
+    // hydrator left registered re-requests a snapshot for a dead checkout on
+    // every reconnect for the rest of the session.
+    session.unhydrateCheckout(checkoutId, _snapshotHydratorKey);
 
     await _proxyServer?.stop();
     _proxyServer = null;

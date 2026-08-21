@@ -105,6 +105,9 @@ export interface HostServerOptions {
    *  calls {@link HostServer.shutdown} then exits). Absent → the verb is a
    *  no-op beyond its OK response. */
   onShutdownRequested?: () => void;
+  /** Build provenance of the app that spawned us, straight off the bootstrap
+   *  payload. Written to host.json untouched; see BootstrapPayloadSchema. */
+  ownerBuild?: string;
 }
 
 export interface HostRemoteConfig {
@@ -303,6 +306,7 @@ export class HostServer {
       token,
       startedAt: new Date().toISOString(),
       agentVersion: VERSION,
+      ...(this.opts.ownerBuild ? { ownerBuild: this.opts.ownerBuild } : {}),
     });
     log.info(`host control plane ready on 127.0.0.1:${listener.port}; host.json written`);
     // Open the always-on remote control plane only when the machine has remote

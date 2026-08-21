@@ -27,6 +27,21 @@ enum MessageTier {
   ignore,
 }
 
+/// Durable, latest-wins frames the bridge caches per checkout and replays in
+/// the connect-time `state.snapshot`. Mirrors the checkout-scoped subset of
+/// `REPLAY_TYPES` in `bridge/src/message-bus.ts` — keep the two in lockstep.
+///
+/// These are the only frames a per-checkout service bundle can miss and never
+/// recover on its own: the replay lands at stream attach, but an isolated
+/// session's bundle is not built until the session list arrives a round trip
+/// later, so `MessageRouter` re-serves them to a late subscriber (see
+/// [MessageRouter.replayFor]).
+const Set<String> kCheckoutDurableReplayTypes = <String>{
+  'agent:status',
+  'git:status',
+  'tree:full',
+};
+
 /// Authoritative app-side mirror of the bridge checkout-variable contract.
 /// Every type here must carry `checkoutId`; absence decodes as `main` only for
 /// legacy frames. Services use this same set when filtering their bundles.

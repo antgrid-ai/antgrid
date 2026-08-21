@@ -4,16 +4,34 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/launcher/host_controller.dart';
 import 'package:antgrid/launcher/host_discovery.dart';
+import 'package:antgrid/config/build_info.dart';
 
-HostFile _host({int pid = 100, int port = 6000, String token = 'tok'}) =>
-    HostFile(
-      version: 1,
-      pid: pid,
-      controlPort: port,
-      token: token,
-      startedAt: 's',
-      agentVersion: 'v',
-    );
+// ownerBuild is stamped with OUR build so the attach gate is satisfied; the
+// tests that exercise the gate build a foreign or unstamped host themselves.
+HostFile _host({
+  int pid = 100,
+  int port = 6000,
+  String token = 'tok',
+  String? ownerBuild,
+}) => HostFile(
+  version: 1,
+  pid: pid,
+  controlPort: port,
+  token: token,
+  startedAt: 's',
+  agentVersion: 'v',
+  ownerBuild: ownerBuild ?? BuildInfo.summary,
+);
+
+/// A host from before `ownerBuild` existed — no stamp at all.
+HostFile _unstampedHost({int pid = 100, int port = 6000}) => HostFile(
+  version: 1,
+  pid: pid,
+  controlPort: port,
+  token: 'tok',
+  startedAt: 's',
+  agentVersion: 'v',
+);
 
 void main() {
   test('trusts a live host (alive PID + successful ping); no spawn', () async {
@@ -31,6 +49,110 @@ void main() {
     final h = await c.ensureHost();
     expect(h.controlPort, 6000);
     expect(spawns, 0);
+  });
+
+  test(
+    'refuses a live host stamped with another build; reaps and respawns',
+    () async {
+      var spawns = 0;
+      final terminated = <int>[];
+      final treeKilled = <int>[];
+      final c = HostController(
+        // A host the previous install left running: pings fine, wrong build.
+        readHost: () async => _host(pid: 100, ownerBuild: '1.0.0 (deadbee)'),
+        pidAlive: (pid) async => true,
+        ping: (h) async => true,
+        devMode: () => false,
+        terminate: (pid) async => terminated.add(pid),
+        terminateTree: (pid) async => treeKilled.add(pid),
+        spawnHost: () async {
+          spawns++;
+          return _host(pid: 222, port: 6001);
+        },
+      );
+      final h = await c.ensureHost();
+      expect(h.pid, 222);
+      expect(spawns, 1);
+      // Tree, not bare pid: the abandoned host's PTY children must die with it.
+      expect(treeKilled, [100]);
+      expect(terminated, isEmpty);
+    },
+  );
+
+  test('refuses a live host carrying no build stamp at all', () async {
+    var spawns = 0;
+    final treeKilled = <int>[];
+    final c = HostController(
+      readHost: () async => _unstampedHost(pid: 101),
+      pidAlive: (pid) async => true,
+      ping: (h) async => true,
+      devMode: () => false,
+      terminateTree: (pid) async => treeKilled.add(pid),
+      spawnHost: () async {
+        spawns++;
+        return _host(pid: 333);
+      },
+    );
+    final h = await c.ensureHost();
+    expect(h.pid, 333);
+    expect(spawns, 1);
+    expect(treeKilled, [101]);
+  });
+
+  test('reaps a foreign-stamped host at most once per run', () async {
+    // Every release build resolves the same `~/.antgrid`, so two installs read
+    // each other's stamp as foreign. Reaping on every ensureHost would make
+    // each side kill the other's replacement in turn — every agent PTY dying
+    // on each pass — until both exhaust their restart budget. One reap is all
+    // the intent (replace a previous install's host) ever needs.
+    var spawns = 0;
+    final treeKilled = <int>[];
+    var current = _host(pid: 100, ownerBuild: '1.0.0 (deadbee)');
+    final c = HostController(
+      readHost: () async => current,
+      pidAlive: (pid) async => true,
+      ping: (h) async => true,
+      devMode: () => false,
+      terminateTree: (pid) async => treeKilled.add(pid),
+      spawnHost: () async {
+        spawns++;
+        // The rival app wins the respawn race and rewrites host.json with its
+        // own stamp — what the readiness poll adopts, since it checks neither.
+        current = _host(pid: 200, ownerBuild: '1.0.0 (deadbee)');
+        return current;
+      },
+    );
+    await c.ensureHost();
+    expect(treeKilled, [100]);
+
+    c.invalidate();
+    final second = await c.ensureHost();
+    expect(second.pid, 200, reason: 'attaches rather than reaping again');
+    expect(spawns, 1);
+    expect(treeKilled, [100]);
+  });
+
+  test('never reaps a host THIS run spawned, however it is stamped', () async {
+    // A bridge binary too old to echo `ownerBuild` writes an unstamped
+    // host.json. Reaping it would kill and respawn our own host every
+    // _verifyTtl, forever — so the gate must exempt `ownedHostPid`.
+    var spawns = 0;
+    final treeKilled = <int>[];
+    final c = HostController(
+      readHost: () async => _unstampedHost(pid: 444),
+      pidAlive: (pid) async => true,
+      ping: (h) async => true,
+      devMode: () => false,
+      terminateTree: (pid) async => treeKilled.add(pid),
+      spawnHost: () async {
+        spawns++;
+        return _unstampedHost(pid: 444);
+      },
+    )..ownedHostPid = 444;
+    final h = await c.ensureHost();
+    expect(h.pid, 444);
+    expect(spawns, 0);
+    expect(treeKilled, isEmpty);
   });
 
   test('respawns when host.json is absent', () async {
@@ -70,12 +192,14 @@ void main() {
     () async {
       var spawns = 0;
       final terminated = <int>[];
+      final treeKilled = <int>[];
       final c = HostController(
         readHost: () async => _host(pid: 100),
         pidAlive: (pid) async => true,
         ping: (h) async => false, // PID alive but control plane unreachable
         devMode: () => false,
         terminate: (pid) async => terminated.add(pid),
+        terminateTree: (pid) async => treeKilled.add(pid),
         spawnHost: () async {
           spawns++;
           return _host(port: 8888);
@@ -84,8 +208,10 @@ void main() {
       final h = await c.ensureHost();
       expect(h.controlPort, 8888);
       expect(spawns, 1);
-      // The unhealthy host's PID must be terminated before the fresh spawn.
-      expect(terminated, [100]);
+      // Tree, not bare: a host that stopped answering its control plane can no
+      // longer be told to stop its PTYs, so a `/F` without `/T` orphans them.
+      expect(treeKilled, [100]);
+      expect(terminated, isEmpty);
     },
   );
 

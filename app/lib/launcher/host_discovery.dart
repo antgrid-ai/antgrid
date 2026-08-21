@@ -16,6 +16,12 @@ class HostFile {
   final String startedAt;
   final String agentVersion;
 
+  /// Build provenance of the app that spawned this host (its
+  /// `BuildInfo.summary`), echoed back by the bridge. Null for a host started
+  /// outside the app, and for any host predating the field — see
+  /// `HostController`'s attach gate for what that null means.
+  final String? ownerBuild;
+
   HostFile({
     required this.version,
     required this.pid,
@@ -23,6 +29,7 @@ class HostFile {
     required this.token,
     required this.startedAt,
     required this.agentVersion,
+    this.ownerBuild,
   });
 
   /// Returns null on missing fields, wrong version, or any parse error.
@@ -39,6 +46,9 @@ class HostFile {
         token: m['token'] as String,
         startedAt: m['startedAt'] as String,
         agentVersion: m['agentVersion'] as String,
+        ownerBuild: m['ownerBuild'] is String
+            ? m['ownerBuild'] as String
+            : null,
       );
     } catch (_) {
       return null;

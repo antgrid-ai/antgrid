@@ -55,6 +55,23 @@ void main() {
     await session.close();
   });
 
+  test('preview:snapshot:request re-fires on re-establishment', () async {
+    // preview:url and ports:update are both change-driven, so a bundle built
+    // after they went by (every isolated session's) has no other way to learn
+    // what its checkout is serving.
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    expect(sentOf(t, 'preview:snapshot:request'), hasLength(1));
+
+    t.clearSent();
+    expect(sentOf(t, 'preview:snapshot:request'), isEmpty);
+    t.redriveHydrators();
+    await Future<void>.delayed(Duration.zero);
+
+    expect(sentOf(t, 'preview:snapshot:request'), hasLength(1));
+    await session.close();
+  });
+
   test('config:read re-fires on re-establishment', () async {
     final t = FakeAgentTransport();
     final session = await makeSession(t);

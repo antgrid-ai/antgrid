@@ -8,6 +8,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CHECKOUT_VARIABLE_MESSAGE_TYPES } from "../src/protocol";
+import { CHECKOUT_REPLAY_TYPES } from "../src/message-bus";
 import {
   CHECKOUT_KINDS,
   isIsolatedCheckoutKind,
@@ -23,9 +24,10 @@ const DRIFT_REASON =
   + "from the Dart set is never stamped with a checkoutId and is served from "
   + "main's working tree.";
 
-/** Collect the members of the Dart mirror's flat single-quoted literal block. */
-function dartCheckoutVariableTypes(source: string): Set<string> {
-  const marker = "kCheckoutVariableMessageTypes = <String>{";
+/** Collect the members of one of the Dart mirror's flat single-quoted literal
+ *  blocks, named by its `<const> = <String>{` marker. */
+function dartSetLiteral(source: string, name: string): Set<string> {
+  const marker = `${name} = <String>{`;
   const start = source.indexOf(marker);
   if (start < 0) throw new Error(`${marker} not found in the Dart mirror`);
   const end = source.indexOf("};", start);
@@ -34,10 +36,31 @@ function dartCheckoutVariableTypes(source: string): Set<string> {
   return new Set([...block.matchAll(/'([^']+)'/g)].map((match) => match[1]!));
 }
 
+function dartCheckoutVariableTypes(source: string): Set<string> {
+  return dartSetLiteral(source, "kCheckoutVariableMessageTypes");
+}
+
+function readDartSource(): string {
+  return readFileSync(join(import.meta.dir, "../..", DART_MIRROR), "utf8");
+}
+
 function readDartMirror(): Set<string> {
-  return dartCheckoutVariableTypes(
-    readFileSync(join(import.meta.dir, "../..", DART_MIRROR), "utf8"),
-  );
+  return dartCheckoutVariableTypes(readDartSource());
+}
+
+function readDartReplayMirror(): Set<string> {
+  return dartSetLiteral(readDartSource(), "kCheckoutDurableReplayTypes");
+}
+
+const REPLAY_DRIFT_REASON =
+  "the checkout-scoped slice of REPLAY_TYPES in bridge/src/message-bus.ts and "
+  + `${DART_MIRROR} kCheckoutDurableReplayTypes have drifted — a type missing `
+  + "from the Dart set is never retained per checkout, so a bundle built after "
+  + "the connect-time replay never sees it and nothing re-sends it.";
+
+function replayDrift(from: Iterable<string>, to: Set<string>): string[] {
+  const missing = [...from].filter((type) => !to.has(type)).sort();
+  return missing.length === 0 ? [] : [REPLAY_DRIFT_REASON, ...missing];
 }
 
 /** Bun prints only the compared values, so the reason has to ride inside them. */
@@ -77,6 +100,20 @@ describe("checkout mirror contract", () => {
 
   test("every Dart checkout-variable type exists on the bridge", () => {
     expect(drift(readDartMirror(), CHECKOUT_VARIABLE_MESSAGE_TYPES)).toEqual([]);
+  });
+
+  test("the scrape of the Dart durable-replay mirror found a plausible set", () => {
+    const dart = readDartReplayMirror();
+    expect(dart.size).toBeGreaterThan(0);
+    expect(dart).toContain("agent:status");
+  });
+
+  test("every checkout-scoped bridge replay type is mirrored in Dart", () => {
+    expect(replayDrift(CHECKOUT_REPLAY_TYPES, readDartReplayMirror())).toEqual([]);
+  });
+
+  test("every Dart durable-replay type is a checkout-scoped bridge replay type", () => {
+    expect(replayDrift(readDartReplayMirror(), new Set(CHECKOUT_REPLAY_TYPES))).toEqual([]);
   });
 
   test("every checkout kind answers both predicates deliberately", () => {

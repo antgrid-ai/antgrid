@@ -11,6 +11,7 @@ export const HostFileSchema = z.object({
   token: z.string().min(1),
   startedAt: z.string(),
   agentVersion: z.string(),
+  ownerBuild: z.string().optional(),
 });
 export type HostFile = z.infer<typeof HostFileSchema>;
 

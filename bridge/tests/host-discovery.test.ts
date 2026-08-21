@@ -27,6 +27,18 @@ test("writeHostFile then readHostFile round-trips", () => {
   expect(readHostFile(path)).toEqual(data);
 });
 
+test("ownerBuild round-trips, and its absence parses rather than failing", () => {
+  withTempAbDir();
+  const path = hostFilePath();
+  const base = { version: 1 as const, pid: 1, controlPort: 2, token: "t", startedAt: "x", agentVersion: "0.1.0" };
+  writeHostFile(path, { ...base, ownerBuild: "1.20662.412 (0f3b1c)" });
+  expect(readHostFile(path)?.ownerBuild).toBe("1.20662.412 (0f3b1c)");
+  // A host started outside the app carries no stamp; the app reads that as
+  // "not this install" and respawns, so it must parse, not fail.
+  writeHostFile(path, base);
+  expect(readHostFile(path)?.ownerBuild).toBeUndefined();
+});
+
 test("readHostFile returns null for missing or malformed file", () => {
   withTempAbDir();
   const path = hostFilePath();

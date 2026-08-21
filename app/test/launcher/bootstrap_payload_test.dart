@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:antgrid/launcher/local_agent_launcher.dart';
 import 'package:antgrid/services/keychain_device_store.dart';
+import 'package:antgrid/config/build_info.dart';
 
 void main() {
   group('BootstrapPayload.toJsonLine', () {
@@ -86,5 +87,15 @@ void main() {
         expect(j['ownerPid'], 7);
       },
     );
+
+    test('always stamps ownerBuild so the host can echo it into host.json', () {
+      for (final p in [
+        BootstrapPayload(projectId: 'p1', projectPath: '/tmp/p1'),
+        BootstrapPayload.machineOnly(),
+      ]) {
+        final j = jsonDecode(p.toJsonLine().trim()) as Map<String, dynamic>;
+        expect(j['ownerBuild'], BuildInfo.summary);
+      }
+    });
   });
 }

@@ -40,6 +40,11 @@ export const BootstrapPayloadSchema = z
     // teardown (force-kill, crash, window-close under `flutter run --machine`).
     // Optional: a host started outside the app (CLI/tests) has no owner.
     ownerPid: z.number().int().positive().optional(),
+    // Build provenance of the spawning app, echoed verbatim into host.json so a
+    // later app run can tell a host from its OWN install from one an update
+    // replaced the app out from under. Opaque here — the host never interprets
+    // it. Optional: a host started outside the app (CLI/tests) has no owner.
+    ownerBuild: z.string().min(1).optional(),
   })
   .refine((p) => p.firstProject === undefined || p.firstProject.mode !== "remote" || p.machine !== undefined, {
     message: "firstProject.mode 'remote' requires a machine block",

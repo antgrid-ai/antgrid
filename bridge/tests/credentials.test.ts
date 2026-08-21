@@ -44,6 +44,18 @@ test("accepts an optional ownerPid and surfaces it", () => {
   if (r.success) expect(r.data.ownerPid).toBe(4242);
 });
 
+test("accepts an optional ownerBuild and surfaces it verbatim", () => {
+  const r = BootstrapPayloadSchema.safeParse({
+    firstProject: { projectId: "p", projectPath: "/tmp/p", mode: "local" },
+    ownerBuild: "1.20662.412 (0f3b1c) 2026-08-21T00:00:00Z",
+  });
+  expect(r.success).toBe(true);
+  // Opaque to the host — it is echoed into host.json, never interpreted.
+  if (r.success) expect(r.data.ownerBuild).toBe("1.20662.412 (0f3b1c) 2026-08-21T00:00:00Z");
+  // An app predating the field still boots a host.
+  expect(BootstrapPayloadSchema.safeParse({ ownerPid: 1 }).success).toBe(true);
+});
+
 test("rejects a non-positive ownerPid", () => {
   for (const ownerPid of [0, -1, 1.5]) {
     const r = BootstrapPayloadSchema.safeParse({

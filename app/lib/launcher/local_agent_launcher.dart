@@ -8,6 +8,7 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'host_control_client.dart';
 import 'host_controller.dart';
 import 'project_id.dart';
+import '../config/build_info.dart';
 import '../util/ab_log.dart';
 
 // ---------------------------------------------------------------------------
@@ -16,7 +17,8 @@ import '../util/ab_log.dart';
 
 /// Serialized as a single JSON line written to the host's stdin on spawn.
 /// Mirror of `bridge/src/auth/credentials.ts` `BootstrapPayloadSchema`:
-/// `{ machine?, firstProject?: { projectId, projectPath, mode }, ownerPid? }`.
+/// `{ machine?, firstProject?: { projectId, projectPath, mode }, ownerPid?,
+/// ownerBuild? }`.
 ///
 /// The desktop driver always opens the first project as `mode: "local"`; the
 /// `machine` block is included whenever a [DeviceRecord] exists so the host can
@@ -31,7 +33,8 @@ class BootstrapPayload {
     this.licenseApiUrl,
     this.relayUrl,
     this.ownerPid,
-  });
+    String? ownerBuild,
+  }) : ownerBuild = ownerBuild ?? BuildInfo.summary;
 
   /// A project-less spawn: the host boots its control plane and waits for
   /// project:open RPCs. Used by the eager warm-up at app launch (no project is
@@ -42,7 +45,9 @@ class BootstrapPayload {
     this.licenseApiUrl,
     this.relayUrl,
     this.ownerPid,
-  }) : projectId = null,
+    String? ownerBuild,
+  }) : ownerBuild = ownerBuild ?? BuildInfo.summary,
+       projectId = null,
        projectPath = null,
        mode = 'local';
 
@@ -54,6 +59,14 @@ class BootstrapPayload {
   /// `didRequestAppExit` teardown (force-kill, crash, or a window close under
   /// `flutter run --machine`). Null leaves the host untethered (CLI spawns).
   final int? ownerPid;
+
+  /// Build provenance of the app that spawned this host ([BuildInfo.summary]).
+  /// The host echoes it into `host.json`, and a later app run refuses to attach
+  /// to a host stamped with anything but its own — the only way to notice that
+  /// an update replaced the app while a host from the previous install stayed
+  /// alive. `agentVersion` cannot serve: the bridge's `VERSION` is a static
+  /// literal nobody bumps, so it is identical across every release.
+  final String ownerBuild;
 
   /// First-core mode. The app only ever spawns `local`; the field stays a
   /// parameter because the bridge's `BootstrapPayloadSchema` also accepts
@@ -72,6 +85,7 @@ class BootstrapPayload {
           'mode': mode,
         },
       if (ownerPid != null) 'ownerPid': ownerPid,
+      'ownerBuild': ownerBuild,
     };
     final d = device;
     if (d != null && licenseApiUrl != null && relayUrl != null) {

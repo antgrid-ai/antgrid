@@ -18,6 +18,23 @@ class MessageRouter {
   late final StreamController<Map<String, dynamic>> _statusCtrl;
   late final StreamController<Map<String, dynamic>> _heavyCtrl;
   StreamSubscription<InboundMessage>? _sub;
+
+  /// Latest durable frame per `checkoutId` → `type`. Populated from the raw
+  /// inbound stream — BEFORE tiering — so a frame is retained even when the
+  /// tier it belongs to has no subscriber yet. The tier is re-derived from the
+  /// TYPE at replay ([replayFor]), never stored: `classifyAbMessage` coerces an
+  /// error-bearing frame to status, which would file a `tree:full` where no
+  /// heavy subscriber looks.
+  ///
+  /// This is what makes a per-checkout service bundle recoverable. The
+  /// bridge's `state.snapshot` replays one `agent:status` per checkout at
+  /// stream attach, but an isolated session's bundle is not created until the
+  /// session list lands a round trip later; the tier streams are broadcast with
+  /// no replay, so those frames used to be dropped for want of a subscriber and
+  /// nothing ever re-sent them — stranding the session on "waiting for agent"
+  /// until the app reconnected.
+  final Map<String, Map<String, Map<String, dynamic>>> _durable = {};
+
   bool _disposed = false;
   bool _heavyListened = false;
   bool _lifecyclePaused = false;
@@ -36,9 +53,34 @@ class MessageRouter {
   Stream<Map<String, dynamic>> get status => _statusCtrl.stream;
   Stream<Map<String, dynamic>> get heavy => _heavyCtrl.stream;
 
+  /// The durable frames seen so far for [checkoutId] on [tier], oldest first.
+  /// Callers seed a fresh per-checkout subscriber with these; re-applying one
+  /// is idempotent (every type here is a latest-wins full snapshot).
+  Iterable<Map<String, dynamic>> replayFor(String checkoutId, MessageTier tier) {
+    final byType = _durable[checkoutId];
+    if (byType == null) return const [];
+    return [
+      for (final entry in byType.entries)
+        if (classifyAbMessageByType(entry.key) == tier) entry.value,
+    ];
+  }
+
+  /// The checkouts holding retained frames. [ProjectSession] sweeps against
+  /// this rather than its own bundle map: a checkout can produce durable frames
+  /// it never gets a bundle for (an archived session still in the bridge's
+  /// replay cache), and those entries pin a whole `tree:full` with nothing to
+  /// ever evict them.
+  Iterable<String> get replayCheckoutIds => _durable.keys;
+
+  /// Forgets a checkout's durable frames. Called when its worktree is gone, so
+  /// a deleted checkout's tree/status stop seeding new subscribers.
+  void dropCheckoutReplay(String checkoutId) => _durable.remove(checkoutId);
+
   void _onInbound(InboundMessage raw) {
     if (raw.channel != 'control') return;
-    switch (classifyAbMessage(raw.json)) {
+    final tier = classifyAbMessage(raw.json);
+    _retainIfDurable(raw.json);
+    switch (tier) {
       case MessageTier.status:
         _statusCtrl.add(raw.json);
         break;
@@ -55,6 +97,17 @@ class MessageRouter {
         );
         break;
     }
+  }
+
+  void _retainIfDurable(Map<String, dynamic> json) {
+    final type = json['type'];
+    if (type is! String || !kCheckoutDurableReplayTypes.contains(type)) return;
+    // An error-bearing frame is a transient failure, not a latest-wins
+    // snapshot. Retaining one would evict the good frame for its type AND —
+    // because classifyAbMessage coerces any `error` to the status tier — replay
+    // it forever on the tier the heavy subscriber that needs it never reads.
+    if (json['error'] != null) return;
+    (_durable[checkoutIdForEnvelope(json)] ??= {})[type] = json;
   }
 
   /// Debug-only backstop for the classification gate: a control-channel frame
@@ -137,6 +190,7 @@ class MessageRouter {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    _durable.clear();
     await _sub?.cancel();
     await _statusCtrl.close();
     await _heavyCtrl.close();

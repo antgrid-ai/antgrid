@@ -12,7 +12,17 @@ import 'dart:async';
 /// Subscribing BEFORE reading the snapshot closes the gap; a duplicate same-value
 /// emit (if an event lands between listen and seed) is harmless to consumers,
 /// which compare state by value.
-Stream<T> seededStream<T>(T Function() current, Stream<T> source) {
+Stream<T> seededStream<T>(T Function() current, Stream<T> source) =>
+    seededStreamAll(() => [current()], source);
+
+/// [seededStream] for a seed of zero or more values — a replay cache rather
+/// than a single current-state snapshot. Seeds in iteration order.
+///
+/// The returned stream is SINGLE-SUBSCRIPTION even when [source] is broadcast,
+/// and deliberately so: the seed is produced per listener, which a broadcast
+/// controller cannot do (its `onListen` fires only for the first). Call the
+/// producing getter once per consumer rather than sharing one returned stream.
+Stream<T> seededStreamAll<T>(Iterable<T> Function() seed, Stream<T> source) {
   late final StreamController<T> controller;
   StreamSubscription<T>? sub;
   controller = StreamController<T>(
@@ -24,7 +34,9 @@ Stream<T> seededStream<T>(T Function() current, Stream<T> source) {
         onError: controller.addError,
         onDone: controller.close,
       );
-      controller.add(current());
+      for (final value in seed()) {
+        controller.add(value);
+      }
     },
     onCancel: () async {
       await sub?.cancel();

@@ -4,6 +4,7 @@ import 'dart:developer' as developer;
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
 import '../analytics/analytics_service.dart';
+import '../providers/seeded_stream.dart';
 import '../services/command_service.dart';
 import '../services/config_service.dart';
 import '../services/file_service.dart';
@@ -147,8 +148,10 @@ class ProjectSession {
   /// to the agent's `client:focus-state`; see [setLifecyclePaused].
   Stream<Map<String, dynamic>> get heavyStream => _router.heavy;
 
+  /// Single-subscription — see [_checkoutStream]. Call this per consumer
+  /// rather than sharing one returned stream between listeners.
   Stream<Map<String, dynamic>> checkoutHeavyStream(String checkoutId) =>
-      heavyStream.where((json) => checkoutIdForEnvelope(json) == checkoutId);
+      _checkoutStream(heavyStream, checkoutId, MessageTier.heavy);
 
   /// Declares app-level background state to the agent, gating both the heavy
   /// stream and the fallback push. See [MessageRouter.setLifecyclePaused].
@@ -159,8 +162,34 @@ class ProjectSession {
   /// without burdening the agent's heavy pipeline.
   Stream<Map<String, dynamic>> get statusStream => _router.status;
 
+  /// Single-subscription — see [_checkoutStream]. Call this per consumer
+  /// rather than sharing one returned stream between listeners.
   Stream<Map<String, dynamic>> checkoutStatusStream(String checkoutId) =>
-      statusStream.where((json) => checkoutIdForEnvelope(json) == checkoutId);
+      _checkoutStream(statusStream, checkoutId, MessageTier.status);
+
+  /// [checkoutId]'s slice of a tier, seeded with the durable frames the router
+  /// has already seen for it.
+  ///
+  /// The seed is what keeps an isolated session's bundle recoverable. Bundles
+  /// are built from the session list, which lands a round trip AFTER the
+  /// connect-time `state.snapshot` has already replayed that checkout's
+  /// `agent:status` / `tree:full` / `git:status` — a plain `.where()` over the
+  /// broadcast tier dropped them for want of a subscriber, and nothing re-sends
+  /// them, so the session sat on "waiting for agent" until the next reconnect.
+  ///
+  /// The seed is per-listener, so the returned stream is single-subscription
+  /// even though the tier it wraps is broadcast: a broadcast controller runs
+  /// `onListen` only for its first listener and would silently hand every later
+  /// one an unseeded stream. A duplicate same-value emit is harmless — every
+  /// seeded type is a latest-wins snapshot.
+  Stream<Map<String, dynamic>> _checkoutStream(
+    Stream<Map<String, dynamic>> tier,
+    String checkoutId,
+    MessageTier tierKind,
+  ) => seededStreamAll(
+    () => _router.replayFor(checkoutId, tierKind),
+    tier.where((json) => checkoutIdForEnvelope(json) == checkoutId),
+  );
 
   /// Send an outbound message through the transport.
   ///
@@ -200,10 +229,17 @@ class ProjectSession {
     for (final id in _pendingCheckoutSweep) {
       if (live.contains(id)) continue;
       unawaited(_checkoutServices.remove(id)?.dispose() ?? Future.value());
+      // Symmetric with the bridge's own dropCheckoutReplay: a removed worktree
+      // must not keep seeding a bundle that a stale id could still recreate.
+      _router.dropCheckoutReplay(id);
     }
-    _pendingCheckoutSweep = _checkoutServices.keys
-        .where((id) => !live.contains(id))
-        .toSet();
+    // Union, not just the bundle map: a checkout can leave durable frames the
+    // router retains without ever getting a bundle (an archived session still
+    // in the bridge's replay cache), and nothing else would ever evict them.
+    _pendingCheckoutSweep = <String>{
+      ..._checkoutServices.keys,
+      ..._router.replayCheckoutIds,
+    }.where((id) => !live.contains(id)).toSet();
   }
 
   Iterable<CheckoutServices> get checkoutServiceBundles =>

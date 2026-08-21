@@ -94,6 +94,96 @@ describe("isolated SessionManager creation", () => {
     }
   });
 
+  it("re-announces when the session is already running", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "antgrid-worktree-session-"));
+    const announces: string[] = [];
+    const record: CheckoutRecord = {
+      id: "checkout-1", projectId: "p", kind: "managed-worktree", path: dir,
+      branch: "antgrid/session-1", baseRef: "main", managed: true,
+      sessionId: "s", createdAt: 1,
+    };
+    const manager = {
+      prepareForSession: async (args: { sessionId: string }): Promise<CheckoutRecord> => ({
+        ...record, sessionId: args.sessionId,
+      }),
+      rollbackPrepared: async () => {},
+      recordFor: async () => record,
+      inspect: async () => ({ exists: true, registered: true, dirty: false, unpushedCommits: false, locked: false }),
+      remove: async () => {},
+    } as unknown as WorktreeManager;
+    try {
+      const sm = new SessionManager({
+        projectId: "p", storeDir: dir, projectPath: dir, terminalManager: fakeTerminal() as any,
+        agentSpec: { command: "claude", name: "claude-code" }, sendMessage: () => {},
+        worktreeSessionsSupported: true, isGitRepository: async () => true, worktreeManager: manager,
+        prepareCheckoutRuntime: async () => {},
+        resolveCheckout: async () => record,
+        announceCheckoutRuntime: (id) => { announces.push(id); },
+        resolveAgentSpec: async () => ({ command: "claude", name: "claude-code" }),
+      });
+      const created = await sm.create("Isolated", { isolation: "worktree" });
+      await sm.start(created.id);
+      announces.length = 0;
+
+      // The second start finds the PTY already up. It must STILL announce: the
+      // caller asked because it has no state for this checkout, and returning
+      // silently is what left a reconnected app on "waiting for agent".
+      await sm.start(created.id);
+      expect(announces).toEqual(["checkout-1"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("re-announces when an already-running CHAT session is started again", async () => {
+    // Chat returns before the PTY branch's `tm.has(id)` guard ever runs, so the
+    // re-announce needs its own path — and chat is the mode most likely to be
+    // resumed after a reconnect, which is the case this whole re-push exists
+    // for. Guarding on a `runningChat` snapshot read AFTER the add would fire
+    // on the first start and never on a restart; that inversion is invisible
+    // to the PTY test above.
+    const dir = mkdtempSync(join(tmpdir(), "antgrid-worktree-session-"));
+    const announces: string[] = [];
+    const chatStarts: string[] = [];
+    const record: CheckoutRecord = {
+      id: "checkout-1", projectId: "p", kind: "managed-worktree", path: dir,
+      branch: "antgrid/session-1", baseRef: "main", managed: true,
+      sessionId: "s", createdAt: 1,
+    };
+    const manager = {
+      prepareForSession: async (args: { sessionId: string }): Promise<CheckoutRecord> => ({
+        ...record, sessionId: args.sessionId,
+      }),
+      rollbackPrepared: async () => {},
+      recordFor: async () => record,
+      inspect: async () => ({ exists: true, registered: true, dirty: false, unpushedCommits: false, locked: false }),
+      remove: async () => {},
+    } as unknown as WorktreeManager;
+    try {
+      const sm = new SessionManager({
+        projectId: "p", storeDir: dir, projectPath: dir, terminalManager: fakeTerminal() as any,
+        agentSpec: { command: "codex", name: "codex" }, sendMessage: () => {},
+        worktreeSessionsSupported: true, isGitRepository: async () => true, worktreeManager: manager,
+        prepareCheckoutRuntime: async () => {},
+        resolveCheckout: async () => record,
+        announceCheckoutRuntime: (id) => { announces.push(id); },
+        resolveAgentSpec: async () => ({ command: "codex", name: "codex" }),
+        onStartChat: (opts) => { chatStarts.push(opts.sessionId); },
+      });
+      const created = await sm.create("Isolated chat", { isolation: "worktree", mode: "chat" });
+      await sm.start(created.id);
+      // The FIRST start must not re-announce: createWorktree already did, and
+      // the runtime pushes its own state as it comes up.
+      announces.length = 0;
+
+      await sm.start(created.id);
+      expect(chatStarts).toEqual([created.id, created.id]);
+      expect(announces).toEqual(["checkout-1"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rolls back the prepared checkout when its working directory is unsafe", async () => {
     const dir = mkdtempSync(join(tmpdir(), "antgrid-worktree-session-"));
     let rolledBack = false;

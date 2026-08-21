@@ -564,8 +564,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     return checkoutRuntimes.runtime(checkoutId) ?? mainRuntime;
   }
 
-  function sendFromRuntime(runtime: CheckoutRuntime, msg: AbMessage): void {
-    sendAb({ ...msg, checkoutId: runtime.checkout.id } as AbMessage);
+  function sendFromRuntime(runtime: CheckoutRuntime, msg: AbMessage, force = false): void {
+    const stamped = { ...msg, checkoutId: runtime.checkout.id } as AbMessage;
+    if (force) republishAb(stamped); else sendAb(stamped);
   }
 
   function internalTerminalId(runtime: CheckoutRuntime, terminalId: string): string {
@@ -1190,6 +1191,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "file:tree:snapshot:request": {
+        // Answer only the checkout that ASKED. `runtimeFor` falls back to
+        // mainRuntime for an id with no runtime yet (an isolated session's
+        // bundle is built before its runtime is prepared), and sendFromRuntime
+        // restamps the reply with the RESOLVED runtime's id — so a fallback
+        // answer is filtered out by the requester and force-pushes main's
+        // picture to everyone else instead.
+        if (runtime.checkout.id !== checkoutIdOf(msg)) break;
         const fw = runtime.fileWatcher;
         if (!fw) break;
         const { tree, seq } = fw.getTreeSnapshot();
@@ -1197,21 +1205,33 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // The app asks for this on every (re)connect and on a pull-to-refresh,
         // and the git decorations belong to the same picture as the tree —
         // answering with a tree alone left the changes list showing whatever
-        // the replay cache last held. Sent unconditionally rather than only on
-        // change: the request means the app has reason to doubt what it has.
+        // the replay cache last held. Forced, not merely unconditional: the
+        // request means the app doubts what it has, and a doubted status is
+        // usually byte-identical to the cached one — which the bus's dedup
+        // drops before any subscriber, leaving a pull-to-refresh with no answer
+        // and no way to ever get one.
         trackGitRefresh(
           runtime,
           refreshGitStatus(runtime)
-            .then(() => sendGitStatus(runtime))
+            .then(() => sendGitStatus(runtime, true))
             .catch(() => {}),
         );
         break;
       }
       case "preview:snapshot:request": {
+        // Same wrong-checkout guard as the tree request above.
+        if (runtime.checkout.id !== checkoutIdOf(msg)) break;
         if (!runtime.tunnelManager) break;
         sendFromRuntime(runtime, createMessage("preview:snapshot", {
           urls: runtime.tunnelManager.getPreviewSnapshot(),
         }));
+        // The snapshot carries only config-declared proxies; ad-hoc detections
+        // ride `ports:update`, which is pushed on CHANGE alone. Same pairing as
+        // the tree request's git status: a caller asking for the preview
+        // picture has no other way to learn about a port found before it was
+        // listening (an isolated session's bundle is built a round trip after
+        // its runtime detected them, and nothing re-pushes a stable set).
+        runtime.portDetector?.emitCurrent();
         break;
       }
       case "push:register": {
@@ -1289,6 +1309,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   // Outbound senders — initially no-op until a transport is attached.
   let sendAb: (msg: AbMessage) => void = (_m) => {};
+  /** Same wire as [sendAb] but bypasses the bus's payload-equality dedup. Only
+   *  the explicit re-sync paths use it — see MessageBus.republish. */
+  let republishAb: (msg: AbMessage) => void = (_m) => {};
   let sendPlain: (data: object) => void = (_d) => {};
   // Replay-cache eviction for torn-down chat sessions; bound with the bus in
   // attachTransport, like sendAb.
@@ -1445,12 +1468,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }, GIT_REFRESH_DEBOUNCE_MS);
   }
 
-  function sendGitStatus(runtime: CheckoutRuntime = mainRuntime) {
+  function sendGitStatus(runtime: CheckoutRuntime = mainRuntime, force = false) {
     sendFromRuntime(runtime,
       createMessage("git:status", {
         projectId: project.id,
         files: runtime.cachedGitFiles,
-      })
+      }),
+      force,
     );
   }
 
@@ -1620,7 +1644,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
   }
 
-  function sendStatus(runtime: CheckoutRuntime = mainRuntime) {
+  /** [force] re-sends an unchanged snapshot past the bus dedup. Set it only on
+   *  the paths that exist BECAUSE a client is missing this state. */
+  function sendStatus(runtime: CheckoutRuntime = mainRuntime, force = false) {
     if (!manager) return;
     // All terminals (agent + services + ad-hoc) flow through `terminals`;
     // the app filters by `type` to route them to the right UI surface.
@@ -1687,7 +1713,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           flags: runtime.config.agent?.flags,
         },
         needsFirstRun,
-      })
+      }),
+      force,
     );
   }
 
@@ -1695,8 +1722,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     log.info("App reconnected, re-syncing existing state");
     // Use cached git state for the immediate resync; refresh in background.
     for (const runtime of checkoutRuntimes.values()) {
-      sendStatus(runtime);
-      sendGitStatus(runtime);
+      // Forced: a resync exists because a client believes it has nothing, and
+      // for an idle checkout the snapshot is byte-identical to the cached one —
+      // exactly what the bus's dedup drops before any subscriber sees it.
+      sendStatus(runtime, true);
+      sendGitStatus(runtime, true);
       trackGitRefresh(
         runtime,
         Promise.all([refreshGitBranch(runtime), refreshGitStatus(runtime)])
@@ -1710,8 +1740,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       );
     }
 
-    // Re-send file tree
-    for (const runtime of checkoutRuntimes.values()) runtime.fileWatcher?.sendFullTree();
+    // Re-send the file tree. Forced for the same reason as the status/git pair
+    // above: an idle project's tree is byte-identical to the cached one, so the
+    // ordinary dedup would drop the very re-push this resync exists to perform.
+    for (const runtime of checkoutRuntimes.values()) runtime.fileWatcher?.sendFullTree({ force: true });
 
     // Re-emit the detected-port list. ports:update is only pushed on change,
     // so a phone that binds after detection would otherwise never see ports
@@ -1775,7 +1807,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
     const fw = new FileWatcher(
       { id: project.id, path: runtime.checkout.path, name: project.name },
-      send,
+      (msg, opts) => sendFromRuntime(runtime, msg, opts?.force),
       connState,
       () => scheduleGitRefresh(runtime),
     );
@@ -2095,8 +2127,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       announceCheckoutRuntime: (checkoutId) => {
         const runtime = checkoutRuntimes.runtime(checkoutId);
         if (!runtime) return;
-        sendStatus(runtime);
-        sendGitStatus(runtime);
+        // Forced, for the same reason as resyncState: an announce for an
+        // already-warm runtime carries the state the app is waiting for and is
+        // identical to what the replay cache holds.
+        sendStatus(runtime, true);
+        sendGitStatus(runtime, true);
       },
       teardownCheckoutRuntime,
       resolveCheckout: async (checkoutId) => {
@@ -2368,7 +2403,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
     const fw = new FileWatcher(
       project,
-      (msg: AbMessage) => sendAb(msg),
+      (msg: AbMessage, opts) => (opts?.force ? republishAb(msg) : sendAb(msg)),
       connState,
       () => scheduleGitRefresh(mainRuntime),
     );
@@ -2536,6 +2571,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   function attachTransport(bus: MessageBus) {
     sendAb = (m) => bus.publish(m, "control");
+    republishAb = (m) => bus.republish(m, "control");
     dropSessionReplay = (sessionId) => bus.dropSessionReplay(sessionId);
     dropCheckoutReplay = (checkoutId) => bus.dropCheckoutReplay(checkoutId);
     // Plaintext (tunnel) sender bypasses the bus — see setPlainHook.

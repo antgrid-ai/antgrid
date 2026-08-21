@@ -132,8 +132,9 @@ void main() {
                 // A real gap: the wedge this guards against only shows up once
                 // the POST is not resolved within the same microtask.
                 await Future<void>.delayed(const Duration(milliseconds: 1));
-                if (!reachable)
+                if (!reachable) {
                   throw const SocketException('connection refused');
+                }
                 final body = jsonDecode(req.body) as Map<String, dynamic>;
                 return http.Response(
                   jsonEncode({

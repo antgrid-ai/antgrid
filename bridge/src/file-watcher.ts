@@ -19,6 +19,10 @@ export interface ProjectInfo {
 
 const DEBOUNCE_MS = 100;
 
+/** The watcher's one outbound hook. `opts.force` is honoured only by senders
+ *  that publish through a deduping bus; a plain sender may ignore it. */
+type SendTreeMessage = (msg: AbMessage, opts?: { force?: boolean }) => void;
+
 type PendingChanges = {
   added: Map<string, FileTreeNode>;
   modified: Map<string, FileTreeNode>;
@@ -28,7 +32,7 @@ type PendingChanges = {
 export class FileWatcher {
   private projectRoot: string;
   private projectId: string;
-  private sendMessage: (msg: AbMessage) => void;
+  private sendMessage: SendTreeMessage;
   private connState: ConnState;
   private watcher: FSWatcher | null = null;
   private onFilesChanged?: () => void;
@@ -43,7 +47,7 @@ export class FileWatcher {
 
   constructor(
     project: ProjectInfo,
-    sendMessage: (msg: AbMessage) => void,
+    sendMessage: SendTreeMessage,
     connState: ConnState,
     onFilesChanged?: () => void,
   ) {
@@ -66,7 +70,9 @@ export class FileWatcher {
     return { tree: root, seq: this.connState.fileSeq };
   }
 
-  sendFullTree(): void {
+  /** [opts.force] bypasses the bus's payload-equality dedup — for the re-sync
+   *  paths, where an unchanged tree is exactly what has to reach the wire. */
+  sendFullTree(opts: { force?: boolean } = {}): void {
     const root = buildTree(this.projectRoot, this.projectRoot, this.ig);
     if (!root) {
       log.error("Failed to build file tree for %s", this.projectRoot);
@@ -78,6 +84,7 @@ export class FileWatcher {
         projectId: this.projectId,
         root,
       }),
+      opts,
     );
     log.info("Sent full file tree for project %s", this.projectId);
   }

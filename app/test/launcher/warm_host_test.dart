@@ -6,6 +6,7 @@ import 'package:antgrid/launcher/host_controller.dart';
 import 'package:antgrid/launcher/host_discovery.dart';
 import 'package:antgrid/launcher/local_agent_launcher.dart';
 import 'package:antgrid/services/keychain_device_store.dart';
+import 'package:antgrid/config/build_info.dart';
 
 HostFile _host({int pid = 100, int port = 6000}) => HostFile(
   version: 1,
@@ -14,6 +15,7 @@ HostFile _host({int pid = 100, int port = 6000}) => HostFile(
   token: 'tok',
   startedAt: 's',
   agentVersion: 'v',
+  ownerBuild: BuildInfo.summary,
 );
 
 void main() {

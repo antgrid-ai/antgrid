@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { HostServer, type HostRemoteConfig, type RemoteRuntime } from "../src/host-server";
 import { MessageBus } from "../src/message-bus";
 import { createMessage } from "../src/protocol";
+import { hostFilePath, readHostFile } from "../src/host-discovery";
 
 // --- shared fakes (mirror host-server.test.ts) -----------------------------
 
@@ -54,6 +55,21 @@ test("opens one control-plane registration equal to the bare deviceUuid", async 
   await host.shutdown();
   host = null;
   expect(true).toBe(true);
+});
+
+test("startControlPlane echoes the app's ownerBuild into host.json", async () => {
+  // The app refuses to attach to a host whose stamp is not its own — that is how
+  // it notices a Store update replaced it while the previous install's host
+  // stayed alive. The host never interprets the value, so the only contract is
+  // that it comes back out byte-for-byte, and is absent when nobody supplied one.
+  host = new HostServer({ ownerBuild: "1.20662.412 (0f3b1c)" });
+  await host.startControlPlane();
+  expect(readHostFile(hostFilePath())?.ownerBuild).toBe("1.20662.412 (0f3b1c)");
+  await host.shutdown();
+
+  host = new HostServer({});
+  await host.startControlPlane();
+  expect(readHostFile(hostFilePath())?.ownerBuild).toBeUndefined();
 });
 
 test("control plane heartbeats the current relayUrl on authenticate (keeps inventory fresh)", async () => {

@@ -168,18 +168,20 @@ class PhonesList {
     return PhonesList(
       phones: rawPhones
           .map((e) {
-            if (e is! Map)
+            if (e is! Map) {
               throw HostControlException('BAD_RESPONSE', 'malformed phone: $e');
+            }
             return PairedPhoneSummary.fromJson(e.cast<String, dynamic>());
           })
           .toList(growable: false),
       knownProjects: rawProjects
           .map((e) {
-            if (e is! Map)
+            if (e is! Map) {
               throw HostControlException(
                 'BAD_RESPONSE',
                 'malformed project: $e',
               );
+            }
             return KnownProject.fromJson(e.cast<String, dynamic>());
           })
           .toList(growable: false),

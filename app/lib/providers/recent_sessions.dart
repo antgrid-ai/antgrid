@@ -126,8 +126,9 @@ class RemoteProjectStatusController
         if (!e.key.startsWith(prefix)) e.key: e.value,
       ...statuses,
     };
-    if (const MapEquality<String, AgentWorkStatus>().equals(state, next))
+    if (const MapEquality<String, AgentWorkStatus>().equals(state, next)) {
       return;
+    }
     state = next;
   }
 
@@ -141,8 +142,9 @@ class RemoteProjectStatusController
         if (e.key.contains('.')) e.key: e.value,
       ...statuses,
     };
-    if (const MapEquality<String, AgentWorkStatus>().equals(state, next))
+    if (const MapEquality<String, AgentWorkStatus>().equals(state, next)) {
       return;
+    }
     state = next;
   }
 }

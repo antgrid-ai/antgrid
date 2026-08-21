@@ -108,6 +108,7 @@ program
             },
           }
         : {}),
+      ...(payload.ownerBuild ? { ownerBuild: payload.ownerBuild } : {}),
       // The app sends `host:shutdown` when its window closes; reuse the same
       // graceful path as SIGTERM (defined below) so PTYs are killed cleanly.
       onShutdownRequested: () => void shutdown("app-close"),

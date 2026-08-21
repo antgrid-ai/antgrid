@@ -1,4 +1,4 @@
-import type { AbMessage } from "./protocol";
+import { CHECKOUT_VARIABLE_MESSAGE_TYPES, type AbMessage } from "./protocol";
 
 export type Channel = "control" | "preview";
 
@@ -44,6 +44,17 @@ const REPLAY_TYPES: ReadonlySet<string> = new Set([
   "handler:status",
 ]);
 
+/** The checkout-scoped slice of [REPLAY_TYPES] — the frames `replayKey` keys by
+ *  checkoutId, and therefore the only ones an app can be missing for ONE
+ *  checkout while holding another's. Mirrored by hand as
+ *  `kCheckoutDurableReplayTypes` in
+ *  app/lib/project/project_message_classification.dart, which re-serves them to
+ *  a per-checkout bundle built after the connect-time replay; the two are gated
+ *  against each other by bridge/tests/checkout-mirror-contract.test.ts. */
+export const CHECKOUT_REPLAY_TYPES: ReadonlySet<string> = new Set(
+  [...REPLAY_TYPES].filter((type) => CHECKOUT_VARIABLE_MESSAGE_TYPES.has(type)),
+);
+
 /**
  * Session-scoped replay: cached per (type, sessionId), not per type — one
  * frame per TYPE would clobber capabilities across concurrent chat sessions.
@@ -76,6 +87,21 @@ export class MessageBus {
   }
 
   publish(msg: AbMessage, channel: Channel): void {
+    this.emit(msg, channel, false);
+  }
+
+  /** Publish, bypassing the payload-equality dedup below.
+   *
+   *  For the explicit re-sync paths ONLY (`resyncState`, `announceCheckoutRuntime`):
+   *  those fire because a client just told us it has nothing, so an unchanged
+   *  payload is exactly the case that must still reach the wire. The ordinary
+   *  dedup is what silently swallowed them — a reconnecting app's `agent:status`
+   *  is byte-identical to the cached one, so no subscriber ever saw it. */
+  republish(msg: AbMessage, channel: Channel): void {
+    this.emit(msg, channel, true);
+  }
+
+  private emit(msg: AbMessage, channel: Channel, force: boolean): void {
     const key = this.replayKey(msg);
     if (key !== null) {
       const prev = this.replayCache.get(key);
@@ -84,7 +110,7 @@ export class MessageBus {
       // become no-ops to both existing subscribers and the replay cache.
       // `createMessage` stamps a fresh `id`/`timestamp` per call, so we
       // strip those before comparing.
-      if (prev && payloadEquals(prev.msg, msg)) return;
+      if (!force && prev && payloadEquals(prev.msg, msg)) return;
       this.replayCache.set(key, { msg, channel });
     }
     // A throwing deliver() propagates to the caller (the agent's primary send
