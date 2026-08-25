@@ -331,5 +331,46 @@ void main() {
         await session.close();
       },
     );
+
+  });
+
+  // A relay app builds its tabs from the replayed agent:status, never from the
+  // `terminal:started` it was not connected for, so this pull is the only way
+  // it ever gets a tab's scrollback. Gating it on `running` made a terminal the
+  // agent RETAINS past its own exit — a `worktree.setup` transcript, which the
+  // banner's "View setup log" reads after the run — permanently unreachable:
+  // it is always stopped by the time such a client first sees it.
+  test('a stopped terminal discovered in the status is still snapshotted', () async {
+    final t = FakeAgentTransport();
+    final session = await newSession(t);
+    final svc = TerminalService.fromSession(session);
+
+    t.emit('agent:status', {
+      'projectId': 'p',
+      'terminals': [
+        {
+          'id': 'wt-1:setup',
+          'terminalId': 'wt-1:setup',
+          'name': 'setup',
+          'running': false,
+        },
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.tabs, contains('wt-1:setup'));
+    // `isNotEmpty`, not a count: the session builds its own main-checkout
+    // TerminalService, so both it and the one under test answer this frame.
+    expect(
+      t.sent.where(
+        (m) =>
+            m['type'] == 'terminal:snapshot:request' &&
+            m['terminalId'] == 'wt-1:setup',
+      ),
+      isNotEmpty,
+    );
+
+    await svc.dispose();
+    await session.close();
   });
 }

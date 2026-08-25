@@ -139,6 +139,13 @@ class ProjectStatusNotifier extends ValueNotifier<ProjectStatus> {
     'command:done',
   };
 
+  /// [statusStream] must already be scoped to ONE checkout — `ProjectSession`
+  /// hands it main's slice. This is the PROJECT's status, and an isolated
+  /// session's worktree runs its own copy of antgrid.yaml (same service names,
+  /// its own ports, its own config validity), so a raw status tier would fold
+  /// every checkout's answer in here as the project's own, last writer wins,
+  /// and then cache and persist it. The reducers below deliberately do no
+  /// filtering of their own.
   ProjectStatusNotifier(Stream<Map<String, dynamic>> statusStream)
     : super(const ProjectStatus.empty()) {
     _sub = statusStream.listen(_apply);
@@ -193,20 +200,36 @@ class ProjectStatusNotifier extends ValueNotifier<ProjectStatus> {
 
     final parsed = parseAbMessage(envelope);
     if (parsed is AgentStatusMessage) {
-      next = next.copyWith(
-        services: parsed.services,
-        lastUpdatedAt: DateTime.now(),
-      );
+      // Guarded on a genuine change, like the config branch above: the bump
+      // alone makes `next != value` (lastUpdatedAt is part of ==), so an
+      // unchanged status would still notify every listener — and the agent now
+      // publishes one on every PTY start and exit.
+      if (!listEquals(next.services, parsed.services)) {
+        next = next.copyWith(
+          services: parsed.services,
+          lastUpdatedAt: DateTime.now(),
+        );
+      }
     } else if (parsed is AgentHello) {
       next = next.copyWith(agentHello: parsed, lastUpdatedAt: DateTime.now());
     } else if (parsed is PortsUpdateMessage) {
       final ports = parsed.ports.map((p) => p.port).toList(growable: false);
-      next = next.copyWith(detectedPorts: ports, lastUpdatedAt: DateTime.now());
+      if (!listEquals(next.detectedPorts, ports)) {
+        next = next.copyWith(
+          detectedPorts: ports,
+          lastUpdatedAt: DateTime.now(),
+        );
+      }
     } else if (parsed is CommandDoneMessage) {
-      next = next.copyWith(
-        clearActiveCommandName: true,
-        lastUpdatedAt: DateTime.now(),
-      );
+      // `command:run` is checkout-scoped; the stream this reads is already
+      // narrowed to one checkout, so a worktree's command finishing cannot
+      // clear the name of the one still running in the project.
+      if (next.activeCommandName != null) {
+        next = next.copyWith(
+          clearActiveCommandName: true,
+          lastUpdatedAt: DateTime.now(),
+        );
+      }
     }
 
     if (next != value) value = next;

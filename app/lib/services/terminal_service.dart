@@ -70,7 +70,25 @@ class TerminalService {
     // git:branches, git:checkout-result. Routed through the focus-gated
     // router status stream so all dispatch goes through one path.
     _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
+
+    // Tier-3 re-drive. A seq cutoff is only meaningful against the PTY
+    // generation it was taken from, and the agent's counter is per PTY: it is
+    // deleted on exit (`ConnState.clearTerminal`), so a same-id respawn starts
+    // again at 1. A disconnect is exactly the window in which a terminal can
+    // exit and respawn unwitnessed — neither `terminal:exited` nor
+    // `terminal:started` arrives — and nothing on the wire distinguishes the
+    // new run from the old, so a surviving cutoff sits above every seq the new
+    // PTY will ever emit and filters its entire output. The tab then renders
+    // blank behind a live process, with no user action that clears it. Dropped
+    // wholesale rather than reasoned about per tab: losing a still-valid cutoff
+    // costs a few duplicated lines on the next snapshot, keeping a stale one
+    // costs the pane.
+    session.hydrateCheckout(checkoutId, _seqCutoffHydratorKey, _dropSeqCutoffs);
   }
+
+  static const _seqCutoffHydratorKey = 'terminal:seq-cutoffs';
+
+  Future<void> _dropSeqCutoffs() async => _snapshotSeq.clear();
 
   void _setState(TerminalState state) {
     if (_disposed) return;
@@ -95,7 +113,9 @@ class TerminalService {
     final parsed = parseAbMessage(json);
     if (parsed == null) return;
     if (parsed is TerminalSnapshotMessage) {
-      _snapshotSeq[parsed.terminalId] = parsed.seq;
+      // Arming is _applySnapshot's job, not this one's: it bails on a tab that
+      // vanished between request and reply, and a cutoff armed for scrollback
+      // nothing rendered filters the live output of the tab that replaces it.
       _applySnapshot(parsed);
       return;
     }
@@ -119,6 +139,7 @@ class TerminalService {
   void _applySnapshot(TerminalSnapshotMessage msg) {
     final tab = _state.tabs[msg.terminalId];
     if (tab == null) return;
+    _snapshotSeq[msg.terminalId] = msg.seq;
     // Deliberately NOT `clear()`. That resets the engine, and a reset takes
     // the guest's MODES with it — alt screen, bracketed paste, focus events,
     // mouse tracking, synchronised output. A fullscreen TUI sets those once at
@@ -256,6 +277,11 @@ class TerminalService {
   void _handleTerminalExited(TerminalExitedMessage msg) {
     _settlePendingTerminal(msg.terminalId);
     _canceledPendingTerminalIds.remove(msg.terminalId);
+    // The agent's seq counter is per PTY, not per terminal id: it is deleted on
+    // exit (`ConnState.clearTerminal`), so a same-id respawn restarts at 1.
+    // A cutoff kept from the previous run sits above every seq the next one
+    // emits, and would filter its entire output as already-snapshotted.
+    _snapshotSeq.remove(msg.terminalId);
     final tab = _state.tabs[msg.terminalId];
     if (tab == null) return;
 
@@ -272,6 +298,7 @@ class TerminalService {
     // Services list is now mirrored into ProjectStatus by ProjectStatusNotifier;
     // consumers read it from projectStatusProvider.
     final newTabs = <String, TerminalTab>{};
+    final discovered = <String>[];
 
     for (final info in msg.terminals) {
       if (_canceledPendingTerminalIds.contains(info.terminalId)) {
@@ -325,6 +352,18 @@ class TerminalService {
           type: info.type,
           driverClientId: info.driverClientId,
         );
+        // Only for a tab this frame is the FIRST word of, unlike
+        // _handleTerminalStarted's unconditional pull: a relay app builds its
+        // tabs from the replayed agent:status rather than from the live started
+        // frame it never receives, so without this the tab arrives and stays
+        // blank. Requested after _setState below, not here — _applySnapshot
+        // drops a reply for a tab it cannot find.
+        // Not gated on `running`: a terminal whose scrollback the agent RETAINS
+        // past its own exit — a `worktree.setup` transcript, which the "View
+        // setup log" action reads after the run — is always stopped by the
+        // time a client that missed it first sees it, and this is the only pull
+        // that would ever reach it.
+        discovered.add(info.terminalId);
       }
     }
 
@@ -351,9 +390,25 @@ class TerminalService {
         layout: msg.layout ?? _state.layout,
         commands: msg.commands ?? _state.commands,
         gitBranch: msg.git?.branch ?? _state.gitBranch,
+        // Carried, not defaulted: a status frame says nothing about an
+        // in-flight branch list or a checkout error, and rebuilding without
+        // them empties an open branch picker and swallows the failure toast.
+        gitBranches: _state.gitBranches,
+        gitBranchesLoading: _state.gitBranchesLoading,
+        gitBranchesError: _state.gitBranchesError,
+        gitCheckoutError: _state.gitCheckoutError,
         needsFirstRun: msg.needsFirstRun,
       ),
     );
+    // A tab can leave the status without ever exiting — a service dropped
+    // from antgrid.yaml, a slot renamed. Its cutoff would otherwise outlive it
+    // and filter the first bytes of whatever later claims the same id.
+    _snapshotSeq.removeWhere((id, _) => !newTabs.containsKey(id));
+    for (final terminalId in discovered) {
+      // Only the tabs that survived the rebuild: one dropped along the way has
+      // nowhere for the reply to land.
+      if (newTabs.containsKey(terminalId)) _requestTerminalSnapshot(terminalId);
+    }
   }
 
   TerminalTab _createTab({
@@ -708,6 +763,10 @@ class TerminalService {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    // Same reason PreviewService deregisters its own: the registry is the
+    // TRANSPORT's, which outlives this service, so a hydrator left behind
+    // keeps clearing a dead checkout's cutoffs on every reconnect forever.
+    session.unhydrateCheckout(checkoutId, _seqCutoffHydratorKey);
     // Resolve any in-flight git action cleanly so its tier-2 timeout timer is
     // cancelled instead of outliving the service.
     _branchesLatch?.settle();

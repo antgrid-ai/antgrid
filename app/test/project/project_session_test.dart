@@ -238,6 +238,57 @@ void main() {
       },
     );
 
+    // The project's status is MAIN's slice of the status tier, never the whole
+    // tier. An isolated session's worktree runs its own copy of antgrid.yaml —
+    // same service names, its own ports, its own config validity — and folding
+    // any of that in here shows, caches and persists the worktree's answer as
+    // the project's own. Scoped at the stream rather than inside the notifier,
+    // so it stays a plain reducer and matches every other per-checkout
+    // consumer; a frame carrying no checkoutId still lands here, which is what
+    // keeps `agent:hello` (about the agent, not a tree) flowing.
+    test('status folds main only, and an unstamped frame counts as main', () async {
+      final t = FakeAgentTransport();
+      final cache = await CachedSessionsStore.open();
+      final session = ProjectSession(
+        projectId: 'p1',
+        transport: t,
+        mode: ProjectSessionMode.relay,
+        cachedSessionsStore: cache,
+        onClose: () async {
+          await t.dispose();
+        },
+      );
+
+      t.emit('agent:status', {
+        'projectId': 'p1',
+        'checkoutId': 'wt-abc123',
+        'terminals': <Map<String, dynamic>>[],
+        'services': [
+          {'id': 'dev', 'name': 'dev', 'running': true, 'command': 'x'},
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(session.status.value.services, isEmpty);
+
+      // No checkoutId at all: the agent describes itself, not a working tree.
+      t.emit('agent:hello', {'version': '1.0.0', 'flags': <String>[]});
+      await Future<void>.delayed(Duration.zero);
+      expect(session.status.value.agentHello, isNotNull);
+
+      t.emit('agent:status', {
+        'projectId': 'p1',
+        'checkoutId': 'main',
+        'terminals': <Map<String, dynamic>>[],
+        'services': [
+          {'id': 'dev', 'name': 'dev', 'running': true, 'command': 'x'},
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(session.status.value.services, hasLength(1));
+
+      await session.close();
+    });
+
     test('close invokes onClose exactly once (idempotent)', () async {
       var closeCount = 0;
       final t = FakeAgentTransport();
