@@ -436,7 +436,9 @@ export class SessionManager {
     this.projectPath = opts.projectPath;
     this.agentSpec = opts.agentSpec;
     this.load();
-    void this.recoverSetupStates();
+    void this.recoverSetupStates().catch((err) => {
+      log.warn("recovering checkout setup states failed: %s", err);
+    });
   }
 
   /**
@@ -912,6 +914,10 @@ export class SessionManager {
         await this.opts.teardownCheckoutRuntime?.(entry.checkoutId);
       } catch (error) {
         if (this.clearDeleting(entry.id)) this.notifyObservers();
+        // The session survived its delete, so the setup this flow cancelled is
+        // still holding its `services:` back with nothing else able to release
+        // them — same reason as the sibling catch on the main delete path.
+        await this.releaseSetupHold(entry);
         throw error;
       }
       this.entries.delete(entry.id);
@@ -1300,7 +1306,9 @@ export class SessionManager {
     // tick the run ended, while the disk write behind them takes as long as it
     // takes.
     this.notifyObservers();
-    void this.settleSetup(entry, setup);
+    void this.settleSetup(entry, setup).catch((err) => {
+      log.warn(`settling setup for session ${entry.id} failed: ${err}`);
+    });
   }
 
   /** The tail of a finished run: release the services it held back, fire the
@@ -1316,6 +1324,11 @@ export class SessionManager {
         log.warn(`deferred services for checkout ${entry.checkoutId} failed to start: ${err}`);
       }
     }
+    // Everything below belongs to THIS run. `cancelSetupRun` settles only
+    // after awaiting a kill, and a `rerun` arriving during that wait mints a
+    // new run whose deliberate marker clear this stamp would overwrite —
+    // leaving a durable outcome recorded over a run that is still going.
+    if (this.setups.get(entry.id) !== setup) return;
     this.firePendingStart(entry.id);
     await this.stampSetupMarker(entry.checkoutId, setup);
   }
@@ -1433,6 +1446,13 @@ export class SessionManager {
     const checkout = await this.opts.resolveCheckout?.(entry.checkoutId)
       ?? await this.opts.worktreeManager?.recordFor(this.opts.projectId, entry.checkoutId);
     if (!checkout) throw new WorktreeError("WORKTREE_MISSING", "The isolated worktree is no longer available.");
+    // The record outliving the directory is the case that matters: a worktree
+    // removed out of band leaves `resolveSetup` unable to find the checkout's
+    // own antgrid.yaml, and a run with no steps reports `done` — stamping a
+    // durable success over a checkout that has no files in it at all.
+    if (!existsSync(checkout.path)) {
+      throw new WorktreeError("WORKTREE_MISSING", "The isolated worktree is no longer available.");
+    }
     // Cleared BEFORE the run rather than overwritten after it: a bridge that
     // dies mid-rerun must come back `interrupted`, and the previous run's `done`
     // would claim otherwise.
@@ -1514,18 +1534,24 @@ export class SessionManager {
       // with WORKTREE_MISSING.
       if (!record) continue;
       if (!record.setupState && this.opts.checkoutDeclaresSetup?.(record) === false) continue;
+      // `done` is deliberately NOT re-seeded. A finished run offers no action,
+      // and `startedAt` can only fall back to the session's creation time — so
+      // a recovered success re-announces "Workspace ready" for every isolated
+      // session on every launch, with only an in-memory dismissal against it.
+      // Absent state is the correct report for a checkout already provisioned.
+      if (record.setupState === "done") continue;
       this.setups.set(entry.id, {
         // No runner behind a recovered state, so no report may ever land on it.
         runId: 0,
-        state: record?.setupState ?? "interrupted",
+        state: record.setupState ?? "interrupted",
         // The step counts died with the run; only its outcome was durable.
         stepIndex: 0,
         stepCount: 0,
-        exitCode: record?.setupExitCode,
+        exitCode: record.setupExitCode,
         // No terminal either: the transcript died with the PTY that wrote it,
         // so the app must not offer a log it cannot replay.
         startedAt: entry.createdAt,
-        finishedAt: record?.setupFinishedAt,
+        finishedAt: record.setupFinishedAt,
         gateReleased: true,
         holdsServices: false,
       });
@@ -1729,13 +1755,23 @@ export class SessionManager {
    *  caller ignores it, exactly as before. */
   stop(id: string): void | Promise<void> {
     const entry = this.entries.get(id);
+    // Cleared for the same reason archive() clears it: the kill below cannot
+    // reach a start that has not happened yet, so a session stopped while its
+    // checkout is still provisioning would launch its agent anyway the moment
+    // setup settled. The prompt stays in `lastQueuedPrompt` for a rerun.
+    const queued = this.setups.get(id);
+    const unqueued = queued?.pendingStart !== undefined;
+    if (queued) queued.pendingStart = undefined;
     if (entry?.mode === "chat") {
       this.runningChat.delete(id);
       const torndown = this.opts.onStopChat?.(id);
       this.changed();
       return torndown;
     }
-    if (!this.tm.has(id)) return;
+    if (!this.tm.has(id)) {
+      if (unqueued) this.changed();
+      return;
+    }
     this.tm.kill(id);
     this.changed();
   }
