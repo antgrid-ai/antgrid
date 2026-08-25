@@ -101,26 +101,47 @@ jobs:
         id: version
         env:
           VERSION_MAJOR: '1'
+          BUILD_NUMBER_OFFSET: ${{ vars.BUILD_NUMBER_OFFSET }}
         run: |
           set -euo pipefail
+
+          # run_number is scoped to ONE workflow in ONE repository and restarts
+          # at 1 in a fresh repo, but the stores remember every build number
+          # they have ever ACCEPTED for the product -- internal-track and
+          # TestFlight uploads included, so "not released publicly yet" does not
+          # reset it. Moving repos therefore walks the counter back under
+          # numbers already taken and every upload is rejected. The offset lifts
+          # the new repo's sequence clear of the old one's high-water mark.
+          #
+          # Unset means 0, and unset is correct on the repo that owns the
+          # original counter -- that is what keeps both repos from consuming the
+          # same offset range while publishing still runs from the old one.
+          offset="${BUILD_NUMBER_OFFSET:-0}"
+          case "$offset" in
+            *[!0-9]*|'') echo "::error::BUILD_NUMBER_OFFSET must be a non-negative integer, got '$offset'"; exit 1 ;;
+          esac
+          build_number=$(( GITHUB_RUN_NUMBER + offset ))
+
           {
-            echo "name=${VERSION_MAJOR}.$(( $(date -u +%s) / 86400 )).${GITHUB_RUN_NUMBER}"
+            echo "name=${VERSION_MAJOR}.$(( $(date -u +%s) / 86400 )).${build_number}"
+            echo "build_number=${build_number}"
             echo "sha=${GITHUB_SHA:0:6}"
             echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } >> "$GITHUB_OUTPUT"
 
       # Override pubspec's static +1 versionCode: Play rejects any upload whose
       # versionCode was already used, and every CI build would otherwise stamp 1.
-      # github.run_number is monotonic per workflow, so each publish gets a fresh,
-      # increasing code. It must stay this workflow's OWN run_number — sourcing it
-      # from another workflow's counter would restart the sequence below codes
-      # Play has already seen and every upload would be rejected.
+      # The stamped build number is monotonic, so each publish gets a fresh,
+      # increasing code. It must stay THIS workflow's own run_number plus the
+      # repo-wide offset — sourcing the counter from another workflow, or
+      # dropping the offset, restarts the sequence below codes Play has already
+      # seen and every upload is rejected.
       - name: Build signed release AAB
         working-directory: app
         run: |
           flutter build appbundle --release \
             --build-name=${{ steps.version.outputs.name }} \
-            --build-number=${{ github.run_number }} \
+            --build-number=${{ steps.version.outputs.build_number }} \
             --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }} \
             --dart-define=APP_VERSION=${{ steps.version.outputs.name }} \
             --dart-define=GIT_SHA=${{ steps.version.outputs.sha }} \
