@@ -130,7 +130,6 @@ void main() {
     final created = await svc.create(name: 'new one', tool: 'claude-code');
     expect(created, isNotNull);
     expect(await svc.start(created!.id, initialPrompt: 'hi'), isNotNull);
-    c.read(activeSessionIdProvider.notifier).set(created.id);
     return created;
   }
 
@@ -143,8 +142,10 @@ void main() {
 
     final created = await startFrom(c);
     // The tail of `startNewSession`, in order: the draft is consumed, the new
-    // session is named for the remount, and only then does the canvas close.
+    // session is focused, it is named for the remount, and only then does the
+    // canvas close.
     resetNewSessionForm(c);
+    c.read(activeSessionIdProvider.notifier).set(created.id);
     c.read(pendingActiveSessionIdProvider.notifier).set(created.id);
     leaveNewSession(c);
 
@@ -169,8 +170,9 @@ void main() {
       ..sessions.add(_oldSession());
     final c = await openProjectThenNewSession(tester, t);
 
-    await startFrom(c);
+    final created = await startFrom(c);
     resetNewSessionForm(c);
+    c.read(activeSessionIdProvider.notifier).set(created.id);
     leaveNewSession(c);
 
     for (var i = 0; i < 10; i++) {

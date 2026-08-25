@@ -5,15 +5,18 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:antgrid/design/widgets/ab_cross_fade.dart';
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/git_branch.dart';
 import 'package:antgrid/providers/agent_catalog.dart';
 import 'package:antgrid/providers/new_session_action.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
+import 'package:antgrid/providers/new_session_start.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/services/sessions_service.dart'
     show SessionOperationException;
+import 'package:antgrid/utils/platform_utils.dart';
 import 'package:antgrid/widgets/ab_status_helpers.dart' show friendlyErrorCopy;
 import 'package:antgrid/widgets/new_session/branch_menu.dart';
 import 'package:antgrid/widgets/new_session/environment_menu.dart';
@@ -1045,6 +1048,420 @@ void main() {
       );
 
       await drainSnackBar(tester);
+    });
+  });
+
+  group('start lock', () {
+    void begin(
+      ProviderContainer container, {
+      NewSessionStartPhase phase = NewSessionStartPhase.activating,
+      String? branch,
+    }) {
+      container
+          .read(newSessionStartProgressProvider.notifier)
+          .begin(
+            phase: phase,
+            targetId: _project.id,
+            targetName: _project.name,
+            deviceName: 'mac-studio',
+            agentLabel: 'Claude Code',
+            isolated: false,
+            title: 'fix the bug',
+            branch: branch,
+          );
+    }
+
+    void advance(ProviderContainer container, NewSessionStartPhase phase) =>
+        container.read(newSessionStartProgressProvider.notifier).advance(phase);
+
+    ProviderContainer containerOf(WidgetTester tester) =>
+        ProviderScope.containerOf(
+          tester.element(find.byType(NewSessionComposer)),
+        );
+
+    /// Never `pumpAndSettle` while a start is armed: the status line and the
+    /// busy send button both run a repeating `AbLoadingDot` controller.
+    Future<void> settle(WidgetTester tester) =>
+        tester.pump(const Duration(milliseconds: 400));
+
+    String statusText(WidgetTester tester) => tester
+        .widget<Text>(
+          find.descendant(
+            of: find.byKey(const Key('new-session-status-line')),
+            matching: find.byType(Text),
+          ),
+        )
+        .data!;
+
+    Finder sendButton() => find.byKey(const Key('new-session-send-button'));
+    Finder stopButton() => find.byKey(const Key('new-session-stop-button'));
+
+    testWidgets('every control in the form refuses taps', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+
+      await tester.pumpWidget(
+        _host(
+          overrides: _baseOverrides(target: _project, worktreeSupported: true),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final container = containerOf(tester);
+      begin(container);
+      await settle(tester);
+
+      // Real taps, because a control that only LOOKS dead still opens its
+      // panel — which is the state the form shipped in.
+      Future<void> tapDead(Finder target) async {
+        await tester.tap(target, warnIfMissed: false);
+        await settle(tester);
+      }
+
+      await tapDead(find.byType(EnvironmentChip));
+      expect(find.text('Machines'), findsNothing);
+
+      await tapDead(find.byType(ProjectChip));
+      expect(find.text('Open folder…'), findsNothing);
+
+      await tapDead(find.byType(BranchChip));
+      expect(find.text('Search branches…'), findsNothing);
+
+      await tapDead(find.byKey(const Key('new-session-worktree-chip')));
+      expect(container.read(newSessionIsolatedProvider), isFalse);
+
+      await tapDead(find.byKey(const Key('new-session-mode-chip')));
+      expect(find.byKey(const Key('new-session-mode-chat')), findsNothing);
+      expect(container.read(newSessionModeProvider), 'terminal');
+
+      await tapDead(find.byKey(const Key('new-session-gear-button')));
+      expect(find.text('Session settings'), findsNothing);
+
+      await tapDead(find.byKey(const Key('new-session-agent-selector')));
+      expect(find.text('Codex'), findsNothing);
+      expect(container.read(newSessionAgentProvider), kDefaultSessionAgent);
+
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets('the prompt is frozen and Enter cannot resubmit', (
+      tester,
+    ) async {
+      var submitCount = 0;
+      await tester.pumpWidget(
+        _host(
+          overrides: _baseOverrides(target: _project),
+          submit: (ref, {allowActiveSessions = false}) async {
+            submitCount++;
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final container = containerOf(tester);
+      await tester.enterText(
+        find.byKey(const Key('new-session-prompt-field')),
+        'fix the bug',
+      );
+      await tester.pump();
+
+      begin(container);
+      await settle(tester);
+
+      final field = tester.widget<TextField>(
+        find.byKey(const Key('new-session-prompt-field')),
+      );
+      // Frozen, not disabled: the prompt already on the wire is the thing the
+      // user is waiting on, so it stays legible and undimmed.
+      expect(field.readOnly, isTrue);
+      expect(field.enabled, isTrue);
+      expect(field.showCursor, isFalse);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await settle(tester);
+
+      expect(submitCount, 0);
+      expect(container.read(newSessionPromptProvider), 'fix the bug');
+
+      // Shift+Enter writes the controller directly, so read-only alone would
+      // still let it edit a prompt that is already being started with.
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await settle(tester);
+
+      expect(container.read(newSessionPromptProvider), 'fix the bug');
+    });
+
+    testWidgets('send becomes Stop, then a plain busy button past the '
+        'cancel boundary', (tester) async {
+      await tester.pumpWidget(
+        _host(overrides: _baseOverrides(target: _project)),
+      );
+      await tester.pumpAndSettle();
+
+      final container = containerOf(tester);
+      expect(stopButton(), findsNothing);
+      expect(tester.widget<ComposerSendButton>(sendButton()).busy, isFalse);
+
+      begin(container);
+      await settle(tester);
+
+      expect(stopButton(), findsOneWidget);
+      await tester.tap(sendButton());
+      await settle(tester);
+
+      expect(container.read(newSessionStartCancelRequestedProvider), isTrue);
+      expect(statusText(tester), 'Cancelling...');
+
+      // Past `creating` the bridge already holds a session, so abandoning the
+      // start would orphan it: the affordance goes away rather than lying.
+      advance(container, NewSessionStartPhase.creating);
+      await settle(tester);
+
+      expect(stopButton(), findsNothing);
+      final busy = tester.widget<ComposerSendButton>(sendButton());
+      expect(busy.busy, isTrue);
+      expect(busy.onTap, isNull);
+      expect(
+        container
+            .read(newSessionStartProgressProvider.notifier)
+            .requestCancel(),
+        isFalse,
+      );
+
+      container.read(newSessionStartProgressProvider.notifier).end();
+      await tester.pumpAndSettle();
+
+      expect(stopButton(), findsNothing);
+      expect(find.byKey(const Key('new-session-status-line')), findsNothing);
+      expect(tester.widget<ComposerSendButton>(sendButton()).busy, isFalse);
+    });
+
+    testWidgets('the status line names the stage the start has reached', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+
+      await tester.pumpWidget(
+        _host(overrides: _baseOverrides(target: _project)),
+      );
+      await tester.pumpAndSettle();
+
+      final container = containerOf(tester);
+      begin(
+        container,
+        phase: NewSessionStartPhase.switchingBranch,
+        branch: 'dev',
+      );
+      await settle(tester);
+
+      expect(find.byKey(const Key('new-session-status-line')), findsOneWidget);
+      expect(statusText(tester), 'Switching to dev...');
+
+      const expected = {
+        NewSessionStartPhase.activating: 'Waking mac-studio...',
+        NewSessionStartPhase.connecting: 'Starting project...',
+        NewSessionStartPhase.preparing: 'Preparing workspace...',
+        NewSessionStartPhase.creating: 'Creating session...',
+        NewSessionStartPhase.launching: 'Launching Claude Code...',
+      };
+      for (final entry in expected.entries) {
+        advance(container, entry.key);
+        await settle(tester);
+        expect(statusText(tester), entry.value);
+      }
+
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets('the status line is shown on mobile too', (tester) async {
+      // The Enter hint is desktop-only, but a cold remote start is a 30s wait
+      // and a phone is where it is most often watched.
+      await tester.pumpWidget(
+        _host(overrides: _baseOverrides(target: _project)),
+      );
+      await tester.pumpAndSettle();
+
+      expect(isMobilePlatform, isTrue);
+      expect(find.byKey(const Key('new-session-status-line')), findsNothing);
+
+      final container = containerOf(tester);
+      begin(container, phase: NewSessionStartPhase.connecting);
+      await settle(tester);
+
+      expect(find.byKey(const Key('new-session-status-line')), findsOneWidget);
+      expect(statusText(tester), 'Starting project...');
+      expect(stopButton(), findsOneWidget);
+    });
+
+    /// Mounts the composer with the prompt focused and hands back its node.
+    Future<FocusNode> focusedPrompt(WidgetTester tester) async {
+      await tester.pumpWidget(
+        _host(overrides: _baseOverrides(target: _project)),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('new-session-prompt-field')));
+      await tester.pumpAndSettle();
+      final node = tester
+          .widget<TextField>(find.byKey(const Key('new-session-prompt-field')))
+          .focusNode!;
+      expect(node.hasFocus, isTrue);
+      return node;
+    }
+
+    testWidgets('a touch start drops the prompt focus', (tester) async {
+      // Flipping the prompt to readOnly closes the platform input connection on
+      // a touch platform, so the soft keyboard collapses on Send and — with
+      // focus still on the field — springs back the instant the start ends,
+      // over a form the user was not typing in and over the snackbar saying
+      // why. Dropping focus makes that close deliberate and one-way.
+      expect(isMobilePlatform, isTrue);
+      final node = await focusedPrompt(tester);
+
+      begin(containerOf(tester));
+      await settle(tester);
+
+      expect(node.hasFocus, isFalse);
+    });
+
+    testWidgets('a desktop start keeps it', (tester) async {
+      // No soft keyboard to collapse, and Enter-to-start is how a retry after
+      // an abort is typed — taking focus away would cost a click every time.
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final node = await focusedPrompt(tester);
+
+      begin(containerOf(tester));
+      await settle(tester);
+
+      expect(node.hasFocus, isTrue);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets('an ended start never fades the Enter hint out in its place', (
+      tester,
+    ) async {
+      // Desktop-roomy is the one shape where the slot survives a start ending
+      // (a phone, or a narrow pane, drops it wholesale). With the prompt
+      // unfocused the slot turns invisible on the same frame as the phase line
+      // is replaced by the Enter hint, so unless the two children animate
+      // separately the fade-out plays on the hint — text that was never on
+      // screen, dissolving out of a slot the user was reading a stage name in.
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      tester.view.physicalSize = const Size(1400, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      double slotOpacity() => tester
+          .widget<Opacity>(
+            find.descendant(
+              of: find.byType(AbCrossFade),
+              matching: find.byType(Opacity),
+            ),
+          )
+          .opacity;
+
+      await tester.pumpWidget(
+        _host(overrides: _baseOverrides(target: _project)),
+      );
+      await tester.pumpAndSettle();
+      expect(slotOpacity(), 0);
+
+      final container = containerOf(tester);
+      begin(container);
+      await tester.pump();
+      await settle(tester);
+      expect(find.byKey(const Key('new-session-status-line')), findsOneWidget);
+      expect(slotOpacity(), 1);
+
+      container.read(newSessionStartProgressProvider.notifier).end();
+      await tester.pump();
+
+      // The frame the swap lands on, and every frame a fade would have run
+      // through: the hint is already gone, not on its way out.
+      expect(find.byKey(const Key('new-session-status-line')), findsNothing);
+      expect(slotOpacity(), 0);
+      await tester.pump(const Duration(milliseconds: 60));
+      expect(slotOpacity(), 0);
+
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets('a remount mid-start hands back a form that is still locked', (
+      tester,
+    ) async {
+      // The lock lives in a provider, not in this State: the New Session screen
+      // builds a different tree either side of the compact breakpoint, so a
+      // resize mid-start disposes the composer — and a widget-local flag came
+      // back cleared while the start it was guarding ran on.
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: _baseOverrides(target: _project, worktreeSupported: true),
+          child: MaterialApp(
+            theme: buildAbTheme(),
+            home: Scaffold(
+              body: Align(
+                alignment: Alignment.bottomCenter,
+                child: Consumer(
+                  builder: (context, ref, _) => ref.watch(_composerVisible)
+                      ? NewSessionComposer(
+                          onOpenFolder: () {},
+                          submit: (_, {allowActiveSessions = false}) async {},
+                        )
+                      : const SizedBox.shrink(),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final container = containerOf(tester);
+      final before = tester.state<State>(find.byType(NewSessionComposer));
+
+      begin(container);
+      await settle(tester);
+      expect(stopButton(), findsOneWidget);
+
+      container.read(_composerVisible.notifier).set(false);
+      await settle(tester);
+      expect(find.byType(NewSessionComposer), findsNothing);
+
+      container.read(_composerVisible.notifier).set(true);
+      await settle(tester);
+
+      // A genuine remount, not a rebuild: the old State was disposed.
+      final after = tester.state<State>(find.byType(NewSessionComposer));
+      expect(identical(before, after), isFalse);
+
+      expect(stopButton(), findsOneWidget);
+      expect(statusText(tester), 'Waking mac-studio...');
+      expect(
+        tester
+            .widget<TextField>(
+              find.byKey(const Key('new-session-prompt-field')),
+            )
+            .readOnly,
+        isTrue,
+      );
+
+      await tester.tap(
+        find.byKey(const Key('new-session-worktree-chip')),
+        warnIfMissed: false,
+      );
+      await settle(tester);
+      expect(container.read(newSessionIsolatedProvider), isFalse);
+
+      advance(container, NewSessionStartPhase.creating);
+      await settle(tester);
+
+      final send = tester.widget<ComposerSendButton>(sendButton());
+      expect(send.onTap, isNull);
+      expect(send.busy, isTrue);
     });
   });
 }

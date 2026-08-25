@@ -14,9 +14,11 @@ import '../../design/widgets/ab_icon.dart';
 import '../../design/widgets/ab_cross_fade.dart';
 import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_kbd.dart';
+import '../../design/widgets/ab_loading.dart';
 import '../../design/widgets/ab_menu.dart';
 import '../../design/widgets/ab_snack_bar.dart';
 import '../../design/widgets/ab_text_field.dart';
+import '../../design/widgets/ab_tooltip.dart';
 
 // The send key moved to the design system (shared with the transcript
 // composer); re-exported so existing importers keep resolving it from here.
@@ -26,6 +28,7 @@ import '../../models/agent_descriptor.dart';
 import '../../providers/agent_catalog.dart';
 import '../../providers/new_session_action.dart';
 import '../../providers/new_session_picker.dart';
+import '../../providers/new_session_start.dart';
 import '../../screens/upgrade_screen.dart';
 import '../../services/sessions_service.dart' show SessionOperationException;
 import '../../utils/platform_utils.dart';
@@ -55,14 +58,67 @@ bool newSessionCanStart({
     (!isCustom || customCmd.trim().isNotEmpty) &&
     (!isolated || isolationReady);
 
+/// What to say when a start ended without producing a session.
+///
+/// A completed checkout is appended to every reason rather than replacing any
+/// of them: it is a second fact about the same outcome, and the one the user
+/// cannot see from the form they are looking at. Without it a Stop during the
+/// checkout reads as "Start cancelled." over a working tree that has moved
+/// under every session in the folder.
+String _abortCopy(NewSessionStartAbort abort) {
+  final switched = abort.branchSwitchedTo;
+  final left = switched == null
+      ? ''
+      : ' The folder was already switched to "$switched".';
+  return '${_abortReasonCopy(abort.reason)}$left';
+}
+
+/// [NewSessionStartAbortReason.cancelled] is the user's own doing, so it reads
+/// as a confirmation; the rest describe something that happened TO the start,
+/// and each names what was and wasn't left behind on the machine.
+String _abortReasonCopy(NewSessionStartAbortReason reason) => switch (reason) {
+  NewSessionStartAbortReason.cancelled => 'Start cancelled.',
+  NewSessionStartAbortReason.intentChanged =>
+    'The setup changed while the session was starting, so nothing was '
+        'created. Start again when the form says what you want.',
+  NewSessionStartAbortReason.createRefused => 'Could not create the session.',
+  NewSessionStartAbortReason.startRefused =>
+    'The session was created but did not start.',
+  NewSessionStartAbortReason.isolationUnavailable =>
+    "This machine can't create isolated sessions — check that its Antgrid is "
+        'up to date.',
+  NewSessionStartAbortReason.abandonedAfterCreate =>
+    'You switched projects while the session was starting, so it was created '
+        'but never launched.',
+  NewSessionStartAbortReason.startedAfterSwitch =>
+    'You switched projects while the session was starting. It launched — find '
+        'it in the project you started it from.',
+  NewSessionStartAbortReason.replyTimedOut =>
+    "The machine didn't answer in time. Check that project's sessions before "
+        'starting another one.',
+};
+
 /// Minimum row slack (hint intrinsic width + trailing gap, with margin)
 /// before the Enter-to-start hint is worth rendering at all.
 const double _enterHintMinWidth = 96;
+
+/// The same floor for the phase status line, set lower because the two are not
+/// worth the same: the hint restates a shortcut, while the phase copy is the
+/// only account of a wait that can run 30s. An ellipsized stage name beats no
+/// stage name, so this only has to leave room for the dot and a few characters.
+const double _statusLineMinWidth = 44;
 
 /// Bottom-row width below which the controls degrade: the agent selector's
 /// slot absorbs the row slack (ellipsizing its label) instead of the desktop
 /// Enter-hint slot. Degradation order is hint → label; the labels never drop.
 const double _composerRowRoomyMinWidth = 460;
+
+/// Flex the phase status line claims while a start runs, against the agent
+/// selector's 1. A phone's bottom row cannot seat both at their intrinsic
+/// widths, and a locked selector is the one of the two with nothing left to
+/// say — it sheds its label to the glyph the way a narrow context row's chips
+/// do, rather than pushing the phase off the line.
+const int _statusSlotFlex = 3;
 
 /// Share of the context row a single picker label may claim before it starts
 /// ellipsizing. Two of them cap out together at well under the full row, which
@@ -104,7 +160,6 @@ class NewSessionComposer extends ConsumerStatefulWidget {
 class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
   late final TextEditingController _prompt;
   late final FocusNode _promptFocus;
-  bool _starting = false;
   bool _hovered = false;
   bool _promptFocused = false;
 
@@ -177,6 +232,12 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
         key != LogicalKeyboardKey.numpadEnter) {
       return KeyEventResult.ignored;
     }
+    // Swallowed, not ignored, while a start runs: the field is read-only by
+    // then, but this handler writes the controller directly, so read-only
+    // alone would still let Shift+Enter edit a prompt already on the wire.
+    if (ref.read(newSessionStartInFlightProvider)) {
+      return KeyEventResult.handled;
+    }
     if (HardwareKeyboard.instance.isShiftPressed) {
       _insertPromptNewline();
       return KeyEventResult.handled;
@@ -206,7 +267,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
   /// [newSessionCanStart] with the reactive `canSend` in `build` so the two
   /// can't diverge.
   bool get _canStart => newSessionCanStart(
-    starting: _starting,
+    starting: ref.read(newSessionStartInFlightProvider),
     hasValidTarget: ref.read(newSessionHasValidTargetProvider),
     isCustom: ref.read(newSessionAgentProvider) == const CustomAgent(),
     customCmd: ref.read(newSessionCustomCmdProvider),
@@ -214,10 +275,24 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     isolationReady: ref.read(newSessionIsolationReadyProvider),
   );
 
+  /// The reason [_reportAbort] last consumed. The abort reason is consume-once
+  /// and the listener below can take it while `_submit` is still unwinding, so
+  /// the arms that have to know whether the user pressed Stop cannot ask the
+  /// provider alone.
+  NewSessionStartAbort? _reportedAbort;
+
+  /// Whether this start ended because the user asked it to. Both sources are
+  /// consulted because either one may hold the answer depending on whether the
+  /// listener has run yet.
+  bool get _endedByCancel =>
+      _reportedAbort?.reason == NewSessionStartAbortReason.cancelled ||
+      ref.read(newSessionStartAbortProvider)?.reason ==
+          NewSessionStartAbortReason.cancelled;
+
   /// Ported verbatim from `_SessionFooterState.build`'s Start button `onTap`.
   Future<void> _submit() async {
     if (!_canStart) return;
-    setState(() => _starting = true);
+    _reportedAbort = null;
     try {
       var allowActiveSessions = false;
       while (true) {
@@ -231,6 +306,10 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
           if (allowActiveSessions) {
             rethrow;
           }
+          // A Stop press the throw outran already ended this start. Asking the
+          // user to confirm a working-tree switch they just cancelled would act
+          // on the opposite of what they last said.
+          if (_endedByCancel) return;
           if (!mounted) return;
           final confirm = await AbConfirmDialog.show(
             context: context,
@@ -258,7 +337,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     } on SessionLimitExceededException catch (e) {
       // A legacy relay's retired cap, not a transient failure — retrying won't
       // clear it, so say what will and show the plan the account is on.
-      if (mounted) {
+      if (mounted && !_endedByCancel) {
         showAbSnackBar(context, e.userMessage);
         await openUpgrade(context, ref.container);
       }
@@ -267,7 +346,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
       // coded arms replace it where its wording names something the reader
       // can't act on; either beats the raw exception the generic arm prints.
       // No navigation — the user stays here with the form intact.
-      if (mounted) {
+      if (mounted && !_endedByCancel) {
         showAbSnackBar(
           context,
           sessionRefusalCopy(
@@ -279,7 +358,9 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
         );
       }
     } catch (e) {
-      if (mounted) {
+      // A start the user stopped reports the cancel and nothing else: the
+      // failure it raced is not an outcome they asked about.
+      if (mounted && !_endedByCancel) {
         showAbSnackBar(
           context,
           'Failed to start session: $e',
@@ -287,8 +368,41 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
         );
       }
     } finally {
-      if (mounted) setState(() => _starting = false);
+      // In a `finally` so the early returns above — an unconfirmed branch
+      // switch, a form that drifted while the dialog was up — report like every
+      // other end of a start rather than leaving the dot to just stop.
+      _reportAbort();
     }
+  }
+
+  /// Say why a start ended without a session, exactly once.
+  ///
+  /// Driven from a listener as well as from `_submit`, because a start outlives
+  /// the composer that began it: the New Session screen builds a different tree
+  /// either side of the compact breakpoint, so the `_submit` continuation can
+  /// resolve on a State that a resize already disposed. Whichever composer is
+  /// mounted when the reason lands is the one that says it; `takeAbortReason`
+  /// CONSUMES, so the other call is a no-op rather than a second snackbar.
+  void _reportAbort() {
+    // Mounted first: reading `ref` on a disposed State throws, and consuming
+    // the reason there would swallow the only record of why the start ended.
+    if (!mounted) return;
+    final abort = ref
+        .read(newSessionStartProgressProvider.notifier)
+        .takeAbort();
+    if (abort == null) return;
+    _reportedAbort = abort;
+    showAbSnackBar(
+      context,
+      _abortCopy(abort),
+      // A cancel the user asked for is a confirmation, not something to read —
+      // unless it also has to account for a checkout it could not take back.
+      duration:
+          abort.reason == NewSessionStartAbortReason.cancelled &&
+              abort.branchSwitchedTo == null
+          ? null
+          : const Duration(seconds: 8),
+    );
   }
 
   @override
@@ -333,6 +447,12 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     ref.listen(newSessionDetectedToolsProvider, (_, next) {
       final detected = next.value;
       if (detected == null || detected.isEmpty) return;
+      // Not while a start is on the wire: `startNewSession` reads the agent
+      // AFTER its awaits, so a detection landing mid-start would relabel a chip
+      // the user was told is locked and launch a tool the status line never
+      // named. Detection re-fires on every control-plane push, and activating
+      // the target is itself one.
+      if (ref.read(newSessionStartInFlightProvider)) return;
       if (ref.read(newSessionAgentTouchedProvider)) return;
       final current = ref.read(newSessionAgentProvider);
       ref
@@ -346,6 +466,24 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     ref.listen(newSessionPromptProvider, (_, next) {
       if (_prompt.text != next) _prompt.text = next;
     });
+    // The reason lands while `startNewSession` is still unwinding, which is
+    // before the `_submit` that began the start resumes — and that `_submit`
+    // may belong to a composer a mid-start resize already disposed. Listening
+    // here means whichever composer is mounted reports it.
+    ref.listen(newSessionStartAbortProvider, (_, next) {
+      if (next != null) _reportAbort();
+    });
+    // Flipping the prompt to readOnly closes the platform input connection on
+    // a touch platform (EditableText._shouldCreateInputConnection), so the soft
+    // keyboard collapses when the start begins and — because nothing dropped
+    // focus — springs back up the moment the field is writable again, over a
+    // form the user was not typing in and over the snackbar explaining why the
+    // start ended. Dropping focus makes the close deliberate and one-way; the
+    // user taps back in to retry. Desktop keeps focus, where Enter-to-start is
+    // the retry.
+    ref.listen(newSessionStartInFlightProvider, (previous, next) {
+      if (next && previous != true && isMobilePlatform) _promptFocus.unfocus();
+    });
 
     final agent = ref.watch(newSessionAgentProvider);
     final customCmd = ref.watch(newSessionCustomCmdProvider);
@@ -358,11 +496,17 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     final supportsChat = ref.watch(newSessionSupportsChatProvider);
     final isolated = ref.watch(newSessionIsolatedProvider);
     final isolationReady = ref.watch(newSessionIsolationReadyProvider);
+    // The in-flight start, watched rather than held in this State: the New
+    // Session screen builds a different tree either side of the compact
+    // breakpoint, so a resize mid-start disposes this widget — and a local
+    // flag would unlock the form while the start it was guarding ran on.
+    final progress = ref.watch(newSessionStartProgressProvider);
+    final starting = progress != null;
     // Reactive form of `_canStart`, built from the values already watched
     // above so the button reacts to every one of them; both go through
     // [newSessionCanStart] so the watch and read paths stay in lockstep.
     final canSend = newSessionCanStart(
-      starting: _starting,
+      starting: starting,
       hasValidTarget: hasValidTarget,
       isCustom: isCustom,
       customCmd: customCmd,
@@ -462,19 +606,22 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                     children: [
                       ConstrainedBox(
                         constraints: capBox,
-                        child: const EnvironmentChip(),
+                        child: EnvironmentChip(enabled: !starting),
                       ),
                       const SizedBox(width: AbTokens.space6),
                       ConstrainedBox(
                         constraints: capBox,
-                        child: ProjectChip(onOpenFolder: widget.onOpenFolder),
+                        child: ProjectChip(
+                          onOpenFolder: widget.onOpenFolder,
+                          enabled: !starting,
+                        ),
                       ),
                       const SizedBox(width: AbTokens.space6),
-                      const Flexible(child: BranchChip()),
+                      Flexible(child: BranchChip(enabled: !starting)),
                       const SizedBox(width: AbTokens.space6),
                       ConstrainedBox(
                         constraints: BoxConstraints(maxWidth: isolationChipMax),
-                        child: const _IsolationChip(),
+                        child: _IsolationChip(enabled: !starting),
                       ),
                     ],
                   );
@@ -519,6 +666,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                         controller: _prompt,
                         focusNode: _promptFocus,
                         enabled: !isCustom,
+                        readOnly: starting,
                         hintText: isCustom
                             ? 'Starts a terminal session — set the command in ⚙'
                             : 'Describe a task or ask a question',
@@ -544,29 +692,44 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                   // so its label ellipsizes (see _composerRowRoomyMinWidth).
                   final roomy =
                       rowConstraints.maxWidth >= _composerRowRoomyMinWidth;
+                  // The Enter hint is desktop-only (a soft keyboard has no
+                  // meaningful Enter-to-send) but the phase line is not: a
+                  // cold remote start is a 30s wait, and a phone is where it
+                  // is most often watched. So the slot is present whenever
+                  // either of the two has something to say.
+                  final showTrailingSlot =
+                      starting || (roomy && !isMobilePlatform);
                   return Row(
                     children: [
-                      _ModeSelector(supportsChat: supportsChat),
+                      _ModeSelector(
+                        supportsChat: supportsChat,
+                        enabled: !starting,
+                      ),
                       const SizedBox(width: AbTokens.space8),
                       Builder(
                         builder: (gearContext) => AbIconButton(
                           key: const Key('new-session-gear-button'),
                           icon: AbIcons.settings,
-                          onTap: () => _openGear(gearContext),
+                          onTap: starting ? null : () => _openGear(gearContext),
                         ),
                       ),
-                      if (roomy && !isMobilePlatform) ...[
-                        // Hardware-Enter hint — desktop only (soft keyboards
-                        // have no meaningful Enter-to-send). Fades rather
-                        // than pops so the row doesn't reflow as readiness
-                        // changes. It lives in the row's slack (not after a
-                        // Spacer) so a narrow pane drops it instead of
-                        // overflowing — the invisible hint still occupies
-                        // layout space.
+                      if (showTrailingSlot) ...[
+                        // The slot fades on READINESS (focus, canSend) so the
+                        // row doesn't reflow; the hint-to-phase swap inside it
+                        // is a hard cut, because AbCrossFade animates one
+                        // child's opacity and not a change of child (which is
+                        // also why the fade below is re-keyed per child). It
+                        // lives in the row's slack (not after a Spacer) so a
+                        // narrow pane drops its content instead of overflowing
+                        // — the invisible slot still occupies layout space.
                         Expanded(
+                          flex: starting ? _statusSlotFlex : 1,
                           child: LayoutBuilder(
                             builder: (context, constraints) {
-                              if (constraints.maxWidth < _enterHintMinWidth) {
+                              if (constraints.maxWidth <
+                                  (starting
+                                      ? _statusLineMinWidth
+                                      : _enterHintMinWidth)) {
                                 return const SizedBox.shrink();
                               }
                               return Align(
@@ -576,33 +739,96 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                                     right: AbTokens.space12,
                                   ),
                                   child: AbCrossFade(
+                                    // Re-keyed on WHICH of the two the slot
+                                    // holds. AbCrossFade fades one child, so
+                                    // without this the swap and the visibility
+                                    // change land on the same frame and it is
+                                    // the newly-substituted child that plays
+                                    // the other one's animation: a start ending
+                                    // with the prompt unfocused faded the Enter
+                                    // hint out, text the user never had. A new
+                                    // key mounts a fresh tween already settled
+                                    // at its target, so each child appears and
+                                    // leaves on its own terms. The trade is
+                                    // that the status line now appears at once
+                                    // rather than fading in — the better half
+                                    // of it, on the frame Send was pressed.
+                                    key: ValueKey(progress == null),
                                     duration: AbTokens.motionDefault,
-                                    visible: _promptFocused && canSend,
-                                    child: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        const AbKbd('⏎'),
-                                        const SizedBox(width: AbTokens.space6),
-                                        Text(
-                                          'to start',
-                                          style: AbTokens.sansStyle(
-                                            fontSize: AbTokens.fontXs,
-                                            color: p.textMuted,
+                                    visible:
+                                        starting || (_promptFocused && canSend),
+                                    child: progress == null
+                                        ? Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              const AbKbd('⏎'),
+                                              const SizedBox(
+                                                width: AbTokens.space6,
+                                              ),
+                                              Text(
+                                                'to start',
+                                                style: AbTokens.sansStyle(
+                                                  fontSize: AbTokens.fontXs,
+                                                  color: p.textMuted,
+                                                ),
+                                              ),
+                                            ],
+                                          )
+                                        : Row(
+                                            key: const Key(
+                                              'new-session-status-line',
+                                            ),
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              AbLoadingDot(
+                                                size: AbTokens.dotSizeMd,
+                                                color: p.textMuted,
+                                              ),
+                                              const SizedBox(
+                                                width: AbTokens.space6,
+                                              ),
+                                              Flexible(
+                                                child: Text(
+                                                  phaseLabel(progress),
+                                                  maxLines: 1,
+                                                  softWrap: false,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                  style: AbTokens.sansStyle(
+                                                    fontSize: AbTokens.fontXs,
+                                                    color: p.textSecondary,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
                                           ),
-                                        ),
-                                      ],
-                                    ),
                                   ),
                                 ),
                               );
                             },
                           ),
                         ),
-                        const _AgentSelector(),
+                        if (starting)
+                          // A bounded slot rather than an intrinsic child: the
+                          // status line took the larger share, and the selector
+                          // has to be able to shed its label to its glyph
+                          // rather than push the row into an overflow. Expanded
+                          // + Align, not a loose Flexible — a Flexible the chip
+                          // underfills leaves its slack AFTER the last child,
+                          // unpinning the send key from the row's right edge.
+                          const Expanded(
+                            child: Align(
+                              alignment: Alignment.centerRight,
+                              child: _AgentSelector(enabled: false),
+                            ),
+                          )
+                        else
+                          const _AgentSelector(),
                       ] else
-                        // No hint slot: hand the slack to the selector so a
-                        // long agent label ellipsizes inside it (ComposerChip
-                        // needs a bounded width) instead of overflowing.
+                        // No trailing slot: hand the slack to the selector so
+                        // a long agent label ellipsizes inside it
+                        // (ComposerChip needs a bounded width) instead of
+                        // overflowing.
                         const Expanded(
                           child: Align(
                             alignment: Alignment.centerRight,
@@ -610,11 +836,44 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
                           ),
                         ),
                       const SizedBox(width: AbTokens.space8),
-                      ComposerSendButton(
-                        key: const Key('new-session-send-button'),
-                        busy: _starting,
-                        onTap: canSend ? _submit : null,
-                      ),
+                      // Stop is the same key in the same slot, so the send
+                      // affordance keeps its test key across both; the outer
+                      // key is what tells the two variants apart. Both carry a
+                      // label: one glyph in one position means start or cancel
+                      // depending on state, and ComposerSendButton paints no
+                      // text to tell a screen reader or a hover which it is.
+                      if (progress != null && progress.isCancellable)
+                        KeyedSubtree(
+                          key: const Key('new-session-stop-button'),
+                          child: Semantics(
+                            button: true,
+                            label: 'Stop starting session',
+                            child: AbTooltip(
+                              message: 'Stop starting session',
+                              child: ComposerSendButton(
+                                key: const Key('new-session-send-button'),
+                                icon: AbIcons.stop,
+                                color: p.error,
+                                onTap: () => ref
+                                    .read(
+                                      newSessionStartProgressProvider.notifier,
+                                    )
+                                    .requestCancel(),
+                              ),
+                            ),
+                          ),
+                        )
+                      else
+                        Semantics(
+                          button: true,
+                          enabled: canSend,
+                          label: 'Start session',
+                          child: ComposerSendButton(
+                            key: const Key('new-session-send-button'),
+                            busy: starting,
+                            onTap: canSend ? _submit : null,
+                          ),
+                        ),
                     ],
                   );
                 },
@@ -649,6 +908,7 @@ class _PromptField extends StatelessWidget {
     required this.controller,
     required this.focusNode,
     required this.enabled,
+    required this.readOnly,
     required this.hintText,
     required this.onChanged,
   });
@@ -656,6 +916,12 @@ class _PromptField extends StatelessWidget {
   final TextEditingController controller;
   final FocusNode focusNode;
   final bool enabled;
+
+  /// Frozen but undimmed, unlike [enabled]: a prompt already on the wire is
+  /// still the thing the user is waiting on, so it has to stay readable — and
+  /// "busy" must not look like the custom-agent "this field is not yours".
+  final bool readOnly;
+
   final String hintText;
   final ValueChanged<String> onChanged;
 
@@ -666,6 +932,10 @@ class _PromptField extends StatelessWidget {
       controller: controller,
       focusNode: focusNode,
       enabled: enabled,
+      readOnly: readOnly,
+      // A caret blinking in a field that cannot take the keystroke invites
+      // exactly the edit this lock exists to refuse.
+      showCursor: !readOnly,
       maxLines: null,
       minLines: 3,
       onChanged: onChanged,
@@ -703,7 +973,11 @@ class _PromptField extends StatelessWidget {
 /// backend would ride in on, and a user who picked "worktree" could not be told
 /// afterwards that they had picked something else.
 class _IsolationChip extends ConsumerWidget {
-  const _IsolationChip();
+  const _IsolationChip({this.enabled = true});
+
+  /// See [ComposerChip.enabled] — handed down by the composer rather than read
+  /// from the start model here, so one owner decides when the row is frozen.
+  final bool enabled;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -722,7 +996,12 @@ class _IsolationChip extends ConsumerWidget {
       key: const Key('new-session-worktree-chip'),
       label: 'isolated',
       value: ref.watch(newSessionIsolatedProvider),
-      tooltip: ready
+      // The frozen arm comes FIRST: a chip dead only because a start is
+      // running must not blame the project's Git or the machine's bridge, and
+      // must not send the reader off to update anything.
+      tooltip: !enabled
+          ? 'Locked while the session starts'
+          : ready
           ? 'Give this session its own branch and workspace, separate from '
                 'your main tree'
           : catalog.isLoading
@@ -736,7 +1015,7 @@ class _IsolationChip extends ConsumerWidget {
           // may neither promise an update works nor read as permanent.
           : 'This machine can\'t create isolated sessions — check that its '
                 'Antgrid is up to date',
-      onChanged: ready
+      onChanged: enabled && ready
           ? (next) => ref.read(newSessionIsolatedProvider.notifier).set(next)
           : null,
     );
@@ -752,11 +1031,14 @@ class _IsolationChip extends ConsumerWidget {
 /// greyed WITH its reason instead of vanishing, so a missing option and an
 /// unsupported one never look alike.
 class _ModeSelector extends ConsumerWidget {
-  const _ModeSelector({required this.supportsChat});
+  const _ModeSelector({required this.supportsChat, this.enabled = true});
 
   /// Null when neither the target machine nor the persisted catalog has
   /// described the selected agent — a third state, not a `false`.
   final bool? supportsChat;
+
+  /// See [ComposerChip.enabled].
+  final bool enabled;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -792,6 +1074,7 @@ class _ModeSelector extends ConsumerWidget {
       icon: isChat ? AbIcons.comment : AbIcons.terminal,
       label: isChat ? 'Chat' : 'Terminal',
       alpha: isChat,
+      enabled: enabled,
       onTap: (ctx) async {
         final anchor = abMenuAnchorRect(ctx);
         if (anchor == null) return;
@@ -839,6 +1122,7 @@ class _ModeChip extends StatelessWidget {
     required this.label,
     required this.alpha,
     required this.onTap,
+    this.enabled = true,
   });
 
   final String icon;
@@ -851,35 +1135,47 @@ class _ModeChip extends StatelessWidget {
 
   final void Function(BuildContext anchorContext) onTap;
 
+  /// See [ComposerChip.enabled] — same treatment, so the composer's two chip
+  /// shapes cannot grow two dialects of "dead".
+  final bool enabled;
+
   @override
   Widget build(BuildContext context) {
     return MouseRegion(
-      cursor: SystemMouseCursors.click,
+      cursor: enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
       child: Builder(
         builder: (ctx) {
           final p = ctx.antgrid;
+          final fg = enabled ? p.textPrimary : p.textDisabled;
           return GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTap: () => onTap(ctx),
+            // Stays live while disabled so the chip keeps swallowing taps
+            // rather than letting them reach the row beneath it.
+            onTap: () {
+              if (!enabled) return;
+              onTap(ctx);
+            },
             child: Container(
               padding: const EdgeInsets.symmetric(
                 horizontal: AbTokens.space8,
                 vertical: AbTokens.space4,
               ),
               decoration: BoxDecoration(
-                border: Border.all(color: p.borderDefault),
+                border: Border.all(
+                  color: enabled ? p.borderDefault : p.borderSubtle,
+                ),
                 borderRadius: AbTokens.borderRadius3,
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  AbIcon(icon, size: 12, color: p.textPrimary),
+                  AbIcon(icon, size: 12, color: fg),
                   const SizedBox(width: AbTokens.space6),
                   Text(
                     label,
                     style: AbTokens.sansStyle(
                       fontSize: AbTokens.fontSm,
-                      color: p.textPrimary,
+                      color: fg,
                     ),
                   ),
                   if (alpha) ...[
@@ -887,7 +1183,11 @@ class _ModeChip extends StatelessWidget {
                     AbChip.system(label: 'Alpha', color: p.warning),
                   ],
                   const SizedBox(width: AbTokens.space6),
-                  AbIcon(AbIcons.chevronDown, size: 10, color: p.textMuted),
+                  AbIcon(
+                    AbIcons.chevronDown,
+                    size: 10,
+                    color: enabled ? p.textMuted : p.textDisabled,
+                  ),
                 ],
               ),
             ),
@@ -903,7 +1203,10 @@ class _ModeChip extends StatelessWidget {
 /// a [ComposerChip] here to match the environment/project chips it sits
 /// beside).
 class _AgentSelector extends ConsumerWidget {
-  const _AgentSelector();
+  const _AgentSelector({this.enabled = true});
+
+  /// See [ComposerChip.enabled].
+  final bool enabled;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -918,6 +1221,7 @@ class _AgentSelector extends ConsumerWidget {
       key: const Key('new-session-agent-selector'),
       icon: AbIcons.terminal,
       label: newSessionAgentLabel(agent, detected, catalog),
+      enabled: enabled,
       onTap: (ctx) async {
         final anchor = abMenuAnchorRect(ctx);
         if (anchor == null) return;

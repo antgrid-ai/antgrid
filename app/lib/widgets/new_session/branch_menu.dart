@@ -12,7 +12,12 @@ import '../../providers/new_session_picker.dart';
 import 'environment_menu.dart';
 
 class BranchChip extends ConsumerWidget {
-  const BranchChip({super.key});
+  const BranchChip({super.key, this.enabled = true});
+
+  /// See [EnvironmentChip.enabled] — the composer owns the frozen state. This
+  /// is not the same as the local `disabled` below, which only reflects a
+  /// branch catalog the chip has nothing to open a panel over.
+  final bool enabled;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -53,6 +58,7 @@ class BranchChip extends ConsumerWidget {
     return ComposerChip(
       icon: AbIcons.gitBranch,
       label: label,
+      enabled: enabled,
       onTap: (ctx) {
         if (disabled) return;
         final anchor = abMenuAnchorRect(ctx);

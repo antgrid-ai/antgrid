@@ -29,6 +29,10 @@ import 'sessions.dart';
 import 'ui_attention_providers.dart';
 import 'value_controller.dart';
 
+/// [newSessionStartInFlightProvider] is derived from the start-progress model
+/// and lives beside it, but its readers have always imported it from here.
+export 'new_session_start.dart' show newSessionStartInFlightProvider;
+
 /// Bare device uuid of a `machine:<uuid>` source id; null for 'local' or the
 /// 'machine:none' placeholder. Single source of truth for the source-id prefix
 /// minted by [buildPickerSources] (`machine:$uuid` / `machine:none`).
@@ -600,13 +604,6 @@ final newSessionSupportsChatProvider = Provider.autoDispose<bool?>((ref) {
 final newSessionAgentTouchedProvider =
     NotifierProvider<ValueController<bool>, bool>(() => ValueController(false));
 
-/// True while [startNewSession] is mid-flight creating+starting a session.
-/// `_bootstrapSessions` (workspace_shell) checks this and skips its
-/// empty->New-Session route so the two paths don't fight over
-/// [workbenchSurfaceProvider].
-final newSessionStartInFlightProvider =
-    NotifierProvider<ValueController<bool>, bool>(() => ValueController(false));
-
 /// The composer's prompt text. Non-empty text becomes the session's first
 /// message (chat) or launch argv (terminal) via `session:start.initialPrompt`.
 final newSessionPromptProvider =
@@ -789,7 +786,6 @@ void resetNewSessionForm(ProviderContainer ref) {
   ref.read(selectedTargetProjectProvider.notifier).set(null);
   ref.read(selectedSourceIdProvider.notifier).set('local');
   ref.read(newSessionAgentTouchedProvider.notifier).set(false);
-  ref.read(newSessionStartInFlightProvider.notifier).set(false);
   ref.read(newSessionPromptProvider.notifier).set('');
   ref.read(newSessionBranchSelectionProvider.notifier).set(null);
   ref.read(newSessionIsolatedProvider.notifier).set(false);

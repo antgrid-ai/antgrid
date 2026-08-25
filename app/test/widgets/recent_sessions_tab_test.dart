@@ -8,11 +8,13 @@ import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/first_run.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
+import 'package:antgrid/providers/new_session_start.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/services/control_plane_client.dart';
 import 'package:antgrid/storage/first_run_store.dart';
 import 'package:antgrid/widgets/new_session/picker_sources.dart';
 import 'package:antgrid/widgets/recent_sessions/recent_sessions_tab.dart';
+import 'package:antgrid/widgets/recent_sessions/starting_session_row.dart';
 import 'package:antgrid/widgets/session_search_field.dart';
 
 import '../helpers/prefs_test_mock.dart';
@@ -371,6 +373,82 @@ void main() {
     expect(find.text('Connect a machine'), findsOneWidget);
     expect(find.textContaining('Turn on Remote'), findsOneWidget);
     expect(find.textContaining('No recent sessions'), findsNothing);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('a start scrolls the list back to the row it adds', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    // Torn down as well as reset below, so a failing `expect` surfaces as
+    // itself rather than as "a foundation debug variable was changed".
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    final rows = [
+      for (var i = 0; i < 40; i++)
+        RecentSessionRow(
+          session: SessionEntry(
+            id: 's$i',
+            name: 'Session $i',
+            createdAt: 0,
+            lastUsedAt: 40 - i,
+            archived: false,
+            running: false,
+          ),
+          origin: const RecentOrigin(
+            isLocal: true,
+            registrationId: 'p',
+            projectId: 'p',
+            machineUuid: null,
+            projectName: 'antgrid',
+            deviceName: 'This device',
+          ),
+        ),
+    ];
+    final container = ProviderContainer(
+      overrides: [recentSessionsProvider.overrideWithValue(rows)],
+    );
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: _wrap(const RecentSessionsTab()),
+      ),
+    );
+    await tester.pump();
+
+    final scrollable = find.descendant(
+      of: find.byType(RecentSessionsTab),
+      matching: find.byType(Scrollable),
+    );
+    tester.state<ScrollableState>(scrollable).position.jumpTo(600);
+    await tester.pump();
+    expect(tester.state<ScrollableState>(scrollable).position.pixels, 600);
+
+    container
+        .read(newSessionStartProgressProvider.notifier)
+        .begin(
+          phase: NewSessionStartPhase.activating,
+          targetId: 'p',
+          targetName: 'antgrid',
+          deviceName: '',
+          agentLabel: 'Claude Code',
+          isolated: false,
+          title: 'fix the bug',
+        );
+    // Not pumpAndSettle: the placeholder row's loading dot repeats forever, so
+    // the tree never settles while a start is armed.
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    // Otherwise the placeholder grows above the viewport: every visible row
+    // shoved down by its height, and the row the shove was for never seen.
+    expect(tester.state<ScrollableState>(scrollable).position.pixels, 0);
+    expect(find.byKey(startingSessionRowKey), findsOneWidget);
+
     debugDefaultTargetPlatformOverride = null;
   });
 
