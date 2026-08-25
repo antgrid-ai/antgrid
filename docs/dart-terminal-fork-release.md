@@ -476,11 +476,12 @@ the generated bindings directly.)
 
 ## Open questions — settle before trusting the cutover
 
-Three of the four are now settled and documented in the sections above: the local
+All four are now settled and documented in the sections above: the local
 `.prebuilt/` override survives (stage 2 of the resolver chain, ahead of the
 download); the source fallback fires only when all three resolvers come back
-empty; and Flutter's `hooks_runner` 1.1.1 does drive a `hooks` 2.x hook. What is
-left:
+empty; and Flutter's `hooks_runner` 1.1.1 does drive a `hooks` 2.x hook. The two
+kept below are the ones whose *reasoning* stays load-bearing — re-read them before
+touching the iOS link mode or bumping `native_prebuilt` again:
 
 1. **Does `portable_pty`'s iOS link mode still need Antgrid's `artifacts.dart`
    patch?** **Settled — the static payload does not resolve, and it broke the
@@ -509,10 +510,24 @@ left:
    compiling the crate whenever the download is unavailable, which is what the
    local verification actually did.
 
-2. **`native_prebuilt` 0.4.0 is out; the fork pins `^0.3.2`.** Every resolution
-   rule recorded in this doc was read from 0.3.2. Check the changelog before
-   bumping, and re-verify the resolver chain if it moves — the local-override
-   precedence is what both store workarounds rest on.
+2. **`native_prebuilt` 0.4.0 — settled; the fork is on `^0.4.0` as of `7a76de4`.**
+   Every resolution rule recorded in this doc was read from 0.3.2 and **still
+   holds by construction, not by re-measurement**: `diff -rq` across the two
+   versions' `lib/` reports exactly one changed file,
+   `lib/src/binary/binary_inspector.dart`. The resolver chain and the
+   local-override precedence both store workarounds rest on are byte-identical.
+
+   What 0.4.0 adds is architecture validation — ELF `e_machine`, Mach-O `cputype`,
+   throwing `BinaryArchitectureException` on mismatch. **It does not cover the
+   committed iOS override**, which is the one artifact a human places by hand:
+   `inspector.inspect()` is called only from `cache/artifact_installer.dart`, so it
+   guards downloads and the shared cache, while `LocalPrebuiltResolver` inspects
+   nothing. `scripts/check-ghostty-ios-abi.sh` is still the only gate on that file.
+
+   One sharp edge if a payload ever goes universal: `_isMachO` accepts the fat
+   magics (`0xCAFEBABE`/`0xCAFEBABF`) but `_validateMachOArchitecture` reads bytes
+   4–7 as `cputype` regardless, which in a fat header is `nfat_arch` — so a fat
+   dylib is rejected as an architecture mismatch. Every slot ships thin today.
 
 ## Cutover checklist
 

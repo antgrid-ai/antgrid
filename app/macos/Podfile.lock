@@ -37,7 +37,7 @@ EXTERNAL SOURCES:
 
 SPEC CHECKSUMS:
   auto_updater_macos: 3a42f1a06be6981f1a18be37e6e7bf86aa732118
-  FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
+  FlutterMacOS: c232990155153907050900a2e175c7773903ba4e
   irondash_engine_context: 893c7d96d20ce361d7e996f39d360c4c2f9869ba
   push: 91373ae39c5341c6de6adefa3fda7f7287d646bf
   Sparkle: 39dbdf28637f6056fbf5ee6494bdbfae54f49f41
