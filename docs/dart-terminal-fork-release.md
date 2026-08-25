@@ -476,11 +476,12 @@ the generated bindings directly.)
 
 ## Open questions — settle before trusting the cutover
 
-Three of the four are now settled and documented in the sections above: the local
+All four are now settled and documented in the sections above: the local
 `.prebuilt/` override survives (stage 2 of the resolver chain, ahead of the
 download); the source fallback fires only when all three resolvers come back
-empty; and Flutter's `hooks_runner` 1.1.1 does drive a `hooks` 2.x hook. What is
-left:
+empty; and Flutter's `hooks_runner` 1.1.1 does drive a `hooks` 2.x hook. The two
+kept below are the ones whose *reasoning* stays load-bearing — re-read them before
+touching the iOS link mode or bumping `native_prebuilt` again:
 
 1. **Does `portable_pty`'s iOS link mode still need Antgrid's `artifacts.dart`
    patch?** **Settled — the static payload does not resolve, and it broke the
@@ -501,18 +502,67 @@ left:
    Reproduced and verified locally on a Mac by simulator build with a cold
    `.dart_tool/hooks_runner`: the pre-fix fork fails with the exact CI error, the
    fixed fork builds and bundles `portable_pty_rs.framework` with an
-   `@rpath` install name. **Untested on a real device** — the App Store path is
-   only exercised by the next TestFlight run.
+   `@rpath` install name.
+
+   **The App Store path is confirmed too**, by run 32847826408 — a
+   `workflow_dispatch` of `deploy-ios` against the fork at `a4f96a`. It archived
+   `ai.radhaai.antgrid` into a 221.1 MB `Runner.xcarchive`, exported an App Store
+   IPA and uploaded it to TestFlight. The `has invalid output … link mode
+   "static"` failure that broke run 31215469869 does not recur on the real
+   signing-and-archive path, so the dynamic payload resolves there and not only
+   on the simulator.
 
    The related simplification does *not* land yet: `deploy-ios.yml`'s
    `aarch64-apple-ios` toolchain step must stay. A dynamic iOS slot falls back to
    compiling the crate whenever the download is unavailable, which is what the
    local verification actually did.
 
-2. **`native_prebuilt` 0.4.0 is out; the fork pins `^0.3.2`.** Every resolution
-   rule recorded in this doc was read from 0.3.2. Check the changelog before
-   bumping, and re-verify the resolver chain if it moves — the local-override
-   precedence is what both store workarounds rest on.
+2. **`native_prebuilt` 0.4.0 — settled; the fork is on `^0.4.0` as of `7a76de4`.**
+   Every resolution rule recorded in this doc was read from 0.3.2 and **still
+   holds by construction, not by re-measurement**: `diff -rq` across the two
+   versions' `lib/` reports exactly one changed file,
+   `lib/src/binary/binary_inspector.dart`. The resolver chain and the
+   local-override precedence both store workarounds rest on are byte-identical.
+
+   What 0.4.0 adds is architecture validation — ELF `e_machine`, Mach-O `cputype`,
+   throwing `BinaryArchitectureException` on mismatch. **It does not cover the
+   committed iOS override**, which is the one artifact a human places by hand.
+   `inspector.inspect()` has exactly two call sites, both in
+   `cache/artifact_installer.dart` (the post-extract path and the cached-file
+   path), so it guards downloads and the shared cache. The `inspector` field
+   lives on `SharedCacheResolver`, which forwards it to `DefaultArtifactInstaller`;
+   `LocalPrebuiltResolver` takes only a `directoryName`, and its `resolve()`
+   hashes the candidate purely to populate `ResolvedFile.hash` — it validates
+   nothing and can reject nothing. `scripts/check-ghostty-ios-abi.sh` is still the
+   only gate on that file.
+
+   Note *where* that leaves the validation, because it is close to inverted:
+   both call sites run `inspect()` only after the bytes have already matched
+   `artifact.payloadSha256`. On the download path the hash pins the exact bytes,
+   so the architecture check is a second opinion about a file already known to be
+   the intended one. The local override is the one artifact with no manifest hash
+   to check against — the only place the check would carry real signal — and it
+   is precisely where it never runs.
+
+   A related trap on the cached-file path: `BinaryArchitectureException` and
+   `BinaryFormatException` are two independent `final class … implements
+   Exception` declarations, with no subtyping between them. The installer's
+   self-heal catches `on BinaryFormatException` and deletes the offending cache
+   entry, so a malformed file is cleaned up and refetched — but an *architecture*
+   mismatch escapes that catch, propagates out of the lock, and leaves the file in
+   place, so every later build fails identically until the shared cache is cleared
+   by hand. Reaching it requires a payload whose hash matches the manifest while
+   being built for the wrong target, i.e. a fork-side packaging mistake — exactly
+   the case this validation exists to catch, and the one it handles worst.
+
+   One more sharp edge if a payload ever goes universal, slightly worse than the
+   field mix-up alone: `_isMachO` accepts the fat magics
+   (`0xCAFEBABE`/`0xCAFEBABF`), but `_validateMachOArchitecture` infers endianness
+   by testing only for `0xFEEDFACE`/`0xFEEDFACF`. A fat header is big-endian by
+   definition and matches neither, so it takes the little-endian branch and reads
+   bytes 4–7 — `nfat_arch` in a fat header, not `cputype` — byte-swapped. A
+   two-slice universal dylib therefore reports `cputype` `0x02000000` and is
+   rejected as an architecture mismatch. Every slot ships thin today.
 
 ## Cutover checklist
 

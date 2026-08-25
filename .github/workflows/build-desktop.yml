@@ -75,7 +75,7 @@ env:
   # and a cache is readable only from its own ref or the DEFAULT branch, so every
   # release wrote 1.8 GB into a scope the next release could not read. The pub
   # cache is the opposite trade (~158 MB, ~12s) and is worth its bytes.
-  FLUTTER_VERSION: '3.47.0'
+  FLUTTER_VERSION: '3.47.1'
   LICENSE_API_URL: 'https://app.antgrid.ai'
   # The only hand-maintained part of the version. Bump for a deliberate product
   # major; the rest of the string is stamped from the clock and the run counter.
