@@ -336,7 +336,11 @@ the step that actually failed.
   written. `interrupted` is DERIVED on load from a marker's absence, so a bridge
   that died mid-run comes back "Setup didn't finish" instead of a row that is
   permanently preparing and unfixable — the same trap `deleting`'s comment in
-  `protocol.ts` was written to avoid. A rerun clears the marker BEFORE it starts,
+  `protocol.ts` was written to avoid. A marker's absence alone is not enough,
+  though: every checkout cut before the project declared a setup block carries
+  none either, so the derivation is gated on the checkout still DECLARING one
+  (`checkoutDeclaresSetup`), or an upgrade banners "Setup didn't finish" on every
+  isolated session the user already had. A rerun clears the marker BEFORE it starts,
   for the same reason. There is deliberately no auto-rerun on launch: a setup
   step can be expensive or destructive and the user did not ask for one on this
   launch.

@@ -70,6 +70,25 @@ describe("CheckoutStore", () => {
     expect(cleared?.setupExitCode).toBeUndefined();
   });
 
+  test("update annotates in place and never resurrects a removed row", async () => {
+    // The setup marker lands on a row the delete flow may already have
+    // reclaimed. A get()-then-put() spans two lock acquisitions, so the put
+    // would write the row back with the worktree it names already gone.
+    const store = new CheckoutStore(dir, "project-a");
+    const base = {
+      id: "checkout-a", projectId: "project-a", kind: "managed-worktree" as const,
+      path: "C:/safe/worktree", branch: "antgrid/session-a", baseRef: "main",
+      managed: true, sessionId: "session-a", createdAt: 1,
+    };
+    await store.put(base);
+    expect(await store.update("checkout-a", (record) => ({ ...record, setupState: "done" }))).toBe(true);
+    expect((await store.get("checkout-a"))?.setupState).toBe("done");
+
+    expect(await store.remove("checkout-a")).toBe(true);
+    expect(await store.update("checkout-a", (record) => ({ ...record, setupState: "failed" }))).toBe(false);
+    expect(await store.list()).toEqual([]);
+  });
+
   test("rejects a running setup state, which must never reach disk", async () => {
     // `running` is absent from the durable enum on purpose: a bridge that dies
     // mid-setup would otherwise leave a row that is permanently preparing with

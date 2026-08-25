@@ -264,6 +264,11 @@ export interface AgentCore {
    *  session at all). Pre-handshake this answers true — nothing is isolated
    *  yet, so no guard should be narrowed away. */
   isMainCheckoutSession(id: string): boolean;
+  /** [client]'s socket closed — it stops vouching for whatever it had on
+   *  screen. Mirrors the work reduction's own `clientGone`: without it a
+   *  desktop that quit, or a phone that dropped off the relay, would keep one
+   *  session permanently "on screen" and mute its setup push forever. */
+  noteClientGone(client: InboundSource): void;
 }
 
 export interface BuildAgentCoreOptions {
@@ -561,8 +566,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // that minted it can. Session PTYs are keyed by their own id, unnamespaced.
   const terminalOwners = new Map<string, { checkoutId: string; externalId: string }>();
   // What each client last said is on screen (`session:focus`), dropped when it
-  // declares it can render nothing here (`client:focus-state`) — the app
-  // restates its focus on resume. Read only by the setup push: a run whose
+  // declares it can render nothing here (`client:focus-state`) or when its
+  // socket goes away (`noteClientGone`) — the app restates its focus on
+  // resume. Read only by the setup push: a run whose
   // banner the user is watching must not also buzz their phone. The work-status
   // read state keeps its own copy in ProjectCore; this one exists because a
   // core has no way back into that reduction.
@@ -2388,6 +2394,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         });
       },
       cancelCheckoutSetup: (checkoutId) => setupRunner.cancel(checkoutId),
+      checkoutDeclaresSetup: (checkout) => {
+        // A config that will not parse cannot say there is nothing to run, so
+        // the doubt is reported as "declares" and the user gets the banner.
+        try { return setupRunner.resolveSetup(checkout) !== null; }
+        catch { return true; }
+      },
       announceCheckoutRuntime: (checkoutId) => {
         const runtime = checkoutRuntimes.runtime(checkoutId);
         if (!runtime) return;
@@ -2983,6 +2995,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     },
     isMainCheckoutSession(id: string): boolean {
       return sessions?.isMainCheckoutSession(id) ?? true;
+    },
+    noteClientGone(client: InboundSource): void {
+      focusedSessionByClient.delete(client);
     },
   };
 }

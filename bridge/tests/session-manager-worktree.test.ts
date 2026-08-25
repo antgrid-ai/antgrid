@@ -430,7 +430,7 @@ describe("isolated session worktree.setup", () => {
   /** A setup runner the test drives by hand. The real one reports from a PTY on
    *  its own schedule; every case here is about what the manager does at a
    *  transition, so the transition has to be the test's to place. */
-  function harness(dir: string, opts: { removeCheckout?: () => void } = {}) {
+  function harness(dir: string, opts: { removeCheckout?: () => void; declaresSetup?: boolean } = {}) {
     const worktree = join(dir, "wt");
     // startCheckout stats the checkout before spawning — a record says nothing
     // about the disk.
@@ -467,6 +467,7 @@ describe("isolated session worktree.setup", () => {
         runs.push({ checkoutId: checkout.id, sessionId, report: onProgress });
       },
       cancelCheckoutSetup: async (checkoutId) => { order.push("cancel-setup"); cancelled.push(checkoutId); },
+      checkoutDeclaresSetup: () => opts.declaresSetup ?? true,
       resolveCheckout: async () => ({ ...record(dir), sessionId: "s" }),
       resolveAgentSpec: async () => ({ command: "claude", name: "claude-code" }),
     });
@@ -744,6 +745,22 @@ describe("isolated session worktree.setup", () => {
       // ...and the gate is open: a recovered state has no runner to wait for.
       await second.sm.start(created.id);
       await waitForTerminal(second.terminal, created.id);
+    });
+  });
+
+  it("reports nothing for a checkout that never had a block to run", async () => {
+    await withDir(async (dir) => {
+      await seedCheckout(dir);
+      const first = harness(dir);
+      const created = await first.sm.create("Isolated", { isolation: "worktree" });
+
+      // A marker's absence alone does not mean a run died: every checkout cut
+      // before the project declared a setup block carries none either, and
+      // reporting those as interrupted banners every isolated session an
+      // upgrade inherits.
+      const second = harness(dir, { declaresSetup: false });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(second.sm.get(created.id)?.setup).toBeUndefined();
     });
   });
 

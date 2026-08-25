@@ -144,6 +144,14 @@ export interface SessionManagerOpts {
    *  checkout is removed: on Windows a live `bun install` holding the worktree
    *  as its cwd makes `git worktree remove` fail. */
   cancelCheckoutSetup?: (checkoutId: string) => Promise<void>;
+  /** Whether this checkout has a `worktree.setup` block AT ALL, answered from
+   *  its own antgrid.yaml. Read once per managed checkout on load, and only to
+   *  keep "died mid-run" apart from "never had a run": every checkout cut before
+   *  this feature shipped carries no marker either, and reporting those as
+   *  `interrupted` puts a "Setup didn't finish" banner on every isolated session
+   *  the user already had. Unanswerable (an unreadable config) reads as true, so
+   *  the doubt surfaces rather than hides. */
+  checkoutDeclaresSetup?: (checkout: CheckoutRecord) => boolean;
   /** Re-push the checkout's workspace state AFTER the session is announced.
    *  `prepareCheckoutRuntime` emits it too, but nothing replays a push frame
    *  and at that point no app knows the checkout exists — so its subscriber
@@ -1083,7 +1091,12 @@ export class SessionManager {
     // the queue lives here rather than in the app so a user who locks their
     // phone comes back to a running agent. Skip, cancel and completion all
     // release the gate and fire this.
-    const gate = entry ? this.setupGate(entry.id) : undefined;
+    //
+    // Never for a session that is ALREADY running: such a start is the
+    // reconnect re-announce path (see startNow / reannounceCheckout), and
+    // queuing it would hold that app's checkout view until the run ends
+    // instead of re-pushing the state it is waiting for.
+    const gate = entry && !this.isRunning(entry) ? this.setupGate(entry.id) : undefined;
     if (gate) {
       gate.pendingStart = { initialPrompt };
       this.notifyObservers();
@@ -1331,6 +1344,11 @@ export class SessionManager {
     setup.state = "skipped";
     setup.finishedAt = Date.now();
     setup.gateReleased = true;
+    // Dropped rather than fired: there is no session to start. It must not
+    // SURVIVE either — a delete Git refuses leaves this row alive, and an entry
+    // still reporting `pendingStart` is one the app's bootstrap never
+    // auto-starts again. The prompt stays in `lastQueuedPrompt` for a rerun.
+    setup.pendingStart = undefined;
   }
 
   /** Awaited, never fatal: until the kill has walked the tree a `bun install`
@@ -1390,17 +1408,15 @@ export class SessionManager {
     const durable: DurableSetupState | undefined = DURABLE_SETUP_STATES.find((state) => state === outcome?.state);
     if (outcome && !durable) return;
     try {
-      const store = this.checkoutStore();
-      const record = await store.get(checkoutId);
-      // Reclaimed while the run was finishing: there is nothing left to annotate
-      // and writing would resurrect the row.
-      if (!record) return;
-      await store.put({
+      // update(), never get()-then-put(): the row may be reclaimed while the run
+      // is finishing, and a read-modify-write spanning two lock acquisitions
+      // would resurrect a checkout whose directory Git has already removed.
+      await this.checkoutStore().update(checkoutId, (record) => ({
         ...record,
         setupState: durable,
         setupFinishedAt: durable ? (outcome?.finishedAt ?? Date.now()) : undefined,
         setupExitCode: durable ? outcome?.exitCode : undefined,
-      });
+      }));
     } catch (err) {
       log.warn(`could not record the setup outcome for checkout ${checkoutId}: ${err}`);
     }
@@ -1432,6 +1448,11 @@ export class SessionManager {
       // A run started while this read was in flight owns the slot.
       if (this.setups.has(entry.id)) continue;
       const record = byCheckout.get(entry.checkoutId);
+      // No marker AND nothing to have run: this checkout predates the project's
+      // setup block (or the feature itself), so there was never a run to
+      // interrupt. Reporting one would banner every isolated session that
+      // existed before the upgrade.
+      if (!record?.setupState && record && this.opts.checkoutDeclaresSetup?.(record) === false) continue;
       this.setups.set(entry.id, {
         // No runner behind a recovered state, so no report may ever land on it.
         runId: 0,

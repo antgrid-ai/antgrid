@@ -229,6 +229,9 @@ export class ProjectCore {
    *  {@link clientGone}. */
   noteClientGone(client: InboundSource): void {
     this.commitWork(clientGone(this._work, client));
+    // The core keeps its own copy of what each client has on screen (the setup
+    // push reads it); a stale entry there mutes that push for good.
+    this.core?.noteClientGone(client);
   }
 
   /** The user pressed a bare Esc into [sessionId]'s PTY — close its turn now

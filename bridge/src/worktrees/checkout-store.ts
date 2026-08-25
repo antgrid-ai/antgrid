@@ -80,6 +80,29 @@ export class CheckoutStore {
       [...records.filter((item) => item.id !== record.id), RecordSchema.parse(record)]);
   }
 
+  /**
+   * Rewrite one row from its current value, under the same lock the write takes.
+   *
+   * The only safe way to annotate a row a caller does not own outright: a
+   * `get()` followed by a `put()` spans two lock acquisitions, so a `remove()`
+   * landing between them is undone — the put RESURRECTS a checkout whose
+   * directory Git has already deleted. Returns false when the row is gone, which
+   * is the annotation quietly dropping rather than a failure.
+   */
+  async update(id: string, patch: (record: CheckoutRecord) => CheckoutRecord): Promise<boolean> {
+    let applied = false;
+    await this.mutate((records) => {
+      const current = records.find((item) => item.id === id);
+      if (!current) return null;
+      const next = RecordSchema.parse(patch(current));
+      if (next.id !== id) throw new Error("checkout id mismatch");
+      if (next.projectId !== this.projectId) throw new Error("checkout projectId mismatch");
+      applied = true;
+      return [...records.filter((item) => item.id !== id), next];
+    });
+    return applied;
+  }
+
   async remove(id: string): Promise<boolean> {
     let removed = false;
     await this.mutate((records) => {
