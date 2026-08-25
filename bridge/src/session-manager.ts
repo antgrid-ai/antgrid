@@ -863,11 +863,26 @@ export class SessionManager {
       return this.deleteManaged(entry, options);
     }
     if (this.tm.has(id)) this.tm.kill(id);
+    this.dropSession(id);
+    this.changed();
+    return true;
+  }
+
+  /** Everything a delete must release for one session, the TerminalManager's
+   *  own memory of its PTY included. That last part is what nothing did: a
+   *  session terminal is namespaced by nothing, so its whole attribution is the
+   *  owner row agent-core writes, and `forget` is the only signal that releases
+   *  it. Left in `stoppedTerminals` with its entry gone, the corpse resolves
+   *  through `terminalOwner`'s "main" default and is advertised in the primary
+   *  workspace as a stopped agent tab, for the life of the process, with
+   *  nothing on any surface able to close it. Safe to call before the PTY's
+   *  exit lands: `forget` tombstones a still-live terminal so the exit cannot
+   *  re-create the rows it just dropped. */
+  private dropSession(id: string): void {
+    this.tm.forget(id);
     this.entries.delete(id);
     this.resumableCache.delete(id);
     this.setups.delete(id);
-    this.changed();
-    return true;
   }
 
   /** Flag a session's delete as in flight and announce it. Emits without
@@ -920,9 +935,7 @@ export class SessionManager {
         await this.releaseSetupHold(entry);
         throw error;
       }
-      this.entries.delete(entry.id);
-      this.resumableCache.delete(entry.id);
-      this.setups.delete(entry.id);
+      this.dropSession(entry.id);
       this.clearDeleting(entry.id);
       // In a finally: the row is already gone from memory and the flag already
       // cleared, so a flush that throws must not leave the app holding the
@@ -1000,9 +1013,7 @@ export class SessionManager {
       await this.releaseSetupHold(entry);
       throw error;
     }
-    this.entries.delete(entry.id);
-    this.resumableCache.delete(entry.id);
-    this.setups.delete(entry.id);
+    this.dropSession(entry.id);
     this.clearDeleting(entry.id);
     // See the sibling tail above: the emit is owed even when the flush fails.
     try {

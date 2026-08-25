@@ -40,6 +40,10 @@ export interface TerminalManagerCallbacks {
   onTerminalExited?: (terminalId: string) => void;
   onTerminalNotification?: (terminalId: string) => void;
   onTerminalTitle?: (terminalId: string, title: string) => void;
+  /** This terminal is gone for good — not exited, FORGOTTEN: nothing will name
+   *  it again and `getStatus` will never report it. The one signal an owner of
+   *  per-terminal state outside this class can key its own release on. */
+  onTerminalForgotten?: (terminalId: string) => void;
 }
 
 export class TerminalManager {
@@ -281,6 +285,7 @@ export class TerminalManager {
     this.modeTrackers.delete(terminalId);
     this.stoppedTerminals.delete(terminalId);
     this.terminalTypes.delete(terminalId);
+    this.callbacks.onTerminalForgotten?.(terminalId);
   }
 
   async killAllGracefully(timeoutMs = 5000): Promise<number> {
