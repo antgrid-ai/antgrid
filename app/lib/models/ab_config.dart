@@ -202,6 +202,16 @@ class AbConfig {
   final List<AbCommand> commands;
   final List<AbPort> ports;
 
+  /// The `worktree` block verbatim, carried rather than modelled.
+  ///
+  /// Nothing in the app renders it — a managed checkout's provisioning is the
+  /// bridge's job — but the settings screen round-trips the WHOLE config
+  /// through this model on Save, so a key that is not carried here is deleted
+  /// from the user's `antgrid.yaml` by an unrelated edit. Keeping it raw also
+  /// means the bridge can widen the block without the app silently dropping
+  /// whatever part of it this build predates.
+  final Map<String, dynamic>? worktree;
+
   const AbConfig({
     this.name,
     this.relayUrl,
@@ -209,6 +219,7 @@ class AbConfig {
     this.services = const [],
     this.commands = const [],
     this.ports = const [],
+    this.worktree,
   });
 
   factory AbConfig.fromJson(Map<String, dynamic> json) => AbConfig(
@@ -230,6 +241,10 @@ class AbConfig {
               : AbPort.fromJson(e as Map<String, dynamic>),
         )
         .toList(),
+    worktree: switch (json['worktree']) {
+      final Map<String, dynamic> m => m,
+      _ => null,
+    },
   );
 
   Map<String, dynamic> toJson() => {
@@ -241,6 +256,7 @@ class AbConfig {
     if (commands.isNotEmpty)
       'commands': commands.map((c) => c.toJson()).toList(),
     if (ports.isNotEmpty) 'ports': ports.map((p) => p.toJson()).toList(),
+    if (worktree != null) 'worktree': worktree,
   };
 
   AbConfig copyWith({
@@ -251,6 +267,7 @@ class AbConfig {
     List<AbService>? services,
     List<AbCommand>? commands,
     List<AbPort>? ports,
+    Map<String, dynamic>? worktree,
   }) {
     assert(
       !(clearRelayUrl && relayUrl != null),
@@ -263,6 +280,7 @@ class AbConfig {
       services: services ?? this.services,
       commands: commands ?? this.commands,
       ports: ports ?? this.ports,
+      worktree: worktree ?? this.worktree,
     );
   }
 }

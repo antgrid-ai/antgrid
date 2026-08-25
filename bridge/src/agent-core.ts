@@ -36,7 +36,8 @@ import { WorktreeManager } from "./worktrees/worktree-manager";
 import { CheckoutStore } from "./worktrees/checkout-store";
 import { resolveProject } from "./worktrees/project-resolver";
 import { CheckoutRuntimeRegistry } from "./worktrees/checkout-runtime-registry";
-import type { CheckoutRecord } from "./worktrees/checkout-types";
+import type { CheckoutRecord, CheckoutSetupProgress } from "./worktrees/checkout-types";
+import { CheckoutSetupRunner } from "./worktrees/checkout-setup";
 import { SessionNamer } from "./session-namer";
 import { antigravityCliHome } from "./agents/antigravity/title";
 import { AntigravityTitleWatcher } from "./agents/antigravity/title-watcher";
@@ -96,6 +97,11 @@ interface CheckoutRuntime {
   gitStatusSeq: number;
   gitStatusApplied: number;
   configuredTerminalIds: Map<string, string>;
+  /** True while the `services` block is held back for a `worktree.setup` run.
+   * [startDeferredServices] is the only thing that clears it — a service
+   * started against a worktree whose dependencies are still installing fails
+   * before the user has seen the session. */
+  servicesDeferred: boolean;
   started: boolean;
   /** This runtime is being torn down, or already has been. Never cleared — a
    * torn-down runtime is replaced, never revived.
@@ -258,6 +264,11 @@ export interface AgentCore {
    *  session at all). Pre-handshake this answers true — nothing is isolated
    *  yet, so no guard should be narrowed away. */
   isMainCheckoutSession(id: string): boolean;
+  /** [client]'s socket closed — it stops vouching for whatever it had on
+   *  screen. Mirrors the work reduction's own `clientGone`: without it a
+   *  desktop that quit, or a phone that dropped off the relay, would keep one
+   *  session permanently "on screen" and mute its setup push forever. */
+  noteClientGone(client: InboundSource): void;
 }
 
 export interface BuildAgentCoreOptions {
@@ -554,6 +565,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // store nor the raw id can say which checkout it belongs to — only the site
   // that minted it can. Session PTYs are keyed by their own id, unnamespaced.
   const terminalOwners = new Map<string, { checkoutId: string; externalId: string }>();
+  // What each client last said is on screen (`session:focus`), dropped when it
+  // declares it can render nothing here (`client:focus-state`) or when its
+  // socket goes away (`noteClientGone`) — the app restates its focus on
+  // resume. Read only by the setup push: a run whose
+  // banner the user is watching must not also buzz their phone. The work-status
+  // read state keeps its own copy in ProjectCore; this one exists because a
+  // core has no way back into that reduction.
+  const focusedSessionByClient = new Map<InboundSource, string>();
 
   function createCheckoutRuntime(
     checkout: CheckoutRecord,
@@ -581,6 +600,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       gitStatusSeq: 0,
       gitStatusApplied: 0,
       configuredTerminalIds: new Map(),
+      servicesDeferred: false,
       started: false,
       disposed: false,
     };
@@ -1160,7 +1180,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       case "session:archive":
       case "session:unarchive":
       case "session:delete":
-      case "session:set-mode": {
+      case "session:set-mode":
+      case "session:setup": {
         // Bound to consts so the switch's narrowing and the not-null check below
         // survive into the async closure.
         const verb = msg;
@@ -1171,10 +1192,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           }));
           break;
         }
-        // Only set-mode awaits (it waits out the old runtime's teardown before
-        // restarting on the new one). Every other verb still runs straight
-        // through to its reply without yielding, since an async body runs
-        // synchronously until its first await.
+        // Only set-mode (it waits out the old runtime's teardown before
+        // restarting on the new one) and setup (a cancel waits out the setup
+        // process tree) await. Every other verb still runs straight through to
+        // its reply without yielding, since an async body runs synchronously
+        // until its first await.
         void (async () => {
           const checkoutId = s.get(verb.sessionId)?.checkoutId ?? "main";
           try {
@@ -1189,6 +1211,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
               deleteBranch: verb.deleteBranch,
             });
             else if (verb.type === "session:set-mode") await s.setMode(verb.sessionId, verb.mode);
+            else if (verb.type === "session:setup") await s.applySetupAction(verb.sessionId, verb.action);
             const entry = s.get(verb.sessionId);
             sendAb(createMessage("session:result", {
               requestId: verb.requestId, ok: true, session: entry, checkoutId,
@@ -1211,12 +1234,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // keyed by session id across the whole project, so it must not be lost
         // to a runtime that has no session manager (or has not built one yet).
         opts.onSessionFocus?.(msg.sessionId, client);
+        focusedSessionByClient.set(client, msg.sessionId);
         if (!sessions) break;
         sessions.focus(msg.sessionId);
         break;
       }
       case "client:focus-state": {
         connState.appFocusPaused = msg.paused;
+        if (msg.paused) focusedSessionByClient.delete(client);
         opts.onClientFocusState?.(msg.paused, client);
         log.info("focus-state: paused=%s", msg.paused);
         break;
@@ -1428,6 +1453,76 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       notificationType: "task_complete", message, sessionId: terminalId, projectId: project.id,
     })),
   });
+
+  /** Provisions a freshly cut worktree — copies the untracked files a `git
+   *  worktree add` cannot bring and runs the project's install steps — before
+   *  its agent and its services start. Eager and factory-scoped like
+   *  [handlerEngine]: the terminal reads defer, so whatever `manager` exists
+   *  when a run actually spawns is the one it uses. */
+  const setupRunner = new CheckoutSetupRunner({
+    projectPath: project.path,
+    terminals: {
+      spawn: (spawnConfig) => {
+        if (!manager) throw new Error("terminal manager is not ready");
+        return manager.spawn(spawnConfig);
+      },
+      killAndAwaitTree: (terminalId) => manager?.killAndAwaitTree(terminalId) ?? Promise.resolve(),
+    },
+  });
+
+  /** Put the setup transcript under the checkout's runtime so
+   *  [teardownCheckoutRuntime] reaches it with killAndAwaitTree before `git
+   *  worktree remove` runs: on Windows a live `bun install` holding the
+   *  checkout as its cwd aborts that sweep mid-tree and strands the session
+   *  undeletable. Mapped to itself rather than namespaced, because the session
+   *  entry hands the app this exact id — translating it on the way out would
+   *  point the app's snapshot request at a terminal nobody has. */
+  /** Setup transcripts this process has spawned, live or finished.
+   *
+   *  Separate from `CheckoutSetupRunner.runs`, which is emptied by `finish()`
+   *  — and `finish()` runs BEFORE the PTY's exit on every kill path, because
+   *  `killAndAwaitTree` resolves on `killProcessTree` + `pty.kill()` returning,
+   *  which is strictly earlier than node-pty dispatching `onExit`. So a
+   *  cancelled, timed-out or rerun-over run reaches `onTerminalExited` with
+   *  `handleExit` already answering false, and only this set still knows what
+   *  the terminal was. Emptied with the rest of the checkout in
+   *  `sweepCheckoutRuntime`. */
+  const setupTerminalIds = new Set<string>();
+
+  function registerSetupTerminal(checkoutId: string, terminalId: string): void {
+    checkoutRuntimes.runtime(checkoutId)?.configuredTerminalIds.set(terminalId, terminalId);
+    terminalOwners.set(terminalId, { checkoutId, externalId: terminalId });
+    setupTerminalIds.add(terminalId);
+  }
+
+  /** Below this a run finished while the user was still on the create flow, and
+   *  a push would be noise on every project whose setup is a cache hit. */
+  const SETUP_PUSH_MIN_MS = 20_000;
+
+  /** One push per run, and only for a run nobody watched to the end. A cancel
+   *  says nothing: the user is the one who ended it. */
+  function notifySetupSettled(sessionId: string, progress: CheckoutSetupProgress, elapsedMs: number): void {
+    if (progress.state !== "done" && progress.state !== "failed") return;
+    if (elapsedMs < SETUP_PUSH_MIN_MS) return;
+    if (isSessionOnScreen(sessionId)) return;
+    const name = sessions?.get(sessionId)?.name;
+    sendNotifying(createMessage("notification:push", {
+      notificationType: progress.state === "done" ? "task_complete" : "error",
+      message: progress.state === "done"
+        ? "Workspace is ready."
+        : progress.message ?? "Workspace setup failed.",
+      sessionId,
+      ...(name ? { sessionTitle: name } : {}),
+      projectId: project.id,
+    }));
+  }
+
+  function isSessionOnScreen(sessionId: string): boolean {
+    for (const focused of focusedSessionByClient.values()) {
+      if (focused === sessionId) return true;
+    }
+    return false;
+  }
 
   async function refreshGitBranch(runtime: CheckoutRuntime = mainRuntime): Promise<void> {
     try {
@@ -1838,9 +1933,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
   }
 
-  async function startCheckoutRuntime(runtime: CheckoutRuntime): Promise<void> {
+  async function startCheckoutRuntime(
+    runtime: CheckoutRuntime,
+    opts?: { deferServices?: boolean },
+  ): Promise<void> {
     if (runtime.started || !manager) return;
     runtime.started = true;
+    runtime.servicesDeferred = opts?.deferServices ?? false;
     const runtimeId = runtime.checkout.id;
     const send = (msg: AbMessage) => sendFromRuntime(runtime, msg);
     const pd = new PortDetector({
@@ -1917,6 +2016,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       for (const changed of [...diff.servicesAdded, ...diff.servicesModified]) {
         const service = result.config.services?.find((candidate) => candidate.name === changed.name);
         if (!service || !manager) continue;
+        // A setup step that edits antgrid.yaml must not spawn what the deferral
+        // is holding back; [startDeferredServices] starts the whole block from
+        // the config this callback is about to assign.
+        if (runtime.servicesDeferred) continue;
         const terminalId = internalTerminalId(runtime, service.name);
         if (diff.servicesModified.some((candidate) => candidate.name === changed.name)) {
           manager.kill(terminalId);
@@ -1941,18 +2044,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       sendStatus(runtime);
     });
 
-    for (const service of runtime.config.services ?? []) {
-      if (service.autoStart === false) continue;
-      manager.spawn({
-        terminalId: internalTerminalId(runtime, service.name),
-        name: service.name,
-        command: service.command,
-        args: service.args,
-        cwd: service.workingDir ?? runtime.checkout.path,
-        env: service.env,
-        type: "service",
-      });
-    }
+    if (!runtime.servicesDeferred) startCheckoutServices(runtime);
     const refreshed = Promise.all([refreshGitBranch(runtime), refreshGitStatus(runtime)]);
     // Tracked, not merely awaited: both spawn `git` children holding the
     // checkout as their cwd, and `awaitGitRefreshes` is what teardown waits on
@@ -1978,6 +2070,37 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }, 10_000);
   }
 
+  /** Spawn the checkout's `services` block. Manual-start slots stay listed in
+   *  status rather than running, same as the main project's own pass. */
+  function startCheckoutServices(runtime: CheckoutRuntime): void {
+    for (const service of runtime.config.services ?? []) {
+      if (service.autoStart === false) continue;
+      manager?.spawn({
+        terminalId: internalTerminalId(runtime, service.name),
+        name: service.name,
+        command: service.command,
+        args: service.args,
+        cwd: service.workingDir ?? runtime.checkout.path,
+        env: service.env,
+        type: "service",
+      });
+    }
+  }
+
+  /** Release the `services` a `deferServices` preparation held back. Called
+   *  once a `worktree.setup` run reaches a terminal state, whatever that state
+   *  is: a failed setup still gets its dev server, because `onFailure: warn`
+   *  means the session runs regardless. */
+  async function startDeferredServices(checkoutId: string): Promise<void> {
+    const runtime = checkoutRuntimes.runtime(checkoutId);
+    if (!runtime?.servicesDeferred) return;
+    runtime.servicesDeferred = false;
+    startCheckoutServices(runtime);
+    // `agent:status` is what carries services[].running to the app, and the
+    // checkout's last push happened while they were still held back.
+    sendStatus(runtime);
+  }
+
   /** Serializes a checkout's runtime lifecycle. Building a runtime and tearing
    * one down both suspend repeatedly, and everything they touch — a recursive
    * watcher, `services:` PTYs, `git` children — holds the checkout directory
@@ -1989,18 +2112,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    * against 31 stops. */
   const withCheckoutRuntimeLock = createKeyedLock();
 
-  function prepareCheckoutRuntime(checkout: CheckoutRecord): Promise<CheckoutRuntime> {
+  function prepareCheckoutRuntime(
+    checkout: CheckoutRecord,
+    opts?: { deferServices?: boolean },
+  ): Promise<CheckoutRuntime> {
     return withCheckoutRuntimeLock(checkout.id, async () => {
       const existing = checkoutRuntimes.runtime(checkout.id);
       if (existing) {
-        await startCheckoutRuntime(existing);
+        await startCheckoutRuntime(existing, opts);
         return existing;
       }
       const runtimeConfig = loadConfig(undefined, checkout.path);
       const spec = agentSpecForConfig(runtimeConfig);
       const runtime = createCheckoutRuntime(checkout, runtimeConfig, spec);
       await checkoutRuntimes.prepare(checkout, runtimeConfig, spec, runtime);
-      await startCheckoutRuntime(runtime);
+      await startCheckoutRuntime(runtime, opts);
       return runtime;
     });
   }
@@ -2043,7 +2169,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       pending.push(killChildTree(proc));
     }
     runtime.runningCommands.clear();
-    for (const internalId of runtime.configuredTerminalIds.values()) {
+    const ownedTerminalIds = [...runtime.configuredTerminalIds.values()];
+    for (const internalId of ownedTerminalIds) {
       if (manager) pending.push(manager.killAndAwaitTree(internalId));
     }
     // Stops run while the kills are in flight — they are the only holders left
@@ -2057,6 +2184,16 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // enough to abort that sweep mid-tree and strand the session undeletable.
     // This is the one place a tree kill must be WAITED on rather than issued.
     await Promise.all([...pending, awaitGitRefreshes(runtime)]);
+    // Nothing can name these ids again once the runtime is gone, and the setup
+    // transcript among them is retained past its own exit on purpose — so this
+    // is the only site that can release it.
+    for (const internalId of ownedTerminalIds) {
+      manager?.forget(internalId);
+      // The owner row too: a retained setup transcript keeps its own past exit
+      // so `sendStatus` can still route it, and this is where that ends.
+      terminalOwners.delete(internalId);
+      setupTerminalIds.delete(internalId);
+    }
     dropCheckoutReplay(checkoutId);
     await checkoutRuntimes.remove(checkoutId);
   }
@@ -2103,6 +2240,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       onTerminalOutput: (id, data) => terminalOwner(id).runtime.portDetector?.feed(id, data),
       onTerminalExited: (id) => {
         terminalOwner(id).runtime.portDetector?.removeTerminal(id);
+        // A setup transcript belongs to no session, so its exit settles the run
+        // and takes none of the session-scoped cleanup below. Its owner row
+        // stays, too: the scrollback is retained on purpose, and `sendStatus`
+        // routes a terminal by that row — dropping it would advertise the
+        // finished transcript on MAIN and prune it from the checkout bundle the
+        // banner's "View setup log" reads, exactly when the run has failed.
+        // Released with the rest of the checkout in `teardownCheckoutRuntime`.
+        if (setupRunner.handleExit(id) || setupTerminalIds.has(id)) return;
         sessions?.noteExited(id);
         // Drop buffered title state so a stale title from this run can't leak
         // into a restarted same-id session (start() reuses the entry id).
@@ -2121,6 +2266,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // its executable path — we substitute the display name until the plugin hook
       // supplies the real conversation title.
       onTerminalTitle: (id, title) => {
+        // Every title on a live setup transcript is a step marker, so it goes to
+        // the runner and NOWHERE else — the namer would otherwise read setup
+        // progress as the session's conversation name.
+        if (setupRunner.handleTitle(id, title)) return;
         // A non-session PTY (a config `terminals:` slot) is attributable to no
         // agent, so its raw title passes through untouched.
         const session = sessions?.get(id);
@@ -2250,7 +2399,37 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         opts.worktreeSessionsSupported ?? WORKTREE_SESSIONS_SUPPORTED,
       worktreeManager,
       isGitRepository,
-      prepareCheckoutRuntime: async (checkout) => { await prepareCheckoutRuntime(checkout); },
+      prepareCheckoutRuntime: async (checkout, prepareOpts) => {
+        await prepareCheckoutRuntime(checkout, prepareOpts);
+      },
+      startDeferredServices,
+      runCheckoutSetup: (checkout, sessionId, onProgress) => {
+        const startedAt = Date.now();
+        setupRunner.start(checkout, sessionId, (progress) => {
+          // Before the report, and off the runner's own id rather than a
+          // computed one: a checkout with no setup block never spawns a PTY,
+          // and registering an id nothing runs under makes every delete warn.
+          if (progress.terminalId) registerSetupTerminal(checkout.id, progress.terminalId);
+          // Reported before the push so the entry it reads — the session title
+          // included — is the one the session manager has just settled.
+          onProgress(progress);
+          notifySetupSettled(sessionId, progress, Date.now() - startedAt);
+        });
+      },
+      cancelCheckoutSetup: (checkoutId) => setupRunner.cancel(checkoutId),
+      checkoutDeclaresSetup: (checkout) => {
+        // A config that will not parse cannot say there is nothing to run, so
+        // the doubt is reported as "declares" and the user gets the banner.
+        try {
+          const setup = setupRunner.resolveSetup(checkout);
+          // An EMPTY `steps` list is a declaration of nothing, and the same
+          // answer `begin()` gives it. The nudge writes exactly that block for
+          // a project it cannot fingerprint (`buildStarterWorktreeSetup`), so
+          // reading it as "declares" would defer services for a run that only
+          // ever reports `done`, and stamp that durably.
+          return !!setup && setup.steps.length > 0;
+        } catch { return true; }
+      },
       announceCheckoutRuntime: (checkoutId) => {
         const runtime = checkoutRuntimes.runtime(checkoutId);
         if (!runtime) return;
@@ -2846,6 +3025,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     },
     isMainCheckoutSession(id: string): boolean {
       return sessions?.isMainCheckoutSession(id) ?? true;
+    },
+    noteClientGone(client: InboundSource): void {
+      focusedSessionByClient.delete(client);
     },
   };
 }

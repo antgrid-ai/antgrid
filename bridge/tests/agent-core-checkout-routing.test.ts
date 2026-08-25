@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
 import { buildAgentCore, type AgentCore } from "../src/agent-core";
@@ -420,3 +420,133 @@ test("main is unaffected while another checkout's delete is in flight", async ()
   expect(frame).toMatchObject({ type: "file:content", content: "main\n" });
   expect(sent.filter((m) => m.type === "control:result" && m.checkoutId === "main")).toEqual([]);
 });
+
+/** A committed antgrid.yaml the managed checkout will read as its own. */
+function commitConfig(body: string): Promise<void> {
+  writeFileSync(join(root, "antgrid.yaml"), body);
+  return initRepo();
+}
+
+function frameIndex(sent: AbMessage[], predicate: (message: AbMessage) => boolean): number {
+  const index = sent.findIndex(predicate);
+  if (index < 0) throw new Error("frame never arrived");
+  return index;
+}
+
+test("a managed checkout's services wait for worktree.setup to finish", async () => {
+  // Auto-starting a service against a worktree whose node_modules has not been
+  // provisioned yet is a guaranteed failure the user then has to read past, so
+  // the block is held from `prepareCheckoutRuntime` until setup reaches ANY
+  // terminal state — `onFailure: warn` means a failed run still gets its
+  // dev server.
+  await commitConfig([
+    "name: checkout-routing",
+    "agent:",
+    "  tool: claude-code",
+    "services:",
+    "  - name: svc",
+    "    command: git --version",
+    "worktree:",
+    "  setup:",
+    "    steps:",
+    "      - name: Install dependencies",
+    "        run: git --version",
+  ].join("\n"));
+  const { bus, sent } = await bootCore();
+  const session = await createSession(bus, sent, "Isolated", "worktree");
+  const checkoutId = session.checkoutId;
+  // The create reply is what the app waits 15 s for, and it already carries the
+  // truth: this workspace is still being provisioned.
+  expect(session.setup).toMatchObject({ state: "running", pendingStart: false });
+
+  const isServiceFrame = (message: AbMessage) =>
+    "terminalId" in message && message.terminalId === "svc"
+    && "checkoutId" in message && message.checkoutId === checkoutId;
+  const isSettled = (message: AbMessage) =>
+    message.type === "session:updated"
+    && message.sessions.some((entry) =>
+      entry.id === session.id && entry.setup !== undefined && entry.setup.state !== "running");
+
+  await waitFor(sent, isServiceFrame, 20000);
+  // Ordering rather than a snapshot: an undeferred block spawns inside
+  // prepareCheckoutRuntime, which runs BEFORE the entry is committed — so a
+  // regression puts the service ahead of the create reply, not merely early.
+  const createReply = frameIndex(sent, (message) =>
+    message.type === "session:result" && message.session?.id === session.id);
+  expect(frameIndex(sent, isServiceFrame)).toBeGreaterThan(createReply);
+  expect(frameIndex(sent, isServiceFrame)).toBeGreaterThan(frameIndex(sent, isSettled));
+  // Main's own slot is untouched by the deferral: only the checkout being
+  // provisioned waits.
+  expect(sent.some((message) =>
+    "terminalId" in message && message.terminalId === "svc"
+    && "checkoutId" in message && message.checkoutId === "main")).toBe(true);
+  // Releasing the services is only half the job: `agent:status` is what carries
+  // services[].running to the app, and this checkout's last push happened while
+  // they were still held back.
+  await waitFor(sent, (message) =>
+    message.type === "agent:status"
+    && "checkoutId" in message && message.checkoutId === checkoutId
+    && (message.services ?? []).some((service) => service.name === "svc" && service.running), 20000);
+}, 20000);
+
+/** Point the setup child at a stub that emits one step marker and lingers.
+ *
+ *  The runner spawns `process.execPath` under a hidden subcommand, which is the
+ *  only self-invocation a compiled single-file bridge supports — so a stub in
+ *  that slot is the only way to put a REAL OSC 2 title on a real setup PTY.
+ *  POSIX-only: the equivalent needs a `.cmd` that can emit a bare ESC, which
+ *  `cmd.exe` has no portable spelling for. The parsing itself is covered
+ *  platform-independently in checkout-setup.test.ts.
+ */
+function withSetupStub<T>(marker: string, fn: () => Promise<T>): Promise<T> {
+  const stub = join(root, "setup-stub.sh");
+  writeFileSync(stub, `#!/bin/sh\nprintf '\\033]2;${marker}\\007'\nsleep 1\n`);
+  chmodSync(stub, 0o755);
+  const real = process.execPath;
+  process.execPath = stub;
+  return fn().finally(() => { process.execPath = real; });
+}
+
+test.skipIf(process.platform === "win32")(
+  "a setup terminal's OSC title becomes step progress and never a session name",
+  async () => {
+    await commitConfig([
+      "name: checkout-routing",
+      "agent:",
+      "  tool: claude-code",
+      "worktree:",
+      "  setup:",
+      "    steps:",
+      "      - name: Copy env files",
+      "        copy: [\"antgrid.yaml\"]",
+      "      - name: Install dependencies",
+      "        run: git --version",
+    ].join("\n"));
+    const { bus, sent } = await bootCore();
+    const session = await withSetupStub(
+      "antgrid-setup:1/2:Install dependencies",
+      () => createSession(bus, sent, "Isolated", "worktree"),
+    );
+
+    // The runner seeds step 0 before the child says anything; the marker is what
+    // moves it. `suppressOscTitle` on that spawn would suppress the onTitle
+    // callback itself and this transition would never arrive.
+    expect(session.setup).toMatchObject({
+      state: "running", stepIndex: 0, stepCount: 2, terminalId: `${session.checkoutId}:setup`,
+    });
+    const advanced = await waitFor(sent, (message) =>
+      message.type === "session:updated"
+      && message.sessions.some((entry) => entry.id === session.id && entry.setup?.stepIndex === 1),
+      20000,
+    );
+    if (advanced.type !== "session:updated") throw new Error("no session list");
+    const entry = advanced.sessions.find((candidate) => candidate.id === session.id)!;
+    expect(entry.setup).toMatchObject({
+      state: "running", stepIndex: 1, stepCount: 2, stepName: "Install dependencies",
+    });
+    // The interception happens BEFORE the namer fallback: a step marker read as
+    // a conversation title would rename the session to "Install dependencies".
+    expect(entry.name).toBe("Isolated");
+  },
+  20000,
+);

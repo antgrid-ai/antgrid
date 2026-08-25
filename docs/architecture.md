@@ -52,15 +52,93 @@ Other dirs: `docs/` (design notes), `scripts/dev.ts` (fallback dev runner),
 
 ## Configuration (`antgrid.yaml`)
 
-Flat file, no project wrapper. Top-level keys: `terminals` (long-running,
-ordered startup), `commands` (on-demand), `proxies` (port tunneling, optional
-`browser:` preview), `layout`, `exclude`.
+Flat file, no project wrapper, and the schema is **strict** — an unknown
+top-level key fails the load rather than being ignored. `AbConfigSchema`
+(`bridge/src/config.ts`) is the source of truth; the keys are `name`,
+`relayUrl`, `agent`, `services` (long-running, started with the checkout unless
+`autoStart: false`), `commands` (on-demand), `ports` (dev-port detection and
+preview tunneling), and `worktree` (below).
 
-The agent uses `process.cwd()` as the project path and derives `projectId` from
-`agent.name`. That path is the project root; a session bound to a managed checkout
-resolves its working directory from the checkout instead (see Checkout-scoped routing).
-The file is located at `./antgrid.yaml` or
-`<ANTGRID_DIR>/antgrid.yaml` (`resolveAbDir()` in `antgrid-dir.ts` — `~/.antgrid`
-by default, `~/.antgrid-dev` for a local dev build; see `hostDir()` in
-`host_discovery.dart`). `getProjectConfig()` synthesizes a `ProjectConfig` for
-FileWatcher/PortScanner/TunnelManager.
+The file is `./antgrid.yaml` or `<ANTGRID_DIR>/antgrid.yaml` (`findConfigFile`;
+`resolveAbDir()` in `antgrid-dir.ts` — `~/.antgrid` by default,
+`~/.antgrid-dev` for a local dev build; see `hostDir()` in
+`host_discovery.dart`). The bridge's folder is the project root: `projectId` is
+`computeProjectId(folder)` — a hash of the realpath'd path, case-folded on
+Windows/macOS — while the display name is `name`, falling back to the folder's
+basename (`projectName`). A session bound to a managed checkout resolves its
+working directory from the checkout instead (see Checkout-scoped routing), and
+`prepareCheckoutRuntime` (`bridge/src/agent-core.ts`) builds that checkout's own
+FileWatcher / PortDetector / TunnelManager from the config found there.
+
+`${env.VAR}` and `${project.path}` interpolate in `services` and `commands`,
+eagerly at load time against `process.cwd()`.
+
+### `worktree.setup`
+
+Provisioning for a freshly cut managed worktree. `git worktree add` gives a tree
+of tracked files at the base commit — no `node_modules`, no `.env`, no generated
+client — so without this block the first isolated session lands in a broken
+build, and the checkout's `services` would auto-start into it.
+
+```yaml
+worktree:
+  setup:
+    steps:
+      - name: Copy env files
+        copy: [".env", "web/.env"]
+      - name: Install dependencies
+        run: bun install
+      - name: Generate Prisma client
+        run: bun run --filter antgrid-web prisma:generate
+        workingDir: .
+        env:
+          CI: "1"
+    timeoutMs: 600000      # the whole run, not per step (default 10 min)
+    onFailure: warn        # the only value v1 accepts
+```
+
+- A step carries **either** `copy` **or** `run`, never both, and `name` is
+  required — that name is what the progress line renders, which is the entire
+  point of a named list.
+- `copy` sources are read from the **main project** and land at the same
+  relative path inside the checkout: the point is pulling in the files the
+  worktree does not have. Both sides must stay under their own root (`pathBelow`,
+  `bridge/src/worktrees/path-guard.ts`) and an absolute entry is refused — a
+  checkout's `antgrid.yaml` is branch-supplied content, so
+  `copy: ["../../.ssh/id_ed25519"]` would otherwise read outside the project and
+  write outside the worktree. An escape refuses the whole run rather than
+  skipping the entry. A **missing source is a warning**, written into the
+  transcript, and the step continues: not every developer has every env file.
+- `run` is a shell line (`shell: true`) — the same trust class as `services` and
+  `commands`, which already run branch-supplied commands on checkout prep.
+- `onFailure: warn` is the only accepted value; the enum reserves `block` for a
+  version whose UI has an escape hatch from a session wedged behind setup. A
+  failed run never blocks the agent — it leaves a persistent banner.
+- The block is honoured **only** from an `antgrid.yaml` that physically lives in
+  the checkout. `findConfigFile` falls back to `<ANTGRID_DIR>/antgrid.yaml`, and
+  a machine-global setup block would otherwise run for every project's
+  worktrees with nobody having asked for it.
+- `worktree` is excluded from the eager interpolation pass and resolved lazily
+  per run by `CheckoutSetupRunner` (`bridge/src/worktrees/checkout-setup.ts`),
+  because the eager context is `process.cwd()` — the MAIN root — which would
+  bake main's paths into a checkout's own steps.
+
+Variables, resolved against the checkout the run belongs to:
+
+| Variable | Value |
+|---|---|
+| `${project.path}` | main project root |
+| `${checkout.path}` | this managed worktree |
+| `${checkout.branch}` | the `antgrid/*` branch Antgrid created |
+| `${base.branch}` | what the worktree was cut from (`CheckoutRecord.baseRef`) |
+| `${session.id}` | the owning session id |
+| `${env.X}` | the bridge process's environment |
+
+Every `run` step also gets `ANTGRID_PROJECT_PATH`, `ANTGRID_CHECKOUT_PATH`,
+`ANTGRID_CHECKOUT_BRANCH`, `ANTGRID_BASE_BRANCH`, `ANTGRID_SESSION_ID` and
+`ANTGRID_SETUP=1` in its environment — a branch or base that does not exist is
+the empty string, never an absent key. A step's own `env:` wins over that
+contract, which wins over the inherited environment.
+
+Host-side lifecycle — the one PTY the run lives in, the deferred `services`, the
+start gate and what survives a restart — is in `bridge/CLAUDE.md`.

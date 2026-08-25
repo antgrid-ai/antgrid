@@ -19,6 +19,7 @@ import '../session_search_modal.dart';
 import 'new_session_composer.dart';
 import 'picker_sources.dart';
 import 'remote_access_nudge_banner.dart';
+import 'worktree_setup_nudge.dart';
 
 /// Canvas for the New Session page: recent sessions fill the space above a
 /// bottom-anchored composer (chip row + prompt input). The composer is the
@@ -106,6 +107,10 @@ class NewSessionContent extends ConsumerWidget {
                         // mobile's fills RecentSessionsTab's empty slot below.
                         // Neither is mounted here any more.
                         const RemoteAccessNudgeBanner(),
+                        // Self-gating too: it renders only while the
+                        // composer's isolation toggle is on for a target that
+                        // can actually make worktrees.
+                        const WorktreeSetupNudge(),
                         // Recents fill the canvas. RefreshIndicator keeps the
                         // old pull-to-refresh contract (inventory + viewed
                         // machine advert).

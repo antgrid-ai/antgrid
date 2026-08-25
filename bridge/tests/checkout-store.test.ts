@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { CheckoutStore } from "../src/worktrees/checkout-store";
@@ -45,6 +45,81 @@ describe("CheckoutStore", () => {
       ],
     }));
     expect((await store.list()).map((record) => record.id)).toEqual(["valid"]);
+  });
+
+  test("round-trips the worktree.setup outcome and clears it again", async () => {
+    // The whole durable surface of `worktree.setup`: how a run ENDED. A rerun
+    // clears the marker before it spawns, so the write-back of `undefined` is
+    // as load-bearing as the write of an outcome — a bridge that died mid-rerun
+    // must come back `interrupted`, not wearing the previous run's `done`.
+    const store = new CheckoutStore(dir, "project-a");
+    const base = {
+      id: "checkout-a", projectId: "project-a", kind: "managed-worktree" as const,
+      path: "C:/safe/worktree", branch: "antgrid/session-a", baseRef: "main",
+      managed: true, sessionId: "session-a", createdAt: 1,
+    };
+    await store.put({ ...base, setupState: "failed", setupFinishedAt: 1_700_000_000_000, setupExitCode: 3 });
+    expect(await store.get("checkout-a")).toMatchObject({
+      setupState: "failed", setupFinishedAt: 1_700_000_000_000, setupExitCode: 3,
+    });
+
+    await store.put(base);
+    const cleared = await store.get("checkout-a");
+    expect(cleared?.setupState).toBeUndefined();
+    expect(cleared?.setupFinishedAt).toBeUndefined();
+    expect(cleared?.setupExitCode).toBeUndefined();
+  });
+
+  test("update annotates in place and never resurrects a removed row", async () => {
+    // The setup marker lands on a row the delete flow may already have
+    // reclaimed. A get()-then-put() spans two lock acquisitions, so the put
+    // would write the row back with the worktree it names already gone.
+    const store = new CheckoutStore(dir, "project-a");
+    const base = {
+      id: "checkout-a", projectId: "project-a", kind: "managed-worktree" as const,
+      path: "C:/safe/worktree", branch: "antgrid/session-a", baseRef: "main",
+      managed: true, sessionId: "session-a", createdAt: 1,
+    };
+    await store.put(base);
+    expect(await store.update("checkout-a", (record) => ({ ...record, setupState: "done" }))).toBe(true);
+    expect((await store.get("checkout-a"))?.setupState).toBe("done");
+
+    expect(await store.remove("checkout-a")).toBe(true);
+    expect(await store.update("checkout-a", (record) => ({ ...record, setupState: "failed" }))).toBe(false);
+    expect(await store.list()).toEqual([]);
+  });
+
+  test("rejects a running setup state, which must never reach disk", async () => {
+    // `running` is absent from the durable enum on purpose: a bridge that dies
+    // mid-setup would otherwise leave a row that is permanently preparing with
+    // nothing alive to ever clear it. Absence is what `interrupted` is derived
+    // from.
+    const store = new CheckoutStore(dir, "project-a");
+    await expect(store.put({
+      id: "checkout-a", projectId: "project-a", kind: "managed-worktree",
+      path: "C:/safe/worktree", branch: null, baseRef: null,
+      managed: true, sessionId: null, createdAt: 1,
+      setupState: "running" as never,
+    })).rejects.toThrow();
+  });
+
+  test("a checkouts.json written before setup markers existed still parses", async () => {
+    // The three fields are optional so an existing file stays valid across the
+    // upgrade — a stricter schema would make every pre-existing worktree read
+    // as a corrupt row and get swept as an orphan.
+    mkdirSync(join(dir, "agents", "project-a"), { recursive: true });
+    writeFileSync(join(dir, "agents", "project-a", "checkouts.json"), JSON.stringify({
+      version: 1,
+      checkouts: [{
+        id: "legacy", projectId: "project-a", kind: "managed-worktree", path: "C:/safe",
+        branch: "antgrid/legacy", baseRef: null, managed: true, sessionId: "s", createdAt: 1,
+      }],
+    }));
+    const store = new CheckoutStore(dir, "project-a");
+    expect(await store.read()).toMatchObject({ healthy: true });
+    const legacy = await store.get("legacy");
+    expect(legacy?.branch).toBe("antgrid/legacy");
+    expect(legacy?.setupState).toBeUndefined();
   });
 
   test("read() separates an absent file from one it could not fully understand", async () => {

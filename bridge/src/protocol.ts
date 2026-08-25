@@ -1176,6 +1176,31 @@ const SessionEntrySchema = z.object({
   checkoutKind: z.enum(["main", "managed-worktree", "external-worktree"]).default("main"),
   checkoutBranch: z.string().nullable().optional(),
   checkoutState: z.enum(["ready", "missing", "failed"]).default("ready"),
+  // Provisioning of this session's own checkout (`worktree.setup`). Orthogonal
+  // to `checkoutState`, deliberately: that answers "is this workspace usable",
+  // this one "has provisioning finished" — a checkout is `ready` while setup is
+  // still running, which is exactly what makes Skip meaningful. Folding it into
+  // the checkoutState vocabulary would make the isolation badge claim the
+  // workspace is broken in the common case.
+  // Optional with no default: an older app ignores the key and sees exactly
+  // today's behaviour. `running` never reaches disk — see checkout-store.ts.
+  setup: z.object({
+    state: z.enum(["running", "done", "failed", "skipped", "interrupted"]),
+    // 0-based, the current step while running and the last one afterwards.
+    stepIndex: z.number().int().nonnegative(),
+    stepCount: z.number().int().nonnegative(),
+    stepName: z.string().optional(),
+    // The setup transcript's terminal, replayable via terminal:snapshot:request.
+    terminalId: z.string().optional(),
+    exitCode: z.number().int().optional(),
+    // One-line failure summary.
+    message: z.string().optional(),
+    // A session:start is queued behind this run. The app reads it to tell
+    // "queued" from "started" — the start reply is ok either way.
+    pendingStart: z.boolean().default(false),
+    startedAt: z.number(),
+    finishedAt: z.number().optional(),
+  }).optional(),
 });
 
 const SessionListMessage = BaseMessage.extend({
@@ -1258,6 +1283,19 @@ const SessionSetModeMessage = BaseMessage.extend({
   requestId: z.string(),
   sessionId: z.string(),
   mode: z.enum(["terminal", "chat"]),
+});
+
+// Skip releases the queued start immediately and lets setup keep running;
+// cancel kills the run; rerun starts a fresh one from a terminal state.
+// Deliberately NOT in CHECKOUT_VARIABLE_MESSAGE_TYPES: every `session:*` verb
+// routes by sessionId on the project stream and the bridge resolves the
+// checkout from the session entry, so a checkoutId on the wire here would be a
+// second, conflicting answer to a question already settled bridge-side.
+const SessionSetupMessage = BaseMessage.extend({
+  type: z.literal("session:setup"),
+  requestId: z.string(),
+  sessionId: z.string(),
+  action: z.enum(["skip", "cancel", "rerun"]),
 });
 
 // App→agent: this session is what the user is looking at, sent on every focus
@@ -1788,6 +1826,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   SessionUnarchiveMessage,
   SessionDeleteMessage,
   SessionSetModeMessage,
+  SessionSetupMessage,
   SessionFocusMessage,
   SessionResultMessage,
   SessionUpdatedMessage,
@@ -1925,6 +1964,7 @@ export type SessionArchive = z.infer<typeof SessionArchiveMessage>;
 export type SessionUnarchive = z.infer<typeof SessionUnarchiveMessage>;
 export type SessionDelete = z.infer<typeof SessionDeleteMessage>;
 export type SessionSetMode = z.infer<typeof SessionSetModeMessage>;
+export type SessionSetup = z.infer<typeof SessionSetupMessage>;
 export type SessionFocus = z.infer<typeof SessionFocusMessage>;
 export type SessionResult = z.infer<typeof SessionResultMessage>;
 export type SessionUpdated = z.infer<typeof SessionUpdatedMessage>;
@@ -2067,7 +2107,7 @@ const KNOWN_TYPES = new Set<string>([
   "session:list", "session:list:result",
   "session:create", "session:start", "session:stop",
   "session:rename", "session:archive", "session:unarchive",
-  "session:delete", "session:set-mode", "session:focus",
+  "session:delete", "session:set-mode", "session:setup", "session:focus",
   "session:result", "session:updated",
   "client:focus-state",
   "terminal:snapshot:request", "terminal:snapshot",
