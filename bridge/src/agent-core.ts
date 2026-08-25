@@ -1247,6 +1247,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         break;
       }
       case "terminal:snapshot:request": {
+        // Same wrong-checkout guard as the tree and preview requests below, and
+        // for the same reason: every checkout runtime sees this frame, so
+        // without it one request is answered N times and the app applies
+        // whichever reply lands last — another checkout's scrollback, under a
+        // seq that then filters the right one's output.
+        if (runtime.checkout.id !== checkoutIdOf(msg)) break;
         const snap = manager.getReplaySnapshot(internalTerminalId(runtime, msg.terminalId));
         if (!snap) {
           log.warn("snapshot requested for unknown terminal %s", msg.terminalId);
@@ -1925,7 +1931,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         const snap = manager.getReplaySnapshot(t.terminalId);
         if (snap && snap.text) {
           sendTerminalFrame(createMessage("terminal:output", {
-            terminalId: terminalOwner(t.terminalId).externalId,
+            // The INTERNAL id: sendTerminalFrame owns the external rewrite, and
+            // handing it an already-externalised one makes its own owner lookup
+            // miss and stamp an isolated checkout's replay as main's.
+            terminalId: t.terminalId,
             data: snap.text,
           }));
         }
@@ -2912,6 +2921,23 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         return;
       }
       if (msg.type === "request") {
+        if (msg.method === "state.snapshot") {
+          // The snapshot is the app's PULL, and for a relay app it is the only
+          // thing its per-checkout terminal tabs are ever built from:
+          // `terminal:started` is not a replay type, and a stream attach runs
+          // no `resyncState` — only a loopback owner connect does. Nothing
+          // else republishes a checkout's status when a PTY spawns, so the
+          // cache `dispatchRpc` is about to read can be arbitrarily old, and
+          // replaying a terminal-less status DELETES the tabs the app has.
+          // Recomputing here is what makes the answer no older than the pull.
+          // Same failure, same fix, as the machine control plane's own
+          // `state.snapshot` intercept (`host-server.ts`); an unchanged
+          // payload is a cheap no-op, since the bus dedups on it.
+          for (const runtime of checkoutRuntimes.values()) {
+            if (runtime.disposed) continue;
+            sendStatus(runtime);
+          }
+        }
         if (msg.method === "session.transcriptSnapshot") {
           void handleTranscriptSnapshotRequest(msg).then((res) => bus.publish(res, channel));
           return;
