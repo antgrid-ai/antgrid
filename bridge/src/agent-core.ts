@@ -2203,13 +2203,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Nothing can name these ids again once the runtime is gone, and the setup
     // transcript among them is retained past its own exit on purpose — so this
     // is the only site that can release it.
-    for (const internalId of ownedTerminalIds) {
-      manager?.forget(internalId);
-      // The owner row too: a retained setup transcript keeps its own past exit
-      // so `sendStatus` can still route it, and this is where that ends.
-      terminalOwners.delete(internalId);
-      setupTerminalIds.delete(internalId);
-    }
+    // `forget` releases the owner row and the setup marker through
+    // `onTerminalForgotten`, so this loop names only what the manager holds.
+    for (const internalId of ownedTerminalIds) manager?.forget(internalId);
     dropCheckoutReplay(checkoutId);
     await checkoutRuntimes.remove(checkoutId);
   }
@@ -2271,7 +2267,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // Reclaim the handler's per-terminal guard + pending state for the dead
         // terminal. A mode flip keeps the arming: the session outlives the PTY.
         handlerEngine.onTerminalExit(id, { keepArmed: sessions?.isFlipping(id) });
-        queueMicrotask(() => terminalOwners.delete(id));
+      },
+      // The owner row outlives the PTY and dies with the manager's own
+      // knowledge of the terminal, never with the process. `sendStatus` routes
+      // every row `getStatus()` reports through `terminalOwner`, and a stopped
+      // terminal is reported until it is forgotten — so a row released at exit
+      // leaves its corpse resolving through the "main" default: the tab
+      // disappears from the checkout the user is looking at and reappears in
+      // the primary workspace under its namespaced internal id.
+      onTerminalForgotten: (id) => {
+        terminalOwners.delete(id);
+        setupTerminalIds.delete(id);
       },
       // A notification (osc9/osc777) means the session did something worth
       // surfacing — float it up the drawer. No-ops for non-session terminals.

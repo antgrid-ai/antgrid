@@ -17,6 +17,7 @@ function fakeTerminal() {
       return opts.terminalId;
     },
     kill: (id: string) => running.delete(id),
+    forget: (id: string) => running.delete(id),
     treeKilled: () => Promise.resolve(),
     has: (id: string) => running.has(id),
     spawns,

@@ -26,6 +26,7 @@ function makeFakeTerm() {
       return cfg.terminalId!;
     },
     kill: (id: string) => { spawned.delete(id); },
+    forget: (id: string) => { spawned.delete(id); },
     treeKilled: () => Promise.resolve(),
     has: (id: string) => spawned.has(id),
   };
@@ -38,6 +39,7 @@ function makeLingeringTerm() {
   return {
     spawn: (cfg: { terminalId?: string }) => { live.add(cfg.terminalId!); return cfg.terminalId!; },
     kill: (_id: string) => {},
+    forget: (_id: string) => {},
     treeKilled: () => Promise.resolve(),
     has: (id: string) => live.has(id),
     exit: (id: string) => { live.delete(id); },

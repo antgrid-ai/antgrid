@@ -16,6 +16,7 @@ function fakeTerminal(alwaysRunning = false) {
     // A no-op kill is how a wedged PTY is modelled: `stopAndAwait` keeps waiting
     // on an exit that never comes and times out.
     kill: (id: string) => { if (!alwaysRunning) running.delete(id); },
+    forget: (id: string) => { running.delete(id); },
     treeKilled: () => Promise.resolve(),
     has: (id: string) => alwaysRunning || running.has(id),
   };
