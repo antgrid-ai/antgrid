@@ -1147,6 +1147,11 @@ void main() {
     testWidgets('the prompt is frozen and Enter cannot resubmit', (
       tester,
     ) async {
+      // Desktop, or this asserts nothing: on a mobile platform the start's own
+      // listener drops prompt focus, so the Enter below never reaches
+      // `_onPromptKeyEvent` and passes with the in-flight guard deleted.
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
       var submitCount = 0;
       await tester.pumpWidget(
         _host(
@@ -1191,6 +1196,7 @@ void main() {
       await settle(tester);
 
       expect(container.read(newSessionPromptProvider), 'fix the bug');
+      debugDefaultTargetPlatformOverride = null;
     });
 
     testWidgets('send becomes Stop, then a plain busy button past the '

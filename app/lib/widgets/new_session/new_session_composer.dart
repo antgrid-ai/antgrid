@@ -197,6 +197,26 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     setState(() => _promptFocused = _promptFocus.hasFocus);
   }
 
+  /// Point an untouched agent pick at a tool the target actually has
+  /// installed. Custom and user-touched picks are left alone
+  /// ([firstInstalledAgent] keeps them).
+  ///
+  /// Never while a start is on the wire: `startNewSession` reads the agent
+  /// AFTER its awaits, so a detection landing mid-start would relabel a chip
+  /// the user was told is locked and launch a tool the status line never
+  /// named. The in-flight listener re-runs this once the start ends, because
+  /// the suppressed detection is dropped rather than queued.
+  void _snapToInstalledAgent() {
+    if (ref.read(newSessionStartInFlightProvider)) return;
+    if (ref.read(newSessionAgentTouchedProvider)) return;
+    final detected = ref.read(newSessionDetectedToolsProvider).value;
+    if (detected == null || detected.isEmpty) return;
+    final current = ref.read(newSessionAgentProvider);
+    ref
+        .read(newSessionAgentProvider.notifier)
+        .set(firstInstalledAgent(detected, current));
+  }
+
   /// Terminal is the default for EVERY agent — the mode all of them can run,
   /// and the one chat (still alpha) has to be chosen over deliberately. A
   /// chat-capable agent no longer opts the session into chat behind the user.
@@ -306,11 +326,14 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
           if (allowActiveSessions) {
             rethrow;
           }
+          // Mounted FIRST: `_endedByCancel` reads `ref`, and a WidgetRef read
+          // on a State that a mid-start resize already disposed throws out of a
+          // fire-and-forget `_submit()` with nowhere to land.
+          if (!mounted) return;
           // A Stop press the throw outran already ended this start. Asking the
           // user to confirm a working-tree switch they just cancelled would act
           // on the opposite of what they last said.
           if (_endedByCancel) return;
-          if (!mounted) return;
           final confirm = await AbConfirmDialog.show(
             context: context,
             title: 'Switch branch?',
@@ -381,7 +404,7 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
   /// the composer that began it: the New Session screen builds a different tree
   /// either side of the compact breakpoint, so the `_submit` continuation can
   /// resolve on a State that a resize already disposed. Whichever composer is
-  /// mounted when the reason lands is the one that says it; `takeAbortReason`
+  /// mounted when the reason lands is the one that says it; `takeAbort`
   /// CONSUMES, so the other call is a no-op rather than a second snackbar.
   void _reportAbort() {
     // Mounted first: reading `ref` on a disposed State throws, and consuming
@@ -444,20 +467,8 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     // When detection resolves, snap the (untouched) default to an installed
     // tool so the default is actually runnable. Custom and user-touched
     // picks are left alone ([firstInstalledAgent] keeps them).
-    ref.listen(newSessionDetectedToolsProvider, (_, next) {
-      final detected = next.value;
-      if (detected == null || detected.isEmpty) return;
-      // Not while a start is on the wire: `startNewSession` reads the agent
-      // AFTER its awaits, so a detection landing mid-start would relabel a chip
-      // the user was told is locked and launch a tool the status line never
-      // named. Detection re-fires on every control-plane push, and activating
-      // the target is itself one.
-      if (ref.read(newSessionStartInFlightProvider)) return;
-      if (ref.read(newSessionAgentTouchedProvider)) return;
-      final current = ref.read(newSessionAgentProvider);
-      ref
-          .read(newSessionAgentProvider.notifier)
-          .set(firstInstalledAgent(detected, current));
+    ref.listen(newSessionDetectedToolsProvider, (_, _) {
+      _snapToInstalledAgent();
     });
     // Keep the controller in sync with external writes to the prompt
     // provider (e.g. resetNewSessionForm clearing it on exit). Guarded on
@@ -483,6 +494,12 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
     // the retry.
     ref.listen(newSessionStartInFlightProvider, (previous, next) {
       if (next && previous != true && isMobilePlatform) _promptFocus.unfocus();
+      // Re-run the snap the start suppressed. A detection that resolved
+      // mid-start was dropped, not queued, and nothing re-delivers it: the
+      // provider only re-emits on a control-plane push, which a start against a
+      // LOCAL target never makes — so without this the form stays parked on an
+      // agent the machine does not have.
+      if (!next && previous == true) _snapToInstalledAgent();
     });
 
     final agent = ref.watch(newSessionAgentProvider);

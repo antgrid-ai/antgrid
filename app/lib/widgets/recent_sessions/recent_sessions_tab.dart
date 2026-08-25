@@ -171,6 +171,12 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
 
     return CustomScrollView(
       controller: _scroll,
+      // Stated, not inherited: `ScrollView` only defaults to
+      // AlwaysScrollableScrollPhysics while it has NO controller, so handing it
+      // one would otherwise leave a list shorter than the viewport refusing the
+      // drag — and the ancestor RefreshIndicator (new_session_content.dart)
+      // inert for exactly the users with the fewest recent sessions.
+      physics: const AlwaysScrollableScrollPhysics(),
       slivers: [
         if (widget.showHeader)
           const SliverToBoxAdapter(child: _SessionsHeader()),

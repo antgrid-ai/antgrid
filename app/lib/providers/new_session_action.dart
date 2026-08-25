@@ -139,11 +139,22 @@ Future<void> startNewSession(
       ? NewSessionStartAbortReason.cancelled
       : NewSessionStartAbortReason.intentChanged;
 
+  // Latched here rather than read back off newSessionStartAbortProvider: the
+  // composer's listener CONSUMES an abort the instant it lands (synchronously,
+  // before this function resumes), so the provider cannot tell "nothing was
+  // recorded" from "recorded, and already said" — and the `finally` below
+  // would answer a Stop that was reported a second time.
+  var aborted = false;
+  void abort(NewSessionStartAbortReason reason) {
+    aborted = true;
+    start.abort(reason);
+  }
+
   // This gate is deliberately checked before doing a shared checkout. An old
   // bridge strips unknown fields, so sending worktree intent without this
   // catalog capability would silently create a shared session.
   if (isolated && !ref.read(newSessionIsolationReadyProvider)) {
-    start.abort(NewSessionStartAbortReason.isolationUnavailable);
+    abort(NewSessionStartAbortReason.isolationUnavailable);
     return;
   }
 
@@ -222,7 +233,7 @@ Future<void> startNewSession(
 
       // Re-verify selected target and branch selection after await
       if (!intentIsCurrent()) {
-        start.abort(bailReason());
+        abort(bailReason());
         return;
       }
     }
@@ -232,7 +243,7 @@ Future<void> startNewSession(
     final pid = await _activateTargetProject(ref, target);
 
     if (!intentIsCurrent()) {
-      start.abort(bailReason());
+      abort(bailReason());
       return;
     }
 
@@ -242,7 +253,7 @@ Future<void> startNewSession(
     start.advance(NewSessionStartPhase.preparing);
     await ref.read(projectSessionProvider(pid).future);
     if (ref.read(selectedRegistrationIdProvider) != pid || !intentIsCurrent()) {
-      start.abort(bailReason());
+      abort(bailReason());
       return;
     }
 
@@ -289,14 +300,14 @@ Future<void> startNewSession(
       // session exists it is theirs, and the place to report anything further
       // about it is the session itself.
       if (created == null) {
-        start.abort(NewSessionStartAbortReason.createRefused);
+        abort(NewSessionStartAbortReason.createRefused);
         return;
       }
       // NOT intentChanged: create already landed, so a session exists on the
       // bridge that this bail leaves unstarted — saying "nothing was created"
       // here would be a lie the user cannot check.
       if (ref.read(selectedRegistrationIdProvider) != pid) {
-        start.abort(NewSessionStartAbortReason.abandonedAfterCreate);
+        abort(NewSessionStartAbortReason.abandonedAfterCreate);
         return;
       }
       final prompt = ref.read(newSessionPromptProvider).trim();
@@ -357,14 +368,14 @@ Future<void> startNewSession(
       // return to this canvas; a CODED refusal still raises past here.
       final started = await starting;
       if (started == null) {
-        start.abort(NewSessionStartAbortReason.startRefused);
+        abort(NewSessionStartAbortReason.startRefused);
         return;
       }
       // The session IS running, so this is not a refusal — but it belongs to a
       // project the user has since left. Say where it went instead of clearing
       // the draft as if they had landed in it.
       if (ref.read(selectedRegistrationIdProvider) != pid) {
-        start.abort(NewSessionStartAbortReason.startedAfterSwitch);
+        abort(NewSessionStartAbortReason.startedAfterSwitch);
         return;
       }
       // An accepted start consumes the draft. Navigation itself preserves
@@ -383,16 +394,15 @@ Future<void> startNewSession(
       // word is the silent vanish the whole progress model exists to remove. A
       // start timeout records one too and nobody is left to read it, which is
       // cheaper than deciding the reason from which await threw.
-      start.abort(NewSessionStartAbortReason.replyTimedOut);
+      abort(NewSessionStartAbortReason.replyTimedOut);
     }
   } finally {
     // A Stop press the flow never reached a checkpoint to observe — because a
     // throw unwound past every one of them — still ended this start at the
     // user's request. Record it here or it dies with the progress it lived on,
     // and the composer's catch arms report a failure the user pre-empted.
-    if (ref.read(newSessionStartCancelRequestedProvider) &&
-        ref.read(newSessionStartAbortProvider) == null) {
-      start.abort(NewSessionStartAbortReason.cancelled);
+    if (!aborted && ref.read(newSessionStartCancelRequestedProvider)) {
+      abort(NewSessionStartAbortReason.cancelled);
     }
     start.end();
   }
@@ -496,18 +506,26 @@ Future<String> _activateTargetProject(
 
   // Remote target: machineUuid + projectId are populated (Tasks 1–3).
   //
-  // The phase is published HERE rather than inside the activation helper: that
-  // helper is shared with the drawer's remote-row tap, navigation stays
-  // unlocked during a start, and a write from there would let an unrelated tap
-  // fast-forward this start's phase (`advance` refuses rewinds, not foreign
-  // forward jumps). Only this caller is a New Session start.
-  ref
-      .read(newSessionStartProgressProvider.notifier)
-      .advance(NewSessionStartPhase.connecting);
+  // The phase is published from a callback THIS caller supplies rather than by
+  // the activation helper itself: that helper is shared with the drawer's
+  // remote-row tap, navigation stays unlocked during a start, and a write from
+  // there would let an unrelated tap fast-forward this start's phase (`advance`
+  // refuses rewinds, not foreign forward jumps). Only this caller is a New
+  // Session start.
+  //
+  // It fires where `connecting` actually begins — after `project:start` is on
+  // the wire — because everything before it (resolving the machine, opening its
+  // control-plane socket, the promote itself) is `activating`, and publishing
+  // `connecting` up here instead superseded `activating` in the same
+  // synchronous turn: no frame ever painted it, so "Waking <machine>…" was
+  // copy the user could not see.
   return openRemoteProjectForActivation(
     ref,
     machineUuid: target.machineUuid!,
     projectId: target.projectId!,
+    onAwaitingRunning: () => ref
+        .read(newSessionStartProgressProvider.notifier)
+        .advance(NewSessionStartPhase.connecting),
   );
 }
 
@@ -528,10 +546,14 @@ Future<String> _activateTargetProject(
 /// uuid, but the SELECTED target + returned id are the per-project compound. The
 /// transport for regId opens its own project socket; the machine keypair
 /// (baseDeviceUuid(regId) == machineUuid) signs its handshake.
+/// [onAwaitingRunning] fires once `project:start` has been accepted and the
+/// only thing left is the host's advert — the boundary a caller narrating this
+/// wait needs, and null for callers that narrate nothing.
 Future<String> openRemoteProjectForActivation(
   ProviderContainer ref, {
   required String machineUuid,
   required String projectId,
+  void Function()? onAwaitingRunning,
 }) async {
   final regId = RemoteProject(
     machineUuid: machineUuid,
@@ -588,6 +610,7 @@ Future<String> openRemoteProjectForActivation(
       cpClient.currentState.lastError,
     );
   }
+  onAwaitingRunning?.call();
   final ok = await awaitProjectRunning(cpClient, projectId);
   if (!ok) {
     // Distinguish a legacy relay's retired session cap from a generic transient

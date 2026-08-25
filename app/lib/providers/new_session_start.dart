@@ -310,7 +310,14 @@ class NewSessionStartController extends Notifier<NewSessionStartProgress?> {
   }
 
   /// Disarm. Idempotent.
-  void end() => state = null;
+  ///
+  /// Drops the checkout too, not only [begin] — `startNewSession` records the
+  /// isolation-unavailable abort BEFORE it arms, so a branch left standing here
+  /// would be appended to a start that touched no working tree.
+  void end() {
+    state = null;
+    _branchSwitchedTo = null;
+  }
 }
 
 /// Whether the user has asked the running start to stop. `startNewSession`
