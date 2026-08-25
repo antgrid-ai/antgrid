@@ -6,6 +6,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { logger } from "./logger";
 const log = logger.child({ component: "agent-core" });
 import { TerminalManager } from "./terminal-manager";
+import { createKeyedLock } from "./keyed-lock";
 import { killChildTree, processGroupSpawn } from "./terminal-session";
 import { createConnState, type ConnState } from "./conn-state";
 import { FileWatcher } from "./file-watcher";
@@ -96,6 +97,18 @@ interface CheckoutRuntime {
   gitStatusApplied: number;
   configuredTerminalIds: Map<string, string>;
   started: boolean;
+  /** This runtime is being torn down, or already has been. Never cleared — a
+   * torn-down runtime is replaced, never revived.
+   *
+   * Not the mechanism that keeps a build and a teardown apart; that is
+   * [withCheckoutRuntimeLock]. This is for the two readers that cannot take
+   * that lock and would otherwise touch a checkout mid-delete: `resyncState`,
+   * which runs on every app handshake, and the process-wide shutdown sweep.
+   * Both walk the registry, and the row survives until the sweep's last line.
+   *
+   * `started` cannot carry it: that is a claim-the-slot flag set on the way IN,
+   * so it reads `true` for a runtime half-built, fully built, or already dead. */
+  disposed: boolean;
 }
 
 // Tracks terminal ids that have pinged /hook-alive (a SessionStart probe an
@@ -569,6 +582,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       gitStatusApplied: 0,
       configuredTerminalIds: new Map(),
       started: false,
+      disposed: false,
     };
   }
 
@@ -1311,6 +1325,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       if (runtime.gitRefreshTimer) clearTimeout(runtime.gitRefreshTimer);
       runtime.gitRefreshTimer = null;
       runtime.started = false;
+      // Shutdown does NOT take the runtime lock — it cannot, it is the thing
+      // every lock holder would be waiting behind — so this is what stops a
+      // `startCheckoutRuntime` parked on a suspension from resuming and
+      // re-arming a watcher the core has already stopped. It also spawns
+      // through `manager`, nulled two lines below.
+      runtime.disposed = true;
     }
     manager?.killAll();
     manager = null;
@@ -1431,7 +1451,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   // and get pushed and cached for replay as if it were current.
   async function refreshGitStatus(runtime: CheckoutRuntime = mainRuntime): Promise<void> {
     const ticket = ++runtime.gitStatusSeq;
-    const files = await getGitStatus(runtime.checkout.path);
+    let files: GitFileEntry[];
+    try {
+      files = await getGitStatus(runtime.checkout.path);
+    } catch {
+      // `Bun.spawn` throws SYNCHRONOUSLY when cwd is gone, which is the normal
+      // state once the checkout has been removed under an in-flight refresh.
+      // Matching [refreshGitBranch], which has always caught: letting this
+      // propagate rejects whatever awaited it — including a session start,
+      // which then badges the session `failed` with an unrelated cause.
+      return;
+    }
     if (ticket < runtime.gitStatusApplied) return;
     runtime.gitStatusApplied = ticket;
     runtime.cachedGitFiles = files;
@@ -1748,6 +1778,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     log.info("App reconnected, re-syncing existing state");
     // Use cached git state for the immediate resync; refresh in background.
     for (const runtime of checkoutRuntimes.values()) {
+      // A resync runs on every app handshake, independent of any delete, and
+      // the registry still lists a checkout whose teardown is in flight — the
+      // row goes last. Everything below would hand that dying checkout two
+      // fresh `git` children cwd'd inside it, so the sweep that follows finds
+      // holders it never saw. See the same guard on the two loops below.
+      if (runtime.disposed) continue;
       // Forced: a resync exists because a client believes it has nothing, and
       // for an idle checkout the snapshot is byte-identical to the cached one —
       // exactly what the bus's dedup drops before any subscriber sees it.
@@ -1771,6 +1807,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // ordinary dedup would drop the very re-push this resync exists to perform.
     for (const runtime of checkoutRuntimes.values()) {
       await yieldToEventLoop();
+      // Re-tested after the yield, not just on entry: `sendFullTree` walks the
+      // whole tree synchronously and `stop()` does not disable it, so a
+      // teardown that started during the yield would be walking a directory
+      // Git is removing.
+      if (runtime.disposed) continue;
       runtime.fileWatcher?.sendFullTree({ force: true });
     }
 
@@ -1778,7 +1819,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // so a phone that binds after detection would otherwise never see ports
     // found before it connected (preview:snapshot only covers config-declared
     // preview ports, not ad-hoc detections).
-    for (const runtime of checkoutRuntimes.values()) runtime.portDetector?.emitCurrent();
+    for (const runtime of checkoutRuntimes.values()) {
+      if (runtime.disposed) continue;
+      runtime.portDetector?.emitCurrent();
+    }
 
     // Re-send terminal scrollback so the app has current output
     if (manager) {
@@ -1849,10 +1893,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     });
     runtime.uploadManager.startSweeper();
     await yieldToEventLoop();
+    // A shutdown can still land here — it does not take the runtime lock, and
+    // by this point it has already nulled `manager`. The delete path cannot:
+    // [withCheckoutRuntimeLock] holds teardown behind this whole function.
+    if (runtime.disposed || !manager) return;
     fw.sendFullTree();
     fw.startWatching();
 
     runtime.configController.watch((result, diff) => {
+      // stopWatch() has already run for a torn-down runtime, but a callback
+      // debounced before it can still land — and this one spawns PTYs into the
+      // checkout and re-registers the runtime, undoing the teardown.
+      if (runtime.disposed) return;
       if (!result.ok) {
         if (!result.missing) send(createMessage("config:changed", {
           agentRestartRequired: false, invalid: true, error: result.error,
@@ -1901,7 +1953,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         type: "service",
       });
     }
-    await Promise.all([refreshGitBranch(runtime), refreshGitStatus(runtime)]);
+    const refreshed = Promise.all([refreshGitBranch(runtime), refreshGitStatus(runtime)]);
+    // Tracked, not merely awaited: both spawn `git` children holding the
+    // checkout as their cwd, and `awaitGitRefreshes` is what teardown waits on
+    // before `git worktree remove` runs. Every other refresh site is tracked;
+    // this one was the exception only because it is awaited inline.
+    trackGitRefresh(runtime, refreshed);
+    await refreshed;
+    if (runtime.disposed) return;
     sendStatus(runtime);
     sendGitStatus(runtime);
     runtime.gitBranchInterval = setInterval(() => {
@@ -1919,23 +1978,66 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }, 10_000);
   }
 
-  async function prepareCheckoutRuntime(checkout: CheckoutRecord): Promise<CheckoutRuntime> {
-    const existing = checkoutRuntimes.runtime(checkout.id);
-    if (existing) {
-      await startCheckoutRuntime(existing);
-      return existing;
-    }
-    const runtimeConfig = loadConfig(undefined, checkout.path);
-    const spec = agentSpecForConfig(runtimeConfig);
-    const runtime = createCheckoutRuntime(checkout, runtimeConfig, spec);
-    await checkoutRuntimes.prepare(checkout, runtimeConfig, spec, runtime);
-    await startCheckoutRuntime(runtime);
-    return runtime;
+  /** Serializes a checkout's runtime lifecycle. Building a runtime and tearing
+   * one down both suspend repeatedly, and everything they touch — a recursive
+   * watcher, `services:` PTYs, `git` children — holds the checkout directory
+   * open. `deleteManaged` runs `git worktree remove` the instant teardown
+   * resolves, so the two interleaving is what strands a session undeletable: on
+   * Windows one handle opened by a resuming start aborts Git's sweep mid-tree,
+   * and the runtime is out of the registry by then, so no later teardown can
+   * find that handle to close it. Measured in the field as 131 watcher starts
+   * against 31 stops. */
+  const withCheckoutRuntimeLock = createKeyedLock();
+
+  function prepareCheckoutRuntime(checkout: CheckoutRecord): Promise<CheckoutRuntime> {
+    return withCheckoutRuntimeLock(checkout.id, async () => {
+      const existing = checkoutRuntimes.runtime(checkout.id);
+      if (existing) {
+        await startCheckoutRuntime(existing);
+        return existing;
+      }
+      const runtimeConfig = loadConfig(undefined, checkout.path);
+      const spec = agentSpecForConfig(runtimeConfig);
+      const runtime = createCheckoutRuntime(checkout, runtimeConfig, spec);
+      await checkoutRuntimes.prepare(checkout, runtimeConfig, spec, runtime);
+      await startCheckoutRuntime(runtime);
+      return runtime;
+    });
   }
 
-  async function teardownCheckoutRuntime(checkoutId: string): Promise<void> {
-    const runtime = checkoutRuntimes.runtime(checkoutId);
-    if (!runtime || checkoutId === "main") return;
+  /** Release every holder a checkout runtime owns. Returns the watcher's close
+   * promise: chokidar's `close()` is asynchronous and resolves only once its
+   * per-directory `fs.watch()` subscriptions are gone, so a caller about to
+   * delete the directory has to wait on it. Everything else stops
+   * synchronously. */
+  function stopCheckoutServices(runtime: CheckoutRuntime): Promise<void> {
+    runtime.configController.stopWatch();
+    const watcherClosed = runtime.fileWatcher?.stop() ?? Promise.resolve();
+    runtime.uploadManager?.stop();
+    runtime.portDetector?.stop();
+    runtime.tunnelManager?.stop();
+    if (runtime.gitBranchInterval) clearInterval(runtime.gitBranchInterval);
+    runtime.gitBranchInterval = null;
+    if (runtime.gitRefreshTimer) clearTimeout(runtime.gitRefreshTimer);
+    runtime.gitRefreshTimer = null;
+    return watcherClosed;
+  }
+
+  function teardownCheckoutRuntime(checkoutId: string): Promise<void> {
+    // Under the lock, so a build already in flight for this checkout finishes
+    // before the sweep starts and every holder it opened is visible to it.
+    return withCheckoutRuntimeLock(checkoutId, async () => {
+      const runtime = checkoutRuntimes.runtime(checkoutId);
+      if (!runtime || checkoutId === "main") return;
+      // For the readers that do NOT take the lock — `resyncState`, which runs on
+      // every app handshake, and the process-wide shutdown sweep. Both walk the
+      // registry, and the row survives until this function's last line.
+      runtime.disposed = true;
+      await sweepCheckoutRuntime(runtime, checkoutId);
+    });
+  }
+
+  async function sweepCheckoutRuntime(runtime: CheckoutRuntime, checkoutId: string): Promise<void> {
     const pending: Promise<void>[] = [];
     for (const proc of runtime.runningCommands.values()) {
       pending.push(killChildTree(proc));
@@ -1944,16 +2046,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     for (const internalId of runtime.configuredTerminalIds.values()) {
       if (manager) pending.push(manager.killAndAwaitTree(internalId));
     }
-    // Synchronous stops run while the kills are in flight — they are the only
-    // holders left once the trees are gone.
-    runtime.configController.stopWatch();
-    runtime.fileWatcher?.stop();
-    runtime.uploadManager?.stop();
-    runtime.portDetector?.stop();
-    runtime.tunnelManager?.stop();
-    if (runtime.gitBranchInterval) clearInterval(runtime.gitBranchInterval);
-    if (runtime.gitRefreshTimer) clearTimeout(runtime.gitRefreshTimer);
-    runtime.gitRefreshTimer = null;
+    // Stops run while the kills are in flight — they are the only holders left
+    // once the trees are gone.
+    pending.push(stopCheckoutServices(runtime));
     // Both waits guard the same sweep, and both are placed after the timers are
     // cleared so nothing new can be scheduled behind them: `deleteManaged` runs
     // `git worktree remove` the moment this resolves, and on Windows either an

@@ -222,7 +222,13 @@ export class FileWatcher {
     );
   }
 
-  stop(): void {
+  /** Returns chokidar's close promise so a caller about to delete the watched
+   *  directory can wait the subscriptions out. Chokidar tears down one
+   *  `fs.watch()` per directory and resolves only when the last is closed;
+   *  dropping it leaves them open, and one live subscription is enough to abort
+   *  a `git worktree remove` sweep. The native recursive watcher closes
+   *  synchronously, so on macOS/Windows this resolves immediately. */
+  stop(): Promise<void> {
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
@@ -230,11 +236,12 @@ export class FileWatcher {
     this.pending.added.clear();
     this.pending.modified.clear();
     this.pending.removed.clear();
-    this.watcher?.close();
+    const closed = this.watcher?.close();
     this.watcher = null;
     this.nativeWatcher?.close();
     this.nativeWatcher = null;
     log.info("File watcher stopped for %s", this.projectId);
+    return Promise.resolve(closed).then(() => undefined);
   }
 
   private onFileAdded(filePath: string): void {
