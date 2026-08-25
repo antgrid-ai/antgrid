@@ -26,6 +26,7 @@ import '../providers/open_checkout.dart';
 import '../providers/project_work_status.dart';
 import '../providers/providers.dart';
 import '../providers/session_delete_pending.dart';
+import '../providers/session_setup.dart';
 import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
 import '../services/control_plane_client.dart';
@@ -270,7 +271,13 @@ class _SessionRowState extends ConsumerState<SessionRow> {
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
-                    SessionIsolationBadge(session: session),
+                    SessionIsolationBadge(
+                      session: session,
+                      // The live list's answer, never `session.setup`: a row
+                      // for a project that isn't focused is served from the
+                      // persisted cache, which carries no setup state at all.
+                      setup: ref.watch(sessionSetupProvider(session.id)),
+                    ),
                     SessionDeletingBadge(deleting: deleting),
                   ],
                 ),

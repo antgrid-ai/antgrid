@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import { CHECKOUT_KINDS, type CheckoutRecord } from "./checkout-types";
+import { CHECKOUT_KINDS, DURABLE_SETUP_STATES, type CheckoutRecord } from "./checkout-types";
 
 const RecordSchema = z.object({
   id: z.string().min(1),
@@ -13,6 +13,9 @@ const RecordSchema = z.object({
   managed: z.boolean(),
   sessionId: z.string().nullable(),
   createdAt: z.number().finite(),
+  setupState: z.enum(DURABLE_SETUP_STATES).optional(),
+  setupFinishedAt: z.number().finite().optional(),
+  setupExitCode: z.number().int().optional(),
 });
 const FileSchema = z.object({ version: z.literal(1), checkouts: z.array(z.unknown()) });
 

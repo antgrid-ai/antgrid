@@ -1,5 +1,133 @@
 import 'agent_work_status.dart';
 
+/// Provisioning of an isolated session's own checkout (`worktree.setup` in the
+/// project's `antgrid.yaml`).
+///
+/// Orthogonal to [SessionEntry.checkoutState], which answers "is this workspace
+/// usable" and stays `ready` for the whole run — this answers "has provisioning
+/// finished". That split is what makes Skip meaningful: the tree is fine, the
+/// dependencies are not there yet.
+///
+/// [state] is carried as the raw wire string, matching the other bridge-owned
+/// vocabularies on [SessionEntry]: the bridge may widen it, and a value this
+/// build cannot name must degrade at the render site rather than be lost here.
+/// Known values: `running`, `done`, `failed`, `skipped`, `interrupted`.
+class SessionSetup {
+  final String state;
+
+  /// 0-based, the current step while running and the last one afterwards.
+  final int stepIndex;
+  final int stepCount;
+  final String? stepName;
+
+  /// The setup transcript's terminal. The only handle on that log — the setup
+  /// PTY is typed neither `agent` nor `service`, so it appears in no list.
+  final String? terminalId;
+  final int? exitCode;
+
+  /// One-line failure summary.
+  final String? message;
+
+  /// A start is queued behind this run. The bridge replies `ok` to a
+  /// `session:start` it queues, so this — not the reply — is how the app tells
+  /// "queued" from "started".
+  final bool pendingStart;
+  final int startedAt;
+  final int? finishedAt;
+
+  const SessionSetup({
+    required this.state,
+    required this.stepIndex,
+    required this.stepCount,
+    required this.startedAt,
+    this.stepName,
+    this.terminalId,
+    this.exitCode,
+    this.message,
+    this.pendingStart = false,
+    this.finishedAt,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'state': state,
+    'stepIndex': stepIndex,
+    'stepCount': stepCount,
+    if (stepName != null) 'stepName': stepName,
+    if (terminalId != null) 'terminalId': terminalId,
+    if (exitCode != null) 'exitCode': exitCode,
+    if (message != null) 'message': message,
+    'pendingStart': pendingStart,
+    'startedAt': startedAt,
+    if (finishedAt != null) 'finishedAt': finishedAt,
+  };
+
+  factory SessionSetup.fromJson(Map<String, dynamic> j) => SessionSetup(
+    state: j['state'] as String,
+    stepIndex: (j['stepIndex'] as num?)?.toInt() ?? 0,
+    stepCount: (j['stepCount'] as num?)?.toInt() ?? 0,
+    stepName: j['stepName'] as String?,
+    terminalId: j['terminalId'] as String?,
+    exitCode: (j['exitCode'] as num?)?.toInt(),
+    message: j['message'] as String?,
+    pendingStart: j['pendingStart'] as bool? ?? false,
+    startedAt: (j['startedAt'] as num?)?.toInt() ?? 0,
+    finishedAt: (j['finishedAt'] as num?)?.toInt(),
+  );
+
+  SessionSetup copyWith({
+    String? state,
+    int? stepIndex,
+    int? stepCount,
+    String? stepName,
+    String? terminalId,
+    int? exitCode,
+    String? message,
+    bool? pendingStart,
+    int? startedAt,
+    int? finishedAt,
+  }) => SessionSetup(
+    state: state ?? this.state,
+    stepIndex: stepIndex ?? this.stepIndex,
+    stepCount: stepCount ?? this.stepCount,
+    stepName: stepName ?? this.stepName,
+    terminalId: terminalId ?? this.terminalId,
+    exitCode: exitCode ?? this.exitCode,
+    message: message ?? this.message,
+    pendingStart: pendingStart ?? this.pendingStart,
+    startedAt: startedAt ?? this.startedAt,
+    finishedAt: finishedAt ?? this.finishedAt,
+  );
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SessionSetup &&
+          other.state == state &&
+          other.stepIndex == stepIndex &&
+          other.stepCount == stepCount &&
+          other.stepName == stepName &&
+          other.terminalId == terminalId &&
+          other.exitCode == exitCode &&
+          other.message == message &&
+          other.pendingStart == pendingStart &&
+          other.startedAt == startedAt &&
+          other.finishedAt == finishedAt;
+
+  @override
+  int get hashCode => Object.hash(
+    state,
+    stepIndex,
+    stepCount,
+    stepName,
+    terminalId,
+    exitCode,
+    message,
+    pendingStart,
+    startedAt,
+    finishedAt,
+  );
+}
+
 class SessionEntry {
   final String id;
   final String name;
@@ -47,6 +175,11 @@ class SessionEntry {
   final String? checkoutBranch;
   final String checkoutState;
 
+  /// Null for every shared session, for a bridge predating the feature, and for
+  /// an isolated session whose project declares no `worktree.setup` — all three
+  /// mean "nothing to report", which is today's behaviour exactly.
+  final SessionSetup? setup;
+
   const SessionEntry({
     required this.id,
     required this.name,
@@ -66,6 +199,7 @@ class SessionEntry {
     this.checkoutKind = 'main',
     this.checkoutBranch,
     this.checkoutState = 'ready',
+    this.setup,
   });
 
   Map<String, dynamic> toJson() => {
@@ -89,6 +223,7 @@ class SessionEntry {
     'checkoutKind': checkoutKind,
     if (checkoutBranch != null) 'checkoutBranch': checkoutBranch,
     'checkoutState': checkoutState,
+    if (setup != null) 'setup': setup!.toJson(),
   };
 
   factory SessionEntry.fromJson(Map<String, dynamic> j) => SessionEntry(
@@ -121,6 +256,10 @@ class SessionEntry {
     checkoutKind: j['checkoutKind'] as String? ?? 'main',
     checkoutBranch: j['checkoutBranch'] as String?,
     checkoutState: j['checkoutState'] as String? ?? 'ready',
+    setup: switch (j['setup']) {
+      final Map<String, dynamic> m => SessionSetup.fromJson(m),
+      _ => null,
+    },
   );
 
   /// Parse a JSON array of session maps, skipping any non-map element. Shared by
@@ -137,6 +276,7 @@ class SessionEntry {
     bool? archived,
     bool? running,
     bool? deleting,
+    SessionSetup? setup,
   }) => SessionEntry(
     id: id,
     name: name ?? this.name,
@@ -156,6 +296,7 @@ class SessionEntry {
     checkoutKind: checkoutKind,
     checkoutBranch: checkoutBranch,
     checkoutState: checkoutState,
+    setup: setup ?? this.setup,
   );
 
   @override
@@ -179,7 +320,8 @@ class SessionEntry {
           other.checkoutId == checkoutId &&
           other.checkoutKind == checkoutKind &&
           other.checkoutBranch == checkoutBranch &&
-          other.checkoutState == checkoutState;
+          other.checkoutState == checkoutState &&
+          other.setup == setup;
 
   @override
   int get hashCode => Object.hash(
@@ -201,5 +343,6 @@ class SessionEntry {
     checkoutKind,
     checkoutBranch,
     checkoutState,
+    setup,
   );
 }

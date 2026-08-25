@@ -86,8 +86,11 @@ class ActiveSessionsBranchSwitchException implements Exception {
 ///
 /// Activates the picker-selected target project so `selectedRegistrationIdProvider`
 /// becomes its id, waits for the per-project [ProjectSession] (transport +
-/// services) to construct, then creates and starts a fresh session in it and
-/// marks it active. Finally leaves new-session mode so the workspace renders.
+/// services) to construct, then creates a fresh session in it, marks it active
+/// and leaves new-session mode so the workspace renders. The `session:start`
+/// goes out on the way through and is reconciled after the hand-off — the
+/// bridge may only have QUEUED it behind an isolated checkout's setup run, so
+/// its reply is no longer worth blocking the navigation on.
 ///
 /// This replaces the old "instant create" path (a pending provider consumed by
 /// `_bootstrapSessions`): the New Session page now owns the explicit
@@ -225,9 +228,9 @@ Future<void> startNewSession(
     // An agent rejection (`ok:false`) comes back as a null result, but a
     // dropped/late reply completes the pending request with a TimeoutException
     // (a throw, not null). Guard the whole create→start block so that thrown
-    // case is handled like the null one — stay on the New Session page — rather
-    // than escaping `startNewSession` as an unhandled async error. The
-    // in-flight flag is still cleared by the outer `finally`.
+    // case is handled like the null one — the draft survives and the canvas is
+    // retryable — rather than escaping `startNewSession` as an unhandled async
+    // error. The in-flight flag is still cleared by the outer `finally`.
     try {
       final created = await svc.create(
         name: name.isEmpty ? null : name,
@@ -239,22 +242,35 @@ Future<void> startNewSession(
         baseBranch: isolated ? explicitBranch : null,
       );
       // create failed (e.g. session cap reached); stay on the New Session page
-      // so the user can retry.
+      // so the user can retry. Only CREATE keeps the user here — once the
+      // session exists it is theirs, and the place to report anything further
+      // about it is the session itself.
       if (created == null) return;
       if (ref.read(selectedRegistrationIdProvider) != pid) return;
       final prompt = ref.read(newSessionPromptProvider).trim();
-      final started = await svc.start(
+
+      // 4. Send the start, then navigate on it rather than on its reply. An
+      // isolated session's start is QUEUED behind the checkout's setup run and
+      // answered `ok: true` immediately with `setup.pendingStart` set, so the
+      // reply cannot say whether the agent is live — every surface reads that
+      // off the session entry instead, and waiting here would only hold the
+      // canvas over a session the user is already owed.
+      //
+      // Sent BEFORE leaveNewSession, deliberately: that remounts WorkspaceShell,
+      // whose bootstrap immediately re-lists the sessions and auto-starts the
+      // one it adopts if the list says it is stopped. Issuing the start first
+      // puts it ahead of that list on the same stream, so the bridge answers
+      // with the start already accounted for instead of taking a second one
+      // that carries no initialPrompt. That ordering is all a SHARED session
+      // needs; an isolated one whose start is queued reports `running: false`
+      // for the whole setup run, and the bootstrap's own `sessionStartQueued`
+      // guard is what stops it starting over the top.
+      final starting = svc.start(
         created.id,
         initialPrompt: prompt.isEmpty ? null : prompt,
         raiseRefusal: true,
       );
-      // start failed with no reason on the wire (an `ok:true` carrying no
-      // session, or an older agent's bare rejection — an unknown tool, no agent
-      // configured); a CODED refusal is raised past here to the composer, which
-      // says what it was. Either way stay on the New Session page so the user
-      // can retry rather than dropping into a session whose PTY never spawned.
-      if (started == null) return;
-      if (ref.read(selectedRegistrationIdProvider) != pid) return;
+
       ref.read(activeSessionIdProvider.notifier).set(created.id);
       ref
           .read(analyticsServiceProvider)
@@ -262,10 +278,6 @@ Future<void> startNewSession(
             AnalyticsEvents.sessionOpened,
             props: {'surface': isMobilePlatform ? 'mobile' : 'desktop'},
           );
-
-      // 4. A successful start consumes the draft. Navigation itself preserves
-      // drafts, so failures and a later return to this canvas remain editable.
-      resetNewSessionForm(ref);
       // Leaving the canvas REMOUNTS WorkspaceShell (AppShell swaps the whole
       // route), and its bootstrap re-derives the active session from the
       // bridge's `lastUsedAt` ranking. Name the session we just started so that
@@ -275,9 +287,25 @@ Future<void> startNewSession(
       // the focus the user just asked for.
       ref.read(pendingActiveSessionIdProvider.notifier).set(created.id);
       leaveNewSession(ref);
+
+      // 5. Reconcile the reply now that the user is already in the session. A
+      // queued start is a SUCCESS — the entry comes back carrying
+      // `setup.pendingStart` — so only a bare rejection (an `ok:true` with no
+      // session, an older agent's unknown tool) leaves the draft intact for a
+      // return to this canvas; a CODED refusal still raises past here.
+      final started = await starting;
+      if (started == null) return;
+      if (ref.read(selectedRegistrationIdProvider) != pid) return;
+      // An accepted start consumes the draft. Navigation itself preserves
+      // drafts, so failures and a later return to this canvas remain editable.
+      resetNewSessionForm(ref);
     } on TimeoutException {
       // A dropped/late reply is retryable. Typed bridge failures intentionally
-      // reach the composer so it can show their safe display message.
+      // reach the composer so it can show their safe display message — though
+      // a START refusal now arrives after the hand-off, by which point the
+      // composer is unmounted and it is the workspace's OperationalErrorToaster
+      // that voices it (the service stamps the reason onto SessionsState.error
+      // before failing the pending request).
     }
   } finally {
     ref.read(newSessionStartInFlightProvider.notifier).set(false);

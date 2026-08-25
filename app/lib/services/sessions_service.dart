@@ -24,6 +24,21 @@ const _kPendingReplyTimeout = Duration(seconds: 15);
 /// a failure that did not happen.
 const _kModeReplyTimeout = Duration(seconds: 25);
 
+/// What a `session:setup` request asks of an isolated session's provisioning
+/// run: [skip] releases the queued agent start and leaves setup running,
+/// [cancel] kills the run, [rerun] starts a fresh one from a finished state.
+///
+/// A closed enum here, unlike the bridge-owned vocabularies decoded onto
+/// [SessionSetup]: this side AUTHORS the value, so a name the bridge has not
+/// heard of is a bug to catch at the call, not a value to degrade.
+enum SessionSetupAction {
+  skip,
+  cancel,
+  rerun;
+
+  String get wire => name;
+}
+
 /// Outcome of a `session:set-mode`. The other session verbs collapse a failure
 /// to `null` because their callers have nothing to say about it; a mode flip
 /// has to snap the toggle back and name the reason, so it carries the reply's
@@ -360,6 +375,24 @@ class SessionsService {
 
   Future<SessionEntry?> unarchive(String id) {
     return _mutate('session:unarchive', {'sessionId': id});
+  }
+
+  /// Acts on [id]'s `worktree.setup` run.
+  ///
+  /// The reply acknowledges the VERB, never the run. A setup takes minutes and
+  /// reports through `session:updated`, so awaiting completion here would lapse
+  /// [_kPendingReplyTimeout] on every project with real provisioning to do —
+  /// and the banner that issued the action is already watching that state.
+  ///
+  /// Raises [SessionOperationException] on a refusal rather than collapsing it
+  /// to null (a `rerun` asked for while the run is still going is the reachable
+  /// one): the banner is the only surface this verb has, so it has to be able
+  /// to name the reason.
+  Future<SessionEntry?> setup(String id, SessionSetupAction action) {
+    return _mutate('session:setup', {
+      'sessionId': id,
+      'action': action.wire,
+    }, raiseRefusal: true);
   }
 
   Future<SessionModeResult> setMode(String id, String mode) {

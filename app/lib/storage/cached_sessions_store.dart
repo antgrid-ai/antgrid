@@ -204,15 +204,17 @@ class CachedSessionsStore {
             for (final item in v) {
               if (item is Map<String, dynamic>) {
                 try {
-                  // `running` and `deleting` are in-memory state only — even if
-                  // an older build persisted them, force false on load so a
-                  // fresh launch never resurrects a stale green status dot, or
-                  // a pending row with nothing left alive to clear it.
+                  // `running`, `deleting` and `setup` are in-memory state only
+                  // — even if a build that wrote this blob persisted them,
+                  // clear them on load so a fresh launch never resurrects a
+                  // stale green status dot, a pending row with nothing left
+                  // alive to clear it, or a workspace forever preparing.
                   list.add(
                     SessionEntry.fromJson({
                       ...item,
                       'running': false,
                       'deleting': false,
+                      'setup': null,
                     }),
                   );
                 } catch (_) {
@@ -275,13 +277,18 @@ class CachedSessionsStore {
   Future<void> _flush() async {
     if (_entriesDirty) {
       _entriesDirty = false;
-      // Strip `running`, `workStatus` and `deleting` before persisting: all
-      // three are process-lifetime state owned by SessionsService, not durable
-      // metadata. A restored `running` renders sessions as live before the
-      // agent reports; a restored `attention` claims an agent is blocked on a
-      // prompt that died with the process; a restored `deleting` is worse
-      // still, because a delete interrupted by the process dying leaves nothing
-      // behind that could ever clear it — the row comes back permanently inert.
+      // Strip `running`, `workStatus`, `deleting` and `setup` before
+      // persisting: all four are process-lifetime state owned by
+      // SessionsService, not durable metadata. A restored `running` renders
+      // sessions as live before the agent reports; a restored `attention`
+      // claims an agent is blocked on a prompt that died with the process; a
+      // restored `deleting` is worse still, because a delete interrupted by the
+      // process dying leaves nothing behind that could ever clear it — the row
+      // comes back permanently inert. `setup` is the same trap and the bridge
+      // treats it the same way (it is runtime-only there too, and a `running`
+      // setup state is deliberately never written to `checkouts.json`): a
+      // cache written mid-provisioning would restore a session as forever
+      // preparing.
       final encoded = jsonEncode({
         'version': 1,
         'entries': _mem.map(
@@ -292,6 +299,7 @@ class CachedSessionsStore {
               final j = {...s.toJson(), 'running': false};
               j.remove('workStatus');
               j.remove('deleting');
+              j.remove('setup');
               return j;
             }).toList(),
           ),

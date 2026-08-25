@@ -36,6 +36,7 @@ import '../providers/new_session_picker.dart'
 import '../providers/providers.dart';
 import '../providers/relay_error_banner.dart';
 import '../providers/session_search.dart';
+import '../providers/session_setup.dart';
 import '../providers/sessions.dart';
 import '../providers/supervisor_status.dart';
 import '../providers/ui_attention_providers.dart';
@@ -57,6 +58,7 @@ import '../widgets/operational_error_toaster.dart';
 import '../widgets/projects_drawer.dart';
 import '../widgets/session_search_modal.dart';
 import '../widgets/session_start_refusal.dart';
+import '../widgets/session_setup_banner.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../widgets/resizable_pane.dart';
 import '../widgets/workspace_tab_bar.dart';
@@ -590,7 +592,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
           .firstOrNull;
       if (desired != null) {
         ref.read(activeSessionIdProvider.notifier).set(desired.id);
-        if (!desired.running) {
+        // A start already queued behind an isolated checkout's setup run is
+        // the create flow's own, prompt and all — see [sessionStartQueued].
+        if (!desired.running && !sessionStartQueued(desired.setup)) {
           // The cross-project half of a session-row / Recent-list tap, so a
           // refused start has to speak here too — otherwise the same tap reports
           // its failure only when the project happened to be focused already.
@@ -658,7 +662,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
         orElse: () => active.first,
       );
       ref.read(activeSessionIdProvider.notifier).set(session.id);
-      if (!session.running) {
+      if (!session.running && !sessionStartQueued(session.setup)) {
         await _startBestEffort(svc, session.id);
         if (!mounted) return;
         if (ref.read(selectedRegistrationIdProvider) != triggeredFor) return;
@@ -1072,6 +1076,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
             const OperationalErrorToaster(),
             const AbBanner(),
             const AbHostBanner(),
+            const SessionSetupBanner(),
             Expanded(
               child: isMobile
                   ? _buildMobile(surfaceChild)

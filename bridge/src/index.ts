@@ -62,6 +62,20 @@ program
     process.exit(0);
   });
 
+// Internal executor for a managed checkout's `worktree.setup`: the bridge
+// re-invokes ITSELF under the setup PTY. The shipped bridge is a compiled
+// single-file executable and cannot `bun run` a script, so a subcommand is the
+// only self-invocation that works — the same shape `resolveHookCommand` relies
+// on. Hidden: nothing about it is user-facing.
+program
+  .command("worktree-setup", { hidden: true })
+  .description("Run a resolved worktree setup plan")
+  .requiredOption("--plan <file>", "Path to the resolved setup plan JSON")
+  .action(async (opts: { plan: string }) => {
+    const { runWorktreeSetupCli } = await import("./cli/worktree-setup");
+    process.exit(await runWorktreeSetupCli({ plan: opts.plan }));
+  });
+
 // Single default action — reads bootstrap payload from stdin, branches on mode.
 program
   .option("--verbose", "Alias for --log-level debug")

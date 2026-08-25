@@ -1,12 +1,13 @@
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { readdir, rm, rmdir } from "node:fs/promises";
-import { join, relative, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
 import { resolveAbDir } from "../antgrid-dir";
 import { branchSlug, checkoutDirName, projectRootName, sessionWords } from "./checkout-names";
 import { readCheckoutOwner, sameRepository } from "./checkout-owner";
 import { CheckoutStore } from "./checkout-store";
 import { isManagedCheckoutKind, type CheckoutRecord } from "./checkout-types";
 import { parseWorktreeList } from "./git-worktree-list";
+import { pathBelow } from "./path-guard";
 import { runGit, type GitRunner } from "./project-resolver";
 import { logGitFailure, logWorktreeEvent, worktreeErrorCode } from "./worktree-log";
 
@@ -136,11 +137,6 @@ export interface WorktreeManagerOptions {
 
 function canonical(path: string): string {
   try { return realpathSync.native(path); } catch { return resolve(path); }
-}
-
-function pathBelow(root: string, target: string): boolean {
-  const rel = relative(root, target);
-  return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !rel.includes(`${sep}..${sep}`);
 }
 
 /** The sole owner of managed Git worktree lifecycle. Paths are derived here,

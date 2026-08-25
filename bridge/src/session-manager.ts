@@ -21,12 +21,17 @@ import type { AbMessage, SessionEntry } from "./protocol";
 import {
   CHECKOUT_KINDS,
   CHECKOUT_STATES,
+  DURABLE_SETUP_STATES,
   isIsolatedCheckoutKind,
   isManagedCheckoutKind,
   type CheckoutKind,
   type CheckoutRecord,
+  type CheckoutSetupProgress,
   type CheckoutState,
+  type DurableSetupState,
+  type SetupState,
 } from "./worktrees/checkout-types";
+import { CheckoutStore } from "./worktrees/checkout-store";
 import { WorktreeError, type WorktreeManager } from "./worktrees/worktree-manager";
 import { logWorktreeEvent, worktreeErrorCode } from "./worktrees/worktree-log";
 
@@ -117,8 +122,28 @@ export interface SessionManagerOpts {
    *  means "not a repository", so a caller that cannot answer fails closed. */
   isGitRepository?: () => Promise<boolean>;
   worktreeManager?: WorktreeManager;
-  /** Construct the checkout-scoped runtime before a session can commit. */
-  prepareCheckoutRuntime?: (checkout: CheckoutRecord) => Promise<void>;
+  /** Construct the checkout-scoped runtime before a session can commit.
+   *  `deferServices` still starts watchers, port detection and tunnels but
+   *  holds the `services` block: auto-starting `bun run dev` against a worktree
+   *  whose `node_modules` has not been provisioned yet is a guaranteed failure
+   *  the user then has to read past. `startDeferredServices` releases them. */
+  prepareCheckoutRuntime?: (checkout: CheckoutRecord, opts?: { deferServices?: boolean }) => Promise<void>;
+  /** Release the `services` a `deferServices` preparation held back. */
+  startDeferredServices?: (checkoutId: string) => Promise<void>;
+  /** Kick off `worktree.setup` for a freshly cut managed checkout. Returns void
+   *  rather than a promise on purpose: createWorktree must have replied and
+   *  announced before this runs, and must never wait on it. Coarse transitions
+   *  come back through `onProgress`; the live transcript is the setup
+   *  terminal's own output. */
+  runCheckoutSetup?: (
+    checkout: CheckoutRecord,
+    sessionId: string,
+    onProgress: (progress: CheckoutSetupProgress) => void,
+  ) => void;
+  /** Kill a running setup's process tree and await it. Awaited before a managed
+   *  checkout is removed: on Windows a live `bun install` holding the worktree
+   *  as its cwd makes `git worktree remove` fail. */
+  cancelCheckoutSetup?: (checkoutId: string) => Promise<void>;
   /** Re-push the checkout's workspace state AFTER the session is announced.
    *  `prepareCheckoutRuntime` emits it too, but nothing replays a push frame
    *  and at that point no app knows the checkout exists — so its subscriber
@@ -310,6 +335,46 @@ export const RESTART_FAILED_ERROR = "failed to restart session after mode switch
 // coalesce the session:updated emit so the drawer re-sort doesn't thrash.
 const ACTIVITY_EMIT_DEBOUNCE_MS = 750;
 
+/** A session's `worktree.setup` run. Runtime-only, deliberately absent from
+ *  PersistedEntry: only the OUTCOME reaches disk (checkouts.json), so a bridge
+ *  that dies mid-run comes back reporting `interrupted` rather than a run that
+ *  nothing on this launch is alive to finish. */
+interface SetupRuntime {
+  /** Tells this run apart from the one a `rerun` replaced, and from the dying
+   *  report of a run a cancel already killed: neither may overwrite the state
+   *  the user has since been shown. Zero for a state recovered from disk, which
+   *  has no runner behind it at all. */
+  runId: number;
+  state: SetupState;
+  stepIndex: number;
+  stepCount: number;
+  stepName?: string;
+  terminalId?: string;
+  exitCode?: number;
+  message?: string;
+  startedAt: number;
+  finishedAt?: number;
+  /** A start held behind this run. Never persisted — `initialPrompt` is
+   *  one-shot launch state everywhere else too, and a bridge restart
+   *  legitimately drops it (the session then sits stopped with a Start
+   *  affordance). */
+  pendingStart?: { initialPrompt?: string };
+  /** The prompt the last queued start carried, kept after that start fired so a
+   *  rerun can re-arm it. Under `onFailure: warn` every exit from `running`
+   *  fires the queue, so a failed run has already spent its prompt on a tree
+   *  the agent could not build in — carrying it forward is what makes
+   *  re-run-setup → restart-agent not a retype. */
+  lastQueuedPrompt?: string;
+  /** Starts no longer queue behind this run. Separate from `state` because a
+   *  skipped run KEEPS RUNNING and keeps reporting — releasing the gate is the
+   *  whole of what Skip does. */
+  gateReleased: boolean;
+  /** This run's checkout was prepared with `deferServices`, so its `services:`
+   *  block is this run's to release when it ends. A rerun never holds them:
+   *  the first run already let them go. */
+  holdsServices: boolean;
+}
+
 export class SessionManager {
   private entries = new Map<string, PersistedEntry>();
   private observers = new Set<() => void>();
@@ -349,6 +414,12 @@ export class SessionManager {
   // something new; a stale `true` is harmless because start() re-runs the real
   // pre-flight and falls back to a fresh start.
   private resumableCache = new Map<string, { agentSessionId: string; resumable: boolean }>();
+  /** Live and recovered `worktree.setup` state, keyed by session id. Runtime
+   *  only — it reaches the wire through toWire and never sessions.json, which
+   *  is also why every mutation here emits with notifyObservers() rather than
+   *  changed(). */
+  private readonly setups = new Map<string, SetupRuntime>();
+  private nextSetupRunId = 1;
 
   constructor(private opts: SessionManagerOpts) {
     this.dir = join(opts.storeDir, "agents", opts.projectId);
@@ -357,6 +428,7 @@ export class SessionManager {
     this.projectPath = opts.projectPath;
     this.agentSpec = opts.agentSpec;
     this.load();
+    void this.recoverSetupStates();
   }
 
   /**
@@ -595,7 +667,11 @@ export class SessionManager {
         sessionName: undefined, // new session won't have a name
         baseBranch: spec.baseBranch,
       });
-      await this.opts.prepareCheckoutRuntime?.(checkout);
+      // Services are held back until setup finishes: auto-starting `bun run dev`
+      // against a worktree whose `node_modules` has not been provisioned yet is
+      // a guaranteed failure the user then has to read past. Watchers, port
+      // detection and tunnels still come up now.
+      await this.opts.prepareCheckoutRuntime?.(checkout, { deferServices: !!this.opts.runCheckoutSetup });
       runtimePrepared = true;
       const checkoutSpec = await this.opts.resolveAgentSpec?.(checkout.id) ?? this.agentSpec;
       this.assertSafeWorkingDir(checkout.path, checkoutSpec.workingDir);
@@ -607,6 +683,10 @@ export class SessionManager {
       // checkout path (`cachedGitBranch`), which is what the UI renders.
       entry.checkoutBranch = checkout.branch;
       entry.checkoutState = "ready";
+      // Seeded before the commit so the entry the create reply carries already
+      // says `running` — the app must never see an isolated session that looks
+      // provisioned for the frame before the first progress lands.
+      const setup = this.opts.runCheckoutSetup ? this.beginSetup(entry.id, true) : undefined;
       this.entries.set(entry.id, entry);
       await this.flushNowOrThrow();
       this.notifyObservers();
@@ -614,9 +694,17 @@ export class SessionManager {
       // bundle from the session list, so anything pushed earlier lands with no
       // subscriber. Never fatal — the session itself is already committed.
       this.reannounceCheckout(checkout.id);
+      // Last, and never awaited: the create reply is what the app is waiting on
+      // (15 s), and a setup run takes minutes. The sub-millisecond gap after the
+      // announce is deliberate — a runner frame sent before it has no subscriber.
+      if (setup) {
+        this.opts.runCheckoutSetup?.(checkout, entry.id,
+          (progress) => this.onSetupProgress(entry.id, setup.runId, progress));
+      }
       return this.toWire(entry);
     } catch (error) {
       this.entries.delete(entry.id);
+      this.setups.delete(entry.id);
       if (runtimePrepared && checkout) {
         try { await this.opts.teardownCheckoutRuntime?.(checkout.id); } catch { /* rollback continues */ }
       }
@@ -752,6 +840,7 @@ export class SessionManager {
     if (this.tm.has(id)) this.tm.kill(id);
     this.entries.delete(id);
     this.resumableCache.delete(id);
+    this.setups.delete(id);
     this.changed();
     return true;
   }
@@ -792,6 +881,7 @@ export class SessionManager {
       if (this.tm.has(entry.id)) this.tm.kill(entry.id);
       this.markDeleting(entry);
       try {
+        await this.cancelSetupForDelete(entry);
         // Still torn down even though there is no worktree left to unlock: the
         // checkout's `services:` PTYs, watcher and port detector outlive it, and
         // once this row is gone nothing on the machine can name that checkoutId
@@ -803,6 +893,7 @@ export class SessionManager {
       }
       this.entries.delete(entry.id);
       this.resumableCache.delete(entry.id);
+      this.setups.delete(entry.id);
       this.clearDeleting(entry.id);
       // In a finally: the row is already gone from memory and the flag already
       // cleared, so a flush that throws must not leave the app holding the
@@ -837,6 +928,12 @@ export class SessionManager {
     // pending state on the way to a dialog.
     this.markDeleting(entry);
     try {
+      // Cancelled, never refused: a user deleting a session does not want to be
+      // told to wait out a `bun install`. Placed past the two preflight
+      // refusals, which destroy nothing and are still answerable — but before
+      // everything that does, because a live setup process holding the checkout
+      // as its cwd is what makes `git worktree remove` fail on Windows.
+      await this.cancelSetupForDelete(entry);
       if (!await this.stopAndAwait(entry.id)) {
         throw new WorktreeError("WORKTREE_DELETE_FAILED", "The session did not stop before its worktree could be removed.");
       }
@@ -871,6 +968,7 @@ export class SessionManager {
     }
     this.entries.delete(entry.id);
     this.resumableCache.delete(entry.id);
+    this.setups.delete(entry.id);
     this.clearDeleting(entry.id);
     // See the sibling tail above: the emit is owed even when the flush fails.
     try {
@@ -979,6 +1077,18 @@ export class SessionManager {
         "This isolated session is being deleted.",
       ));
     }
+    // Queued, not refused: the workspace this agent would launch into is still
+    // being provisioned. The reply stays `ok` because the entry it carries says
+    // `pendingStart`, which is how the app tells "queued" from "started" — and
+    // the queue lives here rather than in the app so a user who locks their
+    // phone comes back to a running agent. Skip, cancel and completion all
+    // release the gate and fire this.
+    const gate = entry ? this.setupGate(entry.id) : undefined;
+    if (gate) {
+      gate.pendingStart = { initialPrompt };
+      this.notifyObservers();
+      return;
+    }
     if (!entry || entry.checkoutId === "main") return this.startNow(id, initialPrompt);
     return this.startCheckout(id, initialPrompt, entry.checkoutId);
   }
@@ -1060,6 +1170,295 @@ export class SessionManager {
       // "waiting for agent with no diagnostic" this re-push exists to end.
       log.warn(`re-announce for checkout ${checkoutId} failed: ${err}`);
     }
+  }
+
+  // --- worktree.setup ---
+
+  /**
+   * Answer the user's `session:setup` verb.
+   *
+   * Only two things refuse: an unknown session, and a rerun of a run that is
+   * still going (a second runner would fight the first for the checkout).
+   * Everything else is a no-op rather than an error — the app can only send
+   * these from a view that may be a frame behind the state it is acting on, and
+   * a cancel that lands just after the run finished asked for the state it
+   * already has.
+   */
+  async applySetupAction(id: string, action: "skip" | "cancel" | "rerun"): Promise<void> {
+    const entry = this.entries.get(id);
+    if (!entry) throw new Error(`session not found: ${id}`);
+    const setup = this.setups.get(id);
+    if (action === "rerun") return this.rerunSetup(entry, setup);
+    if (!setup || setup.state !== "running") return;
+    if (action === "skip") {
+      // The run itself is untouched: the banner keeps reporting it, and the
+      // services it holds back are still its to release when it ends. Skip
+      // answers "I know the deps are cached", not "stop".
+      setup.gateReleased = true;
+      this.notifyObservers();
+      this.firePendingStart(id);
+      return;
+    }
+    await this.cancelSetupRun(entry, setup);
+  }
+
+  /** This session's run while it is still holding starts back, else undefined. */
+  private setupGate(sessionId: string): SetupRuntime | undefined {
+    const setup = this.setups.get(sessionId);
+    return setup?.state === "running" && !setup.gateReleased ? setup : undefined;
+  }
+
+  /** Register a fresh run's state. The runner is started separately and
+   *  strictly later; `terminalId` stays unset until the runner reports the PTY
+   *  it actually spawned, so the app never offers a log it cannot replay. */
+  private beginSetup(
+    sessionId: string,
+    holdsServices: boolean,
+    pendingStart?: { initialPrompt?: string },
+  ): SetupRuntime {
+    const setup: SetupRuntime = {
+      runId: this.nextSetupRunId++,
+      state: "running",
+      stepIndex: 0,
+      stepCount: 0,
+      startedAt: Date.now(),
+      pendingStart,
+      // Survives across reruns so a second one can still re-arm the start.
+      lastQueuedPrompt: pendingStart?.initialPrompt ?? this.setups.get(sessionId)?.lastQueuedPrompt,
+      gateReleased: false,
+      holdsServices,
+    };
+    this.setups.set(sessionId, setup);
+    return setup;
+  }
+
+  /** A coarse transition from the setup runner: step boundaries and terminal
+   *  states only. Emitted through the IMMEDIATE notifyObservers path, never the
+   *  debounced activity emit — the banner reads "step 2 of 4" from this, and a
+   *  750 ms coalesce leaves it a step behind. Live output never comes this way;
+   *  it rides the setup terminal's own `terminal:output`. */
+  private onSetupProgress(sessionId: string, runId: number, progress: CheckoutSetupProgress): void {
+    const entry = this.entries.get(sessionId);
+    const setup = this.setups.get(sessionId);
+    // The session was deleted, a rerun replaced this run, or a cancel already
+    // settled it: a killed process's dying report must not reopen a state the
+    // user has been shown, nor land on its own successor.
+    if (!entry || !setup || setup.runId !== runId || setup.state !== "running") return;
+    setup.state = progress.state;
+    setup.stepIndex = progress.stepIndex;
+    setup.stepCount = progress.stepCount;
+    setup.stepName = progress.stepName;
+    setup.exitCode = progress.exitCode;
+    setup.message = progress.message;
+    // Kept when a later report omits it: the transcript stays reachable after
+    // the run ends, which is the point of the expandable log.
+    if (progress.terminalId !== undefined) setup.terminalId = progress.terminalId;
+    if (progress.state === "running") {
+      this.notifyObservers();
+      return;
+    }
+    setup.finishedAt = Date.now();
+    setup.gateReleased = true;
+    // Before the tail, not after: the badge and banner must settle on the same
+    // tick the run ended, while the disk write behind them takes as long as it
+    // takes.
+    this.notifyObservers();
+    void this.settleSetup(entry, setup);
+  }
+
+  /** The tail of a finished run: release the services it held back, fire the
+   *  start queued behind it, then stamp the durable marker. In that order — the
+   *  queued agent should find its dev server already coming up, and the disk
+   *  write is the only part nothing is waiting on. */
+  private async settleSetup(entry: PersistedEntry, setup: SetupRuntime): Promise<void> {
+    if (setup.holdsServices) {
+      setup.holdsServices = false;
+      try {
+        await this.opts.startDeferredServices?.(entry.checkoutId);
+      } catch (err) {
+        log.warn(`deferred services for checkout ${entry.checkoutId} failed to start: ${err}`);
+      }
+    }
+    this.firePendingStart(entry.id);
+    await this.stampSetupMarker(entry.checkoutId, setup);
+  }
+
+  /** Launch the start held behind a run. The gate must already be open — start()
+   *  re-enters it and would queue the start straight back. */
+  private firePendingStart(sessionId: string): void {
+    const setup = this.setups.get(sessionId);
+    const pending = setup?.pendingStart;
+    if (!setup || !pending) return;
+    setup.pendingStart = undefined;
+    setup.lastQueuedPrompt = pending.initialPrompt;
+    this.notifyObservers();
+    // There is no requestId left to fail: the app was told `ok` the moment the
+    // start was queued, so a spawn that throws corrects itself through the
+    // entry's `running` rather than through a reply.
+    const failed = (err: unknown): void => log.warn(`queued start for session ${sessionId} failed: ${err}`);
+    try {
+      const started = this.start(sessionId, pending.initialPrompt);
+      if (started) started.catch(failed);
+    } catch (err) {
+      failed(err);
+    }
+  }
+
+  /** Kill a run the user cancelled and settle it as `skipped`. */
+  private async cancelSetupRun(entry: PersistedEntry, setup: SetupRuntime): Promise<void> {
+    await this.killSetupTree(entry.checkoutId);
+    // Marked here rather than from the killed run's own dying report — that one
+    // says `failed`, and a cancel the user asked for is not a failure.
+    setup.state = "skipped";
+    setup.exitCode = undefined;
+    setup.message = undefined;
+    setup.finishedAt = Date.now();
+    setup.gateReleased = true;
+    this.notifyObservers();
+    await this.settleSetup(entry, setup);
+  }
+
+  /** Kill a live run because the session is going away. Quiet on purpose: no
+   *  durable marker (the checkout is being reclaimed), no deferred services
+   *  (there will be no runtime to serve them) and no queued start (there will be
+   *  no session to start). */
+  private async cancelSetupForDelete(entry: PersistedEntry): Promise<void> {
+    const setup = this.setups.get(entry.id);
+    if (!setup || setup.state !== "running") return;
+    await this.killSetupTree(entry.checkoutId);
+    // Settled without an emit — the delete flow's own emits cover it. The state
+    // still has to move, or the dying report reopens the run mid-teardown.
+    setup.state = "skipped";
+    setup.finishedAt = Date.now();
+    setup.gateReleased = true;
+  }
+
+  /** Awaited, never fatal: until the kill has walked the tree a `bun install`
+   *  still holds the checkout as its cwd, which is what makes `git worktree
+   *  remove` fail on Windows. A cancel that could not land must not become a
+   *  refusal — the caller is either deleting the session or has already been
+   *  told the run is over. */
+  private async killSetupTree(checkoutId: string): Promise<void> {
+    try {
+      await this.opts.cancelCheckoutSetup?.(checkoutId);
+    } catch (err) {
+      log.warn(`cancelling setup for checkout ${checkoutId} failed: ${err}`);
+    }
+  }
+
+  /** Start a fresh run against the current config, resetting the transcript. */
+  private async rerunSetup(entry: PersistedEntry, previous: SetupRuntime | undefined): Promise<void> {
+    if (previous?.state === "running") throw new Error("workspace setup is already running");
+    if (!isManagedCheckoutKind(entry.checkoutKind)) {
+      throw new Error(`session has no managed workspace to set up: ${entry.id}`);
+    }
+    if (this.deleting.has(entry.id)) {
+      throw new WorktreeError("WORKTREE_DELETE_IN_PROGRESS", "This isolated session is being deleted.");
+    }
+    const run = this.opts.runCheckoutSetup;
+    if (!run) throw new Error("this bridge cannot run workspace setup");
+    const checkout = await this.opts.worktreeManager?.recordFor(this.opts.projectId, entry.checkoutId);
+    if (!checkout) throw new WorktreeError("WORKTREE_MISSING", "The isolated worktree is no longer available.");
+    // Cleared BEFORE the run rather than overwritten after it: a bridge that
+    // dies mid-rerun must come back `interrupted`, and the previous run's `done`
+    // would claim otherwise.
+    await this.stampSetupMarker(entry.checkoutId, undefined);
+    // The prompt carries over so re-run-setup → restart-agent does not make the
+    // user retype it. The gate does not: a fresh run gates afresh, and the
+    // release the user gave the previous one said nothing about this one. An
+    // agent already launched keeps running — the gate only holds new starts.
+    // Only when the agent is stopped: a live agent already received this prompt,
+    // and re-arming would deliver it twice.
+    const requeue = previous?.lastQueuedPrompt !== undefined && !this.isRunning(entry)
+      ? { initialPrompt: previous.lastQueuedPrompt }
+      : undefined;
+    const setup = this.beginSetup(entry.id, false, requeue);
+    this.notifyObservers();
+    run(checkout, entry.id, (progress) => this.onSetupProgress(entry.id, setup.runId, progress));
+  }
+
+  /** Record how a run ENDED, in the project's checkouts.json. `running` can
+   *  never be written and neither can `interrupted`, which is only ever derived
+   *  from a marker's absence: a bridge that dies mid-run must come back
+   *  interrupted rather than permanently preparing. Passing no outcome clears
+   *  the marker, which is how a rerun says the last one no longer describes this
+   *  checkout. */
+  private async stampSetupMarker(
+    checkoutId: string,
+    outcome?: { state: SetupState; finishedAt?: number; exitCode?: number },
+  ): Promise<void> {
+    const durable: DurableSetupState | undefined = DURABLE_SETUP_STATES.find((state) => state === outcome?.state);
+    if (outcome && !durable) return;
+    try {
+      const store = this.checkoutStore();
+      const record = await store.get(checkoutId);
+      // Reclaimed while the run was finishing: there is nothing left to annotate
+      // and writing would resurrect the row.
+      if (!record) return;
+      await store.put({
+        ...record,
+        setupState: durable,
+        setupFinishedAt: durable ? (outcome?.finishedAt ?? Date.now()) : undefined,
+        setupExitCode: durable ? outcome?.exitCode : undefined,
+      });
+    } catch (err) {
+      log.warn(`could not record the setup outcome for checkout ${checkoutId}: ${err}`);
+    }
+  }
+
+  /** Report where setup left off for the managed checkouts this bridge just
+   *  inherited. A marker is the outcome of a finished run; its absence means the
+   *  bridge died mid-run, which is `interrupted`. Deliberately NOT an automatic
+   *  rerun: a setup step can be expensive or destructive and the user did not
+   *  ask for one on this launch.
+   *
+   *  Fire-and-forget off the constructor — the read is async and the session
+   *  list is usable without it, so it lands as one extra session:updated instead
+   *  of blocking every project's load. */
+  private async recoverSetupStates(): Promise<void> {
+    const managed = Array.from(this.entries.values())
+      .filter((entry) => isManagedCheckoutKind(entry.checkoutKind));
+    if (managed.length === 0) return;
+    let records: CheckoutRecord[];
+    try {
+      records = await this.checkoutStore().list();
+    } catch (err) {
+      log.warn("checkout setup markers unreadable: %s", err);
+      return;
+    }
+    const byCheckout = new Map(records.map((record) => [record.id, record]));
+    let recovered = false;
+    for (const entry of managed) {
+      // A run started while this read was in flight owns the slot.
+      if (this.setups.has(entry.id)) continue;
+      const record = byCheckout.get(entry.checkoutId);
+      this.setups.set(entry.id, {
+        // No runner behind a recovered state, so no report may ever land on it.
+        runId: 0,
+        state: record?.setupState ?? "interrupted",
+        // The step counts died with the run; only its outcome was durable.
+        stepIndex: 0,
+        stepCount: 0,
+        exitCode: record?.setupExitCode,
+        // No terminal either: the transcript died with the PTY that wrote it,
+        // so the app must not offer a log it cannot replay.
+        startedAt: entry.createdAt,
+        finishedAt: record?.setupFinishedAt,
+        gateReleased: true,
+        holdsServices: false,
+      });
+      recovered = true;
+    }
+    if (recovered) this.notifyObservers();
+  }
+
+  /** The project's durable checkout metadata. Minted per call rather than held:
+   *  CheckoutStore serializes its read-modify-write against every other holder
+   *  of the same path through a static, path-keyed lock, so a cached instance
+   *  would buy nothing and would only race WorktreeManager's own. `storeDir` is
+   *  the ~/.antgrid root the manager derives its store from too. */
+  private checkoutStore(): CheckoutStore {
+    return new CheckoutStore(this.opts.storeDir, this.opts.projectId);
   }
 
   private startNow(id: string, initialPrompt?: string, checkoutPath = this.projectPath, sessionAgentSpec = this.agentSpec): void {
@@ -1500,6 +1899,27 @@ export class SessionManager {
       checkoutKind: e.checkoutKind,
       checkoutBranch: e.checkoutBranch,
       checkoutState: e.checkoutState,
+      setup: this.setupWire(e.id),
+    };
+  }
+
+  /** The wire view of a session's `worktree.setup` run, absent for a session
+   *  that has none. `pendingStart` is derived rather than carried: the queue
+   *  itself lives in memory here, and the entry only reports that it exists. */
+  private setupWire(sessionId: string): SessionEntry["setup"] {
+    const setup = this.setups.get(sessionId);
+    if (!setup) return undefined;
+    return {
+      state: setup.state,
+      stepIndex: setup.stepIndex,
+      stepCount: setup.stepCount,
+      stepName: setup.stepName,
+      terminalId: setup.terminalId,
+      exitCode: setup.exitCode,
+      message: setup.message,
+      pendingStart: setup.pendingStart !== undefined,
+      startedAt: setup.startedAt,
+      finishedAt: setup.finishedAt,
     };
   }
 
