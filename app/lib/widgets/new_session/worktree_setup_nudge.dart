@@ -318,12 +318,18 @@ Future<void> _applyStarterSetup(
       .read(worktreeSetupNudgeSeenProvider.notifier)
       .markSeen(entryId);
   final steps = (setup['steps'] as List).length;
+  // Both lines say "commit" on purpose: a managed checkout is cut with
+  // `git worktree add ... <base.commit>` and the runner resolves the block
+  // from the config physically inside that checkout, so an uncommitted edit
+  // in the main working tree reaches no isolated session at all. Without
+  // this the nudge retires itself behind a block that silently never runs.
   say(
     steps == 0
         ? 'Added an empty worktree.setup block to antgrid.yaml — fill in the '
-              'steps your checkout needs.'
+              'steps your checkout needs, then commit it.'
         : 'Added $steps setup ${steps == 1 ? 'step' : 'steps'} to '
-              'antgrid.yaml.',
+              'antgrid.yaml. Commit it on your base branch — an isolated '
+              'checkout only sees committed config.',
   );
 }
 

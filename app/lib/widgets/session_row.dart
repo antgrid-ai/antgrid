@@ -370,7 +370,15 @@ class _SessionRowState extends ConsumerState<SessionRow> {
       if (svc == null) return;
       if (ref.read(selectedRegistrationIdProvider) != liveId) return;
       ref.read(activeSessionIdProvider.notifier).set(session.id);
-      if (!session.running) {
+      // A tap is an auto-start path, so it gates like the workspace bootstrap
+      // does: the start queued behind an isolated checkout's setup run is the
+      // create flow's own, prompt and all, and a bare re-start here is a second
+      // one the user never asked for. Read live where the list has landed, and
+      // fall back to the row's own copy where it has not.
+      final queued = sessionStartQueued(
+        ref.read(sessionSetupProvider(session.id)) ?? session.setup,
+      );
+      if (!session.running && !queued) {
         // The two failures end differently, and that is the whole point of
         // catching them separately: a refusal is the bridge's answer that this
         // session did NOT start, while a timeout is no answer at all.

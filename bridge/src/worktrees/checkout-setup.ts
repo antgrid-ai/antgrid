@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, join, parse, resolve } from "node:path";
 import { z } from "zod";
 import { resolveAbDir } from "../antgrid-dir";
 import { findConfigFile, loadConfig, resolveVariables, type ResolveContext, type WorktreeSetup } from "../config";
@@ -309,7 +309,7 @@ export class CheckoutSetupRunner {
       stepName: plan.steps[0]?.name,
       planPath,
       resultPath,
-      timeoutMs: setup.timeoutMs ?? DEFAULT_SETUP_TIMEOUT_MS,
+      timeoutMs: clampTimeout(setup.timeoutMs ?? DEFAULT_SETUP_TIMEOUT_MS),
       timer: null,
       killed: null,
       finished: false,
@@ -317,7 +317,14 @@ export class CheckoutSetupRunner {
     };
     // Registered before the spawn: a title can land on the very first chunk.
     this.runs.set(terminalId, run);
-    run.timer = setTimeout(() => { void this.killRun(run, "timeout"); }, run.timeoutMs);
+    // `.catch` for the same reason `start()` has one: bridge/src/index.ts turns
+    // an unhandled rejection into a whole-host shutdown, and everything
+    // `killRun` reaches — the PTY kill, `onProgress`, the push seal — can throw.
+    run.timer = setTimeout(() => {
+      void this.killRun(run, "timeout").catch((err) => {
+        log.warn(`setup timeout handling for ${run.checkoutId} failed: ${(err as Error).message}`);
+      });
+    }, run.timeoutMs);
     onProgress({
       state: "running",
       stepIndex: 0,
@@ -378,7 +385,7 @@ export class CheckoutSetupRunner {
         name: step.name,
         ...(step.copy ? { copy: step.copy.map((entry) => planCopy(entry, ctx, step.name, projectPath, checkoutPath)) } : {}),
         ...(step.run ? { run: resolveVariables(step.run, ctx) } : {}),
-        workingDir: workingDirRaw ? resolve(checkoutPath, workingDirRaw) : checkoutPath,
+        workingDir: planWorkingDir(workingDirRaw, step.name, checkoutPath),
         ...(step.env
           ? { env: Object.fromEntries(Object.entries(step.env).map(([k, v]) => [k, resolveVariables(v, ctx)])) }
           : {}),
@@ -505,7 +512,10 @@ function planCopy(
   checkoutPath: string,
 ): SetupPlanCopy {
   const rel = resolveVariables(raw, ctx);
-  if (isAbsolute(rel)) {
+  // `parse().root`, not `isAbsolute()`: the drive-RELATIVE spelling `C:foo` is
+  // not absolute, yet `resolve()` anchors it to that drive's own cwd rather
+  // than to the base handed in, so it lands somewhere unrelated to either root.
+  if (parse(rel).root !== "") {
     throw new SetupConfigError(`step "${stepName}": copy path "${rel}" must be relative to the project root`);
   }
   const from = resolve(projectPath, rel);
@@ -514,6 +524,32 @@ function planCopy(
     throw new SetupConfigError(`step "${stepName}": copy path "${rel}" escapes the project root`);
   }
   return { rel, from, to };
+}
+
+/**
+ * A step's cwd, proven to stay inside the checkout it is provisioning.
+ *
+ * `resolve()` DISCARDS its base when the second argument is absolute, so an
+ * unguarded `workingDir: "${project.path}"` would run the step in the main tree
+ * and report a green banner over a worktree nothing was installed into. The
+ * root itself is allowed here (unlike `copy`, where equality means "overwrite
+ * the whole tree"): `workingDir: "."` is the default spelled out.
+ */
+function planWorkingDir(raw: string | undefined, stepName: string, checkoutPath: string): string {
+  if (!raw) return checkoutPath;
+  const dir = resolve(checkoutPath, raw);
+  if (dir !== checkoutPath && !pathBelow(checkoutPath, dir)) {
+    throw new SetupConfigError(`step "${stepName}": workingDir "${raw}" escapes the checkout`);
+  }
+  return dir;
+}
+
+/** `setTimeout` silently collapses a delay above the 32-bit signed ceiling to
+ *  1 ms, so an over-large `timeoutMs` would kill the run on its first tick and
+ *  report it as a timeout. Clamped rather than refused: the intent of a huge
+ *  budget is "do not time out", and the ceiling is ~24.8 days. */
+function clampTimeout(ms: number): number {
+  return Math.min(ms, 0x7fffffff);
 }
 
 function readResult(path: string): SetupResultFile | null {

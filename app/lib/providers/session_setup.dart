@@ -45,7 +45,13 @@ typedef SessionSetupResult = ({bool ok, String? error});
 /// persisted cache — which carries no `setup` by design, since a stored
 /// `running` would restore with nothing alive to finish it and paint a
 /// permanent "preparing" banner (`cached_sessions_store.dart`).
-final sessionSetupProvider = Provider.family<SessionSetup?, String>((
+///
+/// `autoDispose`, unlike most families here: those are keyed by a bounded
+/// entryId or projectId, while this one is keyed by sessionId and read once per
+/// rendered row of a cross-project Recent list. Kept alive, every session id
+/// ever scrolled past — deleted ones included — would leave a provider behind,
+/// each re-running its scan of the list on every `session:updated`.
+final sessionSetupProvider = Provider.autoDispose.family<SessionSetup?, String>((
   ref,
   sessionId,
 ) {
@@ -58,7 +64,7 @@ final sessionSetupProvider = Provider.family<SessionSetup?, String>((
 });
 
 /// [sessionSetupProvider] for the session the workspace is showing.
-final activeSessionSetupProvider = Provider<SessionSetup?>((ref) {
+final activeSessionSetupProvider = Provider.autoDispose<SessionSetup?>((ref) {
   final id = ref.watch(activeSessionIdProvider);
   if (id == null) return null;
   return ref.watch(sessionSetupProvider(id));
@@ -69,7 +75,7 @@ final activeSessionSetupProvider = Provider<SessionSetup?>((ref) {
 /// Read off the entry rather than remembered from the `session:start` reply:
 /// the bridge answers `ok` to a start it has only queued, so the reply cannot
 /// tell the two apart and the entry is the only honest source.
-final sessionStartQueuedProvider = Provider.family<bool, String>((
+final sessionStartQueuedProvider = Provider.autoDispose.family<bool, String>((
   ref,
   sessionId,
 ) {

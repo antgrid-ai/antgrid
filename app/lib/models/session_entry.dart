@@ -20,8 +20,11 @@ class SessionSetup {
   final int stepCount;
   final String? stepName;
 
-  /// The setup transcript's terminal. The only handle on that log — the setup
-  /// PTY is typed neither `agent` nor `service`, so it appears in no list.
+  /// The setup transcript's terminal. The only handle on that log, and the name
+  /// every list filters by: the setup PTY is typed neither `agent` nor
+  /// `service`, and the ad-hoc terminal list selects by EXCLUDING those two —
+  /// so untyped reads there as "a user terminal" unless it is dropped by id
+  /// (`terminal_list_view.dart`).
   final String? terminalId;
   final int? exitCode;
 
@@ -62,7 +65,12 @@ class SessionSetup {
   };
 
   factory SessionSetup.fromJson(Map<String, dynamic> j) => SessionSetup(
-    state: j['state'] as String,
+    // `as String?`, like every sibling: [listFromJson] has no per-element
+    // guard, so one entry whose `setup` arrived without a state would throw
+    // the WHOLE session list away rather than degrade its own row. An empty
+    // state is a name no build can resolve, which is what
+    // [SessionSetupPhase.unknown] is for.
+    state: j['state'] as String? ?? '',
     stepIndex: (j['stepIndex'] as num?)?.toInt() ?? 0,
     stepCount: (j['stepCount'] as num?)?.toInt() ?? 0,
     stepName: j['stepName'] as String?,
@@ -277,6 +285,10 @@ class SessionEntry {
     bool? running,
     bool? deleting,
     SessionSetup? setup,
+    /// Drop the provisioning state instead of carrying it over. Never pass this
+    /// together with [setup] — the two are contradictory answers to the same
+    /// field.
+    bool clearSetup = false,
   }) => SessionEntry(
     id: id,
     name: name ?? this.name,
@@ -296,7 +308,7 @@ class SessionEntry {
     checkoutKind: checkoutKind,
     checkoutBranch: checkoutBranch,
     checkoutState: checkoutState,
-    setup: setup ?? this.setup,
+    setup: clearSetup ? null : (setup ?? this.setup),
   );
 
   @override

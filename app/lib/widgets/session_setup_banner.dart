@@ -76,7 +76,11 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
   /// rather than opening a terminal for a workspace the user just left.
   String? _expandedSessionId;
 
-  bool _acting = false;
+  /// The session a `session:setup` verb is in flight for, keyed like
+  /// [_expandedSessionId] rather than held as a bare bool: this State
+  /// survives a session switch, so a single flag would disable whichever
+  /// session happened to be on screen when a slow answer arrived.
+  String? _actingSessionId;
 
   @override
   void dispose() {
@@ -199,7 +203,9 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
           AbButton(
             label: action.label,
             compact: true,
-            onTap: _acting ? null : () => _act(sessionId, action.verb),
+            onTap: _actingSessionId == sessionId
+                ? null
+                : () => _act(sessionId, action.verb),
           ),
         ],
         const SizedBox(width: AbTokens.space4),
@@ -281,7 +287,7 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
     final container = ref.container;
     final entryId = container.read(selectedRegistrationIdProvider);
     if (entryId == null) return;
-    setState(() => _acting = true);
+    setState(() => _actingSessionId = sessionId);
     detached(
       'SessionSetupBanner',
       'session:setup ${verb.wire} failed',
@@ -296,10 +302,16 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
           if (!mounted || result.ok) return;
           // The user pressed something and is owed an answer: nothing else on
           // screen changes when a setup verb is refused, so a log line alone
-          // would make a refusal indistinguishable from a dropped tap.
+          // would make a refusal indistinguishable from a dropped tap. Only
+          // while that session is still the one on screen, though — `detached`
+          // has logged it either way, and a refusal narrated over a DIFFERENT
+          // session's banner reads as that session having failed.
+          if (container.read(activeSessionIdProvider) != sessionId) return;
           showAbSnackBar(context, '${_failureCopy(verb)} — ${result.error}');
         } finally {
-          if (mounted) setState(() => _acting = false);
+          if (mounted && _actingSessionId == sessionId) {
+            setState(() => _actingSessionId = null);
+          }
         }
       },
     );
@@ -323,7 +335,15 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
       _tailTimer?.cancel();
       _tailTimer = null;
       _tailTerminalId = terminalId;
-      if (terminalId == null) return;
+      if (terminalId == null) {
+        // Dropped with the sampler, not just on a run change: `runKey` is
+        // stable across a run's own settle, so clearing only there would
+        // freeze the last polled line under "Workspace ready" forever — and
+        // render it again directly above the transcript the user just
+        // expanded, which is the duplicate this sampler exists to avoid.
+        _tail = null;
+        return;
+      }
     }
     if (_tailTimer != null) return;
     _tailTimer = Timer.periodic(

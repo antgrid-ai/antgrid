@@ -1477,9 +1477,22 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    *  undeletable. Mapped to itself rather than namespaced, because the session
    *  entry hands the app this exact id — translating it on the way out would
    *  point the app's snapshot request at a terminal nobody has. */
+  /** Setup transcripts this process has spawned, live or finished.
+   *
+   *  Separate from `CheckoutSetupRunner.runs`, which is emptied by `finish()`
+   *  — and `finish()` runs BEFORE the PTY's exit on every kill path, because
+   *  `killAndAwaitTree` resolves on `killProcessTree` + `pty.kill()` returning,
+   *  which is strictly earlier than node-pty dispatching `onExit`. So a
+   *  cancelled, timed-out or rerun-over run reaches `onTerminalExited` with
+   *  `handleExit` already answering false, and only this set still knows what
+   *  the terminal was. Emptied with the rest of the checkout in
+   *  `sweepCheckoutRuntime`. */
+  const setupTerminalIds = new Set<string>();
+
   function registerSetupTerminal(checkoutId: string, terminalId: string): void {
     checkoutRuntimes.runtime(checkoutId)?.configuredTerminalIds.set(terminalId, terminalId);
     terminalOwners.set(terminalId, { checkoutId, externalId: terminalId });
+    setupTerminalIds.add(terminalId);
   }
 
   /** Below this a run finished while the user was still on the create flow, and
@@ -2174,7 +2187,13 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Nothing can name these ids again once the runtime is gone, and the setup
     // transcript among them is retained past its own exit on purpose — so this
     // is the only site that can release it.
-    for (const internalId of ownedTerminalIds) manager?.forget(internalId);
+    for (const internalId of ownedTerminalIds) {
+      manager?.forget(internalId);
+      // The owner row too: a retained setup transcript keeps its own past exit
+      // so `sendStatus` can still route it, and this is where that ends.
+      terminalOwners.delete(internalId);
+      setupTerminalIds.delete(internalId);
+    }
     dropCheckoutReplay(checkoutId);
     await checkoutRuntimes.remove(checkoutId);
   }
@@ -2222,16 +2241,20 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       onTerminalExited: (id) => {
         terminalOwner(id).runtime.portDetector?.removeTerminal(id);
         // A setup transcript belongs to no session, so its exit settles the run
-        // and takes none of the session-scoped cleanup below.
-        if (!setupRunner.handleExit(id)) {
-          sessions?.noteExited(id);
-          // Drop buffered title state so a stale title from this run can't leak
-          // into a restarted same-id session (start() reuses the entry id).
-          namer?.forget(id);
-          // Reclaim the handler's per-terminal guard + pending state for the dead
-          // terminal. A mode flip keeps the arming: the session outlives the PTY.
-          handlerEngine.onTerminalExit(id, { keepArmed: sessions?.isFlipping(id) });
-        }
+        // and takes none of the session-scoped cleanup below. Its owner row
+        // stays, too: the scrollback is retained on purpose, and `sendStatus`
+        // routes a terminal by that row — dropping it would advertise the
+        // finished transcript on MAIN and prune it from the checkout bundle the
+        // banner's "View setup log" reads, exactly when the run has failed.
+        // Released with the rest of the checkout in `teardownCheckoutRuntime`.
+        if (setupRunner.handleExit(id) || setupTerminalIds.has(id)) return;
+        sessions?.noteExited(id);
+        // Drop buffered title state so a stale title from this run can't leak
+        // into a restarted same-id session (start() reuses the entry id).
+        namer?.forget(id);
+        // Reclaim the handler's per-terminal guard + pending state for the dead
+        // terminal. A mode flip keeps the arming: the session outlives the PTY.
+        handlerEngine.onTerminalExit(id, { keepArmed: sessions?.isFlipping(id) });
         queueMicrotask(() => terminalOwners.delete(id));
       },
       // A notification (osc9/osc777) means the session did something worth
@@ -2397,8 +2420,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       checkoutDeclaresSetup: (checkout) => {
         // A config that will not parse cannot say there is nothing to run, so
         // the doubt is reported as "declares" and the user gets the banner.
-        try { return setupRunner.resolveSetup(checkout) !== null; }
-        catch { return true; }
+        try {
+          const setup = setupRunner.resolveSetup(checkout);
+          // An EMPTY `steps` list is a declaration of nothing, and the same
+          // answer `begin()` gives it. The nudge writes exactly that block for
+          // a project it cannot fingerprint (`buildStarterWorktreeSetup`), so
+          // reading it as "declares" would defer services for a run that only
+          // ever reports `done`, and stamp that durably.
+          return !!setup && setup.steps.length > 0;
+        } catch { return true; }
       },
       announceCheckoutRuntime: (checkoutId) => {
         const runtime = checkoutRuntimes.runtime(checkoutId);
