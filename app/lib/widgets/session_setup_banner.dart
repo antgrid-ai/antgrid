@@ -70,7 +70,10 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
 
   /// Dismissal is per RUN, not per session: a rerun of a setup the user
   /// dismissed is a new answer to the same question and has to be shown.
-  String? _dismissedRunKey;
+  /// A set rather than one slot, keyed like [_expandedSessionId] and
+  /// [_actingSessionId]: this State survives a session switch, so a single
+  /// slot would un-dismiss whichever banner the user dismissed first.
+  final Set<String> _dismissedRunKeys = <String>{};
 
   /// The log is expanded per session, so switching sessions collapses it
   /// rather than opening a terminal for a workspace the user just left.
@@ -103,7 +106,7 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
     }
 
     final runKey = '$sessionId|${setup.startedAt}';
-    if (_dismissedRunKey == runKey) {
+    if (_dismissedRunKeys.contains(runKey)) {
       _syncTail(null, null);
       return const SizedBox.shrink();
     }
@@ -221,7 +224,7 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
           AbIconButton(
             icon: AbIcons.close,
             tooltip: 'Dismiss',
-            onTap: () => setState(() => _dismissedRunKey = runKey),
+            onTap: () => setState(() => _dismissedRunKeys.add(runKey)),
           ),
       ],
     );

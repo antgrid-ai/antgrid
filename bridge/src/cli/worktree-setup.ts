@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import {
   SetupPlanFileSchema,
@@ -80,7 +80,12 @@ function copyStep(step: SetupPlanStep): StepFailure | null {
     }
     try {
       mkdirSync(dirname(entry.to), { recursive: true });
-      copyFileSync(entry.from, entry.to);
+      // `copy` is an unconstrained list of paths and nothing in the schema or
+      // the docs restricts it to files, so a directory (`certs/`, `.vscode/`)
+      // has to work rather than abort the whole run on EISDIR.
+      cpSync(entry.from, entry.to, {
+        recursive: statSync(entry.from).isDirectory(),
+      });
     } catch (err) {
       return { exitCode: 1, message: `${step.name}: could not copy ${entry.rel} — ${(err as Error).message}` };
     }

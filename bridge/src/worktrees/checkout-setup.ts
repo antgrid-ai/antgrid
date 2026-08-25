@@ -48,7 +48,14 @@ export interface SetupStepMarker {
 export function parseSetupStepMarker(title: string): SetupStepMarker | null {
   const m = SETUP_MARKER_RE.exec(title);
   if (!m) return null;
-  return { index: Number(m[1]), count: Number(m[2]), name: m[3] };
+  const index = Number(m[1]);
+  const count = Number(m[2]);
+  // The setup PTY runs arbitrary shell from the checkout's own antgrid.yaml, so
+  // any command it invokes can write this title. An unbounded digit run parses
+  // to `Infinity`, which `SessionEntry.setup.stepIndex` declares as an int and
+  // JSON.stringify emits as `null` — a wire value the app cannot decode.
+  if (!Number.isSafeInteger(index) || !Number.isSafeInteger(count)) return null;
+  return { index, count, name: m[3] };
 }
 
 /** One copy pair, both sides already absolute and already proven to sit inside
@@ -297,9 +304,13 @@ export class CheckoutSetupRunner {
     const resultPath = join(this.planDir, `${checkout.id}.result.json`);
     const plan = this.buildPlan(setup, checkout, sessionId, resultPath, env);
 
-    mkdirSync(this.planDir, { recursive: true });
+    // Owner-only, both of them: `buildPlan` has already expanded `${env.*}`
+    // into every `run` line and `step.env` value, so the plan is a plaintext
+    // copy of whatever secrets the config referenced. A default 0644 in a
+    // shared home directory publishes them to every local account.
+    mkdirSync(this.planDir, { recursive: true, mode: 0o700 });
     rmSync(resultPath, { force: true });
-    writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf8");
+    writeFileSync(planPath, JSON.stringify(plan, null, 2), { encoding: "utf8", mode: 0o600 });
 
     const run: ActiveRun = {
       checkoutId: checkout.id,
@@ -325,13 +336,6 @@ export class CheckoutSetupRunner {
         log.warn(`setup timeout handling for ${run.checkoutId} failed: ${(err as Error).message}`);
       });
     }, run.timeoutMs);
-    onProgress({
-      state: "running",
-      stepIndex: 0,
-      stepCount: run.stepCount,
-      stepName: run.stepName,
-      terminalId,
-    });
 
     const command = this.selfCommand(planPath);
     try {
@@ -360,6 +364,19 @@ export class CheckoutSetupRunner {
       this.cleanupFiles(run);
       throw err;
     }
+    // Emitted only once the PTY exists. This is the report that registers
+    // `terminalId` as a setup terminal, and a spawn that threw would otherwise
+    // leave the wire pointing `setup.terminalId` at a PTY nobody created — the
+    // `failed` report that follows carries no terminalId to correct it with.
+    // Still ahead of any output: `spawn` is synchronous and node-pty dispatches
+    // its first chunk on a later turn.
+    onProgress({
+      state: "running",
+      stepIndex: 0,
+      stepCount: run.stepCount,
+      stepName: run.stepName,
+      terminalId,
+    });
   }
 
   private buildPlan(

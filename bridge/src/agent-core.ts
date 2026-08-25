@@ -37,7 +37,7 @@ import { CheckoutStore } from "./worktrees/checkout-store";
 import { resolveProject } from "./worktrees/project-resolver";
 import { CheckoutRuntimeRegistry } from "./worktrees/checkout-runtime-registry";
 import type { CheckoutRecord, CheckoutSetupProgress } from "./worktrees/checkout-types";
-import { CheckoutSetupRunner } from "./worktrees/checkout-setup";
+import { CheckoutSetupRunner, setupTerminalId } from "./worktrees/checkout-setup";
 import { SessionNamer } from "./session-namer";
 import { antigravityCliHome } from "./agents/antigravity/title";
 import { AntigravityTitleWatcher } from "./agents/antigravity/title-watcher";
@@ -627,8 +627,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   function internalTerminalId(runtime: CheckoutRuntime, terminalId: string): string {
     if (sessions?.get(terminalId) || runtime.checkout.id === "main") return terminalId;
-    const namespaced = runtime.configuredTerminalIds.get(terminalId)
+    const computed = runtime.configuredTerminalIds.get(terminalId)
       ?? `${runtime.checkout.id}:${terminalId}`;
+    // The provisioning PTY owns `<checkoutId>:setup` (see `setupTerminalId`),
+    // and `services:`/terminal slot names are unconstrained — a slot literally
+    // named `setup` would otherwise land in the same TerminalManager slot and
+    // reap the live run, or take over its retained transcript once it exits.
+    const namespaced = computed === setupTerminalId(runtime.checkout.id)
+      ? `${computed}:slot`
+      : computed;
     runtime.configuredTerminalIds.set(terminalId, namespaced);
     // Re-recorded on every call, not just the first: terminal exit drops the
     // owner row, and a restarted slot reuses the same namespaced id.

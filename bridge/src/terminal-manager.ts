@@ -53,6 +53,14 @@ export class TerminalManager {
   /** Terminals whose scrollback survives their own exit — see
    *  `retainScrollbackOnExit`. */
   private retainScrollback = new Set<string>();
+  /** Terminals `forget()` dropped while their PTY was still live. `forget` is
+   *  called from a checkout teardown that has already awaited
+   *  `killAndAwaitTree`, which resolves when the tree is reaped — strictly
+   *  before node-pty dispatches the exit. Without a tombstone that later exit
+   *  re-creates the `stoppedTerminals` row the sweep just deleted, and with the
+   *  owner row gone too `terminalOwner()` attributes the corpse to main and
+   *  advertises it there forever. */
+  private forgotten = new Set<string>();
   private sendMessage: (msg: AbMessage) => void;
   private callbacks: TerminalManagerCallbacks;
   private connState: ConnState;
@@ -100,6 +108,7 @@ export class TerminalManager {
     this.stoppedTerminals.delete(terminalId);
     if (config.retainScrollbackOnExit) this.retainScrollback.add(terminalId);
     else this.retainScrollback.delete(terminalId);
+    this.forgotten.delete(terminalId);
 
     const scrollback = new ScrollbackBuffer();
     this.scrollbacks.set(terminalId, scrollback);
@@ -159,6 +168,17 @@ export class TerminalManager {
           // terminal is dead, and nothing later corrects it.
           const current = this.sessions.get(terminalId);
           if (current !== undefined && current !== session) return;
+          // Forgotten while still live: the owner row is already gone, so the
+          // exit frame would be stamped with main's checkout and the
+          // bookkeeping below would resurrect the very rows `forget` deleted.
+          if (this.forgotten.delete(terminalId)) {
+            this.sessions.delete(terminalId);
+            this.scrollbacks.delete(terminalId);
+            this.modeTrackers.delete(terminalId);
+            this.retainScrollback.delete(terminalId);
+            this.connState.clearTerminal(terminalId);
+            return;
+          }
           this.sendMessage(msg);
           // Preserve metadata so the tab stays visible in status
           this.stoppedTerminals.set(terminalId, {
@@ -238,6 +258,7 @@ export class TerminalManager {
     this.sessions.clear();
     this.scrollbacks.clear();
     this.retainScrollback.clear();
+    this.forgotten.clear();
     this.terminalTypes.clear();
     this.stoppedTerminals.clear();
   }
@@ -252,6 +273,9 @@ export class TerminalManager {
    * re-retaining a buffer nobody can reach.
    */
   forget(terminalId: string): void {
+    // Only when an exit is still owed — a terminal that already exited has no
+    // callback left to tombstone, and an unconsumed one would leak.
+    if (this.sessions.has(terminalId)) this.forgotten.add(terminalId);
     this.retainScrollback.delete(terminalId);
     this.scrollbacks.delete(terminalId);
     this.modeTrackers.delete(terminalId);
