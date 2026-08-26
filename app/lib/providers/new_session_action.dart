@@ -21,6 +21,7 @@ import 'agent_transport.dart';
 import 'analytics.dart';
 import 'cached_sessions.dart';
 import 'control_plane.dart';
+import 'demo_mode.dart';
 import 'new_session_picker.dart';
 import 'new_session_start.dart';
 import 'projects.dart';
@@ -158,11 +159,21 @@ Future<void> startNewSession(
     return;
   }
 
+  // Never in the demo. The sample project's branch menu is fixture data
+  // (`newSessionBranchCatalogProvider`), so picking one of its branches is
+  // ordinary demo navigation — but the checkout's local arm is an `ensureHost()`
+  // caller and the demo's target IS a `LocalProject`, so it would spawn the real
+  // bridge and check a branch out in whatever directory the fixture names.
+  // Skipping costs the user nothing: the create step further down answers with
+  // the demo's own refusal either way.
+  final willCheckoutBranch =
+      !isolated && explicitBranch != null && !ref.read(demoModeProvider);
+
   final name = ref.read(newSessionNameProvider).trim();
   start.begin(
     // The checkout runs first when there is one, so the status line must open
     // on it rather than flashing the activation copy for a frame.
-    phase: (!isolated && explicitBranch != null)
+    phase: willCheckoutBranch
         ? NewSessionStartPhase.switchingBranch
         : NewSessionStartPhase.activating,
     targetId: target.id,
@@ -175,7 +186,7 @@ Future<void> startNewSession(
   );
   try {
     // 0. If an explicit branch was selected, perform git checkout BEFORE target activation
-    if (!isolated && explicitBranch != null) {
+    if (willCheckoutBranch) {
       try {
         if (target.isLocal) {
           final host = await ref.read(hostControllerProvider).ensureHost();
@@ -298,7 +309,10 @@ Future<void> startNewSession(
       // create failed (e.g. session cap reached); stay on the New Session page
       // so the user can retry. Only CREATE keeps the user here — once the
       // session exists it is theirs, and the place to report anything further
-      // about it is the session itself.
+      // about it is the session itself. A refusal carrying a reason — the
+      // sample project's included — never reaches here: `SessionsService.create`
+      // fails its completer with a `SessionOperationException`, which the
+      // composer's own catch renders.
       if (created == null) {
         abort(NewSessionStartAbortReason.createRefused);
         return;

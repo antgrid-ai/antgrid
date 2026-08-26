@@ -16,7 +16,9 @@ import '../design/widgets/ab_toolbar.dart';
 import '../design/widgets/ab_url_field.dart';
 import '../models/preview_models.dart';
 import '../navigation/back_intent.dart';
+import '../demo/demo_identity.dart';
 import '../providers/analytics.dart';
+import '../providers/demo_mode.dart';
 import '../services/preview_service.dart';
 import '../providers/agent_transport.dart';
 import '../providers/providers.dart';
@@ -212,6 +214,16 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// quick-picks, and the port list. On a relay-mode port conflict, confirms
   /// before falling back to a different local port.
   Future<void> _openPort(int port, String scheme) async {
+    // The sample project advertises the ports a real dev server would, because
+    // an empty preview tab is not what the product looks like — but the demo
+    // transport reports itself LOCAL, so opening one would point a real webview
+    // at a localhost port nothing is listening on and render a browser error
+    // page inside the demo. Decline in the same words every other demo refusal
+    // uses instead.
+    if (ref.read(demoModeProvider)) {
+      showAbSnackBar(context, kDemoRefusalText);
+      return;
+    }
     // Pin the project this open belongs to. The provider re-reads below are
     // always the currently-focused service (never disposed at the synchronous
     // moment of read), but focus can move across the dialog await — so we

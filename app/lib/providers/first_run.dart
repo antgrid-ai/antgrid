@@ -7,6 +7,7 @@ import '../storage/first_run_store.dart';
 import 'account_agents.dart';
 import 'agent_transport.dart';
 import 'auth.dart';
+import 'demo_mode.dart';
 import 'device_provisioning.dart';
 import 'now_ticker.dart';
 import 'projects.dart';
@@ -46,6 +47,14 @@ class FirstRunController extends Notifier<FirstRunState> {
   // same pattern as CollapsedDrawerIdsNotifier._persist (collapsed_drawer.dart).
   void _commit(FirstRunState next) {
     state = next;
+    // The single write, so no first-run latch can reach disk from inside the
+    // demo whichever of the seven mutators is called — `FirstRunStore` itself
+    // takes no project id to key a gate off, unlike the other demo-gated
+    // stores. In-memory state still moves, so a control the demo does render
+    // still responds; it just does not outlive the process. The checklist
+    // widget's own guard is the complement, not a duplicate: it stops a latch
+    // from hiding the checklist for the rest of THIS session.
+    if (ref.read(demoModeProvider)) return;
     unawaited(_store.write(next));
   }
 

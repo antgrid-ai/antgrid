@@ -3,11 +3,13 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show TextInput;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../demo/demo_identity.dart';
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/widgets/ab_brand_mark.dart';
 import '../design/widgets/ab_focus_ring.dart';
+import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_password_field.dart';
@@ -16,6 +18,7 @@ import '../project/limits.dart';
 import '../analytics/events.dart';
 import '../providers/analytics.dart';
 import '../providers/auth.dart';
+import '../providers/demo_mode.dart';
 import '../providers/device_revocation.dart';
 import '../providers/subscription.dart';
 import '../services/auth_service.dart';
@@ -774,10 +777,16 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
   /// their own account that only this device's memory can answer for them.
   ///
   /// Two tiers, and the split is what the hint is allowed to decide. Continue
-  /// is the fast path and the only thing that reads the hint; every button
-  /// below the divider names its own method and ignores it, so a hint that is
+  /// is the fast path and the only thing that reads the hint; every cell below
+  /// the divider names its own method and ignores it, so a hint that is
   /// missing or wrong costs a tap rather than the account. None of them asks
   /// the server anything.
+  ///
+  /// Three visual classes, one per tier, so the tiers are told apart before
+  /// they are read: the accent-filled Continue, the bordered method group, and
+  /// the outlined demo card. Every one of these was a full-width button of the
+  /// same weight once, and five of them stacked read as a wall rather than a
+  /// hierarchy.
   Widget _emailStepBody(BuildContext context, bool canPop) {
     final busy = _phase == _Phase.submitting;
     return Column(
@@ -808,31 +817,59 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         _SignInButton(
           label: busy ? 'Continuing…' : 'Continue',
           onPressed: busy ? null : _continue,
+          variant: _SignInButtonVariant.primary,
         ),
-        const SizedBox(height: AbTokens.space8),
+        const SizedBox(height: AbTokens.space12),
         const _OrDivider(),
-        const SizedBox(height: AbTokens.space16),
-        _SignInButton(
-          label: 'Continue with GitHub',
-          onPressed: busy ? null : () => _startOAuth('github'),
+        const SizedBox(height: AbTokens.space12),
+        // One bordered group rather than three stacked buttons: these are three
+        // answers to a single question — how to prove the address is yours —
+        // and [AbSegmented]'s construction is how this app already asks a small
+        // closed set where the alternatives must stay visible. Not AbSegmented
+        // itself: a cell here fires an action, and a selected state would
+        // promise a choice that persists.
+        //
+        // The password cell is a peer, not a footnote. `_startOAuth` records
+        // the TYPED address rather than the one the user authenticates as, so
+        // the hint can land wrong, and this cell is the only thing that reaches
+        // step 2 — and the link it carries — whatever the hint says.
+        _AuthMethodRow(
+          methods: [
+            _AuthMethodSpec(
+              icon: AbIcons.github,
+              label: 'GitHub',
+              onTap: busy ? null : () => _startOAuth('github'),
+            ),
+            _AuthMethodSpec(
+              icon: _googleMark,
+              label: 'Google',
+              onTap: busy ? null : () => _startOAuth('google'),
+            ),
+            // Unconditional, never keyed on what the store recalls: visibility
+            // that tracked the hint would flicker as the address is typed and
+            // would tell anyone watching the screen which addresses this device
+            // remembers.
+            _AuthMethodSpec(
+              icon: AbIcons.password,
+              label: 'Password',
+              onTap: busy ? null : _useMyPassword,
+            ),
+          ],
         ),
-        const SizedBox(height: AbTokens.space8),
-        _SignInButton(
-          label: 'Continue with Google',
-          onPressed: busy ? null : () => _startOAuth('google'),
-        ),
-        const SizedBox(height: AbTokens.space8),
-        // Unconditional, never keyed on what the store recalls: visibility that
-        // tracked the hint would flicker as the address is typed and would tell
-        // anyone watching the screen which addresses this device remembers.
-        _SignInButton(
-          label: 'Continue with a password',
-          onPressed: busy ? null : _useMyPassword,
-        ),
+        const SizedBox(height: AbTokens.space24),
+        // A card, not a fifth button, because it is not a way through this
+        // screen — it leaves the account behind entirely, and the two lines it
+        // needs never fitted on a centred button label anyway.
+        //
+        // Unguarded unlike the link below it: on mobile this screen is the
+        // whole app until an account exists, so for an App Store reviewer — or
+        // a tester whose desktop is somewhere else — it is the only affordance
+        // here that leads anywhere at all.
+        _DemoCard(onTap: busy ? null : _enterDemo),
         // The only muted thing on the screen, and the only one that leaves the
         // flow rather than choosing a way through it.
         if (canPop && !isMobilePlatform) ...[
-          const SizedBox(height: AbTokens.space16),
+          const SizedBox(height: AbTokens.space12),
           _MutedLink(
             label: 'Continue without signing in',
             onTap: () => Navigator.of(context).maybePop(),
@@ -841,6 +878,14 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
       ],
     );
   }
+
+  /// Leaves sign-in for the offline demo.
+  ///
+  /// On desktop this screen is a pushed route and the demo replaces the root's
+  /// content, so it has to come off the stack first or the demo renders
+  /// underneath it. `enterDemoMode` does that for every entry point; `ref` is
+  /// read here, before the call, because the pop leaves it defunct.
+  void _enterDemo() => enterDemoMode(ref.container);
 
   /// Step 2. The address is settled, so it reads as text rather than an input;
   /// "change" is the only way back. Every exit stays open — reset, and the
@@ -889,6 +934,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         _SignInButton(
           label: busy ? 'Signing in…' : 'Sign in',
           onPressed: busy ? null : _signInWithPassword,
+          variant: _SignInButtonVariant.primary,
         ),
         const SizedBox(height: AbTokens.space8),
         _MutedLink(
@@ -962,6 +1008,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
               _goToStep(_Step.password);
               unawaited(_signInWithPassword());
             },
+            variant: _SignInButtonVariant.primary,
           ),
         const SizedBox(height: AbTokens.space8),
         _MutedLink(
@@ -1001,6 +1048,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
         _SignInButton(
           label: 'Back to sign in',
           onPressed: () => _goToStep(_Step.password),
+          variant: _SignInButtonVariant.primary,
         ),
       ],
     );
@@ -1067,7 +1115,11 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
           ),
         ),
         const SizedBox(height: AbTokens.space16),
-        _SignInButton(label: 'Send a new link', onPressed: _sendLink),
+        _SignInButton(
+          label: 'Send a new link',
+          onPressed: _sendLink,
+          variant: _SignInButtonVariant.primary,
+        ),
         const SizedBox(height: AbTokens.space8),
         _MutedLink(label: 'Use a different email', onTap: _backToForm),
       ],
@@ -1094,7 +1146,11 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
           ),
         ),
         const SizedBox(height: AbTokens.space16),
-        _SignInButton(label: 'Use a different email', onPressed: _backToForm),
+        _SignInButton(
+          label: 'Use a different email',
+          onPressed: _backToForm,
+          variant: _SignInButtonVariant.primary,
+        ),
       ],
     );
   }
@@ -1198,10 +1254,27 @@ class _MutedLinkState extends State<_MutedLink> {
   }
 }
 
+/// Emphasis for [_SignInButton], mirroring [AbButtonVariant] so there is one
+/// mental model for "this is the way through" across the app.
+enum _SignInButtonVariant {
+  /// Surface fill, 1px border. Every secondary action on the screen.
+  normal,
+
+  /// Accent fill. At most ONE per phase — the accent is what tells the primary
+  /// action apart from its neighbours, and a second one spends that for
+  /// nothing.
+  primary,
+}
+
 class _SignInButton extends StatefulWidget {
-  const _SignInButton({required this.label, required this.onPressed});
+  const _SignInButton({
+    required this.label,
+    required this.onPressed,
+    this.variant = _SignInButtonVariant.normal,
+  });
   final String label;
   final VoidCallback? onPressed;
+  final _SignInButtonVariant variant;
 
   @override
   State<_SignInButton> createState() => _SignInButtonState();
@@ -1215,17 +1288,24 @@ class _SignInButtonState extends State<_SignInButton> {
   Widget build(BuildContext context) {
     final antgrid = context.antgrid;
     final enabled = widget.onPressed != null;
+    final isPrimary = widget.variant == _SignInButtonVariant.primary;
     final visual = Container(
       padding: const EdgeInsets.symmetric(vertical: AbTokens.space10),
       decoration: BoxDecoration(
-        color: _hovered ? antgrid.bgElevated : antgrid.bgSurface,
-        border: Border.all(color: antgrid.borderDefault),
-        borderRadius: AbTokens.borderRadius,
+        color: isPrimary
+            ? (_hovered ? antgrid.accentHighlight : antgrid.accent)
+            : (_hovered ? antgrid.bgElevated : antgrid.bgSurface),
+        border: Border.all(
+          color: isPrimary ? antgrid.accent : antgrid.borderDefault,
+        ),
+        borderRadius: AbTokens.borderRadius5,
       ),
       child: Text(
         widget.label,
         textAlign: TextAlign.center,
-        style: AbTokens.sansStyle(color: antgrid.textPrimary),
+        style: AbTokens.sansStyle(
+          color: isPrimary ? antgrid.accentForeground : antgrid.textPrimary,
+        ),
       ),
     );
     if (!enabled) return Opacity(opacity: 0.4, child: visual);
@@ -1249,8 +1329,257 @@ class _SignInButtonState extends State<_SignInButton> {
         onTap: widget.onPressed,
         child: AbFocusRing(
           focused: _focused,
-          borderRadius: AbTokens.borderRadius,
+          borderRadius: AbTokens.borderRadius5,
           child: visual,
+        ),
+      ),
+    );
+  }
+}
+
+/// Simple Icons `google` (CC0), inlined as a `currentColor` SVG string for the
+/// same reason [AbAgentMarks] inlines its marks: it renders through [AbIcon] on
+/// the same path as every other glyph, with one tinting rule and no asset
+/// manifest to keep in sync. It lives here rather than in [AbIcons] because
+/// that file is the choke point for UI *affordance* icons and this is a
+/// third-party brand mark — the same line [AbAgentMarks] draws. GitHub needs no
+/// equivalent; Codicons ship one.
+const String _googleMark =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
+    'viewBox="0 0 24 24"><path fill="currentColor" d="M12.48 10.92v3.28h7.84'
+    'c-.24 1.84-.853 3.187-1.787 4.133c-1.147 1.147-2.933 2.4-6.053 2.4'
+    'c-4.827 0-8.6-3.893-8.6-8.72s3.773-8.72 8.6-8.72c2.6 0 4.507 1.027 5.907 '
+    '2.347l2.307-2.307C18.747 1.44 16.133 0 12.48 0C5.867 0 .307 5.387.307 12'
+    's5.56 12 12.173 12c3.573 0 6.267-1.173 8.373-3.36c2.16-2.16 2.84-5.213 '
+    '2.84-7.667c0-.76-.053-1.467-.173-2.053z"/></svg>';
+
+/// One way to prove the address is yours, as rendered by [_AuthMethodRow].
+class _AuthMethodSpec {
+  const _AuthMethodSpec({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  /// Iconify SVG: an [AbIcons] constant, or an inlined brand mark.
+  final String icon;
+  final String label;
+
+  /// Null disables the cell. The whole row disables together — only
+  /// [_Phase.submitting] ever does it — so the group dims as one object.
+  final VoidCallback? onTap;
+}
+
+/// The step-1 method group: one bordered box, one cell per method.
+///
+/// Built like [AbSegmented] — outer border, [ClipRRect], 1px dividers stretched
+/// by [IntrinsicHeight], inset focus rings — because it has to read as a single
+/// control answering a single question. Deliberately NOT an [AbSegmented]: a
+/// cell here fires an action, and a selected state would promise a choice that
+/// persists.
+class _AuthMethodRow extends StatelessWidget {
+  const _AuthMethodRow({required this.methods});
+
+  final List<_AuthMethodSpec> methods;
+
+  @override
+  Widget build(BuildContext context) {
+    final antgrid = context.antgrid;
+    return Container(
+      decoration: BoxDecoration(
+        border: Border.all(color: antgrid.borderDefault),
+        borderRadius: AbTokens.borderRadius5,
+      ),
+      child: ClipRRect(
+        borderRadius: AbTokens.borderRadius5,
+        child: IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              for (var i = 0; i < methods.length; i++) ...[
+                if (i > 0) Container(width: 1, color: antgrid.borderDefault),
+                Expanded(child: _AuthMethodCell(spec: methods[i])),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AuthMethodCell extends StatefulWidget {
+  const _AuthMethodCell({required this.spec});
+
+  final _AuthMethodSpec spec;
+
+  @override
+  State<_AuthMethodCell> createState() => _AuthMethodCellState();
+}
+
+class _AuthMethodCellState extends State<_AuthMethodCell> {
+  bool _hovered = false;
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final antgrid = context.antgrid;
+    final onTap = widget.spec.onTap;
+    final fg = _hovered ? antgrid.textPrimary : antgrid.textSecondary;
+
+    final visual = AnimatedContainer(
+      duration: AbTokens.motionDefault,
+      curve: Curves.easeOut,
+      color: _hovered ? antgrid.bgElevated : antgrid.bgSurface,
+      padding: const EdgeInsets.symmetric(vertical: AbTokens.space10),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          AbIcon(widget.spec.icon, size: 16, color: fg),
+          const SizedBox(height: AbTokens.space6),
+          Text(
+            widget.spec.label,
+            style: AbTokens.sansStyle(fontSize: AbTokens.fontXs, color: fg),
+          ),
+        ],
+      ),
+    );
+
+    if (onTap == null) return Opacity(opacity: 0.4, child: visual);
+    return Semantics(
+      button: true,
+      child: FocusableActionDetector(
+        mouseCursor: SystemMouseCursors.click,
+        onShowHoverHighlight: (v) {
+          if (_hovered != v) setState(() => _hovered = v);
+        },
+        onShowFocusHighlight: (v) {
+          if (_focused != v) setState(() => _focused = v);
+        },
+        actions: {
+          ActivateIntent: CallbackAction<ActivateIntent>(
+            onInvoke: (_) {
+              onTap();
+              return null;
+            },
+          ),
+        },
+        child: GestureDetector(
+          onTap: onTap,
+          behavior: HitTestBehavior.opaque,
+          child: AbFocusRing(
+            focused: _focused,
+            // The cell sits under the group's ClipRRect; the default outset
+            // ring would be clipped away entirely.
+            inset: true,
+            borderRadius: AbTokens.borderRadius5,
+            child: visual,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The offline demo, filed as a destination rather than a credential.
+///
+/// Outlined on the page ground instead of filled like the controls above it, so
+/// at rest it is the one element on the screen that does not look like a button
+/// — which is what lets it stay prominent without competing with Continue. It
+/// is also the only left-aligned, two-line thing here, so the caveat travels
+/// with the offer instead of floating under it as an orphan line.
+class _DemoCard extends StatefulWidget {
+  const _DemoCard({required this.onTap});
+
+  final VoidCallback? onTap;
+
+  @override
+  State<_DemoCard> createState() => _DemoCardState();
+}
+
+class _DemoCardState extends State<_DemoCard> {
+  bool _hovered = false;
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final antgrid = context.antgrid;
+    final onTap = widget.onTap;
+
+    final visual = AnimatedContainer(
+      duration: AbTokens.motionDefault,
+      curve: Curves.easeOut,
+      padding: const EdgeInsets.symmetric(
+        horizontal: AbTokens.space12,
+        vertical: AbTokens.space10,
+      ),
+      decoration: BoxDecoration(
+        color: _hovered ? antgrid.bgSurface : antgrid.bgDeep,
+        border: Border.all(color: antgrid.borderDefault),
+        borderRadius: AbTokens.borderRadius5,
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  kDemoEntryLabel,
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontMd,
+                    color: antgrid.textPrimary,
+                  ),
+                ),
+                const SizedBox(height: AbTokens.space2),
+                Text(
+                  'No account needed. Sample data, nothing is connected.',
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: antgrid.textMuted,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: AbTokens.space8),
+          AbIcon(
+            AbIcons.send,
+            size: 14,
+            color: _hovered ? antgrid.textSecondary : antgrid.textMuted,
+          ),
+        ],
+      ),
+    );
+
+    if (onTap == null) return Opacity(opacity: 0.4, child: visual);
+    return Semantics(
+      button: true,
+      child: FocusableActionDetector(
+        mouseCursor: SystemMouseCursors.click,
+        onShowHoverHighlight: (v) {
+          if (_hovered != v) setState(() => _hovered = v);
+        },
+        onShowFocusHighlight: (v) {
+          if (_focused != v) setState(() => _focused = v);
+        },
+        actions: {
+          ActivateIntent: CallbackAction<ActivateIntent>(
+            onInvoke: (_) {
+              onTap();
+              return null;
+            },
+          ),
+        },
+        child: GestureDetector(
+          onTap: onTap,
+          behavior: HitTestBehavior.opaque,
+          child: AbFocusRing(
+            focused: _focused,
+            borderRadius: AbTokens.borderRadius5,
+            child: visual,
+          ),
         ),
       ),
     );

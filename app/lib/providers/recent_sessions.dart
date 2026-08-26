@@ -4,6 +4,7 @@ import 'package:collection/collection.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../demo/demo_identity.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../models/recent_session_row.dart';
 import '../services/account_agents_api.dart';
@@ -19,6 +20,7 @@ import 'account_agents.dart';
 import 'cached_sessions.dart';
 import 'chat_composer_drafts.dart';
 import 'control_plane.dart';
+import 'demo_mode.dart';
 import 'device_provisioning.dart';
 import 'projects.dart';
 import 'recent_agents.dart';
@@ -267,6 +269,13 @@ class MachineAdvertisedProjectsController
 /// metadata source (projects / recent agents / inventory / local uuid /
 /// [remoteProjectLabelsProvider]) updates.
 final recentSessionsProvider = Provider<List<RecentSessionRow>>((ref) {
+  // Early for the same reason `drawerEntriesProvider` is: every source below is
+  // the user's REAL machines. The session cache holds their history, and
+  // `accountAgentsProvider` reads the session cookie out of the keychain to
+  // fetch /account/agents — so reaching any of them here would list real
+  // projects under a banner promising nothing is connected.
+  if (ref.watch(demoModeProvider)) return _demoRecentSessions(ref);
+
   // Re-derive on any cache mutation. We don't care WHICH key changed — the
   // whole list is cheap to rebuild and a global re-sort is required anyway.
   ref.watch(cacheChangesProvider);
@@ -301,6 +310,29 @@ final recentSessionsProvider = Provider<List<RecentSessionRow>>((ref) {
     remoteProjectLabels: remoteProjectLabels,
   );
 });
+
+/// Recent while the demo is on: the sample project's own sessions, nothing else.
+///
+/// Sourced from the LIVE state rather than the cache because the cache refuses
+/// the demo on every write path (see [CachedSessionsStore]) — it holds nothing
+/// of the demo's and never will. `locals` carries [demoProject] so the rows name
+/// themselves "demo-shop (sample)"; without it every key falls through to the
+/// unmatched-cache-key branch, which labels a row with the raw project id.
+List<RecentSessionRow> _demoRecentSessions(Ref ref) {
+  final fresh = ref.watch(freshSessionsStateProvider);
+  return buildRecentSessions(
+    cached: {
+      if (fresh != null && isDemoEntryId(fresh.projectId))
+        fresh.projectId: fresh.sessions,
+    },
+    locals: [demoProject()],
+    remotes: const [],
+    inventory: const [],
+    // No inventory to name the machine from, and asking for one would be the
+    // keychain read this whole branch exists to avoid.
+    localDeviceLabel: _localDeviceLabel(const [], null),
+  );
+}
 
 /// Label for THIS device. The inventory row keyed by [localUuid] carries the
 /// friendly machine name; fall back to a generic label when none is found.
@@ -576,6 +608,12 @@ Future<void> pullToRefreshRecentSessions(
   WidgetRef ref, {
   Iterable<String?> extraMachineUuids = const [],
 }) async {
+  // The drawer's equivalent gesture bails the same way: the first thing
+  // `refreshMachineInventoryAndControlPlanes` does is invalidate and re-await
+  // `accountAgentsProvider`, which reads the keychain cookie and fetches
+  // /account/agents — a demo phoning home, and discarding the real inventory
+  // the user had cached before entering it.
+  if (ref.read(demoModeProvider)) return;
   final rows = ref.read(recentSessionsProvider);
   final uuids = <String?>{
     ...extraMachineUuids,

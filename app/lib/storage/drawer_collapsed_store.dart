@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../demo/demo_identity.dart';
+
 import '../config/storage_scope.dart';
 import 'scoped_prefs.dart';
 
@@ -28,6 +30,10 @@ class DrawerCollapsedStore {
   }
 
   Future<void> write(Set<String> ids) async {
-    await _prefs.setString(_key, jsonEncode(ids.toList()));
+    // The sample project's row collapses like any other, but its id names
+    // nothing the real app can resolve and nothing prunes this set — so it
+    // must not be what survives the demo.
+    final persisted = ids.where((id) => !isDemoEntryId(id)).toList();
+    await _prefs.setString(_key, jsonEncode(persisted));
   }
 }

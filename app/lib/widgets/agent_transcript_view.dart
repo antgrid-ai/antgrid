@@ -30,6 +30,7 @@ import '../models/file_tree_models.dart';
 import '../providers/agent_transport.dart';
 import '../providers/capability_catalog.dart';
 import '../providers/chat_composer_drafts.dart';
+import '../providers/demo_mode.dart';
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
 import '../services/agent_session_service.dart';
@@ -774,7 +775,11 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
         .firstWhereOrNull((s) => s.id == widget.sessionId)
         ?.tool;
     CapabilityCatalog? cachedCatalog;
-    if (toolKey != null && toolKey.isNotEmpty) {
+    // The demo's tool is a real one ('claude') and its target keys as local, so
+    // this cache entry is the SAME one the user's own local Claude sessions
+    // read — writing 'Sample model' into it poisons the real model picker, and
+    // reading it back shows the demo a machine's models.
+    if (toolKey != null && toolKey.isNotEmpty && !ref.watch(demoModeProvider)) {
       final cacheKey = capabilityCacheKey(
         capabilitySourceKey(ref.watch(selectedTargetProvider)),
         toolKey,

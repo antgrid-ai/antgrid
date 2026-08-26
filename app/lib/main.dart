@@ -29,6 +29,7 @@ import 'providers/analytics.dart';
 import 'providers/auth.dart';
 import 'providers/cached_sessions.dart';
 import 'providers/collapsed_drawer.dart';
+import 'providers/demo_mode.dart';
 import 'providers/device_revocation.dart';
 import 'providers/drawer_order.dart';
 import 'providers/first_run.dart';
@@ -44,7 +45,9 @@ import 'navigation/nav_console.dart';
 import 'navigation/nav_controller.dart';
 import 'navigation/nav_serialization.dart';
 import 'navigation/platform_route_guard.dart';
+import 'navigation/root_navigator.dart';
 import 'screens/app_shell.dart';
+import 'screens/demo_home.dart';
 import 'screens/device_cap_dialog.dart';
 import 'screens/sign_in_screen.dart';
 import 'services/devices_api.dart' show DeviceCapInfo;
@@ -60,6 +63,7 @@ import 'storage/recent_ports_store.dart';
 import 'update/update_gate.dart';
 import 'util/ab_log.dart';
 import 'widgets/auth_splash.dart';
+import 'widgets/demo_frame.dart';
 import 'window/window_chrome.dart';
 
 /// Push is Android (FCM) and iOS (APNs) only — desktop has no transport.
@@ -160,7 +164,11 @@ Future<void> main() async {
     installId: installId,
     platform: platform,
     appVersion: BuildInfo.version,
-    enabled: () => container.read(appSettingsServiceProvider).telemetryEnabled,
+    enabled: () => telemetryAllowed(container),
+    // NOT folded into `enabled`: that predicate also decides whether a queued
+    // batch is DROPPED, and the demo must not throw away the real events the
+    // user queued before entering it.
+    paused: () => container.read(demoModeProvider),
     plausibleUrl: AppEnvironment.plausibleUrl,
     plausibleDomain: AppEnvironment.plausibleDomain,
     eventsApiUrl: AppEnvironment.eventsApiUrl,
@@ -272,6 +280,13 @@ Future<void> main() async {
     // Navigation deep links (antgrid://nav/...) apply a location directly.
     final navLoc = navLocationFromUri(uri);
     if (navLoc != null) {
+      // A link names a REAL place — a machine, a project, a session — and the
+      // user asked for it, so it wins over the sample project rather than being
+      // dropped. Leaving first is what makes it whole: the demo's target is
+      // cleared, its transport disposed and its nav history reset, so the link
+      // does not land under a banner saying nothing is connected while the
+      // drawer still lists only the demo.
+      if (container.read(demoModeProvider)) exitDemoMode(container);
       container.read(navControllerProvider.notifier).applyDeepLink(navLoc);
       return;
     }
@@ -314,6 +329,24 @@ class _TelemetryLifecycleObserver extends WidgetsBindingObserver {
     if (state == AppLifecycleState.paused) unawaited(onPause());
   }
 }
+
+/// Whether an analytics event may leave the device.
+///
+/// The single chokepoint for ANALYTICS while the demo is on: the sample project
+/// is reachable with no account behind it, so there is nobody to attribute an
+/// event to and nothing there but canned data anyway. Gating here rather than
+/// per call site covers the widget-level `track(...)` calls too, which the
+/// per-session sink never sees.
+///
+/// Crash reporting is deliberately NOT gated with it. `initCrashReporting`
+/// wraps `runApp`, so its decision is made before a demo can be entered — and a
+/// crash under the sample project is the one report worth having, since it is
+/// exactly what a store reviewer would hit. It answers to the user's own
+/// telemetry setting alone, demo or not.
+@visibleForTesting
+bool telemetryAllowed(ProviderContainer container) =>
+    !container.read(demoModeProvider) &&
+    container.read(appSettingsServiceProvider).telemetryEnabled;
 
 /// System-bar overlay style for [palette]: transparent bars (the app draws
 /// edge-to-edge on mobile, see main()) with icon brightness flipped off the
@@ -389,6 +422,7 @@ class AbApp extends ConsumerWidget {
     const home = UpdateGate(child: _AppHome());
     return MaterialApp(
       title: 'Antgrid',
+      navigatorKey: ref.watch(rootNavigatorKeyProvider),
       debugShowCheckedModeBanner: false,
       theme: theme,
       darkTheme: theme,
@@ -453,7 +487,9 @@ class AbApp extends ConsumerWidget {
               // which is also what lets it drive navigation from wherever the
               // app currently is. It renders nothing unless the driver entry
               // point enabled it.
-              child: AbTextDensity(child: NavConsole(child: child!)),
+              child: AbTextDensity(
+                child: NavConsole(child: DemoFrame(child: child!)),
+              ),
             ),
           ),
         );
@@ -462,6 +498,19 @@ class AbApp extends ConsumerWidget {
     );
   }
 }
+
+/// [deviceCapProvider], held back while the demo is on.
+///
+/// The cap dialog's remedy is revoking one of the user's REAL account devices,
+/// which the demo may never do — and it opens on the root navigator, so from
+/// inside the demo it lands over the sample project, under the banner saying
+/// nothing is connected. Held back rather than dropped: the cap value survives
+/// until the dialog itself clears it, so this provider goes null → cap on the
+/// build that leaves the demo and the listener's edge fires there instead.
+final _pendingDeviceCapProvider = Provider<DeviceCapInfo?>((ref) {
+  if (ref.watch(demoModeProvider)) return null;
+  return ref.watch(deviceCapProvider);
+});
 
 /// Root route: splash while auth is unknown; sign-in gate on mobile;
 /// [AppShell] otherwise. Pricing is reached from app settings only.
@@ -475,11 +524,16 @@ class _AppHome extends ConsumerWidget {
     // free-a-slot dialog rather than failing silently. The cap kind travels on
     // DeviceCapInfo, so the dialog picks device-cap vs worker-cap copy itself.
     // Edge-trigger (null → non-null) so it shows once per rejection.
-    ref.listen<DeviceCapInfo?>(deviceCapProvider, (prev, next) {
+    ref.listen<DeviceCapInfo?>(_pendingDeviceCapProvider, (prev, next) {
       if (prev == null && next != null) {
         showDeviceCapDialog(context, ref, next);
       }
     });
+
+    // Above every account gate below, because the demo has no account: it is
+    // reached from the sign-in screen itself, which is the only surface a
+    // reviewer with no desktop and no credentials ever sees.
+    if (ref.watch(demoModeProvider)) return const DemoHome();
 
     // A revocation forces the sign-in screen on EVERY platform. Desktop is
     // otherwise ungated (it drives its own machine locally and only offers

@@ -75,6 +75,9 @@ void main() {
       expect(find.byType(SignInScreen), findsOneWidget);
       expect(find.byType(AppShell), findsNothing);
       expect(find.text('Continue without signing in'), findsNothing);
+      // The reviewer's only way in — this screen is the whole app on mobile
+      // until an account exists, so losing the link is a 2.1 rejection.
+      expect(find.text('Explore a sample project'), findsOneWidget);
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }
