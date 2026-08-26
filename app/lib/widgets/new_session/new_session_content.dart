@@ -10,6 +10,7 @@ import '../../design/widgets/ab_icon_button.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../../design/widgets/ab_snack_bar.dart';
 import '../../providers/new_session_picker.dart';
+import '../../providers/new_session_start.dart';
 import '../../providers/projects.dart';
 import '../../providers/recent_sessions.dart';
 import '../open_folder_button.dart';
@@ -59,8 +60,19 @@ class NewSessionContent extends ConsumerWidget {
     final showTopBar = onOpenDrawer != null || showSearchButton;
     return CallbackShortcuts(
       bindings: {
-        const SingleActivator(LogicalKeyboardKey.escape): () =>
-            leaveNewSession(ref.container),
+        const SingleActivator(LogicalKeyboardKey.escape): () {
+          // A running start owns Esc. Leaving would unmount the composer while
+          // `startNewSession` kept going, so the session would launch with the
+          // Stop the user just pressed Esc for still on screen a moment ago and
+          // nothing left to report the outcome to. Past the cancel boundary
+          // `requestCancel` refuses and Esc does nothing — a start that can no
+          // longer be stopped must not be walked away from either.
+          if (ref.read(newSessionStartInFlightProvider)) {
+            ref.read(newSessionStartProgressProvider.notifier).requestCancel();
+            return;
+          }
+          leaveNewSession(ref.container);
+        },
       },
       child: Focus(
         autofocus: true,

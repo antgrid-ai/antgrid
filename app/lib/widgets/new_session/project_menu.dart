@@ -26,9 +26,16 @@ import 'picker_sources.dart';
 ///     so rows appear the moment the advert lands (the reason showAbPanel
 ///     exists rather than showAbMenu's static entries).
 class ProjectChip extends ConsumerWidget {
-  const ProjectChip({super.key, required this.onOpenFolder});
+  const ProjectChip({
+    super.key,
+    required this.onOpenFolder,
+    this.enabled = true,
+  });
 
   final VoidCallback onOpenFolder;
+
+  /// See [EnvironmentChip.enabled] — the composer owns the frozen state.
+  final bool enabled;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -38,6 +45,7 @@ class ProjectChip extends ConsumerWidget {
       icon: AbIcons.folder,
       label: valid ? target!.name : 'Select project…',
       attention: !valid,
+      enabled: enabled,
       onTap: (ctx) async {
         final anchor = abMenuAnchorRect(ctx);
         if (anchor == null) return;
