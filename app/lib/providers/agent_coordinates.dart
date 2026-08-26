@@ -2,6 +2,7 @@ import 'package:collection/collection.dart';
 
 import '../services/account_agents_api.dart';
 import '../storage/recent_agents_store.dart';
+import '../util/device_id.dart';
 
 /// An agent's endpoint/identity coordinates: where to dial it and which
 /// Ed25519 pubkey its handshake must verify against, plus display metadata.
@@ -68,4 +69,39 @@ AgentCoordinates? resolveAgentCoordinates({
     );
   }
   return null;
+}
+
+/// How the UI NAMES a machine, and which platform glyph belongs to it.
+///
+/// The recents pass runs first and a match ENDS it, because the two sources may
+/// name the same machine differently and a machine named from the recents on
+/// one surface and from the inventory on another reads as two machines. This is
+/// the same order `_machineLabel` (`widgets/drawer_entry.dart`),
+/// `_remoteMachineLabel` (`widgets/recent_session_row.dart`) and
+/// `_machineLabelFor` (`widgets/new_session_action.dart`) settle it in.
+///
+/// The platform still comes from the inventory whichever source named it — that
+/// is the only source carrying one, and a glyph cannot disagree with a name.
+/// Returns null when neither source knows [base].
+({String name, String? platform})? resolveMachineDisplay({
+  required String base,
+  required List<InventoryAgent>? inventory,
+  required List<RecentAgent> recents,
+}) {
+  final inv = inventory?.firstWhereOrNull((a) => a.deviceUuid == base);
+  final cached = recents.firstWhereOrNull(
+    (r) => baseDeviceUuid(r.agentDeviceId) == base,
+  );
+  final coords = resolveAgentCoordinates(
+    base: base,
+    // Recents first: pass the inventory only when it is the sole source.
+    inventory: cached == null ? inventory : null,
+    cached: cached,
+  );
+  if (coords == null) return null;
+  final machine = coords.machineName?.trim();
+  return (
+    name: machine != null && machine.isNotEmpty ? machine : coords.label,
+    platform: inv?.platform,
+  );
 }

@@ -3,7 +3,6 @@ export 'src/buffered_agent_transport.dart';
 export 'src/connection_handshake.dart';
 export 'src/local_transport.dart';
 export 'src/machine_session.dart';
-export 'src/pair_exception.dart';
 export 'src/relay_service.dart';
 export 'src/crypto_service.dart';
 export 'src/frag.dart';

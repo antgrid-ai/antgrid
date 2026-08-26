@@ -821,9 +821,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     // archive of the currently focused session advances to the next sibling).
     // The "auto-disconnect on empty" behaviour is wired at the delete/archive
     // call sites (session_row.dart) — NOT here — because `_stopAllServices()`
-    // empties the session list synchronously during a project switch (see
-    // `PairedAgentNotifier.selectAgent`), which would race a listener-based
-    // disconnect and partially undo the in-flight switch. The FILTERED list is
+    // empties the session list synchronously during a project switch, which
+    // would race a listener-based disconnect and partially undo the in-flight
+    // switch. The FILTERED list is
     // what the selection follows, so a session the bridge is already removing
     // is stepped off the moment it says so rather than 3-15s later.
     ref.listen<List<SessionEntry>>(selectableSessionsProvider, (_, _) {
@@ -1160,7 +1160,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
                 // the same error. `retry()` is the only input that clears it,
                 // and retryAgentConnection does the invalidate itself.
                 unawaited(
-                  ref.read(pairedAgentProvider.notifier).retryAgentConnection(),
+                  ref
+                      .read(machineConnectionProvider.notifier)
+                      .retryAgentConnection(),
                 );
                 return;
               }
@@ -2160,14 +2162,14 @@ class _WorkspaceBootStatusState extends ConsumerState<_WorkspaceBootStatus> {
     if (_retrying) return;
     setState(() => _retrying = true);
     try {
-      await ref.read(pairedAgentProvider.notifier).retryAgentConnection();
+      await ref.read(machineConnectionProvider.notifier).retryAgentConnection();
     } finally {
       if (mounted) setState(() => _retrying = false);
     }
   }
 
   void _cancel() {
-    final notifier = ref.read(pairedAgentProvider.notifier);
+    final notifier = ref.read(machineConnectionProvider.notifier);
     notifier.cancelActiveAgent();
   }
 
@@ -2252,8 +2254,7 @@ class _WorkspaceBootStatusState extends ConsumerState<_WorkspaceBootStatus> {
   Widget build(BuildContext context) {
     final connAsync = ref.watch(connectionStateProvider);
     final reach = ref.watch(agentReachabilityProvider);
-    final activeAgent = ref.watch(activeAgentProvider);
-    final agentLabel = activeAgent?.agentName ?? 'agent';
+    final agentLabel = ref.watch(focusedMachineNameProvider) ?? 'agent';
 
     final rawPhases = _phases(
       conn: connAsync.value?.connectionState,

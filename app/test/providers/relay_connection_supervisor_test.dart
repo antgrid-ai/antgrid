@@ -15,7 +15,6 @@ import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/relay_connection.dart';
 import 'package:antgrid/services/license_token_minter.dart';
-import 'package:antgrid/services/storage_service.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -152,20 +151,6 @@ class _FixedManager extends RelayConnectionManager {
 
   @override
   RelayConnection connectionFor(String machineDeviceId) => conn;
-}
-
-class _MemoryStorageService extends StorageService {
-  _MemoryStorageService(this.agents);
-
-  List<PairedAgent> agents;
-
-  @override
-  Future<List<PairedAgent>> loadPairedAgents() async => List.of(agents);
-
-  @override
-  Future<void> savePairedAgents(List<PairedAgent> agents) async {
-    this.agents = List.of(agents);
-  }
 }
 
 DeviceIdentity _identity() => DeviceIdentity(
@@ -438,15 +423,6 @@ void main() {
       var builds = 0;
       final container = ProviderContainer(
         overrides: [
-          storageServiceProvider.overrideWithValue(
-            _MemoryStorageService(<PairedAgent>[
-              PairedAgent(
-                relayUrl: 'ws://relay.test',
-                agentDeviceId: 'M',
-                agentName: 'M',
-              ),
-            ]),
-          ),
           relayConnectionManagerProvider.overrideWithValue(_FixedManager(conn)),
           agentTransportForProvider.overrideWith((ref, id) async {
             builds++;
@@ -459,11 +435,12 @@ void main() {
       container
           .read(selectedTargetProvider.notifier)
           .set(const RemoteTarget.legacy('M'));
-      await container.read(pairedAgentProvider.future);
       await container.read(agentTransportForProvider('M').future);
       expect(builds, 1);
 
-      await container.read(pairedAgentProvider.notifier).retryAgentConnection();
+      await container
+          .read(machineConnectionProvider.notifier)
+          .retryAgentConnection();
 
       expect(conn.supervisor!.status, isNot(isA<Blocked>()));
       await container.read(agentTransportForProvider('M').future);
@@ -492,9 +469,6 @@ void main() {
     var builds = 0;
     final container = ProviderContainer(
       overrides: [
-        storageServiceProvider.overrideWithValue(
-          _MemoryStorageService(const <PairedAgent>[]),
-        ),
         relayConnectionManagerProvider.overrideWithValue(_FixedManager(conn)),
         agentTransportForProvider.overrideWith((ref, id) async {
           builds++;
@@ -505,15 +479,16 @@ void main() {
     addTearDown(container.dispose);
 
     // A remote PROJECT focus is `<machineUuid>.<projectId>` and never matches
-    // a PairedAgent row keyed by the bare machine uuid, so resolving the
-    // retry target off the paired list drops this case entirely.
+    // a machine row keyed by the bare uuid, so resolving the retry target off
+    // the machine list drops this case entirely.
     container
         .read(selectedTargetProvider.notifier)
         .set(const RemoteProject(machineUuid: 'M', projectId: 'p'));
-    await container.read(pairedAgentProvider.future);
     await container.read(agentTransportForProvider('M.p').future);
 
-    await container.read(pairedAgentProvider.notifier).retryAgentConnection();
+    await container
+        .read(machineConnectionProvider.notifier)
+        .retryAgentConnection();
 
     expect(conn.supervisor!.status, isNot(isA<Blocked>()));
     await container.read(agentTransportForProvider('M.p').future);

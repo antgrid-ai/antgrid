@@ -262,7 +262,8 @@ class _AppSettingsScreenState extends ConsumerState<AppSettingsScreen> {
                       body: [
                         const SizedBox(height: AbTokens.space8),
                         Text(
-                          'Default relay URL — used when pairing via a URI that doesn\'t specify a relay.',
+                          'Relay every connection from this device uses. Leave '
+                          'empty for the one this build ships with.',
                           style: AbTokens.sansStyle(
                             fontSize: AbTokens.fontXxs,
                             color: antgrid.textMuted,

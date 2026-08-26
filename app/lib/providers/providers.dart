@@ -13,15 +13,18 @@ import '../connection/supervisor_state.dart';
 import '../demo/demo_identity.dart';
 import '../models/ab_message.dart'
     show CommandInfo, NotificationPushMessage, TerminalNotificationMessage;
-import '../models/session_target.dart';
 import '../models/terminal_models.dart';
 import '../project/project_session.dart';
 import '../project/project_session_registry.dart';
+import '../services/account_agents_api.dart' show InventoryAgent;
 import '../services/license_token_minter.dart';
 import '../services/storage_service.dart';
+import 'account_agents.dart';
 import 'auth.dart';
+import 'cached_sessions.dart';
 import 'device_provisioning.dart';
 import 'entry_cleanup.dart';
+import 'agent_coordinates.dart';
 import 'agent_transport.dart';
 import 'provider_retry.dart';
 import 'relay_connection.dart';
@@ -721,16 +724,40 @@ final focusedAgentBlockedProvider = Provider<bool>((ref) {
   return ref.watch(supervisorStatusProvider(id)).value is Blocked;
 });
 
-/// True iff [entryId] corresponds to a relay-paired remote agent (as opposed to
-/// a locally-opened folder). Keyed by id rather than reading the focus, because
-/// drawer rows render for projects that are not the focused one.
+/// True iff [entryId] is reached over the relay (as opposed to a locally-opened
+/// folder). Keyed by id rather than reading the focus, because drawer rows
+/// render for projects that are not the focused one.
+///
+/// Matched on the BASE device uuid against every machine record the app holds,
+/// which is the same resolution `_buildRelayTransportFor` does to decide what
+/// to dial. Matching an id exactly — what this used to do — answers for neither
+/// shape that reaches it: a remote PROJECT is `<machineUuid>.<projectId>` while
+/// a machine record is keyed by the bare uuid.
+///
+/// A legacy project recorded against another device stays FALSE: it carries a
+/// bare projectId that names no machine, so the transport treats it as local
+/// too, and this must not disagree with what is actually dialled.
 final entryIsRelayProvider = Provider.family<bool, String>((ref, entryId) {
-  final agents = ref.watch(pairedAgentProvider).value ?? const [];
-  return agents.any((a) => a.agentDeviceId == entryId);
+  // The sample project's transport reports itself local — that is what keeps it
+  // out of the relay bucket and its push registration.
+  if (isDemoEntryId(entryId)) return false;
+  final base = baseDeviceUuid(entryId);
+  // This machine appears in its OWN account inventory, and the transport
+  // refuses to dial itself (`a.deviceUuid != localUuid`) — so an inventory hit
+  // on the local uuid is a LOCAL entry, not a relay one.
+  if (base == ref.watch(localDeviceUuidProvider).value) return false;
+  final recent = ref.watch(recentAgentsProvider);
+  if (recent.any((r) => baseDeviceUuid(r.agentDeviceId) == base)) return true;
+  final inventory =
+      ref.watch(accountAgentsProvider).value ?? const <InventoryAgent>[];
+  // A null `relayUrl` is a machine that has not enabled remote access: the
+  // transport builder has nothing to dial and falls through to its local arm,
+  // so calling it relay here would disagree with what is actually opened.
+  return inventory.any((a) => a.deviceUuid == base && a.relayUrl != null);
 });
 
-/// True iff the currently focused id corresponds to a relay-paired remote
-/// agent (as opposed to a locally-opened folder).
+/// True iff the currently focused id is reached over the relay (as opposed to a
+/// locally-opened folder).
 final focusedIsRelayProvider = Provider<bool>((ref) {
   final id = ref.watch(selectedRegistrationIdProvider);
   if (id == null) return false;
@@ -829,59 +856,47 @@ final controlPlaneResetProvider =
       () => ValueController(null),
     );
 
-final pairedAgentProvider =
-    AsyncNotifierProvider<PairedAgentNotifier, List<PairedAgent>>(
-      PairedAgentNotifier.new,
+/// The machine-level connection actions — forget, cancel, retry.
+///
+/// Holds no state of its own: the machines themselves live in the reconnect
+/// list and the account inventory, and each machine's connection is owned by
+/// its `ConnectionSupervisor`.
+final machineConnectionProvider =
+    NotifierProvider<MachineConnectionNotifier, void>(
+      MachineConnectionNotifier.new,
     );
 
-/// The currently active agent from the paired list, if any.
-final activeAgentProvider = Provider<PairedAgent?>((ref) {
+/// What to call the machine behind the current focus, if the app knows one.
+///
+/// Resolved by BASE uuid, for the same reason [entryIsRelayProvider] is: a
+/// remote project focus is `<machineUuid>.<projectId>`, so an exact match left
+/// the connect screen naming a generic "agent" for every machine in the
+/// product. The account inventory answers alongside the reconnect list because
+/// the FIRST connect to a machine renders this screen before anything has been
+/// written to the reconnect list — the row is upserted fire-and-forget during
+/// the dial the screen is waiting on.
+///
+/// A plain `String?` rather than a record or a model: providers filter updates
+/// with `==`, so an identity-compared object would push a rebuild on every
+/// reconnect-list write even when the name is unchanged.
+final focusedMachineNameProvider = Provider<String?>((ref) {
   final activeId = ref.watch(selectedRegistrationIdProvider);
   if (activeId == null) return null;
-  final agents = ref.watch(pairedAgentProvider).value ?? const [];
-  try {
-    return agents.firstWhere((a) => a.agentDeviceId == activeId);
-  } on StateError {
-    return null;
-  }
+  return resolveMachineDisplay(
+    base: baseDeviceUuid(activeId),
+    inventory: ref.watch(accountAgentsProvider).value,
+    recents: ref.watch(recentAgentsProvider),
+  )?.name;
 });
 
-class PairedAgentNotifier extends AsyncNotifier<List<PairedAgent>> {
-  // Connect + v2 handshake (and their retry/repair machinery) are owned by
-  // RelayConnection now; this notifier only owns the paired-agent list and the
-  // focus target. Reading the transport provider for an id is what opens its
-  // dedicated socket and runs the handshake.
+class MachineConnectionNotifier extends Notifier<void> {
+  // Connect + handshake (and their retry/repair machinery) are owned by
+  // RelayConnection; this notifier only moves the focus target. Reading the
+  // transport provider for an id is what opens its dedicated socket and runs
+  // the handshake.
 
   @override
-  Future<List<PairedAgent>> build() async {
-    final storage = ref.read(storageServiceProvider);
-    return storage.loadPairedAgents();
-  }
-
-  Future<List<PairedAgent>> _pairedAgentsSnapshot() async {
-    final loaded = state.value;
-    if (loaded != null) return List<PairedAgent>.from(loaded);
-    try {
-      return List<PairedAgent>.from(await future);
-    } catch (_) {
-      return ref.read(storageServiceProvider).loadPairedAgents();
-    }
-  }
-
-  Future<void> selectAgent(String agentDeviceId) async {
-    final agents = state.value ?? [];
-    final agent = agents
-        .where((a) => a.agentDeviceId == agentDeviceId)
-        .firstOrNull;
-    if (agent == null) return;
-
-    // Focus the agent. Each id owns a dedicated socket, so connect + handshake
-    // happen when the transport provider for this id is read (workspace boot);
-    // there is no shared relay to disconnect on switch.
-    ref
-        .read(selectedTargetProvider.notifier)
-        .set(RemoteTarget.legacy(agentDeviceId));
-  }
+  void build() {}
 
   Future<void> forgetMachine(String agentDeviceIdOrUuid) async {
     final machineUuid = baseDeviceUuid(agentDeviceIdOrUuid);
@@ -890,41 +905,55 @@ class PairedAgentNotifier extends AsyncNotifier<List<PairedAgent>> {
       ref.read(selectedTargetProvider.notifier).set(null);
     }
 
-    final agents = await _pairedAgentsSnapshot();
     final recentStore = ref.read(recentAgentsStoreProvider);
     final recentAgents = recentStore.list();
     final forgottenIds = <String>{
-      for (final a in agents)
-        if (baseDeviceUuid(a.agentDeviceId) == machineUuid) a.agentDeviceId,
       for (final r in recentAgents)
         if (baseDeviceUuid(r.agentDeviceId) == machineUuid) r.agentDeviceId,
     };
 
     final mgr = ref.read(relayConnectionManagerProvider);
     final registry = ref.read(projectSessionRegistryProvider.notifier);
+    // Every per-entry store is keyed by the DRAWER id, and a remote project's
+    // is the compound `<uuid>.<projectId>` — a shape the reconnect list never
+    // holds, since it upserts machines by their bare uuid. Purging only those
+    // rows leaves each project's cached session list behind, which is precisely
+    // the resurrection this flow promises to clear. The session cache is the
+    // authority on which projects were ever seen on this machine: the warm
+    // registry alone answers for the handful open right now, and a machine is
+    // usually forgotten from a drawer whose rows are all cold.
+    forgottenIds.addAll(
+      ref
+          .read(projectSessionRegistryProvider)
+          .where((id) => baseDeviceUuid(id) == machineUuid),
+    );
+    forgottenIds.addAll(
+      ref
+          .read(cachedSessionsStoreProvider)
+          .entries()
+          .keys
+          .where((id) => baseDeviceUuid(id) == machineUuid),
+    );
     for (final id in forgottenIds) {
       mgr.release(id);
       // `AndSettle` (awaited) before purge: eviction's `onEvict` writes the
       // status cache that `purgeEntryState` then deletes — ordering matters.
       await registry.forceEvictAndSettle(id);
+      // Riverpod 3 throws from every `ref` member once the container is gone,
+      // and this runs fire-and-forget from a tap handler with no catch — a
+      // sign-out or a window close mid-purge would surface as a crash rather
+      // than a half-finished forget.
+      if (!ref.mounted) return;
       // Clear the forgotten agent's per-entry footprint (cached session list,
       // recent ports, status cache). Without this the old session list
-      // resurrects when the machine is re-paired under the same id.
+      // resurrects when the machine is reached again under the same id.
       await purgeEntryState(ref, id);
+      if (!ref.mounted) return;
     }
 
-    final remainingAgents = agents
-        .where((a) => baseDeviceUuid(a.agentDeviceId) != machineUuid)
-        .toList(growable: false);
-    await ref.read(storageServiceProvider).savePairedAgents(remainingAgents);
-
-    for (final r in recentAgents) {
-      if (baseDeviceUuid(r.agentDeviceId) == machineUuid) {
-        await recentStore.remove(r.agentDeviceId);
-      }
+    for (final id in forgottenIds) {
+      await recentStore.remove(id);
     }
-
-    state = AsyncData(remainingAgents);
   }
 
   /// User-initiated escape from the workspace boot screen — clears the
@@ -934,14 +963,20 @@ class PairedAgentNotifier extends AsyncNotifier<List<PairedAgent>> {
   void cancelActiveAgent() {
     final activeId = ref.read(selectedRegistrationIdProvider);
     ref.read(selectedTargetProvider.notifier).set(null);
-    // Drop the machine socket + warm session for the cancelled agent so
-    // re-selecting this id from the home screen rebuilds a fresh connection
+    // Drop the in-flight machine socket + warm session for the cancelled agent
+    // so re-selecting this id from the home screen rebuilds a fresh connection
     // rather than reusing the half-closed one. The connection is machine-level
     // (bare uuid) — reduce the compound focus id to its base.
     if (activeId != null) {
       final mgr = ref.read(relayConnectionManagerProvider);
       final machineUuid = baseDeviceUuid(activeId);
-      mgr.release(machineUuid);
+      // Same guard, and the same reason, as the control-plane reaper's: the
+      // socket is machine-level and un-refcounted, so releasing an ESTABLISHED
+      // one from here would kill the live E2E session and every other project
+      // stream riding it. Cancel only ever abandons an attempt in flight.
+      if (mgr.peek(machineUuid)?.supervisor?.status is! Connected) {
+        mgr.release(machineUuid);
+      }
       ref.read(projectSessionRegistryProvider.notifier).forceEvict(activeId);
     }
   }
@@ -960,9 +995,9 @@ class PairedAgentNotifier extends AsyncNotifier<List<PairedAgent>> {
   /// listener. With no supervisor yet (nothing dialled for this machine), the
   /// rebuild is what starts one.
   ///
-  /// The target comes from the FOCUS, not the paired-agent list: a remote
-  /// project focus is `<machineUuid>.<projectId>` and never matches a
-  /// `PairedAgent` row keyed by the bare machine uuid.
+  /// The target comes from the FOCUS, not the reconnect list: a remote project
+  /// focus is `<machineUuid>.<projectId>` and never matches a machine row keyed
+  /// by the bare uuid.
   Future<void> retryAgentConnection() async {
     final target = ref.read(selectedTargetProvider);
     if (target == null || target.isLocal) return;

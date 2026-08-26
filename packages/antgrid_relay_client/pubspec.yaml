@@ -1,5 +1,5 @@
 name: antgrid_relay_client
-description: Pure Dart relay client for Antgrid — handles WebSocket auth, pairing, and E2E encryption.
+description: Pure Dart relay client for Antgrid — handles WebSocket auth and E2E encryption.
 publish_to: none
 version: 1.0.0
 

@@ -28,12 +28,12 @@ import 'recent_agents.dart';
 /// when no local project happens to be open (the dedup above relies on an open
 /// local project to cover it, which isn't guaranteed).
 ///
-/// Note on id formats: QR-paired agents persist [RecentAgent.agentDeviceId] as
-/// the agent's full registrationId — `<deviceUuid>.<projectId>` — because the
-/// QR `d=` param carries the compound registrationId. Inventory rows from the
-/// web report only the bare `deviceUuid`. We normalize the recent-id
-/// to its `<deviceUuid>` prefix before deduping so QR-paired agents don't
-/// render twice once their inventory entry loads.
+/// Note on id formats: a machine's [RecentAgent.agentDeviceId] is the bare
+/// `deviceUuid`, but a legacy per-project row persists the compound
+/// `<deviceUuid>.<projectId>` registrationId. Inventory rows from the web
+/// report only the bare `deviceUuid`, so we normalize the recent id to its
+/// `<deviceUuid>` prefix before deduping — otherwise such a row renders twice
+/// once its inventory entry loads.
 List<DrawerEntry> mergeDrawerEntries({
   required List<AbProject> locals,
   required List<RecentAgent> remotes,

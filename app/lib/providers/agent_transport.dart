@@ -177,10 +177,6 @@ Future<AgentTransport?> _buildRelayTransportFor(
   InventoryAgent? uncachedInventoryHit;
 
   final inventory = ref.read(accountAgentsProvider).value;
-  final agents = ref.read(pairedAgentProvider).value ?? const <PairedAgent>[];
-  final paired = agents.firstWhereOrNull(
-    (a) => baseDeviceUuid(a.agentDeviceId) == base,
-  );
   final recent = recentStore.list().firstWhereOrNull(
     (r) => baseDeviceUuid(r.agentDeviceId) == base,
   );
@@ -193,9 +189,7 @@ Future<AgentTransport?> _buildRelayTransportFor(
     inventory: inventory,
     cached: recent,
   );
-  if (paired != null && recent != null && coords != null) {
-    resolve = (agent: paired, agentEd25519PubB64: coords.ed25519Pub);
-  } else if (recent != null && coords != null) {
+  if (recent != null && coords != null) {
     resolve = (
       agent: PairedAgent(
         relayUrl: coords.relayUrl ?? recent.relayUrl,
@@ -245,7 +239,7 @@ Future<AgentTransport?> _buildRelayTransportFor(
 
   final invHit = uncachedInventoryHit;
   if (invHit != null) {
-    // The activation funnel for the no-QR path. `uncachedInventoryHit` is set
+    // The activation funnel. `uncachedInventoryHit` is set
     // only when no cached row backed the machine, so this fires once per
     // newly-reached machine rather than on every warm rebuild. The `reconnect`
     // variant this event used to carry has no successor: reconnecting is the
@@ -301,7 +295,7 @@ Future<AgentTransport?> _buildRelayTransportFor(
   }
   final tokenMinter = minter;
   // Freshness-first, same polarity as the pubkey: the inventory-resolved
-  // endpoint wins over the one pinned on the stored PairedAgent, which is
+  // endpoint wins over the one pinned on the cached machine row, which is
   // exactly the value that goes stale when a host moves relay.
   final relayUrl = coords?.relayUrl ?? r.agent.relayUrl;
   // Read through the container-lifetime resolvers, never through THIS

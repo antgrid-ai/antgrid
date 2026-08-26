@@ -3,10 +3,15 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../demo/demo_identity.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../launcher/host_control_client.dart';
+import '../util/ab_log.dart';
 import '../util/external_open_target.dart';
 import '../utils/platform_utils.dart';
+import 'device_provisioning.dart';
+import 'projects.dart';
+import 'provider_retry.dart';
 import 'remote_access.dart';
 
 /// Which external apps this machine can open a checkout in.
@@ -20,6 +25,44 @@ final externalOpenTargetsProvider = FutureProvider<List<ExternalOpenTarget>>((
   if (isMobilePlatform) return const [];
   return detectExternalOpenTargets();
 });
+
+/// True iff [entryId] names a project whose checkout lives on THIS device —
+/// the only case the loopback control plane can answer about.
+///
+/// An ALLOWLIST, not a remote-blocklist: an id this device holds no local
+/// project for is a remote machine's (`<machineUuid>.<projectId>`), a machine
+/// itself, or something that has been removed, and every one of those must lose
+/// the working-directory affordances. Asking the local store the same way
+/// `projectDisplayNameProvider` does — rather than asking whether some machine
+/// list happens to mention the id — is what keeps a compound remote id from
+/// reading as local: it can never equal a bare local `projectId`.
+///
+/// The demo owns no checkout at all, and answering for it would spawn the
+/// bridge host from inside a sample project that promises nothing is connected.
+/// [noProviderRetry] because the gate must SETTLE: Riverpod 3 otherwise holds
+/// `.future` pending across a ten-attempt backoff, and the only reader awaits it
+/// before opening a menu — a retrying build is a kebab that never answers, not a
+/// menu missing two rows.
+final entryIsLocalCheckoutProvider = FutureProvider.family<bool, String>((
+  ref,
+  entryId,
+) async {
+  if (isDemoEntryId(entryId)) return false;
+  final projects = ref.watch(projectsProvider);
+  final String? localUuid;
+  try {
+    localUuid = await ref.watch(localDeviceUuidProvider.future);
+  } catch (_) {
+    return false;
+  }
+  // Null on mobile/web, and until the desktop uuid is minted. Local-vs-remote
+  // is undecidable then, and the safe answer is the one that offers nothing.
+  if (localUuid == null) return false;
+  for (final project in projects) {
+    if (project.projectId == entryId) return project.isLocalFor(localUuid);
+  }
+  return false;
+}, retry: noProviderRetry);
 
 /// Open a session's working directory in [target].
 ///
@@ -91,6 +134,34 @@ Future<String?> _resolveCheckoutPath(
   required String projectId,
   required String checkoutId,
 }) async {
+  // The local-only contract above, enforced rather than documented: the read
+  // below goes to the LOOPBACK host, so a remote project asks THIS machine
+  // about a checkout it has never seen — and the ask spawns a host to answer
+  // it. The menus that offer these rows gate on the same provider; a menu that
+  // stops gating (or a new caller) must not be able to reach the host.
+  bool local;
+  try {
+    local = await container.read(
+      entryIsLocalCheckoutProvider(projectId).future,
+    );
+  } catch (_) {
+    local = false;
+  }
+  if (!local) {
+    AbLog.warn(
+      'open_checkout',
+      'refused: not a local checkout',
+      fields: {'projectId': projectId},
+    );
+    // Reachable with the row already on screen: the menu gates on this same
+    // provider, then waits on the user's pick, and a project upsert or a uuid
+    // re-mint in that window flips the answer. Silence here is what leaves a
+    // stale clipboard the user believes they just replaced.
+    if (context.mounted) {
+      showAbSnackBar(context, 'That session is not on this machine.');
+    }
+    return null;
+  }
   try {
     final client = await container.read(hostControlClientProvider.future);
     return await client.checkoutPath(

@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../demo/demo_identity.dart';
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_status_tone.dart';
@@ -576,22 +575,26 @@ class _SessionMenu extends ConsumerWidget {
   }
 
   Future<void> _openMenu(BuildContext anchor, ProviderContainer ref) async {
-    // Working-directory rows are LOCAL-only: the checkout lives on the machine
-    // hosting it, so for a relay project the window would open somewhere the
-    // user is not sitting. A failed probe degrades to no rows rather than a
-    // menu that never opens.
+    // Working-directory rows are offered only for a checkout on THIS device:
+    // both resolve their path over the loopback control plane
+    // (`openCheckoutIn`/`copyCheckoutPath` read `hostControlClientProvider`),
+    // which can only answer about projects this machine hosts. Asked about a
+    // remote machine's project it spawns a host and refuses — and the window it
+    // could not open would have been on a machine the user is not sitting at.
     //
-    // The demo is excluded for a second reason: both rows resolve their path
-    // over the loopback control plane (`openCheckoutIn`/`copyCheckoutPath` read
-    // `hostControlClientProvider`), which is an `ensureHost()` caller — and the
-    // sample project has no checkout for it to answer about anyway. Not
-    // `entryIsRelayProvider`'s job: the demo transport reports itself local.
-    final targets =
-        ref.read(entryIsRelayProvider(entryId)) || isDemoEntryId(entryId)
-        ? const <ExternalOpenTarget>[]
-        : await ref
+    // Gated on what the local project store holds, never on whether the id
+    // looks remote: an id absent from it (a remote project, a machine, the
+    // demo) loses the rows, so a source of remote entries added later is
+    // excluded without this line being revisited. A failed probe degrades to no
+    // rows rather than a menu that never opens.
+    final local = await ref
+        .read(entryIsLocalCheckoutProvider(entryId).future)
+        .catchError((_) => false);
+    final targets = local
+        ? await ref
               .read(externalOpenTargetsProvider.future)
-              .catchError((_) => const <ExternalOpenTarget>[]);
+              .catchError((_) => const <ExternalOpenTarget>[])
+        : const <ExternalOpenTarget>[];
     if (!anchor.mounted) return;
     final anchorRect = abMenuAnchorRect(anchor);
     if (anchorRect == null) return;
@@ -753,7 +756,7 @@ class _SessionMenu extends ConsumerWidget {
     if (entryId != ref.read(selectedRegistrationIdProvider)) return;
     if (ref.read(activeSessionsProvider).isNotEmpty) return;
     if (ref.read(focusedIsRelayProvider)) {
-      ref.read(pairedAgentProvider.notifier).cancelActiveAgent();
+      ref.read(machineConnectionProvider.notifier).cancelActiveAgent();
     } else if (ref.read(selectedRegistrationIdProvider) != null) {
       ref.read(selectedTargetProvider.notifier).set(null);
     }
