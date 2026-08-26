@@ -111,7 +111,18 @@ Future<void> _settle(WidgetTester tester) async {
   }
 }
 
+/// Picks a view from the agent bar's workspace rail. Settles first: the rail
+/// is shown from a post-frame callback (see `WorkspaceMenuButton`), so it is
+/// one frame behind the shell that publishes it.
+///
+/// Taps the label with no hover because [_withTabletShell] pins
+/// `TargetPlatform.android`, where the rail never recedes and the labels are
+/// laid out from the first frame. Should the rail ever recede here, this taps a
+/// clipped, zero-opacity label ~200px outside the rail's box — and `tester.tap`
+/// only WARNS on a miss, so the swipe-routing tests would fail as "expected
+/// git, got null" and read as a bug in the fling router.
 Future<void> _pickView(WidgetTester tester, String label) async {
+  await _settle(tester);
   await tester.tap(
     find.descendant(
       of: find.byType(WorkspaceMenuPanel),

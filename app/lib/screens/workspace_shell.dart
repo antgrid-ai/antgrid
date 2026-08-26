@@ -172,10 +172,18 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   /// with the agent panel.
   bool _tabletContextPanelExpanded = false;
 
-  /// [workspaceMenuOpenProvider]'s value from just before a squeeze hid it —
-  /// see [_setTabletContextExpanded] — so leaving the squeeze restores a
-  /// closed menu as closed instead of forcing it back open.
-  bool _menuOpenBeforeSqueeze = true;
+  /// Whether THIS State is the one that pulled the rail down to make room for
+  /// the context pane — the only case in which giving the pane back may reopen
+  /// it. See [_syncMenuToContextPane]. A rail the user shut by hand, or one
+  /// already shut when this shell mounted, is not ours to restore:
+  /// [workspaceMenuOpenProvider] is root-scoped and outlives this State, so its
+  /// value at mount time says nothing about who last set it.
+  bool _menuAutoHidden = false;
+
+  /// What [_syncMenuToContextPane] last acted on, so it fires on the EDGES of
+  /// the pane appearing and disappearing rather than on every rebuild. Null
+  /// until the first desktop build resolves a layout.
+  bool? _contextPaneOnScreen;
 
   /// Gesture state for [_buildTabletTouch]'s single fling dispatcher — see
   /// its doc for why this replaced three separate [_HorizontalFlingDetector]s.
@@ -1053,6 +1061,12 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
         // route — means no workspace tab is on screen at all, so nothing in it
         // may consume a back press.
         ref.read(visibleWorkspaceViewProvider.notifier).set(visibleView);
+        // Driven off the same `visibleView` the tab strip and the back gate
+        // read, so the rail can never disagree with them about whether the pane
+        // is up. Skipped entirely behind a workbench surface: the pane has not
+        // moved, it is merely covered, and syncing there would spend the
+        // remembered value on a round trip through settings.
+        if (surfaceChild == null) _syncMenuToContextPane(visibleView != null);
       });
     }
 
@@ -1562,13 +1576,10 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
                   // [_buildPanels]'s list — corrupted the element tree here
                   // instead (this slot sits under an [AnimatedPadding], not a
                   // plain list, and swapping widget types under it blanked
-                  // the whole screen). [WorkspaceMenuButton]'s popup survives
-                  // an ordinary squeeze (sidebar open, pane open but not
-                  // expanded) untouched — it only gets forced shut at FULL
-                  // zero width (pane expanded, see [_tabletContextPanelWidth]),
-                  // via [_setTabletContextExpanded]/[_openTabletContextPanel]/
-                  // [_closeTabletContextPanel], not the icon alone; see those
-                  // methods' docs.
+                  // the whole screen). Nothing here has to think about
+                  // [WorkspaceMenuButton]'s popup: the rail is already down for
+                  // as long as any view is on screen, whatever width this pane
+                  // is squeezed to — see [_syncMenuToContextPane].
                   child: surfaceChild ?? _agentPanel(),
                 ),
                 Positioned(
@@ -1764,65 +1775,56 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     return mq.size.width - mq.padding.horizontal;
   }
 
-  /// [WorkspaceMenuButton]'s popup is "pinned" (see its own doc) and normally
-  /// survives every squeeze of the agent pane untouched. That breaks down at
-  /// full "expanded" width ([_tabletContextPanelWidth]): the agent pane —
-  /// and the button's [CompositedTransformTarget] living in its [AgentBar] —
-  /// is squeezed to zero width. The popup is right-anchored off that point
-  /// ([WorkspaceMenuButton]'s `followerAnchor: topRight`), so a zero-width
-  /// anchor there makes it hang leftward over the context pane instead of
-  /// sitting under a real button.
+  /// The workspace rail and the context pane's own [WorkspaceTabBar] list the
+  /// same five views, so only ever one of them is up: the pane takes the job
+  /// over as it opens and hands it back as it closes. What is left to the rail
+  /// is the one thing the tab strip cannot do — being the way back to a
+  /// workspace the user has closed, which otherwise takes its own tab strip
+  /// off screen with it (see [contextPanelControlProvider], the only other).
   ///
-  /// The mouse desktop never hits this: entering its own
-  /// [_PanelMode.contextExpanded] drops the agent panel (and the button with
-  /// it) from `_buildPanels`'s list entirely, so the popup's owning
-  /// [OverlayPortal] is torn down and comes back only once the button
-  /// remounts. Doing the same by unmounting here previously corrupted this
-  /// slot's element tree (see [_buildTabletTouch]'s doc), so this reaches the
-  /// same visible outcome — the popup gone for the squeeze, back once it
-  /// isn't — by toggling [workspaceMenuOpenProvider] instead of the widget.
+  /// Hidden, not unmounted: unmounting the button from here corrupted this
+  /// slot's element tree once already (see [_buildTabletTouch]'s doc), and
+  /// [workspaceMenuOpenProvider] reaches the same visible outcome from outside
+  /// the widget. [_menuAutoHidden] is what stops the hand-back from reopening a
+  /// rail this shell never took down — one the user shut by hand, and one
+  /// already shut before this shell mounted, both stay shut.
   ///
-  /// [_menuOpenBeforeSqueeze] is what stops that toggle from reopening a menu
-  /// the user had already closed by hand before expanding.
-  void _setTabletContextExpanded(bool expanded) {
-    final wasSqueezed = _tabletEndDrawerOpen && _tabletContextPanelExpanded;
-    final willSqueeze = _tabletEndDrawerOpen && expanded;
-    if (willSqueeze && !wasSqueezed) {
-      _menuOpenBeforeSqueeze = ref.read(workspaceMenuOpenProvider);
-      ref.read(workspaceMenuOpenProvider.notifier).set(false);
-    } else if (wasSqueezed && !willSqueeze && _menuOpenBeforeSqueeze) {
-      ref.read(workspaceMenuOpenProvider.notifier).set(true);
+  /// A squeezed pane — [_tabletContextPanelExpanded] over an open
+  /// [_tabletEndDrawerOpen], leaving the agent pane (and with it the button's
+  /// [CompositedTransformTarget] in its [AgentBar]) at zero width for the
+  /// right-anchored popup to hang off — is one shape of an already-OPEN pane,
+  /// so the auto-hide has normally taken the rail down long before the squeeze
+  /// arrives. The gap is a rail the user reopened by hand OVER an open pane:
+  /// the pane never changes state, so nothing here fires to take it down again.
+  void _syncMenuToContextPane(bool onScreen) {
+    if (_contextPaneOnScreen == onScreen) return;
+    _contextPaneOnScreen = onScreen;
+    final open = ref.read(workspaceMenuOpenProvider);
+    if (onScreen) {
+      _menuAutoHidden = open;
+      if (open) ref.read(workspaceMenuOpenProvider.notifier).set(false);
+    } else if (_menuAutoHidden) {
+      _menuAutoHidden = false;
+      if (!open) ref.read(workspaceMenuOpenProvider.notifier).set(true);
     }
+  }
+
+  void _setTabletContextExpanded(bool expanded) {
     setState(() => _tabletContextPanelExpanded = expanded);
   }
 
   /// Opens the touch tablet's context pane — reached only from
   /// [_openContextPanel]'s tablet branch, since no fling opens the pane (see
-  /// [_tabletFlingLeftward]). Mirrors [_setTabletContextExpanded]'s squeeze
-  /// check, since [_tabletContextPanelExpanded] survives a close (only
-  /// [_closeTabletContextPanel] restores the popup, and only if the pane was
-  /// squeezed when it closed) — so reopening an already-expanded pane
-  /// re-enters that same squeeze immediately.
+  /// [_tabletFlingLeftward]).
   void _openTabletContextPanel() {
     if (_tabletEndDrawerOpen) return;
-    if (_tabletContextPanelExpanded) {
-      _menuOpenBeforeSqueeze = ref.read(workspaceMenuOpenProvider);
-      ref.read(workspaceMenuOpenProvider.notifier).set(false);
-    }
     setState(() => _tabletEndDrawerOpen = true);
   }
 
   /// Closes the touch tablet's context pane — the shared tail of its two
   /// close paths ([_closeTabletDrawers]'s back handler and the close button in
-  /// the pane's own tab bar) — restoring the workspace menu the same way
-  /// [_setTabletContextExpanded] does, since closing the pane while expanded
-  /// ends the squeeze exactly as un-expanding it does.
+  /// the pane's own tab bar).
   void _closeTabletContextPanel() {
-    if (_tabletEndDrawerOpen &&
-        _tabletContextPanelExpanded &&
-        _menuOpenBeforeSqueeze) {
-      ref.read(workspaceMenuOpenProvider.notifier).set(true);
-    }
     setState(() => _tabletEndDrawerOpen = false);
   }
 
