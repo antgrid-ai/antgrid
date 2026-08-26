@@ -23,8 +23,8 @@ import { PLAN_SLUG_FREE } from "../models/plan.js";
 export type DeleteAccountResult = "deleted" | "blocked_subscription" | "blocked_team";
 
 /** Block deletion only while a *paid* subscription will still auto-renew. A free
- *  plan, or a paid plan already pending cancellation, has no future charge and
- *  does not block.
+ *  plan, a promotional grant, or a paid plan already pending cancellation has no
+ *  future charge and does not block.
  *
  *  Scoped to the account the user OWNS, not the one they bill against. A member
  *  inherits their owner's renewing subscription and cannot cancel it, so
@@ -35,6 +35,13 @@ export async function hasRenewingPaidSubscription(db: DB, userId: string): Promi
   if (!owned) return false;
   const sub = await activeSubscriptionForAccount(db, owned.id);
   if (!sub) return false;
+  // An unpurchased grant renews nothing and bills nobody, so it is not a reason
+  // to refuse. Checked BEFORE the slug test because the grant rides a paid
+  // plan's row — `ensureDefaultSubscription` hands every new account
+  // `pro_yearly` while checkout is disabled, so the slug alone cannot tell it
+  // apart from a real purchase, and every account would be refused deletion
+  // with nothing to cancel.
+  if (sub.promotional) return false;
   const plan = await db.plan.findUnique({ where: { id: sub.planId } });
   if (!plan || plan.slug === PLAN_SLUG_FREE) return false;
   return !isPendingCancellation(sub);

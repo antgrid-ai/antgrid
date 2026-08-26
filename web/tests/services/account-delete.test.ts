@@ -5,7 +5,7 @@ import { createTestUser, createTestSession, createTestSubscription, createTestDe
 import { createAuth } from "../../src/auth/better-auth.js";
 import { createEmailSender } from "../../src/auth/email.js";
 import { deleteUserAccount } from "../../src/services/account.js";
-import { ensureFreeSubscription } from "../../src/models/subscription.js";
+import { ensureFreeSubscription, provisionProductAccountForUser } from "../../src/models/subscription.js";
 import { ensureProductAccount } from "../../src/models/product-account.js";
 import { applySubscriptionEvent } from "../../src/billing/reducer.js";
 
@@ -94,6 +94,28 @@ describe("deleteUserAccount", () => {
     // User untouched
     const u = await pg.db.user.findUniqueOrThrow({ where: { id: user.id } });
     expect(u.email).toBe("bob@example.com");
+  });
+
+  test("the promotional grant every new account gets does not block deletion", async () => {
+    const auth = authFor(pg.db, pg.url);
+    const user = await createTestUser(pg.db, "promo@example.com");
+    // The production path, not a hand-built row: this is what provisioning
+    // hands every new user while checkout is disabled.
+    const account = await provisionProductAccountForUser(pg.db, user.id);
+
+    // Non-vacuity guard. The grant rides a PAID plan, which is the only reason
+    // this case is interesting — were it ever switched to the free plan, the
+    // slug test would carry it and this test would prove nothing.
+    const granted = await pg.db.subscription.findFirstOrThrow({
+      where: { accountId: account.id, status: "active" },
+    });
+    expect(granted.promotional).toBe(true);
+    expect(granted.tier).toBe("pro");
+
+    const result = await deleteUserAccount(pg.db, { baseUrl: undefined, secret: undefined }, auth, {
+      userId: user.id, headers: new Headers(),
+    });
+    expect(result).toBe("deleted");
   });
 
   test("pending-cancel paid sub is fully cancelled and provider ids nulled on deletion", async () => {
