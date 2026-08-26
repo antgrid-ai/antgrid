@@ -6,10 +6,12 @@ import 'recent_sessions.dart';
 import 'sessions.dart';
 
 /// Effective per-project work status, for the surfaces that speak for a whole
-/// project: the title bar's focused-project pill. Session-level surfaces speak
-/// for ONE session instead — drawer rows and the title bar read
-/// [sessionWorkStatusProvider]; the whole Recent list shares
-/// [recentSessionStatusesProvider]. Drawer PROJECT rows show no dot at all.
+/// project: the title bar's focused-project pill, and a COLLAPSED drawer
+/// project row (local or advertised-remote), whose session rows are off screen
+/// and so cannot speak for themselves. An EXPANDED drawer project row shows no
+/// dot — its sessions are right there. Session-level surfaces speak for ONE
+/// session instead: session rows read [sessionWorkStatusProvider], and the
+/// whole Recent list shares [recentSessionStatusesProvider].
 ///
 /// The live control-plane advert — which carries working/attention/error/done
 /// for a project WITHOUT warming (opening) it — is the ONLY source, read from

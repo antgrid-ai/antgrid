@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../connection/relay_mechanisms.dart' show ConnectionBlockedException;
 import '../connection/supervisor_state.dart';
 import '../design/ab_icons.dart';
+import '../design/ab_status_tone.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
@@ -19,6 +20,7 @@ import '../design/widgets/ab_chip.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../models/drawer_entry.dart';
+import '../launcher/host_controller.dart' show HostPhase;
 import '../models/session_target.dart';
 import '../navigation/nav_controller.dart';
 import '../util/device_id.dart';
@@ -32,6 +34,7 @@ import '../providers/cached_sessions.dart';
 import '../providers/drawer_entries.dart';
 import '../providers/collapsed_drawer.dart';
 import '../providers/drawer_expansion.dart';
+import '../providers/host_status.dart';
 import '../providers/new_session_action.dart'
     show SessionLimitExceededException, openRemoteProjectForActivation;
 import '../providers/new_session_picker.dart'
@@ -43,6 +46,7 @@ import '../providers/project_work_status.dart';
 import '../providers/projects.dart';
 import '../providers/providers.dart';
 import '../providers/recent_agents.dart';
+import '../providers/sessions.dart';
 import '../providers/supervisor_status.dart';
 import '../screens/upgrade_screen.dart';
 import '../services/control_plane_client.dart';
@@ -59,49 +63,55 @@ class DrawerEntryRow extends ConsumerStatefulWidget {
   ConsumerState<DrawerEntryRow> createState() => _DrawerEntryRowState();
 }
 
-/// Lightweight group-header variant for a remote machine row in the drawer.
-/// Stateless: the only per-row UI state is hover, owned by [_HoverableDrawerRow].
+/// Section BAND for a remote machine in the drawer — the same visual class as
+/// the `PROJECTS` label above it, not a tree node.
+///
+/// A machine is a container of projects, not a project, and treating it as a
+/// third level of tree cost an indent step that every session name underneath
+/// then paid for out of a 288px panel. As a band it costs nothing: the projects
+/// below it sit at [AbTokens.drawerGutter], exactly where a LOCAL project sits,
+/// which is what lets one project row serve both.
+///
+/// Carries no `REMOTE` chip. Remote is encoded by which band a project is
+/// under — the chip was approximating that, and repeating it on the band that
+/// already names the machine says nothing.
+///
+/// Stateless: the only per-row UI state is hover, owned by [HoverableDrawerRow].
 class MachineDrawerHeaderRow extends ConsumerWidget {
   final DrawerEntry entry;
-  const MachineDrawerHeaderRow(this.entry, {super.key});
+
+  /// Hairline above, separating this machine's block from whatever precedes
+  /// it. False for the first band in the drawer, which already has the
+  /// `PROJECTS` label above it.
+  final bool showRule;
+
+  const MachineDrawerHeaderRow(this.entry, {super.key, this.showRule = true});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     perfRecorder.noteDrawerRebuild();
     final machineUuid = entry.machineUuid!;
     final expanded = ref.watch(expandedDrawerIdsProvider).contains(machineUuid);
-    final t = context.antgrid;
 
-    return _HoverableDrawerRow(
-      builder: (context, hovered) => AbListRow(
-        title: Row(
+    return HoverableDrawerRow(
+      builder: (context, hovered, _) => DrawerBand(
+        label: entry.displayName,
+        showRule: showRule,
+        // Kept on the band, unlike the local one: expanding a machine is what
+        // opens its control-plane socket, so there is something to disclose.
+        expanded: expanded,
+        trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             _MachineOnlineDot(machineUuid: machineUuid),
             _MachineAggregateDot(machineUuid: machineUuid),
-            Flexible(
-              child: Text(
-                entry.displayName,
-                overflow: TextOverflow.ellipsis,
-                style: AbTokens.sansStyle(
-                  fontSize: AbTokens.fontSm,
-                  color: t.textSecondary,
-                ),
-              ),
-            ),
-            const SizedBox(width: AbTokens.space4),
-            AnimatedRotation(
-              turns: expanded ? 0.25 : 0,
-              duration: const Duration(milliseconds: 120),
-              child: AbIcon(AbIcons.chevronRight, size: 10, color: t.textMuted),
+            _DrawerEntryTrailing(
+              entry: entry,
+              hovered: hovered,
+              showRemoteChip: false,
             ),
           ],
         ),
-        trailing: _DrawerEntryTrailing(entry: entry, hovered: hovered),
-        density: AbRowDensity.sm,
-        horizontalPadding: 0,
-        margin: const EdgeInsets.symmetric(vertical: AbTokens.space2),
-        hoverable: true,
         onTap: () =>
             ref.read(expandedDrawerIdsProvider.notifier).toggle(machineUuid),
       ),
@@ -109,39 +119,186 @@ class MachineDrawerHeaderRow extends ConsumerWidget {
   }
 }
 
+/// The band above THIS machine's local projects.
+///
+/// Exists so a local project and a remote one are the same row at the same
+/// indent under the same kind of header — the drawer's two halves used to
+/// diverge in leading glyph, trailing kit and depth all at once. It also gives
+/// the local bridge host the only status surface it has in the drawer.
+///
+/// Deliberately NOT tappable, and so it carries no chevron: a machine band
+/// discloses a control-plane fetch, while every local project is already
+/// listed below this one. A chevron here would promise a load that does not
+/// exist.
+class LocalMachineBand extends ConsumerWidget {
+  const LocalMachineBand({super.key, this.showRule = true});
+
+  final bool showRule;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Its own gutter: this is the one band with no [HoverableDrawerRow]
+    // around it to supply one (nothing here is hover-reactive), and without it
+    // the label sits flush against the panel edge while every other band is
+    // inset.
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: AbTokens.drawerGutter),
+      child: DrawerBand(
+        label: 'This machine',
+        showRule: showRule,
+        trailing: const _LocalHostDot(),
+      ),
+    );
+  }
+}
+
+/// Bridge-host liveness for [LocalMachineBand], mapped from [HostPhase].
+///
+/// `idle` and `stopped` render NOTHING rather than a grey dot: neither is a
+/// fault — the host is spawned on demand, so before the first project is
+/// opened there is simply nothing to report, and an indicator there reads as
+/// "your machine is offline" on a machine the user is sitting at.
+class _LocalHostDot extends ConsumerWidget {
+  const _LocalHostDot();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final phase = ref.watch(hostStatusProvider).value?.phase;
+    final (tone, style, pulse) = switch (phase) {
+      HostPhase.up => (AbStatusTone.success, AbDotStyle.filled, false),
+      HostPhase.starting ||
+      HostPhase.restarting => (AbStatusTone.warning, AbDotStyle.hollow, true),
+      HostPhase.failed => (AbStatusTone.danger, AbDotStyle.filled, false),
+      _ => (null, AbDotStyle.filled, false),
+    };
+    if (tone == null) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(right: AbTokens.space6),
+      child: AbStatusDot(tone: tone, style: style, pulse: pulse),
+    );
+  }
+}
+
+/// One band in the drawer: a small muted section label with an optional
+/// disclosure chevron and trailing status kit.
+///
+/// The label keeps the casing it was given. A band names a MACHINE, and a
+/// machine name is the user's own noun — upper-casing it the way the literal
+/// `PROJECTS` label above is upper-cased turns `RadhaAI` into `RADHAAI`. Size,
+/// weight and colour are what make it read as a band; the case is not.
+///
+/// No leading slot at all — that is the whole point of a band. Its label sits
+/// at the gutter, level with the `PROJECTS` label, so nothing beneath it reads
+/// as indented under it.
+class DrawerBand extends StatelessWidget {
+  const DrawerBand({
+    super.key,
+    required this.label,
+    this.trailing,
+    this.expanded,
+    this.onTap,
+    this.showRule = true,
+  });
+
+  final String label;
+  final Widget? trailing;
+
+  /// Non-null draws a disclosure chevron after the label.
+  final bool? expanded;
+  final VoidCallback? onTap;
+  final bool showRule;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.antgrid;
+    final row = AbListRow(
+      title: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Flexible(
+            child: Text(
+              label,
+              overflow: TextOverflow.ellipsis,
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXs,
+                color: t.textMuted,
+                letterSpacing: 0.2,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          if (expanded != null) ...[
+            const SizedBox(width: AbTokens.space4),
+            AnimatedRotation(
+              turns: expanded! ? 0.25 : 0,
+              duration: const Duration(milliseconds: 120),
+              child: AbIcon(AbIcons.chevronRight, size: 10, color: t.textMuted),
+            ),
+          ],
+        ],
+      ),
+      trailing: trailing,
+      density: AbRowDensity.sm,
+      horizontalPadding: 0,
+      hoverable: onTap != null,
+      onTap: onTap,
+    );
+    if (!showRule) return row;
+    return Container(
+      margin: const EdgeInsets.only(top: AbTokens.space8),
+      decoration: BoxDecoration(
+        border: Border(top: BorderSide(color: context.antgrid.borderSubtle)),
+      ),
+      padding: const EdgeInsets.only(top: AbTokens.space4),
+      child: row,
+    );
+  }
+}
+
 /// Shared hover shell for drawer rows: the gutter [Padding] kept outside the
 /// [MouseRegion] (so the L/R strips aren't hover/tap-reactive), the click cursor,
-/// and the `_hovered` bit both row variants drive. Mobile has no hover, so
-/// affordances start visible. [onHoverStart]/[onHoverEnd] let a row hang extra
-/// work (e.g. a prefetch timer) off the desktop pointer transitions; they never
-/// fire on mobile.
-class _HoverableDrawerRow extends StatefulWidget {
-  const _HoverableDrawerRow({
+/// and the hover bits both row variants drive. [onHoverStart]/[onHoverEnd] let a
+/// row hang extra work (e.g. a prefetch timer) off the desktop pointer
+/// transitions; they never fire on mobile.
+///
+/// The builder gets TWO bits, and they differ only on touch. `hovered` gates
+/// hover-revealed AFFORDANCES and starts true on mobile, which has no pointer to
+/// reveal them with. `pointerOver` is the literal pointer state and stays false
+/// there — a row that swaps its identity glyph for a chevron must key off this
+/// one, or the glyph is permanently swapped on every phone and never shows at
+/// all.
+class HoverableDrawerRow extends StatefulWidget {
+  const HoverableDrawerRow({
+    super.key,
     required this.builder,
     this.onHoverStart,
     this.onHoverEnd,
   });
 
-  final Widget Function(BuildContext context, bool hovered) builder;
+  final Widget Function(BuildContext context, bool hovered, bool pointerOver)
+  builder;
   final VoidCallback? onHoverStart;
   final VoidCallback? onHoverEnd;
 
   @override
-  State<_HoverableDrawerRow> createState() => _HoverableDrawerRowState();
+  State<HoverableDrawerRow> createState() => _HoverableDrawerRowState();
 }
 
-class _HoverableDrawerRowState extends State<_HoverableDrawerRow> {
-  late bool _hovered = isMobilePlatform;
+class _HoverableDrawerRowState extends State<HoverableDrawerRow> {
+  bool _pointerOver = false;
+
+  /// Affordance visibility. Mobile has no pointer, so they start visible.
+  bool get _hovered => isMobilePlatform || _pointerOver;
 
   void _onEnter(PointerEnterEvent _) {
     if (isMobilePlatform) return;
-    if (!_hovered && mounted) setState(() => _hovered = true);
+    if (!_pointerOver && mounted) setState(() => _pointerOver = true);
     widget.onHoverStart?.call();
   }
 
   void _onExit(PointerExitEvent _) {
     if (isMobilePlatform) return;
-    if (_hovered && mounted) setState(() => _hovered = false);
+    if (_pointerOver && mounted) setState(() => _pointerOver = false);
     widget.onHoverEnd?.call();
   }
 
@@ -153,7 +310,7 @@ class _HoverableDrawerRowState extends State<_HoverableDrawerRow> {
         cursor: SystemMouseCursors.click,
         onEnter: _onEnter,
         onExit: _onExit,
-        child: widget.builder(context, _hovered),
+        child: widget.builder(context, _hovered, _pointerOver),
       ),
     );
   }
@@ -194,37 +351,30 @@ class _DrawerEntryRowState extends ConsumerState<DrawerEntryRow> {
       projectSessionRegistryProvider.select((open) => open.contains(entry.id)),
     );
 
-    return _HoverableDrawerRow(
+    return HoverableDrawerRow(
       onHoverStart: _startPrefetch,
       onHoverEnd: _cancelPrefetch,
-      builder: (context, hovered) => AbListRow(
-        // Folder by default; chevron on hover. Both sit in the same pinned slot
-        // so the glyph swap doesn't shift the title.
-        leading: hovered
-            ? AbDisclosureChevron(
-                expanded: expanded,
-                color: _leadingTint(context, isWarm),
-              )
-            : SizedBox(
-                width: AbTokens.drawerLeadingSlot,
-                height: AbTokens.drawerLeadingSlot,
-                child: Center(
-                  child: AbIcon(
-                    AbIcons.folder,
-                    // Match chevron size so the glyph doesn't shrink on hover.
-                    size: 10,
-                    color: _leadingTint(context, isWarm),
-                  ),
-                ),
-              ),
+      builder: (context, hovered, pointerOver) => AbListRow(
+        // Folder by default; chevron under the pointer. Both sit in the same
+        // pinned slot so the glyph swap doesn't shift the title.
+        //
+        // Keyed on the POINTER bit, not the affordance one: the affordance bit
+        // is true for the whole life of a touch row, which left every phone
+        // showing a chevron and never the folder.
+        leading: DrawerProjectLeading(
+          expanded: expanded,
+          pointerOver: pointerOver,
+          warm: isWarm,
+        ),
         title: Text(
           entry.displayName,
-          style: AbTokens.sansStyle(
-            fontSize: AbTokens.fontSm,
-            color: context.antgrid.textSecondary,
-          ),
+          style: drawerProjectTitleStyle(context),
         ),
-        trailing: _DrawerEntryTrailing(entry: entry, hovered: hovered),
+        trailing: _DrawerEntryTrailing(
+          entry: entry,
+          hovered: hovered,
+          expanded: expanded,
+        ),
         density: AbRowDensity.sm,
         horizontalPadding: 0, // gutter lives on the outer Padding
         margin: const EdgeInsets.symmetric(vertical: AbTokens.space2),
@@ -235,6 +385,53 @@ class _DrawerEntryRowState extends ConsumerState<DrawerEntryRow> {
     );
   }
 }
+
+/// The leading slot of a PROJECT row, local or advertised-remote alike.
+///
+/// One rule for the whole drawer: at rest the slot carries the row's identity
+/// glyph, and under the pointer a container swaps it for its disclosure
+/// chevron. Both are boxed to [AbTokens.drawerLeadingSlot] at the same glyph
+/// size, so the swap never shifts the title.
+class DrawerProjectLeading extends StatelessWidget {
+  const DrawerProjectLeading({
+    super.key,
+    required this.expanded,
+    required this.pointerOver,
+    required this.warm,
+  });
+
+  final bool expanded;
+  final bool pointerOver;
+
+  /// The project holds an open session — see [_leadingTint].
+  final bool warm;
+
+  @override
+  Widget build(BuildContext context) {
+    final tint = _leadingTint(context, warm);
+    if (pointerOver) {
+      return AbDisclosureChevron(expanded: expanded, color: tint);
+    }
+    return SizedBox(
+      width: AbTokens.drawerLeadingSlot,
+      height: AbTokens.drawerLeadingSlot,
+      child: Center(
+        // Match chevron size so the glyph doesn't shrink on hover.
+        child: AbIcon(AbIcons.folder, size: 10, color: tint),
+      ),
+    );
+  }
+}
+
+/// Title style for a PROJECT row. Weight, not size, is what makes it read as
+/// the container of the session rows beneath it: those are the payload the user
+/// is scanning for and stay the largest text in the panel, so a project that
+/// out-sized them would invert the hierarchy it is supposed to anchor.
+TextStyle drawerProjectTitleStyle(BuildContext context) => AbTokens.sansStyle(
+  fontSize: AbTokens.fontSm,
+  fontWeight: FontWeight.w600,
+  color: context.antgrid.textSecondary,
+);
 
 /// Leading-glyph tint for a drawer row, dimmed while the project holds no open
 /// session.
@@ -247,18 +444,31 @@ Color _leadingTint(BuildContext context, bool isWarm) {
 }
 
 /// Right-hand affordances of a drawer row: config error, running command,
-/// REMOTE chip, and the hover actions.
+/// collapsed-only work rollup, REMOTE chip, and the hover actions.
 ///
-/// Deliberately carries NO work-status dot. Work status belongs to the SESSION
-/// rows nested under the row, and a project-level rollup beside them only
-/// restated whichever session was loudest. A collapsed machine HEADER still
-/// shows its aggregate dot ([_MachineAggregateDot]) — it has no session rows on
-/// screen to carry one.
+/// The work-status dot is COLLAPSED-ONLY. Expanded, work status belongs to the
+/// SESSION rows nested under the row, and a rollup beside them only restated
+/// whichever session was loudest — see [DrawerProjectAggregateDot], which owns
+/// the rule. A machine band answers the same question through
+/// [_MachineAggregateDot] instead.
 class _DrawerEntryTrailing extends ConsumerWidget {
-  const _DrawerEntryTrailing({required this.entry, required this.hovered});
+  const _DrawerEntryTrailing({
+    required this.entry,
+    required this.hovered,
+    this.expanded,
+    this.showRemoteChip = true,
+  });
 
   final DrawerEntry entry;
   final bool hovered;
+
+  /// Non-null on a PROJECT row, which shows a rollup of its sub-tree while
+  /// collapsed. Null on a machine band, which has [_MachineAggregateDot].
+  final bool? expanded;
+
+  /// False on a machine band: the band names the machine, so a chip repeating
+  /// that it is remote adds nothing.
+  final bool showRemoteChip;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -279,7 +489,13 @@ class _DrawerEntryTrailing extends ConsumerWidget {
             key: ValueKey('drawer-cmd-indicator-${entry.id}'),
             commandName: status.activeCommandName!,
           ),
-        if (entry.kind == EntryKind.remote)
+        // A collapsed project still says whether something inside it needs
+        // the user — that is a call to action, and the sessions that would
+        // carry it are off screen. It does NOT say how many sessions it holds:
+        // a count is a number to read rather than a state to notice, and the
+        // drawer is scanned.
+        if (expanded == false) DrawerProjectAggregateDot(entryId: entry.id),
+        if (showRemoteChip && entry.kind == EntryKind.remote)
           AbChip.system(label: 'REMOTE', color: context.antgrid.accent),
         // Hover-only affordances; kept in the tree via Visibility so layout
         // doesn't jitter on pointer-enter. Remove is always offered (any
@@ -308,10 +524,41 @@ class _DrawerEntryTrailing extends ConsumerWidget {
   }
 }
 
-/// Trash affordance for removing a project/machine from history. Any project
-/// can be removed (active sessions or not) — removing the selected project
-/// clears the selection (`ProjectsNotifier.remove`) and the remote branch drops
-/// the focus first, so it's safe regardless of session state.
+/// Aggregate work-status dot for a COLLAPSED project row, local or
+/// advertised-remote alike: the same narrow call-to-action set
+/// [_MachineAggregateDot] shows, for the same reason.
+///
+/// The rule that drawer project rows carry no dot is about the EXPANDED case —
+/// a rollup sitting beside the session rows it summarises only restated
+/// whichever of them was loudest. Collapsed, those rows are not on screen, and
+/// a session that needs the user has no other way to say so.
+class DrawerProjectAggregateDot extends ConsumerWidget {
+  const DrawerProjectAggregateDot({super.key, required this.entryId});
+
+  final String entryId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final status = ref.watch(projectWorkStatusProvider(entryId));
+    if (status == AgentWorkStatus.done || status == AgentWorkStatus.working) {
+      return const SizedBox.shrink();
+    }
+    return AgentWorkStatusDot(status: status);
+  }
+}
+
+/// Trash affordance for removing a project/machine from history.
+///
+/// A PROJECT row offers it only while the project holds no session. Removing a
+/// project tears its sessions down with it, and the drawer is a scanning
+/// surface where the trash sits one hover away from the row you meant to open —
+/// so the sessions have to be dealt with first, deliberately, on their own
+/// rows. A MACHINE band keeps it unconditionally: "Forget agent" drops cached
+/// coordinates, and the machine comes back on its own while it is signed in.
+///
+/// `ProjectsNotifier.remove` still handles a non-empty project correctly (it
+/// stops the sessions, disposes the services, then clears the selection) —
+/// this is a guard rail, not a correctness fix.
 class _RemoveButton extends ConsumerStatefulWidget {
   final DrawerEntry entry;
   const _RemoveButton({required this.entry});
@@ -331,6 +578,16 @@ class _RemoveButtonState extends ConsumerState<_RemoveButton> {
     // Inventory agents have no locally-stored state to remove — hide the
     // trash affordance entirely (they're managed server-side).
     if (entry is InventoryAgentEntry) return const SizedBox.shrink();
+    // A project row, not a machine band — the same test `_NewSessionButton` is
+    // gated on. A project nobody has opened has an empty cache and so reads as
+    // empty here; the confirm dialog is what covers that case, and it names
+    // what will be lost.
+    if (entry.machineUuid == null &&
+        ref
+            .watch(sessionsForEntryProvider(entry.id))
+            .any((s) => !s.archived)) {
+      return const SizedBox.shrink();
+    }
     final isLocal = entry is LocalProjectEntry;
     return AbIconButton(
       icon: AbIcons.trash,

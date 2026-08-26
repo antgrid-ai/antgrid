@@ -8,7 +8,6 @@ import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
 import '../design/widgets/ab_button.dart';
-import '../design/widgets/ab_disclosure_chevron.dart';
 import '../design/widgets/ab_docked_column.dart';
 import '../design/widgets/ab_empty_state.dart';
 import '../design/widgets/ab_icon.dart';
@@ -18,6 +17,8 @@ import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_tap_target.dart';
 import '../models/drawer_entry.dart';
+import '../project/project_session_registry.dart'
+    show projectSessionRegistryProvider;
 import '../models/session_target.dart';
 import '../providers/account_agents.dart';
 import '../providers/control_plane.dart';
@@ -34,7 +35,15 @@ import '../services/control_plane_client.dart';
 import '../utils/platform_utils.dart';
 import 'ab_status_helpers.dart' show emptyAdvertHint;
 import 'account_footer.dart';
-import 'drawer_entry_row.dart' show DrawerEntryRow, MachineDrawerHeaderRow;
+import 'drawer_entry_row.dart'
+    show
+        DrawerEntryRow,
+        DrawerProjectAggregateDot,
+        DrawerProjectLeading,
+        HoverableDrawerRow,
+        LocalMachineBand,
+        MachineDrawerHeaderRow,
+        drawerProjectTitleStyle;
 import 'first_run_checklist.dart';
 import 'open_folder_button.dart';
 import 'session_row.dart';
@@ -79,7 +88,7 @@ class ProjectsDrawer extends ConsumerWidget {
           // drawer rows are AbRowDensity.sm and size to their content, so this
           // is nothing to keep in sync with them.
           minBodyExtent: AbTokens.rowHeightLg,
-          header: _TopChrome(count: entries.length),
+          header: const _TopChrome(),
           body: _Body(entries: entries),
           // Docked here, not on the New Session canvas: the drawer is the only
           // desktop surface mounted on both routes, and the last setup steps
@@ -111,9 +120,7 @@ class ProjectsDrawer extends ConsumerWidget {
 /// gone while both still paint whole, and the drawer's clip is what
 /// keeps them off the workspace.
 class _TopChrome extends StatelessWidget {
-  const _TopChrome({required this.count});
-
-  final int count;
+  const _TopChrome();
 
   @override
   Widget build(BuildContext context) {
@@ -122,7 +129,7 @@ class _TopChrome extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const _NavActions(),
-        _GroupLabel(label: 'PROJECTS', count: count),
+        const _GroupLabel(label: 'PROJECTS'),
       ],
     );
   }
@@ -194,11 +201,18 @@ class _NavActions extends ConsumerWidget {
   }
 }
 
+/// The panel title, above every machine band.
+///
+/// Carries no count. The number it used to show was the length of the top-level
+/// entry list, which counts each remote MACHINE as one — while the projects it
+/// actually holds are unknown until the row is expanded, and asking would open
+/// a control-plane socket per machine at drawer build. Nothing in the drawer
+/// counts its own contents any more: the panel is scanned for the one row that
+/// needs the user, which is what the attention dots are for.
 class _GroupLabel extends ConsumerWidget {
-  const _GroupLabel({required this.label, required this.count});
+  const _GroupLabel({required this.label});
 
   final String label;
-  final int count;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -232,14 +246,6 @@ class _GroupLabel extends ConsumerWidget {
                 color: context.antgrid.textMuted,
                 letterSpacing: 1.4,
                 fontWeight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(width: AbTokens.space6),
-            Text(
-              '· $count',
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontXs,
-                color: context.antgrid.textMuted,
               ),
             ),
             const Spacer(),
@@ -344,6 +350,18 @@ class _Body extends ConsumerWidget {
         key: ValueKey(entries[i].id),
         entry: entries[i],
         reorderIndex: i,
+        // A local project opens THIS machine's band when it starts a run of
+        // them. Computed per-row rather than by partitioning the list, so
+        // reordering keeps working exactly as it did: drag a local project
+        // below a machine and the band simply follows it. A LEGACY per-project
+        // remote row (compound id, so `machineUuid` is null) is not local and
+        // opens no band — it keeps its own REMOTE chip instead.
+        showLocalBand:
+            entries[i].kind == EntryKind.local &&
+            (i == 0 || entries[i - 1].kind != EntryKind.local),
+        // Every band but the first gets a hairline above it; the first already
+        // has the PROJECTS label.
+        showRule: i > 0,
       ),
     );
   }
@@ -394,7 +412,15 @@ Future<void> _refreshFocusedSessions(WidgetRef ref) async {
 class _EntryWithSessions extends ConsumerWidget {
   final DrawerEntry entry;
   final int? reorderIndex;
-  const _EntryWithSessions({super.key, required this.entry, this.reorderIndex});
+  final bool showLocalBand;
+  final bool showRule;
+  const _EntryWithSessions({
+    super.key,
+    required this.entry,
+    this.reorderIndex,
+    this.showLocalBand = false,
+    this.showRule = false,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -408,7 +434,7 @@ class _EntryWithSessions extends ConsumerWidget {
         ? ref.watch(expandedDrawerIdsProvider).contains(machineUuid)
         : !ref.watch(collapsedDrawerIdsProvider).contains(entry.id);
     final entryRow = machineUuid != null
-        ? MachineDrawerHeaderRow(entry)
+        ? MachineDrawerHeaderRow(entry, showRule: showRule)
         : DrawerEntryRow(entry);
     final entryRowWrapped = reorderIndex != null
         ? ReorderableDelayedDragStartListener(
@@ -420,6 +446,7 @@ class _EntryWithSessions extends ConsumerWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (showLocalBand) LocalMachineBand(showRule: showRule),
         entryRowWrapped,
         if (expanded)
           machineUuid != null
@@ -435,8 +462,10 @@ class _EntryWithSessions extends ConsumerWidget {
 /// rather than collapsing to nothing.
 Widget _machineHint(BuildContext context, String text) {
   return Padding(
+    // Left-aligned with the session rows this hint stands in for, not with the
+    // project row above it.
     padding: const EdgeInsets.fromLTRB(
-      AbTokens.space24,
+      AbTokens.drawerGutter + AbTokens.drawerIndentStep,
       AbTokens.space2,
       AbTokens.drawerGutter,
       AbTokens.space4,
@@ -470,7 +499,7 @@ class _MachineProjects extends ConsumerWidget {
     return stateAsync.when(
       loading: () => Padding(
         padding: const EdgeInsets.fromLTRB(
-          AbTokens.space24,
+          AbTokens.drawerGutter + AbTokens.drawerIndentStep,
           AbTokens.space6,
           AbTokens.drawerGutter,
           AbTokens.space6,
@@ -518,46 +547,61 @@ class _AdvertisedProjectRow extends ConsumerWidget {
       projectId: project.projectId,
     ).registrationId;
     final expanded = ref.watch(expandedDrawerIdsProvider).contains(regId);
-    final t = context.antgrid;
+    final isWarm = ref.watch(
+      projectSessionRegistryProvider.select((open) => open.contains(regId)),
+    );
     final name = (project.label != null && project.label!.isNotEmpty)
         ? project.label!
         : project.projectId;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: AbTokens.drawerGutter,
-          ),
-          child: AbListRow(
+        HoverableDrawerRow(
+          builder: (context, hovered, pointerOver) => AbListRow(
             horizontalPadding: 0,
             density: AbRowDensity.sm,
             hoverable: true,
-            leading: AbDisclosureChevron(expanded: expanded),
+            leading: DrawerProjectLeading(
+              expanded: expanded,
+              pointerOver: pointerOver,
+              warm: isWarm,
+            ),
             title: Text(
               name,
               overflow: TextOverflow.ellipsis,
-              style: AbTokens.sansStyle(
-                fontSize: AbTokens.fontSm,
-                color: t.textSecondary,
-              ),
+              style: drawerProjectTitleStyle(context),
             ),
-            // No work-status dot: work status belongs to the SESSION rows
-            // nested below, and a project-level rollup only restated whichever
-            // of them was loudest.
+            // No permanent run-state glyph: it made the remote half of the
+            // drawer read as busier than the local half for no reason the user
+            // could name. The same collapsed-only attention dot a local project
+            // shows takes its place, so the two halves are one row grammar.
+            // Rollup first, hover actions last — the same order (and the
+            // same reserved-slot treatment) as `_DrawerEntryTrailing`, so the
+            // two halves of the drawer are one row grammar down to their
+            // metrics. An `AbIconButton` is a hard 24px box and the tallest
+            // thing in an `AbRowDensity.sm` row, so inserting it on
+            // pointer-enter grows the row 10px and shoves the whole list below
+            // it down — and leaves these rows 10px shorter than the local ones
+            // at rest, which is the same bug standing still.
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
               spacing: AbTokens.space4,
               children: [
-                // Create a session in THIS project (not the machine): lands on
-                // New Session already targeting it — the user only picks the
-                // agent and hits Start.
-                AbIconButton(
-                  icon: AbIcons.add,
-                  tooltip: 'New session',
-                  onTap: () => _newSessionForProject(context, ref),
+                if (!expanded) DrawerProjectAggregateDot(entryId: regId),
+                Visibility(
+                  visible: hovered,
+                  maintainState: true,
+                  maintainAnimation: true,
+                  maintainSize: true,
+                  // Create a session in THIS project (not the machine): lands
+                  // on New Session already targeting it — the user only picks
+                  // the agent and hits Start.
+                  child: AbIconButton(
+                    icon: AbIcons.add,
+                    tooltip: 'New session',
+                    onTap: () => _newSessionForProject(context, ref),
+                  ),
                 ),
-                _ProjectRunStateIcon(running: project.running),
               ],
             ),
             margin: const EdgeInsets.symmetric(vertical: AbTokens.space2),
@@ -577,31 +621,6 @@ class _AdvertisedProjectRow extends ConsumerWidget {
       project: project,
     );
     closeDrawerIfOverlay(context);
-  }
-}
-
-class _ProjectRunStateIcon extends StatelessWidget {
-  const _ProjectRunStateIcon({required this.running});
-
-  final bool running;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.antgrid;
-    return Tooltip(
-      message: running ? 'Running' : 'Stopped',
-      child: SizedBox(
-        width: AbTokens.drawerLeadingSlot,
-        height: AbTokens.drawerLeadingSlot,
-        child: Center(
-          child: AbIcon(
-            running ? AbIcons.start : AbIcons.stop,
-            size: 10,
-            color: running ? t.statusRunning : t.textMuted,
-          ),
-        ),
-      ),
-    );
   }
 }
 

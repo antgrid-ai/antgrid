@@ -113,6 +113,25 @@ abstract final class AbTokens {
   /// glyph size inside it.
   static const drawerLeadingSlot = 12.0;
 
+  /// Horizontal step per level of drawer nesting.
+  ///
+  /// Spent exactly once, between a project row and its session rows: machine
+  /// headers are rendered as BANDS (a section label like `PROJECTS`, not a
+  /// tree node), so they cost no indent and projects stay at [drawerGutter]
+  /// whichever machine they belong to. Sixteen is what a tree view needs when
+  /// nothing is drawn between the levels — a smaller step only reads with
+  /// indent guides, and the drawer deliberately has none.
+  static const drawerIndentStep = space16;
+
+  /// Leading slot + gap for a SESSION row, tighter than [drawerLeadingSlot] +
+  /// [AbListRow.leadingGap].
+  ///
+  /// A session's leading is a [dotSizeSm] status dot, not a glyph: the wider
+  /// slot spends 20px of a 288px panel on six pixels of dot, and every pixel
+  /// here comes off the end of a session name at the drawer's deepest level.
+  static const drawerSessionLeadingSlot = 8.0;
+  static const drawerSessionLeadingGap = space6;
+
   // ── Focus ring (keyboard navigation) ──
   // Color reuses `accent` — no separate token.
   static const double focusRingWidth = 1.0;

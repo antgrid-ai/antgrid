@@ -13,6 +13,7 @@ import 'package:antgrid/providers/collapsed_drawer.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/services/control_plane_client.dart';
+import 'package:antgrid/widgets/agent_work_status_dot.dart';
 import 'package:antgrid/widgets/drawer_entry_row.dart';
 
 import '../helpers/test_store_overrides.dart';
@@ -85,16 +86,27 @@ void main() {
       running: running,
     );
 
-    // Work status is a SESSION-level signal: the session rows carry the dot and
-    // a project-level rollup beside them only restated the loudest one. No
-    // advert status puts a dot on a project row, expanded or collapsed.
+    // Work status is a SESSION-level signal while the sessions are on screen:
+    // an EXPANDED project row carries no dot, because a rollup beside the rows
+    // it summarises only restated the loudest one. COLLAPSED, those rows are
+    // gone and the row speaks for them — but only for the call-to-action
+    // states, so `working` and `done` stay silent there too.
     //
     // Seeded through the live advert maps the reaper writes, NOT by overriding
-    // projectWorkStatusProvider: DrawerEntryRow stopped reading that provider
-    // when the project dot was removed, so an override of it asserts nothing —
-    // this has to drive the same inputs a real advert would.
+    // projectWorkStatusProvider: that would assert against the override rather
+    // than against the path a real advert takes.
+    //
+    // Asserted by TYPE, not by key: the dot carries no key, so a
+    // `find.byKey` here passes whether or not it is rendered — which is what
+    // let the collapsed case go unnoticed when the rollup was added.
+    final callToAction = {
+      AgentWorkStatus.attention,
+      AgentWorkStatus.unread,
+      AgentWorkStatus.error,
+    };
     for (final status in AgentWorkStatus.values) {
-      testWidgets('renders no project dot for ${status.name}', (tester) async {
+      testWidgets('project dot for ${status.name}: expanded never, collapsed '
+          'only as a call to action', (tester) async {
         final entry = _entry('p1');
         await tester.pumpWidget(
           _wrap(
@@ -123,15 +135,22 @@ void main() {
         await tester.pump();
 
         expect(
-          find.byKey(const ValueKey('drawer-status-dot-p1')),
+          find.byType(AgentWorkStatusDot),
           findsNothing,
+          reason: 'expanded: the session rows below carry the dot',
         );
 
         await _collapse(tester, 'p1');
         expect(
-          find.byKey(const ValueKey('drawer-status-dot-p1')),
-          findsNothing,
+          find.byType(AgentWorkStatusDot),
+          callToAction.contains(status) ? findsOneWidget : findsNothing,
+          reason: 'collapsed: only a state that needs the user',
         );
+
+        // Re-expanding must put the trailing slot back to empty — the rollup
+        // is bound to the collapse, not latched by having once been shown.
+        await _collapse(tester, 'p1');
+        expect(find.byType(AgentWorkStatusDot), findsNothing);
       });
     }
 
