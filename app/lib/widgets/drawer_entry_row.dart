@@ -31,6 +31,7 @@ import '../project/project_status.dart';
 import '../providers/agent_transport.dart';
 import '../providers/relay_connection.dart';
 import '../providers/cached_sessions.dart';
+import '../providers/demo_mode.dart';
 import '../providers/drawer_entries.dart';
 import '../providers/collapsed_drawer.dart';
 import '../providers/drawer_expansion.dart';
@@ -49,7 +50,6 @@ import '../providers/recent_agents.dart';
 import '../providers/sessions.dart';
 import '../providers/supervisor_status.dart';
 import '../screens/upgrade_screen.dart';
-import '../services/control_plane_client.dart';
 import 'ab_status_helpers.dart';
 import 'agent_work_status_dot.dart';
 import 'session_isolation_badge.dart' show sessionIsIsolated;
@@ -146,7 +146,12 @@ class LocalMachineBand extends ConsumerWidget {
       child: DrawerBand(
         label: 'This machine',
         showRule: showRule,
-        trailing: const _LocalHostDot(),
+        // No host dot under the demo: there is no bridge behind the sample
+        // project, and [hostStatusProvider] answers for the REAL machine — on
+        // a desktop that opened a project earlier in the session that is a
+        // live green dot pinned to a project it has nothing to do with. Every
+        // other real-source surface in this drawer is gated the same way.
+        trailing: ref.watch(demoModeProvider) ? null : const _LocalHostDot(),
       ),
     );
   }
@@ -229,17 +234,16 @@ class DrawerBand extends StatelessWidget {
           ),
           if (expanded != null) ...[
             const SizedBox(width: AbTokens.space4),
-            AnimatedRotation(
-              turns: expanded! ? 0.25 : 0,
-              duration: const Duration(milliseconds: 120),
-              child: AbIcon(AbIcons.chevronRight, size: 10, color: t.textMuted),
-            ),
+            AbDisclosureChevron(expanded: expanded!),
           ],
         ],
       ),
       trailing: trailing,
       density: AbRowDensity.sm,
       horizontalPadding: 0,
+      // Bands sit in a run of rows that all clear each other by this much; a
+      // band with no rule above it has nothing else keeping it off them.
+      margin: const EdgeInsets.symmetric(vertical: AbTokens.space2),
       hoverable: onTap != null,
       onTap: onTap,
     );
@@ -366,10 +370,7 @@ class _DrawerEntryRowState extends ConsumerState<DrawerEntryRow> {
           pointerOver: pointerOver,
           warm: isWarm,
         ),
-        title: Text(
-          entry.displayName,
-          style: drawerProjectTitleStyle(context),
-        ),
+        title: Text(entry.displayName, style: drawerProjectTitleStyle(context)),
         trailing: _DrawerEntryTrailing(
           entry: entry,
           hovered: hovered,
@@ -498,10 +499,9 @@ class _DrawerEntryTrailing extends ConsumerWidget {
         if (showRemoteChip && entry.kind == EntryKind.remote)
           AbChip.system(label: 'REMOTE', color: context.antgrid.accent),
         // Hover-only affordances; kept in the tree via Visibility so layout
-        // doesn't jitter on pointer-enter. Remove is always offered (any
-        // project can be dropped from history, with a confirm) — `_RemoveButton`
-        // hides itself only for inventory agents, which have no locally-stored
-        // state to remove.
+        // doesn't jitter on pointer-enter. `_RemoveButton` decides for itself
+        // whether it has anything to offer — see its doc for the two cases it
+        // withholds the trash.
         Visibility(
           visible: hovered,
           maintainState: true,
@@ -540,21 +540,20 @@ class DrawerProjectAggregateDot extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final status = ref.watch(projectWorkStatusProvider(entryId));
-    if (status == AgentWorkStatus.done || status == AgentWorkStatus.working) {
-      return const SizedBox.shrink();
-    }
+    if (!agentWorkStatusNeedsUser(status)) return const SizedBox.shrink();
     return AgentWorkStatusDot(status: status);
   }
 }
 
 /// Trash affordance for removing a project/machine from history.
 ///
-/// A PROJECT row offers it only while the project holds no session. Removing a
-/// project tears its sessions down with it, and the drawer is a scanning
-/// surface where the trash sits one hover away from the row you meant to open —
-/// so the sessions have to be dealt with first, deliberately, on their own
-/// rows. A MACHINE band keeps it unconditionally: "Forget agent" drops cached
-/// coordinates, and the machine comes back on its own while it is signed in.
+/// A LOCAL PROJECT row offers it only while the project holds no session.
+/// Removing a project tears its sessions down with it, and the drawer is a
+/// scanning surface where the trash sits one hover away from the row you meant
+/// to open — so the sessions have to be dealt with first, deliberately, on
+/// their own rows. Anything REMOTE keeps it unconditionally, band or legacy
+/// per-project row alike: "Forget agent" drops cached coordinates, and the
+/// machine comes back on its own while it is signed in.
 ///
 /// `ProjectsNotifier.remove` still handles a non-empty project correctly (it
 /// stops the sessions, disposes the services, then clears the selection) —
@@ -578,17 +577,26 @@ class _RemoveButtonState extends ConsumerState<_RemoveButton> {
     // Inventory agents have no locally-stored state to remove — hide the
     // trash affordance entirely (they're managed server-side).
     if (entry is InventoryAgentEntry) return const SizedBox.shrink();
-    // A project row, not a machine band — the same test `_NewSessionButton` is
-    // gated on. A project nobody has opened has an empty cache and so reads as
-    // empty here; the confirm dialog is what covers that case, and it names
-    // what will be lost.
-    if (entry.machineUuid == null &&
-        ref
-            .watch(sessionsForEntryProvider(entry.id))
-            .any((s) => !s.archived)) {
+    final isLocal = entry is LocalProjectEntry;
+    // LOCAL projects only. A legacy per-project REMOTE row also has a null
+    // `machineUuid`, but its trash is "Forget agent" — the cheap, self-healing
+    // drop of cached coordinates a machine band keeps unconditionally — so
+    // gating it there would strand a row whose machine is gone with no way to
+    // clear the very cache that hides the button.
+    //
+    // A project nobody has opened has an empty cache and so reads as empty
+    // here; the confirm dialog is what covers that case, and it names what
+    // will be lost. Selected down to the bool: this widget is mounted for
+    // every drawer row, and the list identity changes on every
+    // `session:updated` of the focused project.
+    if (isLocal &&
+        ref.watch(
+          sessionsForEntryProvider(
+            entry.id,
+          ).select((s) => s.any((e) => !e.archived)),
+        )) {
       return const SizedBox.shrink();
     }
-    final isLocal = entry is LocalProjectEntry;
     return AbIconButton(
       icon: AbIcons.trash,
       tooltip: isLocal ? 'Remove from history' : 'Forget agent',
@@ -1090,9 +1098,7 @@ class _MachineAggregateDot extends ConsumerWidget {
     final expanded = ref.watch(expandedDrawerIdsProvider).contains(machineUuid);
     if (expanded) return const SizedBox.shrink();
     final status = ref.watch(machineWorkStatusProvider(machineUuid));
-    if (status == null ||
-        status == AgentWorkStatus.done ||
-        status == AgentWorkStatus.working) {
+    if (status == null || !agentWorkStatusNeedsUser(status)) {
       return const SizedBox.shrink();
     }
     return Padding(

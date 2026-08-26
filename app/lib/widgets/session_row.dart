@@ -242,7 +242,7 @@ class _SessionRowState extends ConsumerState<SessionRow> {
     // and the last space6 is the row's own horizontalPadding.
     return Padding(
       padding: const EdgeInsets.fromLTRB(
-        AbTokens.drawerGutter + AbTokens.drawerIndentStep - AbTokens.space6,
+        AbTokens.drawerSessionIndent - AbTokens.space6,
         0,
         AbTokens.space6,
         0,

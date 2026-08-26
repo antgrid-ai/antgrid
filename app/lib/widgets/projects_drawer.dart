@@ -32,6 +32,7 @@ import '../providers/new_session_picker.dart';
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
 import '../services/control_plane_client.dart';
+import '../util/ab_log.dart';
 import '../util/detached.dart';
 import '../utils/platform_utils.dart';
 import 'ab_status_helpers.dart' show emptyAdvertHint;
@@ -68,6 +69,34 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
   /// from a tap that missed.
   final _refreshKey = GlobalKey<RefreshIndicatorState>();
 
+  /// True from the tap until the indicator has finished retracting.
+  ///
+  /// The button's other in-flight signal — the inventory load — clears the
+  /// moment the HTTPS leg returns, which is well before the indicator is done:
+  /// `refreshDrawer` still has the control-plane pull to run, and
+  /// `RefreshIndicator` then spends [_kIndicatorSettle] scaling out. A tap in
+  /// that tail is worse than a stacked fetch: `show()` only short-circuits
+  /// while the indicator is snapping or refreshing, and the scale controller
+  /// it skips resetting leaves the spinner painting at zero — a full refresh
+  /// with no feedback at all, which is the failure this button exists to fix.
+  bool _refreshBusy = false;
+
+  /// `RefreshIndicator`'s own dismiss animation (`_kIndicatorScaleDuration`),
+  /// which it does not expose. Mirrored rather than read, so the button stays
+  /// disabled until the widget is genuinely idle again.
+  static const _kIndicatorSettle = Duration(milliseconds: 200);
+
+  Future<void> _refreshFromButton() async {
+    if (_refreshBusy) return;
+    setState(() => _refreshBusy = true);
+    try {
+      await _refreshKey.currentState?.show();
+      await Future<void>.delayed(_kIndicatorSettle);
+    } finally {
+      if (mounted) setState(() => _refreshBusy = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     // Unfiltered by design. The session search lives in the window title bar
@@ -101,7 +130,9 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
           // drawer rows are AbRowDensity.sm and size to their content, so this
           // is nothing to keep in sync with them.
           minBodyExtent: AbTokens.rowHeightLg,
-          header: _TopChrome(refreshKey: _refreshKey),
+          header: _TopChrome(
+            onRefresh: _refreshBusy ? null : _refreshFromButton,
+          ),
           body: _Body(entries: entries, refreshKey: _refreshKey),
           // Docked here, not on the New Session canvas: the drawer is the only
           // desktop surface mounted on both routes, and the last setup steps
@@ -133,9 +164,11 @@ class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
 /// gone while both still paint whole, and the drawer's clip is what
 /// keeps them off the workspace.
 class _TopChrome extends StatelessWidget {
-  const _TopChrome({required this.refreshKey});
+  const _TopChrome({required this.onRefresh});
 
-  final GlobalKey<RefreshIndicatorState> refreshKey;
+  /// Null while a refresh the button started is still on screen — see
+  /// [_ProjectsDrawerState._refreshBusy].
+  final Future<void> Function()? onRefresh;
 
   @override
   Widget build(BuildContext context) {
@@ -144,7 +177,7 @@ class _TopChrome extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const _NavActions(),
-        _GroupLabel(label: 'PROJECTS', refreshKey: refreshKey),
+        _GroupLabel(label: 'PROJECTS', onRefresh: onRefresh),
       ],
     );
   }
@@ -225,12 +258,13 @@ class _NavActions extends ConsumerWidget {
 /// counts its own contents any more: the panel is scanned for the one row that
 /// needs the user, which is what the attention dots are for.
 class _GroupLabel extends ConsumerWidget {
-  const _GroupLabel({required this.label, required this.refreshKey});
+  const _GroupLabel({required this.label, required this.onRefresh});
+
+  /// Raises the list's [RefreshIndicator] — see
+  /// [_ProjectsDrawerState._refreshFromButton]. Null while one is still up.
+  final Future<void> Function()? onRefresh;
 
   final String label;
-
-  /// The list's [RefreshIndicator] — see [_ProjectsDrawerState._refreshKey].
-  final GlobalKey<RefreshIndicatorState> refreshKey;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -272,21 +306,20 @@ class _GroupLabel extends ConsumerWidget {
                 icon: AbIcons.refresh,
                 tone: AbIconButtonTone.muted,
                 tooltip: 'Refresh',
-                // Disabled while an inventory fetch is in flight so a
-                // double-tap can't stack redundant /account/agents requests.
-                //
                 // Goes through the indicator rather than calling
-                // [refreshDrawer] directly: `show()` runs the SAME handler the
-                // pull gesture does and animates the same spinner, so a tap and
-                // a pull are one interaction with one piece of feedback. It is
-                // a no-op while the indicator is already up, which is the
-                // second half of the double-tap guard.
-                onTap: refreshing
+                // [refreshDrawer] directly: it runs the SAME handler the pull
+                // gesture does and animates the same spinner, so a tap and a
+                // pull are one interaction with one piece of feedback.
+                //
+                // Disabled on either in-flight signal: an inventory fetch (so
+                // a double-tap can't stack redundant /account/agents requests)
+                // or an indicator the button itself raised.
+                onTap: refreshing || onRefresh == null
                     ? null
                     : () => detached(
                         'ProjectsDrawer',
                         'drawer refresh failed',
-                        () async => refreshKey.currentState?.show(),
+                        onRefresh!,
                       ),
               ),
           ],
@@ -322,7 +355,22 @@ class _Body extends ConsumerWidget {
     // is available whether or not projects are listed.
     return RefreshIndicator(
       key: refreshKey,
-      onRefresh: () => refreshDrawer(ref),
+      // The guard belongs HERE, not around a caller's `show()`:
+      // `RefreshIndicator` completes the future it hands back with
+      // `completer.complete()` from a `whenComplete`, so a rejection never
+      // reaches the caller — it escapes on the framework's own discarded
+      // future and lands on `PlatformDispatcher.onError` as a fatal crash.
+      onRefresh: () async {
+        try {
+          await refreshDrawer(ref);
+        } catch (error, stack) {
+          AbLog.error(
+            'ProjectsDrawer',
+            'drawer refresh failed',
+            fields: {'error': '$error', 'stack': '$stack'},
+          );
+        }
+      },
       color: context.antgrid.accent,
       backgroundColor: context.antgrid.bgElevated,
       child: _list(context, ref),
@@ -363,6 +411,13 @@ class _Body extends ConsumerWidget {
         ],
       );
     }
+    // The band names ONE machine, so it is emitted once for the whole list —
+    // at the first local project, wherever the persisted order happens to put
+    // it. Derived from the list rather than from each row's neighbour: an
+    // order that interleaves locals with machines (a drag, or a newly opened
+    // folder appended after them by `applyDrawerOrder`) would otherwise open a
+    // second, identically-labelled "This machine".
+    final firstLocal = entries.indexWhere((e) => e.kind == EntryKind.local);
     return ReorderableListView.builder(
       physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.only(bottom: AbTokens.space4),
@@ -386,15 +441,12 @@ class _Body extends ConsumerWidget {
         key: ValueKey(entries[i].id),
         entry: entries[i],
         reorderIndex: i,
-        // A local project opens THIS machine's band when it starts a run of
-        // them. Computed per-row rather than by partitioning the list, so
-        // reordering keeps working exactly as it did: drag a local project
-        // below a machine and the band simply follows it. A LEGACY per-project
-        // remote row (compound id, so `machineUuid` is null) is not local and
-        // opens no band — it keeps its own REMOTE chip instead.
-        showLocalBand:
-            entries[i].kind == EntryKind.local &&
-            (i == 0 || entries[i - 1].kind != EntryKind.local),
+        // Attached to the row rather than partitioning the list, so reordering
+        // keeps working exactly as it did: drag the first local project and
+        // the band simply follows it. A LEGACY per-project remote row
+        // (compound id, so `machineUuid` is null) is not local and opens no
+        // band — it keeps its own REMOTE chip instead.
+        showLocalBand: i == firstLocal,
         // Every band but the first gets a hairline above it; the first already
         // has the PROJECTS label.
         showRule: i > 0,
@@ -496,12 +548,19 @@ class _EntryWithSessions extends ConsumerWidget {
 /// Muted, indented one-liner under a machine row — used for the loading,
 /// offline, and empty states so the machine subtree always says *something*
 /// rather than collapsing to nothing.
-Widget _machineHint(BuildContext context, String text) {
+///
+/// [indent] is the depth of the rows this hint STANDS IN FOR, which is not
+/// always the depth of the row above it: under a project it replaces session
+/// rows ([AbTokens.drawerSessionIndent]), under a machine band it replaces
+/// project rows, which sit at the gutter.
+Widget _machineHint(
+  BuildContext context,
+  String text, {
+  double indent = AbTokens.drawerSessionIndent,
+}) {
   return Padding(
-    // Left-aligned with the session rows this hint stands in for, not with the
-    // project row above it.
-    padding: const EdgeInsets.fromLTRB(
-      AbTokens.drawerGutter + AbTokens.drawerIndentStep,
+    padding: EdgeInsets.fromLTRB(
+      indent,
       AbTokens.space2,
       AbTokens.drawerGutter,
       AbTokens.space4,
@@ -532,23 +591,30 @@ class _MachineProjects extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final stateAsync = ref.watch(controlPlaneStateProvider(machineUuid));
+    // Everything here stands in for the machine's PROJECT rows, which sit at
+    // the gutter like a local project — not at session depth.
     return stateAsync.when(
-      loading: () => Padding(
-        padding: const EdgeInsets.fromLTRB(
-          AbTokens.drawerGutter + AbTokens.drawerIndentStep,
+      loading: () => const Padding(
+        padding: EdgeInsets.fromLTRB(
+          AbTokens.drawerGutter,
           AbTokens.space6,
           AbTokens.drawerGutter,
           AbTokens.space6,
         ),
-        child: const Align(alignment: Alignment.centerLeft, child: AbLoading()),
+        child: Align(alignment: Alignment.centerLeft, child: AbLoading()),
       ),
-      error: (_, _) => _machineHint(context, 'Machine offline'),
+      error: (_, _) => _machineHint(
+        context,
+        'Machine offline',
+        indent: AbTokens.drawerGutter,
+      ),
       data: (state) {
         final projects = state.projects;
         if (projects.isEmpty) {
           return _machineHint(
             context,
             emptyAdvertHint(state.remoteAccessEnabled),
+            indent: AbTokens.drawerGutter,
           );
         }
         return Column(

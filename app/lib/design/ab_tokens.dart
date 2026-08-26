@@ -123,13 +123,19 @@ abstract final class AbTokens {
   /// indent guides, and the drawer deliberately has none.
   static const drawerIndentStep = space16;
 
+  /// Left edge of everything at SESSION depth — the session rows themselves
+  /// and the hints that stand in for them. One name for the sum so a reader
+  /// can see by grep that they are the same edge, and so retuning either half
+  /// moves all of them together.
+  static const drawerSessionIndent = drawerGutter + drawerIndentStep;
+
   /// Leading slot + gap for a SESSION row, tighter than [drawerLeadingSlot] +
   /// [AbListRow.leadingGap].
   ///
   /// A session's leading is a [dotSizeSm] status dot, not a glyph: the wider
   /// slot spends 20px of a 288px panel on six pixels of dot, and every pixel
   /// here comes off the end of a session name at the drawer's deepest level.
-  static const drawerSessionLeadingSlot = 8.0;
+  static const drawerSessionLeadingSlot = space8;
   static const drawerSessionLeadingGap = space6;
 
   // ── Focus ring (keyboard navigation) ──

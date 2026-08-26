@@ -37,9 +37,10 @@ Widget _wrap(Widget child, {required List<Override> overrides}) {
   );
 }
 
-/// Collapse [id]. Collapsing used to be what made a project row show a rollup
-/// dot, so the no-dot assertions below sweep both states.
-Future<void> _collapse(WidgetTester tester, String id) async {
+/// Flip [id] between collapsed and expanded. A project row's rollup dot is
+/// bound to that state, not latched by it, so every case drives it both ways
+/// from the one helper.
+Future<void> _toggleCollapse(WidgetTester tester, String id) async {
   ProviderScope.containerOf(
     tester.element(find.byType(DrawerEntryRow)),
   ).read(collapsedDrawerIdsProvider.notifier).toggle(id);
@@ -140,7 +141,7 @@ void main() {
           reason: 'expanded: the session rows below carry the dot',
         );
 
-        await _collapse(tester, 'p1');
+        await _toggleCollapse(tester, 'p1');
         expect(
           find.byType(AgentWorkStatusDot),
           callToAction.contains(status) ? findsOneWidget : findsNothing,
@@ -149,7 +150,7 @@ void main() {
 
         // Re-expanding must put the trailing slot back to empty — the rollup
         // is bound to the collapse, not latched by having once been shown.
-        await _collapse(tester, 'p1');
+        await _toggleCollapse(tester, 'p1');
         expect(find.byType(AgentWorkStatusDot), findsNothing);
       });
     }

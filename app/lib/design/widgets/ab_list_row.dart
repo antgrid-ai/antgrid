@@ -171,9 +171,13 @@ class _AbListRowState extends State<AbListRow> {
     final children = <Widget>[
       if (widget.leading != null) ...[
         widget.leading!,
-        SizedBox(
-          width: widget.leadingGapOverride ?? AbListRow.leadingGap,
-        ),
+        // Split so the default keeps its `const` arm: every leading row in the
+        // app takes that branch and only a session row overrides, so the
+        // common case stays canonicalized instead of re-inflating per build.
+        if (widget.leadingGapOverride == null)
+          const SizedBox(width: AbListRow.leadingGap)
+        else
+          SizedBox(width: widget.leadingGapOverride),
       ],
       Expanded(
         child: Column(

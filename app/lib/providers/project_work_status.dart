@@ -26,13 +26,16 @@ import 'sessions.dart';
 /// work-status.ts), and an open-but-idle chat reading "working" was exactly the
 /// bug that rule fixes — re-deriving it here from the session list would put it
 /// straight back for every project whose advert hasn't arrived.
-final projectWorkStatusProvider = Provider.family<AgentWorkStatus, String>((
-  ref,
-  entryId,
-) {
-  return ref.watch(remoteProjectStatusProvider.select((m) => m[entryId])) ??
-      AgentWorkStatus.done;
-});
+///
+/// `autoDispose` because the key space is unbounded and transient: every
+/// advertised project of every machine the user expands mints one, and a plain
+/// family would hold each instance — and its `select` subscription — for the
+/// life of the process long after the machine band was collapsed away.
+final projectWorkStatusProvider = Provider.autoDispose
+    .family<AgentWorkStatus, String>((ref, entryId) {
+      return ref.watch(remoteProjectStatusProvider.select((m) => m[entryId])) ??
+          AgentWorkStatus.done;
+    });
 
 /// The OPEN project's own live stamp for [sessionId], or null when [entryId]
 /// isn't the focused project or the entry carries no status.
