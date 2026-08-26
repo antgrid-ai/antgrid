@@ -1,4 +1,5 @@
 import '../models/ab_project.dart';
+import '../util/device_id.dart';
 
 /// Identity of the built-in offline demo workspace.
 ///
@@ -22,11 +23,14 @@ bool isDemoProjectId(String? projectId) => projectId == kDemoProjectId;
 
 /// Cache/registry keys are the project id for a local session, so the two
 /// predicates coincide today. Kept separate because a store keyed by the relay
-/// `registrationId` would need the suffix match, and callers should not have to
-/// know which kind of key they hold.
+/// `registrationId` would need the compound match, and callers should not have
+/// to know which kind of key they hold.
+///
+/// Split with [baseProjectId], not `endsWith`: a compound id is
+/// `<deviceUuid>.<projectId>` split at the FIRST dot, so a suffix test would
+/// disagree with the rest of the app on any id whose deviceUuid contains one.
 bool isDemoEntryId(String? entryId) =>
-    entryId == kDemoProjectId ||
-    (entryId?.endsWith('.$kDemoProjectId') ?? false);
+    entryId != null && baseProjectId(entryId) == kDemoProjectId;
 
 /// Machine-readable refusal for anything the demo cannot honestly do, and the
 /// one sentence every surface says when it declines. Lives here rather than in

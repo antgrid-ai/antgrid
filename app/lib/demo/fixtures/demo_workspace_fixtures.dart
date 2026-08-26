@@ -23,6 +23,13 @@ const List<String> kDemoBranches = <String>[
 ];
 const String kDemoTerminalId = 'demo-terminal';
 
+/// The `dev` service's log terminal. `ServicesListView` opens a service's logs
+/// by looking its `id` up in the terminal tabs, so the service and the terminal
+/// have to be the same id or "View logs" resolves to nothing and bounces back.
+/// Typed `service`, which is what keeps it out of the ad-hoc Terminals list
+/// (`terminal_list_view.dart` filters on exactly that).
+const String kDemoServiceTerminalId = 'dev';
+
 /// Session the demo opens on — its transcript is complete.
 const String kDemoSessionCheckoutId = 'demo-session-checkout';
 
@@ -60,8 +67,29 @@ const List<Map<String, Object?>> kDemoDurableFrames = <Map<String, Object?>>[
         'rows': 30,
         'type': 'agent',
       },
+      <String, Object?>{
+        'terminalId': kDemoServiceTerminalId,
+        'name': 'dev',
+        'running': true,
+        'shell': 'bun',
+        'cols': 96,
+        'rows': 30,
+        'type': 'service',
+      },
     ],
-    'services': <Map<String, Object?>>[],
+    // Kept in step with [kDemoConfig]'s `services`, the same way `commands`
+    // below is: the sample antgrid.yaml is served verbatim to Project Settings,
+    // so an empty list here reads as "No services declared" one tab away from a
+    // settings page listing `dev`, a terminal running `bun run dev`, a detected
+    // vite port and a preview pointing at it.
+    'services': <Map<String, Object?>>[
+      <String, Object?>{
+        'id': kDemoServiceTerminalId,
+        'name': 'dev',
+        'running': true,
+        'command': 'bun run dev',
+      },
+    ],
     // What the command tray renders from. Kept in step with [kDemoConfig]'s
     // `commands`, which is the same list as the sample antgrid.yaml declares.
     'commands': <Map<String, Object?>>[
@@ -90,7 +118,11 @@ const List<Map<String, Object?>> kDemoDurableFrames = <Map<String, Object?>>[
       },
       <String, Object?>{
         'path': 'tests/checkout.test.ts',
-        'status': 'A',
+        // 'U', not 'A': the bridge files untracked files as 'U' and reserves
+        // 'A' for the STAGED set (`bridge/src/git.ts`), and the Git panel's
+        // discard confirmation reads exactly that pairing to decide between
+        // "Discard all changes to…" and "Permanently delete the new file…".
+        'status': 'U',
         'staged': false,
         'additions': 41,
         'deletions': 0,
@@ -424,6 +456,27 @@ const Map<String, Object?> kDemoTerminalSnapshot = <String, Object?>{
       'Ran 3 tests across 2 files. [42.00ms]\r\n'
       '\r\n'
       '$kDemoShellPrompt',
+};
+
+/// Logs behind the `dev` service's "View logs". A service terminal has no
+/// prompt — it is one long-running process — so this ends mid-stream rather
+/// than on [kDemoShellPrompt]. CRLF for the reason [kDemoTerminalSnapshot]
+/// gives.
+const Map<String, Object?> kDemoServiceSnapshot = <String, Object?>{
+  'type': 'terminal:snapshot',
+  'checkoutId': 'main',
+  'terminalId': kDemoServiceTerminalId,
+  'seq': 1,
+  'scrollback':
+      '\$ bun run dev\r\n'
+      '\r\n'
+      '  VITE v5.4.8  ready in 412 ms\r\n'
+      '\r\n'
+      '  ➜  Local:   $kDemoPreviewUrlString/\r\n'
+      '  ➜  press h + enter to show help\r\n'
+      '\r\n'
+      '  8:41:02 AM [vite] hmr update /src/cart.ts\r\n'
+      '  8:41:19 AM [vite] hmr update /src/checkout.ts\r\n',
 };
 
 const Map<String, Object?> kDemoPortsUpdate = <String, Object?>{

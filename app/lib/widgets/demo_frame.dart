@@ -2,6 +2,7 @@ import 'package:flutter/material.dart' show Theme;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../constants/breakpoints.dart';
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
@@ -10,6 +11,7 @@ import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_inline_banner.dart';
 import '../design/widgets/ab_window_controls.dart';
 import '../providers/demo_mode.dart';
+import '../utils/platform_utils.dart';
 import '../window/window_capabilities.dart';
 import 'window_title_bar.dart';
 
@@ -34,6 +36,16 @@ class DemoFrame extends ConsumerWidget {
     // stack on both edges, and that is the only thing standing between a demo
     // modal and the real app underneath it.
     if (!ref.watch(demoModeProvider)) return child;
+    // The same three-way rule AppShell applies (`_buildRoot`), not a second one
+    // that only happens to agree at phone width. The demo mounts WorkspaceShell
+    // and NewSessionScreen, both of which publish their pane toggles through
+    // `sidebarControlProvider`/`contextPanelControlProvider` for a bar mounted
+    // ABOVE the route to render — and those toggles are the only way back from
+    // a hidden drawer or a hidden/expanded context panel. A chrome-only bar at
+    // desktop width therefore drops a reviewer whose `sidebarHidden` setting is
+    // already on into a demo with no project drawer and nothing to restore it.
+    final narrow = MediaQuery.sizeOf(context).width < kMediumBreakpoint;
+    final showTitleBar = !isMobilePlatform && (appOwnsWindowChrome || !narrow);
     // Everything below is a SIBLING of the app's Navigator, which owns the only
     // Overlay in the tree — so the caption buttons' tooltips, which are
     // `OverlayPortal`s and throw at BUILD time rather than on hover, have none.
@@ -48,9 +60,11 @@ class DemoFrame extends ConsumerWidget {
           // window has no drag region and no close button. Above the strip, since
           // AppKit positions the macOS traffic lights in window coordinates and
           // they do not move with Flutter layout.
-          if (appOwnsWindowChrome)
-            const WindowTitleBar(
-              child: Row(children: [Spacer(), AbWindowControls()]),
+          if (showTitleBar)
+            WindowTitleBar(
+              child: narrow
+                  ? const Row(children: [Spacer(), AbWindowControls()])
+                  : const WindowTitleBarContents(),
             ),
           const SafeArea(bottom: false, child: _DemoBanner()),
           Expanded(

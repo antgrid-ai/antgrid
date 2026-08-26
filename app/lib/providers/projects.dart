@@ -25,7 +25,12 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
   }
 
   Future<void> upsert(AbProject p) async {
-    await _store.upsert(p);
+    // `list()` is a full JSON decode that publishes a fresh List, which is
+    // never `==` the old one — so every `projectsProvider` watcher rebuilds.
+    // Skipped when the store refused the write (the sample project), whose
+    // drawer row goes through here on every tap: it is the demo's primary
+    // navigation gesture.
+    if (!await _store.upsert(p)) return;
     state = _store.list();
   }
 

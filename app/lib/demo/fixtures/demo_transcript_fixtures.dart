@@ -58,14 +58,17 @@ List<Map<String, Object?>> demoSessionEntries(DateTime now) {
   ];
 }
 
+/// Takes the entries rather than a clock: [DemoTransport] memoizes one list for
+/// the transport's whole life, and `session:list` is a tier-3 hydrator that runs
+/// on every establishment and every refresh.
 Map<String, Object?> demoSessionsListResult({
   required String requestId,
-  required DateTime now,
+  required List<Map<String, Object?>> entries,
 }) => <String, Object?>{
   'type': 'session:list:result',
   'projectId': kDemoProjectId,
   'requestId': requestId,
-  'sessions': demoSessionEntries(now),
+  'sessions': entries,
 };
 
 /// Capabilities the chat composer reads: model/mode pickers and slash commands

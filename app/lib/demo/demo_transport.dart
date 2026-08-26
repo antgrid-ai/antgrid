@@ -45,18 +45,28 @@ class DemoTransport extends BufferedAgentTransport {
       <String, Map<String, String>>{};
 
   /// Built once: the fixtures are pure functions of [_now], and the transcript
-  /// RPC alone runs per session on hydrate and again on every redrive — each
-  /// call was rebuilding every frame of both transcripts to index one of them.
+  /// RPC runs per session on hydrate and again on every redrive — so a
+  /// per-call build would render both transcripts in full to index one of them.
   late final Map<String, List<Map<String, Object?>>> _transcripts =
       demoTranscripts(_now);
   late final List<Map<String, Object?>> _entries = demoSessionEntries(_now);
+
+  /// Split once, for the same reason as [_transcripts]: the file explorer sends
+  /// a `file:search` per keystroke with no debounce, and the bodies are `const`.
+  late final Map<String, List<String>> _fileLines = {
+    for (final e in kDemoFileContents.entries) e.key: e.value.split('\n'),
+  };
 
   @override
   bool get isLocal => true;
 
   @override
   Future<void> connect() async {
-    if (_disposed) return;
+    // Idempotent: `connect` is a public contract method, and a second call
+    // would append the whole opening snapshot to `snapshotCache` again while
+    // `setState` de-dupes and hides the doubling — every later subscriber then
+    // replays each durable frame twice.
+    if (_disposed || isEstablished) return;
     for (final frame in _openingFrames()) {
       snapshotCache.add(InboundMessage('control', _stamp(frame)));
     }
@@ -130,8 +140,10 @@ class DemoTransport extends BufferedAgentTransport {
     kDemoTerminalStarted,
     kDemoTerminalSnapshot,
     kDemoGitBranches,
-    // Rebuilt per call rather than hoisted: a redrive after the user has
-    // picked a model or mode has to replay the pick, not the default.
+    // Read through [_configPicks] rather than [demoCapabilities] directly, so
+    // an answer built after the user has picked a model or mode carries the
+    // pick. `snapshotCache` is written once at connect, so today only the
+    // `state.snapshot` answer below can be that late one.
     _capabilitiesFor(kDemoSessionCheckoutId),
     _capabilitiesFor(kDemoSessionCartId),
   ];
@@ -174,7 +186,12 @@ class DemoTransport extends BufferedAgentTransport {
     Map<String, Object?> result;
     switch (message['method'] as String?) {
       case 'state.snapshot':
-        result = <String, Object?>{'frames': _openingFrames()};
+        // Stamped, like the connect-time replay of the very same maps: the two
+        // paths serve identical frames, and one of them handing back no `id`
+        // and no `timestamp` is a divergence no test would catch.
+        result = <String, Object?>{
+          'frames': _openingFrames().map(_stamp).toList(),
+        };
       case 'session.transcriptSnapshot':
         final sessionId = params['sessionId'] as String?;
         result = <String, Object?>{
@@ -221,7 +238,7 @@ class DemoTransport extends BufferedAgentTransport {
     switch (type) {
       case 'session:list':
         return <Map<String, Object?>>[
-          demoSessionsListResult(requestId: requestId ?? '', now: _now),
+          demoSessionsListResult(requestId: requestId ?? '', entries: _entries),
         ];
 
       // Already running in the fixtures, so this is a no-op that still has to
@@ -406,6 +423,14 @@ class DemoTransport extends BufferedAgentTransport {
       default:
         // Fire-and-forget verbs a bridge answers with nothing: focus
         // declarations, resize, stop, cancel-adjacent chatter.
+        //
+        // `agent:session-action` (the "Revert conversation" button, which
+        // renders on every user message in the canned transcripts) lands here
+        // too, and is the one arrival that is NOT fire-and-forget: a real
+        // bridge answers it with `agent:snapshot`/`agent:transcript-replay`.
+        // Nothing the demo can emit reports the refusal — the app consumes no
+        // `agent:error` — so silence is the least dishonest answer, and this
+        // note is here so the catch-all is not mistaken for coverage.
         return const <Map<String, Object?>>[];
     }
   }
@@ -455,14 +480,32 @@ class DemoTransport extends BufferedAgentTransport {
 
   Map<String, Object?> _gitDiff(String? path) {
     final diff = path == null ? null : kDemoGitDiffContent[path];
+    // Counts read back out of the `git:status` fixture rather than restated
+    // here. The Git panel draws them twice, one directly above the other — on
+    // the file row and in the diff header — and `GitDiffContentMessage`
+    // defaults a missing count to 0, which renders as no stat at all beside a
+    // row that just claimed +24 -3.
+    final stat = path == null ? null : _gitStatusEntry(path);
     return <String, Object?>{
       'type': 'git:diff-content',
       'projectId': kDemoProjectId,
       'checkoutId': 'main',
       'path': path ?? '',
       'diff': ?diff,
+      'additions': ?stat?['additions'],
+      'deletions': ?stat?['deletions'],
       if (diff == null) 'error': 'Not part of the sample project',
     };
+  }
+
+  static Map<String, Object?>? _gitStatusEntry(String path) {
+    for (final frame in kDemoDurableFrames) {
+      if (frame['type'] != 'git:status') continue;
+      for (final f in (frame['files'] as List).cast<Map<String, Object?>>()) {
+        if (f['path'] == path) return f;
+      }
+    }
+    return null;
   }
 
   Map<String, Object?> _gitFailure(String type, {Object? files}) =>
@@ -486,8 +529,11 @@ class DemoTransport extends BufferedAgentTransport {
     return <String, Object?>{
       ...kDemoTerminalStarted,
       'terminalId': terminalId,
-      // Not the sample terminal's 'agent' — this one is the user's own shell.
-      'terminalType': null,
+      // Not the sample terminal's 'agent' — this one is the user's own shell,
+      // unless it is the `dev` service being restarted from the Services tab.
+      // Answering null there would retype the tab and drop it into the ad-hoc
+      // Terminals list, which filters on exactly this field.
+      'terminalType': terminalId == kDemoServiceTerminalId ? 'service' : null,
     };
   }
 
@@ -498,6 +544,7 @@ class DemoTransport extends BufferedAgentTransport {
     if (terminalId == null || terminalId == kDemoTerminalId) {
       return kDemoTerminalSnapshot;
     }
+    if (terminalId == kDemoServiceTerminalId) return kDemoServiceSnapshot;
     return <String, Object?>{
       ...kDemoTerminalSnapshot,
       'terminalId': terminalId,
@@ -539,7 +586,6 @@ class DemoTransport extends BufferedAgentTransport {
   }) {
     final matches = <Map<String, Object?>>[];
     final files = <String>{};
-    String? error;
     RegExp? pattern;
     if (query.isNotEmpty) {
       final escaped = regex ? query : RegExp.escape(query);
@@ -548,15 +594,18 @@ class DemoTransport extends BufferedAgentTransport {
           wholeWord ? '\\b(?:$escaped)\\b' : escaped,
           caseSensitive: caseSensitive,
         );
-      } on FormatException catch (e) {
-        // Reported, not swallowed: an unparseable pattern is the user's own
-        // typo to see, and a bare empty result reads as "nothing here".
-        error = 'Invalid regular expression: ${e.message}';
+      } on FormatException {
+        // Settled as an empty result rather than reported through the done
+        // frame's `error` field, for the reason [_fileContent] documents:
+        // `classifyAbMessage` coerces any error-bearing frame to the STATUS
+        // tier, and SearchService subscribes to the HEAVY one alone — an
+        // honest error here never arrives, so the panel spins until the idle
+        // guard gives up on it 12s later and blames the agent.
       }
     }
     if (pattern != null) {
-      for (final entry in kDemoFileContents.entries) {
-        final lines = entry.value.split('\n');
+      for (final entry in _fileLines.entries) {
+        final lines = entry.value;
         for (var i = 0; i < lines.length; i++) {
           for (final m in pattern.allMatches(lines[i])) {
             // A pattern that can match nothing ('a*') would otherwise report a
@@ -592,7 +641,6 @@ class DemoTransport extends BufferedAgentTransport {
         'totalFiles': files.length,
         'duration': 4,
         'engine': 'demo',
-        'error': ?error,
       },
     ];
   }

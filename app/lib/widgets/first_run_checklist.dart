@@ -243,14 +243,33 @@ class FirstRunSetupSection extends ConsumerWidget {
 /// dismisses it). Successor to the static connect-machine guide: same centered
 /// skeleton, but the rows check themselves off from live signals.
 ///
+/// Whether [MobileFirstRunChecklist] will render anything right now.
+///
+/// The mobile half of [desktopSetupSectionVisible], demo gate and all: its
+/// steps describe the user's own machine, `mobileFirstRunStepsProvider` reaches
+/// the keychain and `/account/agents` to answer them, its dismiss is a
+/// permanent on-disk latch, and its closing action opens the very demo it would
+/// be rendering inside. Hoisted so a host can skip the chrome it would wrap
+/// around nothing, same as the desktop predicate.
+bool mobileFirstRunChecklistVisible(WidgetRef ref) =>
+    isMobilePlatform &&
+    !ref.watch(demoModeProvider) &&
+    ref.watch(firstRunChecklistVisibleProvider);
+
 /// Stays on the canvas rather than following the desktop checklist into the
 /// drawer: on mobile that drawer is a slide-in behind a hamburger, and
 /// onboarding a user has to go looking for is not onboarding.
+///
+/// Self-gates on [mobileFirstRunChecklistVisible], so the call site stays a
+/// single stable line.
 class MobileFirstRunChecklist extends ConsumerWidget {
   const MobileFirstRunChecklist({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Before the steps are watched, not after: answering them is what costs the
+    // account fetch this gate exists to keep out of the demo.
+    if (!mobileFirstRunChecklistVisible(ref)) return const SizedBox.shrink();
     final steps = ref.watch(mobileFirstRunStepsProvider);
     _latchAndMaybeComplete(ref, steps);
     final t = context.antgrid;

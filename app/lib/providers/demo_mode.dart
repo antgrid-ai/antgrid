@@ -49,6 +49,16 @@ void _popToRoot(ProviderContainer ref) {
 /// rest of this function runs.
 void enterDemoMode(ProviderContainer ref) {
   _popToRoot(ref);
+  // FIRST, before the focus below. Every gate in the app is written as "if the
+  // demo is on, refuse" while the thing that ARMS the host-spawn paths is a
+  // focused `LocalProject` — which the next statement makes the demo into. In
+  // between, the container would hold a local target with the guard still
+  // false, and a synchronous read of that chain (`focusedMachineToolsProvider`
+  // reads the target first and the flag second, then calls `ensureHost()`)
+  // would spawn the real bridge from inside the sample project. Riverpod
+  // happens to coalesce these writes into one rebuild today; ordering makes it
+  // not depend on that.
+  ref.read(demoModeProvider.notifier).set(true);
   ref
       .read(selectedTargetProvider.notifier)
       .set(const LocalProject(kDemoProjectId));
@@ -73,7 +83,6 @@ void enterDemoMode(ProviderContainer ref) {
         surface: WorkbenchSurface.workspace,
       ),
     );
-  ref.read(demoModeProvider.notifier).set(true);
 }
 
 /// Leaves the demo and drops everything it built.

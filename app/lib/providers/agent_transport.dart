@@ -22,6 +22,7 @@ import '../services/keychain_device_store.dart';
 import '../services/license_token_minter.dart';
 import '../storage/recent_agents_store.dart';
 import '../util/ab_log.dart';
+import '../util/detached.dart';
 import '../util/device_id.dart';
 import 'account_agents.dart';
 import 'agent_coordinates.dart';
@@ -119,7 +120,13 @@ final agentTransportForProvider = FutureProvider.family<AgentTransport?, String>
     // sample project's transport lifetime IS the flag.
     if (!ref.watch(demoModeProvider)) return null;
     final demo = DemoTransport();
-    ref.onDispose(() => unawaited(demo.dispose()));
+    ref.onDispose(
+      () => detached(
+        'AgentTransport',
+        'demo transport dispose failed',
+        demo.dispose,
+      ),
+    );
     await demo.connect();
     return demo;
   }
@@ -372,7 +379,13 @@ Future<AgentTransport?> _buildRelayTransportFor(
   await transport.connect();
   // Detach only THIS stream on teardown; the machine connection's lifetime is
   // governed by the control-plane reaper / registry eviction, not here.
-  ref.onDispose(() => unawaited(transport.dispose()));
+  ref.onDispose(
+    () => detached(
+      'AgentTransport',
+      'stream transport dispose failed',
+      transport.dispose,
+    ),
+  );
   return transport;
 }
 

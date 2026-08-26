@@ -8,6 +8,7 @@ import 'package:antgrid/demo/demo_identity.dart';
 import 'package:antgrid/demo/fixtures/demo_workspace_fixtures.dart';
 import 'package:antgrid/main.dart' show telemetryAllowed;
 import 'package:antgrid/models/preferences_models.dart';
+import 'package:antgrid/models/git_branch.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
@@ -18,6 +19,7 @@ import 'package:antgrid/providers/analytics.dart';
 import 'package:antgrid/providers/drawer_entries.dart';
 import 'package:antgrid/providers/cached_sessions.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
+import 'package:antgrid/providers/new_session_action.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/services/app_settings_service.dart';
@@ -404,6 +406,22 @@ void main() {
         branch: kDemoBranch,
       )).future,
     );
+
+    // Pressing Start with a branch picked. Not one of the providers above: the
+    // checkout that arms `ensureHost()` here is step 0 of the ACTION, and the
+    // demo populates the branch menu, so choosing one of its branches is
+    // ordinary demo navigation rather than a path only a real project reaches.
+    container
+        .read(newSessionBranchSelectionProvider.notifier)
+        .set(
+          NewSessionBranchSelection(targetId: project.id, branch: kDemoBranch),
+        );
+    try {
+      await startNewSession(container);
+    } catch (_) {
+      // The create step refuses, which is the demo behaving correctly — this
+      // test is only about whether the host was reached on the way there.
+    }
 
     expect(askedForHost, isFalse);
   });

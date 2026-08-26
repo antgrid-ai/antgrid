@@ -6,21 +6,30 @@
 // This walks every frame the demo can ever emit — the static fixtures, the
 // opening script, and the reply to every verb the transport handles — through
 // the SAME classifier and parser the live wire goes through.
+import 'package:antgrid/demo/demo_identity.dart';
 import 'package:antgrid/demo/demo_script.dart';
 import 'package:antgrid/demo/demo_transport.dart';
 import 'package:antgrid/demo/fixtures/demo_transcript_fixtures.dart';
 import 'package:antgrid/demo/fixtures/demo_workspace_fixtures.dart';
+import 'package:antgrid/models/ab_config.dart';
 import 'package:antgrid/models/ab_message.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_message_classification.dart';
+import 'package:antgrid/services/config_service.dart';
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// Frames `parseAbMessage` has no case for by design: `SessionsService`,
 /// `ConfigService` and `UploadService` subscribe to the RAW status JSON and
 /// decode these themselves, so a null from the parser is correct for them and
-/// says nothing about whether the frame is well formed. They are checked
-/// against their real consumers instead, below.
+/// says nothing about whether the frame is well formed.
+///
+/// An exemption here removes the ONLY automated check a demo frame gets, so
+/// every type listed is re-checked against its real consumer below — that is
+/// what makes the exemption safe rather than a hole. `session:updated` is the
+/// one entry with no such test: the demo emits none (see the `session:start`
+/// arm in `demo_transport.dart`), so there is nothing to decode. Emit one and
+/// it needs a check here first.
 const Set<String> _rawConsumedTypes = <String>{
   'session:list:result',
   'session:result',
@@ -238,7 +247,10 @@ void main() {
   // The parser-less set, checked against its real consumer instead.
   group('session status frames', () {
     test('the list result decodes into SessionEntry rows', () {
-      final result = demoSessionsListResult(requestId: 'q', now: now);
+      final result = demoSessionsListResult(
+        requestId: 'q',
+        entries: demoSessionEntries(now),
+      );
       expect(result['type'], 'session:list:result');
       final rows = (result['sessions'] as List).cast<Map<String, dynamic>>();
       expect(rows, isNotEmpty);
@@ -262,6 +274,69 @@ void main() {
       expect(result['error'], isA<String>());
       expect(result['errorCode'], isNotEmpty);
     });
+  });
+
+  // The other half of the parser-less set. `ConfigService._handleReadResult`
+  // and friends cast rather than tolerate (`j['ok'] as bool`), so a key spelled
+  // wrong here is a throw inside the status subscription, not an empty surface.
+  group('config status frames', () {
+    test('the read result decodes into the sample AbConfig', () async {
+      final answered = await replies({'type': 'config:read'});
+      final result = answered.firstWhere(
+        (f) => f['type'] == 'config:read-result',
+      );
+      expect(result['ok'], isTrue);
+      final cfg = AbConfig.fromJson(result['config'] as Map<String, dynamic>);
+      expect(cfg.name, kDemoDisplayName);
+      expect(cfg.agent?.tool, kDemoAgentTool);
+      // Both lists are also rendered from `agent:status`, one tab away from
+      // Project Settings — an empty one here is the two disagreeing.
+      expect(cfg.services, isNotEmpty);
+      expect(cfg.commands, isNotEmpty);
+    });
+
+    test(
+      'the write refusal carries the reason under the key the UI reads',
+      () async {
+        final answered = await replies({'type': 'config:write'});
+        final result = answered.firstWhere(
+          (f) => f['type'] == 'config:write-result',
+        );
+        expect(result['ok'], isFalse);
+        // `errors`, plural — `_handleWriteResult` completes the caller with this
+        // list, and Save reports "no reason given" when it is empty.
+        expect((result['errors'] as List).cast<String>(), isNotEmpty);
+      },
+    );
+
+    test('the detect result decodes into DetectedTool rows', () async {
+      final answered = await replies({'type': 'config:detect-tools'});
+      final result = answered.firstWhere(
+        (f) => f['type'] == 'config:detect-tools-result',
+      );
+      final tools = (result['tools'] as List)
+          .map((e) => DetectedTool.fromJson(e as Map<String, dynamic>))
+          .toList();
+      // Empty is the honest answer — the demo probes no machine — but the key
+      // has to exist and hold a list, or the decode above throws.
+      expect(tools, isEmpty);
+    });
+  });
+
+  test('the upload refusal names a code and a sentence', () async {
+    final answered = await replies({
+      'type': 'file:upload-start',
+      'requestId': 'q',
+    });
+    final result = answered.firstWhere(
+      (f) => f['type'] == 'file:upload-result',
+    );
+    expect(result['ok'], isFalse);
+    // `UploadService._throwIfFailed` reads `error` as the CODE and `message` as
+    // the sentence, and `uploadErrorText` shows the code when the sentence is
+    // missing — which would put E_DEMO_UNSUPPORTED in front of the user.
+    expect(result['error'], kDemoRefusalCode);
+    expect(result['message'], isNotEmpty);
   });
 
   test('the sessions the list advertises are the ones with transcripts', () {

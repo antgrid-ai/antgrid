@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../demo/demo_identity.dart';
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_status_tone.dart';
@@ -579,7 +580,14 @@ class _SessionMenu extends ConsumerWidget {
     // hosting it, so for a relay project the window would open somewhere the
     // user is not sitting. A failed probe degrades to no rows rather than a
     // menu that never opens.
-    final targets = ref.read(entryIsRelayProvider(entryId))
+    //
+    // The demo is excluded for a second reason: both rows resolve their path
+    // over the loopback control plane (`openCheckoutIn`/`copyCheckoutPath` read
+    // `hostControlClientProvider`), which is an `ensureHost()` caller — and the
+    // sample project has no checkout for it to answer about anyway. Not
+    // `entryIsRelayProvider`'s job: the demo transport reports itself local.
+    final targets =
+        ref.read(entryIsRelayProvider(entryId)) || isDemoEntryId(entryId)
         ? const <ExternalOpenTarget>[]
         : await ref
               .read(externalOpenTargetsProvider.future)

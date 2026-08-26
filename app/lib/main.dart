@@ -280,6 +280,13 @@ Future<void> main() async {
     // Navigation deep links (antgrid://nav/...) apply a location directly.
     final navLoc = navLocationFromUri(uri);
     if (navLoc != null) {
+      // A link names a REAL place — a machine, a project, a session — and the
+      // user asked for it, so it wins over the sample project rather than being
+      // dropped. Leaving first is what makes it whole: the demo's target is
+      // cleared, its transport disposed and its nav history reset, so the link
+      // does not land under a banner saying nothing is connected while the
+      // drawer still lists only the demo.
+      if (container.read(demoModeProvider)) exitDemoMode(container);
       container.read(navControllerProvider.notifier).applyDeepLink(navLoc);
       return;
     }
@@ -492,6 +499,19 @@ class AbApp extends ConsumerWidget {
   }
 }
 
+/// [deviceCapProvider], held back while the demo is on.
+///
+/// The cap dialog's remedy is revoking one of the user's REAL account devices,
+/// which the demo may never do — and it opens on the root navigator, so from
+/// inside the demo it lands over the sample project, under the banner saying
+/// nothing is connected. Held back rather than dropped: the cap value survives
+/// until the dialog itself clears it, so this provider goes null → cap on the
+/// build that leaves the demo and the listener's edge fires there instead.
+final _pendingDeviceCapProvider = Provider<DeviceCapInfo?>((ref) {
+  if (ref.watch(demoModeProvider)) return null;
+  return ref.watch(deviceCapProvider);
+});
+
 /// Root route: splash while auth is unknown; sign-in gate on mobile;
 /// [AppShell] otherwise. Pricing is reached from app settings only.
 class _AppHome extends ConsumerWidget {
@@ -504,7 +524,7 @@ class _AppHome extends ConsumerWidget {
     // free-a-slot dialog rather than failing silently. The cap kind travels on
     // DeviceCapInfo, so the dialog picks device-cap vs worker-cap copy itself.
     // Edge-trigger (null → non-null) so it shows once per rejection.
-    ref.listen<DeviceCapInfo?>(deviceCapProvider, (prev, next) {
+    ref.listen<DeviceCapInfo?>(_pendingDeviceCapProvider, (prev, next) {
       if (prev == null && next != null) {
         showDeviceCapDialog(context, ref, next);
       }

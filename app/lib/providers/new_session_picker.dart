@@ -667,6 +667,12 @@ final newSessionBranchCatalogProvider =
           isRepository: true,
           current: kDemoBranch,
           branches: kDemoBranches,
+          // Stated, not defaulted. `worktreeSessionsSupported` is what
+          // `newSessionIsolationReadyProvider` reads, and the isolated chip's
+          // disabled tooltip is a claim about the user's OWN machine — "check
+          // that its Antgrid is up to date" — which the demo is in no position
+          // to make about a bridge it never spoke to.
+          worktreeSessionsSupported: true,
         );
       }
 

@@ -13,14 +13,12 @@ import '../../design/widgets/ab_separator.dart';
 import '../../design/widgets/ab_status_dot.dart';
 import '../../models/recent_session_row.dart';
 import '../../providers/demo_mode.dart';
-import '../../providers/first_run.dart';
 import '../../providers/new_session_picker.dart';
 import '../../providers/project_work_status.dart';
 import '../../providers/recent_sessions.dart';
 import '../../providers/supervisor_status.dart';
 import '../../services/control_plane_client.dart';
 import '../../util/detached.dart';
-import '../../utils/platform_utils.dart';
 import '../ab_status_helpers.dart';
 import '../first_run_checklist.dart';
 import 'recent_session_row_widget.dart';
@@ -119,14 +117,18 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
       // the first-run checklist replaces the generic empty state until it is
       // completed or dismissed — it stays through the later steps (Remote,
       // open a project) even once a machine exists in the inventory.
-      // `isMobilePlatform` first is load-bearing: desktop short-circuits
-      // before touching the first-run chain (its checklist lives on the New
-      // Session canvas instead).
-      final showChecklist =
-          isMobilePlatform && ref.watch(firstRunChecklistVisibleProvider);
+      // Its own predicate (desktop short-circuits before touching the first-run
+      // chain, and the demo before reaching the account) — never re-derived
+      // here, or the checklist and the chrome around it disagree.
+      final showChecklist = mobileFirstRunChecklistVisible(ref);
       // "Describe a task below" is a lie while nothing is picked — Send stays
       // disabled without a valid target — so name the actual next step.
       final hasTarget = ref.watch(newSessionHasValidTargetProvider);
+      // This list goes momentarily empty inside the demo too (before the
+      // fixture session:list lands, and after a mobile background evicts the
+      // warm demo), and offering the way in from inside is worse than offering
+      // nothing.
+      final offerDemo = !hasTarget && !ref.watch(demoModeProvider);
       // A scrollable empty state so the ancestor RefreshIndicator (in
       // new_session_content.dart) always has a gesture target: AbEmptyState
       // is a bare Center with no Scrollable of its own, so pull-to-refresh
@@ -150,12 +152,12 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
                         : 'Pick a project, then describe a task below.',
                     // Nothing picked means every path into a session is still
                     // dead — offer the one that needs no machine at all.
-                    action: hasTarget
-                        ? null
-                        : AbButton(
+                    action: offerDemo
+                        ? AbButton(
                             label: kDemoEntryLabel,
                             onTap: () => enterDemoMode(ref.container),
-                          ),
+                          )
+                        : null,
                   ),
           ),
         ],

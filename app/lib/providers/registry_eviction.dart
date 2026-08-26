@@ -4,6 +4,7 @@ import '../demo/demo_identity.dart';
 import '../project/project_session_registry.dart';
 import '../project/project_status_cache.dart';
 import 'agent_transport.dart';
+import 'demo_mode.dart';
 import 'drawer_entries.dart';
 
 /// The registry's eviction callback: snapshot the evicted project's final
@@ -23,9 +24,15 @@ Future<void> snapshotAndInvalidateOnEvict(
   String projectId,
 ) async {
   final session = ref.read(projectSessionProvider(projectId)).value;
-  final stillListed = ref
-      .read(drawerEntriesProvider)
-      .any((e) => e.id == projectId);
+  // While the demo is on, [drawerEntriesProvider] short-circuits to the sample
+  // project alone, so it cannot answer "does this project still exist" about a
+  // real one — every real id would read as deleted and lose the final status
+  // this callback exists to keep. Deletion is a real-app action, and the demo
+  // id itself is refused outright below, so the guard simply does not apply
+  // there.
+  final stillListed =
+      ref.read(demoModeProvider) ||
+      ref.read(drawerEntriesProvider).any((e) => e.id == projectId);
   // The demo gate does not lean on `stillListed` being false for the sample
   // project: nothing about the demo may reach disk, whatever a later change
   // does to drawer entries.
