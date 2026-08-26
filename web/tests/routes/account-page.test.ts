@@ -20,8 +20,9 @@ describe("GET /account", () => {
     const { cookie } = await createTestSession(pg.db, user.id);
     // GET /account re-provisions on every visit (provisionProductAccountForUser),
     // which upgrades a lingering free row back to the promotional grant — so
-    // genuinely-free is not reachable here. A subscription pending
-    // cancellation is the reachable "not blocked" state instead.
+    // genuinely-free is not reachable here. Pending cancellation stands in, and
+    // is worth keeping distinct from the promo grant the test above covers:
+    // this one proves a real purchase stops blocking once it is winding down.
     const account = await provisionProductAccountForUser(pg.db, user.id);
     await pg.db.subscription.updateMany({
       where: { accountId: account.id, status: "active" },
@@ -38,19 +39,23 @@ describe("GET /account", () => {
     expect(html).toContain('name="confirm"');
   });
 
-  test("blocks deletion for an active promotional pro grant", async () => {
+  test("offers deletion under the promotional pro grant", async () => {
     const { app } = buildTestApp(pg.db, pg.url);
     const user = await createTestUser(pg.db, "iris@example.com");
     const { cookie } = await createTestSession(pg.db, user.id);
     // No explicit subscription fixture — a fresh account defaults to the
-    // promotional pro grant, which is treated like a real paid plan for
-    // deletion purposes (accepted limitation during the promo).
+    // promotional pro grant. It was once treated as a paid plan here, which
+    // was survivable only for as long as nobody needed to delete: the grant
+    // renews nothing, no checkout sold it, and no surface can cancel it, so
+    // every account was permanently undeletable and sent to a pricing page
+    // reading "Coming soon". Deletion has to stay reachable — see
+    // hasRenewingPaidSubscription.
 
     const res = await app.request("/account", { headers: { cookie } });
     expect(res.status).toBe(200);
     const html = await res.text();
-    expect(html).toContain("You have an active subscription");
-    expect(html).not.toContain('name="confirm"');
+    expect(html).not.toContain("You have an active subscription");
+    expect(html).toContain('name="confirm"');
   });
 
   test("an owner whose team still has members is told so, not offered the control", async () => {
