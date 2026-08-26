@@ -20,6 +20,7 @@ import '../providers/providers.dart';
 import '../services/app_settings_service.dart';
 import '../services/terminal_service.dart';
 import '../util/detached.dart';
+import '../util/external_url.dart';
 import 'clipboard_image.dart';
 import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
@@ -589,6 +590,11 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       // terminal selection/hyperlinks match the rest of the system.
       selectionColor: context.antgrid.accent.withValues(alpha: 0.3),
       hyperlinkColor: context.antgrid.accent,
+      // Without this the package falls back to a bare `launchUrlString`, which
+      // uses the platform-default launch mode and reports nothing when it
+      // fails. Route through the app's helper so a link opens externally and a
+      // failure is visible, and so terminal-authored URIs are scheme-checked.
+      onOpenHyperlink: (uri) => openTerminalHyperlink(context, uri),
       showHeader: false,
       showFocusRing: false,
       // Thin terminal-native scrollbar — thumb tracks
