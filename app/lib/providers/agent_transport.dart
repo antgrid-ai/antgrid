@@ -9,6 +9,8 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import '../analytics/events.dart';
 import '../connection/connection_supervisor.dart';
 import '../connection/relay_mechanisms.dart';
+import '../demo/demo_identity.dart';
+import '../demo/demo_transport.dart';
 import '../launcher/local_agent_launcher.dart';
 import '../models/ab_message.dart';
 import '../models/ab_project.dart';
@@ -26,6 +28,7 @@ import 'agent_coordinates.dart';
 import 'analytics.dart';
 import 'auth.dart';
 import 'connection_identity.dart';
+import 'demo_mode.dart';
 import 'device_provisioning.dart';
 import 'projects.dart';
 import 'provider_retry.dart';
@@ -107,6 +110,19 @@ final agentTransportForProvider = FutureProvider.family<AgentTransport?, String>
   ref,
   projectId,
 ) async {
+  // First, so nothing below can reach the network for the sample project: the
+  // demo id is reserved and never names a real machine, and both branches below
+  // read the keychain (device identity, session cookie) on their way out.
+  if (isDemoProjectId(projectId)) {
+    // Watched, not read: leaving the demo rebuilds this entry, which disposes
+    // the transport through the onDispose below and resolves to null. The
+    // sample project's transport lifetime IS the flag.
+    if (!ref.watch(demoModeProvider)) return null;
+    final demo = DemoTransport();
+    ref.onDispose(() => unawaited(demo.dispose()));
+    await demo.connect();
+    return demo;
+  }
   // Relay first: if this id corresponds to a paired remote agent, build
   // the relay stream transport and DO NOT watch the projects list (a watch there
   // would respawn the relay transport on every `projectsProvider.upsert`).

@@ -2,13 +2,16 @@ import 'package:collection/collection.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../demo/demo_identity.dart';
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
+import '../design/widgets/ab_button.dart';
 import '../design/widgets/ab_disclosure_chevron.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
+import '../providers/demo_mode.dart';
 import '../providers/first_run.dart';
 import '../utils/platform_utils.dart';
 
@@ -16,6 +19,11 @@ import '../utils/platform_utils.dart';
 /// because provider state must never be written during build. Idempotent: the
 /// notifier's own no-op guards make a double-fired microtask harmless.
 void _latchAndMaybeComplete(WidgetRef ref, List<FirstRunStep> steps) {
+  // The demo answers several of these steps with canned data — Recent lists
+  // sample sessions, the picker lists a sample project — and the latch is
+  // permanent. A reviewer who opens the sample project must not come back to a
+  // checklist claiming they already started a session on a real machine.
+  if (ref.read(demoModeProvider)) return;
   final state = ref.read(firstRunProvider);
   final newlyDone = {
     for (final s in steps)
@@ -122,7 +130,12 @@ const _stepIndent =
 /// which would otherwise outlive the checklist by the whole life of the
 /// install. Keep this as the single expression both sides read.
 bool desktopSetupSectionVisible(WidgetRef ref) =>
-    !isMobilePlatform && ref.watch(firstRunChecklistVisibleProvider);
+    !isMobilePlatform &&
+    // Its steps are about the user's own machine and its actions leave for
+    // surfaces the demo has no account behind — including the button that
+    // opens this very demo.
+    !ref.watch(demoModeProvider) &&
+    ref.watch(firstRunChecklistVisibleProvider);
 
 /// Self-gates (mobile / dismissed / completed ⇒ shrink), so the call site stays
 /// a single stable line — or [desktopSetupSectionVisible] where the host has
@@ -298,6 +311,14 @@ class MobileFirstRunChecklist extends ConsumerWidget {
                   color: t.textMuted,
                 ),
                 textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: AbTokens.space16),
+              // Every step above needs a desktop the user may not be near. This
+              // is the one thing they can do from the phone alone, so the app
+              // is never a dead end while the checklist is open.
+              AbButton(
+                label: kDemoEntryLabel,
+                onTap: () => enterDemoMode(ref.container),
               ),
             ],
           ),

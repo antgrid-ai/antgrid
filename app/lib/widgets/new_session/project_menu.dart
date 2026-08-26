@@ -7,6 +7,7 @@ import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_chip.dart';
 import '../../design/widgets/ab_menu.dart';
 import '../../providers/control_plane.dart';
+import '../../providers/demo_mode.dart';
 import '../../providers/new_session_picker.dart';
 import '../../providers/now_ticker.dart';
 import '../../util/relative_time.dart';
@@ -88,15 +89,20 @@ class ProjectPanel extends ConsumerWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           PanelSectionHeader(source.label),
-          PanelRow(
-            icon: AbIcons.newFolder,
-            label: 'Open folder…',
-            selected: false,
-            onTap: () {
-              Navigator.of(context).pop();
-              onOpenFolder();
-            },
-          ),
+          // Hidden in the demo: this runs the OS folder picker and upserts what
+          // it finds into ProjectStore, which registers a REAL project — and
+          // mints a host device uuid to hold it — from inside a sample project
+          // that promises nothing is connected.
+          if (!ref.watch(demoModeProvider))
+            PanelRow(
+              icon: AbIcons.newFolder,
+              label: 'Open folder…',
+              selected: false,
+              onTap: () {
+                Navigator.of(context).pop();
+                onOpenFolder();
+              },
+            ),
           if (source.projects.isEmpty)
             const PanelHint('No local projects yet')
           else

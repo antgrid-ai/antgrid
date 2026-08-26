@@ -31,6 +31,7 @@ import '../models/preferences_models.dart';
 import '../models/session_entry.dart';
 import '../project/project_session_registry.dart';
 import '../providers/agent_transport.dart';
+import '../providers/demo_mode.dart';
 import '../providers/new_session_picker.dart'
     show newSessionStartInFlightProvider;
 import '../providers/providers.dart';
@@ -256,10 +257,18 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // The demo has no agent that can notify anyone, and both calls below have a
+    // visible cost on iOS: `DarwinInitializationSettings` defaults to
+    // requesting alert permission, so `init()` raises the OS prompt — asked, in
+    // the demo's case, on behalf of nothing. A reviewer meeting an unexplained
+    // permission dialog inside a sample project is exactly the reading we are
+    // trying not to invite.
+    final demo = ref.read(demoModeProvider);
     // Fire-and-forget: async + self-degrading.
-    _osNotifications.init();
-    if (defaultTargetPlatform == TargetPlatform.android ||
-        defaultTargetPlatform == TargetPlatform.iOS) {
+    if (!demo) _osNotifications.init();
+    if (!demo &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.iOS)) {
       _unsubscribeForegroundPush = Push.instance.addOnMessage((m) async {
         try {
           final decoded = await decodePush(
@@ -508,6 +517,10 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   }
 
   void _updatePrefs() {
+    // `projectPreferencesProvider` skips the demo, so `PreferencesService` is
+    // still bound to the LAST REAL project — a split drag or tab switch inside
+    // the sample project would save the demo's layout over that project's.
+    if (ref.read(demoModeProvider)) return;
     final service = ref.read(preferencesServiceProvider);
     service.update(
       service.current.copyWith(

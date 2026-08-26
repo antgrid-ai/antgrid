@@ -92,6 +92,12 @@ class NavController extends Notifier<NavState> {
         cur.sessionId == loc.sessionId;
   }
 
+  /// Drop the whole history, at both edges of a scope that is entered and left
+  /// rather than navigated through. The demo is the one such scope: its entries
+  /// name a project that does not exist outside it, and the real app's entries
+  /// name machines that must not be reachable from inside it.
+  void reset() => state = const NavState();
+
   void back() {
     if (!state.canBack) return;
     final prev = state.past.last;

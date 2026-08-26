@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show TextInput;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../demo/demo_identity.dart';
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
@@ -16,6 +17,7 @@ import '../project/limits.dart';
 import '../analytics/events.dart';
 import '../providers/analytics.dart';
 import '../providers/auth.dart';
+import '../providers/demo_mode.dart';
 import '../providers/device_revocation.dart';
 import '../providers/subscription.dart';
 import '../services/auth_service.dart';
@@ -829,6 +831,25 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
           label: 'Continue with a password',
           onPressed: busy ? null : _useMyPassword,
         ),
+        const SizedBox(height: AbTokens.space16),
+        // Weighted as a peer of the buttons above rather than as a footnote,
+        // and unguarded unlike the link below it: on mobile this screen is the
+        // whole app until an account exists, so for an App Store reviewer — or
+        // a tester whose desktop is somewhere else — it is the only affordance
+        // here that leads anywhere at all.
+        _SignInButton(
+          label: kDemoEntryLabel,
+          onPressed: busy ? null : _enterDemo,
+        ),
+        const SizedBox(height: AbTokens.space6),
+        Text(
+          'No account needed. Sample data, nothing is connected.',
+          textAlign: TextAlign.center,
+          style: AbTokens.sansStyle(
+            fontSize: AbTokens.fontXs,
+            color: context.antgrid.textMuted,
+          ),
+        ),
         // The only muted thing on the screen, and the only one that leaves the
         // flow rather than choosing a way through it.
         if (canPop && !isMobilePlatform) ...[
@@ -841,6 +862,14 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
       ],
     );
   }
+
+  /// Leaves sign-in for the offline demo.
+  ///
+  /// On desktop this screen is a pushed route and the demo replaces the root's
+  /// content, so it has to come off the stack first or the demo renders
+  /// underneath it. `enterDemoMode` does that for every entry point; `ref` is
+  /// read here, before the call, because the pop leaves it defunct.
+  void _enterDemo() => enterDemoMode(ref.container);
 
   /// Step 2. The address is settled, so it reads as text rather than an input;
   /// "change" is the only way back. Every exit stays open — reset, and the

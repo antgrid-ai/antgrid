@@ -2,14 +2,17 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../connection/supervisor_state.dart';
+import '../../demo/demo_identity.dart';
 import '../../design/ab_colors.dart';
 import '../../design/ab_status_tone.dart';
 import '../../design/ab_tokens.dart';
+import '../../design/widgets/ab_button.dart';
 import '../../design/widgets/ab_empty_state.dart';
 import '../../design/widgets/ab_section_header.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../../design/widgets/ab_status_dot.dart';
 import '../../models/recent_session_row.dart';
+import '../../providers/demo_mode.dart';
 import '../../providers/first_run.dart';
 import '../../providers/new_session_picker.dart';
 import '../../providers/project_work_status.dart';
@@ -145,6 +148,14 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
                     subtitle: hasTarget
                         ? 'Describe a task below to start your first session.'
                         : 'Pick a project, then describe a task below.',
+                    // Nothing picked means every path into a session is still
+                    // dead — offer the one that needs no machine at all.
+                    action: hasTarget
+                        ? null
+                        : AbButton(
+                            label: kDemoEntryLabel,
+                            onTap: () => enterDemoMode(ref.container),
+                          ),
                   ),
           ),
         ],

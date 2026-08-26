@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'scoped_prefs.dart';
 
 import '../config/storage_scope.dart';
+import '../demo/demo_identity.dart';
 import '../models/session_entry.dart';
 
 /// SharedPreferences-backed cache of `List<SessionEntry>` keyed by drawer entry
@@ -16,6 +17,10 @@ import '../models/session_entry.dart';
 /// Writes are debounced to coalesce rapid `session:updated` bursts (the agent
 /// emits two frames per mutation — sync `changed()` + async PTY `noteExited`).
 /// Tests can force a flush via [flushNow].
+///
+/// Every writer drops the demo entry on the way in: the sample project is
+/// canned data that must not outlive the demo, and a cached list would surface
+/// in Recent and the drawer beside the user's real machines.
 class CachedSessionsStore {
   static final _key = scopedStorageKey('antgrid.session_cache.v1');
   // Labels churn far more often than the session list itself (every live
@@ -84,6 +89,7 @@ class CachedSessionsStore {
   /// and pinning "Preparing workspace…" over a session nothing is provisioning.
   /// The live list keeps carrying both; only the fallback copy is neutralised.
   Future<void> put(String entryId, List<SessionEntry> sessions) async {
+    if (isDemoEntryId(entryId)) return;
     final next = [
       for (final s in sessions)
         if (s.deleting || s.setup != null)
@@ -142,6 +148,7 @@ class CachedSessionsStore {
   /// label update alone shouldn't force every listener to re-derive its
   /// session list.
   void putLabel(String entryId, String label) {
+    if (isDemoEntryId(entryId)) return;
     if (_labels[entryId] == label) return;
     _labels[entryId] = label;
     _labelsDirty = true;
@@ -160,6 +167,7 @@ class CachedSessionsStore {
   /// boot can seed the status map before the first advert arrives. No-ops if
   /// unchanged; does not emit on [changes].
   void putStatus(String entryId, String status) {
+    if (isDemoEntryId(entryId)) return;
     if (_statuses[entryId] == status) return;
     _statuses[entryId] = status;
     _statusesDirty = true;

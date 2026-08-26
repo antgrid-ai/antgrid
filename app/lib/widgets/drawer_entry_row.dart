@@ -511,6 +511,8 @@ Future<bool> activateDrawerEntryById(
   bool ok;
   switch (entry) {
     case LocalProjectEntry e:
+      // The sample project falls out inside ProjectStore.upsert, which is the
+      // choke point every writer shares — nothing here needs to know.
       e.project.lastOpenedAt = DateTime.now();
       await ref.read(projectsProvider.notifier).upsert(e.project);
       selectProject(ref, e.id);

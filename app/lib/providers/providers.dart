@@ -10,6 +10,7 @@ import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
 import '../config/storage_scope.dart';
 import '../connection/supervisor_state.dart';
+import '../demo/demo_identity.dart';
 import '../models/ab_message.dart'
     show CommandInfo, NotificationPushMessage, TerminalNotificationMessage;
 import '../models/session_target.dart';
@@ -490,6 +491,13 @@ final projectPreferencesProvider = StreamProvider<ProjectPreferences>((ref) {
     return const Stream<ProjectPreferences>.empty();
   }
 
+  // PreferencesService keys ONE file by projectId, so binding the sample
+  // project here would leave a demo panel layout on disk beside the user's real
+  // projects. Defaults, delivered once, are all the demo needs.
+  if (isDemoEntryId(projectId)) {
+    return Stream<ProjectPreferences>.value(const ProjectPreferences());
+  }
+
   // Source the FileService from the (non-throwing) session, not the façade:
   // re-evaluates once the async ProjectSession resolves, and never registers a
   // listener on the throwing façade (see [focusedSessionOrNull]).
@@ -586,9 +594,17 @@ final fileTreeStateProvider = StreamProvider<FileTreeState>((ref) {
   // long-lived watcher of the focused FileService (kept alive by the workspace
   // shell), and it sources the service safely. Previously the binding hung off
   // fileServiceProvider, but nothing may `watch` that throwing façade anymore.
-  ref
-      .watch(_prefsBindingProvider)
-      .bind(service, ref.read(preferencesServiceProvider));
+  //
+  // The sample project is exempt: PreferencesService still points at the last
+  // REAL project (nothing rebinds it for the demo), so binding here would
+  // debounce-write the demo's expanded paths and selection into that project's
+  // preferences.json. The binding's own `projectId == null` guard does not
+  // catch it — the id is non-null and simply belongs to someone else.
+  if (!isDemoEntryId(ref.watch(selectedRegistrationIdProvider))) {
+    ref
+        .watch(_prefsBindingProvider)
+        .bind(service, ref.read(preferencesServiceProvider));
+  }
   return seededStream(() => service.currentState, service.stateStream);
   // retry: a tree-load error must surface to the screen's error state, not spin
   // in Riverpod 3's default retry loop (which would leave the UI on "loading").

@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../utils/platform_utils.dart';
 import 'auth.dart';
+import 'demo_mode.dart';
 import 'first_run.dart';
 import 'remote_access.dart';
 
@@ -35,6 +36,12 @@ final remoteAccessNudgeProvider = Provider.autoDispose<RemoteAccessNudge?>((
   // that provider's chain (hostControlClientProvider → ensureHost) spawns the
   // local bridge host, which must never happen from a phone.
   if (isMobilePlatform) return null;
+  // Same order, second reason: besides the host spawn, the banner's action is
+  // `confirmAndEnableRemoteAccess` — the machine-wide grant. Offering that
+  // beside canned data invites a reviewer to open their own machine up from
+  // inside a sample project (the guard `agent_panel.dart` makes for the title
+  // bar's version of the same control).
+  if (ref.watch(demoModeProvider)) return null;
   // The checklist has the floor: its "Connect your phone" step covers the same
   // ground, and it now sits in the sidebar for the whole session — so a banner
   // saying the same thing on the canvas would be a second voice, permanently.

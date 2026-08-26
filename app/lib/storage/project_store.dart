@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'scoped_prefs.dart';
 
 import '../config/storage_scope.dart';
+import '../demo/demo_identity.dart';
 import '../models/ab_project.dart';
 
 /// SharedPreferences-backed persistence for the user's opened-project list.
@@ -31,6 +32,11 @@ class ProjectStore {
   }
 
   Future<void> upsert(AbProject p) async {
+    // The sample project reaches every path a real one does — opening its
+    // drawer row records a focus, and that records an open. Persisted, it
+    // outlives the demo as a row that names no folder and can never be opened
+    // again. Refused here rather than at each caller: this is the one write.
+    if (isDemoProjectId(p.projectId)) return;
     final all = list();
     final i = all.indexWhere((x) => x.projectId == p.projectId);
     if (i >= 0) {

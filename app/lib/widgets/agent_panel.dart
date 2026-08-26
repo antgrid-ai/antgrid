@@ -18,6 +18,7 @@ import '../design/widgets/ab_tooltip.dart';
 import '../models/handler_state.dart';
 import '../models/session_entry.dart';
 import '../providers/agent_transport.dart';
+import '../providers/demo_mode.dart';
 import '../providers/device_provisioning.dart';
 import '../providers/first_run.dart';
 import '../providers/handler_discovery.dart';
@@ -229,6 +230,12 @@ class AgentBar extends ConsumerWidget {
 /// directly in tests without re-implementing it.
 List<Widget> titleBarProjectActions(WidgetRef ref) {
   if (isMobilePlatform) return const [];
+  // The demo has no machine to make reachable, and [RemoteAccessControl] is a
+  // LIVE switch over the real machine-wide policy — offering it beside canned
+  // data invites a reviewer to grant their machine from inside a sample. The
+  // guard also precedes the uuid read, which mints an anonymous host identity
+  // on desktop purely so this affordance can render.
+  if (ref.watch(demoModeProvider)) return const [];
   final localUuid = ref.watch(localDeviceUuidProvider).value;
   final selectedId = ref.watch(selectedRegistrationIdProvider);
   final projects = ref.watch(projectsProvider);

@@ -298,7 +298,10 @@ Future<void> startNewSession(
       // create failed (e.g. session cap reached); stay on the New Session page
       // so the user can retry. Only CREATE keeps the user here — once the
       // session exists it is theirs, and the place to report anything further
-      // about it is the session itself.
+      // about it is the session itself. A refusal carrying a reason — the
+      // sample project's included — never reaches here: `SessionsService.create`
+      // fails its completer with a `SessionOperationException`, which the
+      // composer's own catch renders.
       if (created == null) {
         abort(NewSessionStartAbortReason.createRefused);
         return;

@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../config/storage_scope.dart';
+import '../demo/demo_identity.dart';
 import 'scoped_prefs.dart';
 
 /// A remembered preview target: a port plus the scheme it was last opened with.
@@ -87,6 +88,8 @@ class RecentPortsStore {
   /// existing entry for the same port (any scheme) is replaced and moved to the
   /// front. No-ops on out-of-range ports.
   Future<void> add(String projectId, int port, String scheme) async {
+    // Nothing the demo does may reach disk; its ports are canned.
+    if (isDemoProjectId(projectId)) return;
     if (port < 1 || port > 65535) return;
     final all = _readAll();
     final ports = List<RecentPort>.from(all[projectId] ?? const <RecentPort>[])

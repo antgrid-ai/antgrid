@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../demo/demo_identity.dart';
 import '../project/project_session_registry.dart';
 import '../project/project_status_cache.dart';
 import 'agent_transport.dart';
@@ -25,7 +26,10 @@ Future<void> snapshotAndInvalidateOnEvict(
   final stillListed = ref
       .read(drawerEntriesProvider)
       .any((e) => e.id == projectId);
-  if (session != null && stillListed) {
+  // The demo gate does not lean on `stillListed` being false for the sample
+  // project: nothing about the demo may reach disk, whatever a later change
+  // does to drawer entries.
+  if (session != null && stillListed && !isDemoEntryId(projectId)) {
     await cache.write(projectId, session.status.value);
   }
   // Invalidate BOTH the session and the transport family entry so the WS is
