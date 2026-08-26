@@ -162,10 +162,6 @@ DeviceRecord _connectionRecord() => DeviceRecord(
   x25519Priv: base64Encode(List<int>.filled(32, 4)),
 );
 
-class _EmptyPairedAgentNotifier extends PairedAgentNotifier {
-  @override
-  Future<List<PairedAgent>> build() async => const [];
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -195,8 +191,6 @@ void main() {
     }) {
       return [
         ...stores.overrides,
-        // Simulate no pre-existing PairedAgents (the race condition).
-        pairedAgentProvider.overrideWith(() => _EmptyPairedAgentNotifier()),
         // Override accountAgentsProvider directly (not the API layer) so the
         // cache is immediately populated. _buildRelayTransportFor uses
         // `.value` to avoid adding async latency for unresolved cases.
@@ -380,7 +374,6 @@ void main() {
       final container = ProviderContainer(
         overrides: [
           ...stores.overrides,
-          pairedAgentProvider.overrideWith(() => _EmptyPairedAgentNotifier()),
           accountAgentsProvider.overrideWith((_) async => inventory),
           localDeviceUuidProvider.overrideWith((_) async => _localUuid),
           connectionDeviceRecordProvider.overrideWith(

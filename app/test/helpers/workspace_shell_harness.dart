@@ -28,21 +28,6 @@ final testAgent = PairedAgent(
   agentName: 'Test Agent',
 );
 
-/// A fake PairedAgentNotifier that returns a list with one mock PairedAgent.
-class FakePairedAgentNotifier extends AsyncNotifier<List<PairedAgent>>
-    implements PairedAgentNotifier {
-  @override
-  Future<List<PairedAgent>> build() async => [testAgent];
-
-  @override
-  Future<void> selectAgent(String agentDeviceId) async {}
-  @override
-  Future<void> forgetMachine(String agentDeviceIdOrUuid) async {}
-  @override
-  Future<void> retryAgentConnection() async {}
-  @override
-  void cancelActiveAgent() {}
-}
 
 /// Pumps the real [AppShell] (which renders WorkspaceShell once paired), with
 /// a fake window chrome since WorkspaceShell mounts `WindowTitleBar` directly.
@@ -66,7 +51,6 @@ Future<ProviderContainer> pumpWorkspaceShell(
     ProviderScope(
       overrides: [
         ...stores.overrides,
-        pairedAgentProvider.overrideWith(() => FakePairedAgentNotifier()),
         selectedRegistrationIdProvider.overrideWith(
           (ref) => withProject ? testAgent.agentDeviceId : null,
         ),

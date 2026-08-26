@@ -13,7 +13,6 @@ import '../connection/supervisor_state.dart';
 import '../demo/demo_identity.dart';
 import '../models/ab_message.dart'
     show CommandInfo, NotificationPushMessage, TerminalNotificationMessage;
-import '../models/session_target.dart';
 import '../models/terminal_models.dart';
 import '../project/project_session.dart';
 import '../project/project_session_registry.dart';
@@ -729,11 +728,9 @@ final focusedAgentBlockedProvider = Provider<bool>((ref) {
 ///
 /// Matched on the BASE device uuid against every machine record the app holds,
 /// which is the same resolution `_buildRelayTransportFor` does to decide what
-/// to dial. An exact-id match against the paired list alone — what this used to
-/// be — could answer for neither shape that reaches it today: a remote PROJECT
-/// is `<machineUuid>.<projectId>` while a machine record is keyed by the bare
-/// uuid, and the paired list is empty on any install that never QR-paired
-/// (`savePairedAgents` has no writer left; admission is account trust).
+/// to dial. Matching an id exactly — what this used to do — answers for neither
+/// shape that reaches it: a remote PROJECT is `<machineUuid>.<projectId>` while
+/// a machine record is keyed by the bare uuid.
 ///
 /// A legacy project recorded against another device stays FALSE: it carries a
 /// bare projectId that names no machine, so the transport treats it as local
@@ -743,8 +740,6 @@ final entryIsRelayProvider = Provider.family<bool, String>((ref, entryId) {
   // out of the relay bucket and its push registration.
   if (isDemoEntryId(entryId)) return false;
   final base = baseDeviceUuid(entryId);
-  final paired = ref.watch(pairedAgentProvider).value ?? const <PairedAgent>[];
-  if (paired.any((a) => baseDeviceUuid(a.agentDeviceId) == base)) return true;
   final recent = ref.watch(recentAgentsProvider);
   if (recent.any((r) => baseDeviceUuid(r.agentDeviceId) == base)) return true;
   final inventory =
@@ -752,8 +747,8 @@ final entryIsRelayProvider = Provider.family<bool, String>((ref, entryId) {
   return inventory.any((a) => a.deviceUuid == base);
 });
 
-/// True iff the currently focused id corresponds to a relay-paired remote
-/// agent (as opposed to a locally-opened folder).
+/// True iff the currently focused id is reached over the relay (as opposed to a
+/// locally-opened folder).
 final focusedIsRelayProvider = Provider<bool>((ref) {
   final id = ref.watch(selectedRegistrationIdProvider);
   if (id == null) return false;
@@ -852,26 +847,26 @@ final controlPlaneResetProvider =
       () => ValueController(null),
     );
 
-final pairedAgentProvider =
-    AsyncNotifierProvider<PairedAgentNotifier, List<PairedAgent>>(
-      PairedAgentNotifier.new,
+/// The machine-level connection actions — select, forget, cancel, retry.
+///
+/// Holds no state of its own: the machines themselves live in the reconnect
+/// list and the account inventory, and each machine's connection is owned by
+/// its `ConnectionSupervisor`.
+final machineConnectionProvider =
+    NotifierProvider<MachineConnectionNotifier, void>(
+      MachineConnectionNotifier.new,
     );
 
 /// The machine behind the current focus, if the app knows one.
 ///
-/// Resolved by BASE uuid, and falling through to the reconnect list, for the
-/// same reason [entryIsRelayProvider] is: a remote project focus is
-/// `<machineUuid>.<projectId>`, and a machine reached under account trust has
-/// no paired row at all — an exact match against the paired list alone left the
-/// connect screen naming a generic "agent" for every machine in the product.
+/// Resolved by BASE uuid, for the same reason [entryIsRelayProvider] is: a
+/// remote project focus is `<machineUuid>.<projectId>`, so an exact match left
+/// the connect screen naming a generic "agent" for every machine in the
+/// product.
 final activeAgentProvider = Provider<PairedAgent?>((ref) {
   final activeId = ref.watch(selectedRegistrationIdProvider);
   if (activeId == null) return null;
   final base = baseDeviceUuid(activeId);
-  final paired = ref.watch(pairedAgentProvider).value ?? const <PairedAgent>[];
-  for (final agent in paired) {
-    if (baseDeviceUuid(agent.agentDeviceId) == base) return agent;
-  }
   for (final recent in ref.watch(recentAgentsProvider)) {
     if (baseDeviceUuid(recent.agentDeviceId) != base) continue;
     final machine = recent.hostMachineName?.trim();
@@ -886,42 +881,14 @@ final activeAgentProvider = Provider<PairedAgent?>((ref) {
   return null;
 });
 
-class PairedAgentNotifier extends AsyncNotifier<List<PairedAgent>> {
-  // Connect + v2 handshake (and their retry/repair machinery) are owned by
-  // RelayConnection now; this notifier only owns the paired-agent list and the
-  // focus target. Reading the transport provider for an id is what opens its
-  // dedicated socket and runs the handshake.
+class MachineConnectionNotifier extends Notifier<void> {
+  // Connect + handshake (and their retry/repair machinery) are owned by
+  // RelayConnection; this notifier only moves the focus target. Reading the
+  // transport provider for an id is what opens its dedicated socket and runs
+  // the handshake.
 
   @override
-  Future<List<PairedAgent>> build() async {
-    final storage = ref.read(storageServiceProvider);
-    return storage.loadPairedAgents();
-  }
-
-  Future<List<PairedAgent>> _pairedAgentsSnapshot() async {
-    final loaded = state.value;
-    if (loaded != null) return List<PairedAgent>.from(loaded);
-    try {
-      return List<PairedAgent>.from(await future);
-    } catch (_) {
-      return ref.read(storageServiceProvider).loadPairedAgents();
-    }
-  }
-
-  Future<void> selectAgent(String agentDeviceId) async {
-    final agents = state.value ?? [];
-    final agent = agents
-        .where((a) => a.agentDeviceId == agentDeviceId)
-        .firstOrNull;
-    if (agent == null) return;
-
-    // Focus the agent. Each id owns a dedicated socket, so connect + handshake
-    // happen when the transport provider for this id is read (workspace boot);
-    // there is no shared relay to disconnect on switch.
-    ref
-        .read(selectedTargetProvider.notifier)
-        .set(RemoteTarget.legacy(agentDeviceId));
-  }
+  void build() {}
 
   Future<void> forgetMachine(String agentDeviceIdOrUuid) async {
     final machineUuid = baseDeviceUuid(agentDeviceIdOrUuid);
@@ -930,12 +897,9 @@ class PairedAgentNotifier extends AsyncNotifier<List<PairedAgent>> {
       ref.read(selectedTargetProvider.notifier).set(null);
     }
 
-    final agents = await _pairedAgentsSnapshot();
     final recentStore = ref.read(recentAgentsStoreProvider);
     final recentAgents = recentStore.list();
     final forgottenIds = <String>{
-      for (final a in agents)
-        if (baseDeviceUuid(a.agentDeviceId) == machineUuid) a.agentDeviceId,
       for (final r in recentAgents)
         if (baseDeviceUuid(r.agentDeviceId) == machineUuid) r.agentDeviceId,
     };
@@ -949,22 +913,13 @@ class PairedAgentNotifier extends AsyncNotifier<List<PairedAgent>> {
       await registry.forceEvictAndSettle(id);
       // Clear the forgotten agent's per-entry footprint (cached session list,
       // recent ports, status cache). Without this the old session list
-      // resurrects when the machine is re-paired under the same id.
+      // resurrects when the machine is reached again under the same id.
       await purgeEntryState(ref, id);
     }
 
-    final remainingAgents = agents
-        .where((a) => baseDeviceUuid(a.agentDeviceId) != machineUuid)
-        .toList(growable: false);
-    await ref.read(storageServiceProvider).savePairedAgents(remainingAgents);
-
-    for (final r in recentAgents) {
-      if (baseDeviceUuid(r.agentDeviceId) == machineUuid) {
-        await recentStore.remove(r.agentDeviceId);
-      }
+    for (final id in forgottenIds) {
+      await recentStore.remove(id);
     }
-
-    state = AsyncData(remainingAgents);
   }
 
   /// User-initiated escape from the workspace boot screen — clears the
@@ -1000,9 +955,9 @@ class PairedAgentNotifier extends AsyncNotifier<List<PairedAgent>> {
   /// listener. With no supervisor yet (nothing dialled for this machine), the
   /// rebuild is what starts one.
   ///
-  /// The target comes from the FOCUS, not the paired-agent list: a remote
-  /// project focus is `<machineUuid>.<projectId>` and never matches a
-  /// `PairedAgent` row keyed by the bare machine uuid.
+  /// The target comes from the FOCUS, not the reconnect list: a remote project
+  /// focus is `<machineUuid>.<projectId>` and never matches a machine row keyed
+  /// by the bare uuid.
   Future<void> retryAgentConnection() async {
     final target = ref.read(selectedTargetProvider);
     if (target == null || target.isLocal) return;

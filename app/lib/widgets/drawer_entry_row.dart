@@ -366,7 +366,7 @@ class _RemoveButtonState extends ConsumerState<_RemoveButton> {
           await container.read(projectsProvider.notifier).remove(e.id);
         case RemoteAgentEntry e:
           await container
-              .read(pairedAgentProvider.notifier)
+              .read(machineConnectionProvider.notifier)
               .forgetMachine(e.agent.agentDeviceId);
         case InventoryAgentEntry _:
           // Inventory agents are not stored locally — nothing to remove.
@@ -420,12 +420,6 @@ Future<bool> selectRemoteAgent(
   String agentDeviceId,
 ) async {
   try {
-    final paired = ref.read(pairedAgentProvider).value ?? const [];
-    final isPaired = paired.any((a) => a.agentDeviceId == agentDeviceId);
-    if (isPaired) {
-      await ref.read(pairedAgentProvider.notifier).selectAgent(agentDeviceId);
-      return true;
-    }
     final ra = ref
         .read(recentAgentsProvider)
         .firstWhere((r) => r.agentDeviceId == agentDeviceId);

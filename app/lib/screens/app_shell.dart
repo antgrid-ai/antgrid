@@ -487,7 +487,6 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
       sub.close();
     }
     _labelSubs.clear();
-    ref.invalidate(pairedAgentProvider);
     ref.invalidate(accountAgentsProvider);
     ref.invalidate(agentCatalogProvider);
     ref.invalidate(remoteProjectLabelsProvider);

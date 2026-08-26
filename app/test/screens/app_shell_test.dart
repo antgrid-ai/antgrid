@@ -25,20 +25,6 @@ final _testAgent = PairedAgent(
 );
 
 /// A fake PairedAgentNotifier that returns a list with one mock PairedAgent.
-class FakePairedAgentNotifier extends AsyncNotifier<List<PairedAgent>>
-    implements PairedAgentNotifier {
-  @override
-  Future<List<PairedAgent>> build() async => [_testAgent];
-
-  @override
-  Future<void> selectAgent(String agentDeviceId) async {}
-  @override
-  Future<void> forgetMachine(String agentDeviceIdOrUuid) async {}
-  @override
-  Future<void> retryAgentConnection() async {}
-  @override
-  void cancelActiveAgent() {}
-}
 
 void main() {
   late TestStoreOverrides stores;
@@ -54,7 +40,6 @@ void main() {
     return ProviderScope(
       overrides: [
         ...stores.overrides,
-        pairedAgentProvider.overrideWith(() => FakePairedAgentNotifier()),
         selectedRegistrationIdProvider.overrideWith(
           (ref) => _testAgent.agentDeviceId,
         ),

@@ -12,7 +12,6 @@ import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/window_title_bar.dart';
 import 'package:antgrid/window/window_chrome.dart';
-import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -25,30 +24,6 @@ import '../helpers/test_store_overrides.dart';
 /// Compound `<machine>.<project>` registration id, const so it can be
 /// `pumpAt`'s default.
 const _focusedProjectId = 'agent-123.test-project';
-
-final _testAgent = PairedAgent(
-  relayUrl: 'wss://test.relay',
-  agentDeviceId: _focusedProjectId,
-  agentName: 'Test Agent',
-);
-
-/// A fake PairedAgentNotifier that returns a list with one mock PairedAgent.
-///
-/// Copied from `app_shell_test.dart` (a local class there, not exported).
-class FakePairedAgentNotifier extends AsyncNotifier<List<PairedAgent>>
-    implements PairedAgentNotifier {
-  @override
-  Future<List<PairedAgent>> build() async => [_testAgent];
-
-  @override
-  Future<void> selectAgent(String agentDeviceId) async {}
-  @override
-  Future<void> forgetMachine(String agentDeviceIdOrUuid) async {}
-  @override
-  Future<void> retryAgentConnection() async {}
-  @override
-  void cancelActiveAgent() {}
-}
 
 void main() {
   late TestStoreOverrides stores;
@@ -82,7 +57,6 @@ void main() {
         overrides: [
           ...stores.overrides,
           ...extraOverrides,
-          pairedAgentProvider.overrideWith(() => FakePairedAgentNotifier()),
           selectedRegistrationIdProvider.overrideWith((ref) => projectId),
           // A focused id makes projectSessionProvider reachable — the handler
           // control resolves its service through serviceWhenReady — so hand

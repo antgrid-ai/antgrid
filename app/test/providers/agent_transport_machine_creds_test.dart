@@ -20,7 +20,6 @@ import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/auth.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
-import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/services/app_settings_service.dart';
 import 'package:antgrid/services/auth_service.dart';
@@ -99,10 +98,6 @@ class _CapturingLauncher extends LocalAgentLauncher {
 // Stub notifiers
 // ---------------------------------------------------------------------------
 
-class _EmptyPairedAgentNotifier extends PairedAgentNotifier {
-  @override
-  Future<List<PairedAgent>> build() async => const [];
-}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -163,7 +158,6 @@ void main() {
     }) => [
       ...stores.overrides,
       // No relay agents — fall through to local path.
-      pairedAgentProvider.overrideWith(() => _EmptyPairedAgentNotifier()),
       accountAgentsProvider.overrideWith((_) async => const <InventoryAgent>[]),
       localDeviceUuidProvider.overrideWith((_) async => 'local-uuid'),
       // Test seam introduced in Task 5.

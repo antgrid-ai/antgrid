@@ -1146,7 +1146,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
                 // the same error. `retry()` is the only input that clears it,
                 // and retryAgentConnection does the invalidate itself.
                 unawaited(
-                  ref.read(pairedAgentProvider.notifier).retryAgentConnection(),
+                  ref.read(machineConnectionProvider.notifier).retryAgentConnection(),
                 );
                 return;
               }
@@ -2158,14 +2158,14 @@ class _WorkspaceBootStatusState extends ConsumerState<_WorkspaceBootStatus> {
     if (_retrying) return;
     setState(() => _retrying = true);
     try {
-      await ref.read(pairedAgentProvider.notifier).retryAgentConnection();
+      await ref.read(machineConnectionProvider.notifier).retryAgentConnection();
     } finally {
       if (mounted) setState(() => _retrying = false);
     }
   }
 
   void _cancel() {
-    final notifier = ref.read(pairedAgentProvider.notifier);
+    final notifier = ref.read(machineConnectionProvider.notifier);
     notifier.cancelActiveAgent();
   }
 

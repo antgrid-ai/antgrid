@@ -756,7 +756,7 @@ class _SessionMenu extends ConsumerWidget {
     if (entryId != ref.read(selectedRegistrationIdProvider)) return;
     if (ref.read(activeSessionsProvider).isNotEmpty) return;
     if (ref.read(focusedIsRelayProvider)) {
-      ref.read(pairedAgentProvider.notifier).cancelActiveAgent();
+      ref.read(machineConnectionProvider.notifier).cancelActiveAgent();
     } else if (ref.read(selectedRegistrationIdProvider) != null) {
       ref.read(selectedTargetProvider.notifier).set(null);
     }

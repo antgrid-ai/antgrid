@@ -113,10 +113,6 @@ class _FakeConnectionManager extends RelayConnectionManager {
   RelayConnection? peek(String machineDeviceId) => _conns[machineDeviceId];
 }
 
-class _EmptyPairedAgentNotifier extends PairedAgentNotifier {
-  @override
-  Future<List<PairedAgent>> build() async => const [];
-}
 
 Future<DeviceRecord> _connectionRecord() async {
   final seed = List<int>.generate(32, (i) => (i * 5 + 1) % 256);
@@ -191,7 +187,6 @@ void main() {
     final c = ProviderContainer(
       overrides: [
         ...stores.overrides,
-        pairedAgentProvider.overrideWith(() => _EmptyPairedAgentNotifier()),
         accountAgentsProvider.overrideWith((_) async => inventory),
         localDeviceUuidProvider.overrideWith((_) async => 'this-device'),
         connectionDeviceRecordProvider.overrideWith((_) async => record),
