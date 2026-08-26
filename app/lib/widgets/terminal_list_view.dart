@@ -12,9 +12,11 @@ import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../design/widgets/ab_toolbar.dart';
+import '../models/session_entry.dart';
 import '../models/terminal_models.dart';
 import '../navigation/back_intent.dart';
 import '../providers/providers.dart';
+import '../providers/sessions.dart';
 import '../providers/visible_surface.dart';
 import '../services/terminal_service.dart';
 import 'terminal_detail_view.dart';
@@ -41,14 +43,32 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
   String? _pinnedTerminalId;
   String? _pushedTerminalId;
 
+  /// The PTYs carrying a checkout's `worktree.setup` transcript.
+  ///
+  /// Excluded from the list below because the ad-hoc filter selects by
+  /// EXCLUSION — a terminal typed neither `agent` nor `service` is "a user
+  /// terminal", and a setup transcript carries no type at all. Left in, a
+  /// provisioning log would list as an interactive tab the user can type into
+  /// and close, killing a live `bun install` mid-install. Named off
+  /// `SessionSetup.terminalId`, the bridge's own answer for which PTY carries
+  /// the transcript, rather than pattern-matched off the id.
+  Set<String> get _setupTerminalIds {
+    final sessions =
+        ref.watch(freshSessionsStateProvider)?.sessions ??
+        const <SessionEntry>[];
+    return {for (final s in sessions) ?s.setup?.terminalId};
+  }
+
   List<TerminalTab> get _adHocTerminals {
     final terminalState = ref.watch(terminalStateProvider);
+    final setupIds = _setupTerminalIds;
     return terminalState.value?.tabs.values
             .where(
               (t) =>
                   t.terminalId != 'agent' &&
                   t.type != 'agent' &&
-                  t.type != 'service',
+                  t.type != 'service' &&
+                  !setupIds.contains(t.terminalId),
             )
             .toList() ??
         [];

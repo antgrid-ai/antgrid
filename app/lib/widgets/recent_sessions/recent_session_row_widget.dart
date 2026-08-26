@@ -13,12 +13,14 @@ import '../../design/widgets/ab_loading.dart';
 import '../../design/widgets/ab_tap_target.dart';
 import '../../design/widgets/ab_tooltip.dart';
 import '../../models/recent_session_row.dart';
+import '../../models/session_entry.dart';
 import '../../providers/agent_catalog.dart';
 import '../../providers/new_session_picker.dart';
 import '../../providers/now_ticker.dart';
 import '../../providers/project_work_status.dart';
 import '../../providers/recent_sessions.dart';
 import '../../providers/session_delete_pending.dart';
+import '../../providers/session_setup.dart';
 import '../../services/control_plane_client.dart';
 import '../../services/session_delete_policy.dart';
 import '../../services/sessions_service.dart' show SessionOperationException;
@@ -100,6 +102,10 @@ class _RecentSessionRowWidgetState
         running: row.session.running,
       )),
     );
+    // The live list's answer, never `row.session.setup`: every Recent row but
+    // the focused project's is served from the persisted cache, which carries
+    // no setup state at all.
+    final setup = ref.watch(sessionSetupProvider(row.session.id));
     void onTap() {
       // The navigator's own context, not this row's: a host that dismisses
       // itself on open — the search popup, the search modal — unmounts this row
@@ -135,6 +141,7 @@ class _RecentSessionRowWidgetState
               ? _MobileLayout(
                   row: row,
                   status: status,
+                  setup: setup,
                   agentLabel: agentLabel,
                   relTime: relTime,
                   rowBg: rowBg,
@@ -144,6 +151,7 @@ class _RecentSessionRowWidgetState
               : _DesktopLayout(
                   row: row,
                   status: status,
+                  setup: setup,
                   agentLabel: agentLabel,
                   relTime: relTime,
                   rowBg: rowBg,
@@ -264,6 +272,7 @@ class _DesktopLayout extends StatelessWidget {
   const _DesktopLayout({
     required this.row,
     required this.status,
+    required this.setup,
     required this.agentLabel,
     required this.relTime,
     required this.rowBg,
@@ -274,6 +283,7 @@ class _DesktopLayout extends StatelessWidget {
 
   final RecentSessionRow row;
   final AgentWorkStatus status;
+  final SessionSetup? setup;
   final String agentLabel;
   final String relTime;
   final Color rowBg;
@@ -312,7 +322,7 @@ class _DesktopLayout extends StatelessWidget {
                 // Non-flex, so the badges are measured before the name and a
                 // long name ellipsizes around them rather than pushing them off
                 // the row.
-                SessionIsolationBadge(session: row.session),
+                SessionIsolationBadge(session: row.session, setup: setup),
                 SessionDeletingBadge(deleting: deleting),
                 const SizedBox(width: AbTokens.space12),
               ],
@@ -384,6 +394,7 @@ class _MobileLayout extends StatelessWidget {
   const _MobileLayout({
     required this.row,
     required this.status,
+    required this.setup,
     required this.agentLabel,
     required this.relTime,
     required this.rowBg,
@@ -393,6 +404,7 @@ class _MobileLayout extends StatelessWidget {
 
   final RecentSessionRow row;
   final AgentWorkStatus status;
+  final SessionSetup? setup;
   final String agentLabel;
   final String relTime;
   final Color rowBg;
@@ -423,7 +435,7 @@ class _MobileLayout extends StatelessWidget {
               ),
               const SizedBox(width: AbTokens.space12),
               Expanded(child: _SessionName(name: row.session.name)),
-              SessionIsolationBadge(session: row.session),
+              SessionIsolationBadge(session: row.session, setup: setup),
               SessionDeletingBadge(deleting: deleting),
               const SizedBox(width: AbTokens.space8),
               // Only a custom launch command belongs on this line: an agent

@@ -114,11 +114,15 @@ ghostty_vte:
   git:
     url: https://github.com/antgrid-ai/dart_terminal.git
     path: pkgs/vte/ghostty_vte
-    ref: 8cc4d3b6720c3a27898b30ba555a1da8cae80a60
+    ref: ce7f469dba73216843a3c684b0697b0f8a5ec64c
 ```
 
 `ghostty_vte_flutter` and `portable_pty` are pinned to the same repository and
 ref, at `pkgs/vte/ghostty_vte_flutter` and `pkgs/pty/portable_pty`.
+
+The ref above must match `app/pubspec.yaml`. Nothing checks the pairing, and
+this file is only read under audit pressure — so a stale ref here names a tree
+that was never distributed and no one finds out until it matters.
 
 | Package | Version | Licence | Copyright holder | Upstream |
 |---|---|---|---|---|

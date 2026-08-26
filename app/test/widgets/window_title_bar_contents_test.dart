@@ -6,13 +6,14 @@ import 'package:antgrid/design/widgets/ab_brand_mark.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/models/terminal_models.dart';
+import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
+import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/window_title_bar.dart';
 import 'package:antgrid/window/window_chrome.dart';
-import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -25,30 +26,6 @@ import '../helpers/test_store_overrides.dart';
 /// Compound `<machine>.<project>` registration id, const so it can be
 /// `pumpAt`'s default.
 const _focusedProjectId = 'agent-123.test-project';
-
-final _testAgent = PairedAgent(
-  relayUrl: 'wss://test.relay',
-  agentDeviceId: _focusedProjectId,
-  agentName: 'Test Agent',
-);
-
-/// A fake PairedAgentNotifier that returns a list with one mock PairedAgent.
-///
-/// Copied from `app_shell_test.dart` (a local class there, not exported).
-class FakePairedAgentNotifier extends AsyncNotifier<List<PairedAgent>>
-    implements PairedAgentNotifier {
-  @override
-  Future<List<PairedAgent>> build() async => [_testAgent];
-
-  @override
-  Future<void> selectAgent(String agentDeviceId) async {}
-  @override
-  Future<void> forgetMachine(String agentDeviceIdOrUuid) async {}
-  @override
-  Future<void> retryAgentConnection() async {}
-  @override
-  void cancelActiveAgent() {}
-}
 
 void main() {
   late TestStoreOverrides stores;
@@ -82,7 +59,16 @@ void main() {
         overrides: [
           ...stores.overrides,
           ...extraOverrides,
-          pairedAgentProvider.overrideWith(() => FakePairedAgentNotifier()),
+          // The title bar renders RemoteHostChip off these two, and both are
+          // account/keychain-backed: the real inventory fetch reads the session
+          // cookie out of the keychain and the real uuid MINTS a host identity
+          // on desktop. Riverpod 3 asserts on a provider overridden twice in
+          // one container, so a test wanting different values must not also
+          // pass them in [extraOverrides].
+          accountAgentsProvider.overrideWith((_) async => const []),
+          localDeviceUuidProvider.overrideWith(
+            (_) async => 'test-local-device',
+          ),
           selectedRegistrationIdProvider.overrideWith((ref) => projectId),
           // A focused id makes projectSessionProvider reachable — the handler
           // control resolves its service through serviceWhenReady — so hand

@@ -1,11 +1,13 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../demo/demo_identity.dart';
 import '../models/drawer_entry.dart';
 import '../util/device_id.dart';
 import '../models/ab_project.dart';
 import '../services/account_agents_api.dart';
 import '../storage/recent_agents_store.dart';
 import 'account_agents.dart';
+import 'demo_mode.dart';
 import 'device_provisioning.dart';
 import 'drawer_order.dart';
 import 'projects.dart';
@@ -26,12 +28,12 @@ import 'recent_agents.dart';
 /// when no local project happens to be open (the dedup above relies on an open
 /// local project to cover it, which isn't guaranteed).
 ///
-/// Note on id formats: QR-paired agents persist [RecentAgent.agentDeviceId] as
-/// the agent's full registrationId — `<deviceUuid>.<projectId>` — because the
-/// QR `d=` param carries the compound registrationId. Inventory rows from the
-/// web report only the bare `deviceUuid`. We normalize the recent-id
-/// to its `<deviceUuid>` prefix before deduping so QR-paired agents don't
-/// render twice once their inventory entry loads.
+/// Note on id formats: a machine's [RecentAgent.agentDeviceId] is the bare
+/// `deviceUuid`, but a legacy per-project row persists the compound
+/// `<deviceUuid>.<projectId>` registrationId. Inventory rows from the web
+/// report only the bare `deviceUuid`, so we normalize the recent id to its
+/// `<deviceUuid>` prefix before deduping — otherwise such a row renders twice
+/// once its inventory entry loads.
 List<DrawerEntry> mergeDrawerEntries({
   required List<AbProject> locals,
   required List<RecentAgent> remotes,
@@ -84,6 +86,14 @@ List<DrawerEntry> applyDrawerOrder(
 /// is treated as empty so the drawer still renders immediately with local +
 /// recent data.
 final drawerEntriesProvider = Provider<List<DrawerEntry>>((ref) {
+  // The sample project is the whole drawer while the demo is on, and none of
+  // the real sources below are watched: `accountAgentsProvider` reads the
+  // session cookie out of the keychain and fetches /account/agents, and every
+  // remote row it would produce dials that machine's relay socket. Returning
+  // early is also what keeps the header from reading "PROJECTS · 0 / No
+  // projects yet" over a workspace that is plainly showing one.
+  if (ref.watch(demoModeProvider)) return demoDrawerEntries();
+
   final locals = ref.watch(projectsProvider);
   final remotes = ref.watch(recentAgentsProvider);
   final inventory = ref.watch(accountAgentsProvider).value ?? const [];
@@ -99,3 +109,14 @@ final drawerEntriesProvider = Provider<List<DrawerEntry>>((ref) {
     order,
   );
 });
+
+/// The drawer's contents while the demo is on: the sample project and nothing
+/// else.
+///
+/// A [LocalProjectEntry] over an in-memory [AbProject] rather than a fourth
+/// [DrawerEntry] subclass — the demo's whole premise is that the real UI
+/// renders it, and a local entry is exactly what it is: `machineUuid` null, so
+/// the row expands into its own sessions instead of a machine's project advert
+/// (which would open a control-plane socket).
+List<DrawerEntry> demoDrawerEntries() =>
+    List.unmodifiable([LocalProjectEntry(demoProject())]);

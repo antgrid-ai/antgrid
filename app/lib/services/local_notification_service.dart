@@ -5,7 +5,23 @@ import '../util/ab_log.dart';
 /// Thin wrapper over flutter_local_notifications. Used only for FOREGROUND
 /// OS notifications when the app is backgrounded; the caller decides when to
 /// invoke based on AppLifecycleState. Degrades silently if unavailable.
+///
+/// One instance per isolate, because [_ready] has to outlive the widget that
+/// initialized it. `WorkspaceShell` constructs this in `initState` and a surface
+/// swap or project switch remounts the whole shell — and the demo's mount
+/// deliberately SKIPS [init] (its `DarwinInitializationSettings` would raise the
+/// iOS alert-permission prompt on behalf of a sample project). Per-instance
+/// readiness would therefore make [show] a no-op for the demo's whole lifetime,
+/// silently dropping the handler escalations that still fan out from the user's
+/// other warm projects.
 class LocalNotificationService {
+  LocalNotificationService._();
+
+  static final LocalNotificationService _instance =
+      LocalNotificationService._();
+
+  factory LocalNotificationService() => _instance;
+
   final FlutterLocalNotificationsPlugin _plugin =
       FlutterLocalNotificationsPlugin();
   bool _ready = false;

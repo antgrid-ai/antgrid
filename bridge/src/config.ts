@@ -44,6 +44,39 @@ export const PortEntrySchema = z.union([
   }).strict(),
 ]);
 
+/** One provisioning step for a freshly cut managed worktree. `copy` and `run`
+ *  are mutually exclusive so a step has exactly one meaning in the progress
+ *  line; `name` is required because that line is the entire point of a named
+ *  list. `copy` sources resolve against the main project path and land at the
+ *  same relative path inside the checkout. */
+export const WorktreeSetupStepSchema = z.object({
+  name: z.string().min(1),
+  copy: z.array(z.string()).optional(),
+  run: z.string().optional(),
+  workingDir: z.string().optional(),
+  env: z.record(z.string(), z.string()).optional(),
+}).strict().superRefine((value, ctx) => {
+  if (value.copy && value.run) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["run"], message: "a step carries either copy or run, not both" });
+  }
+  if (!value.copy && !value.run) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["name"], message: "a step needs copy or run" });
+  }
+});
+
+export const WorktreeSetupSchema = z.object({
+  steps: z.array(WorktreeSetupStepSchema),
+  /** Budget for the whole run, not per step. */
+  timeoutMs: z.number().int().positive().optional(),
+  /** `block` is reserved, not accepted: a setup that can wedge a session behind
+   *  it needs an escape hatch the v1 UI does not have. */
+  onFailure: z.enum(["warn"]).optional(),
+}).strict();
+
+export const WorktreeBlockSchema = z.object({
+  setup: WorktreeSetupSchema.optional(),
+}).strict();
+
 export const AbConfigSchema = z.object({
   name: z.string().optional(),
   relayUrl: z.string().optional(),
@@ -51,12 +84,16 @@ export const AbConfigSchema = z.object({
   services: z.array(ServiceSchema).optional(),
   commands: z.array(CommandSchema).optional(),
   ports: z.array(PortEntrySchema).optional(),
+  worktree: WorktreeBlockSchema.optional(),
 }).strict();
 
 export type OnDetect = z.infer<typeof OnDetectSchema>;
 export type AgentBlock = z.infer<typeof AgentBlockSchema>;
 export type ServiceConfig = z.infer<typeof ServiceSchema>;
 export type CommandConfig = z.infer<typeof CommandSchema>;
+export type WorktreeSetupStep = z.infer<typeof WorktreeSetupStepSchema>;
+export type WorktreeSetup = z.infer<typeof WorktreeSetupSchema>;
+export type WorktreeBlock = z.infer<typeof WorktreeBlockSchema>;
 export interface PortConfig {
   port: number;
   name?: string;
@@ -69,6 +106,7 @@ export interface AbConfig {
   services?: ServiceConfig[];
   commands?: CommandConfig[];
   ports?: PortConfig[];
+  worktree?: WorktreeBlock;
 }
 
 const DEFAULT_CONFIG: AbConfig = {};
@@ -81,16 +119,32 @@ function normalizePorts(raw: z.infer<typeof AbConfigSchema>["ports"]): PortConfi
   });
 }
 
-export function resolveVariables(raw: string, context: { projectPath?: string }): string {
+/** Everything a `${...}` reference can name. Only `projectPath` is known at
+ *  config-load time; the checkout/session members are supplied by callers that
+ *  resolve a value against a specific managed worktree, so an unset one leaves
+ *  the reference untouched rather than interpolating a wrong path. */
+export interface ResolveContext {
+  projectPath?: string;
+  checkoutPath?: string;
+  checkoutBranch?: string;
+  baseBranch?: string;
+  sessionId?: string;
+}
+
+export function resolveVariables(raw: string, context: ResolveContext): string {
   return raw.replace(/\$\{([^}]+)\}/g, (match, expr: string) => {
     if (expr.startsWith("env.")) return process.env[expr.slice(4)] ?? match;
     if (expr === "project.path" && context.projectPath) return context.projectPath;
+    if (expr === "checkout.path" && context.checkoutPath) return context.checkoutPath;
+    if (expr === "checkout.branch" && context.checkoutBranch) return context.checkoutBranch;
+    if (expr === "base.branch" && context.baseBranch) return context.baseBranch;
+    if (expr === "session.id" && context.sessionId) return context.sessionId;
     return match;
   });
 }
 
 function resolveItem<T extends { workingDir?: string; command?: string; args?: string[]; env?: Record<string, string> }>(
-  item: T, ctx: { projectPath?: string },
+  item: T, ctx: ResolveContext,
 ): T {
   const r = { ...item };
   if (r.workingDir) r.workingDir = resolveVariables(r.workingDir, ctx);
@@ -102,8 +156,12 @@ function resolveItem<T extends { workingDir?: string; command?: string; args?: s
   return r;
 }
 
+// `worktree` is deliberately absent from this pass: the context here is
+// process.cwd(), which for a checkout's own antgrid.yaml is the MAIN project
+// root, so eagerly interpolating a setup step would bake the wrong paths in.
+// The setup runner resolves that block lazily against the real checkout.
 function resolveAll(cfg: AbConfig): AbConfig {
-  const ctx = { projectPath: process.cwd() };
+  const ctx: ResolveContext = { projectPath: process.cwd() };
   return {
     ...cfg,
     services: cfg.services?.map((s) => resolveItem(s, ctx)),

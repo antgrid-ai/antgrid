@@ -25,8 +25,32 @@ class ProjectsNotifier extends Notifier<List<AbProject>> {
   }
 
   Future<void> upsert(AbProject p) async {
-    await _store.upsert(p);
+    // `list()` is a full JSON decode that publishes a fresh List, which is
+    // never `==` the old one — so every `projectsProvider` watcher rebuilds.
+    // Skipped when the store refused the write (the sample project), whose
+    // drawer row goes through here on every tap: it is the demo's primary
+    // navigation gesture.
+    if (!await _store.upsert(p)) return;
     state = _store.list();
+  }
+
+  /// Re-stamps every project recorded against [from] with [to].
+  ///
+  /// Called when this device's persisted host identity is replaced — see
+  /// `ensureCurrentUserDeviceRecord`, the one place that happens. Only the
+  /// local-open path ever writes `hostDeviceUuid`, so a row holding the
+  /// outgoing uuid is a folder on THIS machine whose identity moved, never a
+  /// project hosted elsewhere; left behind it fails `AbProject.isLocalFor` for
+  /// good.
+  Future<void> rehost({required String from, required String to}) async {
+    if (from == to) return;
+    var changed = false;
+    for (final p in _store.list()) {
+      if (p.hostDeviceUuid != from) continue;
+      p.hostDeviceUuid = to;
+      changed = await _store.upsert(p) || changed;
+    }
+    if (changed) state = _store.list();
   }
 
   Future<void> remove(String id) async {

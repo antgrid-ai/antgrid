@@ -21,6 +21,7 @@ import '../models/drawer_entry.dart';
 import '../models/session_target.dart';
 import '../providers/account_agents.dart';
 import '../providers/control_plane.dart';
+import '../providers/demo_mode.dart';
 import '../providers/drawer_entries.dart';
 import '../providers/drawer_expansion.dart';
 import '../providers/drawer_order.dart';
@@ -89,7 +90,12 @@ class ProjectsDrawer extends ConsumerWidget {
           // restarts (see update_row.dart). The account footer is declared last
           // so it is the last BUDGETED slot to give up a pixel; only the
           // unbudgeted header outranks it.
-          pinned: const [UpdateRow(), _Footer()],
+          // Neither belongs to a machine-less demo: the footer's account row
+          // fetches the user, the subscription and the pricing catalogue, and
+          // the update row's only action leaves for the store.
+          pinned: ref.watch(demoModeProvider)
+              ? const []
+              : const [UpdateRow(), _Footer()],
         ),
       ),
     );
@@ -199,9 +205,14 @@ class _GroupLabel extends ConsumerWidget {
     // The button shares [refreshDrawer] with the pull-to-refresh gesture so the
     // two affordances refresh the same things. The in-flight guard keys off the
     // inventory load (the only load-once FutureProvider); local projects and
-    // QR-paired recents are store-reactive. Riverpod preserves the prior value
+    // Recent machines are store-reactive. Riverpod preserves the prior value
     // during the reload, so the list never blanks.
-    final refreshing = ref.watch(accountAgentsProvider).isLoading;
+    // Demo: the sample project refreshes from nothing, and the watch itself is
+    // what would fetch /account/agents. Neither the flag nor the button.
+    final demo = ref.watch(demoModeProvider);
+    final refreshing = demo
+        ? false
+        : ref.watch(accountAgentsProvider).isLoading;
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         AbTokens.drawerGutter,
@@ -232,14 +243,15 @@ class _GroupLabel extends ConsumerWidget {
               ),
             ),
             const Spacer(),
-            AbIconButton(
-              icon: AbIcons.refresh,
-              tone: AbIconButtonTone.muted,
-              tooltip: 'Refresh',
-              // Disabled while an inventory fetch is in flight so a double-tap
-              // can't stack redundant /account/agents requests.
-              onTap: refreshing ? null : () => refreshDrawer(ref),
-            ),
+            if (!demo)
+              AbIconButton(
+                icon: AbIcons.refresh,
+                tone: AbIconButtonTone.muted,
+                tooltip: 'Refresh',
+                // Disabled while an inventory fetch is in flight so a
+                // double-tap can't stack redundant /account/agents requests.
+                onTap: refreshing ? null : () => refreshDrawer(ref),
+              ),
           ],
         ),
       ),
@@ -262,6 +274,9 @@ class _Body extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Demo: the gesture has nothing to pull from, and leaving it wired would
+    // put a spinner on a surface that must never reach the network.
+    if (ref.watch(demoModeProvider)) return _list(context, ref);
     // Pull-to-refresh wraps every branch (incl. the empty state) so the gesture
     // is available whether or not projects are listed.
     return RefreshIndicator(
@@ -347,6 +362,9 @@ class _Body extends ConsumerWidget {
 /// reply lands. Shared by the pull gesture and the PROJECTS refresh button so
 /// the two affordances stay in lockstep.
 Future<void> refreshDrawer(WidgetRef ref) async {
+  // The demo hides both affordances that call this; the guard is here so a
+  // third caller cannot reintroduce the inventory fetch by accident.
+  if (ref.read(demoModeProvider)) return;
   unawaited(_refreshFocusedSessions(ref));
   await refreshMachineInventoryAndControlPlanes(
     RefreshRef.of(ref),
@@ -382,9 +400,9 @@ class _EntryWithSessions extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     // A remote MACHINE entry (same-account or inventory) defaults to COLLAPSED
     // and tracks its open state in [expandedDrawerIdsProvider] — expanding it is
-    // what opens the machine's control-plane socket. A local project or legacy
-    // QR per-project entry defaults to EXPANDED and tracks its (rarer) collapse
-    // in [collapsedDrawerIdsProvider].
+    // what opens the machine's control-plane socket. A local project (or a
+    // legacy per-project row) defaults to EXPANDED and tracks its (rarer)
+    // collapse in [collapsedDrawerIdsProvider].
     final machineUuid = entry.machineUuid;
     final expanded = machineUuid != null
         ? ref.watch(expandedDrawerIdsProvider).contains(machineUuid)

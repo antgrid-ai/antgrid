@@ -18,7 +18,12 @@ import 'picker_sources.dart';
 /// rail tabs wrote, so control-plane keep-alive (controlPlaneAliveTargetsProvider)
 /// and target validation keep working unchanged.
 class EnvironmentChip extends ConsumerWidget {
-  const EnvironmentChip({super.key});
+  const EnvironmentChip({super.key, this.enabled = true});
+
+  /// Passed down by the composer rather than read from the start-progress
+  /// provider here: one owner decides when the context row is frozen, and the
+  /// chip stays mountable on its own in tests.
+  final bool enabled;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -30,6 +35,7 @@ class EnvironmentChip extends ConsumerWidget {
     return ComposerChip(
       icon: icon,
       label: label,
+      enabled: enabled,
       onTap: (ctx) async {
         final anchor = abMenuAnchorRect(ctx);
         if (anchor == null) return;
@@ -140,6 +146,7 @@ class ComposerChip extends StatelessWidget {
     required this.label,
     required this.onTap,
     this.attention = false,
+    this.enabled = true,
   });
 
   final String icon;
@@ -149,14 +156,24 @@ class ComposerChip extends StatelessWidget {
   /// Accent styling for "needs a pick" states (e.g. "Select project…").
   final bool attention;
 
+  /// False freezes the chip: [onTap] is ignored and the frame drops to the
+  /// disabled palette. Same treatment as [ComposerToggleChip]'s null
+  /// [ComposerToggleChip.onChanged] — the context row must read as one control
+  /// set, so a row locked mid-operation cannot have two dialects of "dead".
+  final bool enabled;
+
   @override
   Widget build(BuildContext context) {
     return MouseRegion(
-      cursor: SystemMouseCursors.click,
+      cursor: enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
       child: Builder(
         builder: (ctx) {
           final p = ctx.antgrid;
-          final fg = attention ? p.accent : p.textPrimary;
+          final fg = !enabled
+              ? p.textDisabled
+              : attention
+              ? p.accent
+              : p.textPrimary;
           final labelStyle = AbTokens.monoStyle(
             fontSize: AbTokens.fontSm,
             color: fg,
@@ -182,7 +199,11 @@ class ComposerChip extends StatelessWidget {
                 ),
                 decoration: BoxDecoration(
                   border: Border.all(
-                    color: attention ? p.accent : p.borderDefault,
+                    color: !enabled
+                        ? p.borderSubtle
+                        : attention
+                        ? p.accent
+                        : p.borderDefault,
                   ),
                   borderRadius: AbTokens.borderRadius3,
                 ),
@@ -215,7 +236,7 @@ class ComposerChip extends StatelessWidget {
                         AbIcon(
                           AbIcons.chevronDown,
                           size: _chipChevronSize,
-                          color: p.textMuted,
+                          color: enabled ? p.textMuted : p.textDisabled,
                         ),
                       ],
                     ],
@@ -224,7 +245,12 @@ class ComposerChip extends StatelessWidget {
               );
               return GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTap: () => onTap(ctx),
+                // Stays live while disabled so the chip keeps swallowing taps
+                // rather than letting them reach the row beneath it.
+                onTap: () {
+                  if (!enabled) return;
+                  onTap(ctx);
+                },
                 child: _chipInSlot(constraints.maxWidth, body),
               );
             },

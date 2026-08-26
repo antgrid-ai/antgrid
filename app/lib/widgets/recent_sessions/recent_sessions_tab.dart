@@ -2,25 +2,28 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../connection/supervisor_state.dart';
+import '../../demo/demo_identity.dart';
 import '../../design/ab_colors.dart';
 import '../../design/ab_status_tone.dart';
 import '../../design/ab_tokens.dart';
+import '../../design/widgets/ab_button.dart';
 import '../../design/widgets/ab_empty_state.dart';
 import '../../design/widgets/ab_section_header.dart';
 import '../../design/widgets/ab_separator.dart';
 import '../../design/widgets/ab_status_dot.dart';
 import '../../models/recent_session_row.dart';
-import '../../providers/first_run.dart';
+import '../../providers/demo_mode.dart';
 import '../../providers/new_session_picker.dart';
 import '../../providers/project_work_status.dart';
 import '../../providers/recent_sessions.dart';
 import '../../providers/supervisor_status.dart';
 import '../../services/control_plane_client.dart';
-import '../../utils/platform_utils.dart';
+import '../../util/detached.dart';
 import '../ab_status_helpers.dart';
 import '../first_run_checklist.dart';
 import 'recent_session_row_widget.dart';
 import 'recent_sessions_summary.dart';
+import 'starting_session_row.dart';
 
 class _SessionGroup {
   const _SessionGroup({
@@ -70,8 +73,41 @@ class RecentSessionsTab extends ConsumerStatefulWidget {
 }
 
 class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
+  /// Owned here, and handed to whichever of the two branches builds, so a
+  /// start can bring the list back to the top.
+  final ScrollController _scroll = ScrollController();
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  /// [StartingSessionRow] is the first sliver in both branches, so for a
+  /// scrolled-down user it grows and collapses ABOVE the viewport: the
+  /// viewport keeps its offset, so every visible row is shoved down by the
+  /// row's height when a start begins and back up when it ends — while the
+  /// row itself, the entire point of it, is never on screen.
+  ///
+  /// Riding the user's own Send back to the top resolves both halves: the
+  /// shift becomes a motion they caused, and it lands them where the session
+  /// being started — and the real row it turns into — actually appear.
+  void _revealStartingRow() {
+    if (!_scroll.hasClients || _scroll.offset <= 0) return;
+    detached('recents', 'scroll to starting row', () async {
+      await _scroll.animateTo(
+        0,
+        duration: AbTokens.motionDefault,
+        curve: Curves.easeOutCubic,
+      );
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
+    ref.listen(newSessionStartInFlightProvider, (previous, next) {
+      if (next && previous != true) _revealStartingRow();
+    });
     final rows = ref.watch(recentSessionsProvider);
 
     if (rows.isEmpty) {
@@ -81,21 +117,30 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
       // the first-run checklist replaces the generic empty state until it is
       // completed or dismissed — it stays through the later steps (Remote,
       // open a project) even once a machine exists in the inventory.
-      // `isMobilePlatform` first is load-bearing: desktop short-circuits
-      // before touching the first-run chain (its checklist lives on the New
-      // Session canvas instead).
-      final showChecklist =
-          isMobilePlatform && ref.watch(firstRunChecklistVisibleProvider);
+      // Its own predicate (desktop short-circuits before touching the first-run
+      // chain, and the demo before reaching the account) — never re-derived
+      // here, or the checklist and the chrome around it disagree.
+      final showChecklist = mobileFirstRunChecklistVisible(ref);
       // "Describe a task below" is a lie while nothing is picked — Send stays
       // disabled without a valid target — so name the actual next step.
       final hasTarget = ref.watch(newSessionHasValidTargetProvider);
+      // This list goes momentarily empty inside the demo too (before the
+      // fixture session:list lands, and after a mobile background evicts the
+      // warm demo), and offering the way in from inside is worse than offering
+      // nothing.
+      final offerDemo = !hasTarget && !ref.watch(demoModeProvider);
       // A scrollable empty state so the ancestor RefreshIndicator (in
       // new_session_content.dart) always has a gesture target: AbEmptyState
       // is a bare Center with no Scrollable of its own, so pull-to-refresh
       // would be inert here without this wrapper.
       return CustomScrollView(
+        controller: _scroll,
         physics: const AlwaysScrollableScrollPhysics(),
         slivers: [
+          // Mounted in this branch too: the first session a user ever starts
+          // is started from an empty list, which is exactly when an
+          // unaccounted-for 30s wait is least explicable.
+          const SliverToBoxAdapter(child: StartingSessionRow()),
           SliverFillRemaining(
             hasScrollBody: false,
             child: showChecklist
@@ -105,6 +150,14 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
                     subtitle: hasTarget
                         ? 'Describe a task below to start your first session.'
                         : 'Pick a project, then describe a task below.',
+                    // Nothing picked means every path into a session is still
+                    // dead — offer the one that needs no machine at all.
+                    action: offerDemo
+                        ? AbButton(
+                            label: kDemoEntryLabel,
+                            onTap: () => enterDemoMode(ref.container),
+                          )
+                        : null,
                   ),
           ),
         ],
@@ -130,9 +183,19 @@ class _RecentSessionsTabState extends ConsumerState<RecentSessionsTab> {
     final groups = _groupSessions(rows, groupBy, statusFor);
 
     return CustomScrollView(
+      controller: _scroll,
+      // Stated, not inherited: `ScrollView` only defaults to
+      // AlwaysScrollableScrollPhysics while it has NO controller, so handing it
+      // one would otherwise leave a list shorter than the viewport refusing the
+      // drag — and the ancestor RefreshIndicator (new_session_content.dart)
+      // inert for exactly the users with the fewest recent sessions.
+      physics: const AlwaysScrollableScrollPhysics(),
       slivers: [
         if (widget.showHeader)
           const SliverToBoxAdapter(child: _SessionsHeader()),
+        // Above the groups, not inside one: the session does not exist yet, so
+        // it belongs to no machine, project or status bucket.
+        const SliverToBoxAdapter(child: StartingSessionRow()),
         for (var i = 0; i < groups.length; i++) ...[
           SliverToBoxAdapter(
             child: _GroupHeader(

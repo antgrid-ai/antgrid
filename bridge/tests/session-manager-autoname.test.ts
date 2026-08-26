@@ -9,6 +9,7 @@ function makeTm() {
   return {
     has: (id: string) => live.has(id),
     kill: (id: string) => { live.delete(id); },
+    forget: (id: string) => { live.delete(id); },
     treeKilled: () => Promise.resolve(),
     spawn: (cfg: any) => { live.add(cfg.terminalId); return cfg.terminalId; },
     __live: live,

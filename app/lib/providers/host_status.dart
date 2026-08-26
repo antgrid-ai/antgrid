@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../demo/demo_identity.dart';
 import '../launcher/host_controller.dart';
 import '../project/project_session_registry.dart';
 import '../util/ab_log.dart';
@@ -50,9 +51,17 @@ final hostRestartRebindProvider = Provider<void>((ref) {
     // return below on purpose: it is stale whether or not a project is open.
     ref.invalidate(hostControlClientProvider);
 
+    // `DemoTransport` reports itself local (that is what keeps the sample
+    // project out of the relay bucket and its push registration), so the demo
+    // id lands in this list — but it holds no loopback socket and never spoke
+    // to the dead process. Re-binding it would tear the transport down and
+    // replay the canned script from beat 0, mid-read, for a host event that has
+    // nothing to do with it.
     final open = ref
         .read(projectSessionRegistryProvider.notifier)
-        .localOpenProjects();
+        .localOpenProjects()
+        .where((id) => !isDemoEntryId(id))
+        .toList();
     if (open.isEmpty) return;
     AbLog.info(
       'HostRestartRebind',

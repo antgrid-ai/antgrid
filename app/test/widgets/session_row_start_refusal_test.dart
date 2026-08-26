@@ -17,6 +17,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/prefs_test_mock.dart';
+import '../helpers/test_store_overrides.dart';
 
 const _projectId = 'p';
 const _sessionId = 'sess-1';
@@ -79,8 +80,14 @@ void main() {
   ) async {
     final cache = await CachedSessionsStore.open();
     final session = await _session(transport, cache);
+    // The row's own tap asks whether this entry is relay-reached, which reads
+    // the recent-agents store — a throw-by-default provider, and a throw there
+    // is swallowed as a failed activation, i.e. a tap that does nothing.
+    final stores = await buildTestStoreOverrides();
+    addTearDown(stores.close);
     final container = ProviderContainer(
       overrides: [
+        ...stores.overrides,
         selectedRegistrationIdProvider.overrideWithValue(_projectId),
         projectSessionProvider.overrideWith((ref, id) async => session),
       ],

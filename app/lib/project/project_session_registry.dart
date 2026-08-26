@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../demo/demo_identity.dart';
 import '../providers/agent_transport.dart';
 import '../providers/analytics.dart';
 import '../providers/cached_sessions.dart';
@@ -267,7 +268,12 @@ Future<ProjectSession> defaultProjectSessionFactory(
     transport: transport,
     mode: mode,
     cachedSessionsStore: cache,
-    analytics: ref.read(analyticsServiceProvider),
+    // No sink for the sample project: every event it would emit describes
+    // canned data, and the demo is reachable with no account behind it to
+    // attribute anything to.
+    analytics: isDemoProjectId(projectId)
+        ? null
+        : ref.read(analyticsServiceProvider),
     onClose: () async {
       // Transport teardown is handled by the agentTransportForProvider's
       // own ref.onDispose, fired when the registry invalidates it.

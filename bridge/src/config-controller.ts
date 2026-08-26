@@ -18,7 +18,16 @@ export class ConfigController {
 
   read(): ReadResult {
     if (!existsSync(this.filePath)) return { ok: false, missing: true };
-    const raw = readFileSync(this.filePath, "utf8");
+    let raw: string;
+    try {
+      raw = readFileSync(this.filePath, "utf8");
+    } catch {
+      // Gone between the stat and the read — the ordinary race when the
+      // checkout under it is being deleted. This runs from a bare `setTimeout`
+      // in [watch], where a throw is an uncaught exception on the bridge's main
+      // loop, so an absence discovered here must answer like any other.
+      return { ok: false, missing: true };
+    }
     let parsed: unknown;
     try {
       parsed = parseYaml(raw);
@@ -51,14 +60,18 @@ export class ConfigController {
   }
 
   private watcher: FSWatcher | null = null;
+  /** On the instance rather than in [watch]'s closure so [stopWatch] can clear
+   *  it. A debounced read fires up to 100ms after the watcher closes and reads
+   *  the watched file — which for a managed checkout sits inside the directory
+   *  `git worktree remove` is by then sweeping. */
+  private debounce: ReturnType<typeof setTimeout> | null = null;
   private lastConfig: AbConfig = {};
 
   watch(onChange: (next: ReadResult, diff: ConfigDiff) => void): void {
     this.watcher?.close();
-    let debounce: ReturnType<typeof setTimeout> | null = null;
     const trigger = () => {
-      if (debounce) clearTimeout(debounce);
-      debounce = setTimeout(() => {
+      if (this.debounce) clearTimeout(this.debounce);
+      this.debounce = setTimeout(() => {
         const r = this.read();
         const next = r.ok ? r.config : ({} as AbConfig);
         const diff = computeDiff(this.lastConfig, next);
@@ -87,6 +100,8 @@ export class ConfigController {
   stopWatch(): void {
     this.watcher?.close();
     this.watcher = null;
+    if (this.debounce) clearTimeout(this.debounce);
+    this.debounce = null;
   }
 }
 

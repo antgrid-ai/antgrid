@@ -302,3 +302,108 @@ first for every project on the machine, Git-backed or not.
   in the project at once.
 - **`baseRef` is retained without a reader on purpose** — see its comment in
   `worktrees/checkout-types.ts`.
+
+### Checkout setup (`worktree.setup`)
+
+The config schema, the variable table and the `ANTGRID_*` contract are in
+`docs/architecture.md`. This is the host-side lifecycle: `CheckoutSetupRunner`
+(`worktrees/checkout-setup.ts`) resolves the checkout's own block into a plan
+file and runs the whole thing in ONE PTY — the bridge re-invoked under the
+hidden `worktree-setup` subcommand (`cli/worktree-setup.ts`), because the
+shipped bridge is a compiled single-file executable and `process.execPath` plus
+a subcommand is the only self-invocation that works, the same shape
+`resolveHookCommand` relies on. One PTY per step would reset the scrollback of
+the step that actually failed.
+
+- **Setup runs before the checkout's `services`, and the deferral is the point.**
+  `prepareCheckoutRuntime(checkout, { deferServices: true })` holds back the
+  `services` block ALONE — watchers, port detection and tunnels still start — and
+  `startDeferredServices` is the only thing that clears it (the config watcher
+  also refuses to spawn a service added while a checkout is deferred, or a setup
+  step editing `antgrid.yaml` would start what the deferral is holding).
+  Auto-starting `bun run dev` against an empty `node_modules` is a guaranteed
+  failure the user then has to read past. Every terminal state releases it, so
+  `runCheckoutSetup` MUST report exactly one of `done`/`failed`/`skipped` for
+  every run it is handed — a runner that returned nothing would leave that
+  checkout with no services at all. The deferral and the run are taken
+  TOGETHER or not at all, gated on `checkoutDeclaresSetup` at create time: a
+  checkout with no block gets neither, because deferring for a run that never
+  starts strands the dev server and stamping the `done` such a run reports
+  banners "Workspace ready" — durably, and on every launch after it — on a
+  project that never opted in. An EMPTY `steps` list counts as no block, the
+  same answer `begin()` gives it: the app's own nudge writes exactly that for a
+  project it cannot fingerprint (`buildStarterWorktreeSetup`), so reading it as
+  a declaration would reintroduce the banner through the app's writer. The run starts strictly
+  AFTER `createWorktree` has flushed, emitted and re-announced (the create reply
+  must go out well inside the app's 15 s pending-reply timeout), and it is never
+  awaited.
+- **A `running` setup state is never persisted.** `checkouts.json` carries
+  `setupState` only for the durable outcomes (`DURABLE_SETUP_STATES`,
+  `worktrees/checkout-types.ts`); `running` and `interrupted` can never be
+  written. `interrupted` is DERIVED on load from a marker's absence, so a bridge
+  that died mid-run comes back "Setup didn't finish" instead of a row that is
+  permanently preparing and unfixable — the same trap `deleting`'s comment in
+  `protocol.ts` was written to avoid. A marker's absence alone is not enough,
+  though: every checkout cut before the project declared a setup block carries
+  none either, so the derivation is gated on the checkout still DECLARING one
+  (`checkoutDeclaresSetup`), or an upgrade banners "Setup didn't finish" on every
+  isolated session the user already had. A checkout with no `checkouts.json`
+  row at all is the same answer, not a stronger one: a truncated or unreadable
+  store must not banner a whole project with a "Run setup" button `rerunSetup`
+  can only answer `WORKTREE_MISSING`. A rerun clears the marker BEFORE it starts,
+  for the same reason. There is deliberately no auto-rerun on launch: a setup
+  step can be expensive or destructive and the user did not ask for one on this
+  launch.
+- **The setup PTY must stay registered in the runtime's `configuredTerminalIds`
+  or a Windows delete breaks.** That map is what `teardownCheckoutRuntime` sweeps
+  with `killAndAwaitTree` before `git worktree remove`, and a live `bun install`
+  holding the checkout as its cwd is exactly the open handle Windows refuses to
+  delete around. It is registered identity-mapped (`<checkoutId>:setup` → itself,
+  since the app is handed the full id) and off the runner's OWN reported
+  terminalId, so a checkout that spawned nothing registers nothing.
+  A finished run is no longer IN `runs`, so
+  `handleExit` is not a reliable "is this a setup PTY" test: `killAndAwaitTree`
+  resolves on `killProcessTree` + `pty.kill()` returning, which is strictly
+  before node-pty dispatches `onExit`, so `finish()` has already dropped the
+  entry by the time the exit lands on every kill path (cancel, timeout, a rerun
+  over a live run, delete). `agent-core`'s own `setupTerminalIds` set is what
+  still knows, and is what the exit handler must consult.
+  `deleteManaged` additionally cancels a live run and AWAITS the kill on both of
+  its branches — after the dirty/unpushed preflight, since a refusal the user can
+  still answer must not have destroyed the run first — and never refuses a delete
+  on account of setup. The PTY carries no `type` (typing it `service` would put a
+  provisioning log in the services list), which is NOT the same as being
+  hidden: the app's ad-hoc terminal list selects by EXCLUDING `agent` and
+  `service`, so untyped reads there as "a user terminal". It is kept out by
+  name instead — `terminal_list_view.dart` drops every id any session's
+  `setup.terminalId` claims — or the user gets an interactive tab over a live
+  `bun install` and a close button that kills it. Its owner row in
+  `terminalOwners` also SURVIVES its exit, unlike every other terminal's:
+  `sendStatus` routes a terminal by that row, so dropping it would advertise
+  the finished transcript on main and prune it from the checkout bundle the
+  banner's "View setup log" reads — exactly when the run has failed. It is the
+  one terminal spawned with `retainScrollbackOnExit`: the failing step's output is read after the run at
+  least as often as during it, and `TerminalManager.forget` in teardown is what
+  gives that retention a definite end.
+- **`suppressOscTitle` must never be set on the setup PTY.** Step transitions
+  ride OSC 2 titles (`formatSetupStepMarker`), and that flag suppresses the
+  `onTitle` callback itself — the channel being used. The other half is
+  `onTerminalTitle` feeding `setupRunner.handleTitle` and RETURNING before the
+  namer fallback; without that guard the session namer reads setup progress as a
+  conversation title. `suppressOscNotifications` IS set: provisioning must never
+  raise an attention signal. Coarse transitions ride the immediate
+  `notifyObservers()` path, never the debounced activity emit, or the banner lags
+  a step behind; live output stays on the setup terminal's own `terminal:output`.
+- **The start gate lives on the bridge, in memory.** A `session:start` arriving
+  while setup runs records `pendingStart` (with its `initialPrompt`) and replies
+  `ok: true`. A start carrying NO prompt never clears one already queued — the
+  app gates its auto-start paths on `sessionStartQueued`, and this is the
+  backstop for the path that forgets to, since the prompt the user typed has
+  no other copy. `archive` drops a queued start outright: the agent must not
+  launch into a session the user has already put away — the entry carries `setup.pendingStart`, so the reply is honest.
+  A user who creates a session on a phone and locks the screen must come back to
+  a running agent, which is why the queue is not the app's. The prompt is
+  never persisted: a restart legitimately drops it and the session sits stopped
+  with a Start affordance. `session:setup` (`skip` releases the gate and leaves
+  the run going, `cancel` kills the tree, `rerun` starts fresh from a settled
+  state) is the only verb over it.

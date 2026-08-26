@@ -7,11 +7,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import '../config/storage_scope.dart';
+import '../models/ab_project.dart';
 import '../services/device_provisioning.dart';
 import '../services/devices_api.dart';
 import '../services/keychain_device_store.dart';
 import '../util/ab_log.dart';
 import 'auth.dart';
+import 'projects.dart';
 import 'provider_retry.dart';
 
 bool _isDesktopPlatform() =>
@@ -64,11 +66,45 @@ Future<DeviceRecord> ensureCurrentUserDeviceRecord(dynamic ref) async {
         existingDeviceUuid: existing,
       );
 
-  if (await prefs.getString(kLocalHostUuidKey) != record.deviceUuid) {
+  // Re-read rather than reuse `existing`: the desktop self-heal in
+  // [localDeviceUuidProvider] mints and persists an anonymous uuid whenever it
+  // is read with an empty keychain, which can land during the provisioning
+  // round trip above — and a folder opened in that window is stamped with it.
+  final outgoing = await prefs.getString(kLocalHostUuidKey);
+  if (outgoing != record.deviceUuid) {
     await prefs.setString(kLocalHostUuidKey, record.deviceUuid);
+    if (outgoing != null) {
+      await _rehostLocalProjects(ref, from: outgoing, to: record.deviceUuid);
+    }
   }
   ref.invalidate(localDeviceUuidProvider);
   return record;
+}
+
+/// Moves projects recorded against a replaced host identity onto the new one.
+///
+/// This is the only place a persisted host uuid is replaced by a *different*
+/// value, so it is the only place that can repair the rows carrying the old
+/// one: the prefs key self-heals, project rows never did, and a row left behind
+/// fails [AbProject.isLocalFor] forever — losing its working-directory actions
+/// and wearing a "Remote host" chip for a folder on this disk.
+///
+/// Swallowed: a failed repair must not fail provisioning, and the same rows are
+/// still fixed by re-opening the folder (`registerPickedFolder`).
+Future<void> _rehostLocalProjects(
+  dynamic ref, {
+  required String from,
+  required String to,
+}) async {
+  try {
+    await ref.read(projectsProvider.notifier).rehost(from: from, to: to);
+  } catch (e) {
+    AbLog.warn(
+      'device_provisioning',
+      'host uuid backfill skipped',
+      fields: {'error': '$e'},
+    );
+  }
 }
 
 /// Best-effort resolve of the machine [DeviceRecord] to carry into a host

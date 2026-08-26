@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:antgrid/config/storage_scope.dart';
 import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_session_registry.dart'
@@ -19,8 +20,6 @@ import 'package:antgrid/storage/agent_catalog_store.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/storage/project_store.dart';
 import 'package:antgrid/storage/recent_ports_store.dart';
-import 'package:antgrid_relay_client/antgrid_relay_client.dart'
-    show PairedAgent;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/test/test_flutter_secure_storage_platform.dart';
 import 'package:flutter_secure_storage_platform_interface/flutter_secure_storage_platform_interface.dart';
@@ -167,13 +166,10 @@ void main() {
           handlerChat: true,
         ),
       });
-      await pairedStore.savePairedAgents(const [
-        PairedAgent(
-          relayUrl: 'wss://r',
-          agentDeviceId: 'machine-1',
-          agentName: 'Work laptop',
-        ),
-      ]);
+      // Written by hand: nothing produces this blob any more (QR pairing is
+      // gone), but a pre-account-trust install still carries one and sign-out
+      // has to evict it.
+      secureBacking[scopedStorageKey('paired_agents')] = '[]';
       await prefsService.load(entryId);
 
       final container = ProviderContainer(
@@ -203,7 +199,7 @@ void main() {
       expect(recentPorts.list(entryId), isEmpty);
       expect(await cache.read(entryId), isNull);
       expect(await catalog.read(), isEmpty);
-      expect(await pairedStore.loadPairedAgents(), isEmpty);
+      expect(secureBacking, isNot(contains(scopedStorageKey('paired_agents'))));
       // The prefs file lives behind path_provider, which isn't mocked here —
       // the in-memory reset is what stops the stale entry being served.
       expect(prefsService.projectId, isNull);
@@ -226,13 +222,7 @@ void main() {
       await recentPorts.add('p1', 3000, 'http');
       await cache.write('p1', const ProjectStatus.empty());
       final pairedStore = StorageService();
-      await pairedStore.savePairedAgents(const [
-        PairedAgent(
-          relayUrl: 'wss://r',
-          agentDeviceId: 'machine-1',
-          agentName: 'Work laptop',
-        ),
-      ]);
+      secureBacking[scopedStorageKey('paired_agents')] = '[]';
 
       final container = ProviderContainer(
         overrides: [
@@ -259,7 +249,7 @@ void main() {
       expect(failures, ['cachedSessions']);
       expect(recentPorts.list('p1'), isEmpty);
       expect(await cache.read('p1'), isNull);
-      expect(await pairedStore.loadPairedAgents(), isEmpty);
+      expect(secureBacking, isNot(contains(scopedStorageKey('paired_agents'))));
     });
   });
 }

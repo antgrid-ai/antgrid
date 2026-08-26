@@ -1,12 +1,13 @@
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { readdir, rm, rmdir } from "node:fs/promises";
-import { join, relative, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
 import { resolveAbDir } from "../antgrid-dir";
 import { branchSlug, checkoutDirName, projectRootName, sessionWords } from "./checkout-names";
 import { readCheckoutOwner, sameRepository } from "./checkout-owner";
 import { CheckoutStore } from "./checkout-store";
 import { isManagedCheckoutKind, type CheckoutRecord } from "./checkout-types";
 import { parseWorktreeList } from "./git-worktree-list";
+import { pathBelow } from "./path-guard";
 import { runGit, type GitRunner } from "./project-resolver";
 import { logGitFailure, logWorktreeEvent, worktreeErrorCode } from "./worktree-log";
 
@@ -23,6 +24,34 @@ const WORKTREE_ROOT_DIR = "wt";
  * racer it cannot serialize; an orphan is by definition unreferenced, so
  * nothing writes into it and its mtime ages past this. */
 const RECONCILE_GRACE_MS = 60_000;
+
+/** Backoff for [removeWithRetries]. Each entry is the wait BEFORE that attempt,
+ * so the first is free and the budget is ~2.3s over five tries. Sized for the
+ * holder it exists to outlast — a killed PTY's grandchildren, which can outlive
+ * the leader because `taskkill /F /T` walks the tree from the parent down — and
+ * no longer: a handle nothing is closing needs the caller's error, not more
+ * patience. */
+const RECLAIM_BACKOFF_MS = [0, 100, 300, 700, 1200];
+
+/** Recursive delete that actually retries a transient Windows sharing
+ * violation. `fs.rm`'s own `maxRetries`/`retryDelay` cannot be used: Bun
+ * accepts both options and honours NEITHER — measured on the pinned runtime
+ * (1.3.14), `rm` against a directory held as a live child's cwd returns in 0ms
+ * with EBUSY where Node retries for the full budget. The bridge runs on Bun in
+ * both `bun run` and `bun build --compile` form, so the options were a no-op
+ * everywhere it ships. */
+async function removeWithRetries(path: string): Promise<void> {
+  for (const wait of RECLAIM_BACKOFF_MS) {
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+    try {
+      await rm(path, { recursive: true, force: true });
+      return;
+    } catch {
+      // Caller re-tests the directory and reports the failure — whatever holds
+      // it open is worth surfacing rather than retrying blindly.
+    }
+  }
+}
 
 /** How many same-stem branches to walk before giving up. A stem carries the
  * session's own word pair, so reaching even the low tens means something is
@@ -108,11 +137,6 @@ export interface WorktreeManagerOptions {
 
 function canonical(path: string): string {
   try { return realpathSync.native(path); } catch { return resolve(path); }
-}
-
-function pathBelow(root: string, target: string): boolean {
-  const rel = relative(root, target);
-  return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !rel.includes(`${sep}..${sep}`);
 }
 
 /** The sole owner of managed Git worktree lifecycle. Paths are derived here,
@@ -373,10 +397,7 @@ export class WorktreeManager {
     // checkout it exists to reclaim. Tests cannot see that on their own: they
     // build the checkout path from `abDir` too, so both sides agree by accident.
     if (!pathBelow(canonical(this.worktreeRoot()), canonical(record.path))) return;
-    // Retries because the failure this exists to survive is a transient Windows
-    // sharing violation: a scanner or a dying process can hold one file for a
-    // few hundred milliseconds after `worktree remove` already gave up on it.
-    await rm(record.path, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(() => undefined);
+    await removeWithRetries(record.path);
     // The directory going away is what makes the registration prunable: Git
     // holds `.git/worktrees/<id>` until nothing claims it.
     if (!existsSync(record.path)) await this.git(["worktree", "prune"], repoPath).catch(() => undefined);

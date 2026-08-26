@@ -1,0 +1,17 @@
+name: eval-agent
+relayUrl: __RELAY_URL__
+
+# A freshly cut worktree holds tracked files at the base commit and nothing
+# else, so the copy step carries an untracked env file across and the two run
+# steps stand in for a slow `bun install`: the hold is the window the gate has
+# to be observable in, and the sentinel it writes afterwards is the only
+# on-disk witness of "setup has finished".
+worktree:
+  setup:
+    steps:
+      - name: Copy env files
+        copy: [".env.eval", ".env.absent"]
+      - name: Hold the gate
+        run: node -e "setTimeout(() => {}, __SETUP_HOLD_MS__)"
+      - name: Write the sentinel
+        run: node -e "require('fs').writeFileSync(require('path').join(process.env.ANTGRID_PROJECT_PATH, 'setup-done-' + process.env.ANTGRID_SESSION_ID), 'ok')"

@@ -188,4 +188,162 @@ void main() {
       expect(flagged.hashCode, isNot(plain.hashCode));
     });
   });
+
+  group('setup', () {
+    Map<String, dynamic> base() => {
+      'id': 'a',
+      'name': 'n',
+      'createdAt': 1,
+      'lastUsedAt': 1,
+      'archived': false,
+      'running': false,
+    };
+
+    // The absent case carries the whole compatibility claim: every shared
+    // session, every bridge predating the feature, and every disk-only source
+    // say nothing about setup, and all three must decode to the entry this
+    // build already produced.
+    test('an entry with no setup key is the entry that has none', () {
+      final e = SessionEntry.fromJson(base());
+      expect(e.setup, isNull);
+      expect(e.toJson().containsKey('setup'), isFalse);
+      expect(
+        e,
+        const SessionEntry(
+          id: 'a',
+          name: 'n',
+          createdAt: 1,
+          lastUsedAt: 1,
+          archived: false,
+          running: false,
+        ),
+      );
+    });
+
+    test('a setup that is not an object decodes to null, never throws', () {
+      expect(SessionEntry.fromJson({...base(), 'setup': null}).setup, isNull);
+      expect(
+        SessionEntry.fromJson({...base(), 'setup': 'running'}).setup,
+        isNull,
+      );
+    });
+
+    test('a running run decodes every field and round-trips', () {
+      final e = SessionEntry.fromJson({
+        ...base(),
+        'checkoutId': 'worktree-1',
+        'checkoutKind': 'managed-worktree',
+        'setup': {
+          'state': 'running',
+          'stepIndex': 1,
+          'stepCount': 4,
+          'stepName': 'Install dependencies',
+          'terminalId': 'worktree-1:setup',
+          'pendingStart': true,
+          'startedAt': 1700,
+        },
+      });
+      final s = e.setup!;
+      expect(s.state, 'running');
+      expect(s.stepIndex, 1);
+      expect(s.stepCount, 4);
+      expect(s.stepName, 'Install dependencies');
+      // Verbatim, including the `:setup` suffix: the bridge resolves this id
+      // through an identity mapping, so a bare "setup" reaches no terminal.
+      expect(s.terminalId, 'worktree-1:setup');
+      expect(s.pendingStart, isTrue);
+      expect(s.startedAt, 1700);
+      expect(s.exitCode, isNull);
+      expect(s.finishedAt, isNull);
+      expect(SessionEntry.fromJson(e.toJson()), e);
+    });
+
+    test('a failed run carries its exit code and one-line reason', () {
+      final e = SessionEntry.fromJson({
+        ...base(),
+        'setup': {
+          'state': 'failed',
+          'stepIndex': 2,
+          'stepCount': 4,
+          'stepName': 'Generate Prisma client',
+          'exitCode': 7,
+          'message': 'Generate Prisma client exited 7',
+          'startedAt': 1700,
+          'finishedAt': 1900,
+        },
+      });
+      final s = e.setup!;
+      expect(s.exitCode, 7);
+      expect(s.message, 'Generate Prisma client exited 7');
+      expect(s.finishedAt, 1900);
+      expect(s.pendingStart, isFalse);
+      expect(SessionEntry.fromJson(e.toJson()), e);
+    });
+
+    // The bridge owns this vocabulary and may widen it. An unknown value is
+    // carried through for the render site to degrade — dropping it here would
+    // make "a state this build can't name" indistinguishable from "no setup".
+    test('a state this build cannot name survives the decode', () {
+      final e = SessionEntry.fromJson({
+        ...base(),
+        'setup': {'state': 'restoring', 'startedAt': 1},
+      });
+      expect(e.setup?.state, 'restoring');
+      expect(e.toJson()['setup'], containsPair('state', 'restoring'));
+    });
+
+    // Absence has to be false: the flag says an agent start is WAITING, and a
+    // wrong `true` would leave a surface explaining a queue that isn't there.
+    test(
+      'pendingStart and the counters default when the bridge omits them',
+      () {
+        final s = SessionEntry.fromJson({
+          ...base(),
+          'setup': {'state': 'done', 'startedAt': 5},
+        }).setup!;
+        expect(s.pendingStart, isFalse);
+        expect(s.stepIndex, 0);
+        expect(s.stepCount, 0);
+      },
+    );
+
+    // Without this the transition is invisible to SessionsState's equality and
+    // the no-op dedup in _handleUpdated drops every progress push.
+    test('two entries differing only in setup are not equal', () {
+      final plain = SessionEntry.fromJson(base());
+      final preparing = SessionEntry.fromJson({
+        ...base(),
+        'setup': {'state': 'running', 'startedAt': 1},
+      });
+      final later = SessionEntry.fromJson({
+        ...base(),
+        'setup': {
+          'state': 'running',
+          'stepIndex': 1,
+          'stepCount': 4,
+          'startedAt': 1,
+        },
+      });
+      expect(preparing, isNot(plain));
+      expect(preparing.hashCode, isNot(plain.hashCode));
+      expect(later, isNot(preparing));
+      expect(later.hashCode, isNot(preparing.hashCode));
+    });
+
+    test('copyWith carries the run forward and replaces it', () {
+      final entry = SessionEntry.fromJson({
+        ...base(),
+        'setup': {'state': 'running', 'stepCount': 2, 'startedAt': 1},
+      });
+      expect(entry.copyWith(running: true).setup, entry.setup);
+      const done = SessionSetup(
+        state: 'done',
+        stepIndex: 1,
+        stepCount: 2,
+        startedAt: 1,
+        finishedAt: 9,
+      );
+      expect(entry.copyWith(setup: done).setup, done);
+    });
+  });
 }

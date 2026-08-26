@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../demo/demo_identity.dart';
+import '../demo/fixtures/demo_workspace_fixtures.dart';
 import '../models/ab_project.dart';
 import '../models/agent_descriptor.dart';
 import '../models/branch_remote_status.dart';
@@ -22,12 +24,17 @@ import 'account_agents.dart';
 import 'agent_catalog.dart';
 import 'agent_transport.dart';
 import 'control_plane.dart';
+import 'demo_mode.dart';
 import 'device_provisioning.dart';
 import 'projects.dart';
 import 'recent_agents.dart';
 import 'sessions.dart';
 import 'ui_attention_providers.dart';
 import 'value_controller.dart';
+
+/// [newSessionStartInFlightProvider] is derived from the start-progress model
+/// and lives beside it, but its readers have always imported it from here.
+export 'new_session_start.dart' show newSessionStartInFlightProvider;
 
 /// Bare device uuid of a `machine:<uuid>` source id; null for 'local' or the
 /// 'machine:none' placeholder. Single source of truth for the source-id prefix
@@ -208,6 +215,19 @@ List<PickerProject> buildRemoteProjectRows(
 /// Rail sources for the New Session canvas, fed from the same three sources the
 /// dashboard merges (local projects, recent agents, account inventory).
 final pickerSourcesProvider = Provider<List<PickerSource>>((ref) {
+  // Demo: one Local source holding the sample project, and none of the real
+  // sources watched — `accountAgentsProvider` reads the keychain and fetches
+  // /account/agents. `includeLocal` is deliberately overridden: mobile hides
+  // the Local rail because it has no folders to open, but the sample project is
+  // the only thing the demo has to pick.
+  if (ref.watch(demoModeProvider)) {
+    return buildPickerSources(
+      localProjects: [demoProject()],
+      recents: const [],
+      inventory: const [],
+    );
+  }
+
   final locals = ref.watch(projectsProvider);
   final recents = ref.watch(recentAgentsProvider);
   final inventory =
@@ -297,6 +317,14 @@ final newSessionDetectedToolsProvider = FutureProvider<Map<String, String?>>((
   final target = ref.watch(selectedTargetProjectProvider);
   if (target == null) return const <String, String?>{};
 
+  // Before the local arm, same as [newSessionBranchCatalogProvider]: that arm
+  // spawns the real bridge host, and the demo's own agent is canned. The
+  // failure is silent — the surrounding catch swallows it — so nothing on
+  // screen would say the sample project had just started a bridge.
+  if (ref.watch(demoModeProvider)) {
+    return const <String, String?>{kDemoAgentTool: null};
+  }
+
   if (target.isLocal) {
     try {
       final host = await ref.watch(hostControllerProvider).ensureHost();
@@ -352,6 +380,11 @@ final newSessionChatCapableToolsProvider =
     FutureProvider.autoDispose<Set<String>?>((ref) async {
       final target = ref.watch(selectedTargetProjectProvider);
       if (target == null) return null;
+
+      // Same host-spawn hazard as [newSessionDetectedToolsProvider] above.
+      if (ref.watch(demoModeProvider)) {
+        return const <String>{kDemoAgentTool};
+      }
 
       if (target.isLocal) {
         try {
@@ -600,13 +633,6 @@ final newSessionSupportsChatProvider = Provider.autoDispose<bool?>((ref) {
 final newSessionAgentTouchedProvider =
     NotifierProvider<ValueController<bool>, bool>(() => ValueController(false));
 
-/// True while [startNewSession] is mid-flight creating+starting a session.
-/// `_bootstrapSessions` (workspace_shell) checks this and skips its
-/// empty->New-Session route so the two paths don't fight over
-/// [workbenchSurfaceProvider].
-final newSessionStartInFlightProvider =
-    NotifierProvider<ValueController<bool>, bool>(() => ValueController(false));
-
 /// The composer's prompt text. Non-empty text becomes the session's first
 /// message (chat) or launch argv (terminal) via `session:start.initialPrompt`.
 final newSessionPromptProvider =
@@ -632,6 +658,23 @@ final newSessionBranchCatalogProvider =
     FutureProvider.autoDispose<GitBranchCatalog?>((ref) async {
       final target = ref.watch(selectedTargetProjectProvider);
       if (target == null) return null;
+
+      // Before the local branch: `ensureHost()` SPAWNS the real bridge host, and
+      // the sample project is presented under a banner saying nothing is
+      // connected. Its branches are canned like the rest of it.
+      if (ref.watch(demoModeProvider)) {
+        return const GitBranchCatalog(
+          isRepository: true,
+          current: kDemoBranch,
+          branches: kDemoBranches,
+          // Stated, not defaulted. `worktreeSessionsSupported` is what
+          // `newSessionIsolationReadyProvider` reads, and the isolated chip's
+          // disabled tooltip is a claim about the user's OWN machine — "check
+          // that its Antgrid is up to date" — which the demo is in no position
+          // to make about a bridge it never spoke to.
+          worktreeSessionsSupported: true,
+        );
+      }
 
       if (target.isLocal) {
         final host = await ref.watch(hostControllerProvider).ensureHost();
@@ -701,6 +744,10 @@ final newSessionBranchRemoteStatusProvider = FutureProvider.autoDispose
     ) async {
       final target = ref.watch(selectedTargetProjectProvider);
       if (target == null || target.id != key.targetId) return null;
+      // Before the debounce timer, not just before the request: the sample
+      // project's branches are fixtures with no remote behind them, and the
+      // local arm below would spawn the bridge host to ask about one.
+      if (ref.watch(demoModeProvider)) return null;
 
       // Settles only after the user stops moving through branches. Disposal during
       // the wait — composer closed, start pressed, branch changed again — cancels
@@ -789,7 +836,6 @@ void resetNewSessionForm(ProviderContainer ref) {
   ref.read(selectedTargetProjectProvider.notifier).set(null);
   ref.read(selectedSourceIdProvider.notifier).set('local');
   ref.read(newSessionAgentTouchedProvider.notifier).set(false);
-  ref.read(newSessionStartInFlightProvider.notifier).set(false);
   ref.read(newSessionPromptProvider.notifier).set('');
   ref.read(newSessionBranchSelectionProvider.notifier).set(null);
   ref.read(newSessionIsolatedProvider.notifier).set(false);

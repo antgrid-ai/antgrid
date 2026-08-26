@@ -19,6 +19,7 @@ import '../navigation/nav_controller.dart';
 import '../providers/agent_transport.dart';
 import '../providers/providers.dart';
 import '../providers/recent_sessions.dart';
+import '../providers/session_setup.dart';
 import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
 import '../utils/platform_utils.dart';
@@ -496,7 +497,13 @@ class TitleBarBreadcrumb extends ConsumerWidget {
                 : EditableSessionLeaf(session: active),
           ),
         ),
-        if (active != null) SessionIsolationBadge(session: active),
+        if (active != null)
+          SessionIsolationBadge(
+            session: active,
+            // The live list's answer, never `active.setup`: the entry can come
+            // from the persisted cache, which carries no setup state at all.
+            setup: ref.watch(activeSessionSetupProvider),
+          ),
         if (gitBranch != null) ...[
           const SizedBox(width: AbTokens.space8),
           // Bounded, not Flexible: the breadcrumb is the only child that should

@@ -5,6 +5,7 @@ import '../util/device_id.dart';
 import 'agent_catalog.dart';
 import 'agent_transport.dart';
 import 'control_plane.dart';
+import 'demo_mode.dart';
 import 'new_session_picker.dart';
 
 /// The `agent:tools` advert for the machine hosting the FOCUSED project.
@@ -39,6 +40,15 @@ class FocusedTools {
 final focusedMachineToolsProvider = FutureProvider<FocusedTools>((ref) async {
   final target = ref.watch(selectedTargetProvider);
   if (target == null) return const FocusedTools();
+
+  // The EARLIEST host spawn in the app: `enterDemoMode` points
+  // [selectedTargetProvider] at the sample project, which is a `LocalProject`,
+  // and the session mark and mode control watch this from the workspace the
+  // demo opens on — so the real bridge started before the user had touched
+  // anything. Empty is the value this provider already resolves to when the
+  // host cannot answer, and both consumers fall back to
+  // `sessionAgentDisplayLabel` for it, so the demo reads the same as it did.
+  if (ref.watch(demoModeProvider)) return const FocusedTools();
 
   if (target.isLocal) {
     try {

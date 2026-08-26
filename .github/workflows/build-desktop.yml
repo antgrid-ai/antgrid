@@ -75,7 +75,7 @@ env:
   # and a cache is readable only from its own ref or the DEFAULT branch, so every
   # release wrote 1.8 GB into a scope the next release could not read. The pub
   # cache is the opposite trade (~158 MB, ~12s) and is worth its bytes.
-  FLUTTER_VERSION: '3.47.0'
+  FLUTTER_VERSION: '3.47.1'
   LICENSE_API_URL: 'https://app.antgrid.ai'
   # The only hand-maintained part of the version. Bump for a deliberate product
   # major; the rest of the string is stamped from the clock and the run counter.
@@ -86,11 +86,17 @@ jobs:
   # CalVer-ish: <major>.<days since Unix epoch>.<run number>, e.g. 1.20662.412.
   #   - days-since-epoch is UTC integer division, so it has no leading-zero or
   #     DST hazard and increases exactly once a day, forever.
-  #   - run_number discriminates several releases within the same day.
+  #   - the build number discriminates several releases within the same day.
   # The commit and the build time are NOT encoded here (a hex sha is not a legal
   # version component in semver, App Store, or MSIX) — they ride alongside as
   # dart-defines.
   version:
+    # Only the repo that owns the release destinations publishes. This workflow
+    # writes to `antgrid-releases` and the Microsoft Store, neither of which is
+    # scoped to a repo, so an ungated second repo in this org republishes over
+    # the first's releases with its own counter. Every downstream job needs
+    # `version`, so gating here disarms the whole workflow.
+    if: vars.RELEASE_REPO == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -98,6 +104,7 @@ jobs:
     outputs:
       name: ${{ steps.compute.outputs.name }}
       build_name: ${{ steps.compute.outputs.build_name }}
+      build_number: ${{ steps.compute.outputs.build_number }}
       msix: ${{ steps.compute.outputs.msix }}
       tag: ${{ steps.compute.outputs.tag }}
       sha: ${{ steps.compute.outputs.sha }}
@@ -110,8 +117,25 @@ jobs:
           IS_RELEASE: ${{ inputs.release }}
           MODE: ${{ inputs.build_mode || 'release' }}
           PLATFORM: ${{ inputs.platform || 'all' }}
+          BUILD_NUMBER_OFFSET: ${{ vars.BUILD_NUMBER_OFFSET }}
         run: |
           set -euo pipefail
+
+          # run_number is scoped to ONE workflow in ONE repository and restarts
+          # at 1 in a fresh repo, while Sparkle compares against the
+          # CFBundleVersion baked into the INSTALLED app -- so a repo move walks
+          # the counter back under what is already in the field. The guard in
+          # the macOS job turns that into a hard failure rather than a dead
+          # update affordance, but the offset is what stops it happening.
+          #
+          # Unset means 0, and unset is correct on the repo that owns the
+          # original counter -- that is what keeps both repos from consuming the
+          # same offset range while publishing still runs from the old one.
+          offset="${BUILD_NUMBER_OFFSET:-0}"
+          case "$offset" in
+            *[!0-9]*|'') echo "::error::BUILD_NUMBER_OFFSET must be a non-negative integer, got '$offset'"; exit 1 ;;
+          esac
+          build_number=$(( GITHUB_RUN_NUMBER + offset ))
 
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             # A hand-pushed v* tag stays authoritative: the tag IS the version.
@@ -127,7 +151,7 @@ jobs:
               echo "::error::release=true needs platform=all — publish requires the macOS and Linux artifacts"
               exit 1
             fi
-            name="${VERSION_MAJOR}.$(( $(date -u +%s) / 86400 )).${GITHUB_RUN_NUMBER}"
+            name="${VERSION_MAJOR}.$(( $(date -u +%s) / 86400 )).${build_number}"
           fi
 
           # MSIX takes four 16-bit integers with the revision pinned to 0, and it
@@ -150,6 +174,7 @@ jobs:
           # full string for the tag, the release title, and APP_VERSION.
           {
             echo "name=$name"
+            echo "build_number=$build_number"
             echo "build_name=$core"
             echo "msix=$core.0"
             echo "tag=v$name"
@@ -271,7 +296,7 @@ jobs:
         run: |
           flutter build macos --${{ env.BUILD_MODE }} \
             --build-name=${{ needs.version.outputs.build_name }} \
-            --build-number=${{ github.run_number }} \
+            --build-number=${{ needs.version.outputs.build_number }} \
             --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }} \
             --dart-define=APP_VERSION=${{ needs.version.outputs.name }} \
             --dart-define=GIT_SHA=${{ needs.version.outputs.sha }} \
@@ -449,7 +474,7 @@ jobs:
           # release-notes link at a tag that does not exist.
           TAG: ${{ needs.version.outputs.tag }}
           VERSION: ${{ needs.version.outputs.name }}
-          BUILD: ${{ github.run_number }}
+          BUILD: ${{ needs.version.outputs.build_number }}
           SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
           # Sparkle tools release used for sign_update only (the framework the
           # app embeds comes from the auto_updater pod, independently).
@@ -457,10 +482,10 @@ jobs:
         run: |
           set -euo pipefail
           # The app's own detection compares the version triple, but Sparkle's
-          # install compares CFBundleVersion (--build-number, i.e. run_number)
-          # — a release whose triple rises while the build number does not
-          # lights the in-app row and then has Sparkle report "up to date": a
-          # permanently dead affordance.
+          # install compares CFBundleVersion (--build-number, i.e. the
+          # offset run counter) — a release whose triple rises while the
+          # build number does not lights the in-app row and then has Sparkle
+          # report "up to date": a permanently dead affordance.
           # Enforce a strictly increasing build against the currently
           # published appcast. 404 = first release / earlier appcasts skipped
           # as unverifiable (nothing to compare); any OTHER fetch failure or
@@ -624,7 +649,7 @@ jobs:
       - name: Build Windows app
         id: build
         working-directory: app
-        run: flutter build windows --${{ env.BUILD_MODE }} --build-name=${{ needs.version.outputs.build_name }} --build-number=${{ github.run_number }} --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }} --dart-define=APP_VERSION=${{ needs.version.outputs.name }} --dart-define=GIT_SHA=${{ needs.version.outputs.sha }} --dart-define=BUILD_TIME=${{ needs.version.outputs.built }}
+        run: flutter build windows --${{ env.BUILD_MODE }} --build-name=${{ needs.version.outputs.build_name }} --build-number=${{ needs.version.outputs.build_number }} --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }} --dart-define=APP_VERSION=${{ needs.version.outputs.name }} --dart-define=GIT_SHA=${{ needs.version.outputs.sha }} --dart-define=BUILD_TIME=${{ needs.version.outputs.built }}
 
       - name: Copy bridge into output folder
         if: ${{ steps.build.outcome == 'success' }}
@@ -830,7 +855,7 @@ jobs:
         run: |
           flutter build linux --${{ env.BUILD_MODE }} \
             --build-name=${{ needs.version.outputs.build_name }} \
-            --build-number=${{ github.run_number }} \
+            --build-number=${{ needs.version.outputs.build_number }} \
             --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }} \
             --dart-define=APP_VERSION=${{ needs.version.outputs.name }} \
             --dart-define=GIT_SHA=${{ needs.version.outputs.sha }} \

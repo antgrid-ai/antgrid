@@ -40,6 +40,13 @@ abstract final class BackPriority {
   // close the file, not the surface out from under it.
   static const int workspaceSurface = 700;
   static const int mobileAgentPage = 400;
+
+  /// Last registered handler, below every surface the demo can open: a back
+  /// press with anything still to unwind must unwind it, and only an exhausted
+  /// one leaves the sample project. Registered by `DemoHome` alone, so the
+  /// exit gate below it is unreachable while the demo is on — a reviewer's
+  /// back press returns them to sign-in instead of closing the app.
+  static const int demoExit = 100;
 }
 
 /// How long the "press back again" arm stays valid.

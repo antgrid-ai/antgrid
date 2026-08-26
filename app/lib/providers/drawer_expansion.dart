@@ -5,7 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 /// advertised PROJECT sub-rows nested under them (keyed by the compound
 /// `<uuid>.<projectId>` regId). This is the inverse of
 /// [collapsedDrawerIdsProvider], which serves rows that default to EXPANDED
-/// (local + QR-paired projects).
+/// (local projects).
 ///
 /// Kept in-memory (never persisted): a freshly-launched app must start with
 /// every remote machine CLOSED so it doesn't open control-plane sockets the

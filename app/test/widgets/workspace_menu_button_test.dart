@@ -15,14 +15,16 @@
 // POPUP's mechanics, not the platform default — and the touch group at the
 // bottom exercises the unpinned (touch) default deliberately, to confirm
 // there is no platform-specific path left to regress.
+import 'package:antgrid/design/widgets/ab_diff_stat.dart';
+import 'package:antgrid/design/widgets/ab_icon.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
+import 'package:antgrid/design/widgets/ab_menu.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/providers/visible_surface.dart';
-import 'package:antgrid/widgets/new_session/environment_menu.dart'
-    show PanelRow;
 import 'package:antgrid/widgets/workspace_menu_button.dart';
 import 'package:antgrid/widgets/workspace_tab_bar.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -68,6 +70,40 @@ Future<ProviderContainer> _pump(
 AbIconButton _button(WidgetTester tester) =>
     tester.widget<AbIconButton>(find.byKey(WorkspaceMenuButton.buttonKey));
 
+/// Parks a mouse pointer over the rail and waits out its hover-intent delay,
+/// which is what brings it forward from its resting, receded look. Nothing
+/// about the rail's LAYOUT depends on this — every label is on screen either
+/// way — so only the tests that assert its weight need it.
+Future<void> _hoverRail(WidgetTester tester) async {
+  final pointer = await tester.createGesture(kind: PointerDeviceKind.mouse);
+  await pointer.addPointer(location: Offset.zero);
+  addTearDown(pointer.removePointer);
+  await pointer.moveTo(tester.getCenter(find.byType(WorkspaceMenuPanel)));
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 150));
+  await tester.pumpAndSettle();
+}
+
+/// How far the rail has receded: 1 at rest, 0 once it has come forward.
+double _quiet(WidgetTester tester) => tester
+    .widget<AbPopupSurface>(
+      find.descendant(
+        of: find.byType(WorkspaceMenuPanel),
+        matching: find.byType(AbPopupSurface),
+      ),
+    )
+    .quiet;
+
+/// Where a view's glyph sits on screen.
+Rect _iconRect(WidgetTester tester, WorkspaceView view) => tester.getRect(
+  find
+      .descendant(
+        of: find.byType(WorkspaceMenuPanel),
+        matching: find.byType(AbIcon),
+      )
+      .at(WorkspaceView.values.indexOf(view)),
+);
+
 /// A no-op `reveal`-carrying control, so every test below only has to name
 /// the field it actually cares about.
 WorkspaceMenuControl _control({
@@ -111,10 +147,11 @@ void main() {
       });
     });
 
-    // The menu is pinned: the icon that opened it is the only thing that
-    // shuts it, so picking a view leaves it standing and the user can pick
-    // again.
-    testWidgets('picking a view reveals it and leaves the menu up', (
+    // The rail is pinned: nothing in it dismisses itself, so picking a view
+    // leaves it standing and the user can pick again. In the app the shell
+    // takes it away as the pane it just opened arrives — but that is the
+    // shell's doing, covered in test/screens/workspace_menu_docking_test.dart.
+    testWidgets('picking a view reveals it and leaves the rail up', (
       tester,
     ) async {
       await runDesktop(tester, () async {
@@ -128,6 +165,63 @@ void main() {
 
         expect(revealed, [WorkspaceView.git, WorkspaceView.files]);
         expect(find.text('Terminals'), findsOneWidget);
+      });
+    });
+
+    // The resting state, and the reason the rail may sit pinned over a
+    // transcript at all: receded to a translucent, flat surface — but with
+    // every label still on it, which is the whole job.
+    testWidgets('rests receded and comes forward under the pointer', (
+      tester,
+    ) async {
+      await runDesktop(tester, () async {
+        await _pump(tester, control: _control());
+
+        expect(_quiet(tester), 1);
+        for (final view in WorkspaceView.values) {
+          expect(find.text(view.label), findsOneWidget, reason: view.label);
+        }
+
+        await _hoverRail(tester);
+        expect(_quiet(tester), 0);
+      });
+    });
+
+    // Coming forward is a change of weight, never of size or shape. An earlier
+    // version furled to an icon column, which moved every row under the
+    // pointer and hid the labels until one was asked for.
+    testWidgets('coming forward moves nothing', (tester) async {
+      await runDesktop(tester, () async {
+        await _pump(tester, control: _control());
+
+        final resting = tester.getRect(find.byType(WorkspaceMenuPanel));
+        final rows = {
+          for (final view in WorkspaceView.values)
+            view: _iconRect(tester, view),
+        };
+
+        await _hoverRail(tester);
+
+        expect(tester.getRect(find.byType(WorkspaceMenuPanel)), resting);
+        for (final view in WorkspaceView.values) {
+          expect(_iconRect(tester, view), rows[view], reason: view.label);
+        }
+      });
+    });
+
+    // The rail is as wide as its longest row and no wider. It used to be laid
+    // out at a width fixed for the widest row it could EVER hold — the Git
+    // row's whole-worktree `+N -M` — which left two thirds of it empty every
+    // other time.
+    testWidgets('is as wide as its content, not a reserved width', (
+      tester,
+    ) async {
+      await runDesktop(tester, () async {
+        await _pump(tester, control: _control());
+
+        final panel = tester.getRect(find.byType(WorkspaceMenuPanel));
+        final longest = tester.getRect(find.text('Terminals'));
+        expect(panel.right - longest.right, lessThan(20));
       });
     });
 
@@ -224,17 +318,26 @@ void main() {
       });
     });
 
+    // Asserted through the row's semantics rather than its widget, because
+    // that is the half a screen reader gets: the row excludes its own subtree,
+    // so the label and the selected state are stated on the wrapper or they
+    // are stated nowhere.
     testWidgets('marks the view already on screen', (tester) async {
       await runDesktop(tester, () async {
         await _pump(tester, control: _control(active: WorkspaceView.preview));
 
         expect(
-          find.byWidgetPredicate((w) => w is PanelRow && w.selected),
+          find.byWidgetPredicate(
+            (w) => w is Semantics && (w.properties.selected ?? false),
+          ),
           findsOneWidget,
         );
         expect(
           find.byWidgetPredicate(
-            (w) => w is PanelRow && w.selected && w.label == 'Preview',
+            (w) =>
+                w is Semantics &&
+                (w.properties.selected ?? false) &&
+                w.properties.label == 'Preview',
           ),
           findsOneWidget,
         );
@@ -279,6 +382,59 @@ void main() {
         expect(find.text('3'), findsNothing);
         // Every other view keeps its plain count.
         expect(find.text('2'), findsOneWidget);
+      });
+    });
+
+    // Both figures sit in the same trailing column, so they have to read as
+    // the same rank of thing. AbDiffStat's own default is set for the dense
+    // per-file badge in the changed-file tree and is a size smaller.
+    testWidgets('the Git +/- is the same size as a plain count', (
+      tester,
+    ) async {
+      await runDesktop(tester, () async {
+        await _pump(
+          tester,
+          control: _control(),
+          badges: const {WorkspaceView.handler: 2},
+          gitTotals: (additions: 4, deletions: 3),
+        );
+
+        double sizeOf(String text) =>
+            tester.widget<Text>(find.text(text)).style!.fontSize!;
+        expect(sizeOf('+4'), sizeOf('2'));
+      });
+    });
+
+    // A receded rail dims its labels by taking the muted foreground, which a
+    // green `+4` and a bordered badge cannot do — left alone they end up the
+    // loudest thing on a surface nobody has reached for.
+    testWidgets('the counts recede with the rail and come back with it', (
+      tester,
+    ) async {
+      await runDesktop(tester, () async {
+        await _pump(
+          tester,
+          control: _control(),
+          gitTotals: (additions: 4, deletions: 3),
+        );
+
+        double figureOpacity() => tester
+            .widget<Opacity>(
+              find
+                  .ancestor(
+                    of: find.byType(AbDiffStat),
+                    matching: find.byType(Opacity),
+                  )
+                  .first,
+            )
+            .opacity;
+
+        expect(figureOpacity(), lessThan(1));
+        // ...and never to nothing: it is the one fact worth reading at rest.
+        expect(figureOpacity(), greaterThan(0.4));
+
+        await _hoverRail(tester);
+        expect(figureOpacity(), 1);
       });
     });
 
@@ -378,6 +534,20 @@ void main() {
         });
       },
     );
+
+    // Receding is a trade: the rail hands the transcript back some of its
+    // weight and takes a hover to get it again. A touch platform has no hover
+    // to pay with, so it is never charged — the rail arrives forward and
+    // stays there.
+    testWidgets('never recedes where there is no hover to undo it', (
+      tester,
+    ) async {
+      await runTouch(tester, () async {
+        await _pump(tester, control: _control());
+
+        expect(_quiet(tester), 0);
+      });
+    });
 
     // `selected` mirrors the popup, exactly as on desktop — not whether a
     // view happens to be on screen: it starts true with no active view, and

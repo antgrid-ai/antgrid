@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import { CHECKOUT_KINDS, type CheckoutRecord } from "./checkout-types";
+import { CHECKOUT_KINDS, DURABLE_SETUP_STATES, type CheckoutRecord } from "./checkout-types";
 
 const RecordSchema = z.object({
   id: z.string().min(1),
@@ -13,6 +13,9 @@ const RecordSchema = z.object({
   managed: z.boolean(),
   sessionId: z.string().nullable(),
   createdAt: z.number().finite(),
+  setupState: z.enum(DURABLE_SETUP_STATES).optional(),
+  setupFinishedAt: z.number().finite().optional(),
+  setupExitCode: z.number().int().optional(),
 });
 const FileSchema = z.object({ version: z.literal(1), checkouts: z.array(z.unknown()) });
 
@@ -75,6 +78,29 @@ export class CheckoutStore {
     if (record.projectId !== this.projectId) throw new Error("checkout projectId mismatch");
     await this.mutate((records) =>
       [...records.filter((item) => item.id !== record.id), RecordSchema.parse(record)]);
+  }
+
+  /**
+   * Rewrite one row from its current value, under the same lock the write takes.
+   *
+   * The only safe way to annotate a row a caller does not own outright: a
+   * `get()` followed by a `put()` spans two lock acquisitions, so a `remove()`
+   * landing between them is undone — the put RESURRECTS a checkout whose
+   * directory Git has already deleted. Returns false when the row is gone, which
+   * is the annotation quietly dropping rather than a failure.
+   */
+  async update(id: string, patch: (record: CheckoutRecord) => CheckoutRecord): Promise<boolean> {
+    let applied = false;
+    await this.mutate((records) => {
+      const current = records.find((item) => item.id === id);
+      if (!current) return null;
+      const next = RecordSchema.parse(patch(current));
+      if (next.id !== id) throw new Error("checkout id mismatch");
+      if (next.projectId !== this.projectId) throw new Error("checkout projectId mismatch");
+      applied = true;
+      return [...records.filter((item) => item.id !== id), next];
+    });
+    return applied;
   }
 
   async remove(id: string): Promise<boolean> {

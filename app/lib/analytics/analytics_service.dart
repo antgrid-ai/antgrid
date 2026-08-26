@@ -11,6 +11,7 @@ class AnalyticsService {
     required String platform,
     required String appVersion,
     required bool Function() enabled,
+    bool Function()? paused,
     DateTime Function()? now,
     this.batchSize = 10,
   }) : _client = client,
@@ -21,7 +22,10 @@ class AnalyticsService {
        _platform = platform,
        _appVersion = appVersion,
        _enabled = enabled,
+       _paused = paused ?? _never,
        _now = now ?? DateTime.now;
+
+  static bool _never() => false;
 
   final http.Client _client;
   final String _plausibleUrl;
@@ -31,6 +35,9 @@ class AnalyticsService {
   final String _platform;
   final String _appVersion;
   final bool Function() _enabled;
+
+  /// A temporary hold, distinct from [_enabled]: see [flush].
+  final bool Function() _paused;
   final DateTime Function() _now;
   final int batchSize;
 
@@ -83,6 +90,10 @@ class AnalyticsService {
   }
 
   Future<void> flush() async {
+    // A pause is not an opt-out. The queue holds the user's OWN events from
+    // before they entered the sample project, which they had consented to
+    // send; hold them until the pause lifts rather than dropping them.
+    if (_paused()) return;
     // Honor a runtime opt-out: track() stops enqueuing once disabled, but the
     // pause-lifecycle flush would otherwise still transmit events queued while
     // telemetry was on. Drop them instead.

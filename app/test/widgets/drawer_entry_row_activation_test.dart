@@ -3,15 +3,12 @@ import 'package:antgrid/models/session_target.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/control_plane.dart';
 import 'package:antgrid/providers/drawer_entries.dart';
-import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/recent_agents.dart';
 import 'package:antgrid/services/account_agents_api.dart';
 import 'package:antgrid/services/control_plane_client.dart';
-import 'package:antgrid/services/storage_service.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/drawer_entry_row.dart';
-import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -43,25 +40,6 @@ InventoryAgent _inventoryAgent() => InventoryAgent(
   relayUrl: 'wss://relay.example.test/ws',
 );
 
-class _EmptyPairedAgentNotifier extends PairedAgentNotifier {
-  @override
-  Future<List<PairedAgent>> build() async => const [];
-}
-
-class _MemoryStorageService extends StorageService {
-  _MemoryStorageService(this.agents);
-
-  List<PairedAgent> agents;
-
-  @override
-  Future<List<PairedAgent>> loadPairedAgents() async => List.of(agents);
-
-  @override
-  Future<void> savePairedAgents(List<PairedAgent> agents) async {
-    this.agents = List.of(agents);
-  }
-}
-
 class _SeededRecentAgentsNotifier extends RecentAgentsNotifier {
   _SeededRecentAgentsNotifier(this._seed);
   final List<RecentAgent> _seed;
@@ -83,7 +61,6 @@ Future<void> _pumpActivationHarness(
       overrides: [
         ...stores.overrides,
         drawerEntriesProvider.overrideWithValue([entry]),
-        pairedAgentProvider.overrideWith(() => _EmptyPairedAgentNotifier()),
         // Activation now brings the machine up by reading its transport (the
         // supervisor owns the dial). A machine that cannot be reached surfaces
         // as this provider rejecting, which is what the restore-prior-target
@@ -271,26 +248,18 @@ void main() {
     },
   );
 
-  testWidgets('forget remote row removes local machine trust', (tester) async {
+  testWidgets('forget remote row drops the machine from the reconnect list', (
+    tester,
+  ) async {
     useInMemoryPrefs();
     final stores = await buildTestStoreOverrides();
     addTearDown(stores.close);
     final recent = _recentAgent();
     await stores.recentAgentsStore.upsert(recent);
-    final storage = _MemoryStorageService([
-      PairedAgent(
-        relayUrl: recent.relayUrl,
-        agentDeviceId: recent.agentDeviceId,
-        agentName: recent.agentLabel,
-      ),
-    ]);
 
     await tester.pumpWidget(
       ProviderScope(
-        overrides: [
-          ...stores.overrides,
-          storageServiceProvider.overrideWithValue(storage),
-        ],
+        overrides: stores.overrides,
         child: MaterialApp(
           home: Scaffold(body: DrawerEntryRow(RemoteAgentEntry(recent))),
         ),
@@ -311,14 +280,13 @@ void main() {
     await tester.pump();
     // forgetMachine does real-event-loop work (awaited registry evict +
     // purgeEntryState's ProjectStatusCache file I/O) that the fake-async clock
-    // won't advance — so the trust-removal that follows it never lands and the
-    // row's busy spinner never resets. Drain the real loop once, then settle.
+    // won't advance — so the removal that follows it never lands and the row's
+    // busy spinner never resets. Drain the real loop once, then settle.
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 200)),
     );
     await tester.pumpAndSettle();
 
-    expect(storage.agents, isEmpty);
     expect(stores.recentAgentsStore.list(), isEmpty);
   });
 }

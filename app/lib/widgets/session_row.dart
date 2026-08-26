@@ -26,6 +26,7 @@ import '../providers/open_checkout.dart';
 import '../providers/project_work_status.dart';
 import '../providers/providers.dart';
 import '../providers/session_delete_pending.dart';
+import '../providers/session_setup.dart';
 import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
 import '../services/control_plane_client.dart';
@@ -270,7 +271,13 @@ class _SessionRowState extends ConsumerState<SessionRow> {
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
-                    SessionIsolationBadge(session: session),
+                    SessionIsolationBadge(
+                      session: session,
+                      // The live list's answer, never `session.setup`: a row
+                      // for a project that isn't focused is served from the
+                      // persisted cache, which carries no setup state at all.
+                      setup: ref.watch(sessionSetupProvider(session.id)),
+                    ),
                     SessionDeletingBadge(deleting: deleting),
                   ],
                 ),
@@ -363,7 +370,15 @@ class _SessionRowState extends ConsumerState<SessionRow> {
       if (svc == null) return;
       if (ref.read(selectedRegistrationIdProvider) != liveId) return;
       ref.read(activeSessionIdProvider.notifier).set(session.id);
-      if (!session.running) {
+      // A tap is an auto-start path, so it gates like the workspace bootstrap
+      // does: the start queued behind an isolated checkout's setup run is the
+      // create flow's own, prompt and all, and a bare re-start here is a second
+      // one the user never asked for. Read live where the list has landed, and
+      // fall back to the row's own copy where it has not.
+      final queued = sessionStartQueued(
+        ref.read(sessionSetupProvider(session.id)) ?? session.setup,
+      );
+      if (!session.running && !queued) {
         // The two failures end differently, and that is the whole point of
         // catching them separately: a refusal is the bridge's answer that this
         // session did NOT start, while a timeout is no answer at all.
@@ -560,15 +575,26 @@ class _SessionMenu extends ConsumerWidget {
   }
 
   Future<void> _openMenu(BuildContext anchor, ProviderContainer ref) async {
-    // Working-directory rows are LOCAL-only: the checkout lives on the machine
-    // hosting it, so for a relay project the window would open somewhere the
-    // user is not sitting. A failed probe degrades to no rows rather than a
-    // menu that never opens.
-    final targets = ref.read(entryIsRelayProvider(entryId))
-        ? const <ExternalOpenTarget>[]
-        : await ref
+    // Working-directory rows are offered only for a checkout on THIS device:
+    // both resolve their path over the loopback control plane
+    // (`openCheckoutIn`/`copyCheckoutPath` read `hostControlClientProvider`),
+    // which can only answer about projects this machine hosts. Asked about a
+    // remote machine's project it spawns a host and refuses — and the window it
+    // could not open would have been on a machine the user is not sitting at.
+    //
+    // Gated on what the local project store holds, never on whether the id
+    // looks remote: an id absent from it (a remote project, a machine, the
+    // demo) loses the rows, so a source of remote entries added later is
+    // excluded without this line being revisited. A failed probe degrades to no
+    // rows rather than a menu that never opens.
+    final local = await ref
+        .read(entryIsLocalCheckoutProvider(entryId).future)
+        .catchError((_) => false);
+    final targets = local
+        ? await ref
               .read(externalOpenTargetsProvider.future)
-              .catchError((_) => const <ExternalOpenTarget>[]);
+              .catchError((_) => const <ExternalOpenTarget>[])
+        : const <ExternalOpenTarget>[];
     if (!anchor.mounted) return;
     final anchorRect = abMenuAnchorRect(anchor);
     if (anchorRect == null) return;
@@ -730,7 +756,7 @@ class _SessionMenu extends ConsumerWidget {
     if (entryId != ref.read(selectedRegistrationIdProvider)) return;
     if (ref.read(activeSessionsProvider).isNotEmpty) return;
     if (ref.read(focusedIsRelayProvider)) {
-      ref.read(pairedAgentProvider.notifier).cancelActiveAgent();
+      ref.read(machineConnectionProvider.notifier).cancelActiveAgent();
     } else if (ref.read(selectedRegistrationIdProvider) != null) {
       ref.read(selectedTargetProvider.notifier).set(null);
     }

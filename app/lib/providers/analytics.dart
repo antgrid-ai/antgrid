@@ -14,6 +14,7 @@ AnalyticsService buildAnalyticsService({
   required String platform,
   required String appVersion,
   required bool Function() enabled,
+  required bool Function() paused,
   required String plausibleUrl,
   required String plausibleDomain,
   required String eventsApiUrl,
@@ -26,4 +27,5 @@ AnalyticsService buildAnalyticsService({
   platform: platform,
   appVersion: appVersion,
   enabled: enabled,
+  paused: paused,
 );

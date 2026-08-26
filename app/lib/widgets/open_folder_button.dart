@@ -77,15 +77,24 @@ Future<String?> registerPickedFolder(
   bool select = true,
 }) async {
   final id = await computeProjectId(folder);
+  final hostUuid = await _resolveLocalHostUuid(ref);
   final projects = ref.read(projectsProvider);
   final existingMatches = projects.where((p) => p.projectId == id).toList();
   if (existingMatches.isNotEmpty) {
-    existingMatches.first.lastOpenedAt = DateTime.now();
-    await ref.read(projectsProvider.notifier).upsert(existingMatches.first);
+    final existing = existingMatches.first;
+    existing.lastOpenedAt = DateTime.now();
+    // Re-stamp the host identity, not just the timestamp. The uuid this device
+    // answers with can move under an already-stored row — a folder opened while
+    // sign-in provisioning was still in flight keeps the anonymous uuid the
+    // account record then replaced — and a row left on the old one reads as
+    // hosted elsewhere forever: no working-directory actions, and a "Remote
+    // host" chip for a folder on this disk. The pick is the proof of locality;
+    // the user just named this folder on this machine.
+    existing.hostDeviceUuid = hostUuid;
+    await ref.read(projectsProvider.notifier).upsert(existing);
     if (select) selectProject(ref, id);
     return id;
   }
-  final hostUuid = await _resolveLocalHostUuid(ref);
   final project = AbProject(
     projectId: id,
     folder: folder,

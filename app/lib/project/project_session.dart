@@ -86,7 +86,17 @@ class ProjectSession {
            ? baseProjectId(projectId)
            : projectId {
     _router = MessageRouter(transport: transport);
-    status = ProjectStatusNotifier(_router.status);
+    // Main's SLICE, not the whole tier. This notifier is the PROJECT's
+    // status, and an isolated session's worktree runs its own copy of
+    // antgrid.yaml — same service names, its own ports, its own config
+    // validity. Fed the raw tier, it folded every checkout's frame in as the
+    // project's own, last writer wins, and then cached and persisted that.
+    // Scoping at the stream rather than inside the notifier keeps it uniform
+    // with every other per-checkout consumer, and a frame carrying no
+    // checkoutId still lands here — `checkoutIdForEnvelope` answers 'main'
+    // for it, which is what keeps `agent:hello` (about the agent, not a tree)
+    // flowing.
+    status = ProjectStatusNotifier(checkoutStatusStream('main'));
     _mainCheckoutServices = CheckoutServices(this, 'main');
     _checkoutServices['main'] = _mainCheckoutServices;
     sessionsService = SessionsService.fromSession(

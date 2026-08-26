@@ -7,7 +7,6 @@ import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/control_plane.dart';
 import 'package:antgrid/providers/eager_control_planes.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
-import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/relay_connection.dart';
 import 'package:antgrid/providers/ui_attention_providers.dart';
 import 'package:antgrid/providers/value_controller.dart';
@@ -380,7 +379,6 @@ void main() {
             ...stores.overrides,
             relayConnectionManagerProvider.overrideWithValue(manager),
             accountAgentsProvider.overrideWith((_) async => const []),
-            pairedAgentProvider.overrideWith(() => _EmptyPairedAgentNotifier()),
           ],
         );
         addTearDown(c.dispose);
@@ -480,9 +478,4 @@ void main() {
       },
     );
   });
-}
-
-class _EmptyPairedAgentNotifier extends PairedAgentNotifier {
-  @override
-  Future<List<PairedAgent>> build() async => const [];
 }

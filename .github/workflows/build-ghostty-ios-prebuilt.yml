@@ -40,7 +40,7 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version: '3.47.0'   # keep in lockstep with deploy-ios
+          flutter-version: '3.47.1'   # keep in lockstep with deploy-ios
           cache: true
 
       - name: Flutter pub get

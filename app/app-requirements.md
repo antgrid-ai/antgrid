@@ -28,7 +28,7 @@ The app connects outbound to the relay server. It never communicates directly wi
 1. **Flutter** — Single codebase for iOS, Android, macOS, Windows, Linux.
 2. **Two WebSocket channels** — One for command/control (terminals, files, notifications), one for browser preview traffic. Both carry E2E encrypted payloads.
 3. **Offline-resilient** — The app can disconnect and reconnect at any time. On reconnect, it catches up via the relay's offline queue and the agent's scrollback buffers.
-4. **E2E encryption** — The app holds the shared secret (from QR pairing). All encryption/decryption happens on-device. Nothing is sent in plaintext.
+4. **E2E encryption** — Session keys are derived per connection (X25519 ECDH), never persisted. All encryption/decryption happens on-device. Nothing is sent in plaintext.
 5. **Multi-project aware** — The agent serves multiple projects. The app must support project switching.
 
 ---
@@ -44,14 +44,11 @@ The app connects outbound to the relay server. It never communicates directly wi
 
 ## Functional Requirements
 
-### 1. Pairing
+### 1. Admission
 
-- The app must scan a QR code displayed by the Antgrid Agent to establish a pairing.
-- The QR payload contains: relay URL, agent device ID, shared secret, agent name, protocol version.
-- Manual short code entry (e.g., "ANTGRID-AX3F") must be supported as a fallback.
-- On successful pairing, the app must store the pairing credentials securely on-device.
-- The app must support pairing with multiple agents (e.g., work laptop, home desktop) and switching between them.
-- Only one agent connection is active at a time.
+- Signing in to the same account on both ends is the whole admission step — there is no pairing ceremony, QR code, or short code.
+- The app must resolve a machine's dial coordinates and Ed25519 key from the account inventory, and cache them on-device for offline reconnects.
+- The app must support several machines on one account (e.g., work laptop, home desktop) and switching between them.
 
 ### 2. Terminal Viewer
 
@@ -120,8 +117,8 @@ The app connects outbound to the relay server. It never communicates directly wi
 
 ## Security Requirements
 
-- Shared secret from QR pairing must be stored in platform-secure storage (iOS Keychain, Android Keystore).
-- All data sent to the relay must be encrypted with AES-256-GCM using the shared secret.
+- Device credentials must be stored in platform-secure storage (iOS Keychain, Android Keystore); session keys are per-connection and never persisted.
+- All data sent to the relay must be encrypted with AES-256-GCM under the handshake-derived session keys.
 - No plaintext user data may leave the device (except the unencrypted envelope: device IDs and channel type).
 - The app must validate the relay's TLS certificate.
 - Biometric/PIN lock option before accessing the app (optional, user-configurable).
@@ -194,8 +191,8 @@ The app connects outbound to the relay server. It never communicates directly wi
 
 ## Development Phases
 
-### Phase 1 — Shell & Pairing
-Flutter project setup, QR scanner, relay WebSocket connection, encryption layer, device registration, pairing flow. Verify: scan QR → connect to relay → pair with agent.
+### Phase 1 — Shell & Admission
+Flutter project setup, account sign-in, relay WebSocket connection, encryption layer, device registration. Verify: sign in → connect to relay → reach the account's agent.
 
 ### Phase 2 — Terminal Viewer
 Terminal emulation widget, multi-tab support, keyboard input, send/receive terminal messages, scrollback on reconnect, quick-action keys. Verify: view and interact with agent terminals.

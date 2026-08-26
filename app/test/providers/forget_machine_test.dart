@@ -12,32 +12,13 @@ import 'package:antgrid/providers/cached_sessions.dart';
 import 'package:antgrid/providers/recent_ports.dart';
 import 'package:antgrid/project/project_session_registry.dart'
     show projectStatusCacheProvider;
-import 'package:antgrid/services/storage_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid/storage/recent_ports_store.dart';
-import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/prefs_test_mock.dart';
-
-class _MemoryStorageService extends StorageService {
-  _MemoryStorageService(this.agents);
-
-  List<PairedAgent> agents;
-
-  @override
-  Future<List<PairedAgent>> loadPairedAgents() async => List.of(agents);
-
-  @override
-  Future<void> savePairedAgents(List<PairedAgent> agents) async {
-    this.agents = List.of(agents);
-  }
-}
-
-PairedAgent _paired(String id) =>
-    PairedAgent(relayUrl: 'ws://relay.test', agentDeviceId: id, agentName: id);
 
 RecentAgent _recent(String id) {
   final now = DateTime.utc(2026, 1, 1);
@@ -54,23 +35,13 @@ RecentAgent _recent(String id) {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  Future<
-    ({
-      ProviderContainer container,
-      RecentAgentsStore recentStore,
-      _MemoryStorageService storage,
-    })
-  >
-  buildContainer({
-    required List<PairedAgent> paired,
-    required List<RecentAgent> recent,
-  }) async {
+  Future<({ProviderContainer container, RecentAgentsStore recentStore})>
+  buildContainer({required List<RecentAgent> recent}) async {
     useInMemoryPrefs();
     final recentStore = await RecentAgentsStore.open();
     for (final agent in recent) {
       await recentStore.upsert(agent);
     }
-    final storage = _MemoryStorageService(paired);
     // forgetMachine purges each forgotten agent's per-entry footprint, so the
     // container must provide the stores purgeEntryState reads.
     final cachedSessions = await CachedSessionsStore.open();
@@ -81,7 +52,6 @@ void main() {
     final statusCache = ProjectStatusCache.testInstance(root: statusTmp.path);
     final container = ProviderContainer(
       overrides: [
-        storageServiceProvider.overrideWithValue(storage),
         recentAgentsStoreProvider.overrideWithValue(recentStore),
         cachedSessionsStoreProvider.overrideWithValue(cachedSessions),
         recentPortsStoreProvider.overrideWithValue(recentPorts),
@@ -99,63 +69,34 @@ void main() {
         // Windows teardown handle race — harmless.
       }
     });
-    return (container: container, recentStore: recentStore, storage: storage);
+    return (container: container, recentStore: recentStore);
   }
 
-  test(
-    'forgetMachine removes inactive remote from paired and recent stores',
-    () async {
-      final h = await buildContainer(
-        paired: [_paired('M.project'), _paired('N.project')],
-        recent: [_recent('M.project'), _recent('N.project')],
-      );
-      await h.container.read(pairedAgentProvider.future);
+  test('forgetMachine drops the machine from the reconnect list', () async {
+    final h = await buildContainer(
+      recent: [_recent('M.project'), _recent('N.project')],
+    );
 
-      await h.container.read(pairedAgentProvider.notifier).forgetMachine('M');
-      await Future<void>.delayed(Duration.zero);
+    await h.container
+        .read(machineConnectionProvider.notifier)
+        .forgetMachine('M');
+    await Future<void>.delayed(Duration.zero);
 
-      expect(h.storage.agents.map((a) => a.agentDeviceId), ['N.project']);
-      expect(h.recentStore.list().map((a) => a.agentDeviceId), ['N.project']);
-      expect(
-        h.container
-            .read(pairedAgentProvider)
-            .value
-            ?.map((a) => a.agentDeviceId),
-        ['N.project'],
-      );
-    },
-  );
-
-  test(
-    'forgetMachine preserves nonmatching paired agents before provider load',
-    () async {
-      final h = await buildContainer(
-        paired: [_paired('M.project'), _paired('N.project')],
-        recent: [_recent('M.project'), _recent('N.project')],
-      );
-
-      await h.container.read(pairedAgentProvider.notifier).forgetMachine('M');
-      await Future<void>.delayed(Duration.zero);
-
-      expect(h.storage.agents.map((a) => a.agentDeviceId), ['N.project']);
-      expect(h.recentStore.list().map((a) => a.agentDeviceId), ['N.project']);
-    },
-  );
+    expect(h.recentStore.list().map((a) => a.agentDeviceId), ['N.project']);
+  });
 
   test(
     'forgetMachine clears active target for the forgotten machine',
     () async {
       final h = await buildContainer(
-        paired: [_paired('M.project'), _paired('N.project')],
         recent: [_recent('M.project'), _recent('N.project')],
       );
       h.container
           .read(selectedTargetProvider.notifier)
           .set(const RemoteTarget.legacy('M.project'));
-      await h.container.read(pairedAgentProvider.future);
 
       await h.container
-          .read(pairedAgentProvider.notifier)
+          .read(machineConnectionProvider.notifier)
           .forgetMachine('M.project');
 
       expect(h.container.read(selectedTargetProvider), isNull);
@@ -166,11 +107,6 @@ void main() {
     'forgetMachine removes all compound ids for the same bare machine',
     () async {
       final h = await buildContainer(
-        paired: [
-          _paired('M.projectA'),
-          _paired('M.projectB'),
-          _paired('N.project'),
-        ],
         recent: [
           _recent('M.projectA'),
           _recent('M.projectB'),
@@ -181,11 +117,11 @@ void main() {
       mgr.connectionFor('M.projectA');
       mgr.connectionFor('M.projectB');
       mgr.connectionFor('N.project');
-      await h.container.read(pairedAgentProvider.future);
 
-      await h.container.read(pairedAgentProvider.notifier).forgetMachine('M');
+      await h.container
+          .read(machineConnectionProvider.notifier)
+          .forgetMachine('M');
 
-      expect(h.storage.agents.map((a) => a.agentDeviceId), ['N.project']);
       expect(h.recentStore.list().map((a) => a.agentDeviceId), ['N.project']);
       expect(mgr.peek('M.projectA'), isNull);
       expect(mgr.peek('M.projectB'), isNull);
@@ -193,8 +129,14 @@ void main() {
     },
   );
 
+  // The shape that actually reaches this today: the reconnect list holds the
+  // BARE machine uuid (that is what the dial upserts), while every per-entry
+  // store is keyed by the project's compound drawer id. Resolving the purge set
+  // from the reconnect list alone leaves each project's cache behind, and the
+  // machine's projects are usually all cold when it is forgotten — so neither
+  // that list nor the warm registry can name them.
   test(
-    'forgetMachine purges cached sessions + status cache for its agents',
+    'forgetMachine purges the cached projects of a machine held by bare uuid',
     () async {
       useInMemoryPrefs();
       final tmp = await Directory.systemTemp.createTemp('antgrid-forget-test-');
@@ -208,8 +150,8 @@ void main() {
       final statusCache = ProjectStatusCache.testInstance(root: tmp.path);
 
       final recentStore = await RecentAgentsStore.open();
-      await recentStore.upsert(_recent('M.project'));
-      await recentStore.upsert(_recent('N.project'));
+      await recentStore.upsert(_recent('M'));
+      await recentStore.upsert(_recent('N'));
       addTearDown(recentStore.close);
 
       final cachedSessions = await CachedSessionsStore.open();
@@ -238,13 +180,8 @@ void main() {
       ]);
       await statusCache.write('M.project', const ProjectStatus.empty());
 
-      final storage = _MemoryStorageService([
-        _paired('M.project'),
-        _paired('N.project'),
-      ]);
       final container = ProviderContainer(
         overrides: [
-          storageServiceProvider.overrideWithValue(storage),
           recentAgentsStoreProvider.overrideWithValue(recentStore),
           cachedSessionsStoreProvider.overrideWithValue(cachedSessions),
           recentPortsStoreProvider.overrideWithValue(recentPorts),
@@ -252,9 +189,10 @@ void main() {
         ],
       );
       addTearDown(container.dispose);
-      await container.read(pairedAgentProvider.future);
 
-      await container.read(pairedAgentProvider.notifier).forgetMachine('M');
+      await container
+          .read(machineConnectionProvider.notifier)
+          .forgetMachine('M');
       await Future<void>.delayed(Duration.zero);
 
       expect(cachedSessions.get('M.project'), isEmpty);

@@ -7,12 +7,15 @@ import 'package:antgrid/models/file_tree_models.dart';
 import 'package:antgrid/models/preferences_models.dart';
 import 'package:antgrid/models/preview_models.dart';
 import 'package:antgrid/models/terminal_models.dart';
+import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
+import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/screens/app_shell.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import 'package:antgrid/window/window_chrome.dart';
-import 'package:antgrid_relay_client/antgrid_relay_client.dart';
+import 'package:antgrid_relay_client/antgrid_relay_client.dart'
+    show AgentTransport;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 // Riverpod 3 keeps `Override` out of the main barrel.
@@ -22,27 +25,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'prefs_test_mock.dart';
 import 'test_store_overrides.dart';
 
-final testAgent = PairedAgent(
-  relayUrl: 'wss://test.relay',
-  agentDeviceId: 'agent-123.test-project',
-  agentName: 'Test Agent',
-);
-
-/// A fake PairedAgentNotifier that returns a list with one mock PairedAgent.
-class FakePairedAgentNotifier extends AsyncNotifier<List<PairedAgent>>
-    implements PairedAgentNotifier {
-  @override
-  Future<List<PairedAgent>> build() async => [testAgent];
-
-  @override
-  Future<void> selectAgent(String agentDeviceId) async {}
-  @override
-  Future<void> forgetMachine(String agentDeviceIdOrUuid) async {}
-  @override
-  Future<void> retryAgentConnection() async {}
-  @override
-  void cancelActiveAgent() {}
-}
+/// The focused entry id these tests mount the shell on: a remote PROJECT, i.e.
+/// the compound `<machineUuid>.<projectId>` shape.
+const testAgentDeviceId = 'agent-123.test-project';
 
 /// Pumps the real [AppShell] (which renders WorkspaceShell once paired), with
 /// a fake window chrome since WorkspaceShell mounts `WindowTitleBar` directly.
@@ -66,9 +51,16 @@ Future<ProviderContainer> pumpWorkspaceShell(
     ProviderScope(
       overrides: [
         ...stores.overrides,
-        pairedAgentProvider.overrideWith(() => FakePairedAgentNotifier()),
+        // Account- and keychain-backed, and both are read while the shell
+        // chrome builds. The real inventory fetch pulls the session cookie out
+        // of the keychain and the real uuid MINTS a host identity on desktop —
+        // neither belongs in a widget test. Kept out of [extraOverrides] for
+        // the same reason the transport is: Riverpod 3 asserts on a provider
+        // overridden twice in one container.
+        accountAgentsProvider.overrideWith((_) async => const []),
+        localDeviceUuidProvider.overrideWith((_) async => 'test-local-device'),
         selectedRegistrationIdProvider.overrideWith(
-          (ref) => withProject ? testAgent.agentDeviceId : null,
+          (ref) => withProject ? testAgentDeviceId : null,
         ),
         terminalStateProvider.overrideWith(
           (ref) => Stream.value(const TerminalState()),

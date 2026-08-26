@@ -107,7 +107,7 @@ before anything imports the database layer**, including `npm run setup` itself.
 
 The SDK constraint is `sdk: ^3.11.0` (Dart 3.11 or newer, below 4.0) in
 `app/pubspec.yaml` and both packages under `packages/`. CI pins Flutter
-**3.47.0 stable**, repeated across the workflows and `scripts/setup-cloud.sh`
+**3.47.1 stable**, repeated across the workflows and `scripts/setup-cloud.sh`
 and kept in lockstep — grep `flutter-version` and `FLUTTER_VERSION` to find
 every copy before bumping. Any stable Flutter whose bundled Dart satisfies
 `^3.11.0` should work; if you hit something odd, match the CI pin before filing

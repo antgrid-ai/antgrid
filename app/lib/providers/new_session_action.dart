@@ -21,12 +21,15 @@ import 'agent_transport.dart';
 import 'analytics.dart';
 import 'cached_sessions.dart';
 import 'control_plane.dart';
+import 'demo_mode.dart';
 import 'new_session_picker.dart';
+import 'new_session_start.dart';
 import 'projects.dart';
 import 'provider_retry.dart';
 import 'providers.dart';
 import 'recent_agents.dart';
 import 'sessions.dart';
+import 'ui_attention_providers.dart';
 
 /// Thrown when activating a remote project is refused by the retired
 /// concurrent-remote-agent cap (`SESSION_LIMIT_EXCEEDED`, surfaced by the host
@@ -86,8 +89,11 @@ class ActiveSessionsBranchSwitchException implements Exception {
 ///
 /// Activates the picker-selected target project so `selectedRegistrationIdProvider`
 /// becomes its id, waits for the per-project [ProjectSession] (transport +
-/// services) to construct, then creates and starts a fresh session in it and
-/// marks it active. Finally leaves new-session mode so the workspace renders.
+/// services) to construct, then creates a fresh session in it, marks it active
+/// and leaves new-session mode so the workspace renders. The `session:start`
+/// goes out on the way through and is reconciled after the hand-off — the
+/// bridge may only have QUEUED it behind an isolated checkout's setup run, so
+/// its reply is no longer worth blocking the navigation on.
 ///
 /// This replaces the old "instant create" path (a pending provider consumed by
 /// `_bootstrapSessions`): the New Session page now owns the explicit
@@ -98,7 +104,10 @@ class ActiveSessionsBranchSwitchException implements Exception {
 /// remote one resolves its machine (cached recent, else the account inventory)
 /// and lets the connection supervisor bring that machine's socket up.
 ///
-/// Throws on activation/create failure; callers surface the error.
+/// Throws on activation/create failure; callers surface the error. Every
+/// non-throwing bail-out instead records a [NewSessionStartAbortReason], and
+/// each stage publishes itself to [newSessionStartProgressProvider] — a start
+/// that ends with nothing to show must still be able to say why.
 Future<void> startNewSession(
   ProviderContainer ref, {
   bool allowActiveSessions = false,
@@ -110,6 +119,7 @@ Future<void> startNewSession(
       ? selection.branch
       : null;
   final isolated = ref.read(newSessionIsolatedProvider);
+  final start = ref.read(newSessionStartProgressProvider.notifier);
   bool intentIsCurrent() {
     final currentTarget = ref.read(selectedTargetProjectProvider);
     final currentSelection = ref.read(newSessionBranchSelectionProvider);
@@ -119,18 +129,64 @@ Future<void> startNewSession(
         : null;
     return currentTarget?.id == target.id &&
         ref.read(newSessionIsolatedProvider) == isolated &&
-        currentBranch == explicitBranch;
+        currentBranch == explicitBranch &&
+        !ref.read(newSessionStartCancelRequestedProvider);
+  }
+
+  // A Stop press and a form edit both fail intentIsCurrent; only the reason
+  // handed to the composer tells the user which one ended the start.
+  NewSessionStartAbortReason bailReason() =>
+      ref.read(newSessionStartCancelRequestedProvider)
+      ? NewSessionStartAbortReason.cancelled
+      : NewSessionStartAbortReason.intentChanged;
+
+  // Latched here rather than read back off newSessionStartAbortProvider: the
+  // composer's listener CONSUMES an abort the instant it lands (synchronously,
+  // before this function resumes), so the provider cannot tell "nothing was
+  // recorded" from "recorded, and already said" — and the `finally` below
+  // would answer a Stop that was reported a second time.
+  var aborted = false;
+  void abort(NewSessionStartAbortReason reason) {
+    aborted = true;
+    start.abort(reason);
   }
 
   // This gate is deliberately checked before doing a shared checkout. An old
   // bridge strips unknown fields, so sending worktree intent without this
   // catalog capability would silently create a shared session.
-  if (isolated && !ref.read(newSessionIsolationReadyProvider)) return;
+  if (isolated && !ref.read(newSessionIsolationReadyProvider)) {
+    abort(NewSessionStartAbortReason.isolationUnavailable);
+    return;
+  }
 
-  ref.read(newSessionStartInFlightProvider.notifier).set(true);
+  // Never in the demo. The sample project's branch menu is fixture data
+  // (`newSessionBranchCatalogProvider`), so picking one of its branches is
+  // ordinary demo navigation — but the checkout's local arm is an `ensureHost()`
+  // caller and the demo's target IS a `LocalProject`, so it would spawn the real
+  // bridge and check a branch out in whatever directory the fixture names.
+  // Skipping costs the user nothing: the create step further down answers with
+  // the demo's own refusal either way.
+  final willCheckoutBranch =
+      !isolated && explicitBranch != null && !ref.read(demoModeProvider);
+
+  final name = ref.read(newSessionNameProvider).trim();
+  start.begin(
+    // The checkout runs first when there is one, so the status line must open
+    // on it rather than flashing the activation copy for a frame.
+    phase: willCheckoutBranch
+        ? NewSessionStartPhase.switchingBranch
+        : NewSessionStartPhase.activating,
+    targetId: target.id,
+    targetName: target.name,
+    deviceName: target.isLocal ? '' : _machineLabelFor(ref, target),
+    agentLabel: _agentLabelFor(ref),
+    isolated: isolated,
+    title: _startTitle(ref, name),
+    branch: explicitBranch,
+  );
   try {
     // 0. If an explicit branch was selected, perform git checkout BEFORE target activation
-    if (!isolated && explicitBranch != null) {
+    if (willCheckoutBranch) {
       try {
         if (target.isLocal) {
           final host = await ref.read(hostControllerProvider).ensureHost();
@@ -182,22 +238,33 @@ Future<void> startNewSession(
         rethrow;
       }
 
+      // The one step of a start that outlives it. Recorded before the next
+      // checkpoint can bail, so whatever ends this start says the tree moved.
+      start.markBranchSwitched(explicitBranch);
+
       // Re-verify selected target and branch selection after await
-      if (!intentIsCurrent()) return;
+      if (!intentIsCurrent()) {
+        abort(bailReason());
+        return;
+      }
     }
 
-    final name = ref.read(newSessionNameProvider).trim();
-
     // 1. Activate the target so `selectedRegistrationIdProvider` points at it.
+    start.advance(NewSessionStartPhase.activating);
     final pid = await _activateTargetProject(ref, target);
 
-    if (!intentIsCurrent()) return;
+    if (!intentIsCurrent()) {
+      abort(bailReason());
+      return;
+    }
 
     // 2. Wait for the per-project ProjectSession (transport + services) to finish
     // constructing before reading any per-project service façade — otherwise the
     // sync `ref.read(sessionsServiceProvider)` below races the async factory.
+    start.advance(NewSessionStartPhase.preparing);
     await ref.read(projectSessionProvider(pid).future);
     if (ref.read(selectedRegistrationIdProvider) != pid || !intentIsCurrent()) {
+      abort(bailReason());
       return;
     }
 
@@ -225,10 +292,11 @@ Future<void> startNewSession(
     // An agent rejection (`ok:false`) comes back as a null result, but a
     // dropped/late reply completes the pending request with a TimeoutException
     // (a throw, not null). Guard the whole create→start block so that thrown
-    // case is handled like the null one — stay on the New Session page — rather
-    // than escaping `startNewSession` as an unhandled async error. The
-    // in-flight flag is still cleared by the outer `finally`.
+    // case is handled like the null one — the draft survives and the canvas is
+    // retryable — rather than escaping `startNewSession` as an unhandled async
+    // error. Progress is still cleared by the outer `finally`.
     try {
+      start.advance(NewSessionStartPhase.creating);
       final created = await svc.create(
         name: name.isEmpty ? null : name,
         tool: tool,
@@ -239,49 +307,182 @@ Future<void> startNewSession(
         baseBranch: isolated ? explicitBranch : null,
       );
       // create failed (e.g. session cap reached); stay on the New Session page
-      // so the user can retry.
-      if (created == null) return;
-      if (ref.read(selectedRegistrationIdProvider) != pid) return;
+      // so the user can retry. Only CREATE keeps the user here — once the
+      // session exists it is theirs, and the place to report anything further
+      // about it is the session itself. A refusal carrying a reason — the
+      // sample project's included — never reaches here: `SessionsService.create`
+      // fails its completer with a `SessionOperationException`, which the
+      // composer's own catch renders.
+      if (created == null) {
+        abort(NewSessionStartAbortReason.createRefused);
+        return;
+      }
+      // NOT intentChanged: create already landed, so a session exists on the
+      // bridge that this bail leaves unstarted — saying "nothing was created"
+      // here would be a lie the user cannot check.
+      if (ref.read(selectedRegistrationIdProvider) != pid) {
+        abort(NewSessionStartAbortReason.abandonedAfterCreate);
+        return;
+      }
       final prompt = ref.read(newSessionPromptProvider).trim();
-      final started = await svc.start(
+      start.advance(NewSessionStartPhase.launching);
+
+      // 4. Send the start, then navigate on it rather than on its reply. An
+      // isolated session's start is QUEUED behind the checkout's setup run and
+      // answered `ok: true` immediately with `setup.pendingStart` set, so the
+      // reply cannot say whether the agent is live — every surface reads that
+      // off the session entry instead, and waiting here would only hold the
+      // canvas over a session the user is already owed.
+      //
+      // Sent BEFORE leaveNewSession, deliberately: that remounts WorkspaceShell,
+      // whose bootstrap immediately re-lists the sessions and auto-starts the
+      // one it adopts if the list says it is stopped. Issuing the start first
+      // puts it ahead of that list on the same stream, so the bridge answers
+      // with the start already accounted for instead of taking a second one
+      // that carries no initialPrompt. That ordering is all a SHARED session
+      // needs; an isolated one whose start is queued reports `running: false`
+      // for the whole setup run, and the bootstrap's own `sessionStartQueued`
+      // guard is what stops it starting over the top.
+      final starting = svc.start(
         created.id,
         initialPrompt: prompt.isEmpty ? null : prompt,
         raiseRefusal: true,
       );
-      // start failed with no reason on the wire (an `ok:true` carrying no
-      // session, or an older agent's bare rejection — an unknown tool, no agent
-      // configured); a CODED refusal is raised past here to the composer, which
-      // says what it was. Either way stay on the New Session page so the user
-      // can retry rather than dropping into a session whose PTY never spawned.
-      if (started == null) return;
-      if (ref.read(selectedRegistrationIdProvider) != pid) return;
-      ref.read(activeSessionIdProvider.notifier).set(created.id);
-      ref
-          .read(analyticsServiceProvider)
-          ?.track(
-            AnalyticsEvents.sessionOpened,
-            props: {'surface': isMobilePlatform ? 'mobile' : 'desktop'},
-          );
 
-      // 4. A successful start consumes the draft. Navigation itself preserves
+      // A start survives the user walking away from the canvas, so only steal
+      // the focus of someone still standing on it — otherwise the session they
+      // navigated to would be yanked away by work they already left behind.
+      // Read here rather than after the reply, because this IS the hand-off:
+      // TerminalScreen WATCHES activeSessionIdProvider, so setting it is itself
+      // the yank, and by the time the reply lands the user has either been
+      // moved or deliberately left behind.
+      if (ref.read(workbenchSurfaceProvider) == WorkbenchSurface.newSession) {
+        ref.read(activeSessionIdProvider.notifier).set(created.id);
+        ref
+            .read(analyticsServiceProvider)
+            ?.track(
+              AnalyticsEvents.sessionOpened,
+              props: {'surface': isMobilePlatform ? 'mobile' : 'desktop'},
+            );
+        // Leaving the canvas REMOUNTS WorkspaceShell (AppShell swaps the whole
+        // route), and its bootstrap re-derives the active session from the
+        // bridge's `lastUsedAt` ranking. Name the session we just started so
+        // that bootstrap adopts it instead of re-deriving: `lastUsedAt`
+        // measures ACTIVITY, so a keystroke or an agent notification in another
+        // session between `session:start` and the list reply outranks this one
+        // and steals the focus the user just asked for.
+        ref.read(pendingActiveSessionIdProvider.notifier).set(created.id);
+        leaveNewSession(ref);
+      }
+
+      // 5. Reconcile the reply now that the user is already in the session. A
+      // queued start is a SUCCESS — the entry comes back carrying
+      // `setup.pendingStart` — so only a bare rejection (an `ok:true` with no
+      // session, an older agent's unknown tool) leaves the draft intact for a
+      // return to this canvas; a CODED refusal still raises past here.
+      final started = await starting;
+      if (started == null) {
+        abort(NewSessionStartAbortReason.startRefused);
+        return;
+      }
+      // The session IS running, so this is not a refusal — but it belongs to a
+      // project the user has since left. Say where it went instead of clearing
+      // the draft as if they had landed in it.
+      if (ref.read(selectedRegistrationIdProvider) != pid) {
+        abort(NewSessionStartAbortReason.startedAfterSwitch);
+        return;
+      }
+      // An accepted start consumes the draft. Navigation itself preserves
       // drafts, so failures and a later return to this canvas remain editable.
       resetNewSessionForm(ref);
-      // Leaving the canvas REMOUNTS WorkspaceShell (AppShell swaps the whole
-      // route), and its bootstrap re-derives the active session from the
-      // bridge's `lastUsedAt` ranking. Name the session we just started so that
-      // bootstrap adopts it instead of re-deriving: `lastUsedAt` measures
-      // ACTIVITY, so a keystroke or an agent notification in another session
-      // between `session:start` and the list reply outranks this one and steals
-      // the focus the user just asked for.
-      ref.read(pendingActiveSessionIdProvider.notifier).set(created.id);
-      leaveNewSession(ref);
     } on TimeoutException {
       // A dropped/late reply is retryable. Typed bridge failures intentionally
-      // reach the composer so it can show their safe display message.
+      // reach the composer so it can show their safe display message — though
+      // a START refusal now arrives after the hand-off, by which point the
+      // composer is unmounted and it is the workspace's OperationalErrorToaster
+      // that voices it (the service stamps the reason onto SessionsState.error
+      // before failing the pending request).
+      //
+      // The abort is what a CREATE timeout is owed: that one is still on the
+      // canvas, it is the longest wait this flow has, and ending it without a
+      // word is the silent vanish the whole progress model exists to remove. A
+      // start timeout records one too and nobody is left to read it, which is
+      // cheaper than deciding the reason from which await threw.
+      abort(NewSessionStartAbortReason.replyTimedOut);
     }
   } finally {
-    ref.read(newSessionStartInFlightProvider.notifier).set(false);
+    // A Stop press the flow never reached a checkpoint to observe — because a
+    // throw unwound past every one of them — still ended this start at the
+    // user's request. Record it here or it dies with the progress it lived on,
+    // and the composer's catch arms report a failure the user pre-empted.
+    if (!aborted && ref.read(newSessionStartCancelRequestedProvider)) {
+      abort(NewSessionStartAbortReason.cancelled);
+    }
+    start.end();
   }
+}
+
+/// Machine label for the start status line. Mirrors `_remoteMachineLabel` in
+/// `recent_session_row.dart` — hostMachineName → pairing label → inventory
+/// machineName → displayName — so the status line and the Recents row it
+/// becomes name the same machine the same way. The recents pass runs first
+/// because an offline machine the inventory has not listed still has a row
+/// there.
+///
+/// Ends on the bare uuid rather than a friendlier guess: an unnamed machine is
+/// better shown as its id than folded onto another machine's name.
+String _machineLabelFor(ProviderContainer ref, PickerProject target) {
+  final uuid = target.machineUuid ?? baseDeviceUuid(target.id);
+  String? clean(String? s) =>
+      (s != null && s.trim().isNotEmpty) ? s.trim() : null;
+
+  if (ref.exists(recentAgentsProvider)) {
+    for (final recent in ref.read(recentAgentsProvider)) {
+      if (baseDeviceUuid(recent.agentDeviceId) != uuid) continue;
+      // The MATCH ends the recents pass, name or no name — the same machine
+      // must not be labelled from the recents here and from the inventory in
+      // `_remoteMachineLabel`, or the status line and the Recents row it turns
+      // into would name it two different ways.
+      return clean(recent.hostMachineName) ?? clean(recent.agentLabel) ?? uuid;
+    }
+  }
+  final inventory = ref.exists(accountAgentsProvider)
+      ? ref.read(accountAgentsProvider).value
+      : null;
+  if (inventory != null) {
+    for (final agent in inventory) {
+      if (agent.deviceUuid != uuid) continue;
+      return clean(agent.machineName) ?? agent.displayName;
+    }
+  }
+  return uuid;
+}
+
+/// Human agent name for the status line: the target's advertised tool list
+/// first, then the persisted catalog, then the bridge's registry key — showing
+/// `kilo` is honest, naming it after some other agent is not.
+///
+/// Every source is read ONLY where something already holds it. Naming a label
+/// is not a reason to CREATE one of these: the tool list probes the target (and
+/// spawns the local host to do it) and the catalog hydrates off disk, neither
+/// of which a start should trigger. The composer keeps both alive for the whole
+/// New Session surface, so in practice they answer.
+String _agentLabelFor(ProviderContainer ref) => newSessionAgentLabel(
+  ref.read(newSessionAgentProvider),
+  ref.exists(newSessionDetectedToolsProvider)
+      ? ref.read(newSessionDetectedToolsProvider).value
+      : null,
+  ref.exists(agentCatalogProvider) ? ref.read(agentCatalogProvider) : null,
+);
+
+/// What the optimistic Recents row shows where a real session shows its title.
+/// The prompt stands in for an unnamed session because that is what the bridge
+/// will name it from anyway.
+String _startTitle(ProviderContainer ref, String name) {
+  if (name.isNotEmpty) return name;
+  final prompt = ref.read(newSessionPromptProvider).trim();
+  if (prompt.isEmpty) return 'New session';
+  return prompt.split('\n').first;
 }
 
 /// Test seam over the private [_activateTargetProject]: the production drill-in
@@ -318,10 +519,27 @@ Future<String> _activateTargetProject(
   }
 
   // Remote target: machineUuid + projectId are populated (Tasks 1–3).
+  //
+  // The phase is published from a callback THIS caller supplies rather than by
+  // the activation helper itself: that helper is shared with the drawer's
+  // remote-row tap, navigation stays unlocked during a start, and a write from
+  // there would let an unrelated tap fast-forward this start's phase (`advance`
+  // refuses rewinds, not foreign forward jumps). Only this caller is a New
+  // Session start.
+  //
+  // It fires where `connecting` actually begins — after `project:start` is on
+  // the wire — because everything before it (resolving the machine, opening its
+  // control-plane socket, the promote itself) is `activating`, and publishing
+  // `connecting` up here instead superseded `activating` in the same
+  // synchronous turn: no frame ever painted it, so "Waking <machine>…" was
+  // copy the user could not see.
   return openRemoteProjectForActivation(
     ref,
     machineUuid: target.machineUuid!,
     projectId: target.projectId!,
+    onAwaitingRunning: () => ref
+        .read(newSessionStartProgressProvider.notifier)
+        .advance(NewSessionStartPhase.connecting),
   );
 }
 
@@ -342,10 +560,14 @@ Future<String> _activateTargetProject(
 /// uuid, but the SELECTED target + returned id are the per-project compound. The
 /// transport for regId opens its own project socket; the machine keypair
 /// (baseDeviceUuid(regId) == machineUuid) signs its handshake.
+/// [onAwaitingRunning] fires once `project:start` has been accepted and the
+/// only thing left is the host's advert — the boundary a caller narrating this
+/// wait needs, and null for callers that narrate nothing.
 Future<String> openRemoteProjectForActivation(
   ProviderContainer ref, {
   required String machineUuid,
   required String projectId,
+  void Function()? onAwaitingRunning,
 }) async {
   final regId = RemoteProject(
     machineUuid: machineUuid,
@@ -402,6 +624,7 @@ Future<String> openRemoteProjectForActivation(
       cpClient.currentState.lastError,
     );
   }
+  onAwaitingRunning?.call();
   final ok = await awaitProjectRunning(cpClient, projectId);
   if (!ok) {
     // Distinguish a legacy relay's retired session cap from a generic transient

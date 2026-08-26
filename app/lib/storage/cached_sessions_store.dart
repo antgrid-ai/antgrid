@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'scoped_prefs.dart';
 
 import '../config/storage_scope.dart';
+import '../demo/demo_identity.dart';
 import '../models/session_entry.dart';
 
 /// SharedPreferences-backed cache of `List<SessionEntry>` keyed by drawer entry
@@ -16,6 +17,10 @@ import '../models/session_entry.dart';
 /// Writes are debounced to coalesce rapid `session:updated` bursts (the agent
 /// emits two frames per mutation — sync `changed()` + async PTY `noteExited`).
 /// Tests can force a flush via [flushNow].
+///
+/// Every writer drops the demo entry on the way in: the sample project is
+/// canned data that must not outlive the demo, and a cached list would surface
+/// in Recent and the drawer beside the user's real machines.
 class CachedSessionsStore {
   static final _key = scopedStorageKey('antgrid.session_cache.v1');
   // Labels churn far more often than the session list itself (every live
@@ -74,15 +79,23 @@ class CachedSessionsStore {
   /// identical to the in-memory one. Writes are debounced; [changes] still
   /// emits on the next microtask so listeners can react synchronously.
   ///
-  /// `deleting` is dropped on the way IN, not just on the way to disk. The
-  /// cache is what every surface falls back to the moment the live stream stops
-  /// matching an entry, and nothing here is subscribed to the push that would
-  /// clear the flag — so a connection lost inside the delete window would leave
-  /// the row inert, unopenable and undeletable, for the rest of the app run.
-  /// The live list keeps carrying it; only the fallback copy is neutralised.
+  /// `deleting` and `setup` are dropped on the way IN, not just on the way to
+  /// disk. The cache is what every surface falls back to the moment the live
+  /// stream stops matching an entry, and nothing here is subscribed to the push
+  /// that would clear either — so a connection lost inside the delete window
+  /// would leave the row inert, unopenable and undeletable, and a rebuilt
+  /// ProjectSession (LRU evict, host restart, reconnect) would seed
+  /// `sessionSetupProvider` with a run that ended, pulsing the isolation badge
+  /// and pinning "Preparing workspace…" over a session nothing is provisioning.
+  /// The live list keeps carrying both; only the fallback copy is neutralised.
   Future<void> put(String entryId, List<SessionEntry> sessions) async {
+    if (isDemoEntryId(entryId)) return;
     final next = [
-      for (final s in sessions) s.deleting ? s.copyWith(deleting: false) : s,
+      for (final s in sessions)
+        if (s.deleting || s.setup != null)
+          s.copyWith(deleting: false, clearSetup: true)
+        else
+          s,
     ];
     final prev = _mem[entryId];
     if (prev != null && _listsEqual(prev, next)) return;
@@ -135,6 +148,7 @@ class CachedSessionsStore {
   /// label update alone shouldn't force every listener to re-derive its
   /// session list.
   void putLabel(String entryId, String label) {
+    if (isDemoEntryId(entryId)) return;
     if (_labels[entryId] == label) return;
     _labels[entryId] = label;
     _labelsDirty = true;
@@ -153,6 +167,7 @@ class CachedSessionsStore {
   /// boot can seed the status map before the first advert arrives. No-ops if
   /// unchanged; does not emit on [changes].
   void putStatus(String entryId, String status) {
+    if (isDemoEntryId(entryId)) return;
     if (_statuses[entryId] == status) return;
     _statuses[entryId] = status;
     _statusesDirty = true;
@@ -204,15 +219,17 @@ class CachedSessionsStore {
             for (final item in v) {
               if (item is Map<String, dynamic>) {
                 try {
-                  // `running` and `deleting` are in-memory state only — even if
-                  // an older build persisted them, force false on load so a
-                  // fresh launch never resurrects a stale green status dot, or
-                  // a pending row with nothing left alive to clear it.
+                  // `running`, `deleting` and `setup` are in-memory state only
+                  // — even if a build that wrote this blob persisted them,
+                  // clear them on load so a fresh launch never resurrects a
+                  // stale green status dot, a pending row with nothing left
+                  // alive to clear it, or a workspace forever preparing.
                   list.add(
                     SessionEntry.fromJson({
                       ...item,
                       'running': false,
                       'deleting': false,
+                      'setup': null,
                     }),
                   );
                 } catch (_) {
@@ -275,13 +292,18 @@ class CachedSessionsStore {
   Future<void> _flush() async {
     if (_entriesDirty) {
       _entriesDirty = false;
-      // Strip `running`, `workStatus` and `deleting` before persisting: all
-      // three are process-lifetime state owned by SessionsService, not durable
-      // metadata. A restored `running` renders sessions as live before the
-      // agent reports; a restored `attention` claims an agent is blocked on a
-      // prompt that died with the process; a restored `deleting` is worse
-      // still, because a delete interrupted by the process dying leaves nothing
-      // behind that could ever clear it — the row comes back permanently inert.
+      // Strip `running`, `workStatus`, `deleting` and `setup` before
+      // persisting: all four are process-lifetime state owned by
+      // SessionsService, not durable metadata. A restored `running` renders
+      // sessions as live before the agent reports; a restored `attention`
+      // claims an agent is blocked on a prompt that died with the process; a
+      // restored `deleting` is worse still, because a delete interrupted by the
+      // process dying leaves nothing behind that could ever clear it — the row
+      // comes back permanently inert. `setup` is the same trap and the bridge
+      // treats it the same way (it is runtime-only there too, and a `running`
+      // setup state is deliberately never written to `checkouts.json`): a
+      // cache written mid-provisioning would restore a session as forever
+      // preparing.
       final encoded = jsonEncode({
         'version': 1,
         'entries': _mem.map(
@@ -292,6 +314,7 @@ class CachedSessionsStore {
               final j = {...s.toJson(), 'running': false};
               j.remove('workStatus');
               j.remove('deleting');
+              j.remove('setup');
               return j;
             }).toList(),
           ),

@@ -167,8 +167,8 @@ void main() {
     await _pumpPanel(tester, devices: _EmptyNotifier.new);
 
     expect(find.byKey(const Key('remote-access-switch')), findsOneWidget);
-    // QR pairing is hidden for the initial release; an account device admits
-    // itself, so the empty roster has no action to offer.
+    // There is no pairing ceremony — an account device admits itself, so the
+    // empty roster has no action to offer.
     expect(find.byType(AbButton), findsNothing);
   });
 }

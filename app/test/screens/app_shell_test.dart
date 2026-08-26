@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
 import 'package:antgrid/models/terminal_models.dart';
 import 'package:antgrid/models/file_tree_models.dart';
@@ -18,27 +17,7 @@ import 'package:antgrid/screens/workspace_shell.dart';
 import '../helpers/test_store_overrides.dart';
 import '../helpers/prefs_test_mock.dart';
 
-final _testAgent = PairedAgent(
-  relayUrl: 'wss://test.relay',
-  agentDeviceId: 'agent-123.test-project',
-  agentName: 'Test Agent',
-);
-
-/// A fake PairedAgentNotifier that returns a list with one mock PairedAgent.
-class FakePairedAgentNotifier extends AsyncNotifier<List<PairedAgent>>
-    implements PairedAgentNotifier {
-  @override
-  Future<List<PairedAgent>> build() async => [_testAgent];
-
-  @override
-  Future<void> selectAgent(String agentDeviceId) async {}
-  @override
-  Future<void> forgetMachine(String agentDeviceIdOrUuid) async {}
-  @override
-  Future<void> retryAgentConnection() async {}
-  @override
-  void cancelActiveAgent() {}
-}
+const _testAgentDeviceId = 'agent-123.test-project';
 
 void main() {
   late TestStoreOverrides stores;
@@ -54,9 +33,8 @@ void main() {
     return ProviderScope(
       overrides: [
         ...stores.overrides,
-        pairedAgentProvider.overrideWith(() => FakePairedAgentNotifier()),
         selectedRegistrationIdProvider.overrideWith(
-          (ref) => _testAgent.agentDeviceId,
+          (ref) => _testAgentDeviceId,
         ),
         terminalStateProvider.overrideWith(
           (ref) => Stream.value(const TerminalState()),

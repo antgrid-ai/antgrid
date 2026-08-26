@@ -1,7 +1,7 @@
 /// Reduce a possibly-compound `<deviceUuid>.<projectId>` id to its bare
 /// `<deviceUuid>` prefix, matching `InventoryAgent.deviceUuid` format. The
-/// stored value is either a bare UUID (autoOpen path) or a compound
-/// `<deviceUuid>.<projectId>` (QR-paired path).
+/// stored value is either a bare UUID (a machine) or a compound
+/// `<deviceUuid>.<projectId>` (one remote project on that machine).
 String baseDeviceUuid(String agentDeviceId) {
   final dot = agentDeviceId.indexOf('.');
   return dot < 0 ? agentDeviceId : agentDeviceId.substring(0, dot);
