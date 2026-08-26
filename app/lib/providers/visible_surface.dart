@@ -151,23 +151,28 @@ final workspaceMenuControlProvider =
       WorkspaceMenuControl?
     >(() => ValueController(null));
 
-/// Whether the agent bar's workspace menu POPUP is up. Shared by a mouse
-/// desktop and a touch tablet — the tablet's context panel is a docked pane
-/// beside the agent (`WorkspaceShellState._buildTabletTouch`), not an overlay
-/// covering it, so the popup and the panel's own [WorkspaceTabBar] no longer
-/// compete for the same screen space the way they did when the panel was a
-/// full-width overlay. (Mobile phone width never reads this at all —
-/// `WorkspaceMenuButton` renders nothing there; see [workspaceMenuControlProvider].)
+/// Whether the agent bar's workspace rail is up. Shared by a mouse desktop and
+/// a touch tablet, whose context panel is a docked pane beside the agent
+/// (`WorkspaceShellState._buildTabletTouch`) rather than an overlay covering
+/// it. (Mobile phone width never reads this at all — `WorkspaceMenuButton`
+/// renders nothing there; see [workspaceMenuControlProvider].)
 ///
-/// Defaults to OPEN: the five views are on screen the moment a session is, and
-/// the icon is the only thing that takes them away.
+/// Defaults to OPEN, but the shell holds it down for as long as the context
+/// pane is on screen — the pane's own [WorkspaceTabBar] lists the same five
+/// views, so the rail would be a second switcher floating over the transcript
+/// (`WorkspaceShellState._syncMenuToContextPane`). On a mouse desktop, whose
+/// pane starts open, that means the rail's first appearance is the first time
+/// the user closes the pane. The icon still takes it away by hand.
 ///
 /// App state rather than the button's own `State` because the button does not
-/// survive the thing its menu does. Revealing a view replaces the agent panel,
-/// which unmounts the bar the button lives in; a flag held in the widget would
-/// die with it and come back closed, so the menu would silently shut itself
-/// every time it was used. Held here, the button re-opens the menu as soon as it
-/// is mounted again.
+/// survive the thing this flag controls: a workbench surface takes the whole
+/// agent bar off screen, and the shell swaps `WorkspaceShell` out entirely on
+/// the way to a new session. A flag held in the widget would die with the bar
+/// and come back at its default, so the rail could neither stay down where the
+/// user shut it nor come back up where they left it. Held here, the button
+/// resolves the rail's state against this on its next mount — which is also why
+/// `WorkspaceShellState._menuAutoHidden`, and not this value, is what says
+/// whether the shell may reopen it.
 final workspaceMenuOpenProvider = NotifierProvider<ValueController<bool>, bool>(
   () => ValueController(true),
 );
