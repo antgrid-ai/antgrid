@@ -16,11 +16,15 @@ class AbProject {
   String displayName;
 
   /// The physical device whose keychain minted this project's local agent
-  /// identity. `null` for pre-v2 projects (where the field didn't exist yet)
-  /// and for projects opened before the current device was provisioned — in
-  /// both cases the project is treated as "local to whoever is asking" (see
-  /// [isLocalFor]) and the field is backfilled when the project is next
-  /// upserted on this device.
+  /// identity. `null` only for pre-v2 projects, where the field didn't exist
+  /// yet; those are treated as "local to whoever is asking" (see [isLocalFor]).
+  ///
+  /// The value can go STALE while the folder stays local: this device's own
+  /// identity moves when sign-in provisioning replaces an anonymous uuid, and a
+  /// row left on the old one fails [isLocalFor] for good. Two paths repair it —
+  /// `ensureCurrentUserDeviceRecord` remaps every row carrying the outgoing
+  /// uuid as it replaces it, and `registerPickedFolder` re-stamps a row
+  /// whenever the user picks that folder again.
   String? hostDeviceUuid;
   String hostMachineName;
   DateTime lastOpenedAt;

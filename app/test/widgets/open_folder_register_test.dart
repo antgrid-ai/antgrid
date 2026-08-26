@@ -13,6 +13,8 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:antgrid/launcher/project_id.dart';
+import 'package:antgrid/models/ab_project.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/projects.dart';
@@ -80,6 +82,44 @@ void main() {
       );
     },
   );
+
+  testWidgets('re-picking a folder re-stamps a stale host identity', (
+    tester,
+  ) async {
+    // A row left on an identity this device no longer answers with — what a
+    // folder opened during sign-in provisioning carries. Bumping only
+    // `lastOpenedAt` (what this used to do) left it failing `isLocalFor`
+    // forever: no working-directory actions, and a "Remote host" chip for a
+    // folder the user just pointed at on this machine.
+    final ref = await pumpRefHost(tester);
+    final id = (await tester.runAsync(() => computeProjectId(folder)))!;
+    await tester.runAsync(
+      () => stores.projectStore.upsert(
+        AbProject(
+          projectId: id,
+          folder: folder,
+          displayName: 'stale',
+          hostDeviceUuid: 'anon-A',
+          hostMachineName: '',
+          lastOpenedAt: DateTime.utc(2026, 1, 1),
+        ),
+      ),
+    );
+
+    await tester.runAsync(
+      () => registerPickedFolder(ref.container, folder, select: false),
+    );
+
+    final localUuid = await tester.runAsync(
+      () => ref.container.read(localDeviceUuidProvider.future),
+    );
+    final stored = stores.projectStore.list().singleWhere(
+      (p) => p.projectId == id,
+    );
+    expect(stored.hostDeviceUuid, isNot('anon-A'));
+    expect(stored.hostDeviceUuid, localUuid);
+    expect(stored.isLocalFor(localUuid!), isTrue);
+  });
 
   testWidgets('registerPickedFolder defaults to selecting the folder project', (
     tester,
