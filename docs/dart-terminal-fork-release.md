@@ -43,15 +43,6 @@ each one has a different remedy:
 `ghostty_vte_flutter` is the largest divergence by far, and it ships **no native
 code** — so none of it depends on a release. It only needs a pushed commit.
 
-`ghostty_vte` is the subtler case: it *does* front a native library, yet a fork
-change there is still Dart-only whenever the symbol it needs is already exported
-by the pinned prebuilt. The generated bindings cover the whole C surface, so
-plenty of it has no Dart wrapper — `ghostty_grid_ref_hyperlink_uri` sat unwrapped
-until `1277a6b` (OSC 8 hyperlink URIs) and was exported by the shipped v0.1.4
-binary all along. Check the shipped library's exports before assuming a new
-capability costs a VTE release; the Status table's "not needed" survives exactly
-as long as that holds.
-
 *Measured* by diffing the fork's `lib/src/` against Antgrid's vendored copy
 (ignoring trailing whitespace, since the vendored files are CRLF):
 **the fork is now a strict superset of every vendored file.**
@@ -70,6 +61,18 @@ moved that call **into `_ingestBytes`**, so the latched DEC-1004 focus state is
 re-asserted on *every* ingest path — PTY, external transport, and injected debug
 output — rather than one of them. Strictly better. Before concluding a patch was
 lost, check whether it moved.
+
+`ghostty_vte` is the subtler case: it *does* front a native library, yet a fork
+change there is still Dart-only whenever the symbol it needs is already exported
+by the pinned prebuilt. The generated bindings cover the whole C surface, so
+plenty of it has no Dart wrapper — `ghostty_grid_ref_hyperlink_uri` sat unwrapped
+until `1277a6b` (OSC 8 hyperlink URIs) and was exported by the shipped v0.1.4
+*native* binaries all along. Check the shipped library's exports before assuming
+a new capability costs a VTE release; the Status table's "not needed" survives
+exactly as long as that holds — and check per artifact, not per release: the
+same v0.1.4 ships `ghostty-vt.wasm` with a narrower export set (it has
+`ghostty_grid_ref_cell`/`_row`/`_style` but not `_hyperlink_uri`), so a symbol
+being present natively says nothing about web.
 
 ## The `portable_pty` SIGCHLD patch is superseded — do not port it
 
