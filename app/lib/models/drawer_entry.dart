@@ -18,7 +18,7 @@ sealed class DrawerEntry {
   /// Bare device uuid when this entry represents a remote MACHINE (a
   /// same-account paired machine or an inventory machine) — the value whose
   /// control plane advertises projects and under which open projects' sessions
-  /// nest. Null for a local project or a QR-paired entry that is itself a single
+  /// nest. Null for a local project or an entry that is itself a single remote
   /// project (compound `<uuid>.<projectId>` id), neither of which is a machine
   /// the drawer expands into per-project sessions.
   String? get machineUuid => null;
@@ -44,10 +44,9 @@ class RemoteAgentEntry extends DrawerEntry {
   final RecentAgent agent;
   RemoteAgentEntry(this.agent);
 
-  /// A same-account machine-level pairing persists the BARE `deviceUuid` (no
-  /// dot); a legacy QR pairing persists the compound `<uuid>.<projectId>`. The
-  /// dot tells the two apart: bare → this row is a machine; compound → a single
-  /// project.
+  /// A machine persists the BARE `deviceUuid` (no dot); a legacy per-project
+  /// row persists the compound `<uuid>.<projectId>`. The dot tells the two
+  /// apart: bare → this row is a machine; compound → a single project.
   bool get _isMachineLevel => !agent.agentDeviceId.contains('.');
 
   @override

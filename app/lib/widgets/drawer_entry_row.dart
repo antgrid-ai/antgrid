@@ -349,7 +349,9 @@ class _RemoveButtonState extends ConsumerState<_RemoveButton> {
           : 'Forget ${entry.displayName}?',
       body: isLocal
           ? removeLocalProjectBody(container, entry.id)
-          : 'This removes the saved trust relationship. You\'ll need to scan the QR code again to reconnect.',
+          : 'This clears the cached sessions and connection details for '
+                'this machine. It comes back on its own while it is signed '
+                'in to your account.',
       confirmLabel: isLocal ? 'Remove' : 'Forget',
       destructive: true,
     );
@@ -546,8 +548,8 @@ Future<bool> activateDrawerEntryById(
       }
       break;
     case InventoryAgentEntry e:
-      // Same-account machine straight from the peers inventory — no QR, no
-      // pairing. Reading its transport brings the supervisor up; the agent
+      // Same-account machine straight from the peers inventory — nothing to
+      // pair. Reading its transport brings the supervisor up; the agent
       // admits us from the inventory when the E2E handshake lands.
       final priorTarget = ref.read(selectedTargetProvider);
       ref.read(selectedTargetProvider.notifier).set(null);

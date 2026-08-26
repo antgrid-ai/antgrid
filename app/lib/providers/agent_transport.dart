@@ -245,7 +245,7 @@ Future<AgentTransport?> _buildRelayTransportFor(
 
   final invHit = uncachedInventoryHit;
   if (invHit != null) {
-    // The activation funnel for the no-QR path. `uncachedInventoryHit` is set
+    // The activation funnel. `uncachedInventoryHit` is set
     // only when no cached row backed the machine, so this fires once per
     // newly-reached machine rather than on every warm rebuild. The `reconnect`
     // variant this event used to carry has no successor: reconnecting is the

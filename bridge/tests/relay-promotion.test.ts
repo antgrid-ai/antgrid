@@ -3,7 +3,7 @@
 // events (onAuthenticated/onPaired/onError). In v3 there is exactly
 // ONE machine RelayClient, owned by HostServer — this controller just asks the
 // host to bring it up (`ensureMachineRelay`), attaches the local core's bus as
-// a stream (`attach`), and publishes the connect QR. All the reconnect/auth/
+// a stream (`attach`), and announces readiness. All the reconnect/auth/
 // unpair reactivity that used to live here moved to HostServer's control-plane
 // wiring and ProjectCore's attachRelayStream (see host-promotion.test.ts,
 // project-core.test.ts).

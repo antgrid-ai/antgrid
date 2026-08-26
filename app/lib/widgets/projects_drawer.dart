@@ -205,7 +205,7 @@ class _GroupLabel extends ConsumerWidget {
     // The button shares [refreshDrawer] with the pull-to-refresh gesture so the
     // two affordances refresh the same things. The in-flight guard keys off the
     // inventory load (the only load-once FutureProvider); local projects and
-    // QR-paired recents are store-reactive. Riverpod preserves the prior value
+    // Recent machines are store-reactive. Riverpod preserves the prior value
     // during the reload, so the list never blanks.
     // Demo: the sample project refreshes from nothing, and the watch itself is
     // what would fetch /account/agents. Neither the flag nor the button.
@@ -400,9 +400,9 @@ class _EntryWithSessions extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     // A remote MACHINE entry (same-account or inventory) defaults to COLLAPSED
     // and tracks its open state in [expandedDrawerIdsProvider] — expanding it is
-    // what opens the machine's control-plane socket. A local project or legacy
-    // QR per-project entry defaults to EXPANDED and tracks its (rarer) collapse
-    // in [collapsedDrawerIdsProvider].
+    // what opens the machine's control-plane socket. A local project (or a
+    // legacy per-project row) defaults to EXPANDED and tracks its (rarer)
+    // collapse in [collapsedDrawerIdsProvider].
     final machineUuid = entry.machineUuid;
     final expanded = machineUuid != null
         ? ref.watch(expandedDrawerIdsProvider).contains(machineUuid)
