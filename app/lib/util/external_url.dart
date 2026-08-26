@@ -1,7 +1,9 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../design/widgets/ab_snack_bar.dart';
+import '../widgets/terminal_hyperlink_sheet.dart';
 import 'ab_log.dart';
 
 /// Longest URL echoed back to the user or written to `app.log`.
@@ -77,12 +79,17 @@ Uri? openableTerminalHyperlink(String uri) {
 /// returns, so a rejection would reach `PlatformDispatcher.onError` as a fatal
 /// carrying no in-app frames.
 ///
-/// [open] is injectable so tests can assert what would be launched instead of
-/// handing a URL to the real browser, matching `HelpAboutSection.openUrl`.
+/// On touch the destination is confirmed first — see
+/// [showTerminalHyperlinkSheet] for why that is not merely a nag.
+///
+/// [open] and [confirm] are injectable so tests can assert what would be
+/// launched instead of handing a URL to the real browser, matching
+/// `HelpAboutSection.openUrl`.
 Future<void> openTerminalHyperlink(
   BuildContext context,
   String uri, {
   Future<void> Function(BuildContext, String) open = openExternalUrl,
+  Future<bool> Function(BuildContext, Uri) confirm = showTerminalHyperlinkSheet,
 }) async {
   try {
     final target = openableTerminalHyperlink(uri);
@@ -96,6 +103,16 @@ Future<void> openTerminalHyperlink(
           'Only http and https links open from the terminal.',
         );
       }
+      return;
+    }
+    if (_revealsDestinationOnHover) {
+      await open(context, target.toString());
+      return;
+    }
+    if (!await confirm(context, target)) {
+      return;
+    }
+    if (!context.mounted) {
       return;
     }
     await open(context, target.toString());
@@ -112,3 +129,12 @@ Future<void> openTerminalHyperlink(
     );
   }
 }
+
+/// Whether this platform shows a link's destination before it is activated.
+///
+/// Desktop does, through the terminal's hover affordance, so a click there is
+/// already an informed one. Touch has no hover, which is why the mobile path
+/// asks instead.
+bool get _revealsDestinationOnHover =>
+    defaultTargetPlatform != TargetPlatform.android &&
+    defaultTargetPlatform != TargetPlatform.iOS;

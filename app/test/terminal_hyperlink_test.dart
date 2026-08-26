@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:antgrid/util/ab_log.dart';
 import 'package:antgrid/util/external_url.dart';
+import 'package:antgrid/widgets/terminal_hyperlink_sheet.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -109,6 +111,7 @@ void main() {
         context,
         '  https://example.com/a?b=1  ',
         open: (_, url) async => launched.add(url),
+        confirm: (_, _) async => true,
       );
       await tester.pump();
 
@@ -148,6 +151,7 @@ void main() {
           context,
           'https://example.com',
           open: (_, _) async => throw StateError('launcher exploded'),
+          confirm: (_, _) async => true,
         );
         await AbLog.flush();
       });
@@ -161,6 +165,144 @@ void main() {
               as Map<String, dynamic>;
       expect(line['component'], 'TerminalView');
       expect(line['error'], contains('launcher exploded'));
+    });
+
+    // flutter_test reports android by default, so these run on the touch path
+    // unless they say otherwise.
+    testWidgets(
+      'asks before opening on touch, and cancelling launches nothing',
+      (tester) async {
+        final context = await pumpHost(tester);
+        var launched = 0;
+        var asked = 0;
+
+        await openTerminalHyperlink(
+          context,
+          'https://example.com/a',
+          open: (_, _) async => launched++,
+          confirm: (_, _) async {
+            asked++;
+            return false;
+          },
+        );
+        await tester.pump();
+
+        expect(asked, 1);
+        expect(launched, 0);
+      },
+    );
+
+    // The sheet's whole job is naming the destination, so it has to be handed
+    // the URI that will actually be launched -- not the raw terminal string,
+    // which can differ from it.
+    testWidgets('asks about the normalized URI, not the raw one', (
+      tester,
+    ) async {
+      final context = await pumpHost(tester);
+      Uri? asked;
+
+      await openTerminalHyperlink(
+        context,
+        '  https://github.com@evil.example/pull/13  ',
+        open: (_, _) async {},
+        confirm: (_, target) async {
+          asked = target;
+          return true;
+        },
+      );
+      await tester.pump();
+
+      expect(asked.toString(), 'https://github.com@evil.example/pull/13');
+      // The host is what an impostor URL misrepresents, and it is not the half
+      // the anchor text advertises.
+      expect(asked?.host, 'evil.example');
+    });
+
+    testWidgets('desktop opens without asking -- hover already showed it', (
+      tester,
+    ) async {
+      // Cleared inside the body, not in addTearDown: the framework asserts
+      // the foundation debug vars are unset before teardown runs.
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+
+      final context = await pumpHost(tester);
+      final launched = <String>[];
+      var asked = 0;
+
+      await openTerminalHyperlink(
+        context,
+        'https://example.com/a',
+        open: (_, url) async => launched.add(url),
+        confirm: (_, _) async {
+          asked++;
+          return true;
+        },
+      );
+      await tester.pump();
+
+      debugDefaultTargetPlatformOverride = null;
+
+      expect(asked, 0);
+      expect(launched, <String>['https://example.com/a']);
+    });
+  });
+
+  group('showTerminalHyperlinkSheet', () {
+    Future<Future<bool>> open(WidgetTester tester, Uri target) async {
+      late Future<bool> answer;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => ElevatedButton(
+                onPressed: () =>
+                    answer = showTerminalHyperlinkSheet(context, target),
+                child: const Text('go'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('go'));
+      await tester.pumpAndSettle();
+      return answer;
+    }
+
+    testWidgets('names the host on its own line, and the full URI', (
+      tester,
+    ) async {
+      final answer = await open(
+        tester,
+        Uri.parse('https://github.com@evil.example/antgrid/pull/13'),
+      );
+
+      // The host alone, not merely present somewhere inside the URI: a
+      // userinfo prefix is exactly what goes unread when it is not separated.
+      expect(find.text('evil.example'), findsOneWidget);
+      expect(
+        find.text('https://github.com@evil.example/antgrid/pull/13'),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(await answer, isFalse);
+    });
+
+    testWidgets('Open confirms, and a dismiss does not', (tester) async {
+      final target = Uri.parse('https://example.com/a');
+
+      var answer = await open(tester, target);
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+      expect(await answer, isTrue);
+
+      // Dismissing the sheet must read as "no" -- a null from the route would
+      // otherwise be one `!` away from launching what the user backed out of.
+      answer = await open(tester, target);
+      await tester.tapAt(const Offset(400, 20));
+      await tester.pumpAndSettle();
+      expect(await answer, isFalse);
     });
   });
 }
