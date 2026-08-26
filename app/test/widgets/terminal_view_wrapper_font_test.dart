@@ -172,6 +172,20 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
+  // `onOpenHyperlink` is optional on GhosttyTerminalView and its default is an
+  // unchecked `launchUrlString`, so dropping the argument re-opens every scheme
+  // to a single tap while the analyzer and the rest of the suite stay green.
+  testWidgets('terminal routes hyperlink activation through the app', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+
+    final view = await pumpAtScale(tester, 1.0, 't-hyperlink');
+    expect(view.onOpenHyperlink, isNotNull);
+
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('terminal detail keeps status and delete in the title row', (
     tester,
   ) async {
