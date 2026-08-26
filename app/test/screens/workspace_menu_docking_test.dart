@@ -63,10 +63,23 @@ Future<void> _settle(WidgetTester tester) async {
   await tester.pump(const Duration(milliseconds: 400));
 }
 
-/// Picks [label] from the agent bar's workspace menu, which is already open —
-/// it opens itself with the session. Scoped to the popup: the docked panel's tab
-/// strip carries the same five labels.
+/// Hides the context pane the way the title bar's control does, which is what
+/// brings the workspace rail back — with the pane up it has nothing to do (see
+/// `WorkspaceShellState._syncMenuToContextPane`) and the shell keeps it down.
+Future<void> _closePane(
+  WidgetTester tester,
+  ProviderContainer container,
+) async {
+  container.read(contextPanelControlProvider)!.toggle();
+  await _settle(tester);
+}
+
+/// Picks [label] from the agent bar's workspace rail. Scoped to the rail: the
+/// docked panel's tab strip carries the same five labels.
 Future<void> _pickView(WidgetTester tester, String label) async {
+  // Settled first: the rail is shown from a post-frame callback, so it is not
+  // in the tree on the frame that mounts the button carrying it.
+  await _settle(tester);
   await tester.tap(
     find.descendant(
       of: find.byType(WorkspaceMenuPanel),
@@ -77,16 +90,56 @@ Future<void> _pickView(WidgetTester tester, String label) async {
 }
 
 void main() {
+  // The rail and the pane's own tab strip list the same five views, so only
+  // one of them is ever up. A mouse desktop opens onto the pane, which is why
+  // the rail's first appearance is the first time the pane is closed.
+  testWidgets('the rail keeps out of the way while the pane is up', (
+    tester,
+  ) async {
+    await _withShell(tester, (container) async {
+      expect(find.byType(WorkspacePanel), findsOneWidget);
+      expect(find.byType(WorkspaceMenuPanel), findsNothing);
+      expect(container.read(workspaceMenuOpenProvider), isFalse);
+
+      await _closePane(tester, container);
+
+      expect(find.byType(WorkspaceMenuPanel), findsOneWidget);
+      expect(container.read(workspaceMenuOpenProvider), isTrue);
+    });
+  });
+
+  // Hiding the pane takes its tab strip off screen with it, so the rail coming
+  // back is the only way into the workspace from there — but not if the user
+  // had already shut the rail by hand. The hand-back restores what they left.
+  testWidgets('closing the pane does not reopen a rail the user had shut', (
+    tester,
+  ) async {
+    await _withShell(tester, (container) async {
+      await _closePane(tester, container);
+      await tester.tap(find.byKey(WorkspaceMenuButton.buttonKey));
+      await _settle(tester);
+      expect(find.byType(WorkspaceMenuPanel), findsNothing);
+
+      // Out to a view and back, so the pane opens and closes under a rail the
+      // user has already dismissed.
+      container.read(contextPanelControlProvider)!.toggle();
+      await _settle(tester);
+      await _closePane(tester, container);
+
+      expect(find.byType(WorkspaceMenuPanel), findsNothing);
+      expect(container.read(workspaceMenuOpenProvider), isFalse);
+    });
+  });
+
   testWidgets(
-    'picking a view from the menu docks it beside the agent, not full width',
+    'picking a view from the rail docks it beside the agent, not full width',
     (tester) async {
       await _withShell(tester, (container) async {
-        expect(find.byType(AgentPanel), findsOneWidget);
-        expect(find.byType(WorkspacePanel), findsOneWidget);
+        await _closePane(tester, container);
 
         await _pickView(tester, 'Git');
 
-        // Still side-by-side with the agent — the menu never replaces it.
+        // Still side-by-side with the agent — the rail never replaces it.
         expect(find.byType(AgentPanel), findsOneWidget);
         expect(find.byType(WorkspacePanel), findsOneWidget);
         expect(container.read(visibleWorkspaceViewProvider), WorkspaceView.git);
@@ -99,8 +152,7 @@ void main() {
     tester,
   ) async {
     await _withShell(tester, (container) async {
-      container.read(contextPanelControlProvider)!.toggle();
-      await _settle(tester);
+      await _closePane(tester, container);
       expect(find.byType(WorkspacePanel), findsNothing);
 
       await _pickView(tester, 'Preview');
@@ -110,6 +162,9 @@ void main() {
         container.read(visibleWorkspaceViewProvider),
         WorkspaceView.preview,
       );
+      // ...and the pane arriving is what takes the rail away: the strip it
+      // brought with it lists the same five views.
+      expect(find.byType(WorkspaceMenuPanel), findsNothing);
     });
   });
 }
