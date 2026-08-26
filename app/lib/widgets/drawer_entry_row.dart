@@ -16,6 +16,7 @@ import '../design/widgets/ab_disclosure_chevron.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
 import '../design/widgets/ab_list_row.dart';
+import '../design/widgets/ab_separator.dart';
 import '../design/widgets/ab_chip.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/ab_status_dot.dart';
@@ -94,9 +95,9 @@ class MachineDrawerHeaderRow extends ConsumerWidget {
     final expanded = ref.watch(expandedDrawerIdsProvider).contains(machineUuid);
 
     return HoverableDrawerRow(
+      above: showRule ? const DrawerBandRule() : null,
       builder: (context, hovered, _) => DrawerBand(
         label: entry.displayName,
-        showRule: showRule,
         // Kept on the band, unlike the local one: expanding a machine is what
         // opens its control-plane socket, so there is something to disclose.
         expanded: expanded,
@@ -143,18 +144,42 @@ class LocalMachineBand extends ConsumerWidget {
     // inset.
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: AbTokens.drawerGutter),
-      child: DrawerBand(
-        label: 'This machine',
-        showRule: showRule,
-        // No host dot under the demo: there is no bridge behind the sample
-        // project, and [hostStatusProvider] answers for the REAL machine — on
-        // a desktop that opened a project earlier in the session that is a
-        // live green dot pinned to a project it has nothing to do with. Every
-        // other real-source surface in this drawer is gated the same way.
-        trailing: ref.watch(demoModeProvider) ? null : const _LocalHostDot(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (showRule) const DrawerBandRule(),
+          DrawerBand(
+            label: 'This machine',
+            // No host dot under the demo: there is no bridge behind the sample
+            // project, and [hostStatusProvider] answers for the REAL machine — on
+            // a desktop that opened a project earlier in the session that is a
+            // live green dot pinned to a project it has nothing to do with. Every
+            // other real-source surface in this drawer is gated the same way.
+            trailing: ref.watch(demoModeProvider)
+                ? null
+                : const _LocalHostDot(),
+          ),
+        ],
       ),
     );
   }
+}
+
+/// The hairline above a machine band, separating its block from whatever
+/// precedes it.
+///
+/// A SIBLING above the band rather than a wrapper around it: the ~13px this and
+/// its clearance occupy would otherwise sit inside the band's [MouseRegion], so
+/// the empty strip above a band highlighted under the pointer while accepting no
+/// click. Being const also keeps it out of the hover rebuild.
+class DrawerBandRule extends StatelessWidget {
+  const DrawerBandRule({super.key});
+
+  @override
+  Widget build(BuildContext context) => const Padding(
+    padding: EdgeInsets.only(top: AbTokens.space8, bottom: AbTokens.space4),
+    child: AbSeparator.horizontal(),
+  );
 }
 
 /// Bridge-host liveness for [LocalMachineBand], mapped from [HostPhase].
@@ -202,7 +227,6 @@ class DrawerBand extends StatelessWidget {
     this.trailing,
     this.expanded,
     this.onTap,
-    this.showRule = true,
   });
 
   final String label;
@@ -211,12 +235,11 @@ class DrawerBand extends StatelessWidget {
   /// Non-null draws a disclosure chevron after the label.
   final bool? expanded;
   final VoidCallback? onTap;
-  final bool showRule;
 
   @override
   Widget build(BuildContext context) {
     final t = context.antgrid;
-    final row = AbListRow(
+    return AbListRow(
       title: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -247,15 +270,6 @@ class DrawerBand extends StatelessWidget {
       hoverable: onTap != null,
       onTap: onTap,
     );
-    if (!showRule) return row;
-    return Container(
-      margin: const EdgeInsets.only(top: AbTokens.space8),
-      decoration: BoxDecoration(
-        border: Border(top: BorderSide(color: context.antgrid.borderSubtle)),
-      ),
-      padding: const EdgeInsets.only(top: AbTokens.space4),
-      child: row,
-    );
   }
 }
 
@@ -275,9 +289,15 @@ class HoverableDrawerRow extends StatefulWidget {
   const HoverableDrawerRow({
     super.key,
     required this.builder,
+    this.above,
     this.onHoverStart,
     this.onHoverEnd,
   });
+
+  /// Chrome that belongs to this row's block but must not be hover-reactive:
+  /// it sits inside the gutter, above the [MouseRegion]. Kept out of [builder]
+  /// so it is neither highlighted under the pointer nor rebuilt by it.
+  final Widget? above;
 
   final Widget Function(BuildContext context, bool hovered, bool pointerOver)
   builder;
@@ -308,14 +328,20 @@ class _HoverableDrawerRowState extends State<HoverableDrawerRow> {
 
   @override
   Widget build(BuildContext context) {
+    final region = MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: _onEnter,
+      onExit: _onExit,
+      child: widget.builder(context, _hovered, _pointerOver),
+    );
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: AbTokens.drawerGutter),
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        onEnter: _onEnter,
-        onExit: _onExit,
-        child: widget.builder(context, _hovered, _pointerOver),
-      ),
+      child: widget.above == null
+          ? region
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [widget.above!, region],
+            ),
     );
   }
 }
