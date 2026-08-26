@@ -17,8 +17,10 @@ import '../models/session_target.dart';
 import '../models/terminal_models.dart';
 import '../project/project_session.dart';
 import '../project/project_session_registry.dart';
+import '../services/account_agents_api.dart' show InventoryAgent;
 import '../services/license_token_minter.dart';
 import '../services/storage_service.dart';
+import 'account_agents.dart';
 import 'auth.dart';
 import 'device_provisioning.dart';
 import 'entry_cleanup.dart';
@@ -721,12 +723,33 @@ final focusedAgentBlockedProvider = Provider<bool>((ref) {
   return ref.watch(supervisorStatusProvider(id)).value is Blocked;
 });
 
-/// True iff [entryId] corresponds to a relay-paired remote agent (as opposed to
-/// a locally-opened folder). Keyed by id rather than reading the focus, because
-/// drawer rows render for projects that are not the focused one.
+/// True iff [entryId] is reached over the relay (as opposed to a locally-opened
+/// folder). Keyed by id rather than reading the focus, because drawer rows
+/// render for projects that are not the focused one.
+///
+/// Matched on the BASE device uuid against every machine record the app holds,
+/// which is the same resolution `_buildRelayTransportFor` does to decide what
+/// to dial. An exact-id match against the paired list alone — what this used to
+/// be — could answer for neither shape that reaches it today: a remote PROJECT
+/// is `<machineUuid>.<projectId>` while a machine record is keyed by the bare
+/// uuid, and the paired list is empty on any install that never QR-paired
+/// (`savePairedAgents` has no writer left; admission is account trust).
+///
+/// A legacy project recorded against another device stays FALSE: it carries a
+/// bare projectId that names no machine, so the transport treats it as local
+/// too, and this must not disagree with what is actually dialled.
 final entryIsRelayProvider = Provider.family<bool, String>((ref, entryId) {
-  final agents = ref.watch(pairedAgentProvider).value ?? const [];
-  return agents.any((a) => a.agentDeviceId == entryId);
+  // The sample project's transport reports itself local — that is what keeps it
+  // out of the relay bucket and its push registration.
+  if (isDemoEntryId(entryId)) return false;
+  final base = baseDeviceUuid(entryId);
+  final paired = ref.watch(pairedAgentProvider).value ?? const <PairedAgent>[];
+  if (paired.any((a) => baseDeviceUuid(a.agentDeviceId) == base)) return true;
+  final recent = ref.watch(recentAgentsProvider);
+  if (recent.any((r) => baseDeviceUuid(r.agentDeviceId) == base)) return true;
+  final inventory =
+      ref.watch(accountAgentsProvider).value ?? const <InventoryAgent>[];
+  return inventory.any((a) => a.deviceUuid == base);
 });
 
 /// True iff the currently focused id corresponds to a relay-paired remote
@@ -834,16 +857,33 @@ final pairedAgentProvider =
       PairedAgentNotifier.new,
     );
 
-/// The currently active agent from the paired list, if any.
+/// The machine behind the current focus, if the app knows one.
+///
+/// Resolved by BASE uuid, and falling through to the reconnect list, for the
+/// same reason [entryIsRelayProvider] is: a remote project focus is
+/// `<machineUuid>.<projectId>`, and a machine reached under account trust has
+/// no paired row at all — an exact match against the paired list alone left the
+/// connect screen naming a generic "agent" for every machine in the product.
 final activeAgentProvider = Provider<PairedAgent?>((ref) {
   final activeId = ref.watch(selectedRegistrationIdProvider);
   if (activeId == null) return null;
-  final agents = ref.watch(pairedAgentProvider).value ?? const [];
-  try {
-    return agents.firstWhere((a) => a.agentDeviceId == activeId);
-  } on StateError {
-    return null;
+  final base = baseDeviceUuid(activeId);
+  final paired = ref.watch(pairedAgentProvider).value ?? const <PairedAgent>[];
+  for (final agent in paired) {
+    if (baseDeviceUuid(agent.agentDeviceId) == base) return agent;
   }
+  for (final recent in ref.watch(recentAgentsProvider)) {
+    if (baseDeviceUuid(recent.agentDeviceId) != base) continue;
+    final machine = recent.hostMachineName?.trim();
+    return PairedAgent(
+      relayUrl: recent.relayUrl,
+      agentDeviceId: recent.agentDeviceId,
+      agentName: machine != null && machine.isNotEmpty
+          ? machine
+          : recent.agentLabel,
+    );
+  }
+  return null;
 });
 
 class PairedAgentNotifier extends AsyncNotifier<List<PairedAgent>> {

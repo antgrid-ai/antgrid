@@ -444,19 +444,38 @@ Future<bool> selectRemoteAgent(
   }
 }
 
-/// Reconnects the live remote agent if its transport is currently offline.
-/// No-op for local projects (their transport is managed by
-/// `agentTransportProvider`). Skips on `connecting` so we don't race an
-/// in-flight connect.
+/// Reconnects the live remote target if its transport is currently offline.
+/// Skips on `connecting` so we don't race an in-flight connect.
+///
+/// [registrationId] is whatever the caller already has focused — a machine's
+/// bare uuid, or a remote project's `<machineUuid>.<projectId>`. Reading that
+/// id's transport is what declares the connection wanted and hands the
+/// supervisor the ladder; it throws with the block reason when the supervisor
+/// gives up, which is what the snackbar reports.
+///
+/// Deliberately NOT [selectRemoteAgent]: that resolves a MACHINE record and
+/// sets the focus to it, so a compound project id found no record (its
+/// `firstWhere` threw `Bad state: No element` straight into the snackbar) and
+/// the machine it would have focused on success is not the project the user is
+/// looking at. Nothing here writes the focus — the caller already has the one
+/// it wants.
 Future<bool> ensureRemoteOnline(
   BuildContext context,
   ProviderContainer ref,
-  String agentDeviceId,
+  String registrationId,
 ) async {
   if (ref.read(agentReachabilityProvider) != AgentReachability.offline) {
     return true;
   }
-  return selectRemoteAgent(context, ref, agentDeviceId);
+  try {
+    await ref.read(agentTransportForProvider(registrationId).future);
+    return true;
+  } catch (e) {
+    if (context.mounted) {
+      showAbSnackBar(context, 'Connect failed: $e');
+    }
+    return false;
+  }
 }
 
 /// Public activation entry point for drawer interactions (session-row click,

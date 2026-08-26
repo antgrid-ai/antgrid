@@ -8,9 +8,12 @@
 import 'package:antgrid/design/widgets/ab_state_chip.dart';
 import 'package:antgrid/launcher/host_control_client.dart';
 import 'package:antgrid/models/ab_project.dart';
+import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/remote_access.dart';
+import 'package:antgrid/services/account_agents_api.dart';
+import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid/widgets/agent_panel.dart';
 import 'package:antgrid/widgets/remote_host_chip.dart';
 import 'package:antgrid/widgets/window_title_bar.dart';
@@ -75,6 +78,7 @@ Future<void> _pump(
   TargetPlatform platform = TargetPlatform.macOS,
   String? localUuid = _localUuid,
   bool mobileAccessEnabled = false,
+  List<InventoryAgent> inventory = const [],
 }) async {
   debugDefaultTargetPlatformOverride = platform;
   if (project != null) await stores.projectStore.upsert(project);
@@ -84,6 +88,9 @@ Future<void> _pump(
         ...stores.overrides,
         localDeviceUuidProvider.overrideWith((ref) async => localUuid),
         selectedRegistrationIdProvider.overrideWith((_) => selectedId),
+        // Never the real one: it reads the session cookie out of the keychain
+        // and fetches /account/agents.
+        accountAgentsProvider.overrideWith((_) async => inventory),
         remoteAccessPolicyProvider.overrideWith(
           () => _FakePolicyNotifier(
             RemoteAccessPolicy(enabled: mobileAccessEnabled),
@@ -161,6 +168,101 @@ void main() {
       expect(find.byType(AbStateChip), findsOneWidget);
     },
   );
+
+  testWidgets(
+    'a focused remote PROJECT names its machine from the inventory',
+    (tester) async {
+      // The shipped regression: a remote project's focus id is
+      // `<machineUuid>.<projectId>` and it is never upserted into the local
+      // project store, so a store-only lookup found nothing and the chip
+      // vanished for the one route that carries remote projects — driving
+      // another machine looked identical to driving your own.
+      final stores = await buildTestStoreOverrides();
+      addTearDown(stores.close);
+
+      await _pump(
+        tester,
+        stores: stores,
+        selectedId: '$_remoteUuid.remote-proj',
+        inventory: [
+          InventoryAgent(
+            deviceUuid: _remoteUuid,
+            displayName: 'someone@example.com',
+            platform: 'linux',
+            ed25519Pub: 'pub',
+            machineName: 'build-server',
+          ),
+        ],
+      );
+
+      expect(find.byType(RemoteHostChip), findsOneWidget);
+      expect(find.text('build-server'), findsOneWidget);
+      expect(
+        tester.widget<RemoteHostChip>(find.byType(RemoteHostChip)).platform,
+        'linux',
+      );
+    },
+  );
+
+  testWidgets('a remote project falls back to the reconnect list offline', (
+    tester,
+  ) async {
+    // `/account/agents` unreachable: the cached machine row still names it, and
+    // carries no platform — which the chip must render as desktop, not unknown.
+    final stores = await buildTestStoreOverrides();
+    addTearDown(stores.close);
+    await stores.recentAgentsStore.upsert(
+      RecentAgent(
+        agentDeviceId: _remoteUuid,
+        agentLabel: 'work laptop',
+        agentEd25519Pubkey: 'pub',
+        relayUrl: 'wss://relay.example',
+        pairedAt: DateTime.now(),
+        lastConnectedAt: DateTime.now(),
+        hostMachineName: 'build-server',
+      ),
+    );
+
+    await _pump(
+      tester,
+      stores: stores,
+      selectedId: '$_remoteUuid.remote-proj',
+    );
+
+    expect(find.text('build-server'), findsOneWidget);
+    expect(
+      tester.widget<RemoteHostChip>(find.byType(RemoteHostChip)).platform,
+      isNull,
+    );
+  });
+
+  testWidgets('a focused LOCAL project renders no chip for its own machine', (
+    tester,
+  ) async {
+    // The local machine is in the account inventory too; matching the focus
+    // against it must not turn this device into a remote host.
+    final stores = await buildTestStoreOverrides();
+    addTearDown(stores.close);
+
+    final project = _localProject();
+    await _pump(
+      tester,
+      stores: stores,
+      project: project,
+      selectedId: project.projectId,
+      inventory: [
+        InventoryAgent(
+          deviceUuid: _localUuid,
+          displayName: 'me@example.com',
+          platform: 'macos',
+          ed25519Pub: 'pub',
+          machineName: 'this-mac',
+        ),
+      ],
+    );
+
+    expect(find.byType(RemoteHostChip), findsNothing);
+  });
 
   testWidgets(
     'no focused project still renders the machine switch, without the chip',

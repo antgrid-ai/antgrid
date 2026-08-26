@@ -11,7 +11,7 @@ import 'package:antgrid/storage/project_store.dart';
 import '../helpers/prefs_test_mock.dart';
 
 /// The gate on the session kebab's working-directory rows (Open folder, Open in
-/// <editor>, Copy path). Those resolve their path over the LOOPBACK control
+/// `<editor>`, Copy path). Those resolve their path over the LOOPBACK control
 /// plane, so they may only be offered for a checkout this device hosts.
 ///
 /// Cover for the shipped bug: the rows were gated on a remote-blocklist keyed

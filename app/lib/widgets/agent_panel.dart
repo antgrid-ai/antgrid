@@ -17,6 +17,7 @@ import '../design/widgets/ab_toolbar.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../models/handler_state.dart';
 import '../models/session_entry.dart';
+import '../providers/account_agents.dart';
 import '../providers/agent_transport.dart';
 import '../providers/demo_mode.dart';
 import '../providers/device_provisioning.dart';
@@ -24,10 +25,12 @@ import '../providers/first_run.dart';
 import '../providers/handler_discovery.dart';
 import '../providers/projects.dart';
 import '../providers/providers.dart';
+import '../providers/recent_agents.dart';
 import '../providers/session_mode.dart';
 import '../providers/sessions.dart';
 import '../screens/terminal_screen.dart';
 import '../util/ab_log.dart';
+import '../util/device_id.dart';
 import '../util/detached.dart';
 import '../util/relative_time.dart';
 import '../utils/platform_utils.dart';
@@ -237,18 +240,7 @@ List<Widget> titleBarProjectActions(WidgetRef ref) {
   // on desktop purely so this affordance can render.
   if (ref.watch(demoModeProvider)) return const [];
   final localUuid = ref.watch(localDeviceUuidProvider).value;
-  final selectedId = ref.watch(selectedRegistrationIdProvider);
-  final projects = ref.watch(projectsProvider);
-
-  // A null selectedId matches nothing: projectId is non-nullable.
-  final matches = projects.where((p) => p.projectId == selectedId);
-  final focused = matches.isEmpty ? null : matches.first;
-  // Until the local uuid resolves, local-vs-remote is undecidable — withhold the
-  // chip rather than flashing the wrong one.
-  final remoteHost =
-      focused != null && localUuid != null && !focused.isLocalFor(localUuid)
-      ? focused.hostMachineName
-      : null;
+  final remoteHost = _focusedRemoteHost(ref);
 
   return [
     // Rendered even while the policy is unloaded — RemoteAccessControl reports
@@ -257,9 +249,63 @@ List<Widget> titleBarProjectActions(WidgetRef ref) {
     if (localUuid != null && remoteHost != null)
       const SizedBox(width: AbTokens.space8),
     if (remoteHost != null)
-      // TODO(task-13): derive platform from welcome message / agent inventory.
-      RemoteHostChip(hostMachineName: remoteHost, platform: 'macos'),
+      RemoteHostChip(
+        hostMachineName: remoteHost.name,
+        platform: remoteHost.platform,
+      ),
   ];
+}
+
+/// The machine hosting the focused project, or null when it is this one (or
+/// undecidable yet).
+///
+/// Two sources, because a project reaches the focus by two routes. A LOCAL
+/// store record answers for a folder this app opened — including the legacy
+/// case of one recorded against another device. Everything else is a remote
+/// focus that was never upserted locally: a machine's advertised project, whose
+/// id is `<machineUuid>.<projectId>`, or a machine itself. Asking only the
+/// local store — what this used to do — meant the chip never rendered for the
+/// route that actually carries remote projects today, so driving another
+/// machine looked exactly like driving your own.
+({String name, String? platform})? _focusedRemoteHost(WidgetRef ref) {
+  final selectedId = ref.watch(selectedRegistrationIdProvider);
+  if (selectedId == null) return null;
+  // Until the local uuid resolves, local-vs-remote is undecidable — withhold
+  // the chip rather than flashing the wrong one.
+  final localUuid = ref.watch(localDeviceUuidProvider).value;
+  if (localUuid == null) return null;
+
+  for (final project in ref.watch(projectsProvider)) {
+    if (project.projectId != selectedId) continue;
+    return project.isLocalFor(localUuid)
+        ? null
+        : (name: project.hostMachineName, platform: null);
+  }
+
+  final base = baseDeviceUuid(selectedId);
+  if (base == localUuid) return null;
+  // Inventory first: it is the relay-independent anchor, and the only source
+  // carrying the platform. `RecentAgent` is the offline fallback, and the two
+  // may name the machine differently — prefer whichever answered.
+  for (final agent in ref.watch(accountAgentsProvider).value ?? const []) {
+    if (agent.deviceUuid != base) continue;
+    final machine = agent.machineName?.trim();
+    return (
+      name: machine != null && machine.isNotEmpty
+          ? machine
+          : agent.displayName,
+      platform: agent.platform,
+    );
+  }
+  for (final agent in ref.watch(recentAgentsProvider)) {
+    if (baseDeviceUuid(agent.agentDeviceId) != base) continue;
+    final machine = agent.hostMachineName?.trim();
+    return (
+      name: machine != null && machine.isNotEmpty ? machine : agent.agentLabel,
+      platform: null,
+    );
+  }
+  return null;
 }
 
 /// Pill label for a parked session. A park always resumes on its own, so the

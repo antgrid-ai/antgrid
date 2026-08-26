@@ -10,9 +10,12 @@ import '../design/widgets/ab_icon.dart';
 ///
 /// Displays the host machine name and a platform-appropriate icon. Degrades
 /// gracefully to "Remote host" when [hostMachineName] is empty.
+///
+/// [platform] is null when nothing has said — the machine is known only from
+/// the reconnect list, which caches coordinates and not a platform.
 class RemoteHostChip extends StatelessWidget {
   final String hostMachineName;
-  final String platform;
+  final String? platform;
 
   const RemoteHostChip({
     super.key,
@@ -20,19 +23,14 @@ class RemoteHostChip extends StatelessWidget {
     required this.platform,
   });
 
-  String get _iconName {
-    switch (platform) {
-      case 'macos':
-      case 'linux':
-      case 'windows':
-        return AbIcons.deviceDesktop;
-      case 'ios':
-      case 'android':
-        return AbIcons.deviceMobile;
-      default:
-        return AbIcons.server;
-    }
-  }
+  /// Unstated reads as desktop, not unknown: every machine that can host an
+  /// agent is a desktop-class one, so the server glyph is reserved for a
+  /// platform the inventory named and this build does not recognise.
+  String get _iconName => switch (platform) {
+    'ios' || 'android' => AbIcons.deviceMobile,
+    'macos' || 'linux' || 'windows' || null => AbIcons.deviceDesktop,
+    _ => AbIcons.server,
+  };
 
   @override
   Widget build(BuildContext context) {
