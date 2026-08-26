@@ -18,6 +18,7 @@ import '../design/widgets/ab_tooltip.dart';
 import '../models/handler_state.dart';
 import '../models/session_entry.dart';
 import '../providers/account_agents.dart';
+import '../providers/agent_coordinates.dart';
 import '../providers/agent_transport.dart';
 import '../providers/demo_mode.dart';
 import '../providers/device_provisioning.dart';
@@ -246,6 +247,8 @@ List<Widget> titleBarProjectActions(WidgetRef ref) {
     // Rendered even while the policy is unloaded — RemoteAccessControl reports
     // "not known yet" rather than vanishing, deliberately (see its build()).
     if (localUuid != null) const RemoteAccessControl(),
+    // The spacer belongs to the control it follows, and [_focusedRemoteHost]
+    // already withholds the chip until the uuid resolves.
     if (localUuid != null && remoteHost != null)
       const SizedBox(width: AbTokens.space8),
     if (remoteHost != null)
@@ -284,28 +287,11 @@ List<Widget> titleBarProjectActions(WidgetRef ref) {
 
   final base = baseDeviceUuid(selectedId);
   if (base == localUuid) return null;
-  // Inventory first: it is the relay-independent anchor, and the only source
-  // carrying the platform. `RecentAgent` is the offline fallback, and the two
-  // may name the machine differently — prefer whichever answered.
-  for (final agent in ref.watch(accountAgentsProvider).value ?? const []) {
-    if (agent.deviceUuid != base) continue;
-    final machine = agent.machineName?.trim();
-    return (
-      name: machine != null && machine.isNotEmpty
-          ? machine
-          : agent.displayName,
-      platform: agent.platform,
-    );
-  }
-  for (final agent in ref.watch(recentAgentsProvider)) {
-    if (baseDeviceUuid(agent.agentDeviceId) != base) continue;
-    final machine = agent.hostMachineName?.trim();
-    return (
-      name: machine != null && machine.isNotEmpty ? machine : agent.agentLabel,
-      platform: null,
-    );
-  }
-  return null;
+  return resolveMachineDisplay(
+    base: base,
+    inventory: ref.watch(accountAgentsProvider).value,
+    recents: ref.watch(recentAgentsProvider),
+  );
 }
 
 /// Pill label for a parked session. A park always resumes on its own, so the

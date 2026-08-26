@@ -36,7 +36,7 @@ Future<void> _runBestEffortSteps(
 /// resurrects when the same id reappears (the classic symptom: a removed
 /// project's old session list comes back on reopen). Centralizing it here keeps
 /// the local (`ProjectsNotifier.remove`) and remote
-/// (`PairedAgentNotifier.forgetMachine`) paths from drifting out of sync.
+/// (`MachineConnectionNotifier.forgetMachine`) paths from drifting out of sync.
 ///
 /// Caller contract: invoke AFTER the id has been evicted from the warm registry
 /// via [ProjectSessionRegistry.forceEvictAndSettle] (not the fire-and-forget

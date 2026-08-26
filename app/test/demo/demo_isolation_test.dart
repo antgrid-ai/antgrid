@@ -21,6 +21,7 @@ import 'package:antgrid/providers/cached_sessions.dart';
 import 'package:antgrid/providers/recent_sessions.dart';
 import 'package:antgrid/providers/new_session_action.dart';
 import 'package:antgrid/providers/new_session_picker.dart';
+import 'package:antgrid/providers/open_checkout.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/services/app_settings_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
@@ -395,6 +396,14 @@ void main() {
         .projects
         .single;
     container.read(selectedTargetProjectProvider.notifier).set(project);
+
+    // The session kebab's Open-in-editor / Copy-path rows. Resolving a checkout
+    // path runs over the loopback control plane, which spawns the host — so the
+    // gate has to answer before anything reads it, not after.
+    expect(
+      await container.read(entryIsLocalCheckoutProvider(kDemoProjectId).future),
+      isFalse,
+    );
 
     await container.read(focusedMachineToolsProvider.future);
     await container.read(newSessionDetectedToolsProvider.future);

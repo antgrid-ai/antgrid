@@ -83,13 +83,23 @@ class RecentAgentsStore {
   static Future<RecentAgentsStore> open() async =>
       RecentAgentsStore._(await openScopedPrefs({_key}));
 
+  /// A blob that fails to decode is DROPPED, not thrown: this runs inside
+  /// `RecentAgentsNotifier.build()`, which several synchronous providers watch
+  /// (`entryIsRelayProvider` and the drawer rows and tap handlers behind it), so
+  /// a throw here is a red screen or a permanently dead tap rather than a
+  /// missing reconnect list. Same policy as a key bump — stale rows are dropped,
+  /// never migrated.
   List<RecentAgent> list() {
     final raw = _prefs.getString(_key);
     if (raw == null) return List.unmodifiable(const <RecentAgent>[]);
-    final arr = jsonDecode(raw) as List;
-    return List.unmodifiable(
-      arr.map((j) => RecentAgent.fromJson(j as Map<String, dynamic>)),
-    );
+    try {
+      final arr = jsonDecode(raw) as List;
+      return List.unmodifiable(
+        arr.map((j) => RecentAgent.fromJson(j as Map<String, dynamic>)),
+      );
+    } catch (_) {
+      return List.unmodifiable(const <RecentAgent>[]);
+    }
   }
 
   /// Broadcast stream of post-write snapshots. Does NOT replay the current

@@ -5,6 +5,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../connection/relay_mechanisms.dart' show ConnectionBlockedException;
 import '../connection/supervisor_state.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
@@ -26,6 +27,7 @@ import '../project/perf_recorder.dart';
 import '../project/project_session_registry.dart';
 import '../project/project_status.dart';
 import '../providers/agent_transport.dart';
+import '../providers/relay_connection.dart';
 import '../providers/cached_sessions.dart';
 import '../providers/drawer_entries.dart';
 import '../providers/collapsed_drawer.dart';
@@ -306,10 +308,10 @@ class _DrawerEntryTrailing extends ConsumerWidget {
   }
 }
 
-/// Trash affordance for removing a project/agent from history. Any project
+/// Trash affordance for removing a project/machine from history. Any project
 /// can be removed (active sessions or not) — removing the selected project
-/// clears the selection (`ProjectsNotifier.remove`) and the remote branch
-/// unpairs first, so it's safe regardless of session state.
+/// clears the selection (`ProjectsNotifier.remove`) and the remote branch drops
+/// the focus first, so it's safe regardless of session state.
 class _RemoveButton extends ConsumerStatefulWidget {
   final DrawerEntry entry;
   const _RemoveButton({required this.entry});
@@ -410,6 +412,31 @@ String removeLocalProjectBody(ProviderContainer container, String projectId) {
       'are kept.';
 }
 
+/// User-facing copy for a failed dial.
+///
+/// Matched on the structured block reason rather than interpolating the error,
+/// because everything that reaches here is a developer string: a bare
+/// `'Connect failed: $e'` puts `ConnectionBlockedException(handshakeFailing)`
+/// (or a raw `TimeoutException`) in a snackbar. The generic arm carries no
+/// detail for the same reason — the connection error screen is where a reason
+/// belongs, and it has one.
+String connectFailureMessage(Object error) => switch (error) {
+  ConnectionBlockedException(reason: final r) => switch (r) {
+    BlockReason.licenseExpired =>
+      'Connect failed: this machine needs an active plan or a sign-in.',
+    BlockReason.agentOffline => 'Connect failed: that machine is offline.',
+    BlockReason.deviceRevoked =>
+      "Connect failed: this device's access was revoked.",
+    BlockReason.sessionTakenOver =>
+      'Connect failed: another device took over this machine.',
+    BlockReason.superseded =>
+      'Connect failed: a newer connection replaced this one.',
+    BlockReason.handshakeFailing =>
+      'Connect failed: could not verify that machine.',
+  },
+  _ => 'Connect failed.',
+};
+
 /// Top-level helper so the kebab and inline connect actions can share one
 /// implementation. Returns `true` when the remote is now active, `false` if
 /// the attempt failed (snackbar already shown). Callers may use the signal
@@ -434,7 +461,7 @@ Future<bool> selectRemoteAgent(
     return true;
   } catch (e) {
     if (context.mounted) {
-      showAbSnackBar(context, 'Connect failed: $e');
+      showAbSnackBar(context, connectFailureMessage(e));
     }
     return false;
   }
@@ -463,12 +490,32 @@ Future<bool> ensureRemoteOnline(
   if (ref.read(agentReachabilityProvider) != AgentReachability.offline) {
     return true;
   }
+  // `offline` is reachable ONLY from a Blocked(agentOffline) ladder, so the
+  // transport element is already settled in an error that `noProviderRetry`
+  // guarantees Riverpod will never re-run: awaiting `.future` alone replays the
+  // original exception without dialling anything. BOTH halves are required, for
+  // the reasons `MachineConnectionNotifier.retryAgentConnection` sets out.
+  ref
+      .read(relayConnectionManagerProvider)
+      .peek(registrationId)
+      ?.supervisor
+      ?.retry();
+  ref.invalidate(agentTransportForProvider(registrationId));
   try {
-    await ref.read(agentTransportForProvider(registrationId).future);
+    // Null is a machine no source can name coordinates for (dropped from the
+    // inventory, never in the reconnect list). Reporting that as online sends
+    // the caller into a warm-up that can only time out in silence.
+    if (await ref.read(agentTransportForProvider(registrationId).future) ==
+        null) {
+      if (context.mounted) {
+        showAbSnackBar(context, 'That machine is no longer reachable.');
+      }
+      return false;
+    }
     return true;
   } catch (e) {
     if (context.mounted) {
-      showAbSnackBar(context, 'Connect failed: $e');
+      showAbSnackBar(context, connectFailureMessage(e));
     }
     return false;
   }
@@ -498,16 +545,18 @@ Future<bool> activateDrawerEntryById(
     // A session row nested under a remote MACHINE entry carries its project's
     // compound `<uuid>.<projectId>` regId, which is not itself a drawer entry
     // (the entry is the bare-uuid machine). When that project is already open
-    // (warm transport), refocus it as a remote target — no re-pair needed.
+    // (warm transport), refocus it as a remote target — nothing to dial.
     if (_focusOpenRemoteProject(ref, entryId)) return true;
-    // A cold (advertised-but-not-warm) project still needs pairing, promotion,
-    // and a data-plane socket before it can be focused — `_focusOpenRemoteProject`
-    // only refocuses one that is already warm.
+    // A cold (advertised-but-not-warm) project still needs its machine dialled,
+    // then promotion and a data-plane socket, before it can be focused —
+    // `_focusOpenRemoteProject` only refocuses one that is already warm.
     return _openColdRemoteProject(context, ref, entryId);
   }
 
-  // Drop duplicate taps while a remote connection is mid-flight to prevent
-  // overlapping selectAgent() calls. Gated on `focusedIsRelayProvider`
+  // Drop a duplicate tap on the machine whose connection is already mid-flight.
+  // Every reachability provider here reads the FOCUS, so the guard only holds
+  // while the focused machine IS the tapped one — otherwise one machine dialling
+  // would swallow every tap on all the others. Gated on `focusedIsRelayProvider`
   // because `agentReachabilityProvider` returns `connecting` by default
   // whenever no agent is active (including pure local mode), which would
   // otherwise block every tap. Gated on `focusedAgentBlockedProvider` because
@@ -515,8 +564,12 @@ Future<bool> activateDrawerEntryById(
   // without this the tap is a silent no-op forever and the user can never
   // reach the error surface that holds Retry.
   if (entry is RemoteAgentEntry || entry is InventoryAgentEntry) {
-    final hasActiveRemote = ref.read(focusedIsRelayProvider);
-    if (hasActiveRemote &&
+    final focusedId = ref.read(selectedRegistrationIdProvider);
+    final sameMachine =
+        focusedId != null &&
+        baseDeviceUuid(focusedId) == baseDeviceUuid(entryId);
+    if (sameMachine &&
+        ref.read(focusedIsRelayProvider) &&
         !ref.read(focusedAgentBlockedProvider) &&
         ref.read(agentReachabilityProvider) == AgentReachability.connecting) {
       return false;
@@ -542,9 +595,9 @@ Future<bool> activateDrawerEntryById(
       }
       break;
     case InventoryAgentEntry e:
-      // Same-account machine straight from the peers inventory — nothing to
-      // pair. Reading its transport brings the supervisor up; the agent
-      // admits us from the inventory when the E2E handshake lands.
+      // Same-account machine straight from the peers inventory. Reading its
+      // transport brings the supervisor up; the agent admits us from the
+      // inventory when the E2E handshake lands.
       final priorTarget = ref.read(selectedTargetProvider);
       ref.read(selectedTargetProvider.notifier).set(null);
       try {
@@ -599,7 +652,7 @@ bool _focusOpenRemoteProject(ProviderContainer ref, String regId) {
 }
 
 /// Opens a cold remote advertised project (its compound `<uuid>.<projectId>`
-/// regId) from a drawer session-row tap: pairs the machine, promotes it
+/// regId) from a drawer session-row tap: dials the machine, promotes it
 /// (unconditionally — `project:start` is the promote trigger and is idempotent;
 /// see [openRemoteProjectForActivation]), and focuses it. Restores the prior
 /// target and shows a snackbar on failure, mirroring the other remote activation
@@ -711,8 +764,8 @@ class _NewSessionButtonState extends ConsumerState<_NewSessionButton> {
       }
 
       // Activation resolves the focus id (a remote entry's id may differ from
-      // the live `agentDeviceId` it reconnects/auto-pairs to), so read it back
-      // rather than reusing `entryId`.
+      // the live `agentDeviceId` it reconnects to), so read it back rather than
+      // reusing `entryId`.
       final pid = container.read(selectedRegistrationIdProvider);
       if (pid == null) return;
 

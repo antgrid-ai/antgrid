@@ -124,7 +124,9 @@ class _AppShellState extends ConsumerState<AppShell> {
     // screen: it survives a walk over to New Session or Settings, so restating
     // it from those surfaces would vouch for a session the user cannot see and
     // silently exempt it from unread.
-    if (ref.read(workbenchSurfaceProvider) != WorkbenchSurface.workspace) return;
+    if (ref.read(workbenchSurfaceProvider) != WorkbenchSurface.workspace) {
+      return;
+    }
     final active = ref.read(activeSessionIdProvider);
     if (active != null) session.sessionsService.focus(active);
   }

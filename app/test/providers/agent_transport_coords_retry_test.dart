@@ -113,7 +113,6 @@ class _FakeConnectionManager extends RelayConnectionManager {
   RelayConnection? peek(String machineDeviceId) => _conns[machineDeviceId];
 }
 
-
 Future<DeviceRecord> _connectionRecord() async {
   final seed = List<int>.generate(32, (i) => (i * 5 + 1) % 256);
   final kp = await Ed25519().newKeyPairFromSeed(seed);

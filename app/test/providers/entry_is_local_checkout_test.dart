@@ -22,7 +22,9 @@ void main() {
   const localUuid = 'local-device-uuid';
   late ProjectStore projectStore;
 
-  Future<ProviderContainer> containerFor({String? deviceUuid = localUuid}) async {
+  Future<ProviderContainer> containerFor({
+    String? deviceUuid = localUuid,
+  }) async {
     useInMemoryPrefs();
     projectStore = await ProjectStore.open();
     final container = ProviderContainer(
@@ -68,24 +70,26 @@ void main() {
     );
   });
 
-  test('a pre-v2 project with no recorded host is local-to-this-device',
-      () async {
-    // Matches `AbProject.isLocalFor`: a null hostDeviceUuid only ever came from
-    // a project opened on this install, before the field existed.
-    final container = await containerFor();
-    await addProject(
-      container,
-      projectId: '6e5c50e5d6f973a8',
-      hostDeviceUuid: null,
-    );
+  test(
+    'a pre-v2 project with no recorded host is local-to-this-device',
+    () async {
+      // Matches `AbProject.isLocalFor`: a null hostDeviceUuid only ever came from
+      // a project opened on this install, before the field existed.
+      final container = await containerFor();
+      await addProject(
+        container,
+        projectId: '6e5c50e5d6f973a8',
+        hostDeviceUuid: null,
+      );
 
-    expect(
-      await container.read(
-        entryIsLocalCheckoutProvider('6e5c50e5d6f973a8').future,
-      ),
-      isTrue,
-    );
-  });
+      expect(
+        await container.read(
+          entryIsLocalCheckoutProvider('6e5c50e5d6f973a8').future,
+        ),
+        isTrue,
+      );
+    },
+  );
 
   test('a remote machine\'s project is not local', () async {
     final container = await containerFor();

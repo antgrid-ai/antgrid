@@ -16,8 +16,8 @@ Future<bool> confirmAndHardSignOut(BuildContext context, WidgetRef ref) async {
     title: 'Sign out and remove this device?',
     body:
         'This signs you out AND removes this device from your account. '
-        'Phones currently paired with this device will be disconnected and '
-        'need to be re-paired. You can sign in again anytime.',
+        'Your phones lose access to this machine until you sign in again — '
+        'there is nothing to set up a second time.',
     confirmLabel: 'Sign out',
     destructive: true,
   );

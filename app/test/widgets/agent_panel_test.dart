@@ -169,40 +169,39 @@ void main() {
     },
   );
 
-  testWidgets(
-    'a focused remote PROJECT names its machine from the inventory',
-    (tester) async {
-      // The shipped regression: a remote project's focus id is
-      // `<machineUuid>.<projectId>` and it is never upserted into the local
-      // project store, so a store-only lookup found nothing and the chip
-      // vanished for the one route that carries remote projects — driving
-      // another machine looked identical to driving your own.
-      final stores = await buildTestStoreOverrides();
-      addTearDown(stores.close);
+  testWidgets('a focused remote PROJECT names its machine from the inventory', (
+    tester,
+  ) async {
+    // The shipped regression: a remote project's focus id is
+    // `<machineUuid>.<projectId>` and it is never upserted into the local
+    // project store, so a store-only lookup found nothing and the chip
+    // vanished for the one route that carries remote projects — driving
+    // another machine looked identical to driving your own.
+    final stores = await buildTestStoreOverrides();
+    addTearDown(stores.close);
 
-      await _pump(
-        tester,
-        stores: stores,
-        selectedId: '$_remoteUuid.remote-proj',
-        inventory: [
-          InventoryAgent(
-            deviceUuid: _remoteUuid,
-            displayName: 'someone@example.com',
-            platform: 'linux',
-            ed25519Pub: 'pub',
-            machineName: 'build-server',
-          ),
-        ],
-      );
+    await _pump(
+      tester,
+      stores: stores,
+      selectedId: '$_remoteUuid.remote-proj',
+      inventory: [
+        InventoryAgent(
+          deviceUuid: _remoteUuid,
+          displayName: 'someone@example.com',
+          platform: 'linux',
+          ed25519Pub: 'pub',
+          machineName: 'build-server',
+        ),
+      ],
+    );
 
-      expect(find.byType(RemoteHostChip), findsOneWidget);
-      expect(find.text('build-server'), findsOneWidget);
-      expect(
-        tester.widget<RemoteHostChip>(find.byType(RemoteHostChip)).platform,
-        'linux',
-      );
-    },
-  );
+    expect(find.byType(RemoteHostChip), findsOneWidget);
+    expect(find.text('build-server'), findsOneWidget);
+    expect(
+      tester.widget<RemoteHostChip>(find.byType(RemoteHostChip)).platform,
+      'linux',
+    );
+  });
 
   testWidgets('a remote project falls back to the reconnect list offline', (
     tester,
@@ -223,11 +222,7 @@ void main() {
       ),
     );
 
-    await _pump(
-      tester,
-      stores: stores,
-      selectedId: '$_remoteUuid.remote-proj',
-    );
+    await _pump(tester, stores: stores, selectedId: '$_remoteUuid.remote-proj');
 
     expect(find.text('build-server'), findsOneWidget);
     expect(

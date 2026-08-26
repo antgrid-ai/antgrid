@@ -6,7 +6,9 @@ import 'package:antgrid/design/widgets/ab_brand_mark.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
 import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/models/terminal_models.dart';
+import 'package:antgrid/providers/account_agents.dart';
 import 'package:antgrid/providers/agent_transport.dart';
+import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
@@ -57,6 +59,16 @@ void main() {
         overrides: [
           ...stores.overrides,
           ...extraOverrides,
+          // The title bar renders RemoteHostChip off these two, and both are
+          // account/keychain-backed: the real inventory fetch reads the session
+          // cookie out of the keychain and the real uuid MINTS a host identity
+          // on desktop. Riverpod 3 asserts on a provider overridden twice in
+          // one container, so a test wanting different values must not also
+          // pass them in [extraOverrides].
+          accountAgentsProvider.overrideWith((_) async => const []),
+          localDeviceUuidProvider.overrideWith(
+            (_) async => 'test-local-device',
+          ),
           selectedRegistrationIdProvider.overrideWith((ref) => projectId),
           // A focused id makes projectSessionProvider reachable — the handler
           // control resolves its service through serviceWhenReady — so hand

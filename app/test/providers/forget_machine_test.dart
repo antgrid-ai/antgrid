@@ -129,8 +129,14 @@ void main() {
     },
   );
 
+  // The shape that actually reaches this today: the reconnect list holds the
+  // BARE machine uuid (that is what the dial upserts), while every per-entry
+  // store is keyed by the project's compound drawer id. Resolving the purge set
+  // from the reconnect list alone leaves each project's cache behind, and the
+  // machine's projects are usually all cold when it is forgotten — so neither
+  // that list nor the warm registry can name them.
   test(
-    'forgetMachine purges cached sessions + status cache for its agents',
+    'forgetMachine purges the cached projects of a machine held by bare uuid',
     () async {
       useInMemoryPrefs();
       final tmp = await Directory.systemTemp.createTemp('antgrid-forget-test-');
@@ -144,8 +150,8 @@ void main() {
       final statusCache = ProjectStatusCache.testInstance(root: tmp.path);
 
       final recentStore = await RecentAgentsStore.open();
-      await recentStore.upsert(_recent('M.project'));
-      await recentStore.upsert(_recent('N.project'));
+      await recentStore.upsert(_recent('M'));
+      await recentStore.upsert(_recent('N'));
       addTearDown(recentStore.close);
 
       final cachedSessions = await CachedSessionsStore.open();

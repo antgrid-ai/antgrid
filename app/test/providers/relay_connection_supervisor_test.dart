@@ -153,7 +153,6 @@ class _FixedManager extends RelayConnectionManager {
   RelayConnection connectionFor(String machineDeviceId) => conn;
 }
 
-
 DeviceIdentity _identity() => DeviceIdentity(
   deviceId: 'phone-1',
   name: 'Test Phone',
@@ -436,12 +435,12 @@ void main() {
       container
           .read(selectedTargetProvider.notifier)
           .set(const RemoteTarget.legacy('M'));
-        await container.read(agentTransportForProvider('M').future);
+      await container.read(agentTransportForProvider('M').future);
       expect(builds, 1);
 
       await container
-        .read(machineConnectionProvider.notifier)
-        .retryAgentConnection();
+          .read(machineConnectionProvider.notifier)
+          .retryAgentConnection();
 
       expect(conn.supervisor!.status, isNot(isA<Blocked>()));
       await container.read(agentTransportForProvider('M').future);
