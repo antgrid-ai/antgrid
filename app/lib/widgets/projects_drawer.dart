@@ -32,6 +32,7 @@ import '../providers/new_session_picker.dart';
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
 import '../services/control_plane_client.dart';
+import '../util/detached.dart';
 import '../utils/platform_utils.dart';
 import 'ab_status_helpers.dart' show emptyAdvertHint;
 import 'account_footer.dart';
@@ -52,11 +53,23 @@ import 'update_row.dart';
 /// Always-visible (desktop) / slide-in (mobile) drawer listing local projects
 /// and paired remote agents merged by last-access. Width is fixed at 288px on
 /// desktop; on mobile it fills the natural Scaffold drawer width.
-class ProjectsDrawer extends ConsumerWidget {
+class ProjectsDrawer extends ConsumerStatefulWidget {
   const ProjectsDrawer({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<ProjectsDrawer> createState() => _ProjectsDrawerState();
+}
+
+class _ProjectsDrawerState extends ConsumerState<ProjectsDrawer> {
+  /// Lets the header's refresh BUTTON drive the list's pull-to-refresh
+  /// indicator, so the two affordances share their feedback and not just their
+  /// handler. Without it the button's only answer to a tap was going dim, on a
+  /// refresh whose slowest leg is a network round trip — indistinguishable
+  /// from a tap that missed.
+  final _refreshKey = GlobalKey<RefreshIndicatorState>();
+
+  @override
+  Widget build(BuildContext context) {
     // Unfiltered by design. The session search lives in the window title bar
     // and aims at the Recent list, which is the complete flat view of sessions;
     // narrowing THIS list by its projects' sessions only hid rows the user was
@@ -88,8 +101,8 @@ class ProjectsDrawer extends ConsumerWidget {
           // drawer rows are AbRowDensity.sm and size to their content, so this
           // is nothing to keep in sync with them.
           minBodyExtent: AbTokens.rowHeightLg,
-          header: const _TopChrome(),
-          body: _Body(entries: entries),
+          header: _TopChrome(refreshKey: _refreshKey),
+          body: _Body(entries: entries, refreshKey: _refreshKey),
           // Docked here, not on the New Session canvas: the drawer is the only
           // desktop surface mounted on both routes, and the last setup steps
           // are performed from inside a session.
@@ -120,7 +133,9 @@ class ProjectsDrawer extends ConsumerWidget {
 /// gone while both still paint whole, and the drawer's clip is what
 /// keeps them off the workspace.
 class _TopChrome extends StatelessWidget {
-  const _TopChrome();
+  const _TopChrome({required this.refreshKey});
+
+  final GlobalKey<RefreshIndicatorState> refreshKey;
 
   @override
   Widget build(BuildContext context) {
@@ -129,7 +144,7 @@ class _TopChrome extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const _NavActions(),
-        const _GroupLabel(label: 'PROJECTS'),
+        _GroupLabel(label: 'PROJECTS', refreshKey: refreshKey),
       ],
     );
   }
@@ -210,9 +225,12 @@ class _NavActions extends ConsumerWidget {
 /// counts its own contents any more: the panel is scanned for the one row that
 /// needs the user, which is what the attention dots are for.
 class _GroupLabel extends ConsumerWidget {
-  const _GroupLabel({required this.label});
+  const _GroupLabel({required this.label, required this.refreshKey});
 
   final String label;
+
+  /// The list's [RefreshIndicator] — see [_ProjectsDrawerState._refreshKey].
+  final GlobalKey<RefreshIndicatorState> refreshKey;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -256,7 +274,20 @@ class _GroupLabel extends ConsumerWidget {
                 tooltip: 'Refresh',
                 // Disabled while an inventory fetch is in flight so a
                 // double-tap can't stack redundant /account/agents requests.
-                onTap: refreshing ? null : () => refreshDrawer(ref),
+                //
+                // Goes through the indicator rather than calling
+                // [refreshDrawer] directly: `show()` runs the SAME handler the
+                // pull gesture does and animates the same spinner, so a tap and
+                // a pull are one interaction with one piece of feedback. It is
+                // a no-op while the indicator is already up, which is the
+                // second half of the double-tap guard.
+                onTap: refreshing
+                    ? null
+                    : () => detached(
+                        'ProjectsDrawer',
+                        'drawer refresh failed',
+                        () async => refreshKey.currentState?.show(),
+                      ),
               ),
           ],
         ),
@@ -276,7 +307,11 @@ class _Footer extends ConsumerWidget {
 
 class _Body extends ConsumerWidget {
   final List<DrawerEntry> entries;
-  const _Body({required this.entries});
+
+  /// Owned by [_ProjectsDrawerState] so the header's refresh button can show
+  /// this indicator too.
+  final GlobalKey<RefreshIndicatorState> refreshKey;
+  const _Body({required this.entries, required this.refreshKey});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -286,6 +321,7 @@ class _Body extends ConsumerWidget {
     // Pull-to-refresh wraps every branch (incl. the empty state) so the gesture
     // is available whether or not projects are listed.
     return RefreshIndicator(
+      key: refreshKey,
       onRefresh: () => refreshDrawer(ref),
       color: context.antgrid.accent,
       backgroundColor: context.antgrid.bgElevated,
