@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'package:antgrid/demo/demo_identity.dart';
 import 'package:antgrid/design/theme_presets.dart';
 import 'package:antgrid/design/widgets/ab_password_field.dart';
 import 'package:antgrid/design/widgets/ab_text_field.dart';
@@ -172,7 +173,7 @@ Future<void> _continueWith(WidgetTester tester, String email) async {
 }
 
 /// Drives the screen to step 2 through a remembered `password` hint and fills
-/// the password field. Step 1's "Continue with a password" is the other way
+/// the password field. Step 1's "Password" method cell is the other way
 /// in; it has its own tests.
 Future<List<String>> _openPasswordStep(
   WidgetTester tester, {
@@ -238,7 +239,7 @@ void main() {
     final storage = _GatedStorage(null)..gate.complete();
     await tester.pumpWidget(_wrap(storage));
 
-    await tester.tap(find.text('Continue with GitHub'));
+    await tester.tap(find.text('GitHub'));
     await tester.pump();
     await tester.pump();
 
@@ -279,6 +280,39 @@ void main() {
         paths,
         isEmpty,
         reason: 'no address is handed to the server before the user commits',
+      );
+    });
+
+    testWidgets('every method is offered without asking the server', (
+      tester,
+    ) async {
+      final paths = await _pumpScreen(tester);
+
+      // The cells name their own method and ignore the hint, so all three are
+      // unconditional. Visibility that tracked the hint would flicker as the
+      // address is typed and would leak which addresses this device remembers.
+      expect(find.text('GitHub'), findsOneWidget);
+      expect(find.text('Google'), findsOneWidget);
+      expect(find.text('Password'), findsOneWidget);
+      expect(paths, isEmpty);
+    });
+
+    testWidgets('the offline demo is offered with its caveat attached', (
+      tester,
+    ) async {
+      await _pumpScreen(tester);
+
+      // Ungated on purpose: on mobile this screen is the whole app until an
+      // account exists, so for an App Store reviewer — or a tester whose
+      // desktop is somewhere else — this is the only affordance here that
+      // leads anywhere at all.
+      expect(find.text(kDemoEntryLabel), findsOneWidget);
+      expect(
+        find.text('No account needed. Sample data, nothing is connected.'),
+        findsOneWidget,
+        reason:
+            'the caveat rides with the offer, not as an orphan line below '
+            'a button that has already been read',
       );
     });
 
@@ -347,10 +381,10 @@ void main() {
       expect(find.text('Could not open the browser'), findsOneWidget);
 
       // Step 1 offers no link of its own, so this is the whole escape route:
-      // the password button ignores the hint, and the step it reaches is where
+      // the password cell ignores the hint, and the step it reaches is where
       // the link lives. Without it a provider hint would relaunch itself on
       // every Continue with no way out short of clearing the device's storage.
-      await tester.tap(find.text('Continue with a password'));
+      await tester.tap(find.text('Password'));
       await tester.pump();
       expect(find.text('Enter your password'), findsOneWidget);
 
@@ -377,7 +411,7 @@ void main() {
 
       await tester.enterText(find.byType(TextField), 'user@example.com');
       await tester.pump();
-      await tester.tap(find.text('Continue with a password'));
+      await tester.tap(find.text('Password'));
       await tester.pump();
 
       expect(find.text('Enter your password'), findsOneWidget);
@@ -405,7 +439,7 @@ void main() {
     ) async {
       await _pumpScreen(tester);
 
-      await tester.tap(find.text('Continue with a password'));
+      await tester.tap(find.text('Password'));
       await tester.pump();
 
       expect(find.text('Enter a valid email'), findsOneWidget);
@@ -435,7 +469,7 @@ void main() {
 
       await tester.enterText(find.byType(TextField), 'user@example.com');
       await tester.pump();
-      await tester.tap(find.text('Continue with a password'));
+      await tester.tap(find.text('Password'));
       await tester.pump();
       await tester.enterText(find.byType(TextField), 'a-very-long-password');
       await tester.pump();
@@ -466,7 +500,7 @@ void main() {
 
       await tester.enterText(find.byType(TextField), 'user@example.com');
       await tester.pump();
-      await tester.tap(find.text('Continue with a password'));
+      await tester.tap(find.text('Password'));
       await tester.pump();
       await tester.enterText(find.byType(TextField), 'not-the-password');
       await tester.pump();
@@ -503,7 +537,7 @@ void main() {
 
       await tester.enterText(find.byType(TextField), 'user@example.com');
       await tester.pump();
-      await tester.tap(find.text('Continue with GitHub'));
+      await tester.tap(find.text('GitHub'));
       await tester.pump();
       await tester.pump();
 
@@ -524,7 +558,7 @@ void main() {
 
       await tester.enterText(find.byType(TextField), 'user@example.com');
       await tester.pump();
-      await tester.tap(find.text('Continue with GitHub'));
+      await tester.tap(find.text('GitHub'));
       await tester.pump();
       await tester.pump();
 
@@ -785,7 +819,7 @@ void main() {
 
       await tester.enterText(find.byType(TextField), 'user@example.com');
       await tester.pump();
-      await tester.tap(find.text('Continue with a password'));
+      await tester.tap(find.text('Password'));
       await tester.pump();
 
       expect(

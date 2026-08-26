@@ -100,4 +100,8 @@ abstract final class AbIcons {
   // off from the main line" without naming a backend — the marker stands for
   // every non-`main` checkout kind, not for worktrees specifically.
   static const isolated = Codicon.repo_forked;
+  // Sign-in method glyphs. `key` rather than `lock`: the cell offers a
+  // credential the user supplies, not a state of being secured.
+  static const password = Codicon.key;
+  static const github = Codicon.github;
 }
