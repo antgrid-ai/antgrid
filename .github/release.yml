@@ -1,0 +1,18 @@
+# Shapes the body returned by the `releases/generate-notes` API, which
+# scripts/release-notes.sh calls and the repo's "Generate release notes" button
+# uses. GitHub reads this file from the DEFAULT branch, so it does nothing until
+# it lands there — and it silently ignores a label that does not exist, so
+# `changelog-ignore` has to be created in the repo's label list to work at all.
+#
+# Title-prefix filtering in scripts/release-notes.sh catches the conventional
+# `ci:` / `chore:` / `fix(ci):` cases on its own. This label is the escape hatch
+# for the rest: a PR whose title is user-facing prose but whose change is not
+# observable by a user (a review-loop follow-up, a test-only fix) gets
+# `changelog-ignore` and drops out of the notes entirely.
+#
+# Adding `categories:` here would break the caller: it splits GitHub's body on
+# `* ` bullets and would drop every `### Category` heading. Change both or neither.
+changelog:
+  exclude:
+    labels:
+      - changelog-ignore
