@@ -1,17 +1,19 @@
 name: Deploy — Android (Play Store)
 
 # Publishes a signed release AAB to the Play Store internal track once a night,
-# if anything shipped that day. PR-time analyze/test/build lives in
+# if main moved that day. PR-time analyze/test/build lives in
 # ci-android.yml, so this never runs on PRs — one Android toolchain setup per PR
 # instead of two.
 # Nightly rather than per-push, in lockstep with deploy-ios.yml: an internal
 # track that gains four builds a day is noise, and one publish per shipping day
 # is the cadence testers actually consume. See that file for the reasoning.
 #
-# `schedule` only ever fires on the DEFAULT branch, so this is development ->
-# internal track (promote to alpha/beta/production by hand from the Play
-# Console). Merging to main publishes nothing on its own; shipping any other
-# branch is a manual workflow_dispatch run from it.
+# `schedule` only ever fires on the DEFAULT branch, so the nightly RUNS on
+# development and CHECKS OUT main — main is what reaches the internal track
+# (promote to alpha/beta/production by hand from the Play Console). A merge to
+# main publishes nothing by itself; the next cron picks it up. Shipping any
+# other branch is a manual workflow_dispatch from it, which builds that branch
+# and lands under `staging`.
 
 on:
   # Ten minutes after deploy-ios.yml so the two don't contend for the same
@@ -23,7 +25,10 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: deploy-android-${{ github.ref_name }}
+  # Keyed on the deployed ref, so a nightly and a dispatch of the same branch
+  # queue against each other. Keep in lockstep with the gate's `ref:` and the
+  # deploy job's checkout.
+  group: deploy-android-${{ github.event_name == 'schedule' && 'main' || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -44,6 +49,7 @@ jobs:
         uses: ./.github/actions/deploy-gate
         with:
           workflow: deploy-android.yml
+          ref: ${{ github.event_name == 'schedule' && 'main' || github.ref_name }}
           paths: app packages .github/workflows/deploy-android.yml .github/actions/setup-android
           token: ${{ github.token }}
 
@@ -67,7 +73,15 @@ jobs:
     environment: ${{ github.event_name == 'schedule' && 'production' || 'staging' }}
 
     steps:
+      # The deployed ref, not the ref this run fired on. Note the split that
+      # creates: the WORKFLOW file always comes from the default branch, because
+      # that is the only place a cron can fire, while every local composite
+      # action below resolves from the checked-out tree. Land .github/actions/**
+      # changes on both branches, or the nightly runs one branch's workflow
+      # against the other's tooling.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'main' || github.ref_name }}
 
       # The release AAB builds super_native_extensions (Rust) for 4 ABIs plus
       # Flutter/pdfium .so files; native-lib stripping exhausted the runner's
@@ -129,7 +143,9 @@ jobs:
           {
             echo "name=${VERSION_MAJOR}.$(( $(date -u +%s) / 86400 )).${build_number}"
             echo "build_number=${build_number}"
-            echo "sha=${GITHUB_SHA:0:6}"
+            # HEAD, not GITHUB_SHA: the nightly fires on the default branch and
+            # ships main, so GITHUB_SHA names a commit this build does not contain.
+            echo "sha=$(git rev-parse --short=6 HEAD)"
             echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } >> "$GITHUB_OUTPUT"
 
