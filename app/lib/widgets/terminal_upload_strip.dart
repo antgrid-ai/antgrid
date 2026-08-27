@@ -8,7 +8,7 @@ import '../design/widgets/ab_progress_rule.dart';
 import 'terminal_attachment_uploader.dart';
 
 /// The in-flight attach readout, shaped as a twin of `SendToAgentButton` so the
-/// terminal's two floating overlays read as one family.
+/// terminal's floating overlays read as one family.
 ///
 /// [IgnorePointer] by construction: it floats over live terminal text, and a
 /// tap target there would compete with drag-selection for the same pixels.

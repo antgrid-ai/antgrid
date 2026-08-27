@@ -17,21 +17,37 @@ function messageText(content: unknown): string | null {
   return null;
 }
 
+/** A title field that would actually name something, else null. Blank is not
+ *  nullish, so storing `"   "` would let the `??` chain in the resolver return
+ *  it and suppress a lower-precedence title that is genuinely present. One
+ *  helper rather than the check repeated per slot: a copy that omits the
+ *  `.trim()` fails silently, applying no name and hiding the real one. */
+function titleField(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
 /**
  * Claude transcript title, in precedence order:
- *   1. LAST {type:"custom-title", customTitle} — Claude's own conversation
- *      title. It writes this itself (and rewrites it as the topic drifts, so the
- *      last wins); a manual `/rename` lands in the same slot, which is why it
- *      outranks everything else.
- *   2. LAST {type:"summary", summary} — a compaction summary. Effectively dead:
+ *   1. LAST {type:"custom-title", customTitle} — the name the user gave the
+ *      conversation, so it outranks anything Claude picked for itself.
+ *   2. LAST {type:"ai-title", aiTitle} — Claude's own generated title.
+ *   3. LAST {type:"summary", summary} — a compaction summary. Effectively dead:
  *      current transcript formats emit none at all.
- *   3. First {type:"user"} message's text.
+ *   4. First {type:"user"} message's text.
  *
- * Branch 3 is not rare. Claude only writes custom-title in the INTERACTIVE TUI:
- * across 503 local transcripts, 65% of long real-project sessions have one, but
- * 0 of 78 headless/SDK runs do — which is every chat-mode session. When it does
- * write one it is early (137 of 142 land before the first assistant message), so
- * a missing title means absent, not late. Never throws.
+ * The two title records COEXIST rather than one superseding the other: a
+ * renamed conversation restates BOTH on every turn, adjacently. So precedence
+ * here is by type and not by file position, neither spelling may be retired as
+ * legacy, and `LAST` wins within a type only because a value can be revised in
+ * place over a long session.
+ *
+ * Branch 4 is not rare — most transcripts carry no title record at all, because
+ * Claude writes one only in the interactive TUI, never in headless/SDK runs
+ * (which is every chat-mode session). That was measured against `custom-title`
+ * before `ai-title` existed and has not been re-measured since — worth knowing,
+ * because the caller spends a model call on the branch-4 answer (see
+ * maybeGenerateTitle). A title that IS written lands early, so a missing one
+ * means absent, not late. Never throws.
  */
 export async function resolveClaudeTranscriptTitle(transcriptPath: string): Promise<ResolvedTitle | null> {
   const raw = await readOrNull(transcriptPath);
@@ -39,25 +55,25 @@ export async function resolveClaudeTranscriptTitle(transcriptPath: string): Prom
   const lines = raw.split("\n");
   let firstUser: string | null = null;
   let lastSummary: string | null = null;
+  let lastAi: string | null = null;
   let lastCustom: string | null = null;
   for (const line of lines) {
     const t = line.trim();
     if (!t) continue;
     let obj: any;
     try { obj = JSON.parse(t); } catch { continue; }
-    // Each branch guards against a blank string: an empty title is not nullish,
-    // so storing it would let the `??` chain below return "" and suppress a
-    // lower-precedence title that is actually present.
-    if (obj?.type === "custom-title" && typeof obj.customTitle === "string" && obj.customTitle.trim()) {
-      lastCustom = obj.customTitle;
-    } else if (obj?.type === "summary" && typeof obj.summary === "string" && obj.summary.trim()) {
-      lastSummary = obj.summary;
+    if (obj?.type === "custom-title") {
+      lastCustom = titleField(obj.customTitle) ?? lastCustom;
+    } else if (obj?.type === "ai-title") {
+      lastAi = titleField(obj.aiTitle) ?? lastAi;
+    } else if (obj?.type === "summary") {
+      lastSummary = titleField(obj.summary) ?? lastSummary;
     } else if (obj?.type === "user" && firstUser === null) {
       const text = messageText(obj.message?.content);
       if (text) firstUser = text;
     }
   }
-  const real = lastCustom ?? lastSummary;
+  const real = lastCustom ?? lastAi ?? lastSummary;
   if (real) return generated(real);
   return firstUser ? firstMessage(firstUser) : null;
 }

@@ -1,3 +1,5 @@
+import type { ResolvedTitle } from "./agents/types";
+
 export interface AutoNameSink {
   applyAutoName(id: string, name: string): void;
 }
@@ -17,8 +19,15 @@ function sanitizeTitle(raw: string): string {
     .slice(0, MAX_TITLE_LEN);
 }
 
+/** Precedence within the structured signal: the resolvers' own `kind`, aliased
+ *  rather than restated so the two cannot drift. `agents/types.ts` declares only
+ *  types, so this import is erased and drags no agent code in here. */
+export type TitleRank = ResolvedTitle["kind"];
+
 interface Signals {
-  structured?: string;
+  /** Title and rank travel together: a rank stored without the title it
+   *  describes would latch the precedence guard against a name nobody applied. */
+  structured?: { title: string; rank: TitleRank };
   osc?: string;
 }
 
@@ -28,6 +37,9 @@ interface Signals {
  * wins). Rapid changes are debounced into a single applyAutoName. The
  * manual-wins check lives in the sink (SessionManager.applyAutoName), so this
  * unit stays pure policy.
+ *
+ * Within the structured signal, latest wins EXCEPT that a `first-message` title
+ * may not displace a `generated` one — see onStructuredTitle.
  */
 export class SessionNamer {
   private readonly signals = new Map<string, Signals>();
@@ -39,8 +51,25 @@ export class SessionNamer {
     private readonly opts: { debounceMs?: number } = {},
   ) {}
 
-  onStructuredTitle(id: string, title: string): void {
-    this.update(id, (s) => { s.structured = title; });
+  /**
+   * `rank` is required, not defaulted: `generated` is the dominant value, so a
+   * caller that omitted it would silently latch this slot against every later
+   * real title — the exact bug the guard exists to prevent, reintroduced with
+   * no compile error. Stating it at each call site makes that a build decision.
+   *
+   * Only the per-turn native transcript read yields `first-message`, and it
+   * re-yields the SAME opening prompt every turn — so without the guard the
+   * turn after a real title landed would revert the session to that prompt, and
+   * title generation is attempted once per agent session, so nothing restores it.
+   */
+  onStructuredTitle(id: string, title: string, rank: TitleRank): void {
+    // Rank only a title that can actually become a name. One that sanitizes
+    // away applies nothing, and arming the guard on it would block every later
+    // first-message title on behalf of a name the user never saw.
+    if (!sanitizeTitle(title)) return;
+    const current = this.signals.get(id);
+    if (rank === "first-message" && current?.structured?.rank === "generated") return;
+    this.update(id, (s) => { s.structured = { title, rank }; }, current);
   }
 
   onOscTitle(id: string, title: string): void {
@@ -52,7 +81,7 @@ export class SessionNamer {
     for (const id of this.dirty) {
       const s = this.signals.get(id);
       if (!s) continue;
-      const name = sanitizeTitle(s.structured ?? s.osc ?? "");
+      const name = sanitizeTitle(s.structured?.title ?? s.osc ?? "");
       if (name) this.sink.applyAutoName(id, name);
     }
     this.dirty.clear();
@@ -71,6 +100,24 @@ export class SessionNamer {
   }
 
   /**
+   * Drop the structured title + rank for a slot whose AGENT CONVERSATION changed
+   * under a still-live PTY (Claude `/clear`, codex `/new`). The rank describes a
+   * conversation, not a slot, and that PTY never exits — so `forget` never runs
+   * and the previous topic's `generated` rank would veto the new conversation's
+   * first-message title for the life of the process.
+   *
+   * OSC filler is deliberately left: it tracks the terminal, not the
+   * conversation. Nothing is marked dirty either — dropping a title is not a
+   * reason to rename the session; the new conversation's own first turn is.
+   */
+  forgetStructuredTitle(id: string): void {
+    const s = this.signals.get(id);
+    if (!s?.structured) return;
+    delete s.structured;
+    this.signals.set(id, s);
+  }
+
+  /**
    * Cancels the pending debounce timer and drops all buffered state WITHOUT
    * flushing. A session is disposed when it's gone, and naming a torn-down
    * session would be wrong — so pending names are intentionally discarded.
@@ -82,8 +129,8 @@ export class SessionNamer {
     this.signals.clear();
   }
 
-  private update(id: string, mut: (s: Signals) => void): void {
-    const s = this.signals.get(id) ?? {};
+  private update(id: string, mut: (s: Signals) => void, known?: Signals): void {
+    const s = known ?? this.signals.get(id) ?? {};
     mut(s);
     this.signals.set(id, s);
     this.dirty.add(id);

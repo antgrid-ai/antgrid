@@ -76,6 +76,7 @@ class AbListRow extends StatefulWidget {
     this.verticalPadding,
     this.enabled = true,
     this.hoverable = false,
+    this.leadingGapOverride,
   }) : assert(
          actions == null || trailing == null,
          'AbListRow: pass actions or trailing, not both.',
@@ -88,11 +89,17 @@ class AbListRow extends StatefulWidget {
          'horizontalPadding: 0. Use AbRowSelection.surface instead.',
        );
 
-  /// Gap between [leading] and the title block. Public because a caller that
-  /// indents content UNDER the title (a sub-list hanging off a header row) has
-  /// to reproduce this row's own indent, and re-deriving it from a literal
+  /// Default gap between [leading] and the title block. Public because a caller
+  /// that indents content UNDER the title (a sub-list hanging off a header row)
+  /// has to reproduce this row's own indent, and re-deriving it from a literal
   /// silently misaligns the moment the row is retuned.
   static const leadingGap = AbTokens.space8;
+
+  /// Overrides [leadingGap] for this row. For a leading that is a dot rather
+  /// than a glyph, the default gap is measured against a slot the dot doesn't
+  /// fill, so the text reads further away than it looks — see
+  /// [AbTokens.drawerSessionLeadingGap].
+  final double? leadingGapOverride;
 
   final Widget? leading;
   final Widget title;
@@ -164,7 +171,13 @@ class _AbListRowState extends State<AbListRow> {
     final children = <Widget>[
       if (widget.leading != null) ...[
         widget.leading!,
-        const SizedBox(width: AbListRow.leadingGap),
+        // Split so the default keeps its `const` arm: every leading row in the
+        // app takes that branch and only a session row overrides, so the
+        // common case stays canonicalized instead of re-inflating per build.
+        if (widget.leadingGapOverride == null)
+          const SizedBox(width: AbListRow.leadingGap)
+        else
+          SizedBox(width: widget.leadingGapOverride),
       ],
       Expanded(
         child: Column(

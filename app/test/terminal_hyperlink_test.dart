@@ -4,7 +4,6 @@ import 'dart:io';
 import 'package:antgrid/util/ab_log.dart';
 import 'package:antgrid/util/external_url.dart';
 import 'package:antgrid/widgets/terminal_hyperlink_sheet.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -63,6 +62,72 @@ void main() {
       expect(openableTerminalHyperlink('example.com'), isNull);
       expect(openableTerminalHyperlink('https://'), isNull);
       expect(openableTerminalHyperlink('/etc/passwd'), isNull);
+    });
+  });
+
+  group('terminalHyperlinkLooksDeceptive', () {
+    test('catches a host wearing another host as userinfo', () {
+      expect(
+        terminalHyperlinkLooksDeceptive(
+          Uri.parse('https://github.com@evil.example/antgrid/pull/13'),
+        ),
+        isTrue,
+      );
+      expect(
+        terminalHyperlinkLooksDeceptive(
+          Uri.parse('https://user:pw@evil.example/'),
+        ),
+        isTrue,
+      );
+    });
+
+    // Both spellings of the same lie: Dart punycodes nothing, so a raw unicode
+    // host arrives percent-encoded and an `xn--` check alone would pass it.
+    test('catches a homoglyph host, however it was spelled', () {
+      expect(
+        terminalHyperlinkLooksDeceptive(
+          Uri.parse('https://xn--pple-43d.com/login'),
+        ),
+        isTrue,
+      );
+      final raw = Uri.parse('https://\u0430pple.com/login');
+      expect(raw.host, contains('%'));
+      expect(terminalHyperlinkLooksDeceptive(raw), isTrue);
+      // A label merely containing the marker is not one starting with it.
+      expect(
+        terminalHyperlinkLooksDeceptive(Uri.parse('https://myxn--co.com/a')),
+        isFalse,
+      );
+    });
+
+    // The cost of a false positive is a sheet on every ordinary link, which is
+    // how a confirmation stops being read at all.
+    test('passes ordinary links, ports and case included', () {
+      for (final ok in <String>[
+        'https://github.com/antgrid-ai/antgrid/pull/13',
+        'https://sub.github.com/ok',
+        'https://github.com:443/ok',
+        'https://gitHUB.com/OK',
+        'http://192.168.1.9:8080/admin',
+        'http://localhost:3000/',
+      ]) {
+        expect(
+          terminalHyperlinkLooksDeceptive(Uri.parse(ok)),
+          isFalse,
+          reason: ok,
+        );
+      }
+    });
+
+    // Named so the gap is not mistaken for coverage: only the link's visible
+    // text contradicts this one, and that text never reaches the app.
+    test('does NOT catch a lookalike that is honestly its own host', () {
+      expect(
+        terminalHyperlinkLooksDeceptive(
+          Uri.parse('https://github.com.evil.example/antgrid'),
+        ),
+        isFalse,
+      );
     });
   });
 
@@ -167,10 +232,11 @@ void main() {
       expect(line['error'], contains('launcher exploded'));
     });
 
-    // flutter_test reports android by default, so these run on the touch path
-    // unless they say otherwise.
+    // No platform override anywhere in this group any more: what decides is
+    // whether the caller says it had the destination on screen, and a caller
+    // that says nothing is a caller that showed nothing.
     testWidgets(
-      'asks before opening on touch, and cancelling launches nothing',
+      'asks when nothing disclosed the target, and cancelling launches nothing',
       (tester) async {
         final context = await pumpHost(tester);
         var launched = 0;
@@ -218,13 +284,9 @@ void main() {
       expect(asked?.host, 'evil.example');
     });
 
-    testWidgets('desktop opens without asking -- hover already showed it', (
+    testWidgets('opens an ordinary link that was on screen, without asking', (
       tester,
     ) async {
-      // Cleared inside the body, not in addTearDown: the framework asserts
-      // the foundation debug vars are unset before teardown runs.
-      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
-
       final context = await pumpHost(tester);
       final launched = <String>[];
       var asked = 0;
@@ -232,6 +294,7 @@ void main() {
       await openTerminalHyperlink(
         context,
         'https://example.com/a',
+        disclosed: true,
         open: (_, url) async => launched.add(url),
         confirm: (_, _) async {
           asked++;
@@ -240,11 +303,79 @@ void main() {
       );
       await tester.pump();
 
-      debugDefaultTargetPlatformOverride = null;
-
       expect(asked, 0);
       expect(launched, <String>['https://example.com/a']);
     });
+
+    testWidgets('still asks when the URI is built to be misread', (
+      tester,
+    ) async {
+      final context = await pumpHost(tester);
+      final launched = <String>[];
+      Uri? asked;
+
+      await openTerminalHyperlink(
+        context,
+        'https://github.com@evil.example/antgrid/pull/13',
+        disclosed: true,
+        open: (_, url) async => launched.add(url),
+        confirm: (_, target) async {
+          asked = target;
+          return true;
+        },
+      );
+      await tester.pump();
+
+      // The hover readout would have shown this too -- and been read as
+      // GitHub, which is the whole reason the sheet names the host on its own
+      // line.
+      expect(asked?.host, 'evil.example');
+      expect(launched, <String>[
+        'https://github.com@evil.example/antgrid/pull/13',
+      ]);
+    });
+
+    testWidgets('cancelling a deceptive link launches nothing', (tester) async {
+      final context = await pumpHost(tester);
+      var launched = 0;
+
+      await openTerminalHyperlink(
+        context,
+        'https://xn--pple-43d.com/login',
+        disclosed: true,
+        open: (_, _) async => launched++,
+        confirm: (_, _) async => false,
+      );
+      await tester.pump();
+
+      expect(launched, 0);
+    });
+
+    // The gap a `defaultTargetPlatform` test silently exempted: a finger tap on
+    // a desktop touchscreen took the desktop branch on the grounds that the
+    // hover readout had disclosed the destination, and there is no hover on
+    // touch. Asking the CALLER what it showed cannot answer that wrongly --
+    // and it covers the Shift chord and a link scrolled out from under a
+    // resting pointer, which the platform test missed for the same reason.
+    testWidgets('asks on desktop when nothing was on screen', (tester) async {
+      final context = await pumpHost(tester);
+      var launched = 0;
+      var asked = 0;
+
+      await openTerminalHyperlink(
+        context,
+        'https://example.com/a',
+        open: (_, _) async => launched++,
+        confirm: (_, _) async {
+          asked++;
+          return false;
+        },
+      );
+      await tester.pump();
+
+      expect(asked, 1);
+      expect(launched, 0);
+    }, variant: TargetPlatformVariant.desktop());
   });
 
   group('showTerminalHyperlinkSheet', () {

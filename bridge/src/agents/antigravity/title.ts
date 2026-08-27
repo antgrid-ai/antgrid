@@ -130,7 +130,7 @@ export async function resolveAntigravityTranscriptTitle(transcriptPath: string):
 
 /**
  * agy's best available conversation name, in the same precedence order claude
- * uses (custom-title > summary > first message):
+ * uses (manual rename > the agent's own title > first message):
  *   1. `/rename` from history.jsonl — manual intent, captured live.
  *   2. agy's own name from conversation_summaries.db — its manual `title` or
  *      generated `preview` (the lagging upgrade path).

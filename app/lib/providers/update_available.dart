@@ -3,7 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'value_controller.dart';
 
 /// Whether a newer app version is waiting to be installed — a pending
-/// Microsoft Store package update on Windows, a newer `antgrid-releases`
+/// Microsoft Store package update on Windows, a newer `antgrid`
 /// release on macOS/Linux, a newer App Store listing on iOS, a downloaded
 /// Play flexible update on Android. Lit by `UpdateGate` routing the platform
 /// `UpdateStrategy`'s check outcome, rendered by `UpdateRow` in the drawer.

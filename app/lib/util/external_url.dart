@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -79,8 +78,15 @@ Uri? openableTerminalHyperlink(String uri) {
 /// returns, so a rejection would reach `PlatformDispatcher.onError` as a fatal
 /// carrying no in-app frames.
 ///
-/// On touch the destination is confirmed first — see
-/// [showTerminalHyperlinkSheet] for why that is not merely a nag.
+/// The destination is confirmed first unless it was already on screen, and
+/// whenever the URI is shaped to be misread — see [showTerminalHyperlinkSheet]
+/// for why that is not merely a nag, and [terminalHyperlinkLooksDeceptive] for
+/// the shapes.
+///
+/// [disclosed] is the caller saying it had this exact URI painted when the
+/// activation landed — `TerminalHyperlinkPreview`, in practice. It defaults to
+/// false because "we showed it" is a claim only the surface that showed it can
+/// make, and a caller that has no readout must not inherit one by omission.
 ///
 /// [open] and [confirm] are injectable so tests can assert what would be
 /// launched instead of handing a URL to the real browser, matching
@@ -88,6 +94,7 @@ Uri? openableTerminalHyperlink(String uri) {
 Future<void> openTerminalHyperlink(
   BuildContext context,
   String uri, {
+  bool disclosed = false,
   Future<void> Function(BuildContext, String) open = openExternalUrl,
   Future<bool> Function(BuildContext, Uri) confirm = showTerminalHyperlinkSheet,
 }) async {
@@ -105,7 +112,7 @@ Future<void> openTerminalHyperlink(
       }
       return;
     }
-    if (_revealsDestinationOnHover) {
+    if (disclosed && !terminalHyperlinkLooksDeceptive(target)) {
       await open(context, target.toString());
       return;
     }
@@ -130,11 +137,35 @@ Future<void> openTerminalHyperlink(
   }
 }
 
-/// Whether this platform shows a link's destination before it is activated.
+/// Whether [target] is shaped like a link trying to pass as another one.
 ///
-/// Desktop does, through the terminal's hover affordance, so a click there is
-/// already an informed one. Touch has no hover, which is why the mobile path
-/// asks instead.
-bool get _revealsDestinationOnHover =>
-    defaultTargetPlatform != TargetPlatform.android &&
-    defaultTargetPlatform != TargetPlatform.iOS;
+/// Judged from the URI alone, which is all a terminal hyperlink hands over.
+/// Three shapes qualify, and each is a host claiming to be a host it is not:
+///
+///  * A userinfo prefix — `https://github.com@evil.example/` resolves to
+///    `evil.example` while reading as GitHub. Dart parks the impostor in
+///    [Uri.userInfo], where nothing in a URL bar's first glance looks at it.
+///  * A punycoded label — `xn--pple-43d.com` renders as `apple.com`
+///    with a Cyrillic first letter (U+0430).
+///  * A percent-encoded host — Dart does NOT punycode a raw unicode host, it
+///    percent-encodes it, so the same lie arrives spelled the other way and a
+///    check for `xn--` alone misses half of it.
+///
+/// Deliberately not a blocklist of hosts, and deliberately silent about the
+/// lookalike it cannot see: `https://github.com.evil.example/` is an honest
+/// subdomain of an honest domain, and only the link's visible TEXT contradicts
+/// it — text that never reaches this app. A false negative here costs the user
+/// the extra confirmation, not the disclosure: the sheet names the host either
+/// way, and a link that was never on screen is confirmed regardless of shape.
+bool terminalHyperlinkLooksDeceptive(Uri target) {
+  if (target.userInfo.isNotEmpty) {
+    return true;
+  }
+  final host = target.host;
+  if (host.contains('%')) {
+    return true;
+  }
+  // `Uri` lower-cases the host as it parses, but the loop is what a reader
+  // checks, not the parser's contract two files away.
+  return host.split('.').any((label) => label.toLowerCase().startsWith('xn--'));
+}

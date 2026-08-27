@@ -1,6 +1,6 @@
 name: Deploy — iOS (TestFlight)
 
-# Publishes a signed release .ipa to TestFlight once a night, if anything shipped
+# Publishes a signed release .ipa to TestFlight once a night, if main moved
 # that day. The direct analogue of deploy-android.yml's Play Store internal
 # track: TestFlight builds go to internal testers; promotion to an App Store
 # review submission is a manual step in App Store Connect.
@@ -17,11 +17,12 @@ name: Deploy — iOS (TestFlight)
 # that builds iOS. `flutter build ipa`, the CocoaPods resolve, the Xcode
 # archive, the iOS 26 SDK assertion and check-ghostty-ios-abi.sh run here and
 # nowhere else, so a Podfile, Info.plist, entitlements or ghostty-vt bindings
-# change that breaks the archive is now found the next morning rather than ~10
-# minutes after the merge. That is deliberate — an iOS build on every PR would
-# cost more than the per-merge deploys did — but it is a real reduction in
-# signal, not just a shift in when signing errors surface. Cutting a release
-# candidate is a good moment to run this by hand rather than trust last night's.
+# change that breaks the archive is never seen on development at all: the
+# nightly builds main, so the break surfaces on the first cron after the merge
+# that carries it. That is a real reduction in signal, not just a shift in when
+# signing errors surface. Run this by hand from development after touching any
+# of that, and when cutting a release candidate rather than trusting last
+# night's.
 #
 # Required secrets (Settings -> Secrets and variables -> Actions):
 #   IOS_DIST_CERT_BASE64          base64 of an "Apple Distribution" .p12
@@ -48,14 +49,17 @@ on:
   # day. Deliberately not on the hour: GitHub queues scheduled runs and the top
   # of the hour is its most contended slot, where a cron can slip by 30+ minutes.
   #
-  # `schedule` only ever fires on the default branch (development), so shipping
-  # main to TestFlight is a manual `workflow_dispatch` run from that branch.
+  # `schedule` only ever fires on the default branch, so this run happens on
+  # development and checks out main — see the deploy job's checkout.
   schedule:
     - cron: '17 3 * * *'
   workflow_dispatch:
 
 concurrency:
-  group: deploy-ios-${{ github.ref_name }}
+  # Keyed on the deployed ref, so a nightly and a dispatch of the same branch
+  # queue against each other. Keep in lockstep with the gate's `ref:` and the
+  # deploy job's checkout.
+  group: deploy-ios-${{ github.event_name == 'schedule' && 'main' || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -77,7 +81,8 @@ jobs:
         uses: ./.github/actions/deploy-gate
         with:
           workflow: deploy-ios.yml
-          paths: app packages .github/workflows/deploy-ios.yml
+          ref: ${{ github.event_name == 'schedule' && 'main' || github.ref_name }}
+          paths: app packages scripts .github/workflows/deploy-ios.yml
           token: ${{ github.token }}
 
   deploy:
@@ -96,10 +101,23 @@ jobs:
     # defaults to Xcode 16.4 (iOS 18.5 SDK) — so the runner label is load-bearing.
     runs-on: macos-26
     timeout-minutes: 45
-    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    # Keyed on the EVENT, not the branch. The nightly IS the release build — it
+    # is what reaches TestFlight and what testers install,
+    # so it carries production's SENTRY_DSN; a manual dispatch is an ad-hoc
+    # build and gets staging's. A ref_name test cannot express this: `schedule`
+    # only ever fires on the default branch, so it could never select production.
+    environment: ${{ github.event_name == 'schedule' && 'production' || 'staging' }}
 
     steps:
+      # The deployed ref, not the ref this run fired on. Note the split that
+      # creates: the WORKFLOW file always comes from the default branch, because
+      # that is the only place a cron can fire, while every local composite
+      # action below resolves from the checked-out tree. Land .github/actions/**
+      # changes on both branches, or the nightly runs one branch's workflow
+      # against the other's tooling.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'main' || github.ref_name }}
 
       # Fail loudly if the runner's default Xcode ever regresses below the
       # SDK App Store requires, instead of silently shipping a rejected build.
@@ -128,9 +146,16 @@ jobs:
       # SHA-pinned because `@stable` is a BRANCH — this action picks the channel
       # from its ref, so the reference is mutable in a way even a tag is not. The
       # pin freezes the action, not Rust; rustup still resolves stable at run
-      # time. `toolchain` is explicit so a re-pin onto a master SHA, where the
-      # input is required with no default, does not break the build.
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      # time, which is what `toolchain` below asks for — spelled out because on
+      # master that input is required with no default.
+      #
+      # The SHA must be one on MASTER, never `stable`'s tip. Upstream recreates
+      # the channel branches on each release and states that a commit outside
+      # master's history "will eventually get garbage-collected and your
+      # workflows will fail" — a silent death for the repo's only iOS build,
+      # weeks after the pin looks fine. Re-pin from master alone:
+      # https://github.com/dtolnay/rust-toolchain#readme
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, 2026-08-05
         with:
           toolchain: stable
           targets: aarch64-apple-ios
@@ -249,7 +274,9 @@ jobs:
           {
             echo "name=${VERSION_MAJOR}.$(( $(date -u +%s) / 86400 )).${build_number}"
             echo "build_number=${build_number}"
-            echo "sha=${GITHUB_SHA:0:6}"
+            # HEAD, not GITHUB_SHA: the nightly fires on the default branch and
+            # ships main, so GITHUB_SHA names a commit this build does not contain.
+            echo "sha=$(git rev-parse --short=6 HEAD)"
             echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } >> "$GITHUB_OUTPUT"
 
