@@ -23,6 +23,7 @@ import type { MachineRelaySession } from "./relay-promotion";
 import type { AgentEnableRelay } from "./protocol";
 import { MessageBus, type Channel } from "./message-bus";
 import { dispatchRpc } from "./rpc/methods";
+import { snapshotAsksFor } from "./rpc/state-snapshot";
 import { generateEphemeralKeypair } from "./key-exchange";
 import { joinRelayWsPath } from "./relay-url";
 import { createMessage } from "./protocol";
@@ -639,7 +640,7 @@ export class HostServer {
       // payload-dedup also suppresses an identical re-push). Re-publishing here
       // updates the replay cache that dispatchRpc then reads; an unchanged
       // payload is still a cheap no-op.
-      if (msg.method === "state.snapshot") {
+      if (msg.method === "state.snapshot" && snapshotAsksFor(msg.params, ["agent:projects", "agent:tools"])) {
         this.sendProjectsAdvertisement(bus);
         this.sendToolsAdvertisement(bus);
       }

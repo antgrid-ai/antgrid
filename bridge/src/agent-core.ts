@@ -50,6 +50,7 @@ import { classifyTurnEndError } from "./handler/lifecycle-classify";
 import { createDispatchAdapter, createPtyAdapter } from "./handler/session-adapter";
 import { createStructuredAdapter } from "./handler/structured-adapter";
 import { dispatchRpc } from "./rpc/methods";
+import { snapshotAsksFor } from "./rpc/state-snapshot";
 import { StructuredAgentManager } from "./structured/structured-manager";
 import { TOOL_UPDATE_SPECS, createToolUpdateChecker, execToolUpdate, execToolVersion, parseAgentVersion, runAgentUpdate, updateSpecFor } from "./update/specs";
 import { getGitStatus, gitCommit, gitDiscard, gitStage, gitUnstage, type GitFileEntry } from "./git";
@@ -2934,7 +2935,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         return;
       }
       if (msg.type === "request") {
-        if (msg.method === "state.snapshot") {
+        if (msg.method === "state.snapshot" && snapshotAsksFor(msg.params, ["agent:status"])) {
           // The snapshot is the app's PULL, and for a relay app it is the only
           // thing its per-checkout terminal tabs are ever built from:
           // `terminal:started` is not a replay type, and a stream attach runs
@@ -2945,7 +2946,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           // Recomputing here is what makes the answer no older than the pull.
           // Same failure, same fix, as the machine control plane's own
           // `state.snapshot` intercept (`host-server.ts`); an unchanged
-          // payload is a cheap no-op, since the bus dedups on it.
+          // payload is a cheap no-op, since the bus dedups on it. Skipped for
+          // a pull that could not carry the status anyway (the app's separate
+          // tree pull) — nothing there to keep fresh.
           for (const runtime of checkoutRuntimes.values()) {
             if (runtime.disposed) continue;
             sendStatus(runtime);

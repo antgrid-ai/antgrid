@@ -236,6 +236,28 @@ test("control-plane state.snapshot answers with both advert types (welcome-repla
   expect(types).toEqual(["agent:projects", "agent:tools"]);
 });
 
+// The app's second, tree-only pull cannot carry an advert, so it is not a
+// reason to re-derive the catalog.
+test("a control-plane pull that asks for no advert type recomputes nothing", async () => {
+  const standalone = standaloneForSnapshot({
+    mobileAccess: true,
+    seen: [["proj-1", { path: "/p/proj-1", label: "proj-1", lastActiveAt: "2026-01-01T00:00:00.000Z" }]],
+  });
+  const bus = new MessageBus();
+  const delivered: any[] = [];
+  bus.subscribe({ deliver: (m) => delivered.push(m) });
+
+  standalone.dispatchControlPlaneInbound(createMessage("request", {
+    requestId: "r-tree",
+    method: "state.snapshot",
+    params: { types: ["tree:full"] },
+  }) as any, "control", bus);
+  await new Promise((r) => setTimeout(r, 0));
+
+  expect(delivered.map((m) => m.type)).toEqual(["response"]);
+  expect((delivered[0] as any).result.frames).toEqual([]);
+});
+
 // The bug: the handshake push can run before the catalog is ready, caching an
 // empty `agent:projects`. The snapshot pull must RECOMPUTE so
 // a project that became visible after the push still reaches the phone — replay
