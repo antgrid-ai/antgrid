@@ -96,7 +96,12 @@ jobs:
     # defaults to Xcode 16.4 (iOS 18.5 SDK) — so the runner label is load-bearing.
     runs-on: macos-26
     timeout-minutes: 45
-    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    # Keyed on the EVENT, not the branch. The nightly IS the release build — it
+    # is what reaches TestFlight and what testers install,
+    # so it carries production's SENTRY_DSN; a manual dispatch is an ad-hoc
+    # build and gets staging's. A ref_name test cannot express this: `schedule`
+    # only ever fires on the default branch, so it could never select production.
+    environment: ${{ github.event_name == 'schedule' && 'production' || 'staging' }}
 
     steps:
       - uses: actions/checkout@v7

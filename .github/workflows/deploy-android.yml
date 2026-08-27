@@ -8,11 +8,10 @@ name: Deploy — Android (Play Store)
 # track that gains four builds a day is noise, and one publish per shipping day
 # is the cadence testers actually consume. See that file for the reasoning.
 #
-# `schedule` only ever fires on the DEFAULT branch, so in practice this is
-# development -> internal track (promote to alpha/beta/production by hand from
-# the Play Console). The `production` environment selected below when
-# ref_name == 'main' is now reachable only through a manual workflow_dispatch
-# run from main — merging to main publishes nothing on its own.
+# `schedule` only ever fires on the DEFAULT branch, so this is development ->
+# internal track (promote to alpha/beta/production by hand from the Play
+# Console). Merging to main publishes nothing on its own; shipping any other
+# branch is a manual workflow_dispatch run from it.
 
 on:
   # Ten minutes after deploy-ios.yml so the two don't contend for the same
@@ -60,7 +59,12 @@ jobs:
     timeout-minutes: 45
     env:
       ANDROID_NDK_HOME: ${{ github.workspace }}/ndk-r28
-    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    # Keyed on the EVENT, not the branch. The nightly IS the release build — it
+    # is what reaches the Play internal track and what testers install,
+    # so it carries production's SENTRY_DSN; a manual dispatch is an ad-hoc
+    # build and gets staging's. A ref_name test cannot express this: `schedule`
+    # only ever fires on the default branch, so it could never select production.
+    environment: ${{ github.event_name == 'schedule' && 'production' || 'staging' }}
 
     steps:
       - uses: actions/checkout@v7
