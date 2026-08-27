@@ -105,7 +105,7 @@ Future<void> openTerminalHyperlink(
       }
       return;
     }
-    if (_revealsDestinationOnHover) {
+    if (_browserRevealsDestination) {
       await open(context, target.toString());
       return;
     }
@@ -130,11 +130,18 @@ Future<void> openTerminalHyperlink(
   }
 }
 
-/// Whether this platform shows a link's destination before it is activated.
+/// Whether opening the link lands somewhere that reads the destination back.
 ///
-/// Desktop does, through the terminal's hover affordance, so a click there is
-/// already an informed one. Touch has no hover, which is why the mobile path
-/// asks instead.
-bool get _revealsDestinationOnHover =>
+/// Desktop hands the URI to a browser whose address bar does, which is the same
+/// disclosure every terminal leans on. The terminal's own hover affordance is
+/// NOT it and never was: the view only swaps the cursor to a pointer, and
+/// nothing there or here paints the URI.
+///
+/// Mobile has no such guarantee. An `https:` host holding a verified App Link
+/// opens that app instead of any browser (see [openableTerminalHyperlink]), so
+/// the destination can be acted on without ever being shown. That is why the
+/// mobile path asks first, and why the answer to a spoofed target on desktop is
+/// a hover preview rather than the same sheet on both.
+bool get _browserRevealsDestination =>
     defaultTargetPlatform != TargetPlatform.android &&
     defaultTargetPlatform != TargetPlatform.iOS;
