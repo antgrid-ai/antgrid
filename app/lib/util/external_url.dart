@@ -79,8 +79,9 @@ Uri? openableTerminalHyperlink(String uri) {
 /// returns, so a rejection would reach `PlatformDispatcher.onError` as a fatal
 /// carrying no in-app frames.
 ///
-/// On touch the destination is confirmed first — see
-/// [showTerminalHyperlinkSheet] for why that is not merely a nag.
+/// The destination is confirmed first on touch, and on any platform when the
+/// URI is shaped to be misread — see [showTerminalHyperlinkSheet] for why that
+/// is not merely a nag, and [terminalHyperlinkLooksDeceptive] for the shapes.
 ///
 /// [open] and [confirm] are injectable so tests can assert what would be
 /// launched instead of handing a URL to the real browser, matching
@@ -105,8 +106,7 @@ Future<void> openTerminalHyperlink(
       }
       return;
     }
-    if (_browserRevealsDestination &&
-        !terminalHyperlinkLooksDeceptive(target)) {
+    if (_shownBeforeActivated && !terminalHyperlinkLooksDeceptive(target)) {
       await open(context, target.toString());
       return;
     }
@@ -164,22 +164,32 @@ bool terminalHyperlinkLooksDeceptive(Uri target) {
   return host.split('.').any((label) => label.toLowerCase().startsWith('xn--'));
 }
 
-/// Whether opening the link lands somewhere that reads the destination back.
+/// Whether this platform showed the destination before the link was activated.
 ///
-/// Desktop hands the URI to a browser whose address bar does, which is the same
-/// disclosure every terminal leans on. The terminal's own hover affordance is
-/// NOT it and never was: the view only swaps the cursor to a pointer, and
-/// nothing there or here paints the URI.
+/// Desktop has a pointer, so `TerminalHyperlinkPreview` has already painted the
+/// URI under it by the time a click lands — that readout is the disclosure, and
+/// it is the only reason this path may skip the sheet. Deliberately NOT the
+/// browser's address bar: `LaunchMode.externalApplication` resolves through
+/// `ShellExecuteW` on Windows, `NSWorkspace.open` on macOS and
+/// `g_app_info_launch_default_for_uri` on Linux, every one of which honours a
+/// registered `https:` handler — so a desktop click can land in an app with no
+/// address bar just as a mobile one can (see [openableTerminalHyperlink]).
 ///
-/// Mobile has no such guarantee. An `https:` host holding a verified App Link
-/// opens that app instead of any browser (see [openableTerminalHyperlink]), so
-/// the destination can be acted on without ever being shown. That is why the
-/// mobile path asks first, and why the answer to a spoofed target on desktop is
-/// a hover preview rather than the same sheet on both.
+/// Touch has no hover and therefore no readout, which is why it asks every time.
 ///
-/// An address bar only discloses what the reader then has to judge, so this is
-/// not the whole desktop rule: [terminalHyperlinkLooksDeceptive] pulls the
-/// cases back to the sheet where the URI is built to be misread.
-bool get _browserRevealsDestination =>
+/// A BARE URL — one the view matched by regex rather than by OSC 8 markup — is
+/// not a gap here even though the readout may not have marked it: its visible
+/// text IS the URI, which is how it was found, so there is nothing the target
+/// can disagree with.
+///
+/// Known gap, reported rather than papered over: this asks the OS, not the
+/// input device, so a finger tap on a desktop touchscreen takes the desktop
+/// branch having been shown nothing. The pointer kind is the right predicate
+/// and lives in the terminal package, not here.
+///
+/// A readout only discloses what the reader then has to judge, so this is not
+/// the whole desktop rule: [terminalHyperlinkLooksDeceptive] pulls the cases
+/// back to the sheet where the URI is built to be misread.
+bool get _shownBeforeActivated =>
     defaultTargetPlatform != TargetPlatform.android &&
     defaultTargetPlatform != TargetPlatform.iOS;

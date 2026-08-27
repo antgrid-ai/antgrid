@@ -4,7 +4,6 @@ import 'dart:io';
 import 'package:antgrid/util/ab_log.dart';
 import 'package:antgrid/util/external_url.dart';
 import 'package:antgrid/widgets/terminal_hyperlink_sheet.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -284,13 +283,15 @@ void main() {
       expect(asked?.host, 'evil.example');
     });
 
+    // TargetPlatformVariant, not a hand-placed
+    // `debugDefaultTargetPlatformOverride`: the variant sets and restores at
+    // the binding's own lifecycle points, so a throw between the override and
+    // its reset can no longer leak macOS into the touch-path tests above.
+    final desktop = TargetPlatformVariant.only(TargetPlatform.macOS);
+
     testWidgets('desktop opens an ordinary link without asking', (
       tester,
     ) async {
-      // Cleared inside the body, not in addTearDown: the framework asserts
-      // the foundation debug vars are unset before teardown runs.
-      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
-
       final context = await pumpHost(tester);
       final launched = <String>[];
       var asked = 0;
@@ -306,17 +307,13 @@ void main() {
       );
       await tester.pump();
 
-      debugDefaultTargetPlatformOverride = null;
-
       expect(asked, 0);
       expect(launched, <String>['https://example.com/a']);
-    });
+    }, variant: desktop);
 
     testWidgets('desktop still asks when the URI is built to be misread', (
       tester,
     ) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
-
       final context = await pumpHost(tester);
       final launched = <String>[];
       Uri? asked;
@@ -332,21 +329,18 @@ void main() {
       );
       await tester.pump();
 
-      debugDefaultTargetPlatformOverride = null;
-
-      // An address bar would have shown this too -- and been read as GitHub,
-      // which is the whole reason the sheet names the host on its own line.
+      // The hover readout would have shown this too -- and been read as
+      // GitHub, which is the whole reason the sheet names the host on its own
+      // line.
       expect(asked?.host, 'evil.example');
       expect(launched, <String>[
         'https://github.com@evil.example/antgrid/pull/13',
       ]);
-    });
+    }, variant: desktop);
 
     testWidgets('desktop cancelling a deceptive link launches nothing', (
       tester,
     ) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
-
       final context = await pumpHost(tester);
       var launched = 0;
 
@@ -358,10 +352,8 @@ void main() {
       );
       await tester.pump();
 
-      debugDefaultTargetPlatformOverride = null;
-
       expect(launched, 0);
-    });
+    }, variant: desktop);
   });
 
   group('showTerminalHyperlinkSheet', () {
