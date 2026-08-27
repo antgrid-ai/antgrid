@@ -2,6 +2,7 @@
 import { Icon } from "astro-icon/components";
 import Eyebrow from "../ui/Eyebrow.astro";
 import Readout from "../ui/Readout.astro";
+import UseCase from "../ui/UseCase.astro";
 
 // The phase-gated workflow (research → validate → plan → implement, a human
 // checkpoint between each) is the industry-standard agent loop — Anthropic's
@@ -10,11 +11,20 @@ import Readout from "../ui/Readout.astro";
 // Handler answers the agent within the session and holds items on conditions —
 // it never starts work on its own, so "implement" below is WAITING on the
 // human's pick, not auto-dispatched.
+// Three numbers, and the third changes register — the first two size the chore,
+// the last is the guarantee. Kept to figures the page can stand behind: 4 and 0
+// are the mechanism, ~30 min is stated as a human delay, not a measured metric.
+const stats = [
+  { value: "4", label: "phases in a serious run — research, validate, plan, implement", accent: false },
+  { value: "~30 min", label: "your delay at each gate, on the days you're at the desk", accent: false },
+  { value: "0", label: "phases advanced on the agent's say-so", accent: true },
+];
+
 const phases = [
-  { n: "01", name: "research", state: "done", note: "pushed back — shallow. second pass closed it" },
-  { n: "02", name: "validate", state: "done", note: "no red flags — advanced" },
-  { n: "03", name: "plan", state: "needs", note: "woke you — two viable approaches, your pick" },
-  { n: "04", name: "implement", state: "queued", note: "starts when you pick" },
+  { n: "01", name: "research", time: "00:36", state: "done", note: "pushed back — shallow. second pass closed it" },
+  { n: "02", name: "validate", time: "02:34", state: "done", note: "no red flags — advanced" },
+  { n: "03", name: "plan", time: "03:21", state: "needs", note: "woke you — two viable approaches, your pick" },
+  { n: "04", name: "implement", time: "", state: "queued", note: "starts when you pick" },
 ];
 ---
 <section id="handler" class="reveal mx-auto max-w-shell px-6 py-24">
@@ -29,11 +39,20 @@ const phases = [
     </p>
   </div>
 
+  <div class="mb-11 flex flex-wrap gap-x-14 gap-y-7">
+    {stats.map((s) => (
+      <div>
+        <div class={`font-mono text-kicker ${s.accent ? "text-signal" : "text-ink"}`}>{s.value}</div>
+        <div class="mt-2 max-w-52 text-meta leading-relaxed text-muted2">{s.label}</div>
+      </div>
+    ))}
+  </div>
+
   <Readout source="studio-workstation · api · handler armed" state="attention" label="needs you">
     <div class="p-4 md:p-5">
       <div class="mb-4 flex items-start gap-2 rounded border border-edge-inner bg-chrome px-2.5 py-1.5 font-mono text-marker leading-relaxed">
         <Icon name="tabler:message-2" class="mt-0.5 shrink-0 text-signal" width="13" height="13" />
-        <span class="shrink-0 text-muted2">you · armed</span>
+        <span class="shrink-0 text-muted2">you · armed · 23:47</span>
         <span class="text-ink2">research the provider swap; validate it against our rate limits; plan it — give me options before implementing</span>
       </div>
 
@@ -46,11 +65,22 @@ const phases = [
               {p.state === "needs" && <Icon name="tabler:alert-triangle" class="text-amber" width="14" height="14" />}
               {p.state === "queued" && <Icon name="tabler:circle-dashed" class="text-faint" width="14" height="14" />}
             </div>
-            <div class="mb-1.5 font-mono text-row text-ink">{p.name}</div>
+            <div class="mb-1.5 flex items-baseline justify-between gap-2">
+              <span class="font-mono text-row text-ink">{p.name}</span>
+              {p.time && <span class="font-mono text-marker text-faint">{p.time}</span>}
+            </div>
             <div class={`text-meta leading-relaxed ${p.state === "needs" ? "text-amber2" : "text-muted2"}`}>{p.note}</div>
           </div>
         ))}
       </div>
     </div>
   </Readout>
+
+  <UseCase class="mt-7 max-w-2xl">Type the sequence once, before you leave. You get woken for the call that's actually yours.</UseCase>
+
+  {/* The limitation, on the page rather than in a code comment — a reader who
+      assumes autonomy here and discovers otherwise has been mis-sold. */}
+  <p class="mt-4 max-w-2xl text-meta leading-relaxed text-muted2">
+    Handler answers the agent inside a running session and holds a phase until its condition is met. It never starts work on its own, and it never advances a phase on the agent's say-so.
+  </p>
 </section>
