@@ -6,6 +6,11 @@
 #include "utils.h"
 #include "app_links/app_links_plugin_c_api.h"
 
+// Passed back to us on the command line when Windows relaunches the process
+// after applying a Store update; the Dart entrypoint keys the post-update
+// resume off it.
+constexpr const wchar_t kRestartCommandLine[] = L"--after-update";
+
 // Window class + title alone aren't enough to identify "our" instance: every
 // antgrid build (dev debug build, a locally installed release, the packaged
 // MSIX) produces a window with this same class and title, so a naive
@@ -94,6 +99,23 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   // Initialize COM, so that it is available for use in the library and/or
   // plugins.
   ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+  // A Store update force-kills this process (ForceTargetApplicationShutdown),
+  // so without a restart registration the user is simply left with no app.
+  // The flags must stay 0: every RESTART_NO_* bit subtracts a case Windows
+  // would otherwise relaunch us for, patching included. Windows honours the
+  // registration only once the process has been alive ~60s, which any
+  // user-initiated update click is well past.
+  HRESULT restart_registration =
+      ::RegisterApplicationRestart(kRestartCommandLine, 0);
+  if (FAILED(restart_registration)) {
+    wchar_t warning[160];
+    ::wsprintfW(warning,
+                L"antgrid: RegisterApplicationRestart failed (0x%08X); the app "
+                L"will not relaunch itself after a Store update",
+                restart_registration);
+    ::OutputDebugStringW(warning);
+  }
 
   flutter::DartProject project(L"data");
 

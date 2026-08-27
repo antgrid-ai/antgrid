@@ -213,6 +213,12 @@ Win32Window::MessageHandler(HWND hwnd,
       }
       return 0;
 
+    // DefWindowProc was already consenting to shutdown on our behalf; the
+    // drain we care about runs Dart-side before the Store is ever invoked,
+    // so the honest answer here is still yes.
+    case WM_QUERYENDSESSION:
+      return TRUE;
+
     case WM_DWMCOLORIZATIONCOLORCHANGED:
       UpdateTheme(hwnd);
       return 0;
