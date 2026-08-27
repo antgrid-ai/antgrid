@@ -76,11 +76,16 @@ class MachineSession {
   final Map<String, dynamic> Function(String projectId)?
   projectStartMessageBuilder;
 
+  /// Base wait for one `state.snapshot` round trip. Each retry doubles it —
+  /// see [StreamTransport.refreshSnapshot] for why a pull is retried at all.
+  final Duration snapshotTimeout;
+
   MachineSession({
     required this.relay,
     required this.machineDeviceId,
     required SessionHandshaker handshaker,
     this.projectStartMessageBuilder,
+    this.snapshotTimeout = const Duration(seconds: 5),
   }) : _handshaker = handshaker {
     // [ready] is observation-optional: failReady/dispose may completeError
     // before any awaiter attaches (see the getter doc). ignore() pre-registers
@@ -857,7 +862,7 @@ class StreamTransport extends BufferedAgentTransport {
     // timeout to report what is already known. Nothing is lost, since every
     // attached stream is refreshed on each (re)establish.
     if (!session.isEstablished) return;
-    await _fetchSnapshot(timeout: const Duration(seconds: 10));
+    await _fetchSnapshot(timeout: session.snapshotTimeout * 2);
   }
 
   @override
@@ -892,20 +897,77 @@ class StreamTransport extends BufferedAgentTransport {
   /// durable state first, then hydrators pull the view-state the snapshot does
   /// not carry (session list, config, the reopened file, the transcript). This
   /// is the per-stream reconciliation checkpoint.
+  ///
+  /// The pull is retried on timeout, and that is load-bearing: for a relay app
+  /// it is the ONLY carrier of a checkout's `agent:status` — the frame its
+  /// terminal tabs are built from. `terminal:started` is not durable, the
+  /// bridge republishes a checkout's status on nothing an app can trigger short
+  /// of starting a session that is already running, and the next establishment
+  /// is the only other re-pull. A reply that lands after the timeout is
+  /// discarded like any late RPC response. The reply is also large — every
+  /// checkout's `tree:full` rides in it — so a single fixed wait on a slow link
+  /// lost it silently, and a running session opened afterwards sat on "waiting
+  /// for agent" with nothing left to deliver its tab. Only the first attempt
+  /// is awaited: the hydrators do not depend on the snapshot having landed
+  /// (a bundle built before it reads the frames live when they arrive), so
+  /// they must not wait out a bad link's retries.
   Future<void> refreshSnapshot() async {
-    await _fetchSnapshot(timeout: const Duration(seconds: 5));
+    await _fetchSnapshot(timeout: session.snapshotTimeout);
     redriveHydrators();
   }
 
+  /// Round trips one durable-state pull gets before it is given up on, the
+  /// first included. Each retry doubles the previous wait, so the last one
+  /// gives a multi-megabyte reply four times the room the first did.
+  static const _kSnapshotAttempts = 3;
+
+  /// Stamps each pull so the retries of a superseded one stop: a (re)establish
+  /// or a second bind starts a fresh pull on the live keys, and [dispose] ends
+  /// them all.
+  int _snapshotGen = 0;
+
   Future<void> _fetchSnapshot({required Duration timeout}) async {
+    final gen = ++_snapshotGen;
+    if (await _pullSnapshot(timeout, attempt: 1)) return;
+    unawaited(_retrySnapshot(gen, timeout));
+  }
+
+  Future<void> _retrySnapshot(int gen, Duration timeout) async {
+    for (var attempt = 2; attempt <= _kSnapshotAttempts; attempt++) {
+      timeout *= 2;
+      if (gen != _snapshotGen || outbound.isClosed || !session.isEstablished) {
+        return;
+      }
+      if (await _pullSnapshot(timeout, attempt: attempt)) return;
+    }
+    developer.log(
+      'state.snapshot gave up after $_kSnapshotAttempts attempts on stream '
+      '$streamId; durable state stays as it was until the next establishment',
+      name: 'antgrid.relay',
+    );
+  }
+
+  /// One `state.snapshot` round trip. True once the pull is settled — the
+  /// reply landed, or it failed in a way no retry changes (a pre-RPC agent, a
+  /// send that never left) — and false only on a timeout, the one failure a
+  /// slower second try can turn around.
+  Future<bool> _pullSnapshot(Duration timeout, {required int attempt}) async {
+    const method = 'state.snapshot';
+    final params = <String, dynamic>{
+      'types': ['*'],
+    };
     try {
-      final snap = await request(
-        'state.snapshot',
-        params: {
-          'types': ['*'],
-        },
-        timeout: timeout,
-      );
+      // Only the first attempt counts toward the session's consecutive-timeout
+      // rekey trigger, as the lone pull always did. A retry re-asks a question
+      // already counted, and letting it count too made the chain itself the
+      // trigger: three waits on a slow link forced a rekey, the re-establish
+      // started a fresh chain, and the loop re-requested a multi-megabyte
+      // reply forever over a link that could not carry it. A retry that lands
+      // still clears the counter — the session has just proven itself.
+      final snap = attempt == 1
+          ? await request(method, params: params, timeout: timeout)
+          : await super.request(method, params: params, timeout: timeout);
+      if (attempt > 1) session.notifyRpcResult(timedOut: false);
       final frames = (snap['frames'] as List?) ?? const [];
       final fresh = <InboundMessage>[];
       for (final raw in frames) {
@@ -928,13 +990,22 @@ class StreamTransport extends BufferedAgentTransport {
           outbound.add(m);
         }
       }
-    } on RpcException {
-      // Pre-RPC agent or timeout — leave the existing cache untouched.
+      return true;
+    } on RpcException catch (e) {
+      // Leave the existing cache untouched either way.
+      if (e.code != 'E_TIMEOUT') return true;
+      developer.log(
+        'state.snapshot timed out after ${timeout.inMilliseconds}ms on stream '
+        '$streamId (attempt $attempt of $_kSnapshotAttempts)',
+        name: 'antgrid.relay',
+      );
+      return false;
     }
   }
 
   @override
   Future<void> dispose() async {
+    _snapshotGen++;
     failAllPending();
     clearHydrators();
     snapshotCache.clear();
