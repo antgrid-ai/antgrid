@@ -251,3 +251,29 @@ test("a stopped session stops being pulled as running", async () => {
 
   expect(await pullRunning(bus, sent, "main")).not.toContain(session.id);
 }, TEST_MS);
+
+// The app takes the file tree in a pull of its own. That pull asks for no
+// status, so it must not be what keeps every checkout's status fresh — the
+// status pull is, and it still is.
+test("a tree-only pull recomputes no status; the status pull still does", async () => {
+  const { bus, sent } = await bootCore();
+  const session = await startSession(bus, sent, "Main");
+  const statusesBefore = sent.filter((m) => m.type === "agent:status").length;
+
+  const treeId = crypto.randomUUID();
+  bus.dispatchInbound(createMessage("request", {
+    requestId: treeId, method: "state.snapshot", params: { types: ["tree:full"] },
+  }), "control", "loopback");
+  await waitFor(
+    () => sent.some((m) => m.type === "response" && m.requestId === treeId),
+    "the tree-only state.snapshot response",
+  );
+  const treeRes = sent.find((m) => m.type === "response" && m.requestId === treeId);
+  expect(treeRes?.type === "response" && treeRes.ok).toBe(true);
+  const treeFrames = (treeRes as { result?: { frames: AbMessage[] } }).result?.frames ?? [];
+  expect(treeFrames.every((f) => f.type === "tree:full")).toBe(true);
+  expect(sent.filter((m) => m.type === "agent:status").length).toBe(statusesBefore);
+
+  expect(await pullRunning(bus, sent, "main")).toContain(session.id);
+  expect(sent.filter((m) => m.type === "agent:status").length).toBeGreaterThan(statusesBefore);
+}, TEST_MS);

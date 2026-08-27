@@ -76,9 +76,14 @@ class MachineSession {
   final Map<String, dynamic> Function(String projectId)?
   projectStartMessageBuilder;
 
-  /// Base wait for one `state.snapshot` round trip. Each retry doubles it —
-  /// see [StreamTransport.refreshSnapshot] for why a pull is retried at all.
+  /// Base wait for the state half of a `state.snapshot` pull. Each retry
+  /// doubles it — see [StreamTransport.refreshSnapshot] for the split and for
+  /// why a pull is retried at all.
   final Duration snapshotTimeout;
+
+  /// Base wait for the tree half. Its own, and much longer: the reply is every
+  /// checkout's whole file tree, and nothing the terminal needs waits on it.
+  final Duration treeSnapshotTimeout;
 
   MachineSession({
     required this.relay,
@@ -86,6 +91,7 @@ class MachineSession {
     required SessionHandshaker handshaker,
     this.projectStartMessageBuilder,
     this.snapshotTimeout = const Duration(seconds: 5),
+    this.treeSnapshotTimeout = const Duration(seconds: 30),
   }) : _handshaker = handshaker {
     // [ready] is observation-optional: failReady/dispose may completeError
     // before any awaiter attaches (see the getter doc). ignore() pre-registers
@@ -898,51 +904,73 @@ class StreamTransport extends BufferedAgentTransport {
   /// not carry (session list, config, the reopened file, the transcript). This
   /// is the per-stream reconciliation checkpoint.
   ///
-  /// The pull is retried on timeout, and that is load-bearing: for a relay app
-  /// it is the ONLY carrier of a checkout's `agent:status` — the frame its
-  /// terminal tabs are built from. `terminal:started` is not durable, the
-  /// bridge republishes a checkout's status on nothing an app can trigger short
-  /// of starting a session that is already running, and the next establishment
-  /// is the only other re-pull. A reply that lands after the timeout is
-  /// discarded like any late RPC response. The reply is also large — every
-  /// checkout's `tree:full` rides in it — so a single fixed wait on a slow link
-  /// lost it silently, and a running session opened afterwards sat on "waiting
-  /// for agent" with nothing left to deliver its tab. Only the first attempt
-  /// is awaited: the hydrators do not depend on the snapshot having landed
-  /// (a bundle built before it reads the frames live when they arrive), so
-  /// they must not wait out a bad link's retries.
+  /// The pull is two round trips, split by weight. The state pull carries
+  /// every durable frame but the file tree, and for a relay app it is the ONLY
+  /// carrier of a checkout's `agent:status` — the frame its terminal tabs are
+  /// built from: `terminal:started` is not durable, the bridge republishes a
+  /// checkout's status on nothing an app can trigger short of starting a
+  /// session that is already running, and the next establishment is the only
+  /// other re-pull. The tree pull carries `tree:full` alone: it is the one
+  /// unbounded frame (every checkout's whole tree), and while it rode in the
+  /// same all-or-nothing reply a slow link or one lost fragment cost the
+  /// terminal its tab — a running session opened afterwards sat on "waiting
+  /// for agent" with nothing left to deliver it. On its own, a slow tree costs
+  /// the explorer, for a while.
+  ///
+  /// Both are retried on timeout, since a reply that lands after the wait is
+  /// discarded like any late RPC response. Only the state pull's first attempt
+  /// is awaited: the hydrators do not depend on the snapshot having landed (a
+  /// bundle built before it reads the frames live when they arrive), so they
+  /// must not wait out a bad link's retries, let alone the tree.
   Future<void> refreshSnapshot() async {
     await _fetchSnapshot(timeout: session.snapshotTimeout);
     redriveHydrators();
   }
 
-  /// Round trips one durable-state pull gets before it is given up on, the
-  /// first included. Each retry doubles the previous wait, so the last one
-  /// gives a multi-megabyte reply four times the room the first did.
+  /// Round trips one pull gets before it is given up on, the first included.
+  /// Each retry doubles the previous wait, so the last one gives a
+  /// multi-megabyte reply four times the room the first did.
   static const _kSnapshotAttempts = 3;
 
-  /// Stamps each pull so the retries of a superseded one stop: a (re)establish
-  /// or a second bind starts a fresh pull on the live keys, and [dispose] ends
-  /// them all.
-  int _snapshotGen = 0;
+  /// Stamps each pull, per half, so the retries of a superseded one stop: a
+  /// (re)establish or a second bind starts a fresh pull on the live keys, and
+  /// [dispose] ends them all.
+  final _snapshotGen = <_SnapshotPull, int>{};
 
   Future<void> _fetchSnapshot({required Duration timeout}) async {
-    final gen = ++_snapshotGen;
-    if (await _pullSnapshot(timeout, attempt: 1)) return;
-    unawaited(_retrySnapshot(gen, timeout));
+    final state = _fetch(_SnapshotPull.state, timeout);
+    // The control plane's bus never publishes a tree; asking would spend a
+    // round trip on an empty answer.
+    if (streamId != kControlStreamId) {
+      unawaited(_fetch(_SnapshotPull.tree, session.treeSnapshotTimeout));
+    }
+    await state;
   }
 
-  Future<void> _retrySnapshot(int gen, Duration timeout) async {
+  Future<void> _fetch(_SnapshotPull pull, Duration timeout) async {
+    final gen = (_snapshotGen[pull] ?? 0) + 1;
+    _snapshotGen[pull] = gen;
+    if (await _pullSnapshot(pull, timeout, attempt: 1)) return;
+    unawaited(_retrySnapshot(pull, gen, timeout));
+  }
+
+  Future<void> _retrySnapshot(
+    _SnapshotPull pull,
+    int gen,
+    Duration timeout,
+  ) async {
     for (var attempt = 2; attempt <= _kSnapshotAttempts; attempt++) {
       timeout *= 2;
-      if (gen != _snapshotGen || outbound.isClosed || !session.isEstablished) {
+      if (gen != _snapshotGen[pull] ||
+          outbound.isClosed ||
+          !session.isEstablished) {
         return;
       }
-      if (await _pullSnapshot(timeout, attempt: attempt)) return;
+      if (await _pullSnapshot(pull, timeout, attempt: attempt)) return;
     }
     developer.log(
-      'state.snapshot gave up after $_kSnapshotAttempts attempts on stream '
-      '$streamId; durable state stays as it was until the next establishment',
+      '${pull.label} gave up after $_kSnapshotAttempts attempts on stream '
+      '$streamId; its frames stay as they were until the next establishment',
       name: 'antgrid.relay',
     );
   }
@@ -951,23 +979,28 @@ class StreamTransport extends BufferedAgentTransport {
   /// reply landed, or it failed in a way no retry changes (a pre-RPC agent, a
   /// send that never left) — and false only on a timeout, the one failure a
   /// slower second try can turn around.
-  Future<bool> _pullSnapshot(Duration timeout, {required int attempt}) async {
+  Future<bool> _pullSnapshot(
+    _SnapshotPull pull,
+    Duration timeout, {
+    required int attempt,
+  }) async {
     const method = 'state.snapshot';
-    final params = <String, dynamic>{
-      'types': ['*'],
-    };
+    final params = pull.params;
     try {
-      // Only the first attempt counts toward the session's consecutive-timeout
-      // rekey trigger, as the lone pull always did. A retry re-asks a question
-      // already counted, and letting it count too made the chain itself the
-      // trigger: three waits on a slow link forced a rekey, the re-establish
-      // started a fresh chain, and the loop re-requested a multi-megabyte
-      // reply forever over a link that could not carry it. A retry that lands
-      // still clears the counter — the session has just proven itself.
-      final snap = attempt == 1
+      // Only the state pull's first attempt counts toward the session's
+      // consecutive-timeout rekey trigger, as the lone pull always did. A
+      // retry re-asks a question already counted, and letting it count too
+      // made the chain itself the trigger: three waits on a slow link forced
+      // a rekey, the re-establish started a fresh chain, and the loop
+      // re-requested a multi-megabyte reply forever over a link that could
+      // not carry it. The tree pull never counts: it is the heavy half, and a
+      // link too slow for it is not a dead session. A pull that lands still
+      // clears the counter — the session has just proven itself.
+      final counts = pull == _SnapshotPull.state && attempt == 1;
+      final snap = counts
           ? await request(method, params: params, timeout: timeout)
           : await super.request(method, params: params, timeout: timeout);
-      if (attempt > 1) session.notifyRpcResult(timedOut: false);
+      if (!counts) session.notifyRpcResult(timedOut: false);
       final frames = (snap['frames'] as List?) ?? const [];
       final fresh = <InboundMessage>[];
       for (final raw in frames) {
@@ -982,8 +1015,12 @@ class StreamTransport extends BufferedAgentTransport {
           fresh.add(InboundMessage('control', m));
         }
       }
+      // Each half replaces only its own frames: the tree landing must not
+      // drop the status that landed before it, and vice versa. (A bridge that
+      // predates `exclude` answers the state pull with the tree in it too —
+      // harmless, the tree pull's answer simply supersedes those.)
       snapshotCache
-        ..clear()
+        ..removeWhere((m) => pull.carries(m.json['type']))
         ..addAll(fresh);
       if (!outbound.isClosed) {
         for (final m in fresh) {
@@ -995,7 +1032,7 @@ class StreamTransport extends BufferedAgentTransport {
       // Leave the existing cache untouched either way.
       if (e.code != 'E_TIMEOUT') return true;
       developer.log(
-        'state.snapshot timed out after ${timeout.inMilliseconds}ms on stream '
+        '${pull.label} timed out after ${timeout.inMilliseconds}ms on stream '
         '$streamId (attempt $attempt of $_kSnapshotAttempts)',
         name: 'antgrid.relay',
       );
@@ -1005,7 +1042,9 @@ class StreamTransport extends BufferedAgentTransport {
 
   @override
   Future<void> dispose() async {
-    _snapshotGen++;
+    for (final pull in _SnapshotPull.values) {
+      _snapshotGen[pull] = (_snapshotGen[pull] ?? 0) + 1;
+    }
     failAllPending();
     clearHydrators();
     snapshotCache.clear();
@@ -1014,4 +1053,35 @@ class StreamTransport extends BufferedAgentTransport {
     await stateController.close();
     await droppedFrameController.close();
   }
+}
+
+/// Durable frames the state pull leaves to the tree pull. The only unbounded
+/// durable frame the bridge caches — see [StreamTransport.refreshSnapshot].
+const _kHeavyReplayTypes = <String>['tree:full'];
+
+/// The two round trips a durable-state pull is split into, by weight.
+enum _SnapshotPull {
+  /// Every durable frame but the tree: `agent:status`, `git:status`, the
+  /// handler and capability snapshots, the control plane's adverts.
+  state,
+
+  /// `tree:full` alone — every checkout's whole file tree.
+  tree;
+
+  Map<String, dynamic> get params => switch (this) {
+    state => {
+      'types': ['*'],
+      'exclude': _kHeavyReplayTypes,
+    },
+    tree => {'types': _kHeavyReplayTypes},
+  };
+
+  String get label => switch (this) {
+    state => 'state.snapshot',
+    tree => 'state.snapshot[tree]',
+  };
+
+  /// Whether a frame of [type] is this half's to replace in the cache.
+  bool carries(Object? type) =>
+      (type is String && _kHeavyReplayTypes.contains(type)) == (this == tree);
 }

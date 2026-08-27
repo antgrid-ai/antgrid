@@ -176,17 +176,18 @@ export class MessageBus {
     }
   }
 
-  /** Read the latest cached frame(s) for each requested type. Pass `["*"]` for all. */
-  getSnapshot(types: readonly string[]): AbMessage[] {
-    if (types.length === 1 && types[0] === "*") {
-      return Array.from(this.replayCache.values(), (c) => c.msg);
-    }
+  /** Read the latest cached frame(s) for each requested type. Pass `["*"]` for
+   *  all; [exclude] drops types from either answer (see `StateSnapshotParams`). */
+  getSnapshot(types: readonly string[], exclude: readonly string[] = []): AbMessage[] {
+    const excluded = new Set(exclude);
     // Match on the frame's type, not the cache key — session-scoped types
     // store several frames under composite keys.
-    const wanted = new Set(types);
+    const wanted = types.length === 1 && types[0] === "*" ? null : new Set(types);
     const out: AbMessage[] = [];
     for (const c of this.replayCache.values()) {
-      if (wanted.has(c.msg.type)) out.push(c.msg);
+      const type = c.msg.type;
+      if (excluded.has(type)) continue;
+      if (wanted === null || wanted.has(type)) out.push(c.msg);
     }
     return out;
   }
