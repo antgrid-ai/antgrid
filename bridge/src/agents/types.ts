@@ -180,9 +180,8 @@ export interface ResumableArgs {
  *
  * Measured, not assumed: codex NEVER generates a title (its CLI writes the
  * first user message into `threads.title`; the desktop app is what fills in a
- * real one), and Claude writes its `custom-title` only in the interactive TUI,
- * never in headless/SDK runs. So "first-message" is the common case, not an
- * edge one.
+ * real one), and Claude writes its own title only in the interactive TUI, never
+ * in headless/SDK runs. So "first-message" is the common case, not an edge one.
  */
 export interface ResolvedTitle {
   title: string;

@@ -2262,8 +2262,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (setupRunner.handleExit(id) || setupTerminalIds.has(id)) return;
         sessions?.noteExited(id);
         // Drop buffered title state so a stale title from this run can't leak
-        // into a restarted same-id session (start() reuses the entry id).
-        namer?.forget(id);
+        // into a restarted same-id session (start() reuses the entry id). A
+        // mode flip is exempt for the same reason the handler's arming is: the
+        // agent-native conversation carries over across the runtime swap, so
+        // its name — and the precedence rank protecting it — must too.
+        if (!sessions?.isFlipping(id)) namer?.forget(id);
         // Reclaim the handler's per-terminal guard + pending state for the dead
         // terminal. A mode flip keeps the arming: the session outlives the PTY.
         handlerEngine.onTerminalExit(id, { keepArmed: sessions?.isFlipping(id) });
@@ -2395,7 +2398,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           projectId: project.id,
           chatAugment: () => buildChatSpawnAugment(tool, sessionId, apiServer?.port ?? null, abDir),
           onAgentSession: (agentSessionId) => sessions?.setAgentSession(sessionId, agentSessionId),
-          onTitle: (title) => namer?.onStructuredTitle(sessionId, title),
+          // The driver only forwards its backend's OWN generated name (opencode
+          // filters to the root session), never an echo of the first message.
+          onTitle: (title) => namer?.onStructuredTitle(sessionId, title, "generated"),
           onLifecycle: (evt) => {
             handlerEngine.handleEvent({ terminalId: sessionId, ...evt })
               .catch((err) => logger.error("Handler lifecycle event failed: %s", err));
@@ -2500,6 +2505,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // auto-disarm — a stopped driver can't be supervised. Same flip
         // exemption: swapping runtimes is not the session ending.
         handlerEngine.onTerminalExit(id, { keepArmed: sessions?.isFlipping(id) });
+        // A chat slot has no PTY, so onTerminalExited never runs for it and
+        // nothing else would ever release its buffered title — leaving the
+        // stopped conversation's name, and its rank, to veto the next one.
+        if (!sessions?.isFlipping(id)) namer?.forget(id);
         // Returned, not discarded: it settles only once the driver's backend is
         // gone and has released the agent's process lock (codex's ~/.codex
         // sqlite), which anything restarting this slot has to wait out.
@@ -2522,7 +2531,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       antigravityCliHome(),
       (conversationId, title) => {
         const slot = sessions?.findSlotByAgentSession(conversationId);
-        if (slot) namer?.onStructuredTitle(slot, title);
+        // Always a real name: the watcher reports only `/rename` and agy's own
+        // summaries, never the first-message fallback (see its docstring).
+        if (slot) namer?.onStructuredTitle(slot, title, "generated");
       },
     );
     antigravityTitleWatcher.start();
@@ -2822,7 +2833,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // the session (or Claude may have written its own title) in that window.
     if (!title || (sessions && !sessions.isAutoNameable(body.terminalId))) return;
     log.info("generated a session title for %s (%s)", body.terminalId, tool);
-    namer?.onStructuredTitle(body.terminalId, title);
+    namer?.onStructuredTitle(body.terminalId, title, "generated");
   }
 
   // Start local API server for MCP/hook integration (works in both modes)
@@ -2848,14 +2859,23 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // (overwrite-latest), independent of title resolution. terminalId is the
       // slot id (stamped as ANTGRID_TERMINAL_ID at spawn).
       if (!body.titleOnly) {
+        const prevAgentSession = sessions?.get(body.terminalId)?.agentSessionId;
         sessions?.setAgentSession(body.terminalId, body.sessionId, body.transcriptPath);
+        // A new conversation under a STILL-LIVE PTY (`/clear`, `/new`) reaches
+        // no exit path, so this is the only place the previous conversation's
+        // title rank can be released. Left latched, it vetoes every
+        // first-message title the new conversation resolves.
+        if (prevAgentSession && prevAgentSession !== body.sessionId) {
+          namer?.forgetStructuredTitle(body.terminalId);
+        }
       }
       // opencode posts the title inline; Claude/Codex/Antigravity post only
       // correlation ids, so resolve the title from their on-disk session files
       // (async read, off the event loop). resolveStructuredTitle swallows its own
       // errors, so the unawaited promise can't reject.
       if (body.title) {
-        namer?.onStructuredTitle(body.terminalId, body.title);
+        // opencode posts its server-generated conversation name, not a prompt echo.
+        namer?.onStructuredTitle(body.terminalId, body.title, "generated");
         return;
       }
       const resolved = await resolveStructuredTitle(body.agent, {
@@ -2864,8 +2884,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       });
       // Apply the native read first either way: even a first-message title beats
       // "Session 3" while generation is in flight, and it's what we keep if
-      // generation fails.
-      if (resolved) namer?.onStructuredTitle(body.terminalId, resolved.title);
+      // generation fails. Pass the kind through — this is the one signal that
+      // repeats an unchanged placeholder every turn, and the namer needs it to
+      // refuse to overwrite a real title with one (see SessionNamer.TitleRank).
+      if (resolved) namer?.onStructuredTitle(body.terminalId, resolved.title, resolved.kind);
       if (!resolved || resolved.kind === "first-message") {
         void maybeGenerateTitle(body, resolved?.title);
       }
