@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -79,9 +78,15 @@ Uri? openableTerminalHyperlink(String uri) {
 /// returns, so a rejection would reach `PlatformDispatcher.onError` as a fatal
 /// carrying no in-app frames.
 ///
-/// The destination is confirmed first on touch, and on any platform when the
-/// URI is shaped to be misread — see [showTerminalHyperlinkSheet] for why that
-/// is not merely a nag, and [terminalHyperlinkLooksDeceptive] for the shapes.
+/// The destination is confirmed first unless it was already on screen, and
+/// whenever the URI is shaped to be misread — see [showTerminalHyperlinkSheet]
+/// for why that is not merely a nag, and [terminalHyperlinkLooksDeceptive] for
+/// the shapes.
+///
+/// [disclosed] is the caller saying it had this exact URI painted when the
+/// activation landed — `TerminalHyperlinkPreview`, in practice. It defaults to
+/// false because "we showed it" is a claim only the surface that showed it can
+/// make, and a caller that has no readout must not inherit one by omission.
 ///
 /// [open] and [confirm] are injectable so tests can assert what would be
 /// launched instead of handing a URL to the real browser, matching
@@ -89,6 +94,7 @@ Uri? openableTerminalHyperlink(String uri) {
 Future<void> openTerminalHyperlink(
   BuildContext context,
   String uri, {
+  bool disclosed = false,
   Future<void> Function(BuildContext, String) open = openExternalUrl,
   Future<bool> Function(BuildContext, Uri) confirm = showTerminalHyperlinkSheet,
 }) async {
@@ -106,7 +112,7 @@ Future<void> openTerminalHyperlink(
       }
       return;
     }
-    if (_shownBeforeActivated && !terminalHyperlinkLooksDeceptive(target)) {
+    if (disclosed && !terminalHyperlinkLooksDeceptive(target)) {
       await open(context, target.toString());
       return;
     }
@@ -150,7 +156,7 @@ Future<void> openTerminalHyperlink(
 /// subdomain of an honest domain, and only the link's visible TEXT contradicts
 /// it — text that never reaches this app. A false negative here costs the user
 /// the extra confirmation, not the disclosure: the sheet names the host either
-/// way, and on touch it is shown unconditionally.
+/// way, and a link that was never on screen is confirmed regardless of shape.
 bool terminalHyperlinkLooksDeceptive(Uri target) {
   if (target.userInfo.isNotEmpty) {
     return true;
@@ -163,33 +169,3 @@ bool terminalHyperlinkLooksDeceptive(Uri target) {
   // checks, not the parser's contract two files away.
   return host.split('.').any((label) => label.toLowerCase().startsWith('xn--'));
 }
-
-/// Whether this platform showed the destination before the link was activated.
-///
-/// Desktop has a pointer, so `TerminalHyperlinkPreview` has already painted the
-/// URI under it by the time a click lands — that readout is the disclosure, and
-/// it is the only reason this path may skip the sheet. Deliberately NOT the
-/// browser's address bar: `LaunchMode.externalApplication` resolves through
-/// `ShellExecuteW` on Windows, `NSWorkspace.open` on macOS and
-/// `g_app_info_launch_default_for_uri` on Linux, every one of which honours a
-/// registered `https:` handler — so a desktop click can land in an app with no
-/// address bar just as a mobile one can (see [openableTerminalHyperlink]).
-///
-/// Touch has no hover and therefore no readout, which is why it asks every time.
-///
-/// A BARE URL — one the view matched by regex rather than by OSC 8 markup — is
-/// not a gap here even though the readout may not have marked it: its visible
-/// text IS the URI, which is how it was found, so there is nothing the target
-/// can disagree with.
-///
-/// Known gap, reported rather than papered over: this asks the OS, not the
-/// input device, so a finger tap on a desktop touchscreen takes the desktop
-/// branch having been shown nothing. The pointer kind is the right predicate
-/// and lives in the terminal package, not here.
-///
-/// A readout only discloses what the reader then has to judge, so this is not
-/// the whole desktop rule: [terminalHyperlinkLooksDeceptive] pulls the cases
-/// back to the sheet where the URI is built to be misread.
-bool get _shownBeforeActivated =>
-    defaultTargetPlatform != TargetPlatform.android &&
-    defaultTargetPlatform != TargetPlatform.iOS;
