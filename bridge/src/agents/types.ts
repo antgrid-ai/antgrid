@@ -342,7 +342,8 @@ export interface AgentSpec {
    *  why an unverified `--` separator is worse than the misparse it guards. */
   initialPrompt: (prompt: string) => string[];
   /** Extra launch environment, applied only on the registry-key launch path.
-   *  Absent = the agent needs no generated config to notify. */
+   *  Either a generated config file the agent needs in order to notify, or a
+   *  behaviour switch the bridge must pin for every spawn. Absent = neither. */
   env?: (ctx: LaunchEnvCtx) => Record<string, string>;
   /** How this agent updates itself in place. The registry key is the `tool` id
    *  the update path keys by, so it is not restated here.
