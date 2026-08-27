@@ -87,7 +87,9 @@ void pushBackgroundMain() {
   Push.instance.addOnBackgroundMessage(pushBackgroundHandler);
 }
 
-Future<void> main() async {
+/// [args] is the Dart entrypoint's argument list, which only the Windows
+/// runner ever fills — see [kAfterUpdateFlag].
+Future<void> main(List<String> args) async {
   // markdown_widget's CodeBlockNode.build() uses a try/catch as control flow
   // for language-less fenced code blocks (no `class` attr -> null-check throw)
   // and debugPrints the swallowed exception on every render — drowns out
@@ -198,6 +200,9 @@ Future<void> main() async {
         ),
       ),
       analyticsServiceProvider.overrideWithValue(analytics),
+      afterUpdateLaunchProvider.overrideWithValue(
+        args.contains(kAfterUpdateFlag),
+      ),
     ],
   );
 

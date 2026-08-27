@@ -3,10 +3,24 @@ import 'dart:async';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../config/build_info.dart';
 import '../design/ab_icons.dart';
 import '../design/widgets/ab_toast.dart';
 import '../providers/update_available.dart';
+import '../util/detached.dart';
+import 'update_install_controller.dart';
 import 'update_strategy.dart';
+
+/// The command line Windows hands back when it relaunches this process after
+/// applying a Store update. `RegisterApplicationRestart` in
+/// app/windows/runner/main.cpp registers the string and is authoritative for
+/// its spelling; the runner forwards it to the Dart entrypoint.
+const kAfterUpdateFlag = '--after-update';
+
+/// Whether this launch is that relaunch. Overridden from `main()` off the
+/// entrypoint arguments, so an ordinary launch — and every test — sees false
+/// and the app says nothing.
+final afterUpdateLaunchProvider = Provider<bool>((ref) => false);
 
 /// Root wrapper that drives in-app updates via the running platform's
 /// [UpdateStrategy] — the single per-platform table in update_strategy.dart.
@@ -49,6 +63,11 @@ class _UpdateGateState extends ConsumerState<UpdateGate>
   @override
   void initState() {
     super.initState();
+    // Ahead of the strategy gate below: Windows relaunches a build whose
+    // update checks are inactive just the same.
+    if (ref.read(afterUpdateLaunchProvider)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _announceUpdated());
+    }
     final strategy = ref.read(updateStrategyProvider);
     if (strategy == null || !strategy.active) return;
     _strategy = strategy;
@@ -112,7 +131,7 @@ class _UpdateGateState extends ConsumerState<UpdateGate>
         title: 'Update available',
         description: 'A new version is available to install.',
         actionLabel: 'Update',
-        onAction: () => _strategy?.install(context),
+        onAction: _startInstall,
       ),
     );
   }
@@ -126,9 +145,40 @@ class _UpdateGateState extends ConsumerState<UpdateGate>
         title: 'Update ready',
         description: 'A new version has been downloaded.',
         actionLabel: 'Restart',
-        // install == "user accepted the update" on every platform; for the
-        // Play strategy that is completeFlexibleUpdate.
-        onAction: () => _strategy?.install(context),
+        onAction: _startInstall,
+      ),
+    );
+  }
+
+  /// Both toast actions and the drawer row run the one install sequence, so a
+  /// toast tapped while the row's attempt is still on screen is refused rather
+  /// than starting a second one.
+  ///
+  /// This state's context outlives both toasts (and the drawer), which matters
+  /// on Windows: the sequence drains the bridge host before handing over, and
+  /// a context that dies in that window abandons an install the user already
+  /// confirmed.
+  void _startInstall() {
+    detached('UpdateGate', 'install sequence', () async {
+      if (!mounted) return;
+      await ref.read(updateInstallControllerProvider.notifier).start(context);
+    });
+  }
+
+  /// One-shot: the flag comes from this launch's arguments, so it cannot
+  /// survive into the next one.
+  void _announceUpdated() {
+    if (!mounted) return;
+    final version = BuildInfo.version;
+    showAbToastOverlay(
+      context,
+      duration: const Duration(seconds: 8),
+      toast: AbToast(
+        icon: AbIcons.check,
+        // Not "and reopened your sessions": the install sequence shuts the
+        // bridge host down and nothing restores what it was running.
+        title: version == 'dev' ? 'Update installed' : 'Updated to $version',
+        description: 'Open project sessions were stopped.',
       ),
     );
   }
