@@ -34,6 +34,30 @@ enum UpdateCheckOutcome {
   restartReady,
 }
 
+/// What one accepted install attempt did.
+///
+/// Only Windows can report anything but [handedOff]: every other platform
+/// passes the update to a browser, to Sparkle, or to Play and learns nothing
+/// more about it.
+enum UpdateInstallResult {
+  /// The platform owns the update now — the Store is installing (and is about
+  /// to end this process), Sparkle's dialog is up, the releases page is open.
+  handedOff,
+
+  /// Nothing was installed and the update is still pending. On Windows this is
+  /// the Store's entire "not completed" bucket — a declined consent dialog, a
+  /// low-battery or Wi-Fi refusal, a download still in flight — so it means
+  /// "offer it again", never "the user said no".
+  notInstalled,
+
+  /// The pending set had already cleared when the install started.
+  nothingPending,
+
+  /// The install route itself could not be reached — a Windows build with no
+  /// MSIX package identity, or a detected update with no link to open.
+  unavailable,
+}
+
 /// One platform's complete update wiring: whether checks run in this build,
 /// how a check detects, and what accepting the update does.
 ///
@@ -58,7 +82,28 @@ abstract class UpdateStrategy {
   /// The user accepted the affordance — the drawer row's tap, or Android's
   /// restart-toast action. Never throws, surfaces its own UI, and tolerates
   /// a repeat invocation by re-opening the flow.
-  Future<void> install(BuildContext context);
+  Future<UpdateInstallResult> install(BuildContext context);
+
+  /// Whether [install] ends this process: the app quits, everything it was
+  /// running quits with it, and coming back is the platform's business.
+  ///
+  /// Only the Windows Store hand-off does — an MSIX is replaced over a dead
+  /// app. Everywhere else [install] opens something (Sparkle's dialog, a
+  /// releases page, a store listing) or restarts in place with nothing of ours
+  /// to unwind first, so nothing there is worth a confirmation click.
+  bool get installEndsSession => false;
+
+  /// Install progress in whole percent (0-100) while [install] runs, or null
+  /// where the platform reports none.
+  ///
+  /// Where it exists it is broadcast and unbuffered, and carries no terminal
+  /// emission — completion is [install]'s answer alone.
+  Stream<int>? get installProgress => null;
+
+  /// The version [install] would move to, as last seen by [check], or null
+  /// when the source didn't name one. Null is common and means only
+  /// "unknown", so copy that names it needs a nameless fallback.
+  String? get pendingVersion => null;
 
   /// Copy for the drawer row this strategy's outcomes light. The default
   /// promises a download/store hand-off; a strategy whose [install] does
@@ -89,8 +134,10 @@ class PlayUpdateStrategy extends UpdateStrategy {
   }
 
   @override
-  Future<void> install(BuildContext context) =>
-      _service.completeFlexibleUpdate();
+  Future<UpdateInstallResult> install(BuildContext context) async {
+    await _service.completeFlexibleUpdate();
+    return UpdateInstallResult.handedOff;
+  }
 
   // The only outcome that lights the row here is a DOWNLOADED update, and
   // completeFlexibleUpdate restarts the app immediately — 'Update' would
@@ -117,8 +164,19 @@ class WindowsStoreStrategy extends UpdateStrategy {
   /// provider-held, outliving any widget — so a gate remount can't reset it.
   bool _mandatoryAutoLaunched = false;
 
+  String? _pendingVersion;
+
   @override
   bool get active => kReleaseMode;
+
+  @override
+  bool get installEndsSession => true;
+
+  @override
+  Stream<int> get installProgress => _service.downloadProgress;
+
+  @override
+  String? get pendingVersion => _pendingVersion;
 
   @override
   Future<UpdateCheckOutcome> check({required bool rowAlreadyLit}) async {
@@ -128,8 +186,10 @@ class WindowsStoreStrategy extends UpdateStrategy {
     // While only an OPTIONAL update is pending we keep checking: a later
     // check may see it escalate to mandatory and auto-launch.
     if (_mandatoryAutoLaunched) return UpdateCheckOutcome.none;
-    final check = await _service.checkForUpdates();
+    final status = await _service.checkForUpdates();
+    final check = status.check;
     if (check == StoreUpdateCheck.none) return UpdateCheckOutcome.none;
+    _pendingVersion = status.version;
     if (check == StoreUpdateCheck.mandatory) {
       // Partner Center marked the release mandatory — hand straight off to
       // the Store's install flow (which owns the UI and may restart the app)
@@ -144,8 +204,19 @@ class WindowsStoreStrategy extends UpdateStrategy {
   }
 
   @override
-  Future<void> install(BuildContext context) =>
-      _service.requestDownloadAndInstall();
+  Future<UpdateInstallResult> install(BuildContext context) async =>
+      switch (await _service.requestDownloadAndInstall()) {
+        StoreInstallOutcome.completed => UpdateInstallResult.handedOff,
+        StoreInstallOutcome.cancelled => UpdateInstallResult.notInstalled,
+        StoreInstallOutcome.none => UpdateInstallResult.nothingPending,
+        StoreInstallOutcome.unavailable => UpdateInstallResult.unavailable,
+      };
+
+  // The tap here CLOSES the app — an MSIX is replaced over a dead process, and
+  // we drain the bridge before handing off. 'Update' hides the one part of it
+  // the user cannot take back.
+  @override
+  String get rowActionLabel => 'Install & restart';
 }
 
 /// macOS: detection and install read the SAME appcast, so a lit row implies
@@ -184,12 +255,13 @@ class MacosSparkleStrategy extends UpdateStrategy {
   }
 
   @override
-  Future<void> install(BuildContext context) async {
+  Future<UpdateInstallResult> install(BuildContext context) async {
     // Re-assert the feed first: prepare() is fire-and-forget at startup and
     // swallows failures, and a feed-less Sparkle errors (silently) on every
     // startUpdate — this idempotent local call un-deadens the row's tap.
     await _sparkle.configureFeed();
     await _sparkle.startUpdate();
+    return UpdateInstallResult.handedOff;
   }
 }
 
@@ -220,10 +292,13 @@ class LinuxBrowserStrategy extends UpdateStrategy {
   }
 
   @override
-  Future<void> install(BuildContext context) => openExternalUrl(
-    context,
-    GithubReleaseUpdateService.latestDownloadPageUrl,
-  );
+  Future<UpdateInstallResult> install(BuildContext context) async {
+    await openExternalUrl(
+      context,
+      GithubReleaseUpdateService.latestDownloadPageUrl,
+    );
+    return UpdateInstallResult.handedOff;
+  }
 }
 
 /// iOS: iTunes-lookup detection; install opens the App Store listing (iOS
@@ -250,13 +325,14 @@ class IosAppStoreStrategy extends UpdateStrategy {
   }
 
   @override
-  Future<void> install(BuildContext context) {
+  Future<UpdateInstallResult> install(BuildContext context) async {
     // Cached by this same instance's check that lit the row, so it's
     // non-null on every reachable path here.
     final url = _service.listingUrl;
     assert(url != null, 'iOS update row lit without a store listing URL');
-    if (url == null) return Future.value();
-    return openExternalUrl(context, url);
+    if (url == null) return UpdateInstallResult.unavailable;
+    await openExternalUrl(context, url);
+    return UpdateInstallResult.handedOff;
   }
 }
 
