@@ -45,6 +45,17 @@ import '../services/control_plane_client.dart';
   ),
 };
 
+/// Whether this status is a CALL TO ACTION — something the user has to come
+/// and do — as opposed to a report of what the agent is up to.
+///
+/// The narrow set every ROLLUP surface is limited to. A rollup speaks for rows
+/// that are off screen, so it may only say "one of these wants you"; `working`
+/// and `done` are the agent's own business and belong to the row itself, where
+/// there is somewhere to look. One predicate so a project rollup and a machine
+/// rollup cannot come to disagree about the same status.
+bool agentWorkStatusNeedsUser(AgentWorkStatus status) =>
+    status != AgentWorkStatus.done && status != AgentWorkStatus.working;
+
 /// Canonical indicator for an [AgentWorkStatus], shared by the Recent list and
 /// the sidebar so the four states read identically everywhere:
 /// working (pulsing accent) · attention (yellow pulse — needs you) ·

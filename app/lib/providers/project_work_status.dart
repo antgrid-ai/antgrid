@@ -6,10 +6,12 @@ import 'recent_sessions.dart';
 import 'sessions.dart';
 
 /// Effective per-project work status, for the surfaces that speak for a whole
-/// project: the title bar's focused-project pill. Session-level surfaces speak
-/// for ONE session instead — drawer rows and the title bar read
-/// [sessionWorkStatusProvider]; the whole Recent list shares
-/// [recentSessionStatusesProvider]. Drawer PROJECT rows show no dot at all.
+/// project: the title bar's focused-project pill, and a COLLAPSED drawer
+/// project row (local or advertised-remote), whose session rows are off screen
+/// and so cannot speak for themselves. An EXPANDED drawer project row shows no
+/// dot — its sessions are right there. Session-level surfaces speak for ONE
+/// session instead: session rows read [sessionWorkStatusProvider], and the
+/// whole Recent list shares [recentSessionStatusesProvider].
 ///
 /// The live control-plane advert — which carries working/attention/error/done
 /// for a project WITHOUT warming (opening) it — is the ONLY source, read from
@@ -24,13 +26,16 @@ import 'sessions.dart';
 /// work-status.ts), and an open-but-idle chat reading "working" was exactly the
 /// bug that rule fixes — re-deriving it here from the session list would put it
 /// straight back for every project whose advert hasn't arrived.
-final projectWorkStatusProvider = Provider.family<AgentWorkStatus, String>((
-  ref,
-  entryId,
-) {
-  return ref.watch(remoteProjectStatusProvider.select((m) => m[entryId])) ??
-      AgentWorkStatus.done;
-});
+///
+/// `autoDispose` because the key space is unbounded and transient: every
+/// advertised project of every machine the user expands mints one, and a plain
+/// family would hold each instance — and its `select` subscription — for the
+/// life of the process long after the machine band was collapsed away.
+final projectWorkStatusProvider = Provider.autoDispose
+    .family<AgentWorkStatus, String>((ref, entryId) {
+      return ref.watch(remoteProjectStatusProvider.select((m) => m[entryId])) ??
+          AgentWorkStatus.done;
+    });
 
 /// The OPEN project's own live stamp for [sessionId], or null when [entryId]
 /// isn't the focused project or the entry carries no status.

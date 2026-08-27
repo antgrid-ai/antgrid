@@ -232,23 +232,33 @@ class _SessionRowState extends ConsumerState<SessionRow> {
       });
     }
 
-    // Split the gutter: half on the outer Padding (still keeps L/R strips
-    // non-hover-reactive), half inside the row as horizontalPadding so the
-    // selection fill gets breathing room before the status dot without
-    // shifting the dot's screen position.
+    // The drawer's one indent step is spent here, between a project row and
+    // its sessions — machine headers are bands and cost none, so this is the
+    // whole depth budget of the tree.
+    //
+    // Split so the selection fill gets breathing room before the status dot
+    // without shifting the dot's screen position: all but the last space6 sits
+    // on the outer Padding (which also keeps the L/R strips non-hover-reactive),
+    // and the last space6 is the row's own horizontalPadding.
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: AbTokens.space6),
+      padding: const EdgeInsets.fromLTRB(
+        AbTokens.drawerSessionIndent - AbTokens.space6,
+        0,
+        AbTokens.space6,
+        0,
+      ),
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
         onEnter: _onEnter,
         onExit: _onExit,
         child: AbListRow(
+          leadingGapOverride: AbTokens.drawerSessionLeadingGap,
           leading: SizedBox(
-            width: AbTokens.drawerLeadingSlot,
+            width: AbTokens.drawerSessionLeadingSlot,
             height: AbTokens.drawerLeadingSlot,
             // Bias the dot slightly below its box centre. Row-centring lines up
             // the dot with the title's line-box centre, but the visible glyphs
-            // of a fontBody line sit a hair lower (the font reserves more space
+            // of a text line sit a hair lower (the font reserves more space
             // above the baseline than below), so a geometrically-centred dot
             // reads as too high. The small downward nudge matches the optical
             // centre of the text.
@@ -267,7 +277,21 @@ class _SessionRowState extends ConsumerState<SessionRow> {
                     Flexible(
                       child: Text(
                         session.name,
-                        style: AbTokens.sansStyle(),
+                        // The payload of the drawer, and so still its largest
+                        // text — but at fontMd against the project row's
+                        // fontSm, not fontBody at textPrimary, which made every
+                        // session outshout the project containing it. The
+                        // active row is the one thing in the panel that goes
+                        // primary.
+                        style: AbTokens.sansStyle(
+                          fontSize: AbTokens.fontMd,
+                          fontWeight: selected
+                              ? FontWeight.w500
+                              : FontWeight.normal,
+                          color: selected
+                              ? context.antgrid.textPrimary
+                              : context.antgrid.textSecondary,
+                        ),
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
