@@ -939,6 +939,27 @@ jobs:
     permissions:
       contents: write
     steps:
+      # `path:` keeps the clone out of the workspace root the assets land in.
+      # Without it, step ORDER is the only thing protecting them: checkout wipes
+      # a target that has no .git regardless of `clean`, so a later reordering
+      # would silently delete a notarized DMG.
+      #
+      # fetch-depth 0 is for REACHABILITY, not for the commit range — GitHub
+      # computes the range server-side from previous_tag_name. What runs locally
+      # is `git tag --merged`, which needs real history: `fetch-tags: true` on a
+      # shallow clone returns an empty tag list WITHOUT erroring. blob:none keeps
+      # the full history cheap, since only one script is ever read.
+      #
+      # persist-credentials false: nothing here needs git write access — the tag
+      # walk is local and gh authenticates from GH_TOKEN — so there is no reason
+      # to leave a contents:write token in .git/config beside unpacked artifacts.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          path: _repo
+          persist-credentials: false
+
       - uses: actions/download-artifact@v7
         with:
           pattern: antgrid-*
@@ -947,6 +968,10 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # One answer to "which repo" for both the notes and the release —
+          # a fork with RELEASE_REPO=true must not generate notes from
+          # antgrid's PR history and publish them onto its own release.
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.version.outputs.tag }}
           SHA: ${{ needs.version.outputs.sha }}
           BUILT: ${{ needs.version.outputs.built }}
@@ -980,15 +1005,13 @@ jobs:
           fi
           assets="antgrid-macos.dmg antgrid-linux.AppImage antgrid-linux.AppImage.zsync"
           [ -f appcast.xml ] && assets="$assets appcast.xml"
+          # Runs inside the clone (it reads the tag graph); the redirect is
+          # opened in the workspace root, where the assets already are.
+          ( cd _repo && RELEASE_SHA="$SHA" RELEASE_BUILT="$BUILT" \
+              scripts/release-notes.sh "$TAG" "$GITHUB_SHA" ) > release-notes.md
           gh release create "$TAG" \
-            --repo antgrid-ai/antgrid \
+            --repo "$GH_REPO" \
             --title "Antgrid $TAG" \
-            --notes "Desktop builds for Antgrid $TAG.
-
-          - **macOS** (antgrid-macos.dmg): signed and notarized. Open the .dmg and drag Antgrid to Applications.
-          - **Windows**: install from the [Microsoft Store](https://apps.microsoft.com/detail/9N0P7ZRL4D9W).
-          - **Linux** (antgrid-linux.AppImage): \`chmod +x antgrid-linux.AppImage\` then run it. Needs GTK 3 and WebKit2GTK on the host (\`libgtk-3-0\`, \`libwebkit2gtk-4.1-0\`, \`libsecret-1-0\`).
-
-          Built from \`$SHA\` at $BUILT." \
+            --notes-file release-notes.md \
             $prerelease \
             $assets
