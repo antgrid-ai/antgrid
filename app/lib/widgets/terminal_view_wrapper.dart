@@ -621,10 +621,17 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       // uses the platform-default launch mode and reports nothing when it
       // fails. Route through the app's helper so a link opens externally and a
       // failure is visible, and so terminal-authored URIs are scheme-checked.
-      onOpenHyperlink: (uri) => openTerminalHyperlink(context, uri),
-      // The other half of that disclosure: `openTerminalHyperlink` asks before
-      // opening only where the destination would otherwise never be shown at
-      // all, and this is what shows it everywhere else.
+      // `disclosed` is this widget answering for its own readout, not a guess
+      // from the platform: the card is up for THIS uri, so the destination was
+      // on screen when the activation landed. A desktop touchscreen, a Shift
+      // chord and a link that scrolled out from under a resting pointer all
+      // reach here with nothing shown, and all of them get the sheet — which a
+      // `defaultTargetPlatform` test silently exempted the first of.
+      onOpenHyperlink: (uri) => openTerminalHyperlink(
+        context,
+        uri,
+        disclosed: _hoveredLink.value?.uri == uri,
+      ),
       onHyperlinkHover: _onHyperlinkHover,
       showHeader: false,
       showFocusRing: false,

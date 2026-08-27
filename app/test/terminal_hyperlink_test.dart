@@ -232,10 +232,11 @@ void main() {
       expect(line['error'], contains('launcher exploded'));
     });
 
-    // flutter_test reports android by default, so these run on the touch path
-    // unless they say otherwise.
+    // No platform override anywhere in this group any more: what decides is
+    // whether the caller says it had the destination on screen, and a caller
+    // that says nothing is a caller that showed nothing.
     testWidgets(
-      'asks before opening on touch, and cancelling launches nothing',
+      'asks when nothing disclosed the target, and cancelling launches nothing',
       (tester) async {
         final context = await pumpHost(tester);
         var launched = 0;
@@ -283,13 +284,7 @@ void main() {
       expect(asked?.host, 'evil.example');
     });
 
-    // TargetPlatformVariant, not a hand-placed
-    // `debugDefaultTargetPlatformOverride`: the variant sets and restores at
-    // the binding's own lifecycle points, so a throw between the override and
-    // its reset can no longer leak macOS into the touch-path tests above.
-    final desktop = TargetPlatformVariant.only(TargetPlatform.macOS);
-
-    testWidgets('desktop opens an ordinary link without asking', (
+    testWidgets('opens an ordinary link that was on screen, without asking', (
       tester,
     ) async {
       final context = await pumpHost(tester);
@@ -299,6 +294,7 @@ void main() {
       await openTerminalHyperlink(
         context,
         'https://example.com/a',
+        disclosed: true,
         open: (_, url) async => launched.add(url),
         confirm: (_, _) async {
           asked++;
@@ -309,9 +305,9 @@ void main() {
 
       expect(asked, 0);
       expect(launched, <String>['https://example.com/a']);
-    }, variant: desktop);
+    });
 
-    testWidgets('desktop still asks when the URI is built to be misread', (
+    testWidgets('still asks when the URI is built to be misread', (
       tester,
     ) async {
       final context = await pumpHost(tester);
@@ -321,6 +317,7 @@ void main() {
       await openTerminalHyperlink(
         context,
         'https://github.com@evil.example/antgrid/pull/13',
+        disclosed: true,
         open: (_, url) async => launched.add(url),
         confirm: (_, target) async {
           asked = target;
@@ -336,24 +333,49 @@ void main() {
       expect(launched, <String>[
         'https://github.com@evil.example/antgrid/pull/13',
       ]);
-    }, variant: desktop);
+    });
 
-    testWidgets('desktop cancelling a deceptive link launches nothing', (
-      tester,
-    ) async {
+    testWidgets('cancelling a deceptive link launches nothing', (tester) async {
       final context = await pumpHost(tester);
       var launched = 0;
 
       await openTerminalHyperlink(
         context,
         'https://xn--pple-43d.com/login',
+        disclosed: true,
         open: (_, _) async => launched++,
         confirm: (_, _) async => false,
       );
       await tester.pump();
 
       expect(launched, 0);
-    }, variant: desktop);
+    });
+
+    // The gap a `defaultTargetPlatform` test silently exempted: a finger tap on
+    // a desktop touchscreen took the desktop branch on the grounds that the
+    // hover readout had disclosed the destination, and there is no hover on
+    // touch. Asking the CALLER what it showed cannot answer that wrongly --
+    // and it covers the Shift chord and a link scrolled out from under a
+    // resting pointer, which the platform test missed for the same reason.
+    testWidgets('asks on desktop when nothing was on screen', (tester) async {
+      final context = await pumpHost(tester);
+      var launched = 0;
+      var asked = 0;
+
+      await openTerminalHyperlink(
+        context,
+        'https://example.com/a',
+        open: (_, _) async => launched++,
+        confirm: (_, _) async {
+          asked++;
+          return false;
+        },
+      );
+      await tester.pump();
+
+      expect(asked, 1);
+      expect(launched, 0);
+    }, variant: TargetPlatformVariant.desktop());
   });
 
   group('showTerminalHyperlinkSheet', () {
