@@ -36,9 +36,20 @@ ROOT_URI="$(awk '/"name": "ghostty_vte"/{f=1} f&&/"rootUri"/{print; exit}' "$PKG
 BINDINGS="${ROOT_URI#file://}/lib/ghostty_vte_bindings_generated.dart"
 [ -f "$BINDINGS" ] || die "$BINDINGS not found"
 
-MISSING="$(comm -23 \
-  <(grep -oE "symbol: 'ghostty_[A-Za-z0-9_]+'" "$BINDINGS" | sed "s/symbol: '//;s/'//" | sort -u) \
-  <(nm -gU "$DYLIB" | grep ' _ghostty_' | awk '{print substr($3,2)}' | sort -u))"
+# Both lists are materialised before the comparison rather than piped straight
+# into comm. A grep that matches nothing exits 1 inside a process substitution,
+# where neither `set -e` nor pipefail can observe it, so an empty left-hand list
+# makes comm print nothing and this script report "ABI ok" over a dylib it never
+# compared against. `|| true` keeps that case here, where the guards below can
+# name what broke, instead of as a bare non-zero exit: an unresolvable check is
+# a failure, not a skip.
+DECLARED="$(grep -oE "symbol: 'ghostty_[A-Za-z0-9_]+'" "$BINDINGS" | sed "s/symbol: '//;s/'//" | sort -u || true)"
+[ -n "$DECLARED" ] || die "no ghostty_* symbols declared in $BINDINGS — ffigen's output shape changed and this check no longer reads it"
+
+EXPORTED="$(nm -gU "$DYLIB" | grep ' _ghostty_' | awk '{print substr($3,2)}' | sort -u || true)"
+[ -n "$EXPORTED" ] || die "$DYLIB exports no ghostty_* symbols — stripped, empty, or built for the wrong architecture"
+
+MISSING="$(comm -23 <(printf '%s\n' "$DECLARED") <(printf '%s\n' "$EXPORTED"))"
 
 if [ -n "$MISSING" ]; then
   printf 'bindings: %s\ndylib:    %s\n\n' "$BINDINGS" "$DYLIB" >&2

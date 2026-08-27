@@ -82,7 +82,7 @@ jobs:
         with:
           workflow: deploy-ios.yml
           ref: ${{ github.event_name == 'schedule' && 'main' || github.ref_name }}
-          paths: app packages .github/workflows/deploy-ios.yml
+          paths: app packages scripts .github/workflows/deploy-ios.yml
           token: ${{ github.token }}
 
   deploy:
