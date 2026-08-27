@@ -10,9 +10,9 @@ import '../design/widgets/ab_dialog.dart';
 ///
 /// OSC 8 lets a link's visible text disagree with its destination, so the text
 /// a user taps is not evidence of anything: `https://github.com@evil.example/`
-/// reads as GitHub and resolves to `evil.example`. Desktop reveals the target
-/// on hover before the click; touch has no hover at all, so without this the
-/// destination is never shown before the browser is already open.
+/// reads as GitHub and resolves to `evil.example`. Desktop gets its disclosure
+/// from the browser's address bar; a tap here may never reach a browser at all,
+/// because a verified App Link opens its own app instead.
 ///
 /// Returns false when dismissed, so a stray tap outside the sheet cancels.
 Future<bool> showTerminalHyperlinkSheet(
