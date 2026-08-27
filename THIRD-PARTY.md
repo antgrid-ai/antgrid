@@ -114,7 +114,7 @@ ghostty_vte:
   git:
     url: https://github.com/antgrid-ai/dart_terminal.git
     path: pkgs/vte/ghostty_vte
-    ref: f8e2e8201c7bef116ec04baa4cfc039acb53e29c
+    ref: dc5a33376eb5fe6679d56927f4639d46d91b422d
 ```
 
 `ghostty_vte_flutter` and `portable_pty` are pinned to the same repository and
