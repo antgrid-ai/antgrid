@@ -388,7 +388,19 @@ void main() {
     expect(find.byType(AbConfirmDialog), findsNothing);
     expect(h.host.drains, 0);
     expect(h.log, ['install']);
-    expect(h.state, const UpdateInstallDone());
+    // Idle, not Done: the user can close the browser tab without downloading,
+    // and Done is the one state the row refuses to leave.
+    expect(h.state, const UpdateInstallIdle());
+  });
+
+  testWidgets('a browser hand-off can be repeated', (tester) async {
+    final h = await _pump(tester, endsSession: false);
+    await h.start();
+    await tester.pump();
+    await h.start();
+    await tester.pump();
+
+    expect(h.strategy.installs, 2);
   });
 
   testWidgets('a second entry while the confirm is up is dropped', (

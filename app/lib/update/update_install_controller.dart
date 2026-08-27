@@ -164,15 +164,26 @@ class UpdateInstallController extends Notifier<UpdateInstallState> {
     // that gap is what made the tap look like it had been ignored.
     _set(const UpdateInstallWorking(0));
     _listenProgress(strategy);
-    if (endsSession) await _drainOwnedHost();
 
+    // Checked BEFORE the drain, never after: the drain stops the user's agent
+    // sessions, so bailing out once it has run would cost them everything and
+    // install nothing. Past this line the sequence always reaches `install`,
+    // whose Windows implementation ignores the context anyway.
     if (!context.mounted) {
       _cancelProgress();
       _set(const UpdateInstallIdle());
       return;
     }
+    if (endsSession) await _drainOwnedHost();
+
     UpdateInstallResult result;
     try {
+      // The drain above is the only async gap this context crosses, and it runs
+      // solely for `installEndsSession` strategies — whose install ignores the
+      // context entirely (it just calls the Store). Re-checking here and
+      // bailing is the one outcome worse than proceeding: the sessions are
+      // already gone. Every context use AFTER this point is guarded.
+      // ignore: use_build_context_synchronously
       result = await strategy.install(context);
     } catch (e) {
       // Strategies document that they never throw; a future one that does must
@@ -186,9 +197,12 @@ class UpdateInstallController extends Notifier<UpdateInstallState> {
     }
     _cancelProgress();
     _set(switch (result) {
-      // handedOff needs no further state of its own: on Windows the process is
-      // already being torn down around it.
-      UpdateInstallResult.handedOff => const UpdateInstallDone(),
+      // Done is a terminal state the row refuses to leave, which is only
+      // truthful where the process is dying around it. Everywhere else the
+      // hand-off was to a browser, Sparkle or the App Store — the user can
+      // back out of all three, so the affordance has to stay clickable.
+      UpdateInstallResult.handedOff =>
+        endsSession ? const UpdateInstallDone() : const UpdateInstallIdle(),
       UpdateInstallResult.nothingPending => const UpdateInstallIdle(),
       UpdateInstallResult.notInstalled ||
       UpdateInstallResult.unavailable => UpdateInstallFailed(result),
