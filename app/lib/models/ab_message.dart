@@ -1033,6 +1033,38 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         ports: ports,
       );
 
+    case 'port:detected':
+      final projectId = json['projectId'];
+      final port = json['port'];
+      final url = json['url'];
+      final scheme = json['scheme'];
+      final source = json['source'];
+      if (projectId is! String ||
+          port is! int ||
+          url is! String ||
+          scheme is! String ||
+          source is! String) {
+        return null;
+      }
+      final attributesJson = json['attributes'];
+      final attributes = PortDetectedAttributes(
+        name: attributesJson is Map ? attributesJson['name'] as String? : null,
+        onDetect: attributesJson is Map
+            ? (attributesJson['onDetect'] as String? ?? 'notify')
+            : 'notify',
+      );
+      return PortDetectedMessage(
+        id: id,
+        timestamp: timestamp,
+        projectId: projectId,
+        port: port,
+        url: url,
+        scheme: scheme,
+        source: source,
+        sourceSessionId: json['sourceSessionId'] as String?,
+        attributes: attributes,
+      );
+
     case 'tunnel:http-response':
       return TunnelHttpResponse.fromJson(json);
 

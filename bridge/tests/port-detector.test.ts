@@ -2,8 +2,10 @@ import { describe, it, expect } from "bun:test";
 import { PortDetector } from "../src/port-detector";
 import type { PortInfo } from "../src/protocol";
 
-const makeProject = (proxies?: { name: string; port: number; browser?: boolean }[]) => ({
-  ports: proxies?.map((p) => ({ port: p.port, name: p.name })),
+const makeProject = (
+  proxies?: { name: string; port: number; browser?: boolean; onDetect?: "notify" | "openPreview" | "silent" | "ignore" }[],
+) => ({
+  ports: proxies?.map((p) => ({ port: p.port, name: p.name, onDetect: p.onDetect })),
 });
 
 describe("PortDetector", () => {
@@ -200,6 +202,26 @@ describe("PortDetector", () => {
     pd.feed("t1", "http://localhost:3000\n");
 
     expect(detected[0][0].label).toBe("Frontend");
+  });
+
+  it("applies onDetect from a configured proxy", () => {
+    const detected: PortInfo[][] = [];
+    const pd = new PortDetector(makeProject([{ name: "Frontend", port: 3000, onDetect: "silent" }]));
+    pd.onPortsChange = (ports) => detected.push(ports);
+
+    pd.feed("t1", "http://localhost:3000\n");
+
+    expect(detected[0][0].onDetect).toBe("silent");
+  });
+
+  it("omits onDetect for a port with no config declaration", () => {
+    const detected: PortInfo[][] = [];
+    const pd = new PortDetector(makeProject());
+    pd.onPortsChange = (ports) => detected.push(ports);
+
+    pd.feed("t1", "http://localhost:3000\n");
+
+    expect(detected[0][0].onDetect).toBeUndefined();
   });
 
   it("tracks same port from multiple terminals", () => {

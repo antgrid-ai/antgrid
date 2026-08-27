@@ -27,7 +27,6 @@ import '../window/window_capabilities.dart';
 import '../window/window_chrome.dart';
 import 'agent_panel.dart';
 import 'session_isolation_badge.dart';
-import 'session_mode_control.dart';
 import 'session_search_field.dart';
 
 /// The app-drawn window title bar.
@@ -187,9 +186,6 @@ class WindowTitleBarContents extends ConsumerWidget {
   const WindowTitleBarContents({super.key});
 
   @visibleForTesting
-  static const modeSlotKey = Key('window-title-bar-mode');
-
-  @visibleForTesting
   static const chipSlotKey = Key('window-title-bar-chip');
 
   @visibleForTesting
@@ -205,17 +201,6 @@ class WindowTitleBarContents extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final panel = ref.watch(contextPanelControlProvider);
     final sidebar = ref.watch(sidebarControlProvider);
-    // The agent bar owns the session controls whenever it is up; duplicating
-    // them one row higher would say the same thing twice about one session.
-    // The New Session/Recent screen (`WorkbenchSurface.newSession`, or no
-    // project focused at all) also must not take them back — it has no live
-    // session for the controls to describe yet.
-    final noProjectFocused = ref.watch(selectedRegistrationIdProvider) == null;
-    final onNewSessionScreen =
-        noProjectFocused ||
-        ref.watch(workbenchSurfaceProvider) == WorkbenchSurface.newSession;
-    final showSession =
-        !ref.watch(agentBarMountedProvider) && !onNewSessionScreen;
 
     final nav = ref.watch(navControllerProvider);
     final navNotifier = ref.read(navControllerProvider.notifier);
@@ -315,12 +300,7 @@ class WindowTitleBarContents extends ConsumerWidget {
                 ),
               ),
             ),
-            _titleBarRow(
-              ref: ref,
-              showSession: showSession,
-              sidebar: sidebar,
-              panel: panel,
-            ),
+            _titleBarRow(ref: ref, sidebar: sidebar, panel: panel),
           ],
         );
       },
@@ -358,7 +338,6 @@ class WindowTitleBarContents extends ConsumerWidget {
 
   Widget _titleBarRow({
     required WidgetRef ref,
-    required bool showSession,
     required ({bool hidden, VoidCallback toggle})? sidebar,
     required ({bool hidden, VoidCallback toggle})? panel,
   }) {
@@ -407,13 +386,11 @@ class WindowTitleBarContents extends ConsumerWidget {
         // trailing clusters apart and gives the drag region room either side
         // of the search box.
         const Expanded(child: SizedBox.shrink()),
-        // The bar only ever mounts at >= kMediumBreakpoint (app_shell.dart),
-        // comfortably above the old icon-only tier's floor, so this trailing
-        // cluster always fits and no width gate is needed here any more.
-        if (showSession) ...[
-          const KeyedSubtree(key: modeSlotKey, child: SessionModeControl()),
-          const SizedBox(width: AbTokens.space8),
-        ],
+        // Session controls (mode toggle, agent mark, handler shield, name) live
+        // ONLY in the agent bar (`AgentBar`/`agent_panel.dart`) and carry no
+        // title-bar fallback: a panel mode that unmounts the agent bar (e.g. an
+        // expanded context panel) simply leaves them unreachable until the
+        // agent bar is restored, rather than relocating any of them up here.
         KeyedSubtree(
           key: chipSlotKey,
           child: Row(

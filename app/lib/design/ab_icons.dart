@@ -54,6 +54,9 @@ abstract final class AbIcons {
   static const radioTower = Codicon.radio_tower; // machine reachable remotely
   static const server = Codicon.server;
   static const link = Codicon.link;
+  static const openExternal = Codicon.link_external;
+  static const elementPicker = Codicon.inspect;
+  static const previewTabs = Codicon.multiple_windows;
   static const add = Codicon.add;
   static const trash = Codicon.trash;
   // Alias mirroring `add`; semantic for git's stage-changes action.

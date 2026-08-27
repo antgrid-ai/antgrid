@@ -343,6 +343,9 @@ const PortInfoSchema = z.object({
   // Detected dev-server scheme (from terminal-output URL sightings). Absent
   // means unknown; consumers should fall back to http.
   scheme: z.enum(["http", "https"]).optional(),
+  // Only set for a config-declared port. Absent means undeclared (terminal-
+  // detected only) — consumers should treat that the same as "notify".
+  onDetect: z.enum(["notify", "openPreview", "silent", "ignore"]).optional(),
 });
 
 const PortsUpdateMessage = BaseMessage.extend({

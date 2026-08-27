@@ -60,7 +60,17 @@ class PreviewService {
   /// it has none to spare.
   static const _maxRetries = 2;
 
-  PreviewProxyServer? _proxyServer;
+  /// Relay-mode proxies, one per open tab, keyed by dev-server port. Local
+  /// mode never populates this — the webview hits localhost directly.
+  final Map<int, PreviewProxyServer> _proxyServers = {};
+
+  /// Ports already weighed for auto-open — via a live [PortDetectedMessage]
+  /// or a `ports:update` snapshot — so each port is only ever auto-opened
+  /// ONCE per service lifetime. Without this, a port the user deliberately
+  /// closed would pop back open on the next `ports:update` resync (reconnect,
+  /// another port changing, a scheme flip), since the dev server is still
+  /// there to report.
+  final Set<int> _autoOpenConsidered = {};
 
   Stream<PreviewState> get stateStream => _stateController.stream;
   PreviewState get currentState => _state;
@@ -125,6 +135,8 @@ class PreviewService {
   void _handle(Object message) {
     if (message is PortsUpdateMessage) {
       _handlePortsUpdate(message);
+    } else if (message is PortDetectedMessage) {
+      _handlePortDetected(message);
     } else if (message is PreviewSnapshotMessage) {
       _mergePreviewEntries(message.urls);
     } else if (message is PreviewUrlMessage) {
@@ -138,6 +150,44 @@ class PreviewService {
 
   void _handlePortsUpdate(PortsUpdateMessage msg) {
     _setState(_state.copyWith(ports: msg.ports));
+    _autoOpenFromSnapshot(msg.ports);
+  }
+
+  /// A dev server was just detected. Auto-open it as a tab — the bridge has
+  /// already filtered out `onDetect: "ignore"` ports before sending this, so
+  /// anything that reaches here is meant to be previewed. The FIRST tab of
+  /// any kind (manual or detected) keeps focus; every later detection opens
+  /// in the background so it never steals focus from what the user is
+  /// already looking at.
+  void _handlePortDetected(PortDetectedMessage msg) {
+    _autoOpenConsidered.add(msg.port);
+    unawaited(
+      openTab(msg.port, scheme: msg.scheme, focus: _state.tabs.isEmpty),
+    );
+  }
+
+  /// Auto-open ports the bridge already knew about before this checkout's
+  /// service subscribed — replayed via the `ports:update`/`preview:snapshot`
+  /// hydration (see the constructor) rather than the live one-shot
+  /// [PortDetectedMessage]. Without this, a dev server started before the
+  /// preview panel was ever opened never fires the live event — the port
+  /// would only ever reach [PreviewState.ports], leaving the user to pick it
+  /// manually. Each port is weighed exactly once ([_autoOpenConsidered]); a
+  /// port with no declared `onDetect` (terminal-detected only) defaults to
+  /// 'notify', matching the bridge's own default for a declared one.
+  void _autoOpenFromSnapshot(List<PortInfo> ports) {
+    for (final port in ports) {
+      if (!_autoOpenConsidered.add(port.port)) continue;
+      final onDetect = port.onDetect ?? 'notify';
+      if (onDetect != 'notify' && onDetect != 'openPreview') continue;
+      unawaited(
+        openTab(
+          port.port,
+          scheme: port.scheme ?? 'http',
+          focus: _state.tabs.isEmpty,
+        ),
+      );
+    }
   }
 
   /// Folds preview entries — a welcome-replayed `preview:snapshot` or a live
@@ -276,11 +326,41 @@ class PreviewService {
     return pending.future;
   }
 
-  /// Opens [port] in the preview. In relay mode binds the local proxy to the
-  /// exact [port]; if that port is taken returns [SelectPortResult.portInUse]
-  /// WITHOUT changing state, so the UI can confirm a fallback.
-  Future<SelectPortResult> selectPort(int port, {String scheme = 'http'}) {
-    return _open(port, scheme: scheme, allowFallback: false);
+  PreviewTab? _tabByPort(int port) {
+    for (final tab in _state.tabs) {
+      if (tab.port == port) return tab;
+    }
+    return null;
+  }
+
+  /// Opens [port] as a tab, or focuses it if already open (a no-op beyond
+  /// that — no rebuild, no reload — unless [scheme] actually changed). In
+  /// relay mode binds a dedicated local proxy to the exact [port]; if that
+  /// port is taken returns [SelectPortResult.portInUse] WITHOUT changing
+  /// state, so the UI can confirm a fallback via [selectPortWithFallback].
+  /// [focus] false opens the tab in the background (used for auto-open on
+  /// detection) without moving [PreviewState.activeTabId]. [path] lands a
+  /// FRESHLY opened tab somewhere other than the origin (e.g. a pasted link
+  /// to `localhost:3000/dashboard`); it's ignored when [port] is already
+  /// open — reusing a live tab must never yank it to a different page.
+  Future<SelectPortResult> openTab(
+    int port, {
+    String scheme = 'http',
+    bool focus = true,
+    String path = '/',
+  }) {
+    final existing = _tabByPort(port);
+    if (existing != null && existing.scheme == scheme) {
+      if (focus) setActiveTab(port);
+      return Future.value(SelectPortResult.opened);
+    }
+    return _open(
+      port,
+      scheme: scheme,
+      allowFallback: false,
+      focus: focus,
+      path: path,
+    );
   }
 
   /// Confirmed retry after a [SelectPortResult.portInUse]: binds a random
@@ -288,102 +368,122 @@ class PreviewService {
   Future<void> selectPortWithFallback(
     int port, {
     String scheme = 'http',
+    bool focus = true,
+    String path = '/',
   }) async {
-    await _open(port, scheme: scheme, allowFallback: true);
+    await _open(
+      port,
+      scheme: scheme,
+      allowFallback: true,
+      focus: focus,
+      path: path,
+    );
   }
 
   Future<SelectPortResult> _open(
     int port, {
     required String scheme,
     required bool allowFallback,
+    required bool focus,
+    required String path,
   }) async {
+    // '/' is the implicit default everywhere this is built — keep it out of
+    // the URL so an untouched open still reads as the bare origin (matches
+    // what every existing caller/test expects).
+    final suffix = path == '/' ? '' : path;
+
     // Local mode: app and dev server share the host, so the WebView can hit
     // localhost:port directly (over the target scheme). Skip the
     // tunnel-fronting proxy entirely.
     if (session.transport.isLocal) {
-      await _proxyServer?.stop();
-      _proxyServer = null;
-      _setState(
-        _state.copyWith(
-          selectedPort: port,
-          localProxyPort: port,
+      _upsertTab(
+        PreviewTab(
+          port: port,
           scheme: scheme,
-          currentUrl: '$scheme://localhost:$port',
+          localProxyPort: port,
+          currentUrl: '$scheme://localhost:$port$suffix',
         ),
+        focus: focus,
       );
       return SelectPortResult.opened;
     }
+
+    // A scheme change on an already-open port rebinds that port's proxy —
+    // every other port's proxy is a different map entry and is untouched.
+    final previousServer = _proxyServers.remove(port);
+    await previousServer?.stop();
 
     final server = PreviewProxyServer(
       targetPort: port,
       targetScheme: scheme,
       onRequest: proxyRequest,
-      onWebSocketConnect: _onWsConnect,
+      onWebSocketConnect: (channel, path) =>
+          _onWsConnect(port, scheme, channel, path),
     );
-
-    // Free the current local port up-front ONLY when we're about to rebind that
-    // exact port — otherwise a same-port re-selection would collide with our
-    // own still-open proxy. For a different target, keep the existing proxy
-    // alive until the new bind succeeds, so a portInUse failure doesn't tear
-    // down the preview the user is currently viewing (they may cancel the
-    // fallback and expect the old preview to stay live).
-    final rebindingSamePort = _state.localProxyPort == port;
-    if (rebindingSamePort) {
-      await _proxyServer?.stop();
-      _proxyServer = null;
-    }
 
     final int localPort;
     try {
       localPort = await server.start(allowFallback: allowFallback);
     } on PortInUseException {
       await server.stop();
-      // A same-port rebind already tore down the proxy that served this port
-      // and then lost the race to re-bind it — there's no live preview left, so
-      // clear the dead selection rather than leave currentUrl pointing at a
-      // closed socket. (A different-target failure kept the old proxy alive
-      // above, so its state is still valid — leave it untouched.)
-      if (rebindingSamePort) {
-        _setState(
-          _state.copyWith(
-            clearSelectedPort: true,
-            clearLocalProxyPort: true,
-            clearCurrentUrl: true,
-          ),
-        );
-      }
       return SelectPortResult.portInUse;
     }
 
-    // Swap in the new proxy only now that its bind holds the port — deferring
-    // this stop is what keeps a cancelled fallback from tearing down the live
-    // preview (see the rebinding-same-port note above).
-    await _proxyServer?.stop();
-    _proxyServer = server;
+    _proxyServers[port] = server;
 
     // The proxy fronts the webview over plain HTTP regardless of [scheme];
     // the bridge applies [scheme] when reaching the dev server. So the webview
     // origin is always http://localhost:<localPort>.
-    _setState(
-      _state.copyWith(
-        selectedPort: port,
-        localProxyPort: localPort,
+    _upsertTab(
+      PreviewTab(
+        port: port,
         scheme: scheme,
-        currentUrl: 'http://localhost:$localPort',
+        localProxyPort: localPort,
+        currentUrl: 'http://localhost:$localPort$suffix',
       ),
+      focus: focus,
     );
     return SelectPortResult.opened;
   }
 
-  Future<void> deselectPort() async {
-    await _proxyServer?.stop();
-    _proxyServer = null;
-
+  void _upsertTab(PreviewTab tab, {required bool focus}) {
+    final tabs = [
+      for (final t in _state.tabs)
+        if (t.port != tab.port) t,
+      tab,
+    ];
     _setState(
       _state.copyWith(
-        clearSelectedPort: true,
-        clearLocalProxyPort: true,
-        clearCurrentUrl: true,
+        tabs: tabs,
+        activeTabId: focus ? tab.port : _state.activeTabId,
+      ),
+    );
+  }
+
+  /// Focuses an already-open tab. Pure state flip — no network/proxy work —
+  /// which is what guarantees switching tabs never reloads one.
+  void setActiveTab(int port) {
+    if (_tabByPort(port) == null) return;
+    if (_state.activeTabId == port) return;
+    _setState(_state.copyWith(activeTabId: port));
+  }
+
+  /// Closes [port]'s tab, releasing its proxy (relay mode; a no-op in local
+  /// mode, which never binds one). Reassigns the active tab to the first
+  /// remaining one, or clears it if none remain.
+  Future<void> closeTab(int port) async {
+    final server = _proxyServers.remove(port);
+    await server?.stop();
+
+    final tabs = [for (final t in _state.tabs) if (t.port != port) t];
+    final wasActive = _state.activeTabId == port;
+    _setState(
+      _state.copyWith(
+        tabs: tabs,
+        activeTabId: wasActive && tabs.isNotEmpty
+            ? tabs.first.port
+            : _state.activeTabId,
+        clearActiveTabId: wasActive && tabs.isEmpty,
       ),
     );
   }
@@ -392,14 +492,19 @@ class PreviewService {
 
   // --- WebSocket tunnel ---
 
-  void _onWsConnect(WebSocketChannel channel, String path) {
+  void _onWsConnect(
+    int port,
+    String scheme,
+    WebSocketChannel channel,
+    String path,
+  ) {
     final tunnelId = const Uuid().v4();
 
     session.transport.send(
       createAbMessage('tunnel:ws-open', {
         'tunnelId': tunnelId,
-        'port': _state.selectedPort,
-        'scheme': _state.scheme,
+        'port': port,
+        'scheme': scheme,
         'path': path,
         'checkoutId': checkoutId,
       }),
@@ -441,8 +546,10 @@ class PreviewService {
     // every reconnect for the rest of the session.
     session.unhydrateCheckout(checkoutId, _snapshotHydratorKey);
 
-    await _proxyServer?.stop();
-    _proxyServer = null;
+    for (final server in _proxyServers.values) {
+      await server.stop();
+    }
+    _proxyServers.clear();
 
     _retrySweep?.cancel();
     _retrySweep = null;

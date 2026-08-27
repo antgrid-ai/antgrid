@@ -510,7 +510,13 @@ class PanelRow extends StatefulWidget {
   final String icon;
   final String label;
   final bool selected;
-  final VoidCallback onTap;
+
+  /// Pass `null` to render the row in a disabled state (opacity 0.4, no
+  /// hover, no focus, no tap) — same contract as [AbIconButton.onTap]. Lets a
+  /// caller keep a row VISIBLE-BUT-INACTIVE ("nothing to act on yet") rather
+  /// than omit it, so a menu whose every action currently has nothing to act
+  /// on doesn't render empty.
+  final VoidCallback? onTap;
   final Widget? trailing;
 
   /// False for a panel of navigational chrome rather than a picker over
@@ -528,11 +534,52 @@ class _PanelRowState extends State<PanelRow> {
   @override
   Widget build(BuildContext context) {
     final p = context.antgrid;
+    final disabled = widget.onTap == null;
     // Treat keyboard focus the same as pointer hover for the highlight — one
     // "active row" state for either input mode, matching `_MenuItemTile`.
-    final active = _hover || _focused;
-    final fg = active ? p.textPrimary : p.textSecondary;
-    final iconFg = active ? p.textPrimary : p.textMuted;
+    final active = !disabled && (_hover || _focused);
+    final baseFg = active ? p.textPrimary : p.textSecondary;
+    final baseIconFg = active ? p.textPrimary : p.textMuted;
+    // Same dim-the-glyph contract as AbIconButton.onTap: null — no Opacity
+    // wrap, just alpha on the two colors already carrying this row's content.
+    final fg = disabled ? baseFg.withValues(alpha: baseFg.a * 0.4) : baseFg;
+    final iconFg = disabled
+        ? baseIconFg.withValues(alpha: baseIconFg.a * 0.4)
+        : baseIconFg;
+
+    final row = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: active ? p.bgHover : null,
+        borderRadius: AbTokens.borderRadius3,
+      ),
+      child: Row(
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(right: 9),
+            child: AbIcon(widget.icon, size: 13, color: iconFg),
+          ),
+          Expanded(
+            child: Text(
+              widget.label,
+              overflow: TextOverflow.ellipsis,
+              style: (widget.mono ? AbTokens.monoStyle : AbTokens.sansStyle)(
+                fontSize: AbTokens.fontSm,
+                color: fg,
+              ),
+            ),
+          ),
+          if (widget.trailing != null) widget.trailing!,
+          if (widget.selected) ...[
+            const SizedBox(width: AbTokens.space6),
+            AbIcon(AbIcons.check, size: 12, color: p.accent),
+          ],
+        ],
+      ),
+    );
+
+    if (disabled) return row;
+
     return FocusableActionDetector(
       mouseCursor: SystemMouseCursors.click,
       onShowHoverHighlight: (v) {
@@ -549,7 +596,7 @@ class _PanelRowState extends State<PanelRow> {
       actions: {
         ActivateIntent: CallbackAction<ActivateIntent>(
           onInvoke: (_) {
-            widget.onTap();
+            widget.onTap!();
             return null;
           },
         ),
@@ -557,37 +604,7 @@ class _PanelRowState extends State<PanelRow> {
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: widget.onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-          decoration: BoxDecoration(
-            color: active ? p.bgHover : null,
-            borderRadius: AbTokens.borderRadius3,
-          ),
-          child: Row(
-            children: [
-              Padding(
-                padding: const EdgeInsets.only(right: 9),
-                child: AbIcon(widget.icon, size: 13, color: iconFg),
-              ),
-              Expanded(
-                child: Text(
-                  widget.label,
-                  overflow: TextOverflow.ellipsis,
-                  style:
-                      (widget.mono ? AbTokens.monoStyle : AbTokens.sansStyle)(
-                        fontSize: AbTokens.fontSm,
-                        color: fg,
-                      ),
-                ),
-              ),
-              if (widget.trailing != null) widget.trailing!,
-              if (widget.selected) ...[
-                const SizedBox(width: AbTokens.space6),
-                AbIcon(AbIcons.check, size: 12, color: p.accent),
-              ],
-            ],
-          ),
-        ),
+        child: row,
       ),
     );
   }

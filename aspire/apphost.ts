@@ -286,11 +286,17 @@ for (const target of appTargets) {
   // `aspire run` — flutter errors "no devices" otherwise.
   // Desktop targets ("windows"/"macos") match a `flutter -d` device of the same
   // name, so the target string is the device id directly.
+  // `?.trim() || fallback`, not `??`: an env var that's SET but empty (a
+  // stray `set ANTGRID_ANDROID_DEVICE=` in the launching shell, no value)
+  // survives `??` unchanged, so `-d ""` reaches flutter — whose arg parser
+  // then reads the NEXT token as the device match, silently searching for a
+  // device named `--print-dtd` instead of failing loudly. Same guard as
+  // `pickLanIp`'s `ANTGRID_LAN_IP` override above.
   const deviceId =
     target === "android"
-      ? process.env.ANTGRID_ANDROID_DEVICE ?? "emulator"
+      ? process.env.ANTGRID_ANDROID_DEVICE?.trim() || "emulator"
       : target === "ios"
-        ? process.env.ANTGRID_IOS_DEVICE ?? "iphone"
+        ? process.env.ANTGRID_IOS_DEVICE?.trim() || "iphone"
         : target;
 
   // Builder methods return a chainable PromiseLike (awaited once at the end);

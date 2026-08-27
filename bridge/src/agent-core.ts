@@ -1959,7 +1959,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     const runtimeId = runtime.checkout.id;
     const send = (msg: AbMessage) => sendFromRuntime(runtime, msg);
     const pd = new PortDetector({
-      ports: (runtime.config.ports ?? []).map((p) => ({ port: p.port, name: p.name })),
+      ports: (runtime.config.ports ?? []).map((p) => ({ port: p.port, name: p.name, onDetect: p.onDetect })),
     });
     runtime.portDetector = pd;
     const previewPorts = new Set(
@@ -2218,7 +2218,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
 
     const pd = new PortDetector({
-      ports: (config.ports ?? []).map((p) => ({ port: p.port, name: p.name })),
+      ports: (config.ports ?? []).map((p) => ({ port: p.port, name: p.name, onDetect: p.onDetect })),
     });
     portDetector = pd;
     mainRuntime.portDetector = pd;
