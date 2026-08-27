@@ -6,7 +6,7 @@ Evidence-gated supervision for the CLI coding agents you already run — on your
 hardware, end-to-end encrypted.
 
 [![License: Elastic License 2.0](https://img.shields.io/badge/license-Elastic%20License%202.0-4b5563?style=flat)](LICENSE.md)
-[![Latest release](https://img.shields.io/github/v/release/antgrid-ai/antgrid-releases?style=flat&logo=github&label=release)](https://github.com/antgrid-ai/antgrid-releases/releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/antgrid-ai/antgrid?style=flat&logo=github&label=release)](https://github.com/antgrid-ai/antgrid/releases/latest)
 [![Stars](https://img.shields.io/github/stars/antgrid-ai/antgrid?style=flat&logo=github)](https://github.com/antgrid-ai/antgrid/stargazers)
 
 Antgrid runs the coding agents you already use — Claude Code, Codex, Cursor and others —
@@ -107,11 +107,11 @@ The desktop app bundles the bridge that runs your agents — there is nothing el
 install on the machine.
 
 - **Windows** — [Microsoft Store](https://get.microsoft.com/installer/download/9N0P7ZRL4D9W?referrer=appbadge&cid=site)
-- **macOS** — [`antgrid-macos.dmg`](https://github.com/antgrid-ai/antgrid-releases/releases/latest/download/antgrid-macos.dmg)
-- **Linux** — [`antgrid-linux.AppImage`](https://github.com/antgrid-ai/antgrid-releases/releases/latest/download/antgrid-linux.AppImage)
+- **macOS** — [`antgrid-macos.dmg`](https://github.com/antgrid-ai/antgrid/releases/latest/download/antgrid-macos.dmg)
+- **Linux** — [`antgrid-linux.AppImage`](https://github.com/antgrid-ai/antgrid/releases/latest/download/antgrid-linux.AppImage)
 
 Every build, with release notes:
-[github.com/antgrid-ai/antgrid-releases/releases](https://github.com/antgrid-ai/antgrid-releases/releases).
+[github.com/antgrid-ai/antgrid/releases](https://github.com/antgrid-ai/antgrid/releases).
 iOS and Android builds currently ship to TestFlight and Google Play's internal track;
 public store listings are not live yet.
 
