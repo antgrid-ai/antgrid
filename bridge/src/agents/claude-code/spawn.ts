@@ -67,6 +67,11 @@ export function buildClaudeEnv(base?: Record<string, string | undefined>): Recor
   env.CLAUDE_CODE_ENTRYPOINT ??= "cli";                 // first-party rate-limit lane
   env.ENABLE_TOOL_SEARCH ??= "auto:2";                  // trim upfront MCP token load
   env.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT ??= "0";        // don't 300s-kill interactive tools
+  // Antgrid owns the session lifecycle; a conversation that hands itself to
+  // Claude Code's own background supervisor leaves the slot pointing at a job
+  // this bridge does not manage. Chat mode surfaces claude's slash commands
+  // (chat-backend's ingestCommands), so `/background` is reachable here too.
+  env.CLAUDE_CODE_DISABLE_AGENT_VIEW ??= "1";
   if (process.platform === "win32" && env.USERPROFILE) env.HOME = env.USERPROFILE; // stable ~/.claude for resume
   return env;
 }

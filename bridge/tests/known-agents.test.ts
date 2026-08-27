@@ -127,6 +127,13 @@ test("opencode env writer is idempotent", () => {
   expect(a.OPENCODE_TUI_CONFIG).toBe(b.OPENCODE_TUI_CONFIG);
 });
 
+// Antgrid manages the session lifecycle; a self-backgrounded claude leaves the
+// slot resuming an id a job outside this bridge still holds.
+test("claude env disables claude's own background agent view", () => {
+  const base = mkdtempSync(join(tmpdir(), "ab-known-agents-"));
+  expect(resolveAgentEnv("claude-code", base).CLAUDE_CODE_DISABLE_AGENT_VIEW).toBe("1");
+});
+
 test("kilo env points KILO_TUI_CONFIG at an attention-enabled config file", () => {
   const base = mkdtempSync(join(tmpdir(), "ab-known-agents-"));
   const env = resolveAgentEnv("kilo", base);
@@ -142,11 +149,11 @@ test("kilo env points KILO_TUI_CONFIG at an attention-enabled config file", () =
 test("entry-only agents get no extra launch env", () => {
   const base = mkdtempSync(join(tmpdir(), "ab-known-agents-"));
   // These notify by default (or via the focus-routing default-blur) so they
-  // need no injected config — only a registry entry.
+  // need no injected config — only a registry entry. claude-code is absent
+  // deliberately: its launch env pins a behaviour switch, not notifications.
   expect(resolveAgentEnv("kimi", base)).toEqual({});
   expect(resolveAgentEnv("mistral-vibe", base)).toEqual({});
   expect(resolveAgentEnv("codex", base)).toEqual({});
-  expect(resolveAgentEnv("claude-code", base)).toEqual({});
   expect(resolveAgentEnv("antigravity", base)).toEqual({});
 });
 

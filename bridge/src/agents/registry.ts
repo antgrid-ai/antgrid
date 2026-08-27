@@ -64,6 +64,16 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
       ],
     },
     transcript: readClaudeTranscript,
+    // Antgrid owns the session lifecycle: a conversation that hands itself to
+    // claude's own background supervisor exits the PTY, leaves the slot
+    // resuming an id a job we don't manage still holds, and relocates its cwd
+    // out of the session's checkout. Forced, not `??=` like buildClaudeEnv's
+    // defaults — no per-machine preference makes that outcome survivable here.
+    // Closes `/background`, `--bg`, `--routine`, `claude agents`. Does NOT
+    // close the two-press LEFT-ARROW gesture: its only guard is the
+    // machine-wide `leftArrowOpensAgents` global-config key, and the fleet
+    // gate never reaches the REPL keymap (measured on the 2.1.247 binary).
+    env: () => ({ CLAUDE_CODE_DISABLE_AGENT_VIEW: "1" }),
     resumable: ({ transcriptPath }) => !transcriptPath || existsSync(transcriptPath),
     resolveTitle: async ({ transcriptPath }) =>
       transcriptPath ? await resolveClaudeTranscriptTitle(transcriptPath) : null,

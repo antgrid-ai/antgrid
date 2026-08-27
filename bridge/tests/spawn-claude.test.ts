@@ -12,11 +12,19 @@ describe("buildClaudeEnv", () => {
     expect(env.CLAUDE_CODE_ENTRYPOINT).toBe("cli");
     expect(env.ENABLE_TOOL_SEARCH).toBe("auto:2");
     expect(env.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT).toBe("0");
+    expect(env.CLAUDE_CODE_DISABLE_AGENT_VIEW).toBe("1");
   });
 
   it("does not clobber a user-set ENABLE_TOOL_SEARCH", () => {
     const env = buildClaudeEnv({ ENABLE_TOOL_SEARCH: "false", PATH: "/usr/bin" });
     expect(env.ENABLE_TOOL_SEARCH).toBe("false");
+  });
+
+  // The gate is a bare truthiness check on the string, so "0" disables agent
+  // view too. Deferring still matters: an empty value is the only way back in.
+  it("does not clobber a user-set CLAUDE_CODE_DISABLE_AGENT_VIEW", () => {
+    const env = buildClaudeEnv({ CLAUDE_CODE_DISABLE_AGENT_VIEW: "", PATH: "/usr/bin" });
+    expect(env.CLAUDE_CODE_DISABLE_AGENT_VIEW).toBe("");
   });
 });
 
