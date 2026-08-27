@@ -141,6 +141,52 @@ describe("resolveClaudeTranscriptTitle", () => {
     writeFileSync(p, `{"type":"user","message":{"content":[{"type":"text","text":"hello there"}]}}\n`);
     expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "hello there", kind: "first-message" });
   });
+  test("reads Claude's own ai-title (the current spelling of the generated title)", async () => {
+    const d = tmp(); const p = join(d, "t.jsonl");
+    writeFileSync(p,
+      `{"type":"user","message":{"content":"please fix the flaky login test on windows ci"}}\n` +
+      `{"type":"ai-title","aiTitle":"Fix flaky Windows login test","sessionId":"s1"}\n`);
+    expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "Fix flaky Windows login test", kind: "generated" });
+  });
+  test("uses the LAST ai-title — a title can be revised over a long session", async () => {
+    const d = tmp(); const p = join(d, "t.jsonl");
+    writeFileSync(p,
+      `{"type":"ai-title","aiTitle":"Early guess","sessionId":"s1"}\n` +
+      `{"type":"user","message":{"content":"hi"}}\n` +
+      `{"type":"ai-title","aiTitle":"Settled topic","sessionId":"s1"}\n`);
+    expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "Settled topic", kind: "generated" });
+  });
+  // Precedence is by TYPE, not file position: a renamed conversation restates
+  // both records every turn and the ai-title is normally the LATER of the pair,
+  // so this fixture uses the order that actually occurs on disk.
+  test("a user's custom-title outranks Claude's ai-title even when written first", async () => {
+    const d = tmp(); const p = join(d, "t.jsonl");
+    writeFileSync(p,
+      `{"type":"custom-title","customTitle":"Renamed by user","sessionId":"s1"}\n` +
+      `{"type":"ai-title","aiTitle":"Claude's own name","sessionId":"s1"}\n`);
+    expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "Renamed by user", kind: "generated" });
+  });
+  test("ai-title outranks a compaction summary", async () => {
+    const d = tmp(); const p = join(d, "t.jsonl");
+    writeFileSync(p,
+      `{"type":"summary","summary":"A summary"}\n` +
+      `{"type":"ai-title","aiTitle":"Real title","sessionId":"s1"}\n`);
+    expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "Real title", kind: "generated" });
+  });
+  test("a blank ai-title does not suppress the first user message", async () => {
+    const d = tmp(); const p = join(d, "t.jsonl");
+    writeFileSync(p,
+      `{"type":"user","message":{"content":"the real title"}}\n` +
+      `{"type":"ai-title","aiTitle":"   ","sessionId":"s1"}\n`);
+    expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "the real title", kind: "first-message" });
+  });
+  test("a blank ai-title does not erase a real one seen earlier", async () => {
+    const d = tmp(); const p = join(d, "t.jsonl");
+    writeFileSync(p,
+      `{"type":"ai-title","aiTitle":"Real title","sessionId":"s1"}\n` +
+      `{"type":"ai-title","aiTitle":"   ","sessionId":"s1"}\n`);
+    expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "Real title", kind: "generated" });
+  });
   test("missing file → null", async () => {
     expect(await resolveClaudeTranscriptTitle(join(tmp(), "nope.jsonl"))).toBeNull();
   });
