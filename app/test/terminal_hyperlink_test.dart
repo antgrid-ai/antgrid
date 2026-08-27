@@ -66,6 +66,72 @@ void main() {
     });
   });
 
+  group('terminalHyperlinkLooksDeceptive', () {
+    test('catches a host wearing another host as userinfo', () {
+      expect(
+        terminalHyperlinkLooksDeceptive(
+          Uri.parse('https://github.com@evil.example/antgrid/pull/13'),
+        ),
+        isTrue,
+      );
+      expect(
+        terminalHyperlinkLooksDeceptive(
+          Uri.parse('https://user:pw@evil.example/'),
+        ),
+        isTrue,
+      );
+    });
+
+    // Both spellings of the same lie: Dart punycodes nothing, so a raw unicode
+    // host arrives percent-encoded and an `xn--` check alone would pass it.
+    test('catches a homoglyph host, however it was spelled', () {
+      expect(
+        terminalHyperlinkLooksDeceptive(
+          Uri.parse('https://xn--pple-43d.com/login'),
+        ),
+        isTrue,
+      );
+      final raw = Uri.parse('https://\u0430pple.com/login');
+      expect(raw.host, contains('%'));
+      expect(terminalHyperlinkLooksDeceptive(raw), isTrue);
+      // A label merely containing the marker is not one starting with it.
+      expect(
+        terminalHyperlinkLooksDeceptive(Uri.parse('https://myxn--co.com/a')),
+        isFalse,
+      );
+    });
+
+    // The cost of a false positive is a sheet on every ordinary link, which is
+    // how a confirmation stops being read at all.
+    test('passes ordinary links, ports and case included', () {
+      for (final ok in <String>[
+        'https://github.com/antgrid-ai/antgrid/pull/13',
+        'https://sub.github.com/ok',
+        'https://github.com:443/ok',
+        'https://gitHUB.com/OK',
+        'http://192.168.1.9:8080/admin',
+        'http://localhost:3000/',
+      ]) {
+        expect(
+          terminalHyperlinkLooksDeceptive(Uri.parse(ok)),
+          isFalse,
+          reason: ok,
+        );
+      }
+    });
+
+    // Named so the gap is not mistaken for coverage: only the link's visible
+    // text contradicts this one, and that text never reaches the app.
+    test('does NOT catch a lookalike that is honestly its own host', () {
+      expect(
+        terminalHyperlinkLooksDeceptive(
+          Uri.parse('https://github.com.evil.example/antgrid'),
+        ),
+        isFalse,
+      );
+    });
+  });
+
   group('openTerminalHyperlink', () {
     late Directory tmp;
     late String logPath;
@@ -218,7 +284,7 @@ void main() {
       expect(asked?.host, 'evil.example');
     });
 
-    testWidgets('desktop opens without asking -- hover already showed it', (
+    testWidgets('desktop opens an ordinary link without asking', (
       tester,
     ) async {
       // Cleared inside the body, not in addTearDown: the framework asserts
@@ -244,6 +310,57 @@ void main() {
 
       expect(asked, 0);
       expect(launched, <String>['https://example.com/a']);
+    });
+
+    testWidgets('desktop still asks when the URI is built to be misread', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+
+      final context = await pumpHost(tester);
+      final launched = <String>[];
+      Uri? asked;
+
+      await openTerminalHyperlink(
+        context,
+        'https://github.com@evil.example/antgrid/pull/13',
+        open: (_, url) async => launched.add(url),
+        confirm: (_, target) async {
+          asked = target;
+          return true;
+        },
+      );
+      await tester.pump();
+
+      debugDefaultTargetPlatformOverride = null;
+
+      // An address bar would have shown this too -- and been read as GitHub,
+      // which is the whole reason the sheet names the host on its own line.
+      expect(asked?.host, 'evil.example');
+      expect(launched, <String>[
+        'https://github.com@evil.example/antgrid/pull/13',
+      ]);
+    });
+
+    testWidgets('desktop cancelling a deceptive link launches nothing', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+
+      final context = await pumpHost(tester);
+      var launched = 0;
+
+      await openTerminalHyperlink(
+        context,
+        'https://xn--pple-43d.com/login',
+        open: (_, _) async => launched++,
+        confirm: (_, _) async => false,
+      );
+      await tester.pump();
+
+      debugDefaultTargetPlatformOverride = null;
+
+      expect(launched, 0);
     });
   });
 

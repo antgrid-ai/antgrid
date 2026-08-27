@@ -105,7 +105,8 @@ Future<void> openTerminalHyperlink(
       }
       return;
     }
-    if (_browserRevealsDestination) {
+    if (_browserRevealsDestination &&
+        !terminalHyperlinkLooksDeceptive(target)) {
       await open(context, target.toString());
       return;
     }
@@ -130,6 +131,39 @@ Future<void> openTerminalHyperlink(
   }
 }
 
+/// Whether [target] is shaped like a link trying to pass as another one.
+///
+/// Judged from the URI alone, which is all a terminal hyperlink hands over.
+/// Three shapes qualify, and each is a host claiming to be a host it is not:
+///
+///  * A userinfo prefix — `https://github.com@evil.example/` resolves to
+///    `evil.example` while reading as GitHub. Dart parks the impostor in
+///    [Uri.userInfo], where nothing in a URL bar's first glance looks at it.
+///  * A punycoded label — `xn--pple-43d.com` renders as `apple.com`
+///    with a Cyrillic first letter (U+0430).
+///  * A percent-encoded host — Dart does NOT punycode a raw unicode host, it
+///    percent-encodes it, so the same lie arrives spelled the other way and a
+///    check for `xn--` alone misses half of it.
+///
+/// Deliberately not a blocklist of hosts, and deliberately silent about the
+/// lookalike it cannot see: `https://github.com.evil.example/` is an honest
+/// subdomain of an honest domain, and only the link's visible TEXT contradicts
+/// it — text that never reaches this app. A false negative here costs the user
+/// the extra confirmation, not the disclosure: the sheet names the host either
+/// way, and on touch it is shown unconditionally.
+bool terminalHyperlinkLooksDeceptive(Uri target) {
+  if (target.userInfo.isNotEmpty) {
+    return true;
+  }
+  final host = target.host;
+  if (host.contains('%')) {
+    return true;
+  }
+  // `Uri` lower-cases the host as it parses, but the loop is what a reader
+  // checks, not the parser's contract two files away.
+  return host.split('.').any((label) => label.toLowerCase().startsWith('xn--'));
+}
+
 /// Whether opening the link lands somewhere that reads the destination back.
 ///
 /// Desktop hands the URI to a browser whose address bar does, which is the same
@@ -142,6 +176,10 @@ Future<void> openTerminalHyperlink(
 /// the destination can be acted on without ever being shown. That is why the
 /// mobile path asks first, and why the answer to a spoofed target on desktop is
 /// a hover preview rather than the same sheet on both.
+///
+/// An address bar only discloses what the reader then has to judge, so this is
+/// not the whole desktop rule: [terminalHyperlinkLooksDeceptive] pulls the
+/// cases back to the sheet where the URI is built to be misread.
 bool get _browserRevealsDestination =>
     defaultTargetPlatform != TargetPlatform.android &&
     defaultTargetPlatform != TargetPlatform.iOS;
