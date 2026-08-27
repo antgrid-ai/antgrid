@@ -1,9 +1,105 @@
+import 'dart:convert';
+import 'dart:math' as math;
+
 import 'package:flutter/widgets.dart';
 
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/ab_tokens.dart';
 import '../design/widgets/ab_icon.dart';
+
+/// Gap between the pointer and the card, in logical pixels.
+///
+/// Roughly a line of terminal text — enough that the card clears the row it
+/// describes rather than covering the link the user is reading.
+const double _gap = 18;
+
+/// Distance kept from the panel's edges when the anchor is near one.
+const double _margin = AbTokens.space8;
+
+/// Longest run of prefix, host or trailing text laid out.
+///
+/// `maxLines: 1` and [TextOverflow.ellipsis] bound what is PAINTED, not what is
+/// measured — the engine shapes the whole run before eliding it. A payload is
+/// unbounded program-chosen text, so without this a single hover shapes all of
+/// it on the UI thread. Same trap `_elide` guards in `external_url.dart`, which
+/// documents it for the same data.
+const int _maxPartChars = 128;
+
+/// Characters that can reorder or hide the rest of the readout.
+///
+/// Bidi overrides and isolates re-order glyphs ACROSS span boundaries, so a
+/// payload carrying U+202E paints a reading order that is not the URI's — on
+/// the one surface whose whole job is letting exact characters be compared.
+/// [terminalHyperlinkLooksDeceptive] cannot backstop it: the host itself is
+/// clean, so such a link takes the desktop no-sheet path.
+bool _isDisplayUnsafe(int rune) =>
+    rune < 0x20 ||
+    rune == 0x7F ||
+    rune == 0x061C ||
+    (rune >= 0x200E && rune <= 0x200F) ||
+    (rune >= 0x202A && rune <= 0x202E) ||
+    (rune >= 0x2066 && rune <= 0x2069);
+
+/// Renders [part] with the invisible characters spelled out.
+///
+/// Percent-encoded rather than dropped, because that is what `Uri.toString()`
+/// hands the launcher — so the card and the thing it describes agree on these
+/// characters instead of diverging on exactly them.
+String _display(String part) {
+  if (!part.runes.any(_isDisplayUnsafe)) return part;
+  final out = StringBuffer();
+  for (final rune in part.runes) {
+    if (!_isDisplayUnsafe(rune)) {
+      out.writeCharCode(rune);
+      continue;
+    }
+    for (final byte in utf8.encode(String.fromCharCode(rune))) {
+      out.write('%${byte.toRadixString(16).toUpperCase().padLeft(2, '0')}');
+    }
+  }
+  return out.toString();
+}
+
+/// Replaces the password half of a userinfo with a fixed mask.
+///
+/// A hover is not consent to display a secret: `https://x:TOKEN@host/` is a
+/// shape real tooling prints, and before this readout existed the view painted
+/// only an underline. The NAME half survives — it is what an impostor prefix
+/// uses to read as a familiar host, which is the thing this card exists to
+/// expose.
+String _maskPassword(String prefix) {
+  final at = prefix.lastIndexOf('@');
+  if (at < 0) return prefix;
+  final schemeEnd = prefix.indexOf('://');
+  if (schemeEnd < 0) return prefix;
+  final colon = prefix.indexOf(':', schemeEnd + 3);
+  if (colon < 0 || colon > at) return prefix;
+  return '${prefix.substring(0, colon + 1)}•••${prefix.substring(at)}';
+}
+
+/// Caps [part] to [_maxPartChars], keeping the end when [keepTail] is set.
+///
+/// The prefix keeps its TAIL: what matters there is the `@` and the characters
+/// immediately before the host, not the start of a padded userinfo.
+String _cap(String part, {bool keepTail = false}) {
+  if (part.length <= _maxPartChars) return part;
+  // Back off a stranded surrogate half: `substring` cuts UTF-16 code units, and
+  // half a pair renders as a replacement glyph on exactly the characters a
+  // reader is trying to identify.
+  if (keepTail) {
+    var start = part.length - _maxPartChars;
+    if (_isLowSurrogate(part.codeUnitAt(start))) start += 1;
+    return '…${part.substring(start)}';
+  }
+  var end = _maxPartChars;
+  if (_isHighSurrogate(part.codeUnitAt(end - 1))) end -= 1;
+  return '${part.substring(0, end)}…';
+}
+
+bool _isHighSurrogate(int unit) => unit >= 0xD800 && unit <= 0xDBFF;
+
+bool _isLowSurrogate(int unit) => unit >= 0xDC00 && unit <= 0xDFFF;
 
 /// The destination readout for the terminal link under the pointer.
 ///
@@ -24,35 +120,33 @@ class TerminalHyperlinkPreview extends StatelessWidget {
     required this.anchor,
   });
 
-  /// The raw OSC 8 payload, exactly as the program wrote it.
+  /// The raw OSC 8 payload, as the program wrote it apart from a masked
+  /// password and spelled-out control characters.
   ///
   /// Not a parsed [Uri]: this reports what the link SAYS, including a payload
-  /// no launcher would accept, and normalizing it here would show the user a
-  /// string the terminal does not contain.
+  /// no launcher would accept, and normalizing it would show the user a string
+  /// the terminal does not contain.
   final String uri;
 
   /// Where the pointer was when this URI became the hovered one, in the
   /// enclosing stack's coordinates.
   final Offset anchor;
 
-  /// Gap between the pointer and the card, in logical pixels.
-  ///
-  /// Roughly a line of terminal text — enough that the card clears the row it
-  /// describes rather than covering the link the user is reading.
-  static const double _gap = 18;
-
-  /// Distance kept from the panel's edges when the anchor is near one.
-  static const double _margin = AbTokens.space8;
-
   /// The card itself, so a test can assert where the delegate put it.
   static const Key cardKey = ValueKey('terminal.hyperlink.preview.card');
 
-  /// Widest the card may grow before its tail is elided.
+  /// Widest the card may grow before its prefix and tail are elided.
   ///
   /// A URI is unbounded program-chosen text, so something has to stop it: the
-  /// cap is what keeps a long one from spanning the terminal it overlays. The
-  /// host survives the elision — see [_spans].
+  /// cap is what keeps a long one from spanning the terminal it overlays.
   static const double _maxWidth = 420;
+
+  /// Widest the HOST span may grow.
+  ///
+  /// Held well under [_maxWidth] so the host is laid out before the elidable
+  /// spans get what is left — see [_HyperlinkText] for why it must never be the
+  /// part that gets cut.
+  static const double _maxHostWidth = 280;
 
   @override
   Widget build(BuildContext context) {
@@ -77,19 +171,7 @@ class TerminalHyperlinkPreview extends StatelessWidget {
             children: [
               AbIcon(AbIcons.link, size: 12, color: p.accent),
               const SizedBox(width: AbTokens.space6),
-              Flexible(
-                child: Text.rich(
-                  TextSpan(children: _spans(context, uri)),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  // Mono: this is a URL, and the whole point is that its exact
-                  // characters can be compared.
-                  style: AbTokens.monoStyle(
-                    fontSize: AbTokens.fontXs,
-                    color: p.textSecondary,
-                  ),
-                ),
-              ),
+              Flexible(child: _HyperlinkText(uri: uri)),
             ],
           ),
         ),
@@ -98,43 +180,128 @@ class TerminalHyperlinkPreview extends StatelessWidget {
   }
 }
 
-/// Splits [uri] so the HOST is the part that reads brightest.
+/// The URI itself, split so the HOST is both the part that reads brightest and
+/// the part that survives when the card runs out of room.
 ///
 /// The host is the only span that decides where a click actually lands, and it
 /// is the span a spoofed URI works hardest to bury: a `github.com@` userinfo
 /// prefix puts a familiar name where a glance stops reading, and the real
-/// destination after it. The prefix is dim here; the host is not.
+/// destination after it.
 ///
-/// Falls back to one flat span when the payload does not parse or names no
-/// host — there is nothing to emphasize, and a guess about which characters are
-/// the host would be exactly the wrong thing to be confident about.
-List<InlineSpan> _spans(BuildContext context, String uri) {
-  final p = context.antgrid;
-  final parsed = Uri.tryParse(uri.trim());
-  if (parsed == null || parsed.host.isEmpty) {
-    return [TextSpan(text: uri)];
+/// Three separate [Text]s rather than one [Text.rich], because a single rich
+/// run elides its TAIL — which behind a padded userinfo
+/// (`https://github.com.login.oauth.…@evil.example/`) is the host itself, so
+/// the readout would render as a clean GitHub URL and confirm the lie. Here the
+/// host is the only non-flex child, so the elidable spans surrender their width
+/// first and the host is cut last.
+class _HyperlinkText extends StatelessWidget {
+  const _HyperlinkText({required this.uri});
+
+  final String uri;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    // Mono: this is a URL, and the whole point is that its exact characters can
+    // be compared.
+    final base = AbTokens.monoStyle(
+      fontSize: AbTokens.fontXs,
+      color: p.textSecondary,
+    );
+    final range = _hostRange(uri);
+    // Nothing to emphasize, and a guess about which characters are the host
+    // would be exactly the wrong thing to be confident about.
+    if (range == null) {
+      return Text(
+        _display(_cap(uri)),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: base,
+      );
+    }
+    final (start, end) = range;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Flexible(
+          child: Text(
+            _display(
+              _cap(_maskPassword(uri.substring(0, start)), keepTail: true),
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: base.copyWith(color: p.textMuted),
+          ),
+        ),
+        ConstrainedBox(
+          constraints: const BoxConstraints(
+            maxWidth: TerminalHyperlinkPreview._maxHostWidth,
+          ),
+          child: Text(
+            _display(_cap(uri.substring(start, end))),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: base.copyWith(color: p.textPrimary),
+          ),
+        ),
+        Flexible(
+          child: Text(
+            _display(_cap(uri.substring(end))),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: base,
+          ),
+        ),
+      ],
+    );
   }
-  final host = parsed.host;
-  // Located in the ORIGINAL text, not rebuilt from the parse: `Uri` lower-cases
-  // and percent-encodes as it goes, so a reconstruction would show the user a
-  // string the terminal never printed — on precisely the characters this exists
-  // to let them compare.
-  final start = uri.toLowerCase().indexOf(host.toLowerCase());
-  if (start < 0) {
-    return [TextSpan(text: uri)];
+}
+
+/// The `[start, end)` span of the authority's host inside [uri], or null when
+/// the payload names no host.
+///
+/// Located POSITIONALLY in the original text, never by searching it for the
+/// parsed host. Two reasons, and each is the difference between disclosing the
+/// lie and repeating it:
+///
+///  * `indexOf(host)` finds the FIRST occurrence, which an impostor puts in the
+///    userinfo — `https://github.com.evil.tld@evil.tld/` would paint the
+///    userinfo copy bright and leave the real authority reading as body text.
+///  * `Uri.host` percent-encodes a raw unicode host, so it does not occur in
+///    the original text at all and the search silently finds nothing, dropping
+///    the emphasis on precisely the homoglyph it exists to expose.
+///
+/// Rebuilding the string from the parse is not an option either: `Uri`
+/// lower-cases and percent-encodes as it goes, and this exists to let the user
+/// compare the characters the terminal actually printed.
+(int, int)? _hostRange(String uri) {
+  final schemeEnd = uri.indexOf('://');
+  if (schemeEnd < 0) return null;
+  final authorityStart = schemeEnd + 3;
+  var authorityEnd = uri.length;
+  for (var i = authorityStart; i < uri.length; i++) {
+    final c = uri[i];
+    if (c == '/' || c == '?' || c == '#') {
+      authorityEnd = i;
+      break;
+    }
   }
-  final end = start + host.length;
-  return [
-    TextSpan(
-      text: uri.substring(0, start),
-      style: TextStyle(color: p.textMuted),
-    ),
-    TextSpan(
-      text: uri.substring(start, end),
-      style: TextStyle(color: p.textPrimary),
-    ),
-    TextSpan(text: uri.substring(end)),
-  ];
+  // LAST `@`: a userinfo may contain one, and the host is what follows the
+  // final separator — the same rule the parser applies.
+  final at = uri.substring(authorityStart, authorityEnd).lastIndexOf('@');
+  final start = authorityStart + (at < 0 ? 0 : at + 1);
+  var end = authorityEnd;
+  final rest = uri.substring(start, authorityEnd);
+  if (rest.startsWith('[')) {
+    // IPv6 literal: its colons belong to the host, and only one after `]`
+    // starts a port.
+    final close = rest.indexOf(']');
+    if (close >= 0) end = start + close + 1;
+  } else {
+    final colon = rest.indexOf(':');
+    if (colon >= 0) end = start + colon;
+  }
+  return end > start ? (start, end) : null;
 }
 
 /// Parks the card just below the pointer, flipping above it near the bottom
@@ -150,32 +317,31 @@ class _AnchoredNearPointer extends SingleChildLayoutDelegate {
 
   @override
   BoxConstraints getConstraintsForChild(BoxConstraints constraints) =>
-      BoxConstraints.loose(
-        Size(
-          (constraints.maxWidth - TerminalHyperlinkPreview._margin * 2).clamp(
-            0.0,
-            double.infinity,
-          ),
-          constraints.maxHeight,
-        ),
+      constraints.loosen().copyWith(
+        maxWidth: math.max(0, constraints.maxWidth - _margin * 2),
       );
 
   @override
   Offset getPositionForChild(Size size, Size childSize) {
-    const margin = TerminalHyperlinkPreview._margin;
-    const gap = TerminalHyperlinkPreview._gap;
-    // `clamp` with a collapsed range throws, so the panel being narrower than
-    // the card has to resolve to the margin rather than to an assertion.
-    final maxDx = size.width - childSize.width - margin;
-    final dx = maxDx <= margin
-        ? margin
-        : anchor.dx.clamp(margin, maxDx).toDouble();
-    var dy = anchor.dy + gap;
-    if (dy + childSize.height > size.height - margin) {
-      dy = anchor.dy - gap - childSize.height;
+    // `math.max` on the upper bound rather than a branch: `clamp` throws on an
+    // inverted range, so a panel narrower than the card has to resolve to the
+    // margin instead of to an assertion. Hoisted into `double` locals because
+    // `clamp` takes `num`: an inline `math.max` infers that from the parameter
+    // and hands back a `num` no `Offset` will take.
+    final double maxDx = math.max(
+      _margin,
+      size.width - childSize.width - _margin,
+    );
+    final double maxDy = math.max(
+      _margin,
+      size.height - childSize.height - _margin,
+    );
+    final dx = anchor.dx.clamp(_margin, maxDx);
+    var dy = anchor.dy + _gap;
+    if (dy + childSize.height > size.height - _margin) {
+      dy = anchor.dy - _gap - childSize.height;
     }
-    final maxDy = size.height - childSize.height - margin;
-    return Offset(dx, maxDy <= margin ? margin : dy.clamp(margin, maxDy));
+    return Offset(dx, dy.clamp(_margin, maxDy));
   }
 
   @override

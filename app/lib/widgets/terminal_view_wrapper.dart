@@ -69,27 +69,30 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// overlay button only when the user has a non-empty selection.
   String? _selectedText;
 
-  /// The OSC 8 URI under the pointer, from the view's `onHyperlinkHover`, or
-  /// null when the pointer is over no link.
+  /// The OSC 8 link under the pointer and where to park its readout, or null
+  /// when the pointer is over no link.
   ///
   /// Held here rather than read from the view because the view paints only an
   /// underline: the destination itself is disclosed by
-  /// [TerminalHyperlinkPreview] or by nothing at all.
-  String? _hoveredLinkUri;
+  /// [TerminalHyperlinkPreview] or by nothing at all. A notifier rather than
+  /// `setState` because this is the terminal's primary surface and a hover
+  /// crossing a wall of links would otherwise relayout the whole panel — three
+  /// nested `LayoutBuilder`s and a fresh `GhosttyTerminalView` — per link, to
+  /// toggle one floating card. Same shape the sibling upload strip already uses.
+  final ValueNotifier<({String uri, Offset at})?> _hoveredLink = ValueNotifier(
+    null,
+  );
 
-  /// Where the pointer was when [_hoveredLinkUri] last CHANGED.
+  /// A hovered URI still waiting for the pointer position that produced it.
   ///
-  /// Sampled at the change rather than tracked live so the readout stays put
-  /// while the pointer travels along one link — a card sliding under the moving
-  /// cursor is unreadable, and re-laying it out on every hover frame would be
-  /// work for nothing.
-  Offset _hoveredLinkAnchor = Offset.zero;
-
-  /// Latest hover position, updated with no rebuild.
-  ///
-  /// A `setState` per hover frame is what that avoids; the value matters only
-  /// at the instant [_hoveredLinkUri] changes.
-  Offset _lastHoverPosition = Offset.zero;
+  /// The view reports the URI from a `MouseRegion` BELOW this widget's own
+  /// hover handler, and Flutter walks a hit-test path child-first — so at the
+  /// instant the URI arrives, the position for that same event has not reached
+  /// us yet, and on the first hover into the panel there is no earlier position
+  /// to fall back on. Parking the URI here until the enclosing handler supplies
+  /// the matching position is what keeps the card on the link it describes
+  /// rather than one hover behind it.
+  String? _pendingHoverUri;
 
   /// Wraps the terminal subtree so we can detect when the user's primary
   /// focus is inside this view. Required for the paste interceptor, which
@@ -227,6 +230,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     _focusScope.removeListener(_onFocusChange);
     _focusScope.dispose();
     _uploader.dispose();
+    _hoveredLink.dispose();
     super.dispose();
   }
 
@@ -533,9 +537,6 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   Widget _buildTerminal(BuildContext context) {
     final agentTab = ref.watch(agentTerminalProvider);
     final showSendButton = _hasSelection && agentTab != null;
-    // Read once so the null check and the use are the same value — the field
-    // moves from a callback, not from this build.
-    final hoveredLink = _hoveredLinkUri;
     // Desktop's only attach route. Mobile already has one in the quick-actions
     // bar, and a LOCAL session needs none: the agent reads the user's own disk,
     // so a path typed by hand or dropped by the OS already works.
@@ -685,12 +686,21 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                 // Wraps the terminal, not the whole subtree: this is the
                 // Stack's only non-positioned child, so it shares the Stack's
                 // origin — which is the space the preview's anchor is read in.
-                // Translucent so it joins the hit path above the view's own
+                // Non-opaque so it joins the hit path above the view's own
                 // MouseRegion without taking anything from it.
-                Listener(
-                  behavior: HitTestBehavior.translucent,
-                  onPointerHover: (event) =>
-                      _lastHoverPosition = event.localPosition,
+                MouseRegion(
+                  opaque: false,
+                  onHover: _onHoverPosition,
+                  // The view's own exit report cannot be relied on alone: a
+                  // MouseRegion unmounted while hovered never fires onExit, and
+                  // the branches below swap widget types under the pointer
+                  // (grid-freeze vs letterbox vs h-scroll), so a card can
+                  // outlive the terminal that reported it. This is the one
+                  // handler that survives those swaps.
+                  onExit: (_) {
+                    _pendingHoverUri = null;
+                    _hoveredLink.value = null;
+                  },
                   child: LayoutBuilder(
                     builder: (context, constraints) {
                       _maybeSendResize(
@@ -769,13 +779,17 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                 ),
                 if (showSendButton)
                   SendToAgentButton(onPressed: _onSendToAgent),
-                if (hoveredLink != null)
-                  Positioned.fill(
-                    child: TerminalHyperlinkPreview(
-                      uri: hoveredLink,
-                      anchor: _hoveredLinkAnchor,
-                    ),
+                Positioned.fill(
+                  child: ValueListenableBuilder<({String uri, Offset at})?>(
+                    valueListenable: _hoveredLink,
+                    builder: (context, link, _) => link == null
+                        ? const SizedBox.shrink()
+                        : TerminalHyperlinkPreview(
+                            uri: link.uri,
+                            anchor: link.at,
+                          ),
                   ),
+                ),
               ],
             ),
           ),
@@ -784,17 +798,43 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     );
   }
 
-  /// Shows, moves or hides the destination readout as the pointer enters and
-  /// leaves links.
+  /// Shows or hides the destination readout as the pointer enters and leaves
+  /// links.
   ///
   /// The view fires this only on a real change, so there is no same-value
-  /// rebuild to guard against here.
+  /// rebuild to guard against here. A new link is only PENDING until
+  /// [_onHoverPosition] supplies the position it was hovered at — see
+  /// [_pendingHoverUri] for why the position cannot be read here.
   void _onHyperlinkHover(String? uri) {
     if (!mounted) return;
-    setState(() {
-      _hoveredLinkUri = uri;
-      if (uri != null) _hoveredLinkAnchor = _lastHoverPosition;
-    });
+    if (uri == null) {
+      _pendingHoverUri = null;
+      _hoveredLink.value = null;
+      return;
+    }
+    _pendingHoverUri = uri;
+    // Output can scroll a DIFFERENT link under a STATIONARY pointer, and no
+    // hover event follows to carry it — so repoint the card at once against
+    // the anchor it already has, rather than let it go on naming a
+    // destination the click would not open. The pending URI still re-anchors
+    // it on the next real move.
+    final shown = _hoveredLink.value;
+    if (shown != null && shown.uri != uri) {
+      _hoveredLink.value = (uri: uri, at: shown.at);
+    }
+  }
+
+  /// Anchors a pending link to the pointer position of the event that produced
+  /// it.
+  ///
+  /// Sampled once, at the change, rather than tracked live: a card sliding
+  /// under the cursor it belongs to is unreadable, and re-laying it out every
+  /// hover frame would be work for nothing.
+  void _onHoverPosition(PointerHoverEvent event) {
+    final pending = _pendingHoverUri;
+    if (pending == null) return;
+    _pendingHoverUri = null;
+    _hoveredLink.value = (uri: pending, at: event.localPosition);
   }
 
   /// Sends a `terminal:resize` derived from the local viewport + cell metrics
