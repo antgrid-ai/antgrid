@@ -3,6 +3,7 @@ import { Icon } from "astro-icon/components";
 import Eyebrow from "../ui/Eyebrow.astro";
 import Chip from "../ui/Chip.astro";
 import Readout from "../ui/Readout.astro";
+import UseCase from "../ui/UseCase.astro";
 
 // Framed as safety for Handler autonomy, never as parallelism-at-scale — the
 // "N agents in parallel" axis is a competitor's headline and first-party table
@@ -26,11 +27,13 @@ const sessions = [
       <p class="mb-6 max-w-xl text-lede text-muted">
         An agent is only safe to walk away from when its blast radius is a branch. When the work proves out, review and merge it. When it doesn't, throw the worktree away — <span class="text-ink2">main never knew</span>.
       </p>
-      <div class="flex flex-wrap gap-2">
+      <div class="mb-6 flex flex-wrap gap-2">
         <Chip>own checkout, own branch</Chip>
         <Chip>your view follows the worktree</Chip>
         <Chip>main stays clean</Chip>
       </div>
+
+      <UseCase class="max-w-xl">Walk away from a running agent without wondering what state you'll find your tree in.</UseCase>
     </div>
 
     <Readout source="~/repos/api" state="clean" label="main · clean" class="min-w-0 md:order-1">
