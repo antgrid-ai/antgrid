@@ -99,6 +99,21 @@ export async function buildTitleContext(opts: {
 }
 
 /**
+ * A generated title, or why there is none.
+ *
+ * The two reasons are NOT interchangeable to the caller, which is the whole
+ * point of returning one rather than a bare null: "failed" is a spawn that ran
+ * and did not produce a usable title — a signed-out CLI, a timeout, a rambling
+ * answer — any of which the next turn may not repeat, so it is worth a bounded
+ * retry. "unavailable" is the machine's answer, not this attempt's: no
+ * installed agent declares an argv that can serve the call at all, so every
+ * retry would re-read a transcript to reach the same refusal.
+ */
+export type TitleGeneration =
+  | { ok: true; title: string }
+  | { ok: false; reason: "unavailable" | "failed" };
+
+/**
  * Name a session by asking a headless CLI, rather than waiting to see whether
  * the agent names it for us.
  *
@@ -112,7 +127,7 @@ export async function buildTitleContext(opts: {
  * least: the conversation is inlined into the prompt, so it asks for `need:
  * "none"` and takes whichever installed agent can serve it (see resolveHeadless).
  *
- * Never throws — every failure is a null and the caller keeps the name it has.
+ * Never throws — every failure is a `reason` and the caller keeps the name it has.
  */
 export async function generateTitleFromContext(context: string, opts: {
   tool: string;
@@ -121,24 +136,27 @@ export async function generateTitleFromContext(context: string, opts: {
   spawn?: typeof Bun.spawn;
   /** Test seam; production reads PATH via detectInstalledTools(). */
   installedTools?: string[];
-}): Promise<string | null> {
+}): Promise<TitleGeneration> {
   // `need: "none"` — the conversation is inlined into the prompt, so this asks
   // for the tightest argv the agent has rather than one that can reach the repo.
   const picked = resolveHeadless(opts.tool, "none", opts.installedTools);
-  if (!picked) return null;
+  if (!picked) return { ok: false, reason: "unavailable" };
   logBorrow("none", opts.tool, picked.tool);
   const result = await runHeadless(picked.command.cmd(buildPrompt(context), opts.model), {
     cwd: headlessScratchCwd(),
     timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     spawn: opts.spawn,
     env: picked.command.env,
+    scratchEnv: picked.command.scratchEnv,
   });
   // A timeout or a non-zero exit discards the output rather than parsing it.
   // These CLIs print their refusals to STDOUT and they are short: "Invalid API
   // key · Please run /login" clears every one of parseTitleFromOutput's checks
   // and reads as a title. With the `self` rank outranking the first-message
-  // re-read, and one attempt per session, that error string would be the
-  // session's name for good.
-  if (!result || result.code !== 0) return null;
-  return parseTitleFromOutput(result.stdout);
+  // re-read, that error string would be the session's name for good.
+  if (!result || result.code !== 0) return { ok: false, reason: "failed" };
+  const title = parseTitleFromOutput(result.stdout);
+  // An unparseable answer is a failed attempt, not an absent capability: the
+  // spawn worked and the model rambled, which the next turn may not repeat.
+  return title ? { ok: true, title } : { ok: false, reason: "failed" };
 }

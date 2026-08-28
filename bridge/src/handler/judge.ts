@@ -58,7 +58,10 @@ async function runWithRetry<T>(opts: {
   // masquerade as a title (see runHeadless).
   const run = (p: string, timeoutMs: number) => runHeadless(
     resolveCmd(judge.command.cmd(p, opts.model), p),
-    { cwd: opts.cwd, timeoutMs, spawn, env: judge.command.env },
+    {
+      cwd: opts.cwd, timeoutMs, spawn,
+      env: judge.command.env, scratchEnv: judge.command.scratchEnv,
+    },
   );
 
   const prompt = opts.makePrompt(path);

@@ -7,7 +7,7 @@
 // compiler now demands.
 
 import { existsSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { readCodexVersionJson, codexHomeDir } from "./codex/home";
 import { antigravityCliHome, resolveAntigravityTitle } from "./antigravity/title";
@@ -33,20 +33,6 @@ import { opencodeForkHandoff, opencodeNativeForkArgs } from "./opencode/fork";
 import { terminalForkHandoff } from "./fork-handoff";
 
 import { pickHeadlessFrom, type AgentKey, type AgentSpec } from "./types";
-
-// A throwaway store for a headless spawn whose CLI offers no ephemeral flag.
-// It sits under the OS temp dir rather than the agent's own home so that
-// nothing a one-shot call writes can surface in that agent's --resume picker,
-// and so the OS reclaims it. Stable per tool because HeadlessCommand.env is
-// static: what is disposable is the directory, never a particular session.
-//
-// A PATH ONLY: this runs while the AGENTS literal is built, so anything done
-// here happens on every import of this file — including each short-lived
-// `bridge hook` invocation the agent is blocking on, and on machines that run
-// neither of these agents.
-function headlessScratchDir(tool: string): string {
-  return join(tmpdir(), "antgrid-headless", tool);
-}
 
 export const AGENTS: Record<AgentKey, AgentSpec> = {
   "claude-code": {
@@ -243,25 +229,13 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     fork: terminalForkHandoff("Cursor"),
     hooks: cursorHooks,
     augmentsDefaultSpec: true,
-    headless: {
-      // --mode ask is Cursor's own read-only Q&A mode; -p alone would keep the
-      // write and shell tools its help advertises for print mode.
-      readonly: {
-        cmd: (prompt, model) => [
-          "cursor-agent", "-p", "--mode", "ask", "--output-format", "text",
-          ...(model ? ["--model", model] : []), prompt,
-        ],
-        // No ephemeral flag exists, so the conversation store is redirected
-        // instead. CURSOR_DATA_DIR is the right half of Cursor's two-directory
-        // split — it holds conversations, while credentials live under
-        // CURSOR_CONFIG_DIR (cli-config.json), which is left alone. Redirecting
-        // the config dir instead would sign the spawn out, the same way
-        // claude's --bare forces API-key auth and fails closed on a
-        // subscription.
-        env: { CURSOR_DATA_DIR: headlessScratchDir("cursor-agent") },
-        noHistory: "ephemeral-store",
-      },
-    },
+    // No headless entry. `-p --mode ask` reads like the right argv and has
+    // never been run: cursor-agent exits 1 on every invocation without an
+    // `agent login` or CURSOR_API_KEY, so nothing about that argv's reach has
+    // been observed. Absence is the honest answer, and it is not only about a
+    // wrong label — ANY non-sealed reach makes the agent judge-capable, which
+    // would arm a supervisor over the user's working tree on an argv nobody
+    // has run. Naming is unaffected: a "none" call borrows an installed agent.
   },
   "github-copilot": {
     bin: "copilot",
@@ -303,13 +277,14 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
           ...(model ? ["--model", model] : []),
         ],
         // Copilot has no ephemeral flag — a -p run writes session-store.db and a
-        // whole session-state/<uuid>/ tree — so the home is redirected instead.
+        // whole session-state/<uuid>/ tree — so the home is redirected to a
+        // directory that lives only as long as the spawn.
         // Safe for auth, and that is NOT the generalization it looks like:
         // credentials do not live under COPILOT_HOME at all (no GH_TOKEN or
         // GITHUB_TOKEN path either), so a run against an EMPTY scratch home
         // still authenticates. Measured, because the opposite is true of vibe,
         // where the same move would take the credentials with it.
-        env: { COPILOT_HOME: headlessScratchDir("github-copilot") },
+        scratchEnv: ["COPILOT_HOME"],
         noHistory: "ephemeral-store",
       },
     },
@@ -399,22 +374,10 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     titleSource: "osc",
     resume: () => [],
     initialPrompt: () => [],
-    headless: {
-      // Vibe selects a model through --agent profiles, never a --model flag, so
-      // the model argument is dropped rather than passed: `ask` is its built-in
-      // read-only profile. --trust is required, not a widening — without it a
-      // programmatic run stops on the interactive trust prompt, and it is scoped
-      // to this invocation (never written to trusted_folders.toml).
-      readonly: {
-        cmd: (prompt) => ["vibe", "-p", prompt, "--agent", "ask", "--trust", "--output", "text"],
-        // Vibe's home holds the credentials (.env) as well as the session log,
-        // so VIBE_HOME must NOT be redirected. Its config layer reads VIBE_*
-        // with `__` for nesting, which reaches session_logging.enabled directly
-        // — the same switch that makes SessionLogger write nothing at all.
-        env: { VIBE_SESSION_LOGGING__ENABLED: "false" },
-        noHistory: "flag",
-      },
-    },
+    // No headless entry, for the reason spelled out on cursor-agent above:
+    // `vibe -p --agent ask` is unrun — every invocation here exits 1 on a
+    // missing MISTRAL_API_KEY — and shipping an unverified argv would arm the
+    // judge on it.
     fork: terminalForkHandoff("Mistral Vibe"),
   },
 };

@@ -30,7 +30,9 @@ into the prompt. A judge is never borrowed, and `judgeCapable` is exactly "has a
 non-sealed entry". The field's own docstring carries the rules a new entry must
 satisfy (no writes, and how it keeps the run out of the user's `--resume`); add
 one only after running it. A naming spawn runs in a throwaway cwd, NEVER the
-session's checkout — see `headlessScratchCwd`.
+session's checkout — see `headlessScratchCwd`. History a CLI offers no switch to
+skip is redirected per spawn instead (`HeadlessCommand.scratchEnv`, a fresh dir
+the runner deletes after), so never list a var that also carries credentials.
 
 The `agent:tools` advert (and the loopback `tools:list` reply) carries TWO
 arrays, and the split is load-bearing. `tools[]` is the PATH probe — what this

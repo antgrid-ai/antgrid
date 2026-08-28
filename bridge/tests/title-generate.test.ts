@@ -57,7 +57,9 @@ async function generateSessionTitle(opts: {
   installedTools?: string[];
 }): Promise<string | null> {
   const context = await buildTitleContext(opts);
-  return context ? await generateTitleFromContext(context, opts) : null;
+  if (!context) return null;
+  const result = await generateTitleFromContext(context, opts);
+  return result.ok ? result.title : null;
 }
 
 describe("parseTitleFromOutput", () => {
@@ -212,5 +214,49 @@ describe("generateSessionTitle", () => {
     expect(await generateSessionTitle({
       tool: "claude-code", cwd: tmp(), fallbackContext: "do a thing", spawn,
     })).toBeNull();
+  });
+});
+
+// agent-core retries a "failed" within a small budget and never retries an
+// "unavailable" (see TitleAttemptState), so which one a given failure produces
+// decides whether a session can still be named later. Pinned here because the
+// two are one `ok: false` to the type system and nothing else would catch a
+// swap.
+describe("failure reasons", () => {
+  test("no installed agent can serve the call is 'unavailable'", async () => {
+    const { spawn, calls } = fakeSpawn("Add retry to uploader");
+    const r = await generateTitleFromContext("ctx", {
+      tool: "kimi", spawn, installedTools: [],
+    });
+    expect(r).toEqual({ ok: false, reason: "unavailable" });
+    // Nothing ran: the refusal is the machine's, not this attempt's.
+    expect(calls.length).toBe(0);
+  });
+
+  test("a non-zero exit is 'failed', so the next turn may try again", async () => {
+    const { spawn } = fakeSpawn("Invalid API key · Please run /login", { exitCode: 1 });
+    const r = await generateTitleFromContext("ctx", {
+      tool: "claude-code", spawn, installedTools: ["claude-code"],
+    });
+    expect(r).toEqual({ ok: false, reason: "failed" });
+  });
+
+  test("a clean exit with unusable output is 'failed', not a title", async () => {
+    // Long enough to fail parseTitleFromOutput's cap — the spawn worked and the
+    // model rambled.
+    const { spawn } = fakeSpawn("Sure! Here is a title that goes on and on and " +
+      "on well past any reasonable length for naming a session");
+    const r = await generateTitleFromContext("ctx", {
+      tool: "claude-code", spawn, installedTools: ["claude-code"],
+    });
+    expect(r).toEqual({ ok: false, reason: "failed" });
+  });
+
+  test("a usable title comes back as ok", async () => {
+    const { spawn } = fakeSpawn("Add retry to uploader");
+    const r = await generateTitleFromContext("ctx", {
+      tool: "claude-code", spawn, installedTools: ["claude-code"],
+    });
+    expect(r).toEqual({ ok: true, title: "Add retry to uploader" });
   });
 });

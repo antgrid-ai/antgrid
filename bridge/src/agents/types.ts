@@ -244,16 +244,34 @@ export interface HeadlessCommand {
    *  terminal session, which is the spec-level `env`. */
   env?: Record<string, string>;
   /**
+   * Env vars to point at a private, empty directory that lives exactly as long
+   * as the spawn — the runner creates one, sets every name here to it, and
+   * deletes it afterwards (see runHeadless).
+   *
+   * For a CLI with no ephemeral switch, whose state therefore has to be
+   * redirected rather than turned off. A fixed path under the temp dir is not
+   * enough: it is the AGENT's store, so it keeps every session it is ever
+   * pointed at — one measured copilot run left ~51KB of session-state plus a
+   * 352KB uncheckpointed WAL, in a directory Windows never reclaims. Per-spawn
+   * makes the ceiling one call rather than the machine's lifetime.
+   *
+   * Only for state that is safe to lose: a var carrying CREDENTIALS must never
+   * be listed, or every spawn starts signed out (COPILOT_HOME is listable
+   * precisely because copilot's auth is not under it — measured; vibe's home is
+   * the counter-example).
+   */
+  scratchEnv?: string[];
+  /**
    * HOW this argv keeps the run out of the user's own history. Stated rather
    * than assumed because nothing else can check it: no passing test can tell a
    * spawn that persisted a session from one that did not, and every run that
    * does shows up in the user's own `--resume` picker forever.
    *
    *   "flag"            — an explicit off switch, argv or env (claude's
-   *                       --no-session-persistence, codex's --ephemeral,
-   *                       vibe's VIBE_SESSION_LOGGING__ENABLED=false).
-   *   "ephemeral-store" — `env` points the agent's store somewhere disposable
-   *                       (opencode's OPENCODE_DB=:memory:).
+   *                       --no-session-persistence, codex's --ephemeral).
+   *   "ephemeral-store" — `env` or `scratchEnv` points the agent's store
+   *                       somewhere disposable (opencode's OPENCODE_DB=:memory:,
+   *                       copilot's per-spawn COPILOT_HOME).
    *   "stateless"       — the CLI writes no history in this mode at all.
    *
    * An agent whose CLI offers none of the three gets no entry at that reach:

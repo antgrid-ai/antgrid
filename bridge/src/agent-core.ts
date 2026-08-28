@@ -43,6 +43,7 @@ import { antigravityCliHome } from "./agents/antigravity/title";
 import { AntigravityTitleWatcher } from "./agents/antigravity/title-watcher";
 import { resolveStructuredTitle } from "./agents/title-dispatch";
 import { buildTitleContext, generateTitleFromContext } from "./agents/title-generate";
+import { TitleAttempts, type TitleOutcome } from "./agents/title-attempts";
 import { agentSpec, BY_HOOK_NAME, handlerObservable } from "./agents/registry";
 import { HandlerEngine, type HandlerEvent } from "./handler/engine";
 import { createEntitlementReader, type TierClaimSource } from "./entitlement";
@@ -548,39 +549,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   let sessions: SessionManager | null = null;
   let namer: SessionNamer | null = null;
   let antigravityTitleWatcher: AntigravityTitleWatcher | null = null;
-  // Conversations we've already spent a title-generation spawn on, per terminal.
-  // The /session-title post repeats every turn, so without this a session whose
-  // agent never names itself would pay a model call per turn, forever. Keyed by
-  // agent session where there is one, not by slot, so a fresh thread in the same
-  // slot gets one more attempt — see TitleTarget for why a chat slot keys on
-  // itself instead.
-  //
-  // Nested rather than a flat `<terminalId>:<conversation>` key: terminal ids
-  // contain colons of their own (`<checkoutId>:setup`), so in a flat key space
-  // one terminal's release reaches another terminal's entries by prefix.
-  const titleGenAttempted = new Map<string, Set<string>>();
+  // Title-generation budget per conversation, per terminal. The /session-title
+  // post repeats every turn, so without this a session whose agent never names
+  // itself would pay a model call per turn, forever. Keyed by agent session
+  // where there is one, not by slot, so a fresh thread in the same slot gets a
+  // fresh budget — see TitleTarget for why a chat slot keys on itself instead.
+  const titleAttempts = new TitleAttempts();
   /** Conversation id for the attempt gate — see TitleTarget for why a chat slot
    *  keys on itself rather than on an agent session id. */
   const titleAttemptKey = (target: { terminalId: string; agentSessionId?: string }) =>
     target.agentSessionId ?? target.terminalId;
-  function titleAttemptSpent(terminalId: string, conversationId: string): boolean {
-    return titleGenAttempted.get(terminalId)?.has(conversationId) ?? false;
-  }
-  function claimTitleAttempt(terminalId: string, conversationId: string): void {
-    const spent = titleGenAttempted.get(terminalId) ?? new Set<string>();
-    spent.add(conversationId);
-    titleGenAttempted.set(terminalId, spent);
-  }
-  /**
-   * Released with the namer's buffered title, never separately. The two halves
-   * answer the same question — has this slot been named — and a `forget` that
-   * dropped only the rank left a session whose generated name the next
-   * first-message read overwrote, with generation refused forever after. A
-   * resume reuses the agent session id, so the key alone cannot tell the runs
-   * apart.
-   */
   function forgetTitleAttempts(terminalId: string): void {
-    titleGenAttempted.delete(terminalId);
+    titleAttempts.forget(terminalId);
   }
   /** Which agent each LIVE chat slot runs — see the driverFactory that fills it. */
   const chatTools = new Map<string, string>();
@@ -2934,14 +2914,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Tested twice, and the two tests answer different questions. This one is a
     // pure early-out: every turn of the session posts here, and without it each
     // one pays the transcript read below only to be refused after it. It claims
-    // nothing, so it cannot burn the attempt.
-    if (titleAttemptSpent(target.terminalId, key)) return;
+    // nothing, so it cannot burn an attempt.
+    if (titleAttempts.refused(target.terminalId, key)) return;
 
-    // Read the conversation BEFORE claiming the attempt. The claim is one per
+    // Read the conversation BEFORE claiming the attempt. The budget is per
     // agent session, and the first post of a session arrives from SessionStart
-    // — before the user has typed — so claiming first spent every Claude
-    // session's only attempt on an empty transcript, and the turn that finally
-    // had something to name from was refused.
+    // — before the user has typed — so claiming first spent a Claude session's
+    // whole budget on an empty transcript, and the turn that finally had
+    // something to name from was refused.
     //
     // A post carrying `prompt` needs no read at all: the hook handed us the
     // message the user just submitted, which is both the context and the reason
@@ -2955,28 +2935,39 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     });
     if (!context) return;
 
-    // Claim the slot BEFORE awaiting the spawn: two turns can end while the
-    // first is still running, and both would otherwise pass the check. The read
-    // above already awaited, but this check-and-set does not, so only one caller
-    // can get past it.
-    if (titleAttemptSpent(target.terminalId, key)) return;
-    claimTitleAttempt(target.terminalId, key);
-
-    // No cwd: a naming spawn runs in a throwaway directory of its own
-    // (headlessScratchCwd), never this session's checkout.
-    const title = await generateTitleFromContext(context, { tool });
-    // Re-check: the spawn takes tens of seconds, and the user may have renamed
-    // the session in that window.
-    if (!title || (sessions && !sessions.isAutoNameable(target.terminalId))) return;
-    // …or started a NEW conversation in the same slot (`/clear`), whose own title
-    // this would outrank at `self` and whose attempt is already spent. The title
-    // describes the conversation it was generated from, not the slot. Only
-    // answerable when we were naming a conversation the agent had identified;
-    // see TitleTarget.
-    const live = sessions?.get(target.terminalId)?.agentSessionId;
-    if (target.agentSessionId && live && live !== target.agentSessionId) return;
-    log.info("generated a session title for %s (%s)", target.terminalId, tool);
-    namer?.onStructuredTitle(target.terminalId, title, "self");
+    // Claimed BEFORE awaiting the spawn: two turns can end while the first is
+    // still running, and both would otherwise pass the early-out above. The
+    // transcript read already awaited, but this check-and-set does not, so only
+    // one caller gets past it.
+    if (!titleAttempts.begin(target.terminalId, key)) return;
+    // Only the paths that reach a verdict overwrite this. Every other exit is a
+    // title thrown away for reasons unrelated to generating it, which releases
+    // the claim without spending the budget.
+    let outcome: TitleOutcome = "abandoned";
+    try {
+      // No cwd: a naming spawn runs in a throwaway directory of its own
+      // (headlessScratchCwd), never this session's checkout.
+      const result = await generateTitleFromContext(context, { tool });
+      if (!result.ok) {
+        outcome = result.reason;
+        return;
+      }
+      // Re-check: the spawn takes tens of seconds, and the user may have renamed
+      // the session in that window.
+      if (sessions && !sessions.isAutoNameable(target.terminalId)) return;
+      // …or started a NEW conversation in the same slot (`/clear`), whose own
+      // title this would outrank at `self` and which carries a budget of its
+      // own. The title describes the conversation it was generated from, not
+      // the slot. Only answerable when we were naming a conversation the agent
+      // had identified; see TitleTarget.
+      const live = sessions?.get(target.terminalId)?.agentSessionId;
+      if (target.agentSessionId && live && live !== target.agentSessionId) return;
+      outcome = "named";
+      log.info("generated a session title for %s (%s)", target.terminalId, tool);
+      namer?.onStructuredTitle(target.terminalId, result.title, "self");
+    } finally {
+      titleAttempts.settle(target.terminalId, key, outcome);
+    }
   }
 
   // Start local API server for MCP/hook integration (works in both modes)
