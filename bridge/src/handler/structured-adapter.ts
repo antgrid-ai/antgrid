@@ -1,6 +1,7 @@
 // bridge/src/handler/structured-adapter.ts
 import type { AbMessage } from "../protocol";
 import type { SessionAdapter } from "./session-adapter";
+import type { CapCommand } from "../structured/chat-session";
 import { DECIDE_MAX_CHARS } from "./context";
 
 // Flatten a driver transcript snapshot into judge-readable plain text.
@@ -33,16 +34,21 @@ export function renderSnapshotText(frames: AbMessage[], maxChars = DECIDE_MAX_CH
 }
 
 export function createStructuredAdapter(deps: {
-  prompt: (sessionId: string, text: string) => void;
+  prompt: (sessionId: string, text: string, commandId?: string) => void;
   getTranscriptPath: (sessionId: string) => string | undefined;
   getSnapshot: (sessionId: string) => Promise<AbMessage[]>;
+  commandCatalog: (sessionId: string) => CapCommand[] | undefined;
 }): SessionAdapter {
   return {
     // Auto-replies ride the same driver prompt path as an app-sent agent:prompt.
     // NEVER resolvePermission/resolveQuestion here: approving a pending tool
     // call is a human-only act — the destructive floor inspects reply text and
     // cannot see structured tool calls (see engine's forced-escalation events).
-    injectReply: (id, text) => deps.prompt(id, text),
+    //
+    // No command => a plain prompt of the WHOLE text, slash and all. Handing a
+    // driver a commandId it does not recognize is strictly worse than handing
+    // it none: every backend drops the verb and sends the bare args.
+    injectReply: (id, text, command) => deps.prompt(id, command ? command.args : text, command?.id),
     recentOutput: async (id) => {
       // Fail closed: a dead driver yields empty context, and the judge's own
       // unavailable/low-confidence path escalates — never throw from the seam.
@@ -51,6 +57,6 @@ export function createStructuredAdapter(deps: {
     },
     outputKind: () => "rendered",
     transcriptPath: (id) => deps.getTranscriptPath(id),
-    supportsSlashCommands: () => false,
+    commandCatalog: (id) => deps.commandCatalog(id),
   };
 }

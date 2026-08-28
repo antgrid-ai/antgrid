@@ -156,13 +156,13 @@ function scan(
  * delete AND outside-project path" makes a better call than one reading whichever
  * happened to be listed first.
  *
- * pathCheckText scopes the outside-project check to the judge's free-text reply, not the
- * full probe: engine.ts rejects a slash_command action value that isn't a single "/"-free,
- * whitespace-free token before it ever reaches this floor, so by the time it's joined onto
- * the probe it cannot be a filesystem path — but it's still "/"-shaped, and callers
- * conventionally join it right after a newline, which the ABS_PATH anchor reads as a path
- * start. The other tiers still scan the full `text` (the default for pathCheckText too) so
- * a command value smuggling one of those patterns is still caught.
+ * pathCheckText scopes the outside-project check away from a slash command's VERB and
+ * nothing else: engine.ts passes the judge's reply plus the command's argument tail, and
+ * withholds the verb alone. A verb is "/"-shaped and callers join it right after a
+ * newline, which the ABS_PATH anchor reads as a path start — so scanning it would warn on
+ * every `/compact`. Its arguments are ordinary free text and DO get scanned, because an
+ * absolute path there is a real one. The other tiers still scan the full `text` (the
+ * default for pathCheckText too), so a verb smuggling one of those patterns is caught.
  */
 export function classifyDestructive(text: string, projectPath: string, pathCheckText: string = text): FloorResult {
   const hard: FloorWarning[] = [];

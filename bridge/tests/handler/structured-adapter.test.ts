@@ -51,17 +51,91 @@ describe("renderSnapshotText", () => {
 });
 
 describe("createStructuredAdapter", () => {
-  it("injectReply forwards to prompt; slash commands unsupported", () => {
-    const prompts: Array<[string, string]> = [];
+  it("a plain reply forwards to prompt with no commandId", () => {
+    const prompts: Array<[string, string, string | undefined]> = [];
     const a = createStructuredAdapter({
-      prompt: (id, text) => prompts.push([id, text]),
+      prompt: (id, text, commandId) => prompts.push([id, text, commandId]),
       getTranscriptPath: () => "/x.jsonl",
       getSnapshot: async () => [],
+      commandCatalog: () => undefined,
     });
     a.injectReply("s1", "continue");
-    expect(prompts).toEqual([["s1", "continue"]]);
-    expect(a.supportsSlashCommands("s1")).toBe(false);
+    expect(prompts).toEqual([["s1", "continue", undefined]]);
     expect(a.transcriptPath("s1")).toBe("/x.jsonl");
+  });
+
+  it("a resolved command sends the argument tail under its command id", () => {
+    const prompts: Array<[string, string, string | undefined]> = [];
+    const a = createStructuredAdapter({
+      prompt: (id, text, commandId) => prompts.push([id, text, commandId]),
+      getTranscriptPath: () => undefined,
+      getSnapshot: async () => [],
+      commandCatalog: () => undefined,
+    });
+    a.injectReply("s1", "/code-review --fix", { id: "cmd:code-review", args: "--fix" });
+    expect(prompts).toEqual([["s1", "--fix", "cmd:code-review"]]);
+  });
+
+  it("a bare verb sends empty text alongside its command id", () => {
+    const prompts: Array<[string, string, string | undefined]> = [];
+    const a = createStructuredAdapter({
+      prompt: (id, text, commandId) => prompts.push([id, text, commandId]),
+      getTranscriptPath: () => undefined,
+      getSnapshot: async () => [],
+      commandCatalog: () => undefined,
+    });
+    a.injectReply("s1", "/compact", { id: "builtin:compact", args: "" });
+    expect(prompts).toEqual([["s1", "", "builtin:compact"]]);
+  });
+
+  it("an unresolved slash command degrades to an ordinary plain prompt", () => {
+    const prompts: Array<[string, string, string | undefined]> = [];
+    const a = createStructuredAdapter({
+      prompt: (id, text, commandId) => prompts.push([id, text, commandId]),
+      getTranscriptPath: () => undefined,
+      getSnapshot: async () => [],
+      commandCatalog: () => undefined,
+    });
+    // Never a made-up commandId: every backend would drop the verb and send the
+    // bare args, so the whole line goes as text and the agent rejects it visibly.
+    a.injectReply("s1", "/invented arg");
+    expect(prompts).toEqual([["s1", "/invented arg", undefined]]);
+  });
+
+  it("commandCatalog is read from the dep, and undefined stays undefined", () => {
+    const withCatalog = createStructuredAdapter({
+      prompt: () => {},
+      getTranscriptPath: () => undefined,
+      getSnapshot: async () => [],
+      commandCatalog: () => [{ id: "cmd:x", name: "x" }],
+    });
+    expect(withCatalog.commandCatalog("s1")).toEqual([{ id: "cmd:x", name: "x" }]);
+    const without = createStructuredAdapter({
+      prompt: () => {},
+      getTranscriptPath: () => undefined,
+      getSnapshot: async () => [],
+      commandCatalog: () => undefined,
+    });
+    expect(without.commandCatalog("s1")).toBeUndefined();
+  });
+
+  it("injection never resolves a permission or a question", () => {
+    const touched: string[] = [];
+    const base = {
+      prompt: () => {},
+      getTranscriptPath: () => undefined,
+      getSnapshot: async () => [] as AbMessage[],
+      commandCatalog: () => undefined,
+      // Off the deps contract on purpose: approving a pending tool call is a
+      // human-only act, so the seam must not reach for either.
+      resolvePermission: () => { throw new Error("resolvePermission from the inject seam"); },
+      resolveQuestion: () => { throw new Error("resolveQuestion from the inject seam"); },
+    };
+    const deps = new Proxy(base, {
+      get(target, prop, recv) { touched.push(String(prop)); return Reflect.get(target, prop, recv); },
+    });
+    createStructuredAdapter(deps).injectReply("s1", "continue");
+    expect(touched).toEqual(["prompt"]);
   });
 
   it("recentOutput renders the snapshot and fails closed to empty on error", async () => {
@@ -69,12 +143,14 @@ describe("createStructuredAdapter", () => {
       prompt: () => {},
       getTranscriptPath: () => undefined,
       getSnapshot: async () => [item("agent:item-added", "a1", { kind: "message", role: "assistant", text: "hi" })],
+      commandCatalog: () => undefined,
     });
     expect(await ok.recentOutput("s1")).toBe("assistant: hi");
     const bad = createStructuredAdapter({
       prompt: () => {},
       getTranscriptPath: () => undefined,
       getSnapshot: async () => { throw new Error("driver gone"); },
+      commandCatalog: () => undefined,
     });
     expect(await bad.recentOutput("s1")).toBe("");
   });

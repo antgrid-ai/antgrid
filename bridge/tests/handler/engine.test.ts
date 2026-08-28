@@ -14,6 +14,8 @@ import type { InstructionItem, ItemTransition } from "../../src/handler/backlog"
 import { MAX_ITEM_CHARS, type ExtractedItem } from "../../src/handler/extract";
 import type { HandlerSessionRecord } from "../../src/handler/session-store";
 import { MAX_STORED, type StoredSnapshot } from "../../src/handler/snapshot-store";
+import type { InjectCommand } from "../../src/handler/session-adapter";
+import type { CapCommand } from "../../src/structured/chat-session";
 import { planSnapshots, type SnapshotEntry, type SnapshotOutcome } from "../../src/handler/snapshot";
 
 const GOAL = "Migrate auth";
@@ -43,14 +45,20 @@ function makeEngine(overrides: Record<string, unknown> = {}) {
   // records, and every test in this file arms at least one session.
   let stored: StoredSnapshot[] = [];
   const trashed: string[] = [];
+  // Every judged pause in production follows fresh agent output, so a CONSTANT
+  // tail would make two distinct pauses indistinguishable to the staleness guard
+  // (engine.ts's lastJudgedContextHash) and collapse the second into a skip. That
+  // is a fixture artifact, not a scenario — the suites below fire several events
+  // per session on purpose.
+  let ptyReads = 0;
   const engine = new HandlerEngine({
     projectId: "proj", projectPath: () => "/proj", tool: () => "claude-code", abDir: "/tmp/unused",
     adapter: {
-      injectReply: (id: string, t: string) => injected.push([id, t]),
-      recentOutput: () => "pty-tail",
+      injectReply: (id: string, t: string) => { injected.push([id, t]); },
+      recentOutput: () => `pty-tail ${ptyReads++}`,
       transcriptPath: () => "/t.jsonl",
       outputKind: () => "pty",
-      supportsSlashCommands: () => true,
+      commandCatalog: () => undefined,
     },
     sendAb: (m: AbMessage) => sent.push(m),
     sendPush: (m: string) => pushes.push(m),
@@ -765,6 +773,94 @@ describe("backlog transitions", () => {
     expect(progressed).toEqual(["t1"]);
   });
 
+  // Claude's post-completion idle nudge raises a second handler event over output
+  // the judge has already ruled on (work-status.ts filters it for the status dot;
+  // the /handler-event path does not). A second verdict on identical evidence is
+  // drawn from noise, and one such pass marked an item `done` off a re-read of a
+  // message it had already judged.
+  describe("stale-context guard", () => {
+    const frozen = { recentOutput: () => "same tail", transcriptPath: () => undefined };
+
+    it("skips a second pass over context the judge has already ruled on", async () => {
+      let judged = 0;
+      const { engine, sent } = makeEngine({
+        adapter: { injectReply: () => {}, outputKind: () => "pty", commandCatalog: () => undefined, ...frozen },
+        runDecisionFn: async () => { judged++; return decide({ decision: "escalate" }); },
+      });
+      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+      expect(judged).toBe(1);
+      // Skipped, not parked or re-escalated: the open row already says what a
+      // second one would.
+      expect(statusOf(sent).pendingEscalations).toBe(1);
+      expect(statusOf(sent).state).toBe("needs_you");
+    });
+
+    // The incident this guard exists for. The first pass marked the DEPENDENCY
+    // done, which unblocked the item behind it; keying the hash on the backlog too
+    // would read that as news and hand the judge a second look at the same message
+    // — where it found a sentence that merely resembled the unblocked item.
+    it("a backlog move of its own is not news enough to re-judge", async () => {
+      let judged = 0;
+      const transitions: ItemTransition[] = [{ id: "a", status: "done", evidence: "shipped" }];
+      const { engine } = makeEngine({
+        adapter: { injectReply: () => {}, outputKind: () => "pty", commandCatalog: () => undefined, ...frozen },
+        runDecisionFn: async () => { judged++; return decide({ transitions }); },
+      });
+      engine.arm({
+        terminalId: "t1", goal: GOAL, notifyOnly: false,
+        backlog: [item("a"), item("b", { dependsOn: ["a"] })],
+      });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+      expect(judged).toBe(1);
+    });
+
+    it("a judge outage still re-judges the pause it failed on", async () => {
+      let judged = 0;
+      const { engine, timers } = makeEngine({
+        adapter: { injectReply: () => {}, outputKind: () => "pty", commandCatalog: () => undefined, ...frozen },
+        runDecisionFn: async () => { judged++; if (judged === 1) throw new Error("judge down"); return decide({}); },
+      });
+      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(judged).toBe(1);
+      // The outage park re-runs THIS event on wake. Banking the hash before a
+      // verdict came back would make that retry skip the very pause it exists for,
+      // and no further event would raise it.
+      timers.at(-1)!.fn();
+      await drain();
+      expect(judged).toBe(2);
+    });
+
+    it("a submitted line reopens the pass the guard would have skipped", async () => {
+      let judged = 0;
+      const { engine } = makeEngine({
+        adapter: { injectReply: () => {}, outputKind: () => "pty", commandCatalog: () => undefined, ...frozen },
+        runDecisionFn: async () => { judged++; return decide({ decision: "escalate" }); },
+      });
+      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      engine.onUserReply("t1", "carry on\r");
+      await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+      expect(judged).toBe(2);
+    });
+
+    it("a re-arm reopens it too — the user restated what the session is for", async () => {
+      let judged = 0;
+      const { engine } = makeEngine({
+        adapter: { injectReply: () => {}, outputKind: () => "pty", commandCatalog: () => undefined, ...frozen },
+        runDecisionFn: async () => { judged++; return decide({ decision: "escalate" }); },
+      });
+      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      engine.arm({ terminalId: "t1", goal: "a different goal", backlog: [item("a")], notifyOnly: false });
+      await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+      expect(judged).toBe(2);
+    });
+  });
+
   it("failing a dependency derives a block on its dependents and names what they wait on", async () => {
     const { engine, sent, activity } = makeEngine({
       runDecisionFn: async () => decide({
@@ -941,31 +1037,11 @@ describe("chat blocking prompts and slash guard", () => {
     expect(esc.kind).toBeUndefined();
   });
 
-  it("slash_command handle escalates instead of injecting when the adapter refuses", async () => {
-    const injected: Array<[string, string]> = [];
-    const { engine, sent } = makeEngine({
-      adapter: {
-        injectReply: (id: string, t: string) => injected.push([id, t]),
-        recentOutput: () => "",
-        transcriptPath: () => undefined,
-        outputKind: () => "pty",
-        supportsSlashCommands: () => false,
-      },
-      runDecisionFn: async () =>
-        decide({ decision: "handle", action: { kind: "slash_command", value: "/compact" } }),
-    });
-    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
-    await engine.handleEvent({ terminalId: "c1", event: "turn_end" });
-    expect(injected).toHaveLength(0);
-    expect(sent.some((m) => m.type === "handler:escalation")).toBe(true);
-  });
-
-  it("slash_command handle injects via adapter when slash commands are supported", async () => {
+  it("a bare slash command injects as typed", async () => {
     const { engine, sent, injected } = makeEngine({
       // Default projectPath "/proj" (not "/") — this is the real production shape,
-      // and relies on classifyDestructive's pathCheckText scoping (destructive-floor.ts)
-      // to not misread the "/compact" action value as an out-of-project path.
-      // makeEngine()'s default adapter already has supportsSlashCommands: () => true.
+      // and relies on the engine withholding the VERB from classifyDestructive's
+      // pathCheckText, or "/compact" reads as an out-of-project path.
       runDecisionFn: async () =>
         decide({ decision: "handle", action: { kind: "slash_command", value: "/compact" } }),
     });
@@ -975,10 +1051,42 @@ describe("chat blocking prompts and slash guard", () => {
     expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
   });
 
+  it("flattens a multi-line reply into the one line it will submit as", async () => {
+    // The control-char guard exists to stop several commands riding in on one
+    // decision, not to refuse paragraph breaks — and a judge asked to stand in for
+    // the user writes prose. Every such reply escalated before this.
+    const { engine, sent, injected } = makeEngine({
+      runDecisionFn: async () => decide({
+        decision: "handle",
+        reply: "Good call on defect 3.\n\nDig deeper before you fix it.",
+      }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(injected).toEqual([["t1", "Good call on defect 3. Dig deeper before you fix it."]]);
+    expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
+  });
+
+  it("still escalates a reply carrying a control char that is not whitespace", async () => {
+    // Ctrl-C/EOF/escape have no formatting reading: flattening must not launder them
+    // into keystrokes the judge gets to send unsupervised.
+    const { engine, sent, injected } = makeEngine({
+      runDecisionFn: async () => decide({
+        decision: "handle",
+        reply: "pick option two\x1b[B",
+      }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(injected).toHaveLength(0);
+    const esc = sent.find((m) => m.type === "handler:escalation") as never as { reasoning: string };
+    expect(esc.reasoning).toBe("reply contains control characters");
+  });
+
   it("slash_command handle escalates instead of injecting when the value is not a simple verb", async () => {
     // action.value is judge-generated free text with no allowlist (decision.ts) — a
-    // hallucinating judge could shape it like a path. This must escalate rather than
-    // reach classifyDestructive, whose path check is scoped away from action values.
+    // hallucinating judge could shape it like a path. The "/" sits inside the first
+    // token, so the verb itself fails the shape rule and nothing is injected.
     const injected: Array<[string, string]> = [];
     const { engine, sent } = makeEngine({
       adapter: {
@@ -986,7 +1094,7 @@ describe("chat blocking prompts and slash guard", () => {
         recentOutput: () => "",
         transcriptPath: () => undefined,
         outputKind: () => "pty",
-        supportsSlashCommands: () => true,
+        commandCatalog: () => undefined,
       },
       runDecisionFn: async () =>
         decide({ decision: "handle", action: { kind: "slash_command", value: "/etc/hosts" } }),
@@ -995,6 +1103,259 @@ describe("chat blocking prompts and slash guard", () => {
     await engine.handleEvent({ terminalId: "c1", event: "turn_end" });
     expect(injected).toHaveLength(0);
     expect(sent.some((m) => m.type === "handler:escalation")).toBe(true);
+  });
+
+  // A judge that emitted "/code-review --fix" used to escalate on the whole-value
+  // verb rule, so no "handle" carrying arguments ever reached an agent.
+  describe("slash command arguments", () => {
+    it("an argument tail injects the whole line", async () => {
+      const { engine, sent, injected } = makeEngine({
+        runDecisionFn: async () =>
+          decide({ decision: "handle", action: { kind: "slash_command", value: "/code-review --fix" } }),
+      });
+      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(injected).toEqual([["t1", "/code-review --fix"]]);
+      expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
+    });
+
+    it("a malformed verb still escalates when it carries arguments", async () => {
+      const { engine, sent, injected } = makeEngine({
+        runDecisionFn: async () =>
+          decide({ decision: "handle", action: { kind: "slash_command", value: "/etc/hosts --force" } }),
+      });
+      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(injected).toHaveLength(0);
+      const esc = sent.find((m) => m.type === "handler:escalation") as never as { reasoning: string };
+      expect(esc.reasoning).toBe("slash command value is not a simple verb");
+    });
+
+    it("the floor sees an absolute path in the argument tail", async () => {
+      // The whole reason the tail joins pathCheckText: withholding it would wave
+      // through the one half of a slash command that CAN name a path.
+      const { engine, activity, injected } = makeEngine({
+        runDecisionFn: async () =>
+          decide({ decision: "handle", action: { kind: "slash_command", value: "/review /etc/passwd" } }),
+      });
+      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      const rows = records(activity, "floor_warning") as Array<{ reason: string }>;
+      expect(rows.map((r) => r.reason)).toEqual([
+        "absolute path outside project: /etc/passwd",
+      ]);
+      // Advisory, per §5.1: the warning is the outcome, not a block.
+      expect(injected).toEqual([["t1", "/review /etc/passwd"]]);
+    });
+
+    it("the verb itself raises no floor warning", async () => {
+      const { engine, activity, injected } = makeEngine({
+        runDecisionFn: async () =>
+          decide({ decision: "handle", action: { kind: "slash_command", value: "/compact" } }),
+      });
+      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(records(activity, "floor_warning")).toHaveLength(0);
+      expect(injected).toEqual([["t1", "/compact"]]);
+    });
+
+    it("a hard pattern in the argument tail still blocks", async () => {
+      const { engine, sent, injected } = makeEngine({
+        runDecisionFn: async () =>
+          decide({ decision: "handle", action: { kind: "slash_command", value: "/run mkfs.ext4 /dev/sdb" } }),
+      });
+      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(injected).toHaveLength(0);
+      const esc = sent.find((m) => m.type === "handler:escalation") as never as { floorRule?: string };
+      expect(esc.floorRule).toContain("mkfs.ext4");
+    });
+  });
+
+  // Setting both used to drop `reply` silently — unvalidated, unguarded and never
+  // sent — while the guards inspected only the action that won.
+  describe("reply and action are exclusive", () => {
+    it("setting both escalates and injects nothing", async () => {
+      const { engine, sent, injected } = makeEngine({
+        runDecisionFn: async () => decide({
+          decision: "handle", reply: "carry on",
+          action: { kind: "slash_command", value: "/compact" },
+        }),
+      });
+      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(injected).toHaveLength(0);
+      const esc = sent.find((m) => m.type === "handler:escalation") as never as
+        { reasoning: string; draftReply: string };
+      expect(esc.reasoning).toBe("set either reply or action, not both");
+      // What makes the discard non-silent: the reply the old code dropped
+      // unvalidated and unsent is the draft the user is shown and can edit.
+      expect(esc.draftReply).toBe("carry on");
+    });
+
+    it("an action of kind none beside a reply is not both", async () => {
+      const { engine, sent, injected } = makeEngine({
+        runDecisionFn: async () => decide({
+          decision: "handle", reply: "carry on", action: { kind: "none", value: "" },
+        }),
+      });
+      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(injected).toEqual([["t1", "carry on"]]);
+      expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
+    });
+
+    it("a whitespace-only reply beside a command is not both", async () => {
+      const { engine, injected } = makeEngine({
+        runDecisionFn: async () => decide({
+          decision: "handle", reply: "  \n ",
+          action: { kind: "slash_command", value: "/compact" },
+        }),
+      });
+      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(injected).toEqual([["t1", "/compact"]]);
+    });
+
+    it("an empty reply with no action still escalates", async () => {
+      const { engine, sent, injected } = makeEngine({
+        runDecisionFn: async () => decide({ decision: "handle", reply: "   " }),
+      });
+      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(injected).toHaveLength(0);
+      const esc = sent.find((m) => m.type === "handler:escalation") as never as { reasoning: string };
+      expect(esc.reasoning).toBe("empty reply");
+    });
+  });
+
+  // The catalog is the whole reliability rule: a populated one bounds what the
+  // judge may name, an absent one bounds nothing, and there is no third state.
+  describe("command catalog", () => {
+    const CATALOG: CapCommand[] = [{ id: "cmd:code-review", name: "code-review" }];
+
+    function withCatalog(catalog: CapCommand[] | undefined, value: string) {
+      const injected: Array<[string, string]> = [];
+      const commands: Array<InjectCommand | undefined> = [];
+      const engine = makeEngine({
+        adapter: {
+          injectReply: (id: string, t: string, c?: InjectCommand) => {
+            injected.push([id, t]);
+            commands.push(c);
+          },
+          recentOutput: () => "pty-tail",
+          transcriptPath: () => undefined,
+          outputKind: () => "pty",
+          commandCatalog: () => catalog,
+        },
+        runDecisionFn: async () =>
+          decide({ decision: "handle", action: { kind: "slash_command", value } }),
+      });
+      return { ...engine, injected, commands };
+    }
+
+    it("a catalog hit routes on the driver's own command id with the tail as its text", async () => {
+      const { engine, sent, injected, commands } = withCatalog(CATALOG, "/code-review --fix");
+      engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+      await engine.handleEvent({ terminalId: "c1", event: "turn_end" });
+      expect(injected).toEqual([["c1", "/code-review --fix"]]);
+      expect(commands).toEqual([{ id: "cmd:code-review", args: "--fix" }]);
+      expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
+    });
+
+    it("a verb outside a populated catalog escalates and injects nothing", async () => {
+      const { engine, sent, injected } = withCatalog(CATALOG, "/invented --fix");
+      engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+      await engine.handleEvent({ terminalId: "c1", event: "turn_end" });
+      expect(injected).toHaveLength(0);
+      const esc = sent.find((m) => m.type === "handler:escalation") as never as { reasoning: string };
+      expect(esc.reasoning).toContain("/invented");
+    });
+
+    it("membership is matched on the verb, never on the argument tail", async () => {
+      const { engine, injected } = withCatalog(CATALOG, "/fix code-review");
+      engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+      await engine.handleEvent({ terminalId: "c1", event: "turn_end" });
+      expect(injected).toHaveLength(0);
+    });
+
+    it("with no catalog an invented verb reaches the agent as plain text", async () => {
+      // The user's explicit choice for PTY: the agent rejects it visibly, which
+      // lands in the next context, rather than the supervisor refusing in advance.
+      const { engine, sent, injected, commands } = withCatalog(undefined, "/invented arg");
+      engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+      await engine.handleEvent({ terminalId: "c1", event: "turn_end" });
+      expect(injected).toEqual([["c1", "/invented arg"]]);
+      expect(commands).toEqual([undefined]);
+      expect(sent.some((m) => m.type === "handler:escalation")).toBe(false);
+    });
+
+    it("the decide prompt gets the catalog and the SUPERVISED tool, not the judge's", async () => {
+      const opts: Array<{ tool: string; agentTool?: string; commands?: CapCommand[] }> = [];
+      const { engine } = makeEngine({
+        tool: () => "claude-code",
+        adapter: {
+          injectReply: () => {},
+          recentOutput: () => "pty-tail",
+          transcriptPath: () => undefined,
+          outputKind: () => "pty",
+          commandCatalog: () => CATALOG,
+        },
+        runDecisionFn: async (o: { tool: string; agentTool?: string; commands?: CapCommand[] }) => {
+          opts.push(o);
+          return decide({});
+        },
+      });
+      engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false, judgeTool: "codex" });
+      await engine.handleEvent({ terminalId: "c1", event: "turn_end" });
+      expect(opts[0]!.tool).toBe("codex");
+      expect(opts[0]!.agentTool).toBe("claude-code");
+      expect(opts[0]!.commands).toEqual(CATALOG);
+    });
+  });
+
+  // The shape retry lives inside runDecision and is invisible through this stub;
+  // what these pin is that the engine adds no retry of its own around a SAFETY
+  // verdict, where a second ask would be a bypass rather than a correction.
+  describe("safety verdicts are never re-asked", () => {
+    it("a hard-floor rejection spends exactly one judge call", async () => {
+      let judged = 0;
+      const { engine, sent, injected } = makeEngine({
+        runDecisionFn: async () => { judged++; return decide({ decision: "handle", reply: "mkfs.ext4 /dev/sdb" }); },
+      });
+      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(judged).toBe(1);
+      expect(injected).toHaveLength(0);
+      const esc = sent.find((m) => m.type === "handler:escalation") as never as { floorRule?: string };
+      expect(esc.floorRule).toContain("mkfs.ext4");
+    });
+
+    it("a runaway-guard rejection spends exactly one judge call on the capped pass", async () => {
+      let judged = 0;
+      const { engine, sent, injected } = makeEngine({
+        runDecisionFn: async () => { judged++; return decide({ decision: "handle", reply: "same again" }); },
+      });
+      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(judged).toBe(2);
+      expect(injected).toEqual([["t1", "same again"]]);
+      const esc = sent.find((m) => m.type === "handler:escalation") as never as { reasoning: string };
+      expect(esc.reasoning).toContain("circular exchange");
+    });
+
+    it("an advisory floor warning spends one judge call and still injects", async () => {
+      let judged = 0;
+      const { engine, activity, injected } = makeEngine({
+        runDecisionFn: async () => { judged++; return decide({ decision: "handle", reply: "rm -rf node_modules" }); },
+      });
+      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(judged).toBe(1);
+      expect(records(activity, "floor_warning")).toHaveLength(1);
+      expect(injected).toEqual([["t1", "rm -rf node_modules"]]);
+    });
   });
 
   it("judges an isolated session in its own checkout, and floors paths by that checkout", async () => {
@@ -1011,7 +1372,7 @@ describe("chat blocking prompts and slash guard", () => {
         recentOutput: () => "pty-tail",
         transcriptPath: () => undefined,
         outputKind: () => "pty",
-        supportsSlashCommands: () => true,
+        commandCatalog: () => undefined,
       },
       runDecisionFn: async (args: { cwd?: string }) => {
         cwds.push(args.cwd);
@@ -1040,7 +1401,7 @@ describe("chat blocking prompts and slash guard", () => {
         recentOutput: () => "pty-tail",
         transcriptPath: () => undefined,
         outputKind: () => "pty",
-        supportsSlashCommands: () => true,
+        commandCatalog: () => undefined,
       },
       runDecisionFn: async () => decide({ decision: "handle", reply: "rm /proj/src/main.ts" }),
     });
@@ -1131,7 +1492,7 @@ describe("chat blocking prompts and slash guard", () => {
         recentOutput: async () => { aStarted = true; await gate; return "pty-tail"; },
         transcriptPath: () => undefined,
         outputKind: () => "pty",
-        supportsSlashCommands: () => true,
+        commandCatalog: () => undefined,
       },
       runDecisionFn: async () => decide({}),
     });
@@ -1219,7 +1580,7 @@ test("decide context for codex resolves the rollout path for the judge", async (
       adapter: {
         injectReply: () => {}, recentOutput: () => "pty-tail",
         transcriptPath: () => undefined, outputKind: () => "pty" as const,
-        supportsSlashCommands: () => true,
+        commandCatalog: () => undefined,
       },
       runDecisionFn: async (o: { context: string; transcriptPath?: string }) => {
         decideCalls.push({ context: o.context, transcriptPath: o.transcriptPath });
@@ -1256,7 +1617,7 @@ test("opencode decide context reads the db but hands the judge no path", async (
       adapter: {
         injectReply: () => {}, recentOutput: () => "pty-tail",
         transcriptPath: () => undefined, outputKind: () => "pty" as const,
-        supportsSlashCommands: () => true,
+        commandCatalog: () => undefined,
       },
       runDecisionFn: async (o: { context: string; transcriptPath?: string }) => {
         decideCalls.push({ context: o.context, transcriptPath: o.transcriptPath });

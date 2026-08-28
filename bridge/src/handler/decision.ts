@@ -2,8 +2,10 @@
 import { z } from "zod";
 import { agentSpec } from "../agents/registry";
 import { pickHeadlessFrom, type HeadlessCommand, type JudgeTier } from "../agents/types";
+import type { CapCommand } from "../structured/chat-session";
 import { ItemTransitionSchema } from "./backlog";
 import { extractJsonObject } from "./json-extract";
+import { MAX_REPLY_CHARS } from "./reply-shape";
 
 export const HandlerDecisionSchema = z.object({
   decision: z.enum(["continue", "handle", "escalate"]),
@@ -47,6 +49,19 @@ export function pickJudge(
   return { command: picked.command, tier: picked.reach };
 }
 
+// The CLI name, not the AgentKey and not the display label: the judge is
+// reading a transcript the agent itself wrote, where `claude` appears and
+// `claude-code` (our routing key) never does.
+function supervisedName(tool: string): string {
+  return agentSpec(tool)?.bin ?? tool;
+}
+
+// Command names and descriptions come verbatim from filesystem frontmatter and
+// can carry newlines that would break the one-entry-per-line rendering.
+function promptLine(s: string): string {
+  return s.replace(/\s+/g, " ").trim();
+}
+
 // The transition rules below restate what applyTransitions enforces. That is
 // belt-and-braces, not the guard — a prompt cannot bind the component it is
 // addressed to (spec §2.1). It earns its place by making well-formed output the
@@ -55,9 +70,17 @@ export function pickJudge(
 export function buildDecidePrompt(opts: {
   goal: string; backlogText: string; context: string; transcriptPath?: string;
   floorWarnings?: string[];
+  // The agent being SUPERVISED, never the judge running this prompt — a
+  // per-session judge pick can point at a different CLI entirely.
+  agentTool?: string;
+  // Non-empty or absent: an empty catalog is indistinguishable from a failed
+  // or not-yet-landed discovery, so it is never announced as a complete set.
+  commands?: CapCommand[];
 }): string {
   return [
-    "You are a supervisor standing in for the user while a coding agent works.",
+    opts.agentTool
+      ? `You are a supervisor standing in for the user while the coding agent \`${supervisedName(opts.agentTool)}\` works.`
+      : "You are a supervisor standing in for the user while a coding agent works.",
     "Decide whether to let the agent continue, answer it on the user's behalf, or escalate to the user.",
     "",
     "SESSION GOAL (the user's own words):",
@@ -78,6 +101,9 @@ export function buildDecidePrompt(opts: {
     "- Escalating always trumps making progress: if the next step on an item needs the user, escalate instead of transitioning it.",
     "- If you cannot answer with high confidence, escalate. A wrong auto-reply is the expensive failure.",
     "- Safety limits are enforced after your decision; never attempt to bypass them.",
+    `- \`reply\` is free text typed at the agent and submitted as ONE line, under ${MAX_REPLY_CHARS} characters. Write one line: a line break would submit early, so any you write are collapsed to spaces before sending.`,
+    "- `action` with `kind: \"slash_command\"` types a command at the agent instead. `value` is `\"/verb\"` or `\"/verb <args>\"` — the verb is a single token with no spaces and no further `/`.",
+    "- Set either `reply` or `action`, never both. A decision carrying both is refused and reaches the agent as nothing.",
     // The point of turning the floor advisory (§5.1) is that the Assistant sees
     // which of its own proposals were dangerous. Stating that these are its past
     // replies, not the agent's commands, is what makes them actionable.
@@ -89,13 +115,33 @@ export function buildDecidePrompt(opts: {
         "Weigh them when composing this reply. If the same risk is unavoidable here, escalate instead of repeating it.",
       ]
       : []),
+    // Two statements, never an empty header: an absent catalog is a real answer
+    // (a PTY session has none and cannot get one), and announcing a "complete
+    // set" that is empty would read as "this agent has no commands" — which is
+    // exactly the case an absent catalog CANNOT distinguish.
+    ...(opts.commands?.length
+      ? [
+        "",
+        "AVAILABLE COMMANDS (the complete set for this session) — invoke one through `action`, never by typing it in `reply`:",
+        ...opts.commands.map((c) => {
+          const parts = [`- /${promptLine(c.name)}`];
+          if (c.argHint) parts.push(`(args: ${promptLine(c.argHint)})`);
+          if (c.description) parts.push(`— ${promptLine(c.description)}`);
+          return parts.join(" ");
+        }),
+        "A `value` whose verb is not on this list is refused and reaches the agent as nothing.",
+      ]
+      : [
+        "",
+        "No command catalog is available for this session. Prefer plain instructions; use a slash command only if the goal or backlog names one explicitly.",
+      ]),
     "",
     "RECENT CONTEXT:",
     opts.context,
     ...(opts.transcriptPath ? ["", `Fuller transcript at ${opts.transcriptPath} — read it if the excerpt is insufficient.`] : []),
     "",
     "Respond with ONLY a single JSON object, no prose, matching exactly:",
-    '{"decision":"continue|handle|escalate","confidence":0.0,"reason":"...","reply":"(when handle) text to send the agent","action":{"kind":"slash_command|none","value":"/cmd"},"notify":{"title":"...","body":"...","draftReply":"...","urgency":"normal|high"},"transitions":[{"id":"...","status":"queued|active|done|blocked|skipped|failed","evidence":"verbatim quote","outcome":"..."}]}',
+    '{"decision":"continue|handle|escalate","confidence":0.0,"reason":"...","reply":"(when handle, and only if action is omitted) text to send the agent","action":{"kind":"slash_command|none","value":"/verb <args>"},"notify":{"title":"...","body":"...","draftReply":"...","urgency":"normal|high"},"transitions":[{"id":"...","status":"queued|active|done|blocked|skipped|failed","evidence":"verbatim quote","outcome":"..."}]}',
   ].join("\n");
 }
 
@@ -104,6 +150,19 @@ export function buildRetryPrompt(originalPrompt: string, validationError: string
     originalPrompt,
     "",
     `Your previous response was not a valid JSON object for this schema: ${validationError}`,
+    "Respond again with ONLY the single JSON object.",
+  ].join("\n");
+}
+
+// Distinct from buildRetryPrompt on purpose: a decision that parsed cleanly and
+// then failed a harness rule has perfectly valid JSON, and telling it to fix its
+// JSON teaches it to change the one thing it got right.
+export function buildShapeRetryPrompt(originalPrompt: string, rejection: string): string {
+  return [
+    originalPrompt,
+    "",
+    `Your previous response was valid JSON, but the harness refused to send it: ${rejection}`,
+    "It never reached the agent. Answer again obeying the rules above, or escalate instead if you cannot.",
     "Respond again with ONLY the single JSON object.",
   ].join("\n");
 }

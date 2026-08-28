@@ -217,3 +217,9 @@ test("pathCheckText still catches a genuine out-of-project path in the reply its
   const r = classifyDestructive(probe, PROJECT, "see /etc/hosts for details");
   expect(r.warnings.some((w) => w.tier === "ABS_PATH" && w.matched === "/etc/hosts")).toBe(true);
 });
+
+test("pathCheckText covers a reply plus an argument tail but not the verb", () => {
+  const r = classifyDestructive("looks good\n/review /etc/hosts", PROJECT, "looks good\n/etc/hosts");
+  const abs = r.warnings.filter((w) => w.tier === "ABS_PATH");
+  expect(abs.map((w) => w.matched)).toEqual(["/etc/hosts"]);
+});

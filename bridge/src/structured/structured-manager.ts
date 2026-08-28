@@ -1,5 +1,6 @@
 import { createMessage, type AbMessage } from "../protocol";
 import { isChatCapableTool } from "./chat-capable";
+import type { CapCommand } from "./chat-session";
 
 // Structural type the manager needs from a driver (CodexDriver satisfies it).
 export interface StructuredDriver {
@@ -35,6 +36,10 @@ export interface StructuredDriver {
   // implements nothing — the app only offers a stop for a task the session
   // itself advertised — so the no-op is an invariant, not a silent default.
   stopTask?(taskId: string): Promise<void>;
+  // This session's slash commands, or undefined when there is no catalog to
+  // offer. Optional for the same reason as stopTask: presence IS the
+  // capability, so there is no second list to keep in lockstep.
+  commandCatalog?(): CapCommand[] | undefined;
   // May be async: a driver whose backend holds a process-global lock (codex's
   // ~/.codex sqlite) resolves only once that process has fully exited, so a
   // restart doesn't race the dying one for the lock.
@@ -378,6 +383,14 @@ export class StructuredAgentManager {
     const driver = this.drivers.get(sessionId);
     if (!driver?.getTranscriptSnapshot) return [];
     return driver.getTranscriptSnapshot();
+  }
+
+  /** `sessionId`'s slash commands, or undefined when none are available — the
+   *  session isn't running, its driver reports no catalog, or discovery has
+   *  produced nothing yet. All three are the same answer to the one caller that
+   *  asks (the Handler): do not claim to know this session's commands. */
+  commandCatalog(sessionId: string): CapCommand[] | undefined {
+    return this.drivers.get(sessionId)?.commandCatalog?.();
   }
 
   disposeAll(): Promise<void> {

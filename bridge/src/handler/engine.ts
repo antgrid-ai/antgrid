@@ -1,4 +1,5 @@
 // bridge/src/handler/engine.ts
+import { createHash } from "node:crypto";
 import { createMessage, type AbMessage } from "../protocol";
 import { classifyDestructive, describeWarning, type FloorWarning } from "./destructive-floor";
 import {
@@ -27,6 +28,8 @@ import {
   type InstructionItem, type ItemStatus,
 } from "./backlog";
 import { stripAnsi } from "./context";
+import { checkReplyShape, findCommand, oneLine, replyShape } from "./reply-shape";
+import type { CapCommand } from "../structured/chat-session";
 import type { SessionAdapter } from "./session-adapter";
 import { handlerObservable, judgeCapable } from "../agents/registry";
 import { createEntitlementReader, type EntitlementReader } from "../entitlement";
@@ -127,11 +130,13 @@ const SUMMARY_GROUPS: [SummaryStatus, string][] = [
   ["skipped", "Skipped"],
 ];
 
-// Item text and the goal are free text the user typed or extraction produced, so
-// either can carry newlines that would render a push body as a broken multi-line
-// notification.
-function oneLine(s: string): string {
-  return s.replace(/\s+/g, " ").trim();
+// Identity of the evidence a decide pass reasoned over (see lastJudgedContextHash).
+// Deliberately NOT RunawayGuard's 32-bit djb2: a collision there false-escalates,
+// which is the safe direction, but a collision HERE skips a real pause and no
+// further event raises it again. Over a 12k-char context that margin has to be
+// cryptographic, and the cost is one hash per judge call.
+function contextHash(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
 }
 
 // `??` is the wrong operator against a judge decision: `notify.body`/`notify.draftReply`
@@ -329,6 +334,23 @@ interface ArmedSession {
   limitParks: number;
   // One push per park episode: a re-park is the same wait, not a new one.
   parkPushSent?: boolean;
+  // Fingerprint of the context the last COMPLETED decide pass reasoned over. An
+  // event whose context hashes the same brings the judge no information it has
+  // not already ruled on, so it is skipped rather than judged again (claude's
+  // post-completion idle nudge raises one such event per turn; work-status.ts
+  // filters it for the status dot, the /handler-event path does not).
+  //
+  // Keyed on the CONTEXT ALONE, never the backlog: a backlog move is the judge's
+  // own bookkeeping, and re-judging because a prior pass unblocked an item is the
+  // self-referential loop this exists to break — an item was once marked `done` on
+  // a re-read of the very message that had just completed its dependency. New
+  // evidence has to come from the agent. User-originated input (a re-arm, stacked
+  // instructions, a submitted line) clears it; a transition never does.
+  //
+  // Not persisted, for the reason limitParks is not: a restart is itself a break
+  // in continuity, and a stale hash surviving one would skip a pause that nothing
+  // re-raises.
+  lastJudgedContextHash?: string;
   // Outage park born of a judge failure: the pause was never judged, so the
   // wake re-runs this event instead of nudging past supervision.
   retryEvent?: HandlerEvent;
@@ -556,6 +578,10 @@ export class HandlerEngine {
       const goalChanged = p.goal !== undefined && p.goal.trim() !== existing.goal.trim();
       if (p.goal !== undefined) existing.goal = p.goal;
       if (backlog !== undefined) existing.backlog = backlog;
+      // A configure is the user restating what this session is for, so the last
+      // pass's verdict no longer covers the same question — the next event is
+      // judged even if the agent has not moved.
+      existing.lastJudgedContextHash = undefined;
       existing.notifyOnly = p.notifyOnly;
       this.applyJudgeChoice(existing, p);
       this.persist(p.terminalId, existing, true);
@@ -804,6 +830,11 @@ export class HandlerEngine {
       };
     })];
 
+    // Work the user stacked on an agent that may already be idle: without this the
+    // staleness guard would skip the very pass meant to pick the new items up,
+    // and no further event would arrive to raise them.
+    s.lastJudgedContextHash = undefined;
+
     // No propagateBlocked: every item here is `queued` with intra-batch deps, so
     // there is nothing to derive. The decide path already runs it each pass.
     this.persist(terminalId, s, true);
@@ -842,6 +873,11 @@ export class HandlerEngine {
     // comes first: typing into an armed terminal must not cost one disk write +
     // one encrypted status broadcast per character.
     if (!/[\r\n]/.test(data)) return;
+    // A submitted line ordinarily reaches the transcript and moves the hash by
+    // itself; cleared anyway because the two are written by different processes
+    // and the guard must never be the reason a human's own instruction goes
+    // unjudged.
+    s.lastJudgedContextHash = undefined;
     // A human at the keyboard ends a park — before the nothing-changed
     // early-return below, which a parked session normally satisfies.
     const unparked = this.unparkIfParked(terminalId, s);
@@ -1111,8 +1147,18 @@ export class HandlerEngine {
     // The act-on-decision body below keeps its own catch — parking there would
     // re-judge a decision that was already made and acted on.
     let decision: HandlerDecision | null;
+    // Assigned only once the pass is known to be worth judging, and banked only
+    // after a verdict comes back: a judge outage parks and re-runs THIS event, so
+    // banking the hash up front would make the retry skip the pause it exists to
+    // re-judge.
+    let judgedHash: string | undefined;
+    // Read once, before the judge runs, and reused by the handle branch below: the
+    // membership rule must be checked against the catalog the judge was actually
+    // shown, not one a driver re-published while it was thinking.
+    let catalog: CapCommand[] | undefined;
     try {
       const tool = this.deps.tool(evt.terminalId);
+      catalog = this.deps.adapter.commandCatalog(evt.terminalId);
       const transcriptPath = evt.transcriptPath ?? this.deps.adapter.transcriptPath(evt.terminalId);
       const ctx = await assembleContext({
         tool, transcriptPath,
@@ -1121,6 +1167,32 @@ export class HandlerEngine {
         recentKind: this.deps.adapter.outputKind(evt.terminalId),
         purpose: "decide",
       });
+      // Nothing has happened since the last pass reached a verdict, so a second
+      // judge call can only re-rule on evidence already ruled on — and a judge
+      // that answers differently the second time is answering from noise. Skipped
+      // silently: this is the judged path's half of the notify-only rule that one
+      // unanswered escalation is enough, and a duplicate row would say the same
+      // thing the open one already says.
+      const hash = contextHash(ctx.text);
+      if (hash === s.lastJudgedContextHash) {
+        // assembleContext awaited the filesystem; a concurrent disarm may have
+        // dropped this session, and resting it would re-persist it as armed.
+        if (this.sessions.get(evt.terminalId) === s) {
+          s.state = restingState(s);
+          this.emitStatus();
+        }
+        return;
+      }
+      judgedHash = hash;
+      // One retry, spent INSIDE the judge call so it shares that call's total budget
+      // and structurally cannot wrap the destructive floor or the runaway guard —
+      // those are safety verdicts, and a retry loop around them is a bypass. Only
+      // rules the prompt states are retried; a catalog miss is not one of them.
+      const retryIfShape = (d: HandlerDecision): string | null => {
+        if (d.decision !== "handle") return null;
+        const r = checkReplyShape(replyShape(d), catalog);
+        return r?.retryable ? r.reason : null;
+      };
       const runDecisionFn = this.deps.runDecisionFn ?? defaultRunDecision;
       decision = await runDecisionFn({
         tool: s.judgeTool ?? tool, model: s.judgeModel, goal: s.goal,
@@ -1128,6 +1200,11 @@ export class HandlerEngine {
         context: ctx.text, transcriptPath: ctx.transcriptPath ?? transcriptPath,
         cwd: this.deps.projectPath(evt.terminalId),
         floorWarnings: s.floorWarnings,
+        // The SUPERVISED agent, not the judge: `tool:` above is `s.judgeTool ?? tool`,
+        // and a per-session judge pick can name a different CLI entirely.
+        agentTool: tool,
+        commands: catalog,
+        retryIfShape,
       });
     } catch {
       if (this.sessions.get(evt.terminalId) === s) this.onJudgeUnavailable(evt, s);
@@ -1144,6 +1221,7 @@ export class HandlerEngine {
     // A judge that answered proves the provider is serving us again.
     s.transientFailures = 0;
     s.limitParks = 0;
+    s.lastJudgedContextHash = judgedHash;
 
     // A rejection must not strand state in "handling" — reset before rethrowing so
     // the next event isn't ignored and the app's status pill reflects reality.
@@ -1154,41 +1232,28 @@ export class HandlerEngine {
       // escalation never wraps up — wake-rules trump completion.
 
       if (decision.decision === "handle") {
-        const reply = (decision.reply ?? "").trim();
-        const actionText = decision.action?.kind === "slash_command" ? decision.action.value : "";
-        const probe = `${reply}\n${actionText}`;
-        if (!reply && !actionText) return this.escalate(evt.terminalId, s, decision, "empty reply");
+        // Every shape rule lives in reply-shape.ts because the judge is re-asked
+        // against the SAME function (see retryIfShape above): a rule the retry teaches
+        // but this gate does not enforce — or the reverse — is the exact failure this
+        // path exists to end.
+        const shape = replyShape(decision);
+        const rejection = checkReplyShape(shape, catalog);
+        // forcedReason only: floorRule is the §5.3 hard floor's alone, and setting it
+        // here would suppress the escalation card's one-tap choices.
+        if (rejection) return this.escalate(evt.terminalId, s, decision, rejection.reason);
 
-        // Harness guards on the gate-bypassing inject channel (alongside the floor): a
-        // compromised/hallucinating judge must not inject an unbounded blob or smuggle
-        // multiple commands via embedded newlines/control chars in one "handle".
-        const MAX_REPLY_CHARS = 4096;
-        const written = actionText || reply;
-        if (written.length > MAX_REPLY_CHARS) {
-          return this.escalate(evt.terminalId, s, decision, `reply too long (${written.length} > ${MAX_REPLY_CHARS})`);
-        }
-        if (/[\x00-\x1f\x7f]/.test(written)) {
-          return this.escalate(evt.terminalId, s, decision, "reply contains control characters");
-        }
-        // action.value is judge-generated free text (decision.ts has no allowlist), so a
-        // hallucinating judge could shape it like a filesystem path rather than a command
-        // verb. Require a single "/"-free, whitespace-free token so classifyDestructive's
-        // path check — scoped to `reply` only, not this value — never needs to reconsider it.
-        if (actionText && !/^\/[^\s/\\]+$/.test(actionText)) {
-          return this.escalate(evt.terminalId, s, decision, "slash command value is not a simple verb");
-        }
-
-        // Chat adapters can't inject a slash command (drivers need a commandId
-        // the judge doesn't have); surfacing it beats silently sending "/x" as
-        // literal prompt text the agent would misread.
-        if (actionText && !this.deps.adapter.supportsSlashCommands(evt.terminalId)) {
-          return this.escalate(evt.terminalId, s, decision, "slash commands are not supported in chat sessions");
-        }
+        // The probe is the whole command line — args included — because that is what
+        // reaches the agent, and what the runaway guard must hash to notice a repeat.
+        const probe = `${shape.reply}\n${shape.actionText}`;
+        // The path check gets the reply plus the ARGUMENT TAIL and never the verb: a
+        // verb is "/"-shaped and ABS_PATH would read it as a path start, while an
+        // absolute path in the args is a real one the floor has to see.
+        const pathText = `${shape.reply}\n${shape.args}`;
 
         // The floor's ONE call site (spec §5). It inspects the text Handler is
         // about to inject, never the commands the agent goes on to run.
         const projectPath = this.deps.projectPath(evt.terminalId);
-        const floor = classifyDestructive(probe, projectPath, reply);
+        const floor = classifyDestructive(probe, projectPath, pathText);
         // Checked before the partition, and never against it: §5.3 is liftable by
         // nothing, so no instruction can reach this branch.
         if (floor.hard.length > 0) {
@@ -1213,7 +1278,7 @@ export class HandlerEngine {
         // §5.4 drops the warning, never the safety net ("I asked for it" is not the
         // same as "I wanted that exact result").
         const snapshots = warn.length + authorized.length > 0
-          ? await this.prepareSnapshots(evt.terminalId, written)
+          ? await this.prepareSnapshots(evt.terminalId, shape.written)
           : [];
         // The snapshot pass awaits git and the filesystem; a concurrent disarm may
         // have dropped this session, and injecting into one the user stopped is the
@@ -1226,7 +1291,14 @@ export class HandlerEngine {
           return;
         }
 
-        this.deps.adapter.injectReply(evt.terminalId, written);
+        // A catalog hit routes on the driver's own command id, so a chat transport
+        // sends the argument tail alone; a PTY ignores it and types the whole line.
+        // A miss against an AVAILABLE catalog never gets here (checkReplyShape
+        // escalated it); a session with no catalog degrades to plain text, which the
+        // agent rejects visibly rather than the supervisor refusing in advance.
+        const command = findCommand(catalog, shape.verb);
+        this.deps.adapter.injectReply(evt.terminalId, shape.written,
+          command ? { id: command.id, args: shape.args } : undefined);
         this.guard.recordAutoReply(evt.terminalId, probe);
         // Both recorded after the inject and before the handle row, so the feed reads
         // as "what was saved, what was flagged, then what was sent". Auditability is
@@ -1234,7 +1306,7 @@ export class HandlerEngine {
         // Assistant's own view of the risk.
         this.recordSnapshots(evt.terminalId, s, snapshots, [...warn, ...authorized]);
         this.noteFloorWarnings(evt.terminalId, s, warn);
-        this.record(evt.terminalId, "handle", decision.reason, written);
+        this.record(evt.terminalId, "handle", decision.reason, shape.written);
         if (this.maybeWrapUp(evt.terminalId, s)) return;
         s.state = restingState(s);
         this.persist(evt.terminalId, s, true);

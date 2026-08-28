@@ -48,7 +48,7 @@ function makeEngine(claim?: () => TierClaim, over: Record<string, unknown> = {})
       recentOutput: () => "pty-tail",
       transcriptPath: () => "/t.jsonl",
       outputKind: () => "pty",
-      supportsSlashCommands: () => true,
+      commandCatalog: () => undefined,
     },
     sendAb: (m: AbMessage) => sent.push(m),
     sendPush: () => {},

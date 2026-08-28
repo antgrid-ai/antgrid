@@ -1481,15 +1481,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // missing driver then surfaces as agent:error instead of a silent
         // throw. This path never re-enters handleAbMessage, so an auto-reply
         // cannot reset the runaway guard that counts it.
-        prompt: (id, text) => {
+        prompt: (id, text, commandId) => {
           // requestId is required by AgentPromptMessage; drivers use it only
           // for send-correlation, so a fresh UUID is sufficient.
           void structured?.handleAgentMessage(createMessage("agent:prompt", {
             sessionId: id, requestId: crypto.randomUUID(), text,
+            ...(commandId ? { commandId } : {}),
           }), { injected: true });
         },
         getTranscriptPath: (id) => sessions?.getAgentTranscriptPath(id),
         getSnapshot: (id) => structured?.getTranscriptSnapshot(id) ?? Promise.resolve([]),
+        commandCatalog: (id) => structured?.commandCatalog(id),
       }),
     }),
     sendAb: (msg) => sendAb(msg),

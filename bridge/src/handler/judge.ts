@@ -1,7 +1,8 @@
 // bridge/src/handler/judge.ts
 import { runHeadless } from "../agents/headless";
+import type { CapCommand } from "../structured/chat-session";
 import {
-  buildDecidePrompt, buildRetryPrompt, parseDecisionFromOutput, pickJudge,
+  buildDecidePrompt, buildRetryPrompt, buildShapeRetryPrompt, parseDecisionFromOutput, pickJudge,
   type HandlerDecision,
 } from "./decision";
 import { buildExtractPrompt, parseItemsFromOutput, type ExtractedItem } from "./extract";
@@ -14,9 +15,17 @@ function resolveCmd(cmd: string[], prompt: string): string[] {
   return script ? ["bun", script, prompt] : cmd;
 }
 
-// Shared retry-once shape: build prompt → spawn → parse; on parse failure re-spawn
-// with the validation error appended; second failure fails closed (null). Timeout
-// and spawn failure fail closed IMMEDIATELY — no retry.
+// Shared retry-once shape: build prompt → spawn → parse. A parse failure OR a
+// caller `retryIf` rejection each earn exactly one re-spawn; the second answer is
+// final. Timeout and spawn failure earn none.
+//
+// Null means ONE thing — no attempt produced a value — because that is what a
+// caller reads as a judge outage: HandlerEngine parks the session and re-runs the
+// event on it. So a value that PARSED and was then rejected always beats null on
+// the way out, on every leg (timeout, spent budget, failed retry spawn); parking
+// on it would swallow a decision the caller's own gate would have escalated with
+// its text attached. Null is left for a tool with no repo-reach judge, a failed
+// spawn, and output that never parsed at all.
 //
 // timeoutMs is a TOTAL budget across both attempts, not per-spawn: the retry gets
 // only the time the first attempt left unspent. This keeps worst-case wall time at
@@ -28,6 +37,12 @@ async function runWithRetry<T>(opts: {
   spawn?: typeof Bun.spawn; transcriptPath?: string;
   makePrompt: (transcriptPath?: string) => string;
   parse: (stdout: string) => { value: T | null; error?: string };
+  // Re-ask once when the parsed value is well-formed JSON but breaks a caller
+  // rule the prompt states (a non-null string is that rejection's reason).
+  // Deliberately a CALLER hook rather than a rule of this module: the caller's
+  // safety verdicts live above this function and must stay unreachable from
+  // the retry — a retry loop around a safety verdict is a bypass.
+  retryIf?: (value: T) => string | null;
 }): Promise<T | null> {
   const spawn = opts.spawn ?? Bun.spawn;
   // Reach first: a transcript-reach judge has no Read tool, so a transcript-path
@@ -51,30 +66,48 @@ async function runWithRetry<T>(opts: {
   const out1 = await run(prompt, opts.timeoutMs);
   if (out1 === null) return null;
   const r1 = opts.parse(out1.stdout);
-  if (r1.value) return r1.value;
-  if (out1.timedOut) return null; // hung judge with unusable output: no retry
+  const shapeError = r1.value ? opts.retryIf?.(r1.value) ?? null : null;
+  if (r1.value && !shapeError) return r1.value;
+  // A shape-rejected value always beats null on the way out: null means "the
+  // judge could not run" to every caller, and a caller that parks on an outage
+  // would silently swallow a decision its own guards would have escalated with
+  // the text attached. Null still comes back where it always did — a first
+  // attempt whose output would not parse at all.
+  if (out1.timedOut) return r1.value; // hung judge with unusable output: no retry
 
   // Budget spent by the first attempt is gone; the retry runs only within what
   // remains. If none is left, fail closed rather than start a full second timeout.
   const remaining = opts.timeoutMs - (Date.now() - started);
-  if (remaining <= 0) return null;
-  const retryPrompt = buildRetryPrompt(prompt, r1.error ?? "invalid output");
+  if (remaining <= 0) return r1.value;
+  const retryPrompt = shapeError
+    ? buildShapeRetryPrompt(prompt, shapeError)
+    : buildRetryPrompt(prompt, r1.error ?? "invalid output");
   const out2 = await run(retryPrompt, remaining);
-  if (out2 === null) return null;
-  return opts.parse(out2.stdout).value;
+  if (out2 === null) return r1.value;
+  // Exactly one retry: the second answer is final even if it breaks the same
+  // rule, and the caller's own gate escalates it from there.
+  return opts.parse(out2.stdout).value ?? r1.value;
 }
 
 export async function runDecision(opts: {
+  // `tool` is the JUDGE's CLI (a per-session pick may name a different agent
+  // from the one being watched); `agentTool` is the agent under supervision,
+  // and only the prompt reads it.
   tool: string; model?: string; goal: string; backlogText: string; context: string;
   transcriptPath?: string; cwd: string; timeoutMs?: number; spawn?: typeof Bun.spawn;
   floorWarnings?: string[];
+  agentTool?: string;
+  commands?: CapCommand[];
+  retryIfShape?: (decision: HandlerDecision) => string | null;
 }): Promise<HandlerDecision | null> {
   return runWithRetry<HandlerDecision>({
     tool: opts.tool, model: opts.model, cwd: opts.cwd,
     timeoutMs: opts.timeoutMs ?? 45_000, spawn: opts.spawn, transcriptPath: opts.transcriptPath,
+    retryIf: opts.retryIfShape,
     makePrompt: (path) => buildDecidePrompt({
       goal: opts.goal, backlogText: opts.backlogText, context: opts.context, transcriptPath: path,
       floorWarnings: opts.floorWarnings,
+      agentTool: opts.agentTool, commands: opts.commands,
     }),
     parse: (stdout) => {
       const r = parseDecisionFromOutput(stdout);
