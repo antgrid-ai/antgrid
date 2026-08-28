@@ -664,13 +664,27 @@ describe("hook posts", () => {
       ]);
     });
 
-    test("user-prompt posts only a turn-start", async () => {
+    // The prompt rides along, so the session can be named at the first message
+    // instead of waiting for a turn to end.
+    test("user-prompt posts a turn-start and a title request carrying the prompt", async () => {
       const posts = await hookPosts({
         agent: name,
         event: "user-prompt",
         stdin: JSON.stringify({ session_id: "s1", prompt: "hi" }),
       });
-      expect(posts).toEqual([{ port: PORT, path: "/turn-start", body: { terminalId: TERM } }]);
+      expect(posts).toEqual([
+        { port: PORT, path: "/turn-start", body: { terminalId: TERM } },
+        {
+          port: PORT,
+          path: "/session-title",
+          body: {
+            terminalId: TERM,
+            sessionId: "s1",
+            agent: "claude",
+            prompt: "hi",
+          },
+        },
+      ]);
     });
 
     test("a non-waiting notification is a permission_request", async () => {

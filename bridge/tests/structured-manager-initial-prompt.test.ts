@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { StructuredAgentManager, type StructuredDriver } from "../src/structured/structured-manager";
-import type { AbMessage } from "../src/protocol";
+import { createMessage, type AbMessage } from "../src/protocol";
 
 function makeFakeDriver(overrides: Partial<StructuredDriver> = {}): StructuredDriver & { prompts: string[] } {
   const prompts: string[] = [];
@@ -77,5 +77,49 @@ describe("startChat initialPrompt", () => {
     await mgr.stopChat("s1");
     await mgr.startChat({ sessionId: "s1", tool: "codex", initialPrompt: "second" });
     expect(driver.prompts).toEqual(["first", "second"]);
+  });
+});
+
+// A chat session has no hook to carry its first message, so this tap is the only
+// thing that can name one from what the user actually asked for — the naming
+// path for an agent that ships neither hooks nor a title of its own (opencode).
+describe("onUserPrompt", () => {
+  function makeTapped(driver: StructuredDriver) {
+    const seen: Array<[string, string]> = [];
+    const mgr = new StructuredAgentManager({
+      driverFactory: () => driver,
+      sendMessage: () => {},
+      onAgentSession: () => {},
+      onUserPrompt: (sessionId, text) => { seen.push([sessionId, text]); },
+    });
+    return { mgr, seen };
+  }
+
+  it("reports the initial prompt, once per session lifetime", async () => {
+    const { mgr, seen } = makeTapped(makeFakeDriver());
+    await mgr.startChat({ sessionId: "s1", tool: "codex", initialPrompt: "add a login page" });
+    await mgr.startChat({ sessionId: "s1", tool: "codex", initialPrompt: "add a login page" });
+    expect(seen).toEqual([["s1", "add a login page"]]);
+  });
+
+  // The prompt is what the session gets named from, so a delivery that throws
+  // must still report it — the user asked for the same thing either way.
+  it("reports a prompt whose delivery fails", async () => {
+    const driver = makeFakeDriver({ prompt: async () => { throw new Error("boom"); } });
+    const { mgr, seen } = makeTapped(driver);
+    await mgr.startChat({ sessionId: "s1", tool: "codex", initialPrompt: "hello" });
+    expect(seen).toEqual([["s1", "hello"]]);
+  });
+
+  it("reports an app-sent prompt, but not a slash command's arguments", async () => {
+    const { mgr, seen } = makeTapped(makeFakeDriver());
+    await mgr.startChat({ sessionId: "s1", tool: "codex" });
+    await mgr.handleAgentMessage(createMessage("agent:prompt", {
+      sessionId: "s1", requestId: "r1", text: "fix the flaky test",
+    }));
+    await mgr.handleAgentMessage(createMessage("agent:prompt", {
+      sessionId: "s1", requestId: "r2", text: "--all", commandId: "review",
+    }));
+    expect(seen).toEqual([["s1", "fix the flaky test"]]);
   });
 });

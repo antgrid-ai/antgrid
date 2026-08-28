@@ -30,7 +30,7 @@ export function createDriver(ctx: DriverCtx): StructuredDriver {
   };
   ctx.emitUpdateCheck();
   return new OpencodeDriver({
-    sessionId: ctx.sessionId, client: lazy, sendMessage: ctx.send, onTitle: ctx.onTitle,
+    sessionId: ctx.sessionId, client: lazy, sendMessage: ctx.send,
     onLifecycle: ctx.onLifecycle,
   });
 }

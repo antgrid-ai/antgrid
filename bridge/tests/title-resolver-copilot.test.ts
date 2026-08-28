@@ -42,13 +42,18 @@ function seed(
 }
 
 describe("resolveCopilotSessionTitle", () => {
-  test("returns summary when present", async () => {
+  test("ignores Copilot's own summary and reports the first user turn", async () => {
     const home = tmp();
-    seed(home, [{ id: "sess-1", summary: "Fix the parser" }]);
-    expect(await resolveCopilotSessionTitle("sess-1", home)).toEqual({ title: "Fix the parser", kind: "generated" });
+    seed(home, [{ id: "sess-1", summary: "Fix the parser" }], [
+      { session_id: "sess-1", turn_index: 0, user_message: "the parser drops semicolons" },
+    ]);
+    // We name sessions ourselves, so Copilot's summary is not a title source —
+    // depending on it meant a session got a name only once Copilot wrote one.
+    expect(await resolveCopilotSessionTitle("sess-1", home))
+      .toEqual({ title: "the parser drops semicolons", kind: "first-message" });
   });
 
-  test("falls back to first-turn user_message when summary is null", async () => {
+  test("reports the first-turn user_message", async () => {
     const home = tmp();
     seed(home, [{ id: "sess-2", summary: null }], [
       { session_id: "sess-2", turn_index: 1, user_message: "second" },
@@ -95,8 +100,10 @@ describe("copilotSessionExistsSync", () => {
 describe("resolveStructuredTitle -> github-copilot", () => {
   test("routes to the copilot reader via copilotHome", async () => {
     const home = tmp();
-    seed(home, [{ id: "sess-9", summary: "Routed title" }]);
+    seed(home, [{ id: "sess-9", summary: "Routed title" }], [
+      { session_id: "sess-9", turn_index: 0, user_message: "routed message" },
+    ]);
     const title = await resolveStructuredTitle("github-copilot", { sessionId: "sess-9" }, { copilotHome: home });
-    expect(title).toEqual({ title: "Routed title", kind: "generated" });
+    expect(title).toEqual({ title: "routed message", kind: "first-message" });
   });
 });

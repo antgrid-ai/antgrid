@@ -63,6 +63,11 @@ export interface StructuredAgentManagerOpts {
   // Overwrite-latest per key. Separate from the driver's own setConfig (which
   // applies it live) — this is only the durable write.
   onSetConfig?: (sessionId: string, key: string, value: string) => void;
+  // Called with the text of every user prompt this manager delivers. A chat
+  // session has no hook to carry its first message — the bridge itself is what
+  // hands a prompt to the driver — so this is the only place one can be named
+  // from what the user actually asked for.
+  onUserPrompt?: (sessionId: string, text: string) => void;
 }
 
 export class StructuredAgentManager {
@@ -86,6 +91,7 @@ export class StructuredAgentManager {
   private readonly onAgentSession: (sessionId: string, agentSessionId: string) => void;
   private readonly dropSessionReplay?: (sessionId: string) => void;
   private readonly onSetConfig?: (sessionId: string, key: string, value: string) => void;
+  private readonly onUserPrompt?: (sessionId: string, text: string) => void;
 
   constructor(opts: StructuredAgentManagerOpts) {
     this.factory = opts.driverFactory;
@@ -93,6 +99,7 @@ export class StructuredAgentManager {
     this.onAgentSession = opts.onAgentSession;
     this.dropSessionReplay = opts.dropSessionReplay;
     this.onSetConfig = opts.onSetConfig;
+    this.onUserPrompt = opts.onUserPrompt;
   }
 
   async startChat(opts: { sessionId: string; tool: string; resumeId?: string; config?: Record<string, string>; initialPrompt?: string }): Promise<void> {
@@ -196,6 +203,9 @@ export class StructuredAgentManager {
     const driver = this.drivers.get(sessionId);
     if (!driver) return;
     this.initialPromptDelivered.add(sessionId);
+    // Before the delivery, not after: this is the message the session gets named
+    // from, and a prompt() that rejects still tells us what the user asked for.
+    this.onUserPrompt?.(sessionId, initial);
     try {
       await driver.prompt(initial);
     } catch (err) {
@@ -268,6 +278,8 @@ export class StructuredAgentManager {
         case "agent:prompt": {
           const driver = this.drivers.get(msg.sessionId);
           if (!driver) throw new Error("chat session not started");
+          // A slash command's `text` is only its arguments, which name nothing.
+          if (!msg.commandId && msg.text.trim()) this.onUserPrompt?.(msg.sessionId, msg.text);
           await driver.prompt(msg.text, msg.commandId);
           break;
         }

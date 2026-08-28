@@ -2,29 +2,28 @@ import { existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { logger } from "../../logger";
-import { parseAntigravityRenames, readAntigravitySummaries } from "./title";
+import { parseAntigravityRenames } from "./title";
 
-/** True for the agy files a conversation title can change in: the command log
- *  (a `/rename`) and the summaries DB (agy's generated `preview`, WAL-journaled
- *  so writes land in `conversation_summaries.db-wal`). Everything else in the
- *  home dir — especially the churning `cli.log` — is ignored. */
+/** True for the agy file a user-chosen conversation name can change in: the
+ *  command log, where `/rename` is recorded. agy's OWN names live in
+ *  conversation_summaries.db and are deliberately not watched — we generate our
+ *  titles rather than wait on agy's. Everything else in the home dir —
+ *  especially the churning `cli.log` — is ignored. */
 function isTitleSource(filename: string): boolean {
-  return filename === "history.jsonl" || filename.startsWith("conversation_summaries.db");
+  return filename === "history.jsonl";
 }
 
 /**
- * Watches agy's title sources and reports the current best name per conversation
- * as it changes, so the app follows both a `/rename` (instant) and agy's own
- * generated name (which agy writes a beat AFTER the turn) without waiting for the
- * next hook fire — agy triggers no hook on either event.
+ * Watches agy's command log and reports each conversation's `/rename` as it
+ * happens, so the app follows a rename instantly — agy fires no hook on one, so
+ * without this it would not surface until the next turn.
  *
- * The reported title uses the same precedence as the resolver: a live `/rename`
- * (history.jsonl) outranks agy's `title`/`preview` (conversation_summaries.db).
- * The first-user-message fallback is deliberately NOT here — that one is instant
- * and already supplied by the hook → resolver path; the watcher only delivers
- * the two lagging/idle upgrades. Because a lower source is only chosen when the
- * higher one is absent, and every scan reconsiders both, an upgrade never
- * regresses a session's name back down.
+ * Renames ONLY. agy also names conversations itself in conversation_summaries.db
+ * (its `preview`), and that used to be reported here as a lagging upgrade; it is
+ * no longer read anywhere, because we generate our own name from the first user
+ * message instead of waiting to see whether agy writes one (see ResolvedTitle).
+ * The first-user-message fallback is not here either — that one is instant and
+ * already supplied by the hook -> resolver path.
  *
  * Reports only CHANGED titles (deduped per conversation), and only ones produced
  * after `start()` — the current state is seeded silently so a resume doesn't
@@ -49,9 +48,8 @@ export class AntigravityTitleWatcher {
     // swallowed by a seed still in flight.
     this.seed();
     try {
-      // Watch the DIRECTORY, not the individual files: agy rewrites history.jsonl
-      // via atomic replace (drops a file-level watch on Windows) and journals the
-      // summaries DB through a separate -wal file.
+      // Watch the DIRECTORY, not the file: agy rewrites history.jsonl via atomic
+      // replace, which drops a file-level watch on Windows.
       this.watcher = watch(this.home, (_event, filename) => {
         // A null filename (some platforms/events omit it) is unclassifiable, so
         // scan rather than risk dropping a real title change; a named event is
@@ -112,9 +110,7 @@ export class AntigravityTitleWatcher {
   }
 
   private apply(renames: Map<string, string>, seedOnly: boolean): void {
-    const summaries = readAntigravitySummaries(this.home);
-    for (const cid of new Set([...renames.keys(), ...summaries.keys()])) {
-      const title = renames.get(cid) ?? summaries.get(cid);
+    for (const [cid, title] of renames) {
       if (!title || this.lastSeen.get(cid) === title) continue;
       this.lastSeen.set(cid, title);
       if (!seedOnly) this.onTitle(cid, title);

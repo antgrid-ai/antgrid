@@ -2,7 +2,6 @@ import type { HookCommand } from "../hook-command";
 import type { HookInvocation, HookPath, HookPost } from "./hook-posts";
 import type { AbMessage } from "../protocol";
 import type { StructuredDriver } from "../structured/structured-manager";
-import type { JudgeTier } from "../handler/decision";
 import type { HandlerEvent } from "../handler/engine";
 
 /**
@@ -123,8 +122,6 @@ export interface DriverCtx {
   chatAugment: () => { args: string[]; env: Record<string, string> };
   /** Persist the agent-native resume id for this slot (overwrite-latest). */
   onAgentSession: (agentSessionId: string) => void;
-  /** Hand a driver-supplied session title to the namer. */
-  onTitle: (title: string) => void;
   /** Report that the provider stopped serving this session (limit or outage) so
    *  an armed Handler parks instead of going silent. Optional: a driver with no
    *  structured signal for it changes nothing by leaving it unused. */
@@ -171,21 +168,112 @@ export interface ResumableArgs {
 /**
  * A title read from an agent's own store, tagged with how good it actually is.
  *
- * `kind` is load-bearing, not description. Every resolver has a last-resort
- * branch that echoes the user's opening prompt, because that is better than no
- * name at all — but it is NOT a title, and the caller has to be able to tell
- * the two apart to decide whether generating one is worth a model call. The
- * resolvers are the only code that knows which branch it took, so they report
- * it rather than leaving the caller to guess from the string.
+ * `kind` is load-bearing, not description, and there are deliberately only two
+ * values a resolver may report:
  *
- * Measured, not assumed: codex NEVER generates a title (its CLI writes the
- * first user message into `threads.title`; the desktop app is what fills in a
- * real one), and Claude writes its own title only in the interactive TUI, never
- * in headless/SDK runs. So "first-message" is the common case, not an edge one.
+ *   "manual"        — a name the USER typed at the agent (Claude's
+ *                     `custom-title`, agy's `/rename`). Their intent, so it
+ *                     outranks the one we generate.
+ *   "first-message" — an echo of the opening prompt. Better than "Session 3"
+ *                     and nothing else; it is what we generate a title to
+ *                     REPLACE, and the caller keeps it only until ours lands.
+ *
+ * There is no value for a title the AGENT generated for itself. Reading those
+ * made naming depend on whether a given agent happens to name conversations,
+ * how good its names are, and when it writes them — which differed per agent
+ * and left the sessions of agents that never name (codex's CLI, every
+ * headless/SDK run) echoing the opening prompt forever. Antgrid names sessions
+ * itself now, uniformly, from the first user message (see ./title-generate.ts).
+ * A resolver that finds an agent-written name must drop it, not report it.
  */
 export interface ResolvedTitle {
   title: string;
-  kind: "generated" | "first-message";
+  kind: "manual" | "first-message";
+}
+
+/**
+ * How far a headless spawn of an agent's CLI may reach.
+ *
+ * It describes the ARGV, not the agent: one CLI has a different shape per reach
+ * (claude denies write tools for a naming run and allows read tools for a
+ * judge), so an agent declares one entry per reach it has a verified command
+ * for. Ordered tightest-first — {@link pickHeadless} relies on that.
+ *
+ *   "sealed"     — no tools at all; everything the model may use is in the prompt.
+ *   "readonly"   — the argv provably restricts the tool to reads.
+ *   "transcript" — the restriction is config-level and unverified, so the spawn
+ *                  is never handed a transcript path it could act on.
+ */
+export const HEADLESS_REACHES = ["sealed", "readonly", "transcript"] as const;
+export type HeadlessReach = (typeof HEADLESS_REACHES)[number];
+
+/** The reaches a judge may run at. A sealed argv cannot read the repo, which is
+ *  the one thing a supervisor pass exists to do. */
+export type JudgeTier = Exclude<HeadlessReach, "sealed">;
+
+/**
+ * One verified non-interactive invocation of an agent's CLI: a prompt in, the
+ * model's answer on stdout, nothing persisted.
+ *
+ * Its own type because the runner may execute one agent's command for ANOTHER
+ * agent's work — see resolveHeadless in ./headless.ts.
+ */
+export interface HeadlessCommand {
+  cmd: (prompt: string, model?: string) => string[];
+  /** Merged over the bridge's environment for this spawn ONLY — never for a
+   *  terminal session, which is the spec-level `env`. */
+  env?: Record<string, string>;
+  /**
+   * HOW this argv keeps the run out of the user's own history. Stated rather
+   * than assumed because nothing else can check it: no passing test can tell a
+   * spawn that persisted a session from one that did not, and every run that
+   * does shows up in the user's own `--resume` picker forever.
+   *
+   *   "flag"            — an explicit off switch, argv or env (claude's
+   *                       --no-session-persistence, codex's --ephemeral,
+   *                       vibe's VIBE_SESSION_LOGGING__ENABLED=false).
+   *   "ephemeral-store" — `env` points the agent's store somewhere disposable
+   *                       (opencode's OPENCODE_DB=:memory:).
+   *   "stateless"       — the CLI writes no history in this mode at all.
+   *
+   * An agent whose CLI offers none of the three gets no entry at that reach:
+   * absence costs a borrowed spawn, a wrong claim costs the user's history.
+   */
+  noHistory: "flag" | "ephemeral-store" | "stateless";
+}
+
+/**
+ * What the CALLER needs from a headless spawn, which is not the same question
+ * as what an argv permits (see {@link HeadlessReach}).
+ *
+ *   "none" — everything the model may use is inlined into the prompt, so the
+ *            tightest available entry wins.
+ *   "repo" — reading the working tree IS the work, so a sealed argv cannot
+ *            serve it however much tighter it would be.
+ */
+export type HeadlessNeed = "none" | "repo";
+
+const REACHES_FOR: Record<HeadlessNeed, readonly HeadlessReach[]> = {
+  none: HEADLESS_REACHES,
+  repo: HEADLESS_REACHES.filter((r) => r !== "sealed"),
+};
+
+/**
+ * The tightest declared entry that still satisfies `need`, or null.
+ *
+ * Pure and spec-shaped (it takes the map, not a tool name) so `judgeCapable` in
+ * ./registry.ts can answer from it without importing ./headless.ts, which
+ * imports the registry back.
+ */
+export function pickHeadlessFrom(
+  declared: AgentSpec["headless"], need: HeadlessNeed,
+): { reach: HeadlessReach; command: HeadlessCommand } | null {
+  if (!declared) return null;
+  for (const reach of REACHES_FOR[need]) {
+    const command = declared[reach];
+    if (command) return { reach, command };
+  }
+  return null;
 }
 
 export interface HookProfile {
@@ -362,21 +450,36 @@ export interface AgentSpec {
   notifyBodyFromTranscript?: (transcriptPath: string) => Promise<string | null>;
   /** Presence is what makes a tool chat-capable; there is no separate list. */
   driver?: SpecDriverFactory;
-  /** Headless one-shot judge for the supervisor. Absent = no VERIFIED headless
-   *  judge for this tool, which gates the Handler off (escalate-only) rather
-   *  than guessing an argv. `tier` and `cmd` are one field precisely because
-   *  they must never drift: "readonly" asserts the argv provably restricts the
-   *  tool to reads, "transcript" that the restriction is config-level and
-   *  unverified — and the tier is what decides whether the judge is handed a
-   *  transcript path it could act on. */
-  /** `env` is merged over the bridge's own environment for the judge spawn
-   *  ONLY — never for a terminal session (that is the spec-level `env`). It
-   *  exists for agents whose session persistence can't be turned off by a flag. */
-  judge?: {
-    tier: JudgeTier;
-    cmd: (prompt: string, model?: string) => string[];
-    env?: Record<string, string>;
-  };
+  /**
+   * Verified non-interactive invocations of this agent's CLI, keyed by how far
+   * each one may reach (see {@link HeadlessReach}). One capability, several
+   * consumers: naming a session (./headless.ts via ./title-generate.ts) and the
+   * supervisor's judge (../handler/judge.ts) are two callers of the same spawn,
+   * and every future one-shot model call belongs here rather than growing a
+   * third near-identical field.
+   *
+   * The reach a caller needs is what selects the entry, and the two questions
+   * are NOT the same:
+   *   - naming wants the TIGHTEST entry available; the conversation is inlined
+   *     into the prompt, so it needs no repo access at all.
+   *   - the judge REQUIRES at least "readonly" — reading the repo is the work —
+   *     and its reach decides whether it may be handed a transcript path it
+   *     could act on. `judgeCapable` therefore stays "has a non-sealed entry",
+   *     never "has any entry": collapsing the two is what made "can this agent
+   *     name a session" mean "does this agent have a vetted SUPERVISOR", a much
+   *     higher bar that left every other agent's sessions unnamed.
+   *
+   * Every entry must also hold NO WRITES: the model is asked for text and given
+   * no transcript path, so deny tools where a flag can and rely on
+   * non-interactive permission denial where it can't. Its no-history half is
+   * declared per entry — see {@link HeadlessCommand.noHistory}.
+   *
+   * A missing reach = no argv VERIFIED against the real CLI at that reach. For
+   * naming that is not "this agent cannot be named": the prompt carries its own
+   * context, so ./headless.ts borrows another installed agent's command rather
+   * than guessing this one's flags. Add an entry only after running it.
+   */
+  headless?: Partial<Record<HeadlessReach, HeadlessCommand>>;
   /** Returns messages AND, only when the source is a followable file, its path.
    *  Never synthesize a path: a "transcript"-tier judge has no verified
    *  read-only restriction, so it gets no file hint it could not follow. */
@@ -387,9 +490,10 @@ export interface AgentSpec {
    *  agent has no store-existence check (the honest answer, not a default);
    *  callers treat absence as resumable. */
   resumable?: (args: ResumableArgs) => boolean;
-  /** Reads this agent's own session name, tagged `generated` vs `first-message`
-   *  (see ResolvedTitle — the tag drives whether we spend a model call). Absent
-   *  = the agent has no on-disk name to read: opencode pushes its title inline
-   *  on the loopback post, cursor-agent stores none at all. */
+  /** Reads the name for this agent's session that is NOT one the agent chose
+   *  for itself, tagged `manual` vs `first-message` (see ResolvedTitle — the tag
+   *  drives whether we spend a model call). Absent = the agent has neither on
+   *  disk: opencode and cursor-agent store no rename of their own that we read.
+   */
   resolveTitle?: (args: TitleArgs) => Promise<ResolvedTitle | null>;
 }

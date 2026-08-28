@@ -3,7 +3,7 @@ import { readdir } from "node:fs/promises";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { ResolvedTitle } from "../types";
-import { firstMessage, generated, readOrNull } from "../title-read";
+import { firstMessage } from "../title-read";
 
 /** Parse the schema-version <N> out of a `state_<N>.sqlite` filename, or -1. */
 function stateDbVersion(filename: string): number {
@@ -20,10 +20,10 @@ function stateDbVersion(filename: string): number {
  * The CLI writes the first user message into `title` and leaves it there: of 310
  * local threads, every one whose `title` differs from `first_user_message` was
  * written by the Codex DESKTOP app (all 32 appear verbatim in
- * session_index.jsonl, which only that app writes). So `title` is reported as
- * "generated" ONLY where it actually diverges from first_user_message — equal
- * means the CLI never named the thread, and the caller has to generate one.
- * Opened read-only; never throws (returns null on any error).
+ * session_index.jsonl, which only that app writes). So a divergent `title` is
+ * the desktop app naming the thread for itself, which we deliberately do not
+ * read — `first_user_message` is the column that answers what this resolver is
+ * for. Opened read-only; never throws (returns null on any error).
  */
 export async function resolveCodexThreadTitle(threadId: string, codexHome: string): Promise<ResolvedTitle | null> {
   let dbPath: string;
@@ -47,11 +47,16 @@ export async function resolveCodexThreadTitle(threadId: string, codexHome: strin
     if (!row) return null;
     const title = (row.title ?? "").trim();
     const first = (row.first_user_message ?? "").trim();
-    if (title) return title === first ? firstMessage(title) : generated(title);
-    return first ? firstMessage(first) : null;
+    if (first) return firstMessage(first);
+    // Only reachable with an empty first_user_message, where `title` cannot be
+    // told apart from a desktop-written name. Taken as the opening prompt
+    // anyway: it holds the slot until our own generated name lands, and the
+    // alternative is leaving the session unnamed on a column we can't read.
+    return title ? firstMessage(title) : null;
   } catch {
-    // DB locked, missing table, or schema drift — fall through to the caller's
-    // session_index.jsonl fallback rather than failing the title resolution.
+    // DB locked, missing table, or schema drift. Unnameable is not fatal: the
+    // caller keeps whatever name the session already has, and the generated
+    // title lands on its own path.
     return null;
   } finally {
     db?.close();
@@ -90,29 +95,4 @@ export function codexThreadExistsSync(threadId: string, codexHome: string): bool
   } finally {
     db?.close();
   }
-}
-
-/**
- * Legacy/desktop-app fallback: Codex's *desktop app* writes conversation titles
- * to ~/.codex/session_index.jsonl as append-only {id, thread_name, updated_at}
- * lines (the LAST line for an id is current). Every name in here is one the
- * desktop app generated, so a hit is unambiguously a real title. The CLI does
- * not write this file at all, which is why bridge-spawned sessions never appear
- * in it. Scan from the end and return the first match. Never throws.
- */
-export async function resolveCodexThreadName(threadId: string, codexHome: string): Promise<ResolvedTitle | null> {
-  const raw = await readOrNull(join(codexHome, "session_index.jsonl"));
-  if (raw === null) return null;
-  const lines = raw.split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    try {
-      const e = JSON.parse(line) as { id?: string; thread_name?: string };
-      if (e.id === threadId && typeof e.thread_name === "string") return generated(e.thread_name);
-    } catch {
-      // partial/garbage line (e.g. mid-write tail) — skip
-    }
-  }
-  return null;
 }

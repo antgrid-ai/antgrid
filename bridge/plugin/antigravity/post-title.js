@@ -15,10 +15,10 @@ import { join } from "node:path";
 //     (mirrors cursor's post-notify.js).
 // The title is deliberately resolved bridge-side, not here: this hook runs under
 // bare `node`, which has no reliable sqlite reader for agy's global
-// conversation_summaries.db (kept as a bonus upgrade path — see
-// resolveStructuredTitle — but confirmed NOT populated during a live CLI
-// session, even after a clean /exit; transcriptPath is the reliable source, see
-// resolveAntigravityTranscriptTitle in agents/antigravity/title.ts).
+// conversation_summaries.db — and nothing reads that DB any more in any case,
+// since agy's own generated name is not a name we apply (see ResolvedTitle).
+// transcriptPath is the source, see resolveAntigravityTranscriptTitle in
+// agents/antigravity/title.ts.
 //
 // agy feeds the hook payload as JSON on stdin and reads a JSON object on
 // stdout; we always emit `{}` so the agent loop is never gated or mutated — a

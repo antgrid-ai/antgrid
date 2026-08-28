@@ -1,46 +1,12 @@
 // bridge/src/handler/judge.ts
 import { agentSpec } from "../agents/registry";
+import { runHeadless } from "../agents/headless";
+import { pickHeadlessFrom } from "../agents/types";
 import {
   buildDecidePrompt, buildRetryPrompt, parseDecisionFromOutput,
   type HandlerDecision,
 } from "./decision";
 import { buildExtractPrompt, parseItemsFromOutput, type ExtractedItem } from "./extract";
-
-// One spawn of the agent's own CLI (reusing its auth). Spawn failure → null.
-// A timeout still returns whatever stdout was captured before the kill — the
-// CLI may have written a complete answer and merely lingered on exit, so the
-// caller parses it before deciding; `timedOut` tells the caller to skip the
-// retry leg (retry exists for malformed output, not for a hung judge).
-async function spawnJudge(
-  cmd: string[], cwd: string, timeoutMs: number, spawn: typeof Bun.spawn,
-  env?: Record<string, string>,
-): Promise<{ stdout: string; timedOut: boolean } | null> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    // Spread process.env: Bun.spawn's `env` REPLACES the environment rather than
-    // merging, so passing the overrides alone would strip PATH and the agent's
-    // own auth vars out from under the judge.
-    const proc = spawn(cmd, {
-      cwd, stdout: "pipe", stderr: "ignore",
-      ...(env ? { env: { ...process.env, ...env } } : {}),
-    });
-    let timedOut = false;
-    timer = setTimeout(() => {
-      timedOut = true;
-      try { proc.kill(); } catch { /* already gone */ }
-    }, timeoutMs);
-    const out = await new Response(proc.stdout).text();
-    await proc.exited;
-    return { stdout: out, timedOut };
-  } catch {
-    return null;
-  } finally {
-    // Must be finally, not a tail call: killing the proc mid-read rejects the
-    // stdout read, and an un-cleared timer then stays armed for the full budget
-    // holding the dead proc alive — once per judge call, on every failure.
-    clearTimeout(timer);
-  }
-}
 
 // Eval-only judge override (Task 16's e2e harness): the spawned agent process can't
 // have fakes injected in-process, so swap the CLI for a scripted bun script. Gated
@@ -66,16 +32,25 @@ async function runWithRetry<T>(opts: {
   parse: (stdout: string) => { value: T | null; error?: string };
 }): Promise<T | null> {
   const spawn = opts.spawn ?? Bun.spawn;
-  // Tier first: transcript-tier judges have no Read tool, so a transcript-path
-  // hint would be an instruction they cannot follow. No judge on the spec means
-  // no verified headless judge for this tool — Handler stays escalate-only.
-  const judge = agentSpec(opts.tool)?.judge;
-  if (!judge) return null;
-  const path = judge.tier === "readonly" ? opts.transcriptPath : undefined;
+  // Reach first: a transcript-reach judge has no Read tool, so a transcript-path
+  // hint would be an instruction it cannot follow. No "repo" entry on the spec
+  // means no verified headless judge for this tool — Handler stays
+  // escalate-only, and a sealed entry is never promoted into one just because
+  // the agent can answer a question (see AgentSpec.headless).
+  const judge = pickHeadlessFrom(agentSpec(opts.tool)?.headless, "repo");
+  if (!judge || judge.reach === "sealed") return null;
+  const path = judge.reach === "readonly" ? opts.transcriptPath : undefined;
+  // Output is parsed whatever the exit code says: a judge answers in JSON, so a
+  // failed run cannot masquerade as a verdict the way a one-line refusal can
+  // masquerade as a title (see runHeadless).
+  const run = (p: string, timeoutMs: number) => runHeadless(
+    resolveCmd(judge.command.cmd(p, opts.model), p),
+    { cwd: opts.cwd, timeoutMs, spawn, env: judge.command.env },
+  );
 
   const prompt = opts.makePrompt(path);
   const started = Date.now();
-  const out1 = await spawnJudge(resolveCmd(judge.cmd(prompt, opts.model), prompt), opts.cwd, opts.timeoutMs, spawn, judge.env);
+  const out1 = await run(prompt, opts.timeoutMs);
   if (out1 === null) return null;
   const r1 = opts.parse(out1.stdout);
   if (r1.value) return r1.value;
@@ -86,7 +61,7 @@ async function runWithRetry<T>(opts: {
   const remaining = opts.timeoutMs - (Date.now() - started);
   if (remaining <= 0) return null;
   const retryPrompt = buildRetryPrompt(prompt, r1.error ?? "invalid output");
-  const out2 = await spawnJudge(resolveCmd(judge.cmd(retryPrompt, opts.model), retryPrompt), opts.cwd, remaining, spawn, judge.env);
+  const out2 = await run(retryPrompt, remaining);
   if (out2 === null) return null;
   return opts.parse(out2.stdout).value;
 }

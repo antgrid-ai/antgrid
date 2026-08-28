@@ -65,13 +65,17 @@ const ClaudePayloadSchema = z.object({
   session_id: z.string().nullish(),
   transcript_path: z.string().nullish(),
   message: z.string().nullish(),
+  // UserPromptSubmit only: the text the user just submitted. Verified against
+  // the shipped CLI, whose hook input for that event is
+  // `{hook_event_name:"UserPromptSubmit", prompt, session_title, ...}`.
+  prompt: z.string().nullish(),
   // StopFailure only. Left a bare string rather than the CLI's enum so a value
   // added upstream still classifies (as a transient) instead of failing the
   // parse and dropping the event.
   error: z.string().nullish(),
 });
 
-// "user-prompt" (→ /turn-start) is Claude-specific: Claude exposes a
+// "user-prompt" (→ /turn-start + /session-title) is Claude-specific: Claude exposes a
 // UserPromptSubmit hook that fires before each new turn, and it is the ONLY
 // turn-start signal a terminal-mode Claude session has (chat sessions get
 // precise `agent:turn-start` frames from their driver instead).
@@ -130,6 +134,22 @@ export async function toPosts(
       path: "/turn-start",
       body: { ...(terminalId ? { terminalId } : {}) },
     });
+    // Name the session from the prompt the user just submitted. This is the
+    // whole reason Claude's naming does not wait for the turn to end, and it is
+    // Claude-only because no other agent exposes a pre-turn hook — the rest
+    // reach the same code from their turn-END post, minutes later on a real
+    // task. The bridge treats `prompt` as "name this now", so it must not ride
+    // any other event.
+    // An absent path is OMITTED, not sent as "": `setAgentSession` keeps a
+    // previously captured path only for a NULLISH report, and this post repeats
+    // every turn — an empty string would wipe the path the handler's judge and
+    // the resume preflight read.
+    posts.push(
+      titlePost(port, terminalId, input.session_id, "claude", {
+        ...(input.prompt ? { prompt: input.prompt } : {}),
+        ...(input.transcript_path ? { transcriptPath: input.transcript_path } : {}),
+      }),
+    );
   }
   if (invocation.event === "stop") {
     posts.push({

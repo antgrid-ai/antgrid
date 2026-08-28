@@ -2048,7 +2048,7 @@ describe("instruct (extraction)", () => {
   it("a tool with no judge lands the raw text as one item without spawning", async () => {
     let spawned = 0;
     const { engine, sent } = makeEngine({
-      tool: () => "kilo",
+      tool: () => "kimi",
       runExtractionFn: async () => { spawned++; return []; },
     });
     engine.arm({ terminalId: "t1", notifyOnly: false });
@@ -2278,7 +2278,7 @@ describe("instruct (extraction)", () => {
   it("the raw fallback is held to the same per-item cap the extractor is", async () => {
     // renderBacklog interpolates every item into every later decide prompt, and
     // the fallback is the expected path on a rate-limited account.
-    const { engine, sent } = makeEngine({ tool: () => "kilo" });
+    const { engine, sent } = makeEngine({ tool: () => "kimi" });
     engine.arm({ terminalId: "t1", notifyOnly: false });
     engine.instruct({ terminalId: "t1", text: "z".repeat(9_000) });
     await settle();
@@ -2344,7 +2344,7 @@ describe("arm-time extraction (§3.2)", () => {
   it("a judge-less tool lands the goal as one raw item rather than failing", async () => {
     let spawned = 0;
     const { engine, sent } = makeEngine({
-      tool: () => "kilo",
+      tool: () => "kimi",
       runExtractionFn: async () => { spawned += 1; return []; },
     });
     engine.arm({ terminalId: "t1", goal: "ship it", notifyOnly: false });
@@ -2877,7 +2877,7 @@ describe("observabilityFor", () => {
   });
 
   it("reports escalate_only when the slot is visible but its judge cannot run headless", () => {
-    const { engine } = makeEngine({ observable: () => true, tool: () => "cursor-agent" });
+    const { engine } = makeEngine({ observable: () => true, tool: () => "kimi" });
     expect(engine.observabilityFor("t1")).toBe("escalate_only");
   });
 
@@ -2889,7 +2889,7 @@ describe("observabilityFor", () => {
   it("prefers the session's stored judge over the observed session's own tool", () => {
     const { engine } = makeEngine({
       observable: () => true,
-      tool: () => "cursor-agent",
+      tool: () => "kimi",
       loadSessionFn: () => ({ terminalId: "t1", armed: false, judgeTool: "claude-code" }),
     });
     expect(engine.observabilityFor("t1")).toBe("full");
@@ -2919,7 +2919,7 @@ describe("observabilityFor", () => {
   });
 
   it("separates escalate_only from unsupported on the snapshot", () => {
-    const { engine, sent } = makeEngine({ observable: () => true, tool: () => "cursor-agent" });
+    const { engine, sent } = makeEngine({ observable: () => true, tool: () => "kimi" });
     engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
     expect(statusOf(sent).observability).toBe("escalate_only");
   });

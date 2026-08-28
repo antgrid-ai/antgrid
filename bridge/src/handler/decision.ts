@@ -1,6 +1,7 @@
 // bridge/src/handler/decision.ts
 import { z } from "zod";
 import { agentSpec } from "../agents/registry";
+import { pickHeadlessFrom, type JudgeTier } from "../agents/types";
 import { ItemTransitionSchema } from "./backlog";
 import { extractJsonObject } from "./json-extract";
 
@@ -26,7 +27,9 @@ export const HandlerDecisionSchema = z.object({
 });
 export type HandlerDecision = z.infer<typeof HandlerDecisionSchema>;
 
-export type JudgeTier = "readonly" | "transcript";
+// Re-exported, not redefined: the reaches an agent declares live on
+// AgentSpec.headless, and a second spelling here could drift from them.
+export type { JudgeTier } from "../agents/types";
 
 // Judge argv for an arbitrary tool string, read off the one place a tool is
 // described. Tier and argv come back together because they are one field on the
@@ -35,8 +38,11 @@ export type JudgeTier = "readonly" | "transcript";
 export function buildJudgeCommand(
   tool: string, model: string | undefined, prompt: string,
 ): { cmd: string[]; tier: JudgeTier; env?: Record<string, string> } | null {
-  const judge = agentSpec(tool)?.judge;
-  return judge ? { cmd: judge.cmd(prompt, model), tier: judge.tier, env: judge.env } : null;
+  const picked = pickHeadlessFrom(agentSpec(tool)?.headless, "repo");
+  // "repo" cannot select a sealed entry; the check is what lets the reach narrow
+  // to a JudgeTier without a cast, rather than a case that can actually happen.
+  if (!picked || picked.reach === "sealed") return null;
+  return { cmd: picked.command.cmd(prompt, model), tier: picked.reach, env: picked.command.env };
 }
 
 // The transition rules below restate what applyTransitions enforces. That is

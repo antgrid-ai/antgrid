@@ -4,20 +4,20 @@ import { createMessage } from "../../bridge/src/protocol";
 import { promptUntilTurnStart } from "../helpers/chat";
 import { bindFirstProject } from "../support/stream";
 
-// End-to-end proof that a chat-mode opencode session auto-names itself from the
-// conversation title. Unlike codex (notify.js) or claude (SDK), opencode's own
-// server generates a title and pushes it on the session.updated event the
-// OpencodeDriver already consumes; the driver's onTitle callback forwards it
-// through SessionNamer → applyAutoName → session:updated. We assert the default
+// End-to-end proof that a chat-mode opencode session auto-names itself. opencode
+// ships neither hooks nor a title we read (its own generated one is dropped —
+// see ResolvedTitle), so this is the agent that proves the naming path which
+// depends on no vendor integration at all: StructuredAgentManager's onUserPrompt
+// tap hands the bridge the first message, which names the session through
+// SessionNamer → applyAutoName → session:updated. We assert the default
 // "Session N" name is replaced by a real title.
 //
 // Gated on a real `opencode` binary on PATH AND an explicit opt-in signalling
-// that opencode auth (a configured model provider) is available: a generated
-// title requires the server to actually run a model, and without auth opencode
-// leaves the title at a placeholder so the session never renames. The env
-// opt-in avoids a spurious failure on binary-present-but-unauthenticated boxes
-// (most CI), matching how chat-session-codex.test.ts skips when its prereqs are
-// absent. Set ANTGRID_EVAL_OPENCODE_AUTH=1 on a box with opencode auth to run it.
+// that opencode auth (a configured model provider) is available: the turn this
+// waits on has to actually run a model. The env opt-in avoids a spurious failure
+// on binary-present-but-unauthenticated boxes (most CI), matching how
+// chat-session-codex.test.ts skips when its prereqs are absent. Set
+// ANTGRID_EVAL_OPENCODE_AUTH=1 on a box with opencode auth to run it.
 const HAVE_OPENCODE =
   Bun.which("opencode") !== null && process.env.ANTGRID_EVAL_OPENCODE_AUTH === "1";
 
@@ -89,9 +89,9 @@ describe.skipIf(!HAVE_OPENCODE)("chat-session opencode auto-title", () => {
     }
     expect(turnEnded).toBe(true);
 
-    // The title arrives on its own via session:updated once opencode's server
-    // generates it and emits session.updated. Poll until this session's name
-    // stops matching the default pattern.
+    // The title arrives on its own via session:updated once the naming spawn the
+    // first prompt started comes back. Poll until this session's name stops
+    // matching the default pattern.
     let renamed = false;
     const nameDeadline = Date.now() + 40_000;
     while (Date.now() < nameDeadline && !renamed) {
