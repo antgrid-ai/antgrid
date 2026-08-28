@@ -5,9 +5,9 @@
 // So this drives a real ProjectCore and reaches its api-server the way an
 // injected hook does, which is the only thing that proves all three legs are
 // connected.
-import { test, expect, afterEach, afterAll } from "bun:test";
+import { test, expect, beforeEach, afterEach, afterAll } from "bun:test";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
-import { tmpdir, homedir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ProjectCore } from "../../src/project-core";
@@ -16,10 +16,16 @@ import type { AbMessage } from "../../src/protocol";
 
 // The port a hook posts to is discovered from the api-server's own port file —
 // the fallback path in `hook-runner.ts`, and the only handle a test has on a
-// core's loopback port. Resolved the way api-server resolves it, and read only
-// straight after this suite's own start, since it is a single shared path that
-// every started core overwrites.
-const portFile = () => join(process.env.ANTGRID_DIR ?? join(homedir(), ".antgrid"), "api.port");
+// core's loopback port. ANTGRID_DIR is pinned per test so that file is this
+// suite's own: it is one shared path every started core overwrites, and the
+// unpinned one is whatever bridge the developer is actually running.
+let prevAbDir: string | undefined;
+let stateDir: string;
+beforeEach(() => {
+  prevAbDir = process.env.ANTGRID_DIR;
+  stateDir = mkdtempSync(join(tmpdir(), "antgrid-stale-nudge-state-"));
+  process.env.ANTGRID_DIR = stateDir;
+});
 
 // A late EPERM/ENOENT from the raw fs.watch when a temp folder goes away lands
 // asynchronously, sometimes in the next test — the same teardown artifact the
@@ -35,6 +41,13 @@ afterAll(() => { process.off("uncaughtException", ignoreWatcherEperm); });
 const cleanup: Array<() => void | Promise<unknown>> = [];
 // LIFO + awaited: the core stops watching before its folder is removed.
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) try { await fn(); } catch {} });
+// Registered second, so it runs after the cleanup above: a core still shutting
+// down is still reading its abDir.
+afterEach(() => {
+  if (prevAbDir === undefined) delete process.env.ANTGRID_DIR;
+  else process.env.ANTGRID_DIR = prevAbDir;
+  rmSync(stateDir, { recursive: true, force: true });
+});
 
 /** A started local core plus the loopback api-server port its hooks post to. */
 async function startCore(): Promise<{ core: ProjectCore; port: number }> {
@@ -47,7 +60,7 @@ async function startCore(): Promise<{ core: ProjectCore; port: number }> {
   cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
   cleanup.push(() => core.shutdown());
   await core.start();
-  const port = Number(readFileSync(portFile(), "utf8"));
+  const port = Number(readFileSync(join(stateDir, "api.port"), "utf8"));
   expect(port).toBeGreaterThan(0);
   return { core, port };
 }

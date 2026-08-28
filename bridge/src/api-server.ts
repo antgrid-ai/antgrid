@@ -1,9 +1,9 @@
 import { join } from "node:path";
-import { homedir } from "node:os";
-import { writeFileSync, unlinkSync, readFileSync } from "node:fs";
+import { writeFileSync, unlinkSync, readFileSync, mkdirSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { z } from "zod";
 import { logger } from "./logger";
+import { resolveAbDir } from "./antgrid-dir";
 const log = logger.child({ component: "api-server" });
 import { createMessage, type AbMessage } from "./protocol";
 import { AGENTS, BY_HOOK_NAME } from "./agents/registry";
@@ -47,7 +47,6 @@ export interface AgentContext {
 }
 
 const VERSION = "0.1.0";
-const PORT_FILE = join(process.env.ANTGRID_DIR ?? join(homedir(), ".antgrid"), "api.port");
 
 /**
  * The hook-name vocabulary a loopback post may identify itself by (`claude`,
@@ -382,8 +381,15 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
   // ANTGRID_API_PORT env var stamped into each terminal is the real source of
   // truth; this file is a fallback for processes that lack that env (legacy /
   // single-core). See stop() for why removal is guarded.
+  // Resolved per server, never at module load: ANTGRID_DIR is the process-wide
+  // override every other reader honours live (`resolveAbDir`, and hook-runner's
+  // own fallback), so a path frozen at import time answers for whatever the env
+  // held when the first module in the graph loaded. The directory may not exist
+  // yet on a first launch, and losing the file costs hook discovery silently.
+  const portFile = join(resolveAbDir(), "api.port");
   try {
-    writeFileSync(PORT_FILE, String(port), { mode: 0o600 });
+    mkdirSync(join(portFile, ".."), { recursive: true });
+    writeFileSync(portFile, String(port), { mode: 0o600 });
   } catch (err) {
     log.warn("Failed to write API port file: %s", err);
   }
@@ -401,7 +407,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
       // the singleton host a later core may have overwritten it; an
       // unconditional unlink would delete a sibling core's live pointer.
       try {
-        if (readFileSync(PORT_FILE, "utf8").trim() === String(port)) unlinkSync(PORT_FILE);
+        if (readFileSync(portFile, "utf8").trim() === String(port)) unlinkSync(portFile);
       } catch {
         // Port file may not exist or be unreadable — nothing to clean up.
       }
