@@ -105,12 +105,36 @@ abstract class UpdateStrategy {
   /// "unknown", so copy that names it needs a nameless fallback.
   String? get pendingVersion => null;
 
+  /// Emits when the platform's own flow proves nothing is installable after
+  /// all, so a row this strategy latched can go dark again. Null where the
+  /// platform never tells us.
+  ///
+  /// Detection and installation can be two different opinions: macOS reads the
+  /// appcast itself but Sparkle applies filters that reading doesn't (a
+  /// `minimumSystemVersion` above the running OS, a channel), and a row lit by
+  /// the first and refused by the second is an Update button that can never do
+  /// anything. Broadcast and unbuffered, like [installProgress].
+  Stream<void>? get updateRetracted => null;
+
+  /// What an install on this platform cost the user, appended to the
+  /// post-update announcement. Null where it cost nothing worth reporting.
+  ///
+  /// Per-platform because the answer is: Windows and macOS both quit the app
+  /// to install, taking the local bridge and every agent with it. Linux only
+  /// opens a download page — whatever stopped the user's sessions there was
+  /// their own quit, possibly days earlier, and a launch that opens by
+  /// announcing it would be describing something that never happened.
+  String? get updatedNote => null;
+
   /// Copy for the drawer row this strategy's outcomes light. The default
   /// promises a download/store hand-off; a strategy whose [install] does
   /// something stronger must say so (Play's restarts the app in place).
   String get rowTitle => 'Update available';
   String get rowActionLabel => 'Update';
 }
+
+/// The cost line shared by every platform whose install quits the app.
+const kUpdateStoppedSessionsNote = 'Open project sessions were stopped.';
 
 /// Android: Google Play owns download and install; the app's only UI duty is
 /// the restart prompt for a flexible update that finished downloading.
@@ -222,19 +246,24 @@ class WindowsStoreStrategy extends UpdateStrategy {
   // the user cannot take back.
   @override
   String get rowActionLabel => 'Install & restart';
+
+  @override
+  String? get updatedNote => kUpdateStoppedSessionsNote;
 }
 
-/// macOS: detection and install read the SAME appcast, so a lit row implies
-/// Sparkle has something installable. Install is Sparkle's own dialog
-/// (download, verify, install, relaunch).
+/// macOS: detection and install read the SAME appcast, but not with the same
+/// rules — Sparkle applies filters our own read does not, so a lit row is a
+/// claim Sparkle can still refuse, and [updateRetracted] is how it takes it
+/// back. Install is Sparkle's own dialog (download, verify, install,
+/// relaunch).
 ///
 /// Release-only: neither Sparkle nor a GitHub release can update an
 /// unpackaged `flutter run` bundle.
 class MacosSparkleStrategy extends UpdateStrategy {
   MacosSparkleStrategy({
-    MacosSparkleUpdateService sparkle = const MacosSparkleUpdateService(),
+    MacosSparkleUpdateService? sparkle,
     MacosAppcastUpdateService? appcast,
-  }) : _sparkle = sparkle,
+  }) : _sparkle = sparkle ?? MacosSparkleUpdateService(),
        _appcast = appcast ?? MacosAppcastUpdateService();
 
   final MacosSparkleUpdateService _sparkle;
@@ -248,6 +277,15 @@ class MacosSparkleStrategy extends UpdateStrategy {
   /// the row.
   @override
   Future<void> prepare() => _sparkle.configureFeed();
+
+  /// Sparkle quits the app to install and relaunches it — the same cost as the
+  /// Windows Store, reached without a confirm dialog because Sparkle runs its
+  /// own and `didRequestAppExit` drains the host on the way out.
+  @override
+  String? get updatedNote => kUpdateStoppedSessionsNote;
+
+  @override
+  Stream<void> get updateRetracted => _sparkle.noUpdateFound;
 
   @override
   Future<UpdateCheckOutcome> check({required bool rowAlreadyLit}) async {

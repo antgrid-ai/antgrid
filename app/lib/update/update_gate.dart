@@ -17,10 +17,13 @@ import 'update_strategy.dart';
 /// its spelling; the runner forwards it to the Dart entrypoint.
 const kAfterUpdateFlag = '--after-update';
 
-/// Whether this launch is that relaunch. Overridden from `main()` off the
-/// entrypoint arguments, so an ordinary launch — and every test — sees false
-/// and the app says nothing.
-final afterUpdateLaunchProvider = Provider<bool>((ref) => false);
+/// The version this launch replaced, or null when nothing was replaced.
+///
+/// Overridden from `main()` out of [UpdateHandoffStore], so an ordinary launch
+/// — and every test — sees null and the app says nothing. Deliberately NOT
+/// derived from [kAfterUpdateFlag]: Windows passes that argument after a crash
+/// and a hang too, and macOS's Sparkle relaunch passes no argument at all.
+final afterUpdateLaunchProvider = Provider<String?>((ref) => null);
 
 /// Root wrapper that drives in-app updates via the running platform's
 /// [UpdateStrategy] — the single per-platform table in update_strategy.dart.
@@ -59,25 +62,39 @@ class _UpdateGateState extends ConsumerState<UpdateGate>
   UpdateStrategy? _strategy;
 
   DateTime? _lastCheck;
+  StreamSubscription<void>? _retraction;
 
   @override
   void initState() {
     super.initState();
     // Ahead of the strategy gate below: Windows relaunches a build whose
     // update checks are inactive just the same.
-    if (ref.read(afterUpdateLaunchProvider)) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _announceUpdated());
+    final replaced = ref.read(afterUpdateLaunchProvider);
+    if (replaced != null) {
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _announceUpdated(replaced),
+      );
     }
     final strategy = ref.read(updateStrategyProvider);
     if (strategy == null || !strategy.active) return;
     _strategy = strategy;
     unawaited(strategy.prepare());
+    // Subscribed before the first check, so a retraction arriving from the
+    // platform's own flow is never missed.
+    final retracted = strategy.updateRetracted;
+    if (retracted != null) {
+      _retraction = retracted.listen((_) {
+        if (!mounted) return;
+        ref.read(updateAvailableProvider.notifier).set(false);
+      });
+    }
     WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeCheck());
   }
 
   @override
   void dispose() {
+    unawaited(_retraction?.cancel());
     if (_strategy != null) WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -172,20 +189,29 @@ class _UpdateGateState extends ConsumerState<UpdateGate>
     });
   }
 
-  /// One-shot: the flag comes from this launch's arguments, so it cannot
-  /// survive into the next one.
-  void _announceUpdated() {
+  /// One-shot: the mark behind [replaced] is consumed in `main()`, so it
+  /// cannot survive into the next launch.
+  void _announceUpdated(String replaced) {
     if (!mounted) return;
     final version = BuildInfo.version;
+    // The note is the strategy's because the cost is per-platform: Windows and
+    // macOS quit to install, Linux only opened a download page. Read off the
+    // provider rather than `_strategy`, which is null in a build whose checks
+    // are inactive — the announcement still fires there.
+    final note = ref.read(updateStrategyProvider)?.updatedNote;
     showAbToastOverlay(
       context,
       duration: const Duration(seconds: 8),
       toast: AbToast(
         icon: AbIcons.check,
-        // Not "and reopened your sessions": the install sequence shuts the
-        // bridge host down and nothing restores what it was running.
-        title: version == 'dev' ? 'Update installed' : 'Updated to $version',
-        description: 'Open project sessions were stopped.',
+        // Not "and reopened your sessions": nothing restores what the bridge
+        // host was running.
+        title: version == 'dev'
+            ? 'Update installed'
+            : 'Updated to $version',
+        description: note == null
+            ? 'Replaced $replaced.'
+            : 'Replaced $replaced. $note',
       ),
     );
   }

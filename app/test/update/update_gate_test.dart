@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:antgrid/design/widgets/ab_toast.dart';
 import 'package:antgrid/providers/update_available.dart';
 import 'package:antgrid/update/update_gate.dart';
@@ -8,14 +10,27 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class _FakeStrategy extends UpdateStrategy {
-  _FakeStrategy(this.outcome, {this.isActive = true});
+  _FakeStrategy(
+    this.outcome, {
+    this.isActive = true,
+    this.note,
+    this.retracted,
+  });
   final UpdateCheckOutcome outcome;
   final bool isActive;
+  final String? note;
+  final Stream<void>? retracted;
   final List<bool> litArgs = [];
   int installs = 0;
 
   @override
   bool get active => isActive;
+
+  @override
+  String? get updatedNote => note;
+
+  @override
+  Stream<void>? get updateRetracted => retracted;
 
   @override
   Future<UpdateCheckOutcome> check({required bool rowAlreadyLit}) async {
@@ -49,7 +64,7 @@ Future<({ProviderContainer container, _SpyController install})> _pumpGate(
   WidgetTester tester,
   UpdateStrategy? strategy, {
   bool preLit = false,
-  bool afterUpdate = false,
+  String? afterUpdate,
 }) async {
   final spy = _SpyController();
   final container = ProviderContainer(
@@ -190,14 +205,59 @@ void main() {
     // so rather than come up looking like an ordinary start.
     await _pumpGate(
       tester,
-      _FakeStrategy(UpdateCheckOutcome.none),
-      afterUpdate: true,
+      _FakeStrategy(
+        UpdateCheckOutcome.none,
+        note: kUpdateStoppedSessionsNote,
+      ),
+      afterUpdate: '1.20677.100',
     );
 
     final toast = tester.widget<AbToast>(find.byType(AbToast));
-    expect(toast.description, 'Open project sessions were stopped.');
+    expect(
+      toast.description,
+      'Replaced 1.20677.100. Open project sessions were stopped.',
+    );
 
     await tester.pump(const Duration(seconds: 9)); // expire the toast timer
+  });
+
+  testWidgets('a platform that only opened a page claims no lost sessions', (
+    tester,
+  ) async {
+    // Linux replaces an AppImage by hand: whatever stopped the user's sessions
+    // was their own quit, possibly days before this launch.
+    await _pumpGate(
+      tester,
+      _FakeStrategy(UpdateCheckOutcome.none),
+      afterUpdate: '1.20677.100',
+    );
+
+    final toast = tester.widget<AbToast>(find.byType(AbToast));
+    expect(toast.description, 'Replaced 1.20677.100.');
+
+    await tester.pump(const Duration(seconds: 9));
+  });
+
+  testWidgets('the platform retracting an update puts the row out', (
+    tester,
+  ) async {
+    // macOS reads the appcast itself, but Sparkle additionally honours
+    // minimumSystemVersion and the item channel — so it can refuse what our
+    // read advertised, and without this the row is an Update button that can
+    // never do anything for the rest of the process.
+    final retracted = StreamController<void>.broadcast();
+    addTearDown(retracted.close);
+    final h = await _pumpGate(
+      tester,
+      _FakeStrategy(UpdateCheckOutcome.updateAvailable, retracted: retracted.stream),
+    );
+    expect(h.container.read(updateAvailableProvider), isTrue);
+
+    retracted.add(null);
+    await tester.pump();
+
+    expect(h.container.read(updateAvailableProvider), isFalse);
+    await tester.pump(const Duration(seconds: 11));
   });
 
   testWidgets('an ordinary launch announces nothing', (tester) async {

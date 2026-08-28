@@ -235,6 +235,15 @@ class UpdateInstallController extends Notifier<UpdateInstallState> {
       result = UpdateInstallResult.unavailable;
     }
     _cancelProgress();
+    // Marked AFTER the hand-off here, and BEFORE it above — the asymmetry is
+    // the point. A session-ending install may never return, so its mark has to
+    // exist before the call; every other platform's install returns promptly
+    // (Sparkle opens a dialog, Linux opens a tab), so marking on the way out
+    // records only hand-offs that actually happened and leaves nothing to
+    // clear when one doesn't.
+    if (!endsSession && result == UpdateInstallResult.handedOff) {
+      await _markHandoff();
+    }
     if (result != UpdateInstallResult.handedOff) {
       AbLog.warn(
         'UpdateInstall',

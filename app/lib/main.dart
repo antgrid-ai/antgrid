@@ -162,14 +162,16 @@ Future<void> main(List<String> args) async {
   ).wait;
   final initialAppSettings = AppSettings.fromPrefs(prefs);
 
-  // Windows relaunches us with the same argument after a crash, a hang and a
-  // reboot-to-patch as it does after an update (RegisterApplicationRestart is
-  // registered with flags 0 on purpose), so the argument is not evidence.
-  // A version recorded at hand-off that no longer matches the running build
-  // is. Consumed here, once per launch, so it can never announce twice.
-  final updatedFromVersion = args.contains(kAfterUpdateFlag)
-      ? await updateHandoffStore.consume(BuildInfo.version)
-      : null;
+  // Consumed unconditionally, not behind kAfterUpdateFlag. Windows relaunches
+  // us with that argument after a crash, a hang and a reboot-to-patch as well
+  // as after an update, so it is not evidence; and Sparkle's relaunch on macOS
+  // passes no argument at all, so requiring it would mean no macOS or Linux
+  // announcement ever. A version recorded at hand-off that no longer matches
+  // the running build is the evidence, on every platform. Once per launch, so
+  // it can never announce twice.
+  final updatedFromVersion = await updateHandoffStore.consume(
+    BuildInfo.version,
+  );
 
   final installId = await SecureInstallIdStore().ensure();
   final platform = analyticsPlatformTag(defaultTargetPlatform);
@@ -214,7 +216,7 @@ Future<void> main(List<String> args) async {
       ),
       analyticsServiceProvider.overrideWithValue(analytics),
       updateHandoffStoreProvider.overrideWithValue(updateHandoffStore),
-      afterUpdateLaunchProvider.overrideWithValue(updatedFromVersion != null),
+      afterUpdateLaunchProvider.overrideWithValue(updatedFromVersion),
     ],
   );
 

@@ -526,14 +526,34 @@ void main() {
     await tester.pump(const Duration(seconds: 9));
   });
 
-  testWidgets('a platform that ends nothing records nothing', (tester) async {
-    // Nothing replaces the package, so there is no relaunch to announce.
+  testWidgets('a platform that ends nothing records on the way OUT', (
+    tester,
+  ) async {
+    // Sparkle and the browser both return promptly, so the mark can wait for
+    // proof the hand-off happened — which is why this path needs no clear.
     final h = await _pump(tester, endsSession: false);
+    await h.start();
+    await tester.pump();
+
+    expect(h.handoff.marked, [BuildInfo.version]);
+    expect(h.handoff.clears, 0);
+  });
+
+  testWidgets('a hand-off that never happened records nothing', (tester) async {
+    // The asymmetry pays for itself here: nothing was marked, so nothing has
+    // to be unmarked, and no later launch can find a stale mark to misread.
+    final h = await _pump(
+      tester,
+      endsSession: false,
+      result: UpdateInstallResult.unavailable,
+    );
     await h.start();
     await tester.pump();
 
     expect(h.handoff.marked, isEmpty);
     expect(h.handoff.clears, 0);
+
+    await tester.pump(const Duration(seconds: 9)); // expire the failure toast
   });
 
   testWidgets('a browser hand-off can be repeated', (tester) async {
