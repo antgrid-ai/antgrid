@@ -331,8 +331,9 @@ class UpdateInstallController extends Notifier<UpdateInstallState> {
   /// Best-effort on purpose: the user has already decided, so a wedged host
   /// must not be able to veto the update. Failing here costs what happens
   /// today — the job object sweeps the tree as the process dies. The outer
-  /// timeout only backstops `shutdownOwnedHost`'s own ~5s ceiling; both fit
-  /// well inside Windows' 30s shutdown budget.
+  /// timeout only backstops `shutdownOwnedHost`'s own ceiling (~6.5s: a 2s
+  /// control-plane call, a 3s graceful wait, then the force-kill's own POSIX
+  /// grace); both fit well inside Windows' 30s shutdown budget.
   Future<void> _drainOwnedHost() async {
     // Sealed BEFORE the drain, not after: the app stays interactive for the
     // Store's whole window, and anything that spawns a host in it hands the
