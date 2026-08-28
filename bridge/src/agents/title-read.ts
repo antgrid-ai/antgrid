@@ -5,7 +5,9 @@
 import { readFile } from "node:fs/promises";
 import type { ResolvedTitle } from "./types";
 
-export const generated = (title: string): ResolvedTitle => ({ title, kind: "generated" });
+/** A name the USER typed at the agent. There is deliberately no constructor for
+ *  a name the agent generated for itself — see ResolvedTitle. */
+export const manualTitle = (title: string): ResolvedTitle => ({ title, kind: "manual" });
 export const firstMessage = (title: string): ResolvedTitle => ({ title, kind: "first-message" });
 
 /** Read a UTF-8 file, returning null on any error (missing / unreadable). Async

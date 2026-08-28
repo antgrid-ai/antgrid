@@ -1,6 +1,6 @@
 // bridge/tests/handler/judge.test.ts
 import { describe, it, expect } from "bun:test";
-import { runDecision } from "../../src/handler/judge";
+import { runDecision, runExtraction } from "../../src/handler/judge";
 
 const GOAL = "migrate the auth module";
 const BACKLOG_TEXT = "- id=i1 [queued] run the tests";
@@ -79,6 +79,37 @@ describe("runDecision", () => {
 });
 
 // The registry declares the override; this is the wiring that has to apply it.
+// The judge is the one caller that MUST run in the working tree: reading it is
+// the work. A naming spawn deliberately runs in a throwaway directory instead
+// (headlessScratchCwd), and nothing but these assertions stops that from being
+// reused here — where it would leave the judge reasoning about an empty dir and
+// still returning a confident verdict.
+describe("judge cwd", () => {
+  function cwdCapturingSpawn(out: string) {
+    const cwds: (string | undefined)[] = [];
+    const spawn = ((_cmd: string[], opts: { cwd?: string }) => {
+      cwds.push(opts.cwd);
+      return { stdout: new Response(out).body, exited: Promise.resolve(0), kill() {} };
+    }) as unknown as typeof Bun.spawn;
+    return { spawn, cwds };
+  }
+
+  it("spawns a decision in the cwd it was handed", async () => {
+    const { spawn, cwds } = cwdCapturingSpawn(GOOD);
+    await runDecision({
+      tool: "claude-code", goal: GOAL, backlogText: "", context: "C",
+      cwd: "/checkout/here", spawn,
+    });
+    expect(cwds[0]).toBe("/checkout/here");
+  });
+
+  it("spawns an extraction in the cwd it was handed", async () => {
+    const { spawn, cwds } = cwdCapturingSpawn('{"items":[]}');
+    await runExtraction({ tool: "claude-code", text: "do a thing", cwd: "/checkout/here", spawn });
+    expect(cwds[0]).toBe("/checkout/here");
+  });
+});
+
 describe("judge env overrides", () => {
   function envCapturingSpawn(out: string) {
     const envs: (Record<string, string> | undefined)[] = [];
@@ -89,23 +120,60 @@ describe("judge env overrides", () => {
     return { spawn, envs };
   }
 
+  // A key the test owns, rather than whichever one `process.env` happens to
+  // enumerate first: the runner DELETES keys from the spawn env
+  // (ANTGRID_TERMINAL_ID always, the TLS/proxy overrides on demand), so probing
+  // an arbitrary inherited key can pick one of those and fail a correct
+  // implementation depending on how the box is configured.
+  const MARKER = "ANTGRID_TEST_INHERITED_MARKER";
+  async function withInheritedMarker(run: () => Promise<void>): Promise<void> {
+    const prior = process.env[MARKER];
+    process.env[MARKER] = "kept";
+    try { await run(); } finally {
+      if (prior === undefined) delete process.env[MARKER];
+      else process.env[MARKER] = prior;
+    }
+  }
+
   // Merged, never substituted: Bun.spawn REPLACES the environment when `env` is
   // passed, so handing it the override alone would strip PATH and the agent's
   // own credentials out from under the judge — which fails as "no judge output"
   // rather than as anything that names the environment.
   it("merges the agent's judge env over the inherited one", async () => {
     const { spawn, envs } = envCapturingSpawn(GOOD);
-    await runDecision({ tool: "opencode", goal: GOAL, backlogText: "", context: "C", cwd: ".", spawn });
+    await withInheritedMarker(async () => {
+      await runDecision({ tool: "opencode", goal: GOAL, backlogText: "", context: "C", cwd: ".", spawn });
+    });
     expect(envs[0]?.OPENCODE_DB).toBe(":memory:");
-    const inherited = Object.keys(process.env)[0];
-    expect(envs[0]?.[inherited]).toBe(process.env[inherited]);
+    expect(envs[0]?.[MARKER]).toBe("kept");
   });
 
-  // An agent that declares none must get NO env object — passing an empty one
-  // would be a full environment wipe, not a no-op.
-  it("passes no env at all for an agent that declares none", async () => {
+  // An agent that declares none still gets the FULL inherited environment, never
+  // an empty object: Bun.spawn substitutes rather than merges, so an empty env is
+  // a wipe that takes PATH and the agent's credentials with it.
+  it("inherits the whole environment for an agent that declares none", async () => {
     const { spawn, envs } = envCapturingSpawn(GOOD);
-    await runDecision({ tool: "claude-code", goal: GOAL, backlogText: "", context: "C", cwd: ".", spawn });
-    expect(envs[0]).toBeUndefined();
+    await withInheritedMarker(async () => {
+      await runDecision({ tool: "claude-code", goal: GOAL, backlogText: "", context: "C", cwd: ".", spawn });
+    });
+    expect(envs[0]?.[MARKER]).toBe("kept");
+  });
+
+  // Stripped by the shared runner for every headless spawn, whatever the agent
+  // declares: agy and opencode install their Antgrid hooks GLOBALLY, and this is
+  // the only thing keeping a supervisor pass from posting session/notify traffic
+  // for a conversation that does not exist.
+  it("strips ANTGRID_TERMINAL_ID from every judge spawn", async () => {
+    const prior = process.env.ANTGRID_TERMINAL_ID;
+    process.env.ANTGRID_TERMINAL_ID = "term-1";
+    try {
+      const { spawn, envs } = envCapturingSpawn(GOOD);
+      await runDecision({ tool: "claude-code", goal: GOAL, backlogText: "", context: "C", cwd: ".", spawn });
+      expect(envs[0]).toBeDefined();
+      expect(envs[0]?.ANTGRID_TERMINAL_ID).toBeUndefined();
+    } finally {
+      if (prior === undefined) delete process.env.ANTGRID_TERMINAL_ID;
+      else process.env.ANTGRID_TERMINAL_ID = prior;
+    }
   });
 });

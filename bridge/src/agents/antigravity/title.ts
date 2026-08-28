@@ -1,8 +1,7 @@
-import { Database } from "bun:sqlite";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ResolvedTitle } from "../types";
-import { firstMessage, generated, readOrNull } from "../title-read";
+import { firstMessage, manualTitle, readOrNull } from "../title-read";
 
 /**
  * Antigravity transcript title: first `type:"USER_INPUT"` line's `content`,
@@ -65,42 +64,6 @@ export function parseAntigravityRenames(raw: string): Map<string, string> {
   return out;
 }
 
-/**
- * agy's own conversation names, keyed by conversationId, from the global
- * `conversation_summaries.db`: the manual `title` (its copy of the user's
- * `/rename`) if set, else the model-generated `preview` (e.g. "Casual Greeting
- * And Introduction"). Fully-empty rows (a brand-new conversation agy hasn't
- * named yet) are omitted so the caller falls through to the first user message.
- *
- * agy writes this DB asynchronously AFTER a turn (WAL mode), so it's the lagging
- * upgrade path, not the instant one — history.jsonl carries a `/rename` live.
- * Opened read-only with busy_timeout=0 (never wait on agy's write lock); any
- * error (locked, missing, schema drift) yields an empty map. Mirrors the codex/
- * copilot sqlite title readers.
- */
-export function readAntigravitySummaries(antigravityHome: string): Map<string, string> {
-  const out = new Map<string, string>();
-  let db: Database | null = null;
-  try {
-    db = new Database(join(antigravityHome, "conversation_summaries.db"), { readonly: true });
-    db.exec("PRAGMA busy_timeout = 0");
-    const rows = db
-      .query("SELECT conversation_id, title, preview FROM conversation_summaries")
-      .all() as Array<{ conversation_id?: string; title?: string | null; preview?: string | null }>;
-    for (const r of rows) {
-      const cid = (r.conversation_id ?? "").trim();
-      if (!cid) continue;
-      const name = (r.title ?? "").trim() || (r.preview ?? "").trim();
-      if (name) out.set(cid, name);
-    }
-  } catch {
-    // locked / missing / schema drift — leave the map empty
-  } finally {
-    db?.close();
-  }
-  return out;
-}
-
 /** The latest `/rename` title the user set for `conversationId`, or null. Reads
  *  agy's global history.jsonl under `antigravityHome`. Never throws. */
 export async function resolveAntigravityRename(
@@ -129,16 +92,19 @@ export async function resolveAntigravityTranscriptTitle(transcriptPath: string):
 }
 
 /**
- * agy's best available conversation name, in the same precedence order claude
- * uses (manual rename > the agent's own title > first message):
- *   1. `/rename` from history.jsonl — manual intent, captured live.
- *   2. agy's own name from conversation_summaries.db — its manual `title` or
- *      generated `preview` (the lagging upgrade path).
- *   3. first user message from the transcript — until agy names it.
- * Resolving all three here (not only in the watcher) keeps a Stop/PreInvocation
- * re-derive from clobbering a higher source back down, and makes the name
- * survive resume. Only (3) is a `first-message` — the other two are real names,
- * so a generated title is never bought for them.
+ * agy's best available conversation name, in the same precedence order every
+ * other resolver uses (manual rename > first message):
+ *   1. `/rename` from history.jsonl — the user's own name, captured live.
+ *   2. first user message from the transcript — until our generated name lands.
+ *
+ * agy's OWN name (conversation_summaries.db: its copy of the rename, or the
+ * generated `preview`) would sit between the two and is deliberately not read —
+ * see ResolvedTitle. Leaving it out costs nothing on (1): `/rename` is logged to
+ * history.jsonl, so the user's intent still reaches us from a source agy writes
+ * synchronously, rather than one it fills in a beat later.
+ *
+ * Resolving both here (not only in the watcher) keeps a Stop/PreInvocation
+ * re-derive from clobbering the rename back down, and makes it survive resume.
  */
 export async function resolveAntigravityTitle(
   conversationId: string,
@@ -146,9 +112,7 @@ export async function resolveAntigravityTitle(
   transcriptPath?: string,
 ): Promise<ResolvedTitle | null> {
   const rename = await resolveAntigravityRename(conversationId, antigravityHome);
-  if (rename) return generated(rename);
-  const summary = readAntigravitySummaries(antigravityHome).get(conversationId);
-  if (summary) return generated(summary);
+  if (rename) return manualTitle(rename);
   if (!transcriptPath) return null;
   const first = await resolveAntigravityTranscriptTitle(transcriptPath);
   return first ? firstMessage(first) : null;

@@ -40,14 +40,16 @@ function makeClient(rootId = "sess-1") {
   return { client, push, done, created };
 }
 
+
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
-describe("OpencodeDriver session.updated → onTitle", () => {
-  // The whole auto-naming feature hangs off this argument. opencode generates a
-  // title from the first prompt ONLY for a session that doesn't already have
-  // one; any title passed here disables generation for good, so session.updated
-  // never carries a real title and the app stays on "Session N".
-  it("creates the session with no title so opencode will generate one", async () => {
+describe("OpencodeDriver session naming", () => {
+  // Antgrid names its own sessions (see ResolvedTitle), so opencode's title is
+  // neither read nor written: session.updated carries only opencode's own
+  // generated name and is dropped, and nothing is stamped onto opencode's
+  // session record here either. Passing one would rename the conversation in
+  // the user's own opencode history off a name they never chose.
+  it("creates the session without stamping a title on it", async () => {
     const { client, created } = makeClient();
     const driver = new OpencodeDriver({ sessionId: "s1", client, sendMessage: () => {} });
     await driver.start();
@@ -55,38 +57,28 @@ describe("OpencodeDriver session.updated → onTitle", () => {
     expect(created[0]!.title).toBeUndefined();
   });
 
-  it("forwards the root session's generated title", async () => {
-    const { client, push } = makeClient("sess-1");
-    const titles: string[] = [];
+  // opencode is the one agent with no vendor integration to fall back on: it
+  // ships no hook, writes no rename we read, and its plugin's inline title is
+  // dropped. So the driver ignoring session.updated is the whole of the claim
+  // that our generated name survives — a case re-added to the event switch
+  // renames the chat after whatever opencode last called the conversation,
+  // including a subagent's own title.
+  it("drops session.updated, for the root session and for a subtask alike", async () => {
+    const { client, push, done } = makeClient("sess-1");
+    const sent: unknown[] = [];
     const driver = new OpencodeDriver({
-      sessionId: "s1", client, sendMessage: () => {}, onTitle: (t) => titles.push(t),
-    });
-    await driver.start(); // rootSessionId = "sess-1"
-
-    push({ type: "session.updated", properties: { info: { id: "sess-1", title: "Fix the login bug" } } });
-    await tick();
-    expect(titles).toEqual(["Fix the login bug"]);
-
-    // A title for an unrelated session id belongs to another driver — ignored.
-    push({ type: "session.updated", properties: { info: { id: "other", title: "x" } } });
-    await tick();
-    expect(titles).toEqual(["Fix the login bug"]);
-  });
-
-  it("ignores a subtask child's own title", async () => {
-    const { client, push } = makeClient("sess-1");
-    const titles: string[] = [];
-    const driver = new OpencodeDriver({
-      sessionId: "s1", client, sendMessage: () => {}, onTitle: (t) => titles.push(t),
+      sessionId: "s1", client, sendMessage: (m) => { sent.push(m); },
     });
     await driver.start();
+    sent.length = 0;
 
-    push({ type: "session.created", properties: { info: { id: "sess-child", parentID: "sess-1", agent: "explore" } } });
+    push({ type: "session.updated", properties: { info: { id: "sess-1", title: "Fix the login bug" } } });
+    push({
+      type: "session.updated",
+      properties: { info: { id: "sess-child", parentID: "sess-1", title: "Find TODOs" } },
+    });
     await tick();
-    // opencode titles child sessions too; taking one would rename the chat
-    // session after whatever a subagent happened to do last.
-    push({ type: "session.updated", properties: { info: { id: "sess-child", title: "Find TODOs (@explore subagent)" } } });
-    await tick();
-    expect(titles).toEqual([]);
+    expect(sent).toEqual([]);
+    done();
   });
 });

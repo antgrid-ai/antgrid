@@ -65,13 +65,17 @@ const ClaudePayloadSchema = z.object({
   session_id: z.string().nullish(),
   transcript_path: z.string().nullish(),
   message: z.string().nullish(),
+  // UserPromptSubmit only: the text the user just submitted. Verified against
+  // the shipped CLI, whose hook input for that event is
+  // `{hook_event_name:"UserPromptSubmit", prompt, session_title, ...}`.
+  prompt: z.string().nullish(),
   // StopFailure only. Left a bare string rather than the CLI's enum so a value
   // added upstream still classifies (as a transient) instead of failing the
   // parse and dropping the event.
   error: z.string().nullish(),
 });
 
-// "user-prompt" (→ /turn-start) is Claude-specific: Claude exposes a
+// "user-prompt" (→ /turn-start + /session-title) is Claude-specific: Claude exposes a
 // UserPromptSubmit hook that fires before each new turn, and it is the ONLY
 // turn-start signal a terminal-mode Claude session has (chat sessions get
 // precise `agent:turn-start` frames from their driver instead).
@@ -106,6 +110,17 @@ function claudeStopFailureEvent(errorClass: string): "limit_hit" | "turn_failed"
   return CLAUDE_FATAL_STOP_ERRORS.has(errorClass) ? "turn_end" : "turn_failed";
 }
 
+// A submission the model can name a task from. A slash command is the user
+// invoking a command, not describing what they want done — "/clear", "/commit"
+// and their arguments name the command, so a title generated from one describes
+// the tool rather than the session, and the attempt it spends is gone.
+// Withholding `prompt` does not drop the post: it falls through to the on-disk
+// read, which is what a session without a pre-turn hook already does.
+function namesTheSession(prompt: string | null | undefined): boolean {
+  const text = prompt?.trim();
+  return !!text && !text.startsWith("/");
+}
+
 export async function toPosts(
   invocation: HookInvocation,
   { port, terminalId, readStdin }: HookPostCtx,
@@ -116,7 +131,12 @@ export async function toPosts(
   if (invocation.event === "session-start" || invocation.event === "stop") {
     posts.push(
       titlePost(port, terminalId, input.session_id, "claude", {
-        transcriptPath: input.transcript_path ?? "",
+        // Omitted when absent, never "": setAgentSession falls back to the path
+        // it already holds only for a NULLISH one, so an empty string overwrites
+        // it — and this post repeats for the life of the session, so a single
+        // report without a path would cost the handler's judge and the resume
+        // preflight the real one.
+        ...(input.transcript_path ? { transcriptPath: input.transcript_path } : {}),
       }),
     );
   }
@@ -130,6 +150,18 @@ export async function toPosts(
       path: "/turn-start",
       body: { ...(terminalId ? { terminalId } : {}) },
     });
+    // Name the session from the prompt the user just submitted. This is the
+    // whole reason Claude's naming does not wait for the turn to end, and it is
+    // Claude-only because no other agent exposes a pre-turn hook — the rest
+    // reach the same code from their turn-END post, minutes later on a real
+    // task. The bridge treats `prompt` as "name this now", so it must not ride
+    // any other event.
+    posts.push(
+      titlePost(port, terminalId, input.session_id, "claude", {
+        ...(namesTheSession(input.prompt) ? { prompt: input.prompt } : {}),
+        ...(input.transcript_path ? { transcriptPath: input.transcript_path } : {}),
+      }),
+    );
   }
   if (invocation.event === "stop") {
     posts.push({

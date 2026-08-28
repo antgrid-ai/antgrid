@@ -59,7 +59,7 @@ describe("Claude hooks", () => {
     ]);
   });
 
-  test("user-prompt posts a turn-start (fresh turn → working)", async () => {
+  test("user-prompt posts a turn-start and a title request (fresh turn → working)", async () => {
     const h = harness({
       agent: "claude",
       event: "user-prompt",
@@ -68,6 +68,17 @@ describe("Claude hooks", () => {
     await h.run();
     expect(h.posts).toEqual([
       { port: 43123, path: "/turn-start", body: { terminalId: "term-1" } },
+      {
+        port: 43123,
+        path: "/session-title",
+        body: {
+          terminalId: "term-1",
+          sessionId: "s1",
+          agent: "claude",
+          prompt: "hi",
+          transcriptPath: "/tmp/t.jsonl",
+        },
+      },
     ]);
   });
 
@@ -125,7 +136,7 @@ describe("Claude hooks", () => {
       {
         port: 43123,
         path: "/session-title",
-        body: { terminalId: "term-1", sessionId: "s4", transcriptPath: "", agent: "claude" },
+        body: { terminalId: "term-1", sessionId: "s4", agent: "claude" },
       },
     ]));
     expect(h.posts.length).toBe(3);

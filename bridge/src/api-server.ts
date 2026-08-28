@@ -66,7 +66,11 @@ export const NotifyBodySchema = z.object({
 export const SessionTitleSchema = z.object({
   terminalId: z.string().min(1),
   sessionId: z.string().min(1),
-  title: z.string().optional(),
+  /** The message the user just submitted, from an agent with a PRE-turn hook
+   *  (only Claude has one). Its presence is what makes this post a request to
+   *  name the session now rather than a report that a turn ended, so it must
+   *  never be set on a turn-end post. */
+  prompt: z.string().optional(),
   transcriptPath: z.string().optional(),
   agent: z.enum(HOOK_AGENT_NAMES).optional(),
   titleOnly: z.boolean().optional(),

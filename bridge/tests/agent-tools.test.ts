@@ -52,10 +52,21 @@ test("buildAgentCatalog describes the whole registry in declaration order", () =
     handler: { terminal: true, chat: true },
   });
   // The agent the PATH probe can find but the Handler can never observe — the
-  // distinction the descriptor exists to carry.
+  // distinction the descriptor exists to carry. Judge-capable and unobservable
+  // are independent: it declares a headless argv that reaches the repo, and
+  // still reports no turn boundaries for anything to watch.
   expect(byKey["cursor-agent"]).toEqual({
     tool: "cursor-agent",
     label: "Cursor",
+    chatCapable: false,
+    judgeCapable: true,
+    handler: { terminal: false, chat: false },
+  });
+  // The other half of that pair: no headless argv verified at any reach, so it
+  // cannot judge either.
+  expect(byKey["kimi"]).toEqual({
+    tool: "kimi",
+    label: "Kimi",
     chatCapable: false,
     judgeCapable: false,
     handler: { terminal: false, chat: false },
@@ -65,7 +76,7 @@ test("buildAgentCatalog describes the whole registry in declaration order", () =
     tool: "kilo",
     label: "Kilo",
     chatCapable: false,
-    judgeCapable: false,
+    judgeCapable: true,
     handler: { terminal: false, chat: false },
   });
 });

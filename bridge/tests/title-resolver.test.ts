@@ -3,11 +3,10 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveCodexThreadName, resolveCodexThreadTitle } from "../src/agents/codex/title";
+import { resolveCodexThreadTitle } from "../src/agents/codex/title";
 import { resolveClaudeTranscriptTitle } from "../src/agents/claude-code/title";
 import {
   parseAntigravityRenames,
-  readAntigravitySummaries,
   resolveAntigravityRename,
   resolveAntigravityTranscriptTitle,
 } from "../src/agents/antigravity/title";
@@ -30,37 +29,13 @@ function writeStateDb(
   db.close();
 }
 
-describe("resolveCodexThreadName", () => {
-  test("returns the most recent thread_name for the id", async () => {
-    const home = tmp();
-    writeFileSync(join(home, "session_index.jsonl"),
-      `{"id":"t1","thread_name":"Old","updated_at":"2024-01-01T00:00:00Z"}\n` +
-      `{"id":"t2","thread_name":"Other","updated_at":"2024-01-01T00:00:00Z"}\n` +
-      `{"id":"t1","thread_name":"New title","updated_at":"2024-01-02T00:00:00Z"}\n`);
-    expect(await resolveCodexThreadName("t1", home)).toEqual({ title: "New title", kind: "generated" });
-  });
-  test("missing file → null", async () => {
-    expect(await resolveCodexThreadName("t1", tmp())).toBeNull();
-  });
-  test("garbage lines are skipped, not thrown", async () => {
-    const home = tmp();
-    writeFileSync(join(home, "session_index.jsonl"),
-      `not json\n{"id":"t1","thread_name":"Good","updated_at":"z"}\n{partial`);
-    expect(await resolveCodexThreadName("t1", home)).toEqual({ title: "Good", kind: "generated" });
-  });
-  test("unknown id → null", async () => {
-    const home = tmp();
-    writeFileSync(join(home, "session_index.jsonl"),
-      `{"id":"t1","thread_name":"Good","updated_at":"z"}\n`);
-    expect(await resolveCodexThreadName("nope", home)).toBeNull();
-  });
-});
-
 describe("resolveCodexThreadTitle", () => {
-  test("reads title from the threads table", async () => {
+  // A divergent `title` is the Codex DESKTOP app naming the thread for itself.
+  // We name sessions ourselves, so first_user_message is the column that counts.
+  test("ignores a desktop-written title and reads first_user_message", async () => {
     const home = tmp();
     writeStateDb(home, 5, [{ id: "t1", title: "My title", first_user_message: "do the thing" }]);
-    expect(await resolveCodexThreadTitle("t1", home)).toEqual({ title: "My title", kind: "generated" });
+    expect(await resolveCodexThreadTitle("t1", home)).toEqual({ title: "do the thing", kind: "first-message" });
   });
   test("falls back to first_user_message when title is blank", async () => {
     const home = tmp();
@@ -78,28 +53,27 @@ describe("resolveCodexThreadTitle", () => {
   });
   test("picks the newest state_<N>.sqlite", async () => {
     const home = tmp();
-    writeStateDb(home, 4, [{ id: "t1", title: "old schema" }]);
-    writeStateDb(home, 12, [{ id: "t1", title: "new schema" }]);
-    expect(await resolveCodexThreadTitle("t1", home)).toEqual({ title: "new schema", kind: "generated" });
+    writeStateDb(home, 4, [{ id: "t1", first_user_message: "old schema" }]);
+    writeStateDb(home, 12, [{ id: "t1", first_user_message: "new schema" }]);
+    expect(await resolveCodexThreadTitle("t1", home)).toEqual({ title: "new schema", kind: "first-message" });
   });
   test("missing DB → null", async () => {
     expect(await resolveCodexThreadTitle("t1", tmp())).toBeNull();
   });
   test("unknown id → null", async () => {
     const home = tmp();
-    writeStateDb(home, 5, [{ id: "t1", title: "x" }]);
+    writeStateDb(home, 5, [{ id: "t1", first_user_message: "x" }]);
     expect(await resolveCodexThreadTitle("nope", home)).toBeNull();
   });
 });
 
 describe("resolveClaudeTranscriptTitle", () => {
-  test("prefers the manual /rename custom-title over a summary and user message", async () => {
+  test("reports the manual /rename custom-title, outranking the user message", async () => {
     const d = tmp(); const p = join(d, "t.jsonl");
     writeFileSync(p,
       `{"type":"custom-title","customTitle":"Renamed by user","sessionId":"s1"}\n` +
-      `{"type":"user","message":{"content":"first message text"}}\n` +
-      `{"type":"summary","summary":"A summary"}\n`);
-    expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "Renamed by user", kind: "generated" });
+      `{"type":"user","message":{"content":"first message text"}}\n`);
+    expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "Renamed by user", kind: "manual" });
   });
   test("uses the LAST custom-title when renamed more than once", async () => {
     const d = tmp(); const p = join(d, "t.jsonl");
@@ -107,85 +81,57 @@ describe("resolveClaudeTranscriptTitle", () => {
       `{"type":"custom-title","customTitle":"Old name","sessionId":"s1"}\n` +
       `{"type":"user","message":{"content":"hi"}}\n` +
       `{"type":"custom-title","customTitle":"New name","sessionId":"s1"}\n`);
-    expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "New name", kind: "generated" });
+    expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "New name", kind: "manual" });
   });
-  test("a blank custom-title falls through to the summary", async () => {
+  test("a blank custom-title falls through to the first user message", async () => {
     const d = tmp(); const p = join(d, "t.jsonl");
     writeFileSync(p,
       `{"type":"custom-title","customTitle":"   ","sessionId":"s1"}\n` +
-      `{"type":"summary","summary":"Real summary"}\n`);
-    expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "Real summary", kind: "generated" });
+      `{"type":"user","message":{"content":"the real content"}}\n`);
+    expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "the real content", kind: "first-message" });
   });
-  test("prefers the last summary line", async () => {
-    const d = tmp(); const p = join(d, "t.jsonl");
-    writeFileSync(p,
-      `{"type":"user","message":{"content":"first message text"}}\n` +
-      `{"type":"summary","summary":"First summary"}\n` +
-      `{"type":"summary","summary":"Latest summary"}\n`);
-    expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "Latest summary", kind: "generated" });
-  });
-  test("falls back to first user message when no summary", async () => {
+  test("falls back to the first user message", async () => {
     const d = tmp(); const p = join(d, "t.jsonl");
     writeFileSync(p, `{"type":"user","message":{"content":"do the thing"}}\n`);
     expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "do the thing", kind: "first-message" });
-  });
-  test("an empty/blank summary does not suppress the first user message", async () => {
-    const d = tmp(); const p = join(d, "t.jsonl");
-    writeFileSync(p,
-      `{"type":"user","message":{"content":"the real title"}}\n` +
-      `{"type":"summary","summary":"   "}\n`);
-    expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "the real title", kind: "first-message" });
   });
   test("handles array content (first text part)", async () => {
     const d = tmp(); const p = join(d, "t.jsonl");
     writeFileSync(p, `{"type":"user","message":{"content":[{"type":"text","text":"hello there"}]}}\n`);
     expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "hello there", kind: "first-message" });
   });
-  test("reads Claude's own ai-title (the current spelling of the generated title)", async () => {
+  // Claude's OWN name for the conversation. Both spellings are deliberately not
+  // read — we generate our own rather than depend on whether Claude wrote one,
+  // which it does in the interactive TUI and never in a headless/SDK run.
+  test("ignores Claude's ai-title", async () => {
     const d = tmp(); const p = join(d, "t.jsonl");
     writeFileSync(p,
       `{"type":"user","message":{"content":"please fix the flaky login test on windows ci"}}\n` +
       `{"type":"ai-title","aiTitle":"Fix flaky Windows login test","sessionId":"s1"}\n`);
-    expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "Fix flaky Windows login test", kind: "generated" });
+    expect(await resolveClaudeTranscriptTitle(p))
+      .toEqual({ title: "please fix the flaky login test on windows ci", kind: "first-message" });
   });
-  test("uses the LAST ai-title — a title can be revised over a long session", async () => {
+  test("ignores a compaction summary", async () => {
     const d = tmp(); const p = join(d, "t.jsonl");
     writeFileSync(p,
-      `{"type":"ai-title","aiTitle":"Early guess","sessionId":"s1"}\n` +
-      `{"type":"user","message":{"content":"hi"}}\n` +
-      `{"type":"ai-title","aiTitle":"Settled topic","sessionId":"s1"}\n`);
-    expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "Settled topic", kind: "generated" });
+      `{"type":"user","message":{"content":"do the thing"}}\n` +
+      `{"type":"summary","summary":"A summary"}\n`);
+    expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "do the thing", kind: "first-message" });
   });
-  // Precedence is by TYPE, not file position: a renamed conversation restates
-  // both records every turn and the ai-title is normally the LATER of the pair,
-  // so this fixture uses the order that actually occurs on disk.
-  test("a user's custom-title outranks Claude's ai-title even when written first", async () => {
+  // The two records coexist — a renamed conversation restates both every turn,
+  // with the ai-title normally the LATER of the pair — so dropping ai-title must
+  // not take the rename with it.
+  test("a rename still resolves when Claude's own title follows it", async () => {
     const d = tmp(); const p = join(d, "t.jsonl");
     writeFileSync(p,
       `{"type":"custom-title","customTitle":"Renamed by user","sessionId":"s1"}\n` +
       `{"type":"ai-title","aiTitle":"Claude's own name","sessionId":"s1"}\n`);
-    expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "Renamed by user", kind: "generated" });
+    expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "Renamed by user", kind: "manual" });
   });
-  test("ai-title outranks a compaction summary", async () => {
+  test("an ai-title alone leaves the session unresolved rather than named", async () => {
     const d = tmp(); const p = join(d, "t.jsonl");
-    writeFileSync(p,
-      `{"type":"summary","summary":"A summary"}\n` +
-      `{"type":"ai-title","aiTitle":"Real title","sessionId":"s1"}\n`);
-    expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "Real title", kind: "generated" });
-  });
-  test("a blank ai-title does not suppress the first user message", async () => {
-    const d = tmp(); const p = join(d, "t.jsonl");
-    writeFileSync(p,
-      `{"type":"user","message":{"content":"the real title"}}\n` +
-      `{"type":"ai-title","aiTitle":"   ","sessionId":"s1"}\n`);
-    expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "the real title", kind: "first-message" });
-  });
-  test("a blank ai-title does not erase a real one seen earlier", async () => {
-    const d = tmp(); const p = join(d, "t.jsonl");
-    writeFileSync(p,
-      `{"type":"ai-title","aiTitle":"Real title","sessionId":"s1"}\n` +
-      `{"type":"ai-title","aiTitle":"   ","sessionId":"s1"}\n`);
-    expect(await resolveClaudeTranscriptTitle(p)).toEqual({ title: "Real title", kind: "generated" });
+    writeFileSync(p, `{"type":"ai-title","aiTitle":"Claude's own name","sessionId":"s1"}\n`);
+    expect(await resolveClaudeTranscriptTitle(p)).toBeNull();
   });
   test("missing file → null", async () => {
     expect(await resolveClaudeTranscriptTitle(join(tmp(), "nope.jsonl"))).toBeNull();
@@ -219,40 +165,6 @@ describe("resolveAntigravityTranscriptTitle", () => {
     const d = tmp(); const p = join(d, "transcript_full.jsonl");
     writeFileSync(p, `not json\n{"type":"USER_INPUT","content":"real title"}\n{partial`);
     expect(await resolveAntigravityTranscriptTitle(p)).toBe("real title");
-  });
-});
-
-/** Mirror the shape agy's conversation_summaries.db exposes (subset of columns
- *  we read): manual `title` and generated `preview` per conversation. */
-function writeSummariesDb(
-  home: string,
-  rows: Array<{ id: string; title?: string; preview?: string }>,
-) {
-  const db = new Database(join(home, "conversation_summaries.db"));
-  db.run("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT, preview TEXT)");
-  const stmt = db.query("INSERT INTO conversation_summaries (conversation_id, title, preview) VALUES (?, ?, ?)");
-  for (const r of rows) stmt.run(r.id, r.title ?? "", r.preview ?? "");
-  db.close();
-}
-
-describe("readAntigravitySummaries", () => {
-  test("maps a conversation to its generated preview", () => {
-    const home = tmp();
-    writeSummariesDb(home, [{ id: "c1", title: "", preview: "Casual Greeting And Introduction" }]);
-    expect(readAntigravitySummaries(home).get("c1")).toBe("Casual Greeting And Introduction");
-  });
-  test("prefers the manual title over the generated preview", () => {
-    const home = tmp();
-    writeSummariesDb(home, [{ id: "c1", title: "renamed", preview: "generated name" }]);
-    expect(readAntigravitySummaries(home).get("c1")).toBe("renamed");
-  });
-  test("omits a conversation with neither title nor preview", () => {
-    const home = tmp();
-    writeSummariesDb(home, [{ id: "c1", title: "", preview: "" }]);
-    expect(readAntigravitySummaries(home).has("c1")).toBe(false);
-  });
-  test("missing db → empty map, no throw", () => {
-    expect(readAntigravitySummaries(tmp()).size).toBe(0);
   });
 });
 
@@ -319,29 +231,9 @@ describe("resolveStructuredTitle dispatch", () => {
       `{"display":"/rename my chat","conversationId":"c1","type":"slash_command"}\n`);
     expect(
       await resolveStructuredTitle("antigravity", { sessionId: "c1", transcriptPath: p }, { antigravityHome: home }),
-    ).toEqual({ title: "my chat", kind: "generated" });
+    ).toEqual({ title: "my chat", kind: "manual" });
   });
-  test("antigravity prefers agy's generated preview over the first user message", async () => {
-    const home = tmp();
-    const p = join(home, "transcript_full.jsonl");
-    writeFileSync(p, `{"type":"USER_INPUT","content":"hii"}\n`);
-    writeSummariesDb(home, [{ id: "c1", preview: "Casual Greeting And Introduction" }]);
-    expect(
-      await resolveStructuredTitle("antigravity", { sessionId: "c1", transcriptPath: p }, { antigravityHome: home }),
-    ).toEqual({ title: "Casual Greeting And Introduction", kind: "generated" });
-  });
-  test("antigravity prefers a live /rename over agy's generated preview", async () => {
-    const home = tmp();
-    const p = join(home, "transcript_full.jsonl");
-    writeFileSync(p, `{"type":"USER_INPUT","content":"hii"}\n`);
-    writeSummariesDb(home, [{ id: "c1", preview: "Casual Greeting And Introduction" }]);
-    writeFileSync(join(home, "history.jsonl"),
-      `{"display":"/rename my chat","conversationId":"c1","type":"slash_command"}\n`);
-    expect(
-      await resolveStructuredTitle("antigravity", { sessionId: "c1", transcriptPath: p }, { antigravityHome: home }),
-    ).toEqual({ title: "my chat", kind: "generated" });
-  });
-  test("antigravity falls back to the first user message with no rename or preview", async () => {
+  test("antigravity falls back to the first user message with no rename", async () => {
     const home = tmp();
     const p = join(home, "transcript_full.jsonl");
     writeFileSync(p, `{"type":"USER_INPUT","content":"first turn"}\n`);
@@ -361,28 +253,26 @@ describe("resolveStructuredTitle dispatch", () => {
   });
 
 
-  test("codex via sessionId (desktop session_index)", async () => {
+  test("codex via sessionId reads the CLI state DB", async () => {
     const home = tmp();
-    writeFileSync(join(home, "session_index.jsonl"),
-      `{"id":"abc","thread_name":"Codex title","updated_at":"z"}\n`);
-    expect(await resolveStructuredTitle("codex", { sessionId: "abc" }, { codexHome: home })).toEqual({ title: "Codex title", kind: "generated" });
+    writeStateDb(home, 5, [{ id: "abc", first_user_message: "From state DB" }]);
+    expect(await resolveStructuredTitle("codex", { sessionId: "abc" }, { codexHome: home }))
+      .toEqual({ title: "From state DB", kind: "first-message" });
   });
-  test("codex falls back to the CLI state DB when session_index lacks the thread", async () => {
-    const home = tmp();
-    writeStateDb(home, 5, [{ id: "abc", title: "From state DB" }]);
-    expect(await resolveStructuredTitle("codex", { sessionId: "abc" }, { codexHome: home })).toEqual({ title: "From state DB", kind: "generated" });
-  });
-  test("codex prefers the desktop session_index over the state DB when both have the thread", async () => {
+  // session_index.jsonl is written only by the Codex DESKTOP app, and every
+  // name in it is one that app generated — so it is not consulted at all now.
+  test("codex ignores the desktop session_index", async () => {
     const home = tmp();
     writeFileSync(join(home, "session_index.jsonl"),
       `{"id":"abc","thread_name":"Rich desktop title","updated_at":"z"}\n`);
-    writeStateDb(home, 5, [{ id: "abc", title: "CLI first-message title" }]);
-    expect(await resolveStructuredTitle("codex", { sessionId: "abc" }, { codexHome: home })).toEqual({ title: "Rich desktop title", kind: "generated" });
+    writeStateDb(home, 5, [{ id: "abc", first_user_message: "what the user asked" }]);
+    expect(await resolveStructuredTitle("codex", { sessionId: "abc" }, { codexHome: home }))
+      .toEqual({ title: "what the user asked", kind: "first-message" });
   });
   test("claude via transcriptPath", async () => {
     const d = tmp(); const p = join(d, "t.jsonl");
-    writeFileSync(p, `{"type":"summary","summary":"Claude title"}\n`);
-    expect(await resolveStructuredTitle("claude", { sessionId: "x", transcriptPath: p })).toEqual({ title: "Claude title", kind: "generated" });
+    writeFileSync(p, `{"type":"custom-title","customTitle":"Claude title","sessionId":"x"}\n`);
+    expect(await resolveStructuredTitle("claude", { sessionId: "x", transcriptPath: p })).toEqual({ title: "Claude title", kind: "manual" });
   });
   test("claude without transcriptPath → null", async () => {
     expect(await resolveStructuredTitle("claude", { sessionId: "x" })).toBeNull();

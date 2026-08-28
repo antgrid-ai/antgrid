@@ -20,6 +20,18 @@ derived from `toPosts`). Nothing in `app/` changes: `BY_HOOK_NAME`, the tools ad
 `handlerObservable`, and the judge / transcript / title dispatch all derive from
 that one table.
 
+`AgentSpec.headless` is the one exception to "absence is the honest answer".
+It declares the agent's VERIFIED non-interactive argvs keyed by how far each may
+reach, and two callers share them: naming a session (`agents/title-generate.ts`)
+and the Handler's judge (`handler/judge.ts`). A missing entry still means "no
+argv has been run against this CLI" — but for naming, `resolveHeadless` then
+BORROWS the first installed agent that has one, because the whole job is inlined
+into the prompt. A judge is never borrowed, and `judgeCapable` is exactly "has a
+non-sealed entry". The field's own docstring carries the rules a new entry must
+satisfy (no writes, and how it keeps the run out of the user's `--resume`); add
+one only after running it. A naming spawn runs in a throwaway cwd, NEVER the
+session's checkout — see `headlessScratchCwd`.
+
 The `agent:tools` advert (and the loopback `tools:list` reply) carries TWO
 arrays, and the split is load-bearing. `tools[]` is the PATH probe — what this
 machine can actually launch. `agents[]` (`agent-catalog.ts`, projected from the

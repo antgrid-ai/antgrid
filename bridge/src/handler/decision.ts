@@ -1,6 +1,7 @@
 // bridge/src/handler/decision.ts
 import { z } from "zod";
 import { agentSpec } from "../agents/registry";
+import { pickHeadlessFrom, type HeadlessCommand, type JudgeTier } from "../agents/types";
 import { ItemTransitionSchema } from "./backlog";
 import { extractJsonObject } from "./json-extract";
 
@@ -26,17 +27,24 @@ export const HandlerDecisionSchema = z.object({
 });
 export type HandlerDecision = z.infer<typeof HandlerDecisionSchema>;
 
-export type JudgeTier = "readonly" | "transcript";
+// Re-exported, not redefined: the reaches an agent declares live on
+// AgentSpec.headless, and a second spelling here could drift from them.
+export type { JudgeTier } from "../agents/types";
 
-// Judge argv for an arbitrary tool string, read off the one place a tool is
-// described. Tier and argv come back together because they are one field on the
-// spec — a "readonly" claim and the flags that enforce it can no longer drift.
-// Null = no VERIFIED headless judge for this tool, which gates Handler off.
-export function buildJudgeCommand(
-  tool: string, model: string | undefined, prompt: string,
-): { cmd: string[]; tier: JudgeTier; env?: Record<string, string> } | null {
-  const judge = agentSpec(tool)?.judge;
-  return judge ? { cmd: judge.cmd(prompt, model), tier: judge.tier, env: judge.env } : null;
+// The judge command for an arbitrary tool string, read off the one place a tool
+// is described. Tier and command come back together because they are one field
+// on the spec — a "readonly" claim and the flags that enforce it can no longer
+// drift. Null = no VERIFIED headless judge for this tool, which gates Handler
+// off. The COMMAND, not one built argv: a judge run retries with a second
+// prompt, and both attempts must come from the same entry.
+export function pickJudge(
+  tool: string,
+): { command: HeadlessCommand; tier: JudgeTier } | null {
+  const picked = pickHeadlessFrom(agentSpec(tool)?.headless, "repo");
+  // "repo" cannot select a sealed entry; the check is what lets the reach narrow
+  // to a JudgeTier without a cast, rather than a case that can actually happen.
+  if (!picked || picked.reach === "sealed") return null;
+  return { command: picked.command, tier: picked.reach };
 }
 
 // The transition rules below restate what applyTransitions enforces. That is
