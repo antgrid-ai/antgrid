@@ -335,9 +335,15 @@ class _AbListRowState extends State<AbListRow> {
         onShowFocusHighlight: (v) {
           if (_focused != v) setState(() => _focused = v);
         },
-        onShowHoverHighlight: (v) {
-          if (_hovered != v) setState(() => _hovered = v);
-        },
+        // Only tracked when it can be seen: `_hovered` feeds nothing but the
+        // `showHover` fill, so on a flat row — which every drawer row is — the
+        // setState would rebuild the whole row to identical pixels on each
+        // pointer crossing.
+        onShowHoverHighlight: widget.hoverable
+            ? (v) {
+                if (_hovered != v) setState(() => _hovered = v);
+              }
+            : null,
         actions: {
           ActivateIntent: CallbackAction<ActivateIntent>(
             onInvoke: (_) {

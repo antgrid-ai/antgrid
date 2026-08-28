@@ -101,16 +101,23 @@ class MachineDrawerHeaderRow extends ConsumerWidget {
         // Kept on the band, unlike the local one: expanding a machine is what
         // opens its control-plane socket, so there is something to disclose.
         expanded: expanded,
+        // Status dots after the hover actions, and the LIVENESS dot last of
+        // all: it is [LocalMachineBand]'s host dot under another name, and only
+        // the final slot sits a fixed distance from the row's edge on both
+        // bands, so only there can the two share a column. Every dot reserves
+        // its slot whether or not it renders — one resolving must not slide the
+        // trash that shares this row out from under the pointer.
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
+          spacing: AbTokens.space4,
           children: [
-            _MachineOnlineDot(machineUuid: machineUuid),
-            _MachineAggregateDot(machineUuid: machineUuid),
             _DrawerEntryTrailing(
               entry: entry,
               hovered: hovered,
               showRemoteChip: false,
             ),
+            _MachineAggregateDot(machineUuid: machineUuid),
+            _MachineOnlineDot(machineUuid: machineUuid),
           ],
         ),
         onTap: () =>
@@ -170,8 +177,9 @@ class LocalMachineBand extends ConsumerWidget {
 ///
 /// A SIBLING above the band rather than a wrapper around it: the ~13px this and
 /// its clearance occupy would otherwise sit inside the band's [MouseRegion], so
-/// the empty strip above a band highlighted under the pointer while accepting no
-/// click. Being const also keeps it out of the hover rebuild.
+/// the empty strip above a band would take the click cursor while accepting no
+/// click, and would pop the band's hover-revealed trash out of dead space.
+/// Being const also keeps it out of the hover rebuild.
 class DrawerBandRule extends StatelessWidget {
   const DrawerBandRule({super.key});
 
@@ -201,12 +209,38 @@ class _LocalHostDot extends ConsumerWidget {
       HostPhase.failed => (AbStatusTone.danger, AbDotStyle.filled, false),
       _ => (null, AbDotStyle.filled, false),
     };
-    if (tone == null) return const SizedBox.shrink();
-    return Padding(
-      padding: const EdgeInsets.only(right: AbTokens.space6),
+    if (tone == null) return const _BandDotSlot();
+    return _BandDotSlot(
       child: AbStatusDot(tone: tone, style: style, pulse: pulse),
     );
   }
+}
+
+/// One status-dot cell in a band's trailing kit.
+///
+/// The width is reserved whether or not a dot renders. Two things depend on
+/// that. A band's trailing is right-anchored, so an empty cell that collapsed
+/// would drag everything to its left — including the hover-revealed trash,
+/// which would then slide out from under the pointer whenever a socket resolved
+/// or an agent asked a question. And because the cell is a constant width, the
+/// LAST one is a constant distance from the row's edge on every band, which is
+/// what lets [LocalMachineBand]'s host dot and a machine band's liveness dot
+/// share a column. Gaps belong to the composing [Row]'s `spacing`, so the
+/// alignment is not three widgets independently agreeing on an inset.
+///
+/// The reserved width is a floor, not a cap: every dot here is [AbDotSize.sm]
+/// today, and a tight box would silently paint a larger one as a squashed
+/// circle in an off-centre cell rather than overflow where it can be seen.
+class _BandDotSlot extends StatelessWidget {
+  const _BandDotSlot({this.child});
+
+  final Widget? child;
+
+  @override
+  Widget build(BuildContext context) => ConstrainedBox(
+    constraints: const BoxConstraints(minWidth: AbTokens.dotSizeSm),
+    child: child,
+  );
 }
 
 /// One band in the drawer: a small muted section label with an optional
@@ -267,7 +301,12 @@ class DrawerBand extends StatelessWidget {
       // Bands sit in a run of rows that all clear each other by this much; a
       // band with no rule above it has nothing else keeping it off them.
       margin: const EdgeInsets.symmetric(vertical: AbTokens.space2),
-      hoverable: onTap != null,
+      // No `hoverable`: a band is a section HEADING, and the project rows it
+      // contains take no fill — a heading that lit under the pointer would be
+      // the loudest surface in its own section. The chevron is the affordance
+      // instead. Rows that DO fill (a session row, a file-tree row) sit in a
+      // flat run where the fill just tracks the pointer, so it ranks nothing
+      // above its neighbours.
       onTap: onTap,
     );
   }
@@ -296,7 +335,8 @@ class HoverableDrawerRow extends StatefulWidget {
 
   /// Chrome that belongs to this row's block but must not be hover-reactive:
   /// it sits inside the gutter, above the [MouseRegion]. Kept out of [builder]
-  /// so it is neither highlighted under the pointer nor rebuilt by it.
+  /// so the pointer neither reveals the row's hover affordances from over it
+  /// nor rebuilds it.
   final Widget? above;
 
   final Widget Function(BuildContext context, bool hovered, bool pointerOver)
@@ -1092,16 +1132,26 @@ class _MachineOnlineDot extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final status = ref.watch(supervisorStatusProvider(machineUuid)).value;
-    if (status == null) return const SizedBox.shrink();
-    final (tone, _) = connectionDisplayInfo(status);
+    if (status == null) return const _BandDotSlot();
+    final (tone, label) = connectionDisplayInfo(status);
     final online = status is Connected;
-    return Padding(
-      padding: const EdgeInsets.only(right: AbTokens.space6),
-      child: AbStatusDot(
-        tone: tone,
-        style: online ? AbDotStyle.filled : AbDotStyle.hollow,
-        // Pulse while mid-handshake; a settled offline (released) dot holds.
-        pulse: !online && status is! Released,
+    return _BandDotSlot(
+      // Colour is this dot's only channel, and it is the drawer's sole report
+      // that a machine is unreachable — so the ladder's own label carries it to
+      // anyone who cannot use hue.
+      child: Semantics(
+        label: label,
+        child: AbStatusDot(
+          tone: tone,
+          style: online ? AbDotStyle.filled : AbDotStyle.hollow,
+          // Pulse only while the ladder is still climbing. Stated as a
+          // whitelist over the sealed type, so a fifth [SupervisorStatus] has
+          // to opt in here rather than inherit an animation nothing stops: both
+          // settled states must hold still, `Released` being a deliberate
+          // teardown and `Blocked` staying sticky until a typed unblock input
+          // clears it.
+          pulse: status is Climbing,
+        ),
       ),
     );
   }
@@ -1122,15 +1172,12 @@ class _MachineAggregateDot extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final expanded = ref.watch(expandedDrawerIdsProvider).contains(machineUuid);
-    if (expanded) return const SizedBox.shrink();
+    if (expanded) return const _BandDotSlot();
     final status = ref.watch(machineWorkStatusProvider(machineUuid));
     if (status == null || !agentWorkStatusNeedsUser(status)) {
-      return const SizedBox.shrink();
+      return const _BandDotSlot();
     }
-    return Padding(
-      padding: const EdgeInsets.only(right: AbTokens.space6),
-      child: AgentWorkStatusDot(status: status),
-    );
+    return _BandDotSlot(child: AgentWorkStatusDot(status: status));
   }
 }
 
