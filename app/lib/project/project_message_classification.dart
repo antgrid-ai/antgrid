@@ -178,15 +178,19 @@ const Set<String> _statusTypes = <String>{
 /// what makes "add an inbound type without classifying it" fail CI instead of
 /// silently dropping the frame.
 ///
-///   - `tunnel:http-response` arrives on the `preview` channel and is consumed
-///     by PreviewService's direct transport subscription, bypassing the control
-///     classification path entirely.
+///   - `tunnel:http-response`, `tunnel:ws-data` and `tunnel:ws-close` all
+///     arrive on the `preview` channel and are consumed by PreviewService's
+///     direct transport subscription, bypassing the control classification
+///     path entirely — same as the WS tunnel's own `tunnel:ws-open`, which is
+///     app→bridge (outbound) only and so never reaches this parser at all.
 ///   - `client:focus-state` is app→agent (outbound); it parses only for the
 ///     agent / loopback side.
 ///   - the three `*:snapshot:request` types are snapshot REQUESTS serviced
 ///     outside the heavy/status reducers.
 const Set<String> kUnroutedInboundTypes = <String>{
   'tunnel:http-response',
+  'tunnel:ws-data',
+  'tunnel:ws-close',
   'client:focus-state',
   'terminal:snapshot:request',
   'file:tree:snapshot:request',

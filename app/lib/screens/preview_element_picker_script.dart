@@ -11,9 +11,16 @@
 /// disarms itself on navigation without extra cleanup.
 ///
 /// Posts one message via the `AntgridElementPicker` JS channel:
-/// `{type: "picked", tag, id, classes, text, html, selector}` on a click, or
-/// `{type: "cancelled"}` on Escape. `text`/`html` are capped so a large
-/// subtree's markup can't blow up the chat message this eventually becomes.
+/// `{type: "picked", tag, id, classes, text, html, selector, rect, viewport}`
+/// on a click, or `{type: "cancelled"}` on Escape. `text`/`html` are capped so
+/// a large subtree's markup can't blow up the chat message this eventually
+/// becomes.
+///
+/// `rect` is the picked element's viewport-relative box and `viewport` the CSS
+/// pixel size it was measured against. Together they are what lets the app crop
+/// the same-moment screenshot down to the element the user actually pointed at
+/// — attaching the whole page instead leaves the agent to guess which part of
+/// it was meant, which is the one thing a pick already answered.
 const String kElementPickerScript = '''
 (function() {
   if (window.__antgridPickerActive) return;
@@ -99,6 +106,9 @@ const String kElementPickerScript = '''
     e.preventDefault();
     e.stopPropagation();
     var target = nearestMeaningful(e.target);
+    // Measured BEFORE teardown: removing the overlay can reflow the page, and
+    // the box has to describe the frame the screenshot will capture.
+    var box = target.getBoundingClientRect();
     var payload = {
       type: 'picked',
       tag: target.tagName.toLowerCase(),
@@ -106,7 +116,14 @@ const String kElementPickerScript = '''
       classes: target.classList ? Array.prototype.slice.call(target.classList) : [],
       text: cap((target.textContent || '').trim(), TEXT_CAP),
       html: cap(target.outerHTML || '', HTML_CAP),
-      selector: xpathOf(target)
+      selector: xpathOf(target),
+      rect: {
+        x: box.left,
+        y: box.top,
+        width: box.width,
+        height: box.height
+      },
+      viewport: {width: window.innerWidth, height: window.innerHeight}
     };
     teardown();
     if (window.AntgridElementPicker) {

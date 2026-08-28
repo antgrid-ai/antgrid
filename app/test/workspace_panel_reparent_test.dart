@@ -5,9 +5,9 @@
 // the relay tunnel instead of a relayout.
 //
 // The harness mirrors _buildPanels()'s Row shapes and uses the real
-// [ResizablePane] — its LayoutBuilder is the part that makes reparenting
-// non-obvious, because the destination subtree is inflated during layout rather
-// than during build.
+// [ResizablePane], which is the destination the awkward direction reparents
+// back INTO. What that destination must never do is inflate the panes during
+// layout — see `widgets/resizable_pane_test.dart` for that half.
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 

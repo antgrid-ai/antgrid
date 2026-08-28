@@ -8,6 +8,7 @@ import 'package:antgrid/models/preview_models.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/design/widgets/ab_loading.dart';
 import 'package:antgrid/screens/preview_screen.dart';
+import 'package:antgrid/widgets/send_capture_to_agent.dart';
 
 void main() {
   Widget buildTestWidget({required AsyncValue<PreviewState> previewState}) {
@@ -179,6 +180,52 @@ void main() {
     });
   });
 
+  group('formatScreenshotAttachment', () {
+    test('wraps the staged path as an attachment line', () {
+      expect(
+        formatScreenshotAttachment(r'C:\proj\.antgrid\uploads\shot.png'),
+        r'Attached file: C:\proj\.antgrid\uploads\shot.png',
+      );
+    });
+  });
+
+  group('pickedRegion', () {
+    test('reads the rect and the viewport it was measured in', () {
+      final region = pickedRegion(const {
+        'rect': {'x': 10, 'y': 20.5, 'width': 100, 'height': 40},
+        'viewport': {'width': 1200, 'height': 800},
+      });
+      expect(region, isNotNull);
+      expect(region!.rect, const Rect.fromLTWH(10, 20.5, 100, 40));
+      expect(region.viewport, const Size(1200, 800));
+    });
+
+    test('a payload with no rect falls back to the whole viewport', () {
+      expect(pickedRegion(const {'tag': 'div'}), isNull);
+    });
+
+    test('a zero-area box is treated as absent, not cropped to nothing', () {
+      expect(
+        pickedRegion(const {
+          'rect': {'x': 0, 'y': 0, 'width': 0, 'height': 40},
+          'viewport': {'width': 1200, 'height': 800},
+        }),
+        isNull,
+      );
+    });
+
+    test('wrong-typed fields are absent rather than throwing', () {
+      expect(
+        pickedRegion(const {
+          'rect': {'x': 'nope', 'y': 0, 'width': 10, 'height': 10},
+          'viewport': {'width': 1200, 'height': 800},
+        }),
+        isNull,
+      );
+      expect(pickedRegion(const {'rect': 5, 'viewport': 6}), isNull);
+    });
+  });
+
   group('parsePreviewTarget', () {
     test('a bare port defaults to http and the root path', () {
       expect(parsePreviewTarget('3000'), (3000, 'http', '/'));
@@ -189,24 +236,27 @@ void main() {
     });
 
     test('localhost:port with a path preserves it', () {
-      expect(
-        parsePreviewTarget('localhost:3000/dashboard'),
-        (3000, 'http', '/dashboard'),
-      );
+      expect(parsePreviewTarget('localhost:3000/dashboard'), (
+        3000,
+        'http',
+        '/dashboard',
+      ));
     });
 
     test('a full link with scheme, host, and path preserves all three', () {
-      expect(
-        parsePreviewTarget('http://localhost:3000/dashboard?x=1#top'),
-        (3000, 'http', '/dashboard?x=1#top'),
-      );
+      expect(parsePreviewTarget('http://localhost:3000/dashboard?x=1#top'), (
+        3000,
+        'http',
+        '/dashboard?x=1#top',
+      ));
     });
 
     test('127.0.0.1 is accepted the same as localhost', () {
-      expect(
-        parsePreviewTarget('127.0.0.1:5173/docs'),
-        (5173, 'http', '/docs'),
-      );
+      expect(parsePreviewTarget('127.0.0.1:5173/docs'), (
+        5173,
+        'http',
+        '/docs',
+      ));
     });
 
     test('a bare port followed by a path with no host prefix works', () {

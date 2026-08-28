@@ -36,10 +36,14 @@ import '../widgets/new_session/environment_menu.dart'
     show PanelHint, PanelRow, PanelSectionHeader;
 import '../widgets/port_entry.dart';
 import '../widgets/port_list_widget.dart';
+import '../util/image_thumbnail.dart';
+import '../widgets/preview_draw_overlay.dart';
+import '../widgets/send_capture_to_agent.dart';
 import '../widgets/preview_empty_state.dart';
 import '../widgets/send_to_agent_comment.dart';
 import '../design/widgets/ab_loading.dart';
 import 'preview_element_picker_script.dart';
+import 'preview_screenshot_script.dart';
 
 /// The browser preview screen. Shows detected ports, a URL bar at the top of
 /// the panel with refresh/external-browser/element-picker actions, a popup
@@ -83,6 +87,19 @@ class _TabWebViewState {
   bool canGoForward = false;
 }
 
+/// One in-flight viewport capture request — see
+/// [_PreviewScreenState._captureScreenshot] and
+/// [_PreviewScreenState._onScreenshotMessage]. [chunks] starts empty (sized
+/// once the `start` message reports how many pieces to expect) and is
+/// null-filled positionally, since chunk messages are not guaranteed to
+/// arrive in order.
+class _ScreenshotCapture {
+  _ScreenshotCapture(this.port);
+  final int port;
+  final Completer<Uint8List> completer = Completer<Uint8List>();
+  List<String?> chunks = [];
+}
+
 class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   final Map<int, _TabWebViewState> _tabStates = {};
 
@@ -90,6 +107,28 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// single nullable port, not a per-tab map — the picker is one in-the-moment
   /// interaction, never armed on more than one tab at once.
   int? _pickerActiveForPort;
+
+  /// Non-null while a viewport capture is in flight — port it was requested
+  /// on, the completer its [kScreenshotCaptureScript] reply resolves, and the
+  /// chunk buffer that reply fills in over several `AntgridScreenshotCapture`
+  /// messages (see [_onScreenshotMessage]). A single in-flight capture, not
+  /// per-port: like the picker, this is one in-the-moment interaction, and
+  /// both callers disable their trigger for the duration.
+  _ScreenshotCapture? _screenshotCapture;
+
+  /// Port of the tab the draw overlay is armed on, or null — the same shape
+  /// as [_pickerActiveForPort], and mutually exclusive with it: both claim
+  /// every pointer over the page, so only one can be live at a time.
+  ///
+  /// The overlay draws on the LIVE page and captures nothing until send, so
+  /// arming it neither freezes the preview nor swaps the surface — see
+  /// [PreviewDrawOverlay].
+  int? _drawActiveForPort;
+
+  /// Reaches the live overlay so a system back can go through its own
+  /// confirm-before-discarding path rather than around it — see
+  /// [_backFromPreview].
+  final GlobalKey<PreviewDrawOverlayState> _drawKey = GlobalKey();
 
   /// True while the address bar is armed to open a NEW tab (via the "+"
   /// button) rather than navigate the active one — the two share the same
@@ -196,6 +235,10 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       ..addJavaScriptChannel(
         'AntgridElementPicker',
         onMessageReceived: (msg) => _onElementPicked(port, msg.message),
+      )
+      ..addJavaScriptChannel(
+        'AntgridScreenshotCapture',
+        onMessageReceived: (msg) => _onScreenshotMessage(port, msg.message),
       )
       ..setNavigationDelegate(
         NavigationDelegate(
@@ -379,7 +422,9 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         activeId != null && (_tabStates[activeId]?.canGoBack ?? false);
     return BackHandler(
       priority: BackPriority.previewContent,
-      active: onScreen && (activeCanGoBack || activeId != null),
+      active:
+          onScreen &&
+          (_drawActiveForPort != null || activeCanGoBack || activeId != null),
       onBack: _backFromPreview,
       child: previewStateAsync.when(
         loading: () => const AbLoading(message: 'loading preview...'),
@@ -453,7 +498,11 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         (s) => s.previewService,
       );
       if (fallbackSvc == null) return;
-      await fallbackSvc.selectPortWithFallback(port, scheme: scheme, path: path);
+      await fallbackSvc.selectPortWithFallback(
+        port,
+        scheme: scheme,
+        path: path,
+      );
       // The fallback path opens a preview too — count it like the direct path.
       ref.read(analyticsServiceProvider)?.track(AnalyticsEvents.previewOpened);
     } on Object catch (e) {
@@ -502,10 +551,14 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     // Drop state for tabs that closed.
     final openPorts = {for (final tab in state.tabs) tab.port};
     _tabStates.removeWhere((port, _) => !openPorts.contains(port));
-    // A closed tab's controller is gone — the picker can't still be armed on it.
+    // A closed tab's controller is gone — neither the picker nor the draw
+    // overlay can still be armed on it.
     if (_pickerActiveForPort != null &&
         !openPorts.contains(_pickerActiveForPort)) {
       _pickerActiveForPort = null;
+    }
+    if (_drawActiveForPort != null && !openPorts.contains(_drawActiveForPort)) {
+      _drawActiveForPort = null;
     }
 
     // The address bar (and the rest of the toolbar chrome) is always on
@@ -526,14 +579,48 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       final activeIndex = state.activeTabId == null
           ? 0
           : state.tabs.indexWhere((t) => t.port == state.activeTabId);
+      // The overlay only mounts over the tab it was armed on, and only while
+      // that tab is the visible one — a background tab's marks would be
+      // drawn against a page nobody can see.
+      final drawController = _drawActiveForPort == active.port
+          ? _tabStates[active.port]?.controller
+          : null;
       // Every open tab's webview stays mounted in an IndexedStack so
       // switching tabs never disposes (and reloads) a background one — the
       // same keep-mounted technique the outer WorkspacePanel already uses
       // for its own panes.
       return _framed(
-        IndexedStack(
-          index: activeIndex < 0 ? 0 : activeIndex,
-          children: [for (final tab in state.tabs) _buildTabWebView(tab)],
+        Stack(
+          children: [
+            IndexedStack(
+              index: activeIndex < 0 ? 0 : activeIndex,
+              children: [for (final tab in state.tabs) _buildTabWebView(tab)],
+            ),
+            // Fills exactly the webview's own box, which is what lets a
+            // mark's position map onto the captured viewport with nothing
+            // but a width ratio — see [compositePreviewMarks].
+            if (drawController != null)
+              Positioned.fill(
+                child: PreviewDrawOverlay(
+                  key: _drawKey,
+                  captureScreenshot: () => _captureScreenshot(
+                    active.port,
+                    drawController,
+                    onError: (reason) {
+                      if (mounted) {
+                        showAbSnackBar(
+                          context,
+                          'Could not capture the preview: $reason',
+                        );
+                      }
+                    },
+                  ),
+                  onClose: () => setState(() => _drawActiveForPort = null),
+                  onSend: (bytes) =>
+                      unawaited(_sendDrawing(active.port, bytes)),
+                ),
+              ),
+          ],
         ),
       );
     }
@@ -622,10 +709,18 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     return true;
   }
 
-  /// Back inside the preview: one webview page first, then the active tab.
+  /// Back inside the preview: the draw overlay first if it's armed, then one
+  /// webview page, then the active tab.
   bool _backFromPreview() {
     if (ref.read(visibleWorkspaceViewProvider) != WorkspaceView.preview) {
       return false;
+    }
+    // Through the overlay's own close, not straight to the flag: back is how
+    // a phone user dismisses, so it has to hit the same
+    // confirm-before-discarding guard the Close button does.
+    if (_drawActiveForPort != null) {
+      unawaited(_drawKey.currentState?.requestClose() ?? Future.value());
+      return true;
     }
     // Re-check at invoke time: the controller can be gone since registration.
     final id = ref.read(previewStateProvider).value?.activeTabId;
@@ -659,7 +754,9 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// is what disarms the picker automatically; see [_clearPickerIfArmedOn]).
   void _togglePicker(PreviewTab activeTab, _TabWebViewState? activeState) {
     if (_pickerActiveForPort == activeTab.port) {
-      unawaited(activeState?.controller?.runJavaScript(kElementPickerStopScript));
+      unawaited(
+        activeState?.controller?.runJavaScript(kElementPickerStopScript),
+      );
       setState(() => _pickerActiveForPort = null);
       return;
     }
@@ -674,7 +771,13 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       );
     }
     unawaited(activeState?.controller?.runJavaScript(kElementPickerScript));
-    setState(() => _pickerActiveForPort = activeTab.port);
+    // The draw overlay swallows every pointer over the page, so an armed
+    // picker underneath it could never be clicked — see [_toggleDraw], which
+    // disarms in the other direction.
+    setState(() {
+      _drawActiveForPort = null;
+      _pickerActiveForPort = activeTab.port;
+    });
   }
 
   /// Handles a message from the `AntgridElementPicker` JS channel. [port] is
@@ -707,24 +810,203 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
 
     final selectedText = formatPickedElement(decoded);
     final sourceUrl = _tabStates[port]?.currentUrl ?? '';
-    unawaited(_sendPickedElement(selectedText, sourceUrl));
+    unawaited(
+      _sendPickedElement(port, selectedText, sourceUrl, pickedRegion(decoded)),
+    );
   }
 
-  Future<void> _sendPickedElement(String selectedText, String sourceUrl) async {
+  /// Sends a DOM pick to the agent, with a picture of THAT ELEMENT attached
+  /// alongside the description whenever one can be taken — the DOM text alone
+  /// can't tell the agent what the element actually looks like, and a shot of
+  /// the whole page hands back the very question the pick just answered.
+  ///
+  /// Captured and cropped best-effort: a failed shot, or a payload from an
+  /// older script with no rect in it, never blocks the pick, since the DOM
+  /// description is still a complete, useful message on its own.
+  Future<void> _sendPickedElement(
+    int port,
+    String selectedText,
+    String sourceUrl,
+    ({Rect rect, Size viewport})? region,
+  ) async {
+    final container = ref.container;
+    final controller = _tabStates[port]?.controller;
+
+    Uint8List? image;
+    if (controller != null) {
+      final screenshot = await _captureScreenshot(port, controller);
+      if (screenshot != null) {
+        image = region == null
+            ? screenshot
+            : await cropImageToRegion(
+                    screenshot,
+                    region: region.rect,
+                    regionSpace: region.viewport,
+                  ) ??
+                  screenshot;
+      }
+    }
+
+    if (!mounted) return;
     final message = await showSendToAgentComment(
       context: context,
       selectedText: selectedText,
       sourceLabel: '[from preview: $sourceUrl]',
+      imageBytes: image,
     );
     if (message == null || !mounted) return;
-    final svc = focusedCheckoutServiceOrNull(
-      ref.container,
-      (s) => s.terminalService,
+    await sendCaptureToAgent(
+      context: context,
+      container: container,
+      text: message,
+      imageBytes: image,
+      fileName: 'preview-element-${DateTime.now().millisecondsSinceEpoch}.png',
     );
-    if (svc == null) return;
-    svc.sendToAgentTerminal(message);
-    ref.read(switchToAgentProvider)?.call();
-    showSentToAgentSnackBar(context);
+  }
+
+  /// Handles one message from the `AntgridScreenshotCapture` channel. [port]
+  /// is bound at channel-registration time, same as [_onElementPicked] — a
+  /// message from a tab that isn't the one a capture is pending on is
+  /// ignored rather than misattributed.
+  void _onScreenshotMessage(int port, String rawMessage) {
+    final capture = _screenshotCapture;
+    if (capture == null ||
+        capture.port != port ||
+        capture.completer.isCompleted) {
+      return;
+    }
+    Object? decoded;
+    try {
+      decoded = jsonDecode(rawMessage);
+    } on FormatException {
+      return;
+    }
+    if (decoded is! Map<String, dynamic>) return;
+
+    switch (decoded['type']) {
+      case 'error':
+        capture.completer.completeError(
+          StateError(decoded['message'] as String? ?? 'capture failed'),
+        );
+      case 'start':
+        final total = decoded['totalChunks'];
+        if (total is int && total > 0) {
+          capture.chunks = List<String?>.filled(total, null);
+        }
+      case 'chunk':
+        final seq = decoded['seq'];
+        final data = decoded['data'];
+        if (seq is int && data is String && seq < capture.chunks.length) {
+          capture.chunks[seq] = data;
+        }
+      case 'end':
+        if (capture.chunks.isEmpty || capture.chunks.any((c) => c == null)) {
+          capture.completer.completeError(
+            StateError('incomplete screenshot capture'),
+          );
+          return;
+        }
+        final dataUrl = capture.chunks.join();
+        final comma = dataUrl.indexOf(',');
+        if (comma < 0) {
+          capture.completer.completeError(StateError('malformed data URL'));
+          return;
+        }
+        try {
+          capture.completer.complete(
+            base64Decode(dataUrl.substring(comma + 1)),
+          );
+        } on FormatException {
+          capture.completer.completeError(StateError('malformed PNG data'));
+        }
+    }
+  }
+
+  /// Captures [port]'s current viewport via [kScreenshotCaptureScript],
+  /// returning PNG bytes or null on failure/timeout. Disarms an armed
+  /// element picker on this tab first — its overlay (highlight box, hover
+  /// label) would otherwise show up in the shot — shared by both callers,
+  /// since either flow can fire while the other's overlay is live. [onError],
+  /// if given, is reported a human-readable reason on failure; omit it for a
+  /// best-effort caller that should just carry on without a shot rather than
+  /// interrupt its own flow over one.
+  Future<Uint8List?> _captureScreenshot(
+    int port,
+    WebViewController controller, {
+    void Function(String reason)? onError,
+  }) async {
+    if (_pickerActiveForPort == port) {
+      unawaited(controller.runJavaScript(kElementPickerStopScript));
+      setState(() => _pickerActiveForPort = null);
+    }
+    final capture = _ScreenshotCapture(port);
+    _screenshotCapture = capture;
+    try {
+      unawaited(controller.runJavaScript(kScreenshotCaptureScript));
+      return await capture.completer.future.timeout(
+        const Duration(seconds: 20),
+      );
+    } on Object catch (e) {
+      onError?.call('$e');
+      return null;
+    } finally {
+      if (_screenshotCapture == capture) _screenshotCapture = null;
+    }
+  }
+
+  /// Arms/disarms the draw overlay on [activeTab] (mobile reaches it via the
+  /// overflow menu, desktop via its own trailing-row icon). Arming is pure
+  /// state — nothing is captured, nothing is injected into the page, and the
+  /// preview does not change size — so pressing the pencil costs the live
+  /// page neither a reflow nor a repaint. The capture happens once, later,
+  /// when the user sends (see [PreviewDrawOverlay]).
+  ///
+  /// Mutually exclusive with the element picker for the same reason the two
+  /// are separate buttons: both claim every pointer over the page.
+  void _toggleDraw(PreviewTab activeTab, _TabWebViewState? activeState) {
+    if (activeState?.controller == null) return;
+    final port = activeTab.port;
+    if (_drawActiveForPort == port) {
+      setState(() => _drawActiveForPort = null);
+      return;
+    }
+    if (_pickerActiveForPort != null) {
+      unawaited(
+        _tabStates[_pickerActiveForPort]?.controller?.runJavaScript(
+          kElementPickerStopScript,
+        ),
+      );
+    }
+    setState(() {
+      _pickerActiveForPort = null;
+      _drawActiveForPort = port;
+    });
+  }
+
+  /// Hands the flattened screenshot+drawing [bytes] straight to the agent,
+  /// with no comment box in between.
+  ///
+  /// Unlike a DOM pick — where the popover is what shows the description and
+  /// the crop that are ABOUT to be sent — a drawing is already the whole
+  /// message, made on the page the user was looking at. Interposing a second
+  /// "are you sure, add a comment" step there only asks them to confirm what
+  /// they just drew. Where the words go instead depends on the mode, which is
+  /// what [sendCaptureToAgent] decides: a chat gets the image as an
+  /// attachment in its composer, ready to be typed at; a terminal gets the
+  /// staged path written into it on the spot.
+  Future<void> _sendDrawing(int port, Uint8List bytes) async {
+    final container = ref.container;
+    final sourceUrl = _tabStates[port]?.currentUrl ?? '';
+    setState(() => _drawActiveForPort = null);
+
+    await sendCaptureToAgent(
+      context: context,
+      container: container,
+      text: '[from preview screenshot: $sourceUrl]',
+      imageBytes: bytes,
+      fileName:
+          'preview-annotation-${DateTime.now().millisecondsSinceEpoch}.png',
+    );
   }
 
   /// The toolbar (address bar always on top, like a normal/mobile browser)
@@ -786,8 +1068,8 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
           ),
           trailing: isMobilePlatform
               ? [
-                  // Everything else (New/Inspect/Tabs) lives behind this one
-                  // button on mobile — see _openOverflowMenu.
+                  // Everything else (New/Draw & send/Tabs) lives behind this
+                  // one button on mobile — see _openOverflowMenu.
                   AbIconButton(
                     key: _overflowButtonKey,
                     icon: AbIcons.menu,
@@ -819,6 +1101,16 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
                     onTap: activeTab == null
                         ? null
                         : () => _togglePicker(activeTab, activeState),
+                  ),
+                  AbIconButton(
+                    icon: AbIcons.draw,
+                    tooltip: 'Draw on the page',
+                    selected:
+                        _drawActiveForPort != null &&
+                        _drawActiveForPort == activeTab?.port,
+                    onTap: activeTab == null
+                        ? null
+                        : () => _toggleDraw(activeTab, activeState),
                   ),
                   AbIconButton(
                     icon: AbIcons.refresh,
@@ -862,6 +1154,12 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       );
       setState(() => _pickerActiveForPort = null);
     }
+    // Same reasoning for the draw overlay, plus one of its own: its marks are
+    // in the OUTGOING page's coordinates, so carrying them to another tab
+    // would send the agent a drawing over the wrong screenshot.
+    if (_drawActiveForPort != null && _drawActiveForPort != port) {
+      setState(() => _drawActiveForPort = null);
+    }
     preview?.setActiveTab(port);
     // _buildContent only resyncs the address field for a tab whose target URL
     // just CHANGED (see its `lastAppliedUrl` guard) — switching to an
@@ -896,13 +1194,13 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       builder: (_) => _PreviewOverflowPanel(
         hasActiveTab: activeTab != null,
         hasPreviewService: preview != null,
-        pickerActive:
-            activeTab != null && _pickerActiveForPort == activeTab.port,
         onNewPort: _startComposingNewTab,
         onRefresh: () => activeState?.controller?.reload(),
-        onTogglePicker: activeTab == null
+        onDraw: activeTab == null
             ? null
-            : () => _togglePicker(activeTab, activeState),
+            : () => _toggleDraw(activeTab, activeState),
+        drawArmed:
+            _drawActiveForPort != null && _drawActiveForPort == activeTab?.port,
         onClosedTab: (p) => preview?.closeTab(p),
       ),
     );
@@ -913,7 +1211,11 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
   /// whether the page was scrolled to the top at that moment. `getScrollPosition`
   /// racing a fast flick is fine — `_pullStartY` being cleared by
   /// [_onPullUp]/[_cancelPull] before it resolves is checked below.
-  void _onPullDown(int port, WebViewController controller, PointerDownEvent event) {
+  void _onPullDown(
+    int port,
+    WebViewController controller,
+    PointerDownEvent event,
+  ) {
     _pullStartY = event.position.dy;
     _pullArmed = false;
     unawaited(
@@ -1039,10 +1341,10 @@ class _PreviewOverflowPanel extends ConsumerWidget {
   const _PreviewOverflowPanel({
     required this.hasActiveTab,
     required this.hasPreviewService,
-    required this.pickerActive,
     required this.onNewPort,
     required this.onRefresh,
-    required this.onTogglePicker,
+    required this.onDraw,
+    required this.drawArmed,
     required this.onClosedTab,
   });
 
@@ -1054,10 +1356,15 @@ class _PreviewOverflowPanel extends ConsumerWidget {
   /// "New" the same way desktop's own inline "+" button does — on the
   /// service being resolvable at all, not on a tab already being open.
   final bool hasPreviewService;
-  final bool pickerActive;
   final VoidCallback onNewPort;
   final VoidCallback onRefresh;
-  final VoidCallback? onTogglePicker;
+
+  /// Toggles the draw overlay; null while there is no tab to draw on.
+  final VoidCallback? onDraw;
+
+  /// Whether the overlay is currently armed — the row latches, the same way
+  /// desktop's own inline pencil does, since arming it outlives the popup.
+  final bool drawArmed;
   final ValueChanged<int> onClosedTab;
 
   @override
@@ -1083,11 +1390,11 @@ class _PreviewOverflowPanel extends ConsumerWidget {
           onTap: hasPreviewService ? () => act(onNewPort) : null,
         ),
         PanelRow(
-          icon: AbIcons.elementPicker,
-          label: 'Inspect',
-          selected: pickerActive,
+          icon: AbIcons.draw,
+          label: 'Draw on the page',
+          selected: drawArmed,
           mono: false,
-          onTap: onTogglePicker == null ? null : () => act(onTogglePicker!),
+          onTap: onDraw == null ? null : () => act(onDraw!),
         ),
         PanelRow(
           icon: AbIcons.refresh,
@@ -1122,9 +1429,10 @@ class _CornerMaskPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final outer = Path()..addRect(Offset.zero & size);
-    final inner = Path()..addRRect(
-      RRect.fromRectAndRadius(Offset.zero & size, Radius.circular(radius)),
-    );
+    final inner = Path()
+      ..addRRect(
+        RRect.fromRectAndRadius(Offset.zero & size, Radius.circular(radius)),
+      );
     final corners = Path.combine(PathOperation.difference, outer, inner);
     canvas.drawPath(corners, Paint()..color = color);
   }
@@ -1211,6 +1519,39 @@ String formatPickedElement(Map<String, dynamic> json) {
   if (text.isNotEmpty) buffer.writeln('Text: "${_recap(text)}"');
   if (html.isNotEmpty) buffer.writeln('HTML: ${_recap(html)}');
   return buffer.toString().trimRight();
+}
+
+/// Reads the picked element's box out of a `"picked"` payload, as the rect
+/// plus the viewport it was measured in — what [cropImageToRegion] needs to
+/// cut the same-moment screenshot down to just that element.
+///
+/// [json] is untrusted (it is parsed from a message posted by arbitrary web
+/// content), so every field is handled as possibly missing or the wrong type,
+/// and a zero-area box is treated as absent rather than cropped to nothing.
+/// Null means "attach the whole viewport instead", never an error.
+///
+/// Standalone and `@visibleForTesting` for the same reason
+/// [formatPickedElement] is: Dart privacy is per-file, and this is worth
+/// testing without any widget/webview scaffolding.
+@visibleForTesting
+({Rect rect, Size viewport})? pickedRegion(Map<String, dynamic> json) {
+  double? number(Object? value) => value is num ? value.toDouble() : null;
+
+  final rect = json['rect'];
+  final viewport = json['viewport'];
+  if (rect is! Map || viewport is! Map) return null;
+
+  final x = number(rect['x']);
+  final y = number(rect['y']);
+  final width = number(rect['width']);
+  final height = number(rect['height']);
+  final vw = number(viewport['width']);
+  final vh = number(viewport['height']);
+  if (x == null || y == null || width == null || height == null) return null;
+  if (vw == null || vh == null) return null;
+  if (width <= 0 || height <= 0 || vw <= 0 || vh <= 0) return null;
+
+  return (rect: Rect.fromLTWH(x, y, width, height), viewport: Size(vw, vh));
 }
 
 /// Defensive re-cap: the injected script already caps `text`/`html` before

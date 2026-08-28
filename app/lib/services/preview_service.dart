@@ -45,7 +45,7 @@ class PreviewService {
   /// is what lets the bridge replay a response it already produced instead of
   /// running the upstream request twice (see TunnelManager's outbox).
   final Map<String, _InFlightRequest> _pendingRequests = {};
-  final Map<String, StreamSubscription> _activeWsTunnels = {};
+  final Map<String, _WsTunnel> _activeWsTunnels = {};
 
   StreamSubscription<void>? _dropSub;
   Timer? _retrySweep;
@@ -143,6 +143,10 @@ class PreviewService {
       _mergePreviewEntries([message.entry]);
     } else if (message is TunnelHttpResponse) {
       _handleTunnelResponse(message);
+    } else if (message is TunnelWsDataMessage) {
+      _handleWsData(message);
+    } else if (message is TunnelWsCloseMessage) {
+      _handleWsClose(message);
     }
   }
 
@@ -513,17 +517,22 @@ class PreviewService {
 
     final sub = channel.stream.listen(
       (data) {
+        final binary = data is! String;
         session.transport.send(
           createAbMessage('tunnel:ws-data', {
             'tunnelId': tunnelId,
-            'data': data is String ? data : base64Encode(data as List<int>),
+            'data': binary ? base64Encode(data as List<int>) : data as String,
+            if (binary) 'binary': true,
             'checkoutId': checkoutId,
           }),
           channel: 'preview',
         );
       },
       onDone: () {
-        _activeWsTunnels.remove(tunnelId);
+        // Null when this tunnel was already torn down via _handleWsClose
+        // (the bridge/upstream side closed first) — that path already told
+        // the bridge, so closing our own sink here must not tell it again.
+        if (_activeWsTunnels.remove(tunnelId) == null) return;
         session.transport.send(
           createAbMessage('tunnel:ws-close', {
             'tunnelId': tunnelId,
@@ -534,7 +543,28 @@ class PreviewService {
       },
     );
 
-    _activeWsTunnels[tunnelId] = sub;
+    _activeWsTunnels[tunnelId] = _WsTunnel(channel, sub);
+  }
+
+  /// A frame the upstream dev-server sent, relayed here by the bridge —
+  /// forward it into the local socket the previewed page's own WebSocket is
+  /// reading from.
+  void _handleWsData(TunnelWsDataMessage msg) {
+    final tunnel = _activeWsTunnels[msg.tunnelId];
+    if (tunnel == null) return;
+    tunnel.channel.sink.add(msg.binary ? base64Decode(msg.data) : msg.data);
+  }
+
+  /// The bridge's upstream connection closed — mirror it onto the local
+  /// socket so the previewed page's WebSocket client sees a real close event
+  /// (and can run its own reconnect logic) rather than hanging silently.
+  /// Removed from the map BEFORE closing, so the `onDone` callback above
+  /// (which this close triggers) sees it already gone and stays quiet.
+  void _handleWsClose(TunnelWsCloseMessage msg) {
+    final tunnel = _activeWsTunnels.remove(msg.tunnelId);
+    if (tunnel == null) return;
+    unawaited(tunnel.sub.cancel());
+    unawaited(tunnel.channel.sink.close());
   }
 
   Future<void> dispose() async {
@@ -559,8 +589,9 @@ class PreviewService {
     }
     _pendingRequests.clear();
 
-    for (final sub in _activeWsTunnels.values) {
-      await sub.cancel();
+    for (final tunnel in _activeWsTunnels.values) {
+      await tunnel.sub.cancel();
+      await tunnel.channel.sink.close();
     }
     _activeWsTunnels.clear();
 
@@ -586,4 +617,16 @@ class _InFlightRequest {
   DateTime sentAt = DateTime.now();
 
   _InFlightRequest(this.request, this.reply);
+}
+
+/// One active WS tunnel — the local [channel] a previewed page's own
+/// WebSocket connects through, and the [sub] forwarding its outbound frames
+/// to the bridge. Held together because closing the tunnel (either
+/// direction) needs both: cancel the forwarding subscription and close the
+/// local socket so the page's WebSocket client sees a real close event.
+class _WsTunnel {
+  final WebSocketChannel channel;
+  final StreamSubscription sub;
+
+  _WsTunnel(this.channel, this.sub);
 }

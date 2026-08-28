@@ -716,10 +716,22 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       log.warn("Dropping tunnel request for unknown checkout %s", msg.checkoutId);
       return;
     }
-    if (msg.type === "tunnel:http-request" && runtime.tunnelManager) {
-      runtime.tunnelManager.onHttpRequest(msg).catch((err) =>
-        log.error("tunnel:http-request handler failed: %s", err)
-      );
+    if (!runtime.tunnelManager) return;
+    switch (msg.type) {
+      case "tunnel:http-request":
+        runtime.tunnelManager.onHttpRequest(msg).catch((err) =>
+          log.error("tunnel:http-request handler failed: %s", err)
+        );
+        break;
+      case "tunnel:ws-open":
+        runtime.tunnelManager.onWsOpen(msg);
+        break;
+      case "tunnel:ws-data":
+        runtime.tunnelManager.onWsData(msg);
+        break;
+      case "tunnel:ws-close":
+        runtime.tunnelManager.onWsClose(msg);
+        break;
     }
   }
 

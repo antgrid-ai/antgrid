@@ -239,6 +239,48 @@ class TunnelHttpResponse {
   }
 }
 
+/// Inbound half of the WS tunnel (mirrors `TunnelWsData` in the bridge's
+/// `tunnel-protocol.ts`) — a frame the upstream dev-server sent, to relay
+/// into the local WebSocket the previewed page holds open. [binary] mirrors
+/// the frame's own text/binary distinction: absent/false means [data] is
+/// UTF-8 text verbatim, true means it is base64 of the raw bytes.
+class TunnelWsDataMessage {
+  final String tunnelId;
+  final String data;
+  final bool binary;
+
+  const TunnelWsDataMessage({
+    required this.tunnelId,
+    required this.data,
+    this.binary = false,
+  });
+
+  static TunnelWsDataMessage? fromJson(Map<String, dynamic> json) {
+    final tunnelId = json['tunnelId'];
+    final data = json['data'];
+    if (tunnelId is! String || data is! String) return null;
+    return TunnelWsDataMessage(
+      tunnelId: tunnelId,
+      data: data,
+      binary: json['binary'] == true,
+    );
+  }
+}
+
+/// The bridge's side of a WS tunnel closed (the upstream dev-server
+/// connection ended) — mirror the close onto the local WebSocket.
+class TunnelWsCloseMessage {
+  final String tunnelId;
+
+  const TunnelWsCloseMessage({required this.tunnelId});
+
+  static TunnelWsCloseMessage? fromJson(Map<String, dynamic> json) {
+    final tunnelId = json['tunnelId'];
+    if (tunnelId is! String) return null;
+    return TunnelWsCloseMessage(tunnelId: tunnelId);
+  }
+}
+
 class PortsUpdateMessage {
   final String id;
   final int timestamp;

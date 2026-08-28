@@ -11,19 +11,24 @@ import '../design/ab_tokens.dart';
 import '../design/ab_colors.dart';
 
 /// Returns the formatted message string, or null if cancelled.
+///
+/// [imageBytes], when given, is shown as a thumbnail above the text preview —
+/// the capture routes (an element pick, a drawing over the preview) attach a
+/// picture the user never otherwise sees before it reaches the agent, and a
+/// crop of the wrong element is only obvious when you can look at it.
 Future<String?> showSendToAgentComment({
   required BuildContext context,
   required String selectedText,
   required String sourceLabel,
-  Rect? anchorRect,
+  Uint8List? imageBytes,
 }) async {
   final screenWidth = MediaQuery.of(context).size.width;
   final isMobile = screenWidth < kCompactBreakpoint;
 
   if (isMobile) {
-    return _showBottomSheet(context, selectedText, sourceLabel);
+    return _showBottomSheet(context, selectedText, sourceLabel, imageBytes);
   } else {
-    return _showPopover(context, selectedText, sourceLabel, anchorRect);
+    return _showPopover(context, selectedText, sourceLabel, imageBytes);
   }
 }
 
@@ -39,6 +44,7 @@ Future<String?> _showBottomSheet(
   BuildContext context,
   String selectedText,
   String sourceLabel,
+  Uint8List? imageBytes,
 ) {
   return showModalBottomSheet<String>(
     context: context,
@@ -54,6 +60,7 @@ Future<String?> _showBottomSheet(
       child: _CommentContent(
         selectedText: selectedText,
         sourceLabel: sourceLabel,
+        imageBytes: imageBytes,
         onSend: (message) => Navigator.of(context).pop(message),
         onCancel: () => Navigator.of(context).pop(null),
       ),
@@ -61,11 +68,19 @@ Future<String?> _showBottomSheet(
   );
 }
 
+/// Centred, not anchored to whatever triggered it.
+///
+/// This box is a modal step in the middle of a flow — read the capture, type a
+/// line, send — and the thing it is about (a picked element, a drawing) is
+/// already highlighted on the page behind it. Hanging it off a toolbar button
+/// put it in a corner, over the top-right of the very preview the user is
+/// being asked to look at, and pushed it off screen entirely on a narrow
+/// panel. The centre is where a modal is looked for.
 Future<String?> _showPopover(
   BuildContext context,
   String selectedText,
   String sourceLabel,
-  Rect? anchorRect,
+  Uint8List? imageBytes,
 ) async {
   final overlay = Overlay.of(context);
   final completer = Completer<String?>();
@@ -73,11 +88,7 @@ Future<String?> _showPopover(
 
   entry = OverlayEntry(
     builder: (context) {
-      final top = anchorRect != null ? anchorRect.bottom + 4 : 48.0;
-      final right = anchorRect != null
-          ? MediaQuery.of(context).size.width - anchorRect.right
-          : 8.0;
-
+      final size = MediaQuery.sizeOf(context);
       return Stack(
         children: [
           GestureDetector(
@@ -88,13 +99,15 @@ Future<String?> _showPopover(
             behavior: HitTestBehavior.opaque,
             child: const SizedBox.expand(),
           ),
-          Positioned(
-            top: top,
-            right: right,
+          Center(
             child: Material(
-              color: Colors.transparent,
+              color: const Color(0x00000000),
               child: Container(
-                width: 300,
+                width: _kPopoverWidth,
+                // Never taller than the window it floats in — a large capture
+                // preview would otherwise push the comment field and the Send
+                // button off the bottom.
+                constraints: BoxConstraints(maxHeight: size.height * 0.8),
                 decoration: BoxDecoration(
                   color: context.antgrid.bgSurface,
                   border: Border.all(color: context.antgrid.borderDefault),
@@ -103,6 +116,7 @@ Future<String?> _showPopover(
                 child: _CommentContent(
                   selectedText: selectedText,
                   sourceLabel: sourceLabel,
+                  imageBytes: imageBytes,
                   onSend: (message) {
                     entry.remove();
                     if (!completer.isCompleted) completer.complete(message);
@@ -124,15 +138,24 @@ Future<String?> _showPopover(
   return completer.future;
 }
 
+const double _kPopoverWidth = 380.0;
+
+/// Ceiling on the thumbnail. Tall enough to recognise a cropped element or a
+/// drawing at a glance, short enough that the comment field stays in view
+/// without scrolling for the common case.
+const double _kCapturePreviewMaxHeight = 220.0;
+
 class _CommentContent extends StatefulWidget {
   final String selectedText;
   final String sourceLabel;
+  final Uint8List? imageBytes;
   final ValueChanged<String> onSend;
   final VoidCallback onCancel;
 
   const _CommentContent({
     required this.selectedText,
     required this.sourceLabel,
+    required this.imageBytes,
     required this.onSend,
     required this.onCancel,
   });
@@ -195,6 +218,7 @@ class _CommentContentState extends State<_CommentContent> {
         ? '${previewLines.take(3).join('\n')}...'
         : preview;
 
+    final image = widget.imageBytes;
     return Padding(
       padding: const EdgeInsets.all(AbTokens.space16),
       child: Column(
@@ -209,6 +233,10 @@ class _CommentContentState extends State<_CommentContent> {
             ),
           ),
           const SizedBox(height: AbTokens.space8),
+          if (image != null) ...[
+            _CapturePreview(bytes: image),
+            const SizedBox(height: AbTokens.space8),
+          ],
           Container(
             padding: const EdgeInsets.all(AbTokens.space8),
             decoration: BoxDecoration(
@@ -319,6 +347,55 @@ class _CommentContentState extends State<_CommentContent> {
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// The exact image about to be attached, shown before it is.
+///
+/// Decoded at [_kCaptureDecodeWidth] rather than natively: a viewport capture
+/// is a multi-megapixel bitmap, and holding one at full size to draw it a
+/// couple of hundred pixels wide is the difference between a thumbnail and a
+/// spike in memory every time this box opens.
+class _CapturePreview extends StatelessWidget {
+  const _CapturePreview({required this.bytes});
+
+  static const int _kCaptureDecodeWidth = 760;
+
+  final Uint8List bytes;
+
+  @override
+  Widget build(BuildContext context) {
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxHeight: _kCapturePreviewMaxHeight),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: context.antgrid.bgDeepest,
+          borderRadius: AbTokens.borderRadius3,
+          border: Border.all(color: context.antgrid.borderSubtle),
+        ),
+        child: ClipRRect(
+          borderRadius: AbTokens.borderRadius3,
+          child: Image.memory(
+            bytes,
+            cacheWidth: _kCaptureDecodeWidth,
+            fit: BoxFit.contain,
+            // A capture that somehow won't decode must not take the whole
+            // send flow down with it — the text half of the message is still
+            // worth sending.
+            errorBuilder: (context, _, _) => Padding(
+              padding: const EdgeInsets.all(AbTokens.space8),
+              child: Text(
+                'Preview unavailable',
+                style: AbTokens.sansStyle(
+                  fontSize: AbTokens.fontXs,
+                  color: context.antgrid.textMuted,
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

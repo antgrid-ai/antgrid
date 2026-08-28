@@ -1068,6 +1068,12 @@ Object? parseAbMessage(Map<String, dynamic> json) {
     case 'tunnel:http-response':
       return TunnelHttpResponse.fromJson(json);
 
+    case 'tunnel:ws-data':
+      return TunnelWsDataMessage.fromJson(json);
+
+    case 'tunnel:ws-close':
+      return TunnelWsCloseMessage.fromJson(json);
+
     case 'command:output':
       final projectId = json['projectId'];
       final commandName = json['commandName'];

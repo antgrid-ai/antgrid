@@ -138,6 +138,29 @@ class ComposerController extends ChangeNotifier {
     );
   }
 
+  /// Appends [text] on its own line and leaves the caret on a fresh line
+  /// under it — the landing point for content handed to the composer from
+  /// elsewhere (a preview capture's source label), which the user then types
+  /// their own message beneath rather than into the middle of.
+  ///
+  /// Appends rather than replaces: a draft already being typed is the user's,
+  /// and a handoff arriving mid-sentence must not eat it.
+  void appendText(String text) {
+    final body = text.trim();
+    if (body.isEmpty) return;
+    // Parchment always keeps one trailing newline, so the last insertable
+    // offset is one before the document length — inserting AT the length
+    // would land past the document's own terminator.
+    final end = fleather.document.length - 1;
+    final insert = isEmpty ? '$body\n' : '\n$body\n';
+    fleather.replaceText(
+      end,
+      0,
+      insert,
+      selection: TextSelection.collapsed(offset: end + insert.length),
+    );
+  }
+
   void clear() => fleather.clear();
 
   @override

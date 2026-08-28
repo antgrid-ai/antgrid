@@ -2,8 +2,18 @@ import { logger } from "./logger";
 const log = logger.child({ component: "tunnel-manager" });
 import { fetchLocalhost } from "./localhost-fetch";
 import { createMessage, type AbMessage, type PortInfo, type PreviewUrlEntry } from "./protocol";
-import type { TunnelHttpRequest } from "./tunnel-protocol";
+import type { TunnelHttpRequest, TunnelWsClose, TunnelWsData, TunnelWsOpen } from "./tunnel-protocol";
 import type { ConnState } from "./conn-state";
+
+/** One upstream `ws://localhost:<port><path>` connection, keyed by tunnelId.
+ *  [pending] holds app→bridge frames that arrived before `open` fired (the
+ *  browser can send immediately once ITS local WS accepts, which races this
+ *  socket's real handshake) — flushed in order on open, then unused. */
+interface WsUpstream {
+  socket: WebSocket;
+  open: boolean;
+  pending: Array<{ data: string; binary: boolean }>;
+}
 
 /** How long a sent response stays replayable. Must outlive the app's 30s tunnel
  *  timeout so a retry issued just before it gives up still finds the entry. */
@@ -39,6 +49,8 @@ export class TunnelManager {
    *  still upstream (the app cannot see that), and awaiting it here is what
    *  stops the duplicate from becoming a second upstream request. */
   private inflight = new Map<string, Promise<void>>();
+  /** Live WS relays, keyed by tunnelId — see [WsUpstream]. */
+  private wsTunnels = new Map<string, WsUpstream>();
 
   constructor(opts: {
     projectId: string;
@@ -217,10 +229,84 @@ export class TunnelManager {
     }
   }
 
+  /** Opens the real upstream WebSocket for a browser-side tab's WS. Never
+   *  throws back at the caller — an upstream that refuses/errors reports
+   *  through the normal `tunnel:ws-close` path, mirroring what a rejected
+   *  browser-side connect would look like, rather than dropping silently. */
+  onWsOpen(msg: TunnelWsOpen): void {
+    if (this.wsTunnels.has(msg.tunnelId)) return; // duplicate open, ignore
+    const scheme = msg.scheme === "https" ? "wss" : "ws";
+    const safePath = msg.path.startsWith("/") ? msg.path : `/${msg.path}`;
+    const url = `${scheme}://localhost:${msg.port}${safePath}`;
+    const entry: WsUpstream = { socket: new WebSocket(url), open: false, pending: [] };
+    this.wsTunnels.set(msg.tunnelId, entry);
+
+    entry.socket.addEventListener("open", () => {
+      entry.open = true;
+      for (const frame of entry.pending) this.sendUpstream(entry, frame.data, frame.binary);
+      entry.pending = [];
+    });
+    entry.socket.addEventListener("message", (event) => {
+      const binary = typeof event.data !== "string";
+      const data = typeof event.data === "string"
+        ? event.data
+        : event.data instanceof ArrayBuffer
+          ? Buffer.from(event.data).toString("base64")
+          : Buffer.from(event.data as Uint8Array).toString("base64");
+      this.sendTunnel({
+        type: "tunnel:ws-data",
+        tunnelId: msg.tunnelId,
+        data,
+        ...(binary ? { binary: true } : {}),
+        checkoutId: msg.checkoutId,
+      });
+    });
+    const teardown = (code?: number, reason?: string) => {
+      if (!this.wsTunnels.delete(msg.tunnelId)) return; // already closed the other way
+      this.sendTunnel({
+        type: "tunnel:ws-close",
+        tunnelId: msg.tunnelId,
+        ...(code !== undefined ? { code } : {}),
+        ...(reason ? { reason } : {}),
+        checkoutId: msg.checkoutId,
+      });
+    };
+    entry.socket.addEventListener("close", (event) => teardown(event.code, event.reason));
+    entry.socket.addEventListener("error", () => teardown());
+  }
+
+  /** A browser-sent frame to relay upstream. Queued on [WsUpstream.pending]
+   *  if the real connection hasn't finished its handshake yet. */
+  onWsData(msg: TunnelWsData): void {
+    const entry = this.wsTunnels.get(msg.tunnelId);
+    if (!entry) return; // closed/never opened — nothing to relay into
+    if (!entry.open) {
+      entry.pending.push({ data: msg.data, binary: msg.binary === true });
+      return;
+    }
+    this.sendUpstream(entry, msg.data, msg.binary === true);
+  }
+
+  private sendUpstream(entry: WsUpstream, data: string, binary: boolean): void {
+    entry.socket.send(binary ? Buffer.from(data, "base64") : data);
+  }
+
+  /** The app's side of the tunnel closed (the browser tab's WS closed) —
+   *  mirror it upstream. Idempotent: a close already relayed the other way
+   *  (via [onWsOpen]'s teardown) has already removed the map entry. */
+  onWsClose(msg: TunnelWsClose): void {
+    const entry = this.wsTunnels.get(msg.tunnelId);
+    if (!entry) return;
+    this.wsTunnels.delete(msg.tunnelId);
+    entry.socket.close();
+  }
+
   stop(): void {
     this.sentUrlDetails.clear();
     this.outbox.clear();
     this.outboxBytes = 0;
     this.inflight.clear();
+    for (const entry of this.wsTunnels.values()) entry.socket.close();
+    this.wsTunnels.clear();
   }
 }
