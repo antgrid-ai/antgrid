@@ -111,6 +111,31 @@ describe("onUserPrompt", () => {
     expect(seen).toEqual([["s1", "hello"]]);
   });
 
+  // The Handler writes on the user's behalf through this very path
+  // (structured-adapter's injectReply -> handleAgentMessage). Naming a session
+  // from a supervisor nudge would title it "continue".
+  it("does not report a prompt the Handler injected", async () => {
+    const { mgr, seen } = makeTapped(makeFakeDriver());
+    await mgr.startChat({ sessionId: "s1", tool: "codex" });
+    await mgr.handleAgentMessage(createMessage("agent:prompt", {
+      sessionId: "s1", requestId: "r1", text: "continue",
+    }), { injected: true });
+    expect(seen).toEqual([]);
+  });
+
+  // A resume continues a conversation that already has a name, and its first
+  // message is the answer to a question ("yes, carry on") rather than the topic.
+  // The stop before it released the slot's title and its one attempt, so a tap
+  // here would rename the session from the continuation.
+  it("does not report the first message of a RESUMED conversation", async () => {
+    const { mgr, seen } = makeTapped(makeFakeDriver());
+    await mgr.startChat({
+      sessionId: "s1", tool: "codex", resumeId: "agent-native-id",
+      initialPrompt: "yes, carry on with step 3",
+    });
+    expect(seen).toEqual([]);
+  });
+
   it("reports an app-sent prompt, but not a slash command's arguments", async () => {
     const { mgr, seen } = makeTapped(makeFakeDriver());
     await mgr.startChat({ sessionId: "s1", tool: "codex" });

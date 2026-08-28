@@ -15,8 +15,8 @@ import { join } from "node:path";
 //     (mirrors cursor's post-notify.js).
 // The title is deliberately resolved bridge-side, not here: this hook runs under
 // bare `node`, which has no reliable sqlite reader for agy's global
-// conversation_summaries.db — and nothing reads that DB any more in any case,
-// since agy's own generated name is not a name we apply (see ResolvedTitle).
+// conversation_summaries.db — and nothing reads that DB in any case, since
+// agy's own generated name is not a name we apply (see ResolvedTitle).
 // transcriptPath is the source, see resolveAntigravityTranscriptTitle in
 // agents/antigravity/title.ts.
 //

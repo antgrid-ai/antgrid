@@ -136,7 +136,7 @@ describe("Claude hooks", () => {
       {
         port: 43123,
         path: "/session-title",
-        body: { terminalId: "term-1", sessionId: "s4", transcriptPath: "", agent: "claude" },
+        body: { terminalId: "term-1", sessionId: "s4", agent: "claude" },
       },
     ]));
     expect(h.posts.length).toBe(3);

@@ -12,7 +12,11 @@ function ctx(over: Partial<AgentContext> = {}): AgentContext {
 }
 
 describe("POST /session-title", () => {
-  test("valid body routes to onSessionTitle", async () => {
+  // `title` is opencode's plugin posting the name its server generated. It is
+  // still on the wire from every already-installed copy of that plugin, and the
+  // schema declares no field for it: the post must keep parsing, and the name
+  // must be dropped — we name sessions ourselves (see ResolvedTitle).
+  test("valid body routes to onSessionTitle, minus the plugin's own title", async () => {
     const seen: any[] = [];
     const srv = startApiServer(ctx({ onSessionTitle: (b) => seen.push(b) }));
     try {
@@ -22,7 +26,7 @@ describe("POST /session-title", () => {
         body: JSON.stringify({ terminalId: "t1", sessionId: "s1", title: "Hi", transcriptPath: "/tmp/t.jsonl", agent: "opencode" }),
       });
       expect(res.status).toBe(200);
-      expect(seen).toEqual([{ terminalId: "t1", sessionId: "s1", title: "Hi", transcriptPath: "/tmp/t.jsonl", agent: "opencode" }]);
+      expect(seen).toEqual([{ terminalId: "t1", sessionId: "s1", transcriptPath: "/tmp/t.jsonl", agent: "opencode" }]);
     } finally { srv.stop(); }
   });
 

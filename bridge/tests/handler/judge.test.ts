@@ -120,16 +120,32 @@ describe("judge env overrides", () => {
     return { spawn, envs };
   }
 
+  // A key the test owns, rather than whichever one `process.env` happens to
+  // enumerate first: the runner DELETES keys from the spawn env
+  // (ANTGRID_TERMINAL_ID always, the TLS/proxy overrides on demand), so probing
+  // an arbitrary inherited key can pick one of those and fail a correct
+  // implementation depending on how the box is configured.
+  const MARKER = "ANTGRID_TEST_INHERITED_MARKER";
+  async function withInheritedMarker(run: () => Promise<void>): Promise<void> {
+    const prior = process.env[MARKER];
+    process.env[MARKER] = "kept";
+    try { await run(); } finally {
+      if (prior === undefined) delete process.env[MARKER];
+      else process.env[MARKER] = prior;
+    }
+  }
+
   // Merged, never substituted: Bun.spawn REPLACES the environment when `env` is
   // passed, so handing it the override alone would strip PATH and the agent's
   // own credentials out from under the judge — which fails as "no judge output"
   // rather than as anything that names the environment.
   it("merges the agent's judge env over the inherited one", async () => {
     const { spawn, envs } = envCapturingSpawn(GOOD);
-    await runDecision({ tool: "opencode", goal: GOAL, backlogText: "", context: "C", cwd: ".", spawn });
+    await withInheritedMarker(async () => {
+      await runDecision({ tool: "opencode", goal: GOAL, backlogText: "", context: "C", cwd: ".", spawn });
+    });
     expect(envs[0]?.OPENCODE_DB).toBe(":memory:");
-    const inherited = Object.keys(process.env)[0];
-    expect(envs[0]?.[inherited]).toBe(process.env[inherited]);
+    expect(envs[0]?.[MARKER]).toBe("kept");
   });
 
   // An agent that declares none still gets the FULL inherited environment, never
@@ -137,9 +153,10 @@ describe("judge env overrides", () => {
   // a wipe that takes PATH and the agent's credentials with it.
   it("inherits the whole environment for an agent that declares none", async () => {
     const { spawn, envs } = envCapturingSpawn(GOOD);
-    await runDecision({ tool: "claude-code", goal: GOAL, backlogText: "", context: "C", cwd: ".", spawn });
-    const inherited = Object.keys(process.env)[0]!;
-    expect(envs[0]?.[inherited]).toBe(process.env[inherited]);
+    await withInheritedMarker(async () => {
+      await runDecision({ tool: "claude-code", goal: GOAL, backlogText: "", context: "C", cwd: ".", spawn });
+    });
+    expect(envs[0]?.[MARKER]).toBe("kept");
   });
 
   // Stripped by the shared runner for every headless spawn, whatever the agent

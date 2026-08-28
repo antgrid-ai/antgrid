@@ -92,6 +92,22 @@ export class SessionNamer {
     this.update(id, (s) => { s.structured = { title: name, rank }; });
   }
 
+  /**
+   * True when this slot already holds a name no model call should try to improve
+   * on: one we generated, or one the user chose.
+   *
+   * Read by the naming gate, which is keyed by CONVERSATION while this is keyed
+   * by slot — and a mode flip carries the name across the runtime swap while
+   * changing the key underneath it (a terminal keys on the agent's session id, a
+   * chat slot on itself). Without this the flipped session spends a second spawn
+   * and renames itself mid-conversation, defeating the very exemption that kept
+   * the name.
+   */
+  hasFinalTitle(id: string): boolean {
+    const held = this.signals.get(id)?.structured;
+    return !!held && RANK_ORDER[held.rank] >= RANK_ORDER.self;
+  }
+
   onOscTitle(id: string, title: string): void {
     this.update(id, (s) => { s.osc = title; });
   }

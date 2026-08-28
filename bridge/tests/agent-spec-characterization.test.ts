@@ -649,16 +649,18 @@ describe("hook posts", () => {
       ]);
     });
 
-    test("stop coerces a null transcript on the title and handler posts, omits it on notify", async () => {
-      // The asymmetry is deliberate and load-bearing: /notify spreads the key
-      // away, /session-title and /handler-event send "".
+    test("stop omits a null transcript everywhere but the handler post", async () => {
+      // /session-title omits it because the path it carries is PERSISTED:
+      // setAgentSession falls back to the stored path only for a nullish
+      // report, so "" would overwrite the real one for the rest of the session.
+      // /handler-event is per-event state that nothing keeps, so its "" stands.
       const posts = await hookPosts({
         agent: name,
         event: "stop",
         stdin: JSON.stringify({ session_id: "s4", transcript_path: null }),
       });
       expect(posts.map((p) => p.body)).toEqual([
-        { terminalId: TERM, sessionId: "s4", agent: "claude", transcriptPath: "" },
+        { terminalId: TERM, sessionId: "s4", agent: "claude" },
         { type: "task_complete", agent: "claude", terminalId: TERM },
         { terminalId: TERM, agent: "claude", event: "turn_end", transcriptPath: "", sessionId: "s4" },
       ]);
@@ -683,6 +685,26 @@ describe("hook posts", () => {
             agent: "claude",
             prompt: "hi",
           },
+        },
+      ]);
+    });
+
+    // A slash command is the user invoking a command, not describing a task.
+    // The post still goes out — it carries the resume id — but withholding the
+    // prompt sends naming down the on-disk read instead of spending the
+    // session's one attempt on a title that describes the command.
+    test("user-prompt withholds a slash command from the title request", async () => {
+      const posts = await hookPosts({
+        agent: name,
+        event: "user-prompt",
+        stdin: JSON.stringify({ session_id: "s1", prompt: "/commit --amend" }),
+      });
+      expect(posts).toEqual([
+        { port: PORT, path: "/turn-start", body: { terminalId: TERM } },
+        {
+          port: PORT,
+          path: "/session-title",
+          body: { terminalId: TERM, sessionId: "s1", agent: "claude" },
         },
       ]);
     });

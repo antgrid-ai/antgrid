@@ -41,6 +41,8 @@ function makeClient(rootId = "sess-1") {
 }
 
 
+const tick = () => new Promise((r) => setTimeout(r, 0));
+
 describe("OpencodeDriver session naming", () => {
   // Antgrid names its own sessions (see ResolvedTitle), so opencode's title is
   // neither read nor written: session.updated carries only opencode's own
@@ -53,5 +55,30 @@ describe("OpencodeDriver session naming", () => {
     await driver.start();
     expect(created).toHaveLength(1);
     expect(created[0]!.title).toBeUndefined();
+  });
+
+  // opencode is the one agent with no vendor integration to fall back on: it
+  // ships no hook, writes no rename we read, and its plugin's inline title is
+  // dropped. So the driver ignoring session.updated is the whole of the claim
+  // that our generated name survives — a case re-added to the event switch
+  // renames the chat after whatever opencode last called the conversation,
+  // including a subagent's own title.
+  it("drops session.updated, for the root session and for a subtask alike", async () => {
+    const { client, push, done } = makeClient("sess-1");
+    const sent: unknown[] = [];
+    const driver = new OpencodeDriver({
+      sessionId: "s1", client, sendMessage: (m) => { sent.push(m); },
+    });
+    await driver.start();
+    sent.length = 0;
+
+    push({ type: "session.updated", properties: { info: { id: "sess-1", title: "Fix the login bug" } } });
+    push({
+      type: "session.updated",
+      properties: { info: { id: "sess-child", parentID: "sess-1", title: "Find TODOs" } },
+    });
+    await tick();
+    expect(sent).toEqual([]);
+    done();
   });
 });

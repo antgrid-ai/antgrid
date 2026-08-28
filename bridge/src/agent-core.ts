@@ -542,15 +542,29 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   let sessions: SessionManager | null = null;
   let namer: SessionNamer | null = null;
   let antigravityTitleWatcher: AntigravityTitleWatcher | null = null;
-  // Slots we've already spent a title-generation spawn on, keyed
-  // `<terminalId>:<agentSessionId>`. The /session-title post repeats every turn,
-  // so without this a session whose agent never names itself would pay a model
-  // call per turn, forever. Keyed by agent session where there is one, not by
-  // slot, so a fresh thread in the same slot gets one more attempt — see
-  // TitleTarget for why a chat slot keys on itself instead.
-  const titleGenAttempted = new Set<string>();
-  const titleAttemptKey = (terminalId: string, agentSessionId: string) =>
-    `${terminalId}:${agentSessionId}`;
+  // Conversations we've already spent a title-generation spawn on, per terminal.
+  // The /session-title post repeats every turn, so without this a session whose
+  // agent never names itself would pay a model call per turn, forever. Keyed by
+  // agent session where there is one, not by slot, so a fresh thread in the same
+  // slot gets one more attempt — see TitleTarget for why a chat slot keys on
+  // itself instead.
+  //
+  // Nested rather than a flat `<terminalId>:<conversation>` key: terminal ids
+  // contain colons of their own (`<checkoutId>:setup`), so in a flat key space
+  // one terminal's release reaches another terminal's entries by prefix.
+  const titleGenAttempted = new Map<string, Set<string>>();
+  /** Conversation id for the attempt gate — see TitleTarget for why a chat slot
+   *  keys on itself rather than on an agent session id. */
+  const titleAttemptKey = (target: { terminalId: string; agentSessionId?: string }) =>
+    target.agentSessionId ?? target.terminalId;
+  function titleAttemptSpent(terminalId: string, conversationId: string): boolean {
+    return titleGenAttempted.get(terminalId)?.has(conversationId) ?? false;
+  }
+  function claimTitleAttempt(terminalId: string, conversationId: string): void {
+    const spent = titleGenAttempted.get(terminalId) ?? new Set<string>();
+    spent.add(conversationId);
+    titleGenAttempted.set(terminalId, spent);
+  }
   /**
    * Released with the namer's buffered title, never separately. The two halves
    * answer the same question — has this slot been named — and a `forget` that
@@ -560,10 +574,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
    * apart.
    */
   function forgetTitleAttempts(terminalId: string): void {
-    const prefix = `${terminalId}:`;
-    for (const key of titleGenAttempted) {
-      if (key.startsWith(prefix)) titleGenAttempted.delete(key);
-    }
+    titleGenAttempted.delete(terminalId);
   }
   /** Which agent each LIVE chat slot runs — see the driverFactory that fills it. */
   const chatTools = new Map<string, string>();
@@ -1475,7 +1486,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           // for send-correlation, so a fresh UUID is sufficient.
           void structured?.handleAgentMessage(createMessage("agent:prompt", {
             sessionId: id, requestId: crypto.randomUUID(), text,
-          }));
+          }), { injected: true });
         },
         getTranscriptPath: (id) => sessions?.getAgentTranscriptPath(id),
         getSnapshot: (id) => structured?.getTranscriptSnapshot(id) ?? Promise.resolve([]),
@@ -2852,8 +2863,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   };
 
   /**
-   * Name the session ourselves, which is now the ONLY thing that produces a
-   * real title — no agent's own name is read any more (see ResolvedTitle).
+   * Name the session ourselves, which is the ONLY thing that produces a real
+   * title — no agent's own name is read (see ResolvedTitle).
    * Still gated, because it costs a model spawn: once per agent session, never
    * for a session the user already renamed, and only where the native read
    * turned up nothing better than the opening prompt.
@@ -2865,13 +2876,19 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     tool: string, target: TitleTarget, fallback?: string,
   ): Promise<void> {
     if (sessions && !sessions.isAutoNameable(target.terminalId)) return;
+    // Keyed by SLOT, unlike everything below it. A mode flip keeps the session's
+    // name and its rank (see the isFlipping exemptions) but re-keys the attempt,
+    // because a terminal keys on the agent's session id and a chat slot on
+    // itself — so the count alone would let the flipped session rename itself
+    // from whatever the user typed next.
+    if (namer?.hasFinalTitle(target.terminalId)) return;
 
-    const key = titleAttemptKey(target.terminalId, target.agentSessionId ?? target.terminalId);
+    const key = titleAttemptKey(target);
     // Tested twice, and the two tests answer different questions. This one is a
     // pure early-out: every turn of the session posts here, and without it each
     // one pays the transcript read below only to be refused after it. It claims
     // nothing, so it cannot burn the attempt.
-    if (titleGenAttempted.has(key)) return;
+    if (titleAttemptSpent(target.terminalId, key)) return;
 
     // Read the conversation BEFORE claiming the attempt. The claim is one per
     // agent session, and the first post of a session arrives from SessionStart
@@ -2895,8 +2912,8 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // first is still running, and both would otherwise pass the check. The read
     // above already awaited, but this check-and-set does not, so only one caller
     // can get past it.
-    if (titleGenAttempted.has(key)) return;
-    titleGenAttempted.add(key);
+    if (titleAttemptSpent(target.terminalId, key)) return;
+    claimTitleAttempt(target.terminalId, key);
 
     // No cwd: a naming spawn runs in a throwaway directory of its own
     // (headlessScratchCwd), never this session's checkout.
@@ -2978,9 +2995,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         nameFromHook();
         return;
       }
-      // `body.title` is opencode's plugin posting its server-generated
-      // conversation name inline. Read for nothing else: we name sessions
-      // ourselves (see ResolvedTitle), so it is dropped rather than applied.
+      // opencode's plugin still posts its server-generated conversation name
+      // inline; the schema declares no field for it, so it is stripped rather
+      // than applied — we name sessions ourselves (see ResolvedTitle), and an
+      // older installed plugin must keep parsing.
       //
       // Claude/Codex/Copilot/Antigravity post only correlation ids, so the
       // manual-rename-or-opening-prompt read comes off their on-disk session

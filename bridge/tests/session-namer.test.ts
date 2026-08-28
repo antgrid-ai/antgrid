@@ -175,6 +175,25 @@ describe("SessionNamer", () => {
     n.flush();
     expect(s.calls).toEqual([["a", "Generated name"], ["a", "osc filler two"]]);
   });
+  // The naming gate is keyed by CONVERSATION and this is keyed by SLOT, which is
+  // the whole point: a mode flip carries the name across the runtime swap while
+  // re-keying the attempt underneath it, so only a slot-keyed question can stop
+  // the flipped session renaming itself from whatever the user types next.
+  test("hasFinalTitle is true only for a name worth protecting", () => {
+    const n = new SessionNamer(sink(), { debounceMs: 0 });
+    expect(n.hasFinalTitle("a")).toBe(false);
+    n.onStructuredTitle("a", "open this file for me", "first-message");
+    expect(n.hasFinalTitle("a")).toBe(false);
+    n.onStructuredTitle("a", "Fix session auto-naming", "self");
+    expect(n.hasFinalTitle("a")).toBe(true);
+    n.onStructuredTitle("a", "Release blockers", "manual");
+    expect(n.hasFinalTitle("a")).toBe(true);
+    // OSC filler is terminal chrome, never a name a model call should defer to.
+    n.forgetStructuredTitle("a");
+    n.onOscTitle("a", "osc filler");
+    expect(n.hasFinalTitle("a")).toBe(false);
+  });
+
   test("a rename typed at the agent outranks the title we generated", () => {
     const s = sink();
     const n = new SessionNamer(s, { debounceMs: 0 });

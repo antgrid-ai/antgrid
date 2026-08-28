@@ -19,9 +19,9 @@ function isTitleSource(filename: string): boolean {
  * without this it would not surface until the next turn.
  *
  * Renames ONLY. agy also names conversations itself in conversation_summaries.db
- * (its `preview`), and that used to be reported here as a lagging upgrade; it is
- * no longer read anywhere, because we generate our own name from the first user
- * message instead of waiting to see whether agy writes one (see ResolvedTitle).
+ * (its `preview`), and that is read nowhere: we generate our own name from the
+ * first user message rather than waiting to see whether agy writes one (see
+ * ResolvedTitle).
  * The first-user-message fallback is not here either — that one is instant and
  * already supplied by the hook -> resolver path.
  *

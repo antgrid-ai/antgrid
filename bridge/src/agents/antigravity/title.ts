@@ -98,8 +98,8 @@ export async function resolveAntigravityTranscriptTitle(transcriptPath: string):
  *   2. first user message from the transcript — until our generated name lands.
  *
  * agy's OWN name (conversation_summaries.db: its copy of the rename, or the
- * generated `preview`) sat between the two and is no longer read — see
- * ResolvedTitle. Dropping it costs nothing on (1): `/rename` is logged to
+ * generated `preview`) would sit between the two and is deliberately not read —
+ * see ResolvedTitle. Leaving it out costs nothing on (1): `/rename` is logged to
  * history.jsonl, so the user's intent still reaches us from a source agy writes
  * synchronously, rather than one it fills in a beat later.
  *

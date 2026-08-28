@@ -99,8 +99,8 @@ export async function buildTitleContext(opts: {
 }
 
 /**
- * Name a session by asking a headless CLI, because we no longer wait to see
- * whether the agent names it for us.
+ * Name a session by asking a headless CLI, rather than waiting to see whether
+ * the agent names it for us.
  *
  * Agents disagree about this completely — codex's CLI never names a thread
  * (only its desktop app does), Claude writes one in the interactive TUI and

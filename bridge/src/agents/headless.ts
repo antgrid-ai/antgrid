@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { logger } from "../logger";
-import { stripInheritedCertOverrides } from "../terminal-session";
+import { killChildTree, stripInheritedCertOverrides } from "../terminal-session";
 import { detectInstalledTools } from "../tool-detector";
 import { AGENTS, agentSpec } from "./registry";
 import { pickHeadlessFrom, type HeadlessCommand, type HeadlessNeed, type HeadlessReach } from "./types";
@@ -72,9 +72,17 @@ export function resolveHeadless(tool: string, need: HeadlessNeed, installedTools
  */
 export function headlessScratchCwd(): string {
   const dir = join(tmpdir(), "antgrid-headless", "cwd");
-  try { mkdirSync(dir, { recursive: true }); } catch { /* falls back below */ }
+  // Best effort: a spawn whose cwd does not exist fails, and that failure is
+  // already the same null every other headless failure returns. Throwing here
+  // would instead reject the caller's promise on a path that has nothing to do
+  // with the model call.
+  try { mkdirSync(dir, { recursive: true }); } catch { /* the spawn reports it */ }
   return dir;
 }
+
+/** How long a killed tree gets to release the stdout pipe before the reads are
+ *  abandoned and the timeout is reported on its own. */
+const ABANDON_GRACE_MS = 2_000;
 
 export interface HeadlessResult {
   stdout: string;
@@ -104,17 +112,36 @@ export async function runHeadless(
 ): Promise<HeadlessResult | null> {
   const spawn = opts.spawn ?? Bun.spawn;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let abandonTimer: ReturnType<typeof setTimeout> | undefined;
   try {
     const proc = spawn(cmd, {
       cwd: opts.cwd, stdout: "pipe", stderr: "ignore", env: headlessEnv(opts.env),
     });
     let timedOut = false;
-    timer = setTimeout(() => {
-      timedOut = true;
-      try { proc.kill(); } catch { /* already gone */ }
-    }, opts.timeoutMs);
-    const stdout = await new Response(proc.stdout).text();
-    const code = await proc.exited;
+    // Resolves only if the timeout fires AND the tree kill fails to end the
+    // reads below. Nothing here is racing the happy path: on it, this promise
+    // is simply never settled and both awaits win outright.
+    const abandoned = new Promise<null>((resolve) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        // The TREE, not the handle. Every one of these argvs is reached through
+        // a launcher script, so the handle is a `cmd.exe`/`sh` wrapper and the
+        // real agent is its child holding the inherited stdout pipe: killing
+        // the wrapper alone leaves that pipe open, `proc.stdout` never reaches
+        // EOF, and this call never settles. The judge awaits it with no outer
+        // deadline of its own, so that hang wedges a supervised session in
+        // "handling" for the life of the process.
+        void killChildTree(proc);
+        // POSIX cannot reach past the direct child (Bun.spawn starts no process
+        // group), so the kill above is a best effort there and this is the
+        // backstop that makes the budget an actual bound.
+        abandonTimer = setTimeout(() => resolve(null), ABANDON_GRACE_MS);
+      }, opts.timeoutMs);
+    });
+    const stdout = await Promise.race([
+      new Response(proc.stdout).text(), abandoned.then(() => ""),
+    ]);
+    const code = await Promise.race([proc.exited, abandoned]);
     return { stdout, code: timedOut ? null : code, timedOut };
   } catch {
     return null;
@@ -123,6 +150,7 @@ export async function runHeadless(
     // the stdout read, and an un-cleared timer then stays armed for the full
     // budget holding the dead process alive.
     clearTimeout(timer);
+    clearTimeout(abandonTimer);
   }
 }
 

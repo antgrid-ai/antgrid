@@ -1,9 +1,7 @@
 // bridge/src/handler/judge.ts
-import { agentSpec } from "../agents/registry";
 import { runHeadless } from "../agents/headless";
-import { pickHeadlessFrom } from "../agents/types";
 import {
-  buildDecidePrompt, buildRetryPrompt, parseDecisionFromOutput,
+  buildDecidePrompt, buildRetryPrompt, parseDecisionFromOutput, pickJudge,
   type HandlerDecision,
 } from "./decision";
 import { buildExtractPrompt, parseItemsFromOutput, type ExtractedItem } from "./extract";
@@ -37,9 +35,9 @@ async function runWithRetry<T>(opts: {
   // means no verified headless judge for this tool — Handler stays
   // escalate-only, and a sealed entry is never promoted into one just because
   // the agent can answer a question (see AgentSpec.headless).
-  const judge = pickHeadlessFrom(agentSpec(opts.tool)?.headless, "repo");
-  if (!judge || judge.reach === "sealed") return null;
-  const path = judge.reach === "readonly" ? opts.transcriptPath : undefined;
+  const judge = pickJudge(opts.tool);
+  if (!judge) return null;
+  const path = judge.tier === "readonly" ? opts.transcriptPath : undefined;
   // Output is parsed whatever the exit code says: a judge answers in JSON, so a
   // failed run cannot masquerade as a verdict the way a one-line refusal can
   // masquerade as a title (see runHeadless).

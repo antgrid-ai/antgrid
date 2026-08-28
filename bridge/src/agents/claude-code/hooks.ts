@@ -110,6 +110,17 @@ function claudeStopFailureEvent(errorClass: string): "limit_hit" | "turn_failed"
   return CLAUDE_FATAL_STOP_ERRORS.has(errorClass) ? "turn_end" : "turn_failed";
 }
 
+// A submission the model can name a task from. A slash command is the user
+// invoking a command, not describing what they want done — "/clear", "/commit"
+// and their arguments name the command, so a title generated from one describes
+// the tool rather than the session, and the attempt it spends is gone.
+// Withholding `prompt` does not drop the post: it falls through to the on-disk
+// read, which is what a session without a pre-turn hook already does.
+function namesTheSession(prompt: string | null | undefined): boolean {
+  const text = prompt?.trim();
+  return !!text && !text.startsWith("/");
+}
+
 export async function toPosts(
   invocation: HookInvocation,
   { port, terminalId, readStdin }: HookPostCtx,
@@ -120,7 +131,12 @@ export async function toPosts(
   if (invocation.event === "session-start" || invocation.event === "stop") {
     posts.push(
       titlePost(port, terminalId, input.session_id, "claude", {
-        transcriptPath: input.transcript_path ?? "",
+        // Omitted when absent, never "": setAgentSession falls back to the path
+        // it already holds only for a NULLISH one, so an empty string overwrites
+        // it — and this post repeats for the life of the session, so a single
+        // report without a path would cost the handler's judge and the resume
+        // preflight the real one.
+        ...(input.transcript_path ? { transcriptPath: input.transcript_path } : {}),
       }),
     );
   }
@@ -140,13 +156,9 @@ export async function toPosts(
     // reach the same code from their turn-END post, minutes later on a real
     // task. The bridge treats `prompt` as "name this now", so it must not ride
     // any other event.
-    // An absent path is OMITTED, not sent as "": `setAgentSession` keeps a
-    // previously captured path only for a NULLISH report, and this post repeats
-    // every turn — an empty string would wipe the path the handler's judge and
-    // the resume preflight read.
     posts.push(
       titlePost(port, terminalId, input.session_id, "claude", {
-        ...(input.prompt ? { prompt: input.prompt } : {}),
+        ...(namesTheSession(input.prompt) ? { prompt: input.prompt } : {}),
         ...(input.transcript_path ? { transcriptPath: input.transcript_path } : {}),
       }),
     );

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import {
   HandlerDecisionSchema,
-  buildJudgeCommand,
+  pickJudge,
   buildDecidePrompt,
   buildRetryPrompt,
   parseDecisionFromOutput,
@@ -49,60 +49,60 @@ describe("decision schema", () => {
   });
 });
 
-describe("buildJudgeCommand tiers", () => {
+describe("pickJudge tiers", () => {
   it("claude-code is readonly with allowed tools pinned", () => {
-    const r = buildJudgeCommand("claude-code", undefined, "P")!;
+    const r = pickJudge("claude-code")!;
     expect(r.tier).toBe("readonly");
-    expect(r.cmd).toContain("--allowedTools");
+    expect(r.command.cmd("P")).toContain("--allowedTools");
   });
   // --allowedTools is variadic: a prompt after it is eaten as another tool name
   // and claude exits 1, failing every judge call closed. Position, not presence,
   // is what makes the argv work.
   it("claude-code puts the prompt ahead of the variadic --allowedTools", () => {
-    const r = buildJudgeCommand("claude-code", undefined, "P")!;
-    expect(r.cmd.indexOf("P")).toBeGreaterThan(-1);
-    expect(r.cmd.indexOf("P")).toBeLessThan(r.cmd.indexOf("--allowedTools"));
+    const cmd = pickJudge("claude-code")!.command.cmd("P");
+    expect(cmd.indexOf("P")).toBeGreaterThan(-1);
+    expect(cmd.indexOf("P")).toBeLessThan(cmd.indexOf("--allowedTools"));
   });
   it("codex is readonly via sandbox", () => {
-    const r = buildJudgeCommand("codex", undefined, "P")!;
+    const r = pickJudge("codex")!;
     expect(r.tier).toBe("readonly");
-    expect(r.cmd).toContain("read-only");
+    expect(r.command.cmd("P")).toContain("read-only");
   });
   // A project need not be a git repo; without this codex refuses to run at all.
   it("codex skips the git-repo check without weakening the sandbox", () => {
-    const r = buildJudgeCommand("codex", undefined, "P")!;
-    expect(r.cmd).toContain("--skip-git-repo-check");
-    expect(r.cmd).toContain("--sandbox");
-    expect(r.cmd).toContain("read-only");
+    const r = pickJudge("codex")!;
+    expect(r.command.cmd("P")).toContain("--skip-git-repo-check");
+    expect(r.command.cmd("P")).toContain("--sandbox");
+    expect(r.command.cmd("P")).toContain("read-only");
   });
   // A judge pass is machine bookkeeping, and one runs per agent pause — left
   // persisted they bury the user's own sessions in /resume and `codex exec
   // resume`. Both flags are load-bearing rather than cosmetic, so pin them:
   // dropping one is invisible until someone goes looking for their own work.
   it("claude-code and codex write no session of their own", () => {
-    expect(buildJudgeCommand("claude-code", undefined, "P")!.cmd).toContain("--no-session-persistence");
-    expect(buildJudgeCommand("codex", undefined, "P")!.cmd).toContain("--ephemeral");
+    expect(pickJudge("claude-code")!.command.cmd("P")).toContain("--no-session-persistence");
+    expect(pickJudge("codex")!.command.cmd("P")).toContain("--ephemeral");
   });
 
   // opencode has no such flag, so its session store is redirected instead. The
   // DATA dir must NOT move with it: auth.json lives there, so an XDG_DATA_HOME
   // override would hide the session by taking the judge's credentials with it.
   it("opencode redirects its session store without moving its auth", () => {
-    const r = buildJudgeCommand("opencode", undefined, "P")!;
-    expect(r.env).toEqual({ OPENCODE_DB: ":memory:" });
-    expect(Object.keys(r.env!)).not.toContain("XDG_DATA_HOME");
+    const r = pickJudge("opencode")!;
+    expect(r.command.env).toEqual({ OPENCODE_DB: ":memory:" });
+    expect(Object.keys(r.command.env!)).not.toContain("XDG_DATA_HOME");
   });
 
   // Only opencode needs one: claude and codex say it in the argv, and an env
   // override there would be a second, quieter place to look for the same rule.
   it("the flag-based judges carry no env override", () => {
-    expect(buildJudgeCommand("claude-code", undefined, "P")!.env).toBeUndefined();
-    expect(buildJudgeCommand("codex", undefined, "P")!.env).toBeUndefined();
+    expect(pickJudge("claude-code")!.command.env).toBeUndefined();
+    expect(pickJudge("codex")!.command.env).toBeUndefined();
   });
 
   it("opencode is transcript tier; unknown is null", () => {
-    expect(buildJudgeCommand("opencode", undefined, "P")!.tier).toBe("transcript");
-    expect(buildJudgeCommand("gemini", undefined, "P")).toBeNull();
+    expect(pickJudge("opencode")!.tier).toBe("transcript");
+    expect(pickJudge("gemini")).toBeNull();
   });
 });
 

@@ -34,6 +34,11 @@ import { pickHeadlessFrom, type AgentKey, type AgentSpec } from "./types";
 // nothing a one-shot call writes can surface in that agent's --resume picker,
 // and so the OS reclaims it. Stable per tool because HeadlessCommand.env is
 // static: what is disposable is the directory, never a particular session.
+//
+// A PATH ONLY: this runs while the AGENTS literal is built, so anything done
+// here happens on every import of this file — including each short-lived
+// `bridge hook` invocation the agent is blocking on, and on machines that run
+// neither of these agents.
 function headlessScratchDir(tool: string): string {
   return join(tmpdir(), "antgrid-headless", tool);
 }

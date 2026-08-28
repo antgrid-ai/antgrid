@@ -110,13 +110,13 @@ export class StructuredAgentManager {
     if (this.drivers.has(sessionId)) {
       // already running — idempotent, but a racing duplicate start still
       // carries the caller's own initialPrompt and must deliver it once.
-      await this.deliverInitialPrompt(sessionId, initialPrompt);
+      await this.deliverInitialPrompt(sessionId, initialPrompt, resumeId);
       return;
     }
     const inflight = this.starting.get(sessionId);
     if (inflight) {
       await inflight;
-      await this.deliverInitialPrompt(sessionId, initialPrompt);
+      await this.deliverInitialPrompt(sessionId, initialPrompt, resumeId);
       return;
     }
 
@@ -184,7 +184,7 @@ export class StructuredAgentManager {
     // prompt() so the transcript records it exactly like an app-sent
     // agent:prompt. After start, so the config replay above (model/effort)
     // applies to this first turn.
-    await this.deliverInitialPrompt(sessionId, initialPrompt);
+    await this.deliverInitialPrompt(sessionId, initialPrompt, resumeId);
   }
 
   // A prompt failure is surfaced as agent:error but must NOT tear down the
@@ -192,7 +192,9 @@ export class StructuredAgentManager {
   // lost, and the app can resend. Called from all three startChat exits so a
   // racing duplicate start still delivers exactly once per call that carried
   // a prompt.
-  private async deliverInitialPrompt(sessionId: string, initialPrompt: string | undefined): Promise<void> {
+  private async deliverInitialPrompt(
+    sessionId: string, initialPrompt: string | undefined, resumeId?: string,
+  ): Promise<void> {
     const initial = initialPrompt?.trim();
     if (!initial) return;
     // At-most-once per session lifetime: a replayed session:start must not
@@ -205,7 +207,12 @@ export class StructuredAgentManager {
     this.initialPromptDelivered.add(sessionId);
     // Before the delivery, not after: this is the message the session gets named
     // from, and a prompt() that rejects still tells us what the user asked for.
-    this.onUserPrompt?.(sessionId, initial);
+    //
+    // A RESUME is exempt. Its first message continues a conversation that
+    // already has a name ("yes, carry on with step 3" names nothing), and the
+    // stop that preceded it released the slot's title and its attempt — so
+    // without this the resumed session renames itself from the continuation.
+    if (!resumeId) this.onUserPrompt?.(sessionId, initial);
     try {
       await driver.prompt(initial);
     } catch (err) {
@@ -271,15 +278,26 @@ export class StructuredAgentManager {
     });
   }
 
-  /** Dispatch one inbound agent:* control message. */
-  async handleAgentMessage(msg: AbMessage): Promise<void> {
+  /**
+   * Dispatch one inbound agent:* control message.
+   *
+   * `injected` marks a prompt the Handler wrote on the user's behalf rather than
+   * one the user sent. It is an option, not a wire field: the frame never leaves
+   * this process (the supervisor's adapter builds it in memory), so putting it on
+   * the protocol would let a remote client claim it.
+   */
+  async handleAgentMessage(msg: AbMessage, opts: { injected?: boolean } = {}): Promise<void> {
     try {
       switch (msg.type) {
         case "agent:prompt": {
           const driver = this.drivers.get(msg.sessionId);
           if (!driver) throw new Error("chat session not started");
-          // A slash command's `text` is only its arguments, which name nothing.
-          if (!msg.commandId && msg.text.trim()) this.onUserPrompt?.(msg.sessionId, msg.text);
+          // A slash command's `text` is only its arguments, which name nothing —
+          // and neither does a supervisor nudge, which is this component talking
+          // to itself and would otherwise name the session "continue".
+          if (!msg.commandId && !opts.injected && msg.text.trim()) {
+            this.onUserPrompt?.(msg.sessionId, msg.text);
+          }
           await driver.prompt(msg.text, msg.commandId);
           break;
         }
