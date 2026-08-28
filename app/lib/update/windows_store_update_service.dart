@@ -78,9 +78,11 @@ String? storeUpdateVersion(Map<Object?, Object?>? reply) {
   final raw = reply?['version'];
   if (raw is! String) return null;
   final version = raw.trim();
-  if (!RegExp(r'^\d+(\.\d+)*$').hasMatch(version)) return null;
+  if (!_dottedDecimal.hasMatch(version)) return null;
   return version;
 }
+
+final RegExp _dottedDecimal = RegExp(r'^\d+(\.\d+)*$');
 
 /// Pure mapping from the native install reply to an outcome. Null means the
 /// reply was not one of the contract's strings — the caller decides what an

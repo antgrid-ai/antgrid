@@ -112,6 +112,11 @@ class _UpdateGateState extends ConsumerState<UpdateGate>
         if (!rowAlreadyLit) _showUpdateAvailablePrompt();
       case UpdateCheckOutcome.updateAvailableQuiet:
         ref.read(updateAvailableProvider.notifier).set(true);
+        // Quiet means "don't ask", not "don't drain": the strategy already
+        // decided this one installs itself, so run it through the same
+        // sequence as a tap, minus the dialog. Anything else would hand a
+        // live bridge to an MSIX replacement.
+        _startInstall(confirm: false);
       case UpdateCheckOutcome.restartReady:
         ref.read(updateAvailableProvider.notifier).set(true);
         // Same false→true rule as above: Play keeps reporting a downloaded
@@ -131,7 +136,7 @@ class _UpdateGateState extends ConsumerState<UpdateGate>
         title: 'Update available',
         description: 'A new version is available to install.',
         actionLabel: 'Update',
-        onAction: _startInstall,
+        onAction: () => _startInstall(),
       ),
     );
   }
@@ -145,7 +150,7 @@ class _UpdateGateState extends ConsumerState<UpdateGate>
         title: 'Update ready',
         description: 'A new version has been downloaded.',
         actionLabel: 'Restart',
-        onAction: _startInstall,
+        onAction: () => _startInstall(),
       ),
     );
   }
@@ -158,10 +163,12 @@ class _UpdateGateState extends ConsumerState<UpdateGate>
   /// on Windows: the sequence drains the bridge host before handing over, and
   /// a context that dies in that window abandons an install the user already
   /// confirmed.
-  void _startInstall() {
+  void _startInstall({bool confirm = true}) {
     detached('UpdateGate', 'install sequence', () async {
       if (!mounted) return;
-      await ref.read(updateInstallControllerProvider.notifier).start(context);
+      await ref
+          .read(updateInstallControllerProvider.notifier)
+          .start(context, confirm: confirm);
     });
   }
 

@@ -117,8 +117,14 @@ winrt::fire_and_forget EmitDownloadProgress(
     co_return;  // STA gone — process is shutting down, nobody left to tell.
   }
   if (!*alive) co_return;
-  channel->InvokeMethod(kProgressMethod,
-                        std::make_unique<EncodableValue>(percent));
+  try {
+    channel->InvokeMethod(kProgressMethod,
+                          std::make_unique<EncodableValue>(percent));
+  } catch (...) {
+    // An exception escaping a fire_and_forget is std::terminate, and a
+    // progress tick is the last thing that should be allowed to take the
+    // process down.
+  }
 }
 
 winrt::fire_and_forget CheckForUpdates(MethodResult result,
@@ -136,14 +142,30 @@ winrt::fire_and_forget CheckForUpdates(MethodResult result,
     auto updates =
         co_await context.GetAppAndOptionalStorePackageUpdatesAsync();
     update_count = static_cast<int32_t>(updates.Size());
+    bool version_read = false;
     for (StorePackageUpdate const& update : updates) {
-      // The app's own package leads the list and optional packages follow, so
-      // the first entry is the version the user is being offered.
-      if (version.empty()) {
-        version = FormatPackageVersion(update.Package().Id().Version());
-      }
       if (update.Mandatory()) {
         mandatory = true;
+      }
+      // The app's own package leads the list and optional packages follow, so
+      // the first entry is the version the user is being offered.
+      if (!version_read) {
+        version_read = true;
+        // Fenced apart from the scan above: this string is confirm-dialog
+        // copy, while `update_count` decides whether an update EXISTS. Sharing
+        // one try would let a package whose projection refuses to answer
+        // report a real pending update — a mandatory one included — as
+        // "nothing to install".
+        try {
+          version = FormatPackageVersion(update.Package().Id().Version());
+        } catch (...) {
+          // The dialog omits the version; everything else still works.
+        }
+      }
+      // Nothing further can change: the version came from the first entry and
+      // mandatory only ever goes true.
+      if (mandatory) {
+        break;
       }
     }
   } catch (...) {

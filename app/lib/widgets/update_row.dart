@@ -40,9 +40,14 @@ class UpdateRow extends ConsumerWidget {
     if (strategy == null) return const SizedBox.shrink();
 
     final install = ref.watch(updateInstallControllerProvider);
-    final live = install is UpdateInstallIdle || install is UpdateInstallFailed;
+    final live = install.canStart;
     final title = switch (install) {
-      UpdateInstallWorking(:final percent) => 'Updating... $percent%',
+      // 0 is the pre-download plateau, not progress — the Store re-scans and
+      // shows both consent dialogs before the first byte, so a hard "0%" would
+      // read as stalled for the whole of it.
+      UpdateInstallWorking(:final percent) when percent > 0 =>
+        'Updating... $percent%',
+      UpdateInstallWorking() => 'Updating...',
       UpdateInstallDone() => 'Updating...',
       _ => strategy.rowTitle,
     };
@@ -112,7 +117,14 @@ class UpdateRow extends ConsumerWidget {
                   left: 0,
                   right: 0,
                   bottom: 0,
-                  child: AbProgressRule(fraction: install.percent / 100),
+                  // Indeterminate until the platform actually ticks: a rule
+                  // pinned at zero for minutes is indistinguishable from a
+                  // stuck one.
+                  child: AbProgressRule(
+                    fraction: install.percent == 0
+                        ? null
+                        : install.percent / 100,
+                  ),
                 ),
             ],
           ),

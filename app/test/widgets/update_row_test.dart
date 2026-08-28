@@ -48,7 +48,7 @@ class _SpyController extends UpdateInstallController {
   }
 
   @override
-  Future<void> start(BuildContext context) async {
+  Future<void> start(BuildContext context, {bool confirm = true}) async {
     starts++;
   }
 }
@@ -115,8 +115,50 @@ void main() {
     );
 
     expect(find.text('Updating... 42%'), findsOneWidget);
-    expect(find.byType(AbProgressRule), findsOneWidget);
+    expect(
+      tester.widget<AbProgressRule>(find.byType(AbProgressRule)).fraction,
+      0.42,
+    );
     // An action label on a row that refuses taps reads as a dead button.
+    expect(find.text('Update'), findsNothing);
+
+    await tester.tap(find.byType(InkWell), warnIfMissed: false);
+    await tester.pump();
+    expect(h.install.starts, 0);
+  });
+
+  testWidgets('the pre-download plateau reads as waiting, not as stuck at 0%', (
+    tester,
+  ) async {
+    // Nothing ticks until the Store has re-scanned and taken the user through
+    // both of its consent dialogs — minutes, potentially. A hard "0%" over a
+    // rule pinned at zero is indistinguishable from a wedged install.
+    await _pumpRow(
+      tester,
+      _FakeStrategy(),
+      install: const UpdateInstallWorking(0),
+    );
+
+    expect(find.text('Updating...'), findsOneWidget);
+    expect(
+      tester.widget<AbProgressRule>(find.byType(AbProgressRule)).fraction,
+      isNull,
+      reason: 'indeterminate, not zero',
+    );
+  });
+
+  testWidgets('a handed-over install never becomes tappable again', (
+    tester,
+  ) async {
+    // Done is reached only where the process is already dying around the row;
+    // offering a second install there would be offering a second restart.
+    final h = await _pumpRow(
+      tester,
+      _FakeStrategy(),
+      install: const UpdateInstallDone(),
+    );
+
+    expect(find.text('Updating...'), findsOneWidget);
     expect(find.text('Update'), findsNothing);
 
     await tester.tap(find.byType(InkWell), warnIfMissed: false);

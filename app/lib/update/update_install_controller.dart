@@ -9,6 +9,8 @@ import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_toast.dart';
 import '../project/project_session_registry.dart';
 import '../providers/control_plane.dart' show hostControllerProvider;
+import '../providers/providers.dart' show preferencesServiceProvider;
+import '../providers/update_available.dart';
 import '../util/ab_log.dart';
 import 'update_strategy.dart';
 
@@ -16,6 +18,19 @@ import 'update_strategy.dart';
 /// re-derived state doesn't rebuild the affordance that shows it.
 sealed class UpdateInstallState {
   const UpdateInstallState();
+
+  /// Whether a fresh attempt may begin from here.
+  ///
+  /// The single answer for every entry point — the drawer row's tap, both
+  /// update toasts, and [UpdateInstallController.start]'s own guard — so a
+  /// state one of them treats as dead can never be a state another treats as
+  /// go.
+  bool get canStart => switch (this) {
+    UpdateInstallIdle() || UpdateInstallFailed() => true,
+    UpdateInstallConfirming() ||
+    UpdateInstallWorking() ||
+    UpdateInstallDone() => false,
+  };
 }
 
 final class UpdateInstallIdle extends UpdateInstallState {
@@ -120,39 +135,51 @@ final class UpdateInstallFailed extends UpdateInstallState {
 /// dialog still goes straight through, exactly as before.
 class UpdateInstallController extends Notifier<UpdateInstallState> {
   StreamSubscription<int>? _progress;
-  bool _disposed = false;
 
   @override
   UpdateInstallState build() {
-    ref.onDispose(() {
-      _disposed = true;
-      _cancelProgress();
-    });
+    ref.onDispose(_cancelProgress);
     return const UpdateInstallIdle();
   }
 
   /// Runs confirm → drain → install. Never throws, and surfaces its own UI.
   ///
-  /// A second call while a sequence is on screen or under way is dropped: the
-  /// Store's pre-install re-scan alone is several seconds during which the
-  /// only honest thing to do is nothing, and that is long enough for an
-  /// impatient second tap to start a second install.
-  Future<void> start(BuildContext context) async {
-    if (state is UpdateInstallConfirming || state is UpdateInstallWorking) {
-      return;
-    }
+  /// A second call while a sequence is on screen or under way is dropped
+  /// ([UpdateInstallState.canStart] is the one arbiter): the Store's
+  /// pre-install re-scan alone is several seconds during which the only honest
+  /// thing to do is nothing, and that is long enough for an impatient second
+  /// tap to start a second install.
+  ///
+  /// [confirm] is false only for a flow the platform itself initiated — the
+  /// Windows mandatory tier, which the user is not being asked about. The
+  /// drain still runs: it is owed to the bridge, not to the dialog.
+  Future<void> start(BuildContext context, {bool confirm = true}) async {
+    if (!state.canStart) return;
     final strategy = ref.read(updateStrategyProvider);
     if (strategy == null) return;
 
     final endsSession = strategy.installEndsSession;
-    if (endsSession) {
+    if (endsSession && confirm) {
       _set(const UpdateInstallConfirming());
-      final confirmed = await AbConfirmDialog.show(
-        context: context,
-        title: 'Install update and restart?',
-        body: _confirmBody(strategy.pendingVersion),
-        confirmLabel: 'Install & restart',
-      );
+      // Anything that throws between here and the next `_set` would strand the
+      // machine in Confirming, which `canStart` refuses forever — the row
+      // would render a dead affordance for the rest of the process.
+      bool confirmed;
+      try {
+        confirmed = await AbConfirmDialog.show(
+          context: context,
+          title: 'Install update and restart?',
+          body: _confirmBody(strategy.pendingVersion),
+          confirmLabel: 'Install & restart',
+        );
+      } catch (e) {
+        AbLog.error(
+          'UpdateInstall',
+          'confirm dialog threw',
+          fields: {'error': '$e'},
+        );
+        confirmed = false;
+      }
       if (!confirmed) {
         _set(const UpdateInstallIdle());
         return;
@@ -174,7 +201,10 @@ class UpdateInstallController extends Notifier<UpdateInstallState> {
       _set(const UpdateInstallIdle());
       return;
     }
-    if (endsSession) await _drainOwnedHost();
+    if (endsSession) {
+      await _flushPreferences();
+      await _drainOwnedHost();
+    }
 
     UpdateInstallResult result;
     try {
@@ -196,6 +226,19 @@ class UpdateInstallController extends Notifier<UpdateInstallState> {
       result = UpdateInstallResult.unavailable;
     }
     _cancelProgress();
+    if (result != UpdateInstallResult.handedOff) {
+      AbLog.warn(
+        'UpdateInstall',
+        'update did not install',
+        fields: {'outcome': result.name, 'endsSession': '$endsSession'},
+      );
+    }
+    if (ref.mounted && result == UpdateInstallResult.nothingPending) {
+      // The Store saying "nothing pending" is the one source that can prove an
+      // update un-pended. Leaving the row lit would offer an install that can
+      // now only ever answer "already up to date".
+      ref.read(updateAvailableProvider.notifier).set(false);
+    }
     _set(switch (result) {
       // Done is a terminal state the row refuses to leave, which is only
       // truthful where the process is dying around it. Everywhere else the
@@ -207,10 +250,23 @@ class UpdateInstallController extends Notifier<UpdateInstallState> {
       UpdateInstallResult.notInstalled ||
       UpdateInstallResult.unavailable => UpdateInstallFailed(result),
     });
-    if (context.mounted) _toastFor(context, result);
+    if (context.mounted) _toastFor(context, result, endsSession: endsSession);
+    // Last, so the answer is on screen before a respawn that can take seconds.
+    if (endsSession && result != UpdateInstallResult.handedOff) {
+      await _rearmOwnedHost();
+    }
   }
 
-  void _toastFor(BuildContext context, UpdateInstallResult result) {
+  void _toastFor(
+    BuildContext context,
+    UpdateInstallResult result, {
+    required bool endsSession,
+  }) {
+    // Only a session-ending attempt drained the host, so only it owes the user
+    // an account of what the attempt cost them.
+    final drained = endsSession
+        ? ' Project sessions were stopped; the bridge is restarting.'
+        : '';
     switch (result) {
       case UpdateInstallResult.handedOff:
         break;
@@ -219,22 +275,42 @@ class UpdateInstallController extends Notifier<UpdateInstallState> {
           context,
           icon: AbIcons.check,
           title: 'Already up to date',
-          description: 'There was nothing left to install.',
+          description: 'There was nothing left to install.$drained',
         );
       case UpdateInstallResult.notInstalled:
         _toast(
           context,
           icon: AbIcons.warning,
           title: 'Update not installed',
-          description: 'It is still pending — you can start it again.',
+          description: 'It is still pending — you can start it again.$drained',
         );
       case UpdateInstallResult.unavailable:
         _toast(
           context,
           icon: AbIcons.error,
           title: "Couldn't start the update",
-          description: 'Try again later.',
+          description: 'Try again later.$drained',
         );
+    }
+  }
+
+  /// Writes pending preferences out before an install that ends the process.
+  ///
+  /// The same bounded flush `exitApp` does, for the same reason: on this path
+  /// neither the back gate nor `didRequestAppExit` ever runs, so nothing else
+  /// gets the chance.
+  Future<void> _flushPreferences() async {
+    try {
+      await ref
+          .read(preferencesServiceProvider)
+          .flush()
+          .timeout(const Duration(seconds: 2));
+    } catch (e) {
+      AbLog.warn(
+        'UpdateInstall',
+        'preference flush before update failed (ignored)',
+        fields: {'error': '$e'},
+      );
     }
   }
 
@@ -260,6 +336,25 @@ class UpdateInstallController extends Notifier<UpdateInstallState> {
     }
   }
 
+  /// Brings the bridge back after a drain that bought nothing.
+  ///
+  /// [HostController.shutdownOwnedHost] deliberately cancels supervised
+  /// respawn — the app was about to die — so on every outcome but a real
+  /// hand-off there is nothing left to restart the host, and the user is
+  /// sitting on a dead bridge with no banner to say so.
+  Future<void> _rearmOwnedHost() async {
+    if (!ref.mounted) return;
+    try {
+      await ref.read(hostControllerProvider).ensureHost();
+    } catch (e) {
+      AbLog.warn(
+        'UpdateInstall',
+        'host re-arm after an update that did not install failed',
+        fields: {'error': '$e'},
+      );
+    }
+  }
+
   String _confirmBody(String? version) {
     final lead = version == null
         ? 'This update installs over a closed app'
@@ -267,7 +362,13 @@ class UpdateInstallController extends Notifier<UpdateInstallState> {
     // Open PROJECTS, not running agents — a true agent count needs a bridge
     // round-trip this dialog does not justify, so the copy says what the
     // number actually is. Suppressed at zero rather than printed as "0".
-    final open = ref.read(projectSessionRegistryProvider).length;
+    // LOCAL projects only: the drain stops the host this app owns, so a
+    // relay-attached project on another machine keeps running and must not be
+    // counted among the casualties.
+    final open = ref
+        .read(projectSessionRegistryProvider.notifier)
+        .localOpenProjects()
+        .length;
     final sessions = switch (open) {
       0 => '',
       1 => ' 1 open project session will stop.',
@@ -285,7 +386,7 @@ class UpdateInstallController extends Notifier<UpdateInstallState> {
     _progress = progress.listen((percent) {
       // A tick racing the install's own answer (or the notifier's disposal)
       // must not drag a settled state back into working.
-      if (_disposed || state is! UpdateInstallWorking) return;
+      if (!ref.mounted || state is! UpdateInstallWorking) return;
       _set(UpdateInstallWorking(percent));
     });
   }
@@ -297,7 +398,7 @@ class UpdateInstallController extends Notifier<UpdateInstallState> {
   }
 
   void _set(UpdateInstallState next) {
-    if (_disposed) return;
+    if (!ref.mounted) return;
     state = next;
   }
 

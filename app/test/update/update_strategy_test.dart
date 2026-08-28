@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:antgrid/update/github_release_update_service.dart';
 import 'package:antgrid/update/in_app_update_service.dart';
 import 'package:antgrid/update/ios_app_store_update_service.dart';
@@ -25,6 +27,16 @@ class _FakeStore extends WindowsStoreUpdateService {
   final StoreInstallOutcome outcome;
   int checks = 0;
   int installs = 0;
+
+  /// Overridden because the real getter has a side effect: it installs a
+  /// PROCESS-GLOBAL handler on the live `antgrid/store_update` channel and
+  /// latches a static that no suite resets, so one unmocked read leaks into
+  /// every test that runs after it.
+  @override
+  Stream<int> get downloadProgress => _stream;
+  final StreamController<int> progress = StreamController<int>.broadcast();
+  // Cached: `StreamController.stream` hands back a fresh wrapper per read.
+  late final Stream<int> _stream = progress.stream;
 
   @override
   Future<StoreUpdateStatus> checkForUpdates() async {
@@ -177,19 +189,21 @@ void main() {
           await s.check(rowAlreadyLit: false),
           UpdateCheckOutcome.updateAvailableQuiet,
         );
-        expect(store.installs, 1);
+        // The strategy REPORTS; the gate installs. Starting the Store here
+        // would skip the bridge drain the whole sequence exists to perform.
+        expect(store.installs, 0);
 
         // Latch spent: no further Store round-trips, no dialog re-pop.
         expect(await s.check(rowAlreadyLit: true), UpdateCheckOutcome.none);
         expect(store.checks, 1);
-        expect(store.installs, 1);
+        expect(store.installs, 0);
 
         // A third check must stay just as quiet — the latch is what stops the
         // system dialog re-popping on every ≥30-min refocus for the whole
         // process lifetime, not only on the check straight after it.
         expect(await s.check(rowAlreadyLit: false), UpdateCheckOutcome.none);
         expect(store.checks, 1);
-        expect(store.installs, 1);
+        expect(store.installs, 0);
       },
     );
 
@@ -230,7 +244,7 @@ void main() {
           await s.check(rowAlreadyLit: true),
           UpdateCheckOutcome.updateAvailableQuiet,
         );
-        expect(store.installs, 1);
+        expect(store.installs, 0);
       },
     );
 
@@ -250,14 +264,19 @@ void main() {
       // quit-and-drain confirmation on a platform that neither quits nor
       // drains.
       expect(
-        WindowsStoreStrategy(service: _FakeStore(StoreUpdateCheck.none))
-            .installEndsSession,
+        WindowsStoreStrategy(
+          service: _FakeStore(StoreUpdateCheck.none),
+        ).installEndsSession,
         isTrue,
       );
+      final store = _FakeStore(StoreUpdateCheck.none);
+      addTearDown(store.progress.close);
+      // Identity, not isNotNull: the point is that the strategy forwards the
+      // SERVICE's stream, which a non-null stream that never emits satisfies
+      // just as well.
       expect(
-        WindowsStoreStrategy(service: _FakeStore(StoreUpdateCheck.none))
-            .installProgress,
-        isNotNull,
+        WindowsStoreStrategy(service: store).installProgress,
+        same(store.downloadProgress),
       );
     });
 
@@ -279,6 +298,19 @@ void main() {
       );
       await nameless.check(rowAlreadyLit: false);
       expect(nameless.pendingVersion, isNull);
+
+      // A later check that finds nothing must forget the name too, or the
+      // confirm dialog offers to install a version that is no longer pending.
+      final store = _FakeStore(
+        StoreUpdateCheck.optional,
+        version: '1.20677.173.0',
+      );
+      final cleared = WindowsStoreStrategy(service: store);
+      await cleared.check(rowAlreadyLit: false);
+      expect(cleared.pendingVersion, '1.20677.173.0');
+      store.reply = StoreUpdateCheck.none;
+      expect(await cleared.check(rowAlreadyLit: true), UpdateCheckOutcome.none);
+      expect(cleared.pendingVersion, isNull);
     });
 
     testWidgets('every Store outcome maps to its install result', (
@@ -452,8 +484,9 @@ void main() {
           UpdateCheckOutcome.restartReady,
         );
         expect(
-          await PlayUpdateStrategy(service: _FakePlay(UpdateDecision.none))
-              .check(rowAlreadyLit: false),
+          await PlayUpdateStrategy(
+            service: _FakePlay(UpdateDecision.none),
+          ).check(rowAlreadyLit: false),
           UpdateCheckOutcome.none,
         );
       },

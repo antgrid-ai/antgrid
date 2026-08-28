@@ -2,9 +2,12 @@ import 'dart:async';
 
 import 'package:antgrid/design/widgets/ab_confirm_dialog.dart';
 import 'package:antgrid/launcher/host_controller.dart';
+import 'package:antgrid/launcher/host_discovery.dart' show HostFile;
+import 'package:antgrid/design/widgets/ab_toast.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/control_plane.dart'
     show hostControllerProvider;
+import 'package:antgrid/providers/update_available.dart';
 import 'package:antgrid/update/update_install_controller.dart';
 import 'package:antgrid/update/update_strategy.dart';
 import 'package:flutter/material.dart';
@@ -63,6 +66,7 @@ class _FakeHost extends HostController {
   final List<String> log;
   final Future<void> Function()? _onDrain;
   int drains = 0;
+  int rearms = 0;
 
   @override
   Future<void> shutdownOwnedHost() async {
@@ -70,6 +74,13 @@ class _FakeHost extends HostController {
     log.add('drain');
     final hook = _onDrain;
     if (hook != null) await hook();
+  }
+
+  @override
+  Future<HostFile> ensureHost() async {
+    rearms++;
+    log.add('rearm');
+    throw StateError('no host in a widget test');
   }
 }
 
@@ -91,8 +102,9 @@ class _Harness {
   UpdateInstallState get state =>
       container.read(updateInstallControllerProvider);
 
-  Future<void> start() =>
-      container.read(updateInstallControllerProvider.notifier).start(context);
+  Future<void> start({bool confirm = true}) => container
+      .read(updateInstallControllerProvider.notifier)
+      .start(context, confirm: confirm);
 }
 
 Future<_Harness> _pump(
@@ -419,5 +431,96 @@ void main() {
 
     expect(h.host.drains, 1);
     expect(h.strategy.installs, 1);
+  });
+
+  testWidgets('a platform-initiated install skips the dialog, not the drain', (
+    tester,
+  ) async {
+    final h = await _pump(tester);
+    await h.start(confirm: false);
+    await tester.pumpAndSettle();
+
+    // The Windows mandatory tier: the user is not being asked, but the bridge
+    // is still shut down before the MSIX is replaced over it.
+    expect(find.byType(AbConfirmDialog), findsNothing);
+    expect(h.log, ['drain', 'install']);
+    expect(h.state, const UpdateInstallDone());
+  });
+
+  testWidgets(
+    'an update that turns out not to be pending stops offering itself',
+    (tester) async {
+      final h = await _pump(tester, result: UpdateInstallResult.nothingPending);
+      h.container.read(updateAvailableProvider.notifier).set(true);
+
+      unawaited(h.start());
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Install & restart'));
+      await tester.pumpAndSettle();
+
+      // The Store answering "nothing pending" is the only evidence that outranks
+      // the check that lit the row; leaving it lit offers an install that can
+      // now only ever repeat this toast.
+      expect(h.container.read(updateAvailableProvider), isFalse);
+      expect(h.state, const UpdateInstallIdle());
+      expect(find.text('Already up to date'), findsOneWidget);
+
+      await tester.pump(const Duration(seconds: 9));
+    },
+  );
+
+  testWidgets('a failed attempt does not leave the row lit-but-unbacked', (
+    tester,
+  ) async {
+    final h = await _pump(tester, result: UpdateInstallResult.unavailable);
+    h.container.read(updateAvailableProvider.notifier).set(true);
+
+    unawaited(h.start());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Install & restart'));
+    await tester.pumpAndSettle();
+
+    // Only the platform's own "nothing pending" un-lights it — a transient
+    // failure must not hide an update that is still waiting.
+    expect(h.container.read(updateAvailableProvider), isTrue);
+
+    await tester.pump(const Duration(seconds: 9));
+  });
+
+  testWidgets('a drain that bought nothing is undone again', (tester) async {
+    final h = await _pump(tester, result: UpdateInstallResult.notInstalled);
+
+    unawaited(h.start());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Install & restart'));
+    await tester.pumpAndSettle();
+
+    // shutdownOwnedHost cancels supervised respawn, so without this the user
+    // is left on a dead bridge with no banner and nothing to bring it back.
+    expect(h.log, ['drain', 'install', 'rearm']);
+    expect(
+      h.state,
+      const UpdateInstallFailed(UpdateInstallResult.notInstalled),
+    );
+    // The toast has to own up to what the abandoned attempt already cost.
+    final toast = tester.widget<AbToast>(find.byType(AbToast));
+    expect(toast.title, 'Update not installed');
+    expect(toast.description, contains('Project sessions were stopped'));
+
+    await tester.pump(const Duration(seconds: 9));
+  });
+
+  testWidgets('a real hand-off never re-arms the host', (tester) async {
+    final h = await _pump(tester);
+
+    unawaited(h.start());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Install & restart'));
+    await tester.pumpAndSettle();
+
+    // The process is going away; spawning a bridge into the Store's window is
+    // the exact tree the update must not find alive.
+    expect(h.host.rearms, 0);
+    expect(h.log, ['drain', 'install']);
   });
 }

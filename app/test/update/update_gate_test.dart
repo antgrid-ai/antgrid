@@ -36,10 +36,12 @@ class _FakeStrategy extends UpdateStrategy {
 /// live in the controller.
 class _SpyController extends UpdateInstallController {
   int starts = 0;
+  final List<bool> confirmArgs = <bool>[];
 
   @override
-  Future<void> start(BuildContext context) async {
+  Future<void> start(BuildContext context, {bool confirm = true}) async {
     starts++;
+    confirmArgs.add(confirm);
   }
 }
 
@@ -47,12 +49,14 @@ Future<({ProviderContainer container, _SpyController install})> _pumpGate(
   WidgetTester tester,
   UpdateStrategy? strategy, {
   bool preLit = false,
+  bool afterUpdate = false,
 }) async {
   final spy = _SpyController();
   final container = ProviderContainer(
     overrides: [
       updateStrategyProvider.overrideWithValue(strategy),
       updateInstallControllerProvider.overrideWith(() => spy),
+      afterUpdateLaunchProvider.overrideWithValue(afterUpdate),
     ],
   );
   addTearDown(container.dispose);
@@ -97,14 +101,21 @@ void main() {
     await tester.pump(const Duration(seconds: 11)); // expire the toast timer
   });
 
-  testWidgets('a quiet outcome lights the row without a toast', (tester) async {
-    // Windows' mandatory tier: the auto-launched Store dialog is already on
-    // screen, so the gate must not stack an announcement on top of it.
+  testWidgets('a quiet outcome installs itself, unasked but not undrained', (
+    tester,
+  ) async {
+    // Windows' mandatory tier. Quiet means the gate asks nothing and toasts
+    // nothing — the Store's own dialog is the announcement — but the install
+    // still runs through the controller, which is what shuts the bridge down
+    // before the MSIX is replaced over it.
     final strategy = _FakeStrategy(UpdateCheckOutcome.updateAvailableQuiet);
     final h = await _pumpGate(tester, strategy);
 
     expect(h.container.read(updateAvailableProvider), isTrue);
     expect(find.byType(AbToast), findsNothing);
+    expect(h.install.starts, 1);
+    expect(h.install.confirmArgs, [false]);
+    expect(strategy.installs, 0, reason: 'the strategy must not self-install');
   });
 
   testWidgets('an already-lit row is not re-announced', (tester) async {
@@ -168,6 +179,29 @@ void main() {
   ) async {
     final h = await _pumpGate(tester, null);
     expect(h.container.read(updateAvailableProvider), isFalse);
+    expect(find.byType(AbToast), findsNothing);
+  });
+
+  testWidgets('a relaunch after an install accounts for the lost sessions', (
+    tester,
+  ) async {
+    // The only trace of the update the user is left with: the sequence shut
+    // their agents down and nothing restores them, so the relaunch has to say
+    // so rather than come up looking like an ordinary start.
+    await _pumpGate(
+      tester,
+      _FakeStrategy(UpdateCheckOutcome.none),
+      afterUpdate: true,
+    );
+
+    final toast = tester.widget<AbToast>(find.byType(AbToast));
+    expect(toast.description, 'Open project sessions were stopped.');
+
+    await tester.pump(const Duration(seconds: 9)); // expire the toast timer
+  });
+
+  testWidgets('an ordinary launch announces nothing', (tester) async {
+    await _pumpGate(tester, _FakeStrategy(UpdateCheckOutcome.none));
     expect(find.byType(AbToast), findsNothing);
   });
 

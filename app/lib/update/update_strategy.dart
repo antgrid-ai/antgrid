@@ -188,16 +188,21 @@ class WindowsStoreStrategy extends UpdateStrategy {
     if (_mandatoryAutoLaunched) return UpdateCheckOutcome.none;
     final status = await _service.checkForUpdates();
     final check = status.check;
-    if (check == StoreUpdateCheck.none) return UpdateCheckOutcome.none;
+    if (check == StoreUpdateCheck.none) {
+      // Nothing pending any more, so the name of what WAS pending is a lie the
+      // confirm dialog would otherwise still render.
+      _pendingVersion = null;
+      return UpdateCheckOutcome.none;
+    }
     _pendingVersion = status.version;
     if (check == StoreUpdateCheck.mandatory) {
-      // Partner Center marked the release mandatory — hand straight off to
-      // the Store's install flow (which owns the UI and may restart the app)
-      // instead of waiting for a click. Service never throws. Quiet: the
-      // system dialog is already the announcement; the lit drawer row
-      // remains the re-launch affordance after a cancel.
+      // Partner Center marked the release mandatory — hand straight off
+      // instead of waiting for a click. The hand-off is the GATE's to make,
+      // not ours: an install started from here would skip the drain, and
+      // killing the bridge by MSIX replacement rather than shutting it down
+      // is the exact failure this whole sequence exists to prevent. Quiet
+      // means "install without asking", not "install behind the controller".
       _mandatoryAutoLaunched = true;
-      unawaited(_service.requestDownloadAndInstall());
       return UpdateCheckOutcome.updateAvailableQuiet;
     }
     return UpdateCheckOutcome.updateAvailable;
