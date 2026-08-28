@@ -53,6 +53,7 @@ import 'screens/sign_in_screen.dart';
 import 'services/devices_api.dart' show DeviceCapInfo;
 import 'services/app_settings_service.dart';
 import 'services/push_background_handler.dart';
+import 'providers/update_available.dart';
 import 'storage/cached_sessions_store.dart';
 import 'storage/drawer_collapsed_store.dart';
 import 'storage/drawer_order_store.dart';
@@ -60,6 +61,7 @@ import 'storage/first_run_store.dart';
 import 'storage/project_store.dart';
 import 'storage/recent_agents_store.dart';
 import 'storage/recent_ports_store.dart';
+import 'storage/update_handoff_store.dart';
 import 'update/update_gate.dart';
 import 'util/ab_log.dart';
 import 'widgets/auth_splash.dart';
@@ -146,6 +148,7 @@ Future<void> main(List<String> args) async {
     cachedSessionsStore,
     firstRunStore,
     prefs,
+    updateHandoffStore,
   ) = await (
     ProjectStore.open(),
     RecentAgentsStore.open(),
@@ -155,8 +158,18 @@ Future<void> main(List<String> args) async {
     CachedSessionsStore.open(),
     FirstRunStore.open(),
     openAppSettingsPrefs(),
+    UpdateHandoffStore.open(),
   ).wait;
   final initialAppSettings = AppSettings.fromPrefs(prefs);
+
+  // Windows relaunches us with the same argument after a crash, a hang and a
+  // reboot-to-patch as it does after an update (RegisterApplicationRestart is
+  // registered with flags 0 on purpose), so the argument is not evidence.
+  // A version recorded at hand-off that no longer matches the running build
+  // is. Consumed here, once per launch, so it can never announce twice.
+  final updatedFromVersion = args.contains(kAfterUpdateFlag)
+      ? await updateHandoffStore.consume(BuildInfo.version)
+      : null;
 
   final installId = await SecureInstallIdStore().ensure();
   final platform = analyticsPlatformTag(defaultTargetPlatform);
@@ -200,9 +213,8 @@ Future<void> main(List<String> args) async {
         ),
       ),
       analyticsServiceProvider.overrideWithValue(analytics),
-      afterUpdateLaunchProvider.overrideWithValue(
-        args.contains(kAfterUpdateFlag),
-      ),
+      updateHandoffStoreProvider.overrideWithValue(updateHandoffStore),
+      afterUpdateLaunchProvider.overrideWithValue(updatedFromVersion != null),
     ],
   );
 

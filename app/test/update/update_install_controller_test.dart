@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:antgrid/config/build_info.dart';
 import 'package:antgrid/design/widgets/ab_confirm_dialog.dart';
 import 'package:antgrid/launcher/host_controller.dart';
 import 'package:antgrid/launcher/host_discovery.dart' show HostFile;
@@ -8,6 +9,7 @@ import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/control_plane.dart'
     show hostControllerProvider;
 import 'package:antgrid/providers/update_available.dart';
+import 'package:antgrid/storage/update_handoff_store.dart';
 import 'package:antgrid/update/update_install_controller.dart';
 import 'package:antgrid/update/update_strategy.dart';
 import 'package:flutter/material.dart';
@@ -100,6 +102,17 @@ class _FakeHost extends HostController {
   }
 }
 
+class _FakeHandoff implements UpdateHandoffSink {
+  final List<String> marked = [];
+  int clears = 0;
+
+  @override
+  Future<void> markHandoff(String version) async => marked.add(version);
+
+  @override
+  Future<void> clear() async => clears++;
+}
+
 class _Harness {
   _Harness({
     required this.container,
@@ -107,6 +120,7 @@ class _Harness {
     required this.log,
     required this.strategy,
     required this.host,
+    required this.handoff,
   });
 
   final ProviderContainer container;
@@ -114,6 +128,7 @@ class _Harness {
   final List<String> log;
   final _FakeStrategy strategy;
   final _FakeHost host;
+  final _FakeHandoff handoff;
 
   UpdateInstallState get state =>
       container.read(updateInstallControllerProvider);
@@ -142,10 +157,12 @@ Future<_Harness> _pump(
     progress: progress,
   );
   final host = _FakeHost(log, onDrain: onDrain);
+  final handoff = _FakeHandoff();
   final container = ProviderContainer(
     overrides: [
       updateStrategyProvider.overrideWithValue(strategy),
       hostControllerProvider.overrideWithValue(host),
+      updateHandoffStoreProvider.overrideWithValue(handoff),
     ],
   );
   addTearDown(container.dispose);
@@ -172,6 +189,7 @@ Future<_Harness> _pump(
     log: log,
     strategy: strategy,
     host: host,
+    handoff: handoff,
   );
 }
 
@@ -477,6 +495,45 @@ void main() {
 
     expect(h.host.seals, 0);
     expect(h.host.spawnSealed, isFalse);
+  });
+
+  testWidgets('a hand-off records the build being replaced', (tester) async {
+    // `--after-update` alone cannot prove an update happened: Windows relaunches
+    // with the same argument after a crash. The recorded version is the proof.
+    final h = await _pump(tester);
+    unawaited(h.start());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Install & restart'));
+    await tester.pumpAndSettle();
+
+    expect(h.handoff.marked, [BuildInfo.version]);
+    expect(h.handoff.clears, 0);
+  });
+
+  testWidgets('an install that did not happen clears the record', (
+    tester,
+  ) async {
+    // Left behind, it would be found by the next crash relaunch and announced
+    // as an update the user never got.
+    final h = await _pump(tester, result: UpdateInstallResult.notInstalled);
+    unawaited(h.start());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Install & restart'));
+    await tester.pumpAndSettle();
+
+    expect(h.handoff.marked, [BuildInfo.version]);
+    expect(h.handoff.clears, 1);
+    await tester.pump(const Duration(seconds: 9));
+  });
+
+  testWidgets('a platform that ends nothing records nothing', (tester) async {
+    // Nothing replaces the package, so there is no relaunch to announce.
+    final h = await _pump(tester, endsSession: false);
+    await h.start();
+    await tester.pump();
+
+    expect(h.handoff.marked, isEmpty);
+    expect(h.handoff.clears, 0);
   });
 
   testWidgets('a browser hand-off can be repeated', (tester) async {

@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../storage/update_handoff_store.dart';
 import 'value_controller.dart';
 
 /// Whether a newer app version is waiting to be installed — a pending
@@ -21,3 +22,10 @@ import 'value_controller.dart';
 final updateAvailableProvider = NotifierProvider<ValueController<bool>, bool>(
   () => ValueController(false),
 );
+
+/// Records the build being replaced so the next launch can prove an update
+/// actually happened — the `--after-update` argument alone cannot, because
+/// Windows relaunches with it after a crash too. Overridden in `main()`.
+final updateHandoffStoreProvider = Provider<UpdateHandoffSink>((_) {
+  throw StateError('updateHandoffStoreProvider must be overridden in main()');
+});

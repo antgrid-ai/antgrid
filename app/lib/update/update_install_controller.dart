@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../config/build_info.dart';
 import '../design/ab_colors.dart';
 import '../design/ab_icons.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
@@ -211,6 +212,7 @@ class UpdateInstallController extends Notifier<UpdateInstallState> {
     if (endsSession) {
       await _flushPreferences();
       await _drainOwnedHost();
+      await _markHandoff();
     }
 
     UpdateInstallResult result;
@@ -239,6 +241,9 @@ class UpdateInstallController extends Notifier<UpdateInstallState> {
         'update did not install',
         fields: {'outcome': result.name, 'endsSession': '$endsSession'},
       );
+      // Nothing was replaced, so the mark must not survive to be found by a
+      // later crash relaunch and read as an update.
+      if (endsSession) await _clearHandoff();
     }
     if (ref.mounted && result == UpdateInstallResult.nothingPending) {
       // The Store saying "nothing pending" is the one source that can prove an
@@ -354,6 +359,33 @@ class UpdateInstallController extends Notifier<UpdateInstallState> {
   /// respawn — the app was about to die — so on every outcome but a real
   /// hand-off there is nothing left to restart the host, and the user is
   /// sitting on a dead bridge with no banner to say so.
+  /// Records the build the platform is about to replace. Best-effort: a write
+  /// that fails costs the post-update announcement, never the update.
+  Future<void> _markHandoff() async {
+    try {
+      await ref.read(updateHandoffStoreProvider).markHandoff(BuildInfo.version);
+    } catch (e) {
+      AbLog.warn(
+        'UpdateInstall',
+        'recording the handoff version failed (announcement will be skipped)',
+        fields: {'error': '$e'},
+      );
+    }
+  }
+
+  Future<void> _clearHandoff() async {
+    if (!ref.mounted) return;
+    try {
+      await ref.read(updateHandoffStoreProvider).clear();
+    } catch (e) {
+      AbLog.warn(
+        'UpdateInstall',
+        'clearing the handoff version failed',
+        fields: {'error': '$e'},
+      );
+    }
+  }
+
   Future<void> _rearmOwnedHost() async {
     if (!ref.mounted) return;
     // Unsealed unconditionally and first: an install that did not take the
