@@ -374,10 +374,21 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     titleSource: "osc",
     resume: () => [],
     initialPrompt: () => [],
-    // No headless entry, for the reason spelled out on cursor-agent above:
-    // `vibe -p --agent ask` is unrun — every invocation here exits 1 on a
-    // missing MISTRAL_API_KEY — and shipping an unverified argv would arm the
-    // judge on it.
+    // No headless entry, and `-p --agent ask` must not come back as one. Read
+    // against mistralai/mistral-vibe v2.24.5: `ask` is the APPROVAL-gated
+    // profile ("Requires approval for tool executions"), not a read-only one —
+    // that is `plan`, the only builtin pinning write_file and edit to
+    // permission "never". What makes ask LOOK read-only is that programmatic
+    // mode denies every callback it is handed (cli/programmatic.py), so a write
+    // fails closed on an approval it cannot answer.
+    //
+    // That is config-level, never argv-level, which is the whole distinction
+    // HeadlessReach draws: an agent profile is just another config layer, `ask`
+    // contributes no bypass_tool_permissions key, and the loop returns EXECUTE
+    // before consulting any permission the moment a user's own config sets one
+    // — no approval is raised, so nothing is denied. Even `--agent plan` falls
+    // to the same switch, so the best reach available here is "transcript", and
+    // it stays unrun besides (no MISTRAL_API_KEY on any machine measured).
     fork: terminalForkHandoff("Mistral Vibe"),
   },
 };
