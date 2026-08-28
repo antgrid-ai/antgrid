@@ -62,7 +62,7 @@ function makeCore(dir: string, opts: CoreOpts = {}) {
       recentOutput: () => "",
       outputKind: () => "pty",
       transcriptPath: () => undefined,
-      supportsSlashCommands: () => true,
+      commandCatalog: () => undefined,
     },
     sendAb: (m: AbMessage) => sent.push(m),
     loadConfigFn: () => ({ version: 2, defaultNotifyOnly: false }),

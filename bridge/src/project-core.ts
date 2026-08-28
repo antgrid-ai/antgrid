@@ -6,7 +6,7 @@ import { createRelayPromotion, type RelayPromotionController, type RelayPromotio
 import type { AttachStreamOpts, StreamHandle } from "./stream-mux";
 import { createMessage, type AbMessage, type SessionEntry, type WorkStatus } from "./protocol";
 import type { DeleteSessionOptions } from "./session-manager";
-import { answerRequest, clientFocusState, clientGone, closeTurn, initialWorkStatus, reduceWorkStatus, sessionFocus, turnStart, userReply, type WorkStatusState } from "./work-status";
+import { answerRequest, clientFocusState, clientGone, closeTurn, initialWorkStatus, isStaleIdleNudge, reduceWorkStatus, sessionFocus, turnStart, userReply, type WorkStatusState } from "./work-status";
 import { logger } from "./logger";
 const log = logger.child({ component: "project-core" });
 import { createPushDispatcher } from "./push/push-dispatcher";
@@ -303,6 +303,11 @@ export class ProjectCore {
       // one of its own. Read lazily — the fold that answers it runs after the
       // frame this feeds, so `refreshSessionWork` below is what re-emits.
       sessionWorkStatusFor: (id) => this._work.sessionStatuses.get(id),
+      // The same reduction, and the same question `attachRelayStream`'s push
+      // subscriber asks via `_lastNotificationRedundant` — asked here too so the
+      // Handler never pays a context assemble plus a judge spawn for a nudge on
+      // a turn that already finished.
+      isStaleIdleNudge: (id) => isStaleIdleNudge(this._work, id),
       relayUrl: this.deps.relayUrl,
     });
     this.core = core;

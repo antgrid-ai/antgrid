@@ -52,7 +52,6 @@ export interface OpencodeDriverOpts {
   sessionId: string;
   client: OpencodeClientLike;
   sendMessage: (msg: AbMessage) => void;
-  onTitle?: (title: string) => void;
   onLifecycle?: (evt: DriverLifecycleEvent) => void;
 }
 
@@ -72,7 +71,6 @@ export class OpencodeDriver extends ChatSession {
   };
 
   private readonly client: OpencodeClientLike;
-  private readonly onTitle?: (title: string) => void;
   private readonly onLifecycle?: (evt: DriverLifecycleEvent) => void;
 
   private rootSessionId = "";
@@ -101,7 +99,6 @@ export class OpencodeDriver extends ChatSession {
   constructor(opts: OpencodeDriverOpts) {
     super({ sessionId: opts.sessionId, sendMessage: opts.sendMessage });
     this.client = opts.client;
-    this.onTitle = opts.onTitle;
     this.onLifecycle = opts.onLifecycle;
   }
 
@@ -422,7 +419,9 @@ export class OpencodeDriver extends ChatSession {
       case "message.part.updated": return this.onPartUpdated(p);
       case "message.part.delta": return this.onPartDelta(p);
       case "session.created": return this.onSessionCreated(p);
-      case "session.updated": return this.onSessionUpdated(p);
+      // session.updated carries only opencode's own generated conversation
+      // title, which we deliberately do not apply (see ResolvedTitle) — so the
+      // event has nothing left to handle.
       case "session.idle": return this.onSessionIdle(p);
       case "session.status": return this.onSessionStatus(p);
       case "session.error": return this.onSessionError(p);
@@ -501,19 +500,6 @@ export class OpencodeDriver extends ChatSession {
       added: true,
       ...(parentItemId ? { parentItemId } : {}),
     });
-  }
-
-  // opencode's server generates a conversation title and pushes it on
-  // session.updated. Forward it to the namer (per-session-safe: this driver ==
-  // this chat session). Root only, NOT inTree: subtask children get their own
-  // generated titles ("Find TODOs … (@explore subagent)"), and accepting one
-  // would rename the whole chat session after whatever a subagent last did.
-  private onSessionUpdated(p: any): void {
-    const info = p?.info ?? {};
-    if (info.id !== this.rootSessionId) return;
-    const title = typeof info.title === "string" ? info.title.trim() : "";
-    if (!title) return;
-    this.onTitle?.(title);
   }
 
   private flipSubtask(sid: string, status: "completed" | "error" | "cancelled", rawError?: any): void {

@@ -12,11 +12,7 @@ import { join } from "node:path";
 import { readCodexVersionJson, codexHomeDir } from "./codex/home";
 import { antigravityCliHome, resolveAntigravityTitle } from "./antigravity/title";
 import { resolveClaudeTranscriptTitle } from "./claude-code/title";
-import {
-  codexThreadExistsSync,
-  resolveCodexThreadName,
-  resolveCodexThreadTitle,
-} from "./codex/title";
+import { codexThreadExistsSync, resolveCodexThreadTitle } from "./codex/title";
 import { copilotSessionExistsSync, resolveCopilotSessionTitle } from "./github-copilot/title";
 import { injectConfig } from "./config-inject";
 import * as antigravityHooks from "./antigravity/hooks";
@@ -31,7 +27,12 @@ import { createDriver as createOpencodeDriver } from "./opencode/driver";
 import { lastAssistantText, readTranscript as readClaudeTranscript } from "./claude-code/transcript";
 import { readTranscript as readCodexTranscript } from "./codex/transcript";
 import { readTranscript as readOpencodeTranscript } from "./opencode/transcript";
-import type { AgentKey, AgentSpec } from "./types";
+import { claudeForkHandoff, claudeNativeForkArgs } from "./claude-code/fork";
+import { codexForkHandoff, codexNativeForkArgs } from "./codex/fork";
+import { opencodeForkHandoff, opencodeNativeForkArgs } from "./opencode/fork";
+import { terminalForkHandoff } from "./fork-handoff";
+
+import { pickHeadlessFrom, type AgentKey, type AgentSpec } from "./types";
 
 export const AGENTS: Record<AgentKey, AgentSpec> = {
   "claude-code": {
@@ -43,27 +44,54 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     titleSource: "structured",
     resume: (id) => ["--resume", id],
     initialPrompt: (p) => ["--", p],
+    fork: {
+      kind: "native-fork",
+      handoff: claudeForkHandoff,
+      nativeForkArgs: claudeNativeForkArgs,
+    },
     hooks: claudeHooks,
     notifyBodyFromTranscript: lastAssistantText,
     driver: createClaudeDriver,
-    judge: {
-      tier: "readonly",
-      // The prompt goes BEFORE --allowedTools, not last. --allowedTools is
-      // variadic, so a trailing prompt is parsed as one more tool name and
-      // claude exits 1 with "Input must be provided ... when using --print" —
-      // i.e. every judge call silently fails closed. Verified against the real
-      // CLI; keep the prompt ahead of any variadic flag added here later.
-      // --no-session-persistence keeps judge runs out of the user's own history:
-      // a supervisor pass is machine bookkeeping, and one per agent pause buries
-      // the sessions the user actually started under /resume. Valid only with
-      // --print, which this argv already uses.
-      cmd: (prompt, model) => [
-        "claude", "-p", prompt, "--no-session-persistence", "--allowedTools",
-        "Read,Grep,Glob,Bash(git status:*),Bash(git diff:*),Bash(git log:*)",
-        ...(model ? ["--model", model] : []),
-      ],
+    // No "sealed" entry: an allowlist naming this agent's read tools is what a
+    // sealed argv would have to omit, and `--allowedTools` with an empty value
+    // has not been run against the real CLI. Until it is, naming takes the
+    // readonly entry below — which is what it already ran under, since the
+    // previous naming argv denied only Bash/Edit/Write/NotebookEdit and left
+    // Read, Grep and Glob allowed.
+    //
+    // NOT `--bare`, which looks made for this (skips hooks, plugins, memory):
+    // it also forces ANTHROPIC_API_KEY-only auth and never reads OAuth or the
+    // keychain, so it fails closed for every subscription user.
+    headless: {
+      readonly: {
+        // The prompt goes BEFORE --allowedTools, not last. --allowedTools is
+        // variadic, so a trailing prompt is parsed as one more tool name and
+        // claude exits 1 with "Input must be provided ... when using --print" —
+        // i.e. every call silently fails closed. Verified against the real CLI;
+        // keep the prompt ahead of any variadic flag added here later.
+        cmd: (prompt, model) => [
+          "claude", "-p", prompt, "--no-session-persistence", "--allowedTools",
+          "Read,Grep,Glob,Bash(git status:*),Bash(git diff:*),Bash(git log:*)",
+          ...(model ? ["--model", model] : []),
+        ],
+        // --no-session-persistence keeps these runs out of the user's own
+        // history: a supervisor pass or a naming call is machine bookkeeping,
+        // and one per agent pause buries the sessions the user actually started
+        // under /resume. Valid only with --print, which this argv already uses.
+        noHistory: "flag",
+      },
     },
     transcript: readClaudeTranscript,
+    // Antgrid owns the session lifecycle: a conversation that hands itself to
+    // claude's own background supervisor exits the PTY, leaves the slot
+    // resuming an id a job we don't manage still holds, and relocates its cwd
+    // out of the session's checkout. Forced, not `??=` like buildClaudeEnv's
+    // defaults — no per-machine preference makes that outcome survivable here.
+    // Closes `/background`, `--bg`, `--routine`, `claude agents`. Does NOT
+    // close the two-press LEFT-ARROW gesture: its only guard is the
+    // machine-wide `leftArrowOpensAgents` global-config key, and the fleet
+    // gate never reaches the REPL keymap (measured on the 2.1.247 binary).
+    env: () => ({ CLAUDE_CODE_DISABLE_AGENT_VIEW: "1" }),
     resumable: ({ transcriptPath }) => !transcriptPath || existsSync(transcriptPath),
     resolveTitle: async ({ transcriptPath }) =>
       transcriptPath ? await resolveClaudeTranscriptTitle(transcriptPath) : null,
@@ -83,38 +111,44 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     resume: (id) => ["resume", id],
     resumeIsSubcommand: true,
     initialPrompt: (p) => ["--", p],
+    fork: {
+      kind: "native-fork",
+      handoff: codexForkHandoff,
+      nativeForkArgs: codexNativeForkArgs,
+    },
     hooks: codexHooks,
     driver: createCodexDriver,
-    judge: {
-      tier: "readonly",
-      // --skip-git-repo-check because a project need not be a git repo: without
-      // it codex exits 1 on "Not inside a trusted directory" and the judge fails
-      // closed for every non-repo project. It does not widen the tier — the
-      // read-only sandbox is what makes this argv provably read-only, and that
-      // check only guards against writes in untracked dirs.
-      // --ephemeral is codex's equivalent of claude's --no-session-persistence:
-      // no rollout file, so `codex exec resume --last` still points at the user's
-      // own work rather than at whichever supervisor pass ran most recently.
-      cmd: (prompt, model) => [
-        "codex", "exec", "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check",
-        ...(model ? ["-m", model] : []), prompt,
-      ],
+    // codex offers no sandbox tighter than read-only, so there is no sealed
+    // entry to write: `--sandbox read-only` is the floor.
+    headless: {
+      readonly: {
+        // --skip-git-repo-check because a project need not be a git repo:
+        // without it codex exits 1 on "Not inside a trusted directory" and every
+        // call fails closed for non-repo projects. It does not widen the reach —
+        // the read-only sandbox is what makes this argv provably read-only, and
+        // that check only guards against writes in untracked dirs.
+        cmd: (prompt, model) => [
+          "codex", "exec", "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check",
+          ...(model ? ["-m", model] : []), prompt,
+        ],
+        // --ephemeral is codex's equivalent of claude's --no-session-persistence:
+        // no rollout file, so `codex exec resume --last` still points at the
+        // user's own work rather than at whichever bookkeeping pass ran most
+        // recently.
+        noHistory: "flag",
+      },
     },
     transcript: readCodexTranscript,
     // null = the DB is undeterminable (missing/locked/schema drift), which is
     // not a confirmation that the thread is gone.
     resumable: ({ agentSessionId, codexHome }) =>
       codexThreadExistsSync(agentSessionId, codexHome ?? join(homedir(), ".codex")) ?? true,
-    resolveTitle: async ({ sessionId, codexHome }) => {
-      const home = codexHome ?? join(homedir(), ".codex");
-      // Prefer the desktop app's richer generated title (session_index.jsonl) when
-      // it has indexed this thread; otherwise use the CLI's live state DB, which is
-      // the only source populated for bridge-spawned `codex-tui` sessions.
-      return (
-        (await resolveCodexThreadName(sessionId, home)) ??
-        (await resolveCodexThreadTitle(sessionId, home))
-      );
-    },
+    // The CLI's live state DB is the only source populated for bridge-spawned
+    // `codex-tui` sessions. session_index.jsonl is not read at all: every name
+    // in it is one the Codex DESKTOP app generated, and we name sessions
+    // ourselves (see ResolvedTitle).
+    resolveTitle: async ({ sessionId, codexHome }) =>
+      await resolveCodexThreadTitle(sessionId, codexHome ?? join(homedir(), ".codex")),
     update: {
       npmPackage: "@openai/codex",
       command: "codex",
@@ -134,36 +168,49 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     titleSource: "structured",
     resume: (id) => ["--session", id],
     initialPrompt: (p) => ["--prompt", p],
+    fork: {
+      kind: "native-fork",
+      handoff: opencodeForkHandoff,
+      nativeForkArgs: opencodeNativeForkArgs,
+    },
     hooks: opencodeHooks,
     driver: createOpencodeDriver,
-    judge: {
-      // --agent plan selects opencode's built-in restricted Plan agent
-      // (edits denied by default; non-interactive `run` without --auto fails
-      // permission asks closed). Config-level, not flag-proven like claude's
-      // --allowedTools, so the tier stays "transcript": no tool hints, and no
-      // transcript-path handed to a judge whose restriction we can't verify.
-      tier: "transcript",
-      cmd: (prompt, model) =>
-        ["opencode", "run", "--agent", "plan", ...(model ? ["--model", model] : []), prompt],
-      // opencode has no --ephemeral, so persistence is redirected instead of
-      // disabled: the whole session store is one SQLite file, and OPENCODE_DB
-      // takes `:memory:` verbatim (opencode's own tests and its desktop dev build
-      // use the same override), so the judge's session is never written anywhere.
-      //
-      // Safe for auth, which is the question this turns on: model credentials
-      // live in auth.json under the DATA dir, read via OPENCODE_AUTH_CONTENT or
-      // the file — never through the database. (The `credential` table alongside
-      // `session` is connector secrets, not provider auth.) For the same reason
-      // never redirect XDG_DATA_HOME to achieve this: that WOULD move auth.json.
-      //
-      // What the scratch DB does lose is the `account` row, so an opencode-account
-      // token is absent for this spawn — no session sharing, and no account-backed
-      // remote config. A judge shares nothing; remote config is the live risk if a
-      // team serves the judge's model settings that way.
-      env: { OPENCODE_DB: ":memory:" },
+    headless: {
+      // "transcript", not "readonly": --agent plan selects opencode's built-in
+      // restricted Plan agent (edits denied by default; non-interactive `run`
+      // without --auto fails permission asks closed), which is config-level
+      // rather than flag-proven like claude's --allowedTools. So no tool hints,
+      // and no transcript path handed to a spawn whose restriction we can't
+      // verify.
+      transcript: {
+        cmd: (prompt, model) =>
+          ["opencode", "run", "--agent", "plan", ...(model ? ["--model", model] : []), prompt],
+        // opencode has no --ephemeral, so persistence is redirected instead of
+        // disabled: the whole session store is one SQLite file, and OPENCODE_DB
+        // takes `:memory:` verbatim (opencode's own tests and its desktop dev
+        // build use the same override), so the spawn's session is never written
+        // anywhere.
+        //
+        // Safe for auth, which is the question this turns on: model credentials
+        // live in auth.json under the DATA dir, read via OPENCODE_AUTH_CONTENT
+        // or the file — never through the database. (The `credential` table
+        // alongside `session` is connector secrets, not provider auth.) For the
+        // same reason never redirect XDG_DATA_HOME to achieve this: that WOULD
+        // move auth.json.
+        //
+        // What the scratch DB does lose is the `account` row, so an
+        // opencode-account token is absent for this spawn — no session sharing,
+        // and no account-backed remote config. Neither caller shares anything;
+        // remote config is the live risk if a team serves model settings that way.
+        env: { OPENCODE_DB: ":memory:" },
+        noHistory: "ephemeral-store",
+      },
     },
     transcript: readOpencodeTranscript,
-    // No resolveTitle: opencode's plugin posts the title inline.
+    // No resolveTitle: opencode writes no name of its own that we read. The
+    // one it generates arrives inline on the plugin's post and is dropped
+    // (see ResolvedTitle), so an opencode session is named only by
+    // generation off the transcript above.
     env: ({ abDir }) =>
       injectConfig("OPENCODE_TUI_CONFIG", abDir, "opencode-tui.json", {
         attention: { enabled: true },
@@ -179,8 +226,16 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     titleSource: "osc",
     resume: (id) => ["--resume", id],
     initialPrompt: (p) => ["--", p],
+    fork: terminalForkHandoff("Cursor"),
     hooks: cursorHooks,
     augmentsDefaultSpec: true,
+    // No headless entry. `-p --mode ask` reads like the right argv and has
+    // never been run: cursor-agent exits 1 on every invocation without an
+    // `agent login` or CURSOR_API_KEY, so nothing about that argv's reach has
+    // been observed. Absence is the honest answer, and it is not only about a
+    // wrong label — ANY non-sealed reach makes the agent judge-capable, which
+    // would arm a supervisor over the user's working tree on an argv nobody
+    // has run. Naming is unaffected: a "none" call borrows an installed agent.
   },
   "github-copilot": {
     bin: "copilot",
@@ -192,6 +247,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     // Copilot's optional-value --resume drops a space-separated value.
     resume: (id) => [`--resume=${id}`],
     initialPrompt: () => [],
+    fork: terminalForkHandoff("GitHub Copilot"),
     hooks: copilotHooks,
     augmentsDefaultSpec: true,
     resumable: ({ agentSessionId, copilotHome }) =>
@@ -206,6 +262,32 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
       ),
     // No `update`: github-copilot ships no self-updater (IDE-bound), so a
     // request for one fails soft via updateSpecFor → null.
+    headless: {
+      // "readonly", not "sealed": -p reads the working tree with no flag asking
+      // it to. Measured — it answered a "read package.json" prompt even under
+      // --deny-tool, whose value is optional and which therefore denies nothing
+      // when passed bare. Writes are the other half and they fail CLOSED: with
+      // --allow-all-tools withheld, a write hits a permission ask that
+      // non-interactive mode cannot answer ("unable to create the file due to
+      // permission restrictions"), which is what the entry relies on since no
+      // flag expresses read-only directly.
+      readonly: {
+        cmd: (prompt, model) => [
+          "copilot", "-p", prompt, "--silent",
+          ...(model ? ["--model", model] : []),
+        ],
+        // Copilot has no ephemeral flag — a -p run writes session-store.db and a
+        // whole session-state/<uuid>/ tree — so the home is redirected to a
+        // directory that lives only as long as the spawn.
+        // Safe for auth, and that is NOT the generalization it looks like:
+        // credentials do not live under COPILOT_HOME at all (no GH_TOKEN or
+        // GITHUB_TOKEN path either), so a run against an EMPTY scratch home
+        // still authenticates. Measured, because the opposite is true of vibe,
+        // where the same move would take the credentials with it.
+        scratchEnv: ["COPILOT_HOME"],
+        noHistory: "ephemeral-store",
+      },
+    },
   },
   // Plugin-tier, but through agy's own GLOBAL `~/.gemini/config/hooks.json`
   // (see ./antigravity/hooks.ts) — it has no per-spawn hook channel, the same
@@ -225,6 +307,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     // args. See `agy --help`.
     resume: (id) => ["--conversation", id],
     initialPrompt: (p) => ["--prompt-interactive", p],
+    fork: terminalForkHandoff("Antigravity"),
     hooks: antigravityHooks,
     augmentsDefaultSpec: true,
     resolveTitle: async ({ sessionId, transcriptPath, antigravityHome }) =>
@@ -246,10 +329,25 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     titleSource: "osc",
     resume: () => [],
     initialPrompt: () => [],
+    // Kilo documents `--session <id> --fork`, but this integration does not
+    // observe a Kilo-native id. Do not advertise an unreachable native path.
+    fork: terminalForkHandoff("Kilo"),
     env: ({ abDir }) =>
       injectConfig("KILO_TUI_CONFIG", abDir, "kilo-tui.json", {
         attention: { enabled: true },
       }),
+    headless: {
+      // Kilo is an opencode fork down to the env-var names, so this is
+      // opencode's entry with the prefix changed — see it for why "transcript"
+      // rather than "readonly", and why the store is redirected rather than the
+      // data dir (auth lives beside the DB, not inside it).
+      transcript: {
+        cmd: (prompt, model) =>
+          ["kilo", "run", "--agent", "plan", ...(model ? ["--model", model] : []), prompt],
+        env: { KILO_DB: ":memory:" },
+        noHistory: "ephemeral-store",
+      },
+    },
   },
   // Signals only with a bare terminal bell (no OSC 9/777). Since the bell now
   // rings audibly instead of raising a desktop notification, kimi is heard, not
@@ -263,6 +361,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     titleSource: "osc",
     resume: () => [],
     initialPrompt: () => [],
+    fork: terminalForkHandoff("Kimi"),
   },
   // Textual TUI: notifications default ON, fails CLOSED on Textual focus
   // (DEC 1004-derived), so the default-blur drives it — no injection.
@@ -275,6 +374,22 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     titleSource: "osc",
     resume: () => [],
     initialPrompt: () => [],
+    // No headless entry, and `-p --agent ask` must not come back as one. Read
+    // against mistralai/mistral-vibe v2.24.5: `ask` is the APPROVAL-gated
+    // profile ("Requires approval for tool executions"), not a read-only one —
+    // that is `plan`, the only builtin pinning write_file and edit to
+    // permission "never". What makes ask LOOK read-only is that programmatic
+    // mode denies every callback it is handed (cli/programmatic.py), so a write
+    // fails closed on an approval it cannot answer.
+    //
+    // That is config-level, never argv-level, which is the whole distinction
+    // HeadlessReach draws: an agent profile is just another config layer, `ask`
+    // contributes no bypass_tool_permissions key, and the loop returns EXECUTE
+    // before consulting any permission the moment a user's own config sets one
+    // — no approval is raised, so nothing is denied. Even `--agent plan` falls
+    // to the same switch, so the best reach available here is "transcript", and
+    // it stays unrun besides (no MISTRAL_API_KEY on any machine measured).
+    fork: terminalForkHandoff("Mistral Vibe"),
   },
 };
 
@@ -307,7 +422,11 @@ export function agentSpec(tool: string): AgentSpec | undefined {
  * always-present and let an unknown tool through.
  */
 export function judgeCapable(tool: string): boolean {
-  return agentSpec(tool)?.judge !== undefined;
+  // "repo", never "has a headless entry at all": a judge reads the working tree,
+  // so a sealed argv cannot serve one — and treating any one-shot capability as
+  // a judge would arm the Handler for every agent that can merely answer a
+  // question (see AgentSpec.headless).
+  return pickHeadlessFrom(agentSpec(tool)?.headless, "repo") !== null;
 }
 
 /**

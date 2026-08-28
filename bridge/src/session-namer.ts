@@ -19,13 +19,29 @@ function sanitizeTitle(raw: string): string {
     .slice(0, MAX_TITLE_LEN);
 }
 
-/** Precedence within the structured signal: the resolvers' own `kind`, aliased
- *  rather than restated so the two cannot drift. `agents/types.ts` declares only
- *  types, so this import is erased and drags no agent code in here. */
-export type TitleRank = ResolvedTitle["kind"];
+/**
+ * Precedence within the structured signal, strongest first. The two values a
+ * resolver can report are aliased off `ResolvedTitle["kind"]` rather than
+ * restated, so those cannot drift; "self" is the one rank no resolver can
+ * produce, because it is the title WE generated (agents/title-generate.ts).
+ *
+ * `agents/types.ts` declares only types, so the import is erased and drags no
+ * agent code in here.
+ */
+export type TitleRank = ResolvedTitle["kind"] | "self";
+
+/** Higher wins. A title never loses to a weaker one, which is what stops the
+ *  per-turn first-message re-read — the same opening prompt, restated on every
+ *  turn of the session — from undoing a real name. */
+const RANK_ORDER: Record<TitleRank, number> = {
+  "first-message": 0,
+  self: 1,
+  manual: 2,
+};
 
 interface Signals {
-  /** Title and rank travel together: a rank stored without the title it
+  /** Sanitized at ingest, so `title` is exactly the name that will be applied.
+   *  Title and rank travel together: a rank stored without the title it
    *  describes would latch the precedence guard against a name nobody applied. */
   structured?: { title: string; rank: TitleRank };
   osc?: string;
@@ -38,8 +54,8 @@ interface Signals {
  * manual-wins check lives in the sink (SessionManager.applyAutoName), so this
  * unit stays pure policy.
  *
- * Within the structured signal, latest wins EXCEPT that a `first-message` title
- * may not displace a `generated` one — see onStructuredTitle.
+ * Within the structured signal, latest wins EXCEPT that a title may not
+ * displace a STRONGER-ranked one — see onStructuredTitle and RANK_ORDER.
  */
 export class SessionNamer {
   private readonly signals = new Map<string, Signals>();
@@ -52,24 +68,44 @@ export class SessionNamer {
   ) {}
 
   /**
-   * `rank` is required, not defaulted: `generated` is the dominant value, so a
-   * caller that omitted it would silently latch this slot against every later
-   * real title — the exact bug the guard exists to prevent, reintroduced with
-   * no compile error. Stating it at each call site makes that a build decision.
+   * `rank` is required, not defaulted: any default is the dominant value for
+   * some caller, and getting it wrong silently latches this slot against every
+   * later real title — the exact bug the ordering exists to prevent,
+   * reintroduced with no compile error. Stating it at each call site makes that
+   * a build decision.
    *
    * Only the per-turn native transcript read yields `first-message`, and it
-   * re-yields the SAME opening prompt every turn — so without the guard the
-   * turn after a real title landed would revert the session to that prompt, and
-   * title generation is attempted once per agent session, so nothing restores it.
+   * re-yields the SAME opening prompt on every turn of the session — so without
+   * the ordering, the turn after a generated title landed would revert the
+   * session to that prompt, and naming is attempted once per agent session, so
+   * nothing would restore it.
    */
   onStructuredTitle(id: string, title: string, rank: TitleRank): void {
-    // Rank only a title that can actually become a name. One that sanitizes
-    // away applies nothing, and arming the guard on it would block every later
-    // first-message title on behalf of a name the user never saw.
-    if (!sanitizeTitle(title)) return;
-    const current = this.signals.get(id);
-    if (rank === "first-message" && current?.structured?.rank === "generated") return;
-    this.update(id, (s) => { s.structured = { title, rank }; }, current);
+    const held = this.signals.get(id)?.structured;
+    if (held && RANK_ORDER[rank] < RANK_ORDER[held.rank]) return;
+    // Normalize at ingest, so the stored title IS the name that will be applied
+    // and `flush` never has to re-derive it. One that sanitizes away applies
+    // nothing, and latching the slot on it would block every later title on
+    // behalf of a name the user never saw.
+    const name = sanitizeTitle(title);
+    if (!name) return;
+    this.update(id, (s) => { s.structured = { title: name, rank }; });
+  }
+
+  /**
+   * True when this slot already holds a name no model call should try to improve
+   * on: one we generated, or one the user chose.
+   *
+   * Read by the naming gate, which is keyed by CONVERSATION while this is keyed
+   * by slot — and a mode flip carries the name across the runtime swap while
+   * changing the key underneath it (a terminal keys on the agent's session id, a
+   * chat slot on itself). Without this the flipped session spends a second spawn
+   * and renames itself mid-conversation, defeating the very exemption that kept
+   * the name.
+   */
+  hasFinalTitle(id: string): boolean {
+    const held = this.signals.get(id)?.structured;
+    return !!held && RANK_ORDER[held.rank] >= RANK_ORDER.self;
   }
 
   onOscTitle(id: string, title: string): void {
@@ -81,7 +117,7 @@ export class SessionNamer {
     for (const id of this.dirty) {
       const s = this.signals.get(id);
       if (!s) continue;
-      const name = sanitizeTitle(s.structured?.title ?? s.osc ?? "");
+      const name = s.structured?.title ?? sanitizeTitle(s.osc ?? "");
       if (name) this.sink.applyAutoName(id, name);
     }
     this.dirty.clear();
@@ -103,18 +139,20 @@ export class SessionNamer {
    * Drop the structured title + rank for a slot whose AGENT CONVERSATION changed
    * under a still-live PTY (Claude `/clear`, codex `/new`). The rank describes a
    * conversation, not a slot, and that PTY never exits — so `forget` never runs
-   * and the previous topic's `generated` rank would veto the new conversation's
-   * first-message title for the life of the process.
+   * and the previous topic's rank would veto the new conversation's own title
+   * for the life of the process.
    *
    * OSC filler is deliberately left: it tracks the terminal, not the
-   * conversation. Nothing is marked dirty either — dropping a title is not a
-   * reason to rename the session; the new conversation's own first turn is.
+   * conversation. The slot is dropped from `dirty` rather than merely not added
+   * to it — dropping a title is not a reason to rename the session, and a flush
+   * already armed by the title being removed would otherwise fall through to
+   * that OSC filler and rename the session to terminal chrome.
    */
   forgetStructuredTitle(id: string): void {
     const s = this.signals.get(id);
     if (!s?.structured) return;
     delete s.structured;
-    this.signals.set(id, s);
+    this.dirty.delete(id);
   }
 
   /**
@@ -129,8 +167,8 @@ export class SessionNamer {
     this.signals.clear();
   }
 
-  private update(id: string, mut: (s: Signals) => void, known?: Signals): void {
-    const s = known ?? this.signals.get(id) ?? {};
+  private update(id: string, mut: (s: Signals) => void): void {
+    const s = this.signals.get(id) ?? {};
     mut(s);
     this.signals.set(id, s);
     this.dirty.add(id);

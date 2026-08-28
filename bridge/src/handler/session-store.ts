@@ -29,6 +29,23 @@ export type EscalationChoice = z.infer<typeof EscalationChoiceSchema>;
 const uniqueChoiceIds = (cs: EscalationChoice[]): boolean =>
   new Set(cs.map((c) => c.choiceId)).size === cs.length;
 
+// What answers an escalation, which is also what retires it:
+//  - `reply` (or absent) — a pause-question about the agent. Any submitted line
+//    supersedes it, because each pause supersedes the last.
+//  - `resolve_in_session` — an option-based agent prompt only the chat resolve
+//    RPC can answer.
+//  - `guard_blocked` — a REPORT that a harness guard refused an action Handler
+//    wanted to take. Nothing the agent or the user does next answers it: the
+//    action was never taken, so no later pause supersedes it and no resolve
+//    names it. Only an explicit dismiss retires one (see the clearing rule in
+//    onUserReply, and dismissEscalation in engine.ts).
+//
+// The enum only ever widens, so a record written before a member existed still
+// parses; the reverse — an older bridge reading a newer record — fails the whole
+// record and comes back disarmed, which is the trade `version`'s note already owns.
+export const EscalationKindSchema = z.enum(["reply", "resolve_in_session", "guard_blocked"]);
+export type EscalationKind = z.infer<typeof EscalationKindSchema>;
+
 // An unanswered escalation. The engine keeps the full payload (not just a
 // count) so a phone that reconnects — or an app that restarts — can rebuild an
 // answerable "needs you" row from the status snapshot instead of showing a
@@ -43,7 +60,7 @@ export const OpenEscalationSchema = z.object({
   draftReply: z.string(),
   urgency: z.enum(["normal", "high"]),
   floorRule: z.string().optional(),
-  kind: z.enum(["reply", "resolve_in_session"]).optional(),
+  kind: EscalationKindSchema.optional(),
   // `resolve_in_session` only: the driver's permissionId/questionId, so the
   // resolve RPC retires the row for the prompt it answered and leaves a second
   // prompt on the same terminal pending. Engine-internal — deliberately NOT in

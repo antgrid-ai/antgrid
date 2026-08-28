@@ -1,9 +1,10 @@
 import { describe, it, expect } from "bun:test";
 import {
   HandlerDecisionSchema,
-  buildJudgeCommand,
+  pickJudge,
   buildDecidePrompt,
   buildRetryPrompt,
+  buildShapeRetryPrompt,
   parseDecisionFromOutput,
 } from "../../src/handler/decision";
 
@@ -49,60 +50,60 @@ describe("decision schema", () => {
   });
 });
 
-describe("buildJudgeCommand tiers", () => {
+describe("pickJudge tiers", () => {
   it("claude-code is readonly with allowed tools pinned", () => {
-    const r = buildJudgeCommand("claude-code", undefined, "P")!;
+    const r = pickJudge("claude-code")!;
     expect(r.tier).toBe("readonly");
-    expect(r.cmd).toContain("--allowedTools");
+    expect(r.command.cmd("P")).toContain("--allowedTools");
   });
   // --allowedTools is variadic: a prompt after it is eaten as another tool name
   // and claude exits 1, failing every judge call closed. Position, not presence,
   // is what makes the argv work.
   it("claude-code puts the prompt ahead of the variadic --allowedTools", () => {
-    const r = buildJudgeCommand("claude-code", undefined, "P")!;
-    expect(r.cmd.indexOf("P")).toBeGreaterThan(-1);
-    expect(r.cmd.indexOf("P")).toBeLessThan(r.cmd.indexOf("--allowedTools"));
+    const cmd = pickJudge("claude-code")!.command.cmd("P");
+    expect(cmd.indexOf("P")).toBeGreaterThan(-1);
+    expect(cmd.indexOf("P")).toBeLessThan(cmd.indexOf("--allowedTools"));
   });
   it("codex is readonly via sandbox", () => {
-    const r = buildJudgeCommand("codex", undefined, "P")!;
+    const r = pickJudge("codex")!;
     expect(r.tier).toBe("readonly");
-    expect(r.cmd).toContain("read-only");
+    expect(r.command.cmd("P")).toContain("read-only");
   });
   // A project need not be a git repo; without this codex refuses to run at all.
   it("codex skips the git-repo check without weakening the sandbox", () => {
-    const r = buildJudgeCommand("codex", undefined, "P")!;
-    expect(r.cmd).toContain("--skip-git-repo-check");
-    expect(r.cmd).toContain("--sandbox");
-    expect(r.cmd).toContain("read-only");
+    const r = pickJudge("codex")!;
+    expect(r.command.cmd("P")).toContain("--skip-git-repo-check");
+    expect(r.command.cmd("P")).toContain("--sandbox");
+    expect(r.command.cmd("P")).toContain("read-only");
   });
   // A judge pass is machine bookkeeping, and one runs per agent pause — left
   // persisted they bury the user's own sessions in /resume and `codex exec
   // resume`. Both flags are load-bearing rather than cosmetic, so pin them:
   // dropping one is invisible until someone goes looking for their own work.
   it("claude-code and codex write no session of their own", () => {
-    expect(buildJudgeCommand("claude-code", undefined, "P")!.cmd).toContain("--no-session-persistence");
-    expect(buildJudgeCommand("codex", undefined, "P")!.cmd).toContain("--ephemeral");
+    expect(pickJudge("claude-code")!.command.cmd("P")).toContain("--no-session-persistence");
+    expect(pickJudge("codex")!.command.cmd("P")).toContain("--ephemeral");
   });
 
   // opencode has no such flag, so its session store is redirected instead. The
   // DATA dir must NOT move with it: auth.json lives there, so an XDG_DATA_HOME
   // override would hide the session by taking the judge's credentials with it.
   it("opencode redirects its session store without moving its auth", () => {
-    const r = buildJudgeCommand("opencode", undefined, "P")!;
-    expect(r.env).toEqual({ OPENCODE_DB: ":memory:" });
-    expect(Object.keys(r.env!)).not.toContain("XDG_DATA_HOME");
+    const r = pickJudge("opencode")!;
+    expect(r.command.env).toEqual({ OPENCODE_DB: ":memory:" });
+    expect(Object.keys(r.command.env!)).not.toContain("XDG_DATA_HOME");
   });
 
   // Only opencode needs one: claude and codex say it in the argv, and an env
   // override there would be a second, quieter place to look for the same rule.
   it("the flag-based judges carry no env override", () => {
-    expect(buildJudgeCommand("claude-code", undefined, "P")!.env).toBeUndefined();
-    expect(buildJudgeCommand("codex", undefined, "P")!.env).toBeUndefined();
+    expect(pickJudge("claude-code")!.command.env).toBeUndefined();
+    expect(pickJudge("codex")!.command.env).toBeUndefined();
   });
 
   it("opencode is transcript tier; unknown is null", () => {
-    expect(buildJudgeCommand("opencode", undefined, "P")!.tier).toBe("transcript");
-    expect(buildJudgeCommand("gemini", undefined, "P")).toBeNull();
+    expect(pickJudge("opencode")!.tier).toBe("transcript");
+    expect(pickJudge("gemini")).toBeNull();
   });
 });
 
@@ -128,6 +129,38 @@ describe("buildDecidePrompt", () => {
     }
   });
 
+  // The gate downstream searches the RECENT CONTEXT block for the quote, so a
+  // judge told to cite "the context or transcript" loses real transitions to a
+  // rule it was never given.
+  it("narrows the evidence rule to a verbatim quote from the recent context", () => {
+    const p = buildDecidePrompt({ goal: GOAL, backlogText: BACKLOG_TEXT, context: "CTX" });
+    expect(p).toContain("character-for-character");
+    expect(p).toContain("RECENT CONTEXT");
+    expect(p).toContain("discarded and the item stays open");
+  });
+
+  it("states the command anchor for a done on a command-shaped item", () => {
+    const p = buildDecidePrompt({ goal: GOAL, backlogText: BACKLOG_TEXT, context: "CTX" });
+    expect(p).toContain("slash command");
+    expect(p).toContain("does not close it");
+  });
+
+  // Same absent-vs-empty discipline the floor warnings take: an empty list is a
+  // pass with nothing refused, and a header over no lines reads as one anyway.
+  it("renders the refused-transitions section only when there is something to say", () => {
+    const bare = buildDecidePrompt({ goal: GOAL, backlogText: BACKLOG_TEXT, context: "CTX" });
+    const empty = buildDecidePrompt({ goal: GOAL, backlogText: BACKLOG_TEXT, context: "CTX", evidenceRejections: [] });
+    for (const p of [bare, empty]) expect(p).not.toContain("THE HARNESS REFUSED");
+
+    const fed = buildDecidePrompt({
+      goal: GOAL, backlogText: BACKLOG_TEXT, context: "CTX",
+      evidenceRejections: ['"run /code-review --fix" — done needs evidence showing /code-review itself being run'],
+    });
+    expect(fed).toContain("THE HARNESS REFUSED");
+    expect(fed).toContain("showing /code-review itself being run");
+    expect(fed).toContain("the same quote gets the same answer");
+  });
+
   it("stands in for an empty goal and an empty backlog rather than rendering nothing", () => {
     const p = buildDecidePrompt({ goal: "", backlogText: "", context: "CTX" });
     expect(p).toContain("(none stated)");
@@ -137,6 +170,85 @@ describe("buildDecidePrompt", () => {
   it("adds transcript pull-through when a path is given", () => {
     const p = buildDecidePrompt({ goal: GOAL, backlogText: "", context: "CTX", transcriptPath: "/t.jsonl" });
     expect(p).toContain("/t.jsonl");
+  });
+
+  it("keeps the transcript out of the evidence rule it invites a judge past", () => {
+    // The harness grounds a citation against the RECENT CONTEXT block alone — it
+    // holds no other text — so an unqualified "read the fuller transcript" is an
+    // invitation to quote material every terminal transition is then refused for,
+    // leaving the item open forever with the runaway guard as its only exit.
+    const p = buildDecidePrompt({ goal: GOAL, backlogText: "", context: "CTX", transcriptPath: "/t.jsonl" });
+    const hint = p.slice(p.indexOf("Fuller transcript"));
+    expect(hint).toContain("background only");
+    expect(hint).toContain("RECENT CONTEXT");
+    expect(hint).toContain("leave the item open");
+  });
+
+  // Every handle decision used to be escalated by harness rules the judge was
+  // never told: a verb carrying arguments failed the shape check, and a
+  // multi-paragraph reply failed the control-character guard.
+  it("states the slash-command contract", () => {
+    const p = buildDecidePrompt({ goal: GOAL, backlogText: "", context: "CTX" });
+    expect(p).toContain("/verb");
+    expect(p).toContain("/verb <args>");
+  });
+
+  it("states that reply and action are mutually exclusive", () => {
+    expect(buildDecidePrompt({ goal: GOAL, backlogText: "", context: "CTX" })).toContain("never both");
+  });
+
+  it("states that the reply is submitted as ONE line", () => {
+    expect(buildDecidePrompt({ goal: GOAL, backlogText: "", context: "CTX" })).toContain("ONE line");
+  });
+
+  // The judge reads a transcript the agent itself wrote, where `claude` appears
+  // and `claude-code` — our routing key — never does.
+  it("names the supervised agent by its CLI name", () => {
+    expect(buildDecidePrompt({ goal: GOAL, backlogText: "", context: "C", agentTool: "codex" })).toContain("codex");
+    const p = buildDecidePrompt({ goal: GOAL, backlogText: "", context: "C", agentTool: "claude-code" });
+    expect(p).toContain("`claude`");
+    expect(p).not.toContain("claude-code");
+  });
+
+  it("falls back to the generic phrasing when no agent is named", () => {
+    expect(buildDecidePrompt({ goal: GOAL, backlogText: "", context: "C" })).toContain("a coding agent works");
+  });
+
+  it("lists a populated catalog under the complete-set header", () => {
+    const p = buildDecidePrompt({
+      goal: GOAL, backlogText: "", context: "C",
+      commands: [{ id: "cmd:code-review", name: "code-review", description: "Review the diff", argHint: "[--fix]" }],
+    });
+    expect(p).toContain("AVAILABLE COMMANDS");
+    expect(p).toContain("/code-review");
+    expect(p).toContain("[--fix]");
+    expect(p).toContain("Review the diff");
+    expect(p).not.toContain("No command catalog is available");
+  });
+
+  // An empty catalog cannot be distinguished from a discovery that threw or has
+  // not landed, so it takes the same branch as no catalog at all — announcing a
+  // "complete set" of nothing would read as "this agent has no commands".
+  it("renders the no-catalog branch, never an empty header", () => {
+    for (const p of [
+      buildDecidePrompt({ goal: GOAL, backlogText: "", context: "C" }),
+      buildDecidePrompt({ goal: GOAL, backlogText: "", context: "C", commands: [] }),
+    ]) {
+      expect(p).toContain("No command catalog is available");
+      expect(p).not.toContain("AVAILABLE COMMANDS");
+    }
+  });
+});
+
+describe("buildShapeRetryPrompt", () => {
+  // A decision that parsed cleanly and then failed a harness rule has valid
+  // JSON; telling it to fix its JSON teaches it to change the one thing it got
+  // right, so this leg must not reuse the parse-failure wording.
+  it("carries the original prompt and the rejection without blaming the JSON", () => {
+    const p = buildShapeRetryPrompt("ORIG", "slash command value is not a simple verb");
+    expect(p).toContain("ORIG");
+    expect(p).toContain("slash command value is not a simple verb");
+    expect(p).not.toContain("not a valid JSON object");
   });
 });
 

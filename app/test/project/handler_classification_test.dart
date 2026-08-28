@@ -17,8 +17,9 @@ void main() {
     expect(classifyAbMessageByType('handler:snapshot'), MessageTier.heavy);
   });
 
-  test('handler:configure and handler:undo are outbound only', () {
+  test('handler:configure, handler:undo and handler:dismiss are outbound only', () {
     expect(classifyAbMessageByType('handler:configure'), MessageTier.ignore);
     expect(classifyAbMessageByType('handler:undo'), MessageTier.ignore);
+    expect(classifyAbMessageByType('handler:dismiss'), MessageTier.ignore);
   });
 }

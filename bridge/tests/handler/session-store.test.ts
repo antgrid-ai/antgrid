@@ -76,6 +76,22 @@ describe("session record round-trip", () => {
     expect(loaded?.escalations[0].kind).toBe("resolve_in_session");
   });
 
+  it("round-trips a guard_blocked escalation, so a restart still owes the user a dismiss", () => {
+    // The persisted mirror of the widened enum: nothing but an explicit dismiss
+    // retires one, so losing it on a restart is the reported bug by another route.
+    const abDir = tmpAbDir();
+    saveHandlerSession(abDir, "proj", record({
+      escalations: [{
+        escalationId: "b1", question: "Handler did not send its reply",
+        reasoning: "reply contains control characters", draftReply: "yes[B",
+        urgency: "normal", kind: "guard_blocked", at: 2,
+      }],
+    }));
+    const loaded = loadHandlerSession(abDir, "proj", "t1");
+    expect(loaded?.escalations[0].kind).toBe("guard_blocked");
+    expect(loaded?.escalations[0].draftReply).toBe("yes[B");
+  });
+
   it("round-trips quick choices, so a restart re-offers the same card", () => {
     // The card is replayed from this record on re-arm and from every status
     // snapshot; a persisted escalation that lost its choices would come back as a

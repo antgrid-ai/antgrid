@@ -110,6 +110,29 @@ jobs:
 
       - uses: ./.github/actions/setup-android
 
+      # FCM client config, when the run can see secrets. Writing it here is what
+      # puts the google-services plugin — resource generation and its manifest
+      # merge, which ONLY a Firebase-enabled build exercises — under PR-time
+      # verification instead of discovering it in the nightly deploy.
+      #
+      # Tolerant, unlike deploy-android's copy: a pull_request from a fork gets
+      # no secrets, and build.gradle.kts skips the plugin when the file is
+      # absent, so those builds still pass — just without the Firebase half
+      # compiled in. Announce which of the two builds this was; a silent
+      # difference between CI and the release build is the whole reason push
+      # shipped broken.
+      - name: Set up FCM client config
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GOOGLE_SERVICES_JSON_BASE64:-}" ]; then
+            echo "No GOOGLE_SERVICES_JSON_BASE64 (expected on a fork PR) — building WITHOUT the FCM plugin path."
+            exit 0
+          fi
+          printf '%s' "$GOOGLE_SERVICES_JSON_BASE64" | base64 --decode > app/android/app/google-services.json
+          echo "Wrote app/android/app/google-services.json — building WITH the FCM plugin path."
+
       - name: Flutter analyze
         working-directory: app
         run: flutter analyze

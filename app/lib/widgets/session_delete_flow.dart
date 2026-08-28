@@ -48,10 +48,19 @@ Future<SessionDeleteResult> confirmAndDeleteSession({
   required String checkoutKind,
   required String sharedBody,
   required SessionDeleter delete,
+  bool sharedWorkspace = false,
   void Function(bool inFlight)? onInFlight,
 }) async {
   final (String title, String consequence) = switch (checkoutKind) {
     'main' => ('Delete session?', sharedBody),
+    // A member of a shared workspace is detached, not reclaimed: the bridge
+    // keeps the directory and the branch for the sessions still in it, so the
+    // arm below would promise a removal that cannot happen.
+    'managed-worktree' when sharedWorkspace => (
+      'Delete isolated session?',
+      '$sharedBody Its working directory is shared with other sessions and is '
+          'kept.',
+    ),
     // Adds only what a managed checkout costs on top of the surface's wording —
     // whether a process dies is the surface's to claim, not this arm's.
     'managed-worktree' => (

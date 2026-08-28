@@ -258,6 +258,7 @@ class DemoTransport extends BufferedAgentTransport {
       // dead end this switch exists to avoid.
       case 'session:stop':
       case 'session:create':
+      case 'session:fork':
       case 'session:delete':
       case 'session:rename':
       case 'session:archive':

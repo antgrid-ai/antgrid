@@ -106,6 +106,13 @@ describe("literal lift", () => {
     expect(stillWarns(auth, "check /etc/")).toHaveLength(1);
   });
 
+  it("a pattern lift still refuses a bare-root target", () => {
+    // namesTargetOutsideProject reads single-segment roots; the floor's own ABS_PATH
+    // deliberately does not. Unifying the two near-identical regexes would widen every
+    // operation lift to top-level directories, silently and with nothing else failing.
+    expect(stillWarns(armed("recursively delete build directories"), "rm -rf /tmp")).toHaveLength(1);
+  });
+
   it("a path lift survives sentence punctuation and Windows spelling", () => {
     expect(stillWarns(armed("open /var/log/syslog."), "tail /var/log/syslog")).toEqual([]);
     expect(stillWarns(armed("open C:\\Windows\\hosts"), "open c:/Windows/hosts")).toEqual([]);

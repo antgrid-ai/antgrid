@@ -3,6 +3,7 @@ import { Icon } from "astro-icon/components";
 import Eyebrow from "../ui/Eyebrow.astro";
 import Chip from "../ui/Chip.astro";
 import Readout from "../ui/Readout.astro";
+import UseCase from "../ui/UseCase.astro";
 
 // This section owns REACH — where the code lives, and what crossing the network
 // normally costs. It deliberately does not argue encryption: Privacy.astro owns
@@ -29,12 +30,14 @@ const ours = ["install antgrid on the machine", "sign in"];
       <p class="mb-6 max-w-xl text-lede text-muted">
         Getting back to that machine is the part that normally costs you an afternoon. antgrid needs no inbound port: the machine dials out, your app dials out, and they meet at the relay. Corporate NAT, hotel wifi, a phone on cellular — <span class="text-ink2">it's the same connection every time</span>.
       </p>
-      <div class="flex flex-wrap gap-2">
+      <div class="mb-6 flex flex-wrap gap-2">
         <Chip>no VPN</Chip>
         <Chip>no port forwarding</Chip>
         <Chip>no SSH config</Chip>
         <Chip>no inbound ports</Chip>
       </div>
+
+      <UseCase class="max-w-xl">The machine under your desk, reachable from a train — same repo, same branches, nothing copied anywhere.</UseCase>
     </div>
 
     <Readout source="reaching studio-workstation" state="connected" class="min-w-0">

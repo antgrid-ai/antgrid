@@ -2,7 +2,7 @@
 // as known-agents.ts / agent-resume.ts: one concern, one file, no per-agent
 // knowledge of its own.
 
-import { AGENTS, handlerObservable } from "./agents/registry";
+import { AGENTS, handlerObservable, judgeCapable } from "./agents/registry";
 import type { AgentKey, AgentSpec } from "./agents/types";
 import type { AgentDescriptor } from "./protocol";
 
@@ -20,7 +20,7 @@ export function buildAgentCatalog(): AgentDescriptor[] {
     tool,
     label: spec.label,
     chatCapable: spec.driver !== undefined,
-    judgeCapable: spec.judge !== undefined,
+    judgeCapable: judgeCapable(tool),
     handler: {
       terminal: handlerObservable(tool, "terminal"),
       chat: handlerObservable(tool, "chat"),

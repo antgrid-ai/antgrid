@@ -53,6 +53,7 @@ import 'screens/sign_in_screen.dart';
 import 'services/devices_api.dart' show DeviceCapInfo;
 import 'services/app_settings_service.dart';
 import 'services/push_background_handler.dart';
+import 'providers/update_available.dart';
 import 'storage/cached_sessions_store.dart';
 import 'storage/drawer_collapsed_store.dart';
 import 'storage/drawer_order_store.dart';
@@ -60,6 +61,7 @@ import 'storage/first_run_store.dart';
 import 'storage/project_store.dart';
 import 'storage/recent_agents_store.dart';
 import 'storage/recent_ports_store.dart';
+import 'storage/update_handoff_store.dart';
 import 'update/update_gate.dart';
 import 'util/ab_log.dart';
 import 'widgets/auth_splash.dart';
@@ -144,6 +146,7 @@ Future<void> main() async {
     cachedSessionsStore,
     firstRunStore,
     prefs,
+    updateHandoffStore,
   ) = await (
     ProjectStore.open(),
     RecentAgentsStore.open(),
@@ -153,8 +156,20 @@ Future<void> main() async {
     CachedSessionsStore.open(),
     FirstRunStore.open(),
     openAppSettingsPrefs(),
+    UpdateHandoffStore.open(),
   ).wait;
   final initialAppSettings = AppSettings.fromPrefs(prefs);
+
+  // Consumed unconditionally, never behind Windows' `--after-update` argument:
+  // that comes back after a crash, a hang and a reboot-to-patch as well as
+  // after an update, so it is not evidence; and Sparkle's relaunch on macOS
+  // passes no argument at all, so requiring it would mean no macOS or Linux
+  // announcement ever. A version recorded at hand-off that no longer matches
+  // the running build is the evidence, on every platform. Once per launch, so
+  // it can never announce twice.
+  final updatedFromVersion = await updateHandoffStore.consume(
+    BuildInfo.version,
+  );
 
   final installId = await SecureInstallIdStore().ensure();
   final platform = analyticsPlatformTag(defaultTargetPlatform);
@@ -198,6 +213,8 @@ Future<void> main() async {
         ),
       ),
       analyticsServiceProvider.overrideWithValue(analytics),
+      updateHandoffStoreProvider.overrideWithValue(updateHandoffStore),
+      afterUpdateLaunchProvider.overrideWithValue(updatedFromVersion),
     ],
   );
 

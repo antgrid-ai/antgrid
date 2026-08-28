@@ -110,6 +110,31 @@ jobs:
           storeFile=../upload-keystore.jks
           EOF
 
+      # FCM client config for the release AAB. Without this file build.gradle.kts
+      # skips the google-services plugin, the app ships with no google_app_id
+      # resource, FirebaseMessaging.getToken() throws on every launch, and the
+      # phone never sends push:register — push is dead in the field and NOTHING
+      # in the build log says so. That is how it shipped dark; hard-fail instead
+      # of inheriting the silence. Only this repo releases (RELEASE_REPO gates
+      # the job), so an absent secret here is a misconfiguration, never a fork.
+      #
+      # No content check: the google-services plugin already refuses a malformed
+      # file or one with no client for the applicationId, and it reads that id
+      # from Gradle, so a check here would be a second copy that can drift.
+      # What nothing can check from this repo is that the file's project_id
+      # matches the relay's FCM_PROJECT_ID — that env lives in antgrid-ops. A
+      # mismatch mints tokens fine and fails every send as UNREGISTERED.
+      - name: Set up FCM client config
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GOOGLE_SERVICES_JSON_BASE64:-}" ]; then
+            echo "::error::GOOGLE_SERVICES_JSON_BASE64 is not set — this AAB would ship to the Play Store with push permanently disabled."
+            exit 1
+          fi
+          printf '%s' "$GOOGLE_SERVICES_JSON_BASE64" | base64 --decode > app/android/app/google-services.json
+
       # versionName is stamped, not read from pubspec — see the `version` job in
       # build-desktop.yml for the format. VERSION_MAJOR must match the env of the
       # same name there; nothing enforces it across workflow files, so bump both

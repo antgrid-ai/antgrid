@@ -1,46 +1,11 @@
 // bridge/src/handler/judge.ts
-import { agentSpec } from "../agents/registry";
+import { runHeadless } from "../agents/headless";
+import type { CapCommand } from "../structured/chat-session";
 import {
-  buildDecidePrompt, buildRetryPrompt, parseDecisionFromOutput,
+  buildDecidePrompt, buildRetryPrompt, buildShapeRetryPrompt, parseDecisionFromOutput, pickJudge,
   type HandlerDecision,
 } from "./decision";
 import { buildExtractPrompt, parseItemsFromOutput, type ExtractedItem } from "./extract";
-
-// One spawn of the agent's own CLI (reusing its auth). Spawn failure → null.
-// A timeout still returns whatever stdout was captured before the kill — the
-// CLI may have written a complete answer and merely lingered on exit, so the
-// caller parses it before deciding; `timedOut` tells the caller to skip the
-// retry leg (retry exists for malformed output, not for a hung judge).
-async function spawnJudge(
-  cmd: string[], cwd: string, timeoutMs: number, spawn: typeof Bun.spawn,
-  env?: Record<string, string>,
-): Promise<{ stdout: string; timedOut: boolean } | null> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    // Spread process.env: Bun.spawn's `env` REPLACES the environment rather than
-    // merging, so passing the overrides alone would strip PATH and the agent's
-    // own auth vars out from under the judge.
-    const proc = spawn(cmd, {
-      cwd, stdout: "pipe", stderr: "ignore",
-      ...(env ? { env: { ...process.env, ...env } } : {}),
-    });
-    let timedOut = false;
-    timer = setTimeout(() => {
-      timedOut = true;
-      try { proc.kill(); } catch { /* already gone */ }
-    }, timeoutMs);
-    const out = await new Response(proc.stdout).text();
-    await proc.exited;
-    return { stdout: out, timedOut };
-  } catch {
-    return null;
-  } finally {
-    // Must be finally, not a tail call: killing the proc mid-read rejects the
-    // stdout read, and an un-cleared timer then stays armed for the full budget
-    // holding the dead proc alive — once per judge call, on every failure.
-    clearTimeout(timer);
-  }
-}
 
 // Eval-only judge override (Task 16's e2e harness): the spawned agent process can't
 // have fakes injected in-process, so swap the CLI for a scripted bun script. Gated
@@ -50,9 +15,17 @@ function resolveCmd(cmd: string[], prompt: string): string[] {
   return script ? ["bun", script, prompt] : cmd;
 }
 
-// Shared retry-once shape: build prompt → spawn → parse; on parse failure re-spawn
-// with the validation error appended; second failure fails closed (null). Timeout
-// and spawn failure fail closed IMMEDIATELY — no retry.
+// Shared retry-once shape: build prompt → spawn → parse. A parse failure OR a
+// caller `retryIf` rejection each earn exactly one re-spawn; the second answer is
+// final. Timeout and spawn failure earn none.
+//
+// Null means ONE thing — no attempt produced a value — because that is what a
+// caller reads as a judge outage: HandlerEngine parks the session and re-runs the
+// event on it. So a value that PARSED and was then rejected always beats null on
+// the way out, on every leg (timeout, spent budget, failed retry spawn); parking
+// on it would swallow a decision the caller's own gate would have escalated with
+// its text attached. Null is left for a tool with no repo-reach judge, a failed
+// spawn, and output that never parsed at all.
 //
 // timeoutMs is a TOTAL budget across both attempts, not per-spawn: the retry gets
 // only the time the first attempt left unspent. This keeps worst-case wall time at
@@ -64,44 +37,81 @@ async function runWithRetry<T>(opts: {
   spawn?: typeof Bun.spawn; transcriptPath?: string;
   makePrompt: (transcriptPath?: string) => string;
   parse: (stdout: string) => { value: T | null; error?: string };
+  // Re-ask once when the parsed value is well-formed JSON but breaks a caller
+  // rule the prompt states (a non-null string is that rejection's reason).
+  // Deliberately a CALLER hook rather than a rule of this module: the caller's
+  // safety verdicts live above this function and must stay unreachable from
+  // the retry — a retry loop around a safety verdict is a bypass.
+  retryIf?: (value: T) => string | null;
 }): Promise<T | null> {
   const spawn = opts.spawn ?? Bun.spawn;
-  // Tier first: transcript-tier judges have no Read tool, so a transcript-path
-  // hint would be an instruction they cannot follow. No judge on the spec means
-  // no verified headless judge for this tool — Handler stays escalate-only.
-  const judge = agentSpec(opts.tool)?.judge;
+  // Reach first: a transcript-reach judge has no Read tool, so a transcript-path
+  // hint would be an instruction it cannot follow. No "repo" entry on the spec
+  // means no verified headless judge for this tool — Handler stays
+  // escalate-only, and a sealed entry is never promoted into one just because
+  // the agent can answer a question (see AgentSpec.headless).
+  const judge = pickJudge(opts.tool);
   if (!judge) return null;
   const path = judge.tier === "readonly" ? opts.transcriptPath : undefined;
+  // Output is parsed whatever the exit code says: a judge answers in JSON, so a
+  // failed run cannot masquerade as a verdict the way a one-line refusal can
+  // masquerade as a title (see runHeadless).
+  const run = (p: string, timeoutMs: number) => runHeadless(
+    resolveCmd(judge.command.cmd(p, opts.model), p),
+    {
+      cwd: opts.cwd, timeoutMs, spawn,
+      env: judge.command.env, scratchEnv: judge.command.scratchEnv,
+    },
+  );
 
   const prompt = opts.makePrompt(path);
   const started = Date.now();
-  const out1 = await spawnJudge(resolveCmd(judge.cmd(prompt, opts.model), prompt), opts.cwd, opts.timeoutMs, spawn, judge.env);
+  const out1 = await run(prompt, opts.timeoutMs);
   if (out1 === null) return null;
   const r1 = opts.parse(out1.stdout);
-  if (r1.value) return r1.value;
-  if (out1.timedOut) return null; // hung judge with unusable output: no retry
+  const shapeError = r1.value ? opts.retryIf?.(r1.value) ?? null : null;
+  if (r1.value && !shapeError) return r1.value;
+  // A shape-rejected value always beats null on the way out: null means "the
+  // judge could not run" to every caller, and a caller that parks on an outage
+  // would silently swallow a decision its own guards would have escalated with
+  // the text attached. Null still comes back where it always did — a first
+  // attempt whose output would not parse at all.
+  if (out1.timedOut) return r1.value; // hung judge with unusable output: no retry
 
   // Budget spent by the first attempt is gone; the retry runs only within what
   // remains. If none is left, fail closed rather than start a full second timeout.
   const remaining = opts.timeoutMs - (Date.now() - started);
-  if (remaining <= 0) return null;
-  const retryPrompt = buildRetryPrompt(prompt, r1.error ?? "invalid output");
-  const out2 = await spawnJudge(resolveCmd(judge.cmd(retryPrompt, opts.model), retryPrompt), opts.cwd, remaining, spawn, judge.env);
-  if (out2 === null) return null;
-  return opts.parse(out2.stdout).value;
+  if (remaining <= 0) return r1.value;
+  const retryPrompt = shapeError
+    ? buildShapeRetryPrompt(prompt, shapeError)
+    : buildRetryPrompt(prompt, r1.error ?? "invalid output");
+  const out2 = await run(retryPrompt, remaining);
+  if (out2 === null) return r1.value;
+  // Exactly one retry: the second answer is final even if it breaks the same
+  // rule, and the caller's own gate escalates it from there.
+  return opts.parse(out2.stdout).value ?? r1.value;
 }
 
 export async function runDecision(opts: {
+  // `tool` is the JUDGE's CLI (a per-session pick may name a different agent
+  // from the one being watched); `agentTool` is the agent under supervision,
+  // and only the prompt reads it.
   tool: string; model?: string; goal: string; backlogText: string; context: string;
   transcriptPath?: string; cwd: string; timeoutMs?: number; spawn?: typeof Bun.spawn;
   floorWarnings?: string[];
+  evidenceRejections?: string[];
+  agentTool?: string;
+  commands?: CapCommand[];
+  retryIfShape?: (decision: HandlerDecision) => string | null;
 }): Promise<HandlerDecision | null> {
   return runWithRetry<HandlerDecision>({
     tool: opts.tool, model: opts.model, cwd: opts.cwd,
     timeoutMs: opts.timeoutMs ?? 45_000, spawn: opts.spawn, transcriptPath: opts.transcriptPath,
+    retryIf: opts.retryIfShape,
     makePrompt: (path) => buildDecidePrompt({
       goal: opts.goal, backlogText: opts.backlogText, context: opts.context, transcriptPath: path,
-      floorWarnings: opts.floorWarnings,
+      floorWarnings: opts.floorWarnings, evidenceRejections: opts.evidenceRejections,
+      agentTool: opts.agentTool, commands: opts.commands,
     }),
     parse: (stdout) => {
       const r = parseDecisionFromOutput(stdout);

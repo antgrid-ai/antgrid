@@ -2,6 +2,7 @@
 import { Icon } from "astro-icon/components";
 import Eyebrow from "../ui/Eyebrow.astro";
 import Readout from "../ui/Readout.astro";
+import UseCase from "../ui/UseCase.astro";
 
 type Row = { name: string; agent: string; task: string; time: string; state: "working" | "needs" | "done" };
 type Machine = { host: string; tag?: string; rows: Row[] };
@@ -62,5 +63,7 @@ const doneCount = allRows.filter((r) => r.state === "done").length;
       ))}
       <Fragment slot="foot">{workingCount} working · {doneCount} done</Fragment>
     </Readout>
+
+    <UseCase class="mt-7 max-w-2xl">Glance once, answer the one that's blocked, close the phone. No tabbing through six terminals to find it.</UseCase>
   </div>
 </section>
