@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 
 import { pickHeadless, resolveHeadless, runHeadless } from "../src/agents/headless";
 import { AGENTS, judgeCapable } from "../src/agents/registry";
@@ -46,8 +47,7 @@ describe("judgeCapable", () => {
   // working tree. Adding an agent here is the point at which that has to be a
   // decision.
   const JUDGE_CAPABLE = new Set<AgentKey>([
-    "claude-code", "codex", "opencode", "cursor-agent", "github-copilot",
-    "kilo", "mistral-vibe",
+    "claude-code", "codex", "opencode", "github-copilot", "kilo",
   ]);
 
   test("is exactly the set of agents we have armed a judge for", () => {
@@ -123,4 +123,67 @@ describe("runHeadless", () => {
     });
     expect(result).toEqual({ stdout: "", code: null, timedOut: true });
   }, 10_000);
+});
+
+// The state redirect for a CLI with no ephemeral switch. What matters is the
+// LIFETIME: a fixed path would keep a session per call in a temp dir Windows
+// never reclaims, so the directory has to be gone by the time the call returns.
+describe("scratchEnv", () => {
+  /** Records the env it was handed and whether the scratch dir was real at
+   *  spawn time — the moment that matters, since the runner deletes it after. */
+  function envCapturingSpawn(stdout = "ok") {
+    const seen: Array<Record<string, string>> = [];
+    const existed: boolean[] = [];
+    const spawn = ((_cmd: string[], o: Record<string, any>) => {
+      const env = o.env as Record<string, string>;
+      seen.push(env);
+      existed.push(Boolean(env.COPILOT_HOME) && existsSync(env.COPILOT_HOME));
+      return {
+        stdout: new Response(stdout).body,
+        exited: Promise.resolve(0),
+        kill() {},
+      };
+    }) as unknown as typeof Bun.spawn;
+    return { spawn, seen, existed };
+  }
+
+  const run = (spawn: typeof Bun.spawn, scratchEnv?: string[]) => runHeadless(
+    ["agent", "-p", "x"], { cwd: process.cwd(), timeoutMs: 5_000, spawn, scratchEnv },
+  );
+
+  test("the spawn sees a real directory, and it is gone once the call returns", async () => {
+    const { spawn, seen, existed } = envCapturingSpawn();
+    await run(spawn, ["COPILOT_HOME"]);
+    expect(existed[0]).toBe(true);
+    expect(existsSync(seen[0]!.COPILOT_HOME!)).toBe(false);
+  });
+
+  test("every spawn gets its own, so calls cannot accumulate in one store", async () => {
+    const { spawn, seen } = envCapturingSpawn();
+    await run(spawn, ["COPILOT_HOME"]);
+    await run(spawn, ["COPILOT_HOME"]);
+    expect(seen[0]!.COPILOT_HOME).not.toBe(seen[1]!.COPILOT_HOME);
+  });
+
+  test("several vars share the one directory", async () => {
+    const { spawn, seen } = envCapturingSpawn();
+    await run(spawn, ["COPILOT_HOME", "OTHER_HOME"]);
+    expect(seen[0]!.OTHER_HOME).toBe(seen[0]!.COPILOT_HOME!);
+  });
+
+  // Absence must leave the inherited value alone rather than blank it: an agent
+  // that reads its home from the environment would otherwise be redirected by a
+  // command that never asked to be.
+  test("a command that asks for none has the var untouched", async () => {
+    const prior = process.env.COPILOT_HOME;
+    process.env.COPILOT_HOME = "the-user-s-own-home";
+    try {
+      const { spawn, seen } = envCapturingSpawn();
+      await run(spawn);
+      expect(seen[0]!.COPILOT_HOME).toBe("the-user-s-own-home");
+    } finally {
+      if (prior === undefined) delete process.env.COPILOT_HOME;
+      else process.env.COPILOT_HOME = prior;
+    }
+  });
 });

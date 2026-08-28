@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -108,14 +108,19 @@ export async function runHeadless(
     timeoutMs: number;
     spawn?: typeof Bun.spawn;
     env?: Record<string, string>;
+    /** Env vars to point at a directory created for this spawn and deleted
+     *  after it — see HeadlessCommand.scratchEnv. */
+    scratchEnv?: string[];
   },
 ): Promise<HeadlessResult | null> {
   const spawn = opts.spawn ?? Bun.spawn;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let abandonTimer: ReturnType<typeof setTimeout> | undefined;
+  const scratch = makeScratchHome(opts.scratchEnv);
   try {
     const proc = spawn(cmd, {
-      cwd: opts.cwd, stdout: "pipe", stderr: "ignore", env: headlessEnv(opts.env),
+      cwd: opts.cwd, stdout: "pipe", stderr: "ignore",
+      env: headlessEnv({ ...opts.env, ...scratch?.env }),
     });
     let timedOut = false;
     // Resolves only if the timeout fires AND the tree kill fails to end the
@@ -151,7 +156,40 @@ export async function runHeadless(
     // budget holding the dead process alive.
     clearTimeout(timer);
     clearTimeout(abandonTimer);
+    scratch?.dispose();
   }
+}
+
+/**
+ * A private directory for one spawn's redirected state, or null when the
+ * command asked for none.
+ *
+ * Deleted on the way out, which is the whole point: these vars exist because
+ * the CLI has no ephemeral switch, and a fixed path would accumulate a session
+ * per call in a temp dir the OS does not reclaim on Windows.
+ */
+function makeScratchHome(vars?: string[]):
+  { env: Record<string, string>; dispose: () => void } | null {
+  if (!vars?.length) return null;
+  let dir: string;
+  try {
+    dir = mkdtempSync(join(tmpdir(), "antgrid-headless-"));
+  } catch (err) {
+    // Falling through to the inherited value would run the spawn against the
+    // user's REAL agent home and write a session into their history, which is
+    // the one outcome these entries exist to prevent.
+    log.warn("no scratch home for a headless spawn: %s", err);
+    return null;
+  }
+  return {
+    env: Object.fromEntries(vars.map((name) => [name, dir])),
+    dispose: () => {
+      // A spawn that outlived its kill still holds its store open, and Windows
+      // refuses to unlink an open file. One leaked directory on the timeout
+      // path beats throwing from a `finally` that owes the caller a result.
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* leaked */ }
+    },
+  };
 }
 
 /**

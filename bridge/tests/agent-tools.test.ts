@@ -55,15 +55,25 @@ test("buildAgentCatalog describes the whole registry in declaration order", () =
   // distinction the descriptor exists to carry. Judge-capable and unobservable
   // are independent: it declares a headless argv that reaches the repo, and
   // still reports no turn boundaries for anything to watch.
-  expect(byKey["cursor-agent"]).toEqual({
-    tool: "cursor-agent",
-    label: "Cursor",
+  expect(byKey["kilo"]).toEqual({
+    tool: "kilo",
+    label: "Kilo",
     chatCapable: false,
     judgeCapable: true,
     handler: { terminal: false, chat: false },
   });
-  // The other half of that pair: no headless argv verified at any reach, so it
-  // cannot judge either.
+  // Detectable and nameable, but not a judge: cursor-agent declares no headless
+  // argv VERIFIED at any reach. The one it used to carry was written from its
+  // help output and never run, which is the whole distance between naming (a
+  // borrowed "none" call) and arming a supervisor over the working tree.
+  expect(byKey["cursor-agent"]).toEqual({
+    tool: "cursor-agent",
+    label: "Cursor",
+    chatCapable: false,
+    judgeCapable: false,
+    handler: { terminal: false, chat: false },
+  });
+  // The same verdict reached the other way: no headless block at all.
   expect(byKey["kimi"]).toEqual({
     tool: "kimi",
     label: "Kimi",
@@ -72,13 +82,6 @@ test("buildAgentCatalog describes the whole registry in declaration order", () =
     handler: { terminal: false, chat: false },
   });
   expect(byKey["opencode"].handler).toEqual({ terminal: true, chat: true });
-  expect(byKey["kilo"]).toEqual({
-    tool: "kilo",
-    label: "Kilo",
-    chatCapable: false,
-    judgeCapable: true,
-    handler: { terminal: false, chat: false },
-  });
 });
 
 test("agent:tools carries the descriptor array through the schema", () => {
