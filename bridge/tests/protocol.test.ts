@@ -99,7 +99,7 @@ describe("session:* messages", () => {
       sessions: [{
         id: "s1", name: "Session 1",
         createdAt: 1, lastUsedAt: 2, archived: false, running: true, deleting: false, mode: "terminal" as const,
-        agentSessionResumable: true,
+        agentSessionResumable: true, forkSupported: false, sharedWorkspace: false, workspaceMemberCount: 1,
         checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const,
       }],
     });
@@ -129,10 +129,10 @@ describe("session:* messages", () => {
   it("session:result and session:updated roundtrip", () => {
     const result = createMessage("session:result", {
       requestId: "r", ok: true,
-      session: { id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, deleting: false, mode: "terminal" as const, agentSessionResumable: true, checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const },
+      session: { id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, deleting: false, mode: "terminal" as const, agentSessionResumable: true, forkSupported: false, sharedWorkspace: false, workspaceMemberCount: 1, checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const },
     });
     const updated = createMessage("session:updated", {
-      sessions: [{ id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, deleting: false, mode: "terminal" as const, agentSessionResumable: true, checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const }],
+      sessions: [{ id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, deleting: false, mode: "terminal" as const, agentSessionResumable: true, forkSupported: false, sharedWorkspace: false, workspaceMemberCount: 1, checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const }],
     });
     expect(AbMessageSchema.safeParse(JSON.parse(JSON.stringify(result))).success).toBe(true);
     expect(AbMessageSchema.safeParse(JSON.parse(JSON.stringify(updated))).success).toBe(true);
@@ -164,7 +164,7 @@ describe("session:* messages", () => {
     const entry = {
       id: "s1", name: "n", createdAt: 1, lastUsedAt: 1,
       archived: false, running: false, deleting: false, command: "my-agent --serve", mode: "terminal" as const,
-      agentSessionResumable: true,
+      agentSessionResumable: true, forkSupported: false, sharedWorkspace: false, workspaceMemberCount: 1,
       checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const,
     };
     const msg = createMessage("session:list:result", { requestId: "r", sessions: [entry] });
@@ -179,7 +179,7 @@ describe("session:* messages", () => {
     const entry = {
       id: "s1", name: "n", createdAt: 1, lastUsedAt: 1,
       archived: false, running: false, deleting: false, mode: "terminal" as const,
-      agentSessionResumable: true,
+      agentSessionResumable: true, forkSupported: false, sharedWorkspace: false, workspaceMemberCount: 1,
       agentSessionId: "cop-1",
       agentTranscriptPath: "/tmp/copilot-transcript.json",
       checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const,
@@ -252,7 +252,7 @@ describe("session:* messages", () => {
     const entry = {
       id: "s1", name: "n", createdAt: 1, lastUsedAt: 1,
       archived: false, running: false, deleting: true, mode: "terminal" as const,
-      agentSessionResumable: true,
+      agentSessionResumable: true, forkSupported: false, sharedWorkspace: false, workspaceMemberCount: 1,
       checkoutId: "c1", checkoutKind: "managed-worktree" as const, checkoutState: "ready" as const,
     };
     const msg = createMessage("session:list:result", { requestId: "r", sessions: [entry] });

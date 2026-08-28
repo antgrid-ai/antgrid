@@ -12,6 +12,10 @@ import {
 } from "./known-agents";
 import { augmentAgentLaunch, injectsHookAliveProbe } from "./agent-launch-augmenter";
 import { agentSpec } from "./agents/registry";
+// Aliased: this module declares its own, unrelated `AgentSpec` (the launch
+// triple) right below.
+import type { AgentSpec as RegistryAgentSpec } from "./agents/types";
+import { stripAnsi } from "./handler/context";
 import { resumeArgv, sessionResumable } from "./agent-resume";
 import { isChatCapableTool } from "./structured/chat-capable";
 import { initialPromptArgv } from "./initial-prompt";
@@ -34,6 +38,8 @@ import {
 import { CheckoutStore } from "./worktrees/checkout-store";
 import { WorktreeError, type WorktreeManager } from "./worktrees/worktree-manager";
 import { logWorktreeEvent, worktreeErrorCode } from "./worktrees/worktree-log";
+import { createKeyedLock } from "./keyed-lock";
+import { runGit } from "./worktrees/project-resolver";
 
 export interface AgentSpec {
   command: string;
@@ -54,6 +60,12 @@ export interface SessionLaunchSpec {
   /** An explicitly selected local branch to use as a base for a worktree. */
   baseBranch?: string;
 }
+
+export type ForkWorkspace = "copy" | "current";
+
+// The handoff is deliberately bounded before any durable row or worktree is
+// created. A fork must preserve context, never silently trim a conversation.
+export const MAX_FORK_TRANSCRIPT_BYTES = 128 * 1024;
 
 export interface DeleteSessionOptions {
   force?: boolean;
@@ -201,6 +213,19 @@ interface PersistedEntry {
   checkoutKind: CheckoutKind;
   checkoutBranch?: string | null;
   checkoutState: CheckoutState;
+  /** A one-shot normalized conversation handoff, deleted after first launch. */
+  forkTranscript?: string;
+  /** One-shot provider-native fork argv; never reaches the client. */
+  forkNativeArgs?: string[];
+  /** Whether `forkNativeArgs` has already been spawned once. Bounds the wait
+   *  for a provider identity that a mismatched CLI never reports. */
+  forkNativeAttempted?: boolean;
+  conversationStart?: "fresh" | "resume" | "fork";
+  /** The session `fork()` copied this one from. Provenance, not a link: the
+   *  source may be renamed, archived or deleted, and nothing resolves it back.
+   *  It is what still answers "forked from what" once the derived name below
+   *  has been renamed away on either side. */
+  forkedFromSessionId?: string;
 }
 
 /** On-disk shape written by `flush()`; validated on read by PersistedFileSchema. */
@@ -233,6 +258,11 @@ const PersistedEntrySchema = z
     checkoutKind: z.enum(CHECKOUT_KINDS).optional().catch(undefined),
     checkoutBranch: z.string().nullable().optional().catch(undefined),
     checkoutState: z.enum(CHECKOUT_STATES).optional().catch(undefined),
+    forkTranscript: z.string().optional().catch(undefined),
+    forkNativeArgs: z.array(z.string()).optional().catch(undefined),
+    forkNativeAttempted: z.boolean().optional().catch(undefined),
+    conversationStart: z.enum(["fresh", "resume", "fork"]).optional().catch(undefined),
+    forkedFromSessionId: z.string().optional().catch(undefined),
   })
   .transform((s): PersistedEntry => {
     const createdAt = s.createdAt ?? Date.now();
@@ -263,6 +293,11 @@ const PersistedEntrySchema = z
       checkoutKind: s.checkoutId ? (s.checkoutKind ?? "main") : "main",
       checkoutBranch: s.checkoutBranch,
       checkoutState: s.checkoutState ?? "ready",
+      forkTranscript: s.forkTranscript,
+      forkNativeArgs: s.forkNativeArgs,
+      forkNativeAttempted: s.forkNativeAttempted,
+      conversationStart: s.conversationStart ?? (s.agentSessionId ? "resume" : "fresh"),
+      forkedFromSessionId: s.forkedFromSessionId,
     };
   });
 
@@ -385,6 +420,8 @@ interface SetupRuntime {
 
 export class SessionManager {
   private entries = new Map<string, PersistedEntry>();
+  /** Serializes attach, promotion and member removal for one checkout. */
+  private readonly withCheckoutMembership = createKeyedLock();
   private observers = new Set<() => void>();
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private activityEmitTimer: ReturnType<typeof setTimeout> | null = null;
@@ -413,8 +450,11 @@ export class SessionManager {
    *  `deleting` wire flag and `isCheckoutDeleting` — one set, one lifetime, so
    *  the flag an app saw and the refusal it then gets can never disagree.
    *  Populated only by `deleteManaged`; any future checkout-removal path outside
-   *  this class must flag itself here or it goes unguarded. */
-  private readonly deleting = new Map<string, string>();
+   *  this class must flag itself here or it goes unguarded. A `null` value is a
+   *  delete that reclaims NO checkout (detaching one member of a shared
+   *  workspace) — the row still reports `deleting`, but `isCheckoutDeleting`
+   *  must not refuse the siblings that keep working in that directory. */
+  private readonly deleting = new Map<string, string | null>();
   // Memoized sessionResumable() answers, keyed by session id and tagged with the
   // agentSessionId they were computed for. toWire() runs per entry on every
   // changed() emit and the real check does existsSync + a bun:sqlite query, so
@@ -536,6 +576,13 @@ export class SessionManager {
         // the delete, and this peek has no core to ask.
         deleting: false,
         tool: e.tool, command: e.command, args: e.args, mode: e.mode,
+        // Pessimistic, unlike `agentSessionResumable` below: hiding a control
+        // the live list then shows is recoverable; offering Fork on a cold peek
+        // that cannot resolve the checkout's agent spec is a menu item that can
+        // only fail.
+        forkSupported: false,
+        sharedWorkspace: false,
+        workspaceMemberCount: 1,
         // Optimistic, like `running: false` above: the peek has no live core,
         // and the real check needs the agent-store overrides only an instance
         // holds. A wrong `true` shows a control the live list then hides; a
@@ -612,6 +659,75 @@ export class SessionManager {
     return this.toWire(entry);
   }
 
+  /** Create a fresh registry-agent conversation from bridge-owned context. */
+  async fork(sourceSessionId: string, workspace: ForkWorkspace): Promise<SessionEntry> {
+    const source = this.entries.get(sourceSessionId);
+    if (!source) throw new Error(`session not found: ${sourceSessionId}`);
+    if (source.command) throw new Error("Custom-command sessions cannot be forked.");
+    const sourcePath = await this.checkoutPathForFork(source);
+    const sourceAgentSpec = source.checkoutId === "main"
+      ? this.agentSpec
+      : await this.opts.resolveAgentSpec?.(source.checkoutId) ?? this.agentSpec;
+    const tool = source.tool ?? sourceAgentSpec.name;
+    const adapter = agentSpec(tool);
+    if (!adapter) throw new Error("This session's agent does not support transcript forks.");
+    const nativeForkArgs = source.mode === "terminal" && source.agentSessionId
+      ? adapter.fork.nativeForkArgs?.(source.agentSessionId)
+      : undefined;
+    const transcript = nativeForkArgs?.length
+      ? undefined
+      : await this.captureForkTranscript(source, adapter, sourcePath);
+    if (transcript && Buffer.byteLength(transcript, "utf8") > MAX_FORK_TRANSCRIPT_BYTES) {
+      throw new Error("This conversation is too large to fork. Compact or summarize it first.");
+    }
+
+    // Never inherit raw command/args. A fork launches the registry default.
+    const entry = this.buildEntry(undefined, { tool, mode: source.mode });
+    // Named after its source rather than left as the next "Session N": what a
+    // fork is FOR is that it came from somewhere, and the drawer row is where
+    // the user reads that. Assigned here instead of passed to buildEntry so
+    // `manuallyRenamed` stays false — a derived name is not a name the user
+    // chose, and the agent's own conversation title must still win over it.
+    entry.name = this.forkName(source.name);
+    entry.forkedFromSessionId = source.id;
+    entry.conversationStart = "fork";
+    entry.forkTranscript = transcript;
+    entry.forkNativeArgs = nativeForkArgs;
+    if (workspace === "current") {
+      return this.withCheckoutMembership(source.checkoutId, async () => {
+        // Re-read under the membership lock: a concurrent delete may have
+        // promoted or removed the source while transcript capture was pending.
+        const liveSource = this.entries.get(sourceSessionId);
+        if (!liveSource) throw new Error(`session not found: ${sourceSessionId}`);
+        entry.checkoutId = liveSource.checkoutId;
+        entry.checkoutKind = liveSource.checkoutKind;
+        entry.checkoutBranch = liveSource.checkoutBranch;
+        entry.checkoutState = liveSource.checkoutState;
+        this.entries.set(entry.id, entry);
+        try {
+          await this.flushNowOrThrow();
+        } catch (error) {
+          this.entries.delete(entry.id);
+          throw error;
+        }
+        this.notifyObservers();
+        if (entry.checkoutId !== "main") this.reannounceCheckout(entry.checkoutId);
+        return this.toWire(entry);
+      });
+    }
+
+    return this.createWorktree(
+      undefined,
+      { tool, mode: source.mode, isolation: "worktree" },
+      entry,
+      // A thunk, not a value: an argument expression is evaluated before the
+      // call, so resolving HEAD eagerly here would answer "no committed HEAD"
+      // for a non-Git project that createWorktree's own preflight names
+      // correctly as NOT_GIT_REPOSITORY.
+      () => this.committedHead(sourcePath),
+    );
+  }
+
   private buildEntry(name: string | undefined, spec: SessionLaunchSpec | undefined): PersistedEntry {
     let finalName: string;
     if (name === undefined) {
@@ -642,6 +758,7 @@ export class SessionManager {
       checkoutId: "main",
       checkoutKind: "main",
       checkoutState: "ready",
+      conversationStart: "fresh",
     };
     // A new chat session inherits the last-used selection for its tool so it
     // opens on the model/mode/effort the user actually works with, not the
@@ -653,20 +770,72 @@ export class SessionManager {
     return entry;
   }
 
+  private async checkoutPathForFork(source: PersistedEntry): Promise<string> {
+    if (source.checkoutId === "main") return this.projectPath;
+    const checkout = await this.opts.resolveCheckout?.(source.checkoutId);
+    if (!checkout || !existsSync(checkout.path)) {
+      throw new WorktreeError("WORKTREE_MISSING", "The source worktree is no longer available.");
+    }
+    return checkout.path;
+  }
+
+  /** The source checkout's HEAD, as an object id `git worktree add` can use.
+   *  Through `runGit` like every other git call on this path: a synchronous
+   *  spawn here blocks the one loop that is also forwarding every PTY and relay
+   *  frame on the machine, for as long as process creation takes. Only the
+   *  shape is checked — `resolveBase` re-verifies the value against the
+   *  repository before it becomes a Git argument. */
+  private async committedHead(path: string): Promise<string> {
+    const head = await runGit(["rev-parse", "--verify", "HEAD"], path);
+    // Any hex object id: a repository created with `--object-format=sha256`
+    // answers 64 characters, and rejecting it would make its forks impossible.
+    if (head.exitCode === 0 && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(head.stdout.trim())) {
+      return head.stdout.trim();
+    }
+    throw new WorktreeError("WORKTREE_CONFLICT", "The source checkout has no committed HEAD to copy.");
+  }
+
+  private async captureForkTranscript(source: PersistedEntry, adapter: RegistryAgentSpec, projectPath: string): Promise<string> {
+    const scrollback = this.tm.getScrollback(source.id)?.text;
+    const text = await adapter.fork.handoff({
+      maxMsgs: 500,
+      projectPath,
+      agentSessionId: source.agentSessionId,
+      transcriptPath: source.agentTranscriptPath,
+      codexHome: this.opts.codexHome,
+      // Stripped here, at the single point every adapter's terminal fallback
+      // draws from: `getScrollback` is raw PTY output, and a TUI's tail is
+      // mostly CSI/OSC redraw. It becomes an agent's opening prompt — and for
+      // the no-argv agents it is typed back into a PTY, where those bytes read
+      // as keys.
+      terminalTranscript: scrollback ? stripAnsi(scrollback) : undefined,
+    });
+    if (!text.trim()) {
+      throw new Error("This session has no captured transcript to fork yet.");
+    }
+    return text;
+  }
+
   /**
    * Isolated creation deliberately has no visible session until all host-owned
    * state is usable and durable. The old synchronous shared API remains intact
    * for compatibility with pre-worktree callers; the wire handler always awaits
    * either result.
    */
-  private async createWorktree(name: string | undefined, spec: SessionLaunchSpec): Promise<SessionEntry> {
+  private async createWorktree(
+    name: string | undefined,
+    spec: SessionLaunchSpec,
+    preparedEntry?: PersistedEntry,
+    resolveBaseCommit?: () => Promise<string>,
+  ): Promise<SessionEntry> {
     if (!this.opts.worktreeSessionsSupported || !this.opts.worktreeManager) {
       throw new WorktreeError("WORKTREE_UNSUPPORTED", "This bridge cannot isolate sessions yet.");
     }
     if (!await this.opts.isGitRepository?.()) {
       throw new WorktreeError("NOT_GIT_REPOSITORY", "This project is not a Git repository.");
     }
-    const entry = this.buildEntry(name, spec);
+    const baseCommit = await resolveBaseCommit?.();
+    const entry = preparedEntry ?? this.buildEntry(name, spec);
     let checkout: CheckoutRecord | undefined;
     let runtimePrepared = false;
     try {
@@ -676,6 +845,7 @@ export class SessionManager {
         sessionId: entry.id,
         sessionName: undefined, // new session won't have a name
         baseBranch: spec.baseBranch,
+        baseCommit,
       });
       // Services are held back until setup finishes: auto-starting `bun run dev`
       // against a worktree whose `node_modules` has not been provisioned yet is
@@ -794,6 +964,11 @@ export class SessionManager {
     entry.agentSessionId = agentSessionId;
     entry.agentTranscriptPath = nextPath;
     this.resumableCache.delete(id);
+    // A native fork command starts its new conversation as the PTY launches.
+    // Keep its one-shot argv until the provider reports that new identity; a
+    // successful OS spawn alone cannot distinguish an invalid source id from a
+    // real provider fork.
+    if (this.awaitingNativeForkIdentity(entry)) this.completeForkLaunch(entry);
     this.changed();
   }
 
@@ -860,7 +1035,26 @@ export class SessionManager {
     const entry = this.entries.get(id);
     if (!entry) return false;
     if (isManagedCheckoutKind(entry.checkoutKind)) {
-      return this.deleteManaged(entry, options);
+      // Refused BEFORE the lock, never queued behind it: a second delete is an
+      // immediate answer the caller is owed, and serializing it would leave the
+      // app waiting out the whole first teardown for a refusal.
+      // Rejected, not thrown: this arm's contract is a promise, and a sync
+      // throw would escape every caller that only awaits the result.
+      if (this.deleting.has(id)) {
+        return Promise.reject(new WorktreeError(
+          "WORKTREE_DELETE_IN_PROGRESS", "This isolated session is already being deleted."));
+      }
+      // BOTH arms under the membership key, and the count read inside it. The
+      // count is what picks between detaching a member and `git worktree
+      // remove`, so reading it outside lets a concurrent fork attach to the
+      // checkout this call is about to destroy — and lets two member deletes
+      // both see a survivor that the first one then removes.
+      return this.withCheckoutMembership(entry.checkoutId, async () => {
+        if (!this.entries.has(entry.id)) return false;
+        return this.membersForCheckout(entry.checkoutId).length > 1
+          ? this.deleteAttachedMemberLocked(entry)
+          : this.deleteManaged(entry, options);
+      });
     }
     if (this.tm.has(id)) this.tm.kill(id);
     this.dropSession(id);
@@ -888,8 +1082,8 @@ export class SessionManager {
   /** Flag a session's delete as in flight and announce it. Emits without
    *  persisting — `deleting` is runtime state that must never dirty
    *  sessions.json — which is also why this is not `changed()`. */
-  private markDeleting(entry: PersistedEntry): void {
-    this.deleting.set(entry.id, entry.checkoutId);
+  private markDeleting(entry: PersistedEntry, checkoutId: string | null = entry.checkoutId): void {
+    this.deleting.set(entry.id, checkoutId);
     this.notifyObservers();
   }
 
@@ -1596,11 +1790,12 @@ export class SessionManager {
       this.opts.onStartChat?.({
         sessionId: id,
         tool: chatTool,
-        resumeId: this.resumeIdFor(chatTool, entry),
+        resumeId: entry.conversationStart === "fork" ? undefined : this.resumeIdFor(chatTool, entry),
         config: entry.config,
-        initialPrompt,
+        initialPrompt: this.forkInitialPrompt(entry, initialPrompt),
       });
       entry.lastUsedAt = Date.now();
+      this.completeForkLaunch(entry);
       this.changed();
       if (chatAlreadyRunning) this.reannounceCheckout(entry.checkoutId);
       return;
@@ -1631,6 +1826,13 @@ export class SessionManager {
     // Resume tokens (`--resume <id>`, `--session <id>`, or codex's `resume
     // <uuid>` subcommand). Captured here, appended LAST in the spawn block.
     let resumeArgs: string[] = [];
+    // Provider-native fork args are one-shot like the transcript handoff. They
+    // create a fresh provider session and therefore replace, never combine
+    // with, resume args.
+    const nativeForkArgs = entry.forkNativeArgs ?? [];
+    if (nativeForkArgs.length > 0 && initialPrompt?.trim()) {
+      throw new Error("This provider-native fork starts immediately; send a prompt after the fork opens.");
+    }
     // Set only when an augmenter branch actually reports it (currently
     // cursor-agent's hooks.json write); undefined means "trust the registry's
     // static notificationSource" for every other tool. See LaunchAugmentation.
@@ -1652,7 +1854,7 @@ export class SessionManager {
       // Resume the slot's last-active conversation (held in resumeArgs, appended
       // LAST in the spawn block so it lands after any per-session args — required
       // for codex's `resume` subcommand).
-      resumeArgs = this.resumeArgsFor(entry.tool, entry);
+      resumeArgs = entry.conversationStart === "fork" ? [] : this.resumeArgsFor(entry.tool, entry);
     } else if (entry.command) {
       // Custom command lines never resume and get no per-spawn hooks: the user
       // owns the whole line, so we don't inject title/resume integration and no
@@ -1669,7 +1871,7 @@ export class SessionManager {
         baseArgs = [...baseArgs, ...aug.args];
         launchEnv = { ...launchEnv, ...aug.env };
         notificationsInjected = aug.notificationsInjected;
-        resumeArgs = this.resumeArgsFor(sessionAgentSpec.name, entry);
+        resumeArgs = entry.conversationStart === "fork" ? [] : this.resumeArgsFor(sessionAgentSpec.name, entry);
       }
     }
     if (!base) {
@@ -1681,9 +1883,11 @@ export class SessionManager {
 
     // One-shot first prompt, appended LAST (after resume tokens — codex's
     // `resume <uuid>` is a subcommand and the positional prompt must follow it).
+    // Built once: the PTY fallback below hands the same string to the terminal.
+    const launchPrompt = this.forkInitialPrompt(entry, initialPrompt) ?? "";
     const promptArgs = isCustomLine
       ? []
-      : initialPromptArgv(entry.tool ?? sessionAgentSpec.name, initialPrompt ?? "");
+      : initialPromptArgv(entry.tool ?? sessionAgentSpec.name, launchPrompt);
 
     // No per-session args: spawn `base` with its default argv (the antgrid.yaml
     // flags on the fallback path, empty otherwise) — preserves no-shell direct
@@ -1711,8 +1915,12 @@ export class SessionManager {
       // boundary cannot swallow them.
       const resumeAfterRaw =
         agentSpec(entry.tool ?? sessionAgentSpec.name)?.resumeIsSubcommand === true;
-      const beforeRaw = resumeAfterRaw ? [] : resumeArgs.map(shellQuoteArg);
-      const afterRaw = resumeAfterRaw ? resumeArgs.map(shellQuoteArg) : [];
+      // Native fork args obey the same rule for the same reason: codex's `fork`
+      // is a subcommand exactly as its `resume` is, so placing it before the
+      // user's raw args hands the user's global flags to the subcommand.
+      const conversationArgs = [...resumeArgs, ...nativeForkArgs].map(shellQuoteArg);
+      const beforeRaw = resumeAfterRaw ? [] : conversationArgs;
+      const afterRaw = resumeAfterRaw ? conversationArgs : [];
       const foldedPrompt = foldPromptIntoLine ? promptArgs.map(shellQuoteArg) : [];
       command = [...head, ...beforeRaw, argsStr, ...afterRaw, ...foldedPrompt].join(" ");
     }
@@ -1723,7 +1931,7 @@ export class SessionManager {
       ? foldPromptIntoLine
         ? []
         : [...promptArgs]
-      : [...baseArgs, ...resumeArgs, ...promptArgs];
+      : [...baseArgs, ...resumeArgs, ...nativeForkArgs, ...promptArgs];
 
     // Geometry is left to TerminalManager, which spawns at whatever size the
     // pane's driver last reported (80x24 only for the first terminal of a
@@ -1756,8 +1964,124 @@ export class SessionManager {
         ? entry.tool ?? sessionAgentSpec.name
         : undefined,
     });
+    // Some registry agents have no verified launch-argv form for an opening
+    // prompt. Their PTY still buffers input during startup, which gives every
+    // registered terminal agent the same transcript-fork capability without
+    // inventing unsupported CLI flags.
+    if (entry.conversationStart === "fork" && entry.forkTranscript && promptArgs.length === 0) {
+      this.tm.write(id, `${launchPrompt}\r`);
+    }
     entry.lastUsedAt = Date.now();
+    // Transcript forks have been handed to the spawned process. Native forks
+    // wait for setAgentSession() to receive their newly minted provider id —
+    // but for ONE launch only. A CLI predating the fork flag, or a source
+    // conversation the provider has since pruned, never reports an id, and
+    // holding the argv indefinitely re-forks the source on every start while
+    // the forced-empty resumeArgs stop the session ever holding a conversation
+    // of its own. The second launch drops it and starts fresh instead.
+    if (!this.awaitingNativeForkIdentity(entry)) this.completeForkLaunch(entry);
+    else if (entry.forkNativeAttempted) this.completeForkLaunch(entry);
+    else entry.forkNativeAttempted = true;
     this.changed();
+  }
+
+  /** Sessions sharing one MANAGED checkout. `main` is not a shared workspace —
+   *  every ordinary session carries `checkoutId: "main"`, so counting it would
+   *  report every project with two plain sessions as shared, exactly the trap
+   *  `isCheckoutDeleting` asserts against. */
+  private membersForCheckout(checkoutId: string): PersistedEntry[] {
+    if (checkoutId === "main") return [];
+    return Array.from(this.entries.values()).filter((entry) => entry.checkoutId === checkoutId);
+  }
+
+  /** `membersForCheckout(...).length` without the array. `toWire` runs once per
+   *  entry on a list that is rebuilt on every observer emit, so materializing a
+   *  copy of the session map per row makes that emit O(n²). */
+  private countMembersForCheckout(checkoutId: string): number {
+    if (checkoutId === "main") return 0;
+    let count = 0;
+    for (const entry of this.entries.values()) {
+      if (entry.checkoutId === checkoutId) count++;
+    }
+    return count;
+  }
+
+  /** Delete one attached member without reclaiming the checkout it shares.
+   *  Caller holds `withCheckoutMembership` for this checkout. */
+  private async deleteAttachedMemberLocked(entry: PersistedEntry): Promise<boolean> {
+    if (this.deleting.has(entry.id)) {
+      throw new WorktreeError("WORKTREE_DELETE_IN_PROGRESS", "This session is already being deleted.");
+    }
+    // `null`, not the checkout id: this delete reclaims NOTHING, and flagging
+    // the checkout would make agent-core refuse every checkout-variable verb —
+    // keystrokes, file reads, git — for the SIBLINGS that keep working in it,
+    // under a message saying their workspace is being deleted.
+    this.markDeleting(entry, null);
+    try {
+      // Checked, as deleteManaged does: dropSession() tombstones the terminal,
+      // so forgetting a member whose agent never died leaves that process alive
+      // inside the shared worktree with no row and nothing able to kill it.
+      if (!await this.stopAndAwait(entry.id)) {
+        throw new WorktreeError("WORKTREE_DELETE_FAILED", "The session did not stop before it could be detached.");
+      }
+      const survivors = this.membersForCheckout(entry.checkoutId)
+        .filter((candidate) => candidate.id !== entry.id)
+        // A visible member first: handing the workspace to an archived row
+        // strands the worktree and its branch behind a session the default
+        // list never shows.
+        .sort((a, b) =>
+          Number(a.archived) - Number(b.archived)
+          || b.lastUsedAt - a.lastUsedAt || b.createdAt - a.createdAt || a.id.localeCompare(b.id));
+      const successor = survivors[0];
+      if (!successor) throw new Error("No checkout member remains to own this workspace.");
+      await this.checkoutStore().update(entry.checkoutId, (record) =>
+        record.sessionId === entry.id ? { ...record, sessionId: successor.id } : record,
+      );
+      this.dropSession(entry.id);
+      this.clearDeleting(entry.id);
+      // Emit owed even when the flush fails: the flag is already cleared, so the
+      // catch below can no longer emit and the app's last view of this row would
+      // stay `deleting: true` forever.
+      try {
+        await this.flushNowOrThrow();
+      } finally {
+        this.notifyObservers();
+      }
+      return true;
+    } catch (error) {
+      if (this.clearDeleting(entry.id)) this.notifyObservers();
+      throw error;
+    }
+  }
+
+  /** Returns [initialPrompt] UNCHANGED for a non-fork start — `undefined` must
+   *  stay `undefined`, not collapse to `""`: it is what every existing caller
+   *  passes to `onStartChat` for "no opening prompt". */
+  private forkInitialPrompt(entry: PersistedEntry, initialPrompt?: string): string | undefined {
+    if (!entry.forkTranscript) return initialPrompt;
+    const extra = initialPrompt?.trim();
+    return [
+      "Start a fresh conversation using this captured transcript as context. Continue the work; do not resume its native session.",
+      "<antgrid-fork-transcript>",
+      entry.forkTranscript,
+      "</antgrid-fork-transcript>",
+      extra,
+    ].filter((part): part is string => !!part).join("\n\n");
+  }
+
+  private completeForkLaunch(entry: PersistedEntry): void {
+    if (entry.conversationStart !== "fork") return;
+    // The handoff survives a bridge restart between create and launch, but no
+    // longer than the first successful spawn. A later stop/start is a normal
+    // fresh conversation and must not replay the old transcript.
+    entry.forkTranscript = undefined;
+    entry.forkNativeArgs = undefined;
+    entry.forkNativeAttempted = undefined;
+    entry.conversationStart = "fresh";
+  }
+
+  private awaitingNativeForkIdentity(entry: PersistedEntry): boolean {
+    return entry.conversationStart === "fork" && (entry.forkNativeArgs?.length ?? 0) > 0;
   }
 
   /** Initiates teardown; it is NOT complete when this returns. The chat branch
@@ -2003,6 +2327,7 @@ export class SessionManager {
   // transcript hydration on it (see the app's hydrateAttachedChatIfNeeded), so
   // withholding it leaves a session started on another device rendering empty.
   private toWire(e: PersistedEntry): SessionEntry {
+    const memberCount = this.countMembersForCheckout(e.checkoutId);
     return {
       id: e.id,
       name: e.name,
@@ -2013,6 +2338,8 @@ export class SessionManager {
       deleting: this.deleting.has(e.id),
       tool: e.tool,
       command: e.command,
+      forkSupported: !e.command && !!agentSpec(e.tool ?? this.agentSpec.name),
+      forkedFromSessionId: e.forkedFromSessionId,
       args: e.args,
       mode: e.mode,
       agentSessionResumable: this.agentSessionResumable(e),
@@ -2028,6 +2355,10 @@ export class SessionManager {
       checkoutKind: e.checkoutKind,
       checkoutBranch: e.checkoutBranch,
       checkoutState: e.checkoutState,
+      sharedWorkspace: memberCount > 1,
+      // Floored at 1: `main` counts no members, and the wire schema requires a
+      // positive integer.
+      workspaceMemberCount: Math.max(memberCount, 1),
       setup: this.setupWire(e.id),
     };
   }
@@ -2098,6 +2429,18 @@ export class SessionManager {
     });
     this.resumableCache.set(e.id, { agentSessionId: e.agentSessionId, resumable });
     return resumable;
+  }
+
+  /** `"<source> fork"`, numbered on collision the way [nextDefaultName] numbers
+   *  slots. The suffix is stripped from the source first, so a fork of a fork
+   *  reads "Auth fork 2" rather than "Auth fork fork". */
+  private forkName(sourceName: string): string {
+    const base = sourceName.replace(/ fork(?: \d+)?$/, "").trim() || sourceName;
+    const taken = new Set(Array.from(this.entries.values(), (e) => e.name));
+    let candidate = `${base} fork`;
+    // Terminates: every miss consumes one of the finitely many taken names.
+    for (let n = 2; taken.has(candidate); n++) candidate = `${base} fork ${n}`;
+    return candidate;
   }
 
   private nextDefaultName(): string {

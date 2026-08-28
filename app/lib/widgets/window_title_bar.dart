@@ -27,6 +27,7 @@ import '../window/window_capabilities.dart';
 import '../window/window_chrome.dart';
 import 'agent_panel.dart';
 import 'session_isolation_badge.dart';
+import 'session_shared_workspace_badge.dart';
 import 'session_mode_control.dart';
 import 'session_search_field.dart';
 
@@ -497,13 +498,15 @@ class TitleBarBreadcrumb extends ConsumerWidget {
                 : EditableSessionLeaf(session: active),
           ),
         ),
-        if (active != null)
+        if (active != null) ...[
           SessionIsolationBadge(
             session: active,
             // The live list's answer, never `active.setup`: the entry can come
             // from the persisted cache, which carries no setup state at all.
             setup: ref.watch(activeSessionSetupProvider),
           ),
+          SessionSharedWorkspaceBadge(session: active),
+        ],
         if (gitBranch != null) ...[
           const SizedBox(width: AbTokens.space8),
           // Bounded, not Flexible: the breadcrumb is the only child that should

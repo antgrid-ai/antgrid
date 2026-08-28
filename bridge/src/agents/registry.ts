@@ -27,6 +27,11 @@ import { createDriver as createOpencodeDriver } from "./opencode/driver";
 import { lastAssistantText, readTranscript as readClaudeTranscript } from "./claude-code/transcript";
 import { readTranscript as readCodexTranscript } from "./codex/transcript";
 import { readTranscript as readOpencodeTranscript } from "./opencode/transcript";
+import { claudeForkHandoff, claudeNativeForkArgs } from "./claude-code/fork";
+import { codexForkHandoff, codexNativeForkArgs } from "./codex/fork";
+import { opencodeForkHandoff, opencodeNativeForkArgs } from "./opencode/fork";
+import { terminalForkHandoff } from "./fork-handoff";
+
 import { pickHeadlessFrom, type AgentKey, type AgentSpec } from "./types";
 
 // A throwaway store for a headless spawn whose CLI offers no ephemeral flag.
@@ -53,6 +58,11 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     titleSource: "structured",
     resume: (id) => ["--resume", id],
     initialPrompt: (p) => ["--", p],
+    fork: {
+      kind: "native-fork",
+      handoff: claudeForkHandoff,
+      nativeForkArgs: claudeNativeForkArgs,
+    },
     hooks: claudeHooks,
     notifyBodyFromTranscript: lastAssistantText,
     driver: createClaudeDriver,
@@ -115,6 +125,11 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     resume: (id) => ["resume", id],
     resumeIsSubcommand: true,
     initialPrompt: (p) => ["--", p],
+    fork: {
+      kind: "native-fork",
+      handoff: codexForkHandoff,
+      nativeForkArgs: codexNativeForkArgs,
+    },
     hooks: codexHooks,
     driver: createCodexDriver,
     // codex offers no sandbox tighter than read-only, so there is no sealed
@@ -167,6 +182,11 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     titleSource: "structured",
     resume: (id) => ["--session", id],
     initialPrompt: (p) => ["--prompt", p],
+    fork: {
+      kind: "native-fork",
+      handoff: opencodeForkHandoff,
+      nativeForkArgs: opencodeNativeForkArgs,
+    },
     hooks: opencodeHooks,
     driver: createOpencodeDriver,
     headless: {
@@ -220,6 +240,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     titleSource: "osc",
     resume: (id) => ["--resume", id],
     initialPrompt: (p) => ["--", p],
+    fork: terminalForkHandoff("Cursor"),
     hooks: cursorHooks,
     augmentsDefaultSpec: true,
     headless: {
@@ -252,6 +273,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     // Copilot's optional-value --resume drops a space-separated value.
     resume: (id) => [`--resume=${id}`],
     initialPrompt: () => [],
+    fork: terminalForkHandoff("GitHub Copilot"),
     hooks: copilotHooks,
     augmentsDefaultSpec: true,
     resumable: ({ agentSessionId, copilotHome }) =>
@@ -310,6 +332,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     // args. See `agy --help`.
     resume: (id) => ["--conversation", id],
     initialPrompt: (p) => ["--prompt-interactive", p],
+    fork: terminalForkHandoff("Antigravity"),
     hooks: antigravityHooks,
     augmentsDefaultSpec: true,
     resolveTitle: async ({ sessionId, transcriptPath, antigravityHome }) =>
@@ -331,6 +354,9 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     titleSource: "osc",
     resume: () => [],
     initialPrompt: () => [],
+    // Kilo documents `--session <id> --fork`, but this integration does not
+    // observe a Kilo-native id. Do not advertise an unreachable native path.
+    fork: terminalForkHandoff("Kilo"),
     env: ({ abDir }) =>
       injectConfig("KILO_TUI_CONFIG", abDir, "kilo-tui.json", {
         attention: { enabled: true },
@@ -360,6 +386,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     titleSource: "osc",
     resume: () => [],
     initialPrompt: () => [],
+    fork: terminalForkHandoff("Kimi"),
   },
   // Textual TUI: notifications default ON, fails CLOSED on Textual focus
   // (DEC 1004-derived), so the default-blur drives it — no injection.
@@ -388,6 +415,7 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
         noHistory: "flag",
       },
     },
+    fork: terminalForkHandoff("Mistral Vibe"),
   },
 };
 

@@ -157,6 +157,12 @@ class SessionEntry {
   final bool deleting;
   final String? tool;
   final String? command;
+  final bool forkSupported;
+
+  /// The session this one was forked from, or null for every session that was
+  /// not. Provenance, not a link: the source may since have been renamed,
+  /// archived or deleted, so nothing may resolve it and render its name.
+  final String? forkedFromSessionId;
   final String? args;
   final String mode;
 
@@ -182,6 +188,8 @@ class SessionEntry {
   final String checkoutKind;
   final String? checkoutBranch;
   final String checkoutState;
+  final bool sharedWorkspace;
+  final int workspaceMemberCount;
 
   /// Null for every shared session, for a bridge predating the feature, and for
   /// an isolated session whose project declares no `worktree.setup` — all three
@@ -198,6 +206,8 @@ class SessionEntry {
     this.deleting = false,
     this.tool,
     this.command,
+    this.forkSupported = false,
+    this.forkedFromSessionId,
     this.args,
     this.mode = 'terminal',
     this.agentSessionResumable = true,
@@ -207,6 +217,8 @@ class SessionEntry {
     this.checkoutKind = 'main',
     this.checkoutBranch,
     this.checkoutState = 'ready',
+    this.sharedWorkspace = false,
+    this.workspaceMemberCount = 1,
     this.setup,
   });
 
@@ -222,6 +234,8 @@ class SessionEntry {
     if (deleting) 'deleting': true,
     if (tool != null) 'tool': tool,
     if (command != null) 'command': command,
+    if (forkSupported) 'forkSupported': true,
+    if (forkedFromSessionId != null) 'forkedFromSessionId': forkedFromSessionId,
     if (args != null) 'args': args,
     'mode': mode,
     'agentSessionResumable': agentSessionResumable,
@@ -231,6 +245,8 @@ class SessionEntry {
     'checkoutKind': checkoutKind,
     if (checkoutBranch != null) 'checkoutBranch': checkoutBranch,
     'checkoutState': checkoutState,
+    if (sharedWorkspace) 'sharedWorkspace': true,
+    if (workspaceMemberCount > 1) 'workspaceMemberCount': workspaceMemberCount,
     if (setup != null) 'setup': setup!.toJson(),
   };
 
@@ -250,6 +266,8 @@ class SessionEntry {
     deleting: j['deleting'] as bool? ?? false,
     tool: j['tool'] as String?,
     command: j['command'] as String?,
+    forkSupported: j['forkSupported'] as bool? ?? false,
+    forkedFromSessionId: j['forkedFromSessionId'] as String?,
     args: j['args'] as String?,
     mode: j['mode'] as String? ?? 'terminal',
     // Optimistic on absence, matching the bridge schema's default: a stale
@@ -264,6 +282,8 @@ class SessionEntry {
     checkoutKind: j['checkoutKind'] as String? ?? 'main',
     checkoutBranch: j['checkoutBranch'] as String?,
     checkoutState: j['checkoutState'] as String? ?? 'ready',
+    sharedWorkspace: j['sharedWorkspace'] as bool? ?? false,
+    workspaceMemberCount: (j['workspaceMemberCount'] as num?)?.toInt() ?? 1,
     setup: switch (j['setup']) {
       final Map<String, dynamic> m => SessionSetup.fromJson(m),
       _ => null,
@@ -299,6 +319,8 @@ class SessionEntry {
     deleting: deleting ?? this.deleting,
     tool: tool,
     command: command,
+    forkSupported: forkSupported,
+    forkedFromSessionId: forkedFromSessionId,
     args: args,
     mode: mode,
     agentSessionResumable: agentSessionResumable,
@@ -308,6 +330,8 @@ class SessionEntry {
     checkoutKind: checkoutKind,
     checkoutBranch: checkoutBranch,
     checkoutState: checkoutState,
+    sharedWorkspace: sharedWorkspace,
+    workspaceMemberCount: workspaceMemberCount,
     setup: clearSetup ? null : (setup ?? this.setup),
   );
 
@@ -324,6 +348,8 @@ class SessionEntry {
           other.deleting == deleting &&
           other.tool == tool &&
           other.command == command &&
+          other.forkSupported == forkSupported &&
+          other.forkedFromSessionId == forkedFromSessionId &&
           other.args == args &&
           other.mode == mode &&
           other.agentSessionResumable == agentSessionResumable &&
@@ -333,10 +359,13 @@ class SessionEntry {
           other.checkoutKind == checkoutKind &&
           other.checkoutBranch == checkoutBranch &&
           other.checkoutState == checkoutState &&
+          other.sharedWorkspace == sharedWorkspace &&
+          other.workspaceMemberCount == workspaceMemberCount &&
           other.setup == setup;
 
   @override
-  int get hashCode => Object.hash(
+  // hashAll, not hash: the field list is past Object.hash's 20-argument ceiling.
+  int get hashCode => Object.hashAll([
     id,
     name,
     createdAt,
@@ -346,6 +375,8 @@ class SessionEntry {
     deleting,
     tool,
     command,
+    forkSupported,
+    forkedFromSessionId,
     args,
     mode,
     agentSessionResumable,
@@ -355,6 +386,8 @@ class SessionEntry {
     checkoutKind,
     checkoutBranch,
     checkoutState,
+    sharedWorkspace,
+    workspaceMemberCount,
     setup,
-  );
+  ]);
 }

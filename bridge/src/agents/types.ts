@@ -148,6 +148,26 @@ export interface TranscriptOpts {
   opencodeDbPath?: string;
 }
 
+/** The bridge-owned source material an agent adapter may turn into a fork
+ * handoff. Neither field is ever client supplied. */
+export interface ForkHandoffOpts extends TranscriptOpts {
+  projectPath: string;
+  terminalTranscript?: string;
+}
+
+/** Required fork contract for every registry agent. The adapter owns the
+ * provider-specific read and the normalized handoff shape. */
+export interface AgentForkSupport {
+  /** `native-fork` means a terminal launch can ask the provider to clone a
+   * concrete native session. The handoff remains the safe fallback when that
+   * native id was never observed. */
+  kind: "native-fork" | "native-transcript" | "terminal-transcript";
+  handoff: (opts: ForkHandoffOpts) => Promise<string>;
+  /** Provider-verified CLI fork invocation. It creates a new native identity,
+   * unlike resume, and is used only for terminal launches. */
+  nativeForkArgs?: (agentSessionId: string) => string[];
+}
+
 /** Inputs to a spec's `resolveTitle`. The `*Home` fields are test seams. */
 export interface TitleArgs {
   sessionId: string;
@@ -429,6 +449,8 @@ export interface AgentSpec {
    *  submitted. `[]` = no VERIFIED interactive form; see initial-prompt.ts for
    *  why an unverified `--` separator is worse than the misparse it guards. */
   initialPrompt: (prompt: string) => string[];
+  /** Every registered agent must explicitly say how it supplies fork context. */
+  fork: AgentForkSupport;
   /** Extra launch environment, applied only on the registry-key launch path.
    *  Either a generated config file the agent needs in order to notify, or a
    *  behaviour switch the bridge must pin for every spawn. Absent = neither. */

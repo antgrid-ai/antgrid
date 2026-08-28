@@ -1873,6 +1873,17 @@ export class HostServer {
     if (!isManagedCheckoutKind(session.checkoutKind)) {
       return SessionManager.deletePersisted(resolveAbDir(), projectId, sessionId);
     }
+    // A forked "current workspace" session shares its checkout with siblings, so
+    // removing the worktree here would delete THEIR working tree — with the
+    // dirty/unpushed preflight having only ever looked at the shared tree, and
+    // `force` from a dialog that described this row's changes. Detach instead,
+    // mirroring SessionManager.deleteAttachedMemberLocked. `CheckoutRecord`'s
+    // singular `sessionId` is informational (nothing reads it), so the row can
+    // simply go.
+    const members = persisted.filter((entry) => entry.checkoutId === session.checkoutId);
+    if (members.length > 1) {
+      return SessionManager.deletePersisted(resolveAbDir(), projectId, sessionId);
+    }
     if (options.removeCheckout === false) {
       throw new WorktreeError("WORKTREE_CONFLICT", "An isolated session must remove its managed worktree when deleted.");
     }
