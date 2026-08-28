@@ -1149,6 +1149,13 @@ const SessionEntrySchema = z.object({
   deleting: z.boolean().default(false),
   tool: z.string().optional(),
   command: z.string().optional(),
+  // A current bridge derives this from the registry adapter. False by default
+  // keeps the menu hidden against an older bridge that cannot parse session:fork.
+  forkSupported: z.boolean().default(false),
+  // The session this one was forked from. Provenance rather than a link: the
+  // source may be renamed, archived or deleted, and no surface resolves it
+  // back — it is what survives the derived name once either side is renamed.
+  forkedFromSessionId: z.string().optional(),
   // Raw, shell-interpreted CLI-args string passed verbatim (not an argv array).
   args: z.string().optional(),
   mode: z.enum(["terminal", "chat"]).default("terminal"),
@@ -1176,6 +1183,8 @@ const SessionEntrySchema = z.object({
   checkoutKind: z.enum(["main", "managed-worktree", "external-worktree"]).default("main"),
   checkoutBranch: z.string().nullable().optional(),
   checkoutState: z.enum(["ready", "missing", "failed"]).default("ready"),
+  sharedWorkspace: z.boolean().default(false),
+  workspaceMemberCount: z.number().int().positive().default(1),
   // Provisioning of this session's own checkout (`worktree.setup`). Orthogonal
   // to `checkoutState`, deliberately: that answers "is this workspace usable",
   // this one "has provisioning finished" — a checkout is `ready` while setup is
@@ -1232,6 +1241,16 @@ const SessionCreateMessage = BaseMessage.extend({
   if (value.baseBranch && value.isolation !== "worktree") {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["baseBranch"], message: "baseBranch requires worktree isolation" });
   }
+});
+
+// A fork names only an existing bridge-owned session and its workspace policy.
+// In particular it never accepts an agent-native id, transcript, path, command
+// or argv from a client: all of those are local authority held by the bridge.
+const SessionForkMessage = BaseMessage.extend({
+  type: z.literal("session:fork"),
+  requestId: z.string(),
+  sourceSessionId: z.string(),
+  workspace: z.enum(["copy", "current"]),
 });
 
 const SessionStartMessage = BaseMessage.extend({
@@ -1819,6 +1838,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   SessionListMessage,
   SessionListResultMessage,
   SessionCreateMessage,
+  SessionForkMessage,
   SessionStartMessage,
   SessionStopMessage,
   SessionRenameMessage,
@@ -1957,6 +1977,7 @@ export type SessionEntry = z.infer<typeof SessionEntrySchema>;
 export type SessionList = z.infer<typeof SessionListMessage>;
 export type SessionListResult = z.infer<typeof SessionListResultMessage>;
 export type SessionCreate = z.infer<typeof SessionCreateMessage>;
+export type SessionFork = z.infer<typeof SessionForkMessage>;
 export type SessionStart = z.infer<typeof SessionStartMessage>;
 export type SessionStop = z.infer<typeof SessionStopMessage>;
 export type SessionRename = z.infer<typeof SessionRenameMessage>;
@@ -2105,7 +2126,7 @@ const KNOWN_TYPES = new Set<string>([
   "config:read", "config:read-result", "config:write", "config:write-result",
   "config:changed", "config:detect-tools", "config:detect-tools-result",
   "session:list", "session:list:result",
-  "session:create", "session:start", "session:stop",
+  "session:create", "session:fork", "session:start", "session:stop",
   "session:rename", "session:archive", "session:unarchive",
   "session:delete", "session:set-mode", "session:setup", "session:focus",
   "session:result", "session:updated",

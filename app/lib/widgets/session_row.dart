@@ -37,8 +37,10 @@ import 'agent_work_status_dot.dart';
 import 'drawer_entry_row.dart' show activateDrawerEntryById, ensureRemoteOnline;
 import 'session_delete_flow.dart';
 import 'session_deleting_badge.dart';
+import 'session_fork_dialog.dart';
 import 'session_isolation_badge.dart';
 import 'session_rename_dialog.dart';
+import 'session_shared_workspace_badge.dart';
 import 'session_start_refusal.dart';
 
 /// One row in the sessions sub-tree of [ProjectsDrawer]. Tapping focuses the
@@ -52,6 +54,13 @@ import 'session_start_refusal.dart';
 /// ~0.45 of the 3px free half-space ≈ a 1.3px nudge — the measured gap for a
 /// 14px line at 1.2 line-height.
 const double _dotOpticalYBias = 0.45;
+
+/// Shown when a `session:start` the user explicitly asked for gets no reply.
+/// One literal because the row tap and the kebab's Fork make the user the same
+/// promise, and a start that is still pending must not read as a failed one.
+const String _startNoAnswerMessage =
+    "The agent didn't answer. If the session doesn't come up in a moment, try "
+    'again.';
 
 class SessionRow extends ConsumerStatefulWidget {
   final String entryId;
@@ -302,6 +311,7 @@ class _SessionRowState extends ConsumerState<SessionRow> {
                       // persisted cache, which carries no setup state at all.
                       setup: ref.watch(sessionSetupProvider(session.id)),
                     ),
+                    SessionSharedWorkspaceBadge(session: session),
                     SessionDeletingBadge(deleting: deleting),
                   ],
                 ),
@@ -422,11 +432,7 @@ class _SessionRowState extends ConsumerState<SessionRow> {
           // Leaving the activeSessionId set while the surface never switches is
           // the worst of both — a tap that visibly did nothing.
           if (refusalHost.mounted) {
-            showAbSnackBar(
-              refusalHost,
-              "The agent didn't answer. If the session doesn't come up in a "
-              'moment, try again.',
-            );
+            showAbSnackBar(refusalHost, _startNoAnswerMessage);
           }
         }
         // A different project can be activated while start() is in flight. The
@@ -453,18 +459,8 @@ class _SessionRowState extends ConsumerState<SessionRow> {
     _showFocusedSessionSurface(ref);
   }
 
-  void _showFocusedSessionSurface(ProviderContainer ref) {
-    ref.read(workbenchSurfaceProvider.notifier).set(WorkbenchSurface.workspace);
-    ref
-        .read(navControllerProvider.notifier)
-        .commit(
-          NavLocation(
-            target: ref.read(selectedTargetProvider),
-            surface: WorkbenchSurface.workspace,
-            sessionId: session.id,
-          ),
-        );
-  }
+  void _showFocusedSessionSurface(ProviderContainer ref) =>
+      _showSessionSurface(ref, session.id);
 
   /// Inline rename field. Enter (onSubmitted) and blur (onFocusChange)
   /// commit; Escape (intercepted by the wrapping [Focus]) cancels.
@@ -518,7 +514,24 @@ class _SessionRowState extends ConsumerState<SessionRow> {
   }
 }
 
-enum _SessionAction { start, stop, rename, archive, delete }
+/// Puts the workspace surface in front of the user on [sessionId], and records
+/// it as the nav entry. Top-level so the row tap and the kebab's Fork land the
+/// user in exactly the same place — a forked session the user is not looking at
+/// is indistinguishable from a menu item that did nothing.
+void _showSessionSurface(ProviderContainer ref, String sessionId) {
+  ref.read(workbenchSurfaceProvider.notifier).set(WorkbenchSurface.workspace);
+  ref
+      .read(navControllerProvider.notifier)
+      .commit(
+        NavLocation(
+          target: ref.read(selectedTargetProvider),
+          surface: WorkbenchSurface.workspace,
+          sessionId: sessionId,
+        ),
+      );
+}
+
+enum _SessionAction { start, stop, fork, rename, archive, delete }
 
 /// One kebab-menu outcome. Sealed rather than a flat enum because the
 /// working-directory rows carry which app was picked, and because the dispatch
@@ -634,6 +647,26 @@ class _SessionMenu extends ConsumerWidget {
             session.running ? _SessionAction.stop : _SessionAction.start,
           ),
         ),
+        if (session.forkSupported)
+          AbMenuItem(
+            label: 'Fork session',
+            value: const _RowAction(_SessionAction.fork),
+            // Greyed rather than dropped: `forkSupported` answers whether the
+            // AGENT can be forked, which is a permanent fact about the tool,
+            // while having something to fork is a fact about this session that
+            // its first turn fixes. Hiding the row for the second would teach
+            // the user the tool cannot do it at all.
+            //
+            // What the bridge actually reads is a native conversation id or the
+            // live terminal's scrollback (`captureForkTranscript`), and both
+            // inputs are already on the wire — so this mirrors the precondition
+            // rather than asking for it. Drift costs a refusal the branch below
+            // now reports, never a silence.
+            enabled: session.running || session.agentSessionId != null,
+            disabledReason:
+                'This session has nothing to fork yet. Start it and let the '
+                'agent reply first.',
+          ),
         const AbMenuItem(
           label: 'Rename',
           value: _RowAction(_SessionAction.rename),
@@ -715,6 +748,66 @@ class _SessionMenu extends ConsumerWidget {
           }
         case _SessionAction.stop:
           await svc.stopSession(session.id);
+        case _SessionAction.fork:
+          final workspace = await promptSessionFork(
+            anchor,
+            isolatedSource: sessionIsIsolated(session),
+          );
+          if (workspace == null || !anchor.mounted) return;
+          // Caught per-branch, per the contract above: every fork refusal the
+          // bridge documents — no captured transcript yet, a conversation past
+          // the handoff cap, a custom-command session, a missing checkout —
+          // arrives as a typed exception carrying the bridge's own sentence,
+          // and without this the menu item just appears to do nothing.
+          try {
+            final fork = await svc.fork(session.id, workspace: workspace);
+            // An `ok` carrying no session: there is nothing to start and
+            // nothing to land in, so say so rather than returning as though the
+            // fork had happened. The same answer the New Session canvas treats
+            // as a refused create.
+            if (fork == null) {
+              if (anchor.mounted) {
+                reportSessionNotice(
+                  anchor,
+                  sessionForkRefusalCopy(null, null),
+                );
+              }
+              return;
+            }
+            // Started before the focus switch, not after: focusing another
+            // project's row remounts the shell, whose bootstrap re-lists the
+            // sessions and auto-starts the one it adopts. Issuing the start
+            // first puts it ahead of that list on the same stream — the
+            // ordering the New Session canvas keeps, for the same reason.
+            //
+            // Neither failure abandons the focus below. The fork EXISTS by
+            // here and is the user's; a start that was refused is a session to
+            // land in and read the reason from, and one that never answered may
+            // still be coming up.
+            try {
+              final started = await svc.start(fork.id, raiseRefusal: true);
+              if (started == null && anchor.mounted) {
+                reportSessionNotice(
+                  anchor,
+                  sessionStartRefusalCopy(null, null),
+                );
+              }
+            } on SessionOperationException catch (error) {
+              if (anchor.mounted) reportStartRefusal(anchor, error);
+            } on TimeoutException {
+              if (anchor.mounted) {
+                reportSessionNotice(anchor, _startNoAnswerMessage);
+              }
+            }
+            if (anchor.mounted) await _focusSession(anchor, ref, svc, fork.id);
+          } on SessionOperationException catch (error) {
+            if (anchor.mounted) {
+              reportSessionNotice(
+                anchor,
+                sessionForkRefusalCopy(error.errorCode, error.message),
+              );
+            }
+          }
         case _SessionAction.rename:
           final name = await promptSessionRename(anchor, session.name);
           if (name != null && name.trim().isNotEmpty) {
@@ -739,6 +832,31 @@ class _SessionMenu extends ConsumerWidget {
     }
   }
 
+  /// Moves the user into [sessionId] in THIS row's project — the same
+  /// two-branch handshake the row tap performs. A focused project is a direct
+  /// write; another project's row seeds the intent and switches first, and a
+  /// switch that fails has to clear that intent or it leaks into the next,
+  /// unrelated project open.
+  Future<void> _focusSession(
+    BuildContext anchor,
+    ProviderContainer ref,
+    SessionsService svc,
+    String sessionId,
+  ) async {
+    if (ref.read(selectedRegistrationIdProvider) == entryId) {
+      ref.read(activeSessionIdProvider.notifier).set(sessionId);
+      svc.focus(sessionId);
+      _showSessionSurface(ref, sessionId);
+      return;
+    }
+    ref.read(pendingActiveSessionIdProvider.notifier).set(sessionId);
+    if (!await activateDrawerEntryById(anchor, ref, entryId)) {
+      ref.read(pendingActiveSessionIdProvider.notifier).set(null);
+      return;
+    }
+    _showSessionSurface(ref, sessionId);
+  }
+
   Future<void> _deleteSession(
     BuildContext context,
     ProviderContainer ref,
@@ -750,6 +868,7 @@ class _SessionMenu extends ConsumerWidget {
       context: context,
       sessionName: session.name,
       checkoutKind: session.checkoutKind,
+      sharedWorkspace: session.sharedWorkspace,
       sharedBody:
           'This permanently deletes "${session.name}" and terminates its agent process.',
       delete: ({force, deleteBranch}) =>

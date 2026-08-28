@@ -1212,6 +1212,29 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         })();
         break;
       }
+      case "session:fork": {
+        if (!sessions) {
+          sendAb(createMessage("session:result", {
+            requestId: msg.requestId, ok: false, error: "agent not ready",
+          }));
+          break;
+        }
+        const s = sessions;
+        // The manager resolves the source session, transcript, native tool and
+        // checkout. This handler intentionally forwards no path or native id.
+        void s.fork(msg.sourceSessionId, msg.workspace).then(
+          (entry) => sendAb(createMessage("session:result", {
+            requestId: msg.requestId, ok: true, session: entry, checkoutId: entry.checkoutId,
+          })),
+          (err) => sendAb(createMessage("session:result", {
+            requestId: msg.requestId,
+            ok: false,
+            error: err instanceof Error ? err.message : "Could not fork the session.",
+            ...(err instanceof WorktreeError ? { errorCode: err.code } : {}),
+          })),
+        );
+        break;
+      }
       case "session:start":
       case "session:stop":
       case "session:rename":
