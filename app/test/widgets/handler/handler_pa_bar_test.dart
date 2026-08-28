@@ -41,7 +41,8 @@ HandlerInstructionItem _item(String id, String text, String status) =>
     HandlerInstructionItem(id: id, text: text, status: status, createdAt: 1);
 
 /// [kind] null is the free-text row; 'resolve_in_session' is the option-based
-/// prompt only the transcript can resolve.
+/// prompt only the transcript can resolve; 'guard_blocked' is the report of an
+/// action Handler could not take, which only its card's Dismiss retires.
 HandlerEscalation _escalation(String id, {String? kind}) => HandlerEscalation(
   escalationId: id,
   terminalId: 't1',
@@ -421,6 +422,52 @@ void main() {
         ),
         'Your next message ends the pause — the prompt still needs the '
         'transcript',
+      );
+    });
+
+    test('a report is not counted among the questions a message clears', () {
+      // onUserReply keeps a guard_blocked row standing, so counting it would
+      // promise clearing the bridge refuses to do.
+      expect(
+        handlerTypingHint(
+          _armed(
+            runState: HandlerRunState.needsYou,
+            escalations: [
+              _escalation('e1'),
+              _escalation('b1', kind: 'guard_blocked'),
+            ],
+          ),
+        ),
+        'Your next message clears this question, answered or not',
+      );
+    });
+
+    test('a session standing only on reports warns about nothing', () {
+      // needs_you with nothing a typed line would clear: the bar has no promise
+      // to make, and the report goes away through its own Dismiss.
+      expect(
+        handlerTypingHint(
+          _armed(
+            runState: HandlerRunState.needsYou,
+            escalations: [_escalation('b1', kind: 'guard_blocked')],
+          ),
+        ),
+        isNull,
+      );
+    });
+
+    test('a report beside a prompt shrinks neither count wrongly', () {
+      expect(
+        handlerTypingHint(
+          _armed(
+            runState: HandlerRunState.needsYou,
+            escalations: [
+              _escalation('e1', kind: 'resolve_in_session'),
+              _escalation('b1', kind: 'guard_blocked'),
+            ],
+          ),
+        ),
+        'Answer the prompt in the transcript — not here',
       );
     });
 

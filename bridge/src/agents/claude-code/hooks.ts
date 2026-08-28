@@ -222,6 +222,14 @@ export async function toPosts(
     }
   }
   if (invocation.event === "notification") {
+    // Claude Code fires this same "notification" hook, with the identical
+    // "Claude is waiting for your input" message, both for a genuine mid-turn
+    // block (e.g. a question tool with no stop event yet) and for its generic
+    // post-completion idle nudge. We can't tell those apart from the message
+    // alone, so tag it "awaiting_input" rather than "permission_request" and
+    // let work-status.ts's turn-state-aware reduction decide whether it's a
+    // live call-to-action or a stale nudge to ignore.
+    const isWaitingNudge = !!input.message && /waiting/i.test(input.message);
     if (terminalId) {
       posts.push({
         port,
@@ -232,17 +240,14 @@ export async function toPosts(
           event: "awaiting_input",
           transcriptPath: input.transcript_path ?? "",
           sessionId: input.session_id ?? "",
+          // The same reading the /notify below branches on, carried so the host's
+          // stale-nudge drop cannot classify as an idle nudge the very invocation
+          // it is about to record as a live block: this POST is decided before
+          // that one has folded into the reduction it reads.
+          idleNudge: isWaitingNudge,
         },
       });
     }
-    // Claude Code fires this same "notification" hook, with the identical
-    // "Claude is waiting for your input" message, both for a genuine mid-turn
-    // block (e.g. a question tool with no stop event yet) and for its generic
-    // post-completion idle nudge. We can't tell those apart from the message
-    // alone, so tag it "awaiting_input" rather than "permission_request" and
-    // let work-status.ts's turn-state-aware reduction decide whether it's a
-    // live call-to-action or a stale nudge to ignore.
-    const isWaitingNudge = !!input.message && /waiting/i.test(input.message);
     posts.push({
       port,
       path: "/notify",

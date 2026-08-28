@@ -66,10 +66,13 @@ function promptLine(s: string): string {
 // belt-and-braces, not the guard — a prompt cannot bind the component it is
 // addressed to (spec §2.1). It earns its place by making well-formed output the
 // likely one: an evaluator that answers in prose gets its progress dropped, and
-// the item then sits open with nothing explaining why.
+// the item then sits open with nothing explaining why. The refused-transitions
+// section is the same bargain one pass later: the harness has already dropped
+// those moves, and stating why is what stops the next pass re-citing identically.
 export function buildDecidePrompt(opts: {
   goal: string; backlogText: string; context: string; transcriptPath?: string;
   floorWarnings?: string[];
+  evidenceRejections?: string[];
   // The agent being SUPERVISED, never the judge running this prompt — a
   // per-session judge pick can point at a different CLI entirely.
   agentTool?: string;
@@ -93,7 +96,8 @@ export function buildDecidePrompt(opts: {
     "- Report every item whose state changed as one entry in `transitions`.",
     "- Use ONLY the ids listed above, copied exactly. Any other id is discarded, and you cannot create an item — if the agent did something the backlog does not cover, describe it in `reason` instead.",
     "- Statuses: `queued` (waiting its turn — use it to revive a blocked item whose precondition is now met), `active` (being worked on now), `done` (finished), `blocked` (a precondition or dependency is unmet), `skipped` (no longer applicable — its condition turned out false, or a later item supersedes it), `failed` (attempted and could not be completed).",
-    "- Every transition to `done`, `skipped` or `failed` MUST carry `evidence`: a short verbatim quote from the context or transcript. One without it is discarded and the item stays open, so quote rather than paraphrase.",
+    "- Every transition to `done`, `skipped` or `failed` MUST carry `evidence`: a short verbatim quote copied character-for-character out of the RECENT CONTEXT block below, at least a phrase long. The harness searches that block for your quote — a paraphrase, a summary, or a quote from anywhere else is discarded and the item stays open. Never quote the item's own wording back; that says nothing about what happened.",
+    "- If an item names a slash command, `done` additionally requires a quote showing THAT command being invoked. A quote about some other, similar step does not close it, however real the quote is.",
     "- Report `done` only on evidence the work actually happened (test output, exit codes, a diff), never on intent or belief. `outcome` is your one-line summary for the user and never substitutes for evidence.",
     "- An item the agent has already satisfied on its own is `done` with that evidence — do not drive it again.",
     "",
@@ -113,6 +117,17 @@ export function buildDecidePrompt(opts: {
         "SAFETY WARNINGS ON YOUR OWN EARLIER REPLIES — these were sent anyway, and are recorded for the user:",
         ...opts.floorWarnings.map((w) => `- ${w}`),
         "Weigh them when composing this reply. If the same risk is unavoidable here, escalate instead of repeating it.",
+      ]
+      : []),
+    // Named as REFUSED, not as failed: the moves were well-formed and the judge
+    // has no other way to learn they never landed — the backlog it is handed next
+    // pass simply shows the items still open, which reads as work not yet done.
+    ...(opts.evidenceRejections?.length
+      ? [
+        "",
+        "TRANSITIONS THE HARNESS REFUSED LAST PASS — those items are still open:",
+        ...opts.evidenceRejections.map((r) => `- ${r}`),
+        "Cite differently or leave the item open; the same quote gets the same answer.",
       ]
       : []),
     // Two statements, never an empty header: an absent catalog is a real answer
@@ -138,7 +153,17 @@ export function buildDecidePrompt(opts: {
     "",
     "RECENT CONTEXT:",
     opts.context,
-    ...(opts.transcriptPath ? ["", `Fuller transcript at ${opts.transcriptPath} — read it if the excerpt is insufficient.`] : []),
+    // The transcript is background for REASONING and never a citation source: the
+    // harness grounds evidence against the RECENT CONTEXT block alone (it is the
+    // only text it holds), so an unqualified invitation to read further is an
+    // invitation to cite quotes every terminal transition then gets refused for.
+    ...(opts.transcriptPath
+      ? [
+        "",
+        `Fuller transcript at ${opts.transcriptPath} — read it if the excerpt is insufficient.`,
+        "Read it for background only: every `evidence` quote must still be copied out of the RECENT CONTEXT block above, which is the only text the harness can search. If what closes an item is not in that block, leave the item open and say so in `reason`.",
+      ]
+      : []),
     "",
     "Respond with ONLY a single JSON object, no prose, matching exactly:",
     '{"decision":"continue|handle|escalate","confidence":0.0,"reason":"...","reply":"(when handle, and only if action is omitted) text to send the agent","action":{"kind":"slash_command|none","value":"/verb <args>"},"notify":{"title":"...","body":"...","draftReply":"...","urgency":"normal|high"},"transitions":[{"id":"...","status":"queued|active|done|blocked|skipped|failed","evidence":"verbatim quote","outcome":"..."}]}',

@@ -96,6 +96,7 @@ export async function runDecision(opts: {
   tool: string; model?: string; goal: string; backlogText: string; context: string;
   transcriptPath?: string; cwd: string; timeoutMs?: number; spawn?: typeof Bun.spawn;
   floorWarnings?: string[];
+  evidenceRejections?: string[];
   agentTool?: string;
   commands?: CapCommand[];
   retryIfShape?: (decision: HandlerDecision) => string | null;
@@ -106,7 +107,7 @@ export async function runDecision(opts: {
     retryIf: opts.retryIfShape,
     makePrompt: (path) => buildDecidePrompt({
       goal: opts.goal, backlogText: opts.backlogText, context: opts.context, transcriptPath: path,
-      floorWarnings: opts.floorWarnings,
+      floorWarnings: opts.floorWarnings, evidenceRejections: opts.evidenceRejections,
       agentTool: opts.agentTool, commands: opts.commands,
     }),
     parse: (stdout) => {

@@ -375,6 +375,33 @@ class HandlerService {
     );
   }
 
+  /// Acknowledge a `guard_blocked` report — the only thing that retires one, on
+  /// either side of the wire. Nothing the agent or the user does next answers a
+  /// report about an action Handler never took.
+  ///
+  /// Refuses every other kind: the app-side mirror of the bridge's own refusal,
+  /// because a Dismiss on a live question would drop it more silently than any
+  /// path that exists today.
+  void dismiss(HandlerEscalation escalation) {
+    if (_disposed) return;
+    if (escalation.kind != 'guard_blocked') return;
+    _sendDismiss(escalation);
+    _dropRows(
+      escalation.terminalId,
+      (e) => e.escalationId != escalation.escalationId,
+    );
+  }
+
+  void _sendDismiss(HandlerEscalation escalation) {
+    session.send(
+      createAbMessage('handler:dismiss', {
+        'projectId': session.projectId,
+        'terminalId': escalation.terminalId,
+        'escalationId': escalation.escalationId,
+      }),
+    );
+  }
+
   /// The judge pick a picker would seed from (status snapshots and optimistic
   /// [arm] writes feed the cache). Null = never picked.
   ///
@@ -433,10 +460,12 @@ class HandlerService {
   /// reuse `terminal:input` (trailing `\r` submits the line, matching the
   /// bridge act path); chat slots send `agent:prompt` — the same inbound verb
   /// an app-composed message uses, which also resets the bridge's runaway
-  /// guard. Optimistically drops the terminal's free-text escalations AND
-  /// recomputes the answering session's pending count locally so the header pill
-  /// and tab badge don't show a stale "needs you" over an empty list for the
-  /// round-trip; the next handler:status snapshot reconciles authoritatively.
+  /// guard. Optimistically drops exactly the rows the bridge's own rule retires
+  /// (see [_survivesReply]) through [_dropRows].
+  ///
+  /// A `guard_blocked` row IS replyable — the sheet opens prefilled with the text
+  /// the guard refused — and sending is itself the explicit act on it, so its
+  /// dismiss goes out with the answer.
   ///
   /// Returns whether the answer reached the wire. Every refusal below leaves an
   /// unanswered escalation behind, so a surface that showed the send as
@@ -479,30 +508,60 @@ class HandlerService {
     // line clears the terminal's whole free-text set (below, and in the bridge), so a
     // sibling left out of this set comes back off the next status snapshot with its
     // one-tap chip live — and that tap puts a second line into a session the first
-    // one already unblocked.
+    // one already unblocked. A `guard_blocked` sibling is NOT one of those: the
+    // bridge does not retire it on a submitted line, so suppressing it here would
+    // hide a row the next snapshot still legitimately carries.
     for (final e in _state.escalations) {
       if (e.terminalId == escalation.terminalId &&
-          e.kind != 'resolve_in_session') {
+          e.kind != 'resolve_in_session' &&
+          e.kind != 'guard_blocked') {
         _answeredEscalations.add(e.escalationId);
       }
     }
     _answeredEscalations.add(escalation.escalationId);
+    // Sending your own words IS the explicit act on a report — the bridge cannot
+    // tell that line apart from an unrelated one, which is the whole reason the
+    // kind exists — so the dismiss rides along with it.
+    if (escalation.kind == 'guard_blocked') _sendDismiss(escalation);
+    _dropRows(
+      escalation.terminalId,
+      (e) => _survivesReply(e, escalation),
+    );
+    return true;
+  }
+
+  /// Whether [e] outlives the submitted line that answered [answered]. Exactly
+  /// the bridge's rule: an option-based prompt is unanswerable by a typed line,
+  /// and a report is not answered by one either — but the report the user
+  /// replied FROM is dismissed alongside the send, so it goes.
+  bool _survivesReply(HandlerEscalation e, HandlerEscalation answered) =>
+      e.kind == 'resolve_in_session' ||
+      (e.kind == 'guard_blocked' &&
+          e.escalationId != answered.escalationId);
+
+  /// Optimistically drop every row on [terminalId] that [survives] rejects, and
+  /// recompute the owning session's pending count so the header pill and tab
+  /// badge don't show a stale "needs you" over an empty list for the round trip.
+  /// The next `handler:status` snapshot reconciles authoritatively.
+  ///
+  /// Clearing wholesale instead would blank the pill over a session the bridge
+  /// still reports as needs_you and flip it back a round trip later — the
+  /// blank-over-a-blocked-agent flash this optimism exists to spare the user.
+  void _dropRows(
+    String terminalId,
+    bool Function(HandlerEscalation) survives,
+  ) {
     final sessions = Map<String, HandlerSessionState>.from(_state.sessions);
-    final answered = sessions[escalation.terminalId];
-    if (answered != null) {
-      // Exactly the bridge's rule: a submitted line retires the terminal's
-      // free-text rows and leaves every option-based prompt standing. Clearing
-      // wholesale would blank the pill over a session the bridge still reports
-      // as needs_you, then flip it back a round-trip later — the blank-over-a-
-      // blocked-agent flash this optimism is meant to spare the user.
-      final surviving = _survivingPrompts(answered.escalations);
-      sessions[escalation.terminalId] = answered.copyWith(
+    final owner = sessions[terminalId];
+    if (owner != null) {
+      final surviving = owner.escalations.where(survives).toList();
+      sessions[terminalId] = owner.copyWith(
         pendingEscalations: surviving.length,
         escalations: surviving,
         runState:
-            surviving.isEmpty && answered.runState == HandlerRunState.needsYou
+            surviving.isEmpty && owner.runState == HandlerRunState.needsYou
             ? HandlerRunState.watching
-            : answered.runState,
+            : owner.runState,
       );
     }
     _emit(
@@ -510,19 +569,11 @@ class HandlerService {
         sessions: sessions,
         escalations: [
           for (final e in _state.escalations)
-            if (e.terminalId != escalation.terminalId ||
-                e.kind == 'resolve_in_session')
-              e,
+            if (e.terminalId != terminalId || survives(e)) e,
         ],
       ),
     );
-    return true;
   }
-
-  List<HandlerEscalation> _survivingPrompts(List<HandlerEscalation> rows) => [
-    for (final e in rows)
-      if (e.kind == 'resolve_in_session') e,
-  ];
 
   /// Answer [escalation] by tapping one of its own quick choices (spec §4.6).
   /// [choiceId] is resolved against the offered set and the choice's `text` is

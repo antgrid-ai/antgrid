@@ -129,6 +129,38 @@ describe("buildDecidePrompt", () => {
     }
   });
 
+  // The gate downstream searches the RECENT CONTEXT block for the quote, so a
+  // judge told to cite "the context or transcript" loses real transitions to a
+  // rule it was never given.
+  it("narrows the evidence rule to a verbatim quote from the recent context", () => {
+    const p = buildDecidePrompt({ goal: GOAL, backlogText: BACKLOG_TEXT, context: "CTX" });
+    expect(p).toContain("character-for-character");
+    expect(p).toContain("RECENT CONTEXT");
+    expect(p).toContain("discarded and the item stays open");
+  });
+
+  it("states the command anchor for a done on a command-shaped item", () => {
+    const p = buildDecidePrompt({ goal: GOAL, backlogText: BACKLOG_TEXT, context: "CTX" });
+    expect(p).toContain("slash command");
+    expect(p).toContain("does not close it");
+  });
+
+  // Same absent-vs-empty discipline the floor warnings take: an empty list is a
+  // pass with nothing refused, and a header over no lines reads as one anyway.
+  it("renders the refused-transitions section only when there is something to say", () => {
+    const bare = buildDecidePrompt({ goal: GOAL, backlogText: BACKLOG_TEXT, context: "CTX" });
+    const empty = buildDecidePrompt({ goal: GOAL, backlogText: BACKLOG_TEXT, context: "CTX", evidenceRejections: [] });
+    for (const p of [bare, empty]) expect(p).not.toContain("THE HARNESS REFUSED");
+
+    const fed = buildDecidePrompt({
+      goal: GOAL, backlogText: BACKLOG_TEXT, context: "CTX",
+      evidenceRejections: ['"run /code-review --fix" — done needs evidence showing /code-review itself being run'],
+    });
+    expect(fed).toContain("THE HARNESS REFUSED");
+    expect(fed).toContain("showing /code-review itself being run");
+    expect(fed).toContain("the same quote gets the same answer");
+  });
+
   it("stands in for an empty goal and an empty backlog rather than rendering nothing", () => {
     const p = buildDecidePrompt({ goal: "", backlogText: "", context: "CTX" });
     expect(p).toContain("(none stated)");
@@ -138,6 +170,18 @@ describe("buildDecidePrompt", () => {
   it("adds transcript pull-through when a path is given", () => {
     const p = buildDecidePrompt({ goal: GOAL, backlogText: "", context: "CTX", transcriptPath: "/t.jsonl" });
     expect(p).toContain("/t.jsonl");
+  });
+
+  it("keeps the transcript out of the evidence rule it invites a judge past", () => {
+    // The harness grounds a citation against the RECENT CONTEXT block alone — it
+    // holds no other text — so an unqualified "read the fuller transcript" is an
+    // invitation to quote material every terminal transition is then refused for,
+    // leaving the item open forever with the runaway guard as its only exit.
+    const p = buildDecidePrompt({ goal: GOAL, backlogText: "", context: "CTX", transcriptPath: "/t.jsonl" });
+    const hint = p.slice(p.indexOf("Fuller transcript"));
+    expect(hint).toContain("background only");
+    expect(hint).toContain("RECENT CONTEXT");
+    expect(hint).toContain("leave the item open");
   });
 
   // Every handle decision used to be escalated by harness rules the judge was

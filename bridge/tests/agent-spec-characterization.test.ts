@@ -725,6 +725,10 @@ describe("hook posts", () => {
             event: "awaiting_input",
             transcriptPath: "/t",
             sessionId: "s3",
+            // The half that keeps the host's stale-nudge drop from silencing a
+            // genuine block: it must read the SAME classification the /notify
+            // below carries, which lands after it.
+            idleNudge: false,
           },
         },
         {
@@ -742,7 +746,10 @@ describe("hook posts", () => {
         stdin: JSON.stringify({ message: "Claude is WAITING for your input" }),
       });
       expect(posts.map((p) => p.body)).toEqual([
-        { terminalId: TERM, agent: "claude", event: "awaiting_input", transcriptPath: "", sessionId: "" },
+        {
+          terminalId: TERM, agent: "claude", event: "awaiting_input",
+          transcriptPath: "", sessionId: "", idleNudge: true,
+        },
         { type: "awaiting_input", terminalId: TERM, message: "Claude is WAITING for your input" },
       ]);
     });

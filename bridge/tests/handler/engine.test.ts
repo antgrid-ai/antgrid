@@ -33,6 +33,25 @@ function sessionRecord(over: Partial<HandlerSessionRecord> = {}): HandlerSession
 
 interface FakeTimer { ms: number; fn: () => void; cancelled: boolean; fired: boolean }
 
+// A terminal transition's evidence is graded against the material the judge was
+// shown, so a fixture citing text the fake output never contained has every
+// transition in this file refused — and the suite then passes while asserting
+// nothing about the transitions it thinks it is exercising. This is that
+// material, written out once: deliberately NOT derived from whatever a test
+// happens to cite, because a corpus that echoes the test's own evidence makes
+// the gate unfalsifiable here.
+const EVIDENCE_TAIL = [
+  "tests passed",
+  "already applied upstream",
+  "ran to completion",
+  "moot after the rewrite",
+  "shipped to main",
+  "compiler said no",
+  "merged upstream",
+  "no longer needed",
+  "reverted by hand",
+].join("\n");
+
 function makeEngine(overrides: Record<string, unknown> = {}) {
   const sent: AbMessage[] = [];
   const injected: Array<[string, string]> = [];
@@ -55,7 +74,9 @@ function makeEngine(overrides: Record<string, unknown> = {}) {
     projectId: "proj", projectPath: () => "/proj", tool: () => "claude-code", abDir: "/tmp/unused",
     adapter: {
       injectReply: (id: string, t: string) => { injected.push([id, t]); },
-      recentOutput: () => `pty-tail ${ptyReads++}`,
+      // The counter stays LAST so outputSnippet's last-three-lines rule still sees
+      // it: a notify-only escalation asserts on "pty-tail" reaching the phone.
+      recentOutput: () => `${EVIDENCE_TAIL}\npty-tail ${ptyReads++}`,
       transcriptPath: () => "/t.jsonl",
       outputKind: () => "pty",
       commandCatalog: () => undefined,
@@ -743,7 +764,7 @@ describe("backlog transitions", () => {
   it("a completed item is one-way: a later transition on it is rejected", async () => {
     const { engine, activity } = makeEngine({
       runDecisionFn: async () => decide({
-        transitions: [{ id: "a", status: "done", evidence: "ran" }],
+        transitions: [{ id: "a", status: "done", evidence: "ran to completion" }],
       }),
     });
     engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a"), item("b")], notifyOnly: false });
@@ -759,7 +780,7 @@ describe("backlog transitions", () => {
     const progressed: string[] = [];
     const orig = guard.recordProgress.bind(guard);
     guard.recordProgress = (id: string) => { progressed.push(id); orig(id); };
-    let transitions: ItemTransition[] = [{ id: "a", status: "skipped", evidence: "moot" }];
+    let transitions: ItemTransition[] = [{ id: "a", status: "skipped", evidence: "moot after the rewrite" }];
     const { engine } = makeEngine({ guard, runDecisionFn: async () => decide({ transitions }) });
     engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a"), item("b")], notifyOnly: false });
 
@@ -768,7 +789,7 @@ describe("backlog transitions", () => {
     // backlog could hold the consecutive-auto-reply cap open forever.
     expect(progressed).toEqual([]);
 
-    transitions = [{ id: "b", status: "done", evidence: "shipped" }];
+    transitions = [{ id: "b", status: "done", evidence: "shipped to main" }];
     await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
     expect(progressed).toEqual(["t1"]);
   });
@@ -779,7 +800,12 @@ describe("backlog transitions", () => {
   // drawn from noise, and one such pass marked an item `done` off a re-read of a
   // message it had already judged.
   describe("stale-context guard", () => {
-    const frozen = { recentOutput: () => "same tail", transcriptPath: () => undefined };
+    const frozen = {
+      // Constant BETWEEN passes, which is the point here — and long enough to
+      // ground the citation these tests move an item on.
+      recentOutput: () => "same tail · shipped to main",
+      transcriptPath: () => undefined,
+    };
 
     it("skips a second pass over context the judge has already ruled on", async () => {
       let judged = 0;
@@ -803,7 +829,7 @@ describe("backlog transitions", () => {
     // — where it found a sentence that merely resembled the unblocked item.
     it("a backlog move of its own is not news enough to re-judge", async () => {
       let judged = 0;
-      const transitions: ItemTransition[] = [{ id: "a", status: "done", evidence: "shipped" }];
+      const transitions: ItemTransition[] = [{ id: "a", status: "done", evidence: "shipped to main" }];
       const { engine } = makeEngine({
         adapter: { injectReply: () => {}, outputKind: () => "pty", commandCatalog: () => undefined, ...frozen },
         runDecisionFn: async () => { judged++; return decide({ transitions }); },
@@ -895,6 +921,258 @@ describe("backlog transitions", () => {
   });
 });
 
+// A non-empty `evidence` string is not a citation: a judge clears that by
+// paraphrasing, inventing, or — the incident these tests exist for — quoting a
+// real sentence about something else entirely. The gate grades the
+// quote against the context THIS pass was judged on, and against the command the
+// item names. What it cannot do is judge attribution; that limit is stated in
+// backlog.ts and pinned in backlog.test.ts.
+describe("evidence citations", () => {
+  const PTY = {
+    injectReply: () => {},
+    transcriptPath: () => undefined,
+    outputKind: () => "pty" as const,
+    commandCatalog: () => undefined,
+  };
+
+  it("grades the citation against THIS pass's context, not a pass already gone", async () => {
+    // Scrollback moves on. A quote that was honest two passes ago is no longer
+    // checkable, and accepting it would make the corpus the whole session's
+    // history — which is not the window the judge is reasoning over.
+    const tails = ["the migration landed cleanly", "compiling the workspace now"];
+    let n = 0;
+    let transitions: ItemTransition[] = [];
+    const { engine, sent } = makeEngine({
+      adapter: { ...PTY, recentOutput: () => tails[n++] ?? "" },
+      runDecisionFn: async () => decide({ transitions }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")], notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    transitions = [{ id: "a", status: "done", evidence: "the migration landed cleanly" }];
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(statusOf(sent).backlog[0].status).toBe("queued");
+  });
+
+  it("writes one evidence_rejected row carrying the item and the reason, and no item_done", async () => {
+    const { engine, activity } = makeEngine({
+      runDecisionFn: async () => decide({
+        transitions: [{ id: "a", status: "done", evidence: "everything is finished and green" }],
+      }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")], notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const rows = records(activity, "evidence_rejected") as Array<{ reason: string; detail?: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].reason).toBe("item a");
+    expect(rows[0].detail).toContain("not in the context");
+    expect(records(activity, "item_done")).toHaveLength(0);
+  });
+
+  it("a repeat refusal on the same item is logged again but not fed to the user twice", async () => {
+    // One row per ITEM: the feed is a history of what happened to the backlog,
+    // not a transcript of how many ways the judge tried to close one line.
+    const { engine, activity } = makeEngine({
+      runDecisionFn: async () => decide({
+        transitions: [{ id: "a", status: "done", evidence: "everything is finished and green" }],
+      }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")], notifyOnly: false });
+    const logged = await capturingWarnings(async () => {
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    });
+    expect(records(activity, "evidence_rejected")).toHaveLength(1);
+    expect(logged.match(/not in the context/g)).toHaveLength(2);
+  });
+
+  it("a refused completion lifts no runaway cap and wraps nothing up", async () => {
+    // The failure direction of the whole gate: the session stays open with the
+    // item unfinished, rather than the user being told work landed that did not.
+    const guard = new RunawayGuard();
+    const progressed: string[] = [];
+    const orig = guard.recordProgress.bind(guard);
+    guard.recordProgress = (id: string) => { progressed.push(id); orig(id); };
+    const { engine, sent, activity } = makeEngine({
+      guard,
+      runDecisionFn: async () => decide({
+        transitions: [{ id: "a", status: "done", evidence: "I completed the whole backlog" }],
+      }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")], notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(progressed).toEqual([]);
+    expect(records(activity, "wrapped_up")).toHaveLength(0);
+    expect(statusOf(sent).backlog[0].status).toBe("queued");
+  });
+
+  it("feeds the refusals into the next decide prompt, keeping only the most recent few", async () => {
+    const seen: Array<string[] | undefined> = [];
+    let transitions: ItemTransition[] = [];
+    const { engine } = makeEngine({
+      runDecisionFn: async (o: { evidenceRejections?: string[] }) => {
+        seen.push(o.evidenceRejections ? [...o.evidenceRejections] : undefined);
+        return decide({ transitions });
+      },
+    });
+    engine.arm({
+      terminalId: "t1", goal: GOAL, notifyOnly: false,
+      backlog: ["a", "b", "c", "d"].map((id) => item(id)),
+    });
+    for (const id of ["a", "b", "c", "d"]) {
+      transitions = [{ id, status: "done", evidence: `nothing on record about ${id}` }];
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    }
+    transitions = [];
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+
+    expect(seen[0]).toEqual([]);
+    expect(seen[1]?.[0]).toContain("item a");
+    const last = seen.at(-1)!;
+    expect(last).toHaveLength(3);
+    // The oldest is what falls off: a stale refusal teaches less than a fresh one.
+    expect(last[0]).toContain("item b");
+    expect(last[2]).toContain("item d");
+  });
+
+  it("a grounded, anchored completion still wraps up and pushes", async () => {
+    // The gate is a narrowing, not a blanket refusal — an honest citation of the
+    // command the item named closes it exactly as before.
+    const { engine, activity, pushes } = makeEngine({
+      adapter: {
+        ...PTY,
+        recentOutput: () => "> /code-review --fix\nreview complete, no findings",
+      },
+      runDecisionFn: async () => decide({
+        transitions: [{ id: "a", status: "done", evidence: "> /code-review --fix" }],
+      }),
+    });
+    engine.arm({
+      terminalId: "t1", goal: GOAL, notifyOnly: false,
+      backlog: [item("a", { text: "run /code-review --fix" })],
+    });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(records(activity, "wrapped_up")).toHaveLength(1);
+    expect(pushes).toHaveLength(1);
+  });
+
+  it("refuses a real quote about a different review on a command-shaped item", async () => {
+    // The reported incident, end to end: the sentence is genuinely in the context
+    // and says nothing about the command the item asked for.
+    const { engine, sent, activity } = makeEngine({
+      adapter: {
+        ...PTY,
+        recentOutput: () => "running my own review of the changes\nreview complete, no findings",
+      },
+      runDecisionFn: async () => decide({
+        transitions: [{ id: "a", status: "done", evidence: "review complete, no findings" }],
+      }),
+    });
+    engine.arm({
+      terminalId: "t1", goal: GOAL, notifyOnly: false,
+      backlog: [item("a", { text: "run /code-review --fix" })],
+    });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(statusOf(sent).backlog[0].status).toBe("queued");
+    expect(records(activity, "wrapped_up")).toHaveLength(0);
+    const rows = records(activity, "evidence_rejected") as Array<{ detail?: string }>;
+    expect(rows[0]?.detail).toContain("/code-review");
+  });
+
+  // `commandTokens` reads shape alone, so a route or a path segment in the user's
+  // own wording anchors an item to a quote no honest sentence can contain. Left
+  // alone that is permanent: the item never closes, wrap-up never fires, no
+  // progress is banked, and the runaway cap eventually raises a report the user
+  // has to dismiss by hand. Two answers, and the session gets whichever it can.
+  describe("an item whose text carries a command-shaped token that is not a command", () => {
+    const ROUTE = "Fix the /login redirect so it lands on the dashboard";
+    const LANDED = "LoginRedirect.tsx updated; login now redirects to /dashboard";
+
+    /** Fresh output each pass — a repeated context is skipped unjudged by
+     *  lastJudgedContextHash, which would stall the refusal count this exercises. */
+    function routeEngine(over: Record<string, unknown> = {}) {
+      let n = 0;
+      return makeEngine({
+        adapter: { ...PTY, recentOutput: () => `${LANDED}
+pass ${n++}` },
+        runDecisionFn: async () => decide({
+          transitions: [{ id: "a", status: "done", evidence: LANDED }],
+        }),
+        ...over,
+      });
+    }
+
+    it("closes on the first pass when the session's catalog says the token is no command", async () => {
+      const { engine, activity } = routeEngine({
+        adapter: {
+          ...PTY,
+          recentOutput: () => LANDED,
+          commandCatalog: () => [{ id: "cmd:code-review", name: "code-review" }],
+        },
+      });
+      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false, backlog: [item("a", { text: ROUTE })] });
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(records(activity, "wrapped_up")).toHaveLength(1);
+    });
+
+    it("gives up the anchor after a bounded number of refusals when there is no catalog", async () => {
+      // A PTY has no catalog and cannot get one, so nothing can prove the token is
+      // not a command — the anchor is asked for and then, once it has plainly gone
+      // unanswered, dropped. Grounding is what still holds.
+      const guard = new RunawayGuard();
+      const progressed: string[] = [];
+      const orig = guard.recordProgress.bind(guard);
+      guard.recordProgress = (id: string) => { progressed.push(id); orig(id); };
+      const { engine, sent, activity } = routeEngine({ guard });
+      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false, backlog: [item("a", { text: ROUTE })] });
+      for (let i = 0; i < 3; i++) await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(statusOf(sent).backlog[0].status).toBe("queued");
+      expect(progressed).toEqual([]);
+      await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(records(activity, "wrapped_up")).toHaveLength(1);
+      expect(progressed).toEqual(["t1"]);
+    });
+
+    it("the waiver buys nothing for a quote that is not in the context", async () => {
+      // What is waived is the demand for a token, never the demand for a citation.
+      let n = 0;
+      const { engine, sent } = makeEngine({
+        adapter: { ...PTY, recentOutput: () => `${LANDED}
+pass ${n++}` },
+        runDecisionFn: async () => decide({
+          transitions: [{ id: "a", status: "done", evidence: "the redirect works now" }],
+        }),
+      });
+      engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false, backlog: [item("a", { text: ROUTE })] });
+      for (let i = 0; i < 5; i++) await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+      expect(statusOf(sent).backlog[0].status).toBe("queued");
+    });
+  });
+
+  it("stops telling the judge an item is still open once it has closed", async () => {
+    // The section is headed "those items are still open". An entry that outlives
+    // its item's completion contradicts the BACKLOG block in the same prompt and
+    // asks for a re-citation of work already banked.
+    const seen: Array<string[] | undefined> = [];
+    let evidence = "nothing on record about a";
+    let n = 0;
+    const { engine } = makeEngine({
+      adapter: { ...PTY, recentOutput: () => `merged upstream
+pass ${n++}` },
+      runDecisionFn: async (o: { evidenceRejections?: string[] }) => {
+        seen.push(o.evidenceRejections ? [...o.evidenceRejections] : undefined);
+        return decide({ transitions: [{ id: "a", status: "done", evidence }] });
+      },
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false, backlog: [item("a"), item("b")] });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    evidence = "merged upstream";
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(seen[1]?.[0]).toContain("item a");
+    expect(seen[2]).toEqual([]);
+  });
+});
+
 describe("wrap-up", () => {
   it("wraps up once every item is terminal, including failed and skipped ones", async () => {
     // The deadlock fix: an item nobody could reach used to hold the session
@@ -904,7 +1182,7 @@ describe("wrap-up", () => {
       sendPush: (m: string) => pushes.push(m),
       runDecisionFn: async () => decide({
         transitions: [
-          { id: "a", status: "done", evidence: "merged" },
+          { id: "a", status: "done", evidence: "merged upstream" },
           { id: "b", status: "failed", evidence: "compiler said no" },
           { id: "c", status: "skipped", evidence: "no longer needed" },
         ],
@@ -935,7 +1213,7 @@ describe("wrap-up", () => {
     const { engine } = makeEngine({
       sendPush: (m: string) => pushes.push(m),
       runDecisionFn: async () => decide({
-        transitions: ["a", "b", "c", "d"].map((id) => ({ id, status: "skipped" as const, evidence: "moot" })),
+        transitions: ["a", "b", "c", "d"].map((id) => ({ id, status: "skipped" as const, evidence: "moot after the rewrite" })),
       }),
     });
     engine.arm({
@@ -959,7 +1237,7 @@ describe("wrap-up", () => {
     const { engine, injected, activity } = makeEngine({
       runDecisionFn: async () => decide({
         decision: "handle", reply: "yes, finish",
-        transitions: [{ id: "a", status: "done", evidence: "ran" }],
+        transitions: [{ id: "a", status: "done", evidence: "ran to completion" }],
       }),
     });
     engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")], notifyOnly: false });
@@ -972,7 +1250,7 @@ describe("wrap-up", () => {
     const { engine, sent, activity } = makeEngine({
       runDecisionFn: async () => decide({
         decision: "escalate",
-        transitions: [{ id: "a", status: "done", evidence: "ran" }],
+        transitions: [{ id: "a", status: "done", evidence: "ran to completion" }],
       }),
     });
     engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")], notifyOnly: false });
@@ -987,7 +1265,7 @@ describe("wrap-up", () => {
     // backlog, so without the guard the next continue auto-disarms and silently
     // buries the unanswered question.
     let d: HandlerDecision = decide({
-      decision: "escalate", transitions: [{ id: "a", status: "done", evidence: "ran" }],
+      decision: "escalate", transitions: [{ id: "a", status: "done", evidence: "ran to completion" }],
     });
     const { engine, sent, activity } = makeEngine({ runDecisionFn: async () => d });
     engine.arm({ terminalId: "t1", goal: GOAL, backlog: [item("a")], notifyOnly: false });
@@ -1691,6 +1969,16 @@ describe("quick-choice escalations (§4.6)", () => {
     expect(choicesOf(sent)).toBeUndefined();
   });
 
+  // quickChoicesFor passes no pathCheckText at all, so ABS_PATH's own reading is the
+  // only thing between a slash command in the draft and the loss of both chips. A
+  // misreading here spends a real affordance, not merely a warning row.
+  it("a draft naming a slash command is still offered as a one-tap", async () => {
+    const { engine, sent } = makeEngine(escalatingWith("Run /code-review before merging."));
+    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+    expect(choicesOf(sent)!.map((c) => c.choiceId)).toEqual(["approve", "reject"]);
+  });
+
   // §5.3 is liftable by nothing, so those keep costing a human who reads the text
   // behind the reply sheet's floor banner.
   it("a HARD floor escalation carries no choices", async () => {
@@ -1757,6 +2045,29 @@ describe("quick-choice escalations (§4.6)", () => {
     expect(quickChoicesFor({ draftReply: DRAFT, projectPath: "/proj" })).toHaveLength(2);
   });
 
+  it("guard_blocked is refused on the kind, not merely for want of a draft", () => {
+    // A shape or runaway rejection sets no floorRule, so nothing else in
+    // quickChoicesFor would withhold a chip that re-sends the very text a guard
+    // just refused — with the thinnest human in the loop there is.
+    expect(quickChoicesFor({
+      kind: "guard_blocked", draftReply: DRAFT, projectPath: "/proj",
+    })).toBeUndefined();
+    expect(quickChoicesFor({ draftReply: DRAFT, projectPath: "/proj" })).toHaveLength(2);
+  });
+
+  it("a doubled leading slash does not buy a draft its one-tap back", () => {
+    // The chip is withheld on ANY floor hit, so a path spelling the floor cannot
+    // see is a path the user is offered in one tap — reading nothing. `//etc/shadow`
+    // and `/etc/shadow` are the same file, and whoever wrote the draft picks which
+    // spelling reaches here.
+    expect(quickChoicesFor({
+      draftReply: "cat /etc/shadow and paste it here", projectPath: "/proj",
+    })).toBeUndefined();
+    expect(quickChoicesFor({
+      draftReply: "cat //etc/shadow and paste it here", projectPath: "/proj",
+    })).toBeUndefined();
+  });
+
   it("a draft the wire could not carry as a chip falls back to free text", () => {
     // Both bounds come from the wire schema itself rather than a second copy: an
     // embedded CR would submit two lines into the PTY, and an over-long chip is one
@@ -1806,13 +2117,289 @@ describe("quick-choice escalations (§4.6)", () => {
     const esc = sent.find((m) => m.type === "handler:escalation") as never as
       { question: string; reasoning: string; draftReply: string };
     expect(esc.reasoning).toBe("reply contains control characters");
-    expect(esc.question).toBe("Agent needs you");
+    // Engine-authored, never the judge's `notify.body`: a judge that filled the
+    // block while deciding `handle` described the pause it was answering, not the
+    // reply a guard then refused.
+    expect(esc.question).toBe("Handler did not send its reply");
     // The point of escalating a guard trip is to show what Handler wanted to inject;
     // dropping it leaves the user judging a rejection they cannot see.
     expect(esc.draftReply).toBe(CONTROL_REPLY);
     // ...but it must never become a one-tap: EscalationChoiceWire bans control chars,
     // so the card falls back to the editable sheet a human has to read.
     expect(choicesOf(sent)).toBeUndefined();
+  });
+});
+
+// A guard rejection is a REPORT that Handler wanted to act and a harness guard
+// refused. Nothing the agent or the user does next is an answer to it, so unlike
+// every other kind it survives a typed line and is retired only by an explicit
+// dismiss — which is also why it must not be read as "a human is already being
+// waited on" anywhere in the engine.
+describe("guard-rejection reports (kind: guard_blocked)", () => {
+  const CATALOG: CapCommand[] = [{ id: "cmd:code-review", name: "code-review" }];
+
+  interface EscFrame {
+    escalationId: string; kind?: string; question: string; reasoning: string;
+    draftReply: string; floorRule?: string; choices?: unknown[];
+  }
+  function escalations(sent: AbMessage[]): EscFrame[] {
+    return sent.filter((m) => m.type === "handler:escalation") as never as EscFrame[];
+  }
+  function rowsOf(sent: AbMessage[]): Array<{ escalationId: string; kind?: string }> {
+    const status = sent.filter((m) => m.type === "handler:status").at(-1) as never as {
+      sessions: Array<{ escalations: Array<{ escalationId: string; kind?: string }> }>;
+    };
+    return status.sessions[0]?.escalations ?? [];
+  }
+  function blockedRecord(over: Partial<HandlerSessionRecord> = {}): HandlerSessionRecord {
+    return sessionRecord({
+      escalations: [{
+        escalationId: "b0", question: "Handler did not send its reply",
+        reasoning: "reply contains control characters", draftReply: "yes\x1b[B",
+        urgency: "normal", at: 1, kind: "guard_blocked",
+      }],
+      ...over,
+    });
+  }
+  // Same varying tail the shared fixture uses: a constant one would make two
+  // distinct pauses hash the same and the second would be skipped unjudged.
+  function withCatalog(overrides: Record<string, unknown> = {}) {
+    const injected: Array<[string, string]> = [];
+    let reads = 0;
+    const engine = makeEngine({
+      adapter: {
+        injectReply: (id: string, t: string) => { injected.push([id, t]); },
+        recentOutput: () => `pty-tail ${reads++}`,
+        transcriptPath: () => undefined,
+        outputKind: () => "pty",
+        commandCatalog: () => CATALOG,
+      },
+      ...overrides,
+    });
+    return { ...engine, injected };
+  }
+
+  // The reported symptom's own source row: Handler picked a slash command the
+  // session's catalog does not carry, the shape guard refused it, and the user
+  // has to be able to learn that happened.
+  it("a shape rejection escalates with kind guard_blocked and no choices", async () => {
+    const { engine, sent, injected } = withCatalog({
+      runDecisionFn: async () => decide({
+        decision: "handle", action: { kind: "slash_command", value: "/invented --fix" },
+      }),
+    });
+    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "c1", event: "turn_end" });
+    expect(injected).toHaveLength(0);
+    const [esc] = escalations(sent);
+    expect(esc!.kind).toBe("guard_blocked");
+    expect(esc!.question).toBe("Handler did not send its reply");
+    expect(esc!.reasoning).toContain("/invented");
+    expect(esc!.choices).toBeUndefined();
+    expect(statusOf(sent).state).toBe("needs_you");
+  });
+
+  it("a hard-floor rejection and a runaway rejection carry the same kind", async () => {
+    const floor = makeEngine({
+      runDecisionFn: async () => decide({ decision: "handle", reply: "mkfs.ext4 /dev/sdb" }),
+    });
+    floor.engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    await floor.engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const [floored] = escalations(floor.sent);
+    expect(floored!.kind).toBe("guard_blocked");
+    // The §5.3 rule still rides the row: the card names which floor refused it.
+    expect(floored!.floorRule).toBeTruthy();
+
+    const runaway = makeEngine({
+      runDecisionFn: async () => decide({ decision: "handle", reply: "carry on" }),
+    });
+    runaway.engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    await runaway.engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await runaway.engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(runaway.injected).toEqual([["t1", "carry on"]]);
+    const [circular] = escalations(runaway.sent);
+    expect(circular!.reasoning).toContain("circular exchange");
+    expect(circular!.kind).toBe("guard_blocked");
+    expect(circular!.floorRule).toBeUndefined();
+  });
+
+  // The bug itself: an unrelated typed line took the report to disk with it, and
+  // the user never learned Handler had wanted to act.
+  it("a submitted line clears the reply rows beside a guard_blocked row and leaves it standing", async () => {
+    let d: HandlerDecision = decide({ decision: "handle", reply: "mkfs.ext4 /dev/sdb" });
+    const { engine, sent, saved } = makeEngine({ runDecisionFn: async () => d });
+    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    d = decide({ decision: "escalate" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    expect(rowsOf(sent).map((e) => e.kind)).toEqual(["guard_blocked", undefined]);
+
+    engine.onUserReply("t1", "never mind, do something else\r");
+    expect(rowsOf(sent).map((e) => e.kind)).toEqual(["guard_blocked"]);
+    expect(statusOf(sent).state).toBe("needs_you");
+    // …and on disk, which is where the report vanished from before.
+    const rec = saved.at(-1) as HandlerSessionRecord;
+    expect(rec.escalations.map((e) => e.kind)).toEqual(["guard_blocked"]);
+  });
+
+  it("an id-less prompt retraction keeps guard_blocked rows", async () => {
+    // An id-less retraction means every PROMPT is gone; a report is not a prompt,
+    // and no driver ever had anything to withdraw.
+    let d: HandlerDecision = decide({ decision: "handle", reply: "mkfs.ext4 /dev/sdb" });
+    const { engine, sent } = makeEngine({ runDecisionFn: async () => d });
+    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    d = decide({ decision: "escalate" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    engine.onPromptRetracted("t1");
+    expect(rowsOf(sent).map((e) => e.kind)).toEqual(["guard_blocked"]);
+    expect(statusOf(sent).state).toBe("needs_you");
+  });
+
+  it("dismissEscalation retires exactly the named row and rests the session", async () => {
+    const { engine, sent, saved } = makeEngine({
+      runDecisionFn: async () => decide({ decision: "handle", reply: "mkfs.ext4 /dev/sdb" }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const id = escalations(sent)[0]!.escalationId;
+    engine.dismissEscalation("t1", id);
+    expect(rowsOf(sent)).toHaveLength(0);
+    expect(statusOf(sent).state).toBe("watching");
+    expect((saved.at(-1) as HandlerSessionRecord).escalations).toEqual([]);
+  });
+
+  it("an unknown id, a reply row and a resolve_in_session row are all refused with a resync", async () => {
+    const { engine, sent } = makeEngine({ runDecisionFn: async () => decide({ decision: "escalate" }) });
+    engine.arm({ terminalId: "c1", goal: GOAL, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "c1", event: "turn_end" });
+    await engine.handleEvent({ terminalId: "c1", event: "permission_request", detail: "Bash: ls", promptId: "p1" });
+    const [reply, prompt] = escalations(sent);
+    expect(rowsOf(sent)).toHaveLength(2);
+
+    const statuses = () => sent.filter((m) => m.type === "handler:status").length;
+    for (const id of ["nope", reply!.escalationId, prompt!.escalationId]) {
+      const before = statuses();
+      engine.dismissEscalation("c1", id);
+      // A refusal is not silence: the sender is holding a row it may not retire
+      // this way, and the resync is what puts their list back.
+      expect(statuses()).toBe(before + 1);
+      expect(rowsOf(sent)).toHaveLength(2);
+    }
+    // An unarmed terminal is the same answer, and must not throw.
+    expect(() => engine.dismissEscalation("t-unknown", "nope")).not.toThrow();
+  });
+
+  it("a standing guard_blocked row suppresses no further escalation", async () => {
+    // notify-only: one unanswered QUESTION is enough, but a report is not one —
+    // reading it as one would silence the session for the rest of its life.
+    const notify = makeEngine({ loadSessionFn: () => blockedRecord() });
+    notify.engine.arm({ terminalId: "t1", notifyOnly: true });
+    await notify.engine.handleEvent({ terminalId: "t1", event: "awaiting_input" });
+    expect(escalations(notify.sent)).toHaveLength(1);
+
+    // The transient ceiling.
+    const transient = makeEngine({
+      loadSessionFn: () => blockedRecord(), runDecisionFn: async () => decide({}),
+    });
+    transient.engine.arm({ terminalId: "t1", notifyOnly: false });
+    for (let i = 0; i < 3; i++) {
+      await transient.engine.handleEvent({ terminalId: "t1", event: "turn_failed" });
+      const t = transient.timers.at(-1)!;
+      if (!t.fired && !t.cancelled) t.fn();
+    }
+    expect(escalations(transient.sent).map((e) => e.reasoning)).toContain("repeated transient failures");
+
+    // The limit-park ceiling.
+    const limit = makeEngine({ loadSessionFn: () => blockedRecord() });
+    limit.engine.arm({ terminalId: "t1", notifyOnly: false });
+    for (let i = 0; i < LIMIT_PARK_CEILING; i++) {
+      await limit.engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+      const t = limit.timers.at(-1)!;
+      if (!t.fired && !t.cancelled) t.fn();
+    }
+    expect(escalations(limit.sent)).toHaveLength(1);
+  });
+
+  it("a standing guard_blocked row neither blocks wrap-up nor the park-timer nudge", async () => {
+    const { engine, activity, pushes } = makeEngine({
+      loadSessionFn: () => blockedRecord({ backlog: [item("a")] }),
+      runDecisionFn: async () => decide({ transitions: [{ id: "a", status: "done", evidence: "ran to completion" }] }),
+    });
+    engine.arm({ terminalId: "t1", notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    // Holding the wrap-up open would leave a finished session armed until somebody
+    // tapped Dismiss — so the push carries the report out instead.
+    expect(records(activity, "wrapped_up")).toHaveLength(1);
+    expect(pushes.at(-1)).toContain("1 action(s) Handler could not take");
+
+    const parked = makeEngine({ loadSessionFn: () => blockedRecord() });
+    parked.engine.arm({ terminalId: "t1", notifyOnly: false });
+    await parked.engine.handleEvent({ terminalId: "t1", event: "limit_hit" });
+    parked.timers.at(-1)!.fn();
+    // The nudge answers nothing a report asked, so a report must not strand it.
+    expect(parked.injected).toEqual([["t1", "continue"]]);
+  });
+
+  it("a guard_blocked row survives a suspend and a re-arm", () => {
+    const { engine, sent } = makeEngine({
+      loadSessionFn: () => blockedRecord({
+        armed: false, suspended: true,
+        escalations: [
+          {
+            escalationId: "b0", question: "Handler did not send its reply", reasoning: "r",
+            draftReply: "d", urgency: "normal", at: 1, kind: "guard_blocked",
+          },
+          {
+            escalationId: "p0", question: "Agent requests permission", reasoning: "r",
+            draftReply: "", urgency: "high", at: 2, kind: "resolve_in_session", promptId: "p1",
+          },
+        ],
+      }),
+    });
+    engine.arm({ terminalId: "t1", notifyOnly: false });
+    // The prompt row names a driver a restart rebuilt empty; the report names
+    // nothing that had to survive the runtime.
+    expect(rowsOf(sent).map((e) => e.escalationId)).toEqual(["b0"]);
+    expect(statusOf(sent).state).toBe("needs_you");
+  });
+
+  it("an identical repeat report is recorded in the feed but not raised twice", async () => {
+    const { engine, sent, activity } = makeEngine({
+      runDecisionFn: async () => decide({ decision: "handle", reply: "mkfs.ext4 /dev/sdb" }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    // A second copy costs the user a second Dismiss for a situation the open row
+    // already describes in the same words — but the feed still says it happened
+    // again, which is the fact worth keeping.
+    expect(escalations(sent)).toHaveLength(1);
+    expect(rowsOf(sent)).toHaveLength(1);
+    expect(records(activity, "escalate")).toHaveLength(2);
+    // The handle branch sets "handling" before the judge call and resets it
+    // nowhere else, so a dedup that returned early would leave the pill reporting
+    // work nobody is doing until the next event happened to land.
+    expect(statusOf(sent).state).toBe("needs_you");
+  });
+
+  it("a sixth standing report drops the oldest", async () => {
+    let n = 0;
+    const { engine, sent } = makeEngine({
+      // Distinct drafts, so each is a genuinely different refusal rather than the
+      // repeat the dedup above absorbs.
+      runDecisionFn: async () => decide({ decision: "handle", reply: `do thing ${n++}\x1b[B` }),
+    });
+    engine.arm({ terminalId: "t1", goal: GOAL, notifyOnly: false });
+    for (let i = 0; i < 6; i++) await engine.handleEvent({ terminalId: "t1", event: "turn_end" });
+    const raised = escalations(sent).map((e) => e.escalationId);
+    expect(raised).toHaveLength(6);
+    const standing = rowsOf(sent).map((e) => e.escalationId);
+    expect(standing).toHaveLength(5);
+    // The oldest goes rather than the newest: the list has to describe the
+    // situation the session is in now, and every report is in the feed regardless.
+    expect(standing).not.toContain(raised[0]);
+    expect(standing.at(-1)).toBe(raised[5]);
   });
 });
 
@@ -3064,7 +3651,7 @@ describe("snapshot-before-act (§5.2)", () => {
     const { engine, pushes } = makeEngine({
       runDecisionFn: async () => decide({
         decision: "handle", reply: RESET,
-        transitions: [{ id: "i1", status: "done", evidence: "reverted" }],
+        transitions: [{ id: "i1", status: "done", evidence: "reverted by hand" }],
       }),
       takeSnapshotsFn: snapshotter([]),
     });

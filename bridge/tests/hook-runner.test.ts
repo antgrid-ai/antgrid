@@ -116,7 +116,10 @@ describe("Claude hooks", () => {
       {
         port: 43123,
         path: "/handler-event",
-        body: { terminalId: "term-1", agent: "claude", event: "awaiting_input", transcriptPath: "/t", sessionId: "s3" },
+        body: {
+          terminalId: "term-1", agent: "claude", event: "awaiting_input",
+          transcriptPath: "/t", sessionId: "s3", idleNudge: false,
+        },
       },
     ]));
   });
@@ -287,7 +290,10 @@ describe("Claude hooks", () => {
       {
         port: 43123,
         path: "/handler-event",
-        body: { terminalId: "term-1", agent: "claude", event: "awaiting_input", transcriptPath: "", sessionId: "" },
+        body: {
+          terminalId: "term-1", agent: "claude", event: "awaiting_input",
+          transcriptPath: "", sessionId: "", idleNudge: true,
+        },
       },
     ]));
   });

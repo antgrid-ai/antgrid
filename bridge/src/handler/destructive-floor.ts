@@ -100,7 +100,27 @@ const SECRETS: RegExp[] = [
   /\bAKIA[0-9A-Z]{16}\b/,
 ];
 
-const ABS_PATH = /(?:^|[\s'"=])(\/[^\s'"]+|[A-Za-z]:\\[^\s'"]+)/g;
+// A path claim needs an INTERIOR separator. A slash command is "/"-shaped too, and
+// reading `/code-review` as an out-of-project path teaches the Assistant that its own
+// commands are dangerous — in the one channel (§5.1) that exists to teach it which of
+// its proposals actually are. reply-shape's VERB rule forbids a "/" inside a verb, so
+// an interior separator is precisely the shape a slash command can never have.
+//
+// The cost is the bare single-segment roots — `/tmp`, `/etc`, `/opt` — which no longer
+// register as a mention. Acting on one is still caught: the four tiers above scan the
+// full text, and authorization.ts's own outside-target check still reads them, so no
+// pattern lift can authorize `rm -rf /tmp`.
+//
+// The drive-letter branch keeps single-segment coverage (`C:\Temp`), because no slash
+// command can be spelled that way and there is nothing to disambiguate.
+//
+// `\/+` absorbs repeated leading slashes: `//etc/shadow` names the same file as
+// `/etc/shadow` on every POSIX kernel, and the leading anchor allows no restart on
+// an interior slash — so without it that spelling matched NEITHER branch. It cost
+// the warning and, because quickChoicesFor withholds its one-tap chip on any floor
+// hit, handed the draft a live Approve chip the single-slash spelling does not get.
+// Unlike the bare roots below it, that shape is chosen by whoever wrote the text.
+const ABS_PATH = /(?:^|[\s'"=])(\/+[^\s'"/]+\/[^\s'"]*|[A-Za-z]:\\[^\s'"]+)/g;
 
 // One synthetic key for every outside-project path, because this tier is lifted
 // literally (§5.4) — the path is the claim, the pattern never is.
@@ -158,11 +178,13 @@ function scan(
  *
  * pathCheckText scopes the outside-project check away from a slash command's VERB and
  * nothing else: engine.ts passes the judge's reply plus the command's argument tail, and
- * withholds the verb alone. A verb is "/"-shaped and callers join it right after a
- * newline, which the ABS_PATH anchor reads as a path start — so scanning it would warn on
- * every `/compact`. Its arguments are ordinary free text and DO get scanned, because an
- * absolute path there is a real one. The other tiers still scan the full `text` (the
- * default for pathCheckText too), so a verb smuggling one of those patterns is caught.
+ * withholds the verb alone. What makes that safe is reply-shape's VERB rule, which forbids
+ * both separators inside a verb — so no verb the harness will send can carry a path shape,
+ * whatever ABS_PATH happens to accept. Catalog membership is NOT the reason: a PTY session
+ * has no catalog and its verb is typed at the agent verbatim. Its arguments are ordinary
+ * free text and DO get scanned, because an absolute path there is a real one. The other
+ * tiers still scan the full `text` (the default for pathCheckText too), so a verb smuggling
+ * one of those patterns is caught.
  */
 export function classifyDestructive(text: string, projectPath: string, pathCheckText: string = text): FloorResult {
   const hard: FloorWarning[] = [];

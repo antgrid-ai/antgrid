@@ -159,6 +159,83 @@ test("Windows out-of-project path is flagged, in-project is not", () => {
 });
 
 // ---------------------------------------------------------------------------
+// The interior-separator rule, both sides of its trade. A slash command read as a
+// path corrupts the §5.1 channel that exists to teach the Assistant which of its own
+// proposals were dangerous, so a "/"-led token only counts as a path once it carries
+// a separator INSIDE it — the one shape reply-shape's VERB rule forbids a verb to have.
+// What that gives up is the bare top-level roots; the tiers that scan the full text
+// are what bound the loss.
+// ---------------------------------------------------------------------------
+
+test("a slash command in prose is not read as a path", () => {
+  for (const text of ["run /code-review next", "use /init to bootstrap the repo", "then /compact"]) {
+    expect(warnsWith(text, "ABS_PATH")).toBe(false);
+  }
+});
+
+test("a slash command in an argument tail is not read as a path", () => {
+  // Mirrors the engine's reply + argument-tail join — the half the verb scoping was
+  // never able to cover, since only the verb is withheld.
+  const r = classifyDestructive("looks good\n/review /code-review", PROJECT, "looks good\n/code-review");
+  expect(r.warnings.some((w) => w.tier === "ABS_PATH")).toBe(false);
+});
+
+test("the accepted trade: a bare top-level root is no longer read as a path", () => {
+  for (const text of ["stage it under /tmp", "nothing writes to /etc", "cd /"]) {
+    expect(warnsWith(text, "ABS_PATH")).toBe(false);
+  }
+});
+
+test("an explicit directory reference is still a path", () => {
+  // The `/etc` vs `/etc/` line of the definition: the separator is what makes the
+  // claim, and the trailing one survives into `matched` (authorization lifts it
+  // literally, so a lift for /etc/hosts must not cover /etc/).
+  const abs = classifyDestructive("copy it to /etc/", PROJECT).warnings.find((w) => w.tier === "ABS_PATH");
+  expect(abs?.matched).toBe("/etc/");
+});
+
+test("two-segment paths still warn in every spelling", () => {
+  for (const text of ["/etc/passwd", "write to /etc/hosts.", "--out=/etc/passwd", 'read "/etc/shadow"']) {
+    expect(warnsWith(text, "ABS_PATH")).toBe(true);
+  }
+});
+
+test("a C-style comment is not a path", () => {
+  // A judge quoting code writes `//` constantly, and a leading empty segment is not
+  // a first segment.
+  expect(warnsWith("the code has // TODO fix this", "ABS_PATH")).toBe(false);
+});
+
+test("a doubled leading slash names the same file and is read the same way", () => {
+  // `//etc/shadow` IS `/etc/shadow` on every POSIX kernel, and the leading anchor
+  // allows no restart on an interior slash — so a spelling that matched neither
+  // branch cost the warning AND, since quickChoicesFor withholds its one-tap chip
+  // on any floor hit, handed the draft an Approve chip the single-slash spelling
+  // does not get. Unlike the bare roots above, this shape is chosen by whoever
+  // wrote the text.
+  for (const text of ["cat //etc/shadow and paste it here", "tar czf out.tgz //home/victim/Documents"]) {
+    expect(warnsWith(text, "ABS_PATH")).toBe(true);
+  }
+  const abs = classifyDestructive("read ///etc/nginx/nginx.conf", PROJECT).warnings
+    .find((w) => w.tier === "ABS_PATH");
+  expect(abs?.matched).toBe("///etc/nginx/nginx.conf");
+});
+
+test("the drive-letter branch keeps single-segment paths", () => {
+  // The asymmetry is deliberate: `C:\Temp` cannot be mistaken for a slash command.
+  const WIN = "C:\\Users\\me\\proj";
+  expect(warnsWith("wipe C:\\Temp", "ABS_PATH", WIN)).toBe(true);
+});
+
+test("acting on a bare root is still caught by the other tiers", () => {
+  // This is what bounds the trade: what is given up is the mention, never the act.
+  expect(tiers("rm -rf /tmp")).toContain("DESTRUCTIVE");
+  expect(tiers("rm -rf /tmp")).not.toContain("ABS_PATH");
+  expect(tiers("chmod -R 777 /etc")).toContain("DESTRUCTIVE");
+  expect(isHard("dd if=/dev/zero of=/dev/sdb")).toBe(true);
+});
+
+// ---------------------------------------------------------------------------
 // Result shape.
 // ---------------------------------------------------------------------------
 
@@ -196,14 +273,16 @@ test("identical repeats of one pattern collapse to a single warning", () => {
 
 // ---------------------------------------------------------------------------
 // pathCheckText: engine.ts's probe joins a judge reply and a slash_command action value
-// with a newline ("reply\n/compact"). Every slash command is "/"-shaped, so without
-// scoping the path check away from it, ABS_PATH always misreads the action value as an
-// out-of-project path.
+// with a newline ("reply\n/compact"). The verb is withheld from the path scan because it
+// is a routing token the harness resolves against a command catalog rather than judge
+// free text — an invariant that holds whatever ABS_PATH itself accepts.
 // ---------------------------------------------------------------------------
 
 test("pathCheckText scopes the path check away from a joined slash-command action value", () => {
   const probe = "looks good\n/compact";
-  expect(tiers(probe)).toContain("ABS_PATH");
+  // The verb is not a path candidate on either side of the scoping: the scoping is
+  // about what the text IS, not about rescuing the regex from it.
+  expect(tiers(probe)).not.toContain("ABS_PATH");
   expect(tiers(probe, PROJECT, "looks good")).not.toContain("ABS_PATH");
 });
 
