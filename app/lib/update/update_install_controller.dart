@@ -339,21 +339,32 @@ class UpdateInstallController extends Notifier<UpdateInstallState> {
   ///
   /// Best-effort on purpose: the user has already decided, so a wedged host
   /// must not be able to veto the update. Failing here costs what happens
-  /// today — the job object sweeps the tree as the process dies. The outer
-  /// timeout only backstops `shutdownOwnedHost`'s own ceiling (~6.5s: a 2s
-  /// control-plane call, a 3s graceful wait, then the force-kill's own POSIX
-  /// grace); both fit well inside Windows' 30s shutdown budget.
+  /// today — the job object sweeps the tree as the process dies. The timeouts
+  /// only backstop `shutdownOwnedHost`'s own ceiling (~6.5s: a 2s control-plane
+  /// call, a 3s graceful wait, then the force-kill's own POSIX grace); the pair
+  /// still fits well inside Windows' 30s shutdown budget.
   Future<void> _drainOwnedHost() async {
     // Sealed BEFORE the drain, not after: the app stays interactive for the
     // Store's whole window, and anything that spawns a host in it hands the
     // update a live PTY tree to kill. Sealing after would leave the gap the
     // drain is racing.
-    ref.read(hostControllerProvider).sealSpawns();
+    final host = ref.read(hostControllerProvider);
+    host.sealSpawns();
+    // The seal only closes `ensureHost`'s door. A spawn already through it has
+    // yet to publish `ownedHostPid`, so a teardown running ahead of it finds
+    // nothing to kill and the bridge surfaces behind the update — the exact
+    // live tree the seal exists to prevent.
     try {
-      await ref
-          .read(hostControllerProvider)
-          .shutdownOwnedHost()
-          .timeout(const Duration(seconds: 8));
+      await host.drainInFlight().timeout(const Duration(seconds: 4));
+    } catch (e) {
+      AbLog.warn(
+        'UpdateInstall',
+        'in-flight host spawn did not settle (tearing down anyway)',
+        fields: {'error': '$e'},
+      );
+    }
+    try {
+      await host.shutdownOwnedHost().timeout(const Duration(seconds: 8));
     } catch (e) {
       AbLog.warn(
         'UpdateInstall',
@@ -363,17 +374,18 @@ class UpdateInstallController extends Notifier<UpdateInstallState> {
     }
   }
 
-  /// Brings the bridge back after a drain that bought nothing.
-  ///
-  /// [HostController.shutdownOwnedHost] deliberately cancels supervised
-  /// respawn — the app was about to die — so on every outcome but a real
-  /// hand-off there is nothing left to restart the host, and the user is
-  /// sitting on a dead bridge with no banner to say so.
   /// Records the build the platform is about to replace. Best-effort: a write
   /// that fails costs the post-update announcement, never the update.
+  ///
+  /// Bounded like every other step in the sequence: by the time this runs the
+  /// host is drained and spawns are sealed, so a platform channel that never
+  /// answers would strand the machine there with no bridge and no way back.
   Future<void> _markHandoff() async {
     try {
-      await ref.read(updateHandoffStoreProvider).markHandoff(BuildInfo.version);
+      await ref
+          .read(updateHandoffStoreProvider)
+          .markHandoff(BuildInfo.version)
+          .timeout(const Duration(seconds: 2));
     } catch (e) {
       AbLog.warn(
         'UpdateInstall',
@@ -386,7 +398,10 @@ class UpdateInstallController extends Notifier<UpdateInstallState> {
   Future<void> _clearHandoff() async {
     if (!ref.mounted) return;
     try {
-      await ref.read(updateHandoffStoreProvider).clear();
+      await ref
+          .read(updateHandoffStoreProvider)
+          .clear()
+          .timeout(const Duration(seconds: 2));
     } catch (e) {
       AbLog.warn(
         'UpdateInstall',
@@ -396,6 +411,12 @@ class UpdateInstallController extends Notifier<UpdateInstallState> {
     }
   }
 
+  /// Brings the bridge back after a drain that bought nothing.
+  ///
+  /// [HostController.shutdownOwnedHost] deliberately cancels supervised
+  /// respawn — the app was about to die — so on every outcome but a real
+  /// hand-off there is nothing left to restart the host, and the user is
+  /// sitting on a dead bridge with no banner to say so.
   Future<void> _rearmOwnedHost() async {
     if (!ref.mounted) return;
     // Unsealed unconditionally and first: an install that did not take the

@@ -11,18 +11,14 @@ import '../util/detached.dart';
 import 'update_install_controller.dart';
 import 'update_strategy.dart';
 
-/// The command line Windows hands back when it relaunches this process after
-/// applying a Store update. `RegisterApplicationRestart` in
-/// app/windows/runner/main.cpp registers the string and is authoritative for
-/// its spelling; the runner forwards it to the Dart entrypoint.
-const kAfterUpdateFlag = '--after-update';
-
 /// The version this launch replaced, or null when nothing was replaced.
 ///
 /// Overridden from `main()` out of [UpdateHandoffStore], so an ordinary launch
 /// — and every test — sees null and the app says nothing. Deliberately NOT
-/// derived from [kAfterUpdateFlag]: Windows passes that argument after a crash
-/// and a hang too, and macOS's Sparkle relaunch passes no argument at all.
+/// derived from the `--after-update` command line `RegisterApplicationRestart`
+/// registers in app/windows/runner/main.cpp: Windows hands that argument back
+/// after a crash and a hang too, and macOS's Sparkle relaunch passes no
+/// argument at all.
 final afterUpdateLaunchProvider = Provider<String?>((ref) => null);
 
 /// Root wrapper that drives in-app updates via the running platform's
@@ -64,6 +60,14 @@ class _UpdateGateState extends ConsumerState<UpdateGate>
   DateTime? _lastCheck;
   StreamSubscription<void>? _retraction;
 
+  /// Set once the platform's own install flow has refused what a check
+  /// advertised. Terminal for the process on purpose: the feed does not change
+  /// under us, so the next check reads the same refused item, re-lights the row
+  /// the retraction just put out and fires the announcement toast again — on
+  /// every throttled resume, for an Update button that still cannot do
+  /// anything.
+  bool _retracted = false;
+
   @override
   void initState() {
     super.initState();
@@ -85,6 +89,7 @@ class _UpdateGateState extends ConsumerState<UpdateGate>
     if (retracted != null) {
       _retraction = retracted.listen((_) {
         if (!mounted) return;
+        _retracted = true;
         ref.read(updateAvailableProvider.notifier).set(false);
       });
     }
@@ -109,7 +114,7 @@ class _UpdateGateState extends ConsumerState<UpdateGate>
     // dispose; `ref` throws on a disposed ConsumerState.
     if (!mounted) return;
     final strategy = _strategy;
-    if (strategy == null) return;
+    if (strategy == null || _retracted) return;
     final now = DateTime.now();
     final last = _lastCheck;
     if (last != null && now.difference(last) < _throttle) return;

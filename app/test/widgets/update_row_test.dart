@@ -41,11 +41,12 @@ class _SpyController extends UpdateInstallController {
   final UpdateInstallState _seed;
   int starts = 0;
 
+  /// Deliberately skips `super.build()`: the real one resolves
+  /// `hostControllerProvider`, reaching the process-global launcher singleton
+  /// and attaching an `unsealSpawns()` to this container's disposal. The row
+  /// only renders state, so the seed is the whole contract here.
   @override
-  UpdateInstallState build() {
-    super.build();
-    return _seed;
-  }
+  UpdateInstallState build() => _seed;
 
   @override
   Future<void> start(BuildContext context, {bool confirm = true}) async {
@@ -106,8 +107,8 @@ void main() {
     tester,
   ) async {
     // The first seconds of a Windows install are silent — the Store re-scans
-    // its pending set before showing anything of its own — and a second tap in
-    // that window used to start a second install.
+    // its pending set before showing anything of its own — which is long enough
+    // for an impatient second tap to start a second install.
     final h = await _pumpRow(
       tester,
       _FakeStrategy(),

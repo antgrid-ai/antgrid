@@ -7,8 +7,11 @@
 #include "app_links/app_links_plugin_c_api.h"
 
 // Passed back to us on the command line when Windows relaunches the process
-// after applying a Store update; the Dart entrypoint keys the post-update
-// resume off it.
+// after applying a Store update. Nothing in Dart reads it, deliberately: the
+// same argument comes back after a crash, a hang and a reboot-to-patch, so it
+// is not evidence an update happened. The version UpdateHandoffStore records
+// at hand-off is (app/lib/storage/update_handoff_store.dart). The registration
+// still needs a command line, and this one names the case it exists for.
 constexpr const wchar_t kRestartCommandLine[] = L"--after-update";
 
 // Window class + title alone aren't enough to identify "our" instance: every

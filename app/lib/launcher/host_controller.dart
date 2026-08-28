@@ -408,7 +408,14 @@ class HostController {
   /// Clear the crash-loop budget and try again now. Backs the UI's retry
   /// affordance on [HostPhase.failed]; rethrows so the caller can show the
   /// spawn error.
+  ///
+  /// Refused BEFORE the budget is touched while [sealSpawns] holds: the reset
+  /// below abandons any restart still sleeping out its backoff, and the seal
+  /// stops [_scheduleRestart] queueing another — so retrying into a seal would
+  /// trade a refusal the caller can show for a supervision chain nothing
+  /// re-arms.
   Future<void> retryNow() async {
+    if (_spawnSealed) throw const HostSpawnSealed();
     _restartsInWindow = 0;
     _restartWindowStart = null;
     _restartEpoch++;

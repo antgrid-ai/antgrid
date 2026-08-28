@@ -93,7 +93,27 @@ class MacosSparkleUpdateService implements UpdaterListener {
     }
   }
 
-  void dispose() => unawaited(_noUpdateFound.close());
+  /// Detaches from Sparkle and closes [noUpdateFound].
+  ///
+  /// `autoUpdater` is a process-global singleton that holds listeners by strong
+  /// reference and never drops them on its own, so an instance that skips this
+  /// stays registered — and keeps answering delegate callbacks on a closed
+  /// controller — for the rest of the process.
+  void dispose() {
+    if (_listening) {
+      _listening = false;
+      try {
+        autoUpdater.removeListener(this);
+      } catch (e) {
+        AbLog.warn(
+          'Update',
+          'MacosSparkleUpdateService.removeListener failed (ignored)',
+          fields: {'error': '$e'},
+        );
+      }
+    }
+    unawaited(_noUpdateFound.close());
+  }
 
   // --- UpdaterListener -----------------------------------------------------
   //

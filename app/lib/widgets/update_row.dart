@@ -47,8 +47,7 @@ class UpdateRow extends ConsumerWidget {
       // read as stalled for the whole of it.
       UpdateInstallWorking(:final percent) when percent > 0 =>
         'Updating... $percent%',
-      UpdateInstallWorking() => 'Updating...',
-      UpdateInstallDone() => 'Updating...',
+      UpdateInstallWorking() || UpdateInstallDone() => 'Updating...',
       _ => strategy.rowTitle,
     };
 

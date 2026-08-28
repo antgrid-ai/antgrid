@@ -1,4 +1,4 @@
-// Test helper that materializes the four persistent-store providers main()
+// Test helper that materializes the persistent-store providers main()
 // expects to be overridden. Tests that mount widgets reading from
 // `recentAgentsProvider`, `projectsProvider`, etc. can call
 // [buildTestStoreOverrides] inside their test setup to satisfy those
@@ -17,6 +17,7 @@ import 'package:antgrid/providers/first_run.dart';
 import 'package:antgrid/providers/projects.dart';
 import 'package:antgrid/providers/recent_agents.dart';
 import 'package:antgrid/providers/recent_ports.dart';
+import 'package:antgrid/providers/update_available.dart';
 import 'package:antgrid/project/project_session_registry.dart'
     show projectStatusCacheProvider;
 import 'package:antgrid/project/project_status_cache.dart';
@@ -28,6 +29,7 @@ import 'package:antgrid/storage/first_run_store.dart';
 import 'package:antgrid/storage/project_store.dart';
 import 'package:antgrid/storage/recent_agents_store.dart';
 import 'package:antgrid/storage/recent_ports_store.dart';
+import 'package:antgrid/storage/update_handoff_store.dart';
 
 class TestStoreOverrides {
   final List<Override> overrides;
@@ -77,6 +79,7 @@ Future<TestStoreOverrides> buildTestStoreOverrides() async {
     cachedSessionsStore,
     recentPortsStore,
     firstRunStore,
+    updateHandoffStore,
     prefs,
   ) = await (
     ProjectStore.open(),
@@ -86,6 +89,7 @@ Future<TestStoreOverrides> buildTestStoreOverrides() async {
     CachedSessionsStore.open(),
     RecentPortsStore.open(),
     FirstRunStore.open(),
+    UpdateHandoffStore.open(),
     openAppSettingsPrefs(),
   ).wait;
   // Deterministic, NOT eagerly created: ProjectStatusCache.testInstance only
@@ -108,6 +112,7 @@ Future<TestStoreOverrides> buildTestStoreOverrides() async {
       cachedSessionsStoreProvider.overrideWithValue(cachedSessionsStore),
       recentPortsStoreProvider.overrideWithValue(recentPortsStore),
       firstRunStoreProvider.overrideWithValue(firstRunStore),
+      updateHandoffStoreProvider.overrideWithValue(updateHandoffStore),
       projectStatusCacheProvider.overrideWithValue(
         ProjectStatusCache.testInstance(root: statusCacheRoot),
       ),

@@ -131,6 +131,10 @@ abstract class UpdateStrategy {
   /// something stronger must say so (Play's restarts the app in place).
   String get rowTitle => 'Update available';
   String get rowActionLabel => 'Update';
+
+  /// Releases anything [prepare] attached to a process-global. Default:
+  /// nothing. Called when the container holding [updateStrategyProvider] goes.
+  void dispose() {}
 }
 
 /// The cost line shared by every platform whose install quits the app.
@@ -287,6 +291,11 @@ class MacosSparkleStrategy extends UpdateStrategy {
   @override
   Stream<void> get updateRetracted => _sparkle.noUpdateFound;
 
+  /// `prepare()` registers this strategy's service with the process-global
+  /// `autoUpdater`, which never releases a listener on its own.
+  @override
+  void dispose() => _sparkle.dispose();
+
   @override
   Future<UpdateCheckOutcome> check({required bool rowAlreadyLit}) async {
     // The row latches for the process lifetime — once lit a further check
@@ -386,13 +395,15 @@ class IosAppStoreStrategy extends UpdateStrategy {
 ///
 /// The switch is exhaustive over [TargetPlatform] on purpose — a new
 /// platform is a compile error here, not a silently dead update path.
-final updateStrategyProvider = Provider<UpdateStrategy?>(
-  (_) => switch (defaultTargetPlatform) {
+final updateStrategyProvider = Provider<UpdateStrategy?>((ref) {
+  final strategy = switch (defaultTargetPlatform) {
     TargetPlatform.android => PlayUpdateStrategy(),
     TargetPlatform.windows => WindowsStoreStrategy(),
     TargetPlatform.macOS => MacosSparkleStrategy(),
     TargetPlatform.linux => LinuxBrowserStrategy(),
     TargetPlatform.iOS => IosAppStoreStrategy(),
     TargetPlatform.fuchsia => null,
-  },
-);
+  };
+  if (strategy != null) ref.onDispose(strategy.dispose);
+  return strategy;
+});

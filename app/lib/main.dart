@@ -89,9 +89,7 @@ void pushBackgroundMain() {
   Push.instance.addOnBackgroundMessage(pushBackgroundHandler);
 }
 
-/// [args] is the Dart entrypoint's argument list, which only the Windows
-/// runner ever fills — see [kAfterUpdateFlag].
-Future<void> main(List<String> args) async {
+Future<void> main() async {
   // markdown_widget's CodeBlockNode.build() uses a try/catch as control flow
   // for language-less fenced code blocks (no `class` attr -> null-check throw)
   // and debugPrints the swallowed exception on every render — drowns out
@@ -162,9 +160,9 @@ Future<void> main(List<String> args) async {
   ).wait;
   final initialAppSettings = AppSettings.fromPrefs(prefs);
 
-  // Consumed unconditionally, not behind kAfterUpdateFlag. Windows relaunches
-  // us with that argument after a crash, a hang and a reboot-to-patch as well
-  // as after an update, so it is not evidence; and Sparkle's relaunch on macOS
+  // Consumed unconditionally, never behind Windows' `--after-update` argument:
+  // that comes back after a crash, a hang and a reboot-to-patch as well as
+  // after an update, so it is not evidence; and Sparkle's relaunch on macOS
   // passes no argument at all, so requiring it would mean no macOS or Linux
   // announcement ever. A version recorded at hand-off that no longer matches
   // the running build is the evidence, on every platform. Once per launch, so

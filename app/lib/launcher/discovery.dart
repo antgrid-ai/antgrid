@@ -85,7 +85,7 @@ Future<void> terminateTree(int pid) async {
 /// spawned — the bridge traps it (bridge/src/index.ts) and its `shutdown()`
 /// runs `killProcessTree` over every terminal, which DOES name each PTY's own
 /// group, because a PTY child is a session leader by construction. Escalating
-/// to SIGKILL only after [grace] keeps the old behaviour as the floor.
+/// to SIGKILL only after [grace] keeps an unconditional kill as the floor.
 ///
 /// Changing the spawn to a detached mode would fix the group directly, but it
 /// is entangled with the Windows job-object assignment and the bootstrap-write
@@ -105,17 +105,19 @@ Future<void> terminateTreePosix(
   if (!send(-pid, ProcessSignal.sigterm)) {
     send(pid, ProcessSignal.sigterm);
   }
-  final deadline = grace;
   var waited = Duration.zero;
   const step = Duration(milliseconds: 100);
-  while (waited < deadline) {
+  while (waited < grace) {
     if (!await alive(pid)) return;
     await delay(step);
     waited += step;
   }
+  // The loop grants the final step but never checks it, and SIGKILL against a
+  // pid the OS may already have reused reaches something else entirely.
+  if (!await alive(pid)) return;
   // Past helping: take what we can reach. A host wedged badly enough to ignore
-  // SIGTERM was never going to sweep its own children, so this is the same
-  // orphan risk that shipped before — not a regression, just the floor.
+  // SIGTERM was never going to sweep its own children, so orphans here are the
+  // floor this escalation accepts rather than something it introduces.
   if (!send(-pid, ProcessSignal.sigkill)) {
     send(pid, ProcessSignal.sigkill);
   }

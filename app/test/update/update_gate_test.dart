@@ -53,6 +53,12 @@ class _SpyController extends UpdateInstallController {
   int starts = 0;
   final List<bool> confirmArgs = <bool>[];
 
+  /// Deliberately skips `super.build()`: the real one resolves
+  /// `hostControllerProvider`, reaching the process-global launcher singleton
+  /// and attaching an `unsealSpawns()` to this container's disposal.
+  @override
+  UpdateInstallState build() => const UpdateInstallIdle();
+
   @override
   Future<void> start(BuildContext context, {bool confirm = true}) async {
     starts++;
