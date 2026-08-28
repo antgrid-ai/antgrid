@@ -138,7 +138,14 @@ class UpdateInstallController extends Notifier<UpdateInstallState> {
 
   @override
   UpdateInstallState build() {
-    ref.onDispose(_cancelProgress);
+    // Captured, not re-read on dispose: `ref.read` is unavailable by then, and
+    // a sequence torn down mid-flight must still lift the spawn seal — a seal
+    // nothing lifts leaves the machine unable to start any agent at all.
+    final host = ref.read(hostControllerProvider);
+    ref.onDispose(() {
+      _cancelProgress();
+      host.unsealSpawns();
+    });
     return const UpdateInstallIdle();
   }
 
@@ -322,6 +329,11 @@ class UpdateInstallController extends Notifier<UpdateInstallState> {
   /// timeout only backstops `shutdownOwnedHost`'s own ~5s ceiling; both fit
   /// well inside Windows' 30s shutdown budget.
   Future<void> _drainOwnedHost() async {
+    // Sealed BEFORE the drain, not after: the app stays interactive for the
+    // Store's whole window, and anything that spawns a host in it hands the
+    // update a live PTY tree to kill. Sealing after would leave the gap the
+    // drain is racing.
+    ref.read(hostControllerProvider).sealSpawns();
     try {
       await ref
           .read(hostControllerProvider)
@@ -344,6 +356,10 @@ class UpdateInstallController extends Notifier<UpdateInstallState> {
   /// sitting on a dead bridge with no banner to say so.
   Future<void> _rearmOwnedHost() async {
     if (!ref.mounted) return;
+    // Unsealed unconditionally and first: an install that did not take the
+    // process with it must not leave the machine unable to start an agent,
+    // and this is the only path that lifts the seal.
+    ref.read(hostControllerProvider).unsealSpawns();
     try {
       await ref.read(hostControllerProvider).ensureHost();
     } catch (e) {

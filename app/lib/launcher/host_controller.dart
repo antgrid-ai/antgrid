@@ -18,6 +18,18 @@ import '../util/log_rotation.dart';
 
 void _log(String msg) => AbLog.info('HostController', msg);
 
+/// Thrown by [HostController.ensureHost] while spawning is sealed for an
+/// in-flight update. Distinct from a spawn FAILURE: nothing is wrong with the
+/// machine and retrying later succeeds.
+class HostSpawnSealed implements Exception {
+  const HostSpawnSealed();
+
+  @override
+  String toString() =>
+      'HostSpawnSealed: an update is installing; the bridge stays down until '
+      'it finishes';
+}
+
 /// Lifecycle of the machine's bridge host as the app understands it.
 enum HostPhase {
   /// Nothing has needed the host yet this launch.
@@ -225,6 +237,9 @@ class HostController {
   /// later ordinary spawn inside the 60s window would be mislabelled.)
   bool _supervisedSpawn = false;
 
+  /// While true, nothing may bring a host up — see [sealSpawns].
+  bool _spawnSealed = false;
+
   HostStatus _status = const HostStatus(HostPhase.idle);
   final _statusCtl = StreamController<HostStatus>.broadcast();
 
@@ -288,9 +303,34 @@ class HostController {
     }
   }
 
+  /// Refuse to bring a host up until [unsealSpawns].
+  ///
+  /// A Windows Store install drains the host and then leaves the app fully
+  /// interactive for the Store's whole window — two consent dialogs, the
+  /// download, the deploy. Any [ensureHost] in that window spawns a fresh
+  /// bridge and PTY tree that the update then force-kills, undoing the drain
+  /// it was just given. Sealing is what makes the drain hold.
+  ///
+  /// The job object still sweeps such a tree ([encloseInAppLifetimeJob]), so
+  /// this buys a graceful shutdown rather than package integrity — do not
+  /// treat it as the backstop.
+  void sealSpawns() => _spawnSealed = true;
+
+  /// Lifts [sealSpawns]. Owed on every path where the install did NOT take the
+  /// process with it, or the app is left unable to start an agent at all.
+  void unsealSpawns() => _spawnSealed = false;
+
+  @visibleForTesting
+  bool get spawnSealed => _spawnSealed;
+
   /// Resolve a live host, respawning if stale. Single-flighted: concurrent
   /// cold-start callers share one spawn.
+  ///
+  /// Throws [HostSpawnSealed] while [sealSpawns] holds. Every caller already
+  /// handles a throwing spawn (there is no host to fall back to), so the seal
+  /// needs no per-caller degradation of its own.
   Future<HostFile> ensureHost() {
+    if (_spawnSealed) return Future.error(const HostSpawnSealed());
     final existing = _inFlight;
     if (existing != null) return existing;
     final fut = _ensureHostInner();
@@ -398,7 +438,10 @@ class HostController {
   }
 
   void _scheduleRestart(int? exitCode) {
-    if (_disposed || _restartPending) return;
+    // Belt and braces beside `_expectExit`: that only covers the generation we
+    // drained, while the seal also covers a host someone raced up and lost
+    // before the update landed.
+    if (_disposed || _restartPending || _spawnSealed) return;
 
     final now = _now();
     final windowStart = _restartWindowStart;

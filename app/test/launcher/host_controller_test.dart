@@ -686,4 +686,58 @@ void main() {
       expect(cmd.preargs, isEmpty);
     });
   });
+
+  group('spawn seal', () {
+    // A Windows Store install drains the host and then leaves the app fully
+    // interactive for the Store's whole window. Anything that spawns in that
+    // window hands the update a live PTY tree to force-kill.
+    HostController sealable({required void Function() onSpawn}) =>
+        HostController(
+          readHost: () async => null,
+          pidAlive: (pid) async => false,
+          ping: (h) async => false,
+          devMode: () => false,
+          spawnHost: () async {
+            onSpawn();
+            return _host();
+          },
+        );
+
+    test('a sealed controller refuses to spawn', () async {
+      var spawns = 0;
+      final c = sealable(onSpawn: () => spawns++);
+      c.sealSpawns();
+
+      await expectLater(c.ensureHost(), throwsA(isA<HostSpawnSealed>()));
+      expect(spawns, 0);
+    });
+
+    test('unsealing restores spawning', () async {
+      var spawns = 0;
+      final c = sealable(onSpawn: () => spawns++);
+      c.sealSpawns();
+      await expectLater(c.ensureHost(), throwsA(isA<HostSpawnSealed>()));
+
+      c.unsealSpawns();
+      final h = await c.ensureHost();
+
+      expect(h.controlPort, 6000);
+      expect(spawns, 1);
+    });
+
+    test('sealing does not poison the single-flight slot', () async {
+      // The refusal returns before `_inFlight` is ever set, so a seal that
+      // rejects must not leave a dead future cached for the next caller.
+      var spawns = 0;
+      final c = sealable(onSpawn: () => spawns++);
+      c.sealSpawns();
+      await expectLater(c.ensureHost(), throwsA(isA<HostSpawnSealed>()));
+      c.unsealSpawns();
+
+      final results = await Future.wait([c.ensureHost(), c.ensureHost()]);
+
+      expect(results, hasLength(2));
+      expect(spawns, 1, reason: 'concurrent callers still share one spawn');
+    });
+  });
 }

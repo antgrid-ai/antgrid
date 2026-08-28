@@ -67,6 +67,22 @@ class _FakeHost extends HostController {
   final Future<void> Function()? _onDrain;
   int drains = 0;
   int rearms = 0;
+  int seals = 0;
+  int unseals = 0;
+
+  /// Seal/unseal deliberately stay OUT of [log]: the shared list pins the
+  /// drain-before-install ordering, and counters keep that assertion readable.
+  @override
+  void sealSpawns() {
+    seals++;
+    super.sealSpawns();
+  }
+
+  @override
+  void unsealSpawns() {
+    unseals++;
+    super.unsealSpawns();
+  }
 
   @override
   Future<void> shutdownOwnedHost() async {
@@ -403,6 +419,64 @@ void main() {
     // Idle, not Done: the user can close the browser tab without downloading,
     // and Done is the one state the row refuses to leave.
     expect(h.state, const UpdateInstallIdle());
+  });
+
+  testWidgets('spawning is sealed before the drain, not after', (tester) async {
+    // Asserted from INSIDE the drain: sealing afterwards would leave open
+    // exactly the window the seal exists to close.
+    _FakeHost? host;
+    bool? sealedDuringDrain;
+    final h = await _pump(
+      tester,
+      // Runs after `host` is assigned below — the drain is several frames away.
+      onDrain: () async => sealedDuringDrain = host!.spawnSealed,
+    );
+    host = h.host;
+    unawaited(h.start());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Install & restart'));
+    await tester.pumpAndSettle();
+
+    expect(sealedDuringDrain, isTrue);
+  });
+
+  testWidgets('a hand-off leaves the seal on, so nothing respawns', (
+    tester,
+  ) async {
+    // The process is dying; anything that spawned here would hand the Store a
+    // live PTY tree to force-kill.
+    final h = await _pump(tester);
+    unawaited(h.start());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Install & restart'));
+    await tester.pumpAndSettle();
+
+    expect(h.host.seals, 1);
+    expect(h.host.unseals, 0);
+    expect(h.host.spawnSealed, isTrue);
+  });
+
+  testWidgets('an install that did not happen lifts the seal', (tester) async {
+    // Otherwise a declined consent dialog leaves the machine unable to start
+    // any agent until the app is restarted.
+    final h = await _pump(tester, result: UpdateInstallResult.notInstalled);
+    unawaited(h.start());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Install & restart'));
+    await tester.pumpAndSettle();
+
+    expect(h.host.spawnSealed, isFalse);
+    expect(h.host.rearms, 1);
+    await tester.pump(const Duration(seconds: 9));
+  });
+
+  testWidgets('a platform that ends nothing never seals', (tester) async {
+    final h = await _pump(tester, endsSession: false);
+    await h.start();
+    await tester.pump();
+
+    expect(h.host.seals, 0);
+    expect(h.host.spawnSealed, isFalse);
   });
 
   testWidgets('a browser hand-off can be repeated', (tester) async {
