@@ -854,7 +854,14 @@ const OpenEscalationWire = z.object({
   // "resolve_in_session" = an option-based prompt (permission / structured
   // question) that must be resolved in the chat UI — injected text can't
   // answer it, and auto-approval is deliberately impossible (see engine).
-  kind: z.enum(["reply", "resolve_in_session"]).optional(),
+  //
+  // "guard_blocked" = a REPORT that a harness guard (reply shape, the §5.3 hard
+  // floor, the runaway guard) refused an action Handler wanted to take. A typed
+  // line does not answer it — the action was never taken — so only
+  // `handler:dismiss` retires one, and the bridge never mints `choices` for it:
+  // this row exists BECAUSE a guard refused this exact text, and a one-tap that
+  // re-sent it would be the thinnest human in the loop there is.
+  kind: z.enum(["reply", "resolve_in_session", "guard_blocked"]).optional(),
   // §4.6 quick choices, optional exactly the way `kind` is: absent means "free-text
   // reply", so an app that predates this renders its reply sheet unchanged. Two is
   // the floor because one chip is a card with no alternative, and the free-text
@@ -918,6 +925,25 @@ const HandlerUndoMessage = BaseMessage.extend({
   projectId: z.string(),
 }).extend(HandlerUndoWire.shape);
 
+// The user acknowledging a `guard_blocked` escalation — the only thing that
+// retires one, since nothing the agent or the user does next answers a report
+// about an action Handler never took. Payload-only for the same reason as
+// HandlerUndoWire: parseMessageFast admits on the discriminator alone, so
+// agent-core re-parses with this before the engine sees it.
+//
+// It carries a terminalId where handler:undo carries none, because an escalation
+// lives on one supervised session while a snapshot is project-scoped and names
+// its own session through the store.
+export const HandlerDismissWire = z.object({
+  terminalId: z.string(),
+  escalationId: z.string(),
+});
+
+const HandlerDismissMessage = BaseMessage.extend({
+  type: z.literal("handler:dismiss"),
+  projectId: z.string(),
+}).extend(HandlerDismissWire.shape);
+
 const HandlerSessionSnapshot = z.object({
   terminalId: z.string(),
   notifyOnly: z.boolean(),
@@ -979,7 +1005,8 @@ const HandlerActivityMessage = BaseMessage.extend({
     "continue", "handle", "escalate",
     "armed", "goal_edited",
     "item_done", "item_blocked", "item_skipped", "item_failed",
-    "instruction_dropped", "floor_warning", "wrapped_up", "parked", "resumed",
+    "instruction_dropped", "floor_warning", "evidence_rejected",
+    "wrapped_up", "parked", "resumed",
   ]),
   reason: z.string(),
   detail: z.string().optional(),
@@ -1807,6 +1834,7 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   HandlerActivityMessage,
   HandlerSnapshotMessage,
   HandlerUndoMessage,
+  HandlerDismissMessage,
   GitStatusMessage,
   GitDiffRequestMessage,
   GitDiffContentMessage,
@@ -1931,6 +1959,7 @@ export type HandlerEscalationMsg = z.infer<typeof HandlerEscalationMessage>;
 export type HandlerActivityMsg = z.infer<typeof HandlerActivityMessage>;
 export type HandlerSnapshotMsg = z.infer<typeof HandlerSnapshotMessage>;
 export type HandlerUndoMsg = z.infer<typeof HandlerUndoMessage>;
+export type HandlerDismissMsg = z.infer<typeof HandlerDismissMessage>;
 export type GitStatus = z.infer<typeof GitStatusMessage>;
 export type GitDiffRequest = z.infer<typeof GitDiffRequestMessage>;
 export type GitDiffContent = z.infer<typeof GitDiffContentMessage>;
@@ -2111,7 +2140,7 @@ const KNOWN_TYPES = new Set<string>([
   "agent:disconnecting", "agent:projects", "agent:tools", "stream-ready", "stream-invalid", "control:result", "app:ready",
   "command:run", "command:output", "command:done", "notification:push", "push:register",
   "handler:configure", "handler:instruct", "handler:status", "handler:escalation", "handler:activity",
-  "handler:snapshot", "handler:undo",
+  "handler:snapshot", "handler:undo", "handler:dismiss",
   "git:status", "git:diff", "git:diff-content",
   "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",
   "git:commit", "git:commit-result", "git:discard", "git:discard-result",

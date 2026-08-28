@@ -289,6 +289,26 @@ export abstract class ChatSession implements StructuredDriver {
     }
   }
 
+  /** This session's slash commands, or undefined when no catalog is available.
+   *  Empty is NEVER surfaced as empty: an empty list means any of "discovery
+   *  threw", "discovery hasn't landed yet" and "this agent has no commands", and
+   *  a supervisor told it holds the complete set on that basis would refuse
+   *  every command the agent really has. Deliberately NOT gated on
+   *  `capsDiscovered` — that flag opens on the MODEL list, and claude ingests
+   *  commands outside it, so gating here would drop a catalog that exists.
+   *
+   *  `builtin:*` entries are excluded because invoking one sends the agent no
+   *  turn at all: `prompt()` above short-circuits `builtin:compact` into
+   *  `compact()`, and codex's `sendPrompt` intercepts `builtin:review` the same
+   *  way — a supervisor that injected one would then wait for a turn end nothing
+   *  raises. Every backend appends `builtin:compact` unconditionally at the end
+   *  of ingest, so without this filter a session with no real commands would
+   *  claim a complete catalog of one. */
+  commandCatalog(): CapCommand[] | undefined {
+    const promptable = this.capCommands.filter((c) => !c.id.startsWith("builtin:"));
+    return promptable.length ? promptable : undefined;
+  }
+
   resolvePermission(permissionId: string, optionId: string): void {
     const pending = this.pendingApprovals.get(permissionId);
     if (!pending) return;

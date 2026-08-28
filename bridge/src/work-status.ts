@@ -118,6 +118,26 @@ function isCallToAction(n: NotificationType): boolean {
   return n === "permission_request" || n === "awaiting_input" || n === "error";
 }
 
+/** Has [sessionId]'s OWN turn already ended? The only window in which an
+ *  agent's "waiting for your input" signal can be the generic post-completion
+ *  idle nudge rather than a live mid-turn block — the hook fires the identical
+ *  text for both and cannot tell them apart, so the host answers it from turn
+ *  state. A pure read; it changes nothing.
+ *
+ *  The window is exactly "between turns": every path that begins a turn
+ *  ({@link turnStart}, an inferred open in {@link userReply},
+ *  {@link answerRequest}) drops the entry.
+ *
+ *  The CALLER chooses the key, and an id with no entry of its own answers
+ *  false. A caller that cannot prove its id was folded under its own key must
+ *  pass the raw id and take that false rather than reading the
+ *  {@link UNATTRIBUTED_TURN} fallback: one session's task_complete swallowing
+ *  another's genuine first block is a permanent drop (nothing is recorded, so
+ *  nothing can raise it again). */
+export function isStaleIdleNudge(state: WorkStatusState, sessionId: string): boolean {
+  return state.notifications.get(sessionId) === "task_complete";
+}
+
 /** Rollup order for the project row. `unread` outranks `done` and nothing else:
  *  it is a "come and look" nudge, never a claim that the agent is still busy. */
 const RANK: Record<WorkStatus, number> = {
@@ -657,7 +677,7 @@ function foldNotification(
   // unattributed hooks would otherwise have one session's task_complete swallow
   // a different session's genuine first block, and the drop is permanent
   // (nothing is recorded, so the dot never lights up).
-  const stale = msg.notificationType === "awaiting_input" && own === "task_complete";
+  const stale = msg.notificationType === "awaiting_input" && isStaleIdleNudge(prev, key);
   if (msg.notificationType === own || stale) {
     if (activeTurns === prev.activeTurns
       && pendingTurns === prev.pendingTurns

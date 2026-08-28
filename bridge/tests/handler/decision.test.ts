@@ -4,6 +4,7 @@ import {
   pickJudge,
   buildDecidePrompt,
   buildRetryPrompt,
+  buildShapeRetryPrompt,
   parseDecisionFromOutput,
 } from "../../src/handler/decision";
 
@@ -128,6 +129,38 @@ describe("buildDecidePrompt", () => {
     }
   });
 
+  // The gate downstream searches the RECENT CONTEXT block for the quote, so a
+  // judge told to cite "the context or transcript" loses real transitions to a
+  // rule it was never given.
+  it("narrows the evidence rule to a verbatim quote from the recent context", () => {
+    const p = buildDecidePrompt({ goal: GOAL, backlogText: BACKLOG_TEXT, context: "CTX" });
+    expect(p).toContain("character-for-character");
+    expect(p).toContain("RECENT CONTEXT");
+    expect(p).toContain("discarded and the item stays open");
+  });
+
+  it("states the command anchor for a done on a command-shaped item", () => {
+    const p = buildDecidePrompt({ goal: GOAL, backlogText: BACKLOG_TEXT, context: "CTX" });
+    expect(p).toContain("slash command");
+    expect(p).toContain("does not close it");
+  });
+
+  // Same absent-vs-empty discipline the floor warnings take: an empty list is a
+  // pass with nothing refused, and a header over no lines reads as one anyway.
+  it("renders the refused-transitions section only when there is something to say", () => {
+    const bare = buildDecidePrompt({ goal: GOAL, backlogText: BACKLOG_TEXT, context: "CTX" });
+    const empty = buildDecidePrompt({ goal: GOAL, backlogText: BACKLOG_TEXT, context: "CTX", evidenceRejections: [] });
+    for (const p of [bare, empty]) expect(p).not.toContain("THE HARNESS REFUSED");
+
+    const fed = buildDecidePrompt({
+      goal: GOAL, backlogText: BACKLOG_TEXT, context: "CTX",
+      evidenceRejections: ['"run /code-review --fix" — done needs evidence showing /code-review itself being run'],
+    });
+    expect(fed).toContain("THE HARNESS REFUSED");
+    expect(fed).toContain("showing /code-review itself being run");
+    expect(fed).toContain("the same quote gets the same answer");
+  });
+
   it("stands in for an empty goal and an empty backlog rather than rendering nothing", () => {
     const p = buildDecidePrompt({ goal: "", backlogText: "", context: "CTX" });
     expect(p).toContain("(none stated)");
@@ -137,6 +170,85 @@ describe("buildDecidePrompt", () => {
   it("adds transcript pull-through when a path is given", () => {
     const p = buildDecidePrompt({ goal: GOAL, backlogText: "", context: "CTX", transcriptPath: "/t.jsonl" });
     expect(p).toContain("/t.jsonl");
+  });
+
+  it("keeps the transcript out of the evidence rule it invites a judge past", () => {
+    // The harness grounds a citation against the RECENT CONTEXT block alone — it
+    // holds no other text — so an unqualified "read the fuller transcript" is an
+    // invitation to quote material every terminal transition is then refused for,
+    // leaving the item open forever with the runaway guard as its only exit.
+    const p = buildDecidePrompt({ goal: GOAL, backlogText: "", context: "CTX", transcriptPath: "/t.jsonl" });
+    const hint = p.slice(p.indexOf("Fuller transcript"));
+    expect(hint).toContain("background only");
+    expect(hint).toContain("RECENT CONTEXT");
+    expect(hint).toContain("leave the item open");
+  });
+
+  // Every handle decision used to be escalated by harness rules the judge was
+  // never told: a verb carrying arguments failed the shape check, and a
+  // multi-paragraph reply failed the control-character guard.
+  it("states the slash-command contract", () => {
+    const p = buildDecidePrompt({ goal: GOAL, backlogText: "", context: "CTX" });
+    expect(p).toContain("/verb");
+    expect(p).toContain("/verb <args>");
+  });
+
+  it("states that reply and action are mutually exclusive", () => {
+    expect(buildDecidePrompt({ goal: GOAL, backlogText: "", context: "CTX" })).toContain("never both");
+  });
+
+  it("states that the reply is submitted as ONE line", () => {
+    expect(buildDecidePrompt({ goal: GOAL, backlogText: "", context: "CTX" })).toContain("ONE line");
+  });
+
+  // The judge reads a transcript the agent itself wrote, where `claude` appears
+  // and `claude-code` — our routing key — never does.
+  it("names the supervised agent by its CLI name", () => {
+    expect(buildDecidePrompt({ goal: GOAL, backlogText: "", context: "C", agentTool: "codex" })).toContain("codex");
+    const p = buildDecidePrompt({ goal: GOAL, backlogText: "", context: "C", agentTool: "claude-code" });
+    expect(p).toContain("`claude`");
+    expect(p).not.toContain("claude-code");
+  });
+
+  it("falls back to the generic phrasing when no agent is named", () => {
+    expect(buildDecidePrompt({ goal: GOAL, backlogText: "", context: "C" })).toContain("a coding agent works");
+  });
+
+  it("lists a populated catalog under the complete-set header", () => {
+    const p = buildDecidePrompt({
+      goal: GOAL, backlogText: "", context: "C",
+      commands: [{ id: "cmd:code-review", name: "code-review", description: "Review the diff", argHint: "[--fix]" }],
+    });
+    expect(p).toContain("AVAILABLE COMMANDS");
+    expect(p).toContain("/code-review");
+    expect(p).toContain("[--fix]");
+    expect(p).toContain("Review the diff");
+    expect(p).not.toContain("No command catalog is available");
+  });
+
+  // An empty catalog cannot be distinguished from a discovery that threw or has
+  // not landed, so it takes the same branch as no catalog at all — announcing a
+  // "complete set" of nothing would read as "this agent has no commands".
+  it("renders the no-catalog branch, never an empty header", () => {
+    for (const p of [
+      buildDecidePrompt({ goal: GOAL, backlogText: "", context: "C" }),
+      buildDecidePrompt({ goal: GOAL, backlogText: "", context: "C", commands: [] }),
+    ]) {
+      expect(p).toContain("No command catalog is available");
+      expect(p).not.toContain("AVAILABLE COMMANDS");
+    }
+  });
+});
+
+describe("buildShapeRetryPrompt", () => {
+  // A decision that parsed cleanly and then failed a harness rule has valid
+  // JSON; telling it to fix its JSON teaches it to change the one thing it got
+  // right, so this leg must not reuse the parse-failure wording.
+  it("carries the original prompt and the rejection without blaming the JSON", () => {
+    const p = buildShapeRetryPrompt("ORIG", "slash command value is not a simple verb");
+    expect(p).toContain("ORIG");
+    expect(p).toContain("slash command value is not a simple verb");
+    expect(p).not.toContain("not a valid JSON object");
   });
 });
 

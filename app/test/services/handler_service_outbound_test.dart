@@ -664,4 +664,153 @@ void main() {
     await svc.dispose();
     await session.close();
   });
+
+  group('guard-rejection reports (handler:dismiss)', () {
+    /// A `handler:status` snapshot replaying [escalations] on one armed session,
+    /// which is how a report reaches the app after a reconnect or a restart.
+    Map<String, dynamic> statusFrame(List<Map<String, dynamic>> escalations) => {
+      'projectId': 'p',
+      'sessions': [
+        {
+          'terminalId': 't9',
+          'notifyOnly': false,
+          'state': escalations.isEmpty ? 'watching' : 'needs_you',
+          'pendingEscalations': escalations.length,
+          'armedAt': 1,
+          'goal': 'ship it',
+          'backlog': <Object>[],
+          'escalations': escalations,
+        },
+      ],
+    };
+
+    Map<String, dynamic> row({
+      String escalationId = 'b1',
+      String? kind = 'guard_blocked',
+      int at = 1,
+    }) => {
+      'escalationId': escalationId,
+      'question': 'Handler did not send its reply',
+      'reasoning': 'reply contains control characters',
+      'draftReply': '/code-review --fix',
+      'urgency': 'normal',
+      'at': at,
+      'kind': ?kind,
+    };
+
+    HandlerEscalation only(HandlerService svc, String id) =>
+        svc.currentState.escalations.firstWhere((e) => e.escalationId == id);
+
+    test('dismiss sends handler:dismiss and drops only that row', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', statusFrame([row(), row(escalationId: 'b2', at: 2)]));
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.escalations, hasLength(2));
+
+      svc.dismiss(only(svc, 'b1'));
+
+      final sent = t.sent.firstWhere((m) => m['type'] == 'handler:dismiss');
+      expect(sent['projectId'], 'p');
+      expect(sent['terminalId'], 't9');
+      expect(sent['escalationId'], 'b1');
+      // A sibling report is a separate refusal the user has not read yet.
+      expect(
+        svc.currentState.escalations.map((e) => e.escalationId),
+        ['b2'],
+      );
+      expect(svc.currentState.sessions['t9']!.pendingEscalations, 1);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('dismiss on a reply or resolve_in_session row sends nothing', () async {
+      // The app-side mirror of the bridge's refusal: a live question dropped by
+      // a Dismiss would vanish more silently than any path that exists today.
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', statusFrame([
+        row(escalationId: 'r1', kind: null),
+        row(escalationId: 'p1', kind: 'resolve_in_session', at: 2),
+      ]));
+      await Future<void>.delayed(Duration.zero);
+
+      svc.dismiss(only(svc, 'r1'));
+      svc.dismiss(only(svc, 'p1'));
+      expect(t.sent.any((m) => m['type'] == 'handler:dismiss'), isFalse);
+      expect(svc.currentState.escalations, hasLength(2));
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('replying to a report sends the reply AND its dismiss, and leaves a sibling standing',
+        () async {
+      // The bridge cannot tell the user's line apart from an unrelated one — the
+      // whole reason the kind exists — so sending your own words has to carry
+      // the acknowledgement with it.
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', statusFrame([row(), row(escalationId: 'b2', at: 2)]));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.reply(only(svc, 'b1'), 'run the review yourself'), isTrue);
+      expect(t.sent.where((m) => m['type'] == 'terminal:input'), hasLength(1));
+      final dismissed = t.sent.where((m) => m['type'] == 'handler:dismiss');
+      expect(dismissed, hasLength(1));
+      expect(dismissed.single['escalationId'], 'b1');
+      expect(svc.currentState.escalations.map((e) => e.escalationId), ['b2']);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+
+    test('an unrelated reply on the same terminal leaves the reports standing', () async {
+      // The reported bug, app-side: the optimistic drop must mirror the bridge's
+      // clearing rule, or the row disappears locally and comes back on the next
+      // snapshot — or worse, reads as retired.
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = HandlerService.fromSession(session);
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('handler:status', statusFrame([
+        row(),
+        row(escalationId: 'q1', kind: null, at: 2),
+      ]));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.reply(only(svc, 'q1'), 'never mind, do something else'), isTrue);
+      expect(t.sent.any((m) => m['type'] == 'handler:dismiss'), isFalse);
+      expect(svc.currentState.escalations.map((e) => e.escalationId), ['b1']);
+      expect(svc.currentState.sessions['t9']!.pendingEscalations, 1);
+      expect(
+        svc.currentState.sessions['t9']!.runState,
+        HandlerRunState.needsYou,
+      );
+
+      // …and the row is still there after the bridge replays it, which is what
+      // the answered-set suppression would have quietly undone.
+      t.emit('handler:status', statusFrame([row()]));
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.escalations.map((e) => e.escalationId), ['b1']);
+
+      await sub.cancel();
+      await svc.dispose();
+      await session.close();
+    });
+  });
 }

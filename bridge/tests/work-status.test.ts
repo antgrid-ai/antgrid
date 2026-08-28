@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { answerRequest, clientFocusState, clientGone, closeTurn, initialWorkStatus, reduceWorkStatus, sessionFocus, turnStart, userReply, type WorkStatusState } from "../src/work-status";
+import { answerRequest, clientFocusState, clientGone, closeTurn, initialWorkStatus, isStaleIdleNudge, reduceWorkStatus, sessionFocus, turnStart, userReply, type WorkStatusState } from "../src/work-status";
 import type { InboundSource } from "../src/message-bus";
 
 /** The two client classes the read state distinguishes: the phone reaches a core
@@ -155,6 +155,54 @@ test("a turn-start clears a stale awaiting_input (question answered, work resume
   const blocked = fold([sessions(1), push("awaiting_input")]);
   expect(blocked.status).toBe("attention");
   expect(turnStart(blocked, "r0").status).toBe("working");
+});
+
+// ── isStaleIdleNudge (the shared predicate) ─────────────────────────────────
+//
+// The same question the fold above asks itself, exported so the /handler-event
+// path drops the nudge before the Handler pays for a context assemble and a
+// judge spawn. One definition, so the two paths cannot drift.
+
+test("isStaleIdleNudge is true only after this session's OWN task_complete", () => {
+  expect(isStaleIdleNudge(fold([sessions(1), push("task_complete", "r0")]), "r0")).toBe(true);
+  expect(isStaleIdleNudge(fold([sessions(1), push("awaiting_input", "r0")]), "r0")).toBe(false);
+  expect(isStaleIdleNudge(fold([sessions(1)]), "r0")).toBe(false);
+});
+
+test("a recorded permission_request is never stale", () => {
+  // The paired /notify races the /handler-event POST and re-files the same hook
+  // firing as permission_request whenever its message isn't the waiting nudge.
+  // If that lands first it must UNLATCH the window — a genuine permission block
+  // dropped here has no further event able to raise it.
+  const s = fold([sessions(1), push("task_complete", "r0"), push("permission_request", "r0")]);
+  expect(isStaleIdleNudge(s, "r0")).toBe(false);
+});
+
+test("isStaleIdleNudge never reads the unattributed fallback", () => {
+  // Mirrors the attributed-vs-fallback rule the fold's own stale check keeps:
+  // a config-`terminals:` slot finishing must not silence a real first block on
+  // a session that has recorded nothing of its own.
+  const s = fold([sessions(2), push("task_complete", "service-terminal-1")]);
+  expect(s.notifications.get("")).toBe("task_complete");
+  expect(isStaleIdleNudge(s, "r1")).toBe(false);
+});
+
+test("a turn-start closes the suppression window", () => {
+  const done = fold([sessions(1), push("task_complete", "r0")]);
+  expect(isStaleIdleNudge(turnStart(done, "r0"), "r0")).toBe(false);
+});
+
+test("a keystroke-inferred turn start also closes the window", () => {
+  // The agents with no pre-turn hook (codex/cursor/copilot) open their turn off
+  // a submitted keystroke — that has to unlatch the window too, or their whole
+  // next turn is unsupervised.
+  const done = fold([sessions(1, { tool: "codex" }), push("task_complete", "r0")]);
+  const typed = userReply(done, "r0", { typed: true });
+  expect(isStaleIdleNudge(userReply(typed, "r0", { submitted: true }), "r0")).toBe(false);
+});
+
+test("an unknown session id is not stale", () => {
+  expect(isStaleIdleNudge(fold([sessions(1), push("task_complete", "r0")]), "not-a-session")).toBe(false);
 });
 
 test("attention > error > working precedence: a fresh permission wins over a live turn", () => {

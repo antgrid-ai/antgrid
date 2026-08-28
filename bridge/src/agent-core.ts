@@ -21,7 +21,7 @@ import { loadConfig, findConfigFile, projectName, type AbConfig } from "./config
 import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from "./bootstrap";
 import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } from "./known-agents";
 import { augmentAgentLaunch } from "./agent-launch-augmenter";
-import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, HandlerInstructWire, HandlerUndoWire, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
+import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
 import { startApiServer, type ApiServerHandle } from "./api-server";
 import { MessageBus, type InboundSource } from "./message-bus";
@@ -353,6 +353,12 @@ export interface BuildAgentCoreOptions {
    *  {@link AgentCore.refreshSessionWork} when the reduction moves — the list
    *  is otherwise only re-emitted when the sessions themselves change. */
   sessionWorkStatusFor?: (sessionId: string) => WorkStatus | undefined;
+  /** True when this slot's own turn already ended, so an injected hook's
+   *  ambiguous `awaiting_input` can only be its post-completion idle nudge. The
+   *  owner answers from the same work-status reduction that already drops the
+   *  nudge's phone push; an absent hook forwards, which is the direction a
+   *  supervisor has to fail in. */
+  isStaleIdleNudge?: (sessionId: string) => boolean;
   /** Relay base URL of the machine socket this core attaches to. Host-supplied
    *  in remote mode: only a standalone agent with an explicit `relayUrl:` in its
    *  antgrid.yaml can learn it from config, so without this a host-spawned
@@ -888,6 +894,22 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           // bad undo must not tear down the live armed session it names nothing in.
           // Re-emit status so the sender's UI resyncs.
           logger.warn("handler:undo rejected: malformed payload");
+          handlerEngine.emitStatus();
+        }
+        break;
+      }
+      case "handler:dismiss": {
+        // Same re-parse discipline as the three above: parseMessageFast validated
+        // the type and nothing else, and these two ids select which report on which
+        // supervised session goes away.
+        const parsed = HandlerDismissWire.safeParse(msg);
+        if (parsed.success) {
+          handlerEngine.dismissEscalation(parsed.data.terminalId, parsed.data.escalationId);
+        } else {
+          // Rejected WITHOUT disarming, for the same reason a malformed arm is: a
+          // bad dismiss must not tear down the live armed session it names a row on.
+          // Re-emit status so the sender's UI resyncs.
+          logger.warn("handler:dismiss rejected: malformed payload");
           handlerEngine.emitStatus();
         }
         break;
@@ -1504,15 +1526,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // missing driver then surfaces as agent:error instead of a silent
         // throw. This path never re-enters handleAbMessage, so an auto-reply
         // cannot reset the runaway guard that counts it.
-        prompt: (id, text) => {
+        prompt: (id, text, commandId) => {
           // requestId is required by AgentPromptMessage; drivers use it only
           // for send-correlation, so a fresh UUID is sufficient.
           void structured?.handleAgentMessage(createMessage("agent:prompt", {
             sessionId: id, requestId: crypto.randomUUID(), text,
+            ...(commandId ? { commandId } : {}),
           }), { injected: true });
         },
         getTranscriptPath: (id) => sessions?.getAgentTranscriptPath(id),
         getSnapshot: (id) => structured?.getTranscriptSnapshot(id) ?? Promise.resolve([]),
+        commandCatalog: (id) => structured?.commandCatalog(id),
       }),
     }),
     sendAb: (msg) => sendAb(msg),
@@ -3041,6 +3065,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     },
     onHookAlive: (terminalId) => { hookAlivePinged.add(terminalId); },
     onTurnStart: (terminalId) => opts.onTurnStart?.(terminalId),
+    isStaleIdleNudge: (terminalId) => opts.isStaleIdleNudge?.(terminalId) ?? false,
   });
 
   const TranscriptSnapshotParams = z.object({ sessionId: z.string() });

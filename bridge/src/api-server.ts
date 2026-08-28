@@ -1,9 +1,9 @@
 import { join } from "node:path";
-import { homedir } from "node:os";
-import { writeFileSync, unlinkSync, readFileSync } from "node:fs";
+import { writeFileSync, unlinkSync, readFileSync, mkdirSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { z } from "zod";
 import { logger } from "./logger";
+import { resolveAbDir } from "./antgrid-dir";
 const log = logger.child({ component: "api-server" });
 import { createMessage, type AbMessage } from "./protocol";
 import { AGENTS, BY_HOOK_NAME } from "./agents/registry";
@@ -24,6 +24,16 @@ export interface AgentContext {
   onSessionTitle?: (body: SessionTitleBody) => void;
   /** Forwarded a validated /handler-event POST from an injected agent hook. */
   onHandlerEvent?: (body: HandlerEventBody) => void;
+  /** True when a hook's `awaiting_input` for this slot can only be the generic
+   *  post-completion idle nudge, because the slot's own turn already ended.
+   *  Wired in buildAgentCore to the owner's work-status reduction — the same
+   *  fold that already skips the nudge's phone push, so the two rules cannot
+   *  drift apart.
+   *
+   *  ABSENT MEANS FORWARD, and that is the safe direction: a genuine mid-turn
+   *  block that never reaches the Handler leaves a blocked agent unsupervised,
+   *  with no further event able to raise it. */
+  isStaleIdleNudge?: (terminalId: string) => boolean;
   /** Called when an injected hook pings /hook-alive, the drift probe for any
    *  agent whose `hooks.posts` declares that path. */
   onHookAlive?: (terminalId: string) => void;
@@ -37,7 +47,6 @@ export interface AgentContext {
 }
 
 const VERSION = "0.1.0";
-const PORT_FILE = join(process.env.ANTGRID_DIR ?? join(homedir(), ".antgrid"), "api.port");
 
 /**
  * The hook-name vocabulary a loopback post may identify itself by (`claude`,
@@ -87,6 +96,12 @@ const HandlerEventSchema = z.object({
   // the engine's fallback wait) and what the driver called the failure.
   resetsAt: z.number().optional(),
   errorClass: z.string().optional(),
+  // `awaiting_input` only: the poster's own reading of the message it saw — true
+  // when it looks like the agent's generic idle nudge, false when the same hook
+  // classified it as a live block. Nothing else can tell them apart, and the
+  // paired /notify from the SAME invocation is decided on it, so the drop below
+  // has to read it or the two answers disagree. Absent = the poster did not say.
+  idleNudge: z.boolean().optional(),
 });
 export type HandlerEventBody = z.infer<typeof HandlerEventSchema>;
 
@@ -327,6 +342,29 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
         try { body = await req.json(); } catch { return json({ error: "Invalid JSON body" }, 400); }
         const parsed = HandlerEventSchema.safeParse(body);
         if (!parsed.success) return json({ error: "Invalid body" }, 400);
+        // The agent's notification hook is stateless: it fires the identical
+        // "waiting for your input" signal for a real mid-turn block and for its
+        // idle nudge after the turn already ended. Only the host knows which,
+        // and forwarding the second costs the Handler a context assemble plus a
+        // judge spawn on a turn nothing can change any more. Asked for this ONE
+        // event kind — the turn/limit kinds are unambiguous and must never be
+        // gated on turn state. Still 200: the hook must not see a failure.
+        //
+        // BOTH halves are required. The reduction is read before the paired
+        // /notify of the same hook invocation has folded into it (that POST is
+        // issued alongside this one and lands after), so turn state alone would
+        // classify a genuine mid-turn block as an idle nudge whenever the slot's
+        // last notification was a turn-end — reachable from a lost /turn-start, or
+        // from Handler's own park push, which writes task_complete for the slot.
+        // The Handler would then never hear the block while the same invocation's
+        // /notify dotted the session "needs you", and nothing re-raises it.
+        // `idleNudge` is the poster's own reading of the message, which is exactly
+        // what /notify branches on: unless it says this is the nudge shape, forward.
+        if (parsed.data.event === "awaiting_input" && parsed.data.idleNudge === true
+          && ctx.isStaleIdleNudge?.(parsed.data.terminalId)) {
+          log.debug("Dropped a post-completion idle nudge for %s", parsed.data.terminalId);
+          return json({ ok: true, stale: true });
+        }
         ctx.onHandlerEvent?.(parsed.data);
         return json({ ok: true });
       }
@@ -343,8 +381,15 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
   // ANTGRID_API_PORT env var stamped into each terminal is the real source of
   // truth; this file is a fallback for processes that lack that env (legacy /
   // single-core). See stop() for why removal is guarded.
+  // Resolved per server, never at module load: ANTGRID_DIR is the process-wide
+  // override every other reader honours live (`resolveAbDir`, and hook-runner's
+  // own fallback), so a path frozen at import time answers for whatever the env
+  // held when the first module in the graph loaded. The directory may not exist
+  // yet on a first launch, and losing the file costs hook discovery silently.
+  const portFile = join(resolveAbDir(), "api.port");
   try {
-    writeFileSync(PORT_FILE, String(port), { mode: 0o600 });
+    mkdirSync(join(portFile, ".."), { recursive: true });
+    writeFileSync(portFile, String(port), { mode: 0o600 });
   } catch (err) {
     log.warn("Failed to write API port file: %s", err);
   }
@@ -362,7 +407,7 @@ export function startApiServer(ctx: AgentContext): ApiServerHandle {
       // the singleton host a later core may have overwritten it; an
       // unconditional unlink would delete a sibling core's live pointer.
       try {
-        if (readFileSync(PORT_FILE, "utf8").trim() === String(port)) unlinkSync(PORT_FILE);
+        if (readFileSync(portFile, "utf8").trim() === String(port)) unlinkSync(portFile);
       } catch {
         // Port file may not exist or be unreadable — nothing to clean up.
       }

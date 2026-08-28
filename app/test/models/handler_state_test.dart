@@ -273,5 +273,21 @@ void main() {
       expect(e.choices, isNull);
       expect(e.choiceById('approve'), isNull);
     });
+
+    test('a guard_blocked escalation never carries choices', () {
+      // The row exists BECAUSE a guard refused this exact text, so a one-tap
+      // would re-send it with the thinnest possible human in the loop. The
+      // bridge refuses to mint these; this is the app's own floor.
+      final e = HandlerEscalation.fromWire(
+        't1',
+        escalationWire(choices: [approve, reject], kind: 'guard_blocked'),
+      )!;
+      expect(e.kind, 'guard_blocked');
+      expect(e.choices, isNull);
+      expect(e.choiceById('approve'), isNull);
+      // Still answerable in the user's own words — the draft is what the reply
+      // sheet opens on.
+      expect(e.draftReply, isNotEmpty);
+    });
   });
 }
