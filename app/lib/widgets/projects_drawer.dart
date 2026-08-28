@@ -662,7 +662,9 @@ class _AdvertisedProjectRow extends ConsumerWidget {
           builder: (context, hovered, pointerOver) => AbListRow(
             horizontalPadding: 0,
             density: AbRowDensity.sm,
-            hoverable: true,
+            // No `hoverable`: matches the local project row, which never took
+            // it — the fill previews selection, and this row's tap expands.
+            // See `DrawerBand` for the rule.
             leading: DrawerProjectLeading(
               expanded: expanded,
               pointerOver: pointerOver,
