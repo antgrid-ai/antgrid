@@ -1,7 +1,10 @@
 import type { ResolvedTitle } from "./agents/types";
 
 export interface AutoNameSink {
-  applyAutoName(id: string, name: string): void;
+  /** The signal the name came from, absent for the OSC fallback. Passed on so
+   *  the sink can apply the same precedence DURABLY: this class holds nothing
+   *  after the PTY exits, and the name outlives it on the session entry. */
+  applyAutoName(id: string, name: string, rank?: TitleRank): void;
 }
 
 const MAX_TITLE_LEN = 60;
@@ -38,6 +41,17 @@ const RANK_ORDER: Record<TitleRank, number> = {
   self: 1,
   manual: 2,
 };
+
+/** Every rank, for the persisted schema that has to name them. Derived from
+ *  RANK_ORDER rather than restated, because `Record<TitleRank, number>` is what
+ *  makes forgetting a new rank a build error. */
+export const TITLE_RANKS = Object.keys(RANK_ORDER) as [TitleRank, ...TitleRank[]];
+
+/** Comparable strength of a title signal. The OSC fallback carries no rank and
+ *  ranks below every structured one — it is terminal chrome, not a title. */
+export function titleRankValue(rank?: TitleRank): number {
+  return rank ? RANK_ORDER[rank] : -1;
+}
 
 interface Signals {
   /** Sanitized at ingest, so `title` is exactly the name that will be applied.
@@ -82,7 +96,7 @@ export class SessionNamer {
    */
   onStructuredTitle(id: string, title: string, rank: TitleRank): void {
     const held = this.signals.get(id)?.structured;
-    if (held && RANK_ORDER[rank] < RANK_ORDER[held.rank]) return;
+    if (held && titleRankValue(rank) < titleRankValue(held.rank)) return;
     // Normalize at ingest, so the stored title IS the name that will be applied
     // and `flush` never has to re-derive it. One that sanitizes away applies
     // nothing, and latching the slot on it would block every later title on
@@ -105,7 +119,7 @@ export class SessionNamer {
    */
   hasFinalTitle(id: string): boolean {
     const held = this.signals.get(id)?.structured;
-    return !!held && RANK_ORDER[held.rank] >= RANK_ORDER.self;
+    return titleRankValue(held?.rank) >= titleRankValue("self");
   }
 
   onOscTitle(id: string, title: string): void {
@@ -118,7 +132,7 @@ export class SessionNamer {
       const s = this.signals.get(id);
       if (!s) continue;
       const name = s.structured?.title ?? sanitizeTitle(s.osc ?? "");
-      if (name) this.sink.applyAutoName(id, name);
+      if (name) this.sink.applyAutoName(id, name, s.structured?.rank);
     }
     this.dirty.clear();
   }
