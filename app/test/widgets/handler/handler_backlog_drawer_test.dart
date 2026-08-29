@@ -144,6 +144,26 @@ void main() {
     expect(_sentIds(session), ['i1', 'i3', 'i2']);
   });
 
+  testWidgets('move to top lifts an item over every slot in one edit', (
+    tester,
+  ) async {
+    final session = await _armedSession([_tests, _commit, _pr]);
+    await _pumpDrawer(tester, session);
+
+    await _openMenuFor(tester, 0);
+    // The row already at the head has nowhere to lift to.
+    expect(_openMenuLabels(tester), isNot(contains('Move to top')));
+    await _pick(tester, 'Move down');
+    _transportOf(session).clearSent();
+
+    await _openMenuFor(tester, 2);
+    await _pick(tester, 'Move to top');
+
+    // _sentIds insists on exactly one configure: the whole point of the entry
+    // is that it costs one round trip and not one per slot.
+    expect(_sentIds(session), ['i3', 'i1', 'i2']);
+  });
+
   testWidgets('the first item cannot move up and the last cannot move down', (
     tester,
   ) async {
@@ -216,7 +236,82 @@ void main() {
     expect(edited.containsKey('evidence'), isFalse);
   });
 
-  testWidgets('requeue is offered for skipped items and no other status', (
+  testWidgets('requeue puts a blocked item back to queued', (tester) async {
+    const blocked = HandlerInstructionItem(
+      id: 'i2',
+      text: 'open a PR',
+      status: 'blocked',
+      dependsOn: ['i1'],
+      outcome: 'the test run it waits on has not finished',
+      createdAt: 2,
+    );
+    final session = await _armedSession([_tests, blocked]);
+    await _pumpDrawer(tester, session);
+
+    await _openMenuFor(tester, 1);
+    await _pick(tester, 'Requeue');
+
+    final edited = (_sentConfigure(session)['backlog'] as List).last as Map;
+    expect(edited['status'], 'queued');
+    expect(edited.containsKey('outcome'), isFalse);
+    // The dependency is left alone: the bridge blocking this again on its next
+    // pass is the right answer, and the row already says what it waits on.
+    expect(edited['dependsOn'], ['i1']);
+  });
+
+  testWidgets('an item behind stalled work is offered no requeue', (
+    tester,
+  ) async {
+    const failed = HandlerInstructionItem(
+      id: 'i1',
+      text: 'run the tests',
+      status: 'failed',
+      createdAt: 1,
+    );
+    const waiting = HandlerInstructionItem(
+      id: 'i2',
+      text: 'open a PR',
+      status: 'blocked',
+      dependsOn: ['i1'],
+      createdAt: 2,
+    );
+    final session = await _armedSession([failed, waiting]);
+    await _pumpDrawer(tester, session);
+
+    // Dropping the dependency is the action that frees it, and it stays.
+    expect(find.byTooltip('Remove this dependency'), findsOneWidget);
+    await _openMenuFor(tester, 1);
+    // The bridge re-blocks anything waiting on failed work on its next pass, so
+    // requeueing here changes the word and nothing else.
+    expect(_openMenuLabels(tester), isNot(contains('Requeue')));
+    await _pick(tester, 'Delete');
+  });
+
+  testWidgets('the waits-on line names a dependency that is itself stuck', (
+    tester,
+  ) async {
+    const blockedDep = HandlerInstructionItem(
+      id: 'i1',
+      text: 'run the tests',
+      status: 'blocked',
+      createdAt: 1,
+    );
+    const waiting = HandlerInstructionItem(
+      id: 'i2',
+      text: 'open a PR',
+      status: 'blocked',
+      dependsOn: ['i1'],
+      createdAt: 2,
+    );
+    final session = await _armedSession([blockedDep, waiting]);
+    await _pumpDrawer(tester, session);
+
+    // Both rows' own status columns, plus the waits-on line — which is the one
+    // saying why the item behind it is offered no requeue.
+    expect(find.text('blocked'), findsNWidgets(3));
+  });
+
+  testWidgets('requeue is offered for skipped and blocked and no other status', (
     tester,
   ) async {
     const failed = HandlerInstructionItem(
@@ -231,7 +326,19 @@ void main() {
       status: 'skipped',
       createdAt: 5,
     );
-    final session = await _armedSession([_tests, _commit, failed, skipped]);
+    const blocked = HandlerInstructionItem(
+      id: 'i6',
+      text: 'tag the release',
+      status: 'blocked',
+      createdAt: 6,
+    );
+    final session = await _armedSession([
+      _tests,
+      _commit,
+      failed,
+      skipped,
+      blocked,
+    ]);
     await _pumpDrawer(tester, session);
 
     for (final row in [0, 1, 2]) {
@@ -240,8 +347,14 @@ void main() {
       await _pick(tester, 'Delete');
       _transportOf(session).clearSent();
     }
-    await _openMenuFor(tester, 3);
-    expect(_openMenuLabels(tester), contains('Requeue'));
+    // Neither reached an outcome: one's precondition did not hold, the other is
+    // waiting on something that has not cleared.
+    for (final row in [3, 4]) {
+      await _openMenuFor(tester, row);
+      expect(_openMenuLabels(tester), contains('Requeue'));
+      await _pick(tester, 'Delete');
+      _transportOf(session).clearSent();
+    }
   });
 
   testWidgets('the edit carries the session\'s own notifyOnly', (tester) async {
@@ -274,11 +387,43 @@ void main() {
       await _openMenuFor(tester, row);
       expect(
         _openMenuLabels(tester),
-        everyElement(isIn(['Move up', 'Move down', 'Requeue', 'Delete'])),
+        everyElement(
+          isIn(['Move to top', 'Move up', 'Move down', 'Requeue', 'Delete']),
+        ),
       );
       await _pick(tester, 'Delete');
       _transportOf(session).clearSent();
     }
+  });
+
+  testWidgets('a row says what happened, or what it is waiting on', (
+    tester,
+  ) async {
+    const finished = HandlerInstructionItem(
+      id: 'i1',
+      text: 'run the tests',
+      status: 'done',
+      condition: 'the branch is dirty',
+      outcome: 'all 41 tests passed',
+      evidence: '41 passed, 0 failed',
+      createdAt: 1,
+    );
+    const waiting = HandlerInstructionItem(
+      id: 'i2',
+      text: 'open a PR',
+      status: 'queued',
+      condition: 'the tests pass',
+      createdAt: 2,
+    );
+    final session = await _armedSession([finished, waiting]);
+    await _pumpDrawer(tester, session);
+
+    expect(find.text('all 41 tests passed'), findsOneWidget);
+    // The gate is the question the outcome has already answered.
+    expect(find.textContaining('the branch is dirty'), findsNothing);
+    expect(find.text('only if the tests pass'), findsOneWidget);
+    // Evidence backs the outcome; it is not a second subtitle.
+    expect(find.textContaining('41 passed, 0 failed'), findsNothing);
   });
 
   testWidgets('an empty backlog renders its own state, not a broken list', (
