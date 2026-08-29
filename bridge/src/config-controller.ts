@@ -2,7 +2,7 @@ import { existsSync, readFileSync, watch as fsWatch, type FSWatcher } from "node
 import { basename, dirname } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { AbConfigSchema, type AbConfig, formatZodIssues } from "./config";
-import { atomicWriteFile } from "./discovery";
+import { atomicWriteFile, isWatchEventFor } from "./discovery";
 import { logger } from "./logger";
 const log = logger.child({ component: "config-controller" });
 
@@ -79,14 +79,14 @@ export class ConfigController {
         onChange(r, diff);
       }, 100);
     };
-    const fileName = basename(this.filePath).toLowerCase();
+    const fileName = basename(this.filePath);
     // The DIRECTORY, never the file: [write] publishes by rename, and an inotify
     // watch is keyed to the inode it was armed on — so on Linux the first save
     // orphans a file-path watch and every later one is invisible for the life of
     // the process (measured on Node and on Bun, on two filesystems). Watching
     // the parent also covers the file not existing yet.
     this.watcher = fsWatch(dirname(this.filePath), (_event, name) => {
-      if (namesConfig(name, fileName)) trigger();
+      if (isWatchEventFor(name, fileName)) trigger();
     });
     // FSWatcher emits async 'error' events (EPERM/ENOENT on Windows when the
     // watched path is locked or removed at runtime); with no handler Node
@@ -104,29 +104,6 @@ export class ConfigController {
     if (this.debounce) clearTimeout(this.debounce);
     this.debounce = null;
   }
-}
-
-/** Whether a directory-watch event is about our config file. It over-accepts in
- *  three deliberate ways, because a spurious hit costs one debounced re-read of a
- *  fixed path while a dropped one is the silent deafness [ConfigController.watch]
- *  exists to fix:
- *
- *  - Case-insensitively, on every platform. antgrid.yaml is USER-authored, so a
- *    repo may carry `Antgrid.yaml`, and every other access to it (existsSync,
- *    readFileSync, the rename in atomicWriteFile) resolves case-insensitively on
- *    Windows and macOS. An exact compare would find the file, seed from it, serve
- *    reads off it — and then ignore every save to it for the life of the process.
- *  - The `<name>.<pid>.tmp` scratch atomicWriteFile renames from. Windows reports
- *    ONLY the scratch name when the rename target does not yet exist, so dropping
- *    it makes a config file's first creation unobservable — and `config:write`
- *    applies nothing itself, so that config would never take effect at all.
- *    Within a save the 100ms debounce coalesces it with the target's own event.
- *  - A nameless event (inotify IN_ATTRIB on the directory itself), which carries
- *    nothing to filter on. */
-function namesConfig(name: string | Buffer | null, fileName: string): boolean {
-  if (!name) return true;
-  const n = name.toString().toLowerCase();
-  return n === fileName || (n.startsWith(`${fileName}.`) && n.endsWith(".tmp"));
 }
 
 export interface ConfigDiff {

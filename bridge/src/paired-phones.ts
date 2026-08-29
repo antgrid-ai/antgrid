@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, watch as fsWatch } from "node:fs";
 import { join } from "node:path";
-import { atomicWriteFile } from "./discovery";
+import { atomicWriteFile, isWatchEventFor } from "./discovery";
 import { logger } from "./logger";
 const log = logger.child({ component: "paired-phones" });
 
@@ -185,7 +185,12 @@ export function loadPairedPhones(abDir: string, opts: PairedPhonesOptions = {}):
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
       let timer: ReturnType<typeof setTimeout> | null = null;
       const w = fsWatch(dir, (_event, filename) => {
-        if (filename && filename.toString() !== "paired-phones.json") return;
+        // Must accept the scratch name too, not just "paired-phones.json": Bun
+        // on Linux delivers exactly ONE event for a rename-publish into a watched
+        // directory and names the SCRATCH file, never the target. An exact
+        // compare here made this watcher permanently silent on the runtime the
+        // bridge ships — no reload after `antgrid phones remove`, no re-advertise.
+        if (!isWatchEventFor(filename, "paired-phones.json")) return;
         if (timer) clearTimeout(timer);
         timer = setTimeout(() => {
           const raw = readRaw(path);

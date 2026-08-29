@@ -74,6 +74,33 @@ function renameWithRetry(tmp: string, path: string): void {
   renameSync(tmp, path);
 }
 
+/** Whether an `fs.watch` event naming `eventName` should be treated as touching
+ *  `fileName`. Every directory watcher over a file [atomicWriteFile] publishes
+ *  MUST filter through this rather than comparing the name itself.
+ *
+ *  It over-accepts in three deliberate ways, because a spurious hit costs one
+ *  re-read of a fixed path while a dropped one is a watcher that has silently
+ *  gone deaf:
+ *
+ *  - The `<name>.<pid>.tmp` scratch a publish renames from. Measured on Linux:
+ *    for one rename-publish into a watched directory, Node delivers four events
+ *    ending in `rename:<name>`, but Bun delivers exactly ONE — `rename:
+ *    <name>.<pid>.tmp` — and never names the target at all. Windows reports only
+ *    the scratch too when the target does not yet exist. So on the runtime the
+ *    bridge actually ships, an exact-name filter never fires.
+ *  - Case-insensitively. A user-authored target (antgrid.yaml) may be on disk in
+ *    another case, and every other access resolves it case-insensitively on
+ *    Windows and macOS — so an exact compare would read the file happily and
+ *    then ignore every save to it.
+ *  - A nameless event (inotify IN_ATTRIB on the directory itself), which carries
+ *    nothing to filter on. */
+export function isWatchEventFor(eventName: string | Buffer | null | undefined, fileName: string): boolean {
+  if (!eventName) return true;
+  const n = eventName.toString().toLowerCase();
+  const f = fileName.toLowerCase();
+  return n === f || (n.startsWith(`${f}.`) && n.endsWith(".tmp"));
+}
+
 const reaped = new Set<string>();
 
 /** Drop scratch files a bridge was killed before it could rename. Rename is

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, existsSync, readdirSync, readFileSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { atomicWriteFile } from "../src/discovery";
+import { atomicWriteFile, isWatchEventFor } from "../src/discovery";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "antgrid-disc-")); });
@@ -123,4 +123,38 @@ describe("atomicWriteFile", () => {
       for (const k of kids) { try { k.kill(); } catch { /* already exited */ } }
     }
   }, 30_000);
+});
+
+// Asserted on the predicate rather than through a live watcher on purpose: the
+// event shape this guards against is Bun-on-Linux only, so a behavioural test
+// passes on a Windows or macOS dev machine whether or not the bug is present.
+describe("isWatchEventFor", () => {
+  test("accepts the scratch name a publish renames from", () => {
+    // The whole bug. Bun on Linux delivers ONE event for a rename-publish into a
+    // watched directory and names the scratch, never the target — so a watcher
+    // that only accepts the target name never fires at all.
+    expect(isWatchEventFor("paired-phones.json.4321.tmp", "paired-phones.json")).toBe(true);
+    expect(isWatchEventFor("antgrid.yaml.4321.tmp", "antgrid.yaml")).toBe(true);
+  });
+
+  test("accepts the target itself, whatever case it is reported in", () => {
+    expect(isWatchEventFor("antgrid.yaml", "antgrid.yaml")).toBe(true);
+    // A user-authored target may sit on disk in another case, and every other
+    // access resolves it case-insensitively on Windows and macOS.
+    expect(isWatchEventFor("Antgrid.yaml", "antgrid.yaml")).toBe(true);
+    expect(isWatchEventFor("antgrid.yaml", "Antgrid.yaml")).toBe(true);
+  });
+
+  test("accepts a nameless event, which carries nothing to filter on", () => {
+    expect(isWatchEventFor(null, "antgrid.yaml")).toBe(true);
+    expect(isWatchEventFor(undefined, "antgrid.yaml")).toBe(true);
+  });
+
+  test("rejects a sibling that merely shares a prefix or suffix", () => {
+    expect(isWatchEventFor("my-antgrid.yaml", "antgrid.yaml")).toBe(false);
+    expect(isWatchEventFor("antgrid.yaml.bak", "antgrid.yaml")).toBe(false);
+    expect(isWatchEventFor("mobile-access-policy.json", "paired-phones.json")).toBe(false);
+    // A scratch belonging to a DIFFERENT store in the same directory.
+    expect(isWatchEventFor("sessions.json.4321.tmp", "paired-phones.json")).toBe(false);
+  });
 });
