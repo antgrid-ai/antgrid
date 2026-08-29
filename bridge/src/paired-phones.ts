@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, watch as fsWatch } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, watch as fsWatch } from "node:fs";
 import { join } from "node:path";
+import { atomicWriteFile } from "./discovery";
 import { logger } from "./logger";
 const log = logger.child({ component: "paired-phones" });
 
@@ -85,14 +86,15 @@ export function loadPairedPhones(abDir: string, opts: PairedPhonesOptions = {}):
   let touchWriteRaw: string | null = null;
 
   function flush(silent = false) {
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     const data: FileShape = { version: 1, phones };
     const raw = JSON.stringify(data, null, 2);
-    writeFileSync(path, raw);
-    if (process.platform !== "win32") chmodSync(path, 0o600);
-    // Cleared on any write carrying more than touches: those MUST still notify,
-    // and a stale value could silence a later external edit that happens to match.
-    touchWriteRaw = silent ? raw : null;
+    // Cleared BEFORE the write, armed only after one lands. Any write carrying
+    // more than touches MUST still notify, and a snapshot left armed by a write
+    // that threw would silence a later external edit that happens to match it.
+    // Re-notifying costs a re-advertise; under-notifying costs correctness.
+    touchWriteRaw = null;
+    atomicWriteFile(path, raw, { fileMode: 0o600 });
+    if (silent) touchWriteRaw = raw;
   }
 
   function flushLastSeen() {
@@ -122,12 +124,15 @@ export function loadPairedPhones(abDir: string, opts: PairedPhonesOptions = {}):
       const phone = phones.find((p) => p.phonePubkey === pk);
       if (phone) phone.lastSeenAt = at;
     }
-    pendingTouches.clear();
     // Silent only when the write carries nothing but our own touches. When we
     // absorbed a concurrent external edit, the watcher event our write triggers
     // is the ONLY notification that edit will ever get — suppressing it strands
     // every connected phone on a stale catalog.
     flush(JSON.stringify(phones) === before);
+    // Dropped only once the write landed. The timer is already cleared, so
+    // clearing these first would discard a minute of coalesced admissions on a
+    // throw with nothing armed to retry them.
+    pendingTouches.clear();
   }
 
   return {
@@ -160,13 +165,22 @@ export function loadPairedPhones(abDir: string, opts: PairedPhonesOptions = {}):
       if (touchTimer) return;
       touchTimer = setTimeout(() => {
         touchTimer = null;
-        flushLastSeen();
+        // Nothing awaits this callback and the flush renames a file the CLI or a
+        // scanner may hold open, so an EPERM here would reach the event loop as
+        // an uncaughtException and take the whole bridge down over a `last seen`
+        // timestamp. Same guard as handler/engine.ts's park timer.
+        try { flushLastSeen(); } catch (err) { log.warn("paired-phones last-seen flush failed: %s", err); }
       }, lastSeenFlushMs);
       // A pending `last seen` write must never be the reason the process lives.
       touchTimer.unref?.();
     },
     flushLastSeen,
-    close: flushLastSeen,
+    // Shutdown runs this before it stops the control plane and removes
+    // host.json, so a failed `last seen` write must not abort the teardown and
+    // leave a stale host record pointing at a dead port.
+    close: () => {
+      try { flushLastSeen(); } catch (err) { log.warn("paired-phones close flush failed: %s", err); }
+    },
     watch: (onChange) => {
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
       let timer: ReturnType<typeof setTimeout> | null = null;
