@@ -264,21 +264,30 @@ class _SessionRowState extends ConsumerState<SessionRow> {
           leadingGapOverride: AbTokens.drawerSessionLeadingGap,
           leading: SizedBox(
             width: AbTokens.drawerSessionLeadingSlot,
-            height: AbTokens.drawerLeadingSlot,
-            // Bias the dot slightly below its box centre. Row-centring lines up
-            // the dot with the title's line-box centre, but the visible glyphs
-            // of a text line sit a hair lower (the font reserves more space
-            // above the baseline than below), so a geometrically-centred dot
-            // reads as too high. The small downward nudge matches the optical
-            // centre of the text.
-            child: Align(
-              alignment: const Alignment(0, _dotOpticalYBias),
-              child: _leadingDot(work, deleting: deleting),
+            // Anchors the row's content height to the 24px iconButtonBox independently of
+            // trailing, so the row height stays strictly constant without
+            // reserving horizontal space for the kebab menu when unhovered.
+            height: AbTokens.iconButtonBox,
+            child: Center(
+              child: SizedBox(
+                width: AbTokens.drawerSessionLeadingSlot,
+                height: AbTokens.drawerLeadingSlot,
+                // Bias the dot slightly below its box centre. Row-centring lines up
+                // the dot with the title's line-box centre, but the visible glyphs
+                // of a text line sit a hair lower (the font reserves more space
+                // above the baseline than below), so a geometrically-centred dot
+                // reads as too high. The small downward nudge matches the optical
+                // centre of the text.
+                child: Align(
+                  alignment: const Alignment(0, _dotOpticalYBias),
+                  child: _leadingDot(work, deleting: deleting),
+                ),
+              ),
             ),
           ),
-          // Row height is anchored by the always-reserved kebab slot (taller
-          // than the text line), so swapping the title for the field doesn't
-          // change the height; the field expands to the full title width.
+          // Row height is anchored by the 24px leading slot, so swapping the
+          // title for the field doesn't change the height; the field expands
+          // to the full title width.
           title: (_editing && !deleting)
               ? _buildEditor()
               : Row(
@@ -315,20 +324,16 @@ class _SessionRowState extends ConsumerState<SessionRow> {
                     SessionDeletingBadge(deleting: deleting),
                   ],
                 ),
-          // Hover-only kebab kept in the tree (and its size reserved) so the
-          // row height never jitters — including while editing, when it's
-          // hidden but its slot still anchors the row's height.
+          // Hover-only kebab (always visible on mobile touch devices). Does
+          // not take trailing width when unhovered, leaving the full width
+          // for session titles.
           // Hidden entirely while deleting rather than partly disabled: every
           // item on it (start/stop/rename/archive/delete, and the
           // working-directory rows pointing into a checkout that is going away)
           // acts on a session being removed.
-          trailing: Visibility(
-            visible: _hovered && !_editing && !deleting,
-            maintainState: true,
-            maintainAnimation: true,
-            maintainSize: true,
-            child: _SessionMenu(entryId: widget.entryId, session: session),
-          ),
+          trailing: (_hovered && !_editing && !deleting)
+              ? _SessionMenu(entryId: widget.entryId, session: session)
+              : null,
           selected: selected,
           enabled: !deleting,
           selectionStyle: AbRowSelection.surface,
