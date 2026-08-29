@@ -15,6 +15,7 @@ import '../../design/widgets/ab_menu.dart';
 import '../../design/widgets/ab_text_field.dart';
 import '../../models/handler_state.dart';
 import '../../providers/providers.dart';
+import '../../services/handler_service.dart';
 import 'handler_item_status.dart';
 
 /// The 1-tap presets (spec §4.2). Each label is verbatim the instruction the
@@ -57,8 +58,14 @@ class HandlerBacklogDrawer extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final p = context.antgrid;
-    final session = ref.watch(handlerStateProvider).value?.sessions[terminalId];
+    final state = ref.watch(handlerStateProvider).value;
+    final session = state?.sessions[terminalId];
     final backlog = session?.backlog ?? const <HandlerInstructionItem>[];
+    // Keyed by terminal, so a rebuild for a different terminalId cannot draw
+    // one session's outstanding instruction under another's backlog.
+    final pending =
+        state?.pendingInstructionsFor(terminalId) ?? const <String>[];
+    final editLock = handlerEditLockReason(pending);
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -86,9 +93,13 @@ class HandlerBacklogDrawer extends ConsumerWidget {
               ),
             ),
           ),
+        if (editLock != null) _EditLockNotice(reason: editLock),
         const SizedBox(height: AbTokens.space8),
         Flexible(
-          child: backlog.isEmpty
+          // An outstanding instruction keeps the list on screen on its own:
+          // "what you ask for lands here" is exactly the wrong sentence to
+          // print over a sentence the user has just asked for.
+          child: backlog.isEmpty && pending.isEmpty
               ? Padding(
                   padding: const EdgeInsets.symmetric(
                     horizontal: AbTokens.space16,
@@ -103,14 +114,19 @@ class HandlerBacklogDrawer extends ConsumerWidget {
               : ListView.builder(
                   shrinkWrap: true,
                   padding: EdgeInsets.zero,
-                  itemCount: backlog.length,
-                  itemBuilder: (_, index) => _BacklogRow(
-                    terminalId: terminalId,
-                    item: backlog[index],
-                    canMoveUp: index > 0,
-                    canMoveDown: index < backlog.length - 1,
-                    labelFor: (id) => _dependencyLabel(backlog, id),
-                  ),
+                  itemCount: backlog.length + pending.length,
+                  itemBuilder: (_, index) => index >= backlog.length
+                      ? _PendingInstructionRow(
+                          text: pending[index - backlog.length],
+                        )
+                      : _BacklogRow(
+                          terminalId: terminalId,
+                          item: backlog[index],
+                          canMoveUp: index > 0,
+                          canMoveDown: index < backlog.length - 1,
+                          labelFor: (id) => _dependencyLabel(backlog, id),
+                          lockReason: editLock,
+                        ),
                 ),
         ),
         // Only for a session that can receive one: an unarmed terminal has no
@@ -145,6 +161,11 @@ class _InstructionComposer extends ConsumerStatefulWidget {
 class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
   final _input = TextEditingController();
 
+  /// The sentence a send was held for, if one was. Rendered only while that
+  /// sentence is still outstanding, which is exactly as long as the refusal is
+  /// true — so the line retires itself and needs no timer to take it away.
+  String? _held;
+
   @override
   void dispose() {
     _input.dispose();
@@ -157,24 +178,43 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
   ///
   /// Resolved through the container for the same reason [_sendEdit] is: this
   /// fires from a tap inside a sheet, which the send itself may pop.
-  void _instruct(String text) {
-    if (text.trim().isEmpty) return;
-    focusedServiceOrNull(
-      ref.container,
-      (s) => s.handlerService,
-    )?.instruct(widget.terminalId, text);
+  ///
+  /// The service owns both the empty check and the debounce, so a chip and the
+  /// field are refused on the same terms; this only decides what the user is
+  /// told about it. A blank field is silent — there was nothing to send and
+  /// the user knows it — while a duplicate is a send that looked identical to
+  /// one that worked and did not happen, on the primary action of the surface.
+  HandlerInstructResult _instruct(String text) {
+    final result =
+        focusedServiceOrNull(
+          ref.container,
+          (s) => s.handlerService,
+        )?.instruct(widget.terminalId, text) ??
+        HandlerInstructResult.empty;
+    setState(() {
+      _held = result == HandlerInstructResult.duplicate ? text.trim() : null;
+    });
+    return result;
   }
 
   void _submitTyped() {
-    final text = _input.text;
-    if (text.trim().isEmpty) return;
-    _instruct(text);
+    // Cleared only on a send that happened: a refused one would take the
+    // user's words with it and leave an empty field beside an unchanged list.
+    if (_instruct(_input.text) != HandlerInstructResult.sent) return;
     _input.clear();
   }
 
   @override
   Widget build(BuildContext context) {
     final p = context.antgrid;
+    final held = _held;
+    final outstanding =
+        ref
+            .watch(handlerStateProvider)
+            .value
+            ?.pendingInstructionsFor(widget.terminalId) ??
+        const <String>[];
+    final stillHeld = held != null && outstanding.contains(held) ? held : null;
     return Container(
       decoration: BoxDecoration(
         border: Border(top: BorderSide(color: p.borderSubtle)),
@@ -205,11 +245,11 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
             ),
           ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(
+            padding: EdgeInsets.fromLTRB(
               AbTokens.space16,
               0,
               AbTokens.space16,
-              AbTokens.space8,
+              stillHeld == null ? AbTokens.space8 : AbTokens.space4,
             ),
             child: Row(
               children: [
@@ -230,6 +270,32 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
               ],
             ),
           ),
+          // Answered where the send was made, and in the same verb the field,
+          // the button and the waiting row all use. Without it a held duplicate
+          // moves nothing on screen: the field keeps the user's words, the list
+          // is unchanged, and the tail row saying so may be scrolled away —
+          // which is a broken button, not a debounce.
+          if (stillHeld != null)
+            // Full width so the line starts on the field's own left edge; the
+            // column around it centres anything that sizes to its child.
+            SizedBox(
+              width: double.infinity,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  AbTokens.space16,
+                  0,
+                  AbTokens.space16,
+                  AbTokens.space8,
+                ),
+                child: Text(
+                  'Already adding "${_quoted(stillHeld)}".',
+                  style: AbTokens.sansStyle(
+                    fontSize: AbTokens.fontXs,
+                    color: p.textSecondary,
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -306,11 +372,96 @@ Widget? _itemSubtitle(HandlerInstructionItem item) {
   return (text: id, resolved: false, status: null);
 }
 
+/// How much of the user's own sentence the lock reason quotes back. It has to
+/// fit a tooltip, and the sentence is however much the user felt like typing.
+const _quotedInstructionChars = 60;
+
+String _quoted(String sentence) {
+  if (sentence.length <= _quotedInstructionChars) return sentence;
+  // Back off a trailing high surrogate: `substring` cuts UTF-16 code units, and
+  // a stranded half renders as a replacement glyph.
+  final last = sentence.codeUnitAt(_quotedInstructionChars - 1);
+  final end = (last >= 0xD800 && last <= 0xDBFF)
+      ? _quotedInstructionChars - 1
+      : _quotedInstructionChars;
+  return '${sentence.substring(0, end)}…';
+}
+
+/// Why the backlog cannot be edited right now, or null while it can.
+///
+/// Every edit is a wholesale `handler:configure`, and the items an outstanding
+/// instruction becomes are appended behind that handoff — so an edit sent in
+/// between replaces the bridge's list with one the new items were never in, and
+/// the work the user just asked for is gone with nothing said. The window is
+/// the length of an extraction and the user has no reason to suspect it.
+///
+/// The reason quotes their sentence rather than describing the app's state:
+/// the row wearing [handlerPendingInstructionLabel] is on screen while this is
+/// refusing, and the quote is what makes the two one fact instead of two. It
+/// names the end of the hold rather than the data loss it prevents, because it
+/// stands on screen for the whole window (see [_EditLockNotice]) and the
+/// question a user reads it with is when the list comes back, not what the
+/// bridge would otherwise have done to it.
+String? handlerEditLockReason(List<String> pending) {
+  if (pending.isEmpty) return null;
+  if (pending.length > 1) {
+    return 'Still adding ${pending.length} instructions — editing is paused '
+        'until they land.';
+  }
+  return 'Still adding "${_quoted(pending.single)}" — editing is paused '
+      'until it lands.';
+}
+
+/// Why the list is not the user's to edit right now, standing for exactly as
+/// long as that is true.
+///
+/// The reason used to be delivered only on a tap — a tooltip on hover, a snack
+/// bar on a press — and on a phone neither arrives. This drawer opens as a
+/// modal sheet, and a snack bar goes through `ScaffoldMessenger` to the page's
+/// own `Scaffold`, which is the route UNDERNEATH it; the menu that raises one
+/// sits a layer above the sheet again. A tooltip is long-press-only on touch.
+/// So the explanation stops being something the user has to ask for: the hold
+/// lasts one extraction and ends on its own, and a line that arrives and leaves
+/// with it answers every held control at once, before any of them is touched.
+class _EditLockNotice extends StatelessWidget {
+  const _EditLockNotice({required this.reason});
+
+  final String reason;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AbTokens.space16,
+        AbTokens.space4,
+        AbTokens.space16,
+        0,
+      ),
+      child: Text(
+        reason,
+        // A step brighter than the progress line above it, and no louder: the
+        // list is held because the user asked for something, not because
+        // anything is wrong.
+        style: AbTokens.sansStyle(
+          fontSize: AbTokens.fontXs,
+          color: p.textSecondary,
+        ),
+      ),
+    );
+  }
+}
+
 /// Sends [edit] applied to the FRESHEST backlog readable at the moment of the
 /// tap. `handler:configure` replaces the bridge's list wholesale with no merge,
 /// and extraction appends to it asynchronously behind the handoff, so an edit
 /// derived from anything older silently deletes whatever landed in between —
 /// which is also why the edited list is never held across an await.
+///
+/// The refusal covering that same window lives in [HandlerService.updateBacklog]
+/// rather than here: this file is one editing surface, and the service is the
+/// only way any of them reaches the wire. What is owed here is the reason —
+/// [handlerEditLockReason], on every affordance and standing above the list.
 ///
 /// [HandlerSessionState.notifyOnly] rides along from that same snapshot: it is
 /// required on the wire, and a guessed value flips the session between
@@ -450,6 +601,34 @@ List<HandlerInstructionItem> _withItemRequeued(
       ),
 ];
 
+/// The user's sentence, between the send and the items it becomes.
+///
+/// It sits at the tail of the list because that is where `appendItems` puts
+/// what the extractor makes of it, so the row's position is the truth rather
+/// than a placeholder's guess. It is not a stand-in for one item either: a
+/// sentence can land as several, under wording the bridge chose, which is why
+/// this shows what the user wrote and claims nothing about the shape of what
+/// arrives.
+///
+/// No menu, for the same reason. `handler:configure` replaces a backlog this
+/// instruction is not in yet and cannot reach the extraction already running,
+/// so a Delete here would clear the row and let the items land anyway.
+class _PendingInstructionRow extends StatelessWidget {
+  const _PendingInstructionRow({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    return AbListRow(
+      horizontalPadding: AbTokens.space16,
+      leading: const HandlerPendingLabel(),
+      title: Text(text, style: AbTokens.sansStyle(color: p.textSecondary)),
+    );
+  }
+}
+
 class _BacklogRow extends ConsumerWidget {
   const _BacklogRow({
     required this.terminalId,
@@ -457,6 +636,7 @@ class _BacklogRow extends ConsumerWidget {
     required this.canMoveUp,
     required this.canMoveDown,
     required this.labelFor,
+    required this.lockReason,
   });
 
   final String terminalId;
@@ -466,10 +646,31 @@ class _BacklogRow extends ConsumerWidget {
   final ({String text, bool resolved, String? status}) Function(String id)
   labelFor;
 
+  /// [handlerEditLockReason] for this session, non-null while every edit on
+  /// this row is held.
+  final String? lockReason;
+
   /// Whether something this item waits on is itself stalled, which is what
   /// decides between the two ways out of `blocked`.
   bool get _waitsOnStalledWork => (item.dependsOn ?? const <String>[]).any(
     (id) => _stallingStatuses.contains(labelFor(id).status),
+  );
+
+  /// One menu entry, carrying the lock. Built through here rather than at each
+  /// site so an entry added later cannot be the one that still ships a stale
+  /// list.
+  AbMenuItem _entry({
+    required String label,
+    required String icon,
+    required VoidCallback onTap,
+    bool danger = false,
+  }) => AbMenuItem(
+    label: label,
+    icon: icon,
+    danger: danger,
+    onTap: onTap,
+    enabled: lockReason == null,
+    disabledReason: lockReason,
   );
 
   Future<void> _openMenu(
@@ -487,12 +688,14 @@ class _BacklogRow extends ConsumerWidget {
         // Inapplicable actions are omitted, never shown disabled: an edge item
         // has nowhere to move, a finished one has nothing to requeue, and an
         // item behind stalled work would be re-blocked before the user looked
-        // away.
+        // away. An edit held by [lockReason] is the other case and stays on the
+        // menu greyed: the action applies, it is the moment that doesn't, and
+        // dropping it would answer "why can't I move this" with a shorter menu.
         if (canMoveUp) ...[
           // Offered without its mirror. The queue runs from the top, so lifting
           // an item ahead is a change that holds, while sending one to the
           // bottom is undone by the next instruction — extraction appends.
-          AbMenuItem(
+          _entry(
             label: 'Move to top',
             icon: AbIcons.moveToTop,
             onTap: () => _sendEdit(
@@ -501,7 +704,7 @@ class _BacklogRow extends ConsumerWidget {
               (b) => _withItemAtTop(b, item.id),
             ),
           ),
-          AbMenuItem(
+          _entry(
             label: 'Move up',
             icon: AbIcons.arrowUp,
             onTap: () => _sendEdit(
@@ -512,7 +715,7 @@ class _BacklogRow extends ConsumerWidget {
           ),
         ],
         if (canMoveDown)
-          AbMenuItem(
+          _entry(
             label: 'Move down',
             icon: AbIcons.arrowDown,
             onTap: () => _sendEdit(
@@ -522,7 +725,7 @@ class _BacklogRow extends ConsumerWidget {
             ),
           ),
         if (_requeueableStatuses.contains(item.status) && !_waitsOnStalledWork)
-          AbMenuItem(
+          _entry(
             label: 'Requeue',
             icon: AbIcons.refresh,
             onTap: () => _sendEdit(
@@ -532,7 +735,7 @@ class _BacklogRow extends ConsumerWidget {
             ),
           ),
         const AbMenuDivider(),
-        AbMenuItem(
+        _entry(
           label: 'Delete',
           icon: AbIcons.trash,
           danger: true,
@@ -576,6 +779,7 @@ class _BacklogRow extends ConsumerWidget {
         for (final dep in dependsOn)
           _DependencyRow(
             label: labelFor(dep),
+            lockReason: lockReason,
             onRemove: () => _sendEdit(
               container,
               terminalId,
@@ -588,9 +792,17 @@ class _BacklogRow extends ConsumerWidget {
 }
 
 class _DependencyRow extends StatelessWidget {
-  const _DependencyRow({required this.label, required this.onRemove});
+  const _DependencyRow({
+    required this.label,
+    required this.lockReason,
+    required this.onRemove,
+  });
 
   final ({String text, bool resolved, String? status}) label;
+
+  /// [handlerEditLockReason] for this session, non-null while dropping the
+  /// dependency is held.
+  final String? lockReason;
   final VoidCallback onRemove;
 
   @override
@@ -645,11 +857,16 @@ class _DependencyRow extends StatelessWidget {
               ),
             ),
           ],
+          // Genuinely disabled while held — dimmed glyph, no hover fill, no
+          // focus ring, no click cursor — rather than a disabled tint over a
+          // control that still behaves pressable. Nothing is lost by it:
+          // [_EditLockNotice] stands above the list for the whole window, so
+          // the reason no longer has to ride on this tap.
           AbIconButton(
             icon: AbIcons.close,
-            tooltip: 'Remove this dependency',
+            tooltip: lockReason ?? 'Remove this dependency',
             tone: AbIconButtonTone.muted,
-            onTap: onRemove,
+            onTap: lockReason == null ? onRemove : null,
           ),
         ],
       ),

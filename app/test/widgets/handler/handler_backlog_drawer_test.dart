@@ -1,7 +1,9 @@
 import 'package:antgrid/design/ab_colors.dart';
 import 'package:antgrid/design/ab_icons.dart';
 import 'package:antgrid/design/ab_tokens.dart';
+import 'package:antgrid/design/widgets/ab_chip.dart';
 import 'package:antgrid/design/widgets/ab_icon.dart';
+import 'package:antgrid/design/widgets/ab_icon_button.dart';
 import 'package:antgrid/design/widgets/ab_menu.dart';
 import 'package:antgrid/design/widgets/ab_text_field.dart';
 import 'package:antgrid/models/handler_state.dart';
@@ -37,6 +39,17 @@ const _pr = HandlerInstructionItem(
   createdAt: 3,
 );
 
+/// What the extractor made of an instruction. A snapshot retires an outstanding
+/// sentence on the backlog having GROWN, so a test that needs to reach the far
+/// side of an extraction has to append something — a frame carrying the same
+/// list is a frame the instruction had no part in raising.
+const _extracted = HandlerInstructionItem(
+  id: 'i9',
+  text: 'run the tests again',
+  status: 'queued',
+  createdAt: 9,
+);
+
 /// Boots a real [ProjectSession] over a fake transport and queues one
 /// `handler:status` snapshot into it, so the drawer reads (and edits) the same
 /// state the production service would hold. The snapshot is delivered by the
@@ -55,7 +68,21 @@ Future<ProjectSession> _armedSession(
     cachedSessionsStore: await CachedSessionsStore.open(),
     onClose: () async => transport.dispose(),
   );
-  transport.emit('handler:status', {
+  _emitStatus(session, backlog, notifyOnly: notifyOnly, state: state);
+  return session;
+}
+
+/// Pushes one `handler:status` snapshot in. The bridge emits one after every
+/// handler event on any armed session; what retires an outstanding instruction
+/// is this terminal's backlog having grown, so a second call carrying an
+/// appended item is how a test gets to the far side of an extraction.
+void _emitStatus(
+  ProjectSession session,
+  List<HandlerInstructionItem> backlog, {
+  bool notifyOnly = false,
+  String state = 'watching',
+}) {
+  _transportOf(session).emit('handler:status', {
     'projectId': 'p',
     'sessions': [
       {
@@ -69,7 +96,6 @@ Future<ProjectSession> _armedSession(
       },
     ],
   });
-  return session;
 }
 
 FakeAgentTransport _transportOf(ProjectSession session) =>
@@ -111,10 +137,20 @@ Future<void> _openMenuFor(WidgetTester tester, int rowIndex) async {
   await tester.pumpAndSettle();
 }
 
-List<String> _openMenuLabels(WidgetTester tester) => [
+List<AbMenuItem> _openMenuItems(WidgetTester tester) => [
   for (final entry in tester.widget<AbMenu>(find.byType(AbMenu)).items)
-    if (entry is AbMenuItem) entry.label,
+    if (entry is AbMenuItem) entry,
 ];
+
+List<String> _openMenuLabels(WidgetTester tester) => [
+  for (final entry in _openMenuItems(tester)) entry.label,
+];
+
+/// Lets the snack bar's dismiss timer expire, so it can't outlive the test.
+Future<void> _drainSnackBar(WidgetTester tester) async {
+  await tester.pump(const Duration(seconds: 4));
+  await tester.pumpAndSettle();
+}
 
 Future<void> _pick(WidgetTester tester, String label) async {
   await tester.tap(find.text(label));
@@ -460,10 +496,13 @@ void main() {
   // message TYPE a preset chip produces. A chip that grew its own verb would
   // route around every rule that applies to instructions.
   group('instructing', () {
-    /// The one `handler:instruct` the drawer sent.
-    Map<String, dynamic> sentInstruct(ProjectSession session) => _transportOf(
+    List<Map<String, dynamic>> instructs(ProjectSession session) => _transportOf(
       session,
-    ).sent.where((m) => m['type'] == 'handler:instruct').single;
+    ).sent.where((m) => m['type'] == 'handler:instruct').toList();
+
+    /// The one `handler:instruct` the drawer sent.
+    Map<String, dynamic> sentInstruct(ProjectSession session) =>
+        instructs(session).single;
 
     testWidgets('a preset chip sends handler:instruct with its own sentence', (
       tester,
@@ -501,7 +540,131 @@ void main() {
       await tester.pump();
 
       expect(sentInstruct(session)['text'], 'also update the docs');
+      // The field is emptied; the sentence itself is not gone — it moves to
+      // the list, which is the other half of this same submit.
+      expect(
+        tester.widget<AbTextField>(find.byType(AbTextField)).controller!.text,
+        isEmpty,
+      );
+    });
+
+    testWidgets('a sent instruction sits in the list until a status lands', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests]);
+      await _pumpDrawer(tester, session);
+
+      await tester.enterText(find.byType(AbTextField), 'also update the docs');
+      await tester.tap(find.byTooltip('Add to backlog'));
+      await tester.pump();
+
+      // In the user's own words, at the tail — the slot appendItems will fill
+      // with whatever the extractor makes of them.
+      expect(find.text('also update the docs'), findsOneWidget);
+      expect(find.text('adding'), findsOneWidget);
+      // Nothing to reorder or drop: the item is not in the bridge's list yet.
+      expect(find.byTooltip('Item actions'), findsOneWidget);
+
+      _emitStatus(session, [
+        _tests,
+        const HandlerInstructionItem(
+          id: 'i9',
+          text: 'update the docs',
+          status: 'queued',
+          createdAt: 9,
+        ),
+      ]);
+      await tester.pump();
+
+      // The extractor rewrote the sentence, which is why the row it replaces
+      // could never have been matched to it — the snapshot retires it wholesale.
       expect(find.text('also update the docs'), findsNothing);
+      expect(find.text('adding'), findsNothing);
+      expect(find.text('update the docs'), findsOneWidget);
+    });
+
+    testWidgets('a first instruction stands in for the empty state', (
+      tester,
+    ) async {
+      final session = await _armedSession(const []);
+      await _pumpDrawer(tester, session);
+
+      await tester.tap(find.text('Run Tests'));
+      await tester.pump();
+
+      expect(find.textContaining('lands here'), findsNothing);
+      // Twice: the chip that sent it, and the row it is now waiting in.
+      expect(find.text('Run Tests'), findsNWidgets(2));
+    });
+
+    testWidgets('a repeated send is refused until the snapshot lands', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests]);
+      await _pumpDrawer(tester, session);
+
+      // The chip, never the bare text: once the send lands, the sentence is on
+      // screen twice — on the chip and in the row waiting for its items.
+      final chip = find.widgetWithText(AbChip, 'Run Tests');
+      await tester.tap(chip);
+      await tester.pump();
+      await tester.tap(chip);
+      await tester.pump();
+
+      // The bridge appends and absorbs no duplicate, so a second identical
+      // send is a second copy of the work in the backlog.
+      expect(instructs(session), hasLength(1));
+
+      // The second tap moves something on screen. Without it the chip is
+      // indistinguishable from a broken button — the list is unchanged, and the
+      // row waiting at the tail may be scrolled well out of sight.
+      expect(find.text('Already adding "Run Tests".'), findsOneWidget);
+
+      _emitStatus(session, [_tests, _extracted]);
+      await tester.pump();
+      await tester.tap(chip);
+      await tester.pump();
+
+      // The debounce lasts exactly as long as the ambiguity: once the bridge
+      // has spoken, asking for the same thing again is a real second ask.
+      expect(instructs(session), hasLength(2));
+      expect(find.text('Already adding "Run Tests".'), findsNothing);
+    });
+
+    testWidgets('a duplicate typed send keeps the words and says why', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests]);
+      await _pumpDrawer(tester, session);
+
+      await tester.tap(find.widgetWithText(AbChip, 'Run Tests'));
+      await tester.pump();
+      await tester.enterText(find.byType(AbTextField), 'Run Tests');
+      await tester.tap(find.byTooltip('Add to backlog'));
+      await tester.pump();
+
+      expect(instructs(session), hasLength(1));
+      // The field keeps what was typed: a clear on a send that did not happen
+      // takes the user's words away and leaves an unchanged list behind.
+      expect(
+        tester.widget<AbTextField>(find.byType(AbTextField)).controller!.text,
+        'Run Tests',
+      );
+      expect(find.text('Already adding "Run Tests".'), findsOneWidget);
+    });
+
+    testWidgets('a second tap on send has nothing left to send', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests]);
+      await _pumpDrawer(tester, session);
+
+      await tester.enterText(find.byType(AbTextField), 'also update the docs');
+      await tester.tap(find.byTooltip('Add to backlog'));
+      await tester.tap(find.byTooltip('Add to backlog'));
+      await tester.pump();
+
+      expect(instructs(session), hasLength(1));
     });
 
     testWidgets('a whitespace-only submit sends nothing', (tester) async {
@@ -580,6 +743,153 @@ void main() {
       expect(
         tester.widget<Text>(disclaimer).style,
         AbTokens.sansStyle(fontSize: AbTokens.fontXxs, color: p.textMuted),
+      );
+    });
+  });
+
+  // An edit is a wholesale replace and an instruction appends behind it, so
+  // anything sent in the gap deletes what the user just asked for. These pin
+  // both halves: that nothing gets out, and that the user is told why.
+  group('holding edits while an instruction lands', () {
+    List<Map<String, dynamic>> configures(ProjectSession session) =>
+        _transportOf(
+          session,
+        ).sent.where((m) => m['type'] == 'handler:configure').toList();
+
+    // Spelled out rather than compared against the function: this is copy the
+    // user reads at the one moment they are owed an explanation, so a rewrite
+    // of it has to fail here.
+    const oneOutstanding =
+        'Still adding "Run Tests" — editing is paused until it lands.';
+
+    testWidgets('the reason stands above the list, not behind a tap', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests, _commit, _pr]);
+      await _pumpDrawer(tester, session);
+
+      await tester.tap(find.text('Run Tests'));
+      await tester.pump();
+
+      // On a phone this drawer is a modal sheet, which paints over the snack
+      // bar its own ScaffoldMessenger renders, and a tooltip is long-press
+      // only — so nothing delivered on a tap arrives. The line is on screen
+      // before anything held is touched, and leaves when the hold does.
+      expect(find.text(oneOutstanding), findsOneWidget);
+
+      _emitStatus(session, [_tests, _commit, _pr, _extracted]);
+      await tester.pump();
+
+      expect(find.text(oneOutstanding), findsNothing);
+    });
+
+    testWidgets('every edit on a row is held, and each says why', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests, _commit, _pr]);
+      await _pumpDrawer(tester, session);
+
+      await tester.tap(find.text('Run Tests'));
+      await tester.pump();
+
+      await _openMenuFor(tester, 2);
+      // Still listed — the action applies, it is the moment that doesn't, and
+      // a shorter menu would answer "why can't I move this" with nothing.
+      expect(_openMenuLabels(tester), contains('Move up'));
+      for (final entry in _openMenuItems(tester)) {
+        expect(entry.enabled, isFalse, reason: entry.label);
+        expect(entry.disabledReason, oneOutstanding, reason: entry.label);
+      }
+
+      await _pick(tester, 'Delete');
+
+      expect(configures(session), isEmpty);
+      await _drainSnackBar(tester);
+    });
+
+    testWidgets('the same edit goes through once the snapshot lands', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests, _commit, _pr]);
+      await _pumpDrawer(tester, session);
+
+      await tester.tap(find.text('Run Tests'));
+      await tester.pump();
+      _emitStatus(session, [_tests, _commit, _pr, _extracted]);
+      await tester.pump();
+
+      await _openMenuFor(tester, 1);
+      for (final entry in _openMenuItems(tester)) {
+        expect(entry.enabled, isTrue, reason: entry.label);
+      }
+      await _pick(tester, 'Delete');
+
+      expect(_sentIds(session), ['i1', 'i3', 'i9']);
+    });
+
+    testWidgets('dropping a dependency is held on the same terms', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests, _commit, _pr]);
+      await _pumpDrawer(tester, session);
+
+      await tester.tap(find.text('Run Tests'));
+      await tester.pump();
+
+      // Disabled outright rather than tinted disabled over a live control: the
+      // reason is standing above the list, so this button has nothing left to
+      // promise and must not offer a cursor, a hover fill or a focus ring.
+      final held = tester
+          .widgetList<AbIconButton>(find.byType(AbIconButton))
+          .where((b) => b.tooltip == oneOutstanding);
+      expect(held, isNotEmpty);
+      expect(held.every((b) => b.onTap == null), isTrue);
+
+      await tester.tap(find.byTooltip(oneOutstanding).first);
+      await tester.pumpAndSettle();
+
+      expect(configures(session), isEmpty);
+    });
+
+    testWidgets('two outstanding instructions are counted, not quoted', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests, _commit]);
+      await _pumpDrawer(tester, session);
+
+      await tester.tap(find.text('Run Tests'));
+      await tester.pump();
+      await tester.tap(find.text('Commit'));
+      await tester.pump();
+
+      const twoOutstanding =
+          'Still adding 2 instructions — editing is paused until they land.';
+      expect(find.text(twoOutstanding), findsOneWidget);
+
+      await _openMenuFor(tester, 0);
+      expect(_openMenuItems(tester).first.disabledReason, twoOutstanding);
+    });
+
+    testWidgets('a new instruction is not held — the bridge appends it', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests]);
+      await _pumpDrawer(tester, session);
+
+      await tester.tap(find.text('Run Tests'));
+      await tester.pump();
+      await tester.enterText(find.byType(AbTextField), 'also update the docs');
+      await tester.tap(find.byTooltip('Add to backlog'));
+      await tester.pump();
+
+      // Two appends cannot erase each other, and the extraction chain is
+      // per-terminal and serial — so stacking work is exactly what this
+      // surface is for, lock or no lock.
+      expect(
+        _transportOf(
+          session,
+        ).sent.where((m) => m['type'] == 'handler:instruct'),
+        hasLength(2),
       );
     });
   });
