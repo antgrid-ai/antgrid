@@ -519,12 +519,23 @@ class PreviewService {
 
     final sub = channel.stream.listen(
       (data) {
-        final binary = data is! String;
+        if (data is String) {
+          session.transport.send(
+            createAbMessage('tunnel:ws-data', {
+              'tunnelId': tunnelId,
+              'data': data,
+              'checkoutId': checkoutId,
+            }),
+            channel: 'preview',
+          );
+          return;
+        }
+
         session.transport.send(
           createAbMessage('tunnel:ws-data', {
             'tunnelId': tunnelId,
-            'data': binary ? base64Encode(data as List<int>) : data as String,
-            if (binary) 'binary': true,
+            'data': base64Encode(data as List<int>),
+            'binary': true,
             'checkoutId': checkoutId,
           }),
           channel: 'preview',
