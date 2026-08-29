@@ -18,13 +18,30 @@ beforeEach(() => {
   writeFileSync(join(root, "antgrid.yaml"), "name: checkout-routing\nagent:\n  tool: claude-code\n");
 });
 
+// 30s, not the 5s Bun gives a hook by default: `shutdown()` waits out a
+// graceful PTY kill whose own budget IS 5s (`killAllGracefully`) and then
+// drains the in-flight `git` children holding a checkout as their cwd. The
+// default is therefore exactly the wrong size, and `test(..., 20000)` does not
+// raise it — a hook budget is separate from the test's.
 afterEach(async () => {
-  await core?.shutdown();
+  // Bound before the await, never read after it. Bun does not CANCEL a hook
+  // that overruns its budget, it just stops waiting: the body resumes inside
+  // the next test, where the module-level `core`/`root`/`previousAbDir` have
+  // already been reassigned. Read at resume, a late teardown drops that test's
+  // core on the floor, deletes its checkout mid-run and restores its env —
+  // which is how one slow shutdown used to fail three unrelated tests.
+  const dying = core;
+  const dir = root;
+  const restore = previousAbDir;
   core = null;
-  if (previousAbDir === undefined) delete process.env.ANTGRID_DIR;
-  else process.env.ANTGRID_DIR = previousAbDir;
-  rmSync(root, { recursive: true, force: true });
-});
+  if (restore === undefined) delete process.env.ANTGRID_DIR;
+  else process.env.ANTGRID_DIR = restore;
+  try {
+    await dying?.shutdown();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 30_000);
 
 test("explicit unknown checkout is rejected without falling back to main", async () => {
   core = await buildAgentCore({
@@ -318,7 +335,10 @@ test("a bridge restart restores checkout bindings and their file routing", async
     m.type === "file:content" && m.checkoutId === first.checkoutId,
   );
   expect(frame).toMatchObject({ type: "file:content", content: "isolated\n" });
-});
+  // The only test that awaits a full `shutdown()` in its BODY, so it needs the
+  // same headroom the teardown hook does — the default 5s is `killAllGracefully`'s
+  // own budget, leaving nothing for the git drain behind it.
+}, 30_000);
 
 test("a configured terminal in a managed checkout is attributed to that checkout", async () => {
   // The service must be committed: the managed checkout reads its own copy of
