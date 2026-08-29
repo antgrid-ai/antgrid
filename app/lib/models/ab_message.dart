@@ -397,6 +397,17 @@ class GitFileStatusEntry {
   final int additions; // lines added vs HEAD, combined staged+unstaged
   final int deletions; // lines removed vs HEAD, combined staged+unstaged
 
+  /// Which unmerged state a conflict is in, in the bridge's vocabulary
+  /// (bothModified, deletedByThem, …). Null on everything but a conflict, and
+  /// on a conflict from a bridge that predates the field.
+  final String? conflictKind;
+
+  /// A conflict with no marker left in the file: the user has worked through
+  /// it, so staging it is the routine "include this" rather than a claim about
+  /// content nobody has read. Defaults to false — an unknown answer must lead
+  /// to the confirmation, never past it.
+  final bool conflictResolved;
+
   const GitFileStatusEntry({
     required this.path,
     required this.status,
@@ -404,7 +415,15 @@ class GitFileStatusEntry {
     this.oldPath,
     this.additions = 0,
     this.deletions = 0,
+    this.conflictKind,
+    this.conflictResolved = false,
   });
+
+  bool get isConflict => status == '!';
+
+  /// A conflict the user has not visibly finished — the one thing that turns
+  /// staging into a question rather than an action. See [conflictResolved].
+  bool get isUnresolvedConflict => isConflict && !conflictResolved;
 
   static GitFileStatusEntry? fromJson(Map<String, dynamic> json) {
     final path = json['path'];
@@ -417,6 +436,8 @@ class GitFileStatusEntry {
       oldPath: json['oldPath'] as String?,
       additions: (json['additions'] as num?)?.toInt() ?? 0,
       deletions: (json['deletions'] as num?)?.toInt() ?? 0,
+      conflictKind: json['conflictKind'] as String?,
+      conflictResolved: json['conflictResolved'] as bool? ?? false,
     );
   }
 }

@@ -72,6 +72,11 @@ abstract final class AbIcons {
   static const trash = Codicon.trash;
   // Alias mirroring `add`; semantic for git's stage-changes action.
   static const gitStage = Codicon.add;
+  // The VS Code tree-toolbar pair, deliberately NOT [expand]/[collapse] above:
+  // those are MDI diagonal arrows meaning "grow/shrink this pane", and a tree
+  // that folds its folders is a different verb.
+  static const collapseAll = Codicon.collapse_all;
+  static const expandAll = Codicon.expand_all;
   // VS Code's own codicon name for its unstage/"−" action.
   static const gitUnstage = Codicon.remove;
   static const menu = Codicon.menu;

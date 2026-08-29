@@ -156,6 +156,17 @@ class GitPaneState {
   final FileContent? viewingFile;
   final bool viewingLoading;
 
+  /// Folders the user has collapsed in the changed-files tree.
+  ///
+  /// COLLAPSED, not expanded — the inverse of `FileTreeState.expandedPaths` —
+  /// because the Git tab's default is "show me everything that changed" and an
+  /// expanded-set default of empty would open on a list of shut folders. It is
+  /// also deliberately not the Files tab's set: the two tabs answer different
+  /// questions about the same paths, and collapsing a folder to get a long
+  /// change list under control must not fold away the file the Explorer is
+  /// sitting on.
+  final Set<String> collapsedPaths;
+
   const GitPaneState({
     this.diffPath,
     this.diffContent,
@@ -165,6 +176,7 @@ class GitPaneState {
     this.viewingPath,
     this.viewingFile,
     this.viewingLoading = false,
+    this.collapsedPaths = const {},
   });
 
   static const empty = GitPaneState();
@@ -180,6 +192,7 @@ class GitPaneState {
     FileContent? viewingFile,
     bool? viewingLoading,
     bool clearViewing = false,
+    Set<String>? collapsedPaths,
   }) {
     return GitPaneState(
       diffPath: clearDiff ? null : (diffPath ?? this.diffPath),
@@ -192,6 +205,9 @@ class GitPaneState {
       viewingLoading: clearViewing
           ? false
           : (viewingLoading ?? this.viewingLoading),
+      // Survives clearDiff/clearViewing: closing a diff is not a reason to
+      // reopen every folder the user shut to find it.
+      collapsedPaths: collapsedPaths ?? this.collapsedPaths,
     );
   }
 }

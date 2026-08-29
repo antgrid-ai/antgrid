@@ -27,7 +27,11 @@ class PreviewProxyServer {
   /// The proxy itself always serves the webview over plain HTTP.
   final String targetScheme;
   final Future<TunnelHttpResponse> Function(TunnelHttpRequest) onRequest;
-  final void Function(WebSocketChannel channel, String path)?
+  final void Function(
+    WebSocketChannel channel,
+    String path,
+    Map<String, String> headers,
+  )?
   onWebSocketConnect;
 
   HttpServer? _server;
@@ -82,8 +86,13 @@ class PreviewProxyServer {
       // Check for WebSocket upgrade
       if (request.headers['upgrade']?.toLowerCase() == 'websocket') {
         if (onWebSocketConnect != null) {
+          // Captured before the upgrade: a cookie-authenticated dev server reads
+          // its session off the WebSocket handshake, not the page load that
+          // preceded it, so the upstream socket has to carry these or it opens
+          // anonymously behind an authenticated page.
+          final handshakeHeaders = _upstreamHandshakeHeaders(request);
           return webSocketHandler((WebSocketChannel channel, String? protocol) {
-            onWebSocketConnect!(channel, '/${request.url}');
+            onWebSocketConnect!(channel, '/${request.url}', handshakeHeaders);
           })(request);
         }
         return shelf.Response.forbidden('WebSocket not supported');
@@ -91,6 +100,22 @@ class PreviewProxyServer {
 
       return _handleHttpRequest(request);
     };
+  }
+
+  /// The browser's handshake headers, with `Origin` repointed at the dev
+  /// server's own origin. The WebView's origin is this proxy — a different port
+  /// on a fallback bind, and always plain http for an https target — and a dev
+  /// server that checks Origin would reject that as cross-site. The headers the
+  /// upstream handshake owns (`Sec-WebSocket-*`, `Connection`, `Upgrade`,
+  /// `Host`) are dropped by the bridge, which is what mints them.
+  Map<String, String> _upstreamHandshakeHeaders(shelf.Request request) {
+    final headers = <String, String>{};
+    request.headers.forEach((key, value) {
+      headers[key] = value;
+    });
+    headers.removeWhere((k, _) => k.toLowerCase() == 'origin');
+    headers['origin'] = '$targetScheme://localhost:$targetPort';
+    return headers;
   }
 
   Future<shelf.Response> _handleHttpRequest(shelf.Request request) async {
@@ -149,7 +174,9 @@ class PreviewProxyServer {
       // list because the header map can't. Shelf emits a List<String> value as
       // repeated headers, so the WebView keeps every cookie — not just the last.
       if (response.setCookies.isNotEmpty) {
-        responseHeaders['set-cookie'] = response.setCookies;
+        responseHeaders['set-cookie'] = targetScheme == 'https'
+            ? response.setCookies.map(_downgradeSecureCookie).toList()
+            : response.setCookies;
       }
 
       // An absolute redirect back to the dev server would send the WebView
@@ -218,6 +245,37 @@ class PreviewProxyServer {
           'application/xml',
           'application/graphql',
         }.contains(mime);
+  }
+
+  /// Strips the attributes that make a cookie unstorable on this proxy's
+  /// origin. The dev server speaks TLS and marks its session cookie `Secure`;
+  /// the proxy serves the WebView plain HTTP, where a browser drops such a
+  /// cookie without a word — so a sign-in against an https dev server would
+  /// bounce back to its login page forever. `SameSite=None` goes with it: it is
+  /// only legal alongside `Secure`, and a preview is same-origin anyway.
+  /// Only applied to an https target; a plain-http one is passed through.
+  ///
+  /// A `__Host-`/`__Secure-` prefixed cookie is passed through UNTOUCHED: those
+  /// prefixes make `Secure` mandatory, so stripping it has the browser reject
+  /// the cookie outright rather than store it — the same sign-in loop, now
+  /// caused by the fix. Left intact it is at least storable, since every engine
+  /// the WebView runs on treats `http://localhost` as a trustworthy origin.
+  static String _downgradeSecureCookie(String cookie) {
+    if (_hasSecurePrefix(cookie)) return cookie;
+    final kept = <String>[];
+    for (final part in cookie.split(';')) {
+      final attr = part.trim().toLowerCase();
+      if (attr == 'secure') continue;
+      kept.add(attr == 'samesite=none' ? ' SameSite=Lax' : part);
+    }
+    return kept.join(';');
+  }
+
+  /// Whether [cookie]'s NAME carries one of the two prefixes that make `Secure`
+  /// part of the cookie's validity rather than one of its attributes.
+  static bool _hasSecurePrefix(String cookie) {
+    final name = cookie.split('=').first.trim().toLowerCase();
+    return name.startsWith('__host-') || name.startsWith('__secure-');
   }
 
   /// Returns [location] repointed at the proxy origin if it's an absolute

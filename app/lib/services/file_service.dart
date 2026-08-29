@@ -636,6 +636,25 @@ class FileService {
     _setState(_state.copyWith(showChangedOnly: !_state.showChangedOnly));
   }
 
+  /// Git pane: fold a changed-files folder shut, or open it again.
+  ///
+  /// Separate from [toggleExpanded], which owns the Files tab's tree — see
+  /// [GitPaneState.collapsedPaths] for why the two states are not shared.
+  void toggleGitFolder(String path) {
+    final collapsed = Set<String>.from(_state.git.collapsedPaths);
+    if (!collapsed.remove(path)) collapsed.add(path);
+    _setState(
+      _state.copyWith(git: _state.git.copyWith(collapsedPaths: collapsed)),
+    );
+  }
+
+  /// Git pane: fold every folder in [paths] shut at once, or (with an empty
+  /// set) open them all. The caller supplies the folder list because only the
+  /// rendered tree knows which directories the current change set produced.
+  void setGitCollapsedFolders(Set<String> paths) {
+    _setState(_state.copyWith(git: _state.git.copyWith(collapsedPaths: paths)));
+  }
+
   void clearDiff() {
     // Superseded by the user closing the diff — a clean end, not a strand.
     _diffLatch?.settle();

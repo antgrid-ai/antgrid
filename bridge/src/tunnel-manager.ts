@@ -1,6 +1,6 @@
 import { logger } from "./logger";
 const log = logger.child({ component: "tunnel-manager" });
-import { fetchLocalhost } from "./localhost-fetch";
+import { fetchLocalhost, isTlsOnlyPort } from "./localhost-fetch";
 import { createMessage, type AbMessage, type PortInfo, type PreviewUrlEntry } from "./protocol";
 import type { TunnelHttpRequest, TunnelWsClose, TunnelWsData, TunnelWsOpen } from "./tunnel-protocol";
 import type { ConnState } from "./conn-state";
@@ -24,6 +24,33 @@ const OUTBOX_TTL_MS = 35_000;
  *  and those are exactly the ones this keeps. */
 const OUTBOX_MAX_ENTRY_BYTES = 2 * 1024 * 1024;
 const OUTBOX_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
+
+// Handshake headers the upstream connection owns: Bun mints its own key,
+// version and framing, and `host` follows from the URL we build. The
+// subprotocol is dropped rather than forwarded because nothing carries the
+// server's choice back to the browser — letting the server agree one the
+// browser never hears about is worse than negotiating none.
+const WS_HOP_BY_HOP_HEADERS = new Set([
+  "connection",
+  "upgrade",
+  "host",
+  "content-length",
+  "transfer-encoding",
+  "sec-websocket-key",
+  "sec-websocket-version",
+  "sec-websocket-extensions",
+  "sec-websocket-accept",
+  "sec-websocket-protocol",
+]);
+
+function upstreamWsHeaders(headers: Record<string, string> | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers ?? {})) {
+    if (WS_HOP_BY_HOP_HEADERS.has(k.toLowerCase())) continue;
+    out[k] = v;
+  }
+  return out;
+}
 
 export class TunnelManager {
   private projectId: string;
@@ -180,6 +207,9 @@ export class TunnelManager {
       });
     } catch (err) {
       const body = `Proxy error: ${err instanceof Error ? err.message : String(err)}`;
+      // The 502 reaches only the previewing device, so without this a tunnel
+      // failure is diagnosable exclusively from the phone's screen.
+      log.warn("Tunnel fetch failed for %s: %s", url, body);
       this.emitResponse(msg.requestId, body, {
         type: "tunnel:http-response" as const,
         requestId: msg.requestId,
@@ -235,10 +265,25 @@ export class TunnelManager {
    *  browser-side connect would look like, rather than dropping silently. */
   onWsOpen(msg: TunnelWsOpen): void {
     if (this.wsTunnels.has(msg.tunnelId)) return; // duplicate open, ignore
-    const scheme = msg.scheme === "https" ? "wss" : "ws";
+    // The phone can only guess the scheme for a dev server it never saw
+    // announce itself; `fetchLocalhost` has already corrected the guess for
+    // this port by the time a page on it opens a socket.
+    const secure = msg.scheme === "https" || isTlsOnlyPort(msg.port);
     const safePath = msg.path.startsWith("/") ? msg.path : `/${msg.path}`;
-    const url = `${scheme}://localhost:${msg.port}${safePath}`;
-    const entry: WsUpstream = { socket: new WebSocket(url), open: false, pending: [] };
+    const url = `${secure ? "wss" : "ws"}://localhost:${msg.port}${safePath}`;
+    // Same self-signed-cert exemption `fetchLocalhost` makes, and for the same
+    // reason: without it every wss upstream dies in the TLS handshake, and a
+    // dev server whose page needs a socket — Blazor, Vite HMR, a live-reload
+    // shim — renders as a blank tab with nothing to point at.
+    // lib.dom's WebSocket shadows Bun's (tsconfig takes the default libs for an
+    // ESNext target), and its constructor's second parameter is `protocols` —
+    // so the options Bun does accept at runtime have to be cast past the type.
+    const wsOptions: Bun.WebSocketOptions = {
+      headers: upstreamWsHeaders(msg.headers),
+      ...(secure ? { tls: { rejectUnauthorized: false } } : {}),
+    };
+    const socket = new WebSocket(url, wsOptions as unknown as string[]);
+    const entry: WsUpstream = { socket, open: false, pending: [] };
     this.wsTunnels.set(msg.tunnelId, entry);
 
     entry.socket.addEventListener("open", () => {

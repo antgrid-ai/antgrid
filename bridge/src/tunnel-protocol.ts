@@ -47,6 +47,13 @@ export const TunnelWsOpen = z.object({
   port: z.number().int().positive(),
   scheme: z.enum(["http", "https"]).optional(),
   path: z.string(),
+  /** The browser's own handshake headers, minus the ones the upstream
+   *  handshake owns. Chiefly `Cookie`: a dev server that authenticates by
+   *  cookie reads the WebSocket request, not the page load that preceded it,
+   *  so without these the socket opens ANONYMOUSLY behind an authenticated
+   *  page — which a Blazor circuit renders as "not authorized" rather than as
+   *  a failure. Optional so an app predating it still opens a tunnel. */
+  headers: z.record(z.string(), z.string()).optional(),
   checkoutId: z.string().default("main"),
 });
 

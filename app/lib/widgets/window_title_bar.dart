@@ -21,7 +21,6 @@ import '../providers/providers.dart';
 import '../providers/recent_sessions.dart';
 import '../providers/session_setup.dart';
 import '../providers/sessions.dart';
-import '../providers/ui_attention_providers.dart';
 import '../utils/platform_utils.dart';
 import '../window/window_capabilities.dart';
 import '../window/window_chrome.dart';

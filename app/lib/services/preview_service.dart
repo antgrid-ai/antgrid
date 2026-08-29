@@ -421,8 +421,8 @@ class PreviewService {
       targetPort: port,
       targetScheme: scheme,
       onRequest: proxyRequest,
-      onWebSocketConnect: (channel, path) =>
-          _onWsConnect(port, scheme, channel, path),
+      onWebSocketConnect: (channel, path, headers) =>
+          _onWsConnect(port, scheme, channel, path, headers),
     );
 
     final int localPort;
@@ -501,6 +501,7 @@ class PreviewService {
     String scheme,
     WebSocketChannel channel,
     String path,
+    Map<String, String> headers,
   ) {
     final tunnelId = const Uuid().v4();
 
@@ -510,6 +511,7 @@ class PreviewService {
         'port': port,
         'scheme': scheme,
         'path': path,
+        'headers': headers,
         'checkoutId': checkoutId,
       }),
       channel: 'preview',
