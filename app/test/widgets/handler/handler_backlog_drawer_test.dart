@@ -589,7 +589,7 @@ void main() {
     );
     // No second route to the one action: the presets and the field below are
     // it, and a button here would give that action a second name.
-    expect(find.byTooltip('Add to backlog'), findsOneWidget);
+    expect(find.byTooltip('Send to Handler'), findsOneWidget);
   });
 
   // The window between a seeded arm and its extraction landing, which is the
@@ -761,7 +761,7 @@ void main() {
       await _pumpDrawer(tester, session);
 
       await tester.enterText(find.byType(AbTextField), 'also update the docs');
-      await tester.tap(find.byTooltip('Add to backlog'));
+      await tester.tap(find.byTooltip('Send to Handler'));
       await tester.pump();
 
       expect(sentInstruct(session)['text'], 'also update the docs');
@@ -780,13 +780,13 @@ void main() {
       await _pumpDrawer(tester, session);
 
       await tester.enterText(find.byType(AbTextField), 'also update the docs');
-      await tester.tap(find.byTooltip('Add to backlog'));
+      await tester.tap(find.byTooltip('Send to Handler'));
       await tester.pump();
 
       // In the user's own words, at the tail — the slot appendItems will fill
       // with whatever the extractor makes of them.
       expect(find.text('also update the docs'), findsOneWidget);
-      expect(find.text('adding'), findsOneWidget);
+      expect(find.text('sending'), findsOneWidget);
       // Nothing to reorder or drop: the item is not in the bridge's list yet.
       expect(find.byTooltip('Item actions'), findsOneWidget);
 
@@ -804,7 +804,7 @@ void main() {
       // The extractor rewrote the sentence, which is why the row it replaces
       // could never have been matched to it — the snapshot retires it wholesale.
       expect(find.text('also update the docs'), findsNothing);
-      expect(find.text('adding'), findsNothing);
+      expect(find.text('sending'), findsNothing);
       expect(find.text('update the docs'), findsOneWidget);
     });
 
@@ -843,7 +843,7 @@ void main() {
       // The second tap moves something on screen. Without it the chip is
       // indistinguishable from a broken button — the list is unchanged, and the
       // row waiting at the tail may be scrolled well out of sight.
-      expect(find.text('Already adding "Run Tests".'), findsOneWidget);
+      expect(find.text('Already sending "Run Tests".'), findsOneWidget);
 
       _emitStatus(session, [_tests, _extracted]);
       await tester.pump();
@@ -853,7 +853,7 @@ void main() {
       // The debounce lasts exactly as long as the ambiguity: once the bridge
       // has spoken, asking for the same thing again is a real second ask.
       expect(instructs(session), hasLength(2));
-      expect(find.text('Already adding "Run Tests".'), findsNothing);
+      expect(find.text('Already sending "Run Tests".'), findsNothing);
     });
 
     testWidgets('a duplicate typed send keeps the words and says why', (
@@ -865,7 +865,7 @@ void main() {
       await tester.tap(find.widgetWithText(AbChip, 'Run Tests'));
       await tester.pump();
       await tester.enterText(find.byType(AbTextField), 'Run Tests');
-      await tester.tap(find.byTooltip('Add to backlog'));
+      await tester.tap(find.byTooltip('Send to Handler'));
       await tester.pump();
 
       expect(instructs(session), hasLength(1));
@@ -875,7 +875,7 @@ void main() {
         tester.widget<AbTextField>(find.byType(AbTextField)).controller!.text,
         'Run Tests',
       );
-      expect(find.text('Already adding "Run Tests".'), findsOneWidget);
+      expect(find.text('Already sending "Run Tests".'), findsOneWidget);
     });
 
     testWidgets('a second tap on send has nothing left to send', (
@@ -885,8 +885,8 @@ void main() {
       await _pumpDrawer(tester, session);
 
       await tester.enterText(find.byType(AbTextField), 'also update the docs');
-      await tester.tap(find.byTooltip('Add to backlog'));
-      await tester.tap(find.byTooltip('Add to backlog'));
+      await tester.tap(find.byTooltip('Send to Handler'));
+      await tester.tap(find.byTooltip('Send to Handler'));
       await tester.pump();
 
       expect(instructs(session), hasLength(1));
@@ -898,7 +898,7 @@ void main() {
       final before = _transportOf(session).sent.length;
 
       await tester.enterText(find.byType(AbTextField), '   ');
-      await tester.tap(find.byTooltip('Add to backlog'));
+      await tester.tap(find.byTooltip('Send to Handler'));
       await tester.pump();
 
       expect(_transportOf(session).sent.length, before);
@@ -1019,7 +1019,7 @@ void main() {
     // user reads at the one moment they are owed an explanation, so a rewrite
     // of it has to fail here.
     const oneOutstanding =
-        'Still adding "Run Tests" — editing is paused until it lands.';
+        'Still sending "Run Tests" — editing is paused until it lands.';
 
     testWidgets('the reason stands above the list, not behind a tap', (
       tester,
@@ -1122,7 +1122,7 @@ void main() {
       await tester.pump();
 
       const twoOutstanding =
-          'Still adding 2 instructions — editing is paused until they land.';
+          'Still sending 2 instructions — editing is paused until they land.';
       expect(find.text(twoOutstanding), findsOneWidget);
 
       await _openMenuFor(tester, 0);
@@ -1138,7 +1138,7 @@ void main() {
       await tester.tap(find.text('Run Tests'));
       await tester.pump();
       await tester.enterText(find.byType(AbTextField), 'also update the docs');
-      await tester.tap(find.byTooltip('Add to backlog'));
+      await tester.tap(find.byTooltip('Send to Handler'));
       await tester.pump();
 
       // Two appends cannot erase each other, and the extraction chain is
@@ -1308,7 +1308,7 @@ void main() {
         find.descendant(
           of: find.byType(Dialog),
           matching: find.text(
-            'Still adding "Run Tests" — editing is paused until it lands.',
+            'Still sending "Run Tests" — editing is paused until it lands.',
           ),
         ),
         findsOneWidget,

@@ -218,6 +218,22 @@ function grant(into: Set<string>, value: string): boolean {
 const PROHIBITION =
   /\b(?:never|not|don't|doesn't|didn't|won't|can't|cannot|shouldn't|mustn't|avoid(?:s|ing)?|refrain|instead\s+of|rather\s+than)\b/i;
 
+// The other polarity a clause can carry, and the one an instruction only started
+// carrying once a sentence could take an earlier one back: withdrawal. "actually
+// skip the force push" holds no word above, so the alias table read it as a
+// request and the feed said out loud that the user had permitted a force push for
+// the session — the inverse of what they wrote — while silencing the advisory for
+// every pass after it.
+//
+// Over-filtering is the safe direction here, so this is deliberately loose: a
+// clause wrongly read as a countermand costs one unlifted advisory row, and a
+// missed one costs a session-wide grant nobody asked for. "scratch" is the one
+// exception, pinned to its idiom — bare, it is a noun that turns up inside the
+// very paths a grant is about (`/etc/scratch/notes`), which is a false match on
+// the word rather than a wrong reading of the sentence.
+const COUNTERMAND =
+  /\b(?:skip(?:s|ped|ping)?|cancel(?:s|led|ling|ed|ing)?|drop(?:s|ped|ping)?|forget|scratch\s+(?:that|it)|undo|stop|no\s+longer|take\s+(?:that|it)\s+back)\b/i;
+
 // Clause-level, not sentence-level: "delete the build dir, but never touch
 // node_modules" has to keep its first half. Rejoined with newlines because every floor
 // pattern spans with `[^\n]*`, so a dropped clause cannot be bridged across.
@@ -228,7 +244,7 @@ const PROHIBITION =
 function grantableClauses(text: string): string {
   return text
     .split(/(?<=[.!?])\s+|[;\n]+|\s+but\s+/i)
-    .filter((clause) => !PROHIBITION.test(clause))
+    .filter((clause) => !PROHIBITION.test(clause) && !COUNTERMAND.test(clause))
     .join("\n");
 }
 

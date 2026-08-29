@@ -411,6 +411,33 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
+  // The list the user did not touch, changing anyway. They said something, the
+  // extractor matched it to a line they had already written, and the drawer may
+  // not even have been open — so the row names the surface and quotes the item.
+  testWidgets('an amended row quotes the line that moved', (
+    tester,
+  ) async {
+    await pumpHandlerScreen(
+      tester,
+      stateWith(sessions: {'t1': sessionState('t1')}).copyWith(
+        activity: const [
+          HandlerActivityRecord(
+            recordId: 'r1',
+            at: 1,
+            terminalId: 't1',
+            decision: 'instruction_amended',
+            reason: '2 items changed',
+            detail: '"commit the fix" · "run the tests"',
+          ),
+        ],
+      ),
+    );
+    expect(find.text('Backlog updated: 2 items changed'), findsOneWidget);
+    expect(find.text('"commit the fix" · "run the tests"'), findsOneWidget);
+    expect(find.text('instruction_amended'), findsNothing);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   // Hand-mirrored from the bridge's ActivityRecord.decision (handler/config.ts)
   // and HandlerActivityMessage (protocol.ts). Nothing catches drift between the
   // three, and a kind that reaches the app with no arm is dressed exactly like
@@ -428,6 +455,7 @@ void main() {
     'item_failed',
     'instruction_dropped',
     'instruction_authorized',
+    'instruction_amended',
     'floor_warning',
     'evidence_rejected',
     'wrapped_up',

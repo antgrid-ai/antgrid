@@ -38,6 +38,14 @@ class HandlerService {
   // a status frame, and every survivor is re-baselined against the same one).
   final Map<String, ({int backlog, int armedAt})> _instructBaselines = {};
 
+  // Terminals whose next status frame is already spent. An amendment is the one
+  // bridge outcome that BOTH records an activity row and emits a snapshot, and
+  // the snapshot carries a backlog its own drop has already shortened — so read
+  // as a survivor's evidence it would retire a second sentence whose extraction
+  // has not started. Marked when the row retires off it, and spent by
+  // [_retirePending] re-baselining that terminal instead of retiring off it.
+  final Set<String> _creditedStatus = {};
+
   // Judge picks, keyed by terminalId. `sessions` in [HandlerState] only holds
   // currently-armed sessions, so a disarmed terminal's judge pick would
   // otherwise vanish and the next arm would silently reset to Default — the
@@ -134,7 +142,7 @@ class HandlerService {
   /// engine serialises EVERY armed session on every handler event, twice, so a
   /// second armed terminal's ordinary supervision produces one within
   /// milliseconds of a send. Retiring on the frame alone cleared terminal A's
-  /// sentence while A's extraction was still running — which took the "adding"
+  /// sentence while A's extraction was still running — which took the "sending"
   /// row away with the backlog unchanged, lifted the debounce so a re-tap
   /// stacked the same work twice, and lifted the drawer's edit lock inside
   /// exactly the window it exists to cover.
@@ -150,7 +158,8 @@ class HandlerService {
   ///
   /// The cap path appends nothing and emits no status at all, so it is not
   /// reachable from here — [_onHeavyJson] retires that one off its own activity
-  /// record.
+  /// record. An amendment does emit one, and [_creditedStatus] is how that frame
+  /// re-baselines the survivors instead of answering for them too.
   Map<String, List<String>> _retirePending(
     Map<String, HandlerSessionState> sessions,
   ) {
@@ -159,11 +168,13 @@ class HandlerService {
       final terminalId = entry.key;
       final session = sessions[terminalId];
       final baseline = _instructBaselines[terminalId];
+      final credited = _creditedStatus.remove(terminalId);
       final answered =
           session == null ||
-          baseline == null ||
-          session.backlogTotal != baseline.backlog ||
-          session.armedAt != baseline.armedAt;
+          (!credited &&
+              (baseline == null ||
+                  session.backlogTotal != baseline.backlog ||
+                  session.armedAt != baseline.armedAt));
       final kept = session == null
           ? const <String>[]
           : (answered ? entry.value.sublist(1) : entry.value);
@@ -183,15 +194,26 @@ class HandlerService {
   /// Drops [terminalId]'s oldest outstanding sentence, for the signals that
   /// arrive outside a status snapshot. The baseline is left where it is: the
   /// session it was taken against has not moved.
-  Map<String, List<String>> _withOldestPendingRetired(String terminalId) {
+  ///
+  /// [spendsNextStatus] is whether the bridge emits a snapshot alongside this
+  /// record. It does for an amendment, and that snapshot's backlog is one item
+  /// shorter — which [_retirePending] would otherwise read as the NEXT sentence
+  /// having landed, taking its "sending" row away while its extraction is still
+  /// running and lifting the edit lock inside the window it exists to cover.
+  Map<String, List<String>> _withOldestPendingRetired(
+    String terminalId, {
+    required bool spendsNextStatus,
+  }) {
     final outstanding = _state.pendingInstructionsFor(terminalId);
     if (outstanding.isEmpty) return _state.pendingInstructions;
     final next = Map<String, List<String>>.from(_state.pendingInstructions);
     if (outstanding.length == 1) {
       next.remove(terminalId);
       _instructBaselines.remove(terminalId);
+      _creditedStatus.remove(terminalId);
     } else {
       next[terminalId] = outstanding.sublist(1);
+      if (spendsNextStatus) _creditedStatus.add(terminalId);
     }
     return next;
   }
@@ -310,14 +332,20 @@ class HandlerService {
       case 'handler:activity':
         final msg = parseAbMessage(json);
         if (msg is! HandlerActivityMessage) return;
-        // The one outcome an instruction can reach without a status frame: a
-        // backlog already at the bridge's cap appends nothing, persists
-        // nothing and broadcasts nothing but this record. Left unretired, the
-        // "adding" row stands forever and the edit lock it raises holds
-        // Delete — which under a full backlog is the only thing that frees
-        // room — until an unrelated handler event, a re-arm or a reconnect.
-        final pendingInstructions = msg.decision == 'instruction_dropped'
-            ? _withOldestPendingRetired(msg.terminalId)
+        // The two outcomes an instruction can reach that [_retirePending] cannot
+        // read off the item count: a backlog already at the bridge's cap appends
+        // nothing and emits nothing, and an amendment moves the count for a
+        // reason that is this sentence's own answer rather than the next one's.
+        // Left unretired, the "sending" row stands forever and the edit lock it
+        // raises holds Delete — which under a full backlog is the only thing that
+        // frees room — until an unrelated handler event, a re-arm or a reconnect.
+        final amended = msg.decision == 'instruction_amended';
+        final pendingInstructions =
+            amended || msg.decision == 'instruction_dropped'
+            ? _withOldestPendingRetired(
+                msg.terminalId,
+                spendsNextStatus: amended,
+              )
             : _state.pendingInstructions;
         final next = <HandlerActivityRecord>[
           HandlerActivityRecord(

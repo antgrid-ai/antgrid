@@ -594,8 +594,8 @@ class HandlerActivityRecord {
   // unrenderable feed row, never at compile time.
   // 'continue' | 'handle' | 'escalate' | 'armed' | 'goal_edited' |
   // 'item_done' | 'item_blocked' | 'item_skipped' | 'item_failed' |
-  // 'instruction_dropped' | 'instruction_authorized' | 'floor_warning' |
-  // 'evidence_rejected' | 'wrapped_up' | 'parked' | 'resumed'
+  // 'instruction_dropped' | 'instruction_authorized' | 'instruction_amended' |
+  // 'floor_warning' | 'evidence_rejected' | 'wrapped_up' | 'parked' | 'resumed'
   final String decision;
   final String reason;
   final String? detail;

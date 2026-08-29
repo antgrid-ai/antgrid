@@ -1005,7 +1005,7 @@ const HandlerActivityMessage = BaseMessage.extend({
     "continue", "handle", "escalate",
     "armed", "goal_edited",
     "item_done", "item_blocked", "item_skipped", "item_failed",
-    "instruction_dropped", "instruction_authorized",
+    "instruction_dropped", "instruction_authorized", "instruction_amended",
     "floor_warning", "evidence_rejected",
     "wrapped_up", "parked", "resumed",
   ]),

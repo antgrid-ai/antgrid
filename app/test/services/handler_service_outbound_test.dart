@@ -314,6 +314,78 @@ void main() {
     await session.close();
   });
 
+  test('an amended instruction retires on its activity record', () async {
+    // A sentence that only rewords something already tracked leaves the item
+    // count exactly where it was, which is the only thing the status snapshot
+    // is compared on — so this record is the whole outcome, the same way a
+    // dropped one is.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+    final sub = session.heavyStream.listen((_) {});
+
+    _status(t, [_item]);
+    await Future<void>.delayed(Duration.zero);
+    svc.instruct('t1', 'make that the full suite');
+
+    t.emit('handler:activity', {
+      'projectId': 'p',
+      'recordId': 'r1',
+      'at': 9,
+      'terminalId': 't1',
+      'decision': 'instruction_amended',
+      'reason': 'reworded "run the tests"',
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(svc.currentState.pendingInstructionsFor('t1'), isEmpty);
+
+    await sub.cancel();
+    await svc.dispose();
+    await session.close();
+  });
+
+  test('an amendment answers only its own sentence', () async {
+    // An amendment records a row AND emits a status frame carrying a backlog its
+    // own drop has already shortened. Read as the NEXT sentence's evidence too,
+    // that frame retired a second instruction whose extraction had not started —
+    // taking its row away, lifting the debounce, and lifting the drawer's edit
+    // lock inside exactly the window it exists to cover.
+    final t = FakeAgentTransport();
+    final session = await _newSession(t);
+    final svc = HandlerService.fromSession(session);
+    final sub = session.heavyStream.listen((_) {});
+
+    _status(t, [_item, _extracted]);
+    await Future<void>.delayed(Duration.zero);
+    svc.instruct('t1', 'actually skip the commit');
+    svc.instruct('t1', 'and update the changelog');
+
+    t.emit('handler:activity', {
+      'projectId': 'p',
+      'recordId': 'r1',
+      'at': 9,
+      'terminalId': 't1',
+      'decision': 'instruction_amended',
+      'reason': 'removed "open PR"',
+    });
+    // The snapshot that same call emits, one item shorter.
+    _status(t, [_item]);
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.currentState.pendingInstructionsFor('t1'), [
+      'and update the changelog',
+    ]);
+
+    // Its own append is what answers it.
+    _status(t, [_item, _extracted]);
+    await Future<void>.delayed(Duration.zero);
+    expect(svc.currentState.pendingInstructionsFor('t1'), isEmpty);
+
+    await sub.cancel();
+    await svc.dispose();
+    await session.close();
+  });
+
   test('updateBacklog is refused while an instruction is outstanding', () async {
     // Every edit is a wholesale replace and extraction appends behind it, so a
     // list built while one is in flight deletes the items the user just asked

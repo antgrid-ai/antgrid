@@ -74,9 +74,11 @@ class HandlerItemStatusLabel extends StatelessWidget {
 }
 
 /// The word an outstanding instruction wears while it is one. Deliberately the
-/// verb the drawer's field and send button already use ("Add an instruction…",
-/// "Add to backlog"), so the action is called the same thing at every step.
-const handlerPendingInstructionLabel = 'adding';
+/// verb the drawer's field and send button already use ("Send an instruction…",
+/// "Send to Handler"), so the action is called the same thing at every step —
+/// and a verb that stays true for a sentence taking a line off the list, which
+/// "adding" beside a countermand promises the opposite of.
+const handlerPendingInstructionLabel = 'sending';
 
 /// The same column, for a sentence the bridge has not turned into items yet.
 ///

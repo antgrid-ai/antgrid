@@ -886,6 +886,12 @@ String _itemDecisionLabel(String decision) {
   // there is more than one — so this row leads with what was allowed, the
   // same way round as the `floor_warning` row about the same command.
   'instruction_authorized' => ('Allowed for this session: ${r.reason}', null),
+  // The list changed and the user did not touch it — they said something, and
+  // Handler took a line off it or rewrote one. Named after the drawer they
+  // recognise, with the item quoted in their own words: which of their lines
+  // moved is the whole question, and it is the one thing the backlog itself can
+  // no longer answer once the line is gone.
+  'instruction_amended' => ('Backlog updated: ${r.reason}', null),
   // Advisory floor hit (spec §5.1). The action went through — this row is
   // the audit trail prevention was traded for, so it is never conditional
   // on what Handler decided afterwards.
@@ -921,6 +927,10 @@ String _itemDecisionLabel(String decision) {
       // scanned one kind of row at a time cannot be asked to tell two identical
       // glyphs apart by what a session had already done. Permission, not alarm.
       'instruction_authorized' => (AbIcons.password, p.accent),
+      // The drawer's own Edit mark. A change the user made by hand and one
+      // their sentence made for them are the same change to the same list, and
+      // giving the second its own glyph would teach the pencil a second meaning.
+      'instruction_amended' => (AbIcons.edit, p.accent),
       // The remit being tested. Shield in the warning tone, beside `armed`'s.
       'floor_warning' => (AbIcons.shield, p.warning),
       'evidence_rejected' => (AbIcons.warning, p.warning),
@@ -970,6 +980,8 @@ Widget? _activitySubtitle(HandlerActivityRecord r, AbColors p) {
     case 'item_failed':
     case 'instruction_dropped':
     case 'evidence_rejected':
+    // The items themselves, quoted — the user's own prose, and read as prose.
+    case 'instruction_amended':
       return detail == null ? null : Text(detail, style: sans);
     default:
       // A kind this build has no arm for — a bridge ahead of the app. The row

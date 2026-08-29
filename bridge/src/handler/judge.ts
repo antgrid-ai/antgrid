@@ -5,7 +5,8 @@ import {
   buildDecidePrompt, buildRetryPrompt, buildShapeRetryPrompt, parseDecisionFromOutput, pickJudge,
   type HandlerDecision,
 } from "./decision";
-import { buildExtractPrompt, parseItemsFromOutput, type ExtractedItem } from "./extract";
+import type { InstructionItem } from "./backlog";
+import { buildExtractPrompt, parseExtractionOutput, type ExtractionResult } from "./extract";
 
 // Eval-only judge override (Task 16's e2e harness): the spawned agent process can't
 // have fakes injected in-process, so swap the CLI for a scripted bun script. Gated
@@ -121,21 +122,25 @@ export async function runDecision(opts: {
 }
 
 // Deliberately no transcriptPath and no context parameter: extraction reads the
-// user's instruction and nothing else (spec §3.1), so there is no context tier to
-// assemble. The budget is well under decide's 45s because this prompt
-// carries no transcript excerpt and the arm it feeds is non-blocking (§3.2) — a
-// slower one only widens the window in which the backlog is still empty.
+// user's instruction and the list it is already keeping for them, and nothing else
+// (spec §3.1) — no transcript, no working tree — so there is no context tier to
+// assemble. `backlog` is what lets one sentence take back an earlier one; it is
+// rendered under the extractor's own bound (renderAmendable), never whole. The
+// budget is well under decide's 45s because this prompt carries no transcript
+// excerpt and the arm it feeds is non-blocking (§3.2) — a slower one only widens
+// the window in which the backlog is still empty.
 export async function runExtraction(opts: {
   tool: string; model?: string; text: string; cwd: string;
+  backlog?: InstructionItem[];
   timeoutMs?: number; spawn?: typeof Bun.spawn;
-}): Promise<ExtractedItem[] | null> {
-  return runWithRetry<ExtractedItem[]>({
+}): Promise<ExtractionResult | null> {
+  return runWithRetry<ExtractionResult>({
     tool: opts.tool, model: opts.model, cwd: opts.cwd,
     timeoutMs: opts.timeoutMs ?? 20_000, spawn: opts.spawn,
-    makePrompt: () => buildExtractPrompt(opts.text),
+    makePrompt: () => buildExtractPrompt(opts.text, opts.backlog ?? []),
     parse: (stdout) => {
-      const r = parseItemsFromOutput(stdout);
-      return { value: r.items, error: r.error };
+      const r = parseExtractionOutput(stdout);
+      return { value: r.items === null ? null : { items: r.items, amend: r.amend }, error: r.error };
     },
   });
 }

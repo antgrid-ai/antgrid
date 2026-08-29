@@ -447,7 +447,11 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
                 Expanded(
                   child: AbTextField(
                     controller: _input,
-                    hintText: 'Add an instruction…',
+                    // "Send", not "Add": a sentence here can take a line off this
+                    // list or reword one as readily as it can add one, and a
+                    // control promising to add is at its most wrong exactly when
+                    // the user is cancelling something.
+                    hintText: 'Send an instruction…',
                     textInputAction: TextInputAction.send,
                     onSubmitted: (_) => _submitTyped(),
                   ),
@@ -455,7 +459,7 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
                 const SizedBox(width: AbTokens.space6),
                 AbIconButton(
                   icon: AbIcons.send,
-                  tooltip: 'Add to backlog',
+                  tooltip: 'Send to Handler',
                   onTap: _submitTyped,
                 ),
               ],
@@ -479,7 +483,7 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
                   AbTokens.space8,
                 ),
                 child: Text(
-                  'Already adding "${_quoted(stillHeld)}".',
+                  'Already sending "${_quoted(stillHeld)}".',
                   style: AbTokens.sansStyle(
                     fontSize: AbTokens.fontXs,
                     color: p.textSecondary,
@@ -696,10 +700,10 @@ String _quoted(String sentence) {
 String? handlerEditLockReason(List<String> pending) {
   if (pending.isEmpty) return null;
   if (pending.length > 1) {
-    return 'Still adding ${pending.length} instructions — editing is paused '
+    return 'Still sending ${pending.length} instructions — editing is paused '
         'until they land.';
   }
-  return 'Still adding "${_quoted(pending.single)}" — editing is paused '
+  return 'Still sending "${_quoted(pending.single)}" — editing is paused '
       'until it lands.';
 }
 
