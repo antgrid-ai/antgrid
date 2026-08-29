@@ -114,7 +114,7 @@ already has them.
 
 - `config.ts` — Zod schemas for `antgrid.yaml`; var interpolation (`${project.path}`, `${env.VAR}`).
 - `protocol.ts` — message types as Zod discriminated union. `createMessage()`, `parseMessage()`/`parseMessageFast()`.
-- `terminal-manager.ts` → `terminal-session.ts` — PTY lifecycle; manager coordinates multiple sessions.
+- `terminal-manager.ts` → `terminal-session.ts` — PTY lifecycle; manager coordinates multiple sessions. On Windows each PTY also joins a kill-on-close job (`win32-process.ts`); the invariants are under **Isolated sessions**, because what they protect is a checkout delete.
 - `work-status.ts` — pure fold from outbound bus frames (+ the inbound turn-start/answer hooks) to PER-SESSION work status; `ProjectCore.workStatus` is only its rollup. **This is the ONLY per-session reduction** — `SessionManager` folds nothing, it stamps this one's answer onto each `session:updated` entry via the injected `sessionWorkStatusFor`, and `ProjectCore.commitWork` calls `refreshSessionWork()` when the per-session map moves (the list is otherwise re-emitted only when the sessions themselves change). That re-emit folds straight back in, so it terminates *only* because `foldSessions` returns the SAME state for an unchanged session set — keep that discipline. Two readers, two paths: the advert carries `status` + `sessionStatuses` (dots), and `SessionEntry.workStatus` carries the live per-session value the mode-switch dialog branches on (`undefined` for a session the reduction has no entry for, i.e. not running — which is right, a flip does not restart a stopped session). **Presence of `sessionStatuses` is the app's capability signal** — `{}` means "warm, nothing running", absent means an older bridge, so never omit it for a warm core. A session is "working" only while a TURN is open, never merely because it is alive, and "unread" once that turn ENDED with nobody looking at it — read state the bridge owns outright, because it is the only party that sees both every turn end and every client's `session:focus`. Read state is tracked PER CLIENT, keyed by `InboundSource` — the desktop reaches a core over loopback, the phone over the relay, and they look at different sessions. A session is "seen" if ANYONE is on it. One shared slot was tried first and is wrong: the last client to speak stole it, so a phone opening session B put a blue dot on session A under the desktop's cursor. Three inbound signals feed it — `sessionFocus` (`session:focus`), `clientFocusState` (`client:focus-state`) and `clientGone` (the socket closed: `onPeerOffline` for the phone, `LocalListener.onOwnerDisconnected` for the desktop, without which a client that quit keeps one session permanently exempt). All arrive on the DATA plane, so a project nobody has opened reports no read state at all. It is gated on `readTracking`: until some client says what it is looking at, nothing may be called unseen — otherwise a bare agent, an eval, or a desktop driven from its own terminal turns every finished turn blue with nothing able to clear it. Backgrounding (`client:focus-state{paused}`) releases only THAT client's session, so a sibling still watching keeps its own read; an answer landing in someone's pocket is unread; the app RESTATES its focus on resume, since only it knows what is still on screen. Nothing persists it on either side — a bridge restart is a fresh read state, and the app is forbidden from caching it (`app_shell.dart` skips `unread` when writing the status cache). The four "user acted" signals are asymmetric on purpose, and each asymmetry is load-bearing:
   - `/turn-start` hook (Claude only) → `turnStart`: clears the block AND opens a turn.
   - chat resolve (`agent:permission-resolve`/`-question-resolve`) → `answerRequest`: same, but ONLY if something was actually pending — a resolve racing a retraction would otherwise open a turn no turn-end closes.
@@ -268,6 +268,20 @@ first for every project on the machine, Git-backed or not.
   and `stopAndAwait` needs both answers: an asynchronous taskkill can deliver
   the leader's exit while it is still walking the rest of the tree, so the exit
   alone no longer implies the directory is free.
+  A parent-link walk also cannot reach an ORPHAN at all, and orphans are the
+  ordinary case: the agent's own helpers outlive the PTY, and once their parent
+  has exited there is no tree left to walk while their cwd still holds the
+  checkout. Every PTY is therefore also assigned to a kill-on-close job
+  (`win32-process.ts`) the instant its pid exists — later is already too late
+  for whatever the child has spawned by then — and the handle is closed on
+  NATURAL exit as well as on kill, since an agent finishing by itself is what
+  usually happens and a handle nothing closes leaks the tree it owns. Closing
+  the handle IS the reap, so the kernel closing them as the bridge dies sweeps
+  every PTY tree with no shutdown handler involved, which is what covers a
+  force-killed bridge. It narrows the failure rather than removing it — a
+  `ShellExecute`-created child joins its creator's job, not ours — so
+  `listProcessesWithCwdUnder` stays the way to name whoever still holds a
+  directory when a delete fails anyway. None of it applies off Windows.
   Mind the asymmetry in what a survivor costs
   — on Windows it blocks the delete outright, while POSIX unlinks the directory
   out from under it and leaves only a process nobody will reap.
@@ -285,7 +299,31 @@ first for every project on the machine, Git-backed or not.
   still raises `WORKTREE_DELETE_FAILED`, because whatever held the directory open
   is worth surfacing. Git's stderr goes to the local log via `logGitFailure`, and
   deliberately NOT into the structured `logWorktreeEvent` payloads, which feed
-  analytics and so carry a code and no message.
+  analytics and so carry a code and no message. **Surfacing it means NAMING the
+  holder**: on Windows a delete that still fails enumerates the live processes
+  whose cwd is inside the checkout and puts them in the thrown message, capped
+  and spelled RELATIVE to the checkout — a host path never crosses the session
+  wire, and "an orphaned `bun.exe` in `bridge/`" is the actionable half anyway.
+  Their full paths go to the local log (`logDirectoryHolders`); only the COUNT
+  joins the events. That local line is emitted even when NO holder could be
+  named — off Windows, past a reconcile's scan budget, or for a directory refused
+  with nothing live in it — because the events carry no path and it is the only
+  thing that ever says which directory survived. Off Windows the enumeration
+  answers nothing and the sentence must read as it always did. **Naming a holder
+  is also why that failure has its own code.** `friendlyErrorCopy`
+  (`app/lib/widgets/ab_status_helpers.dart`) has a `WORKTREE_DELETE_FAILED` arm
+  and `sessionRefusalCopy` prefers an arm over the bridge's message, so that code
+  would swallow the clause it took a process-table scan to produce. The held case
+  throws `WORKTREE_DELETE_HELD` instead, which has no arm and so falls through to
+  `error.message` verbatim — give it one and the feature goes silent again, with
+  nothing failing to say so.
+  The reconcile sweep does the same reclaim and gets its own
+  `worktree_reclaim_failed` event — a survivor moves none of `ReconcileCounts`,
+  so without it the sweep reports itself as having had nothing to do while it
+  fails on the same stranded directories at every single create — but NOT the
+  same patience: it takes one bare `rm`, not `removeWithRetries`, because it
+  rides on a `session:create` the app abandons after 15s and is itself the retry
+  loop.
 - **A rollback is not a delete.** `rollbackPrepared` bypasses the dirty/unpushed
   guard on purpose — no agent was ever admitted to that checkout — but never
   drops a branch whose head has moved out from under it.

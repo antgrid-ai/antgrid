@@ -7,7 +7,7 @@
 // worktree is gone, and never surviving after it.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { __setRootForTest } from "../src/logger";
 import { CheckoutStore } from "../src/worktrees/checkout-store";
@@ -120,13 +120,14 @@ describe("WorktreeManager delete failures", () => {
     return record;
   }
 
-  function manager(git: GitRunner): WorktreeManager {
+  function manager(git: GitRunner, extra: ConstructorParameters<typeof WorktreeManager>[0] = {}): WorktreeManager {
     return new WorktreeManager({
       abDir,
       git,
       // Nothing called prepareForSession here, so the repository path can only
       // come from the catalogue resolver — the same route a restart takes.
       resolveRepoPath: async (id) => (id === projectId ? repoPath : undefined),
+      ...extra,
     });
   }
 
@@ -147,6 +148,111 @@ describe("WorktreeManager delete failures", () => {
     await expect(manager(git.run).remove({ checkoutId: record.id, force: false, deleteBranch: false }))
       .rejects.toMatchObject({ code: "WORKTREE_DELETE_FAILED" });
     expect(await store().get(record.id)).toMatchObject({ id: record.id });
+  });
+
+  describe("naming what holds a directory that will not go away", () => {
+    // The enumeration reads the real machine's process table, so it is injected
+    // here for the same reason `git` is: neither a holder nor its absence can
+    // be arranged, and the message built out of one is what the user reads.
+    test("names the holders in the message and counts them in the event", async () => {
+      // "Permission denied" is all the field ever saw. The holder is routinely
+      // an orphaned `bun test` the PTY teardown could not reach, and nothing
+      // else on the machine will ever name it. The code differs from the
+      // holderless case on purpose: the app REPLACES WORKTREE_DELETE_FAILED
+      // with a sentence of its own, which would eat the clause below.
+      const record = await seed();
+      const git = fakeGit(worktreePath, { removeExitCode: 1 });
+      const holders = [
+        { pid: 18688, name: "bun.exe", cwd: join(worktreePath, "bridge") },
+        { pid: 4020, name: "dart.exe", cwd: worktreePath },
+      ];
+      const lines: string[] = [];
+      __setRootForTest({ write: (message: string) => { lines.push(message); } }, "info");
+      try {
+        await expect(
+          manager(git.run, { listHolders: () => holders })
+            .remove({ checkoutId: record.id, force: true, deleteBranch: false }),
+        ).rejects.toMatchObject({
+          code: "WORKTREE_DELETE_HELD",
+          message: expect.stringMatching(/Held by bun\.exe \(pid 18688\) in bridge, dart\.exe \(pid 4020\)\.$/),
+        });
+      } finally {
+        __setRootForTest(process.stdout, "info");
+      }
+      // The count is the whole analytics-safe part: a holder's current
+      // directory names the user's home layout, so it stays in the local log.
+      expect(lines.join("")).toContain("\"holders\":2");
+      expect(lines.join("")).toContain("bun.exe");
+    });
+
+    test("names only the first few holders and says how many it left out", async () => {
+      const record = await seed();
+      const git = fakeGit(worktreePath, { removeExitCode: 1 });
+      const holders = Array.from({ length: 5 }, (_, index) => ({
+        pid: 100 + index, name: `bun-${index}.exe`, cwd: worktreePath,
+      }));
+      await expect(
+        manager(git.run, { listHolders: () => holders })
+          .remove({ checkoutId: record.id, force: true, deleteBranch: false }),
+      ).rejects.toThrow(/bun-2\.exe \(pid 102\), and 2 more\.$/);
+    });
+
+    test("leaves the message alone when nothing can be named, and still logs the directory", async () => {
+      // Off Windows the enumeration answers nothing at all — and on it, a
+      // directory can be refused with no live holder to blame. The sentence has
+      // to read as it always did, with no dangling "held by".
+      const record = await seed();
+      const git = fakeGit(worktreePath, { removeExitCode: 1 });
+      const lines: string[] = [];
+      __setRootForTest({ write: (message: string) => { lines.push(message); } }, "warn");
+      try {
+        await expect(
+          manager(git.run, { listHolders: () => [] })
+            .remove({ checkoutId: record.id, force: true, deleteBranch: false }),
+        ).rejects.toMatchObject({
+          code: "WORKTREE_DELETE_FAILED",
+          message: "The isolated worktree's directory could not be removed.",
+        });
+      } finally {
+        __setRootForTest(process.stdout, "info");
+      }
+      // The event carries a projectId and a count, and this is the one line
+      // that ever names WHICH directory survived — without it a support bundle
+      // cannot tell one stranded checkout from five identical events.
+      expect(lines.join("")).toContain(JSON.stringify(worktreePath).slice(1, -1));
+    });
+
+    test("an enumeration that throws cannot change what the delete failed with", async () => {
+      // It runs only where a delete has already failed, so the one thing it
+      // must never do is replace that failure with its own.
+      const record = await seed();
+      const git = fakeGit(worktreePath, { removeExitCode: 1 });
+      await expect(
+        manager(git.run, { listHolders: () => { throw new Error("no process table"); } })
+          .remove({ checkoutId: record.id, force: true, deleteBranch: false }),
+      ).rejects.toMatchObject({
+        code: "WORKTREE_DELETE_FAILED",
+        message: "The isolated worktree's directory could not be removed.",
+      });
+    });
+
+    test("locates no holder that sits outside the checkout", async () => {
+      // The two ways out, because `relative` answers them differently: a
+      // sibling walks out with `..`, while a cross-root pair — another drive
+      // letter, a UNC share — comes back ABSOLUTE, which no `..` test catches.
+      // Either one named here would put the host's own directory layout into a
+      // message that crosses the session wire.
+      const record = await seed();
+      const git = fakeGit(worktreePath, { removeExitCode: 1 });
+      const holders = [
+        { pid: 77, name: "sibling.exe", cwd: resolve(worktreePath, "..", "elsewhere") },
+        { pid: 78, name: "crossroot.exe", cwd: process.platform === "win32" ? "Z:\\work" : "/etc" },
+      ];
+      await expect(
+        manager(git.run, { listHolders: () => holders })
+          .remove({ checkoutId: record.id, force: true, deleteBranch: false }),
+      ).rejects.toThrow(/Held by sibling\.exe \(pid 77\), crossroot\.exe \(pid 78\)\.$/);
+    });
   });
 
   test("refuses to remove an unregistered directory Antgrid does not own", async () => {

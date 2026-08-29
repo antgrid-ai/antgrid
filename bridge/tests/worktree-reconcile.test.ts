@@ -1,13 +1,46 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { __setRootForTest } from "../src/logger";
 import { CheckoutStore } from "../src/worktrees/checkout-store";
-import { WorktreeManager } from "../src/worktrees/worktree-manager";
+import { WorktreeManager, type ReconcileCounts } from "../src/worktrees/worktree-manager";
 
 /** Beyond RECONCILE_GRACE_MS, so an injected clock puts every existing
  *  directory's mtime outside the window that protects a create in flight. */
 const PAST_GRACE_MS = 120_000;
+
+/** Make a directory survive a recursive delete, and return the release.
+ *
+ *  Windows is held the way the field failure holds it — the directory is a live
+ *  process's current directory, which Windows refuses to delete and which is
+ *  the entire bug. POSIX has no such rule, so a parent nothing may write to
+ *  stands in for it: the sweep's reporting is what these tests are about, not
+ *  the mechanism that refused. */
+function holdDirectory(dir: string): () => void {
+  if (process.platform === "win32") {
+    const previous = process.cwd();
+    process.chdir(dir);
+    return () => { process.chdir(previous); };
+  }
+  const parent = dirname(dir);
+  chmodSync(parent, 0o500);
+  return () => { chmodSync(parent, 0o700); };
+}
+
+/** Whether this environment enforces [holdDirectory] at all — root ignores the
+ *  POSIX half, and CI containers commonly run as root. */
+const HOLD_ENFORCED = ((): boolean => {
+  const probe = mkdtempSync(join(tmpdir(), "antgrid-hold-probe-"));
+  const dir = join(probe, "held");
+  mkdirSync(dir);
+  const release = holdDirectory(dir);
+  try { rmSync(dir, { recursive: true, force: true }); } catch { /* refused outright, which is the answer */ }
+  const enforced = existsSync(dir);
+  release();
+  rmSync(probe, { recursive: true, force: true });
+  return enforced;
+})();
 
 async function git(cwd: string, args: string[]): Promise<string> {
   const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
@@ -75,6 +108,37 @@ describe("WorktreeManager reconciliation", () => {
 
     expect(existsSync(orphan.path)).toBe(false);
     expect((await git(repo, ["worktree", "list", "--porcelain"])).match(/^worktree /gm)?.length).toBe(1);
+  });
+
+  test.skipIf(!HOLD_ENFORCED)("reports a reclaim that left its directory standing, and who held it", async () => {
+    const instance = manager();
+    const orphan = await instance.prepareForSession({ projectId, repoPath: repo, sessionId: "abcdefgh" });
+    await new CheckoutStore(abDir, projectId).remove(orphan.id);
+
+    const lines: string[] = [];
+    let counts: ReconcileCounts | undefined;
+    const release = holdDirectory(orphan.path);
+    __setRootForTest({ write: (message: string) => { lines.push(message); } }, "info");
+    try {
+      counts = await agedManager({
+        // The real enumeration reads this machine's entire process table:
+        // right on a failure path, wrong in a test that would then assert on
+        // whatever else happens to be running.
+        listHolders: () => [{ pid: 4242, name: "bun.exe", cwd: join(orphan.path, "bridge") }],
+      }).reconcile(projectId, repo);
+    } finally {
+      __setRootForTest(process.stdout, "info");
+      release();
+    }
+
+    // The defect this event exists for: both calls in the sweep swallow their
+    // failure and a survivor moves no count, so `worktree_reconcile_completed`
+    // reads exactly like a sweep with nothing to do — on every create, for as
+    // long as the directory stays stranded.
+    expect(counts).toMatchObject({ reclaimed: 0 });
+    expect(existsSync(orphan.path)).toBe(true);
+    expect(lines.join("")).toContain("worktree_reclaim_failed");
+    expect(lines.join("")).toContain("bun.exe");
   });
 
   test("leaves an orphan directory alone while it is inside the grace window", async () => {
