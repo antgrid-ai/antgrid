@@ -7,7 +7,7 @@ import { logger } from "./logger";
 const log = logger.child({ component: "agent-core" });
 import { TerminalManager } from "./terminal-manager";
 import { createKeyedLock } from "./keyed-lock";
-import { killChildTree, processGroupSpawn } from "./terminal-session";
+import { AGENT_GRACE_MS, killChildTree, processGroupSpawn } from "./terminal-session";
 import { createConnState, type ConnState } from "./conn-state";
 import { FileWatcher } from "./file-watcher";
 import { FileUploadManager } from "./file-upload";
@@ -919,10 +919,26 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         sendStatus();
         break;
       }
-      case "terminal:stop":
-        manager.kill(internalTerminalId(runtime, msg.terminalId));
+      case "terminal:stop": {
+        // A session id reaches this verb — `internalTerminalId` returns one
+        // verbatim — and a session PTY is `type: "agent"`, so it takes the
+        // grace. It has to take it through `SessionManager`, which is the only
+        // thing that records a session as stopping: without that the row keeps
+        // reading as running for the whole grace and the Start pressed inside
+        // it hits `startNow`'s already-running guard, exactly as `terminal:start`
+        // above refuses a session id rather than racing `session:start`.
+        if (sessions?.get(msg.terminalId)) {
+          sessions.stop(msg.terminalId);
+          sendStatus();
+          break;
+        }
+        // Budgeted, not promised: `gracefulBudget` answers 0 for a service or
+        // an ad-hoc terminal, and a user terminal someone is running an agent
+        // in is the case the budget exists for.
+        manager.kill(internalTerminalId(runtime, msg.terminalId), AGENT_GRACE_MS);
         sendStatus();
         break;
+      }
       case "terminal:resize":
         manager.resize(
           internalTerminalId(runtime, msg.terminalId),
@@ -1442,7 +1458,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     namer = null;
     antigravityTitleWatcher?.stop();
     antigravityTitleWatcher = null;
-    void structured?.disposeAll();
+    // Awaited with the rest, not voided: a chat runtime's dispose now waits out
+    // its own soft ask (codex exits on stdin EOF) before it terminates, so a
+    // discarded promise lets `process.exit` land first and leaves the
+    // app-server alive holding the ~/.codex sqlite lock the next start needs.
+    // Caught, because `pending` must stay reject-free for the `Promise.all`.
+    if (structured) pending.push(structured.disposeAll().catch(() => {}));
     structured = null;
     await Promise.all(pending);
   }
@@ -3245,7 +3266,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // map, so no session was ever asked to exit on its own and the line below
       // reported 0 for a machine that had just killed a dozen agents.
       const closed = manager ? await manager.killAllGracefully(5000) : 0;
-      teardownServices();
+      // Awaited: it ends in a `killChildTree` per running `command:run` child,
+      // and those are spawned through a shell with no job around them — issuing
+      // that kill and abandoning it leaves the real command holding a checkout
+      // directory with nothing left to sweep it.
+      await teardownServices();
       // After the timers are cleared, so nothing new can be scheduled behind
       // this — see [trackGitRefresh] for why an in-flight one has to be
       // waited out rather than abandoned, and [drainGitRefreshes] for why the

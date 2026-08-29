@@ -1,4 +1,9 @@
-import { TerminalSession, buildSpawnEnv } from "./terminal-session";
+import {
+  TerminalSession,
+  buildSpawnEnv,
+  WINDOWS_SHUTDOWN_GRACE_MS,
+} from "./terminal-session";
+import type { GracefulExitAsk } from "./agents/types";
 import { ScrollbackBuffer } from "./scrollback";
 import { TerminalModeTracker } from "./terminal-modes";
 import { logger } from "./logger";
@@ -19,6 +24,9 @@ export interface TerminalSpawnConfig {
   suppressOscNotifications?: boolean;
   suppressOscTitle?: boolean;
   hookAliveProbeAgent?: string;
+  /** This agent's measured refinement of the platform's soft ask; see
+   *  `GracefulExitAsk`. Absent everywhere but an agent session. */
+  gracefulAsk?: GracefulExitAsk;
   /** Keep this terminal's scrollback replayable after the process exits.
    *  For a transcript whose whole value is what it said — a `worktree.setup`
    *  run, where the log of the step that failed is the only explanation the
@@ -44,6 +52,36 @@ export interface TerminalManagerCallbacks {
    *  it again and `getStatus` will never report it. The one signal an owner of
    *  per-terminal state outside this class can key its own release on. */
   onTerminalForgotten?: (terminalId: string) => void;
+}
+
+/**
+ * How long THIS session may be given, under a caller's budget.
+ *
+ * Only agent PTYs are asked to leave. On Windows the soft ask is a keystroke,
+ * which a cooked-mode reader — a `bun install` in a setup PTY, a service
+ * running a build tool, a shell blocked on a child — cannot see at all, so
+ * asking one would spend the whole budget to change nothing while destroying
+ * the parent links the sweep walks. On POSIX they have nothing to flush.
+ * `type: "agent"` is stamped at exactly ONE site (`SessionManager.startNow`),
+ * which is what makes this a single fact rather than a policy to maintain.
+ *
+ * `askNonAgents` is the shutdown path, and it is not a widening: POSIX shutdown
+ * SIGTERMs every terminal, which withdrawing would be the regression. It stays
+ * off on Windows, where the keystroke would not land on a cooked-mode reader
+ * anyway.
+ *
+ * A declared `graceMs` can only SHORTEN the caller's budget — see
+ * `GracefulExitAsk.graceMs`.
+ */
+export function gracefulBudget(
+  session: TerminalSession,
+  budgetMs: number,
+  askNonAgents = false,
+): number {
+  if (budgetMs <= 0) return 0;
+  if (session.type === "agent") return Math.min(budgetMs, session.graceMs ?? budgetMs);
+  if (askNonAgents && process.platform !== "win32") return budgetMs;
+  return 0;
 }
 
 export class TerminalManager {
@@ -106,6 +144,21 @@ export class TerminalManager {
     if (this.sessions.has(terminalId)) {
       log.warn(`Terminal "${terminalId}" already exists, killing first`);
       this.kill(terminalId);
+      // The replaced run's exit lands later, on a slot this spawn now owns,
+      // where the same-id gate below drops it — its bookkeeping included. So
+      // the bookkeeping runs HERE, while the id still means the old run.
+      // Ordering is the whole point: `namer.forget` and
+      // `handlerEngine.onTerminalExit` are keyed by terminal id, so dispatching
+      // them once the replacement has registered would reclaim the LIVE run's
+      // state instead of the dead one's. Only the callback fires, never the
+      // `terminal:exited` frame — an exit frame for a slot a live session holds
+      // tells the app a running terminal is dead, and nothing later corrects it.
+      //
+      // A grace made this reachable rather than theoretical: the window between
+      // the ask and the exit is now seconds, which is long enough for the user
+      // to press Stop and then Start (`SessionManager.stopTerminal` ->
+      // `startNow`).
+      this.callbacks.onTerminalExited?.(terminalId);
     }
 
     // Clear from stopped list since we're re-spawning
@@ -145,6 +198,7 @@ export class TerminalManager {
       suppressOscNotifications: config.suppressOscNotifications,
       suppressOscTitle: config.suppressOscTitle,
       hookAliveProbeAgent: config.hookAliveProbeAgent,
+      gracefulAsk: config.gracefulAsk,
       onTitle: (title: string) => this.callbacks.onTerminalTitle?.(terminalId, title),
       onMessage: (msg: AbMessage) => {
         if (msg.type === "terminal:output") {
@@ -221,13 +275,24 @@ export class TerminalManager {
     return terminalId;
   }
 
-  kill(terminalId: string): void {
+  /**
+   * Stop a terminal. `graceMs` is a budget, not a promise: the terminals it
+   * actually reaches are decided by `gracefulBudget`, and the sweep runs either
+   * way. Default 0 keeps a caller that has no room for one — a kill-then-
+   * respawn on the same terminal id, where a grace would overlap two PTYs on
+   * one slot — on exactly the path it had before.
+   */
+  kill(terminalId: string, graceMs = 0): void {
     const session = this.sessions.get(terminalId);
     if (!session) {
       log.warn(`Terminal "${terminalId}" not found`);
       return;
     }
-    session.kill();
+    const grace = gracefulBudget(session, graceMs);
+    // Stays void either way: nearly every caller fires this from a message
+    // handler and must not be made to wait on the reaping.
+    if (grace > 0) void session.close(grace);
+    else session.kill();
     // Session removal happens in the onMessage exit handler
   }
 
@@ -245,12 +310,14 @@ export class TerminalManager {
     return this.sessions.get(terminalId)?.treeKilled ?? Promise.resolve();
   }
 
-  killAndAwaitTree(terminalId: string): Promise<void> {
+  killAndAwaitTree(terminalId: string, graceMs = 0): Promise<void> {
     const session = this.sessions.get(terminalId);
     if (!session) {
       log.warn(`Terminal "${terminalId}" not found`);
       return Promise.resolve();
     }
+    const grace = gracefulBudget(session, graceMs);
+    if (grace > 0) return session.close(grace);
     session.kill();
     return session.treeKilled;
   }
@@ -259,8 +326,17 @@ export class TerminalManager {
     for (const session of this.sessions.values()) {
       session.kill();
     }
+    this.resetMaps();
+  }
+
+  /** Everything this class remembers about terminals, dropped in one place.
+   *  `modeTrackers` pairs 1:1 with `scrollbacks`, so it goes with them — a
+   *  tracker left behind for a terminal whose buffer is gone is unreachable
+   *  state that lives for the process. */
+  private resetMaps(): void {
     this.sessions.clear();
     this.scrollbacks.clear();
+    this.modeTrackers.clear();
     this.retainScrollback.clear();
     this.forgotten.clear();
     this.terminalTypes.clear();
@@ -293,43 +369,40 @@ export class TerminalManager {
     const count = all.length;
     if (count === 0) return 0;
 
-    // Windows gets no graceful phase, because it has none to give: node maps
-    // every signal to TerminateProcess, so `killGracefully` takes the leader
-    // ALONE — and `killProcessTree` walks parent links, so the children it
-    // would have reaped are re-parented out of reach the instant that leader
-    // exits (the tree must die BEFORE the leader; see killProcessTree's doc).
-    // Asking nicely first would therefore COST the sweep rather than soften
-    // it, stranding the conhost/agent orphans whose open handles abort
-    // `git worktree remove` — which is the one thing shutdown sweeps trees to
-    // prevent. POSIX names a process group, which outlives its leader, so
-    // there the ordering is free and the graceful path below is real.
-    if (process.platform === "win32") {
-      this.killAll();
-      await Promise.all(all.map((s) => s.treeKilled));
-      return count;
-    }
+    // Windows is clamped and POSIX is not, and the asymmetry is the caller's,
+    // not the platform's: `HostController.shutdownOwnedHost` force-kills this
+    // whole tree ~3s after asking, so anything past that is spent inside a
+    // window it has already given up on. POSIX has no such caller, so it keeps
+    // the full budget it was given.
+    const budget = process.platform === "win32"
+      ? Math.min(timeoutMs, WINDOWS_SHUTDOWN_GRACE_MS)
+      : timeoutMs;
+    // Each chain ends in its own unconditional sweep, so this resolves only
+    // once every tree is gone — the property `git worktree remove` and the
+    // Windows package destage both depend on. Sessions report their own exits,
+    // so no poll loop is needed to notice them.
+    await Promise.all(all.map((session) => session.close(gracefulBudget(session, budget, true))));
 
-    // Send SIGTERM to all sessions
-    for (const session of all) {
-      session.killGracefully();
-    }
+    // Nothing has closed the inbound door yet — the transport is still
+    // attached and the config watcher still armed — so a `session:start` or a
+    // `servicesModified` respawn can land a NEW session in the map during the
+    // wait above. Clearing from the snapshot would drop it from every map
+    // without killing it, orphaning a PTY that no watchdog and no job handle
+    // covers. `killAll` reads the LIVE map, which is the whole reason it stays
+    // the terminal step.
+    const asked = new Set(all);
+    const late = [...this.sessions.values()].filter((session) => !asked.has(session));
+    this.killAll();
+    await Promise.all(late.map((session) => session.treeKilled));
 
-    // Poll until all sessions exit or timeout
-    const start = Date.now();
-    while (this.sessions.size > 0 && Date.now() - start < timeoutMs) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-
-    // Force-kill survivors
-    if (this.sessions.size > 0) {
-      log.warn("Force-killing %d surviving terminal(s)", this.sessions.size);
-      // Snapshotted before killAll clears the map: shutdown reports "%d
-      // terminal(s) closed" off this return, and the trees are still dying.
-      const survivors = [...this.sessions.values()];
-      this.killAll();
-      await Promise.all(survivors.map((s) => s.treeKilled));
-    }
-
+    const answered = all.filter((session) => session.askAnswered === true).length;
+    log.info(
+      "Closed %d terminal(s): %d exited on request, %d force-killed%s",
+      count,
+      answered,
+      count - answered,
+      late.length > 0 ? `, ${late.length} spawned during shutdown` : "",
+    );
     return count;
   }
 

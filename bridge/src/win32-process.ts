@@ -67,6 +67,11 @@ const JOB_LIMIT_FLAGS_OFFSET = 16;
  */
 const PROCESSENTRY32W_SIZE = 568;
 const PROCESSENTRY32W_PID_OFFSET = 8;
+/** `th32ParentProcessID`, between `cntThreads` (28) and `pcPriClassBase` (36).
+ *  Windows never re-parents an orphan, so this keeps naming the original parent
+ *  long after that parent has exited — which is what makes it usable as an
+ *  identity check for a pid that might since have been recycled. */
+const PROCESSENTRY32W_PARENT_OFFSET = 32;
 const PROCESSENTRY32W_NAME_OFFSET = 44;
 const PROCESSENTRY32W_NAME_MAX_CHARS = 260;
 
@@ -368,6 +373,131 @@ export function createKillOnCloseJob(): Win32Job | null {
     log.warn("kill-on-close job unavailable: %s", err);
     return null;
   }
+}
+
+/** One live process, as a Toolhelp snapshot describes it. */
+export interface ProcessIdentity {
+  readonly pid: number;
+  /** `th32ParentProcessID` — the pid that created it, alive or not. */
+  readonly parentPid: number;
+  /** Image name as Toolhelp reports it, e.g. `bun.exe`. */
+  readonly name: string;
+}
+
+/** Every live process, or null when the Win32 layer is unavailable — which is
+ *  a different answer from "the machine is running nothing". */
+function enumerateProcesses(): ProcessIdentity[] | null {
+  const a = loadApi();
+  if (a === null) return null;
+  let snapshot: Pointer | null = null;
+  try {
+    snapshot = a.kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (!isUsableHandle(snapshot)) return null;
+    const entry = new Uint8Array(PROCESSENTRY32W_SIZE);
+    const view = new DataView(entry.buffer);
+    view.setUint32(0, PROCESSENTRY32W_SIZE, true);
+    const all: ProcessIdentity[] = [];
+    let more = a.kernel32.Process32FirstW(snapshot, ptr(entry));
+    // A live machine never runs zero processes, so a first call that fails —
+    // ERROR_BAD_LENGTH is the documented transient — is unknowable, and
+    // falling through to the empty array below would report it as "nothing is
+    // running", which every caller reads as "the tree is gone".
+    if (more === 0) return null;
+    while (more !== 0) {
+      all.push({
+        pid: view.getUint32(PROCESSENTRY32W_PID_OFFSET, true),
+        parentPid: view.getUint32(PROCESSENTRY32W_PARENT_OFFSET, true),
+        name: readEntryName(view),
+      });
+      view.setUint32(0, PROCESSENTRY32W_SIZE, true);
+      more = a.kernel32.Process32NextW(snapshot, ptr(entry));
+    }
+    return all;
+  } catch (err) {
+    log.debug({ err: String(err) }, "process enumeration failed");
+    return null;
+  } finally {
+    if (isUsableHandle(snapshot)) {
+      try {
+        a.kernel32.CloseHandle(snapshot);
+      } catch {
+        // Advisory path; a handle the kernel already rejected is nothing to report.
+      }
+    }
+  }
+}
+
+/**
+ * Everything `rootPid` has started, transitively, as of right now.
+ *
+ * Taken BEFORE a graceful ask, and that timing is the whole point. Asking a
+ * leader to exit destroys the parent links `taskkill /T` walks — the survivors
+ * are re-parented to nothing and the walk has no route to them — and the PTY's
+ * kill-on-close job does not close that gap on its own: a child created through
+ * `ShellExecute` joins its creator's job, not ours. A snapshot taken while the
+ * tree is still whole is the only reach that survives the leader leaving.
+ *
+ * Null when the snapshot could not be taken — including off Windows, where
+ * `loadApi` answers null. An empty array means the leader started nothing; the
+ * two must stay distinguishable, because a caller that cannot take the
+ * snapshot has lost the only reach a departing leader leaves behind and owes
+ * itself a decision, not a silent no-op.
+ */
+export function snapshotDescendants(rootPid: number): ProcessIdentity[] | null {
+  if (!Number.isInteger(rootPid) || rootPid <= 0) return null;
+  const all = enumerateProcesses();
+  if (all === null) return null;
+  const byParent = new Map<number, ProcessIdentity[]>();
+  for (const p of all) {
+    // A process reporting itself as its own parent (pid 0 does) would otherwise
+    // make the walk below never terminate.
+    if (p.parentPid === p.pid) continue;
+    const siblings = byParent.get(p.parentPid);
+    if (siblings) siblings.push(p);
+    else byParent.set(p.parentPid, [p]);
+  }
+  const found: ProcessIdentity[] = [];
+  const seen = new Set<number>([rootPid]);
+  const queue = [rootPid];
+  while (queue.length > 0) {
+    for (const child of byParent.get(queue.shift()!) ?? []) {
+      if (seen.has(child.pid)) continue;
+      seen.add(child.pid);
+      found.push(child);
+      queue.push(child.pid);
+    }
+  }
+  return found;
+}
+
+/**
+ * Which of `entries` are still the SAME processes.
+ *
+ * A pid alone cannot answer that: by the time a grace period has elapsed the
+ * process may be gone and Windows may have reissued its pid, and killing a
+ * recycled pid kills a stranger's process tree. The parent pid and the image
+ * name are recorded at snapshot time and neither changes for the life of a
+ * process — Windows leaves the parent field pointing at the original creator
+ * even after it exits — so a match on all three is identity, not coincidence.
+ *
+ * Null when the answer is unknowable. "All still alive" would be the safe
+ * reading for a caller that is only WAITING, and "all gone" the safe reading
+ * for one that is about to KILL; there is no single array that serves both, so
+ * neither is invented here.
+ */
+export function survivingProcesses(
+  entries: readonly ProcessIdentity[],
+): ProcessIdentity[] | null {
+  if (entries.length === 0) return [];
+  const all = enumerateProcesses();
+  if (all === null) return null;
+  const wanted = new Set(entries.map((p) => p.pid));
+  const live = new Map<number, ProcessIdentity>();
+  for (const p of all) if (wanted.has(p.pid)) live.set(p.pid, p);
+  return entries.filter((want) => {
+    const now = live.get(want.pid);
+    return now !== undefined && now.parentPid === want.parentPid && now.name === want.name;
+  });
 }
 
 /** A live process holding a directory as its current directory. */

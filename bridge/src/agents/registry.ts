@@ -15,6 +15,7 @@ import { resolveClaudeTranscriptTitle } from "./claude-code/title";
 import { codexThreadExistsSync, resolveCodexThreadTitle } from "./codex/title";
 import { copilotSessionExistsSync, resolveCopilotSessionTitle } from "./github-copilot/title";
 import { injectConfig } from "./config-inject";
+import { ETX } from "./types";
 import * as antigravityHooks from "./antigravity/hooks";
 import * as claudeHooks from "./claude-code/hooks";
 import * as codexHooks from "./codex/hooks";
@@ -52,6 +53,18 @@ export const AGENTS: Record<AgentKey, AgentSpec> = {
     hooks: claudeHooks,
     notifyBodyFromTranscript: lastAssistantText,
     driver: createClaudeDriver,
+    // Measured against the installed CLI on Windows. One Ctrl-C only arms the
+    // quit ("Press Ctrl-C again to exit") and is spent for nothing; two exit an
+    // idle session in 1.4-3.0s. The third covers a Ctrl-C the agent spends
+    // interrupting a live turn instead, and costs nothing when it is not needed
+    // — the presses stop the moment the PTY reports its exit.
+    //
+    // This is the agent the graceful phase exists for: the fullscreen renderer
+    // arms a `fullscreenBootPending[pid]` canary in `~/.claude.json` and
+    // withdraws it from a `process.on("exit")` hook, which neither
+    // `TerminateProcess` nor `SIGKILL` runs. A stale entry auto-disables that
+    // renderer MACHINE-WIDE until the file is hand-edited.
+    gracefulExit: { keystrokes: [ETX, ETX, ETX] },
     // No "sealed" entry: an allowlist naming this agent's read tools is what a
     // sealed argv would have to omit, and `--allowedTools` with an empty value
     // has not been run against the real CLI. Until it is, naming takes the

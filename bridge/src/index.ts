@@ -17,6 +17,12 @@ const log = logger.child({ component: "bridge" });
 
 const VALID_LEVELS = new Set<string>(["trace", "debug", "info", "warn", "error", "fatal"]);
 
+/** Ceiling on the whole teardown, from the first signal to `process.exit`.
+ *  Sits above everything `HostServer.shutdown` budgets for itself — the 5s
+ *  graceful ask for every terminal, then the tree kills behind it — so it only
+ *  ever fires for a stall nothing else bounds. */
+const SHUTDOWN_HARD_LIMIT_MS = 20_000;
+
 // Re-exported for tests/protocol.test.ts, which imports it from `./index`.
 export { buildAgentHello } from "./agent-core";
 
@@ -117,7 +123,11 @@ program
               },
               onAuthRevoked: () => {
                 process.stderr.write(`${JSON.stringify({ event: "auth_revoked" })}\n`);
-                process.exit(4);
+                // Through the same teardown as every other exit. Exiting here
+                // directly ran no shutdown code at all: on Windows the kernel
+                // still swept each PTY as it closed our job handles, but POSIX
+                // has no such backstop and every agent tree was orphaned.
+                void shutdown("auth-revoked", 4);
               },
             },
           }
@@ -140,13 +150,38 @@ program
     process.once("exit", () => { try { perfLog?.stop(); } catch {} });
 
     let isShuttingDown = false;
-    const shutdown = async (reason?: string) => {
+    // Recorded rather than passed through, because the verdict can arrive
+    // DURING a shutdown already in flight: token maintenance runs to the last
+    // moment, and a revocation that lost that race would exit 0 and tell the
+    // app's supervisor to respawn straight back into the dead credential pair.
+    let exitCode = 0;
+    const shutdown = async (reason?: string, code = 0) => {
+      if (code !== 0) exitCode = code;
       if (isShuttingDown) return;
       isShuttingDown = true;
       log.info("Shutting down%s...", reason ? ` (${reason})` : "");
       perfLog?.stop();
-      await host.shutdown(reason);
-      process.exit(0);
+      // The exit is the one thing this function owes: `onAuthRevoked` used to
+      // call `process.exit(4)` outright, and routing it through the teardown
+      // makes that exit conditional on a multi-second async path that asks
+      // every agent to leave. A shutdown that throws would otherwise land in
+      // the `unhandledRejection` handler above, be swallowed by the
+      // `isShuttingDown` guard, and hang the process on a dead credential pair;
+      // one that merely stalls hangs it just as well. So bound it and exit
+      // regardless — an unswept tree is worse than nothing only until the
+      // kernel closes our job handles, which is exactly what a Windows exit
+      // does anyway.
+      const bail = setTimeout(() => {
+        log.warn("Shutdown exceeded %dms; exiting anyway", SHUTDOWN_HARD_LIMIT_MS);
+        process.exit(exitCode);
+      }, SHUTDOWN_HARD_LIMIT_MS);
+      try {
+        await host.shutdown(reason);
+      } catch (err) {
+        log.error("Shutdown failed: %s", err);
+      }
+      clearTimeout(bail);
+      process.exit(exitCode);
     };
 
     // Wire teardown BEFORE the (possibly multi-second) first-project open, so an

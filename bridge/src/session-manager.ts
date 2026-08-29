@@ -22,6 +22,7 @@ import { initialPromptArgv } from "./initial-prompt";
 import { TITLE_RANKS, titleRankValue, type TitleRank } from "./session-namer";
 import type { WorkStatus } from "./protocol";
 import type { TerminalManager } from "./terminal-manager";
+import { AGENT_GRACE_MS } from "./terminal-session";
 import type { AbMessage, SessionEntry } from "./protocol";
 import {
   CHECKOUT_KINDS,
@@ -471,6 +472,17 @@ export class SessionManager {
   // Set in start()'s chat branch, cleared in stop()'s — the PTY-less analogue of
   // `tm.has(id)`, and best-effort (a crashed driver surfaces via agent:error).
   private runningChat = new Set<string>();
+  /**
+   * Sessions whose PTY has been ASKED to exit and has not gone yet.
+   *
+   * The ask is worth seconds, and for those seconds `tm.has(id)` still answers
+   * true — the session is genuinely alive. Reading that as "running" leaves a
+   * Stop rendering a live row, and makes the Start the user presses next hit
+   * `startNow`'s already-running guard and be answered `ok: true` having done
+   * nothing. Keyed on the session's own tree-kill promise, so the row clears
+   * itself whichever way the teardown ends.
+   */
+  private stopping = new Map<string, Promise<void>>();
   // Callbacks waiting for a session's PTY to actually be gone, keyed by session
   // id and fired from noteExited(). See awaitTerminalExit().
   private terminalExitWaiters = new Map<string, Set<(exited: boolean) => void>>();
@@ -1109,7 +1121,7 @@ export class SessionManager {
   archive(id: string): void {
     const entry = this.entries.get(id);
     if (!entry) throw new Error(`session not found: ${id}`);
-    if (this.tm.has(id)) this.tm.kill(id);
+    if (this.tm.has(id)) this.stopTerminal(id);
     // The kill above cannot reach a start that has not happened yet: a session
     // archived while its checkout is still provisioning would otherwise launch
     // its agent the moment setup settled. The prompt stays in
@@ -1155,7 +1167,7 @@ export class SessionManager {
           : this.deleteManaged(entry, options);
       });
     }
-    if (this.tm.has(id)) this.tm.kill(id);
+    if (this.tm.has(id)) this.stopTerminal(id);
     this.dropSession(id);
     this.changed();
     return true;
@@ -1212,7 +1224,7 @@ export class SessionManager {
       // project's store), so there is nothing left to reclaim and the session
       // row is the only trace. Refusing here — which `inspect`'s
       // WORKTREE_MISSING would — makes that row permanently undeletable.
-      if (this.tm.has(entry.id)) this.tm.kill(entry.id);
+      if (this.tm.has(entry.id)) this.stopTerminal(entry.id);
       this.markDeleting(entry);
       try {
         await this.cancelSetupForDelete(entry);
@@ -1902,11 +1914,21 @@ export class SessionManager {
       if (chatAlreadyRunning) this.reannounceCheckout(entry.checkoutId);
       return;
     }
-    if (this.tm.has(id)) {
+    if (this.tm.has(id) && !this.stopping.has(id)) {
       log.warn(`session ${id} already running`);
       this.reannounceCheckout(entry.checkoutId);
       return;
     }
+    // A start inside the grace window is a real restart, not a re-announce: the
+    // user pressed Stop and then Start. `TerminalManager.spawn` kills the
+    // still-dying PTY on this id before taking the slot — it has already had
+    // its chance to leave on its own — and its later exit cannot evict the
+    // replacement (see the same-id gate in the manager's exit handler). That
+    // kill is a no-op once the grace's own sweep has run (`TerminalSession`
+    // refuses to walk a tree twice, since the leader's pid is free by then and
+    // a reissued one belongs to a stranger), so what bounds the overlap is the
+    // sweep having happened, not this call re-issuing it.
+    this.stopping.delete(id);
 
     // Resolve the launch command for THIS session. Precedence:
     //   per-session tool (registry -> bin) -> per-session custom command ->
@@ -2068,6 +2090,7 @@ export class SessionManager {
       hookAliveProbeAgent: injectsHookAliveProbe(entry.tool ?? sessionAgentSpec.name)
         ? entry.tool ?? sessionAgentSpec.name
         : undefined,
+      gracefulAsk: agentSpec(entry.tool ?? sessionAgentSpec.name)?.gracefulExit,
     });
     // Some registry agents have no verified launch-argv form for an opening
     // prompt. Their PTY still buffers input during startup, which gives every
@@ -2212,7 +2235,7 @@ export class SessionManager {
       if (unqueued) this.changed();
       return;
     }
-    this.tm.kill(id);
+    this.stopTerminal(id);
     this.changed();
   }
 
@@ -2497,9 +2520,32 @@ export class SessionManager {
   }
 
   /** Whether this slot's runtime is live — a PTY for terminal mode, the driver
-   *  bookkeeping for chat, since a chat session has no PTY to ask. */
+   *  bookkeeping for chat, since a chat session has no PTY to ask. A PTY that
+   *  has been asked to leave is already on its way out: see `stopping`. */
   private isRunning(e: PersistedEntry): boolean {
-    return e.mode === "chat" ? this.runningChat.has(e.id) : this.tm.has(e.id);
+    return e.mode === "chat"
+      ? this.runningChat.has(e.id)
+      : this.tm.has(e.id) && !this.stopping.has(e.id);
+  }
+
+  /** Ask this session's PTY to exit, then sweep it. Every per-session teardown
+   *  goes through here so the budget is stated once, and so the row stops
+   *  claiming to be running the moment the ask goes out. */
+  private stopTerminal(id: string): void {
+    this.tm.kill(id, AGENT_GRACE_MS);
+    // Read here and nowhere later: the exit handler drops the session from the
+    // manager's map, so an `await` between these two lines would hand back the
+    // already-resolved placeholder and make every tree wait vacuous.
+    const settled = this.tm.treeKilled(id);
+    this.stopping.set(id, settled);
+    const clear = (): void => {
+      if (this.stopping.get(id) !== settled) return;
+      this.stopping.delete(id);
+      // Nothing else emits when a tree finally goes, and the row has been
+      // reporting this teardown since the ask.
+      if (this.entries.has(id)) this.notifyObservers();
+    };
+    void settled.then(clear, clear);
   }
 
   /**

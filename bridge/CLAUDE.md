@@ -34,6 +34,17 @@ session's checkout — see `headlessScratchCwd`. History a CLI offers no switch 
 skip is redirected per spawn instead (`HeadlessCommand.scratchEnv`, a fresh dir
 the runner deletes after), so never list a var that also carries credentials.
 
+`AgentSpec.gracefulExit` is the one field that REFINES the default rather than
+declaring a capability, and it is the opposite of `headless` for a reason: a
+guessed argv can do damage, a guessed soft ask cannot, because the sweep that
+follows it is unconditional. Every agent is asked with the platform default;
+an entry only narrows that, and a wrong one costs the grace period and nothing
+else. Add one only from a measured ask→exit, since an invented keystroke count
+is latency on every stop of that agent. Its shape and the `ETX` constant live
+in `agents/types.ts` rather than beside the PTY, because that module is
+declaration-only — the header there says what the reverse import breaks. See
+**Stopping an agent**.
+
 **An agent's native session id is not stable across a resume**, so nothing may
 read a change of it as "a new conversation started". Measured on Claude Code:
 `--resume` copies the transcript into a NEW file and appends under a fresh id,
@@ -148,6 +159,88 @@ already has them.
 - `stream-mux.ts` — multiplexes project cores over the machine socket as sealed `{s, m}` envelopes (`s` absent/`"0"` = machine control plane; the ENVELOPE JSON is what gets fragmented, so `s` survives reassembly). `attachStream(bus, opts)` → `StreamHandle{streamId, detach, sendTunnel}`; admission = `stream-open` → `stream-opened` vs `error{ref: streamId}` (a rejection leaves the socket and other streams live); `opts.mayDeliver` is the OUTBOUND authorization hook, re-read on every bus frame and every `sendTunnel` (tunnel bypasses the bus) — absent means always-deliver, so a caller that answers to a switch must fail closed in its own provider; on each `welcome` the mux re-opens every attached stream (the relay dropped its `openStreams` on the disconnect). Current relays admit every stream a healthy machine opens — no per-account quota survives (`SESSION_LIMIT_EXCEEDED` is retired, kept only for relays predating the worker-limit change; `ErrorCode` in `packages/antgrid-wire/src/relay-protocol.ts` reserves the name for exactly that reason, and the relay side is the Streams bullet in `relay/CLAUDE.md`). The one rejection a current relay can still send is `STREAM_LIMIT_EXCEEDED`, the relay's structural per-connection ceiling: orders of magnitude above real use, so treat it as our bug (a leak of undetached streams), never as backpressure to retry. An inbound frame for an unknown streamId is dropped AND answered with a control-plane `stream-invalid {streamId}` (rate-limited per dead id): a host restart re-attaches every project under fresh ids, and without that notice the phone replays onto the dead id forever with nothing to trigger a renegotiation.
 - `host-server.ts` + `paired-phones.ts` — machine-level device trust. `HostServer.startRemoteControlPlane()` owns the single machine RelayClient (bare `deviceUuid` — the only registration shape; compound `deviceUuid.projectId` is gone); project cores attach as streams via `remoteDepsFor(projectId)` (`ProjectCoreRemoteDeps = {attachStream, currentPeerPubkey, sendPushDeliver}` — `wireRelaySlot` is deleted). Stream admission publishes `stream-ready {projectId, streamId}`, and `buildProjectsAdvertisement` (`agent:projects`) carries per-project `streamId` so a reconnecting phone binds without a fresh `project:start`; stopped projects start on demand (`handleControlPlaneVerb` → `project:start`). `startCore` re-advertises unconditionally: an open no phone asked for (restart re-open, desktop-side open) lands AFTER the handshake advert, and nothing else announces it. A rejected verb returns `control:result {ok:false,error}` to the phone (never silently dropped). Authorization for a remote device is `loadRemoteAccessPolicy(abDir)` (`agents/mobile-access-policy.json` — the filename and the `mobile-access:*` verbs keep the old spelling on purpose: both cross a version boundary the rename cannot reach) — ONE machine-wide boolean, the only gate, read live at every check via `remoteAccessEnabled()` so `mobile-access:set` takes effect without restarting a core. It gates the stream in BOTH directions and both halves are load-bearing: inbound at `currentPhoneAllowed()` (agent-core's bus handler + `handleTunnelMessage`), outbound at the stream's `mayDeliver` (`attachRelayStream`). Inbound alone is not enough — a project the phone cold-started opens as a `mode:"remote"` core with no `PromotionHandle`, so `demoteAllPromoted()` (which turning the switch off also runs, for every PROMOTED slot) never touches it and it would keep streaming terminal/tree/git at the phone. Gating at the send, not at detach, is deliberate: the core and its stream stay alive, so flipping the switch back on resumes the same `streamId` with no re-attach and no destroyed work. Which projectId that phone may name is bounded solely by `isSafeProjectId` + the `seenProjects` catalog — every remote verb (`project:start`, both sessions RPCs) must do that lookup, there is no second gate behind it. `loadPairedPhones(abDir)` (`agents/paired-phones.json`) is NOT authorization: it is the identity/push-token/`lastSeenAt` row, kept for push targeting and freshness (hence `watch()` + `touchLastSeen` survive).
 - `auth/` — in-memory OAuth (no on-disk store). `credentials.ts` parses one JSON line from stdin into a `BootstrapPayload` (`local | remote`, 10s idle timeout) written by the app on spawn. `oauth-client.ts` mints tokens via `POST /api/auth/oauth2/token` (`grant_type=client_credentials`, `resource=<licenseApiUrl>/api/auth`); `startTokenMaintenance` re-mints at 80% of TTL (30s retry). On `invalid_client` → emit `auth_revoked` to stderr, exit 4 — that verdict is keyed on the ERROR CODE, not the status: Better-Auth answers a revoked device with 401 but a deleted client row with **400** ("missing client"), and a sign-out rotates the device and drops its row, so both mean the cached pair is dead. Credentials reach the host only once, via the stdin bootstrap, so a host left running on a rotated-away pair can never recover on its own — the app respawns it when the account device changes (`local_host_warmup.dart`). **The boot-time control-plane mint is exempt from the exit** (`fatalRevokeArmed`, disarmed across `start()`'s `startRemoteControlPlane()`): host.json and the ready marker are already out by then, so exiting would have the app's supervisor respawn straight back into the same dead pair — a permanent crash loop that also takes down the loopback plane local work depends on. Boot logs and serves loopback-only; a verdict from token maintenance afterwards is still fatal.
+
+## Stopping an agent
+
+A coding agent has an exit path of its own — Claude Code withdraws its
+`fullscreenBootPending[pid]` canary from `~/.claude.json` in a `process.on("exit")`
+hook, and a stale entry silently disables the fullscreen renderer MACHINE-WIDE,
+for every project, until the file is hand-edited. Neither `TerminateProcess` nor
+`SIGKILL` runs one. So every teardown path asks first and sweeps after.
+
+- **The ask never replaces the sweep.** `TerminalSession.close(graceMs)` asks,
+  waits at most the budget, and then does exactly what `kill()` did — same
+  `killProcessTree`, same job close — on BOTH branches, whether the agent left
+  or not. That is what keeps a wrong `gracefulExit` entry, an agent that ignores
+  the ask, and a platform where the ask cannot land from ever costing a process
+  tree; every guarantee under **Isolated sessions** is unchanged by construction.
+  `close()` is deliberately NOT `async`: `SessionManager.stopAndAwait` reads
+  `treeKilled` right after asking for the stop, and an assignment landing after
+  a suspension would hand that read a resolved placeholder and run
+  `git worktree remove` against a live checkout.
+- **`gracefulBudget` (`terminal-manager.ts`) is the only policy.** `graceMs` at
+  every call site is a BUDGET, not a promise. Only `type: "agent"` terminals are
+  asked — stamped at one site (`SessionManager.startNow`), which is what makes
+  this a fact rather than a list to maintain. A service or an ad-hoc terminal
+  gets none: on Windows the ask is a keystroke a cooked-mode reader (a
+  `bun install`, a build tool, a shell blocked on a child) cannot see at all, so
+  it would spend the whole budget to change nothing. `askNonAgents` is the
+  shutdown path and is not a widening — POSIX shutdown already SIGTERMed
+  everything and withdrawing that would be the regression.
+- **The two platforms ask by different means, and each has a precondition.**
+  POSIX signals the process GROUP (`kill(-pid, SIGTERM)`), never the bare
+  leader: `spawn()` shell-wraps a free-form command, so the leader is the
+  wrapper and the agent underneath it learns nothing. Windows writes Ctrl-C
+  (ETX) into the ConPTY — which a raw-mode TUI reads and a cooked-mode child
+  does not, and which is NOT a console `CTRL_C_EVENT`;
+  `GenerateConsoleCtrlEvent` was measured and reaches nothing from here.
+- **On Windows the descendant snapshot is taken BEFORE the ask.** An agent that
+  leaves on request takes with it the live parent links `taskkill /T` walks, and
+  a `ShellExecute` child was never in our job — so a survivor holding the
+  checkout would be unreachable by both. `snapshotDescendants` /
+  `survivingProcesses` (`win32-process.ts`) match on pid + parentPid + name, so
+  a recycled pid is never killed. Neither ever answers "all gone" for a process
+  table it could not read: both return **null**, because the safe reading
+  differs by caller — "all alive" for one that is only WAITING
+  (`awaitSnapshotGone` keeps polling), "all gone" for one about to KILL
+  (`killSnapshotSurvivors` sweeps nothing and logs). The grace itself is REFUSED
+  on either of the two failures that leave a departing leader unreachable — no
+  kill-on-close job, or a snapshot that could not be taken — since asking first
+  is then the one thing that genuinely costs reach, and each refusal is logged
+  once per reason.
+- **Budgets are ceilings set by the caller above.** Per-session teardown gets
+  `AGENT_GRACE_MS`, which must stay well inside `TEARDOWN_TIMEOUT_MS` (one
+  budget covers the exit AND the tree, and overrunning it surfaces as
+  `WORKTREE_DELETE_FAILED`). Shutdown clamps to `WINDOWS_SHUTDOWN_GRACE_MS` on
+  Windows ONLY, because `HostController.shutdownOwnedHost` force-kills the whole
+  tree seconds after asking; POSIX keeps the caller's full budget. That clamp
+  sits below the measured claude-code exit, so a Windows app-quit is the one
+  path where the ask is genuinely best-effort — raising it past the app's own
+  poll buys nothing, it just moves the force-kill upstream.
+- **A session inside its grace is not running.** `SessionManager.stopping` keys
+  on the session's own tree-kill promise, and `isRunning` subtracts it — the
+  seconds the ask is worth are seconds `tm.has(id)` still answers true, which
+  otherwise leaves Stop rendering a live row and makes the Start the user
+  presses next hit `startNow`'s already-running guard and be answered `ok: true`
+  having done nothing.
+- **A same-id respawn pays the replaced run's exit bookkeeping itself, at the
+  replacement.** The grace turned the replace window from ~200ms into seconds,
+  which is long enough for the user to press Stop and then Start — so the
+  replaced PTY's exit routinely lands on a slot the replacement already owns,
+  where the same-id gate in `TerminalManager`'s exit handler drops it. The gate
+  is right to (an exit frame for a live slot tells the app a running terminal is
+  dead, and nothing corrects it), but everything that exit OWED — `namer.forget`,
+  `forgetTitleAttempts`, the handler's per-terminal guard, `noteExited` — goes
+  with it, and the restarted session then inherits the dead run's title state and
+  arming. `spawn()`'s duplicate branch fires `onTerminalExited` itself, and the
+  ORDERING is the whole invariant: that cleanup is keyed by terminal id, so it
+  must run while the id still means the old run — dispatching it after the
+  replacement registers reclaims the LIVE run's state instead. Only the callback
+  fires there, never the frame.
+- **Chat mode has no PTY and so no ladder.** codex's ask is its stdin closing
+  (the app-server exits on EOF) with a bounded wait and a `killChildTree`
+  escalation. The SDK-driven backends own their own process lifetime and are not
+  covered here.
 
 ## Isolated sessions (`src/worktrees/`)
 
@@ -276,7 +369,9 @@ first for every project on the machine, Git-backed or not.
   the handle `teardownCheckoutRuntime` holds is the shell, never the command
   whose cwd is inside the checkout — `killChildTree` is that pairing, and
   `TerminalManager.killAndAwaitTree` its PTY counterpart (the same signal
-  `kill()` sends; only the waiting differs). Waiting for the tree is NOT waiting
+  `kill()` sends; only the waiting differs) — both take an optional grace that
+  precedes, and never substitutes for, everything described here (**Stopping an
+  agent**). Waiting for the tree is NOT waiting
   for the PTY's exit — `SessionManager.awaitTerminalExit` is the other question,
   and `stopAndAwait` needs both answers: an asynchronous taskkill can deliver
   the leader's exit while it is still walking the rest of the tree, so the exit
