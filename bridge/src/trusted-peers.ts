@@ -1,5 +1,5 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { readFileSync } from "node:fs";
+import { atomicWriteFile } from "./discovery";
 import { logger } from "./logger";
 const log = logger.child({ component: "trusted-peers" });
 
@@ -79,8 +79,10 @@ export class TrustedPeersProvider {
 
   private saveToDisk(devices: TrustedPeer[]): void {
     try {
-      mkdirSync(dirname(this.opts.filePath), { recursive: true });
-      writeFileSync(this.opts.filePath, JSON.stringify(devices, null, 2));
+      // 0o600 like every sibling store: this is the account's device inventory,
+      // and the rename installs a fresh inode each time, so a mode the previous
+      // file carried is not preserved.
+      atomicWriteFile(this.opts.filePath, JSON.stringify(devices, null, 2), { fileMode: 0o600 });
     } catch (err) {
       log.warn("trusted-peers cache write failed: %s", String(err));
     }

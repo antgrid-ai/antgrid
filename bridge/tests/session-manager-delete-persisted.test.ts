@@ -1,6 +1,6 @@
 // bridge/tests/session-manager-delete-persisted.test.ts
 import { test, expect } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "../src/session-manager";
@@ -22,9 +22,11 @@ test("deletePersisted removes the row and leaves the rest", async () => {
     expect(removed).toBe(true);
     const left = await SessionManager.readPersisted(store, "projA", true);
     expect(left.map((s) => s.id)).toEqual(["b"]);
-    // Atomic write: the temp file is renamed into place, never left behind, and
-    // the result is valid JSON (a torn write would make readPersisted return []).
-    expect(existsSync(join(store, "agents", "projA", "sessions.json.tmp"))).toBe(false);
+    // Atomic write: the scratch file is renamed into place, never left behind,
+    // and the result is valid JSON (a torn write would make readPersisted return
+    // []). Matched by prefix, not by one fixed name — the scratch is pid-scoped,
+    // so naming `sessions.json.tmp` would assert about a file nothing writes.
+    expect(readdirSync(join(store, "agents", "projA")).filter((f) => f !== "sessions.json")).toEqual([]);
     const onDisk = readFileSync(join(store, "agents", "projA", "sessions.json"), "utf8");
     expect(() => JSON.parse(onDisk)).not.toThrow();
   } finally {

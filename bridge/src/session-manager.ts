@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, chmodSync } from "node:fs";
-import { readFile, writeFile, rename, chmod, mkdir } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { logger } from "./logger";
@@ -40,6 +40,7 @@ import { CheckoutStore } from "./worktrees/checkout-store";
 import { WorktreeError, type WorktreeManager } from "./worktrees/worktree-manager";
 import { logWorktreeEvent, worktreeErrorCode } from "./worktrees/worktree-log";
 import { createKeyedLock } from "./keyed-lock";
+import { atomicWriteFile } from "./discovery";
 import { runGit } from "./worktrees/project-resolver";
 
 export interface AgentSpec {
@@ -343,24 +344,40 @@ function parsePersistedContent(raw: string | null): PersistedEntry[] {
   }
 }
 
-/** Atomically write sessions.json (async, fs/promises) — tmp file + rename so a
- *  crash mid-write can never truncate the file (which load()/readPersisted would
- *  then read as empty and silently drop every session). Mirrors the instance
- *  flush(): pretty-printed, 0o600 on POSIX. The only caller is the static
- *  deletePersisted on the WS event loop, hence async. Keep in lockstep with
- *  flush(). */
-async function writePersistedAtomic(
-  path: string,
-  sessions: PersistedEntry[],
-): Promise<void> {
+/** The ONE publish primitive for sessions.json — every writer in this file goes
+ *  through it, so there is a single scratch-name and rename-retry policy for the
+ *  file. tmp + rename means a crash mid-write can never truncate it (which
+ *  load()/readPersisted would then read as empty and silently drop every
+ *  session).
+ *
+ *  It must never suspend, and that — not the lock — is what makes it safe. An
+ *  await between writing the scratch file and renaming it is a window another
+ *  writer lands in: the two would rename past each other and publish a blend.
+ *  Being synchronous, it occupies one turn and nothing can interleave with it.
+ *
+ *  Do NOT make it take `withSessionsFile` itself. flushNow() reaches it off the
+ *  lock on purpose (see there), so the lock is not an invariant it could restore
+ *  — and createKeyedLock is not reentrant, so acquiring the key its two awaited
+ *  callers already hold would hang every isolated-session create and every cold
+ *  delete, permanently and with no error. */
+function writePersistedAtomic(path: string, sessions: PersistedEntry[]): void {
   const file: FileShape = { version: 1, sessions };
-  const tmp = `${path}.tmp`;
-  await writeFile(tmp, JSON.stringify(file, null, 2), "utf8");
-  await rename(tmp, path);
-  if (process.platform !== "win32") {
-    try { await chmod(path, 0o600); } catch { /* ignore */ }
-  }
+  atomicWriteFile(path, JSON.stringify(file, null, 2), { fileMode: 0o600 });
 }
+
+/** Serializes the sessions.json writers that SUSPEND, keyed on the absolute file
+ *  path — deletePersisted's read-modify-write, and the debounced flush queued
+ *  behind it. It is deliberately not "every publish": flushNow() writes off the
+ *  lock (see there), which is safe only because writePersistedAtomic occupies a
+ *  single turn.
+ *
+ *  Module-level rather than per-instance because the static deletePersisted has
+ *  no instance, and host-server can briefly hold two SessionManagers for one
+ *  project across an evict/reopen. Nothing slow may ever be held under it —
+ *  flushNowOrThrow sits on the isolated-create path the app waits on — and
+ *  nothing may acquire withCheckoutMembership from inside it, since that lock is
+ *  already held across flushNowOrThrow in the other order. */
+const withSessionsFile = createKeyedLock();
 
 /** True for an unedited default slot name ("Session 3") — one the user never
  *  named. Gates the auto-name backfill (a non-default name was user-chosen) and
@@ -440,6 +457,10 @@ export class SessionManager {
   private readonly withCheckoutMembership = createKeyedLock();
   private observers = new Set<() => void>();
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  /** A debounced flush whose timer has fired but whose write is still queued on
+   *  `withSessionsFile`. Without it flushNow() reads a null flushTimer as "clean"
+   *  and skips the final write on exactly the shutdown it exists to cover. */
+  private flushQueued = false;
   private activityEmitTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly dir: string;
   private readonly path: string;
@@ -631,17 +652,22 @@ export class SessionManager {
     sessionId: string,
   ): Promise<boolean> {
     const path = join(storeDir, "agents", projectId, "sessions.json");
-    let raw: string | null = null;
-    try {
-      raw = await readFile(path, "utf8");
-    } catch {
-      return false; // missing/unreadable → nothing to delete
-    }
-    const entries = parsePersistedContent(raw);
-    const next = entries.filter((e) => e.id !== sessionId);
-    if (next.length === entries.length) return false; // id not present
-    await writePersistedAtomic(path, next);
-    return true;
+    // The read and the write are one transaction: two deletes on the same cold
+    // project overlap otherwise, and the second republishes the set it read
+    // before the first landed — resurrecting a row the user already removed.
+    return withSessionsFile(path, async () => {
+      let raw: string | null = null;
+      try {
+        raw = await readFile(path, "utf8");
+      } catch {
+        return false; // missing/unreadable → nothing to delete
+      }
+      const entries = parsePersistedContent(raw);
+      const next = entries.filter((e) => e.id !== sessionId);
+      if (next.length === entries.length) return false; // id not present
+      writePersistedAtomic(path, next);
+      return true;
+    });
   }
 
   get(id: string): SessionEntry | undefined {
@@ -2353,12 +2379,19 @@ export class SessionManager {
   }
 
   flushNow(): void {
-    // Either timer being armed means a write is pending. Disarm both (a stray
+    // Either timer being armed, or a fired timer's write still queued on the
+    // lock, means a write is pending. Disarm both (a stray
     // timer must not outlive teardown and keep the event loop alive) and do a
     // single final write so the last activity bump survives. The activity
     // timer's wire emit is intentionally dropped — peers re-read persisted
     // lastUsedAt on reconnect.
-    const dirty = this.flushTimer !== null || this.activityEmitTimer !== null;
+    //
+    // Stays synchronous and off withSessionsFile: teardownServices calls this
+    // without awaiting it, so the write has to land on this tick or the last
+    // bump is lost on every clean shutdown. Safe without the lock only because
+    // the publish itself never suspends — nothing can be half-done to interleave
+    // with.
+    const dirty = this.flushTimer !== null || this.activityEmitTimer !== null || this.flushQueued;
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
@@ -2381,8 +2414,9 @@ export class SessionManager {
       clearTimeout(this.activityEmitTimer);
       this.activityEmitTimer = null;
     }
-    await mkdir(this.dir, { recursive: true });
-    await writePersistedAtomic(this.path, Array.from(this.entries.values()));
+    await withSessionsFile(this.path, async () => {
+      writePersistedAtomic(this.path, Array.from(this.entries.values()));
+    });
   }
 
   /** Absolute paths, and relative paths that escape the checkout, would make a
@@ -2571,23 +2605,25 @@ export class SessionManager {
     if (this.flushTimer) return;
     this.flushTimer = setTimeout(() => {
       this.flushTimer = null;
-      this.flush();
+      // Queued behind the awaited writers rather than firing into the middle of
+      // one. Safe only because flush() snapshots `entries` when it RUNS, so a
+      // queued flush publishes current state — never the set as of when it was
+      // armed. flushNow() deliberately stays off the lock (see there).
+      this.flushQueued = true;
+      void withSessionsFile(this.path, async () => {
+        this.flushQueued = false;
+        this.flush();
+      });
     }, FLUSH_DEBOUNCE_MS);
   }
 
+  /** Must keep swallowing I/O errors — it runs from a timer nobody awaits, and
+   *  its counterpart flushNowOrThrow is the one that reports them. Reads
+   *  `entries` here rather than taking a snapshot at the call site: see
+   *  scheduleFlush. */
   private flush(): void {
     try {
-      if (!existsSync(this.dir)) mkdirSync(this.dir, { recursive: true });
-      const data: FileShape = {
-        version: 1,
-        sessions: Array.from(this.entries.values()),
-      };
-      const tmp = `${this.path}.tmp`;
-      writeFileSync(tmp, JSON.stringify(data, null, 2));
-      renameSync(tmp, this.path);
-      if (process.platform !== "win32") {
-        try { chmodSync(this.path, 0o600); } catch { /* ignore */ }
-      }
+      writePersistedAtomic(this.path, Array.from(this.entries.values()));
     } catch (err) {
       log.error("failed to persist sessions.json: %s", err);
     }
