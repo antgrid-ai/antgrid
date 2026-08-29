@@ -191,8 +191,8 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
 
   /// Keeps `GhosttyTerminalView`'s element alive across the branch swaps below.
   ///
-  /// The branches build structurally different subtrees (grid-freeze vs
-  /// letterbox vs h-scroll), so without a key Flutter reconciles by
+  /// The branches build structurally different subtrees (driver grid-freeze vs
+  /// non-driver letterbox), so without a key Flutter reconciles by
   /// runtimeType at the same position, fails to match, and UNMOUNTS the view —
   /// taking its selection, focus node, scroll offset, soft-keyboard hooks and
   /// grid bookkeeping with it, for what is a pure layout event that does not
@@ -814,7 +814,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                   // The view's own exit report cannot be relied on alone: a
                   // MouseRegion unmounted while hovered never fires onExit, and
                   // the branches below swap widget types under the pointer
-                  // (grid-freeze vs letterbox vs h-scroll), so a card can
+                  // (grid-freeze vs letterbox), so a card can
                   // outlive the terminal that reported it. This is the one
                   // handler that survives those swaps.
                   onExit: (_) {
@@ -847,21 +847,48 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                       }
 
                       // Non-driver → size the grid to the driver's authoritative
-                      // cols so wrapping matches exactly. Letterbox (center) when it
-                      // fits; horizontal-scroll when the driver is wider than this
-                      // viewport. No `_TerminalGridFreeze` here — a viewer must
-                      // track the authoritative width, not pin a local one.
-                      final authWidth = tab.cols * cell.charWidth + _hPad;
-                      final grid = SizedBox(
-                        width: authWidth,
-                        child: terminalView,
+                      // cols AND rows, then letterbox it. No `_TerminalGridFreeze`
+                      // here — a viewer must track the authoritative geometry, not
+                      // pin a local one.
+                      //
+                      // Rows matter for the same reason cols do, and the attach
+                      // blob is what makes it acute: the agent serializes a screen
+                      // exactly `tab.rows` tall, so an engine with FEWER rows
+                      // scrolls the blob's opening rows away as it paints and every
+                      // absolute cursor move in the live stream that follows lands
+                      // short. A phone viewing a desktop-driven terminal is that
+                      // case by default.
+                      // Through `gridExtentFor` rather than inline: `cells *
+                      // metric` does not survive the view's own
+                      // `floor((extent - padding) / metric)`, and a cell lost
+                      // there is the mismatch this pinning exists to remove.
+                      final authWidth = gridExtentFor(
+                        cells: tab.cols,
+                        metric: cell.charWidth,
+                        padding: _hPad,
                       );
-                      return authWidth <= constraints.maxWidth
-                          ? Align(alignment: Alignment.center, child: grid)
-                          : SingleChildScrollView(
-                              scrollDirection: Axis.horizontal,
-                              child: grid,
-                            );
+                      final authHeight = gridExtentFor(
+                        cells: tab.rows,
+                        metric: cell.linePixels,
+                        padding: _hPad,
+                      );
+                      // `scaleDown` rather than a scroll view on the overflowing
+                      // axis: `GhosttyTerminalView` owns a ScrollController and
+                      // vertical drag handlers for its own scrollback, so a
+                      // vertical scroll view wrapped around it loses every drag to
+                      // the inner scrollable and the rows it exists to reveal
+                      // become unreachable. Scaling keeps the whole driver screen
+                      // visible with no gesture to arbitrate, and never enlarges —
+                      // so the fits case is a plain centred letterbox on both axes.
+                      return FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.center,
+                        child: SizedBox(
+                          width: authWidth,
+                          height: authHeight,
+                          child: terminalView,
+                        ),
+                      );
                     },
                   ),
                 ),

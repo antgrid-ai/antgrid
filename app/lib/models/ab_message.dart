@@ -677,6 +677,14 @@ class TerminalSnapshotMessage {
   /// byte tail, and the client must place its own erase.
   final bool composed;
 
+  /// Whether [scrollback] carries history ABOVE the screen, behind a `3J`
+  /// that erases what the engine already holds.
+  ///
+  /// A reply is broadcast to every client on the project, so this frame may
+  /// be the answer to a DIFFERENT device's cold attach. Only the client that
+  /// asked has an empty engine; for anyone else the erase is pure loss.
+  final bool history;
+
   const TerminalSnapshotMessage({
     required this.id,
     required this.timestamp,
@@ -684,6 +692,7 @@ class TerminalSnapshotMessage {
     required this.scrollback,
     required this.seq,
     this.composed = false,
+    this.history = false,
   });
 }
 
@@ -1295,6 +1304,9 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         // Anything but a literal `true` reads false, which selects the legacy
         // branch — the one that is safe against a blob it cannot interpret.
         composed: json['composed'] == true,
+        // Same conservative read as `composed`: anything but a literal
+        // `true` is a blob that erases nothing above the screen.
+        history: json['history'] == true,
       );
 
     case 'file:tree:snapshot:request':

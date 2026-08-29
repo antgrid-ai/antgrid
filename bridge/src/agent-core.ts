@@ -1340,7 +1340,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // down.
         void (async () => {
           try {
-            const snap = await manager.getAttachSnapshot(internalTerminalId(runtime, msg.terminalId));
+            const snap = await manager.getAttachSnapshot(
+              internalTerminalId(runtime, msg.terminalId),
+              { history: msg.history === true },
+            );
             if (runtime.disposed) return;
             if (!snap) {
               log.warn("snapshot requested for unknown terminal %s", msg.terminalId);
@@ -1351,6 +1354,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
               scrollback: snap.text,
               seq: snap.seq,
               composed: true,
+              // Echoed so the OTHER clients this reply fans out to can
+              // refuse it -- see the field on the schema.
+              history: msg.history === true,
             }));
           } catch (err) {
             log.warn("snapshot for terminal %s failed: %s", msg.terminalId, err);
@@ -2064,39 +2070,52 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // terminal behind it in `getStatus()` order for as long as it takes to
     // drain. Nothing downstream cares about the order: the app keys the blob
     // and its cutoff by terminalId.
+    //
+    // Each one SENDS at its own barrier rather than in a pass after the join,
+    // or the concurrency buys nothing: a blob describes the instant its seq was
+    // read, and holding it until the slowest terminal drains ships a screen the
+    // app has already been shown past — whose `2J` then erases the frames it
+    // applied in between, and whose seq re-arms the cutoff BELOW them so
+    // nothing refilters and nothing re-sends. `Promise.all` stays only as the
+    // join, so `resyncState`'s caller still waits for the whole set.
+    //
+    // Screen-only, never `history`: this is a PUSH, so nothing here knows what
+    // the app's engine holds, and a history blob erases before it paints. The
+    // app's own hydrator pull is what asks for history, per terminal, on the
+    // same re-establishment — see the `history` flag on terminal:snapshot:request.
     if (manager) {
       const mgr = manager;
-      const snaps = await Promise.all(
+      await Promise.all(
         mgr.getStatus().map(async (t) => {
+          let snap: Awaited<ReturnType<typeof mgr.getAttachSnapshot>>;
           try {
-            return { id: t.terminalId, snap: await mgr.getAttachSnapshot(t.terminalId) };
+            snap = await mgr.getAttachSnapshot(t.terminalId);
           } catch (err) {
             // One terminal's failure must not cost the others theirs — awaited
             // together, a rejection would abandon the whole resync.
             log.warn("resync snapshot for terminal %s failed: %s", t.terminalId, err);
-            return { id: t.terminalId, snap: null };
+            return;
           }
+          // `null` means the screen is gone — an exited terminal, which
+          // `getStatus` still reports so the tab stays visible. Never a test on
+          // the STRING: every snapshot opens with the attach preamble, so an
+          // empty-screen blob is not an empty one and such a test would skip
+          // nothing it means to.
+          if (!snap) return;
+          // A snapshot, never an output frame: a composed blob is a whole
+          // screen, so appended as ordinary output it would stack a second copy
+          // into a live tab, and with no seq the app's cutoff cannot filter it.
+          sendTerminalFrame(createMessage("terminal:snapshot", {
+            // The INTERNAL id: sendTerminalFrame owns the external rewrite, and
+            // handing it an already-externalised one makes its own owner lookup
+            // miss and stamp an isolated checkout's replay as main's.
+            terminalId: t.terminalId,
+            scrollback: snap.text,
+            seq: snap.seq,
+            composed: true,
+          }));
         }),
       );
-      for (const { id, snap } of snaps) {
-        // `null` means the screen is gone — an exited terminal, which
-        // `getStatus` still reports so the tab stays visible. Its text is never
-        // empty: the attach preamble alone is 20 bytes, so a test on the STRING
-        // says nothing and would skip nothing.
-        if (!snap) continue;
-        // A snapshot, never an output frame: a composed blob is a whole
-        // screen, so appended as ordinary output it would stack a second copy
-        // into a live tab, and with no seq the app's cutoff cannot filter it.
-        sendTerminalFrame(createMessage("terminal:snapshot", {
-          // The INTERNAL id: sendTerminalFrame owns the external rewrite, and
-          // handing it an already-externalised one makes its own owner lookup
-          // miss and stamp an isolated checkout's replay as main's.
-          terminalId: id,
-          scrollback: snap.text,
-          seq: snap.seq,
-          composed: true,
-        }));
-      }
     }
   }
 

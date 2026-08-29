@@ -10,7 +10,8 @@
 // user's own history with it.
 //
 // The engine cases are gated on native availability: a host without the
-// prebuilt libghostty-vt no-ops rather than failing.
+// prebuilt libghostty-vt reports them SKIPPED rather than failing — and never
+// passing, which is what a bare early return would have made it.
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
@@ -19,6 +20,16 @@ import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import '../helpers/prefs_test_mock.dart';
+
+/// True when the native VT is missing, having marked the current test skipped.
+///
+/// Skipped rather than quietly returned from: a bare early return makes a host
+/// with no prebuilt libghostty-vt report a green suite that asserted nothing.
+bool _skipWithoutNative() {
+  if (_hasNative()) return false;
+  markTestSkipped('native VT unavailable');
+  return true;
+}
 
 bool _hasNative() {
   try {
@@ -61,7 +72,7 @@ void main() {
   test(
     'the seq cutoff is dropped before the re-attach requests go out',
     () async {
-      if (!_hasNative()) return; // native VT unavailable — no-op.
+      if (_skipWithoutNative()) return;
       final t = FakeAgentTransport();
       final session = await makeSession(t);
       await seedTabA(t);
@@ -97,9 +108,50 @@ void main() {
   );
 
   test(
+    'a snapshot pull asks for history only while the engine is empty',
+    () async {
+      if (_skipWithoutNative()) return;
+      // The agent's history blob ERASES before it paints, so this flag decides
+      // between two losses. Asked for against an engine that already holds the
+      // user's scrollback, it destroys thousands of lines to put back the few
+      // hundred the agent keeps. Not asked for against an empty one, a scrolling
+      // build log — the worktree setup transcript above all — comes back as its
+      // last few rows with nothing above them.
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      t.clearSent();
+      await seedTabA(t);
+
+      // Discovery: the tab's engine was built moments ago and holds nothing.
+      final discovery = t.sent.firstWhere(
+        (m) => m['type'] == 'terminal:snapshot:request',
+      );
+      expect(discovery['history'], isTrue);
+
+      t.emit('terminal:output', {
+        'terminalId': 'a',
+        'data': 'painted',
+        'seq': 1,
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      t.clearSent();
+      t.redriveHydrators();
+      await Future<void>.delayed(Duration.zero);
+
+      final reattach = t.sent.firstWhere(
+        (m) => m['type'] == 'terminal:snapshot:request',
+      );
+      expect(reattach['history'], isFalse);
+
+      await session.close();
+    },
+  );
+
+  test(
     'a snapshot request that is never answered leaves no cutoff behind',
     () async {
-      if (!_hasNative()) return; // native VT unavailable — no-op.
+      if (_skipWithoutNative()) return;
       // The fake transport records the request and never replies, which is what
       // an unknown terminal id or a send in a keyless window looks like from
       // here. The clear has to be unconditional for this case to render at all.
@@ -136,7 +188,7 @@ void main() {
   );
 
   test('a legacy snapshot does not stack a copy per attach', () async {
-    if (!_hasNative()) return; // native VT unavailable — no-op.
+    if (_skipWithoutNative()) return;
     final t = FakeAgentTransport();
     final session = await makeSession(t);
     await seedTabA(t);
@@ -170,7 +222,7 @@ void main() {
 
   test('a composed snapshot is applied verbatim onto the screen its preamble '
       'selects', () async {
-    if (!_hasNative()) return; // native VT unavailable — no-op.
+    if (_skipWithoutNative()) return;
     final t = FakeAgentTransport();
     final session = await makeSession(t);
     await seedTabA(t);
@@ -200,7 +252,7 @@ void main() {
   });
 
   test("a composed snapshot never erases the app's scrollback", () async {
-    if (!_hasNative()) return; // native VT unavailable — no-op.
+    if (_skipWithoutNative()) return;
     // The blob repaints one screen and carries no history, so an erase that
     // reached past the screen would destroy the user's own — ten thousand lines
     // of it — with nothing on this path able to put it back.
@@ -228,8 +280,106 @@ void main() {
     await session.close();
   });
 
+  test("a warm engine refuses another device's cold history blob", () async {
+    if (_skipWithoutNative()) return;
+    // A snapshot reply is published on the project bus, so a phone's FIRST
+    // attach is answered to every client on that project. The cold blob leads
+    // with `3J`, which would erase the desktop's own scrollback -- the exact
+    // loss the warm preamble omits `3J` to avoid. The frame is labelled, and a
+    // client whose engine is already painted drops it.
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    await seedTabA(t);
+    final tab = session.terminalService.currentState.tabs['a']!;
+
+    // This client's OWN cold request is answered first, which is what
+    // makes it warm: the claim is spent, so a later history blob can only
+    // be someone else's. Without this the tab is still awaiting its own
+    // answer and would rightly accept the next history blob it sees.
+    t.emit('terminal:snapshot', {
+      'terminalId': 'a',
+      'scrollback': '\x1b[?1049l\x1b[r\x1b[0m\x1b[2J\x1b[HREADY',
+      'seq': 1,
+      'composed': true,
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    for (var i = 0; i < 60; i++) {
+      t.emit('terminal:output', {'terminalId': 'a', 'data': 'MINE-$i\r\n'});
+    }
+    await Future<void>.delayed(Duration.zero);
+
+    t.emit('terminal:snapshot', {
+      'terminalId': 'a',
+      'scrollback':
+          '\x1b[?1049l\x1b[r\x1b[0m\x1b[3J\x1b[2J\x1b[HTHEIR-COLD-SCREEN',
+      'seq': 9,
+      'composed': true,
+      'history': true,
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    // Untouched: history intact, and the other device's screen never painted.
+    expect(tab.ghostty.plainText, contains('MINE-0'));
+    expect(tab.ghostty.plainText, isNot(contains('THEIR-COLD-SCREEN')));
+
+    await session.close();
+  });
+
+  test('a cold client still gets the history it asked for', () async {
+    if (_skipWithoutNative()) return;
+    // The refusal above must not swallow this client's OWN answer. A snapshot
+    // request goes out while the engine is empty, live output paints it during
+    // the round trip -- routine on a busy terminal -- and the reply then finds
+    // a painted engine. It is still the answer to OUR request, and dropping it
+    // would leave the cold attach with a screen and no history.
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    await seedTabA(t);
+    final tab = session.terminalService.currentState.tabs['a']!;
+
+    // A fresh tab is cold, so the discovery request claimed history.
+    final request = t.sent.lastWhere(
+      (m) => m['type'] == 'terminal:snapshot:request',
+    );
+    expect(request['history'], isTrue);
+
+    // Output lands before the reply does.
+    t.emit('terminal:output', {'terminalId': 'a', 'data': 'LIVE-BYTE\r\n'});
+    await Future<void>.delayed(Duration.zero);
+
+    t.emit('terminal:snapshot', {
+      'terminalId': 'a',
+      'scrollback':
+          '\x1b[?1049l\x1b[r\x1b[0m\x1b[3J\x1b[2J\x1b[HMY-COLD-SCREEN',
+      'seq': 9,
+      'composed': true,
+      'history': true,
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(tab.ghostty.plainText, contains('MY-COLD-SCREEN'));
+
+    // The claim is spent: a SECOND history blob (another device's) now finds a
+    // painted engine with nothing outstanding, and is refused.
+    t.emit('terminal:snapshot', {
+      'terminalId': 'a',
+      'scrollback':
+          '\x1b[?1049l\x1b[r\x1b[0m\x1b[3J\x1b[2J\x1b[HTHEIR-COLD-SCREEN',
+      'seq': 10,
+      'composed': true,
+      'history': true,
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(tab.ghostty.plainText, contains('MY-COLD-SCREEN'));
+    expect(tab.ghostty.plainText, isNot(contains('THEIR-COLD-SCREEN')));
+
+    await session.close();
+  });
+
   test('applying a composed snapshot twice is idempotent', () async {
-    if (!_hasNative()) return; // native VT unavailable — no-op.
+    if (_skipWithoutNative()) return;
     final t = FakeAgentTransport();
     final session = await makeSession(t);
     await seedTabA(t);

@@ -27,6 +27,35 @@ class TerminalService {
   final Set<String> _deletedTerminalIds = {};
   final Set<String> _pendingTerminalIds = {};
   final Set<String> _canceledPendingTerminalIds = {};
+
+  /// Terminals whose Ghostty engine has had bytes written into it since the tab
+  /// was built. Drives the `history` flag on a snapshot request: the agent's
+  /// history blob ERASES before it paints, so asking for one against an engine
+  /// that already holds the user's scrollback destroys it, and asking for a
+  /// screen-only blob against an empty engine leaves a scrolling build log
+  /// showing its last few rows and nothing above them.
+  ///
+  /// Keyed to the ENGINE's life, not the terminal's: [_createTab] is the only
+  /// place a fresh controller is born, and an exit-then-respawn under the same
+  /// id keeps the same engine — with the dead run's output still on it, which is
+  /// history worth protecting. Deliberately not derived from the engine's own
+  /// line contents: a guest that cleared its screen presents as empty while
+  /// holding thousands of lines above.
+  final Set<String> _paintedTerminalIds = {};
+
+  /// Terminals this client has asked for a history blob and not yet been
+  /// answered for.
+  ///
+  /// A reply fans out to every client, so [_applySnapshot] refuses a history
+  /// blob against a painted engine. Without this claim that refusal would
+  /// also swallow OUR OWN answer whenever live output lands during the round
+  /// trip -- routine on a busy terminal -- leaving the cold attach with a
+  /// screen and no history, which is the whole loss the flag exists to fix.
+  ///
+  /// Consumed by the next snapshot that actually applies, whatever it is: an
+  /// older agent strips the request key and answers screen-only, and a claim
+  /// nothing retires would later admit ANOTHER device's erase.
+  final Set<String> _awaitingHistoryIds = {};
   bool _trackedUse = false;
 
   String? _clientId;
@@ -186,6 +215,37 @@ class TerminalService {
   void _applySnapshot(TerminalSnapshotMessage msg) {
     final tab = _state.tabs[msg.terminalId];
     if (tab == null) return;
+    // A blob describes the instant its seq was read, and one terminal has
+    // several snapshot producers on a single re-establishment: the agent's
+    // resync push, this service's hydrator pull, a focus-resume pull, and any
+    // other client's request — replies are published on the project bus, so
+    // every attached client gets them. The frame that lands last is not the
+    // one that describes the latest instant, and applying an older one both
+    // repaints a screen the tab has moved past and lowers the cutoff BELOW
+    // frames already applied, which nothing refilters and nothing re-sends.
+    //
+    // Safe against a respawn's counter reset (the agent's seq is per PTY and
+    // starts again at 1) because every path into a new generation drops the
+    // cutoff first — terminal:started, the exit handler, and the re-drive.
+    // Equal seqs are still applied: a screen-only push and a `history` reply
+    // can describe the same instant, and only the second carries the history.
+    final held = _snapshotSeq[msg.terminalId];
+    if (held != null && msg.seq < held) return;
+    // Consumed here, not at the guards above: a frame that never applied
+    // leaves the claim standing for the answer that does.
+    final wasAwaited = _awaitingHistoryIds.remove(msg.terminalId);
+    // A history blob erases before it paints, and replies fan out to every
+    // client on the project -- so this one may be the answer to another
+    // device's cold attach. Only a client whose engine is empty asked for
+    // it; for a painted engine the erase would destroy the user's own
+    // scrollback, which is exactly what the warm preamble exists to avoid.
+    // Dropped rather than degraded: a painted engine has been taking live
+    // output all along, so it needs no repaint either.
+    if (msg.history &&
+        !wasAwaited &&
+        _paintedTerminalIds.contains(msg.terminalId)) {
+      return;
+    }
     _snapshotSeq[msg.terminalId] = msg.seq;
     // Deliberately NOT `clear()`. That resets the engine, and a reset takes
     // the guest's MODES with it — alt screen, bracketed paste, focus events,
@@ -203,12 +263,26 @@ class TerminalService {
     // appended lands after the cursor is placed, so the blob goes on verbatim.
     if (!msg.composed) tab.ghostty.appendOutputBytes(_legacyAttachErase);
     tab.ghostty.appendOutputBytes(utf8.encode(msg.scrollback));
+    _paintedTerminalIds.add(msg.terminalId);
   }
 
   void _requestTerminalSnapshot(String terminalId) {
+    final wantsHistory = !_paintedTerminalIds.contains(terminalId);
+    if (wantsHistory) {
+      _awaitingHistoryIds.add(terminalId);
+    } else {
+      _awaitingHistoryIds.remove(terminalId);
+    }
     session.sendForCheckout(
       checkoutId,
-      createAbMessage('terminal:snapshot:request', {'terminalId': terminalId}),
+      createAbMessage('terminal:snapshot:request', {
+        'terminalId': terminalId,
+        // See [_paintedTerminalIds]. An agent that predates the key strips it
+        // (the request schema is a `z.object`) and answers with the legacy
+        // prelude-plus-byte-tail blob, which `_applySnapshot` puts its own
+        // erase ahead of.
+        'history': wantsHistory,
+      }),
     );
   }
 
@@ -261,6 +335,7 @@ class TerminalService {
       terminalId: msg.terminalId,
     );
     tab.ghostty.appendOutputBytes(utf8.encode(msg.data));
+    _paintedTerminalIds.add(msg.terminalId);
   }
 
   void _handleTerminalStarted(TerminalStartedMessage msg) {
@@ -469,6 +544,8 @@ class TerminalService {
     // from antgrid.yaml, a slot renamed. Its cutoff would otherwise outlive it
     // and filter the first bytes of whatever later claims the same id.
     _snapshotSeq.removeWhere((id, _) => !newTabs.containsKey(id));
+    _paintedTerminalIds.removeWhere((id) => !newTabs.containsKey(id));
+    _awaitingHistoryIds.removeWhere((id) => !newTabs.containsKey(id));
     for (final terminalId in discovered) {
       // Only the tabs that survived the rebuild: one dropped along the way has
       // nowhere for the reply to land.
@@ -487,6 +564,12 @@ class TerminalService {
     String? driverClientId,
     TerminalSessionState? sessionState,
   }) {
+    // A fresh engine holds nothing, so the next snapshot request for this id is
+    // a COLD one. Cleared here rather than at every removal site because this is
+    // the single place a controller is built — a stale `true` would cost the
+    // user the history the new tab is about to be handed.
+    _paintedTerminalIds.remove(terminalId);
+    _awaitingHistoryIds.remove(terminalId);
     final tab = TerminalTab(
       terminalId: terminalId,
       name: name,
@@ -696,6 +779,8 @@ class TerminalService {
     _resizeTimers.remove(terminalId)?.cancel();
     _resizeBaseDrivers.remove(terminalId);
     _snapshotSeq.remove(terminalId);
+    _paintedTerminalIds.remove(terminalId);
+    _awaitingHistoryIds.remove(terminalId);
     tab.ghostty.dispose();
     final tabs = Map<String, TerminalTab>.from(_state.tabs)..remove(terminalId);
     final isActive = _state.activeTerminalId == terminalId;
