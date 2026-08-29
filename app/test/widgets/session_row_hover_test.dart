@@ -134,5 +134,56 @@ void main() {
         debugDefaultTargetPlatformOverride = null;
       }
     });
+
+    testWidgets('tapping kebab menu opens session actions menu and selecting action executes', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        final transport = FakeAgentTransport();
+        final session = _session('sess-3');
+        await pumpRow(tester, transport, session);
+
+        final rowFinder = find.byType(SessionRow);
+        final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+        addTearDown(mouse.removePointer);
+        await mouse.addPointer(location: Offset.zero);
+        await mouse.moveTo(tester.getCenter(rowFinder));
+        await tester.pump();
+
+        final kebab = find.byTooltip('Session actions');
+        expect(kebab, findsOneWidget);
+
+        await tester.tap(kebab);
+        await tester.pumpAndSettle();
+
+        expect(find.text('Stop'), findsOneWidget);
+        expect(find.text('Rename'), findsOneWidget);
+        expect(find.text('Delete'), findsOneWidget);
+
+        // Move mouse away from SessionRow to simulate mouse moving over popup menu items
+        await mouse.moveTo(const Offset(600, 600));
+        await tester.pump();
+
+        // Kebab is still mounted because menu is open
+        expect(find.byTooltip('Session actions'), findsOneWidget);
+
+        // Tap 'Rename' menu item
+        await tester.tap(find.text('Rename'));
+        await tester.pumpAndSettle();
+
+        // Rename dialog appears because anchor remained mounted
+        expect(find.text('Rename session'), findsOneWidget);
+
+        // Cancel rename dialog
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
+
+        // Menu and dialog closed, and since mouse is away, kebab is now unmounted
+        expect(find.byTooltip('Session actions'), findsNothing);
+
+        await tester.pumpWidget(const SizedBox());
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
   });
 }
