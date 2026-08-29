@@ -1,3 +1,8 @@
+// Declaration only, and deliberately so: this module has no runtime imports,
+// which is what lets `terminal-session.ts` read `ETX` from here. The reverse
+// import cycles through `tool-detector` back into this directory and leaves
+// the spec table below reading a constant still in its temporal dead zone.
+
 import type { HookCommand } from "../hook-command";
 import type { HookInvocation, HookPath, HookPost } from "./hook-posts";
 import type { AbMessage } from "../protocol";
@@ -491,6 +496,20 @@ export interface AgentSpec {
   /** Presence is what makes a tool chat-capable; there is no separate list. */
   driver?: SpecDriverFactory;
   /**
+   * How this agent is asked to exit before its PTY is swept, when the platform
+   * default is not what it answers to.
+   *
+   * The one field here that REFINES rather than declares. `headless`'s "absence
+   * is the honest answer" rule exists because a guessed argv can do damage; a
+   * guessed soft ask cannot, because the escalation that follows it is
+   * unconditional — a wrong entry costs the grace period and nothing else. So
+   * every agent is asked with the platform default (SIGTERM to the process
+   * group; one Ctrl-C into the ConPTY), and this narrows that for the agents
+   * somebody has actually timed. Add an entry only from a measured run: an
+   * invented keystroke count is latency on every stop of that agent.
+   */
+  gracefulExit?: GracefulExitAsk;
+  /**
    * Verified non-interactive invocations of this agent's CLI, keyed by how far
    * each one may reach (see {@link HeadlessReach}). One capability, several
    * consumers: naming a session (./headless.ts via ./title-generate.ts) and the
@@ -536,4 +555,29 @@ export interface AgentSpec {
    *  disk: opencode and cursor-agent store no rename of their own that we read.
    */
   resolveTitle?: (args: TitleArgs) => Promise<ResolvedTitle | null>;
+}
+
+/** Ctrl-C, as a terminal delivers it. */
+export const ETX = "\x03";
+
+/**
+ * How one agent is asked to leave, when the platform default is not what that
+ * agent answers to. Every field REFINES the default rather than gating it: the
+ * sweep that follows the ask is unconditional, so a wrong guess costs latency
+ * and never correctness — which is why this is the one capability record whose
+ * absence is legitimately a default rather than the "nobody has measured this"
+ * silence `AgentSpec.headless` requires.
+ */
+export interface GracefulExitAsk {
+  /** POSIX. Sent to the process GROUP. */
+  readonly signal?: NodeJS.Signals;
+  /** Windows. Written into the ConPTY input, in order. */
+  readonly keystrokes?: readonly string[];
+  /** Delay between keystrokes. */
+  readonly gapMs?: number;
+  /** Shortens the caller's budget for this agent; it can never lengthen it —
+   *  a longer measured need is a reason to move `AGENT_GRACE_MS`
+   *  (`terminal-session.ts`) and re-check the delete arithmetic documented
+   *  there. */
+  readonly graceMs?: number;
 }
