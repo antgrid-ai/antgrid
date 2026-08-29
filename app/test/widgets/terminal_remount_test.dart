@@ -105,12 +105,20 @@ Widget _wrap(Widget child) => ProviderScope(
   ),
 );
 
-Finder get _hScroll => find.byWidgetPredicate(
-  (w) => w is SingleChildScrollView && w.scrollDirection == Axis.horizontal,
+/// A scroll view the WRAPPER put above the terminal.
+///
+/// `GhosttyTerminalView` owns one of its own for its scrollback, so the
+/// contract can only be stated as an ancestor: the non-driver path scales its
+/// grid down rather than scrolling it, on BOTH axes, because a scroll view
+/// wrapped around the terminal loses every drag to that inner scrollable and
+/// strands the rows it exists to reveal.
+Finder get _wrappingScrollView => find.ancestor(
+  of: find.byType(GhosttyTerminalView),
+  matching: find.byType(SingleChildScrollView),
 );
 
 /// The wrapper branches on the target platform to pick the
-/// claim/letterbox/h-scroll paths these tests assert on, so every case here
+/// claim/letterbox/scale paths these tests assert on, so every case here
 /// needs the override.
 ///
 /// It has to arrive as a VARIANT and not as a `setUp`/`tearDown` pair:
@@ -186,8 +194,9 @@ void main() {
 
     // No settle: `pumpWidget` renders exactly one frame, and the view's metrics
     // report cannot have been acted on yet. 200 cols overflows the 300px
-    // viewport, so an authoritative frame is an h-scroll and a
-    // viewport-derived one is the driver freeze.
+    // viewport, so an authoritative first frame is laid out WIDER than the
+    // viewport (and then scaled to fit), where a viewport-derived one is the
+    // driver freeze and matches the viewport exactly.
     await tester.pumpWidget(
       _wrap(
         Center(
@@ -200,13 +209,18 @@ void main() {
       ),
     );
 
-    expect(_hScroll, findsOneWidget);
+    expect(
+      tester.getSize(find.byType(GhosttyTerminalView)).width,
+      greaterThan(300),
+    );
+    expect(find.byType(FittedBox), findsOneWidget);
+    expect(_wrappingScrollView, findsNothing);
 
     await tester.pumpAndSettle();
   }, variant: _macOnly);
 
   testWidgets(
-    'crossing the letterbox/h-scroll boundary reparents rather than remounts',
+    'crossing the fits/scaled boundary reparents rather than remounts',
     (tester) async {
       final service = await _makeService(addTearDown);
       final tab = _tab(id: 'boundary', cols: 40, registerTearDown: addTearDown);
@@ -215,24 +229,34 @@ void main() {
         Center(
           child: SizedBox(
             width: width,
-            height: 400,
+            // Tall enough to clear 24 rows, so WIDTH alone decides whether
+            // this grid is painted at natural size or scaled down.
+            height: 560,
             child: TerminalViewWrapper(tab: tab, terminalService: service),
           ),
         ),
       );
 
-      // Wide enough for 40 cols → letterbox.
-      await tester.pumpWidget(atWidth(900));
+      // Wide enough for 40 cols: painted at its natural size, merely centred.
+      await tester.pumpWidget(atWidth(700));
       await tester.pumpAndSettle();
-      expect(find.byType(Align), findsOneWidget);
+      expect(
+        tester.getRect(find.byType(GhosttyTerminalView)).width,
+        closeTo(tester.getSize(find.byType(GhosttyTerminalView)).width, 0.5),
+      );
       final before = tester.element(find.byType(GhosttyTerminalView));
 
-      // Narrower than the authoritative width → h-scroll. A pure layout event:
-      // the engine geometry is unchanged, so disposing the view's selection,
-      // focus node, scroll offset and soft-keyboard hooks for it is pure loss.
+      // Narrower than the authoritative width, so the same grid is now scaled
+      // down to fit. A pure layout event: the engine geometry is unchanged, so
+      // disposing the view's selection, focus node, scroll offset and
+      // soft-keyboard hooks for it is pure loss.
       await tester.pumpWidget(atWidth(200));
       await tester.pumpAndSettle();
-      expect(_hScroll, findsOneWidget);
+      expect(
+        tester.getRect(find.byType(GhosttyTerminalView)).width,
+        lessThan(tester.getSize(find.byType(GhosttyTerminalView)).width),
+      );
+      expect(_wrappingScrollView, findsNothing);
 
       expect(
         identical(tester.element(find.byType(GhosttyTerminalView)), before),
@@ -268,7 +292,11 @@ void main() {
         fontWeight: AbTokens.bumpedWeight(FontWeight.w400, fontSize),
         devicePixelRatio: tester.view.devicePixelRatio,
       );
-      return tab.cols * cell.charWidth + _hPad;
+      return gridExtentFor(
+        cells: tab.cols,
+        metric: cell.charWidth,
+        padding: _hPad,
+      );
     }
 
     double renderedWidth() =>

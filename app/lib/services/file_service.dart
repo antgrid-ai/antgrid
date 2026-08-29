@@ -7,6 +7,7 @@ import '../models/file_tree_models.dart';
 import '../models/preferences_models.dart';
 import '../models/ab_message.dart';
 import '../project/project_session.dart';
+import '../util/detached.dart';
 import 'reply_latch.dart';
 
 /// Per-project file tree + git status + viewing-file service.
@@ -24,6 +25,7 @@ class FileService {
 
   StreamSubscription<Map<String, dynamic>>? _heavySub;
   StreamSubscription<Map<String, dynamic>>? _statusSub;
+  StreamSubscription<void>? _resumeSub;
   int _snapshotSeq = -1;
   int _gitOpSeq = 0;
   bool _disposed = false;
@@ -62,6 +64,18 @@ class FileService {
     // file tree stayed empty for the life of the session. As a hydrator it also
     // re-pulls on every reconnect.
     session.hydrateCheckout(checkoutId, _treeHydratorKey, _hydrateTree);
+    // A hydrator covers re-ESTABLISHMENT; this covers the other window the
+    // agent suppresses in, which re-establishes nothing. While the app is
+    // backgrounded the agent DROPS every `tree:update` and keeps bumping its
+    // file seq, so what resumes is a delta stream whose base is missing every
+    // add and remove from that window: a file the agent created stays invisible
+    // and a directory it deleted stays listed, for the life of the connection.
+    // Nothing self-corrects it — `_snapshotSeq` only ever advances on a full
+    // snapshot, which only this pull asks for.
+    _resumeSub = session.focusResumed.listen(
+      (_) =>
+          detached('FileService', 'tree re-pull on focus resume', _hydrateTree),
+    );
   }
 
   static const _treeHydratorKey = 'file:tree';
@@ -696,6 +710,8 @@ class FileService {
     _heavySub = null;
     await _statusSub?.cancel();
     _statusSub = null;
+    await _resumeSub?.cancel();
+    _resumeSub = null;
     await _stateController.close();
   }
 }

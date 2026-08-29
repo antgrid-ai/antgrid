@@ -6,9 +6,17 @@ import {
 import type { GracefulExitAsk } from "./agents/types";
 import { ScrollbackBuffer } from "./scrollback";
 import { TerminalModeTracker } from "./terminal-modes";
-import { TerminalScreen } from "./terminal-screen";
+import { MAX_ATTACH_BLOB, TerminalScreen } from "./terminal-screen";
 import { logger } from "./logger";
 const log = logger.child({ component: "terminal-manager" });
+
+/**
+ * How many times an attach re-waits on the VT before it settles for replaying
+ * an unparsed tail — see `getAttachSnapshot`. One extra round clears an
+ * ordinary burst; nothing clears a guest that outruns the parser, so this only
+ * needs to be past "briefly behind".
+ */
+const SETTLE_ROUNDS = 3;
 import { createMessage, type AbMessage } from "./protocol";
 import type { ConnState } from "./conn-state";
 
@@ -95,8 +103,6 @@ export class TerminalManager {
    *  `Terminal` per PTY costs memory, so every site that drops a scrollback
    *  must dispose one here too. */
   private screens = new Map<string, TerminalScreen>();
-  /** Chunk sinks for the snapshots currently mid-barrier — see `getAttachSnapshot`. */
-  private snapshotTails = new Map<string, Set<string[]>>();
   private terminalTypes = new Map<string, "agent" | "service">();
   /** Metadata for exited terminals so they remain visible in status. */
   private stoppedTerminals = new Map<string, StoppedTerminalInfo>();
@@ -179,6 +185,12 @@ export class TerminalManager {
     this.scrollbacks.set(terminalId, scrollback);
     const modes = new TerminalModeTracker();
     this.modeTrackers.set(terminalId, modes);
+    // Assigned below, before `spawn()`, so no output can reach the handler
+    // while it is null. Captured rather than looked up for the same reason
+    // `scrollback` and `modes` are: a replaced PTY keeps emitting until its
+    // tree is reaped, and a lookup would file those bytes in the REPLACEMENT's
+    // screen while its scrollback and modes go to the dead run's own.
+    let screen: TerminalScreen | null = null;
 
     // Stamp this core's api-server port AND the terminal id into the spawned
     // shell. Hooks/plugins echo ANTGRID_TERMINAL_ID back to /session-title for
@@ -212,23 +224,17 @@ export class TerminalManager {
         if (msg.type === "terminal:output") {
           scrollback.append(msg.data);
           modes.feed(msg.data);
-          // BEFORE the suppression drop, and looked up rather than captured so
-          // the closure has no ordering dependency on when the screen is made.
-          // This placement is what makes a suppressed window recoverable at
-          // all: a socket drop and a backgrounded app both stop the outbound
-          // frame below, and only an emulator that stayed current through it
-          // can hand the app back the screen it missed. The screen also stays
-          // current through a remote-access flip, which drops at the stream's
-          // `mayDeliver` instead — but nothing raises a recovery for that edge,
-          // since it neither re-establishes the transport nor moves the app's
-          // declared focus, so that window is still stale until the guest
-          // repaints of its own accord.
-          this.screens.get(terminalId)?.feed(msg.data);
-          // A chunk landing while a snapshot is mid-barrier is not in the blob
-          // being serialized, so every pending snapshot keeps its own copy to
-          // replay after it — see `getAttachSnapshot`.
-          const tails = this.snapshotTails.get(terminalId);
-          if (tails) for (const tail of tails) tail.push(msg.data);
+          // BEFORE the suppression drop. This placement is what makes a
+          // suppressed window recoverable at all: a socket drop and a
+          // backgrounded app both stop the outbound frame below, and only an
+          // emulator that stayed current through it can hand the app back the
+          // screen it missed. The screen also stays current through a
+          // remote-access flip, which drops at the stream's `mayDeliver`
+          // instead — but nothing raises a recovery for that edge, since it
+          // neither re-establishes the transport nor moves the app's declared
+          // focus, so that window is still stale until the guest repaints of
+          // its own accord.
+          screen?.feed(msg.data);
           this.callbacks.onTerminalOutput?.(terminalId, msg.data);
           const seq = this.connState.bumpTerminalSeq(terminalId);
           if (this.connState.suppressed) {
@@ -299,7 +305,8 @@ export class TerminalManager {
     // screen, whose own exit lands too late to release it (the duplicate gate
     // in the exit handler returns before the bookkeeping).
     this.screens.get(terminalId)?.dispose();
-    this.screens.set(terminalId, new TerminalScreen(session.cols, session.rows));
+    screen = new TerminalScreen(session.cols, session.rows);
+    this.screens.set(terminalId, screen);
     if (config.type) {
       this.terminalTypes.set(terminalId, config.type);
     }
@@ -532,40 +539,68 @@ export class TerminalManager {
    * The supplement goes strictly AFTER the whole blob, never interleaved — the
    * serializer ends with a relative cursor restore.
    *
+   * `opts.history` asks for the emulator's scrollback as well as the screen,
+   * and is the CALLER's call because only the app knows whether its engine
+   * holds a deeper copy that a history blob would erase. Pass it for a cold
+   * attach — an engine that has rendered nothing for this terminal — and never
+   * for a re-attach.
+   *
    * The seq and the blob must describe the SAME instant, and the serialize
    * barrier is a real suspension point, so the two are made to agree rather
    * than assumed to. A chunk arriving while the barrier is pending is sent to
    * the app immediately (this is the same ordered channel, so it lands BEFORE
-   * the reply), is not in the blob, and would then be wiped by the blob's own
-   * `2J` — with its seq already above any cutoff read beforehand, so nothing
-   * refilters it and nothing re-sends it. Four kilobytes of a streaming build,
-   * gone from the tab for good. Capturing those chunks and replaying them after
-   * the body is what closes it: body + tail reconstructs the screen as of the
-   * LAST byte counted, so the cutoff can be read afterwards and be exact.
+   * the reply) and would then be wiped by the blob's own `2J` — with its seq
+   * already above any cutoff read beforehand, so nothing refilters it and
+   * nothing re-sends it. Four kilobytes of a streaming build, gone from the tab
+   * for good. `pendingTail()` is what closes it: body + tail reconstructs the
+   * screen as of the LAST byte counted, so the cutoff can be read afterwards
+   * and be exact.
+   *
+   * The tail must come from xterm rather than from watching the chunks go by.
+   * `settle()`'s callback fires from inside the parser's own loop, which then
+   * keeps consuming the writes queued behind it, so most chunks that arrive
+   * across the barrier are in the body ALREADY — replaying everything seen
+   * paints them twice, into the user's scrollback, on every attach.
    */
-  async getAttachSnapshot(terminalId: string): Promise<{ text: string; seq: number } | null> {
+  async getAttachSnapshot(
+    terminalId: string,
+    opts: { history?: boolean } = {},
+  ): Promise<{ text: string; seq: number } | null> {
     const screen = this.screens.get(terminalId);
     if (!screen) return null;
-    const tail: string[] = [];
-    let tails = this.snapshotTails.get(terminalId);
-    if (!tails) this.snapshotTails.set(terminalId, (tails = new Set()));
-    tails.add(tail);
-    try {
+    // Settled repeatedly while the parser is merely behind, because a tail is
+    // the expensive answer: those bytes have ALREADY gone out live, so
+    // replaying them puts a second copy of whatever they scrolled off the
+    // screen into the user's history, and the warm preamble stops at `2J`
+    // precisely so it never clears that. A chunk the parser catches up on lands
+    // in the BODY instead, which repaints the screen and scrolls nothing.
+    // Bounded because a guest can outrun the parser indefinitely, and there the
+    // duplicate rows are the lesser loss against a screen frozen a slice back.
+    for (let round = 0; round < SETTLE_ROUNDS; round++) {
       await screen.settle();
       // The screen can be replaced or disposed across the barrier: an exit and
       // a same-id respawn both swap the map entry, and the barrier still fires
       // on the dead one — whose screen would then be stamped with a seq the new
       // PTY starts below and re-arm a cutoff above everything it will ever
-      // emit. A blank pane behind a live process.
+      // emit. A blank pane behind a live process. Re-tested every round, since
+      // each one is another suspension.
       if (screen.isDisposed || this.screens.get(terminalId) !== screen) return null;
-      const blob = screen.serializeNow();
-      const seq = this.connState.terminalSeq(terminalId);
-      const supplement = this.modeTrackers.get(terminalId)?.supplementalPrelude() ?? "";
-      return { text: blob + tail.join("") + supplement, seq };
-    } finally {
-      tails.delete(tail);
-      if (tails.size === 0) this.snapshotTails.delete(terminalId);
+      if (!screen.hasPendingTail) break;
     }
+    // One synchronous run: the body, the chunks it does not yet contain, and
+    // the seq that counts both. Nothing can arrive between two statements, so
+    // the three describe one instant by construction.
+    const blob = screen.serializeNow(opts);
+    const tail = screen.pendingTail();
+    const seq = this.connState.terminalSeq(terminalId);
+    const supplement = this.modeTrackers.get(terminalId)?.supplementalPrelude() ?? "";
+    if (tail.length > MAX_ATTACH_BLOB) {
+      // `serializeNow` measures the body alone and structurally cannot see
+      // this half, which is the half a flood makes large: measured at 0.78 MB
+      // of replayed tail behind a 176-byte screen.
+      log.warn("attach tail %d bytes replayed after the screen, past the %d mark", tail.length, MAX_ATTACH_BLOB);
+    }
+    return { text: blob + tail + supplement, seq };
   }
 
   getStatus(): Array<{

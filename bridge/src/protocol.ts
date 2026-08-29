@@ -1395,6 +1395,12 @@ const ClientFocusStateMessage = BaseMessage.extend({
 const TerminalSnapshotRequestMessage = BaseMessage.extend({
   type: z.literal("terminal:snapshot:request"),
   terminalId: z.string(),
+  // COLD attach: the client's engine has rendered nothing for this terminal, so
+  // the reply should carry the emulator's scrollback as well as the screen and
+  // erase before painting. Only the client can answer this — it is the only side
+  // that knows what its engine holds — and answering it wrongly costs the user's
+  // own (far deeper) history. Absent/false means re-attach: screen only.
+  history: z.boolean().optional(),
   ...CheckoutScoped,
 });
 
@@ -1408,6 +1414,14 @@ const TerminalSnapshotMessage = BaseMessage.extend({
   // COMPLETE attach sequence — preamble, serialized screen, supplemental modes —
   // to be applied verbatim with nothing prepended or appended.
   composed: z.boolean().optional(),
+  // True: the body carries scrollback ABOVE the screen and its preamble
+  // leads with `3J`. A reply is published on the project bus, so every
+  // client attached to this terminal receives the one that ONE of them
+  // asked for -- and that erase would take a warm client's own history
+  // with it. The requester cannot be addressed (there is no per-client
+  // routing on this path), so the frame is labelled instead and a client
+  // whose engine is already painted drops it.
+  history: z.boolean().optional(),
   ...CheckoutScoped,
 });
 

@@ -1,10 +1,12 @@
 // Task 6: non-driver rendering + focus-gated resize claims.
 //
 // A terminal whose authoritative grid (cols × charWidth) is wider than the
-// local viewport must horizontal-scroll (not reflow) so a viewer on a narrow
-// device sees the driver's exact wrapping; a grid that fits is letterboxed
-// (centered). Separately, a view that never gains focus must never claim the
-// driver role by sending a resize.
+// local viewport must be SCALED DOWN whole -- never reflowed, never
+// scrolled -- so a viewer on a narrow device sees the driver's exact
+// wrapping. Rows are pinned for the same reason as cols, so the scale
+// applies to BOTH axes; a grid that fits is letterboxed (centered) at its
+// natural size, since the scale never enlarges. Separately, a view that
+// never gains focus must never claim the driver role by sending a resize.
 import 'package:antgrid/models/terminal_models.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/providers/client_id.dart';
@@ -19,6 +21,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../helpers/prefs_test_mock.dart';
@@ -26,6 +29,21 @@ import '../helpers/prefs_test_mock.dart';
 /// Opened per-test in `setUp`; the wrapper watches terminalZoom, so `_wrap`
 /// must override the (default-throwing) settings provider.
 late SharedPreferencesWithCache _settingsPrefs;
+
+/// Sub-pixel slack for geometry read back through a layout and a transform.
+const _epsilon = 0.5;
+
+/// A scroll view the WRAPPER put above the terminal.
+///
+/// `GhosttyTerminalView` owns one of its own for its scrollback, so the
+/// contract can only be stated as an ancestor: the non-driver path scales its
+/// grid down rather than scrolling it, on BOTH axes, because a scroll view
+/// wrapped around the terminal loses every drag to that inner scrollable and
+/// strands the rows it exists to reveal.
+final _wrappingScrollView = find.ancestor(
+  of: find.byType(GhosttyTerminalView),
+  matching: find.byType(SingleChildScrollView),
+);
 
 const _myClientId = 'this-install';
 const _otherClientId = 'some-other-device';
@@ -67,6 +85,10 @@ TerminalTab _tab({
     driverClientId: driverClientId,
   );
   tab.ghostty.attachExternalTransport(writeBytes: (_) => true);
+  // TerminalTab builds its controller eagerly, and these tabs never enter
+  // TerminalService's own map — so nothing else disposes them and each one is a
+  // leaked native VT for the life of the test process.
+  addTearDown(() async => tab.ghostty.dispose());
   return tab;
 }
 
@@ -101,7 +123,7 @@ void main() {
   });
 
   testWidgets(
-    'non-driver wider-than-viewport grid yields a horizontal scroll view',
+    'non-driver grid larger than the viewport is scaled down, not scrolled',
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
       final h = await _makeService(addTearDown);
@@ -123,34 +145,45 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final horizontalScroll = find.byWidgetPredicate(
-        (w) =>
-            w is SingleChildScrollView && w.scrollDirection == Axis.horizontal,
-      );
-      expect(horizontalScroll, findsOneWidget);
-      // Letterbox Align must NOT be used when the grid overflows.
-      expect(find.byType(Align), findsNothing);
+      // No scroll view on EITHER axis: a vertical one is unreachable behind
+      // GhosttyTerminalView's own drag handlers, and a horizontal one hides
+      // columns the driver can see.
+      expect(_wrappingScrollView, findsNothing);
+
+      // Laid out at the driver's geometry...
+      final laidOut = tester.getSize(find.byType(GhosttyTerminalView));
+      expect(laidOut.width, greaterThan(300));
+
+      // ...and painted scaled down, wholly inside the viewport, so every row
+      // and column the driver has is on screen with nothing to scroll to.
+      final painted = tester.getRect(find.byType(GhosttyTerminalView));
+      expect(painted.width, lessThan(laidOut.width));
+      expect(painted.width, lessThanOrEqualTo(300 + _epsilon));
+      expect(painted.height, lessThanOrEqualTo(400 + _epsilon));
 
       debugDefaultTargetPlatformOverride = null;
     },
   );
 
   testWidgets(
-    'non-driver fits-in-viewport grid is letterboxed (centered), no h-scroll',
+    'non-driver fits-in-viewport grid is letterboxed (centered), unscaled',
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
       final h = await _makeService(addTearDown);
 
-      // Tiny authoritative grid (cols: 5) comfortably fits the 300px viewport →
-      // amDriver == false and authWidth <= maxWidth → centered, not scrolled.
+      // Tiny authoritative grid (cols: 5, rows: 24) inside a viewport that
+      // clears it on BOTH axes -- 400px would not hold 24 rows, and the
+      // vertical axis binds the scale just as the horizontal one does. Both
+      // dimensions stay inside the 800x600 test surface, or the wrapper's own
+      // rect runs off screen and centring cannot be read off it.
       final tab = _tab(id: 't2', cols: 5);
 
       await tester.pumpWidget(
         _wrap(
           Center(
             child: SizedBox(
-              width: 300,
-              height: 400,
+              width: 600,
+              height: 560,
               child: TerminalViewWrapper(tab: tab, terminalService: h.service),
             ),
           ),
@@ -158,12 +191,20 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.byType(Align), findsOneWidget);
-      final horizontalScroll = find.byWidgetPredicate(
-        (w) =>
-            w is SingleChildScrollView && w.scrollDirection == Axis.horizontal,
-      );
-      expect(horizontalScroll, findsNothing);
+      expect(_wrappingScrollView, findsNothing);
+
+      // The scale never ENLARGES, so a grid this small is painted at exactly
+      // its natural size and merely centred: a plain letterbox on both axes.
+      final laidOut = tester.getSize(find.byType(GhosttyTerminalView));
+      final painted = tester.getRect(find.byType(GhosttyTerminalView));
+      expect(painted.width, closeTo(laidOut.width, _epsilon));
+      expect(painted.height, closeTo(laidOut.height, _epsilon));
+
+      // Centred inside the letterbox box itself, not the wrapper: the wrapper
+      // also carries chrome, so its centre is not the box the child aligns in.
+      final box = tester.getRect(find.byType(FittedBox));
+      expect(painted.center.dx, closeTo(box.center.dx, _epsilon));
+      expect(painted.center.dy, closeTo(box.center.dy, _epsilon));
 
       debugDefaultTargetPlatformOverride = null;
     },
@@ -282,14 +323,11 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // Driver fill path uses neither the letterbox Align nor the overflow
-      // horizontal scroll — both are non-driver constructs.
-      expect(find.byType(Align), findsNothing);
-      final horizontalScroll = find.byWidgetPredicate(
-        (w) =>
-            w is SingleChildScrollView && w.scrollDirection == Axis.horizontal,
-      );
-      expect(horizontalScroll, findsNothing);
+      // The driver fill path uses no scaler at all. That is the non-driver
+      // construct, and a driver whose content were scaled would be typing
+      // into a grid that does not match the size it renders at.
+      expect(find.byType(FittedBox), findsNothing);
+      expect(_wrappingScrollView, findsNothing);
 
       debugDefaultTargetPlatformOverride = null;
     },

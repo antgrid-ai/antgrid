@@ -12,6 +12,7 @@ import '../models/ab_message.dart';
 import '../project/project_message_classification.dart';
 import '../project/project_session.dart';
 import '../util/ab_log.dart';
+import '../util/detached.dart';
 import 'pending_reply.dart';
 import 'preview_proxy_server.dart';
 
@@ -49,6 +50,7 @@ class PreviewService {
   final Map<String, _WsTunnel> _activeWsTunnels = {};
 
   StreamSubscription<void>? _dropSub;
+  StreamSubscription<void>? _resumeSub;
   Timer? _retrySweep;
 
   /// Grace period between learning a frame was dropped and re-sending. It is
@@ -90,6 +92,19 @@ class PreviewService {
     // every reconnect; the bridge answers with `preview:snapshot` and re-emits
     // the detected ports alongside it.
     session.hydrateCheckout(checkoutId, _snapshotHydratorKey, _hydrateSnapshot);
+    // A hydrator covers re-ESTABLISHMENT; a focus resume re-establishes nothing
+    // and is the other window the agent suppresses in. `preview:url` dropped
+    // there is remembered as undelivered agent-side, but the only thing that
+    // drains that flag is the port re-emit behind this very request — so without
+    // this pull a port that opened while the app was backgrounded stays unknown
+    // to it for the life of the connection.
+    _resumeSub = session.focusResumed.listen(
+      (_) => detached(
+        'PreviewService',
+        'preview snapshot re-pull on focus resume',
+        _hydrateSnapshot,
+      ),
+    );
     _txSub = session.transport.messages.listen(_onTransportMessage);
     _dropSub = session.transport.droppedFrames.listen(
       (_) => _onFramesDropped(),
@@ -620,6 +635,8 @@ class PreviewService {
     _txSub = null;
     await _dropSub?.cancel();
     _dropSub = null;
+    await _resumeSub?.cancel();
+    _resumeSub = null;
 
     await _stateController.close();
   }

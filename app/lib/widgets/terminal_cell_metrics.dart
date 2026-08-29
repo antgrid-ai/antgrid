@@ -54,12 +54,20 @@ const double kGhosttyLineHeight = 1.35;
       ),
     ),
     textDirection: TextDirection.ltr,
-  )..layout();
+  );
   // `layout()` allocates an engine-side ui.Paragraph that only a dispose
   // releases promptly — GC reclaims it eventually, but the Skia allocation is
-  // invisible to Dart heap accounting, so nothing pressures a collection.
-  final width = painter.width;
-  painter.dispose();
+  // invisible to Dart heap accounting, so nothing pressures a collection. In a
+  // `finally` because this runs inside `build()`: a throw here (a font the
+  // engine cannot resolve) would otherwise leak one paragraph per frame for as
+  // long as the widget keeps rebuilding.
+  final double width;
+  try {
+    painter.layout();
+    width = painter.width;
+  } finally {
+    painter.dispose();
+  }
   return (
     charWidth: _snapToPhysical(math.max(1.0, width), devicePixelRatio),
     linePixels: _snapToPhysical(
@@ -68,6 +76,24 @@ const double kGhosttyLineHeight = 1.35;
     ),
   );
 }
+
+/// The extent a grid of [cells] must be laid out at for `GhosttyTerminalView`
+/// to recover exactly [cells] from it, given the padding it will subtract.
+///
+/// The view derives its grid with `floor((extent - padding) / metric)`, and
+/// `cells * metric` does not survive that round trip: the quotient lands a hair
+/// under `cells` for roughly 3% of the dpr/font-size pairs this app can produce
+/// (dpr 1.5 at 10.7pt, dpr 2.625 at 10.1pt, ...), which costs a row or a column
+/// and leaves a viewer's engine a cell short of the driver it is mirroring —
+/// exactly the mismatch pinning the authoritative geometry exists to remove.
+/// The nudge is orders of magnitude below the one-logical-pixel floor
+/// [measureTerminalCell] clamps both metrics to, so it can never buy an extra
+/// cell.
+double gridExtentFor({
+  required int cells,
+  required double metric,
+  required double padding,
+}) => cells * metric + padding + 0.01;
 
 double _snapToPhysical(double value, double devicePixelRatio) {
   if (devicePixelRatio <= 0) return value;

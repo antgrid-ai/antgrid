@@ -130,4 +130,39 @@ void main() {
 
     await session.close();
   });
+
+  test('every surface the agent suppresses re-pulls on the resume edge',
+      () async {
+    // The terminal was the first surface to grow this subscription, and for a
+    // while the only one — while the file tree and the preview carried the same
+    // defect. The agent drops `tree:update` and `preview:url` in exactly the
+    // window it drops terminal output, and bumps its seq counters through it
+    // either way, so a delta stream resumed onto a stale base never converges:
+    // a file created while backgrounded stays invisible and a port opened there
+    // stays unknown, for the life of the connection.
+    final t = FakeAgentTransport();
+    final cache = await CachedSessionsStore.open();
+    final session = ProjectSession(
+      projectId: 'p',
+      transport: t,
+      mode: ProjectSessionMode.local,
+      cachedSessionsStore: cache,
+      onClose: () async => t.dispose(),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    session.setLifecyclePaused(true);
+    await Future<void>.delayed(Duration.zero);
+    t.clearSent();
+
+    session.setLifecyclePaused(false);
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
+    final pulled = t.sent.map((m) => m['type']).toSet();
+    expect(pulled, contains('file:tree:snapshot:request'));
+    expect(pulled, contains('preview:snapshot:request'));
+
+    await session.close();
+  });
 }
