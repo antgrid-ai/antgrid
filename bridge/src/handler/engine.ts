@@ -4,7 +4,7 @@ import { createMessage, type AbMessage } from "../protocol";
 import { classifyDestructive, describeWarning, type FloorWarning } from "./destructive-floor";
 import {
   authorizeInstruction, createAuthorization, partitionWarnings,
-  type InstructionAuthorization,
+  type GrantSummary, type InstructionAuthorization, type LiftedTier,
 } from "./authorization";
 import {
   clearSessionTrash, describeSnapshot, planSnapshots, releaseSnapshots, takeSnapshots, undoSnapshot,
@@ -144,6 +144,13 @@ const MAX_REMEMBERED_REJECTIONS = 3;
 // back into the prompt each time — before the harness concludes it cannot be met.
 const MAX_ANCHOR_REFUSALS = 3;
 
+// How many granted literals ride along in a grant row's detail, and how much of
+// the line they may spend. The row's reason carries the true totals, so the list
+// never has to stand in for the count — it is the sample that makes the totals
+// concrete, and a feed row is read at a glance either way.
+const MAX_GRANT_ENTRIES = 8;
+const MAX_GRANT_DETAIL_CHARS = 200;
+
 // The item outcomes the activity feed carries a kind for. A skip is as
 // consequential as a completion (§4.3), so they stay distinguishable without
 // parsing the reason text.
@@ -205,6 +212,71 @@ function snapshotWire(st: StoredSnapshot) {
     state: st.undoneAt !== undefined ? "undone" as const : st.failure ? "failed" as const : "available" as const,
     ...(st.failure ? { detail: st.failure } : {}),
   };
+}
+
+type Noun = readonly [one: string, many: string];
+
+function countPhrase(n: number, [one, many]: Noun): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+// What a lift is counted in. Three nouns rather than one, because the tiers are
+// three unlike permissions and the count is the half that survives a clip: a
+// sentence that lifted the §5.1 secret-access advisory for the rest of the
+// session must not be reported as having allowed a command.
+const GRANT_NOUNS: Record<LiftedTier, Noun> = {
+  DESTRUCTIVE: ["destructive command", "destructive commands"],
+  EGRESS: ["network command", "network commands"],
+  SECRETS: ["secret read", "secret reads"],
+};
+const GRANT_TIERS: LiftedTier[] = ["DESTRUCTIVE", "EGRESS", "SECRETS"];
+
+/**
+ * What one instruction's §5.4 lift added, as the two halves of a feed row: the
+ * totals, and a sample of the literals themselves.
+ *
+ * Null when it added nothing. Most instructions grant nothing at all, and a row
+ * saying so every time is exactly the noise that teaches a user to skim past the
+ * one row that matters.
+ *
+ * A single lift is the reason and carries no detail: "1 destructive command"
+ * over `rm -rf` spends the row's loudest slot on a count the line below it
+ * already implies, and buries the one thing the user came to check — the inverse
+ * of how the `floor_warning` row about that same command reads.
+ */
+function describeGrant(g: GrantSummary): { reason: string; detail?: string } | null {
+  const groups: { noun: Noun; entries: string[] }[] = [];
+  for (const tier of GRANT_TIERS) {
+    const matched = g.operations.filter((o) => o.tier === tier).map((o) => o.matched);
+    if (matched.length > 0) groups.push({ noun: GRANT_NOUNS[tier], entries: matched });
+  }
+  if (g.paths.length > 0) groups.push({ noun: ["path", "paths"], entries: g.paths });
+  // `destinations`, never `hosts`: the harvest reads any dotted token as a host so
+  // that granting and checking agree with each other, and repeating that superset
+  // back would call every source file the user named a network permission.
+  if (g.destinations.length > 0) {
+    groups.push({ noun: ["host", "hosts"], entries: g.destinations });
+  }
+  const entries = groups.flatMap((x) => x.entries);
+  if (entries.length === 0) return null;
+  if (entries.length === 1) return { reason: entries[0]! };
+  const parts = groups.map((x) => countPhrase(x.entries.length, x.noun));
+  const reason = parts.length <= 1
+    ? parts.join("")
+    : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+  const shown: string[] = [];
+  let budget = MAX_GRANT_DETAIL_CHARS;
+  for (const e of entries.slice(0, MAX_GRANT_ENTRIES)) {
+    // The first entry always rides, however long: a row whose list is empty
+    // while its count says "2 commands" reads as a bug in the row.
+    if (shown.length > 0 && e.length > budget) break;
+    shown.push(e);
+    budget -= e.length + 3;
+  }
+  // The feed row carries the totals in its title, but the drawer echo shows this
+  // half alone — so a sample that stopped short has to say so where it stopped.
+  const more = entries.length > shown.length ? ` +${entries.length - shown.length} more` : "";
+  return { reason, detail: `${shown.join(" · ")}${more}` };
 }
 
 function wakeClock(at: number): string {
@@ -791,20 +863,30 @@ export class HandlerEngine {
    * This is also the ONE feed point for §5.4 authorization. The arm-time goal is
    * deliberately not one: it is a statement of what the session is for, and a lift
    * has to be traceable to a sentence the user wrote to authorize an action.
+   *
+   * Returns what the sentence granted, or null where it reached no session and no
+   * lift was taken. The grant is the half of an instruction the user cannot infer
+   * from their own words — "clear out the build dir" reads as a chore and is also
+   * a session-long permission — so it is recorded here rather than left implicit.
    */
-  instruct(p: { terminalId: string; text: string }): void {
+  instruct(p: { terminalId: string; text: string }): GrantSummary | null {
     const s = this.sessions.get(p.terminalId);
     if (!s) {
       log.warn("handler instruct ignored: no armed session for %s", p.terminalId);
-      return;
+      return null;
     }
     const text = p.text.trim();
-    if (!text) return;
+    if (!text) return null;
     // Taken from the raw payload and BEFORE the extraction spawn: extraction output is
     // judge-authored, so deriving a lift from it would let a compromised agent widen
     // its own permissions through the extractor.
-    authorizeInstruction(s.auth, text, this.deps.projectPath(p.terminalId));
+    const granted = authorizeInstruction(s.auth, text, this.deps.projectPath(p.terminalId));
+    const described = describeGrant(granted);
+    if (described) {
+      this.record(p.terminalId, "instruction_authorized", described.reason, described.detail);
+    }
     this.queueExtraction(p.terminalId, text);
+    return granted;
   }
 
   // `onlyIfEmpty` is for the arm-time pass (§3.2): the goal is extracted once,
@@ -1875,7 +1957,10 @@ export class HandlerEngine {
   // can never be told less than the user was.
   private noteFloorWarnings(terminalId: string, s: ArmedSession, warnings: FloorWarning[]): void {
     for (const w of warnings) {
-      this.record(terminalId, "floor_warning", describeWarning(w), w.pattern);
+      // No detail: `describeWarning` already carries the readable half, and the
+      // other one is a regex source — the row a user is meant to act on is the
+      // last place to print the floor's own spelling of itself.
+      this.record(terminalId, "floor_warning", describeWarning(w));
       this.rememberWarning(s, describeWarning(w));
     }
   }

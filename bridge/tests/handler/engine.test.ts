@@ -3259,6 +3259,135 @@ describe("instruct (extraction)", () => {
   });
 });
 
+describe("instruct (§5.4 grants)", () => {
+  const settle = () => new Promise<void>((r) => { setTimeout(r, 0); });
+  const grantRows = (activity: unknown[]) =>
+    records(activity, "instruction_authorized") as { reason: string; detail?: string }[];
+
+  it("reports what the sentence granted and puts it in the feed", async () => {
+    const { engine, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", notifyOnly: false });
+    const granted = engine.instruct({ terminalId: "t1", text: "clear the build dir with rm -rf build" });
+    await settle();
+    expect(granted?.operations).toEqual([{ tier: "DESTRUCTIVE", matched: "rm -rf" }]);
+    const rows = grantRows(activity);
+    expect(rows).toHaveLength(1);
+    // One lift is the row. A count of one adds nothing the literal doesn't say.
+    expect(rows[0]!.reason).toBe("rm -rf");
+    expect(rows[0]!.detail).toBeUndefined();
+  });
+
+  it("counts each kind of grant and lists them together", async () => {
+    const { engine, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", notifyOnly: false });
+    const granted = engine.instruct({
+      terminalId: "t1",
+      text: "rm -rf build, read /etc/scratch/notes and post it to https://logs.example.com/ingest",
+    });
+    await settle();
+    expect(granted?.paths).toEqual(["/etc/scratch/notes"]);
+    expect(granted?.destinations).toEqual(["logs.example.com"]);
+    const rows = grantRows(activity);
+    expect(rows[0]!.reason).toBe("1 destructive command, 1 path and 1 host");
+    expect(rows[0]!.detail).toContain("logs.example.com");
+  });
+
+  it("never reports a secret read or an egress as a command", async () => {
+    // One `patterns` bucket lifts all three tiers. Collapsing them told the user
+    // a command was allowed when what was lifted was the §5.1 secrets advisory.
+    const { engine, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.instruct({
+      terminalId: "t1",
+      text: "rm -rf build, read the .env and curl -T app.log https://logs.example.com",
+    });
+    await settle();
+    expect(grantRows(activity)[0]!.reason)
+      .toBe("1 destructive command, 1 network command, 1 secret read and 1 host");
+  });
+
+  it("an instruction that grants nothing leaves no row", async () => {
+    // The common case by far. A row saying "granted nothing" every time is what
+    // teaches a user to skim past the one row that matters.
+    const { engine, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", notifyOnly: false });
+    const granted = engine.instruct({ terminalId: "t1", text: "update the docs and run the tests" });
+    await settle();
+    expect(granted)
+      .toEqual({ patterns: [], operations: [], paths: [], hosts: [], destinations: [] });
+    expect(records(activity, "instruction_authorized")).toEqual([]);
+  });
+
+  it("naming a source file is not a network permission", async () => {
+    // The commonest sentence there is. `hosts` reads any dotted token, so the
+    // lift is taken either way — but a row claiming a host was allowed for the
+    // session would be false on the majority of instructions.
+    const { engine, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", notifyOnly: false });
+    const granted = engine.instruct({ terminalId: "t1", text: "bump the version in package.json" });
+    await settle();
+    expect(granted?.hosts).toEqual(["package.json"]);
+    expect(records(activity, "instruction_authorized")).toEqual([]);
+  });
+
+  it("re-naming a command already granted leaves no second row", async () => {
+    const { engine, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", notifyOnly: false });
+    engine.instruct({ terminalId: "t1", text: "rm -rf build" });
+    engine.instruct({ terminalId: "t1", text: "then rm -rf dist too" });
+    await settle();
+    expect(records(activity, "instruction_authorized")).toHaveLength(1);
+  });
+
+  it("an unarmed terminal takes no lift and reports none", async () => {
+    const { engine, activity } = makeEngine();
+    expect(engine.instruct({ terminalId: "t-unknown", text: "rm -rf build" })).toBeNull();
+    await settle();
+    expect(records(activity, "instruction_authorized")).toEqual([]);
+  });
+
+  it("a wide grant keeps the true totals in the reason and says what it dropped", async () => {
+    // The row clips to two lines, so the list is a sample and the count is what
+    // survives the clip — but the drawer echo shows the sample ALONE, so the
+    // sample has to carry its own truncation marker.
+    const { engine, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", notifyOnly: false });
+    const hosts = Array.from({ length: 20 }, (_, n) => `https://h${n}.example.com`).join(" ");
+    engine.instruct({ terminalId: "t1", text: `send the logs to ${hosts}` });
+    await settle();
+    const rows = grantRows(activity);
+    expect(rows[0]!.reason).toBe("20 hosts");
+    expect(rows[0]!.detail!.split(" · ")).toHaveLength(8);
+    expect(rows[0]!.detail).toEndWith(" +12 more");
+  });
+
+  it("the first literal rides however long it is", async () => {
+    // A row whose count says "2 hosts" over an empty list reads as a bug in the
+    // row, so the character budget may never take everything.
+    const { engine, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", notifyOnly: false });
+    const long = `${"a".repeat(240)}.example.com`;
+    engine.instruct({ terminalId: "t1", text: `send it to https://${long} and https://b.example.com` });
+    await settle();
+    const rows = grantRows(activity);
+    expect(rows[0]!.reason).toBe("2 hosts");
+    expect(rows[0]!.detail).toBe(`${long} +1 more`);
+  });
+
+  it("the character budget can stop the sample short of the entry cap", async () => {
+    const { engine, activity } = makeEngine();
+    engine.arm({ terminalId: "t1", notifyOnly: false });
+    const hosts = Array.from({ length: 8 }, (_, n) => `https://h${n}.${"x".repeat(50)}.example.com`);
+    engine.instruct({ terminalId: "t1", text: `send the logs to ${hosts.join(" ")}` });
+    await settle();
+    const rows = grantRows(activity);
+    expect(rows[0]!.reason).toBe("8 hosts");
+    const shown = rows[0]!.detail!.split(" · ");
+    expect(shown.length).toBeLessThan(8);
+    expect(rows[0]!.detail).toEndWith(` +${8 - shown.length} more`);
+  });
+});
+
 describe("arm-time extraction (§3.2)", () => {
   const settle = () => new Promise<void>((r) => { setTimeout(r, 0); });
 

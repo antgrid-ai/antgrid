@@ -296,10 +296,41 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
   /// true — so the line retires itself and needs no timer to take it away.
   String? _held;
 
+  /// The sentence a send is waiting on a grant for, and the newest grant the
+  /// feed already held when it went.
+  ///
+  /// The echo below reports what ONE sentence also allowed, so both halves are
+  /// needed. A grant made an hour ago is not news — it is history the activity
+  /// feed already holds, and standing it over the field on every open would turn
+  /// an echo into a permanent statement of the session's standing permissions,
+  /// which is a surface for managing them and not one this sheet offers. Nor is
+  /// a grant that landed while nothing of ours was in flight: `handler:instruct`
+  /// reaches this terminal from the phone too, and a high-water mark alone
+  /// attributed that phone's lift to whatever the field last sent.
+  String? _awaitingGrantFor;
+  String? _grantAnchor;
+
+  /// The grant attributed to [_awaitingGrantFor], once one has been. Latched,
+  /// because the status snapshot that retires the sentence lands right behind
+  /// the activity row carrying the grant — a line gated on the sentence still
+  /// being outstanding would show for a frame and go.
+  HandlerActivityRecord? _echoed;
+
   @override
   void dispose() {
     _input.dispose();
     super.dispose();
+  }
+
+  /// Newest first, the order the service prepends activity in.
+  HandlerActivityRecord? _newestGrant(HandlerState? state) {
+    for (final r in state?.activity ?? const <HandlerActivityRecord>[]) {
+      if (r.terminalId == widget.terminalId &&
+          r.decision == 'instruction_authorized') {
+        return r;
+      }
+    }
+    return null;
   }
 
   /// Preset chips and typed text land here alike: one path, one message type,
@@ -323,8 +354,29 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
         HandlerInstructResult.empty;
     setState(() {
       _held = result == HandlerInstructResult.duplicate ? text.trim() : null;
+      if (result == HandlerInstructResult.sent) {
+        _awaitingGrantFor = text.trim();
+        _grantAnchor = _newestGrant(
+          ref.read(handlerStateProvider).value,
+        )?.recordId;
+        _echoed = null;
+      }
     });
     return result;
+  }
+
+  /// A grant arrives as an activity row of its own, ahead of the status snapshot
+  /// that retires the sentence — so the attribution has to be made while the
+  /// sentence is still outstanding, and kept once it no longer is.
+  void _adoptGrant(HandlerState? state) {
+    final sentence = _awaitingGrantFor;
+    if (sentence == null || _echoed != null) return;
+    final outstanding =
+        state?.pendingInstructionsFor(widget.terminalId) ?? const <String>[];
+    if (!outstanding.contains(sentence)) return;
+    final grant = _newestGrant(state);
+    if (grant == null || grant.recordId == _grantAnchor) return;
+    setState(() => _echoed = grant);
   }
 
   void _submitTyped() {
@@ -336,6 +388,7 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen(handlerStateProvider, (_, next) => _adoptGrant(next.value));
     final p = context.antgrid;
     final held = _held;
     final outstanding =
@@ -345,6 +398,8 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
             ?.pendingInstructionsFor(widget.terminalId) ??
         const <String>[];
     final stillHeld = held != null && outstanding.contains(held) ? held : null;
+    final echoed = _echoed;
+    final granted = echoed == null ? null : _grantLiterals(echoed);
     return Container(
       decoration: BoxDecoration(
         border: Border(top: BorderSide(color: p.borderSubtle)),
@@ -383,7 +438,9 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
               AbTokens.space16,
               0,
               AbTokens.space16,
-              stillHeld == null ? AbTokens.space8 : AbTokens.space4,
+              stillHeld == null && granted == null
+                  ? AbTokens.space8
+                  : AbTokens.space4,
             ),
             child: Row(
               children: [
@@ -430,10 +487,82 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
                 ),
               ),
             ),
+          if (granted != null && granted.isNotEmpty)
+            _GrantEcho(granted: granted),
         ],
       ),
     );
   }
+}
+
+/// What the sentence just sent ALSO did (spec §5.4). An instruction reads as a
+/// chore — "clear out the build dir with rm -rf build" — and the lift it takes
+/// stands for the rest of the session: Handler runs that shape from here on
+/// without the advisory row that would otherwise name it. That is the one
+/// consequence of this field a user cannot read off their own sentence.
+///
+/// Deliberately not behind the disclaimer's dismissal. That flag retires one
+/// notice once it has been read; this line carries different words every time it
+/// appears, and inheriting the flag would hide the grants made after the first.
+///
+/// Says what was allowed and for how long, and stops. The count and the audit
+/// trail are the activity feed's job, one screen up.
+class _GrantEcho extends StatelessWidget {
+  const _GrantEcho({required this.granted});
+
+  /// Commands, absolute paths and hosts, as the bridge joined them.
+  final String granted;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    // Full width so the lines start on the field's own left edge; the column
+    // around it centres anything that sizes to its child.
+    return SizedBox(
+      width: double.infinity,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          AbTokens.space16,
+          0,
+          AbTokens.space16,
+          AbTokens.space8,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Also allowed for the rest of this session:',
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXs,
+                color: p.textSecondary,
+              ),
+            ),
+            Text(
+              granted,
+              // Clipped rather than wrapped away: a wide instruction can name more
+              // than fits, and the bridge appends its own "+N more" so the sample
+              // says how much it left out wherever it is read.
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: AbTokens.monoStyle(
+                fontSize: AbTokens.fontXs,
+                color: p.textSecondary,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The literals a grant row carries, wherever the bridge put them: a lone lift
+/// rides in the reason — the feed row leads with it rather than with a count of
+/// one — and anything wider is sampled into the detail.
+String _grantLiterals(HandlerActivityRecord r) {
+  final detail = r.detail?.trim() ?? '';
+  return detail.isEmpty ? r.reason : detail;
 }
 
 /// Handler acts first and is read hours later, so there is no review step in
@@ -1184,8 +1313,7 @@ const _itemGoneReason =
 /// Neither, as far as the snapshot on screen can tell — the project is no
 /// longer warm under the sheet, or the service went down with it. Named by what
 /// the user watched happen rather than by a cause this side cannot establish.
-const _sendFailedReason =
-    "The edit didn't reach this session. $_keepYourWords";
+const _sendFailedReason = "The edit didn't reach this session. $_keepYourWords";
 
 /// Emptying the field is a deliberate gesture (select all, delete, retype) and
 /// the point in it where Save dies is the first keystroke, long before the

@@ -127,6 +127,27 @@ void _emitDisarmed(ProjectSession session) {
 FakeAgentTransport _transportOf(ProjectSession session) =>
     session.transport as FakeAgentTransport;
 
+/// One `handler:activity` row. The §5.4 grant the bridge records for an
+/// instruction arrives on this wire, before any status snapshot: the lift is
+/// taken from the raw sentence, and the extraction that follows it is a headless
+/// CLI run away.
+void _emitGrant(
+  ProjectSession session, {
+  String recordId = 'g1',
+  String reason = '1 destructive command and 1 host',
+  String? detail = 'rm -rf · logs.example.com',
+}) {
+  _transportOf(session).emit('handler:activity', {
+    'projectId': 'p',
+    'recordId': recordId,
+    'at': 5,
+    'terminalId': 't1',
+    'decision': 'instruction_authorized',
+    'reason': reason,
+    'detail': ?detail,
+  });
+}
+
 /// The session list the drawer titles itself from. Emitted separately from the
 /// handler snapshot because the two are separate wires: a terminal is armed
 /// long before — or entirely without — a `session:list` the app has read, and
@@ -575,19 +596,23 @@ void main() {
   // likeliest moment of all for this sheet to be open. Inviting the user to add
   // what they want done here gets the session's own opening sentence retyped,
   // and the extraction already running appends it a second time.
-  testWidgets('an empty list under a goal points at the goal, not at the field', (
-    tester,
-  ) async {
-    final session = await _armedSession(const []);
-    await _pumpDrawer(tester, session);
+  testWidgets(
+    'an empty list under a goal points at the goal, not at the field',
+    (tester) async {
+      final session = await _armedSession(const []);
+      await _pumpDrawer(tester, session);
 
-    expect(find.text('Working towards: ship the fix'), findsOneWidget);
-    expect(find.text('Nothing queued beyond the goal above.'), findsOneWidget);
-    expect(
-      find.text("Add what you want done while you're away."),
-      findsNothing,
-    );
-  });
+      expect(find.text('Working towards: ship the fix'), findsOneWidget);
+      expect(
+        find.text('Nothing queued beyond the goal above.'),
+        findsOneWidget,
+      );
+      expect(
+        find.text("Add what you want done while you're away."),
+        findsNothing,
+      );
+    },
+  );
 
   // A notify-only session escalates every pause and injects nothing, so a
   // backlog on one is a list the user works through themselves.
@@ -667,9 +692,10 @@ void main() {
   // message TYPE a preset chip produces. A chip that grew its own verb would
   // route around every rule that applies to instructions.
   group('instructing', () {
-    List<Map<String, dynamic>> instructs(ProjectSession session) => _transportOf(
-      session,
-    ).sent.where((m) => m['type'] == 'handler:instruct').toList();
+    List<Map<String, dynamic>> instructs(ProjectSession session) =>
+        _transportOf(
+          session,
+        ).sent.where((m) => m['type'] == 'handler:instruct').toList();
 
     /// The one `handler:instruct` the drawer sent.
     Map<String, dynamic> sentInstruct(ProjectSession session) =>
@@ -1172,13 +1198,17 @@ void main() {
     }
 
     AbButton saveButton(WidgetTester tester) => tester.widget<AbButton>(
-      find.ancestor(of: find.text('Save item'), matching: find.byType(AbButton)),
+      find.ancestor(
+        of: find.text('Save item'),
+        matching: find.byType(AbButton),
+      ),
     );
 
     Map<String, dynamic> editedItem(ProjectSession session, String id) =>
-        ((_sentConfigure(session)['backlog'] as List)
-                .firstWhere((i) => (i as Map)['id'] == id)
-            as Map)
+        ((_sentConfigure(session)['backlog'] as List).firstWhere(
+                  (i) => (i as Map)['id'] == id,
+                )
+                as Map)
             .cast<String, dynamic>();
 
     testWidgets('replaces the item text and nothing else about the item', (
@@ -1257,7 +1287,10 @@ void main() {
       )!;
 
       await openEditor(tester, 1);
-      await tester.enterText(editorFields().first, 'commit the fix on a branch');
+      await tester.enterText(
+        editorFields().first,
+        'commit the fix on a branch',
+      );
       await tester.pumpAndSettle();
 
       // An instruction lands mid-edit. A replace sent now would delete the
@@ -1283,7 +1316,9 @@ void main() {
       await tester.tap(find.text('Save item'));
       await tester.pumpAndSettle();
       expect(
-        _transportOf(session).sent.where((m) => m['type'] == 'handler:configure'),
+        _transportOf(
+          session,
+        ).sent.where((m) => m['type'] == 'handler:configure'),
         isEmpty,
       );
       // Still on screen, still holding what was typed.
@@ -1360,7 +1395,13 @@ void main() {
 
       await openEditor(tester, 1);
 
-      expect(find.descendant(of: find.byType(Dialog), matching: find.textContaining('epend')), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byType(Dialog),
+          matching: find.textContaining('epend'),
+        ),
+        findsNothing,
+      );
       expect(
         tester
             .widgetList<AbIcon>(
@@ -1461,7 +1502,10 @@ void main() {
       await _pumpDrawer(tester, session);
 
       await openEditor(tester, 1);
-      await tester.enterText(editorFields().first, 'commit the fix on a branch');
+      await tester.enterText(
+        editorFields().first,
+        'commit the fix on a branch',
+      );
       await tester.pumpAndSettle();
 
       // Nothing is outstanding, so the hold has nothing to say here: without
@@ -1492,7 +1536,10 @@ void main() {
       await _pumpDrawer(tester, session);
 
       await openEditor(tester, 1);
-      await tester.enterText(editorFields().first, 'commit the fix on a branch');
+      await tester.enterText(
+        editorFields().first,
+        'commit the fix on a branch',
+      );
       await tester.pumpAndSettle();
 
       // The product's own two-client case: the same user's phone drops the row
@@ -1511,7 +1558,9 @@ void main() {
       // A replace built from a list the item has left is a list replaced with
       // itself: it would report success for an edit that never happened.
       expect(
-        _transportOf(session).sent.where((m) => m['type'] == 'handler:configure'),
+        _transportOf(
+          session,
+        ).sent.where((m) => m['type'] == 'handler:configure'),
         isEmpty,
       );
       expect(find.byType(Dialog), findsOneWidget);
@@ -1530,7 +1579,10 @@ void main() {
       )!;
 
       await openEditor(tester, 1);
-      await tester.enterText(editorFields().first, 'commit the fix on a branch');
+      await tester.enterText(
+        editorFields().first,
+        'commit the fix on a branch',
+      );
       await tester.pumpAndSettle();
 
       // The project goes cold under the open sheet — an LRU eviction, a host
@@ -1552,7 +1604,9 @@ void main() {
       );
       expect(saveButton(tester).onTap, isNull);
       expect(
-        _transportOf(session).sent.where((m) => m['type'] == 'handler:configure'),
+        _transportOf(
+          session,
+        ).sent.where((m) => m['type'] == 'handler:configure'),
         isEmpty,
       );
       expect(
@@ -1572,10 +1626,7 @@ void main() {
       // clusters, so a counter measuring String.length would report the field
       // 400 characters over a cap it was still accepting keystrokes under —
       // which is the broken-field report the counter exists to prevent.
-      await tester.enterText(
-        editorFields().first,
-        '🙂' * handlerMaxItemChars,
-      );
+      await tester.enterText(editorFields().first, '🙂' * handlerMaxItemChars);
       await tester.pumpAndSettle();
 
       expect(find.text('0 characters left'), findsOneWidget);
@@ -1642,6 +1693,176 @@ void main() {
       expect(
         editedItem(session, 'i5')['text'],
         ('commit and push the fix ' * 16).trim(),
+      );
+    });
+  });
+
+  // The composer is where session-long permission is granted, and the sentence
+  // that grants it reads as a chore. The echo is the only place that fact is
+  // put in front of the user at the moment they cause it.
+  group('grant echo', () {
+    testWidgets('a grant made by the sentence just sent is echoed', (
+      tester,
+    ) async {
+      final session = await _armedSession(const [_tests]);
+      await _pumpDrawer(tester, session);
+
+      await tester.tap(find.text('Clean Build'));
+      await tester.pump();
+      _emitGrant(session);
+      await tester.pump();
+
+      expect(
+        find.text('Also allowed for the rest of this session:'),
+        findsOneWidget,
+      );
+      expect(find.text('rm -rf · logs.example.com'), findsOneWidget);
+      // On the field's own left edge. The column around this centres anything
+      // that sizes to its child, and both lines are narrower than the sheet.
+      expect(
+        tester
+            .getTopLeft(find.text('Also allowed for the rest of this session:'))
+            .dx,
+        tester.getTopLeft(find.byType(AbTextField)).dx,
+      );
+    });
+
+    testWidgets('a lone lift is echoed from the reason it rides in', (
+      tester,
+    ) async {
+      // One grant is the feed row's title and carries no detail — a count of
+      // one says nothing the literal doesn't — so the echo reads it there.
+      final session = await _armedSession(const [_tests]);
+      await _pumpDrawer(tester, session);
+
+      await tester.tap(find.text('Clean Build'));
+      await tester.pump();
+      _emitGrant(session, reason: 'rm -rf', detail: null);
+      await tester.pump();
+
+      expect(find.text('rm -rf'), findsOneWidget);
+    });
+
+    testWidgets('a sampled grant echoes what it left out', (tester) async {
+      // The feed row keeps the totals in its title; this line is on its own, so
+      // the sample has to carry its own marker or 8 entries read as all 20.
+      final session = await _armedSession(const [_tests]);
+      await _pumpDrawer(tester, session);
+
+      await tester.tap(find.text('Clean Build'));
+      await tester.pump();
+      _emitGrant(
+        session,
+        reason: '20 hosts',
+        detail: 'a.example.com · b.example.com +18 more',
+      );
+      await tester.pump();
+
+      expect(
+        find.text('a.example.com · b.example.com +18 more'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a sentence that granted nothing echoes nothing', (
+      tester,
+    ) async {
+      final session = await _armedSession(const [_tests]);
+      await _pumpDrawer(tester, session);
+
+      await tester.tap(find.text('Clean Build'));
+      await tester.pump();
+
+      expect(find.textContaining('Also allowed'), findsNothing);
+    });
+
+    testWidgets('a grant already in the feed is history, not an echo', (
+      tester,
+    ) async {
+      // Opening the sheet is not an act that granted anything, and a standing
+      // line over the field would be a permissions surface this sheet does not
+      // offer.
+      final session = await _armedSession(const [_tests]);
+      await _pumpDrawer(tester, session);
+
+      _emitGrant(session);
+      await tester.pump();
+
+      expect(find.textContaining('Also allowed'), findsNothing);
+    });
+
+    testWidgets('a standing grant is not re-attributed to the next send', (
+      tester,
+    ) async {
+      // The anchor's job. Without it the next sentence inherits whatever the
+      // feed already held and claims a permission it never took.
+      final session = await _armedSession(const [_tests]);
+      await _pumpDrawer(tester, session);
+
+      _emitGrant(session);
+      await tester.pump();
+      await tester.tap(find.text('Clean Build'));
+      await tester.pump();
+
+      expect(find.textContaining('Also allowed'), findsNothing);
+    });
+
+    testWidgets('the echo names the newer grant, not the one it followed', (
+      tester,
+    ) async {
+      final session = await _armedSession(const [_tests]);
+      await _pumpDrawer(tester, session);
+
+      _emitGrant(session, recordId: 'old', detail: 'git clean -fd');
+      await tester.pump();
+      await tester.tap(find.text('Clean Build'));
+      await tester.pump();
+      _emitGrant(session, recordId: 'new', detail: 'rm -rf');
+      await tester.pump();
+
+      expect(find.text('rm -rf'), findsOneWidget);
+      expect(find.text('git clean -fd'), findsNothing);
+    });
+
+    testWidgets('a grant landing after the sentence retired is not echoed', (
+      tester,
+    ) async {
+      // `handler:instruct` reaches this terminal from the phone too, and the
+      // field must not report that device's lift as its own doing.
+      final session = await _armedSession(const [_tests]);
+      await _pumpDrawer(tester, session);
+
+      await tester.tap(find.text('Clean Build'));
+      await tester.pump();
+      _emitStatus(session, const [_tests, _extracted]);
+      await tester.pump();
+      _emitGrant(session, recordId: 'phone', detail: 'git push --force');
+      await tester.pump();
+
+      expect(find.textContaining('Also allowed'), findsNothing);
+    });
+
+    testWidgets('the echo survives the disclaimer being dismissed', (
+      tester,
+    ) async {
+      // The disclaimer's flag retires one notice the user has read; this line
+      // says something new each time, so it must not inherit it.
+      final session = await _armedSession(const [_tests]);
+      final firstRun = await FirstRunStore.open();
+      await firstRun.write(
+        const FirstRunState(handlerDisclaimerDismissed: true),
+      );
+      await _pumpDrawer(tester, session, firstRun: firstRun);
+
+      await tester.tap(find.text('Clean Build'));
+      await tester.pump();
+      _emitGrant(session);
+      await tester.pump();
+
+      expect(find.text(handlerDisclaimerText), findsNothing);
+      expect(
+        find.text('Also allowed for the rest of this session:'),
+        findsOneWidget,
       );
     });
   });

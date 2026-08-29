@@ -847,36 +847,58 @@ String _itemDecisionLabel(String decision) {
 }
 
 /// What one activity row says, and in what tone.
-(String, Color?) _activityTitle(HandlerActivityRecord r, AbColors p) =>
-    switch (r.decision) {
-      'armed' => ('Armed', null),
-      'goal_edited' => ('Goal edited', null),
-      'handle' => ('Auto-answered: ${r.reason}', null),
-      'escalate' => ('Escalated: ${r.reason}', null),
-      // Skipped and failed read exactly like done, deliberately: §4.3 requires
-      // a skip to be as visible as a completion, or "3 items skipped as moot"
-      // becomes the summary an assistant that simply gave up would also write.
-      'item_done' ||
-      'item_blocked' ||
-      'item_skipped' ||
-      'item_failed' => ('${_itemDecisionLabel(r.decision)}: ${r.reason}', null),
-      // Work the user asked for that will never be tracked. The status snapshot
-      // that follows is identical to the one before, so this row is the only
-      // place the instruction leaves a trace.
-      'instruction_dropped' => ('Instruction dropped: ${r.reason}', null),
-      // Advisory floor hit (spec §5.1). The action went through — this row is
-      // the audit trail prevention was traded for, so it is never conditional
-      // on what Handler decided afterwards.
-      'floor_warning' => ('Flagged: ${r.reason}', p.warning),
-      // A completion the harness refused to bank. The status snapshot that
-      // follows is identical to the one before it, so this row is the only trace
-      // of a session that will now not wrap up on its own.
-      'evidence_rejected' => ('Completion not verified: ${r.reason}', p.warning),
-      'wrapped_up' => ('Wrapped up', null),
-      'parked' => ('Paused: ${r.reason}', null),
-      'resumed' => ('Resumed: ${r.reason}', null),
-      _ => (r.reason, null),
-    };
+(String, Color?) _activityTitle(
+  HandlerActivityRecord r,
+  AbColors p,
+) => switch (r.decision) {
+  'armed' => ('Armed', null),
+  'goal_edited' => ('Goal edited', null),
+  // The pass that decided nothing needed doing, and the most frequent row in
+  // the feed by a wide margin. It keeps the judge's reason — that is the only
+  // trace of what Handler saw while the user was away — but takes the muted
+  // tone, because a feed scanned for what went wrong has to be skimmable past
+  // the rows where nothing did.
+  //
+  // Named off the run state rather than in words of its own: the header pill
+  // above this feed says "Watching" for the same state, and two spellings on
+  // one screen read as two different sessions.
+  'continue' => (
+    '${handlerRunStateLabel(HandlerRunState.watching)}: ${r.reason}',
+    p.textMuted,
+  ),
+  'handle' => ('Auto-answered: ${r.reason}', null),
+  'escalate' => ('Escalated: ${r.reason}', null),
+  // Skipped and failed read exactly like done, deliberately: §4.3 requires
+  // a skip to be as visible as a completion, or "3 items skipped as moot"
+  // becomes the summary an assistant that simply gave up would also write.
+  'item_done' ||
+  'item_blocked' ||
+  'item_skipped' ||
+  'item_failed' => ('${_itemDecisionLabel(r.decision)}: ${r.reason}', null),
+  // Work the user asked for that will never be tracked. The status snapshot
+  // that follows is identical to the one before, so this row is the only
+  // place the instruction leaves a trace.
+  'instruction_dropped' => ('Instruction dropped: ${r.reason}', null),
+  // What an instruction permitted, beside what it asked for. "Clear out the
+  // build dir" reads as a chore and also lifts the flag off that command for
+  // the whole session, so the scope is stated rather than the act alone. The
+  // bridge puts a lone lift in the reason and the totals there only once
+  // there is more than one — so this row leads with what was allowed, the
+  // same way round as the `floor_warning` row about the same command.
+  'instruction_authorized' => ('Allowed for this session: ${r.reason}', null),
+  // Advisory floor hit (spec §5.1). The action went through — this row is
+  // the audit trail prevention was traded for, so it is never conditional
+  // on what Handler decided afterwards.
+  'floor_warning' => ('Flagged: ${r.reason}', p.warning),
+  // A completion the harness refused to bank. The status snapshot that
+  // follows is identical to the one before it, so this row is the only trace
+  // of a session that will now not wrap up on its own.
+  'evidence_rejected' => ('Completion not verified: ${r.reason}', p.warning),
+  'wrapped_up' => ('Wrapped up', null),
+  'parked' => ('Paused: ${r.reason}', null),
+  'resumed' => ('Resumed: ${r.reason}', null),
+  _ => (r.reason, null),
+};
 
 /// The glyph in the reserved rail. It earns the width the rail costs on every
 /// row: the feed is scanned for one kind of entry at a time far more often than
@@ -885,6 +907,9 @@ String _itemDecisionLabel(String decision) {
     switch (r.decision) {
       'armed' => (AbIcons.shield, p.accent),
       'goal_edited' => (AbIcons.list, p.textMuted),
+      // Watched, nothing sent. The one glyph in the rail that stands for an
+      // absence of action, so a column of them is what the eye skips over.
+      'continue' => (AbIcons.eye, p.textMuted),
       'handle' => (AbIcons.send, p.accent),
       'escalate' => (AbIcons.bell, p.accent),
       'item_done' => (AbIcons.check, p.success),
@@ -892,6 +917,11 @@ String _itemDecisionLabel(String decision) {
       'item_failed' => (AbIcons.error, p.error),
       'item_skipped' => (AbIcons.close, p.textMuted),
       'instruction_dropped' => (AbIcons.warning, p.textMuted),
+      // A key, not a shield: `armed` already owns the accent shield, and a feed
+      // scanned one kind of row at a time cannot be asked to tell two identical
+      // glyphs apart by what a session had already done. Permission, not alarm.
+      'instruction_authorized' => (AbIcons.password, p.accent),
+      // The remit being tested. Shield in the warning tone, beside `armed`'s.
       'floor_warning' => (AbIcons.shield, p.warning),
       'evidence_rejected' => (AbIcons.warning, p.warning),
       'wrapped_up' => (AbIcons.check, p.textMuted),
@@ -915,10 +945,17 @@ Widget? _activitySubtitle(HandlerActivityRecord r, AbColors p) {
     case 'goal_edited':
     case 'wrapped_up':
     case 'resumed':
+    // The judge's reason is the whole of a continue row and it is already the
+    // title; the bridge sends no detail with one, and inventing a second line
+    // for the feed's most repeated row would cost the rows around it.
+    case 'continue':
       return null;
     case 'handle':
       return detail == null ? null : Text('→ $detail', style: mono);
     case 'floor_warning':
+    // Commands, absolute paths and hosts — read as data, never as prose, and the
+    // only part of the row a user can check against what they meant to allow.
+    case 'instruction_authorized':
       return detail == null ? null : Text(detail, style: mono);
     case 'parked':
       // The bridge stamps the wake deadline into detail as an ISO instant.
@@ -935,7 +972,11 @@ Widget? _activitySubtitle(HandlerActivityRecord r, AbColors p) {
     case 'evidence_rejected':
       return detail == null ? null : Text(detail, style: sans);
     default:
-      return Text(r.decision, style: mono);
+      // A kind this build has no arm for — a bridge ahead of the app. The row
+      // still says something (its reason is the title), so the fallback prints
+      // whatever came with it rather than the protocol word, which is a name the
+      // user has never seen and cannot act on.
+      return detail == null ? null : Text(detail, style: sans);
   }
 }
 
