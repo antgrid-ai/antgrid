@@ -10,12 +10,13 @@
 // child was spawned to lead one, so each has its own case here and neither can
 // stand in for the other.
 import { describe, test, expect } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { TerminalManager } from "../src/terminal-manager";
 import { killChildTree, killProcessTree, processGroupSpawn } from "../src/terminal-session";
+import { listProcessesWithCwdUnder } from "../src/win32-process";
 import { createConnState } from "../src/conn-state";
 import type { AbMessage } from "../src/protocol";
 
@@ -387,4 +388,202 @@ describe("TerminalManager.killAllGracefully", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 60_000);
+});
+
+// The survivor a parent-link walk cannot see. A coding agent's helpers outlive
+// the process that started them, so `taskkill /F /T` — which walks the LIVE
+// parent-child table from a pid — has no tree left to walk to them, while their
+// cwd keeps a checkout subdirectory open and `git worktree remove` dies of a
+// sharing violation. Job membership is inherited at CreateProcess and survives
+// the parent's death, which is why the PTY's job reaches them; nothing short of
+// a real orphan tests that, so these spawn one.
+//
+// Windows-only because the problem is: POSIX has no inherited membership, needs
+// none, and unlinks a directory out from under a running process anyway.
+describe("a PTY's orphans", () => {
+  /** Spawned detached so it survives the middle process, which reaps its own
+   *  attached children on the way out — the field's survivors never were. */
+  const SLEEPER = "setInterval(() => {}, 1e6)";
+
+  /** Spawns the sleeper and exits, leaving it with a dead parent. `spawn` goes
+   *  through libuv's `uv_spawn`, i.e. a direct CreateProcess — the only shape
+   *  that inherits a job (a ShellExecute launch is created by another process
+   *  and joins that one's job instead, which is why this is not a
+   *  `Start-Process` like the tests above). */
+  const MIDDLE = `
+import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+const [cwd, pidFile] = process.argv.slice(2);
+const child = spawn(process.execPath, ["-e", ${JSON.stringify(SLEEPER)}], {
+  cwd,
+  stdio: "ignore",
+  detached: true,
+  windowsHide: true,
+});
+child.unref();
+writeFileSync(pidFile, \`\${child.pid} \${process.pid}\`);
+process.exit(0);
+`;
+
+  /** The PTY's own process: it starts the middle process and then stays up
+   *  until the test releases it, so the kill case has a live leader to kill and
+   *  the natural-exit case has one that leaves on its own. */
+  const LEADER = `
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+const [middle, midCwd, sleeperCwd, pidFile, go] = process.argv.slice(2);
+spawn(process.execPath, [middle, sleeperCwd, pidFile], {
+  cwd: midCwd,
+  stdio: "ignore",
+  windowsHide: true,
+}).unref();
+setInterval(() => { if (existsSync(go)) process.exit(0); }, 100);
+`;
+
+  /** Liveness read off a Toolhelp snapshot rather than `process.kill(pid, 0)`:
+   *  a handle someone still holds keeps an exited pid answerable to OpenProcess,
+   *  so the signal probe reports a corpse as alive. Both processes are given a
+   *  cwd under `root` so the same probe answers for both — and for the sleeper
+   *  it is the property under test outright, since holding that directory is
+   *  what blocks the delete. */
+  function holds(root: string, pid: number): boolean {
+    return listProcessesWithCwdUnder(root).some((p) => p.pid === pid);
+  }
+
+  interface Orphan {
+    root: string;
+    go: string;
+    sleeperPid: number;
+  }
+
+  /** Spawns the terminal and returns once its sleeper is genuinely orphaned. */
+  async function orphanUnder(manager: TerminalManager, dir: string): Promise<Orphan> {
+    const root = join(dir, "held");
+    const midCwd = join(root, "middle");
+    const sleeperCwd = join(root, "sleeper");
+    mkdirSync(midCwd, { recursive: true });
+    mkdirSync(sleeperCwd, { recursive: true });
+    const middle = join(dir, "middle.ts");
+    const leader = join(dir, "leader.ts");
+    writeFileSync(middle, MIDDLE);
+    writeFileSync(leader, LEADER);
+    const pidFile = join(dir, "orphan.pid");
+    const go = join(dir, "go");
+
+    manager.spawn({
+      terminalId: "t1",
+      command: process.execPath,
+      args: [leader, middle, midCwd, sleeperCwd, pidFile, go],
+    });
+
+    const raw = await waitFor(() => readPidFile(pidFile), 30_000);
+    expect(raw).toBeDefined();
+    const [sleeperPid, middlePid] = (raw as string).split(" ").map(Number);
+    expect(Number.isInteger(sleeperPid)).toBe(true);
+    expect(Number.isInteger(middlePid)).toBe(true);
+
+    expect(await waitFor(() => (holds(root, sleeperPid) ? true : undefined), 20_000)).toBe(true);
+    // The parent is gone and the sleeper is not, so no walk from any live pid
+    // reaches it — the exact state taskkill cannot answer for.
+    expect(await waitFor(() => (holds(root, middlePid) ? undefined : true), 20_000)).toBe(true);
+    expect(holds(root, sleeperPid)).toBe(true);
+
+    return { root, go, sleeperPid };
+  }
+
+  function cleanUp(manager: TerminalManager, dir: string, sleeperPid: number | undefined): void {
+    manager.killAll();
+    if (sleeperPid !== undefined) {
+      spawnSync("taskkill", ["/F", "/T", "/PID", String(sleeperPid)], { windowsHide: true });
+    }
+    // Retries because a just-killed holder releases the directory
+    // asynchronously — the very lag that strands a checkout. Hand-rolled
+    // because `rm`'s own `maxRetries`/`retryDelay` are accepted and honoured by
+    // NEITHER on Bun (see `removeWithRetries` in `worktree-manager.ts`), so
+    // passing them would throw EBUSY out of this `finally` over whatever the
+    // test was actually reporting.
+    for (let attempt = 0; attempt < 10; attempt++) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+        break;
+      } catch {
+        Bun.sleepSync(100);
+      }
+    }
+  }
+
+  test.skipIf(process.platform !== "win32")("die with a killed terminal", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "antgrid-orphan-kill-")));
+    const manager = new TerminalManager(() => {}, undefined, createConnState());
+    let sleeperPid: number | undefined;
+    try {
+      const orphan = await orphanUnder(manager, dir);
+      sleeperPid = orphan.sleeperPid;
+
+      await manager.killAndAwaitTree("t1");
+
+      // Bounded rather than immediate: closing the job initiates termination,
+      // and the directory is released a moment behind it. What is ruled out is
+      // a survivor.
+      expect(await waitFor(() => (holds(orphan.root, sleeperPid!) ? undefined : true), 10_000)).toBe(true);
+    } finally {
+      cleanUp(manager, dir, sleeperPid);
+    }
+  }, 90_000);
+
+  // The leak the job actually closes: nobody kills anything here. The agent
+  // finishes by itself, and only the PTY's exit closing the job keeps its
+  // helpers from holding the checkout for as long as the bridge lives.
+  test.skipIf(process.platform !== "win32")("die with a terminal that exits on its own", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "antgrid-orphan-exit-")));
+    const messages: AbMessage[] = [];
+    const manager = new TerminalManager((m) => messages.push(m), undefined, createConnState());
+    let sleeperPid: number | undefined;
+    try {
+      const orphan = await orphanUnder(manager, dir);
+      sleeperPid = orphan.sleeperPid;
+
+      writeFileSync(orphan.go, "");
+
+      expect(
+        await waitFor(
+          () => (messages.some((m) => m.type === "terminal:exited" && m.terminalId === "t1") ? true : undefined),
+          30_000,
+        ),
+      ).toBe(true);
+      expect(await waitFor(() => (holds(orphan.root, sleeperPid!) ? undefined : true), 10_000)).toBe(true);
+    } finally {
+      cleanUp(manager, dir, sleeperPid);
+    }
+  }, 90_000);
+});
+
+// CI runs the bridge suite on ubuntu only, so every case above that proves the
+// job actually reaps a tree is skipped there. These read the source instead —
+// the same countermeasure as the non-blocking-taskkill test — because both
+// invariants below are load-bearing, invisible off Windows, and a revert to
+// either would ship green.
+describe("the PTY job's source invariants", () => {
+  const source = readFileSync(join(import.meta.dir, "../src/terminal-session.ts"), "utf8");
+
+  test("encloses the pid with nothing awaited in between", () => {
+    const spawned = source.indexOf("this.pty = ptySpawn(");
+    const enclosed = source.indexOf("this.encloseInJob(this.pty.pid)");
+    expect(spawned).toBeGreaterThan(-1);
+    expect(enclosed).toBeGreaterThan(spawned);
+    // The child is already running by then, and anything it spawns ahead of the
+    // assignment is created outside the job and stays beyond every sweep.
+    // Comments stripped first — the one above the call says the word.
+    expect(source.slice(spawned, enclosed).replace(/\/\/.*$/gm, "")).not.toContain("await");
+  });
+
+  test("closes the job on a natural exit, not only on a kill", () => {
+    const exitHandler = source.indexOf("this.pty.onExit(");
+    const afterSpawn = source.indexOf("private encloseInJob");
+    expect(exitHandler).toBeGreaterThan(-1);
+    expect(afterSpawn).toBeGreaterThan(exitHandler);
+    // An agent finishing on its own is the common case, and a handle nothing
+    // closes leaks the whole tree it owns.
+    expect(source.slice(exitHandler, afterSpawn)).toContain("this.closeJob()");
+  });
 });

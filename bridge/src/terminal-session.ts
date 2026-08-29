@@ -9,6 +9,7 @@ import { createMessage, type AbMessage } from "./protocol";
 import { findOnPath } from "./tool-detector";
 import { TerminalNotificationScanner, type NotificationEvent } from "./notification-scanner";
 import { VtCapabilityResponder } from "./vt-capability-responder";
+import { createKillOnCloseJob, type Win32Job } from "./win32-process";
 
 /**
  * When ANTGRID_DEBUG_PTY_LOG is set, every PTY output chunk is appended to that
@@ -77,10 +78,15 @@ export function processGroupSpawn(platform: NodeJS.Platform = process.platform):
  *
  * The two platforms are reached differently and fail differently. Windows walks
  * parent links, so the tree must die BEFORE the leader: once the leader exits
- * its children are re-parented out of reach. POSIX names the process group,
- * which needs no ordering — but a pid that leads no group names no group, and
- * the signal is then a harmless ESRCH that quietly reaches nothing. That is why
- * callers spawning outside a PTY must pass `processGroupSpawn()`.
+ * its children are re-parented out of reach. It walks the LIVE table, so a
+ * process whose parent has ALREADY exited is unreachable to it whatever the
+ * ordering — and those orphans are the ordinary survivors of an agent session.
+ * That half is covered by the kill-on-close job every Windows PTY is also
+ * enclosed in (`TerminalSession.spawn`); this function is one of the two
+ * sweeps, never the whole of it. POSIX names the process group, which needs no
+ * ordering — but a pid that leads no group names no group, and the signal is
+ * then a harmless ESRCH that quietly reaches nothing. That is why callers
+ * spawning outside a PTY must pass `processGroupSpawn()`.
  *
  * The kill is issued synchronously on both platforms; only the WAITING is
  * deferred. The promise resolves once taskkill has exited, so a caller that
@@ -386,6 +392,9 @@ export class TerminalSession {
   private pty: IPty | null = null;
   private disposables: IDisposable[] = [];
   private treeKilledPromise: Promise<void> = Promise.resolve();
+  /** Windows only, and only while this session owns a live tree — see
+   *  `encloseInJob`. Null everywhere else. */
+  private job: Win32Job | null = null;
 
   // Output batching — collect chunks, join on flush
   private batchChunks: string[] = [];
@@ -556,6 +565,11 @@ export class TerminalSession {
       name: "xterm-256color",
     });
 
+    // First statement after the pid exists, and nothing may await before it:
+    // the child is already running, and anything it spawns ahead of the
+    // assignment is created outside the job and stays beyond every sweep.
+    this.encloseInJob(this.pty.pid);
+
     this._running = true;
 
     this.onMessage(
@@ -602,6 +616,11 @@ export class TerminalSession {
         this._running = false;
         this.flushBatch();
         this.dispose();
+        // An exit nobody asked for takes the tree with it too: an agent that
+        // finishes on its own is the common case, and the helpers it leaves
+        // behind hold a checkout subdirectory open — which on Windows is
+        // exactly what makes that checkout undeletable.
+        this.closeJob();
         log.info(`Terminal "${this.terminalId}" exited with code ${exitCode}`);
         this.onMessage(
           createMessage("terminal:exited", {
@@ -611,6 +630,59 @@ export class TerminalSession {
         );
       })
     );
+  }
+
+  /**
+   * Enclose the PTY's tree in a job the kernel empties when this session is
+   * finished with it.
+   *
+   * `killProcessTree` walks live parent links, which by construction cannot
+   * reach a process whose parent has already exited — and those are the
+   * ordinary survivors here. An agent's helpers (sandbox command runners,
+   * analysis servers) outlive the PTY holding a checkout subdirectory as their
+   * current directory, and Windows refuses to delete a directory that is any
+   * process's cwd, so `git worktree remove` aborts and the isolated session
+   * becomes undeletable. Job membership is inherited at `CreateProcess` and
+   * survives the parent's death, so a job reaches exactly what the walk
+   * cannot. It narrows the failure rather than closing it: a child created
+   * through `ShellExecute` is spawned by another process entirely and joins
+   * that one's job.
+   *
+   * The pid is the right root: bun-pty reports the SHELL it spawned, and the
+   * ConPTY's `conhost.exe` is a sibling created by this process that carries
+   * our cwd, not the PTY's — measured, so it holds no checkout to begin with.
+   *
+   * Inert off Windows, where the process group already reaches the tree and an
+   * orphan blocks no delete, and inert whenever the Win32 layer failed to
+   * load: `createKillOnCloseJob` answers null for both, so a spawn proceeds
+   * exactly as it does with no job at all.
+   */
+  private encloseInJob(pid: number): void {
+    // A second spawn into this session replaces the tree the old handle owns.
+    this.closeJob();
+    const job = createKillOnCloseJob();
+    if (job === null) return;
+    // A kill-on-close job with no members is a kernel object with nothing to
+    // reap — drop it rather than hold a handle for a tree it does not own.
+    if (!job.assign(pid)) {
+      job.close();
+      return;
+    }
+    this.job = job;
+  }
+
+  /**
+   * Closing the handle IS the reap: every member still running dies with it,
+   * orphans included. Cleared from the session in the same step, so the handle
+   * is closed exactly once however many teardown paths reach it.
+   *
+   * Nothing here runs when the bridge is force-killed, and nothing needs to —
+   * the kernel closes our handles as it reaps us, which sweeps every PTY tree
+   * on the one path that skips all shutdown code.
+   */
+  private closeJob(): void {
+    this.job?.close();
+    this.job = null;
   }
 
   private enqueueBatch(data: string): void {
@@ -723,7 +795,20 @@ export class TerminalSession {
     // Captured before the chain so a later respawn reassigning `this.pty`
     // cannot redirect the deferred handle kill at the new PTY.
     const pty = this.pty;
-    if (!pty) return;
+    // Taken off the session for the same reason, and so the exit this kill
+    // provokes finds nothing left to close.
+    const job = this.job;
+    this.job = null;
+    if (!pty) {
+      job?.close();
+      return;
+    }
+    // A re-kill finds the job already taken, so its own chain closes nothing —
+    // and `treeKilled` is read by whoever asks LAST. Chaining the previous
+    // promise in is what keeps that read covering the job close: without it a
+    // second kill lands a promise that resolves while the first chain, the only
+    // one holding the handle, is still walking the tree.
+    const previous = this.treeKilledPromise;
     this.treeKilledPromise = killProcessTree(pty.pid).then(() => {
       try {
         pty.kill();
@@ -731,6 +816,12 @@ export class TerminalSession {
         // On Windows `taskkill /T` normally reaped the leader already, so this
         // lands on a dead handle by design rather than by accident.
       }
+      // Last, so the parent-link walk above still runs against a live tree.
+      // The job is the backstop for what that walk cannot see — an orphan
+      // whose parent is already gone — never a replacement for it, and
+      // `treeKilled` therefore still resolves only once both have been issued.
+      job?.close();
+      return previous;
     });
   }
 }
