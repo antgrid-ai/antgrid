@@ -131,28 +131,30 @@ Future<Uint8List?> compositePreviewMarks({
 }) async {
   if (marks.isEmpty) return screenshot;
 
-  final ui.Image image;
+  ui.Codec? codec;
+  ui.Image? image;
+  ui.Image? flattened;
+  ui.Picture? picture;
   try {
-    final codec = await ui.instantiateImageCodec(screenshot);
+    codec = await ui.instantiateImageCodec(screenshot);
     image = (await codec.getNextFrame()).image;
-  } on Object {
-    return null;
-  }
-
-  final scale = overlaySize.width > 0 ? image.width / overlaySize.width : 1.0;
-  final recorder = ui.PictureRecorder();
-  final canvas = Canvas(recorder);
-  canvas.drawImage(image, Offset.zero, Paint());
-  paintPreviewMarks(canvas, marks, scale);
-  final picture = recorder.endRecording();
-  try {
-    final flattened = await picture.toImage(image.width, image.height);
+    final scale =
+        overlaySize.width > 0 ? image.width / overlaySize.width : 1.0;
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    canvas.drawImage(image, Offset.zero, Paint());
+    paintPreviewMarks(canvas, marks, scale);
+    picture = recorder.endRecording();
+    flattened = await picture.toImage(image.width, image.height);
     final data = await flattened.toByteData(format: ui.ImageByteFormat.png);
     return data?.buffer.asUint8List();
   } on Object {
     return null;
   } finally {
-    picture.dispose();
+    picture?.dispose();
+    flattened?.dispose();
+    image?.dispose();
+    codec?.dispose();
   }
 }
 

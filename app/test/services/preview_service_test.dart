@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/demo/demo_identity.dart';
 import 'package:antgrid/models/preview_models.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/preview_service.dart';
@@ -409,6 +410,54 @@ void main() {
 
       await svc.closeTab(3000);
       await svc.closeTab(4000);
+      await sub.cancel();
+      await session.close();
+    });
+
+    test('a silent or ignored detected port does not open a tab', () async {
+      final t = _LocalFakeTransport();
+      final session = await _newSession(t);
+      final svc = session.previewService;
+      final sub = session.heavyStream.listen((_) {});
+
+      for (final onDetect in ['silent', 'ignore']) {
+        t.emitJson({
+          'id': 'detected-$onDetect',
+          'timestamp': 0,
+          'type': 'port:detected',
+          'projectId': 'p',
+          'port': onDetect == 'silent' ? 3000 : 4000,
+          'url': 'http://localhost:${onDetect == 'silent' ? 3000 : 4000}',
+          'scheme': 'http',
+          'source': 'output',
+          'attributes': {'onDetect': onDetect},
+        });
+      }
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.tabs, isEmpty);
+
+      await sub.cancel();
+      await session.close();
+    });
+
+    test('demo ports remain listed without opening a localhost tab', () async {
+      final t = _LocalFakeTransport();
+      final session = await _newSession(t, projectId: kDemoProjectId);
+      final svc = session.previewService;
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('ports:update', {
+        'projectId': kDemoProjectId,
+        'ports': [
+          {'port': 3000, 'scheme': 'http', 'onDetect': 'notify'},
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.ports.single.port, 3000);
+      expect(svc.currentState.tabs, isEmpty);
+
       await sub.cancel();
       await session.close();
     });

@@ -28,6 +28,7 @@ import '../providers/agent_transport.dart';
 import '../providers/providers.dart';
 import '../providers/recent_ports.dart';
 import '../providers/visible_surface.dart';
+import '../util/detached.dart';
 import '../util/external_url.dart';
 import '../utils/platform_utils.dart';
 import '../widgets/preview_tab_bar.dart';
@@ -98,9 +99,18 @@ class _ScreenshotCapture {
   final int port;
   final Completer<Uint8List> completer = Completer<Uint8List>();
   List<String?> chunks = [];
+  int dataChars = 0;
 }
 
 class _PreviewScreenState extends ConsumerState<PreviewScreen> {
+  static const _screenshotChunkChars = 200000;
+  static const _maxScreenshotBytes = 20 * 1024 * 1024;
+  static const _maxScreenshotDataChars =
+      ((_maxScreenshotBytes + 2) ~/ 3) * 4 + 64;
+  static const _maxScreenshotChunks =
+      (_maxScreenshotDataChars + _screenshotChunkChars - 1) ~/
+          _screenshotChunkChars;
+
   final Map<int, _TabWebViewState> _tabStates = {};
 
   /// Port of the tab the element picker is currently armed on, or null. A
@@ -616,8 +626,11 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
                     },
                   ),
                   onClose: () => setState(() => _drawActiveForPort = null),
-                  onSend: (bytes) =>
-                      unawaited(_sendDrawing(active.port, bytes)),
+                  onSend: (bytes) => detached(
+                    'PreviewScreen',
+                    'send drawing',
+                    () => _sendDrawing(active.port, bytes),
+                  ),
                 ),
               ),
           ],
@@ -808,10 +821,18 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     final state = ref.read(previewStateProvider).value;
     if (state == null || port != state.activeTabId) return;
 
-    final selectedText = formatPickedElement(decoded);
+    final picked = decoded;
+    final selectedText = formatPickedElement(picked);
     final sourceUrl = _tabStates[port]?.currentUrl ?? '';
-    unawaited(
-      _sendPickedElement(port, selectedText, sourceUrl, pickedRegion(decoded)),
+    detached(
+      'PreviewScreen',
+      'send picked element',
+      () => _sendPickedElement(
+        port,
+        selectedText,
+        sourceUrl,
+        pickedRegion(picked),
+      ),
     );
   }
 
@@ -890,15 +911,39 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         );
       case 'start':
         final total = decoded['totalChunks'];
-        if (total is int && total > 0) {
-          capture.chunks = List<String?>.filled(total, null);
+        if (capture.chunks.isNotEmpty ||
+            total is! int ||
+            total <= 0 ||
+            total > _maxScreenshotChunks) {
+          capture.completer.completeError(
+            StateError('invalid screenshot capture size'),
+          );
+          return;
         }
+        capture.chunks = List<String?>.filled(total, null);
       case 'chunk':
         final seq = decoded['seq'];
         final data = decoded['data'];
-        if (seq is int && data is String && seq < capture.chunks.length) {
-          capture.chunks[seq] = data;
+        if (seq is! int ||
+            data is! String ||
+            seq < 0 ||
+            seq >= capture.chunks.length ||
+            data.length > _screenshotChunkChars) {
+          capture.completer.completeError(
+            StateError('invalid screenshot capture chunk'),
+          );
+          return;
         }
+        final replaced = capture.chunks[seq]?.length ?? 0;
+        final dataChars = capture.dataChars - replaced + data.length;
+        if (dataChars > _maxScreenshotDataChars) {
+          capture.completer.completeError(
+            StateError('screenshot capture is too large'),
+          );
+          return;
+        }
+        capture.chunks[seq] = data;
+        capture.dataChars = dataChars;
       case 'end':
         if (capture.chunks.isEmpty || capture.chunks.any((c) => c == null)) {
           capture.completer.completeError(
@@ -908,7 +953,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         }
         final dataUrl = capture.chunks.join();
         final comma = dataUrl.indexOf(',');
-        if (comma < 0) {
+        if (!dataUrl.startsWith('data:image/png;base64,') || comma < 0) {
           capture.completer.completeError(StateError('malformed data URL'));
           return;
         }
@@ -935,12 +980,16 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     WebViewController controller, {
     void Function(String reason)? onError,
   }) async {
+    if (_screenshotCapture != null) {
+      onError?.call('another screenshot capture is already in progress');
+      return null;
+    }
     if (_pickerActiveForPort == port) {
       unawaited(controller.runJavaScript(kElementPickerStopScript));
       setState(() => _pickerActiveForPort = null);
     }
     final capture = _ScreenshotCapture(port);
-    _screenshotCapture = capture;
+    setState(() => _screenshotCapture = capture);
     try {
       unawaited(controller.runJavaScript(kScreenshotCaptureScript));
       return await capture.completer.future.timeout(
@@ -950,7 +999,13 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
       onError?.call('$e');
       return null;
     } finally {
-      if (_screenshotCapture == capture) _screenshotCapture = null;
+      if (_screenshotCapture == capture) {
+        if (mounted) {
+          setState(() => _screenshotCapture = null);
+        } else {
+          _screenshotCapture = null;
+        }
+      }
     }
   }
 
@@ -1028,6 +1083,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
     final activeState = state.activeTabId != null
         ? _tabStates[state.activeTabId]
         : null;
+    final captureInFlight = _screenshotCapture != null;
 
     // Desktop-only, and only while driving THIS device's own dev server —
     // opening the tunnel proxy's URL in the controller's own system browser
@@ -1098,7 +1154,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
                     selected:
                         _pickerActiveForPort != null &&
                         _pickerActiveForPort == activeTab?.port,
-                    onTap: activeTab == null
+                    onTap: activeTab == null || captureInFlight
                         ? null
                         : () => _togglePicker(activeTab, activeState),
                   ),
@@ -1108,7 +1164,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
                     selected:
                         _drawActiveForPort != null &&
                         _drawActiveForPort == activeTab?.port,
-                    onTap: activeTab == null
+                    onTap: activeTab == null || captureInFlight
                         ? null
                         : () => _toggleDraw(activeTab, activeState),
                   ),
@@ -1196,7 +1252,7 @@ class _PreviewScreenState extends ConsumerState<PreviewScreen> {
         hasPreviewService: preview != null,
         onNewPort: _startComposingNewTab,
         onRefresh: () => activeState?.controller?.reload(),
-        onDraw: activeTab == null
+        onDraw: activeTab == null || _screenshotCapture != null
             ? null
             : () => _toggleDraw(activeTab, activeState),
         drawArmed:

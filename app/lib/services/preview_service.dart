@@ -6,6 +6,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
 
+import '../demo/demo_identity.dart';
 import '../models/preview_models.dart';
 import '../models/ab_message.dart';
 import '../project/project_message_classification.dart';
@@ -157,14 +158,16 @@ class PreviewService {
     _autoOpenFromSnapshot(msg.ports);
   }
 
-  /// A dev server was just detected. Auto-open it as a tab — the bridge has
-  /// already filtered out `onDetect: "ignore"` ports before sending this, so
-  /// anything that reaches here is meant to be previewed. The FIRST tab of
+  /// A dev server was just detected. Silent ports remain listed without
+  /// opening, and an ignored frame is rejected defensively. The FIRST tab of
   /// any kind (manual or detected) keeps focus; every later detection opens
-  /// in the background so it never steals focus from what the user is
-  /// already looking at.
+  /// in the background so it never steals focus from what the user is already
+  /// looking at.
   void _handlePortDetected(PortDetectedMessage msg) {
+    if (isDemoProjectId(projectId)) return;
     _autoOpenConsidered.add(msg.port);
+    final onDetect = msg.attributes.onDetect;
+    if (onDetect != 'notify' && onDetect != 'openPreview') return;
     unawaited(
       openTab(msg.port, scheme: msg.scheme, focus: _state.tabs.isEmpty),
     );
@@ -180,6 +183,7 @@ class PreviewService {
   /// port with no declared `onDetect` (terminal-detected only) defaults to
   /// 'notify', matching the bridge's own default for a declared one.
   void _autoOpenFromSnapshot(List<PortInfo> ports) {
+    if (isDemoProjectId(projectId)) return;
     for (final port in ports) {
       if (!_autoOpenConsidered.add(port.port)) continue;
       final onDetect = port.onDetect ?? 'notify';
