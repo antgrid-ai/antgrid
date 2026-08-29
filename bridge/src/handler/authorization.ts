@@ -235,6 +235,10 @@ export function authorizeInstruction(
 // — same pattern, a target the user said nothing about. Naming one of these still
 // works; it needs the second grade of lift (the literal one) to do it.
 const OUTSIDE_ROOTED = /(?:^|[\s'"=])~[/\\]|(?:^|[\s'"=/\\])\.\.[/\\]/;
+// Deliberately WIDER than the floor's own ABS_PATH, which requires an interior separator
+// so a slash command is not read as a path: this one answers whether the text names a
+// target outside the project, and a bare root is a real answer to that. Narrowing the two
+// in lockstep would let "recursively delete the build dirs" authorize `rm -rf /tmp`.
 const ABSOLUTE_TARGET = /(?:^|[\s'"=])(\/[^\s'"]+|[A-Za-z]:[\\/][^\s'"]+)/g;
 
 function namesTargetOutsideProject(flaggedText: string, projectPath: string): boolean {

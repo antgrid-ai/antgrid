@@ -8,6 +8,7 @@ import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/services/handler_service.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import 'package:antgrid/widgets/handler/handler_blocked_action_card.dart';
 import 'package:antgrid/widgets/handler/handler_decision_card.dart';
 import 'package:antgrid/widgets/handler/handler_screen.dart';
 import 'package:flutter/foundation.dart';
@@ -348,6 +349,38 @@ void main() {
     expect(find.textContaining('Done: run the tests'), findsOneWidget);
     expect(find.textContaining('Skipped: open a PR'), findsOneWidget);
     expect(find.text('Goal edited'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  // A refused completion moves nothing, so the status snapshot after it is
+  // identical to the one before — this row is the only trace the user gets of a
+  // session that will now not wrap up on its own.
+  testWidgets('a refused completion renders with its reason and detail', (
+    tester,
+  ) async {
+    await pumpHandlerScreen(
+      tester,
+      stateWith(sessions: {'t1': sessionState('t1')}).copyWith(
+        activity: const [
+          HandlerActivityRecord(
+            recordId: 'r1',
+            at: 1,
+            terminalId: 't1',
+            decision: 'evidence_rejected',
+            reason: 'run /code-review --fix',
+            detail: 'done needs evidence showing /code-review itself being run',
+          ),
+        ],
+      ),
+    );
+    expect(
+      find.textContaining('Completion not verified: run /code-review --fix'),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('showing /code-review itself being run'),
+      findsOneWidget,
+    );
     debugDefaultTargetPlatformOverride = null;
   });
 
@@ -1057,6 +1090,40 @@ void main() {
       expect(find.textContaining('Not watched'), findsNothing);
       expect(find.text('ESCALATE ONLY'), findsNothing);
       debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets(
+    'a guard_blocked row renders the refused text and dismisses it on the wire',
+    (tester) async {
+      // The row exists because a guard refused this exact text, so the card has
+      // to SHOW it — a rejection the user cannot read is one they cannot judge —
+      // and offer the one control that retires it.
+      final t = await pumpLiveHandlerScreen(tester);
+      t.emit('handler:status', armedStatusJson(escalations: [
+        {
+          'escalationId': 'b1',
+          'question': 'Handler did not send its reply',
+          'reasoning': 'slash command /code-review is not in this catalog',
+          'draftReply': '/code-review --fix',
+          'urgency': 'normal',
+          'at': 1,
+          'kind': 'guard_blocked',
+        },
+      ]));
+      await pumpDelivery(tester);
+
+      expect(find.byType(HandlerBlockedActionCard), findsOneWidget);
+      expect(find.text('/code-review --fix'), findsOneWidget);
+
+      await tester.tap(find.text(handlerDismissLabel));
+      await tester.pump();
+
+      final sent = t.sent.where((m) => m['type'] == 'handler:dismiss').toList();
+      expect(sent, hasLength(1));
+      expect(sent.single['projectId'], 'p');
+      expect(sent.single['terminalId'], 't1');
+      expect(sent.single['escalationId'], 'b1');
     },
   );
 }

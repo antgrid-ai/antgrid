@@ -102,7 +102,7 @@ dependencies:
   device_info_plus: ^11.5.0
   window_manager: ^0.5.2
   # macOS in-place updates via Sparkle (Windows uses the Microsoft Store
-  # instead — see lib/update/). Feed: appcast.xml on antgrid-releases.
+  # instead — see lib/update/). Feed: appcast.xml on the antgrid repo releases.
   auto_updater: ^1.0.0
   package_info_plus: ^9.0.1
   # Installed-version vs release-tag precedence in the update check —
@@ -191,17 +191,17 @@ dependency_overrides:
     git:
       url: https://github.com/antgrid-ai/dart_terminal.git
       path: pkgs/vte/ghostty_vte_flutter
-      ref: ce7f469dba73216843a3c684b0697b0f8a5ec64c
+      ref: c262d5f2002d26b2116b2c5c943a46a63f994133
   ghostty_vte:
     git:
       url: https://github.com/antgrid-ai/dart_terminal.git
       path: pkgs/vte/ghostty_vte
-      ref: ce7f469dba73216843a3c684b0697b0f8a5ec64c
+      ref: c262d5f2002d26b2116b2c5c943a46a63f994133
   portable_pty:
     git:
       url: https://github.com/antgrid-ai/dart_terminal.git
       path: pkgs/pty/portable_pty
-      ref: ce7f469dba73216843a3c684b0697b0f8a5ec64c
+      ref: c262d5f2002d26b2116b2c5c943a46a63f994133
 
 # Microsoft Store packaging (MSIX). The Store signs the package itself, so no
 # code-signing cert is used on this path (unlike the Inno Setup installer in

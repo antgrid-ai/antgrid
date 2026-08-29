@@ -54,6 +54,11 @@ export const AntgridSessionNamer: Plugin = async () => ({
       // named the conversation (title arrives on a later session.updated). The
       // bridge captures the id unconditionally and uses the title only if present.
       if (!sessionId) return;
+      // Root only. A subagent is a session of its own and updates like one, and
+      // the bridge stores whatever id this posts as the slot's resume id — so
+      // forwarding a child's would resume the terminal into the subagent's
+      // conversation instead of the user's.
+      if (info?.parentID) return;
       try {
         await fetch(`http://127.0.0.1:${port}/session-title`, {
           method: "POST",

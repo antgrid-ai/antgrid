@@ -1,18 +1,19 @@
 name: Deploy — Android (Play Store)
 
 # Publishes a signed release AAB to the Play Store internal track once a night,
-# if anything shipped that day. PR-time analyze/test/build lives in
+# if main moved that day. PR-time analyze/test/build lives in
 # ci-android.yml, so this never runs on PRs — one Android toolchain setup per PR
 # instead of two.
 # Nightly rather than per-push, in lockstep with deploy-ios.yml: an internal
 # track that gains four builds a day is noise, and one publish per shipping day
 # is the cadence testers actually consume. See that file for the reasoning.
 #
-# `schedule` only ever fires on the DEFAULT branch, so in practice this is
-# development -> internal track (promote to alpha/beta/production by hand from
-# the Play Console). The `production` environment selected below when
-# ref_name == 'main' is now reachable only through a manual workflow_dispatch
-# run from main — merging to main publishes nothing on its own.
+# `schedule` only ever fires on the DEFAULT branch, so the nightly RUNS on
+# development and CHECKS OUT main — main is what reaches the internal track
+# (promote to alpha/beta/production by hand from the Play Console). A merge to
+# main publishes nothing by itself; the next cron picks it up. Shipping any
+# other branch is a manual workflow_dispatch from it, which builds that branch
+# and lands under `staging`.
 
 on:
   # Ten minutes after deploy-ios.yml so the two don't contend for the same
@@ -24,7 +25,10 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: deploy-android-${{ github.ref_name }}
+  # Keyed on the deployed ref, so a nightly and a dispatch of the same branch
+  # queue against each other. Keep in lockstep with the gate's `ref:` and the
+  # deploy job's checkout.
+  group: deploy-android-${{ github.event_name == 'schedule' && 'main' || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -45,6 +49,7 @@ jobs:
         uses: ./.github/actions/deploy-gate
         with:
           workflow: deploy-android.yml
+          ref: ${{ github.event_name == 'schedule' && 'main' || github.ref_name }}
           paths: app packages .github/workflows/deploy-android.yml .github/actions/setup-android
           token: ${{ github.token }}
 
@@ -60,10 +65,23 @@ jobs:
     timeout-minutes: 45
     env:
       ANDROID_NDK_HOME: ${{ github.workspace }}/ndk-r28
-    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    # Keyed on the EVENT, not the branch. The nightly IS the release build — it
+    # is what reaches the Play internal track and what testers install,
+    # so it carries production's SENTRY_DSN; a manual dispatch is an ad-hoc
+    # build and gets staging's. A ref_name test cannot express this: `schedule`
+    # only ever fires on the default branch, so it could never select production.
+    environment: ${{ github.event_name == 'schedule' && 'production' || 'staging' }}
 
     steps:
+      # The deployed ref, not the ref this run fired on. Note the split that
+      # creates: the WORKFLOW file always comes from the default branch, because
+      # that is the only place a cron can fire, while every local composite
+      # action below resolves from the checked-out tree. Land .github/actions/**
+      # changes on both branches, or the nightly runs one branch's workflow
+      # against the other's tooling.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'main' || github.ref_name }}
 
       # The release AAB builds super_native_extensions (Rust) for 4 ABIs plus
       # Flutter/pdfium .so files; native-lib stripping exhausted the runner's
@@ -91,6 +109,31 @@ jobs:
           keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
           storeFile=../upload-keystore.jks
           EOF
+
+      # FCM client config for the release AAB. Without this file build.gradle.kts
+      # skips the google-services plugin, the app ships with no google_app_id
+      # resource, FirebaseMessaging.getToken() throws on every launch, and the
+      # phone never sends push:register — push is dead in the field and NOTHING
+      # in the build log says so. That is how it shipped dark; hard-fail instead
+      # of inheriting the silence. Only this repo releases (RELEASE_REPO gates
+      # the job), so an absent secret here is a misconfiguration, never a fork.
+      #
+      # No content check: the google-services plugin already refuses a malformed
+      # file or one with no client for the applicationId, and it reads that id
+      # from Gradle, so a check here would be a second copy that can drift.
+      # What nothing can check from this repo is that the file's project_id
+      # matches the relay's FCM_PROJECT_ID — that env lives in antgrid-ops. A
+      # mismatch mints tokens fine and fails every send as UNREGISTERED.
+      - name: Set up FCM client config
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GOOGLE_SERVICES_JSON_BASE64:-}" ]; then
+            echo "::error::GOOGLE_SERVICES_JSON_BASE64 is not set — this AAB would ship to the Play Store with push permanently disabled."
+            exit 1
+          fi
+          printf '%s' "$GOOGLE_SERVICES_JSON_BASE64" | base64 --decode > app/android/app/google-services.json
 
       # versionName is stamped, not read from pubspec — see the `version` job in
       # build-desktop.yml for the format. VERSION_MAJOR must match the env of the
@@ -125,7 +168,9 @@ jobs:
           {
             echo "name=${VERSION_MAJOR}.$(( $(date -u +%s) / 86400 )).${build_number}"
             echo "build_number=${build_number}"
-            echo "sha=${GITHUB_SHA:0:6}"
+            # HEAD, not GITHUB_SHA: the nightly fires on the default branch and
+            # ships main, so GITHUB_SHA names a commit this build does not contain.
+            echo "sha=$(git rev-parse --short=6 HEAD)"
             echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } >> "$GITHUB_OUTPUT"
 

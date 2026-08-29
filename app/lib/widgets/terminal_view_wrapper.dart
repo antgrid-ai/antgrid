@@ -26,6 +26,7 @@ import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
 import 'terminal_attachment_uploader.dart';
 import 'terminal_drop_target.dart';
+import 'terminal_hyperlink_preview.dart';
 import 'terminal_quick_actions_bar.dart';
 import 'terminal_upload_button.dart';
 import 'terminal_upload_strip.dart';
@@ -75,6 +76,31 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
   /// `onSelectionContentChanged` callback so we can show the send-to-agent
   /// overlay button only when the user has a non-empty selection.
   String? _selectedText;
+
+  /// The OSC 8 link under the pointer and where to park its readout, or null
+  /// when the pointer is over no link.
+  ///
+  /// Held here rather than read from the view because the view paints only an
+  /// underline: the destination itself is disclosed by
+  /// [TerminalHyperlinkPreview] or by nothing at all. A notifier rather than
+  /// `setState` because this is the terminal's primary surface and a hover
+  /// crossing a wall of links would otherwise relayout the whole panel — three
+  /// nested `LayoutBuilder`s and a fresh `GhosttyTerminalView` — per link, to
+  /// toggle one floating card. Same shape the sibling upload strip already uses.
+  final ValueNotifier<({String uri, Offset at})?> _hoveredLink = ValueNotifier(
+    null,
+  );
+
+  /// A hovered URI still waiting for the pointer position that produced it.
+  ///
+  /// The view reports the URI from a `MouseRegion` BELOW this widget's own
+  /// hover handler, and Flutter walks a hit-test path child-first — so at the
+  /// instant the URI arrives, the position for that same event has not reached
+  /// us yet, and on the first hover into the panel there is no earlier position
+  /// to fall back on. Parking the URI here until the enclosing handler supplies
+  /// the matching position is what keeps the card on the link it describes
+  /// rather than one hover behind it.
+  String? _pendingHoverUri;
 
   /// Wraps the terminal subtree so we can detect when the user's primary
   /// focus is inside this view. Required for the paste interceptor, which
@@ -244,6 +270,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     }
     _focusScope.dispose();
     _uploader.dispose();
+    _hoveredLink.dispose();
     super.dispose();
   }
 
@@ -635,7 +662,18 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       // uses the platform-default launch mode and reports nothing when it
       // fails. Route through the app's helper so a link opens externally and a
       // failure is visible, and so terminal-authored URIs are scheme-checked.
-      onOpenHyperlink: (uri) => openTerminalHyperlink(context, uri),
+      // `disclosed` is this widget answering for its own readout, not a guess
+      // from the platform: the card is up for THIS uri, so the destination was
+      // on screen when the activation landed. A desktop touchscreen, a Shift
+      // chord and a link that scrolled out from under a resting pointer all
+      // reach here with nothing shown, and all of them get the sheet — which a
+      // `defaultTargetPlatform` test silently exempted the first of.
+      onOpenHyperlink: (uri) => openTerminalHyperlink(
+        context,
+        uri,
+        disclosed: _hoveredLink.value?.uri == uri,
+      ),
+      onHyperlinkHover: _onHyperlinkHover,
       showHeader: false,
       showFocusRing: false,
       // Thin terminal-native scrollbar — thumb tracks
@@ -693,47 +731,66 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
             node: _focusScope,
             child: Stack(
               children: [
-                LayoutBuilder(
-                  builder: (context, constraints) {
-                    _maybeSendResize(
-                      tab.terminalId,
-                      constraints,
-                      amDriver,
-                      tab.driverClientId,
-                    );
+                // Wraps the terminal, not the whole subtree: this is the
+                // Stack's only non-positioned child, so it shares the Stack's
+                // origin — which is the space the preview's anchor is read in.
+                // Non-opaque so it joins the hit path above the view's own
+                // MouseRegion without taking anything from it.
+                MouseRegion(
+                  opaque: false,
+                  onHover: _onHoverPosition,
+                  // The view's own exit report cannot be relied on alone: a
+                  // MouseRegion unmounted while hovered never fires onExit, and
+                  // the branches below swap widget types under the pointer
+                  // (grid-freeze vs letterbox vs h-scroll), so a card can
+                  // outlive the terminal that reported it. This is the one
+                  // handler that survives those swaps.
+                  onExit: (_) {
+                    _pendingHoverUri = null;
+                    _hoveredLink.value = null;
+                  },
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      _maybeSendResize(
+                        tab.terminalId,
+                        constraints,
+                        amDriver,
+                        tab.driverClientId,
+                      );
 
-                    // Driver (or metrics not yet known) → fill the viewport. Pin
-                    // the grid to the last settled width via `_TerminalGridFreeze`
-                    // so transient resizes (e.g. dragging the agent/workspace
-                    // divider) don't spam Ghostty grid resizes —
-                    // `ghostty_vte_flutter` doesn't reflow soft-wrapped lines, and
-                    // Ink-style TUI redraws (Claude Code) leak stale fragments
-                    // when the grid changes underneath them.
-                    final charWidth = _charWidth;
-                    if (amDriver || charWidth == null || charWidth <= 0) {
-                      return _TerminalGridFreeze(
-                        onSettled: _onRenderSizeSettled,
+                      // Driver (or metrics not yet known) → fill the viewport. Pin
+                      // the grid to the last settled width via `_TerminalGridFreeze`
+                      // so transient resizes (e.g. dragging the agent/workspace
+                      // divider) don't spam Ghostty grid resizes —
+                      // `ghostty_vte_flutter` doesn't reflow soft-wrapped lines, and
+                      // Ink-style TUI redraws (Claude Code) leak stale fragments
+                      // when the grid changes underneath them.
+                      final charWidth = _charWidth;
+                      if (amDriver || charWidth == null || charWidth <= 0) {
+                        return _TerminalGridFreeze(
+                          onSettled: _onRenderSizeSettled,
+                          child: terminalView,
+                        );
+                      }
+
+                      // Non-driver → size the grid to the driver's authoritative
+                      // cols so wrapping matches exactly. Letterbox (center) when it
+                      // fits; horizontal-scroll when the driver is wider than this
+                      // viewport. No `_TerminalGridFreeze` here — a viewer must
+                      // track the authoritative width, not pin a local one.
+                      final authWidth = tab.cols * charWidth + _hPad;
+                      final grid = SizedBox(
+                        width: authWidth,
                         child: terminalView,
                       );
-                    }
-
-                    // Non-driver → size the grid to the driver's authoritative
-                    // cols so wrapping matches exactly. Letterbox (center) when it
-                    // fits; horizontal-scroll when the driver is wider than this
-                    // viewport. No `_TerminalGridFreeze` here — a viewer must
-                    // track the authoritative width, not pin a local one.
-                    final authWidth = tab.cols * charWidth + _hPad;
-                    final grid = SizedBox(
-                      width: authWidth,
-                      child: terminalView,
-                    );
-                    return authWidth <= constraints.maxWidth
-                        ? Align(alignment: Alignment.center, child: grid)
-                        : SingleChildScrollView(
-                            scrollDirection: Axis.horizontal,
-                            child: grid,
-                          );
-                  },
+                      return authWidth <= constraints.maxWidth
+                          ? Align(alignment: Alignment.center, child: grid)
+                          : SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              child: grid,
+                            );
+                    },
+                  ),
                 ),
                 // Top-LEFT, deliberately: `SendToAgentButton` owns top-right and
                 // both can be live at once, while the bottom edge is where the
@@ -770,12 +827,62 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                 ),
                 if (showSendButton)
                   SendToAgentButton(onPressed: _onSendToAgent),
+                Positioned.fill(
+                  child: ValueListenableBuilder<({String uri, Offset at})?>(
+                    valueListenable: _hoveredLink,
+                    builder: (context, link, _) => link == null
+                        ? const SizedBox.shrink()
+                        : TerminalHyperlinkPreview(
+                            uri: link.uri,
+                            anchor: link.at,
+                          ),
+                  ),
+                ),
               ],
             ),
           ),
         ),
       ),
     );
+  }
+
+  /// Shows or hides the destination readout as the pointer enters and leaves
+  /// links.
+  ///
+  /// The view fires this only on a real change, so there is no same-value
+  /// rebuild to guard against here. A new link is only PENDING until
+  /// [_onHoverPosition] supplies the position it was hovered at — see
+  /// [_pendingHoverUri] for why the position cannot be read here.
+  void _onHyperlinkHover(String? uri) {
+    if (!mounted) return;
+    if (uri == null) {
+      _pendingHoverUri = null;
+      _hoveredLink.value = null;
+      return;
+    }
+    _pendingHoverUri = uri;
+    // Output can scroll a DIFFERENT link under a STATIONARY pointer, and no
+    // hover event follows to carry it — so repoint the card at once against
+    // the anchor it already has, rather than let it go on naming a
+    // destination the click would not open. The pending URI still re-anchors
+    // it on the next real move.
+    final shown = _hoveredLink.value;
+    if (shown != null && shown.uri != uri) {
+      _hoveredLink.value = (uri: uri, at: shown.at);
+    }
+  }
+
+  /// Anchors a pending link to the pointer position of the event that produced
+  /// it.
+  ///
+  /// Sampled once, at the change, rather than tracked live: a card sliding
+  /// under the cursor it belongs to is unreadable, and re-laying it out every
+  /// hover frame would be work for nothing.
+  void _onHoverPosition(PointerHoverEvent event) {
+    final pending = _pendingHoverUri;
+    if (pending == null) return;
+    _pendingHoverUri = null;
+    _hoveredLink.value = (uri: pending, at: event.localPosition);
   }
 
   /// Sends a `terminal:resize` derived from the local viewport + cell metrics

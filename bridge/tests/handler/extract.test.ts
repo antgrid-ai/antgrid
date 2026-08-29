@@ -297,10 +297,10 @@ describe("runExtraction", () => {
   // the raw instruction as a single item rather than failing.
   it("returns null for tools without a judge, without spawning", async () => {
     const { spawn, calls } = fakeSpawn([GOOD]);
-    // kilo is a registry agent whose spec declares no judge — an unknown tool
+    // kimi is a registry agent whose spec declares no judge — an unknown tool
     // would exercise the missing-spec branch instead, and stop covering this one
     // the day that name gains a spec.
-    const items = await runExtraction({ tool: "kilo", text: "run the tests", cwd: ".", spawn });
+    const items = await runExtraction({ tool: "kimi", text: "run the tests", cwd: ".", spawn });
     expect(items).toBeNull();
     expect(calls.length).toBe(0);
   });

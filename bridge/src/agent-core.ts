@@ -21,9 +21,9 @@ import { loadConfig, findConfigFile, projectName, type AbConfig } from "./config
 import { buildConfigFromBootstrap, consoleBootstrapIO, writeConfigYaml } from "./bootstrap";
 import { resolveAgent, listKnownTools, oscTitleForNaming, isOscTitleUnusable } from "./known-agents";
 import { augmentAgentLaunch } from "./agent-launch-augmenter";
-import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, HandlerInstructWire, HandlerUndoWire, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
+import { CHECKOUT_VARIABLE_MESSAGE_TYPES, createMessage, HandlerConfigureWire, HandlerDismissWire, HandlerInstructWire, HandlerUndoWire, type AbMessage, type RpcRequest, type SessionEntry, type WorkStatus } from "./protocol";
 import { parseTunnelMessage } from "./tunnel-protocol";
-import { startApiServer, type ApiServerHandle, type SessionTitleBody } from "./api-server";
+import { startApiServer, type ApiServerHandle } from "./api-server";
 import { MessageBus, type InboundSource } from "./message-bus";
 import { resolveAbDir } from "./antgrid-dir";
 import { computeProjectId } from "./project-id";
@@ -42,7 +42,8 @@ import { SessionNamer } from "./session-namer";
 import { antigravityCliHome } from "./agents/antigravity/title";
 import { AntigravityTitleWatcher } from "./agents/antigravity/title-watcher";
 import { resolveStructuredTitle } from "./agents/title-dispatch";
-import { generateSessionTitle } from "./agents/title-generate";
+import { buildTitleContext, generateTitleFromContext } from "./agents/title-generate";
+import { TitleAttempts, type TitleOutcome } from "./agents/title-attempts";
 import { agentSpec, BY_HOOK_NAME, handlerObservable } from "./agents/registry";
 import { HandlerEngine, type HandlerEvent } from "./handler/engine";
 import { createEntitlementReader, type TierClaimSource } from "./entitlement";
@@ -50,6 +51,7 @@ import { classifyTurnEndError } from "./handler/lifecycle-classify";
 import { createDispatchAdapter, createPtyAdapter } from "./handler/session-adapter";
 import { createStructuredAdapter } from "./handler/structured-adapter";
 import { dispatchRpc } from "./rpc/methods";
+import { snapshotAsksFor } from "./rpc/state-snapshot";
 import { StructuredAgentManager } from "./structured/structured-manager";
 import { TOOL_UPDATE_SPECS, createToolUpdateChecker, execToolUpdate, execToolVersion, parseAgentVersion, runAgentUpdate, updateSpecFor } from "./update/specs";
 import { getGitStatus, gitCommit, gitDiscard, gitStage, gitUnstage, type GitFileEntry } from "./git";
@@ -352,6 +354,12 @@ export interface BuildAgentCoreOptions {
    *  {@link AgentCore.refreshSessionWork} when the reduction moves — the list
    *  is otherwise only re-emitted when the sessions themselves change. */
   sessionWorkStatusFor?: (sessionId: string) => WorkStatus | undefined;
+  /** True when this slot's own turn already ended, so an injected hook's
+   *  ambiguous `awaiting_input` can only be its post-completion idle nudge. The
+   *  owner answers from the same work-status reduction that already drops the
+   *  nudge's phone push; an absent hook forwards, which is the direction a
+   *  supervisor has to fail in. */
+  isStaleIdleNudge?: (sessionId: string) => boolean;
   /** Relay base URL of the machine socket this core attaches to. Host-supplied
    *  in remote mode: only a standalone agent with an explicit `relayUrl:` in its
    *  antgrid.yaml can learn it from config, so without this a host-spawned
@@ -541,12 +549,21 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   let sessions: SessionManager | null = null;
   let namer: SessionNamer | null = null;
   let antigravityTitleWatcher: AntigravityTitleWatcher | null = null;
-  // Slots we've already spent a title-generation spawn on, keyed
-  // `<terminalId>:<agentSessionId>`. The /session-title post repeats every turn,
-  // so without this a session whose agent never names itself would pay a model
-  // call per turn, forever. Keyed by agent session, not slot, so a resume or a
-  // fresh thread in the same slot gets one more attempt.
-  const titleGenAttempted = new Set<string>();
+  // Title-generation budget per conversation, per terminal. The /session-title
+  // post repeats every turn, so without this a session whose agent never names
+  // itself would pay a model call per turn, forever. Keyed by agent session
+  // where there is one, not by slot, so a fresh thread in the same slot gets a
+  // fresh budget — see TitleTarget for why a chat slot keys on itself instead.
+  const titleAttempts = new TitleAttempts();
+  /** Conversation id for the attempt gate — see TitleTarget for why a chat slot
+   *  keys on itself rather than on an agent session id. */
+  const titleAttemptKey = (target: { terminalId: string; agentSessionId?: string }) =>
+    target.agentSessionId ?? target.terminalId;
+  function forgetTitleAttempts(terminalId: string): void {
+    titleAttempts.forget(terminalId);
+  }
+  /** Which agent each LIVE chat slot runs — see the driverFactory that fills it. */
+  const chatTools = new Map<string, string>();
   let structured: StructuredAgentManager | null = null;
   // Holds this core's api-server handle. Declared before `manager` so the
   // TerminalManager's late-bound getApiPort getter can read `apiServer.port`
@@ -873,6 +890,22 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         }
         break;
       }
+      case "handler:dismiss": {
+        // Same re-parse discipline as the three above: parseMessageFast validated
+        // the type and nothing else, and these two ids select which report on which
+        // supervised session goes away.
+        const parsed = HandlerDismissWire.safeParse(msg);
+        if (parsed.success) {
+          handlerEngine.dismissEscalation(parsed.data.terminalId, parsed.data.escalationId);
+        } else {
+          // Rejected WITHOUT disarming, for the same reason a malformed arm is: a
+          // bad dismiss must not tear down the live armed session it names a row on.
+          // Re-emit status so the sender's UI resyncs.
+          logger.warn("handler:dismiss rejected: malformed payload");
+          handlerEngine.emitStatus();
+        }
+        break;
+      }
       case "terminal:start": {
         const savedService = (runtime.config.services ?? []).find((s) => s.name === msg.terminalId);
         const isSession = !!sessions?.get(msg.terminalId);
@@ -1193,6 +1226,29 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         })();
         break;
       }
+      case "session:fork": {
+        if (!sessions) {
+          sendAb(createMessage("session:result", {
+            requestId: msg.requestId, ok: false, error: "agent not ready",
+          }));
+          break;
+        }
+        const s = sessions;
+        // The manager resolves the source session, transcript, native tool and
+        // checkout. This handler intentionally forwards no path or native id.
+        void s.fork(msg.sourceSessionId, msg.workspace).then(
+          (entry) => sendAb(createMessage("session:result", {
+            requestId: msg.requestId, ok: true, session: entry, checkoutId: entry.checkoutId,
+          })),
+          (err) => sendAb(createMessage("session:result", {
+            requestId: msg.requestId,
+            ok: false,
+            error: err instanceof Error ? err.message : "Could not fork the session.",
+            ...(err instanceof WorktreeError ? { errorCode: err.code } : {}),
+          })),
+        );
+        break;
+      }
       case "session:start":
       case "session:stop":
       case "session:rename":
@@ -1462,15 +1518,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // missing driver then surfaces as agent:error instead of a silent
         // throw. This path never re-enters handleAbMessage, so an auto-reply
         // cannot reset the runaway guard that counts it.
-        prompt: (id, text) => {
+        prompt: (id, text, commandId) => {
           // requestId is required by AgentPromptMessage; drivers use it only
           // for send-correlation, so a fresh UUID is sufficient.
           void structured?.handleAgentMessage(createMessage("agent:prompt", {
             sessionId: id, requestId: crypto.randomUUID(), text,
-          }));
+            ...(commandId ? { commandId } : {}),
+          }), { injected: true });
         },
         getTranscriptPath: (id) => sessions?.getAgentTranscriptPath(id),
         getSnapshot: (id) => structured?.getTranscriptSnapshot(id) ?? Promise.resolve([]),
+        commandCatalog: (id) => structured?.commandCatalog(id),
       }),
     }),
     sendAb: (msg) => sendAb(msg),
@@ -2274,8 +2332,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         if (setupRunner.handleExit(id) || setupTerminalIds.has(id)) return;
         sessions?.noteExited(id);
         // Drop buffered title state so a stale title from this run can't leak
-        // into a restarted same-id session (start() reuses the entry id).
-        namer?.forget(id);
+        // into a restarted same-id session (start() reuses the entry id). A
+        // mode flip is exempt for the same reason the handler's arming is: the
+        // agent-native conversation carries over across the runtime swap, so
+        // its name — and the precedence rank protecting it — must too.
+        if (!sessions?.isFlipping(id)) { namer?.forget(id); forgetTitleAttempts(id); }
         // Reclaim the handler's per-terminal guard + pending state for the dead
         // terminal. A mode flip keeps the arming: the session outlives the PTY.
         handlerEngine.onTerminalExit(id, { keepArmed: sessions?.isFlipping(id) });
@@ -2393,11 +2454,25 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       dropSessionReplay: (sessionId) => dropSessionReplay(sessionId),
       onAgentSession: (sessionId, agentSessionId) => sessions?.setAgentSession(sessionId, agentSessionId),
       onSetConfig: (sessionId, key, value) => sessions?.setSessionConfig(sessionId, key, value),
+      // The bridge hands every chat prompt to the driver itself, so a chat
+      // session is named from its first message with no hook in the loop — the
+      // only naming path an agent that ships neither hooks nor a title of its
+      // own (opencode) has.
+      onUserPrompt: (sessionId, text) => {
+        const tool = chatTools.get(sessionId);
+        if (!tool) return;
+        maybeGenerateTitle(tool, { terminalId: sessionId, prompt: text })
+          .catch((err) => log.error("Title generation failed: %s", err));
+      },
       driverFactory: (sessionId, tool, send) => {
         // Chat mode is gated on isChatCapableTool, which IS "the spec has a
         // driver" — so an unreachable tool here means the two disagreed.
         const driver = agentSpec(tool)?.driver;
         if (!driver) throw new Error(`tool "${tool}" has no chat driver`);
+        // Recorded where the driver is built, so the prompt tap names a session
+        // with the agent it is actually talking to: a SessionEntry carries
+        // `tool` only when it overrode the project default.
+        chatTools.set(sessionId, tool);
         const sessionCheckoutId = sessions?.get(sessionId)?.checkoutId ?? "main";
         const sessionRuntime = checkoutRuntimes.runtime(sessionCheckoutId) ?? mainRuntime;
         return driver({
@@ -2407,7 +2482,6 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           projectId: project.id,
           chatAugment: () => buildChatSpawnAugment(tool, sessionId, apiServer?.port ?? null, abDir),
           onAgentSession: (agentSessionId) => sessions?.setAgentSession(sessionId, agentSessionId),
-          onTitle: (title) => namer?.onStructuredTitle(sessionId, title),
           onLifecycle: (evt) => {
             handlerEngine.handleEvent({ terminalId: sessionId, ...evt })
               .catch((err) => logger.error("Handler lifecycle event failed: %s", err));
@@ -2512,6 +2586,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // auto-disarm — a stopped driver can't be supervised. Same flip
         // exemption: swapping runtimes is not the session ending.
         handlerEngine.onTerminalExit(id, { keepArmed: sessions?.isFlipping(id) });
+        // A chat slot has no PTY, so onTerminalExited never runs for it and
+        // nothing else would ever release its buffered title — leaving the
+        // stopped conversation's name, and its rank, to veto the next one.
+        if (!sessions?.isFlipping(id)) { namer?.forget(id); forgetTitleAttempts(id); }
+        chatTools.delete(id);
         // Returned, not discarded: it settles only once the driver's backend is
         // gone and has released the agent's process lock (codex's ~/.codex
         // sqlite), which anything restarting this slot has to wait out.
@@ -2525,16 +2604,17 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       applyAutoName: (id, name) => sessions?.applyAutoName(id, name),
     });
 
-    // agy fires no hook on a `/rename` or when it writes its own generated
-    // conversation name, so neither would reach the sidebar until the next turn.
-    // Watch agy's title sources and route the current best name through the namer
-    // (same debounce + manual-wins precedence as every other title signal).
-    // No-ops if agy isn't installed.
+    // agy fires no hook on a `/rename`, so it would not reach the sidebar until
+    // the next turn. Watch its command log and route the rename through the
+    // namer (same debounce + precedence as every other title signal). No-ops if
+    // agy isn't installed.
     antigravityTitleWatcher = new AntigravityTitleWatcher(
       antigravityCliHome(),
       (conversationId, title) => {
         const slot = sessions?.findSlotByAgentSession(conversationId);
-        if (slot) namer?.onStructuredTitle(slot, title);
+        // Always the user's own name: the watcher reports only `/rename` now,
+        // never agy's generated name and never the first-message fallback.
+        if (slot) namer?.onStructuredTitle(slot, title, "manual");
       },
     );
     antigravityTitleWatcher.start();
@@ -2806,35 +2886,100 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   }
 
   /**
-   * Last resort for a session no agent will name: ask the agent's own headless
-   * CLI. Gated hard, because it costs a model spawn — only when the native read
-   * gave us nothing better than the user's opening prompt (see ResolvedTitle),
-   * once per agent session, and never for a session the user already renamed.
+   * Which conversation a naming run is for.
+   *
+   * `agentSessionId` is the agent's own conversation id, and only the hook path
+   * has one: a chat slot is named from the prompt the bridge itself delivered,
+   * which can arrive before the driver has reported an id — and would then
+   * CHANGE mid-session, spending a second attempt on a conversation already
+   * named. Chat therefore keys on the slot, which is 1:1 with its conversation.
+   */
+  type TitleTarget = {
+    terminalId: string;
+    agentSessionId?: string;
+    prompt?: string;
+    transcriptPath?: string;
+  };
+
+  /**
+   * Name the session ourselves, which is the ONLY thing that produces a real
+   * title — no agent's own name is read (see ResolvedTitle).
+   * Still gated, because it costs a model spawn: once per agent session, never
+   * for a session the user already renamed, and only where the native read
+   * turned up nothing better than the opening prompt.
    *
    * Fire-and-forget by design: /session-title is posted from a hook the agent is
-   * blocking on, so the reply must not wait on a judge spawn.
+   * blocking on, so the reply must not wait on the spawn.
    */
-  async function maybeGenerateTitle(body: SessionTitleBody, fallback?: string): Promise<void> {
-    const tool = body.agent ? BY_HOOK_NAME[body.agent] : undefined;
-    if (!tool || !body.sessionId) return;
-    if (sessions && !sessions.isAutoNameable(body.terminalId)) return;
-    const key = `${body.terminalId}:${body.sessionId}`;
-    // Claim the slot BEFORE awaiting: two turns can end while the first spawn is
-    // still running, and both would otherwise pass the check.
-    if (titleGenAttempted.has(key)) return;
-    titleGenAttempted.add(key);
-    const title = await generateSessionTitle({
+  async function maybeGenerateTitle(
+    tool: string, target: TitleTarget, fallback?: string,
+  ): Promise<void> {
+    if (sessions && !sessions.isAutoNameable(target.terminalId)) return;
+    // Keyed by SLOT, unlike everything below it. A mode flip keeps the session's
+    // name and its rank (see the isFlipping exemptions) but re-keys the attempt,
+    // because a terminal keys on the agent's session id and a chat slot on
+    // itself — so the count alone would let the flipped session rename itself
+    // from whatever the user typed next.
+    if (namer?.hasFinalTitle(target.terminalId)) return;
+
+    const key = titleAttemptKey(target);
+    // Tested twice, and the two tests answer different questions. This one is a
+    // pure early-out: every turn of the session posts here, and without it each
+    // one pays the transcript read below only to be refused after it. It claims
+    // nothing, so it cannot burn an attempt.
+    if (titleAttempts.refused(target.terminalId, key)) return;
+
+    // Read the conversation BEFORE claiming the attempt. The budget is per
+    // agent session, and the first post of a session arrives from SessionStart
+    // — before the user has typed — so claiming first spent a Claude session's
+    // whole budget on an empty transcript, and the turn that finally had
+    // something to name from was refused.
+    //
+    // A post carrying `prompt` needs no read at all: the hook handed us the
+    // message the user just submitted, which is both the context and the reason
+    // this fires before the transcript has been written.
+    const submitted = target.prompt?.trim();
+    const context = submitted || await buildTitleContext({
       tool,
-      cwd: project.path,
-      transcriptPath: body.transcriptPath,
-      agentSessionId: body.sessionId,
+      transcriptPath: target.transcriptPath,
+      agentSessionId: target.agentSessionId,
       fallbackContext: fallback,
     });
-    // Re-check: the spawn takes tens of seconds, and the user may have renamed
-    // the session (or Claude may have written its own title) in that window.
-    if (!title || (sessions && !sessions.isAutoNameable(body.terminalId))) return;
-    log.info("generated a session title for %s (%s)", body.terminalId, tool);
-    namer?.onStructuredTitle(body.terminalId, title);
+    if (!context) return;
+
+    // Claimed BEFORE awaiting the spawn: two turns can end while the first is
+    // still running, and both would otherwise pass the early-out above. The
+    // transcript read already awaited, but this check-and-set does not, so only
+    // one caller gets past it.
+    if (!titleAttempts.begin(target.terminalId, key)) return;
+    // Only the paths that reach a verdict overwrite this. Every other exit is a
+    // title thrown away for reasons unrelated to generating it, which releases
+    // the claim without spending the budget.
+    let outcome: TitleOutcome = "abandoned";
+    try {
+      // No cwd: a naming spawn runs in a throwaway directory of its own
+      // (headlessScratchCwd), never this session's checkout.
+      const result = await generateTitleFromContext(context, { tool });
+      if (!result.ok) {
+        outcome = result.reason;
+        return;
+      }
+      // Re-check: the spawn takes tens of seconds, and the user may have renamed
+      // the session in that window.
+      if (sessions && !sessions.isAutoNameable(target.terminalId)) return;
+      // …or started a NEW conversation in the same slot (`/clear`), whose own
+      // title this would outrank at `self` and which carries a budget of its
+      // own. The title describes the conversation it was generated from, not
+      // the slot. Only answerable when we were naming a conversation the agent
+      // had identified; see TitleTarget.
+      const live = sessions?.get(target.terminalId)?.agentSessionId;
+      if (target.agentSessionId && live && live !== target.agentSessionId) return;
+      outcome = "named";
+      log.info("generated a session title for %s (%s)", target.terminalId, tool);
+      namer?.onStructuredTitle(target.terminalId, result.title, "self");
+    } finally {
+      titleAttempts.settle(target.terminalId, key, outcome);
+    }
   }
 
   // Start local API server for MCP/hook integration (works in both modes)
@@ -2860,30 +3005,70 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // (overwrite-latest), independent of title resolution. terminalId is the
       // slot id (stamped as ANTGRID_TERMINAL_ID at spawn).
       if (!body.titleOnly) {
+        const prevAgentSession = sessions?.get(body.terminalId)?.agentSessionId;
         sessions?.setAgentSession(body.terminalId, body.sessionId, body.transcriptPath);
+        // A new conversation under a STILL-LIVE PTY (`/clear`, `/new`) reaches
+        // no exit path, so this is the only place the previous conversation's
+        // title rank can be released. Left latched, it vetoes every
+        // first-message title the new conversation resolves.
+        if (prevAgentSession && prevAgentSession !== body.sessionId) {
+          namer?.forgetStructuredTitle(body.terminalId);
+        }
       }
-      // opencode posts the title inline; Claude/Codex/Antigravity post only
-      // correlation ids, so resolve the title from their on-disk session files
-      // (async read, off the event loop). resolveStructuredTitle swallows its own
-      // errors, so the unawaited promise can't reject.
-      if (body.title) {
-        namer?.onStructuredTitle(body.terminalId, body.title);
+      // Chat slots are named from the in-process prompt tap (onUserPrompt): the
+      // bridge delivers every chat prompt itself, so it sees the first message
+      // before the agent does and needs no hook to carry it. The reused title
+      // plugin's hooks still POST here for claude/codex chat spawns — they keep
+      // the resume id above current, but must never start a second naming spawn
+      // (same reason onHandlerEvent drops chat-mode posts).
+      const hookTool = body.agent ? BY_HOOK_NAME[body.agent] : undefined;
+      const chatSlot = sessions?.get(body.terminalId)?.mode === "chat";
+      const nameFromHook = (fallback?: string) => {
+        if (!hookTool || !body.sessionId || chatSlot) return;
+        maybeGenerateTitle(hookTool, {
+          terminalId: body.terminalId,
+          agentSessionId: body.sessionId,
+          prompt: body.prompt,
+          transcriptPath: body.transcriptPath,
+        }, fallback).catch((err) => log.error("Title generation failed: %s", err));
+      };
+      // A post carrying the submitted prompt is PRE-turn (Claude's
+      // UserPromptSubmit). Naming starts here rather than at the turn-end post,
+      // which on a real task is many minutes later — and the prompt text is the
+      // whole context, so nothing on disk is read. Nothing else on this path
+      // applies: no title has been written for a turn that has not run.
+      //
+      // Trimmed, matching the test maybeGenerateTitle applies to it: a
+      // whitespace-only submission is not context, and taking this branch for
+      // one would name nothing AND skip the native read it displaced.
+      if (body.prompt?.trim()) {
+        nameFromHook();
         return;
       }
+      // opencode's plugin still posts its server-generated conversation name
+      // inline; the schema declares no field for it, so it is stripped rather
+      // than applied — we name sessions ourselves (see ResolvedTitle), and an
+      // older installed plugin must keep parsing.
+      //
+      // Claude/Codex/Copilot/Antigravity post only correlation ids, so the
+      // manual-rename-or-opening-prompt read comes off their on-disk session
+      // files (async, off the event loop). resolveStructuredTitle swallows its
+      // own errors, so the unawaited promise can't reject.
       const resolved = await resolveStructuredTitle(body.agent, {
         sessionId: body.sessionId,
         transcriptPath: body.transcriptPath,
       });
-      // Apply the native read first either way: even a first-message title beats
-      // "Session 3" while generation is in flight, and it's what we keep if
-      // generation fails.
-      if (resolved) namer?.onStructuredTitle(body.terminalId, resolved.title);
-      if (!resolved || resolved.kind === "first-message") {
-        void maybeGenerateTitle(body, resolved?.title);
-      }
+      // Apply the native read first either way: a first-message title beats
+      // "Session 3" while generation is in flight, and it is what we keep if
+      // generation fails. Pass the kind through — the first-message signal
+      // repeats the same opening prompt on every turn of the session, and only
+      // the rank stops it overwriting the generated name (see TitleRank).
+      if (resolved) namer?.onStructuredTitle(body.terminalId, resolved.title, resolved.kind);
+      if (!resolved || resolved.kind === "first-message") nameFromHook(resolved?.title);
     },
     onHookAlive: (terminalId) => { hookAlivePinged.add(terminalId); },
     onTurnStart: (terminalId) => opts.onTurnStart?.(terminalId),
+    isStaleIdleNudge: (terminalId) => opts.isStaleIdleNudge?.(terminalId) ?? false,
   });
 
   const TranscriptSnapshotParams = z.object({ sessionId: z.string() });
@@ -2946,7 +3131,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         return;
       }
       if (msg.type === "request") {
-        if (msg.method === "state.snapshot") {
+        if (msg.method === "state.snapshot" && snapshotAsksFor(msg.params, ["agent:status"])) {
           // The snapshot is the app's PULL, and for a relay app it is the only
           // thing its per-checkout terminal tabs are ever built from:
           // `terminal:started` is not a replay type, and a stream attach runs
@@ -2957,7 +3142,9 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           // Recomputing here is what makes the answer no older than the pull.
           // Same failure, same fix, as the machine control plane's own
           // `state.snapshot` intercept (`host-server.ts`); an unchanged
-          // payload is a cheap no-op, since the bus dedups on it.
+          // payload is a cheap no-op, since the bus dedups on it. Skipped for
+          // a pull that could not carry the status anyway (the app's separate
+          // tree pull) — nothing there to keep fresh.
           for (const runtime of checkoutRuntimes.values()) {
             if (runtime.disposed) continue;
             sendStatus(runtime);

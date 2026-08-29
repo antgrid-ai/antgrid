@@ -1,0 +1,14 @@
+---
+// The consequence line under a section's argument: what the mechanism above
+// actually buys the reader, in one sentence, second person. One per section, so
+// every band answers "and therefore?" instead of leaving the reader to infer it.
+//
+// The arrow carries the accent and the sentence stays ink — six of these down the
+// page in signal would spend the colour the live readouts need (see Readout.astro
+// on scarcity). Mono because it is an aside off the argument, not more argument.
+const { class: cls = "" } = Astro.props;
+---
+<p class={`flex gap-2 font-mono text-meta leading-relaxed text-ink2 ${cls}`}>
+  <span class="shrink-0 text-signal" aria-hidden="true">↳</span>
+  <span><slot /></span>
+</p>

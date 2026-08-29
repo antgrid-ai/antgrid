@@ -43,24 +43,19 @@ test("emits (conversationId, name) once when a /rename is appended after start",
   expect(calls).toEqual([["c1", "my chat"]]);
 });
 
-test("emits agy's generated preview when it lands in conversation_summaries.db", async () => {
+// agy writes its own conversation preview into that DB, and we deliberately do
+// not read it: Antgrid names the session itself, so the only title this watcher
+// carries is one the user typed (see ResolvedTitle in agents/types.ts).
+test("ignores agy's generated preview, and still emits a later /rename", async () => {
   const home = tmp();
   const calls: Array<[string, string]> = [];
   makeWatcher(home, calls).start();
   writeSummariesDb(home, [{ id: "c1", preview: "Casual Greeting And Introduction" }]);
   await Bun.sleep(300);
-  expect(calls).toEqual([["c1", "Casual Greeting And Introduction"]]);
-});
-
-test("a live /rename outranks a generated preview for the same conversation", async () => {
-  const home = tmp();
-  const calls: Array<[string, string]> = [];
-  makeWatcher(home, calls).start();
-  writeSummariesDb(home, [{ id: "c1", preview: "Generated Name" }]);
-  await Bun.sleep(300);
+  expect(calls).toEqual([]);
   appendFileSync(join(home, "history.jsonl"), line("c1", "/rename mine"));
   await Bun.sleep(300);
-  expect(calls).toEqual([["c1", "Generated Name"], ["c1", "mine"]]);
+  expect(calls).toEqual([["c1", "mine"]]);
 });
 
 test("does not re-emit a title that has not changed", async () => {
@@ -77,7 +72,6 @@ test("does not re-emit a title that has not changed", async () => {
 test("seeds pre-existing titles at start without emitting them", async () => {
   const home = tmp();
   writeFileSync(join(home, "history.jsonl"), line("c1", "/rename before start"));
-  writeSummariesDb(home, [{ id: "c2", preview: "Prior Generated" }]);
   const calls: Array<[string, string]> = [];
   makeWatcher(home, calls).start();
   await Bun.sleep(300);

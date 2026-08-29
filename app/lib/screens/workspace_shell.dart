@@ -587,6 +587,11 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       // unresponsive "+ new session" — surface it inline so the user has
       // an actionable next step instead of staring at a blank panel.
       if (mounted && ref.read(selectedRegistrationIdProvider) == triggeredFor) {
+        // The queued pick was this run's to resolve, and nothing else will:
+        // left set, it keeps `reconcileActiveSession` from ever falling back
+        // to a default and holds the explorer's checkout unsettled, so the
+        // banner's "switch and back" would be the only way out.
+        ref.read(pendingActiveSessionIdProvider.notifier).set(null);
         ref
             .read(relayErrorBannerProvider.notifier)
             .set(

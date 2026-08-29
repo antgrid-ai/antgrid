@@ -107,4 +107,87 @@ void main() {
 
     expect(container.read(activeSessionIdProvider), 'a');
   });
+
+  // A project switch delivers its list in stages — the persisted cache the
+  // instant the SessionsService constructs, the wire seconds later on a relay.
+  // The cross-project tap that started the switch queued the session it wants;
+  // `first` from the early stage is a different session rendered in full and
+  // then visibly switched away from.
+  group('a queued cross-project pick', () {
+    testWidgets('is selected from the first list that carries it', (
+      tester,
+    ) async {
+      var sessions = <SessionEntry>[];
+      final container = ProviderContainer(
+        overrides: [activeSessionsProvider.overrideWith((_) => sessions)],
+      );
+      addTearDown(container.dispose);
+      container.read(pendingActiveSessionIdProvider.notifier).set('b');
+
+      await _pumpReconciler(tester, container);
+      // `a` outranks `b` on activity, which is what `first` would answer.
+      sessions = [_entry('a', lastUsedAt: 2), _entry('b', lastUsedAt: 1)];
+      container.invalidate(activeSessionsProvider);
+      await tester.pump();
+
+      expect(container.read(activeSessionIdProvider), 'b');
+      // Still the bootstrap's to consume — it owns the start + focus that
+      // follow, and reports a refused start for a session the user named.
+      expect(container.read(pendingActiveSessionIdProvider), 'b');
+    });
+
+    testWidgets('holds the selection empty while no list carries it', (
+      tester,
+    ) async {
+      var sessions = <SessionEntry>[];
+      final container = ProviderContainer(
+        overrides: [activeSessionsProvider.overrideWith((_) => sessions)],
+      );
+      addTearDown(container.dispose);
+      container.read(pendingActiveSessionIdProvider.notifier).set('c');
+
+      await _pumpReconciler(tester, container);
+      sessions = [_entry('a'), _entry('b')];
+      container.invalidate(activeSessionsProvider);
+      await tester.pump();
+
+      expect(container.read(activeSessionIdProvider), isNull);
+    });
+
+    testWidgets('outranks a selection the switch left behind', (tester) async {
+      var sessions = <SessionEntry>[];
+      final container = ProviderContainer(
+        overrides: [activeSessionsProvider.overrideWith((_) => sessions)],
+      );
+      addTearDown(container.dispose);
+      // The previous project's session — the listener that would have cleared
+      // it on the empty list was unmounted through the switch.
+      container.read(activeSessionIdProvider.notifier).set('old');
+      container.read(pendingActiveSessionIdProvider.notifier).set('b');
+
+      await _pumpReconciler(tester, container);
+      sessions = [_entry('a', lastUsedAt: 2), _entry('b', lastUsedAt: 1)];
+      container.invalidate(activeSessionsProvider);
+      await tester.pump();
+
+      expect(container.read(activeSessionIdProvider), 'b');
+    });
+
+    testWidgets('once consumed, the default pick is back', (tester) async {
+      var sessions = <SessionEntry>[];
+      final container = ProviderContainer(
+        overrides: [activeSessionsProvider.overrideWith((_) => sessions)],
+      );
+      addTearDown(container.dispose);
+      container.read(pendingActiveSessionIdProvider.notifier).set('c');
+
+      await _pumpReconciler(tester, container);
+      container.read(pendingActiveSessionIdProvider.notifier).set(null);
+      sessions = [_entry('a', lastUsedAt: 2), _entry('b', lastUsedAt: 1)];
+      container.invalidate(activeSessionsProvider);
+      await tester.pump();
+
+      expect(container.read(activeSessionIdProvider), 'a');
+    });
+  });
 }

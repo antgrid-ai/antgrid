@@ -369,6 +369,10 @@ class HandlerEscalationChoice {
   ///    text that answers nothing while the bridge clears the row anyway. The
   ///    bridge refuses to mint these — this is the app's own floor, because a
   ///    dead button is invisible to whoever taps it.
+  ///  - [kind] is `guard_blocked`. That row exists BECAUSE a guard refused this
+  ///    exact text, so a one-tap would re-send it with the thinnest possible
+  ///    human in the loop. The bridge refuses to mint these — this is the app's
+  ///    own floor, for the same reason the `resolve_in_session` one is.
   ///  - the count is outside the wire's 2..3, or any entry is malformed. A card
   ///    is never one chip, so a partial list is dropped whole rather than
   ///    rendered short — and dropping only the choices keeps the escalation
@@ -382,6 +386,7 @@ class HandlerEscalationChoice {
     String? kind,
   }) {
     if (kind == 'resolve_in_session') return null;
+    if (kind == 'guard_blocked') return null;
     if (json is! List || json.length < 2 || json.length > 3) return null;
     final choices = <HandlerEscalationChoice>[];
     for (final e in json) {
@@ -405,8 +410,15 @@ class HandlerEscalation {
   final String urgency; // 'normal' | 'high'
   final String? floorRule;
   final int at;
+  // Hand-mirror of OpenEscalationWire.kind (bridge/src/protocol.ts) and
+  // OpenEscalationSchema (bridge/src/handler/session-store.ts); a bare String on
+  // both sides, so a missed mirror is silent.
+  //
   // null/'reply' → free-text reply sheet; 'resolve_in_session' → option-based
-  // prompt (permission/question) answered in the chat transcript UI.
+  // prompt (permission/question) answered in the chat transcript UI;
+  // 'guard_blocked' → a report that a harness guard refused an action Handler
+  // wanted to take. A reply to one is optional, a dismiss is what retires it
+  // (`handler:dismiss`), and the bridge never sends choices for one.
   final String? kind;
 
   /// The quick choices to render as a decision card, or null for a plain
@@ -582,8 +594,8 @@ class HandlerActivityRecord {
   // unrenderable feed row, never at compile time.
   // 'continue' | 'handle' | 'escalate' | 'armed' | 'goal_edited' |
   // 'item_done' | 'item_blocked' | 'item_skipped' | 'item_failed' |
-  // 'instruction_dropped' | 'floor_warning' | 'wrapped_up' | 'parked' |
-  // 'resumed'
+  // 'instruction_dropped' | 'floor_warning' | 'evidence_rejected' |
+  // 'wrapped_up' | 'parked' | 'resumed'
   final String decision;
   final String reason;
   final String? detail;

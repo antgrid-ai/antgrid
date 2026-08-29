@@ -21,19 +21,32 @@ String sessionStartRefusalCopy(String? code, String? message) {
   return sessionRefusalCopy(code, message, 'Could not start this session.');
 }
 
-/// Reports [error] on the root navigator's context rather than [context]'s own:
-/// a session tap can dispose the row that fired it (mobile pops the drawer, a
-/// cross-project switch rebuilds it), and a message the user asked for must not
-/// vanish with the widget. Same reason `recent_session_row_widget.dart`'s onTap
-/// hands `openRecentSession` the navigator's context. Falls back to [context]
-/// where there is no Navigator (widget tests).
-void reportStartRefusal(BuildContext context, SessionOperationException error) {
+/// What a user is told when the bridge refuses `session:fork`.
+///
+/// Its own fallback rather than [sessionStartRefusalCopy]'s: a fork that never
+/// happened and a session that never started are different answers, and the
+/// fallback is exactly what a user reads when the refusal carries no code and
+/// no sentence of its own — a bare `ok: false`, which is a bridge declining to
+/// explain rather than a bridge that said nothing.
+String sessionForkRefusalCopy(String? code, String? message) =>
+    sessionRefusalCopy(code, message, 'Could not fork this session.');
+
+void reportStartRefusal(BuildContext context, SessionOperationException error) =>
+    reportSessionNotice(
+      context,
+      sessionStartRefusalCopy(error.errorCode, error.message),
+    );
+
+/// Reports [message] about a session on the root navigator's context rather
+/// than [context]'s own: a session tap can dispose the row that fired it
+/// (mobile pops the drawer, a cross-project switch rebuilds it), and an answer
+/// the user asked for must not vanish with the widget. Same reason
+/// `recent_session_row_widget.dart`'s onTap hands `openRecentSession` the
+/// navigator's context. Falls back to [context] where there is no Navigator
+/// (widget tests).
+void reportSessionNotice(BuildContext context, String message) {
   final host =
       Navigator.maybeOf(context, rootNavigator: true)?.context ?? context;
   if (!host.mounted) return;
-  showAbSnackBar(
-    host,
-    sessionStartRefusalCopy(error.errorCode, error.message),
-    duration: const Duration(seconds: 8),
-  );
+  showAbSnackBar(host, message, duration: const Duration(seconds: 8));
 }

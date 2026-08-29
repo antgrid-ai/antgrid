@@ -341,6 +341,22 @@ class SessionsService {
     return pending.future;
   }
 
+  /// Forks from bridge-owned transcript and workspace state. The app supplies
+  /// no command, native conversation id, transcript, or filesystem path.
+  Future<SessionEntry?> fork(String sourceSessionId, {required String workspace}) {
+    final requestId = _newRequestId();
+    final pending = _newPending<SessionEntry?>(
+      () => _pendingCreates.remove(requestId),
+    );
+    _pendingCreates[requestId] = pending;
+    unawaited(_send(createAbMessage('session:fork', {
+      'requestId': requestId,
+      'sourceSessionId': sourceSessionId,
+      'workspace': workspace,
+    })));
+    return pending.future;
+  }
+
   /// Starts [id]. With [raiseRefusal], a typed bridge refusal — an isolated
   /// session whose checkout is gone, an antgrid.yaml that moved
   /// `agent.workingDir` out of it — arrives as a [SessionOperationException]

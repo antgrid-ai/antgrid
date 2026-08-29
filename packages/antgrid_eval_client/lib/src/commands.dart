@@ -280,7 +280,10 @@ class CommandHandler {
   /// stream. [StreamTransport.refreshSnapshot] does exactly that, and the
   /// frames surface through the [_attachStream] subscription as
   /// `antgrid-message` events, so type waiters resolve instead of racing the
-  /// deduped burst.
+  /// deduped burst. `snapshot-complete` marks the STATE half landed; the tree
+  /// is pulled in a round trip of its own and can surface after it, so a
+  /// `tree:full` waiter has to be a type waiter, not a read of what landed by
+  /// the event.
   Future<void> _handleSnapshot(Map<String, dynamic> cmd) async {
     final session = _session;
     if (session == null) {

@@ -346,4 +346,32 @@ void main() {
       expect(entry.copyWith(setup: done).setup, done);
     });
   });
+
+  test('parses and round-trips forkedFromSessionId', () {
+    final e = SessionEntry.fromJson({
+      'id': 'a',
+      'name': 'n',
+      'createdAt': 1,
+      'lastUsedAt': 1,
+      'archived': false,
+      'running': false,
+      'forkedFromSessionId': 'source-1',
+    });
+    expect(e.forkedFromSessionId, 'source-1');
+    expect(e.toJson()['forkedFromSessionId'], 'source-1');
+    expect(e.copyWith(running: true).forkedFromSessionId, 'source-1');
+  });
+
+  test('a session that is not a fork carries no provenance', () {
+    final e = SessionEntry.fromJson({
+      'id': 'a',
+      'name': 'n',
+      'createdAt': 1,
+      'lastUsedAt': 1,
+      'archived': false,
+      'running': false,
+    });
+    expect(e.forkedFromSessionId, isNull);
+    expect(e.toJson().containsKey('forkedFromSessionId'), isFalse);
+  });
 }

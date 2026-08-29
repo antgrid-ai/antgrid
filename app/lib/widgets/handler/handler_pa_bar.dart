@@ -64,6 +64,13 @@ String handlerPaStatusLabel(HandlerSessionState session, {DateTime? now}) {
 /// answering them, and never says which — so the line has to promise clearing,
 /// not answers.
 ///
+/// Two kinds are exempt from that clearing on the bridge and so must be exempt
+/// from the promise here: `resolve_in_session` (only the transcript's own
+/// resolve carries the id) and `guard_blocked` (a report of an action Handler
+/// could not take, retired only by its card's Dismiss). This prose is a
+/// hand-mirror of that rule; getting it wrong promises the user something the
+/// bridge refuses to do.
+///
 /// Nothing is ever blocked. Handler's whole premise is acting while you are
 /// away, so a lock the user has to remember to undo would be left in the wrong
 /// position exactly when it matters.
@@ -79,13 +86,20 @@ String? handlerTypingHint(
   HandlerRunState.watching => null,
 };
 
-/// An option-based prompt (`kind: 'resolve_in_session'`) is the one row a typed
-/// line neither answers nor clears — only the transcript's permission card or
-/// question form carries the id that resolves it, which is why
+/// An option-based prompt (`kind: 'resolve_in_session'`) is one of the two rows
+/// a typed line neither answers nor clears — only the transcript's permission
+/// card or question form carries the id that resolves it, which is why
 /// `handler_screen.dart`'s `answer()` routes there instead of opening the reply
 /// sheet.
 int _prompts(HandlerSessionState session) =>
     session.escalations.where((e) => e.kind == 'resolve_in_session').length;
+
+/// The other one. A `guard_blocked` row reports an action Handler wanted to take
+/// and a guard refused, so there is no pause for a line to supersede — the
+/// bridge keeps it standing and only the card's Dismiss retires it. A hint that
+/// counted it would promise clearing the bridge will not do.
+int _reports(HandlerSessionState session) =>
+    session.escalations.where((e) => e.kind == 'guard_blocked').length;
 
 /// Plural because an agent can be stopped on several at once — parallel tool
 /// calls raise a permission prompt per call, and the bridge now carries a row
@@ -93,31 +107,38 @@ int _prompts(HandlerSessionState session) =>
 String _promptSubject(int prompts) =>
     prompts == 1 ? 'the prompt' : '$prompts prompts';
 
-String _needsYouHint(HandlerSessionState session) {
+String? _needsYouHint(HandlerSessionState session) {
   final prompts = _prompts(session);
   if (prompts > 0) {
     // Both halves or neither. The redirect alone reads as "typing here does
     // nothing", and a user who types anyway loses the free-text questions
     // queued behind the prompt — the silent clearing this whole line exists to
     // stop, merely moved to the mixed case.
-    // Counted off the bridge's own total, for the same reason the branch below is —
-    // a row the lenient parse dropped must not shrink the number of questions this
-    // line promises to clear. Floored: the two arrive in one snapshot but the parse
-    // can only ever lose rows, never invent them.
-    final others = math.max(0, session.pendingEscalations - prompts);
+    final others = _others(session, prompts);
     final answer = 'Answer ${_promptSubject(prompts)} in the transcript';
     if (others == 0) return '$answer — not here';
     final questions = others == 1 ? 'question' : '$others questions';
     return '$answer — a message here clears the other $questions';
   }
-  // Kinds come from the per-session rows, the number from the count the bridge
-  // folds off that same list, so a row the lenient parse dropped never shrinks
-  // the total on screen.
-  final pending = session.pendingEscalations;
+  final pending = _others(session, 0);
+  // A session standing only on reports is at needs_you with nothing a typed line
+  // would clear, so the bar has nothing to warn about.
+  if (pending == 0) return null;
   return pending > 1
       ? 'Your next message clears all $pending questions, answered or not'
       : 'Your next message clears this question, answered or not';
 }
+
+/// The questions a submitted line actually clears: everything the bridge counts,
+/// minus the two kinds it keeps standing.
+///
+/// Counted off the bridge's own total rather than the parsed rows, for the same
+/// reason the prompt count is subtracted from it — a row the lenient parse
+/// dropped must not shrink the number this line promises to clear. Floored: the
+/// two arrive in one snapshot but the parse can only ever lose rows, never
+/// invent them.
+int _others(HandlerSessionState session, int prompts) =>
+    math.max(0, session.pendingEscalations - prompts - _reports(session));
 
 /// A park ends on the first submitted line either way, but a prompt raised
 /// before the park survives it (`enterPark` never touches `s.escalations`), and

@@ -189,6 +189,21 @@ describe("MessageBus.getSnapshot", () => {
     const bus = new MessageBus();
     expect(bus.getSnapshot(["tree:full"])).toEqual([]);
   });
+
+  test("exclude drops a type from both the ['*'] and the named answer", () => {
+    const bus = new MessageBus();
+    const tree = createMessage("tree:full", {
+      projectId: "p1",
+      root: { name: "root", path: "/", type: "directory" as const, children: [] },
+    });
+    const git = createMessage("git:status", { projectId: "p1", files: [] });
+    bus.publish(tree, "control");
+    bus.publish(git, "control");
+
+    expect(bus.getSnapshot(["*"], ["tree:full"]).map((m) => m.type)).toEqual(["git:status"]);
+    expect(bus.getSnapshot(["tree:full", "git:status"], ["tree:full"]).map((m) => m.type)).toEqual(["git:status"]);
+    expect(bus.getSnapshot(["tree:full"], ["tree:full"])).toEqual([]);
+  });
 });
 
 describe("session-scoped replay (agent:capabilities)", () => {

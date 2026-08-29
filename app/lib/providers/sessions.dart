@@ -139,6 +139,12 @@ class ActiveSessionId extends ValueController<String?> {
 /// agent's session list lands. Cleared on consumption even if the id is no
 /// longer present (the session was deleted on the agent since the cache
 /// write).
+///
+/// While set it is the answer to "what is selected", not a hint: every default
+/// pick — [reconcileActiveSession]'s `first`, the nav layer's session-less
+/// entry, the explorer's checkout — defers to it, because the list it will be
+/// resolved against lands in stages (persisted cache, then the wire) and a
+/// default taken from an early stage is a visible wrong session.
 final pendingActiveSessionIdProvider =
     NotifierProvider<ValueController<String?>, String?>(
       () => ValueController(null),
@@ -204,15 +210,23 @@ final focusedCheckoutIdProvider = Provider<String>((ref) {
 /// a reusable callback.
 void reconcileActiveSession(WidgetRef ref, List<SessionEntry> available) {
   final current = ref.read(activeSessionIdProvider);
-  if (current == null) {
-    if (available.isNotEmpty) {
-      ref.read(activeSessionIdProvider.notifier).set(available.first.id);
-    }
-    return;
+  if (current != null && available.any((s) => s.id == current)) return;
+
+  // A queued deliberate pick outranks `first`. The first list a project switch
+  // delivers is the persisted cache, seeded the instant its SessionsService
+  // constructs — long before `_bootstrapSessions` gets its `session:list`
+  // reply back over the wire (seconds, on a relay). Taking `first` here
+  // renders that session in full, and the bootstrap then visibly switches
+  // away from it. If the queued id is in this list, it IS the selection; if it
+  // is not yet (a session the cache predates), select nothing rather than
+  // something the user did not ask for — the bootstrap resolves it against the
+  // live list and falls back itself when the id turns out stale.
+  final pending = ref.read(pendingActiveSessionIdProvider);
+  final String? next;
+  if (pending != null) {
+    next = available.any((s) => s.id == pending) ? pending : null;
+  } else {
+    next = available.isEmpty ? null : available.first.id;
   }
-  final stillValid = available.any((s) => s.id == current);
-  if (stillValid) return;
-  ref
-      .read(activeSessionIdProvider.notifier)
-      .set(available.isEmpty ? null : available.first.id);
+  if (next != current) ref.read(activeSessionIdProvider.notifier).set(next);
 }

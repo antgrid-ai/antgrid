@@ -20,6 +20,7 @@ import '../../providers/providers.dart';
 import '../../providers/sessions.dart';
 import '../../util/relative_time.dart';
 import 'handler_backlog_drawer.dart';
+import 'handler_blocked_action_card.dart';
 import 'handler_decision_card.dart';
 import 'handler_item_status.dart';
 import 'handler_layout.dart';
@@ -123,7 +124,25 @@ class HandlerScreen extends ConsumerWidget {
           SliverList.list(
             children: [
               for (final e in state.escalations)
-                if (e.choices != null)
+                // First in the chain, and a cheap floor rather than a live
+                // case: the bridge never mints choices for a report, so this
+                // and the decision card can never both want the row.
+                if (e.kind == 'guard_blocked')
+                  HandlerBlockedActionCard(
+                    escalation: e,
+                    trailing: meta(e.terminalId, e.at),
+                    // Re-resolved through the container for the same reason
+                    // `answer` re-resolves after its sheet: the build-time
+                    // instance can be disposed by the time a tap lands.
+                    onDismiss: service == null
+                        ? null
+                        : () => focusedServiceOrNull(
+                            container,
+                            (s) => s.handlerService,
+                          )?.dismiss(e),
+                    onReply: service == null ? null : () => answer(e),
+                  )
+                else if (e.choices != null)
                   HandlerDecisionCard(
                     escalation: e,
                     trailing: meta(e.terminalId, e.at),
@@ -849,6 +868,10 @@ String _itemDecisionLabel(String decision) {
       // the audit trail prevention was traded for, so it is never conditional
       // on what Handler decided afterwards.
       'floor_warning' => ('Flagged: ${r.reason}', p.warning),
+      // A completion the harness refused to bank. The status snapshot that
+      // follows is identical to the one before it, so this row is the only trace
+      // of a session that will now not wrap up on its own.
+      'evidence_rejected' => ('Completion not verified: ${r.reason}', p.warning),
       'wrapped_up' => ('Wrapped up', null),
       'parked' => ('Paused: ${r.reason}', null),
       'resumed' => ('Resumed: ${r.reason}', null),
@@ -870,6 +893,7 @@ String _itemDecisionLabel(String decision) {
       'item_skipped' => (AbIcons.close, p.textMuted),
       'instruction_dropped' => (AbIcons.warning, p.textMuted),
       'floor_warning' => (AbIcons.shield, p.warning),
+      'evidence_rejected' => (AbIcons.warning, p.warning),
       'wrapped_up' => (AbIcons.check, p.textMuted),
       'parked' => (AbIcons.stop, p.warning),
       'resumed' => (AbIcons.start, p.textMuted),
@@ -908,6 +932,7 @@ Widget? _activitySubtitle(HandlerActivityRecord r, AbColors p) {
     case 'item_skipped':
     case 'item_failed':
     case 'instruction_dropped':
+    case 'evidence_rejected':
       return detail == null ? null : Text(detail, style: sans);
     default:
       return Text(r.decision, style: mono);

@@ -1,7 +1,7 @@
 import { describe, test, expect, it } from "bun:test";
 import {
   createMessage, parseMessage, parseMessageFast,
-  HandlerConfigureWire, HandlerInstructWire, HandlerUndoWire,
+  HandlerConfigureWire, HandlerInstructWire, HandlerUndoWire, HandlerDismissWire,
   type HandlerInstructionItem,
 } from "../../src/protocol";
 
@@ -86,7 +86,7 @@ describe("handler wire", () => {
 
   test("activity accepts the item-outcome kinds; escalation accepts floorRule", () => {
     for (const decision of ["armed", "goal_edited", "item_done", "item_blocked",
-      "item_skipped", "item_failed", "wrapped_up"] as const) {
+      "item_skipped", "item_failed", "evidence_rejected", "wrapped_up"] as const) {
       const act = createMessage("handler:activity", {
         projectId: "p", recordId: "r", at: 1, terminalId: "t1", decision, reason: "done",
       });
@@ -117,6 +117,9 @@ describe("handler wire", () => {
     expect(parseMessage(JSON.stringify(createMessage("handler:escalation", base)))).toBeTruthy();
     expect(parseMessage(JSON.stringify(createMessage("handler:escalation", {
       ...base, kind: "resolve_in_session",
+    })))).toBeTruthy();
+    expect(parseMessage(JSON.stringify(createMessage("handler:escalation", {
+      ...base, kind: "guard_blocked",
     })))).toBeTruthy();
     expect(parseMessage(JSON.stringify({
       ...createMessage("handler:escalation", base), kind: "bogus",
@@ -169,6 +172,10 @@ describe("handler wire", () => {
           escalationId: "e1", question: "q", reasoning: "r", draftReply: "",
           urgency: "high", at: 2, kind: "resolve_in_session",
         }, {
+          escalationId: "e3", question: "Handler did not send its reply",
+          reasoning: "reply contains control characters", draftReply: "yes[B",
+          urgency: "normal", at: 4, kind: "guard_blocked",
+        }, {
           escalationId: "e2", question: "q", reasoning: "r", draftReply: "ship it",
           urgency: "normal", at: 3,
           choices: [
@@ -179,7 +186,10 @@ describe("handler wire", () => {
       }],
     });
     const parsed = parseMessage(JSON.stringify(msg)) as any;
-    expect(parsed.sessions[0].escalations[1].choices[0].text).toBe("ship it");
+    expect(parsed.sessions[0].escalations[2].choices[0].text).toBe("ship it");
+    // The app rebuilds its rows wholesale from this snapshot, and the kind is
+    // what tells it a Dismiss is the only thing that retires one.
+    expect(parsed.sessions[0].escalations[1].kind).toBe("guard_blocked");
   });
 
   test("status carries a parked session with its park fields", () => {
@@ -454,6 +464,36 @@ describe("handler:snapshot / handler:undo (§5.2)", () => {
       const viaPayload = HandlerUndoWire.safeParse(c.payload).success;
       const viaEnvelope = parseMessage(JSON.stringify({
         id: crypto.randomUUID(), timestamp: 1, type: "handler:undo", projectId: "p", ...c.payload,
+      })) !== null;
+      expect(viaPayload).toBe(viaEnvelope);
+      expect(viaPayload).toBe(c.valid);
+    });
+  }
+});
+
+describe("handler:dismiss", () => {
+  test("the dismiss verb routes through both parse paths", () => {
+    const msg = createMessage("handler:dismiss", { projectId: "p", terminalId: "t1", escalationId: "e1" });
+    const parsed = parseMessage(JSON.stringify(msg)) as any;
+    expect(parsed.terminalId).toBe("t1");
+    expect(parsed.escalationId).toBe("e1");
+    // The hot path admits it on the discriminator alone, which is why agent-core
+    // re-parses with HandlerDismissWire before the engine drops a row.
+    expect(parseMessageFast(JSON.stringify(msg))?.type).toBe("handler:dismiss");
+  });
+
+  const cases: Array<{ name: string; payload: Record<string, unknown>; valid: boolean }> = [
+    { name: "a well-formed dismiss", payload: { terminalId: "t1", escalationId: "e1" }, valid: true },
+    { name: "missing escalationId", payload: { terminalId: "t1" }, valid: false },
+    { name: "non-string escalationId", payload: { terminalId: "t1", escalationId: 7 }, valid: false },
+    { name: "missing terminalId", payload: { escalationId: "e1" }, valid: false },
+  ];
+
+  for (const c of cases) {
+    it(`payload and envelope agree on ${c.name}`, () => {
+      const viaPayload = HandlerDismissWire.safeParse(c.payload).success;
+      const viaEnvelope = parseMessage(JSON.stringify({
+        id: crypto.randomUUID(), timestamp: 1, type: "handler:dismiss", projectId: "p", ...c.payload,
       })) !== null;
       expect(viaPayload).toBe(viaEnvelope);
       expect(viaPayload).toBe(c.valid);

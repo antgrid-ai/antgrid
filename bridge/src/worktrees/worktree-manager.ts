@@ -117,6 +117,8 @@ export interface PrepareWorktreeArgs {
   sessionId: string;
   sessionName?: string;
   baseBranch?: string;
+  /** A bridge-resolved immutable commit. Never accepted from a client. */
+  baseCommit?: string;
 }
 
 export interface RemoveWorktreeArgs {
@@ -193,7 +195,7 @@ export class WorktreeManager {
       // fails with NOT_GIT_REPOSITORY rather than on a reconcile symptom.
       await this.reconcileLocked(args.projectId, repoPath);
 
-      const base = await this.resolveBase(repoPath, args.baseBranch);
+      const base = await this.resolveBase(repoPath, args.baseBranch, args.baseCommit);
       const checkoutId = this.newCheckoutId();
       const wtRoot = resolve(this.abDir, WORKTREE_ROOT_DIR);
       const root = resolve(wtRoot, projectRootName(repoPath, args.projectId));
@@ -703,7 +705,22 @@ export class WorktreeManager {
     return status.stdout.trim().length > 0;
   }
 
-  private async resolveBase(repoPath: string, baseBranch?: string): Promise<{ ref: string | null; commit: string }> {
+  private async resolveBase(repoPath: string, baseBranch?: string, baseCommit?: string): Promise<{ ref: string | null; commit: string }> {
+    if (baseCommit) {
+      // `baseCommit` is produced by SessionManager from `git rev-parse HEAD`
+      // on an existing checkout. Verify it anyway: this is the last boundary
+      // before it becomes a Git argument that creates a worktree.
+      // 40 hex (sha1) or 64 (a `--object-format=sha256` repository). Keep in
+      // lockstep with SessionManager.committedHead, the only producer.
+      if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(baseCommit)) {
+        throw new WorktreeError("WORKTREE_CONFLICT", "The source checkout has no valid committed HEAD.");
+      }
+      const verified = await this.git(["rev-parse", "--verify", `${baseCommit}^{commit}`], repoPath);
+      if (verified.exitCode !== 0) {
+        throw new WorktreeError("WORKTREE_CONFLICT", "The source checkout's committed HEAD is unavailable.");
+      }
+      return { ref: null, commit: verified.stdout.trim() };
+    }
     if (baseBranch) {
       const branches = await this.git(["for-each-ref", "--format=%(refname:short)", "refs/heads"], repoPath);
       if (branches.exitCode !== 0 || !branches.stdout.split(/\r?\n/).map((name) => name.trim()).includes(baseBranch)) {
