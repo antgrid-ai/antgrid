@@ -1329,19 +1329,33 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // Same wrong-checkout guard as the tree and preview requests below, and
         // for the same reason: every checkout runtime sees this frame, so
         // without it one request is answered N times and the app applies
-        // whichever reply lands last — another checkout's scrollback, under a
-        // seq that then filters the right one's output.
+        // whichever reply lands last — another checkout's screen, under a seq
+        // that then filters the right one's output. It stays outside the
+        // closure below because serializing N screens is real work.
         if (runtime.checkout.id !== checkoutIdOf(msg)) break;
-        const snap = manager.getReplaySnapshot(internalTerminalId(runtime, msg.terminalId));
-        if (!snap) {
-          log.warn("snapshot requested for unknown terminal %s", msg.terminalId);
-          break;
-        }
-        sendFromRuntime(runtime, createMessage("terminal:snapshot", {
-          terminalId: msg.terminalId,
-          scrollback: snap.text,
-          seq: snap.seq,
-        }));
+        // Detaching the body moved it out from under the dispatcher's own
+        // `.catch`, so it owns its rejections now — same shape as the
+        // `session:*` handlers above. Unhandled, one failed snapshot reaches
+        // `index.ts`'s `unhandledRejection` hook, which shuts the whole host
+        // down.
+        void (async () => {
+          try {
+            const snap = await manager.getAttachSnapshot(internalTerminalId(runtime, msg.terminalId));
+            if (runtime.disposed) return;
+            if (!snap) {
+              log.warn("snapshot requested for unknown terminal %s", msg.terminalId);
+              return;
+            }
+            sendFromRuntime(runtime, createMessage("terminal:snapshot", {
+              terminalId: msg.terminalId,
+              scrollback: snap.text,
+              seq: snap.seq,
+              composed: true,
+            }));
+          } catch (err) {
+            log.warn("snapshot for terminal %s failed: %s", msg.terminalId, err);
+          }
+        })();
         break;
       }
       case "file:tree:snapshot:request": {
@@ -2040,19 +2054,48 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       runtime.portDetector?.emitCurrent();
     }
 
-    // Re-send terminal scrollback so the app has current output
+    // Re-send each terminal's screen so the app has current output.
+    //
+    // Serialized together, never one after another. Each snapshot waits out its
+    // OWN terminal's whole unparsed backlog, and the terminals share nothing —
+    // one `TerminalScreen`, one write buffer each — so awaiting them in turn
+    // just adds the timer round-trips up: measured 184 ms for a dozen idle
+    // terminals against 14 ms together, and a single flooding one holds every
+    // terminal behind it in `getStatus()` order for as long as it takes to
+    // drain. Nothing downstream cares about the order: the app keys the blob
+    // and its cutoff by terminalId.
     if (manager) {
-      for (const t of manager.getStatus()) {
-        const snap = manager.getReplaySnapshot(t.terminalId);
-        if (snap && snap.text) {
-          sendTerminalFrame(createMessage("terminal:output", {
-            // The INTERNAL id: sendTerminalFrame owns the external rewrite, and
-            // handing it an already-externalised one makes its own owner lookup
-            // miss and stamp an isolated checkout's replay as main's.
-            terminalId: t.terminalId,
-            data: snap.text,
-          }));
-        }
+      const mgr = manager;
+      const snaps = await Promise.all(
+        mgr.getStatus().map(async (t) => {
+          try {
+            return { id: t.terminalId, snap: await mgr.getAttachSnapshot(t.terminalId) };
+          } catch (err) {
+            // One terminal's failure must not cost the others theirs — awaited
+            // together, a rejection would abandon the whole resync.
+            log.warn("resync snapshot for terminal %s failed: %s", t.terminalId, err);
+            return { id: t.terminalId, snap: null };
+          }
+        }),
+      );
+      for (const { id, snap } of snaps) {
+        // `null` means the screen is gone — an exited terminal, which
+        // `getStatus` still reports so the tab stays visible. Its text is never
+        // empty: the attach preamble alone is 20 bytes, so a test on the STRING
+        // says nothing and would skip nothing.
+        if (!snap) continue;
+        // A snapshot, never an output frame: a composed blob is a whole
+        // screen, so appended as ordinary output it would stack a second copy
+        // into a live tab, and with no seq the app's cutoff cannot filter it.
+        sendTerminalFrame(createMessage("terminal:snapshot", {
+          // The INTERNAL id: sendTerminalFrame owns the external rewrite, and
+          // handing it an already-externalised one makes its own owner lookup
+          // miss and stamp an isolated checkout's replay as main's.
+          terminalId: id,
+          scrollback: snap.text,
+          seq: snap.seq,
+          composed: true,
+        }));
       }
     }
   }

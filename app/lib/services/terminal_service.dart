@@ -7,6 +7,7 @@ import '../models/terminal_models.dart';
 import '../models/ab_message.dart';
 import '../project/perf_recorder.dart';
 import '../project/project_session.dart';
+import '../util/detached.dart';
 import '../utils/terminal_bell.dart';
 import 'reply_latch.dart';
 
@@ -16,6 +17,7 @@ class TerminalService {
 
   StreamSubscription<Map<String, dynamic>>? _heavySub;
   StreamSubscription<Map<String, dynamic>>? _statusSub;
+  StreamSubscription<void>? _resumeSub;
   bool _disposed = false;
 
   final Map<String, int> _snapshotSeq = {};
@@ -71,24 +73,58 @@ class TerminalService {
     // router status stream so all dispatch goes through one path.
     _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
 
-    // Tier-3 re-drive. A seq cutoff is only meaningful against the PTY
-    // generation it was taken from, and the agent's counter is per PTY: it is
-    // deleted on exit (`ConnState.clearTerminal`), so a same-id respawn starts
-    // again at 1. A disconnect is exactly the window in which a terminal can
-    // exit and respawn unwitnessed — neither `terminal:exited` nor
-    // `terminal:started` arrives — and nothing on the wire distinguishes the
-    // new run from the old, so a surviving cutoff sits above every seq the new
-    // PTY will ever emit and filters its entire output. The tab then renders
-    // blank behind a live process, with no user action that clears it. Dropped
-    // wholesale rather than reasoned about per tab: losing a still-valid cutoff
-    // costs a few duplicated lines on the next snapshot, keeping a stale one
-    // costs the pane.
-    session.hydrateCheckout(checkoutId, _seqCutoffHydratorKey, _dropSeqCutoffs);
+    // Tier-3 re-drive. This is the terminal's ONLY reconnect recovery: the
+    // agent drops terminal output while suppressed but keeps bumping the seq,
+    // so a tab that was already on screen when the stream went away renders
+    // whatever it held then, forever — nothing else re-pulls it (the discovery
+    // pulls only fire for a tab the app has never seen).
+    //
+    // A seq cutoff is only meaningful against the PTY generation it was taken
+    // from, and the agent's counter is per PTY: it is deleted on exit
+    // (`ConnState.clearTerminal`), so a same-id respawn starts again at 1. A
+    // disconnect is exactly the window in which a terminal can exit and respawn
+    // unwitnessed — neither `terminal:exited` nor `terminal:started` arrives —
+    // and nothing on the wire distinguishes the new run from the old, so a
+    // surviving cutoff sits above every seq the new PTY will ever emit and
+    // filters its entire output. The tab then renders blank behind a live
+    // process, with no user action that clears it. Dropped wholesale rather
+    // than reasoned about per tab: losing a still-valid cutoff costs a few
+    // duplicated lines on the next snapshot, keeping a stale one costs the
+    // pane.
+    session.hydrateCheckout(
+      checkoutId,
+      _snapshotHydratorKey,
+      _rehydrateTerminals,
+    );
+    _resumeSub = session.focusResumed.listen(
+      (_) => detached(
+        'TerminalService',
+        're-attach snapshot pull on focus resume',
+        _rehydrateTerminals,
+      ),
+    );
   }
 
-  static const _seqCutoffHydratorKey = 'terminal:seq-cutoffs';
+  static const _snapshotHydratorKey = 'terminal:snapshots';
 
-  Future<void> _dropSeqCutoffs() async => _snapshotSeq.clear();
+  Future<void> _rehydrateTerminals() async {
+    if (_disposed) return;
+    // Cleared first and unconditionally, because a request is not a promise of
+    // a reply: an id the agent no longer knows is answered with a log line and
+    // no frame, and a send in a keyless window vanishes. Only the tabs whose
+    // reply lands re-arm a cutoff (in _applySnapshot), so a clear made
+    // conditional on one would strand a cutoff above every seq a respawned PTY
+    // emits and leave the pane blank behind a live process.
+    _snapshotSeq.clear();
+    for (final tab in _state.tabs.values) {
+      // A pending tab is the app's own optimistic invention — the agent has
+      // never confirmed the id, so it would answer "snapshot requested for
+      // unknown terminal" and send nothing. Its own terminal:started carries
+      // the pull.
+      if (_pendingTerminalIds.contains(tab.terminalId)) continue;
+      _requestTerminalSnapshot(tab.terminalId);
+    }
+  }
 
   void _setState(TerminalState state) {
     if (_disposed) return;
@@ -129,10 +165,21 @@ class TerminalService {
     }
   }
 
-  /// Erase scrollback (`CSI 3 J`), erase the screen (`CSI 2 J`) and home the
-  /// cursor — everything `clear()` would do to the CONTENT, and nothing it
-  /// would do to the modes.
-  static final Uint8List _snapshotErase = Uint8List.fromList(
+  /// Erase for the LEGACY payload only — an older agent's raw byte tail, up to
+  /// ten thousand characters of it, which is several screens.
+  ///
+  /// `CSI 3 J` is in it because a body taller than the screen SCROLLS: `2J`
+  /// clears the visible rows, and the tail then pushes each of them into the
+  /// buffer above as it draws past the bottom, so every attach stacks another
+  /// copy of the same output into the user's history with no way to clear it.
+  /// The re-attach now fires on every focus resume, so that is unbounded.
+  /// Erasing history the tail is about to reprint is the lesser loss, and it is
+  /// what this path did before the composed blob existed.
+  ///
+  /// A composed blob takes no erase at all — it is exactly one screen and
+  /// carries its own preamble, which deliberately stops at `2J` so the app's
+  /// own scrollback survives it.
+  static final Uint8List _legacyAttachErase = Uint8List.fromList(
     utf8.encode('\x1b[3J\x1b[2J\x1b[H'),
   );
 
@@ -147,7 +194,14 @@ class TerminalService {
     // tail this snapshot carries, so nothing here can put them back: the
     // engine would sit on the primary screen with mouse off while the guest
     // draws into an alt screen, until the agent itself is restarted.
-    tab.ghostty.appendOutputBytes(_snapshotErase);
+    //
+    // A composed blob is self-contained: it opens with its own preamble (alt
+    // screen exit, margin reset, screen erase, cursor home, SGR reset),
+    // repaints the visible screen, restores its own modes, and ends in a
+    // RELATIVE cursor placement. Anything prepended lands ahead of that
+    // preamble — the wrong-screen bug the preamble exists to fix — and anything
+    // appended lands after the cursor is placed, so the blob goes on verbatim.
+    if (!msg.composed) tab.ghostty.appendOutputBytes(_legacyAttachErase);
     tab.ghostty.appendOutputBytes(utf8.encode(msg.scrollback));
   }
 
@@ -247,6 +301,17 @@ class TerminalService {
 
     final activeId = _state.activeTerminalId ?? msg.terminalId;
     _setState(_state.copyWith(tabs: tabs, activeTerminalId: activeId));
+    // A start means a fresh PTY, and the agent's seq counter is per PTY —
+    // deleted on exit, so this one begins again at 1. Any cutoff still held for
+    // this id was taken from the previous generation and now sits above every
+    // seq the new one will ever emit, filtering its whole output: a blank pane
+    // behind a live process. Dropped BEFORE the pull, and unconditionally,
+    // because the reply is not guaranteed and losing a live cutoff costs a few
+    // duplicated lines where keeping a dead one costs the pane. The exit
+    // handler covers the ordinary case; this covers the start whose exit was
+    // never delivered, which is every window where outbound frames were dropped
+    // (a remote-access flip drops status frames too).
+    _snapshotSeq.remove(msg.terminalId);
     // Newly-discovered terminal — fetch its scrollback so we can drop stale
     // terminal:output frames via the per-terminal seq cutoff.
     _requestTerminalSnapshot(msg.terminalId);
@@ -765,8 +830,10 @@ class TerminalService {
     _disposed = true;
     // Same reason PreviewService deregisters its own: the registry is the
     // TRANSPORT's, which outlives this service, so a hydrator left behind
-    // keeps clearing a dead checkout's cutoffs on every reconnect forever.
-    session.unhydrateCheckout(checkoutId, _seqCutoffHydratorKey);
+    // keeps pulling a dead checkout's snapshots on every reconnect forever.
+    session.unhydrateCheckout(checkoutId, _snapshotHydratorKey);
+    await _resumeSub?.cancel();
+    _resumeSub = null;
     // Resolve any in-flight git action cleanly so its tier-2 timeout timer is
     // cancelled instead of outliving the service.
     _branchesLatch?.settle();

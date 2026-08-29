@@ -671,12 +671,19 @@ class TerminalSnapshotMessage {
   final String scrollback;
   final int seq;
 
+  /// Whether [scrollback] is a COMPLETE attach sequence — preamble, serialized
+  /// screen, supplemental modes — to be applied verbatim with nothing prepended
+  /// or appended. False (an older agent) means it is a mode prelude plus a raw
+  /// byte tail, and the client must place its own erase.
+  final bool composed;
+
   const TerminalSnapshotMessage({
     required this.id,
     required this.timestamp,
     required this.terminalId,
     required this.scrollback,
     required this.seq,
+    this.composed = false,
   });
 }
 
@@ -1285,6 +1292,9 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         terminalId: terminalId,
         scrollback: scrollback,
         seq: seq,
+        // Anything but a literal `true` reads false, which selects the legacy
+        // branch — the one that is safe against a blob it cannot interpret.
+        composed: json['composed'] == true,
       );
 
     case 'file:tree:snapshot:request':
