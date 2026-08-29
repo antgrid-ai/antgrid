@@ -409,6 +409,8 @@ redistributed inside it.
 | `@anthropic-ai/claude-agent-sdk` | 0.3.201 | proprietary — see above | Anthropic PBC |
 | `@inquirer/prompts` | 8.4.2 | MIT | Copyright (c) 2025 Simon Boudrias |
 | `@opencode-ai/sdk` | 1.15.10 | MIT | declared in `package.json`; the published package ships no licence file |
+| `@xterm/addon-serialize` | 0.14.0 | MIT | The xterm.js authors; declared in `package.json`, the published package ships no licence file |
+| `@xterm/headless` | 6.0.0 | MIT | The xterm.js authors; declared in `package.json`, the published package ships no licence file |
 | `bun-pty` | 0.4.8 | MIT | Copyright (c) 2025 Dilip Thapa |
 | `chokidar` | 5.0.0 | MIT | Copyright (c) 2012 Paul Miller, Elan Shanker |
 | `commander` | 13.1.0 | MIT | Copyright (c) 2011 TJ Holowaychuk |

@@ -1384,6 +1384,11 @@ const TerminalSnapshotMessage = BaseMessage.extend({
   terminalId: z.string(),
   scrollback: z.string(),
   seq: z.number().int().nonnegative(),
+  // Absent/false: `scrollback` is a mode prelude plus a raw byte tail, and the
+  // client must place its own erase (an older bridge). True: `scrollback` is a
+  // COMPLETE attach sequence — preamble, serialized screen, supplemental modes —
+  // to be applied verbatim with nothing prepended or appended.
+  composed: z.boolean().optional(),
   ...CheckoutScoped,
 });
 

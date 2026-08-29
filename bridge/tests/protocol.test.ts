@@ -311,6 +311,24 @@ describe("terminal:snapshot", () => {
     if (parsed?.type !== "terminal:snapshot") throw new Error("unreachable");
     expect(parsed.seq).toBe(42);
     expect(parsed.scrollback).toBe("hello\nworld\n");
+    // An older bridge sends no flag at all, and the client must read that as a
+    // mode prelude plus a byte tail it has to erase around itself.
+    expect(parsed.composed).toBeUndefined();
+  });
+
+  it("carries the composed flag through the parse hop", () => {
+    const msg = {
+      id: "b0a1f5c9-4b28-4f0e-8b3b-9c4b1c2d3e4f",
+      timestamp: Date.now(),
+      type: "terminal:snapshot",
+      terminalId: "t1",
+      scrollback: "\u001b[?1049l\u001b[3J\u001b[2J\u001b[H\u001b[0mscreen",
+      seq: 7,
+      composed: true,
+    };
+    const parsed = parseMessage(JSON.stringify(msg));
+    if (parsed?.type !== "terminal:snapshot") throw new Error("unreachable");
+    expect(parsed.composed).toBe(true);
   });
 });
 

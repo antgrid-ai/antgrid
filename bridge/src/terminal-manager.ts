@@ -6,6 +6,7 @@ import {
 import type { GracefulExitAsk } from "./agents/types";
 import { ScrollbackBuffer } from "./scrollback";
 import { TerminalModeTracker } from "./terminal-modes";
+import { TerminalScreen } from "./terminal-screen";
 import { logger } from "./logger";
 const log = logger.child({ component: "terminal-manager" });
 import { createMessage, type AbMessage } from "./protocol";
@@ -89,6 +90,13 @@ export class TerminalManager {
   private scrollbacks = new Map<string, ScrollbackBuffer>();
   /** Paired 1:1 with `scrollbacks` — the tail alone cannot carry mode state. */
   private modeTrackers = new Map<string, TerminalModeTracker>();
+  /** Also paired 1:1 with `scrollbacks`, and the reason an attach can rebuild a
+   *  SCREEN rather than replay a slice of the stream that drew one. A live
+   *  `Terminal` per PTY costs memory, so every site that drops a scrollback
+   *  must dispose one here too. */
+  private screens = new Map<string, TerminalScreen>();
+  /** Chunk sinks for the snapshots currently mid-barrier — see `getAttachSnapshot`. */
+  private snapshotTails = new Map<string, Set<string[]>>();
   private terminalTypes = new Map<string, "agent" | "service">();
   /** Metadata for exited terminals so they remain visible in status. */
   private stoppedTerminals = new Map<string, StoppedTerminalInfo>();
@@ -204,6 +212,23 @@ export class TerminalManager {
         if (msg.type === "terminal:output") {
           scrollback.append(msg.data);
           modes.feed(msg.data);
+          // BEFORE the suppression drop, and looked up rather than captured so
+          // the closure has no ordering dependency on when the screen is made.
+          // This placement is what makes a suppressed window recoverable at
+          // all: a socket drop and a backgrounded app both stop the outbound
+          // frame below, and only an emulator that stayed current through it
+          // can hand the app back the screen it missed. The screen also stays
+          // current through a remote-access flip, which drops at the stream's
+          // `mayDeliver` instead — but nothing raises a recovery for that edge,
+          // since it neither re-establishes the transport nor moves the app's
+          // declared focus, so that window is still stale until the guest
+          // repaints of its own accord.
+          this.screens.get(terminalId)?.feed(msg.data);
+          // A chunk landing while a snapshot is mid-barrier is not in the blob
+          // being serialized, so every pending snapshot keeps its own copy to
+          // replay after it — see `getAttachSnapshot`.
+          const tails = this.snapshotTails.get(terminalId);
+          if (tails) for (const tail of tails) tail.push(msg.data);
           this.callbacks.onTerminalOutput?.(terminalId, msg.data);
           const seq = this.connState.bumpTerminalSeq(terminalId);
           if (this.connState.suppressed) {
@@ -233,6 +258,8 @@ export class TerminalManager {
             this.sessions.delete(terminalId);
             this.scrollbacks.delete(terminalId);
             this.modeTrackers.delete(terminalId);
+            this.screens.get(terminalId)?.dispose();
+            this.screens.delete(terminalId);
             this.retainScrollback.delete(terminalId);
             this.connState.clearTerminal(terminalId);
             return;
@@ -249,6 +276,8 @@ export class TerminalManager {
           if (!this.retainScrollback.has(terminalId)) {
             this.scrollbacks.delete(terminalId);
             this.modeTrackers.delete(terminalId);
+            this.screens.get(terminalId)?.dispose();
+            this.screens.delete(terminalId);
           }
           this.connState.clearTerminal(terminalId);
           this.callbacks.onTerminalExited?.(terminalId);
@@ -264,6 +293,13 @@ export class TerminalManager {
     });
 
     this.sessions.set(terminalId, session);
+    // Sized from the SESSION, not from `config`: the session applies its own
+    // 80x24 defaults, and a VT sized differently from the PTY serializes a
+    // screen the guest never drew. A same-id respawn replaces the previous
+    // screen, whose own exit lands too late to release it (the duplicate gate
+    // in the exit handler returns before the bookkeeping).
+    this.screens.get(terminalId)?.dispose();
+    this.screens.set(terminalId, new TerminalScreen(session.cols, session.rows));
     if (config.type) {
       this.terminalTypes.set(terminalId, config.type);
     }
@@ -337,6 +373,10 @@ export class TerminalManager {
     this.sessions.clear();
     this.scrollbacks.clear();
     this.modeTrackers.clear();
+    // Dropped with the rest, but DISPOSED first: a `TerminalScreen` owns an
+    // xterm instance whose internal disposables outlive the map entry.
+    for (const screen of this.screens.values()) screen.dispose();
+    this.screens.clear();
     this.retainScrollback.clear();
     this.forgotten.clear();
     this.terminalTypes.clear();
@@ -359,6 +399,8 @@ export class TerminalManager {
     this.retainScrollback.delete(terminalId);
     this.scrollbacks.delete(terminalId);
     this.modeTrackers.delete(terminalId);
+    this.screens.get(terminalId)?.dispose();
+    this.screens.delete(terminalId);
     this.stoppedTerminals.delete(terminalId);
     this.terminalTypes.delete(terminalId);
     this.callbacks.onTerminalForgotten?.(terminalId);
@@ -444,6 +486,7 @@ export class TerminalManager {
       return;
     }
     session.resize(clientId, cols, rows);
+    this.screens.get(terminalId)?.resize(session.cols, session.rows);
     this.lastDriverGeometry = { cols: session.cols, rows: session.rows };
     this.sendMessage(
       createMessage("terminal:size", {
@@ -467,7 +510,7 @@ export class TerminalManager {
   /**
    * Raw scrollback tail, for readers that want the program's OUTPUT — the
    * handler's LLM context and the local API. Anything replayed INTO an app's
-   * terminal emulator wants `getReplaySnapshot` instead.
+   * terminal emulator wants `getAttachSnapshot` instead.
    */
   getScrollback(terminalId: string): { text: string; seq: number } | null {
     const buf = this.scrollbacks.get(terminalId);
@@ -476,19 +519,53 @@ export class TerminalManager {
   }
 
   /**
-   * What a (re)attaching app must be fed: latched DEC private modes first, then
-   * the scrollback tail.
+   * What a (re)attaching app must be fed: the serialized SCREEN, then the
+   * latched modes the serializer does not carry.
    *
-   * The app rebuilds its VT engine per attach and this blob is its ONLY input,
-   * so a mode the tail no longer carries is a mode the app does not have —
-   * which is how mouse reporting, set once at TUI startup, went missing and
-   * took every click with it. Never hand an app plain `getScrollback` output.
+   * The app's engine OUTLIVES the attach and this blob is the only thing that
+   * corrects it, so a mode the blob does not carry is a mode the app keeps
+   * whatever the guest has since done to it — which is how mouse reporting, set
+   * once at TUI startup, went missing and took every click with it. Never hand
+   * an app plain `getScrollback` output: it is a suffix of a DIFF stream and
+   * reconstructs only the rows the program happened to rewrite most recently.
+   *
+   * The supplement goes strictly AFTER the whole blob, never interleaved — the
+   * serializer ends with a relative cursor restore.
+   *
+   * The seq and the blob must describe the SAME instant, and the serialize
+   * barrier is a real suspension point, so the two are made to agree rather
+   * than assumed to. A chunk arriving while the barrier is pending is sent to
+   * the app immediately (this is the same ordered channel, so it lands BEFORE
+   * the reply), is not in the blob, and would then be wiped by the blob's own
+   * `2J` — with its seq already above any cutoff read beforehand, so nothing
+   * refilters it and nothing re-sends it. Four kilobytes of a streaming build,
+   * gone from the tab for good. Capturing those chunks and replaying them after
+   * the body is what closes it: body + tail reconstructs the screen as of the
+   * LAST byte counted, so the cutoff can be read afterwards and be exact.
    */
-  getReplaySnapshot(terminalId: string): { text: string; seq: number } | null {
-    const snap = this.getScrollback(terminalId);
-    if (!snap) return null;
-    const prelude = this.modeTrackers.get(terminalId)?.prelude() ?? "";
-    return { ...snap, text: prelude + snap.text };
+  async getAttachSnapshot(terminalId: string): Promise<{ text: string; seq: number } | null> {
+    const screen = this.screens.get(terminalId);
+    if (!screen) return null;
+    const tail: string[] = [];
+    let tails = this.snapshotTails.get(terminalId);
+    if (!tails) this.snapshotTails.set(terminalId, (tails = new Set()));
+    tails.add(tail);
+    try {
+      await screen.settle();
+      // The screen can be replaced or disposed across the barrier: an exit and
+      // a same-id respawn both swap the map entry, and the barrier still fires
+      // on the dead one — whose screen would then be stamped with a seq the new
+      // PTY starts below and re-arm a cutoff above everything it will ever
+      // emit. A blank pane behind a live process.
+      if (screen.isDisposed || this.screens.get(terminalId) !== screen) return null;
+      const blob = screen.serializeNow();
+      const seq = this.connState.terminalSeq(terminalId);
+      const supplement = this.modeTrackers.get(terminalId)?.supplementalPrelude() ?? "";
+      return { text: blob + tail.join("") + supplement, seq };
+    } finally {
+      tails.delete(tail);
+      if (tails.size === 0) this.snapshotTails.delete(terminalId);
+    }
   }
 
   getStatus(): Array<{

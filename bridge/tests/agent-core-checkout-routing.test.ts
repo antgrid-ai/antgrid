@@ -366,6 +366,34 @@ test("a configured terminal in a managed checkout is attributed to that checkout
   )).toBe(true);
 });
 
+test("a terminal snapshot request is answered by the asking checkout alone", async () => {
+  await initRepo();
+  const { bus, sent } = await startWithIsolatedSession();
+  // cwd deliberately outside the project: on Windows a live PTY holds its own
+  // cwd open and the fixture's teardown rm would hit EBUSY.
+  bus.dispatchInbound(
+    createMessage("terminal:start", { terminalId: "adhoc", cwd: tmpdir() }),
+    "control",
+    "loopback",
+  );
+  await waitFor(sent, (message) =>
+    message.type === "terminal:started" && message.terminalId === "adhoc",
+  );
+  sent.length = 0;
+
+  bus.dispatchInbound(
+    createMessage("terminal:snapshot:request", { terminalId: "adhoc" }),
+    "control",
+    "loopback",
+  );
+  await waitFor(sent, (message) => message.type === "terminal:snapshot");
+  // Serializing a screen is real work and every runtime sees the frame, so the
+  // guard has to short-circuit before the isolated runtime does any of it —
+  // otherwise the app applies whichever reply lands last.
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  expect(sent.filter((message) => message.type === "terminal:snapshot").length).toBe(1);
+});
+
 /** Dispatch `fire` from inside the very delivery of the first `session:updated`
  *  that carries `deleting: true`, then run the isolated session's delete to
  *  completion. Dispatching from the subscriber removes the scheduler gap, so the

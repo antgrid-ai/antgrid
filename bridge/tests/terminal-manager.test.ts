@@ -31,24 +31,26 @@ describe("TerminalManager", () => {
     manager.killAll();
   });
 
-  test("replay snapshot extends the raw scrollback, never replaces it", async () => {
+  test("attach snapshot opens with the attach preamble and carries the live seq", async () => {
     manager.spawn({ terminalId: "t1" });
     await new Promise((r) => setTimeout(r, 800));
 
-    // Taken replay-first: anything the shell emits between the two calls would
-    // grow `raw` past `replay` and fail the suffix check rather than pass it.
-    const replay = manager.getReplaySnapshot("t1");
-    const raw = manager.getScrollback("t1");
-    expect(replay).not.toBeNull();
-    expect(raw).not.toBeNull();
-    expect(replay!.text.endsWith(raw!.text)).toBe(true);
-    expect(replay!.seq).toBe(raw!.seq);
+    const seqBefore = manager.getScrollback("t1")!.seq;
+    const attach = await manager.getAttachSnapshot("t1");
+    expect(attach).not.toBeNull();
+    // The app applies this verbatim, so the sequence that lands its engine on
+    // the right buffer has to be the first thing in it.
+    expect(attach!.text.startsWith("\x1b[?1049l\x1b[r")).toBe(true);
+    // The cutoff describes the blob exactly. It is read AFTER the barrier, and
+    // anything that arrived during one is replayed into the body — so on an
+    // idle terminal there is nothing to replay and it cannot have moved.
+    expect(attach!.seq).toBe(seqBefore);
 
     manager.killAll();
   });
 
-  test("replay snapshot is null for an unknown terminal", () => {
-    expect(manager.getReplaySnapshot("nope")).toBeNull();
+  test("attach snapshot is null for an unknown terminal", async () => {
+    expect(await manager.getAttachSnapshot("nope")).toBeNull();
   });
 
   test("kill terminal emits terminal:exited", async () => {

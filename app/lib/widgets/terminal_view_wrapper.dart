@@ -25,6 +25,7 @@ import 'clipboard_image.dart';
 import 'send_to_agent_button.dart';
 import 'send_to_agent_comment.dart';
 import 'terminal_attachment_uploader.dart';
+import 'terminal_cell_metrics.dart';
 import 'terminal_drop_target.dart';
 import 'terminal_hyperlink_preview.dart';
 import 'terminal_quick_actions_bar.dart';
@@ -107,11 +108,102 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       GhosttyTerminalSoftKeyboardController();
 
   /// Exact float cell metrics reported post-frame by Ghostty
-  /// (`onCellMetricsChanged`). Null until the first frame settles; the
-  /// non-driver branch needs `_charWidth` to size the authoritative grid and
-  /// the resize-sender needs both to derive native cols/rows from constraints.
-  double? _charWidth;
-  double? _lineHeightPx;
+  /// (`onCellMetricsChanged`), tagged with the inputs they were measured for.
+  ///
+  /// The tag is what makes the reported values safe to PREFER over
+  /// [measureTerminalCell]: the report arrives a frame after the font inputs
+  /// change, so an untagged pair is stale for one frame after every zoom step
+  /// and every UI-Size change — the same one-frame wrong grid the synchronous
+  /// measurement exists to eliminate.
+  ({
+    double fontSize,
+    FontWeight fontWeight,
+    double devicePixelRatio,
+    double charWidth,
+    double linePixels,
+  })?
+  _reportedCell;
+
+  /// The reported cell, but only when it was measured for exactly these
+  /// inputs; null otherwise, so the caller falls back to measuring itself.
+  ({double charWidth, double linePixels})? _reportedCellMatching(
+    double fontSize,
+    FontWeight fontWeight,
+    double devicePixelRatio,
+  ) {
+    final reported = _reportedCell;
+    if (reported == null) return null;
+    if (reported.fontSize != fontSize) return null;
+    if (reported.fontWeight != fontWeight) return null;
+    if (reported.devicePixelRatio != devicePixelRatio) return null;
+    return (charWidth: reported.charWidth, linePixels: reported.linePixels);
+  }
+
+  /// Our own last measurement, tagged the same way.
+  ({
+    double fontSize,
+    FontWeight fontWeight,
+    double devicePixelRatio,
+    double charWidth,
+    double linePixels,
+  })?
+  _measuredCell;
+
+  /// [measureTerminalCell], memoized on its inputs.
+  ///
+  /// The view's report cannot be the only cache: it is dispatched only when the
+  /// SNAPPED metrics move, and both are step functions of `fontSize`, so a small
+  /// zoom step that lands in the same physical-pixel bucket changes the inputs
+  /// and produces no report. `_reportedCell` then keeps a tag that can never
+  /// match again and the measurement runs on every build for the life of the
+  /// widget — and builds are frequent here (a selection drag rebuilds per
+  /// pointer move). Correctness never depended on the report: the fallback is a
+  /// hand-mirror of the same measurement, pinned by
+  /// `terminal_cell_metrics_contract_test.dart`.
+  ({double charWidth, double linePixels}) _measureCellCached(
+    double fontSize,
+    FontWeight fontWeight,
+    double devicePixelRatio,
+  ) {
+    final memo = _measuredCell;
+    if (memo != null &&
+        memo.fontSize == fontSize &&
+        memo.fontWeight == fontWeight &&
+        memo.devicePixelRatio == devicePixelRatio) {
+      return (charWidth: memo.charWidth, linePixels: memo.linePixels);
+    }
+    final cell = measureTerminalCell(
+      fontFamily: AbTokens.fontMono,
+      fontFamilyFallback: AbTokens.fontMonoFallbacks,
+      fontSize: fontSize,
+      fontWeight: fontWeight,
+      devicePixelRatio: devicePixelRatio,
+    );
+    _measuredCell = (
+      fontSize: fontSize,
+      fontWeight: fontWeight,
+      devicePixelRatio: devicePixelRatio,
+      charWidth: cell.charWidth,
+      linePixels: cell.linePixels,
+    );
+    return cell;
+  }
+
+  /// Keeps `GhosttyTerminalView`'s element alive across the branch swaps below.
+  ///
+  /// The branches build structurally different subtrees (grid-freeze vs
+  /// letterbox vs h-scroll), so without a key Flutter reconciles by
+  /// runtimeType at the same position, fails to match, and UNMOUNTS the view —
+  /// taking its selection, focus node, scroll offset, soft-keyboard hooks and
+  /// grid bookkeeping with it, for what is a pure layout event that does not
+  /// even change the engine geometry. Same failure and same remedy as
+  /// `workspace_shell.dart`'s `_agentPanelKey`/`_contextPanelKey`.
+  ///
+  /// Must stay a `final` field on the State — each mount owns its own. A static
+  /// or widget-level key throws "Multiple widgets used the same GlobalKey" the
+  /// moment two wrappers are mounted at once, e.g. during the mobile
+  /// list-and-detail route transition.
+  final GlobalKey _viewKey = GlobalKey();
 
   /// True while this view holds primary focus — mirrors `_focusScope.hasFocus`.
   /// Drives the optimistic-driver state: while `driverClientId == null` (no
@@ -577,7 +669,22 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
         MediaQuery.textScalerOf(context).scale(AbTokens.fontBody) *
         effectiveZoom;
 
+    // One local feeds both the measurement and the view, so the two are
+    // structurally incapable of disagreeing on the weight the cell was sized at.
+    final terminalFontWeight = AbTokens.bumpedWeight(
+      FontWeight.w400,
+      terminalFontSize,
+    );
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    // Prefer what the view actually reported, but only while it still describes
+    // these inputs; otherwise measure the cell ourselves so this frame's grid is
+    // already right rather than corrected one frame later.
+    final cell =
+        _reportedCellMatching(terminalFontSize, terminalFontWeight, dpr) ??
+        _measureCellCached(terminalFontSize, terminalFontWeight, dpr);
+
     final terminalView = GhosttyTerminalView(
+      key: _viewKey,
       controller: tab.ghostty,
       autofocus: true,
       // Mobile: taps scroll/read; the IME comes only from the Keyboard
@@ -595,7 +702,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       // but the view paints via its own TextPainters — so it has to be handed
       // in explicitly or the terminal, the surface that matters most here,
       // stays thin on exactly the displays the bump exists for.
-      fontWeight: AbTokens.bumpedWeight(FontWeight.w400, terminalFontSize),
+      fontWeight: terminalFontWeight,
       boldFontWeight: AbTokens.bumpedWeight(FontWeight.w700, terminalFontSize),
       // Center the sub-cell remainder on all four sides so the
       // leftover-padding strip doesn't accumulate asymmetrically
@@ -645,15 +752,21 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
       scrollbarTrackColor: const Color(0x00000000),
       minimumContrastRatio: _minContrastRatio,
       onCellMetricsChanged: (charWidth, linePixels) {
-        // Compare-then-setState: `_maybeSendResize` derives cols/rows from
-        // these during build, so a bare assignment would leave it computing on
-        // stale metrics with no corrective rebuild after a font-size change.
+        // Compare-then-setState: the grid width and `_maybeSendResize`'s
+        // cols/rows are derived from these during build, so a bare assignment
+        // would leave both computing on stale metrics with no corrective
+        // rebuild. Stamped with the inputs this report was measured for — the
+        // callback is captured per build, so they are the view's own.
         if (!mounted) return;
-        if (_charWidth == charWidth && _lineHeightPx == linePixels) return;
-        setState(() {
-          _charWidth = charWidth;
-          _lineHeightPx = linePixels;
-        });
+        final next = (
+          fontSize: terminalFontSize,
+          fontWeight: terminalFontWeight,
+          devicePixelRatio: dpr,
+          charWidth: charWidth,
+          linePixels: linePixels,
+        );
+        if (_reportedCell == next) return;
+        setState(() => _reportedCell = next);
       },
       onSelectionContentChanged: (content) {
         final text = content?.text;
@@ -715,17 +828,18 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                         constraints,
                         amDriver,
                         tab.driverClientId,
+                        charWidth: cell.charWidth,
+                        lineHeightPx: cell.linePixels,
                       );
 
-                      // Driver (or metrics not yet known) → fill the viewport. Pin
-                      // the grid to the last settled width via `_TerminalGridFreeze`
-                      // so transient resizes (e.g. dragging the agent/workspace
-                      // divider) don't spam Ghostty grid resizes —
+                      // Driver → fill the viewport. Pin the grid to the last
+                      // settled width via `_TerminalGridFreeze` so transient
+                      // resizes (e.g. dragging the agent/workspace divider)
+                      // don't spam Ghostty grid resizes —
                       // `ghostty_vte_flutter` doesn't reflow soft-wrapped lines, and
                       // Ink-style TUI redraws (Claude Code) leak stale fragments
                       // when the grid changes underneath them.
-                      final charWidth = _charWidth;
-                      if (amDriver || charWidth == null || charWidth <= 0) {
+                      if (amDriver) {
                         return _TerminalGridFreeze(
                           onSettled: _onRenderSizeSettled,
                           child: terminalView,
@@ -737,7 +851,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
                       // fits; horizontal-scroll when the driver is wider than this
                       // viewport. No `_TerminalGridFreeze` here — a viewer must
                       // track the authoritative width, not pin a local one.
-                      final authWidth = tab.cols * charWidth + _hPad;
+                      final authWidth = tab.cols * cell.charWidth + _hPad;
                       final grid = SizedBox(
                         width: authWidth,
                         child: terminalView,
@@ -853,13 +967,10 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     String terminalId,
     BoxConstraints constraints,
     bool amDriver,
-    String? observedDriverClientId,
-  ) {
-    final charWidth = _charWidth;
-    final lineHeightPx = _lineHeightPx;
-    if (charWidth == null || lineHeightPx == null) return;
-    if (charWidth <= 0 || lineHeightPx <= 0) return;
-
+    String? observedDriverClientId, {
+    required double charWidth,
+    required double lineHeightPx,
+  }) {
     // Subtract the view's symmetric padding from BOTH axes so the native grid
     // matches what GhosttyTerminalView._syncGrid actually renders
     // (floor((dim - padding) / cellMetric)). `_hPad` (= padding.horizontal,

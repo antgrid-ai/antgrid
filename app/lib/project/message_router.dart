@@ -17,6 +17,7 @@ class MessageRouter {
   final AgentTransport transport;
   late final StreamController<Map<String, dynamic>> _statusCtrl;
   late final StreamController<Map<String, dynamic>> _heavyCtrl;
+  final _resumedCtrl = StreamController<void>.broadcast();
   StreamSubscription<InboundMessage>? _sub;
 
   /// Latest durable frame per `checkoutId` → `type`. Populated from the raw
@@ -53,10 +54,24 @@ class MessageRouter {
   Stream<Map<String, dynamic>> get status => _statusCtrl.stream;
   Stream<Map<String, dynamic>> get heavy => _heavyCtrl.stream;
 
+  /// Fires on the paused → resumed edge of the declaration in
+  /// [_syncFocusState], once `client:focus-state{paused: false}` is already on
+  /// the transport.
+  ///
+  /// The agent suppresses heavy output while paused and DROPS what it
+  /// suppresses (it keeps bumping its seq counters regardless), so a surface
+  /// that rebuilds from snapshots has nothing to rebuild from until it asks
+  /// again. Unpausing does not re-establish the transport, so the tier-3
+  /// hydrators never run for this edge — this is the only signal for it.
+  Stream<void> get focusResumed => _resumedCtrl.stream;
+
   /// The durable frames seen so far for [checkoutId] on [tier], oldest first.
   /// Callers seed a fresh per-checkout subscriber with these; re-applying one
   /// is idempotent (every type here is a latest-wins full snapshot).
-  Iterable<Map<String, dynamic>> replayFor(String checkoutId, MessageTier tier) {
+  Iterable<Map<String, dynamic>> replayFor(
+    String checkoutId,
+    MessageTier tier,
+  ) {
     final byType = _durable[checkoutId];
     if (byType == null) return const [];
     return [
@@ -173,8 +188,20 @@ class MessageRouter {
   void _syncFocusState() {
     final paused = _lifecyclePaused || !_heavyListened;
     if (paused == _sentPaused) return;
+    final wasPaused = _sentPaused == true;
     _sentPaused = paused;
     _sendFocusState(paused: paused);
+    // Raised here — on the UNION, after the declaration is enqueued — because
+    // this is the only point that knows what the agent actually gates on and
+    // already dedups it to genuine transitions. A subscriber pulling from the
+    // lifecycle edge alone would be answered into a window where no heavy
+    // subscriber exists and the agent is still dropping frames; a pull enqueued
+    // ahead of the declaration would be too. The broadcast controller hands
+    // subscribers a microtask later while `transport.send` preserves order, so
+    // the agent clears `appFocusPaused` before any of their sends arrive.
+    // `resyncFocusState` nulls `_sentPaused` first, so a re-declaration on a
+    // fresh stream raises nothing — the hydrators own re-establishment.
+    if (wasPaused && !paused && !_disposed) _resumedCtrl.add(null);
   }
 
   void _sendFocusState({required bool paused}) {
@@ -194,5 +221,6 @@ class MessageRouter {
     await _sub?.cancel();
     await _statusCtrl.close();
     await _heavyCtrl.close();
+    await _resumedCtrl.close();
   }
 }
