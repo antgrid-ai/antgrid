@@ -328,13 +328,28 @@ void main() {
     svc.instruct('t1', 'and rerun the tests');
     t.clearSent();
 
-    svc.updateBacklog(terminalId: 't1', backlog: const [], notifyOnly: false);
-
+    // Reported, not just silent: a surface holding text the user typed has to
+    // be able to keep it rather than close over a send that never happened.
+    expect(
+      svc.updateBacklog(
+        terminalId: 't1',
+        backlog: const [],
+        notifyOnly: false,
+      ),
+      isFalse,
+    );
     expect(t.sent.any((m) => m['type'] == 'handler:configure'), isFalse);
 
     _status(t, [_item, _extracted]);
     await Future<void>.delayed(Duration.zero);
-    svc.updateBacklog(terminalId: 't1', backlog: const [], notifyOnly: false);
+    expect(
+      svc.updateBacklog(
+        terminalId: 't1',
+        backlog: const [],
+        notifyOnly: false,
+      ),
+      isTrue,
+    );
 
     expect(t.sent.any((m) => m['type'] == 'handler:configure'), isTrue);
 

@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LengthLimitingTextInputFormatter;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../design/ab_colors.dart';
 import '../../design/ab_icons.dart';
 import '../../design/ab_tokens.dart';
 import '../../design/widgets/ab_adaptive_sheet.dart';
+import '../../design/widgets/ab_button.dart';
 import '../../design/widgets/ab_chip.dart';
 import '../../design/widgets/ab_dialog.dart';
 import '../../design/widgets/ab_empty_state.dart';
@@ -18,6 +20,7 @@ import '../../providers/first_run.dart';
 import '../../providers/providers.dart';
 import '../../providers/sessions.dart';
 import '../../services/handler_service.dart';
+import '../../util/detached.dart';
 import 'handler_item_status.dart';
 
 /// The 1-tap presets (spec §4.2). Each label is verbatim the instruction the
@@ -582,6 +585,9 @@ String? handlerEditLockReason(List<String> pending) {
 /// So the explanation stops being something the user has to ask for: the hold
 /// lasts one extraction and ends on its own, and a line that arrives and leaves
 /// with it answers every held control at once, before any of them is touched.
+///
+/// [_ItemEditor] gives this slot the rest of its refusals too — one place a
+/// held edit is explained, whatever is holding it.
 class _EditLockNotice extends StatelessWidget {
   const _EditLockNotice({required this.reason});
 
@@ -599,9 +605,10 @@ class _EditLockNotice extends StatelessWidget {
       ),
       child: Text(
         reason,
-        // A step brighter than the progress line above it, and no louder: the
-        // list is held because the user asked for something, not because
-        // anything is wrong.
+        // A step brighter than the progress line above it, and no louder. The
+        // usual reason is a hold the user caused by asking for something; the
+        // rest sit under a Save already greyed out, which says "not now" loudly
+        // enough on its own.
         style: AbTokens.sansStyle(
           fontSize: AbTokens.fontXs,
           color: p.textSecondary,
@@ -629,20 +636,50 @@ class _EditLockNotice extends StatelessWidget {
 /// Takes the container rather than a `WidgetRef` because a menu entry fires
 /// after its route pops, by which time a status update may have taken this row
 /// out of the tree.
-void _sendEdit(
+///
+/// [edit] returning null means the item it names is no longer in the list it
+/// was handed, which is a refusal rather than a replace of the list with
+/// itself: a `handler:configure` built from a miss changes nothing on the
+/// bridge and would report success for an edit that never happened.
+///
+/// Reports WHY the edit did not reach the wire. Every caller but one discards
+/// it — a reorder or a delete refused is a list that simply did not move, and
+/// [_EditLockNotice] is already on screen saying why. [_ItemEditor] is the
+/// exception, because a refusal there would take the user's typing with it,
+/// and the two refusals end differently: a hold lifts itself, a destination
+/// that is gone does not.
+_EditSend _sendEdit(
   ProviderContainer container,
   String terminalId,
-  List<HandlerInstructionItem> Function(List<HandlerInstructionItem>) edit,
+  List<HandlerInstructionItem>? Function(List<HandlerInstructionItem>) edit,
 ) {
   final service = focusedServiceOrNull(container, (s) => s.handlerService);
-  if (service == null) return;
+  if (service == null) return _EditSend.unreachable;
   final session = service.currentState.sessions[terminalId];
-  if (session == null) return;
-  service.updateBacklog(
-    terminalId: terminalId,
-    backlog: edit(session.backlog),
-    notifyOnly: session.notifyOnly,
-  );
+  if (session == null) return _EditSend.unreachable;
+  final next = edit(session.backlog);
+  if (next == null) return _EditSend.unreachable;
+  return service.updateBacklog(
+        terminalId: terminalId,
+        backlog: next,
+        notifyOnly: session.notifyOnly,
+      )
+      ? _EditSend.sent
+      : _EditSend.held;
+}
+
+/// What became of one [_sendEdit].
+enum _EditSend {
+  sent,
+
+  /// [HandlerService.updateBacklog] refused it: an instruction is outstanding
+  /// for this terminal, and the window ends when the extraction lands.
+  held,
+
+  /// There was nothing to send it to — no focused service, no session under
+  /// that terminal, or an item that has left the backlog the edit names.
+  /// Nothing about waiting fixes any of the three.
+  unreachable,
 }
 
 List<HandlerInstructionItem> _withoutItem(
@@ -733,6 +770,12 @@ const _requeueableStatuses = {'skipped', 'blocked'};
 /// frees the item is dropping the dependency, and that stays on the row.
 const _stallingStatuses = {'blocked', 'failed'};
 
+/// Statuses the item has already run to, whatever the answer was. A gate on one
+/// of these cannot fire again and the row prints the outcome in its place (see
+/// [_itemSubtitle]) — so the editor leaves the clause off for the same reason
+/// the menu leaves Requeue off: the action applies to nothing.
+const _finishedStatuses = {'done', 'failed'};
+
 /// Puts a stalled item back in the queue.
 List<HandlerInstructionItem> _withItemRequeued(
   List<HandlerInstructionItem> backlog,
@@ -759,6 +802,56 @@ List<HandlerInstructionItem> _withItemRequeued(
         createdAt: i.createdAt,
       ),
 ];
+
+/// How long an item is allowed to be, mirroring the bridge's `MAX_ITEM_CHARS`
+/// (`bridge/src/handler/extract.ts`), for `condition` as well as `text`.
+///
+/// It is the EXTRACTOR's ceiling, not a `handler:configure` rule — the wire
+/// item takes a bare string. So this is not validation the bridge would perform
+/// anyway; it is what keeps an item the user reworded the same size as every
+/// item the extractor minted. The judge is shown the backlog as a list, and one
+/// entry the length of a paragraph crowds out the rest of it.
+const handlerMaxItemChars = 400;
+
+/// Replaces what an item SAYS, and nothing else about it.
+///
+/// Status, outcome, evidence and `dependsOn` all ride through untouched: the
+/// user changed the wording, not what happened. Unlike a requeue, this leaves
+/// the item where it stands — a reworded `done` item is still done, and its
+/// outcome is still the record of that.
+///
+/// [condition] null drops the clause, so an emptied field says "runs whenever
+/// its turn comes" on the wire the same way an item that never had one does.
+///
+/// Null where [id] is not in [backlog] any more. The item can leave under an
+/// open editor — a phone driving the same bridge deletes it, the bridge drops
+/// it — and a list quietly returned unchanged would go out as a replace that
+/// changed nothing, close the sheet, and lose the user's wording behind what
+/// reads as a save.
+List<HandlerInstructionItem>? _withItemRetexted(
+  List<HandlerInstructionItem> backlog,
+  String id, {
+  required String text,
+  required String? condition,
+}) {
+  if (!backlog.any((i) => i.id == id)) return null;
+  return [
+    for (final i in backlog)
+      if (i.id != id)
+        i
+      else
+        HandlerInstructionItem(
+          id: i.id,
+          text: text,
+          dependsOn: i.dependsOn,
+          condition: condition,
+          status: i.status,
+          outcome: i.outcome,
+          evidence: i.evidence,
+          createdAt: i.createdAt,
+        ),
+  ];
+}
 
 /// The user's sentence, between the send and the items it becomes.
 ///
@@ -832,18 +925,47 @@ class _BacklogRow extends ConsumerWidget {
     disabledReason: lockReason,
   );
 
+  /// The editor is a route of its own rather than a field opened inside the
+  /// row. A row that grew into a form would push every item below it down the
+  /// moment the menu closed, and on a phone the keyboard would then cover the
+  /// list it was reordering — [showAbAdaptiveSheet] pads for that inset itself,
+  /// and leaves the backlog where the user left it.
+  Future<void> _openEditor(BuildContext context) => showAbAdaptiveSheet<void>(
+    context,
+    child: _ItemEditor(terminalId: terminalId, item: item),
+  );
+
   Future<void> _openMenu(
     BuildContext context,
     ProviderContainer container,
   ) async {
     final anchor = abMenuAnchorRect(context);
     if (anchor == null) return;
+    // The navigator, not this row: [showAbMenu] pops before it calls an entry,
+    // and by then a status frame may have shortened the list out from under the
+    // row that was tapped. A navigator outlives every route it hosts, so the
+    // editor opens over the drawer either way.
+    final navigator = Navigator.of(context);
     await showAbMenu<void>(
       context: context,
       anchorRect: anchor,
       preferred: AbMenuPlacement.above,
       width: 200,
       entries: [
+        // First, and on every row whatever its status. The text an item is
+        // judged against was written by the extraction pass, which splits one
+        // sentence into several, rewords them and cuts them at
+        // [handlerMaxItemChars] — so a wrong item is far more often mis-worded
+        // than misplaced, and Delete-and-retype costs another extraction.
+        _entry(
+          label: 'Edit',
+          icon: AbIcons.edit,
+          onTap: () => detached(
+            'HandlerBacklogDrawer',
+            'open item editor',
+            () => _openEditor(navigator.context),
+          ),
+        ),
         // Inapplicable actions are omitted, never shown disabled: an edge item
         // has nowhere to move, a finished one has nothing to requeue, and an
         // item behind stalled work would be re-blocked before the user looked
@@ -1035,6 +1157,387 @@ class _DependencyRow extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// The dead ends [_ItemEditor] can reach, each said where the disabled Save is.
+///
+/// The first three end the same way, because the sheet holds the only copy of
+/// what the user wrote and closing it is what loses it — so every one of them
+/// says to take the words first, and none of them offers a retry that would not
+/// work.
+const _keepYourWords = 'Copy anything you want to keep.';
+
+/// The session went away under the open sheet: auto-disarmed once every item
+/// reached a terminal state, or disarmed by the terminal exiting.
+const _handlerGoneReason =
+    "Handler isn't armed on this session any more, so the edit can't be "
+    'saved. $_keepYourWords';
+
+/// The item did, which is the two-client case: the same user's phone deleted it
+/// while the desktop was mid-edit.
+const _itemGoneReason =
+    'This item is no longer on the backlog — it was removed while you were '
+    'editing. $_keepYourWords';
+
+/// Neither, as far as the snapshot on screen can tell — the project is no
+/// longer warm under the sheet, or the service went down with it. Named by what
+/// the user watched happen rather than by a cause this side cannot establish.
+const _sendFailedReason =
+    "The edit didn't reach this session. $_keepYourWords";
+
+/// Emptying the field is a deliberate gesture (select all, delete, retype) and
+/// the point in it where Save dies is the first keystroke, long before the
+/// retype. Delete is named because it is the one way to drop an item, and it is
+/// named the same here as on the row.
+const _noTextReason =
+    'An item needs something to say. To drop it, use Delete on the row.';
+
+/// Rewrites what one item says, in the words the user wanted in the first
+/// place. The text on a row is not theirs: extraction splits one sentence into
+/// several, rewords each and cuts it at [handlerMaxItemChars], and until this
+/// existed the only correction was Delete, retype, and wait out a second
+/// extraction — which drops the item's place in the queue and its history with
+/// it.
+///
+/// `condition` is editable HERE AND ONLY where the model already wrote one AND
+/// the item can still run. The clause is model-authored and load-bearing in
+/// exactly the way the text is: "only if the tests pass" over a sentence the
+/// user meant unconditionally is an item that silently never runs, and no other
+/// surface can undo it. What this deliberately withholds is AUTHORING a gate
+/// where none stands — the same act [HandlerBacklogDrawer] refuses for
+/// `dependsOn`, refused for the same reason: a hand-written gate quietly stops
+/// work the user asked for, and nothing on this screen would say which one did
+/// it. Correcting the model's clause, and clearing it, both move the item
+/// towards running; only invention moves it away — and on a [_finishedStatuses]
+/// item none of the three moves anything, which is why the field is not there.
+///
+/// Everything else about the item is the bridge's: id, status, outcome,
+/// evidence, ordering and dependencies all survive the edit untouched.
+class _ItemEditor extends ConsumerStatefulWidget {
+  const _ItemEditor({required this.terminalId, required this.item});
+
+  final String terminalId;
+  final HandlerInstructionItem item;
+
+  @override
+  ConsumerState<_ItemEditor> createState() => _ItemEditorState();
+}
+
+class _ItemEditorState extends ConsumerState<_ItemEditor> {
+  late final TextEditingController _text;
+
+  /// Null where there is no clause to correct — the item carries none, or it
+  /// has already run and the one it carries can never fire again. The first is
+  /// what keeps this sheet from being a place to author a gate; the second
+  /// keeps it from offering an edit that changes nothing.
+  late final TextEditingController? _condition;
+
+  /// Set by a save the sheet had no way to see coming. Cleared by the next
+  /// keystroke, so a service that comes back is one retype away rather than
+  /// permanently refused.
+  bool _refused = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final text = widget.item.text;
+    _text = TextEditingController(text: text)
+      // Caret at the end rather than the whole text selected. What stands in
+      // this field is model output that is usually most of the way right and
+      // wanted one word changed, and select-all makes the first keystroke
+      // destroy it.
+      ..selection = TextSelection.collapsed(offset: text.length);
+    final condition = _trimmedOrNull(widget.item.condition);
+    final finished = _finishedStatuses.contains(widget.item.status);
+    _condition = condition == null || finished
+        ? null
+        : TextEditingController(text: condition);
+  }
+
+  @override
+  void dispose() {
+    _text.dispose();
+    _condition?.dispose();
+    super.dispose();
+  }
+
+  /// The clause the save carries: the edited one where the field stands, and
+  /// the item's own untouched where it does not — an item with no field is one
+  /// whose gate this sheet has no opinion about, not one whose gate it drops.
+  String? get _editedCondition {
+    final condition = _condition;
+    return condition == null
+        ? _trimmedOrNull(widget.item.condition)
+        : _trimmedOrNull(condition.text);
+  }
+
+  bool get _changed =>
+      _text.text.trim() != widget.item.text.trim() ||
+      _editedCondition != _trimmedOrNull(widget.item.condition);
+
+  /// What stands between the user and a save, or null while nothing does. The
+  /// button reads the same answer, so its state and the sentence under it are
+  /// one fact rather than two that can disagree — a live Save that does nothing
+  /// and a dead one that says nothing are the same bug from opposite sides.
+  ///
+  /// Ordered by how much the sheet can say: a destination the snapshot shows to
+  /// be gone is named exactly, a hold explains itself, and only what neither
+  /// accounts for falls through to the refusal a tap discovered.
+  String? _saveBlockedReason(
+    List<String> pending,
+    HandlerSessionState? session,
+  ) {
+    if (session == null) return _handlerGoneReason;
+    if (!session.backlog.any((i) => i.id == widget.item.id)) {
+      return _itemGoneReason;
+    }
+    final lock = handlerEditLockReason(pending);
+    if (lock != null) return lock;
+    if (_refused) return _sendFailedReason;
+    if (_text.text.trim().isEmpty) return _noTextReason;
+    return null;
+  }
+
+  /// Closes only on a send that happened. This is the one edit carrying
+  /// something the user cannot get back by repeating the gesture, so every
+  /// refusal leaves the sheet standing with their words in it and answers in
+  /// the same rebuild — [_saveBlockedReason] is where that answer is written.
+  void _save() {
+    final result = _sendEdit(
+      ref.container,
+      widget.terminalId,
+      (b) => _withItemRetexted(
+        b,
+        widget.item.id,
+        text: _text.text.trim(),
+        condition: _editedCondition,
+      ),
+    );
+    if (result == _EditSend.sent) {
+      Navigator.of(context).maybePop();
+      return;
+    }
+    // Every refusal [_saveBlockedReason] can see has already taken Save out of
+    // reach, so a tap that gets here found something the snapshot on screen
+    // does not have: a project invalidated under the sheet leaves the last one
+    // standing, which is what makes this the only report of it.
+    setState(() => _refused = true);
+  }
+
+  void _onEdited() => setState(() => _refused = false);
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    final state = ref.watch(handlerStateProvider).value;
+    final pending =
+        state?.pendingInstructionsFor(widget.terminalId) ?? const <String>[];
+    final blocked = _saveBlockedReason(
+      pending,
+      state?.sessions[widget.terminalId],
+    );
+    final condition = _condition;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: abDialogTitlePadding,
+          child: abDialogTitle(
+            'Edit item',
+            onClose: () => Navigator.of(context).maybePop(),
+          ),
+        ),
+        // The fields are the only part that gives. On a phone the sheet gets
+        // the screen minus the keyboard, and a fallback item at six lines plus
+        // a condition asks for more than that leaves — so what a user is in the
+        // middle of scrolls, and the title saying where they are and the row
+        // saying how to leave both stay put.
+        Flexible(
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    AbTokens.space16,
+                    AbTokens.space8,
+                    AbTokens.space16,
+                    0,
+                  ),
+                  child: _CappedField(
+                    controller: _text,
+                    // Opens at the two lines the row itself renders, so an item
+                    // is the same shape here as where it was tapped, and grows
+                    // to six before scrolling inside itself — a fallback item
+                    // runs to [handlerMaxItemChars], and a field that grew that
+                    // far would leave the sheet nothing but field.
+                    minLines: 2,
+                    maxLines: 6,
+                    autofocus: true,
+                    onChanged: (_) => _onEdited(),
+                  ),
+                ),
+                if (condition != null) ...[
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(
+                      AbTokens.space16,
+                      AbTokens.space10,
+                      AbTokens.space16,
+                      AbTokens.space4,
+                    ),
+                    // The row's own words for this clause, so the gate is named
+                    // the same thing where it is read and where it is changed.
+                    child: Text(
+                      'Runs only if',
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontXs,
+                        color: p.textMuted,
+                      ),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: AbTokens.space16,
+                    ),
+                    child: _CappedField(
+                      controller: condition,
+                      minLines: 1,
+                      maxLines: 3,
+                      onChanged: (_) => _onEdited(),
+                    ),
+                  ),
+                  // Emptying the field is the un-gating act, and the one edit on
+                  // this sheet whose effect is invisible in what it leaves
+                  // behind. So it is answered at the moment it happens, and
+                  // never before.
+                  if (_editedCondition == null)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(
+                        AbTokens.space16,
+                        AbTokens.space4,
+                        AbTokens.space16,
+                        0,
+                      ),
+                      child: Text(
+                        'No condition — the item runs whenever its turn comes.',
+                        style: AbTokens.sansStyle(
+                          fontSize: AbTokens.fontXs,
+                          color: p.textMuted,
+                        ),
+                      ),
+                    ),
+                ],
+              ],
+            ),
+          ),
+        ),
+        // Beside the button it explains rather than above the fields, and never
+        // inside the part that scrolls: a reason the user has to go looking for
+        // is a reason they meet after the second tap.
+        if (blocked != null) _EditLockNotice(reason: blocked),
+        const SizedBox(height: AbTokens.space16),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            AbTokens.space16,
+            0,
+            AbTokens.space16,
+            AbTokens.space16,
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              AbButton(
+                label: 'Cancel',
+                onTap: () => Navigator.of(context).maybePop(),
+              ),
+              const SizedBox(width: AbTokens.space8),
+              // Off while anything blocks the save, and off until there is
+              // something to save. Only the second half goes unsaid: a Save
+              // that would save nothing is read as done rather than as broken,
+              // and a wholesale replace that changes nothing costs a round trip
+              // to leave the list exactly where it stands.
+              AbButton(
+                label: 'Save item',
+                variant: AbButtonVariant.primary,
+                onTap: blocked == null && _changed ? _save : null,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+String? _trimmedOrNull(String? value) {
+  final trimmed = value?.trim();
+  return trimmed == null || trimmed.isEmpty ? null : trimmed;
+}
+
+/// A field bounded at [handlerMaxItemChars], and the only thing this sheet says
+/// about that bound: how much room is left, once running out is close enough to
+/// matter.
+///
+/// A standing counter would sit on every edit to tell almost none of them
+/// anything — the items that reach the cap are the extractor's raw-sentence
+/// fallbacks, a small share of any list. Saying nothing at all is worse: the
+/// formatter simply stops accepting keystrokes, which is the shape a user
+/// reports as a broken field.
+class _CappedField extends StatelessWidget {
+  const _CappedField({
+    required this.controller,
+    required this.onChanged,
+    required this.minLines,
+    required this.maxLines,
+    this.autofocus = false,
+  });
+
+  final TextEditingController controller;
+  final ValueChanged<String> onChanged;
+  final int minLines;
+  final int maxLines;
+  final bool autofocus;
+
+  /// Roughly a short clause — far enough out that the warning arrives while
+  /// there is still room to finish a thought in.
+  static const _warnWithin = 40;
+
+  @override
+  Widget build(BuildContext context) {
+    // Counted the way [LengthLimitingTextInputFormatter] counts, in grapheme
+    // clusters: a field that stopped at 400 while a counter still promised room
+    // would be the broken-field report this line exists to prevent.
+    final left = handlerMaxItemChars - controller.text.characters.length;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        AbTextField(
+          controller: controller,
+          autofocus: autofocus,
+          minLines: minLines,
+          maxLines: maxLines,
+          inputFormatters: [
+            LengthLimitingTextInputFormatter(handlerMaxItemChars),
+          ],
+          onChanged: onChanged,
+        ),
+        if (left <= _warnWithin)
+          Padding(
+            padding: const EdgeInsets.only(top: AbTokens.space4),
+            child: Text(
+              left == 1 ? '1 character left' : '$left characters left',
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXs,
+                color: context.antgrid.textMuted,
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

@@ -434,14 +434,21 @@ class HandlerService {
   /// edit reaches the wire — a second editing surface inherits it instead of
   /// having to remember it. A surface that offers the edit anyway owes the user
   /// the reason; the refusal alone is silent.
-  void updateBacklog({
+  ///
+  /// Reports whether the replace went out, so a surface holding something the
+  /// user cannot get back — text they just typed — can keep it rather than
+  /// close over a send that did not happen. Reading the hold off the state
+  /// instead would be a second copy of this rule, and one that can go stale
+  /// between the frame a button was drawn in and the tap that fires it.
+  bool updateBacklog({
     required String terminalId,
     required List<HandlerInstructionItem> backlog,
     required bool notifyOnly,
   }) {
-    if (_disposed) return;
-    if (_state.pendingInstructionsFor(terminalId).isNotEmpty) return;
+    if (_disposed) return false;
+    if (_state.pendingInstructionsFor(terminalId).isNotEmpty) return false;
     arm(terminalId: terminalId, backlog: backlog, notifyOnly: notifyOnly);
+    return true;
   }
 
   /// Stack another instruction onto [terminalId]'s backlog. The bridge extracts

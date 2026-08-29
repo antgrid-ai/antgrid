@@ -50,6 +50,10 @@ abstract final class AbIcons {
   // app's fold/unfold mark everywhere it appears, and a list action borrowing it
   // teaches the glyph a second meaning one row above a real move arrow.
   static const moveToTop = Codicon.fold_up;
+  // A plain pencil. `revert` is the pencil-with-arrow and already means discard,
+  // so borrowing it for "change the words" would put two opposite actions behind
+  // one glyph in the same menu.
+  static const edit = Codicon.edit;
   static const copy = Codicon.copy;
   static const check = Codicon.check;
   static const deviceMobile = Codicon.device_mobile;

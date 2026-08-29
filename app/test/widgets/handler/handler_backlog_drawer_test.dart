@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:antgrid/design/ab_colors.dart';
 import 'package:antgrid/design/ab_icons.dart';
 import 'package:antgrid/design/ab_tokens.dart';
+import 'package:antgrid/design/widgets/ab_button.dart';
 import 'package:antgrid/design/widgets/ab_chip.dart';
 import 'package:antgrid/design/widgets/ab_empty_state.dart';
 import 'package:antgrid/design/widgets/ab_icon.dart';
@@ -12,6 +15,7 @@ import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
 import 'package:antgrid/providers/first_run.dart';
+import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
 import 'package:antgrid/storage/first_run_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
@@ -106,6 +110,17 @@ void _emitStatus(
         'backlog': [for (final i in backlog) i.toWire()],
       },
     ],
+  });
+}
+
+/// A snapshot with nothing armed, which is what the bridge sends the moment a
+/// session disarms — every item reaching a terminal state does it on its own,
+/// and so does the terminal exiting. [HandlerState.sessions] is rebuilt
+/// wholesale from each frame, so the terminal simply stops being a key.
+void _emitDisarmed(ProjectSession session) {
+  _transportOf(session).emit('handler:status', {
+    'projectId': 'p',
+    'sessions': <Map<String, dynamic>>[],
   });
 }
 
@@ -473,7 +488,14 @@ void main() {
       expect(
         _openMenuLabels(tester),
         everyElement(
-          isIn(['Move to top', 'Move up', 'Move down', 'Requeue', 'Delete']),
+          isIn([
+            'Edit',
+            'Move to top',
+            'Move up',
+            'Move down',
+            'Requeue',
+            'Delete',
+          ]),
         ),
       );
       await _pick(tester, 'Delete');
@@ -1101,6 +1123,525 @@ void main() {
           session,
         ).sent.where((m) => m['type'] == 'handler:instruct'),
         hasLength(2),
+      );
+    });
+  });
+
+  // The text on a row is the extractor's, not the user's — it splits one
+  // sentence into several, rewords each and cuts it at handlerMaxItemChars. So
+  // rewording an item is the correction this list needs most, and it is the one
+  // edit here carrying something the user cannot get back by repeating it.
+  group('editing an item', () {
+    /// Everything an edit must leave alone, on one item: a status the judge
+    /// reached, the outcome and evidence justifying it, a dependency, a
+    /// condition, and the id and createdAt the bridge minted.
+    const rich = HandlerInstructionItem(
+      id: 'i3',
+      text: 'open a PR',
+      status: 'blocked',
+      dependsOn: ['i1'],
+      condition: 'the branch is pushed',
+      outcome: 'waiting on the test run',
+      evidence: 'tests are still running',
+      createdAt: 3,
+    );
+
+    const conditioned = HandlerInstructionItem(
+      id: 'i4',
+      text: 'deploy to staging',
+      status: 'queued',
+      condition: 'the tests pass',
+      createdAt: 4,
+    );
+
+    /// The editor is the only [Dialog] in the tree — [_pumpDrawer] mounts the
+    /// drawer itself as a plain body, so anything inside one is the sheet.
+    Finder editorFields() => find.descendant(
+      of: find.byType(Dialog),
+      matching: find.byType(AbTextField),
+    );
+
+    Future<void> openEditor(WidgetTester tester, int rowIndex) async {
+      await _openMenuFor(tester, rowIndex);
+      await _pick(tester, 'Edit');
+    }
+
+    Future<void> save(WidgetTester tester) async {
+      await tester.tap(find.text('Save item'));
+      await tester.pumpAndSettle();
+    }
+
+    AbButton saveButton(WidgetTester tester) => tester.widget<AbButton>(
+      find.ancestor(of: find.text('Save item'), matching: find.byType(AbButton)),
+    );
+
+    Map<String, dynamic> editedItem(ProjectSession session, String id) =>
+        ((_sentConfigure(session)['backlog'] as List)
+                .firstWhere((i) => (i as Map)['id'] == id)
+            as Map)
+            .cast<String, dynamic>();
+
+    testWidgets('replaces the item text and nothing else about the item', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests, rich]);
+      await _pumpDrawer(tester, session);
+
+      await openEditor(tester, 1);
+      await tester.enterText(editorFields().first, 'open a draft PR');
+      await tester.pumpAndSettle();
+      await save(tester);
+
+      final edited = editedItem(session, 'i3');
+      expect(edited['text'], 'open a draft PR');
+      // Everything else is the bridge's record of this item. The user changed
+      // the wording, not what happened to it.
+      expect(edited['status'], 'blocked');
+      expect(edited['dependsOn'], ['i1']);
+      expect(edited['condition'], 'the branch is pushed');
+      expect(edited['outcome'], 'waiting on the test run');
+      expect(edited['evidence'], 'tests are still running');
+      expect(edited['createdAt'], 3);
+      // And the list itself is untouched — an edit is not a reorder.
+      expect(_sentIds(session), ['i1', 'i3']);
+    });
+
+    testWidgets('opens on the item text, so a correction is not a retype', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests, rich]);
+      await _pumpDrawer(tester, session);
+
+      await openEditor(tester, 1);
+
+      final field = tester.widget<AbTextField>(editorFields().first);
+      expect(field.controller!.text, 'open a PR');
+      // Caret at the end, not a full selection: this is model output that is
+      // usually most of the way right, and select-all makes the first
+      // keystroke destroy it.
+      expect(field.controller!.selection.baseOffset, 'open a PR'.length);
+      expect(field.controller!.selection.isCollapsed, isTrue);
+    });
+
+    testWidgets('stops at the length every extracted item is held to', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests, _commit]);
+      await _pumpDrawer(tester, session);
+
+      await openEditor(tester, 1);
+      await tester.enterText(editorFields().first, 'c' * 500);
+      await tester.pumpAndSettle();
+
+      // The warning is on screen at the cap rather than only the keystrokes
+      // going missing, which is the shape a user reports as a broken field.
+      expect(find.text('0 characters left'), findsOneWidget);
+      await save(tester);
+
+      expect(
+        (editedItem(session, 'i2')['text'] as String).length,
+        handlerMaxItemChars,
+      );
+    });
+
+    testWidgets('a held edit keeps the typing and says why it is held', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests, _commit]);
+      await _pumpDrawer(tester, session);
+      final service = focusedServiceOrNull(
+        ProviderScope.containerOf(
+          tester.element(find.byType(HandlerBacklogDrawer)),
+        ),
+        (s) => s.handlerService,
+      )!;
+
+      await openEditor(tester, 1);
+      await tester.enterText(editorFields().first, 'commit the fix on a branch');
+      await tester.pumpAndSettle();
+
+      // An instruction lands mid-edit. A replace sent now would delete the
+      // items it is about to append, so updateBacklog refuses it outright —
+      // and unlike a reorder, this one is carrying words the user cannot get
+      // back by repeating the gesture.
+      service.instruct('t1', 'Run Tests');
+      await tester.pumpAndSettle();
+
+      expect(saveButton(tester).onTap, isNull);
+      // In the sheet, not only on the list behind it: the drawer's own notice
+      // is under a barrier here, and the disabled button is what needs
+      // explaining. Same sentence either way — one hold, one wording.
+      expect(
+        find.descendant(
+          of: find.byType(Dialog),
+          matching: find.text(
+            'Still adding "Run Tests" — editing is paused until it lands.',
+          ),
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Save item'));
+      await tester.pumpAndSettle();
+      expect(
+        _transportOf(session).sent.where((m) => m['type'] == 'handler:configure'),
+        isEmpty,
+      );
+      // Still on screen, still holding what was typed.
+      expect(
+        tester.widget<AbTextField>(editorFields().first).controller!.text,
+        'commit the fix on a branch',
+      );
+
+      _emitStatus(session, [_tests, _commit, _extracted]);
+      await tester.pumpAndSettle();
+      await save(tester);
+
+      expect(editedItem(session, 'i2')['text'], 'commit the fix on a branch');
+    });
+
+    testWidgets('the model-written condition is editable where one stands', (
+      tester,
+    ) async {
+      final session = await _armedSession([conditioned]);
+      await _pumpDrawer(tester, session);
+
+      await openEditor(tester, 0);
+      expect(find.text('Runs only if'), findsOneWidget);
+      await tester.enterText(editorFields().last, 'the tests pass on main');
+      await tester.pumpAndSettle();
+      await save(tester);
+
+      final edited = editedItem(session, 'i4');
+      expect(edited['condition'], 'the tests pass on main');
+      expect(edited['text'], 'deploy to staging');
+    });
+
+    testWidgets('clearing the condition drops the clause and says so', (
+      tester,
+    ) async {
+      final session = await _armedSession([conditioned]);
+      await _pumpDrawer(tester, session);
+
+      await openEditor(tester, 0);
+      await tester.enterText(editorFields().last, '   ');
+      await tester.pumpAndSettle();
+
+      // The one edit here whose effect is invisible in what it leaves behind,
+      // so it is answered at the moment it happens.
+      expect(
+        find.text('No condition — the item runs whenever its turn comes.'),
+        findsOneWidget,
+      );
+      await save(tester);
+
+      // Nulled, not sent empty: the wire says "runs whenever its turn comes"
+      // the same way an item that never had a condition does.
+      expect(editedItem(session, 'i4').containsKey('condition'), isFalse);
+    });
+
+    testWidgets('an item with no condition is offered no field to write one', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests, _commit]);
+      await _pumpDrawer(tester, session);
+
+      await openEditor(tester, 1);
+
+      // Correcting the model's gate, and clearing it, both move an item towards
+      // running. Authoring one from nothing is the act this withholds — the
+      // same one the drawer withholds for dependsOn, for the same reason.
+      expect(editorFields(), findsOneWidget);
+      expect(find.text('Runs only if'), findsNothing);
+    });
+
+    testWidgets('nothing in the editor authors a dependency', (tester) async {
+      final session = await _armedSession([_tests, rich]);
+      await _pumpDrawer(tester, session);
+
+      await openEditor(tester, 1);
+
+      expect(find.descendant(of: find.byType(Dialog), matching: find.textContaining('epend')), findsNothing);
+      expect(
+        tester
+            .widgetList<AbIcon>(
+              find.descendant(
+                of: find.byType(Dialog),
+                matching: find.byType(AbIcon),
+              ),
+            )
+            .where((i) => i.icon == AbIcons.add || i.icon == AbIcons.link),
+        isEmpty,
+      );
+      await tester.enterText(editorFields().first, 'open a draft PR');
+      await tester.pumpAndSettle();
+      await save(tester);
+
+      expect(editedItem(session, 'i3')['dependsOn'], ['i1']);
+    });
+
+    testWidgets('saving is off until there is something to save', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests, _commit]);
+      await _pumpDrawer(tester, session);
+
+      await openEditor(tester, 1);
+      // A wholesale replace that changes nothing costs a round trip to leave
+      // the list exactly where it stands.
+      expect(saveButton(tester).onTap, isNull);
+
+      await tester.enterText(editorFields().first, '   ');
+      await tester.pumpAndSettle();
+      // An item with no text is not an item.
+      expect(saveButton(tester).onTap, isNull);
+
+      await tester.enterText(editorFields().first, 'commit the fix');
+      await tester.pumpAndSettle();
+      expect(saveButton(tester).onTap, isNull);
+
+      await tester.enterText(editorFields().first, 'commit and push the fix');
+      await tester.pumpAndSettle();
+      expect(saveButton(tester).onTap, isNotNull);
+    });
+
+    testWidgets('an emptied field says what an item needs', (tester) async {
+      final session = await _armedSession([_tests, _commit]);
+      await _pumpDrawer(tester, session);
+
+      await openEditor(tester, 1);
+      await tester.enterText(editorFields().first, '   ');
+      await tester.pumpAndSettle();
+
+      // Select-all-and-delete is how a retype starts, and Save dies on its
+      // first keystroke. Every other refusal on this sheet is spoken; a dead
+      // primary button with nothing beside it reads as a broken sheet.
+      expect(saveButton(tester).onTap, isNull);
+      expect(
+        find.text(
+          'An item needs something to say. To drop it, use Delete on the row.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a finished item is offered no gate it could still change', (
+      tester,
+    ) async {
+      const finished = HandlerInstructionItem(
+        id: 'i5',
+        text: 'run the tests',
+        status: 'done',
+        condition: 'the branch is pushed',
+        outcome: 'all of them passed',
+        createdAt: 5,
+      );
+      final session = await _armedSession([finished]);
+      await _pumpDrawer(tester, session);
+
+      await openEditor(tester, 0);
+
+      // The item has already run: the clause cannot fire again, and the row it
+      // was tapped on gave its line to the outcome rather than to the gate — so
+      // the field would edit a fact the user could not see a moment ago.
+      expect(editorFields(), findsOneWidget);
+      expect(find.text('Runs only if'), findsNothing);
+
+      await tester.enterText(editorFields().first, 'run the unit tests');
+      await tester.pumpAndSettle();
+      await save(tester);
+
+      // Withholding the field withholds the edit, never the clause.
+      expect(editedItem(session, 'i5')['condition'], 'the branch is pushed');
+    });
+
+    testWidgets('a session that disarms mid-edit says so rather than nothing', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests, _commit]);
+      await _pumpDrawer(tester, session);
+
+      await openEditor(tester, 1);
+      await tester.enterText(editorFields().first, 'commit the fix on a branch');
+      await tester.pumpAndSettle();
+
+      // Nothing is outstanding, so the hold has nothing to say here: without
+      // its own sentence this is a live Save over a session that is gone.
+      _emitDisarmed(session);
+      await tester.pumpAndSettle();
+
+      expect(saveButton(tester).onTap, isNull);
+      expect(
+        find.text(
+          "Handler isn't armed on this session any more, so the edit can't be "
+          'saved. Copy anything you want to keep.',
+        ),
+        findsOneWidget,
+      );
+      // Still on screen, still holding the words, which is the only copy of
+      // them there is.
+      expect(
+        tester.widget<AbTextField>(editorFields().first).controller!.text,
+        'commit the fix on a branch',
+      );
+    });
+
+    testWidgets('an item deleted elsewhere is said, not reported as saved', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests, _commit]);
+      await _pumpDrawer(tester, session);
+
+      await openEditor(tester, 1);
+      await tester.enterText(editorFields().first, 'commit the fix on a branch');
+      await tester.pumpAndSettle();
+
+      // The product's own two-client case: the same user's phone drops the row
+      // the desktop is part-way through rewording.
+      _emitStatus(session, [_tests]);
+      await tester.pumpAndSettle();
+
+      expect(saveButton(tester).onTap, isNull);
+      expect(
+        find.text(
+          'This item is no longer on the backlog — it was removed while you '
+          'were editing. Copy anything you want to keep.',
+        ),
+        findsOneWidget,
+      );
+      // A replace built from a list the item has left is a list replaced with
+      // itself: it would report success for an edit that never happened.
+      expect(
+        _transportOf(session).sent.where((m) => m['type'] == 'handler:configure'),
+        isEmpty,
+      );
+      expect(find.byType(Dialog), findsOneWidget);
+    });
+
+    testWidgets('a save with nowhere to go says so instead of doing nothing', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests, _commit]);
+      await _pumpDrawer(tester, session);
+      final service = focusedServiceOrNull(
+        ProviderScope.containerOf(
+          tester.element(find.byType(HandlerBacklogDrawer)),
+        ),
+        (s) => s.handlerService,
+      )!;
+
+      await openEditor(tester, 1);
+      await tester.enterText(editorFields().first, 'commit the fix on a branch');
+      await tester.pumpAndSettle();
+
+      // The project goes cold under the open sheet — an LRU eviction, a host
+      // restart, a connection retry. The snapshot the sheet renders from is the
+      // last one there ever was, so nothing on screen can see it coming and
+      // the tap is what finds out.
+      // Not awaited: the teardown inside it completes on microtasks, which
+      // only a pump flushes, and the flag this test turns on is set before the
+      // first of them.
+      unawaited(service.dispose());
+      await tester.tap(find.text('Save item'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text(
+          "The edit didn't reach this session. Copy anything you want to keep.",
+        ),
+        findsOneWidget,
+      );
+      expect(saveButton(tester).onTap, isNull);
+      expect(
+        _transportOf(session).sent.where((m) => m['type'] == 'handler:configure'),
+        isEmpty,
+      );
+      expect(
+        tester.widget<AbTextField>(editorFields().first).controller!.text,
+        'commit the fix on a branch',
+      );
+    });
+
+    testWidgets('the counter counts what the field actually accepts', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests, _commit]);
+      await _pumpDrawer(tester, session);
+
+      await openEditor(tester, 1);
+      // Every cluster here is two UTF-16 code units. The formatter counts
+      // clusters, so a counter measuring String.length would report the field
+      // 400 characters over a cap it was still accepting keystrokes under —
+      // which is the broken-field report the counter exists to prevent.
+      await tester.enterText(
+        editorFields().first,
+        '🙂' * handlerMaxItemChars,
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('0 characters left'), findsOneWidget);
+      await save(tester);
+
+      expect(
+        (editedItem(session, 'i2')['text'] as String).characters.length,
+        handlerMaxItemChars,
+      );
+    });
+
+    testWidgets('the buttons stay reachable on a phone with the keyboard up', (
+      tester,
+    ) async {
+      // The one shape where the fields outgrow the sheet: showAbAdaptiveSheet's
+      // mobile branch is the screen minus the keyboard inset and nothing else,
+      // so anything that cannot shrink clips the button row off the bottom.
+      // The scale stands in for the shipped font, which is materially wider
+      // than the one widget tests draw with.
+      tester.view.physicalSize = const Size(375, 667);
+      tester.view.devicePixelRatio = 1;
+      tester.platformDispatcher.textScaleFactorTestValue = 1.3;
+      addTearDown(tester.view.reset);
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+
+      final long = HandlerInstructionItem(
+        id: 'i5',
+        // The extractor's raw-sentence fallback — the case this editor exists
+        // for, and the one that always fills the six-line clamp.
+        text: 'commit the fix ' * 26,
+        status: 'queued',
+        condition: 'the branch is pushed',
+        createdAt: 5,
+      );
+      final session = await _armedSession([long]);
+      // Dismissed, so the two lines of the first-run disclaimer are not what
+      // the drawer behind runs out of room on. The sheet is what is on trial.
+      final firstRun = await FirstRunStore.open();
+      await firstRun.write(
+        const FirstRunState(handlerDisclaimerDismissed: true),
+      );
+      await _pumpDrawer(tester, session, firstRun: firstRun);
+
+      await openEditor(tester, 0);
+      // In that order, because it is the order the user meets: the sheet opens
+      // at full height and the field's autofocus raises the keyboard under it.
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      await tester.pumpAndSettle();
+
+      // Scoped to the sheet: the drawer underneath carries the composer's own
+      // field, and at this width the sheet is a bottom sheet rather than a
+      // Dialog.
+      final field = find
+          .descendant(
+            of: find.byType(BottomSheet),
+            matching: find.byType(AbTextField),
+          )
+          .first;
+      await tester.enterText(field, 'commit and push the fix ' * 16);
+      await tester.pumpAndSettle();
+      await save(tester);
+
+      // Reached, tapped, and sent.
+      expect(
+        editedItem(session, 'i5')['text'],
+        ('commit and push the fix ' * 16).trim(),
       );
     });
   });
