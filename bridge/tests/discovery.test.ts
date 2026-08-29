@@ -53,6 +53,42 @@ describe("atomicWriteFile", () => {
     expect(readFileSync(path, "utf8")).toBe("a");
   });
 
+  test("reaps a scratch file whose writer was killed before it could rename", () => {
+    // Force-kill is the routine teardown, and the scratch file cannot live off
+    // the target's own directory — which for antgrid.yaml is the user's git
+    // working tree, and for host.json is a full copy of the control-plane token.
+    const path = join(dir, "out.json");
+    const abandoned = `${path}.999999.tmp`;
+    writeFileSync(abandoned, "half a document");
+    atomicWriteFile(path, "a");
+    expect(existsSync(abandoned)).toBe(false);
+    expect(readFileSync(path, "utf8")).toBe("a");
+  });
+
+  test("keeps a scratch file a running writer still owns", async () => {
+    const path = join(dir, "out.json");
+    const kid = Bun.spawn([process.execPath, "-e", "await Bun.sleep(30_000)"], { stdout: "ignore", stderr: "ignore" });
+    const live = `${path}.${kid.pid}.tmp`;
+    try {
+      writeFileSync(live, "a document being written right now");
+      atomicWriteFile(path, "a");
+      expect(readFileSync(live, "utf8")).toBe("a document being written right now");
+    } finally {
+      kid.kill();
+      await kid.exited;
+    }
+  });
+
+  test("reaps only its own target's scratch files", () => {
+    // The prefix is the whole basename: two stores sharing a directory (the
+    // phone stores both live in <abDir>/agents) must not reap each other.
+    const path = join(dir, "out.json");
+    const foreign = join(dir, "other.json.999999.tmp");
+    writeFileSync(foreign, "not ours");
+    atomicWriteFile(path, "a");
+    expect(readFileSync(foreign, "utf8")).toBe("not ours");
+  });
+
   test("concurrent writers all succeed and publish a whole document", async () => {
     // Real processes because the contention is a kernel-level one: on Windows a
     // rename is refused while any process holds the target, so a shared scratch

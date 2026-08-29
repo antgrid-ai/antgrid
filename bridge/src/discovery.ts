@@ -1,5 +1,5 @@
-import { writeFileSync, renameSync, mkdirSync, chmodSync, rmSync, statSync } from "node:fs";
-import { dirname } from "node:path";
+import { writeFileSync, renameSync, mkdirSync, chmodSync, rmSync, statSync, readdirSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 
 export interface AtomicWriteOptions {
   dirMode?: number;
@@ -16,6 +16,7 @@ export interface AtomicWriteOptions {
 // hardening, restrict the containing dir via `icacls` to the current user.
 export function atomicWriteFile(path: string, content: string, opts: AtomicWriteOptions = {}): void {
   mkdirSync(dirname(path), { recursive: true, mode: opts.dirMode });
+  reapAbandonedScratch(path);
   // Scoped to the pid rather than shared: the `antgrid` CLI writes these same
   // stores while the host is running, and one scratch file both processes
   // truncate is renamed into place as a blend of the two. Reusing a single name
@@ -71,6 +72,49 @@ function renameWithRetry(tmp: string, path: string): void {
     }
   }
   renameSync(tmp, path);
+}
+
+const reaped = new Set<string>();
+
+/** Drop scratch files a bridge was killed before it could rename. Rename is
+ *  atomic only within a filesystem, so the scratch file cannot be moved off the
+ *  target's own directory — and those directories belong to the user: the git
+ *  working tree holding `antgrid.yaml` (where a leaked `.tmp` shows up in
+ *  `git status` and can be committed), `~/.claude` and friends, and <abDir>,
+ *  where the leak is a full copy of the control-plane token that
+ *  `removeHostFile` never reaps. This is not a crash path: force-kill IS the
+ *  routine teardown, since the app's job object sweeps the host tree as it exits.
+ *
+ *  Once per target per process — the readdir is work the write itself does not
+ *  need, and anything a live writer loses it immediately rewrites. A pid still
+ *  running is left alone, so pid reuse can only ever make us KEEP a stale file,
+ *  never delete one being written. */
+function reapAbandonedScratch(path: string): void {
+  if (reaped.has(path)) return;
+  reaped.add(path);
+  const dir = dirname(path);
+  const prefix = `${basename(path)}.`;
+  try {
+    for (const entry of readdirSync(dir)) {
+      if (!entry.startsWith(prefix) || !entry.endsWith(".tmp")) continue;
+      // Deliberately excludes the pre-<pid> shared `<path>.tmp` (it parses as 0):
+      // a bridge old enough to still write that name could be writing it now, and
+      // nothing in its name says otherwise.
+      const pid = Number(entry.slice(prefix.length, entry.length - ".tmp".length));
+      if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid || isRunning(pid)) continue;
+      try { rmSync(join(dir, entry), { force: true }); } catch { /* best-effort */ }
+    }
+  } catch { /* best-effort: a store must still publish on a directory we cannot list */ }
+}
+
+function isRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM is another user's process — running, and none of our business.
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
 }
 
 /** Whether the target will refuse a replacement however long we wait. Windows
