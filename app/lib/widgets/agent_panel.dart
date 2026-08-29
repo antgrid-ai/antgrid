@@ -416,10 +416,12 @@ class HandlerHeaderControl extends ConsumerWidget {
       return pill ?? const SizedBox.shrink();
     }
 
-    // Spec §4.1: arming is one tap and carries no payload — no goal, no
+    // Spec §4.1: arming is one tap and this control composes no payload — no
     // backlog, no judge override. Everything the session needs is either
     // already stored on the bridge or extracted behind the handoff, so sending
     // any of those keys here would overwrite state this control never showed.
+    // The goal is the exception and is not composed here either:
+    // armWithFirstRunExplainer carries the session's own opening prompt.
     void toggleArm() {
       if (service == null) return;
       if (session != null) {
@@ -432,7 +434,6 @@ class HandlerHeaderControl extends ConsumerWidget {
         armWithFirstRunExplainer(
           context: context,
           container: ref.container,
-          service: service,
           terminalId: activeId,
           notifyOnly: state.defaultNotifyOnly,
           agentObservable: coverage.observable,

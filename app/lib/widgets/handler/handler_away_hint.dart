@@ -56,7 +56,6 @@ class HandlerAwayHint extends ConsumerWidget {
                       armWithFirstRunExplainer(
                         context: context,
                         container: ref.container,
-                        service: service,
                         terminalId: activeId,
                         notifyOnly: handlerState.defaultNotifyOnly,
                         agentObservable: coverage.observable,

@@ -14,7 +14,9 @@ import '../../design/widgets/ab_list_row.dart';
 import '../../design/widgets/ab_menu.dart';
 import '../../design/widgets/ab_text_field.dart';
 import '../../models/handler_state.dart';
+import '../../providers/first_run.dart';
 import '../../providers/providers.dart';
+import '../../providers/sessions.dart';
 import '../../services/handler_service.dart';
 import 'handler_item_status.dart';
 
@@ -28,6 +30,13 @@ const handlerPresetInstructions = <String>[
   'Create PR',
   'Clean Build',
 ];
+
+/// What the sheet is called, and what it is called for. The surface keeps its
+/// own name first: a card, a menu entry and the pill all send the user here by
+/// the word "backlog", and a title that led with the session would rename the
+/// destination halfway through the trip.
+String _backlogTitle(String? sessionName) =>
+    sessionName == null ? 'Backlog' : 'Backlog · $sessionName';
 
 /// Verbatim from spec §5.5 — the wording is the spec's, not a paraphrase.
 const handlerDisclaimerText =
@@ -73,10 +82,18 @@ class HandlerBacklogDrawer extends ConsumerWidget {
         Padding(
           padding: abDialogTitlePadding,
           child: abDialogTitle(
-            'Backlog',
+            _backlogTitle(_sessionName(ref, terminalId)),
             onClose: () => Navigator.of(context).maybePop(),
+            // Budgeted for two lines: a generated session name runs to 60
+            // characters and a renamed one to whatever the user typed, so
+            // "Backlog · <name>" wraps on a phone as the ordinary case rather
+            // than the edge. Every other caller of this helper passes a
+            // constant that never reaches a second line.
+            wraps: true,
           ),
         ),
+        if (session != null && session.goal.trim().isNotEmpty)
+          _GoalLine(goal: session.goal.trim()),
         if (session != null && backlog.isNotEmpty)
           Padding(
             padding: const EdgeInsets.fromLTRB(
@@ -96,19 +113,19 @@ class HandlerBacklogDrawer extends ConsumerWidget {
         if (editLock != null) _EditLockNotice(reason: editLock),
         const SizedBox(height: AbTokens.space8),
         Flexible(
-          // An outstanding instruction keeps the list on screen on its own:
-          // "what you ask for lands here" is exactly the wrong sentence to
-          // print over a sentence the user has just asked for.
+          // An outstanding instruction keeps the list on screen on its own: an
+          // invitation to add something is exactly the wrong thing to print
+          // over a sentence the user has just added.
           child: backlog.isEmpty && pending.isEmpty
               ? Padding(
                   padding: const EdgeInsets.symmetric(
                     horizontal: AbTokens.space16,
                     vertical: AbTokens.space24,
                   ),
-                  child: AbEmptyState.compact(
-                    title: session == null
-                        ? 'Handler is not armed on this session.'
-                        : 'Nothing queued — what you ask for lands here.',
+                  child: _NothingQueued(
+                    armed: session != null,
+                    notifyOnly: session?.notifyOnly ?? false,
+                    hasGoal: session?.goal.trim().isNotEmpty ?? false,
                   ),
                 )
               : ListView.builder(
@@ -138,6 +155,116 @@ class HandlerBacklogDrawer extends ConsumerWidget {
         ] else
           const SizedBox(height: AbTokens.space8),
       ],
+    );
+  }
+}
+
+/// The session's own name, read from the same list the Handler tab's cards name
+/// their rows from — one session described two ways by two surfaces of one
+/// feature reads as two sessions.
+///
+/// Null where the tab would fall back to the raw terminal id. An id there tells
+/// rows apart on a screen listing several; here it would stand in a title over
+/// the only session on screen, spending the line on a string with nothing to
+/// distinguish it from.
+String? _sessionName(WidgetRef ref, String terminalId) {
+  for (final s in ref.watch(activeSessionsProvider)) {
+    if (s.id != terminalId) continue;
+    return s.name.trim().isEmpty ? null : s.name;
+  }
+  return null;
+}
+
+/// An armed session with nothing in its list: a session the app adopted rather
+/// than started, an arm after a restart, an empty composer, a list the user
+/// emptied themselves — or a seeded arm whose extraction has not landed yet,
+/// which is a headless CLI run of up to ~20 seconds and is the likeliest moment
+/// of all for this sheet to be open, since the shield and the backlog entry sit
+/// one tap apart.
+///
+/// So it opens with the act rather than the absence, and answers the question an
+/// empty list raises in every one of those cases — whether an unfed Handler is
+/// doing anything at all. It offers no button: the presets and the field are
+/// already on screen under this list, and a second route to one action is how
+/// one action ends up with two names.
+///
+/// [hasGoal] is what stops the invitation reading as "nothing was received".
+/// The goal stands above this list and the bridge extracts items from it, so a
+/// user told to add what they want done would retype the sentence they started
+/// the session with — and the extraction that is already running appends it a
+/// second time. Naming the goal instead invites what is genuinely missing.
+class _NothingQueued extends StatelessWidget {
+  const _NothingQueued({
+    required this.armed,
+    required this.notifyOnly,
+    required this.hasGoal,
+  });
+
+  /// False for a terminal Handler was never armed on — a state with no
+  /// invitation to make, since nothing here would receive it.
+  final bool armed;
+
+  /// A notify-only session escalates every pause and injects nothing, so this
+  /// list is one the user works through themselves. Saying otherwise is the
+  /// single biggest thing this surface can be wrong about.
+  final bool notifyOnly;
+
+  /// Whether a goal is stated above this list.
+  final bool hasGoal;
+
+  @override
+  Widget build(BuildContext context) => armed
+      ? AbEmptyState(
+          title: hasGoal
+              ? 'Nothing queued beyond the goal above.'
+              : "Add what you want done while you're away.",
+          subtitle: notifyOnly
+              ? 'Notify only on this session — every pause comes to you, and '
+                    'nothing here is acted on while you are away.'
+              : 'Handler already answers what the agent pauses on. A backlog '
+                    'is the work it takes on by itself.',
+        )
+      // The Handler tab's own direction, verbatim: one instruction worded one
+      // way wherever the user meets it.
+      : const AbEmptyState(
+          title: 'Handler is not armed on this session.',
+          subtitle: 'Arm it with the shield at the end of the top bar.',
+        );
+}
+
+/// What the list is for, in the user's own words — and, since an arm carrying a
+/// goal is what the bridge extracts the backlog from, where these items came
+/// from. This sheet is where a user goes to ask that, and it is the only surface
+/// that can answer: the card it opens from shows the goal as a headline and says
+/// nothing about its relationship to the list underneath.
+class _GoalLine extends StatelessWidget {
+  const _GoalLine({required this.goal});
+
+  final String goal;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.antgrid;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AbTokens.space16,
+        AbTokens.space4,
+        AbTokens.space16,
+        0,
+      ),
+      child: Text(
+        'Working towards: $goal',
+        // The goal is a sentence the user typed on the New Session canvas at
+        // whatever length suited them, and one line clips most of a pasted one.
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        // A step brighter than the progress line below it: this is the user's
+        // own words, not a count the app derived.
+        style: AbTokens.sansStyle(
+          fontSize: AbTokens.fontXs,
+          color: p.textSecondary,
+        ),
+      ),
     );
   }
 }
@@ -223,25 +350,29 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          SizedBox(
-            height: AbTokens.rowHeightSm,
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: AbTokens.space16),
-              child: Row(
-                children: [
-                  for (final (i, preset)
-                      in handlerPresetInstructions.indexed) ...[
-                    if (i > 0) const SizedBox(width: AbTokens.space14),
-                    AbChip.label(
-                      label: preset,
-                      color: p.textSecondary,
-                      size: AbChipSize.md,
-                      onTap: () => _instruct(preset),
-                    ),
-                  ],
-                ],
-              ),
+          // Wrapped, not scrolled. Four md chips overrun a narrow phone by
+          // roughly one label, and a strip that scrolls says so only to
+          // someone who already drags it — so the last preset was reachable
+          // only by accident, on the fastest route this sheet has to a useful
+          // backlog. A second run costs one row on the widths that need it and
+          // nothing on the widths that don't.
+          Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: AbTokens.space16,
+              vertical: AbTokens.space10,
+            ),
+            child: Wrap(
+              spacing: AbTokens.space14,
+              runSpacing: AbTokens.space10,
+              children: [
+                for (final preset in handlerPresetInstructions)
+                  AbChip.label(
+                    label: preset,
+                    color: p.textSecondary,
+                    size: AbChipSize.md,
+                    onTap: () => _instruct(preset),
+                  ),
+              ],
             ),
           ),
           Padding(
@@ -306,12 +437,23 @@ class _InstructionComposerState extends ConsumerState<_InstructionComposer> {
 /// which the undo path (spec §5.2) could be stumbled upon at the moment it is
 /// wanted — this puts it in front of the user beforehand. It makes undo
 /// discoverable; it does not make a bad outcome less likely.
-class _Disclaimer extends StatelessWidget {
+///
+/// Closable, and nothing stands where it was. Two lines under the composer on
+/// every open is a standing tax for a sentence that stops being news after the
+/// first read, and the Undo list it points at has its own pinned section header
+/// one layer up on the screen this sheet opens from — so past the first read
+/// the job is already done there, and a residual affordance here would be a
+/// permanent control whose whole content is a line the user has dismissed.
+class _Disclaimer extends ConsumerWidget {
   const _Disclaimer();
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final p = context.antgrid;
+    final dismissed = ref.watch(
+      firstRunProvider.select((s) => s.handlerDisclaimerDismissed),
+    );
+    if (dismissed) return const SizedBox.shrink();
     return Container(
       width: double.infinity,
       decoration: BoxDecoration(
@@ -321,12 +463,29 @@ class _Disclaimer extends StatelessWidget {
         horizontal: AbTokens.space16,
         vertical: AbTokens.space8,
       ),
-      child: Text(
-        handlerDisclaimerText,
-        style: AbTokens.sansStyle(
-          fontSize: AbTokens.fontXxs,
-          color: p.textMuted,
-        ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Text(
+              handlerDisclaimerText,
+              style: AbTokens.sansStyle(
+                fontSize: AbTokens.fontXxs,
+                color: p.textMuted,
+              ),
+            ),
+          ),
+          const SizedBox(width: AbTokens.space6),
+          // The away hint's own wording for the same gesture: one permanent
+          // dismissal, named the same way wherever the user meets it.
+          AbIconButton(
+            icon: AbIcons.close,
+            tooltip: "Dismiss — won't show again",
+            tone: AbIconButtonTone.muted,
+            onTap: () =>
+                ref.read(firstRunProvider.notifier).dismissHandlerDisclaimer(),
+          ),
+        ],
       ),
     );
   }
@@ -757,6 +916,12 @@ class _BacklogRow extends ConsumerWidget {
           horizontalPadding: AbTokens.space16,
           leading: HandlerItemStatusLabel(status: item.status),
           title: Text(item.text, style: AbTokens.sansStyle()),
+          // An item's text is bounded at MAX_ITEM_CHARS (400) and reaches it
+          // whenever extraction falls back to the raw sentence — a failed judge
+          // CLI, a rate-limited account, an agent that cannot judge headless.
+          // Nothing else on this row carries the text, so a single clipped line
+          // leaves the user reordering and deleting items they cannot read.
+          titleMaxLines: 2,
           subtitle: _itemSubtitle(item),
           // The outcome is a sentence the bridge wrote to a length nothing
           // caps, and its verdict is as often at the end as the start

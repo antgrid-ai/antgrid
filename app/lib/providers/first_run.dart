@@ -103,6 +103,11 @@ class FirstRunController extends Notifier<FirstRunState> {
     if (state.handlerAwayHintDismissed) return;
     _commit(state.copyWith(handlerAwayHintDismissed: true));
   }
+
+  void dismissHandlerDisclaimer() {
+    if (state.handlerDisclaimerDismissed) return;
+    _commit(state.copyWith(handlerDisclaimerDismissed: true));
+  }
 }
 
 final firstRunProvider = NotifierProvider<FirstRunController, FirstRunState>(

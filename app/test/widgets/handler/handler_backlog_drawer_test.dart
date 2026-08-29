@@ -2,6 +2,7 @@ import 'package:antgrid/design/ab_colors.dart';
 import 'package:antgrid/design/ab_icons.dart';
 import 'package:antgrid/design/ab_tokens.dart';
 import 'package:antgrid/design/widgets/ab_chip.dart';
+import 'package:antgrid/design/widgets/ab_empty_state.dart';
 import 'package:antgrid/design/widgets/ab_icon.dart';
 import 'package:antgrid/design/widgets/ab_icon_button.dart';
 import 'package:antgrid/design/widgets/ab_menu.dart';
@@ -10,7 +11,9 @@ import 'package:antgrid/models/handler_state.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
+import 'package:antgrid/providers/first_run.dart';
 import 'package:antgrid/storage/cached_sessions_store.dart';
+import 'package:antgrid/storage/first_run_store.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
 import 'package:antgrid/widgets/handler/handler_backlog_drawer.dart';
 import 'package:flutter/material.dart';
@@ -58,6 +61,7 @@ Future<ProjectSession> _armedSession(
   List<HandlerInstructionItem> backlog, {
   bool notifyOnly = false,
   String state = 'watching',
+  String goal = 'ship the fix',
 }) async {
   useInMemoryPrefs();
   final transport = FakeAgentTransport();
@@ -68,7 +72,13 @@ Future<ProjectSession> _armedSession(
     cachedSessionsStore: await CachedSessionsStore.open(),
     onClose: () async => transport.dispose(),
   );
-  _emitStatus(session, backlog, notifyOnly: notifyOnly, state: state);
+  _emitStatus(
+    session,
+    backlog,
+    notifyOnly: notifyOnly,
+    state: state,
+    goal: goal,
+  );
   return session;
 }
 
@@ -81,6 +91,7 @@ void _emitStatus(
   List<HandlerInstructionItem> backlog, {
   bool notifyOnly = false,
   String state = 'watching',
+  String goal = 'ship the fix',
 }) {
   _transportOf(session).emit('handler:status', {
     'projectId': 'p',
@@ -91,7 +102,7 @@ void _emitStatus(
         'state': state,
         'pendingEscalations': 0,
         'armedAt': 1,
-        'goal': 'ship the fix',
+        'goal': goal,
         'backlog': [for (final i in backlog) i.toWire()],
       },
     ],
@@ -101,12 +112,42 @@ void _emitStatus(
 FakeAgentTransport _transportOf(ProjectSession session) =>
     session.transport as FakeAgentTransport;
 
-Future<void> _pumpDrawer(WidgetTester tester, ProjectSession session) async {
+/// The session list the drawer titles itself from. Emitted separately from the
+/// handler snapshot because the two are separate wires: a terminal is armed
+/// long before — or entirely without — a `session:list` the app has read, and
+/// the title has to hold either way.
+void _emitSessions(ProjectSession session, {required String name}) {
+  _transportOf(session).emit('session:list:result', {
+    'projectId': 'p',
+    'sessions': [
+      {
+        'id': 't1',
+        'name': name,
+        'createdAt': 0,
+        'lastUsedAt': 0,
+        'archived': false,
+        'running': true,
+        'mode': 'terminal',
+      },
+    ],
+  });
+}
+
+/// [firstRun] carries a pre-dismissed disclaimer in; without one the store
+/// starts empty, which is what every other test here wants.
+Future<void> _pumpDrawer(
+  WidgetTester tester,
+  ProjectSession session, {
+  FirstRunStore? firstRun,
+}) async {
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
         selectedRegistrationIdProvider.overrideWithValue('p'),
         projectSessionProvider('p').overrideWith((ref) => session),
+        firstRunStoreProvider.overrideWithValue(
+          firstRun ?? await FirstRunStore.open(),
+        ),
       ],
       child: const MaterialApp(
         home: Scaffold(body: HandlerBacklogDrawer(terminalId: 't1')),
@@ -145,6 +186,14 @@ List<AbMenuItem> _openMenuItems(WidgetTester tester) => [
 List<String> _openMenuLabels(WidgetTester tester) => [
   for (final entry in _openMenuItems(tester)) entry.label,
 ];
+
+/// Lets the session cache's write-through debounce fire. A `session:list`
+/// schedules one, and a timer still pending when the tree goes down fails the
+/// test on an invariant that has nothing to do with what it asserted.
+Future<void> _drainSessionCacheFlush(WidgetTester tester) async {
+  await tester.pump(const Duration(seconds: 1));
+  await tester.pumpAndSettle();
+}
 
 /// Lets the snack bar's dismiss timer expire, so it can't outlive the test.
 Future<void> _drainSnackBar(WidgetTester tester) async {
@@ -468,18 +517,84 @@ void main() {
     final session = await _armedSession(const []);
     await _pumpDrawer(tester, session);
 
-    expect(find.textContaining('Nothing queued'), findsOneWidget);
+    expect(find.byType(AbEmptyState), findsOneWidget);
     expect(find.byTooltip('Item actions'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('a terminal with no armed session says so', (tester) async {
+  // A session with no goal reaching this state is an adopted session, an arm
+  // after a restart, an empty composer, or a list the user emptied. Handler is
+  // live in every one of them, which is the fact the copy has to carry.
+  testWidgets('an empty list asks for the first instruction, not for pity', (
+    tester,
+  ) async {
+    final session = await _armedSession(const [], goal: '');
+    await _pumpDrawer(tester, session);
+
+    // Spelled out rather than compared against a constant: this is the whole
+    // content of the surface at this moment, so a rewrite has to fail here.
+    expect(
+      find.text("Add what you want done while you're away."),
+      findsOneWidget,
+    );
+    expect(
+      find.text(
+        'Handler already answers what the agent pauses on. A backlog is the '
+        'work it takes on by itself.',
+      ),
+      findsOneWidget,
+    );
+    // No second route to the one action: the presets and the field below are
+    // it, and a button here would give that action a second name.
+    expect(find.byTooltip('Add to backlog'), findsOneWidget);
+  });
+
+  // The window between a seeded arm and its extraction landing, which is the
+  // likeliest moment of all for this sheet to be open. Inviting the user to add
+  // what they want done here gets the session's own opening sentence retyped,
+  // and the extraction already running appends it a second time.
+  testWidgets('an empty list under a goal points at the goal, not at the field', (
+    tester,
+  ) async {
+    final session = await _armedSession(const []);
+    await _pumpDrawer(tester, session);
+
+    expect(find.text('Working towards: ship the fix'), findsOneWidget);
+    expect(find.text('Nothing queued beyond the goal above.'), findsOneWidget);
+    expect(
+      find.text("Add what you want done while you're away."),
+      findsNothing,
+    );
+  });
+
+  // A notify-only session escalates every pause and injects nothing, so a
+  // backlog on one is a list the user works through themselves.
+  testWidgets('a notify-only empty list does not promise autonomous work', (
+    tester,
+  ) async {
+    final session = await _armedSession(const [], notifyOnly: true, goal: '');
+    await _pumpDrawer(tester, session);
+
+    expect(
+      find.text(
+        'Notify only on this session — every pause comes to you, and nothing '
+        'here is acted on while you are away.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('takes on by itself'), findsNothing);
+  });
+
+  testWidgets('a terminal with no armed session says so, and asks nothing', (
+    tester,
+  ) async {
     final session = await _armedSession([_tests]);
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
           selectedRegistrationIdProvider.overrideWithValue('p'),
           projectSessionProvider('p').overrideWith((ref) => session),
+          firstRunStoreProvider.overrideWithValue(await FirstRunStore.open()),
         ],
         child: const MaterialApp(
           home: Scaffold(body: HandlerBacklogDrawer(terminalId: 'other')),
@@ -489,6 +604,40 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.textContaining('not armed'), findsOneWidget);
+    // Nothing here would receive an instruction, so the invitation is withheld
+    // rather than printed over a session that cannot act on it.
+    expect(find.textContaining("while you're away"), findsNothing);
+    // The way out, worded exactly as the Handler tab words it.
+    expect(
+      find.text('Arm it with the shield at the end of the top bar.'),
+      findsOneWidget,
+    );
+  });
+
+  group('naming the session being edited', () {
+    testWidgets('the title carries the session this backlog belongs to', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests]);
+      _emitSessions(session, name: 'fix the login bug');
+      await _pumpDrawer(tester, session);
+
+      expect(find.text('Backlog · fix the login bug'), findsOneWidget);
+      await _drainSessionCacheFlush(tester);
+    });
+
+    testWidgets('an unnamed terminal keeps the surface name, not its id', (
+      tester,
+    ) async {
+      // No session list has landed, so the tab's own resolver would fall back
+      // to the raw terminal id. In a sheet showing one session that is a string
+      // with nothing to tell apart, so it is withheld.
+      final session = await _armedSession([_tests]);
+      await _pumpDrawer(tester, session);
+
+      expect(find.text('Backlog'), findsOneWidget);
+      expect(find.textContaining('t1'), findsNothing);
+    });
   });
 
   // The instruction field and the presets live here rather than pinned above
@@ -527,6 +676,34 @@ void main() {
       for (final preset in handlerPresetInstructions) {
         expect(find.text(preset), findsOneWidget);
       }
+    });
+
+    testWidgets('and every one of them stays on a narrow phone', (
+      tester,
+    ) async {
+      // `find.text` above passes on a preset parked off the right edge — a
+      // horizontal strip builds all its children whether or not any is
+      // reachable. Geometry is the only thing that can tell the two apart, and
+      // this width is where the fourth chip used to fall off.
+      tester.view.physicalSize = const Size(320, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      final session = await _armedSession([_tests]);
+      await _pumpDrawer(tester, session);
+
+      for (final preset in handlerPresetInstructions) {
+        expect(
+          tester.getRect(find.text(preset)).right,
+          lessThanOrEqualTo(320.0),
+          reason: preset,
+        );
+      }
+
+      // Reachable, not merely laid out: the last one still sends.
+      await tester.tap(find.text(handlerPresetInstructions.last));
+      await tester.pump();
+      expect(sentInstruct(session)['text'], handlerPresetInstructions.last);
     });
 
     testWidgets('typed text sends handler:instruct and clears the field', (
@@ -744,6 +921,40 @@ void main() {
         tester.widget<Text>(disclaimer).style,
         AbTokens.sansStyle(fontSize: AbTokens.fontXxs, color: p.textMuted),
       );
+    });
+
+    testWidgets('closing the disclaimer takes it away with nothing left', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests]);
+      await _pumpDrawer(tester, session);
+
+      await tester.tap(find.byTooltip("Dismiss — won't show again"));
+      await tester.pumpAndSettle();
+
+      expect(find.text(handlerDisclaimerText), findsNothing);
+      // No stand-in: the Undo list the sentence points at carries its own
+      // pinned header one layer up, so a residual control here would hold
+      // nothing but a line the user has just closed.
+      expect(find.byTooltip("Dismiss — won't show again"), findsNothing);
+    });
+
+    testWidgets('a closed disclaimer does not come back on the next open', (
+      tester,
+    ) async {
+      final session = await _armedSession([_tests]);
+      final firstRun = await FirstRunStore.open();
+      await firstRun.write(
+        const FirstRunState(handlerDisclaimerDismissed: true),
+      );
+
+      await _pumpDrawer(tester, session, firstRun: firstRun);
+
+      expect(find.text(handlerDisclaimerText), findsNothing);
+      // Everything the sheet is FOR is untouched — the retirement is of one
+      // standing notice, not of the footer it stood in.
+      expect(find.byType(AbTextField), findsOneWidget);
+      expect(find.text(handlerPresetInstructions.first), findsOneWidget);
     });
   });
 

@@ -21,6 +21,7 @@ class FirstRunState {
     this.nudgeDeviceDismissed = false,
     this.handlerArmedOnce = false,
     this.handlerAwayHintDismissed = false,
+    this.handlerDisclaimerDismissed = false,
   });
 
   final bool checklistDismissed;
@@ -51,6 +52,17 @@ class FirstRunState {
   /// never nag across sessions or projects.
   final bool handlerAwayHintDismissed;
 
+  /// Retires the backlog drawer's standing "Handler can make mistakes" notice
+  /// once the user has closed it. Its own flag rather than a share of
+  /// [handlerArmedOnce]: arming happens on the shield, whole sessions before
+  /// the drawer is ever opened, so reading the arm as an acknowledgement would
+  /// retire a sentence nobody was shown.
+  ///
+  /// It gates that ONE notice. Anything else that later stands under the
+  /// composer says something the user could not have read here, and inheriting
+  /// this flag would hide it on the strength of a different dismissal.
+  final bool handlerDisclaimerDismissed;
+
   FirstRunState copyWith({
     bool? checklistDismissed,
     bool? checklistCompleted,
@@ -60,6 +72,7 @@ class FirstRunState {
     bool? nudgeDeviceDismissed,
     bool? handlerArmedOnce,
     bool? handlerAwayHintDismissed,
+    bool? handlerDisclaimerDismissed,
   }) => FirstRunState(
     checklistDismissed: checklistDismissed ?? this.checklistDismissed,
     checklistCompleted: checklistCompleted ?? this.checklistCompleted,
@@ -70,6 +83,8 @@ class FirstRunState {
     handlerArmedOnce: handlerArmedOnce ?? this.handlerArmedOnce,
     handlerAwayHintDismissed:
         handlerAwayHintDismissed ?? this.handlerAwayHintDismissed,
+    handlerDisclaimerDismissed:
+        handlerDisclaimerDismissed ?? this.handlerDisclaimerDismissed,
   );
 
   Map<String, dynamic> toJson() => {
@@ -81,6 +96,7 @@ class FirstRunState {
     'nudgeDeviceDismissed': nudgeDeviceDismissed,
     'handlerArmedOnce': handlerArmedOnce,
     'handlerAwayHintDismissed': handlerAwayHintDismissed,
+    'handlerDisclaimerDismissed': handlerDisclaimerDismissed,
   };
 
   /// Defensive: any bad field degrades to its default rather than aborting the
@@ -99,6 +115,7 @@ class FirstRunState {
       nudgeDeviceDismissed: flag(j['nudgeDeviceDismissed']),
       handlerArmedOnce: flag(j['handlerArmedOnce']),
       handlerAwayHintDismissed: flag(j['handlerAwayHintDismissed']),
+      handlerDisclaimerDismissed: flag(j['handlerDisclaimerDismissed']),
     );
   }
 }

@@ -13,7 +13,17 @@ const abDialogTitlePadding = EdgeInsets.fromLTRB(
 );
 
 /// Builds a standard dialog title row with close button.
-Widget abDialogTitle(String title, {required VoidCallback onClose}) {
+///
+/// [wraps] budgets the second line this row has always allowed. The default
+/// leading is exactly the font size, which shows nothing while a caller passes a
+/// short constant — 'Fork session', 'Open link' — and puts one line's
+/// descenders into the next line's ascenders the moment a title composes in text
+/// of the user's own length. Pass it wherever the title is not a constant.
+Widget abDialogTitle(
+  String title, {
+  required VoidCallback onClose,
+  bool wraps = false,
+}) {
   return Row(
     children: [
       Expanded(
@@ -24,7 +34,9 @@ Widget abDialogTitle(String title, {required VoidCallback onClose}) {
           style: AbTokens.sansStyle(
             fontSize: AbTokens.fontBody,
             fontWeight: FontWeight.w600,
-            height: 1.0,
+            // AbListRow's own leading for wrapped chrome text, so a title and
+            // the rows under it break at the same rhythm.
+            height: wraps ? 1.2 : 1.0,
           ),
         ),
       ),
