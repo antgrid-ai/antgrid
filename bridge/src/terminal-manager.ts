@@ -144,6 +144,21 @@ export class TerminalManager {
     if (this.sessions.has(terminalId)) {
       log.warn(`Terminal "${terminalId}" already exists, killing first`);
       this.kill(terminalId);
+      // The replaced run's exit lands later, on a slot this spawn now owns,
+      // where the same-id gate below drops it — its bookkeeping included. So
+      // the bookkeeping runs HERE, while the id still means the old run.
+      // Ordering is the whole point: `namer.forget` and
+      // `handlerEngine.onTerminalExit` are keyed by terminal id, so dispatching
+      // them once the replacement has registered would reclaim the LIVE run's
+      // state instead of the dead one's. Only the callback fires, never the
+      // `terminal:exited` frame — an exit frame for a slot a live session holds
+      // tells the app a running terminal is dead, and nothing later corrects it.
+      //
+      // A grace made this reachable rather than theoretical: the window between
+      // the ask and the exit is now seconds, which is long enough for the user
+      // to press Stop and then Start (`SessionManager.stopTerminal` ->
+      // `startNow`).
+      this.callbacks.onTerminalExited?.(terminalId);
     }
 
     // Clear from stopped list since we're re-spawning

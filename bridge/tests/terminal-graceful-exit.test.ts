@@ -448,6 +448,62 @@ describe("forget after a graceful exit", () => {
   }, 30_000);
 });
 
+// The grace made this reachable rather than theoretical. The window between the
+// ask and the exit used to be a couple of hundred milliseconds; it is seconds
+// now, which is comfortably long enough for a user to press Stop and then Start
+// (`SessionManager.stopTerminal` -> `startNow`, which clears `stopping` and
+// spawns on the same terminal id). The replaced run's exit then lands on a slot
+// the replacement owns, where the same-id gate drops it — so whatever the exit
+// owed has to have been paid at the replacement instead.
+describe("a restart inside the grace", () => {
+  test("pays the replaced run's exit bookkeeping without telling the app it died", async () => {
+    const dir = tempDir("restart");
+    const { command, args } = stubbornSleeper(dir);
+    const exited: string[] = [];
+    const messages: AbMessage[] = [];
+    const manager = new TerminalManager(
+      (m) => messages.push(m),
+      { onTerminalExited: (id) => exited.push(id) },
+      createConnState(),
+    );
+    const exitFrames = (): AbMessage[] =>
+      messages.filter((m) => m.type === "terminal:exited" && m.terminalId === "t1");
+    try {
+      manager.spawn({ terminalId: "t1", type: "agent", command, args });
+      await new Promise((r) => setTimeout(r, 400));
+
+      manager.kill("t1", 3000);
+      manager.spawn({ terminalId: "t1", type: "agent", command, args });
+      // Asserted with nothing awaited in between, because "eventually" is the
+      // bug: a dispatch that waits for the real exit arrives after the
+      // replacement has registered, and `namer.forget` /
+      // `handlerEngine.onTerminalExit` are keyed by terminal id — they would
+      // reclaim the live run's title state and arming instead of the dead
+      // run's.
+      expect(exited).toEqual(["t1"]);
+
+      // Long enough for the replaced PTY's own exit to land on the new session.
+      await new Promise((r) => setTimeout(r, 1500));
+      expect(exited).toEqual(["t1"]);
+      expect(manager.has("t1")).toBe(true);
+      // The half the same-id gate exists to protect: an exit frame for a slot a
+      // live session holds tells the app a running terminal is dead, and
+      // nothing later corrects it.
+      expect(exitFrames()).toEqual([]);
+
+      // The replacement is owed its own exit — the split must not have spent it
+      // on the run before.
+      manager.killAll();
+      await waitFor(() => (exitFrames().length > 0 ? true : undefined), 5000);
+      expect(exited).toEqual(["t1", "t1"]);
+      expect(exitFrames()).toHaveLength(1);
+    } finally {
+      manager.killAll();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+});
+
 describe("the Windows ask", () => {
   /** A raw-mode reader — what every TUI agent is, and the only reader a ConPTY
    *  keystroke reaches. Optionally starts a grandchild through `Start-Process`

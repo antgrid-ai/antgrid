@@ -46,6 +46,26 @@ function makeLingeringTerm() {
   };
 }
 
+// Terminal manager that models the grace: the ask neither ends the PTY nor
+// settles the tree wait, so the window a stop opens is under the test's control
+// rather than a timer's. `settleTree` is the tree finally going, which is a
+// different event from the PTY's exit and lands at a different time.
+function makeGracefulTerm() {
+  const live = new Set<string>();
+  const spawns: string[] = [];
+  const pending = new Map<string, () => void>();
+  return {
+    spawns,
+    spawn: (cfg: { terminalId?: string }) => { live.add(cfg.terminalId!); spawns.push(cfg.terminalId!); return cfg.terminalId!; },
+    kill: (_id: string, _graceMs?: number) => {},
+    forget: (_id: string) => {},
+    treeKilled: (id: string) => new Promise<void>((resolve) => pending.set(id, resolve)),
+    has: (id: string) => live.has(id),
+    settleTree: (id: string) => { pending.get(id)?.(); pending.delete(id); },
+    exit: (id: string) => { live.delete(id); },
+  };
+}
+
 function seedCopilotSessions(home: string, ids: string[]) {
   const db = new Database(join(home, "session-store.db"));
   db.run("CREATE TABLE sessions (id TEXT PRIMARY KEY)");
@@ -1033,6 +1053,42 @@ describe("SessionManager start/stop", () => {
     expect(await Promise.all([first, second])).toEqual([true, true]);
     expect((sm as any).terminalExitWaiters.size).toBe(0);
     sm.noteExited(s.id); // a second exit report must not re-fire a settled waiter
+    sm.flushNow();
+  });
+
+  // What the grace makes reachable: the seconds between the ask and the exit
+  // are long enough for the user to press Stop and then Start. Both halves are
+  // load-bearing — the row must stop claiming to run the moment the ask goes
+  // out, or Stop leaves a live-looking session; and the Start that follows must
+  // be a real restart, or it hits the already-running guard and is answered
+  // `ok: true` having done nothing.
+  it("a start inside the stop's grace restarts rather than re-announcing", async () => {
+    const term = makeGracefulTerm();
+    const sm = new SessionManager({
+      projectId: "p1", storeDir: dir, projectPath: dir, terminalManager: term as any,
+      agentSpec: { command: "claude", name: "claude-code" },
+      sendMessage: () => {},
+    });
+    const s = sm.create("t");
+    sm.start(s.id);
+    expect(term.spawns).toEqual([s.id]);
+
+    sm.stop(s.id);
+    // The PTY outlives the ask by design; only the exit ends it.
+    expect(term.has(s.id)).toBe(true);
+    expect(sm.get(s.id)?.running).toBe(false);
+
+    sm.start(s.id);
+    expect(term.spawns).toEqual([s.id, s.id]);
+    expect(sm.get(s.id)?.running).toBe(true);
+
+    // The replaced run's tree settles afterwards, behind the restart. Its
+    // `stopping` entry is no longer the one on the slot, so it must clear
+    // nothing — a late settle that retracted the restart would put the row back
+    // to stopped with a live agent under it.
+    term.settleTree(s.id);
+    await Promise.resolve();
+    expect(sm.get(s.id)?.running).toBe(true);
     sm.flushNow();
   });
 

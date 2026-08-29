@@ -223,6 +223,20 @@ for every project, until the file is hand-edited. Neither `TerminateProcess` nor
   otherwise leaves Stop rendering a live row and makes the Start the user
   presses next hit `startNow`'s already-running guard and be answered `ok: true`
   having done nothing.
+- **A same-id respawn pays the replaced run's exit bookkeeping itself, at the
+  replacement.** The grace turned the replace window from ~200ms into seconds,
+  which is long enough for the user to press Stop and then Start — so the
+  replaced PTY's exit routinely lands on a slot the replacement already owns,
+  where the same-id gate in `TerminalManager`'s exit handler drops it. The gate
+  is right to (an exit frame for a live slot tells the app a running terminal is
+  dead, and nothing corrects it), but everything that exit OWED — `namer.forget`,
+  `forgetTitleAttempts`, the handler's per-terminal guard, `noteExited` — goes
+  with it, and the restarted session then inherits the dead run's title state and
+  arming. `spawn()`'s duplicate branch fires `onTerminalExited` itself, and the
+  ORDERING is the whole invariant: that cleanup is keyed by terminal id, so it
+  must run while the id still means the old run — dispatching it after the
+  replacement registers reclaims the LIVE run's state instead. Only the callback
+  fires there, never the frame.
 - **Chat mode has no PTY and so no ladder.** codex's ask is its stdin closing
   (the app-server exits on EOF) with a bounded wait and a `killChildTree`
   escalation. The SDK-driven backends own their own process lifetime and are not
