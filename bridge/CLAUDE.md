@@ -34,6 +34,19 @@ session's checkout — see `headlessScratchCwd`. History a CLI offers no switch 
 skip is redirected per spawn instead (`HeadlessCommand.scratchEnv`, a fresh dir
 the runner deletes after), so never list a var that also carries credentials.
 
+**An agent's native session id is not stable across a resume**, so nothing may
+read a change of it as "a new conversation started". Measured on Claude Code:
+`--resume` copies the transcript into a NEW file and appends under a fresh id,
+so the same thread comes back wearing a different name. Every guard against
+re-naming a session is otherwise per-run — `SessionNamer` and `TitleAttempts`
+both die with the PTY — which is why the winning signal is also written to the
+session row as `autoTitleRank`, and why `SessionManager.noteConversationStart`
+records AT LAUNCH that a run continues the previous conversation. The first
+identity report spends that claim; every rotation after it is a real `/clear`.
+Get either half wrong and a stop/start pays another model spawn and renames the
+session — and not back to the same title, since the transcript read returns the
+LAST few messages, so the new name describes wherever the work had drifted to.
+
 The `agent:tools` advert (and the loopback `tools:list` reply) carries TWO
 arrays, and the split is load-bearing. `tools[]` is the PATH probe — what this
 machine can actually launch. `agents[]` (`agent-catalog.ts`, projected from the

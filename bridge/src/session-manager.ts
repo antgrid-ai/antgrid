@@ -19,6 +19,7 @@ import { stripAnsi } from "./handler/context";
 import { resumeArgv, sessionResumable } from "./agent-resume";
 import { isChatCapableTool } from "./structured/chat-capable";
 import { initialPromptArgv } from "./initial-prompt";
+import { TITLE_RANKS, titleRankValue, type TitleRank } from "./session-namer";
 import type { WorkStatus } from "./protocol";
 import type { TerminalManager } from "./terminal-manager";
 import type { AbMessage, SessionEntry } from "./protocol";
@@ -194,6 +195,14 @@ interface PersistedEntry {
   // create-time name). Auto-naming from the agent title is suppressed forever
   // after — manual always wins. Backfilled from the name pattern on load.
   manuallyRenamed: boolean;
+  // Which signal produced the current `name`, absent for a default name or one
+  // derived from the terminal's OSC chrome. Durable because SessionNamer's copy
+  // of the same precedence dies with the PTY: without it every restart lets the
+  // per-turn first-message read rename the session back to its opening prompt,
+  // and lets the naming gate spend another model spawn re-titling a session that
+  // already has a real title. Released when a NEW conversation takes the slot —
+  // see noteConversationStart and setAgentSession.
+  autoTitleRank?: TitleRank;
   // Last-active agent-native conversation id for this slot (the agent's own
   // id-space, distinct from `id`). Persisted-only — never sent on the wire.
   // Overwrite-latest: whatever the agent last reported is "where you left off",
@@ -251,6 +260,7 @@ const PersistedEntrySchema = z
     args: z.string().optional().catch(undefined),
     mode: z.enum(["terminal", "chat"]).optional().catch(undefined),
     manuallyRenamed: z.boolean().optional().catch(undefined),
+    autoTitleRank: z.enum(TITLE_RANKS).optional().catch(undefined),
     agentSessionId: z.string().optional().catch(undefined),
     agentTranscriptPath: z.string().optional().catch(undefined),
     config: z.record(z.string(), z.string()).optional().catch(undefined),
@@ -282,6 +292,12 @@ const PersistedEntrySchema = z
       // isn't a default "Session N" was user-chosen → treat as manual so
       // live-follow never clobbers it. Default names start following.
       manuallyRenamed: s.manuallyRenamed ?? !isDefaultSessionName(s.name),
+      // Deliberately NOT backfilled from the name: a file written before this
+      // field existed cannot say whether its name was generated or read off the
+      // opening prompt, and guessing "generated" would freeze every one of them
+      // against ever being named properly. Absent means "behave as before" —
+      // the rank starts describing the name from the next title that lands.
+      autoTitleRank: s.autoTitleRank,
       agentSessionId: s.agentSessionId,
       agentTranscriptPath: s.agentTranscriptPath,
       config: s.config,
@@ -462,6 +478,11 @@ export class SessionManager {
   // something new; a stale `true` is harmless because start() re-runs the real
   // pre-flight and falls back to a fresh start.
   private resumableCache = new Map<string, { agentSessionId: string; resumable: boolean }>();
+  /** Sessions launched to CONTINUE their previous conversation, until the agent
+   *  reports the identity it continued under. Per-run and therefore in memory:
+   *  a launch always precedes the report, and a bridge that died between them
+   *  killed the run too. See noteConversationStart. */
+  private readonly awaitingResumedIdentity = new Set<string>();
   /** Live and recovered `worktree.setup` state, keyed by session id. Runtime
    *  only — it reaches the wire through toWire and never sessions.json, which
    *  is also why every mutation here emits with notifyObservers() rather than
@@ -911,6 +932,10 @@ export class SessionManager {
     if (!trimmed) throw new Error("name cannot be empty");
     entry.name = trimmed;
     entry.manuallyRenamed = true;
+    // The name is the user's now, so it no longer describes any signal. Kept
+    // honest rather than load-bearing: manuallyRenamed already refuses every
+    // auto-name, and a rank left behind would outlive the title it described.
+    entry.autoTitleRank = undefined;
     this.changed();
   }
 
@@ -932,13 +957,52 @@ export class SessionManager {
     return !!entry && !entry.manuallyRenamed;
   }
 
-  applyAutoName(id: string, name: string): void {
+  /**
+   * Whether this slot already holds a name no model call should try to improve
+   * on. The DURABLE twin of SessionNamer.hasFinalTitle, which holds nothing once
+   * the PTY has exited — so this is the only thing that still knows, after a
+   * restart, that the name on the row was generated rather than defaulted.
+   */
+  hasFinalAutoTitle(id: string): boolean {
+    const entry = this.entries.get(id);
+    return titleRankValue(entry?.autoTitleRank) >= titleRankValue("self");
+  }
+
+  applyAutoName(id: string, name: string, rank?: TitleRank): void {
     const entry = this.entries.get(id);
     if (!entry || entry.manuallyRenamed) return;
+    // Precedence, restated here because SessionNamer's copy only spans one run:
+    // the first-message read repeats the SAME opening prompt every turn and the
+    // OSC signal is terminal chrome, so after a restart either would rename a
+    // session we had already titled back to something worse.
+    if (titleRankValue(rank) < titleRankValue(entry.autoTitleRank)) return;
     const trimmed = name.trim();
-    if (!trimmed || trimmed === entry.name) return;
+    if (!trimmed) return;
+    // The rank travels with the name it describes, so an unchanged name still
+    // writes when the signal behind it strengthened.
+    if (trimmed === entry.name && rank === entry.autoTitleRank) return;
     entry.name = trimmed;
+    entry.autoTitleRank = rank;
     this.changed();
+  }
+
+  /**
+   * Record whether this launch continues the slot's previous conversation, and
+   * release the generated title when it does not.
+   *
+   * A continuation cannot be recognized from the agent's session id afterwards:
+   * measured on Claude Code, `--resume` copies the transcript into a new file
+   * and appends under a FRESH id, so the same thread comes back wearing a
+   * different name. Only the launch knows, which is why it is recorded here and
+   * consumed by the first report in setAgentSession.
+   */
+  private noteConversationStart(entry: PersistedEntry, resumed: boolean): void {
+    if (resumed) {
+      this.awaitingResumedIdentity.add(entry.id);
+      return;
+    }
+    this.awaitingResumedIdentity.delete(entry.id);
+    entry.autoTitleRank = undefined;
   }
 
   /**
@@ -950,6 +1014,15 @@ export class SessionManager {
   setAgentSession(id: string, agentSessionId: string, agentTranscriptPath?: string): void {
     const entry = this.entries.get(id);
     if (!entry) return;
+    // A conversation change releases the slot's title — the name describes what
+    // was being worked on, not the slot. Ordered BEFORE the unchanged early-out
+    // below so a resume that comes back under the SAME id still consumes the
+    // claim; left armed, the `/clear` after it would read as that resume.
+    if (!this.awaitingResumedIdentity.delete(id)
+        && entry.agentSessionId !== undefined
+        && entry.agentSessionId !== agentSessionId) {
+      entry.autoTitleRank = undefined;
+    }
     // Keep a previously captured path if this report omits one for the SAME
     // session — an agent's SessionStart can fire before the transcript path is
     // known, then a later turn-end report supplies it (antigravity's
@@ -1076,6 +1149,7 @@ export class SessionManager {
     this.tm.forget(id);
     this.entries.delete(id);
     this.resumableCache.delete(id);
+    this.awaitingResumedIdentity.delete(id);
     this.setups.delete(id);
   }
 
@@ -1787,10 +1861,12 @@ export class SessionManager {
       const chatAlreadyRunning = this.runningChat.has(id);
       this.runningChat.add(id);
       const chatTool = entry.tool ?? "codex";
+      const resumeId = entry.conversationStart === "fork" ? undefined : this.resumeIdFor(chatTool, entry);
+      this.noteConversationStart(entry, resumeId !== undefined);
       this.opts.onStartChat?.({
         sessionId: id,
         tool: chatTool,
-        resumeId: entry.conversationStart === "fork" ? undefined : this.resumeIdFor(chatTool, entry),
+        resumeId,
         config: entry.config,
         initialPrompt: this.forkInitialPrompt(entry, initialPrompt),
       });
@@ -1880,6 +1956,9 @@ export class SessionManager {
       // than spawning a default shell.
       throw new Error("agent.tool or agent.command not configured");
     }
+    // After the throw: a launch that never happened has started no conversation
+    // and must not release the title of the one still recorded here.
+    this.noteConversationStart(entry, resumeArgs.length > 0);
 
     // One-shot first prompt, appended LAST (after resume tokens — codex's
     // `resume <uuid>` is a subcommand and the positional prompt must follow it).

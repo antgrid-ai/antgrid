@@ -2589,7 +2589,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Policy unit that turns title signals (OSC-2 + injected hook/plugin POSTs)
     // into session names, honoring manual-rename precedence via applyAutoName.
     namer = new SessionNamer({
-      applyAutoName: (id, name) => sessions?.applyAutoName(id, name),
+      applyAutoName: (id, name, rank) => sessions?.applyAutoName(id, name, rank),
     });
 
     // agy fires no hook on a `/rename`, so it would not reach the sidebar until
@@ -2909,6 +2909,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // itself — so the count alone would let the flipped session rename itself
     // from whatever the user typed next.
     if (namer?.hasFinalTitle(target.terminalId)) return;
+    // The durable half of the same question, and the one that answers it after a
+    // restart: the namer is empty by then, the attempt budget below is empty
+    // too, and only the session row still knows its name is one we generated.
+    // Without it every stop/start pays another model spawn and renames the
+    // session from wherever the conversation had since drifted to.
+    if (sessions?.hasFinalAutoTitle(target.terminalId)) return;
 
     const key = titleAttemptKey(target);
     // Tested twice, and the two tests answer different questions. This one is a

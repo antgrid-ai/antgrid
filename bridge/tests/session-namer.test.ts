@@ -227,3 +227,32 @@ describe("SessionNamer", () => {
     expect(s.calls).toEqual([["a", "First name"], ["a", "Second name"]]);
   });
 });
+
+// The rank has to reach the sink, because the sink is the only half of this
+// precedence that outlives the PTY: SessionManager writes it beside the name so
+// a restarted session still knows which signal named it.
+describe("the rank travels with the name", () => {
+  function rankedSink() {
+    const calls: Array<[string, string, string | undefined]> = [];
+    return {
+      calls,
+      applyAutoName: (id: string, name: string, rank?: string) => calls.push([id, name, rank]),
+    };
+  }
+
+  test("a structured title is applied with the rank it was ingested at", () => {
+    const s = rankedSink();
+    const n = new SessionNamer(s, { debounceMs: 0 });
+    n.onStructuredTitle("a", "Fix session auto-naming", "self");
+    n.flush();
+    expect(s.calls).toEqual([["a", "Fix session auto-naming", "self"]]);
+  });
+
+  test("the OSC fallback carries none — it is terminal chrome, not a title", () => {
+    const s = rankedSink();
+    const n = new SessionNamer(s, { debounceMs: 0 });
+    n.onOscTitle("a", "osc filler");
+    n.flush();
+    expect(s.calls).toEqual([["a", "osc filler", undefined]]);
+  });
+});
