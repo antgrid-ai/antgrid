@@ -8,6 +8,46 @@ const FETCH_TIMEOUT_MS = 25_000;
 
 const ALLOWED_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]", "0.0.0.0"]);
 
+// Transport failures where the OTHER scheme is worth exactly one attempt.
+// Plaintext at a TLS listener resets (the listener cannot read the bytes as a
+// handshake record and hangs up); TLS at a plaintext listener is refused, the
+// same as a dead port. Each is listed under both spellings Bun reports it by —
+// which of the two arrives is not something this side can pin down. Nothing
+// else belongs here — a timeout above all, where a retry would double a wait
+// the app is already timing.
+const SCHEME_RETRY_CODES = new Set([
+  "ECONNRESET",
+  "ConnectionClosed",
+  "ECONNREFUSED",
+  "ConnectionRefused",
+]);
+
+function isSchemeRetryable(err: unknown): boolean {
+  // The code sits on the error itself, or on the `cause` of a wrapping
+  // `TypeError: fetch failed` — reading only the outer one leaves the retry
+  // silently never firing, and a TLS-only dev server as unreachable as it was
+  // before.
+  const e = err as { code?: unknown; cause?: { code?: unknown } } | null;
+  const code = typeof e?.code === "string" ? e.code : e?.cause?.code;
+  return typeof code === "string" && SCHEME_RETRY_CODES.has(code);
+}
+
+// Ports proven to need TLS, so only the first request of a page load pays the
+// failed round trip. Keyed by port alone: every hostname above is an alias for
+// this machine's loopback, so a listener that speaks TLS speaks it under all of
+// them. A dev server the bridge never saw announce itself — anything started
+// outside a project terminal, an Aspire AppHost being the common one — reaches
+// us with the phone's default `http`, and this is the only place that can
+// correct it.
+const tlsOnlyPorts = new Set<number>();
+
+/** Whether `localhost:<port>` has been observed to require TLS. The WebSocket
+ *  upstream reads this instead of retrying: a failed handshake there is
+ *  indistinguishable from a dev server refusing the connection outright. */
+export function isTlsOnlyPort(port: number): boolean {
+  return tlsOnlyPorts.has(port);
+}
+
 // Text content types that are safe to decode as utf8.
 // Everything else is treated as binary (base64) by default.
 const TEXT_CONTENT_TYPES = new Set([
@@ -136,6 +176,59 @@ function encodeBody(
   return { body: merged.toString(plainEncoding), bodyEncoding: plainEncoding };
 }
 
+/**
+ * One fetch, retried once under the other scheme when the failure says the
+ * listener disagrees about TLS.
+ *
+ * The phone names a scheme per port and can only ever guess it for a server it
+ * never saw start (it defaults to `http`), so a TLS-only dev server was
+ * previously unreachable through the tunnel — with a bare socket error for a
+ * page the desktop, whose WebView dials the port directly, renders fine. The
+ * mismatched attempt costs nothing upstream: it is rejected at the transport,
+ * so no request is ever delivered twice and the retry is safe for any method.
+ */
+async function fetchWithSchemeRecovery(target: URL, init: RequestInit): Promise<Response> {
+  // Empty for a default-port URL, which the tunnel never builds — memoing 0
+  // for every such request would be meaningless, so leave it unkeyed.
+  const port = target.port ? Number(target.port) : null;
+  const knownTls = port !== null && tlsOnlyPorts.has(port);
+  const first = target.protocol === "https:" || knownTls ? "https:" : "http:";
+  const second = first === "https:" ? "http:" : "https:";
+
+  const attempt = (protocol: string) => {
+    const url = new URL(target);
+    url.protocol = protocol;
+    return fetch(url, {
+      ...init,
+      // Dev HTTPS servers almost always use self-signed certs. The hostname is
+      // already gated to localhost by the caller, so skipping cert verification
+      // here is scoped to local dev preview only.
+      ...(protocol === "https:" ? { tls: { rejectUnauthorized: false } } : {}),
+    });
+  };
+
+  try {
+    return await attempt(first);
+  } catch (err) {
+    if (!isSchemeRetryable(err)) throw err;
+    let resp: Response;
+    try {
+      resp = await attempt(second);
+    } catch {
+      // Both schemes failed: the port is simply not answering. Report the
+      // attempt the caller actually asked for, not the speculative one.
+      throw err;
+    }
+    if (port !== null) {
+      if (second === "https:") tlsOnlyPorts.add(port);
+      // The memo outlives the server that earned it — the next process on the
+      // port may speak plaintext.
+      else tlsOnlyPorts.delete(port);
+    }
+    return resp;
+  }
+}
+
 export async function fetchLocalhost(opts: {
   url: string;
   method?: string;
@@ -155,7 +248,7 @@ export async function fetchLocalhost(opts: {
     };
   }
 
-  const resp = await fetch(opts.url, {
+  const resp = await fetchWithSchemeRecovery(parsed, {
     method: opts.method ?? "GET",
     headers: opts.headers ?? {},
     body: opts.body,
@@ -165,10 +258,6 @@ export async function fetchLocalhost(opts: {
     // intermediate hop — and auth flows put the Set-Cookie on the redirecting
     // response, so a followed redirect silently drops the session/handoff cookie.
     redirect: "manual",
-    // Dev HTTPS servers almost always use self-signed certs. The hostname is
-    // already gated to localhost above, so skipping cert verification here is
-    // scoped to local dev preview only.
-    ...(parsed.protocol === "https:" ? { tls: { rejectUnauthorized: false } } : {}),
   });
 
   // Carry Set-Cookie out-of-band: Headers.forEach flattens a repeated header to

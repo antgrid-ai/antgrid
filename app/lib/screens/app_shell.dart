@@ -365,6 +365,16 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
   // attention/error or a manual pull-to-refresh. Null value = older bridge.
   final Map<String, int?> _lastAdvertRunningCount = {};
 
+  // Last-seen per-project advert `lastActiveAt`, keyed by entryId. The bridge
+  // bumps this on ANY session-list identity change — rename, create, archive,
+  // delete — not just the running-state/status/count moves the three maps
+  // above cover. Without it, a rename on an idle session (nothing running,
+  // nothing to flip) never re-peeks a cold project: a device that has this
+  // project's drawer row collapsed keeps showing the pre-rename cached name
+  // forever, since nothing else here would ever differ. Null value = older
+  // bridge / never advertised.
+  final Map<String, String?> _lastAdvertLastActiveAt = {};
+
   @override
   void initState() {
     super.initState();
@@ -457,6 +467,7 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
         _lastAdvertRunning.removeWhere((k, _) => k.startsWith(prefix));
         _lastAdvertStatus.removeWhere((k, _) => k.startsWith(prefix));
         _lastAdvertRunningCount.removeWhere((k, _) => k.startsWith(prefix));
+        _lastAdvertLastActiveAt.removeWhere((k, _) => k.startsWith(prefix));
       }
     }
     for (final uuid in openIds) {
@@ -484,6 +495,7 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
     _lastAdvertRunning.clear();
     _lastAdvertStatus.clear();
     _lastAdvertRunningCount.clear();
+    _lastAdvertLastActiveAt.clear();
     _seedingSessions.clear();
     for (final sub in _labelSubs.values) {
       sub.close();
@@ -572,6 +584,9 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
       final hadCount = _lastAdvertRunningCount.containsKey(entryId);
       final prevCount = _lastAdvertRunningCount[entryId];
       _lastAdvertRunningCount[entryId] = ap.runningSessions;
+      final hadLastActiveAt = _lastAdvertLastActiveAt.containsKey(entryId);
+      final prevLastActiveAt = _lastAdvertLastActiveAt[entryId];
+      _lastAdvertLastActiveAt[entryId] = ap.lastActiveAt;
       if (cp == null) continue;
       // Seed a never-synced project's sessions, OR re-peek when its advertised
       // run-state or work status flips — the bridge peek reports true per-session
@@ -599,10 +614,18 @@ class _ControlPlaneReaperState extends ConsumerState<ControlPlaneReaper> {
       // working↔done without moving the count, so this never peeks on mere
       // turn boundaries.
       final sessionCountChanged = hadCount && prevCount != ap.runningSessions;
+      // `lastActiveAt` moves on a rename/create/archive/delete too — the bridge
+      // bumps it on every session-identity change, not just an open (see
+      // host-server.ts's onSessionsChange wiring) — so this is what catches an
+      // idle session getting renamed, which flips neither running, status, nor
+      // the count above.
+      final lastActiveAtChanged =
+          hadLastActiveAt && prevLastActiveAt != ap.lastActiveAt;
       if (neverSynced ||
           runStateFlipped ||
           statusFlipped ||
-          sessionCountChanged) {
+          sessionCountChanged ||
+          lastActiveAtChanged) {
         _peekProjectSessions(cp, ap.projectId, entryId, store);
       }
     }

@@ -217,6 +217,7 @@ class _FileContentViewerState extends ConsumerState<FileContentViewer>
     );
     if (svc == null) return;
     svc.sendToAgentTerminal(message);
+    ref.read(focusAgentInputProvider)?.call();
     controller.cancelSelection();
     setState(() => _hasSelection = false);
     showSentToAgentSnackBar(context);

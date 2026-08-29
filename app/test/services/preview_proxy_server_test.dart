@@ -180,6 +180,119 @@ void main() {
     expect(raw, contains('csrf=123'));
   });
 
+  test('downgrades Secure cookies from an https target', () async {
+    final port = await freePort();
+    final proxy = PreviewProxyServer(
+      targetPort: port,
+      targetScheme: 'https',
+      onRequest: (_) async => const TunnelHttpResponse(
+        requestId: 'x',
+        status: 200,
+        headers: {'content-type': 'text/plain'},
+        // What an https dev server's sign-in sets. The WebView is served plain
+        // HTTP, where a Secure cookie is dropped without a word, so the session
+        // would never be stored and the sign-in would loop.
+        setCookies: [
+          '.Session=xyz; path=/; secure; httponly',
+          'handoff=; path=/; Secure; SameSite=None',
+        ],
+        body: 'ok',
+        bodyEncoding: 'utf8',
+      ),
+    );
+    final bound = await proxy.start();
+    addTearDown(() async => proxy.stop());
+
+    final raw = await _get(bound);
+
+    expect(raw.toLowerCase(), isNot(contains('secure')));
+    expect(raw, contains('.Session=xyz'));
+    expect(raw, contains('httponly'));
+    // SameSite=None is only legal alongside Secure, so it has to move too.
+    expect(raw.toLowerCase(), isNot(contains('samesite=none')));
+    expect(raw, contains('SameSite=Lax'));
+  });
+
+  // The one cookie the downgrade must NOT touch: the two prefixes make Secure
+  // part of the cookie's validity, so stripping it has the browser reject the
+  // cookie outright — the sign-in loop the downgrade exists to prevent, now
+  // caused by it.
+  test('leaves a __Host-/__Secure- prefixed cookie intact', () async {
+    final port = await freePort();
+    final proxy = PreviewProxyServer(
+      targetPort: port,
+      targetScheme: 'https',
+      onRequest: (_) async => const TunnelHttpResponse(
+        requestId: 'x',
+        status: 200,
+        headers: {'content-type': 'text/plain'},
+        setCookies: [
+          '__Host-bff=abc; Path=/; Secure; HttpOnly; SameSite=None',
+          '__Secure-rt=def; Path=/; Secure',
+        ],
+        body: 'ok',
+        bodyEncoding: 'utf8',
+      ),
+    );
+    final bound = await proxy.start();
+    addTearDown(() async => proxy.stop());
+
+    final raw = await _get(bound);
+
+    expect(raw, contains('__Host-bff=abc; Path=/; Secure; HttpOnly'));
+    expect(raw, contains('SameSite=None'));
+    expect(raw, contains('__Secure-rt=def; Path=/; Secure'));
+  });
+
+  test('passes a plain-http target cookies through untouched', () async {
+    final port = await freePort();
+    final proxy = PreviewProxyServer(
+      targetPort: port,
+      onRequest: (_) async => const TunnelHttpResponse(
+        requestId: 'x',
+        status: 200,
+        headers: {'content-type': 'text/plain'},
+        setCookies: ['sid=1; Path=/; Secure'],
+        body: 'ok',
+        bodyEncoding: 'utf8',
+      ),
+    );
+    final bound = await proxy.start();
+    addTearDown(() async => proxy.stop());
+
+    expect(await _get(bound), contains('sid=1; Path=/; Secure'));
+  });
+
+  test('forwards the browser handshake headers on a WebSocket upgrade', () async {
+    final port = await freePort();
+    Map<String, String>? captured;
+    final proxy = PreviewProxyServer(
+      targetPort: port,
+      targetScheme: 'https',
+      onRequest: (_) async => _ok(),
+      onWebSocketConnect: (channel, path, headers) {
+        captured = headers;
+        channel.sink.close();
+      },
+    );
+    final bound = await proxy.start();
+    addTearDown(() async => proxy.stop());
+
+    final ws = await WebSocket.connect(
+      'ws://localhost:$bound/_blazor',
+      headers: {'cookie': '.Session=xyz'},
+    );
+    addTearDown(() async => ws.close());
+    await ws.done.timeout(const Duration(seconds: 5), onTimeout: () => null);
+
+    // A cookie-authenticated dev server reads its session off the handshake, so
+    // dropping it opens the socket anonymously behind an authenticated page.
+    expect(captured?['cookie'], '.Session=xyz');
+    // The WebView's origin is this plain-http proxy; a dev server checking
+    // Origin would read that as cross-site.
+    expect(captured?['origin'], 'https://localhost:$port');
+  });
+
   test('advertises the gzip body encoding on every tunneled request', () async {
     final port = await freePort();
     TunnelHttpRequest? captured;

@@ -92,6 +92,15 @@ export class ProjectCore {
   // reduction is a pure fold over outbound bus frames — see work-status.ts.
   private _work: WorkStatusState = initialWorkStatus;
   private _onWorkStatusChange: (() => void) | null = null;
+  private _onSessionsChange: (() => void) | null = null;
+  /** Identity signature (id/name/archived, sorted) of the last `session:updated`
+   *  this core observed. `session:updated` also re-fires on a pure work-status
+   *  re-stamp ({@link SessionManager.refreshWorkStatus}, no list change at all),
+   *  so {@link onSessionsChange} cannot just listen for the message type — it
+   *  has to diff against this to fire only on a REAL list mutation (rename,
+   *  create, archive, delete). Null until the first frame, so startup never
+   *  counts as a change. */
+  private _sessionsSignature: string | null = null;
   /** Set by {@link observeWorkStatus} for the message it just folded: true when
    *  the notification carried nothing new (exact-repeat or the
    *  awaiting_input-after-task_complete stale nudge). The push subscriber
@@ -142,6 +151,30 @@ export class ProjectCore {
    *  so the host can re-advertise the control plane on a real transition rather
    *  than polling. Pass null to clear. */
   onWorkStatusChange(cb: (() => void) | null): void { this._onWorkStatusChange = cb; }
+
+  /** Register a callback fired whenever the session list's IDENTITY changes —
+   *  a session created, renamed, archived/unarchived or deleted — so a cold
+   *  peeker (a device with this project's drawer collapsed, never warmed) can
+   *  be told to re-peek even though nothing here moved {@link workStatus} or
+   *  {@link workRunningCount}. A pure per-turn work-status re-stamp does NOT
+   *  fire this (see {@link _sessionsSignature}). Pass null to clear. */
+  onSessionsChange(cb: (() => void) | null): void { this._onSessionsChange = cb; }
+
+  /** Diff an observed `session:updated` against {@link _sessionsSignature},
+   *  firing {@link onSessionsChange} only when the session set's identity
+   *  actually moved. `workStatus`/`agentSessionResumable`/etc. are deliberately
+   *  excluded from the signature — those churn on ordinary turn boundaries via
+   *  {@link SessionManager.refreshWorkStatus}, which re-emits the exact same
+   *  `session:updated` message type with an unchanged list. */
+  private observeSessionsIdentity(sessions: readonly SessionEntry[]): void {
+    const signature = sessions
+      .map((s) => JSON.stringify([s.id, s.name, s.archived]))
+      .sort()
+      .join(",");
+    const prev = this._sessionsSignature;
+    this._sessionsSignature = signature;
+    if (prev !== null && prev !== signature) this._onSessionsChange?.();
+  }
 
   /** Commit a new work-status reduction, firing {@link onWorkStatusChange} only
    *  on a real transition of the advertised values (a fresh object with all of
@@ -318,8 +351,9 @@ export class ProjectCore {
     // subscriber (like the push dispatcher); lives for the bus's lifetime.
     bus.subscribe({ deliver: (msg) => {
       this.observeWorkStatus(msg);
-      if (msg.type === "session:updated" && core.hasIsolatedSessions()) {
-        this.listener?.requireCheckoutRouting();
+      if (msg.type === "session:updated") {
+        this.observeSessionsIdentity(msg.sessions);
+        if (core.hasIsolatedSessions()) this.listener?.requireCheckoutRouting();
       }
     } });
     if (this.deps.mode === "local") {

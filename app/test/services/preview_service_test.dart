@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:antgrid/demo/demo_identity.dart';
 import 'package:antgrid/models/preview_models.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/services/preview_service.dart';
@@ -182,48 +183,83 @@ void main() {
     });
 
     test(
-      'selectPort in local mode sets currentUrl to localhost:port',
+      'openTab in local mode sets the tab currentUrl to localhost:port',
       () async {
         final t = _LocalFakeTransport();
         final session = await _newSession(t);
         final svc = session.previewService;
 
-        await svc.selectPort(3000);
+        await svc.openTab(3000);
 
-        expect(svc.currentState.selectedPort, 3000);
-        expect(svc.currentState.localProxyPort, 3000);
-        expect(svc.currentState.currentUrl, 'http://localhost:3000');
+        expect(svc.currentState.activeTabId, 3000);
+        expect(svc.currentState.activeTab?.localProxyPort, 3000);
+        expect(svc.currentState.activeTab?.currentUrl, 'http://localhost:3000');
 
-        await svc.deselectPort();
-        expect(svc.currentState.selectedPort, isNull);
-        expect(svc.currentState.currentUrl, isNull);
+        await svc.closeTab(3000);
+        expect(svc.currentState.activeTabId, isNull);
+        expect(svc.currentState.tabs, isEmpty);
 
         await session.close();
       },
     );
 
     test(
-      'selectPort (relay) binds the exact port and returns opened',
+      'openTab with a path lands the tab there, not just the origin',
+      () async {
+        final t = _LocalFakeTransport();
+        final session = await _newSession(t);
+        final svc = session.previewService;
+
+        await svc.openTab(3000, path: '/dashboard');
+
+        expect(
+          svc.currentState.activeTab?.currentUrl,
+          'http://localhost:3000/dashboard',
+        );
+
+        await session.close();
+      },
+    );
+
+    test('openTab (relay) binds the exact port and returns opened', () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = session.previewService;
+
+      final port = await freePort();
+
+      final result = await svc.openTab(port);
+
+      expect(result, SelectPortResult.opened);
+      expect(svc.currentState.activeTabId, port);
+      expect(svc.currentState.activeTab?.localProxyPort, port);
+      expect(svc.currentState.activeTab?.currentUrl, 'http://localhost:$port');
+
+      await svc.closeTab(port);
+      await session.close();
+    });
+
+    test(
+      'openTab (relay) with a path lands the tab there behind the proxy',
       () async {
         final t = FakeAgentTransport();
         final session = await _newSession(t);
         final svc = session.previewService;
 
         final port = await freePort();
+        await svc.openTab(port, path: '/dashboard');
 
-        final result = await svc.selectPort(port);
+        expect(
+          svc.currentState.activeTab?.currentUrl,
+          'http://localhost:$port/dashboard',
+        );
 
-        expect(result, SelectPortResult.opened);
-        expect(svc.currentState.selectedPort, port);
-        expect(svc.currentState.localProxyPort, port);
-        expect(svc.currentState.currentUrl, 'http://localhost:$port');
-
-        await svc.deselectPort();
+        await svc.closeTab(port);
         await session.close();
       },
     );
 
-    test('selectPort (relay) returns portInUse and leaves state unchanged '
+    test('openTab (relay) returns portInUse and leaves state unchanged '
         'when the port is taken', () async {
       final t = FakeAgentTransport();
       final session = await _newSession(t);
@@ -232,15 +268,41 @@ void main() {
       final blocker = await ServerSocket.bind('localhost', 0);
       addTearDown(() async => blocker.close());
 
-      final result = await svc.selectPort(blocker.port);
+      final result = await svc.openTab(blocker.port);
 
       expect(result, SelectPortResult.portInUse);
-      expect(svc.currentState.selectedPort, isNull);
-      expect(svc.currentState.localProxyPort, isNull);
-      expect(svc.currentState.currentUrl, isNull);
+      expect(svc.currentState.activeTabId, isNull);
+      expect(svc.currentState.tabs, isEmpty);
 
       await session.close();
     });
+
+    test(
+      'openTab re-detecting an already-open port is a no-op',
+      () async {
+        final t = FakeAgentTransport();
+        final session = await _newSession(t);
+        final svc = session.previewService;
+
+        final port = await freePort();
+        await svc.openTab(port);
+        final tabBefore = svc.currentState.activeTab;
+
+        // Same port, same scheme — must not rebind the proxy or replace the
+        // tab (the whole point of the no-op: no reload on re-detection).
+        final result = await svc.openTab(port);
+
+        expect(result, SelectPortResult.opened);
+        expect(svc.currentState.tabs, hasLength(1));
+        expect(
+          svc.currentState.activeTab?.localProxyPort,
+          tabBefore?.localProxyPort,
+        );
+
+        await svc.closeTab(port);
+        await session.close();
+      },
+    );
 
     test(
       'selectPortWithFallback binds a different local port when taken',
@@ -255,21 +317,21 @@ void main() {
 
         await svc.selectPortWithFallback(port);
 
-        expect(svc.currentState.selectedPort, port);
-        expect(svc.currentState.localProxyPort, isNotNull);
-        expect(svc.currentState.localProxyPort, isNot(port));
+        expect(svc.currentState.activeTabId, port);
+        expect(svc.currentState.activeTab?.localProxyPort, isNotNull);
+        expect(svc.currentState.activeTab?.localProxyPort, isNot(port));
         expect(
-          svc.currentState.currentUrl,
-          'http://localhost:${svc.currentState.localProxyPort}',
+          svc.currentState.activeTab?.currentUrl,
+          'http://localhost:${svc.currentState.activeTab?.localProxyPort}',
         );
 
-        await svc.deselectPort();
+        await svc.closeTab(port);
         await session.close();
       },
     );
 
     test(
-      'selectPort portInUse keeps the previously-opened preview live',
+      'openTab portInUse keeps the previously-opened tab live',
       () async {
         final t = FakeAgentTransport();
         final session = await _newSession(t);
@@ -277,30 +339,261 @@ void main() {
 
         // Open port A successfully (exact bind).
         final portA = await freePort();
-        final r1 = await svc.selectPort(portA);
+        final r1 = await svc.openTab(portA);
         expect(r1, SelectPortResult.opened);
-        expect(svc.currentState.localProxyPort, portA);
+        expect(svc.currentState.activeTab?.localProxyPort, portA);
 
-        // Attempt an in-use port B → portInUse.
+        // Attempt an in-use port B → portInUse. Backgrounded so it can't steal
+        // focus from A even on success.
         final blocker = await ServerSocket.bind('localhost', 0);
         addTearDown(() async => blocker.close());
-        final r2 = await svc.selectPort(blocker.port);
+        final r2 = await svc.openTab(blocker.port, focus: false);
 
         expect(r2, SelectPortResult.portInUse);
-        // The previous preview must remain selected AND its proxy still live.
-        expect(svc.currentState.selectedPort, portA);
-        expect(svc.currentState.localProxyPort, portA);
-        expect(svc.currentState.currentUrl, 'http://localhost:$portA');
+        // Port A's tab must remain open AND its proxy still live.
+        expect(svc.currentState.activeTabId, portA);
+        expect(svc.currentState.tabs, hasLength(1));
+        expect(svc.currentState.activeTab?.localProxyPort, portA);
         // Proof the A proxy is still bound: an external bind of portA fails.
         await expectLater(
           ServerSocket.bind('localhost', portA),
           throwsA(isA<SocketException>()),
         );
 
-        await svc.deselectPort();
+        await svc.closeTab(portA);
         await session.close();
       },
     );
+
+    test('two detected ports open two tabs; the first focuses, the second '
+        'backgrounds', () async {
+      // Local transport: openTab's local-mode branch sets state synchronously
+      // (no real socket bind to wait on), so the fire-and-forget
+      // `unawaited(openTab(...))` inside `_handlePortDetected` has already
+      // applied by the time the message-emit call returns.
+      final t = _LocalFakeTransport();
+      final session = await _newSession(t);
+      final svc = session.previewService;
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emitJson({
+        'id': 'd1',
+        'timestamp': 0,
+        'type': 'port:detected',
+        'projectId': 'p',
+        'port': 3000,
+        'url': 'http://localhost:3000',
+        'scheme': 'http',
+        'source': 'output',
+        'attributes': {'onDetect': 'notify'},
+      });
+      await Future<void>.delayed(Duration.zero);
+      // First detection with no tabs open yet — focuses.
+      expect(svc.currentState.activeTabId, 3000);
+      expect(svc.currentState.tabs, hasLength(1));
+
+      t.emitJson({
+        'id': 'd2',
+        'timestamp': 0,
+        'type': 'port:detected',
+        'projectId': 'p',
+        'port': 4000,
+        'url': 'http://localhost:4000',
+        'scheme': 'http',
+        'source': 'output',
+        'attributes': {'onDetect': 'notify'},
+      });
+      await Future<void>.delayed(Duration.zero);
+      // Second detection — opens in the background, focus stays on the first.
+      expect(svc.currentState.tabs, hasLength(2));
+      expect(svc.currentState.activeTabId, 3000);
+
+      await svc.closeTab(3000);
+      await svc.closeTab(4000);
+      await sub.cancel();
+      await session.close();
+    });
+
+    test('a silent or ignored detected port does not open a tab', () async {
+      final t = _LocalFakeTransport();
+      final session = await _newSession(t);
+      final svc = session.previewService;
+      final sub = session.heavyStream.listen((_) {});
+
+      for (final onDetect in ['silent', 'ignore']) {
+        t.emitJson({
+          'id': 'detected-$onDetect',
+          'timestamp': 0,
+          'type': 'port:detected',
+          'projectId': 'p',
+          'port': onDetect == 'silent' ? 3000 : 4000,
+          'url': 'http://localhost:${onDetect == 'silent' ? 3000 : 4000}',
+          'scheme': 'http',
+          'source': 'output',
+          'attributes': {'onDetect': onDetect},
+        });
+      }
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.tabs, isEmpty);
+
+      await sub.cancel();
+      await session.close();
+    });
+
+    test('demo ports remain listed without opening a localhost tab', () async {
+      final t = _LocalFakeTransport();
+      final session = await _newSession(t, projectId: kDemoProjectId);
+      final svc = session.previewService;
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('ports:update', {
+        'projectId': kDemoProjectId,
+        'ports': [
+          {'port': 3000, 'scheme': 'http', 'onDetect': 'notify'},
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.ports.single.port, 3000);
+      expect(svc.currentState.tabs, isEmpty);
+
+      await sub.cancel();
+      await session.close();
+    });
+
+    test('ports:update auto-opens a port whose dev server was already '
+        'running before this checkout subscribed', () async {
+      // Regression: before this, a port only auto-opened off the live
+      // one-shot port:detected event. A dev server started (and detected)
+      // BEFORE the preview panel ever subscribed had already missed that
+      // event — the port only ever reached state.ports via the ports:update/
+      // preview:snapshot hydration, which never opened a tab, forcing the
+      // user through manual entry despite the port being known.
+      final t = _LocalFakeTransport();
+      final session = await _newSession(t);
+      final svc = session.previewService;
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('ports:update', {
+        'projectId': 'p',
+        'ports': [
+          {'port': 3000, 'scheme': 'http', 'onDetect': 'notify'},
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.tabs, hasLength(1));
+      expect(svc.currentState.activeTabId, 3000);
+
+      await svc.closeTab(3000);
+      await sub.cancel();
+      await session.close();
+    });
+
+    test(
+      'ports:update does not auto-open a port with no declared onDetect '
+      "field the same as 'notify'",
+      () async {
+        final t = _LocalFakeTransport();
+        final session = await _newSession(t);
+        final svc = session.previewService;
+        final sub = session.heavyStream.listen((_) {});
+
+        t.emit('ports:update', {
+          'projectId': 'p',
+          'ports': [
+            {'port': 3000, 'scheme': 'http'},
+          ],
+        });
+        await Future<void>.delayed(Duration.zero);
+
+        expect(svc.currentState.tabs, hasLength(1));
+        expect(svc.currentState.activeTabId, 3000);
+
+        await svc.closeTab(3000);
+        await sub.cancel();
+        await session.close();
+      },
+    );
+
+    test('ports:update never auto-opens a silent or ignored port', () async {
+      final t = _LocalFakeTransport();
+      final session = await _newSession(t);
+      final svc = session.previewService;
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('ports:update', {
+        'projectId': 'p',
+        'ports': [
+          {'port': 3000, 'scheme': 'http', 'onDetect': 'silent'},
+          {'port': 4000, 'scheme': 'http', 'onDetect': 'ignore'},
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      expect(svc.currentState.tabs, isEmpty);
+      expect(svc.currentState.ports, hasLength(2));
+
+      await sub.cancel();
+      await session.close();
+    });
+
+    test('ports:update never reopens a port the user already closed',
+        () async {
+      final t = _LocalFakeTransport();
+      final session = await _newSession(t);
+      final svc = session.previewService;
+      final sub = session.heavyStream.listen((_) {});
+
+      t.emit('ports:update', {
+        'projectId': 'p',
+        'ports': [
+          {'port': 3000, 'scheme': 'http', 'onDetect': 'notify'},
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.tabs, hasLength(1));
+
+      await svc.closeTab(3000);
+      expect(svc.currentState.tabs, isEmpty);
+
+      // A resync of the same, still-running port (reconnect, another port
+      // changing) must not pop the closed tab back open.
+      t.emit('ports:update', {
+        'projectId': 'p',
+        'ports': [
+          {'port': 3000, 'scheme': 'http', 'onDetect': 'notify'},
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(svc.currentState.tabs, isEmpty);
+
+      await sub.cancel();
+      await session.close();
+    });
+
+    test('closing the active tab reassigns focus to a remaining tab',
+        () async {
+      final t = FakeAgentTransport();
+      final session = await _newSession(t);
+      final svc = session.previewService;
+
+      final portA = await freePort();
+      await svc.openTab(portA);
+      final portB = await freePort();
+      await svc.openTab(portB, focus: false);
+      expect(svc.currentState.activeTabId, portA);
+
+      await svc.closeTab(portA);
+
+      expect(svc.currentState.tabs, hasLength(1));
+      expect(svc.currentState.activeTabId, portB);
+
+      await svc.closeTab(portB);
+      expect(svc.currentState.activeTabId, isNull);
+      await session.close();
+    });
 
     test('dispose cancels subscriptions and fails pending requests', () async {
       final t = FakeAgentTransport();
@@ -455,7 +748,7 @@ void main() {
 }
 
 /// Local-mode fake transport variant for testing the `isLocal` branch in
-/// [PreviewService.selectPort].
+/// [PreviewService.openTab].
 class _LocalFakeTransport extends FakeAgentTransport {
   @override
   bool get isLocal => true;

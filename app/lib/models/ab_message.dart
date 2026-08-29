@@ -397,6 +397,17 @@ class GitFileStatusEntry {
   final int additions; // lines added vs HEAD, combined staged+unstaged
   final int deletions; // lines removed vs HEAD, combined staged+unstaged
 
+  /// Which unmerged state a conflict is in, in the bridge's vocabulary
+  /// (bothModified, deletedByThem, …). Null on everything but a conflict, and
+  /// on a conflict from a bridge that predates the field.
+  final String? conflictKind;
+
+  /// A conflict with no marker left in the file: the user has worked through
+  /// it, so staging it is the routine "include this" rather than a claim about
+  /// content nobody has read. Defaults to false — an unknown answer must lead
+  /// to the confirmation, never past it.
+  final bool conflictResolved;
+
   const GitFileStatusEntry({
     required this.path,
     required this.status,
@@ -404,7 +415,15 @@ class GitFileStatusEntry {
     this.oldPath,
     this.additions = 0,
     this.deletions = 0,
+    this.conflictKind,
+    this.conflictResolved = false,
   });
+
+  bool get isConflict => status == '!';
+
+  /// A conflict the user has not visibly finished — the one thing that turns
+  /// staging into a question rather than an action. See [conflictResolved].
+  bool get isUnresolvedConflict => isConflict && !conflictResolved;
 
   static GitFileStatusEntry? fromJson(Map<String, dynamic> json) {
     final path = json['path'];
@@ -417,6 +436,8 @@ class GitFileStatusEntry {
       oldPath: json['oldPath'] as String?,
       additions: (json['additions'] as num?)?.toInt() ?? 0,
       deletions: (json['deletions'] as num?)?.toInt() ?? 0,
+      conflictKind: json['conflictKind'] as String?,
+      conflictResolved: json['conflictResolved'] as bool? ?? false,
     );
   }
 }
@@ -1040,8 +1061,46 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         ports: ports,
       );
 
+    case 'port:detected':
+      final projectId = json['projectId'];
+      final port = json['port'];
+      final url = json['url'];
+      final scheme = json['scheme'];
+      final source = json['source'];
+      if (projectId is! String ||
+          port is! int ||
+          url is! String ||
+          scheme is! String ||
+          source is! String) {
+        return null;
+      }
+      final attributesJson = json['attributes'];
+      final attributes = PortDetectedAttributes(
+        name: attributesJson is Map ? attributesJson['name'] as String? : null,
+        onDetect: attributesJson is Map
+            ? (attributesJson['onDetect'] as String? ?? 'notify')
+            : 'notify',
+      );
+      return PortDetectedMessage(
+        id: id,
+        timestamp: timestamp,
+        projectId: projectId,
+        port: port,
+        url: url,
+        scheme: scheme,
+        source: source,
+        sourceSessionId: json['sourceSessionId'] as String?,
+        attributes: attributes,
+      );
+
     case 'tunnel:http-response':
       return TunnelHttpResponse.fromJson(json);
+
+    case 'tunnel:ws-data':
+      return TunnelWsDataMessage.fromJson(json);
+
+    case 'tunnel:ws-close':
+      return TunnelWsCloseMessage.fromJson(json);
 
     case 'command:output':
       final projectId = json['projectId'];

@@ -211,6 +211,22 @@ const GitFileStatus = z.object({
   // app already treats it as 0.
   additions: z.number().int().nonnegative().optional(),
   deletions: z.number().int().nonnegative().optional(),
+  // Both are sent only for status "!" (see [ConflictKind] in git.ts), and both
+  // are optional so an older bridge still validates. Absence of
+  // conflictResolved reads as "not resolved", which is what makes the app ask
+  // before it stages an unmerged path — the safe direction.
+  conflictKind: z
+    .enum([
+      "bothModified",
+      "bothAdded",
+      "bothDeleted",
+      "addedByUs",
+      "addedByThem",
+      "deletedByUs",
+      "deletedByThem",
+    ])
+    .optional(),
+  conflictResolved: z.boolean().optional(),
 });
 
 const GitStatusMessage = BaseMessage.extend({
@@ -343,6 +359,9 @@ const PortInfoSchema = z.object({
   // Detected dev-server scheme (from terminal-output URL sightings). Absent
   // means unknown; consumers should fall back to http.
   scheme: z.enum(["http", "https"]).optional(),
+  // Only set for a config-declared port. Absent means undeclared (terminal-
+  // detected only) — consumers should treat that the same as "notify".
+  onDetect: z.enum(["notify", "openPreview", "silent", "ignore"]).optional(),
 });
 
 const PortsUpdateMessage = BaseMessage.extend({

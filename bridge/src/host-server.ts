@@ -1526,6 +1526,15 @@ export class HostServer {
     // track activity (working/attention/error/done) without warming this core
     // themselves. Deduped inside the core, so this fires on transitions only.
     core.onWorkStatusChange(() => this.readvertiseToControlPlane());
+    // A rename/create/archive/delete moves none of workStatus/runningCount, so
+    // it needs its own signal: bump the seen-project stamp the advert already
+    // carries as `lastActiveAt`, so a cold peeker (this project's drawer row
+    // collapsed on another device) has something to notice and re-peek on —
+    // see app_shell.dart's _onControlPlaneState.
+    core.onSessionsChange(() => {
+      this.touchSeenProject(projectId);
+      this.readvertiseToControlPlane();
+    });
     // Record in the non-authoritative hint catalog so a later stop()/evict still
     // lets us advertise this project as known-but-stopped. NOT removed on stop.
     // The in-memory .set() is what matters for runtime; the flush is a non-secret

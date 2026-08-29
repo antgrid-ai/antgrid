@@ -1,9 +1,19 @@
 import { logger } from "./logger";
 const log = logger.child({ component: "tunnel-manager" });
-import { fetchLocalhost } from "./localhost-fetch";
+import { fetchLocalhost, isTlsOnlyPort } from "./localhost-fetch";
 import { createMessage, type AbMessage, type PortInfo, type PreviewUrlEntry } from "./protocol";
-import type { TunnelHttpRequest } from "./tunnel-protocol";
+import type { TunnelHttpRequest, TunnelWsClose, TunnelWsData, TunnelWsOpen } from "./tunnel-protocol";
 import type { ConnState } from "./conn-state";
+
+/** One upstream `ws://localhost:<port><path>` connection, keyed by tunnelId.
+ *  [pending] holds app→bridge frames that arrived before `open` fired (the
+ *  browser can send immediately once ITS local WS accepts, which races this
+ *  socket's real handshake) — flushed in order on open, then unused. */
+interface WsUpstream {
+  socket: WebSocket;
+  open: boolean;
+  pending: Array<{ data: string; binary: boolean }>;
+}
 
 /** How long a sent response stays replayable. Must outlive the app's 30s tunnel
  *  timeout so a retry issued just before it gives up still finds the entry. */
@@ -14,6 +24,33 @@ const OUTBOX_TTL_MS = 35_000;
  *  and those are exactly the ones this keeps. */
 const OUTBOX_MAX_ENTRY_BYTES = 2 * 1024 * 1024;
 const OUTBOX_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
+
+// Handshake headers the upstream connection owns: Bun mints its own key,
+// version and framing, and `host` follows from the URL we build. The
+// subprotocol is dropped rather than forwarded because nothing carries the
+// server's choice back to the browser — letting the server agree one the
+// browser never hears about is worse than negotiating none.
+const WS_HOP_BY_HOP_HEADERS = new Set([
+  "connection",
+  "upgrade",
+  "host",
+  "content-length",
+  "transfer-encoding",
+  "sec-websocket-key",
+  "sec-websocket-version",
+  "sec-websocket-extensions",
+  "sec-websocket-accept",
+  "sec-websocket-protocol",
+]);
+
+function upstreamWsHeaders(headers: Record<string, string> | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers ?? {})) {
+    if (WS_HOP_BY_HOP_HEADERS.has(k.toLowerCase())) continue;
+    out[k] = v;
+  }
+  return out;
+}
 
 export class TunnelManager {
   private projectId: string;
@@ -39,6 +76,8 @@ export class TunnelManager {
    *  still upstream (the app cannot see that), and awaiting it here is what
    *  stops the duplicate from becoming a second upstream request. */
   private inflight = new Map<string, Promise<void>>();
+  /** Live WS relays, keyed by tunnelId — see [WsUpstream]. */
+  private wsTunnels = new Map<string, WsUpstream>();
 
   constructor(opts: {
     projectId: string;
@@ -168,6 +207,9 @@ export class TunnelManager {
       });
     } catch (err) {
       const body = `Proxy error: ${err instanceof Error ? err.message : String(err)}`;
+      // The 502 reaches only the previewing device, so without this a tunnel
+      // failure is diagnosable exclusively from the phone's screen.
+      log.warn("Tunnel fetch failed for %s: %s", url, body);
       this.emitResponse(msg.requestId, body, {
         type: "tunnel:http-response" as const,
         requestId: msg.requestId,
@@ -217,10 +259,99 @@ export class TunnelManager {
     }
   }
 
+  /** Opens the real upstream WebSocket for a browser-side tab's WS. Never
+   *  throws back at the caller — an upstream that refuses/errors reports
+   *  through the normal `tunnel:ws-close` path, mirroring what a rejected
+   *  browser-side connect would look like, rather than dropping silently. */
+  onWsOpen(msg: TunnelWsOpen): void {
+    if (this.wsTunnels.has(msg.tunnelId)) return; // duplicate open, ignore
+    // The phone can only guess the scheme for a dev server it never saw
+    // announce itself; `fetchLocalhost` has already corrected the guess for
+    // this port by the time a page on it opens a socket.
+    const secure = msg.scheme === "https" || isTlsOnlyPort(msg.port);
+    const safePath = msg.path.startsWith("/") ? msg.path : `/${msg.path}`;
+    const url = `${secure ? "wss" : "ws"}://localhost:${msg.port}${safePath}`;
+    // Same self-signed-cert exemption `fetchLocalhost` makes, and for the same
+    // reason: without it every wss upstream dies in the TLS handshake, and a
+    // dev server whose page needs a socket — Blazor, Vite HMR, a live-reload
+    // shim — renders as a blank tab with nothing to point at.
+    // lib.dom's WebSocket shadows Bun's (tsconfig takes the default libs for an
+    // ESNext target), and its constructor's second parameter is `protocols` —
+    // so the options Bun does accept at runtime have to be cast past the type.
+    const wsOptions: Bun.WebSocketOptions = {
+      headers: upstreamWsHeaders(msg.headers),
+      ...(secure ? { tls: { rejectUnauthorized: false } } : {}),
+    };
+    const socket = new WebSocket(url, wsOptions as unknown as string[]);
+    const entry: WsUpstream = { socket, open: false, pending: [] };
+    this.wsTunnels.set(msg.tunnelId, entry);
+
+    entry.socket.addEventListener("open", () => {
+      entry.open = true;
+      for (const frame of entry.pending) this.sendUpstream(entry, frame.data, frame.binary);
+      entry.pending = [];
+    });
+    entry.socket.addEventListener("message", (event) => {
+      const binary = typeof event.data !== "string";
+      const data = typeof event.data === "string"
+        ? event.data
+        : event.data instanceof ArrayBuffer
+          ? Buffer.from(event.data).toString("base64")
+          : Buffer.from(event.data as Uint8Array).toString("base64");
+      this.sendTunnel({
+        type: "tunnel:ws-data",
+        tunnelId: msg.tunnelId,
+        data,
+        ...(binary ? { binary: true } : {}),
+        checkoutId: msg.checkoutId,
+      });
+    });
+    const teardown = (code?: number, reason?: string) => {
+      if (!this.wsTunnels.delete(msg.tunnelId)) return; // already closed the other way
+      this.sendTunnel({
+        type: "tunnel:ws-close",
+        tunnelId: msg.tunnelId,
+        ...(code !== undefined ? { code } : {}),
+        ...(reason ? { reason } : {}),
+        checkoutId: msg.checkoutId,
+      });
+    };
+    entry.socket.addEventListener("close", (event) => teardown(event.code, event.reason));
+    entry.socket.addEventListener("error", () => teardown());
+  }
+
+  /** A browser-sent frame to relay upstream. Queued on [WsUpstream.pending]
+   *  if the real connection hasn't finished its handshake yet. */
+  onWsData(msg: TunnelWsData): void {
+    const entry = this.wsTunnels.get(msg.tunnelId);
+    if (!entry) return; // closed/never opened — nothing to relay into
+    if (!entry.open) {
+      entry.pending.push({ data: msg.data, binary: msg.binary === true });
+      return;
+    }
+    this.sendUpstream(entry, msg.data, msg.binary === true);
+  }
+
+  private sendUpstream(entry: WsUpstream, data: string, binary: boolean): void {
+    entry.socket.send(binary ? Buffer.from(data, "base64") : data);
+  }
+
+  /** The app's side of the tunnel closed (the browser tab's WS closed) —
+   *  mirror it upstream. Idempotent: a close already relayed the other way
+   *  (via [onWsOpen]'s teardown) has already removed the map entry. */
+  onWsClose(msg: TunnelWsClose): void {
+    const entry = this.wsTunnels.get(msg.tunnelId);
+    if (!entry) return;
+    this.wsTunnels.delete(msg.tunnelId);
+    entry.socket.close();
+  }
+
   stop(): void {
     this.sentUrlDetails.clear();
     this.outbox.clear();
     this.outboxBytes = 0;
     this.inflight.clear();
+    for (const entry of this.wsTunnels.values()) entry.socket.close();
+    this.wsTunnels.clear();
   }
 }

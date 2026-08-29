@@ -1,8 +1,9 @@
 import type { PortInfo } from "./protocol";
+import type { OnDetect } from "./config";
 import { extractUrls, canonicalize, toUrlString } from "./url-parser";
 
 export interface PortDetectorInit {
-  ports?: { port: number; name?: string }[];
+  ports?: { port: number; name?: string; onDetect?: OnDetect }[];
 }
 
 export interface PortDetectionEvent {
@@ -61,6 +62,7 @@ export class PortDetector {
   private terminalPorts = new Map<string, Set<number>>();
   private configuredPorts: Set<number>;
   private portLabels: Map<number, string>;
+  private portOnDetect: Map<number, OnDetect>;
   private lineBuffers = new Map<string, string>();
   private observers = new Set<(e: PortDetectionEvent) => void>();
   private lastDetections = new Map<number, { url: string; scheme: "http" | "https"; source: "process" | "output" }>();
@@ -113,10 +115,12 @@ export class PortDetector {
   constructor(init?: PortDetectorInit) {
     this.configuredPorts = new Set<number>();
     this.portLabels = new Map();
+    this.portOnDetect = new Map();
     if (init?.ports) {
       for (const p of init.ports) {
         this.configuredPorts.add(p.port);
         if (p.name) this.portLabels.set(p.port, p.name);
+        if (p.onDetect) this.portOnDetect.set(p.port, p.onDetect);
       }
     }
   }
@@ -216,6 +220,7 @@ export class PortDetector {
       .map((port) => ({
         port,
         ...(this.portLabels.has(port) ? { label: this.portLabels.get(port) } : {}),
+        ...(this.portOnDetect.has(port) ? { onDetect: this.portOnDetect.get(port) } : {}),
         ...(this.lastDetections.has(port)
           ? { scheme: this.lastDetections.get(port)!.scheme }
           : {}),

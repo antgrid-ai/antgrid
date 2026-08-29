@@ -3,7 +3,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { getGitStatus, gitCommit, gitDiscard, gitStage, gitUnstage } from "../src/git";
+import { getGitStatus, gitCommit, gitDiscard, gitStage, gitUnstage, unresolvedConflictError } from "../src/git";
 
 /** Content with line endings normalized — a checkout on Windows honours
  * core.autocrlf, so what git restores is CRLF while the fixture wrote LF. */
@@ -391,18 +391,171 @@ describe("git helpers", () => {
     expect(status).toHaveLength(2);
   });
 
-  it("reports a merge conflict as ! and excludes it from M/A/D/U", async () => {
+  /** Leaves tracked.txt unmerged — both sides edited it — markers and all. */
+  async function conflictOnTracked() {
     await run(dir, ["checkout", "-b", "feature"]);
     writeFileSync(join(dir, "tracked.txt"), "feature\n");
     await run(dir, ["commit", "-am", "feature change"]);
     await run(dir, ["checkout", "-"]);
     writeFileSync(join(dir, "tracked.txt"), "main\n");
     await run(dir, ["commit", "-am", "main change"]);
-    await run(dir, ["merge", "feature"]); // exits non-zero on conflict; fire-and-forget helper ignores exit code
+    // Exits non-zero on conflict; the fire-and-forget helper ignores that.
+    await run(dir, ["merge", "feature"]);
+  }
+
+  it("reports a merge conflict as ! and excludes it from M/A/D/U", async () => {
+    await conflictOnTracked();
     const status = await getGitStatus(dir);
     expect(status).toEqual([
-      { path: "tracked.txt", status: "!", staged: false, additions: 0, deletions: 0 },
+      {
+        path: "tracked.txt",
+        status: "!",
+        staged: false,
+        additions: 0,
+        deletions: 0,
+        conflictKind: "bothModified",
+        conflictResolved: false,
+      },
     ]);
+  });
+
+  // The app stages a conflict on the user's word, and this is what decides
+  // whether it asks for that word first — so it has to track the FILE, not
+  // git's unmerged bit, which nothing but staging ever clears.
+  it("reports a conflict as resolved once the markers are gone", async () => {
+    await conflictOnTracked();
+    expect((await getGitStatus(dir))[0].conflictResolved).toBe(false);
+
+    writeFileSync(join(dir, "tracked.txt"), "merged by hand\n");
+    const status = await getGitStatus(dir);
+    expect(status).toEqual([
+      {
+        path: "tracked.txt",
+        status: "!", // still unmerged as far as git is concerned
+        staged: false,
+        additions: 0,
+        deletions: 0,
+        conflictKind: "bothModified",
+        conflictResolved: true,
+      },
+    ]);
+  });
+
+  // The scan is memoized across polls, and only the UNRESOLVED verdict is
+  // remembered — so the direction that must never be cached is this one.
+  it("re-reads a conflict that had its markers put back", async () => {
+    await conflictOnTracked();
+    writeFileSync(join(dir, "tracked.txt"), "merged by hand\n");
+    expect((await getGitStatus(dir))[0].conflictResolved).toBe(true);
+
+    writeFileSync(join(dir, "tracked.txt"), "<<<<<<< HEAD\nmain\n=======\nfeature\n>>>>>>> feature\n");
+    expect((await getGitStatus(dir))[0].conflictResolved).toBe(false);
+
+    // And back again, which is the cached-unresolved entry being invalidated
+    // by the edit rather than outliving it.
+    writeFileSync(join(dir, "tracked.txt"), "merged by hand, again\n");
+    expect((await getGitStatus(dir))[0].conflictResolved).toBe(true);
+  });
+
+  // A binary conflict is "both modified", so it IS scanned — but git writes no
+  // marker block into one, it leaves "ours" on disk whole. Reading that as
+  // resolved stages "ours" as the merge result with nobody asked.
+  it("never calls a binary conflict resolved for lack of markers", async () => {
+    const binary = (byte: number) =>
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x1a, 0x0a, byte]);
+    writeFileSync(join(dir, "asset.bin"), binary(1));
+    await run(dir, ["add", "asset.bin"]);
+    await run(dir, ["commit", "-m", "add binary"]);
+
+    await run(dir, ["checkout", "-b", "feature"]);
+    writeFileSync(join(dir, "asset.bin"), binary(2));
+    await run(dir, ["commit", "-am", "feature binary"]);
+    await run(dir, ["checkout", "-"]);
+    writeFileSync(join(dir, "asset.bin"), binary(3));
+    await run(dir, ["commit", "-am", "main binary"]);
+    await run(dir, ["merge", "feature"]);
+
+    const entry = (await getGitStatus(dir)).find((e) => e.path === "asset.bin");
+    expect(entry?.conflictKind).toBe("bothModified");
+    expect(entry?.conflictResolved).toBe(false);
+  });
+
+  it("never calls a deletion conflict resolved, markers or not", async () => {
+    // Deleted on the branch being merged, edited here: there is no marker
+    // block in the file, and the choice it needs is not one an edit can make.
+    await run(dir, ["checkout", "-b", "feature"]);
+    await run(dir, ["rm", "tracked.txt"]);
+    await run(dir, ["commit", "-m", "delete on feature"]);
+    await run(dir, ["checkout", "-"]);
+    writeFileSync(join(dir, "tracked.txt"), "main\n");
+    await run(dir, ["commit", "-am", "main change"]);
+    await run(dir, ["merge", "feature"]);
+
+    expect(await getGitStatus(dir)).toEqual([
+      {
+        path: "tracked.txt",
+        status: "!",
+        staged: false,
+        additions: 0,
+        deletions: 0,
+        conflictKind: "deletedByThem",
+        conflictResolved: false,
+      },
+    ]);
+  });
+
+  // The one resolution with no file left to stage. "git add" records the
+  // removal (it has since git 2.0), so this needs no "git rm" branch — pinned
+  // because the obvious reading of "stage a path that isn't there" is a
+  // pathspec error, which is what such a branch would be written for.
+  it("stages a deletion conflict resolved by deleting the file", async () => {
+    await run(dir, ["checkout", "-b", "feature"]);
+    writeFileSync(join(dir, "tracked.txt"), "feature\n");
+    await run(dir, ["commit", "-am", "feature change"]);
+    await run(dir, ["checkout", "-"]);
+    await run(dir, ["rm", "tracked.txt"]);
+    await run(dir, ["commit", "-m", "delete on main"]);
+    await run(dir, ["merge", "feature"]);
+    expect((await getGitStatus(dir))[0].conflictKind).toBe("deletedByUs");
+
+    // The merge left THEIR file on disk; removing it is how the user says
+    // the deletion wins.
+    rmSync(join(dir, "tracked.txt"));
+    expect((await gitStage(dir, ["tracked.txt"])).success).toBe(true);
+    expect(await getGitStatus(dir)).toEqual([]);
+    expect((await gitCommit(dir, "merge")).success).toBe(true);
+  });
+
+  it("refuses to commit while a conflict is unresolved, naming the file", async () => {
+    await conflictOnTracked();
+
+    const res = await gitCommit(dir, "merge");
+    expect(res.success).toBe(false);
+    // The path, not git's own "Committing is not possible" hint block.
+    expect(res.error).toBe("Resolve 1 merge conflict before committing: tracked.txt");
+    expect(res.sha).toBeUndefined();
+  });
+
+  it("commits once the conflict is staged as resolved", async () => {
+    await conflictOnTracked();
+
+    writeFileSync(join(dir, "tracked.txt"), "resolved\n");
+    expect((await gitStage(dir, ["tracked.txt"])).success).toBe(true);
+    // Staging IS the resolution: the "!" is gone, and what's left is the
+    // ordinary staged modification the merge commit will carry.
+    expect(await getGitStatus(dir)).toEqual([
+      { path: "tracked.txt", status: "M", staged: true, additions: 1, deletions: 1 },
+    ]);
+
+    const res = await gitCommit(dir, "merge");
+    expect(res.success).toBe(true);
+    expect(res.sha).toMatch(/^[0-9a-f]{7,40}$/);
+  });
+
+  it("summarizes past three conflicted paths rather than listing them all", () => {
+    expect(unresolvedConflictError(["a", "b", "c", "d", "e"])).toBe(
+      "Resolve 5 merge conflicts before committing: a, b, c and 2 more",
+    );
   });
 
   it("discarding a rename restores the old path and removes the new one", async () => {

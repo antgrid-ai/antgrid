@@ -52,11 +52,19 @@ class TerminalViewWrapper extends ConsumerStatefulWidget {
   /// `NoSuchChannelException` rather than answering "no image".
   final Future<ClipboardImage?> Function() readImage;
 
+  /// True only for the copy the agent panel mounts (`TerminalScreen`), which
+  /// publishes [focusAgentInputProvider] so a message composed elsewhere can
+  /// leave the keyboard here. Off everywhere else on purpose: the workspace
+  /// panel's terminal list mounts several of these, and none of them is where
+  /// a "send to agent" lands.
+  final bool isAgentSurface;
+
   const TerminalViewWrapper({
     super.key,
     required this.tab,
     required this.terminalService,
     this.readImage = readClipboardImage,
+    this.isAgentSurface = false,
   });
 
   @override
@@ -314,12 +322,44 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     );
     FocusManager.instance.addEarlyKeyEventHandler(_handleEarlyKey);
     _focusScope.addListener(_onFocusChange);
+    // Pinned: dispose can run after the ProviderScope is gone, and reading
+    // through `ref` then throws.
+    _container = ref.container;
+    if (!widget.isAgentSurface) return;
+    // Post-frame because publishing writes a provider. Retracted in dispose,
+    // not deactivate: this sits inside the GlobalKey-reparented AgentPanel, so
+    // deactivate fires on every desktop panel-mode toggle and would leave the
+    // agent unfocusable after one.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref.read(focusAgentInputProvider.notifier).set(_publishedFocusInput);
+    });
   }
+
+  late final ProviderContainer _container;
+
+  /// The exact callback published to [focusAgentInputProvider], held so dispose
+  /// retracts ITS OWN and never the next view's — a session flipping to chat
+  /// mode mounts the transcript before this one is disposed.
+  late final VoidCallback _publishedFocusInput = _focusScope.requestFocus;
 
   @override
   void dispose() {
     FocusManager.instance.removeEarlyKeyEventHandler(_handleEarlyKey);
     _focusScope.removeListener(_onFocusChange);
+    // Identity alone, no isAgentSurface check: a copy that never published
+    // simply never matches. try/catch for the app-teardown case the pinned
+    // container exists for.
+    try {
+      if (identical(
+        _container.read(focusAgentInputProvider),
+        _publishedFocusInput,
+      )) {
+        _container.read(focusAgentInputProvider.notifier).set(null);
+      }
+    } on Object {
+      // Nothing to retract from — the container is gone.
+    }
     _focusScope.dispose();
     _uploader.dispose();
     _hoveredLink.dispose();
@@ -577,6 +617,7 @@ class _TerminalViewWrapperState extends ConsumerState<TerminalViewWrapper> {
     if (svc == null) return;
     svc.sendToAgentTerminal(message);
     ref.read(switchToAgentProvider)?.call();
+    ref.read(focusAgentInputProvider)?.call();
     setState(() => _selectedText = null);
     showSentToAgentSnackBar(context);
   }

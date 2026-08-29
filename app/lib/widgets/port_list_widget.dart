@@ -7,11 +7,14 @@ import '../design/widgets/ab_list_row.dart';
 import '../design/widgets/ab_status_dot.dart';
 import '../models/preview_models.dart';
 
-/// Displays a list of detected dev server ports. Users tap a port to open
-/// the embedded webview preview for that port.
+/// Displays a list of detected dev server ports. Users tap a port to open it
+/// as a preview tab (or focus it, if already open as one).
 class PortListWidget extends StatelessWidget {
   final List<PortInfo> ports;
-  final int? selectedPort;
+
+  /// Ports already open as a tab — shown with the "selected" treatment
+  /// instead of a single [int?] selection, since several can be open at once.
+  final Set<int> openPorts;
 
   /// Called with the tapped port and its target scheme ('http'/'https' as
   /// detected by the bridge; http when unknown).
@@ -20,7 +23,7 @@ class PortListWidget extends StatelessWidget {
   const PortListWidget({
     super.key,
     required this.ports,
-    required this.selectedPort,
+    required this.openPorts,
     required this.onPortSelected,
   });
 
@@ -31,7 +34,7 @@ class PortListWidget extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: AbTokens.space8),
       itemBuilder: (context, index) {
         final port = ports[index];
-        final isSelected = port.port == selectedPort;
+        final isSelected = openPorts.contains(port.port);
         final scheme = port.scheme ?? 'http';
         final label = port.label ?? port.processName;
         // Only call out https — http is the norm and would just be noise.

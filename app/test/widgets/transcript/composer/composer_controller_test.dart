@@ -350,4 +350,41 @@ void main() {
       expect(c.fleather.selection.baseOffset, '/model '.length);
     });
   });
+
+  group('appendText', () {
+    test('seeds an empty composer and leaves the caret on a fresh line', () {
+      final c = fromDelta([
+        {'insert': '\n'},
+      ]);
+      c.appendText('[from preview: http://localhost:3000/]');
+
+      expect(c.toMarkdown(), '[from preview: http://localhost:3000/]');
+      // Caret past the seeded line, so what the user types next is their own
+      // sentence rather than an edit of the handoff.
+      expect(
+        c.fleather.selection.baseOffset,
+        '[from preview: http://localhost:3000/]\n'.length,
+      );
+    });
+
+    test('appends under an existing draft instead of replacing it', () {
+      final c = fromDelta([
+        {'insert': 'already typing\n'},
+      ]);
+      c.appendText('[from preview: http://localhost:3000/]');
+
+      expect(
+        c.toMarkdown(),
+        'already typing\n\n[from preview: http://localhost:3000/]',
+      );
+    });
+
+    test('empty or blank text is a no-op', () {
+      final c = fromDelta([
+        {'insert': 'draft\n'},
+      ]);
+      c.appendText('   ');
+      expect(c.toMarkdown(), 'draft');
+    });
+  });
 }

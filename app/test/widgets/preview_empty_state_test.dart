@@ -20,7 +20,7 @@ void main() {
       );
 
       expect(
-        find.text('Enter a dev server port below\nto preview it here'),
+        find.text('Enter a dev server port above\nto preview it here'),
         findsOneWidget,
       );
     });

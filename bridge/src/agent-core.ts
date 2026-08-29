@@ -733,10 +733,22 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       log.warn("Dropping tunnel request for unknown checkout %s", msg.checkoutId);
       return;
     }
-    if (msg.type === "tunnel:http-request" && runtime.tunnelManager) {
-      runtime.tunnelManager.onHttpRequest(msg).catch((err) =>
-        log.error("tunnel:http-request handler failed: %s", err)
-      );
+    if (!runtime.tunnelManager) return;
+    switch (msg.type) {
+      case "tunnel:http-request":
+        runtime.tunnelManager.onHttpRequest(msg).catch((err) =>
+          log.error("tunnel:http-request handler failed: %s", err)
+        );
+        break;
+      case "tunnel:ws-open":
+        runtime.tunnelManager.onWsOpen(msg);
+        break;
+      case "tunnel:ws-data":
+        runtime.tunnelManager.onWsData(msg);
+        break;
+      case "tunnel:ws-close":
+        runtime.tunnelManager.onWsClose(msg);
+        break;
     }
   }
 
@@ -2110,7 +2122,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     const runtimeId = runtime.checkout.id;
     const send = (msg: AbMessage) => sendFromRuntime(runtime, msg);
     const pd = new PortDetector({
-      ports: (runtime.config.ports ?? []).map((p) => ({ port: p.port, name: p.name })),
+      ports: (runtime.config.ports ?? []).map((p) => ({ port: p.port, name: p.name, onDetect: p.onDetect })),
     });
     runtime.portDetector = pd;
     const previewPorts = new Set(
@@ -2369,7 +2381,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
 
     const pd = new PortDetector({
-      ports: (config.ports ?? []).map((p) => ({ port: p.port, name: p.name })),
+      ports: (config.ports ?? []).map((p) => ({ port: p.port, name: p.name, onDetect: p.onDetect })),
     });
     portDetector = pd;
     mainRuntime.portDetector = pd;

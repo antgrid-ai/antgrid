@@ -30,6 +30,7 @@ import '../models/file_tree_models.dart';
 import '../providers/agent_transport.dart';
 import '../providers/capability_catalog.dart';
 import '../providers/chat_composer_drafts.dart';
+import '../providers/composer_handoff.dart';
 import '../providers/demo_mode.dart';
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
@@ -142,7 +143,27 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
     _input = _drafts.forSession(widget.sessionId);
     _input.addListener(_onInputChanged);
     _inputFocus.addListener(_onInputFocusChanged);
+    // Pinned for the same reason as `_drafts` above: dispose can run after the
+    // ProviderScope is gone, and reading through `ref` then throws.
+    _container = ref.container;
+    // Post-frame: publishing writes a provider, which must not happen during
+    // initState. Same registration shape as WorkspaceShell's own hooks.
+    //
+    // Retracted in dispose rather than deactivate, unlike those: this view sits
+    // inside the GlobalKey-reparented AgentPanel, so deactivate fires on every
+    // desktop panel-mode toggle and would leave the agent unfocusable after one.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref.read(focusAgentInputProvider.notifier).set(_publishedFocusInput);
+    });
   }
+
+  late final ProviderContainer _container;
+
+  /// The exact callback published to [focusAgentInputProvider], held so dispose
+  /// retracts ITS OWN and never the next view's — a session flipping to
+  /// terminal mode mounts that view before this one is disposed.
+  late final VoidCallback _publishedFocusInput = _inputFocus.requestFocus;
 
   // Load prior turns for this session, re-arming on every SERVICE SWAP rather
   // than once at mount. AgentPanel keys this view by session id, so a fresh
@@ -209,6 +230,18 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
     // makes the cache dispose it here rather than under a live editor.
     _drafts.release(widget.sessionId);
     _inputFocus.removeListener(_onInputFocusChanged);
+    // try/catch for the app-teardown case the pinned container exists for: the
+    // container itself can already be disposed by the time this runs.
+    try {
+      if (identical(
+        _container.read(focusAgentInputProvider),
+        _publishedFocusInput,
+      )) {
+        _container.read(focusAgentInputProvider.notifier).set(null);
+      }
+    } on Object {
+      // Nothing to retract from — the container is gone.
+    }
     _inputFocus.dispose();
     _scroll.dispose();
     _panelFocus.dispose();
@@ -363,6 +396,30 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
       setState(() => attachment.thumbnail = thumbnail);
     });
     await _runUpload(attachment);
+  }
+
+  /// Takes the one capture parked for the composer (a preview element pick, a
+  /// drawing over the live preview) and turns it into an ordinary attachment
+  /// plus seeded text — from there it is the user's draft, and nothing sends
+  /// until they press send.
+  ///
+  /// Claimed by clearing the slot FIRST: this runs from a listener that fires
+  /// again on any later rebuild, and a handoff left in place would be attached
+  /// a second time.
+  void _consumeHandoff(ComposerHandoff handoff) {
+    ref.read(composerHandoffProvider.notifier).set(null);
+    _input.appendText(handoff.text);
+    _inputFocus.requestFocus();
+    final bytes = handoff.bytes;
+    final fileName = handoff.fileName;
+    if (bytes == null || fileName == null) return;
+    detached('AgentTranscriptView', 'attach handed-off capture', () async {
+      await _attachBytes(
+        fileName: fileName,
+        bytes: bytes,
+        mimeType: handoff.mimeType,
+      );
+    });
   }
 
   /// Fleather hands the pasted image over from a void callback, so the upload
@@ -584,6 +641,21 @@ class _AgentTranscriptViewState extends ConsumerState<AgentTranscriptView> {
   @override
   Widget build(BuildContext context) {
     _armHydration();
+    // Watched, not listened: the capture is parked as a VALUE precisely
+    // because this view may not have been mounted when it was made (a session
+    // in terminal mode, an expanded workspace panel), so it has to be picked
+    // up on the first build that CAN — which a listen-only hook, firing only
+    // on change, would sit right through. Post-frame because consuming it
+    // writes to a provider and mutates the composer.
+    final handoff = ref.watch(composerHandoffProvider);
+    if (handoff != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final pending = ref.read(composerHandoffProvider);
+        if (pending == null) return;
+        _consumeHandoff(pending);
+      });
+    }
     final stateAsync = ref.watch(agentSessionStateProvider(widget.sessionId));
     // `.value` (nullable), not `.value ?? const AgentSessionState()`: the
     // latter collapses AsyncValue.loading into the empty state, flashing

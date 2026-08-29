@@ -109,6 +109,7 @@ class _CommandOutputOverlayState extends ConsumerState<CommandOutputOverlay> {
     if (svc == null) return;
     svc.sendToAgentTerminal(message);
     ref.read(switchToAgentProvider)?.call();
+    ref.read(focusAgentInputProvider)?.call();
     showSentToAgentSnackBar(context);
   }
 

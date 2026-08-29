@@ -12,6 +12,7 @@ import 'package:antgrid/providers/device_provisioning.dart';
 import 'package:antgrid/providers/providers.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/test_helpers/fake_agent_transport.dart';
+import 'package:antgrid/widgets/session_mode_control.dart';
 import 'package:antgrid/widgets/window_title_bar.dart';
 import 'package:antgrid/window/window_chrome.dart';
 import 'package:flutter/foundation.dart';
@@ -145,24 +146,22 @@ void main() {
   });
 
   // There used to be a separate, narrower icon-only tier (kTitleBarTierIconOnly
-  // = 700px) that hid the mode control and chip below it. That tier is gone
-  // now that app_shell.dart never mounts this bar below kMediumBreakpoint
-  // (840px) in the first place — comfortably above the old 700px floor — so
-  // the trailing cluster is unconditional. This guards against a regression
-  // at the bar's own narrowest realistic width.
-  testWidgets(
-    'at the bar\'s minimum mount width the mode control and chip are present',
-    (tester) async {
-      try {
-        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-        await pumpAt(tester, kMediumBreakpoint);
-        expect(find.byKey(WindowTitleBarContents.modeSlotKey), findsOneWidget);
-        expect(find.byKey(WindowTitleBarContents.chipSlotKey), findsOneWidget);
-      } finally {
-        debugDefaultTargetPlatformOverride = null;
-      }
-    },
-  );
+  // = 700px) that hid the chip below it. That tier is gone now that
+  // app_shell.dart never mounts this bar below kMediumBreakpoint (840px) in
+  // the first place — comfortably above the old 700px floor — so the
+  // trailing cluster is unconditional. This guards against a regression at
+  // the bar's own narrowest realistic width.
+  testWidgets('at the bar\'s minimum mount width the chip is present', (
+    tester,
+  ) async {
+    try {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      await pumpAt(tester, kMediumBreakpoint);
+      expect(find.byKey(WindowTitleBarContents.chipSlotKey), findsOneWidget);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
 
   // The session's name lives in the agent bar and NOWHERE else — rendering it
   // here too made a project id flash in this row before the name settled one
@@ -178,43 +177,41 @@ void main() {
     }
   });
 
-  // Unlike the name, this is a control: the modes that mount no agent bar
-  // would otherwise leave the session with no mode switch. The title bar
-  // carries no fallback for the agent mark or the handler shield — those
-  // live only in the agent bar, mounted or not. The chip is machine-scoped,
-  // so it is deliberately NOT part of the handover.
-  testWidgets('the session controls yield to a mounted agent bar', (
-    tester,
-  ) async {
-    try {
-      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-      await pumpAt(
-        tester,
-        1400,
-        extraOverrides: [
-          agentBarMountedProvider.overrideWith(() => ValueController(true)),
-        ],
-      );
-      expect(find.byKey(WindowTitleBarContents.modeSlotKey), findsNothing);
-      expect(find.byKey(WindowTitleBarContents.chipSlotKey), findsOneWidget);
-      // Still no name, even in the state that hands the controls over.
-      expect(find.byType(TitleBarBreadcrumb), findsNothing);
-    } finally {
-      debugDefaultTargetPlatformOverride = null;
-    }
-  });
+  // The title bar carries no fallback for the session mode control — unlike
+  // the old handover behavior, an unmounted agent bar (e.g. an expanded
+  // context panel) leaves the mode control unreachable rather than relocating
+  // it up here, same as it carries none for the agent mark or the handler
+  // shield. The chip is machine-scoped and unaffected either way.
+  testWidgets(
+    'the title bar never shows the session mode control, mounted agent bar or not',
+    (tester) async {
+      try {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        await pumpAt(
+          tester,
+          1400,
+          extraOverrides: [
+            agentBarMountedProvider.overrideWith(() => ValueController(true)),
+          ],
+        );
+        expect(find.byType(SessionModeControl), findsNothing);
+        expect(find.byKey(WindowTitleBarContents.chipSlotKey), findsOneWidget);
+        // Still no name, in either state.
+        expect(find.byType(TitleBarBreadcrumb), findsNothing);
 
-  testWidgets('the mode control returns with no agent bar mounted', (
-    tester,
-  ) async {
-    try {
-      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-      await pumpAt(tester, 1400);
-      expect(find.byKey(WindowTitleBarContents.modeSlotKey), findsOneWidget);
-    } finally {
-      debugDefaultTargetPlatformOverride = null;
-    }
-  });
+        await pumpAt(
+          tester,
+          1400,
+          extraOverrides: [
+            agentBarMountedProvider.overrideWith(() => ValueController(false)),
+          ],
+        );
+        expect(find.byType(SessionModeControl), findsNothing);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
 
   // The other side of the gate every session-control test leans on: with
   // nothing focused there is no session for a mode control to speak for, and
@@ -226,7 +223,7 @@ void main() {
     try {
       debugDefaultTargetPlatformOverride = TargetPlatform.windows;
       await pumpAt(tester, 1400, projectId: null);
-      expect(find.byKey(WindowTitleBarContents.modeSlotKey), findsNothing);
+      expect(find.byType(SessionModeControl), findsNothing);
       expect(find.byKey(WindowTitleBarContents.searchSlotKey), findsOneWidget);
       expect(find.byType(AbBrandMark), findsOneWidget);
     } finally {

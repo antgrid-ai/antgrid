@@ -91,6 +91,14 @@ const EnvSchema = z
 
 export type Env = z.output<typeof EnvSchema> & Partial<ReturnType<typeof billingToEnvFields>>;
 
+// Anchored to this file, not process.cwd() — a launcher that spawns `bun run
+// dev` from outside `web/` (e.g. Aspire's addBunApp, which doesn't cd into
+// the app directory the way `npm run dev` does) would otherwise silently miss
+// web/.env: readDotenv swallows the ENOENT, so every required field with no
+// default or ambient fallback fails validation instead of loading. Same fix,
+// same rationale as `src/ui/asset.ts`'s MANIFEST_PATH.
+const DEFAULT_DOTENV_PATH = resolve(import.meta.dirname, "..", ".env");
+
 /**
  * Read `.env` (if present) and overlay it on top of the given source so
  * file-level config wins over ambient process/shell env. Callers can opt
@@ -175,7 +183,8 @@ export function loadEnv(
   // Only overlay `.env` when reading the ambient process env — tests pass
   // explicit sources and should not be affected by a local `.env`.
   const useDotenv = source === DEFAULT_SOURCE;
-  const dotenvPath = opts.dotenvPath === undefined ? ".env" : opts.dotenvPath;
+  const dotenvPath =
+    opts.dotenvPath === undefined ? DEFAULT_DOTENV_PATH : opts.dotenvPath;
   const overlay = useDotenv && dotenvPath ? readDotenv(dotenvPath) : {};
   // `.env` wins over the ambient process env — intentional so developers can
   // override what their shell/process happens to have set.
