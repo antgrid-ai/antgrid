@@ -1662,6 +1662,35 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     return Promise.allSettled([...runtime.pendingGitRefreshes]);
   }
 
+  // Upper bound on the shutdown-only drain below. Kept under
+  // `killAllGracefully`'s own 5s so the two together still fit inside the grace
+  // a supervisor allows the host — `owner-watchdog.ts` and the pre-update drain
+  // both give it seconds, not minutes.
+  const SHUTDOWN_GIT_DRAIN_MS = 3_000;
+
+  /** The shutdown-only, BOUNDED form of {@link awaitGitRefreshes}. The wait in
+   *  [teardownCheckoutRuntime] gates a `git worktree remove` and must stay
+   *  unbounded — a `git status` still holding the checkout as its cwd is what
+   *  aborts that sweep on Windows. Shutdown removes nothing, so there the same
+   *  wait only buys us not orphaning a child, which is never worth holding the
+   *  process open for: `git` against a very large or network-backed tree can
+   *  stop answering for far longer than anything waiting on us will allow.
+   *  False when the deadline won, so the caller can say so. */
+  async function drainGitRefreshes(timeoutMs: number): Promise<boolean> {
+    // Never rejects (every element is an allSettled), so the loser of the race
+    // running on unawaited is not an unhandled rejection.
+    const drained = Promise.all([...checkoutRuntimes.values()].map(awaitGitRefreshes));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<false>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+    });
+    try {
+      return await Promise.race([drained.then(() => true), deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   // Re-reads git status after the file watcher saw the tree move, and pushes
   // it only if it actually changed.
   ///
@@ -3219,8 +3248,11 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       teardownServices();
       // After the timers are cleared, so nothing new can be scheduled behind
       // this — see [trackGitRefresh] for why an in-flight one has to be
-      // waited out rather than abandoned.
-      await Promise.all([...checkoutRuntimes.values()].map(awaitGitRefreshes));
+      // waited out rather than abandoned, and [drainGitRefreshes] for why the
+      // waiting stops here where it cannot at a checkout teardown.
+      if (!(await drainGitRefreshes(SHUTDOWN_GIT_DRAIN_MS))) {
+        log.warn("Shutdown proceeded with a git refresh still in flight");
+      }
 
       log.info("Antgrid Agent stopped. %d terminal(s) closed.", closed);
       return closed;
