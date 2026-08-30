@@ -75,6 +75,9 @@ class _SessionRowState extends ConsumerState<SessionRow> {
   // Mobile has no hover — keep the kebab visible.
   late bool _hovered = isMobilePlatform;
 
+  // Keep kebab mounted and visible while the action menu is actively open.
+  bool _menuOpen = false;
+
   // Re-entrancy latch for _activate. A cold remote project tap kicks off an
   // up-to-30s pair+promote, so a rapid double-tap would otherwise launch two
   // concurrent activations that race the selected-target save/restore in
@@ -264,21 +267,30 @@ class _SessionRowState extends ConsumerState<SessionRow> {
           leadingGapOverride: AbTokens.drawerSessionLeadingGap,
           leading: SizedBox(
             width: AbTokens.drawerSessionLeadingSlot,
-            height: AbTokens.drawerLeadingSlot,
-            // Bias the dot slightly below its box centre. Row-centring lines up
-            // the dot with the title's line-box centre, but the visible glyphs
-            // of a text line sit a hair lower (the font reserves more space
-            // above the baseline than below), so a geometrically-centred dot
-            // reads as too high. The small downward nudge matches the optical
-            // centre of the text.
-            child: Align(
-              alignment: const Alignment(0, _dotOpticalYBias),
-              child: _leadingDot(work, deleting: deleting),
+            // Anchors the row's content height to the 24px iconButtonBox independently of
+            // trailing, so the row height stays strictly constant without
+            // reserving horizontal space for the kebab menu when unhovered.
+            height: AbTokens.iconButtonBox,
+            child: Center(
+              child: SizedBox(
+                width: AbTokens.drawerSessionLeadingSlot,
+                height: AbTokens.drawerLeadingSlot,
+                // Bias the dot slightly below its box centre. Row-centring lines up
+                // the dot with the title's line-box centre, but the visible glyphs
+                // of a text line sit a hair lower (the font reserves more space
+                // above the baseline than below), so a geometrically-centred dot
+                // reads as too high. The small downward nudge matches the optical
+                // centre of the text.
+                child: Align(
+                  alignment: const Alignment(0, _dotOpticalYBias),
+                  child: _leadingDot(work, deleting: deleting),
+                ),
+              ),
             ),
           ),
-          // Row height is anchored by the always-reserved kebab slot (taller
-          // than the text line), so swapping the title for the field doesn't
-          // change the height; the field expands to the full title width.
+          // Row height is anchored by the 24px leading slot, so swapping the
+          // title for the field doesn't change the height; the field expands
+          // to the full title width.
           title: (_editing && !deleting)
               ? _buildEditor()
               : Row(
@@ -315,20 +327,25 @@ class _SessionRowState extends ConsumerState<SessionRow> {
                     SessionDeletingBadge(deleting: deleting),
                   ],
                 ),
-          // Hover-only kebab kept in the tree (and its size reserved) so the
-          // row height never jitters — including while editing, when it's
-          // hidden but its slot still anchors the row's height.
+          // Hover-only kebab (always visible on mobile touch devices). Does
+          // not take trailing width when unhovered, leaving the full width
+          // for session titles. Kept mounted while the menu is open.
           // Hidden entirely while deleting rather than partly disabled: every
           // item on it (start/stop/rename/archive/delete, and the
           // working-directory rows pointing into a checkout that is going away)
           // acts on a session being removed.
-          trailing: Visibility(
-            visible: _hovered && !_editing && !deleting,
-            maintainState: true,
-            maintainAnimation: true,
-            maintainSize: true,
-            child: _SessionMenu(entryId: widget.entryId, session: session),
-          ),
+          trailing: ((_hovered || _menuOpen) && !_editing && !deleting)
+              ? _SessionMenu(
+                  entryId: widget.entryId,
+                  session: session,
+                  onMenuOpened: () {
+                    if (mounted) setState(() => _menuOpen = true);
+                  },
+                  onMenuClosed: () {
+                    if (mounted) setState(() => _menuOpen = false);
+                  },
+                )
+              : null,
           selected: selected,
           enabled: !deleting,
           selectionStyle: AbRowSelection.surface,
@@ -559,7 +576,15 @@ final class _CopyPath extends _SessionMenuChoice {
 class _SessionMenu extends ConsumerWidget {
   final String entryId;
   final SessionEntry session;
-  const _SessionMenu({required this.entryId, required this.session});
+  final VoidCallback? onMenuOpened;
+  final VoidCallback? onMenuClosed;
+
+  const _SessionMenu({
+    required this.entryId,
+    required this.session,
+    this.onMenuOpened,
+    this.onMenuClosed,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -612,113 +637,118 @@ class _SessionMenu extends ConsumerWidget {
   }
 
   Future<void> _openMenu(BuildContext anchor, ProviderContainer ref) async {
-    // Working-directory rows are offered only for a checkout on THIS device:
-    // both resolve their path over the loopback control plane
-    // (`openCheckoutIn`/`copyCheckoutPath` read `hostControlClientProvider`),
-    // which can only answer about projects this machine hosts. Asked about a
-    // remote machine's project it spawns a host and refuses — and the window it
-    // could not open would have been on a machine the user is not sitting at.
-    //
-    // Gated on what the local project store holds, never on whether the id
-    // looks remote: an id absent from it (a remote project, a machine, the
-    // demo) loses the rows, so a source of remote entries added later is
-    // excluded without this line being revisited. A failed probe degrades to no
-    // rows rather than a menu that never opens.
-    final local = await ref
-        .read(entryIsLocalCheckoutProvider(entryId).future)
-        .catchError((_) => false);
-    final targets = local
-        ? await ref
-              .read(externalOpenTargetsProvider.future)
-              .catchError((_) => const <ExternalOpenTarget>[])
-        : const <ExternalOpenTarget>[];
-    if (!anchor.mounted) return;
-    final anchorRect = abMenuAnchorRect(anchor);
-    if (anchorRect == null) return;
-    final choice = await showAbMenu<_SessionMenuChoice>(
-      context: anchor,
-      anchorRect: anchorRect,
-      width: 200,
-      bounds: MenuBoundsScope.maybeOf(anchor),
-      entries: [
-        AbMenuItem(
-          label: session.running ? 'Stop' : 'Start',
-          value: _RowAction(
-            session.running ? _SessionAction.stop : _SessionAction.start,
-          ),
-        ),
-        if (session.forkSupported)
+    onMenuOpened?.call();
+    try {
+      // Working-directory rows are offered only for a checkout on THIS device:
+      // both resolve their path over the loopback control plane
+      // (`openCheckoutIn`/`copyCheckoutPath` read `hostControlClientProvider`),
+      // which can only answer about projects this machine hosts. Asked about a
+      // remote machine's project it spawns a host and refuses — and the window it
+      // could not open would have been on a machine the user is not sitting at.
+      //
+      // Gated on what the local project store holds, never on whether the id
+      // looks remote: an id absent from it (a remote project, a machine, the
+      // demo) loses the rows, so a source of remote entries added later is
+      // excluded without this line being revisited. A failed probe degrades to no
+      // rows rather than a menu that never opens.
+      final local = await ref
+          .read(entryIsLocalCheckoutProvider(entryId).future)
+          .catchError((_) => false);
+      final targets = local
+          ? await ref
+                .read(externalOpenTargetsProvider.future)
+                .catchError((_) => const <ExternalOpenTarget>[])
+          : const <ExternalOpenTarget>[];
+      if (!anchor.mounted) return;
+      final anchorRect = abMenuAnchorRect(anchor);
+      if (anchorRect == null) return;
+      final choice = await showAbMenu<_SessionMenuChoice>(
+        context: anchor,
+        anchorRect: anchorRect,
+        width: 200,
+        bounds: MenuBoundsScope.maybeOf(anchor),
+        entries: [
           AbMenuItem(
-            label: 'Fork session',
-            value: const _RowAction(_SessionAction.fork),
-            // Greyed rather than dropped: `forkSupported` answers whether the
-            // AGENT can be forked, which is a permanent fact about the tool,
-            // while having something to fork is a fact about this session that
-            // its first turn fixes. Hiding the row for the second would teach
-            // the user the tool cannot do it at all.
-            //
-            // What the bridge actually reads is a native conversation id or the
-            // live terminal's scrollback (`captureForkTranscript`), and both
-            // inputs are already on the wire — so this mirrors the precondition
-            // rather than asking for it. Drift costs a refusal the branch below
-            // now reports, never a silence.
-            enabled: session.running || session.agentSessionId != null,
-            disabledReason:
-                'This session has nothing to fork yet. Start it and let the '
-                'agent reply first.',
+            label: session.running ? 'Stop' : 'Start',
+            value: _RowAction(
+              session.running ? _SessionAction.stop : _SessionAction.start,
+            ),
           ),
-        const AbMenuItem(
-          label: 'Rename',
-          value: _RowAction(_SessionAction.rename),
-        ),
-        const AbMenuItem(
-          label: 'Archive',
-          value: _RowAction(_SessionAction.archive),
-        ),
-        if (targets.isNotEmpty) ...[
-          const AbMenuDivider(),
-          for (final target in targets)
+          if (session.forkSupported)
             AbMenuItem(
-              label: target.label,
-              icon: target.icon,
-              value: _OpenExternally(target),
+              label: 'Fork session',
+              value: const _RowAction(_SessionAction.fork),
+              // Greyed rather than dropped: `forkSupported` answers whether the
+              // AGENT can be forked, which is a permanent fact about the tool,
+              // while having something to fork is a fact about this session that
+              // its first turn fixes. Hiding the row for the second would teach
+              // the user the tool cannot do it at all.
+              //
+              // What the bridge actually reads is a native conversation id or the
+              // live terminal's scrollback (`captureForkTranscript`), and both
+              // inputs are already on the wire — so this mirrors the precondition
+              // rather than asking for it. Drift costs a refusal the branch below
+              // now reports, never a silence.
+              enabled: session.running || session.agentSessionId != null,
+              disabledReason:
+                  'This session has nothing to fork yet. Start it and let the '
+                  'agent reply first.',
             ),
           const AbMenuItem(
-            label: 'Copy path',
-            icon: AbIcons.copy,
-            value: _CopyPath(),
+            label: 'Rename',
+            value: _RowAction(_SessionAction.rename),
+          ),
+          const AbMenuItem(
+            label: 'Archive',
+            value: _RowAction(_SessionAction.archive),
+          ),
+          if (targets.isNotEmpty) ...[
+            const AbMenuDivider(),
+            for (final target in targets)
+              AbMenuItem(
+                label: target.label,
+                icon: target.icon,
+                value: _OpenExternally(target),
+              ),
+            const AbMenuItem(
+              label: 'Copy path',
+              icon: AbIcons.copy,
+              value: _CopyPath(),
+            ),
+          ],
+          const AbMenuDivider(),
+          const AbMenuItem(
+            label: 'Delete',
+            value: _RowAction(_SessionAction.delete),
+            danger: true,
           ),
         ],
-        const AbMenuDivider(),
-        const AbMenuItem(
-          label: 'Delete',
-          value: _RowAction(_SessionAction.delete),
-          danger: true,
-        ),
-      ],
-    );
-    if (choice == null || !anchor.mounted) return;
+      );
+      if (choice == null || !anchor.mounted) return;
 
-    // The working-directory rows resolve their path over the loopback control
-    // plane, so unlike every other row they must not warm the session service.
-    switch (choice) {
-      case _OpenExternally(:final target):
-        await openCheckoutIn(
-          anchor,
-          ref,
-          projectId: entryId,
-          checkoutId: session.checkoutId,
-          target: target,
-        );
-      case _CopyPath():
-        await copyCheckoutPath(
-          anchor,
-          ref,
-          projectId: entryId,
-          checkoutId: session.checkoutId,
-        );
-      case _RowAction(:final action):
-        await _runRowAction(anchor, ref, action);
+      // The working-directory rows resolve their path over the loopback control
+      // plane, so unlike every other row they must not warm the session service.
+      switch (choice) {
+        case _OpenExternally(:final target):
+          await openCheckoutIn(
+            anchor,
+            ref,
+            projectId: entryId,
+            checkoutId: session.checkoutId,
+            target: target,
+          );
+        case _CopyPath():
+          await copyCheckoutPath(
+            anchor,
+            ref,
+            projectId: entryId,
+            checkoutId: session.checkoutId,
+          );
+        case _RowAction(:final action):
+          await _runRowAction(anchor, ref, action);
+      }
+    } finally {
+      onMenuClosed?.call();
     }
   }
 

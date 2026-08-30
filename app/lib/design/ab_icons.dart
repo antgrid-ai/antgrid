@@ -54,10 +54,29 @@ abstract final class AbIcons {
   static const radioTower = Codicon.radio_tower; // machine reachable remotely
   static const server = Codicon.server;
   static const link = Codicon.link;
+  static const openExternal = Codicon.link_external;
+  static const elementPicker = Codicon.inspect;
+  // "edit" is VS Code's pencil glyph — reads as "mark this up", distinct
+  // from the pointer-shaped [elementPicker].
+  static const draw = Codicon.edit;
+  static const undo = Codicon.discard;
+  // MDI, not Codicon: the Codicon set has no shape-drawing primitives at all
+  // — `primitive_square`/`circle_large_outline` are filled status dots drawn
+  // for list decoration, not outlines that read as "draw a box here".
+  static const drawLine = Mdi.vector_line;
+  static const drawRect = Mdi.rectangle_outline;
+  static const drawEllipse = Mdi.ellipse_outline;
+  static const drawText = Mdi.format_text;
+  static const previewTabs = Codicon.multiple_windows;
   static const add = Codicon.add;
   static const trash = Codicon.trash;
   // Alias mirroring `add`; semantic for git's stage-changes action.
   static const gitStage = Codicon.add;
+  // The VS Code tree-toolbar pair, deliberately NOT [expand]/[collapse] above:
+  // those are MDI diagonal arrows meaning "grow/shrink this pane", and a tree
+  // that folds its folders is a different verb.
+  static const collapseAll = Codicon.collapse_all;
+  static const expandAll = Codicon.expand_all;
   // VS Code's own codicon name for its unstage/"−" action.
   static const gitUnstage = Codicon.remove;
   static const menu = Codicon.menu;

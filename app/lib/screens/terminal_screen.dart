@@ -101,6 +101,9 @@ class TerminalScreen extends ConsumerWidget {
         key: ValueKey(agentTab.terminalId),
         tab: agentTab,
         terminalService: terminalService,
+        // The agent panel's own terminal: where a "send to agent" lands, so
+        // this is the copy that owns focusAgentInputProvider.
+        isAgentSurface: true,
       ),
     );
   }

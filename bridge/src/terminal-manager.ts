@@ -1,8 +1,22 @@
-import { TerminalSession, buildSpawnEnv } from "./terminal-session";
+import {
+  TerminalSession,
+  buildSpawnEnv,
+  WINDOWS_SHUTDOWN_GRACE_MS,
+} from "./terminal-session";
+import type { GracefulExitAsk } from "./agents/types";
 import { ScrollbackBuffer } from "./scrollback";
 import { TerminalModeTracker } from "./terminal-modes";
+import { MAX_ATTACH_BLOB, TerminalScreen } from "./terminal-screen";
 import { logger } from "./logger";
 const log = logger.child({ component: "terminal-manager" });
+
+/**
+ * How many times an attach re-waits on the VT before it settles for replaying
+ * an unparsed tail — see `getAttachSnapshot`. One extra round clears an
+ * ordinary burst; nothing clears a guest that outruns the parser, so this only
+ * needs to be past "briefly behind".
+ */
+const SETTLE_ROUNDS = 3;
 import { createMessage, type AbMessage } from "./protocol";
 import type { ConnState } from "./conn-state";
 
@@ -19,6 +33,9 @@ export interface TerminalSpawnConfig {
   suppressOscNotifications?: boolean;
   suppressOscTitle?: boolean;
   hookAliveProbeAgent?: string;
+  /** This agent's measured refinement of the platform's soft ask; see
+   *  `GracefulExitAsk`. Absent everywhere but an agent session. */
+  gracefulAsk?: GracefulExitAsk;
   /** Keep this terminal's scrollback replayable after the process exits.
    *  For a transcript whose whole value is what it said — a `worktree.setup`
    *  run, where the log of the step that failed is the only explanation the
@@ -46,11 +63,46 @@ export interface TerminalManagerCallbacks {
   onTerminalForgotten?: (terminalId: string) => void;
 }
 
+/**
+ * How long THIS session may be given, under a caller's budget.
+ *
+ * Only agent PTYs are asked to leave. On Windows the soft ask is a keystroke,
+ * which a cooked-mode reader — a `bun install` in a setup PTY, a service
+ * running a build tool, a shell blocked on a child — cannot see at all, so
+ * asking one would spend the whole budget to change nothing while destroying
+ * the parent links the sweep walks. On POSIX they have nothing to flush.
+ * `type: "agent"` is stamped at exactly ONE site (`SessionManager.startNow`),
+ * which is what makes this a single fact rather than a policy to maintain.
+ *
+ * `askNonAgents` is the shutdown path, and it is not a widening: POSIX shutdown
+ * SIGTERMs every terminal, which withdrawing would be the regression. It stays
+ * off on Windows, where the keystroke would not land on a cooked-mode reader
+ * anyway.
+ *
+ * A declared `graceMs` can only SHORTEN the caller's budget — see
+ * `GracefulExitAsk.graceMs`.
+ */
+export function gracefulBudget(
+  session: TerminalSession,
+  budgetMs: number,
+  askNonAgents = false,
+): number {
+  if (budgetMs <= 0) return 0;
+  if (session.type === "agent") return Math.min(budgetMs, session.graceMs ?? budgetMs);
+  if (askNonAgents && process.platform !== "win32") return budgetMs;
+  return 0;
+}
+
 export class TerminalManager {
   private sessions = new Map<string, TerminalSession>();
   private scrollbacks = new Map<string, ScrollbackBuffer>();
   /** Paired 1:1 with `scrollbacks` — the tail alone cannot carry mode state. */
   private modeTrackers = new Map<string, TerminalModeTracker>();
+  /** Also paired 1:1 with `scrollbacks`, and the reason an attach can rebuild a
+   *  SCREEN rather than replay a slice of the stream that drew one. A live
+   *  `Terminal` per PTY costs memory, so every site that drops a scrollback
+   *  must dispose one here too. */
+  private screens = new Map<string, TerminalScreen>();
   private terminalTypes = new Map<string, "agent" | "service">();
   /** Metadata for exited terminals so they remain visible in status. */
   private stoppedTerminals = new Map<string, StoppedTerminalInfo>();
@@ -106,6 +158,21 @@ export class TerminalManager {
     if (this.sessions.has(terminalId)) {
       log.warn(`Terminal "${terminalId}" already exists, killing first`);
       this.kill(terminalId);
+      // The replaced run's exit lands later, on a slot this spawn now owns,
+      // where the same-id gate below drops it — its bookkeeping included. So
+      // the bookkeeping runs HERE, while the id still means the old run.
+      // Ordering is the whole point: `namer.forget` and
+      // `handlerEngine.onTerminalExit` are keyed by terminal id, so dispatching
+      // them once the replacement has registered would reclaim the LIVE run's
+      // state instead of the dead one's. Only the callback fires, never the
+      // `terminal:exited` frame — an exit frame for a slot a live session holds
+      // tells the app a running terminal is dead, and nothing later corrects it.
+      //
+      // A grace made this reachable rather than theoretical: the window between
+      // the ask and the exit is now seconds, which is long enough for the user
+      // to press Stop and then Start (`SessionManager.stopTerminal` ->
+      // `startNow`).
+      this.callbacks.onTerminalExited?.(terminalId);
     }
 
     // Clear from stopped list since we're re-spawning
@@ -118,6 +185,12 @@ export class TerminalManager {
     this.scrollbacks.set(terminalId, scrollback);
     const modes = new TerminalModeTracker();
     this.modeTrackers.set(terminalId, modes);
+    // Assigned below, before `spawn()`, so no output can reach the handler
+    // while it is null. Captured rather than looked up for the same reason
+    // `scrollback` and `modes` are: a replaced PTY keeps emitting until its
+    // tree is reaped, and a lookup would file those bytes in the REPLACEMENT's
+    // screen while its scrollback and modes go to the dead run's own.
+    let screen: TerminalScreen | null = null;
 
     // Stamp this core's api-server port AND the terminal id into the spawned
     // shell. Hooks/plugins echo ANTGRID_TERMINAL_ID back to /session-title for
@@ -145,11 +218,23 @@ export class TerminalManager {
       suppressOscNotifications: config.suppressOscNotifications,
       suppressOscTitle: config.suppressOscTitle,
       hookAliveProbeAgent: config.hookAliveProbeAgent,
+      gracefulAsk: config.gracefulAsk,
       onTitle: (title: string) => this.callbacks.onTerminalTitle?.(terminalId, title),
       onMessage: (msg: AbMessage) => {
         if (msg.type === "terminal:output") {
           scrollback.append(msg.data);
           modes.feed(msg.data);
+          // BEFORE the suppression drop. This placement is what makes a
+          // suppressed window recoverable at all: a socket drop and a
+          // backgrounded app both stop the outbound frame below, and only an
+          // emulator that stayed current through it can hand the app back the
+          // screen it missed. The screen also stays current through a
+          // remote-access flip, which drops at the stream's `mayDeliver`
+          // instead — but nothing raises a recovery for that edge, since it
+          // neither re-establishes the transport nor moves the app's declared
+          // focus, so that window is still stale until the guest repaints of
+          // its own accord.
+          screen?.feed(msg.data);
           this.callbacks.onTerminalOutput?.(terminalId, msg.data);
           const seq = this.connState.bumpTerminalSeq(terminalId);
           if (this.connState.suppressed) {
@@ -179,6 +264,8 @@ export class TerminalManager {
             this.sessions.delete(terminalId);
             this.scrollbacks.delete(terminalId);
             this.modeTrackers.delete(terminalId);
+            this.screens.get(terminalId)?.dispose();
+            this.screens.delete(terminalId);
             this.retainScrollback.delete(terminalId);
             this.connState.clearTerminal(terminalId);
             return;
@@ -195,6 +282,8 @@ export class TerminalManager {
           if (!this.retainScrollback.has(terminalId)) {
             this.scrollbacks.delete(terminalId);
             this.modeTrackers.delete(terminalId);
+            this.screens.get(terminalId)?.dispose();
+            this.screens.delete(terminalId);
           }
           this.connState.clearTerminal(terminalId);
           this.callbacks.onTerminalExited?.(terminalId);
@@ -210,6 +299,14 @@ export class TerminalManager {
     });
 
     this.sessions.set(terminalId, session);
+    // Sized from the SESSION, not from `config`: the session applies its own
+    // 80x24 defaults, and a VT sized differently from the PTY serializes a
+    // screen the guest never drew. A same-id respawn replaces the previous
+    // screen, whose own exit lands too late to release it (the duplicate gate
+    // in the exit handler returns before the bookkeeping).
+    this.screens.get(terminalId)?.dispose();
+    screen = new TerminalScreen(session.cols, session.rows);
+    this.screens.set(terminalId, screen);
     if (config.type) {
       this.terminalTypes.set(terminalId, config.type);
     }
@@ -221,13 +318,24 @@ export class TerminalManager {
     return terminalId;
   }
 
-  kill(terminalId: string): void {
+  /**
+   * Stop a terminal. `graceMs` is a budget, not a promise: the terminals it
+   * actually reaches are decided by `gracefulBudget`, and the sweep runs either
+   * way. Default 0 keeps a caller that has no room for one — a kill-then-
+   * respawn on the same terminal id, where a grace would overlap two PTYs on
+   * one slot — on exactly the path it had before.
+   */
+  kill(terminalId: string, graceMs = 0): void {
     const session = this.sessions.get(terminalId);
     if (!session) {
       log.warn(`Terminal "${terminalId}" not found`);
       return;
     }
-    session.kill();
+    const grace = gracefulBudget(session, graceMs);
+    // Stays void either way: nearly every caller fires this from a message
+    // handler and must not be made to wait on the reaping.
+    if (grace > 0) void session.close(grace);
+    else session.kill();
     // Session removal happens in the onMessage exit handler
   }
 
@@ -245,12 +353,14 @@ export class TerminalManager {
     return this.sessions.get(terminalId)?.treeKilled ?? Promise.resolve();
   }
 
-  killAndAwaitTree(terminalId: string): Promise<void> {
+  killAndAwaitTree(terminalId: string, graceMs = 0): Promise<void> {
     const session = this.sessions.get(terminalId);
     if (!session) {
       log.warn(`Terminal "${terminalId}" not found`);
       return Promise.resolve();
     }
+    const grace = gracefulBudget(session, graceMs);
+    if (grace > 0) return session.close(grace);
     session.kill();
     return session.treeKilled;
   }
@@ -259,8 +369,21 @@ export class TerminalManager {
     for (const session of this.sessions.values()) {
       session.kill();
     }
+    this.resetMaps();
+  }
+
+  /** Everything this class remembers about terminals, dropped in one place.
+   *  `modeTrackers` pairs 1:1 with `scrollbacks`, so it goes with them — a
+   *  tracker left behind for a terminal whose buffer is gone is unreachable
+   *  state that lives for the process. */
+  private resetMaps(): void {
     this.sessions.clear();
     this.scrollbacks.clear();
+    this.modeTrackers.clear();
+    // Dropped with the rest, but DISPOSED first: a `TerminalScreen` owns an
+    // xterm instance whose internal disposables outlive the map entry.
+    for (const screen of this.screens.values()) screen.dispose();
+    this.screens.clear();
     this.retainScrollback.clear();
     this.forgotten.clear();
     this.terminalTypes.clear();
@@ -283,6 +406,8 @@ export class TerminalManager {
     this.retainScrollback.delete(terminalId);
     this.scrollbacks.delete(terminalId);
     this.modeTrackers.delete(terminalId);
+    this.screens.get(terminalId)?.dispose();
+    this.screens.delete(terminalId);
     this.stoppedTerminals.delete(terminalId);
     this.terminalTypes.delete(terminalId);
     this.callbacks.onTerminalForgotten?.(terminalId);
@@ -293,43 +418,40 @@ export class TerminalManager {
     const count = all.length;
     if (count === 0) return 0;
 
-    // Windows gets no graceful phase, because it has none to give: node maps
-    // every signal to TerminateProcess, so `killGracefully` takes the leader
-    // ALONE — and `killProcessTree` walks parent links, so the children it
-    // would have reaped are re-parented out of reach the instant that leader
-    // exits (the tree must die BEFORE the leader; see killProcessTree's doc).
-    // Asking nicely first would therefore COST the sweep rather than soften
-    // it, stranding the conhost/agent orphans whose open handles abort
-    // `git worktree remove` — which is the one thing shutdown sweeps trees to
-    // prevent. POSIX names a process group, which outlives its leader, so
-    // there the ordering is free and the graceful path below is real.
-    if (process.platform === "win32") {
-      this.killAll();
-      await Promise.all(all.map((s) => s.treeKilled));
-      return count;
-    }
+    // Windows is clamped and POSIX is not, and the asymmetry is the caller's,
+    // not the platform's: `HostController.shutdownOwnedHost` force-kills this
+    // whole tree ~3s after asking, so anything past that is spent inside a
+    // window it has already given up on. POSIX has no such caller, so it keeps
+    // the full budget it was given.
+    const budget = process.platform === "win32"
+      ? Math.min(timeoutMs, WINDOWS_SHUTDOWN_GRACE_MS)
+      : timeoutMs;
+    // Each chain ends in its own unconditional sweep, so this resolves only
+    // once every tree is gone — the property `git worktree remove` and the
+    // Windows package destage both depend on. Sessions report their own exits,
+    // so no poll loop is needed to notice them.
+    await Promise.all(all.map((session) => session.close(gracefulBudget(session, budget, true))));
 
-    // Send SIGTERM to all sessions
-    for (const session of all) {
-      session.killGracefully();
-    }
+    // Nothing has closed the inbound door yet — the transport is still
+    // attached and the config watcher still armed — so a `session:start` or a
+    // `servicesModified` respawn can land a NEW session in the map during the
+    // wait above. Clearing from the snapshot would drop it from every map
+    // without killing it, orphaning a PTY that no watchdog and no job handle
+    // covers. `killAll` reads the LIVE map, which is the whole reason it stays
+    // the terminal step.
+    const asked = new Set(all);
+    const late = [...this.sessions.values()].filter((session) => !asked.has(session));
+    this.killAll();
+    await Promise.all(late.map((session) => session.treeKilled));
 
-    // Poll until all sessions exit or timeout
-    const start = Date.now();
-    while (this.sessions.size > 0 && Date.now() - start < timeoutMs) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-
-    // Force-kill survivors
-    if (this.sessions.size > 0) {
-      log.warn("Force-killing %d surviving terminal(s)", this.sessions.size);
-      // Snapshotted before killAll clears the map: shutdown reports "%d
-      // terminal(s) closed" off this return, and the trees are still dying.
-      const survivors = [...this.sessions.values()];
-      this.killAll();
-      await Promise.all(survivors.map((s) => s.treeKilled));
-    }
-
+    const answered = all.filter((session) => session.askAnswered === true).length;
+    log.info(
+      "Closed %d terminal(s): %d exited on request, %d force-killed%s",
+      count,
+      answered,
+      count - answered,
+      late.length > 0 ? `, ${late.length} spawned during shutdown` : "",
+    );
     return count;
   }
 
@@ -371,6 +493,7 @@ export class TerminalManager {
       return;
     }
     session.resize(clientId, cols, rows);
+    this.screens.get(terminalId)?.resize(session.cols, session.rows);
     this.lastDriverGeometry = { cols: session.cols, rows: session.rows };
     this.sendMessage(
       createMessage("terminal:size", {
@@ -394,7 +517,7 @@ export class TerminalManager {
   /**
    * Raw scrollback tail, for readers that want the program's OUTPUT — the
    * handler's LLM context and the local API. Anything replayed INTO an app's
-   * terminal emulator wants `getReplaySnapshot` instead.
+   * terminal emulator wants `getAttachSnapshot` instead.
    */
   getScrollback(terminalId: string): { text: string; seq: number } | null {
     const buf = this.scrollbacks.get(terminalId);
@@ -403,19 +526,81 @@ export class TerminalManager {
   }
 
   /**
-   * What a (re)attaching app must be fed: latched DEC private modes first, then
-   * the scrollback tail.
+   * What a (re)attaching app must be fed: the serialized SCREEN, then the
+   * latched modes the serializer does not carry.
    *
-   * The app rebuilds its VT engine per attach and this blob is its ONLY input,
-   * so a mode the tail no longer carries is a mode the app does not have —
-   * which is how mouse reporting, set once at TUI startup, went missing and
-   * took every click with it. Never hand an app plain `getScrollback` output.
+   * The app's engine OUTLIVES the attach and this blob is the only thing that
+   * corrects it, so a mode the blob does not carry is a mode the app keeps
+   * whatever the guest has since done to it — which is how mouse reporting, set
+   * once at TUI startup, went missing and took every click with it. Never hand
+   * an app plain `getScrollback` output: it is a suffix of a DIFF stream and
+   * reconstructs only the rows the program happened to rewrite most recently.
+   *
+   * The supplement goes strictly AFTER the whole blob, never interleaved — the
+   * serializer ends with a relative cursor restore.
+   *
+   * `opts.history` asks for the emulator's scrollback as well as the screen,
+   * and is the CALLER's call because only the app knows whether its engine
+   * holds a deeper copy that a history blob would erase. Pass it for a cold
+   * attach — an engine that has rendered nothing for this terminal — and never
+   * for a re-attach.
+   *
+   * The seq and the blob must describe the SAME instant, and the serialize
+   * barrier is a real suspension point, so the two are made to agree rather
+   * than assumed to. A chunk arriving while the barrier is pending is sent to
+   * the app immediately (this is the same ordered channel, so it lands BEFORE
+   * the reply) and would then be wiped by the blob's own `2J` — with its seq
+   * already above any cutoff read beforehand, so nothing refilters it and
+   * nothing re-sends it. Four kilobytes of a streaming build, gone from the tab
+   * for good. `pendingTail()` is what closes it: body + tail reconstructs the
+   * screen as of the LAST byte counted, so the cutoff can be read afterwards
+   * and be exact.
+   *
+   * The tail must come from xterm rather than from watching the chunks go by.
+   * `settle()`'s callback fires from inside the parser's own loop, which then
+   * keeps consuming the writes queued behind it, so most chunks that arrive
+   * across the barrier are in the body ALREADY — replaying everything seen
+   * paints them twice, into the user's scrollback, on every attach.
    */
-  getReplaySnapshot(terminalId: string): { text: string; seq: number } | null {
-    const snap = this.getScrollback(terminalId);
-    if (!snap) return null;
-    const prelude = this.modeTrackers.get(terminalId)?.prelude() ?? "";
-    return { ...snap, text: prelude + snap.text };
+  async getAttachSnapshot(
+    terminalId: string,
+    opts: { history?: boolean } = {},
+  ): Promise<{ text: string; seq: number } | null> {
+    const screen = this.screens.get(terminalId);
+    if (!screen) return null;
+    // Settled repeatedly while the parser is merely behind, because a tail is
+    // the expensive answer: those bytes have ALREADY gone out live, so
+    // replaying them puts a second copy of whatever they scrolled off the
+    // screen into the user's history, and the warm preamble stops at `2J`
+    // precisely so it never clears that. A chunk the parser catches up on lands
+    // in the BODY instead, which repaints the screen and scrolls nothing.
+    // Bounded because a guest can outrun the parser indefinitely, and there the
+    // duplicate rows are the lesser loss against a screen frozen a slice back.
+    for (let round = 0; round < SETTLE_ROUNDS; round++) {
+      await screen.settle();
+      // The screen can be replaced or disposed across the barrier: an exit and
+      // a same-id respawn both swap the map entry, and the barrier still fires
+      // on the dead one — whose screen would then be stamped with a seq the new
+      // PTY starts below and re-arm a cutoff above everything it will ever
+      // emit. A blank pane behind a live process. Re-tested every round, since
+      // each one is another suspension.
+      if (screen.isDisposed || this.screens.get(terminalId) !== screen) return null;
+      if (!screen.hasPendingTail) break;
+    }
+    // One synchronous run: the body, the chunks it does not yet contain, and
+    // the seq that counts both. Nothing can arrive between two statements, so
+    // the three describe one instant by construction.
+    const blob = screen.serializeNow(opts);
+    const tail = screen.pendingTail();
+    const seq = this.connState.terminalSeq(terminalId);
+    const supplement = this.modeTrackers.get(terminalId)?.supplementalPrelude() ?? "";
+    if (tail.length > MAX_ATTACH_BLOB) {
+      // `serializeNow` measures the body alone and structurally cannot see
+      // this half, which is the half a flood makes large: measured at 0.78 MB
+      // of replayed tail behind a 176-byte screen.
+      log.warn("attach tail %d bytes replayed after the screen, past the %d mark", tail.length, MAX_ATTACH_BLOB);
+    }
+    return { text: blob + tail + supplement, seq };
   }
 
   getStatus(): Array<{

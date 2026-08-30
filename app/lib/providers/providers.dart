@@ -770,6 +770,29 @@ final switchToAgentProvider =
       () => ValueController(null),
     );
 
+/// Callback that puts the keyboard on the agent's input — the chat composer's
+/// field, or the agent terminal's focus scope, whichever is on screen.
+///
+/// Exists because every "send to agent" surface composes somewhere ELSE: a
+/// drawing over the preview, a picked element, a terminal selection, a command's
+/// output. Handing the message over without the keyboard leaves the user
+/// clicking into the agent before they can follow it up with a sentence, which
+/// is the whole point of having sent it.
+///
+/// Paired with [switchToAgentProvider] rather than folded into it: that one
+/// makes the agent VISIBLE (a mobile page swipe), this one makes it TYPEABLE,
+/// and a sender wants both. Published only by the agent panel's own views —
+/// never by the workspace panel's terminal list, whose terminals are not where
+/// a message to the agent lands.
+///
+/// Same identity-retraction rule as [openDrawerProvider], and for the same
+/// reason: a session flipping mode mounts the incoming view before the outgoing
+/// one is disposed, so a view may only retract the callback it published.
+final focusAgentInputProvider =
+    NotifierProvider<ValueController<VoidCallback?>, VoidCallback?>(
+      () => ValueController(null),
+    );
+
 /// Callback that toggles the projects drawer open/closed — the agent bar's
 /// hamburger button. Set by whichever mobile route is mounted (WorkspaceShell
 /// or NewSessionScreen).

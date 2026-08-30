@@ -1,8 +1,25 @@
 // bridge/src/git.ts
 import { existsSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { join } from "node:path";
 
 export type GitFileStatusCode = "M" | "A" | "D" | "R" | "U" | "!";
+
+/**
+ * Which of git's seven unmerged states a conflict is in, named the way VS
+ * Code's Source Control view names the same codes. Only the first two are a
+ * two-sided edit of one file's content, so only they can carry a marker block
+ * the user deletes to resolve; the rest are a delete or an add racing an edit,
+ * where resolving means picking a side and nothing in the file says so.
+ */
+export type ConflictKind =
+  | "bothModified"
+  | "bothAdded"
+  | "bothDeleted"
+  | "addedByUs"
+  | "addedByThem"
+  | "deletedByUs"
+  | "deletedByThem";
 
 export interface GitFileEntry {
   path: string;
@@ -15,9 +32,25 @@ export interface GitFileEntry {
    * for a merge conflict (nothing to diff against) and for a binary file. */
   additions: number;
   deletions: number;
+  /** Which unmerged state this path is in. Set only when status is "!". */
+  conflictKind?: ConflictKind;
+  /** Set only when status is "!": no conflict marker is left in the file, so
+   * staging it is the routine "I'm done with this one" rather than a claim
+   * about content nobody has looked at. See [scanConflictResolution] for what
+   * this can and cannot know — false is always the safe answer. */
+  conflictResolved?: boolean;
 }
 
-const CONFLICT_CODES = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
+/** git's unmerged XY codes, in the order `git status` documents them. */
+const CONFLICT_CODES = new Map<string, ConflictKind>([
+  ["DD", "bothDeleted"],
+  ["AU", "addedByUs"],
+  ["UD", "deletedByThem"],
+  ["UA", "addedByThem"],
+  ["DU", "deletedByUs"],
+  ["AA", "bothAdded"],
+  ["UU", "bothModified"],
+]);
 
 /**
  * Parses `git status --porcelain=v1 -z` output into the buckets every git
@@ -37,13 +70,13 @@ const CONFLICT_CODES = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
  * (the same hazard `gitDiscard` documents below).
  */
 function parsePorcelain(raw: string, prefix: string): {
-  conflictPaths: Set<string>;
+  conflicts: Map<string, ConflictKind>;
   renames: Map<string, string>; // newPath -> oldPath, staged renames
   staged: Map<string, GitFileStatusCode>; // from X
   unstaged: Map<string, GitFileStatusCode>; // from Y
   untracked: Set<string>;
 } {
-  const conflictPaths = new Set<string>();
+  const conflicts = new Map<string, ConflictKind>();
   const renames = new Map<string, string>();
   const staged = new Map<string, GitFileStatusCode>();
   const unstaged = new Map<string, GitFileStatusCode>();
@@ -65,8 +98,9 @@ function parsePorcelain(raw: string, prefix: string): {
     if (!inScope(rawPath)) continue;
     const path = rel(rawPath);
 
-    if (CONFLICT_CODES.has(xy)) {
-      conflictPaths.add(path);
+    const conflictKind = CONFLICT_CODES.get(xy);
+    if (conflictKind !== undefined) {
+      conflicts.set(path, conflictKind);
       continue;
     }
     if (x === "?" && y === "?") {
@@ -100,7 +134,7 @@ function parsePorcelain(raw: string, prefix: string): {
       unstaged.set(path, "M"); // folds type-changed ("T") into modified
     }
   }
-  return { conflictPaths, renames, staged, unstaged, untracked };
+  return { conflicts, renames, staged, unstaged, untracked };
 }
 
 /**
@@ -193,9 +227,148 @@ async function countAddedLines(cwd: string, relPath: string): Promise<number> {
   }
 }
 
+/**
+ * Cap on a conflicted file this module will read to look for markers. Same
+ * shape of protection as [MAX_UNTRACKED_STAT_BYTES] and the same 10-second
+ * cadence behind it, but its own constant: this one bounds a scan of a file
+ * git has already told us is mid-merge, which is a much smaller set.
+ */
+const MAX_CONFLICT_SCAN_BYTES = 1_048_576;
+
+/** A line that STARTS with seven `<`, `=` or `>` — git's own marker shape,
+ * and the exact rule VS Code greps for before staging an unmerged file. */
+const CONFLICT_MARKER = /^(<{7}|={7}|>{7})/m;
+
+/** The ordinary "has this file changed since we read it" pair. */
+interface ConflictScan {
+  mtimeMs: number;
+  size: number;
+}
+
+/**
+ * Per-checkout memo of conflicted files last seen with markers STILL in them,
+ * keyed by the mtime+size that verdict was read from.
+ *
+ * Only the unresolved verdict is remembered, and that asymmetry is the whole
+ * safety argument: a stale entry can cost an extra confirmation, never skip
+ * one. Working through a conflict writes the file, which moves its mtime, so
+ * the next pass re-reads it and reports the resolution.
+ *
+ * Bounded by construction rather than swept: each pass rebuilds its checkout's
+ * map from the conflicts that pass saw, and a checkout with nothing unmerged
+ * left drops out of the map entirely. A project closed mid-merge is the one
+ * residue — it keeps its last map, sized by that one merge, and re-uses it if
+ * the project comes back.
+ */
+const unresolvedConflictScans = new Map<string, Map<string, ConflictScan>>();
+
+/** How much of a file decides whether it is binary — git's own threshold for
+ * the same call. */
+const BINARY_SNIFF_BYTES = 8000;
+
+/** Whether [absPath] still holds a conflict marker. A file that cannot be read
+ * at all answers true — the same "assume the worst" every uncertain case
+ * takes, and a BINARY one answers true for a sharper reason: git never writes
+ * a marker block into one, it leaves "ours" on disk whole. Absent markers there
+ * means nobody has picked a side yet, so reading it as resolved would stage
+ * "ours" as the merge result without ever asking. */
+async function hasConflictMarkers(absPath: string): Promise<boolean> {
+  try {
+    const bytes = await Bun.file(absPath).bytes();
+    if (bytes.subarray(0, BINARY_SNIFF_BYTES).includes(0)) return true;
+    return CONFLICT_MARKER.test(new TextDecoder().decode(bytes));
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Which of [paths] have no conflict marker left in them, i.e. which conflicts
+ * the user has actually worked through. This is what decides whether staging
+ * one is the routine "include this" or a claim about content nobody has read,
+ * and it is the same heuristic — deliberately — that VS Code's Source Control
+ * view makes the same decision on.
+ *
+ * Heuristic in both directions, and it stays one because the cost is only ever
+ * an extra confirmation: a Markdown setext underline (`=======`) reads as
+ * unresolved, and markers deleted while both halves were kept reads as
+ * resolved. Git would commit that second file either way; all this decides is
+ * whether the app asks first.
+ *
+ * Every uncertain answer is left OUT of the returned set, so the app asks: an
+ * unreadable file, a binary one (git leaves no markers to delete there), and
+ * one past [MAX_CONFLICT_SCAN_BYTES] — a marker can sit anywhere in a file, so
+ * a partial scan can never clear one.
+ *
+ * Callers pass only the two-sided kinds. Reading is memoized against
+ * [unresolvedConflictScans] because this runs on `getGitStatus`'s 10-second
+ * poll: a big merge is hundreds of conflicted files, and re-reading every one
+ * of them on every pass would put exactly the kind of fan-out on the app's
+ * git:status path that [getGitStatus]'s own comment describes as the source of
+ * the startup lag. A pass after the first re-reads only what changed — plus
+ * whatever it last reported RESOLVED, whose verdict is deliberately not cached.
+ */
+async function scanConflictResolution(
+  cwd: string,
+  paths: string[],
+): Promise<Set<string>> {
+  const prior = unresolvedConflictScans.get(cwd);
+  const stillUnresolved = new Map<string, ConflictScan>();
+  const resolved = new Set<string>();
+
+  await Promise.all(
+    paths.map(async (relPath) => {
+      const absPath = join(cwd, relPath);
+      let scan: ConflictScan;
+      try {
+        const info = await stat(absPath);
+        scan = { mtimeMs: info.mtimeMs, size: info.size };
+      } catch {
+        return; // unreadable, and nothing to key a memo on
+      }
+      const seen = prior?.get(relPath);
+      const unchanged =
+        seen !== undefined &&
+        seen.mtimeMs === scan.mtimeMs &&
+        seen.size === scan.size;
+      if (
+        unchanged ||
+        scan.size > MAX_CONFLICT_SCAN_BYTES ||
+        (await hasConflictMarkers(absPath))
+      ) {
+        stillUnresolved.set(relPath, scan);
+        return;
+      }
+      resolved.add(relPath);
+    }),
+  );
+
+  if (stillUnresolved.size > 0) {
+    unresolvedConflictScans.set(cwd, stillUnresolved);
+  } else {
+    unresolvedConflictScans.delete(cwd);
+  }
+  return resolved;
+}
+
 export interface GitOpResult {
   success: boolean;
   error?: string;
+}
+
+/** Longest conflicted-path list a refusal spells out before summarizing —
+ * beyond this the message stops being a sentence and the app's own changed-file
+ * list is the better place to read the rest. */
+const NAMED_CONFLICTS_IN_ERROR = 3;
+
+/** One-line, path-naming replacement for git's terminal-shaped "unmerged
+ * files" hint block. Exported for the app-facing message contract only. */
+export function unresolvedConflictError(paths: string[]): string {
+  const named = paths.slice(0, NAMED_CONFLICTS_IN_ERROR).join(", ");
+  const rest = paths.length - NAMED_CONFLICTS_IN_ERROR;
+  const list = rest > 0 ? `${named} and ${rest} more` : named;
+  const count = paths.length === 1 ? "1 merge conflict" : `${paths.length} merge conflicts`;
+  return `Resolve ${count} before committing: ${list}`;
 }
 
 export interface GitCommitResult extends GitOpResult {
@@ -279,7 +452,7 @@ export async function getGitStatus(cwd: string): Promise<GitFileEntry[]> {
   const porcelain = await readPorcelain(cwd);
   if (porcelain === null) return [];
 
-  const { conflictPaths, renames, staged, unstaged, untracked } = porcelain;
+  const { conflicts, renames, staged, unstaged, untracked } = porcelain;
   // Independent of each other — run concurrently rather than serially, and
   // fan the per-file untracked reads out too. Awaiting them one at a time
   // was the actual source of the "git changes don't show up right away"
@@ -287,16 +460,32 @@ export async function getGitStatus(cwd: string): Promise<GitFileEntry[]> {
   // git:status resend, so N untracked files meant N sequential fs reads on
   // the critical path before the app ever saw them.
   const untrackedList = [...untracked];
-  const [diffStats, untrackedAdditions] = await Promise.all([
+  const conflictList = [...conflicts];
+  // Only a two-sided edit of one file's content can be resolved by editing that
+  // file; every other unmerged kind needs a side picked, and nothing in the file
+  // records that choice — so none of them is ever scanned, or ever resolved.
+  const scannable = conflictList
+    .filter(([, kind]) => kind === "bothModified" || kind === "bothAdded")
+    .map(([path]) => path);
+  const [diffStats, untrackedAdditions, resolvedConflicts] = await Promise.all([
     getDiffStats(cwd),
     Promise.all(untrackedList.map((path) => countAddedLines(cwd, path))),
+    scanConflictResolution(cwd, scannable),
   ]);
   const statsFor = (path: string) =>
     diffStats.get(path) ?? { additions: 0, deletions: 0 };
 
   const entries: GitFileEntry[] = [];
-  for (const path of conflictPaths) {
-    entries.push({ path, status: "!", staged: false, additions: 0, deletions: 0 });
+  for (const [path, conflictKind] of conflictList) {
+    entries.push({
+      path,
+      status: "!",
+      staged: false,
+      additions: 0,
+      deletions: 0,
+      conflictKind,
+      conflictResolved: resolvedConflicts.has(path),
+    });
   }
   for (const [path, oldPath] of renames) {
     entries.push({ path, status: "R", staged: true, oldPath, ...statsFor(path) });
@@ -358,6 +547,18 @@ export async function gitCommit(
   message: string,
 ): Promise<GitCommitResult> {
   if (!message.trim()) return { success: false, error: "Commit message is empty" };
+
+  // Git refuses this itself, but as a three-line hint block written for a
+  // terminal ("error: Committing is not possible because you have unmerged
+  // files" + two `git add/rm` hints) that says nothing about WHICH files —
+  // unreadable in a toast, and untranslatable into the app's own vocabulary
+  // because the wording is git's and localized. Naming the paths is the part
+  // a client can act on, so the check happens here rather than being parsed
+  // back out of stderr.
+  const conflicts = [...((await readPorcelain(cwd))?.conflicts.keys() ?? [])];
+  if (conflicts.length > 0) {
+    return { success: false, error: unresolvedConflictError(conflicts) };
+  }
 
   const commit = await runGit(cwd, ["commit", "-m", message]);
   if (commit.exitCode !== 0) {

@@ -38,35 +38,56 @@ void main() {
       final info = PortInfo.fromJson({'pid': 1234});
       expect(info, isNull);
     });
+
+    test('fromJson parses declared onDetect', () {
+      final info = PortInfo.fromJson({'port': 3000, 'onDetect': 'silent'});
+      expect(info, isNotNull);
+      expect(info!.onDetect, 'silent');
+    });
+
+    test('fromJson leaves onDetect null for an undeclared port', () {
+      final info = PortInfo.fromJson({'port': 3000});
+      expect(info, isNotNull);
+      expect(info!.onDetect, isNull);
+    });
   });
 
   group('PreviewState', () {
     test('default constructor has correct defaults', () {
       const state = PreviewState();
       expect(state.ports, isEmpty);
-      expect(state.selectedPort, isNull);
-      expect(state.localProxyPort, isNull);
-      expect(state.currentUrl, isNull);
+      expect(state.tabs, isEmpty);
+      expect(state.activeTabId, isNull);
+      expect(state.activeTab, isNull);
       expect(state.isLoading, false);
       expect(state.error, isNull);
     });
 
     test('copyWith creates new instance with updated fields', () {
       const state = PreviewState();
+      const tab = PreviewTab(
+        port: 3000,
+        scheme: 'http',
+        localProxyPort: 3000,
+        currentUrl: 'http://localhost:3000',
+      );
       final updated = state.copyWith(
         ports: [PortInfo(port: 3000)],
-        selectedPort: 3000,
+        tabs: [tab],
+        activeTabId: 3000,
         isLoading: true,
       );
       expect(updated.ports.length, 1);
-      expect(updated.selectedPort, 3000);
+      expect(updated.tabs, [tab]);
+      expect(updated.activeTabId, 3000);
+      expect(updated.activeTab, tab);
       expect(updated.isLoading, true);
     });
 
-    test('copyWith with clearSelectedPort resets nullable field', () {
-      final state = const PreviewState().copyWith(selectedPort: 3000);
-      final cleared = state.copyWith(clearSelectedPort: true);
-      expect(cleared.selectedPort, isNull);
+    test('copyWith with clearActiveTabId resets nullable field', () {
+      final state = const PreviewState().copyWith(activeTabId: 3000);
+      final cleared = state.copyWith(clearActiveTabId: true);
+      expect(cleared.activeTabId, isNull);
     });
 
     test('copyWith with clearError resets error', () {
@@ -75,17 +96,34 @@ void main() {
       expect(cleared.error, isNull);
     });
 
+    test('activeTab returns null when activeTabId names no open tab', () {
+      const state = PreviewState(
+        tabs: [PreviewTab(port: 3000, scheme: 'http')],
+        activeTabId: 4000,
+      );
+      expect(state.activeTab, isNull);
+    });
+  });
+
+  group('PreviewTab', () {
     test('copyWith with clearLocalProxyPort resets localProxyPort', () {
-      final state = const PreviewState().copyWith(localProxyPort: 8080);
-      final cleared = state.copyWith(clearLocalProxyPort: true);
+      const tab = PreviewTab(
+        port: 3000,
+        scheme: 'http',
+        localProxyPort: 8080,
+      );
+      final cleared = tab.copyWith(clearLocalProxyPort: true);
       expect(cleared.localProxyPort, isNull);
+      expect(cleared.port, 3000);
     });
 
     test('copyWith with clearCurrentUrl resets currentUrl', () {
-      final state = const PreviewState().copyWith(
+      const tab = PreviewTab(
+        port: 3000,
+        scheme: 'http',
         currentUrl: 'http://localhost:3000',
       );
-      final cleared = state.copyWith(clearCurrentUrl: true);
+      final cleared = tab.copyWith(clearCurrentUrl: true);
       expect(cleared.currentUrl, isNull);
     });
   });
@@ -222,6 +260,63 @@ void main() {
         'timestamp': 1234567890,
         // missing projectId
         'ports': 'not a list',
+      });
+      expect(msg, isNull);
+    });
+
+    test('port:detected returns PortDetectedMessage', () {
+      final msg = parseAbMessage({
+        'type': 'port:detected',
+        'id': 'msg-2',
+        'timestamp': 1234567890,
+        'projectId': 'proj-1',
+        'port': 3000,
+        'url': 'http://localhost:3000',
+        'scheme': 'http',
+        'source': 'output',
+        'sourceSessionId': 'sess-1',
+        'attributes': {'name': 'web', 'onDetect': 'openPreview'},
+      });
+      expect(msg, isA<PortDetectedMessage>());
+      final detected = msg as PortDetectedMessage;
+      expect(detected.id, 'msg-2');
+      expect(detected.port, 3000);
+      expect(detected.url, 'http://localhost:3000');
+      expect(detected.scheme, 'http');
+      expect(detected.source, 'output');
+      expect(detected.sourceSessionId, 'sess-1');
+      expect(detected.attributes.name, 'web');
+      expect(detected.attributes.onDetect, 'openPreview');
+    });
+
+    test('port:detected defaults onDetect to notify when attributes '
+        'omits it', () {
+      final msg = parseAbMessage({
+        'type': 'port:detected',
+        'id': 'msg-3',
+        'timestamp': 1234567890,
+        'projectId': 'proj-1',
+        'port': 3000,
+        'url': 'http://localhost:3000',
+        'scheme': 'http',
+        'source': 'process',
+        'attributes': <String, dynamic>{},
+      });
+      expect(msg, isA<PortDetectedMessage>());
+      expect((msg as PortDetectedMessage).attributes.onDetect, 'notify');
+    });
+
+    test('malformed port:detected returns null', () {
+      final msg = parseAbMessage({
+        'type': 'port:detected',
+        'id': 'msg-4',
+        'timestamp': 1234567890,
+        'projectId': 'proj-1',
+        // missing port
+        'url': 'http://localhost:3000',
+        'scheme': 'http',
+        'source': 'output',
+        'attributes': {'onDetect': 'notify'},
       });
       expect(msg, isNull);
     });

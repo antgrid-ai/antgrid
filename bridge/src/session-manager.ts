@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, chmodSync } from "node:fs";
-import { readFile, writeFile, rename, chmod, mkdir } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { logger } from "./logger";
@@ -19,8 +19,10 @@ import { stripAnsi } from "./handler/context";
 import { resumeArgv, sessionResumable } from "./agent-resume";
 import { isChatCapableTool } from "./structured/chat-capable";
 import { initialPromptArgv } from "./initial-prompt";
+import { TITLE_RANKS, titleRankValue, type TitleRank } from "./session-namer";
 import type { WorkStatus } from "./protocol";
 import type { TerminalManager } from "./terminal-manager";
+import { AGENT_GRACE_MS } from "./terminal-session";
 import type { AbMessage, SessionEntry } from "./protocol";
 import {
   CHECKOUT_KINDS,
@@ -39,6 +41,7 @@ import { CheckoutStore } from "./worktrees/checkout-store";
 import { WorktreeError, type WorktreeManager } from "./worktrees/worktree-manager";
 import { logWorktreeEvent, worktreeErrorCode } from "./worktrees/worktree-log";
 import { createKeyedLock } from "./keyed-lock";
+import { atomicWriteFile } from "./discovery";
 import { runGit } from "./worktrees/project-resolver";
 
 export interface AgentSpec {
@@ -194,6 +197,14 @@ interface PersistedEntry {
   // create-time name). Auto-naming from the agent title is suppressed forever
   // after — manual always wins. Backfilled from the name pattern on load.
   manuallyRenamed: boolean;
+  // Which signal produced the current `name`, absent for a default name or one
+  // derived from the terminal's OSC chrome. Durable because SessionNamer's copy
+  // of the same precedence dies with the PTY: without it every restart lets the
+  // per-turn first-message read rename the session back to its opening prompt,
+  // and lets the naming gate spend another model spawn re-titling a session that
+  // already has a real title. Released when a NEW conversation takes the slot —
+  // see noteConversationStart and setAgentSession.
+  autoTitleRank?: TitleRank;
   // Last-active agent-native conversation id for this slot (the agent's own
   // id-space, distinct from `id`). Persisted-only — never sent on the wire.
   // Overwrite-latest: whatever the agent last reported is "where you left off",
@@ -251,6 +262,7 @@ const PersistedEntrySchema = z
     args: z.string().optional().catch(undefined),
     mode: z.enum(["terminal", "chat"]).optional().catch(undefined),
     manuallyRenamed: z.boolean().optional().catch(undefined),
+    autoTitleRank: z.enum(TITLE_RANKS).optional().catch(undefined),
     agentSessionId: z.string().optional().catch(undefined),
     agentTranscriptPath: z.string().optional().catch(undefined),
     config: z.record(z.string(), z.string()).optional().catch(undefined),
@@ -282,6 +294,12 @@ const PersistedEntrySchema = z
       // isn't a default "Session N" was user-chosen → treat as manual so
       // live-follow never clobbers it. Default names start following.
       manuallyRenamed: s.manuallyRenamed ?? !isDefaultSessionName(s.name),
+      // Deliberately NOT backfilled from the name: a file written before this
+      // field existed cannot say whether its name was generated or read off the
+      // opening prompt, and guessing "generated" would freeze every one of them
+      // against ever being named properly. Absent means "behave as before" —
+      // the rank starts describing the name from the next title that lands.
+      autoTitleRank: s.autoTitleRank,
       agentSessionId: s.agentSessionId,
       agentTranscriptPath: s.agentTranscriptPath,
       config: s.config,
@@ -327,24 +345,40 @@ function parsePersistedContent(raw: string | null): PersistedEntry[] {
   }
 }
 
-/** Atomically write sessions.json (async, fs/promises) — tmp file + rename so a
- *  crash mid-write can never truncate the file (which load()/readPersisted would
- *  then read as empty and silently drop every session). Mirrors the instance
- *  flush(): pretty-printed, 0o600 on POSIX. The only caller is the static
- *  deletePersisted on the WS event loop, hence async. Keep in lockstep with
- *  flush(). */
-async function writePersistedAtomic(
-  path: string,
-  sessions: PersistedEntry[],
-): Promise<void> {
+/** The ONE publish primitive for sessions.json — every writer in this file goes
+ *  through it, so there is a single scratch-name and rename-retry policy for the
+ *  file. tmp + rename means a crash mid-write can never truncate it (which
+ *  load()/readPersisted would then read as empty and silently drop every
+ *  session).
+ *
+ *  It must never suspend, and that — not the lock — is what makes it safe. An
+ *  await between writing the scratch file and renaming it is a window another
+ *  writer lands in: the two would rename past each other and publish a blend.
+ *  Being synchronous, it occupies one turn and nothing can interleave with it.
+ *
+ *  Do NOT make it take `withSessionsFile` itself. flushNow() reaches it off the
+ *  lock on purpose (see there), so the lock is not an invariant it could restore
+ *  — and createKeyedLock is not reentrant, so acquiring the key its two awaited
+ *  callers already hold would hang every isolated-session create and every cold
+ *  delete, permanently and with no error. */
+function writePersistedAtomic(path: string, sessions: PersistedEntry[]): void {
   const file: FileShape = { version: 1, sessions };
-  const tmp = `${path}.tmp`;
-  await writeFile(tmp, JSON.stringify(file, null, 2), "utf8");
-  await rename(tmp, path);
-  if (process.platform !== "win32") {
-    try { await chmod(path, 0o600); } catch { /* ignore */ }
-  }
+  atomicWriteFile(path, JSON.stringify(file, null, 2), { fileMode: 0o600 });
 }
+
+/** Serializes the sessions.json writers that SUSPEND, keyed on the absolute file
+ *  path — deletePersisted's read-modify-write, and the debounced flush queued
+ *  behind it. It is deliberately not "every publish": flushNow() writes off the
+ *  lock (see there), which is safe only because writePersistedAtomic occupies a
+ *  single turn.
+ *
+ *  Module-level rather than per-instance because the static deletePersisted has
+ *  no instance, and host-server can briefly hold two SessionManagers for one
+ *  project across an evict/reopen. Nothing slow may ever be held under it —
+ *  flushNowOrThrow sits on the isolated-create path the app waits on — and
+ *  nothing may acquire withCheckoutMembership from inside it, since that lock is
+ *  already held across flushNowOrThrow in the other order. */
+const withSessionsFile = createKeyedLock();
 
 /** True for an unedited default slot name ("Session 3") — one the user never
  *  named. Gates the auto-name backfill (a non-default name was user-chosen) and
@@ -424,6 +458,10 @@ export class SessionManager {
   private readonly withCheckoutMembership = createKeyedLock();
   private observers = new Set<() => void>();
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  /** A debounced flush whose timer has fired but whose write is still queued on
+   *  `withSessionsFile`. Without it flushNow() reads a null flushTimer as "clean"
+   *  and skips the final write on exactly the shutdown it exists to cover. */
+  private flushQueued = false;
   private activityEmitTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly dir: string;
   private readonly path: string;
@@ -434,6 +472,17 @@ export class SessionManager {
   // Set in start()'s chat branch, cleared in stop()'s — the PTY-less analogue of
   // `tm.has(id)`, and best-effort (a crashed driver surfaces via agent:error).
   private runningChat = new Set<string>();
+  /**
+   * Sessions whose PTY has been ASKED to exit and has not gone yet.
+   *
+   * The ask is worth seconds, and for those seconds `tm.has(id)` still answers
+   * true — the session is genuinely alive. Reading that as "running" leaves a
+   * Stop rendering a live row, and makes the Start the user presses next hit
+   * `startNow`'s already-running guard and be answered `ok: true` having done
+   * nothing. Keyed on the session's own tree-kill promise, so the row clears
+   * itself whichever way the teardown ends.
+   */
+  private stopping = new Map<string, Promise<void>>();
   // Callbacks waiting for a session's PTY to actually be gone, keyed by session
   // id and fired from noteExited(). See awaitTerminalExit().
   private terminalExitWaiters = new Map<string, Set<(exited: boolean) => void>>();
@@ -462,6 +511,11 @@ export class SessionManager {
   // something new; a stale `true` is harmless because start() re-runs the real
   // pre-flight and falls back to a fresh start.
   private resumableCache = new Map<string, { agentSessionId: string; resumable: boolean }>();
+  /** Sessions launched to CONTINUE their previous conversation, until the agent
+   *  reports the identity it continued under. Per-run and therefore in memory:
+   *  a launch always precedes the report, and a bridge that died between them
+   *  killed the run too. See noteConversationStart. */
+  private readonly awaitingResumedIdentity = new Set<string>();
   /** Live and recovered `worktree.setup` state, keyed by session id. Runtime
    *  only — it reaches the wire through toWire and never sessions.json, which
    *  is also why every mutation here emits with notifyObservers() rather than
@@ -610,17 +664,22 @@ export class SessionManager {
     sessionId: string,
   ): Promise<boolean> {
     const path = join(storeDir, "agents", projectId, "sessions.json");
-    let raw: string | null = null;
-    try {
-      raw = await readFile(path, "utf8");
-    } catch {
-      return false; // missing/unreadable → nothing to delete
-    }
-    const entries = parsePersistedContent(raw);
-    const next = entries.filter((e) => e.id !== sessionId);
-    if (next.length === entries.length) return false; // id not present
-    await writePersistedAtomic(path, next);
-    return true;
+    // The read and the write are one transaction: two deletes on the same cold
+    // project overlap otherwise, and the second republishes the set it read
+    // before the first landed — resurrecting a row the user already removed.
+    return withSessionsFile(path, async () => {
+      let raw: string | null = null;
+      try {
+        raw = await readFile(path, "utf8");
+      } catch {
+        return false; // missing/unreadable → nothing to delete
+      }
+      const entries = parsePersistedContent(raw);
+      const next = entries.filter((e) => e.id !== sessionId);
+      if (next.length === entries.length) return false; // id not present
+      writePersistedAtomic(path, next);
+      return true;
+    });
   }
 
   get(id: string): SessionEntry | undefined {
@@ -911,6 +970,10 @@ export class SessionManager {
     if (!trimmed) throw new Error("name cannot be empty");
     entry.name = trimmed;
     entry.manuallyRenamed = true;
+    // The name is the user's now, so it no longer describes any signal. Kept
+    // honest rather than load-bearing: manuallyRenamed already refuses every
+    // auto-name, and a rank left behind would outlive the title it described.
+    entry.autoTitleRank = undefined;
     this.changed();
   }
 
@@ -932,13 +995,52 @@ export class SessionManager {
     return !!entry && !entry.manuallyRenamed;
   }
 
-  applyAutoName(id: string, name: string): void {
+  /**
+   * Whether this slot already holds a name no model call should try to improve
+   * on. The DURABLE twin of SessionNamer.hasFinalTitle, which holds nothing once
+   * the PTY has exited — so this is the only thing that still knows, after a
+   * restart, that the name on the row was generated rather than defaulted.
+   */
+  hasFinalAutoTitle(id: string): boolean {
+    const entry = this.entries.get(id);
+    return titleRankValue(entry?.autoTitleRank) >= titleRankValue("self");
+  }
+
+  applyAutoName(id: string, name: string, rank?: TitleRank): void {
     const entry = this.entries.get(id);
     if (!entry || entry.manuallyRenamed) return;
+    // Precedence, restated here because SessionNamer's copy only spans one run:
+    // the first-message read repeats the SAME opening prompt every turn and the
+    // OSC signal is terminal chrome, so after a restart either would rename a
+    // session we had already titled back to something worse.
+    if (titleRankValue(rank) < titleRankValue(entry.autoTitleRank)) return;
     const trimmed = name.trim();
-    if (!trimmed || trimmed === entry.name) return;
+    if (!trimmed) return;
+    // The rank travels with the name it describes, so an unchanged name still
+    // writes when the signal behind it strengthened.
+    if (trimmed === entry.name && rank === entry.autoTitleRank) return;
     entry.name = trimmed;
+    entry.autoTitleRank = rank;
     this.changed();
+  }
+
+  /**
+   * Record whether this launch continues the slot's previous conversation, and
+   * release the generated title when it does not.
+   *
+   * A continuation cannot be recognized from the agent's session id afterwards:
+   * measured on Claude Code, `--resume` copies the transcript into a new file
+   * and appends under a FRESH id, so the same thread comes back wearing a
+   * different name. Only the launch knows, which is why it is recorded here and
+   * consumed by the first report in setAgentSession.
+   */
+  private noteConversationStart(entry: PersistedEntry, resumed: boolean): void {
+    if (resumed) {
+      this.awaitingResumedIdentity.add(entry.id);
+      return;
+    }
+    this.awaitingResumedIdentity.delete(entry.id);
+    entry.autoTitleRank = undefined;
   }
 
   /**
@@ -950,6 +1052,15 @@ export class SessionManager {
   setAgentSession(id: string, agentSessionId: string, agentTranscriptPath?: string): void {
     const entry = this.entries.get(id);
     if (!entry) return;
+    // A conversation change releases the slot's title — the name describes what
+    // was being worked on, not the slot. Ordered BEFORE the unchanged early-out
+    // below so a resume that comes back under the SAME id still consumes the
+    // claim; left armed, the `/clear` after it would read as that resume.
+    if (!this.awaitingResumedIdentity.delete(id)
+        && entry.agentSessionId !== undefined
+        && entry.agentSessionId !== agentSessionId) {
+      entry.autoTitleRank = undefined;
+    }
     // Keep a previously captured path if this report omits one for the SAME
     // session — an agent's SessionStart can fire before the transcript path is
     // known, then a later turn-end report supplies it (antigravity's
@@ -1010,7 +1121,7 @@ export class SessionManager {
   archive(id: string): void {
     const entry = this.entries.get(id);
     if (!entry) throw new Error(`session not found: ${id}`);
-    if (this.tm.has(id)) this.tm.kill(id);
+    if (this.tm.has(id)) this.stopTerminal(id);
     // The kill above cannot reach a start that has not happened yet: a session
     // archived while its checkout is still provisioning would otherwise launch
     // its agent the moment setup settled. The prompt stays in
@@ -1056,7 +1167,7 @@ export class SessionManager {
           : this.deleteManaged(entry, options);
       });
     }
-    if (this.tm.has(id)) this.tm.kill(id);
+    if (this.tm.has(id)) this.stopTerminal(id);
     this.dropSession(id);
     this.changed();
     return true;
@@ -1076,6 +1187,7 @@ export class SessionManager {
     this.tm.forget(id);
     this.entries.delete(id);
     this.resumableCache.delete(id);
+    this.awaitingResumedIdentity.delete(id);
     this.setups.delete(id);
   }
 
@@ -1112,7 +1224,7 @@ export class SessionManager {
       // project's store), so there is nothing left to reclaim and the session
       // row is the only trace. Refusing here — which `inspect`'s
       // WORKTREE_MISSING would — makes that row permanently undeletable.
-      if (this.tm.has(entry.id)) this.tm.kill(entry.id);
+      if (this.tm.has(entry.id)) this.stopTerminal(entry.id);
       this.markDeleting(entry);
       try {
         await this.cancelSetupForDelete(entry);
@@ -1787,10 +1899,12 @@ export class SessionManager {
       const chatAlreadyRunning = this.runningChat.has(id);
       this.runningChat.add(id);
       const chatTool = entry.tool ?? "codex";
+      const resumeId = entry.conversationStart === "fork" ? undefined : this.resumeIdFor(chatTool, entry);
+      this.noteConversationStart(entry, resumeId !== undefined);
       this.opts.onStartChat?.({
         sessionId: id,
         tool: chatTool,
-        resumeId: entry.conversationStart === "fork" ? undefined : this.resumeIdFor(chatTool, entry),
+        resumeId,
         config: entry.config,
         initialPrompt: this.forkInitialPrompt(entry, initialPrompt),
       });
@@ -1800,11 +1914,21 @@ export class SessionManager {
       if (chatAlreadyRunning) this.reannounceCheckout(entry.checkoutId);
       return;
     }
-    if (this.tm.has(id)) {
+    if (this.tm.has(id) && !this.stopping.has(id)) {
       log.warn(`session ${id} already running`);
       this.reannounceCheckout(entry.checkoutId);
       return;
     }
+    // A start inside the grace window is a real restart, not a re-announce: the
+    // user pressed Stop and then Start. `TerminalManager.spawn` kills the
+    // still-dying PTY on this id before taking the slot — it has already had
+    // its chance to leave on its own — and its later exit cannot evict the
+    // replacement (see the same-id gate in the manager's exit handler). That
+    // kill is a no-op once the grace's own sweep has run (`TerminalSession`
+    // refuses to walk a tree twice, since the leader's pid is free by then and
+    // a reissued one belongs to a stranger), so what bounds the overlap is the
+    // sweep having happened, not this call re-issuing it.
+    this.stopping.delete(id);
 
     // Resolve the launch command for THIS session. Precedence:
     //   per-session tool (registry -> bin) -> per-session custom command ->
@@ -1880,6 +2004,9 @@ export class SessionManager {
       // than spawning a default shell.
       throw new Error("agent.tool or agent.command not configured");
     }
+    // After the throw: a launch that never happened has started no conversation
+    // and must not release the title of the one still recorded here.
+    this.noteConversationStart(entry, resumeArgs.length > 0);
 
     // One-shot first prompt, appended LAST (after resume tokens — codex's
     // `resume <uuid>` is a subcommand and the positional prompt must follow it).
@@ -1963,6 +2090,7 @@ export class SessionManager {
       hookAliveProbeAgent: injectsHookAliveProbe(entry.tool ?? sessionAgentSpec.name)
         ? entry.tool ?? sessionAgentSpec.name
         : undefined,
+      gracefulAsk: agentSpec(entry.tool ?? sessionAgentSpec.name)?.gracefulExit,
     });
     // Some registry agents have no verified launch-argv form for an opening
     // prompt. Their PTY still buffers input during startup, which gives every
@@ -2107,7 +2235,7 @@ export class SessionManager {
       if (unqueued) this.changed();
       return;
     }
-    this.tm.kill(id);
+    this.stopTerminal(id);
     this.changed();
   }
 
@@ -2274,12 +2402,19 @@ export class SessionManager {
   }
 
   flushNow(): void {
-    // Either timer being armed means a write is pending. Disarm both (a stray
+    // Either timer being armed, or a fired timer's write still queued on the
+    // lock, means a write is pending. Disarm both (a stray
     // timer must not outlive teardown and keep the event loop alive) and do a
     // single final write so the last activity bump survives. The activity
     // timer's wire emit is intentionally dropped — peers re-read persisted
     // lastUsedAt on reconnect.
-    const dirty = this.flushTimer !== null || this.activityEmitTimer !== null;
+    //
+    // Stays synchronous and off withSessionsFile: teardownServices calls this
+    // without awaiting it, so the write has to land on this tick or the last
+    // bump is lost on every clean shutdown. Safe without the lock only because
+    // the publish itself never suspends — nothing can be half-done to interleave
+    // with.
+    const dirty = this.flushTimer !== null || this.activityEmitTimer !== null || this.flushQueued;
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
@@ -2302,8 +2437,9 @@ export class SessionManager {
       clearTimeout(this.activityEmitTimer);
       this.activityEmitTimer = null;
     }
-    await mkdir(this.dir, { recursive: true });
-    await writePersistedAtomic(this.path, Array.from(this.entries.values()));
+    await withSessionsFile(this.path, async () => {
+      writePersistedAtomic(this.path, Array.from(this.entries.values()));
+    });
   }
 
   /** Absolute paths, and relative paths that escape the checkout, would make a
@@ -2384,9 +2520,32 @@ export class SessionManager {
   }
 
   /** Whether this slot's runtime is live — a PTY for terminal mode, the driver
-   *  bookkeeping for chat, since a chat session has no PTY to ask. */
+   *  bookkeeping for chat, since a chat session has no PTY to ask. A PTY that
+   *  has been asked to leave is already on its way out: see `stopping`. */
   private isRunning(e: PersistedEntry): boolean {
-    return e.mode === "chat" ? this.runningChat.has(e.id) : this.tm.has(e.id);
+    return e.mode === "chat"
+      ? this.runningChat.has(e.id)
+      : this.tm.has(e.id) && !this.stopping.has(e.id);
+  }
+
+  /** Ask this session's PTY to exit, then sweep it. Every per-session teardown
+   *  goes through here so the budget is stated once, and so the row stops
+   *  claiming to be running the moment the ask goes out. */
+  private stopTerminal(id: string): void {
+    this.tm.kill(id, AGENT_GRACE_MS);
+    // Read here and nowhere later: the exit handler drops the session from the
+    // manager's map, so an `await` between these two lines would hand back the
+    // already-resolved placeholder and make every tree wait vacuous.
+    const settled = this.tm.treeKilled(id);
+    this.stopping.set(id, settled);
+    const clear = (): void => {
+      if (this.stopping.get(id) !== settled) return;
+      this.stopping.delete(id);
+      // Nothing else emits when a tree finally goes, and the row has been
+      // reporting this teardown since the ask.
+      if (this.entries.has(id)) this.notifyObservers();
+    };
+    void settled.then(clear, clear);
   }
 
   /**
@@ -2492,23 +2651,25 @@ export class SessionManager {
     if (this.flushTimer) return;
     this.flushTimer = setTimeout(() => {
       this.flushTimer = null;
-      this.flush();
+      // Queued behind the awaited writers rather than firing into the middle of
+      // one. Safe only because flush() snapshots `entries` when it RUNS, so a
+      // queued flush publishes current state — never the set as of when it was
+      // armed. flushNow() deliberately stays off the lock (see there).
+      this.flushQueued = true;
+      void withSessionsFile(this.path, async () => {
+        this.flushQueued = false;
+        this.flush();
+      });
     }, FLUSH_DEBOUNCE_MS);
   }
 
+  /** Must keep swallowing I/O errors — it runs from a timer nobody awaits, and
+   *  its counterpart flushNowOrThrow is the one that reports them. Reads
+   *  `entries` here rather than taking a snapshot at the call site: see
+   *  scheduleFlush. */
   private flush(): void {
     try {
-      if (!existsSync(this.dir)) mkdirSync(this.dir, { recursive: true });
-      const data: FileShape = {
-        version: 1,
-        sessions: Array.from(this.entries.values()),
-      };
-      const tmp = `${this.path}.tmp`;
-      writeFileSync(tmp, JSON.stringify(data, null, 2));
-      renameSync(tmp, this.path);
-      if (process.platform !== "win32") {
-        try { chmodSync(this.path, 0o600); } catch { /* ignore */ }
-      }
+      writePersistedAtomic(this.path, Array.from(this.entries.values()));
     } catch (err) {
       log.error("failed to persist sessions.json: %s", err);
     }

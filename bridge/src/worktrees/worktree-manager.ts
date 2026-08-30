@@ -1,7 +1,8 @@
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { readdir, rm, rmdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { resolveAbDir } from "../antgrid-dir";
+import { listProcessesWithCwdUnder, type DirectoryHolder } from "../win32-process";
 import { branchSlug, checkoutDirName, projectRootName, sessionWords } from "./checkout-names";
 import { readCheckoutOwner, sameRepository } from "./checkout-owner";
 import { CheckoutStore } from "./checkout-store";
@@ -9,7 +10,7 @@ import { isManagedCheckoutKind, type CheckoutRecord } from "./checkout-types";
 import { parseWorktreeList } from "./git-worktree-list";
 import { pathBelow } from "./path-guard";
 import { runGit, type GitRunner } from "./project-resolver";
-import { logGitFailure, logWorktreeEvent, worktreeErrorCode } from "./worktree-log";
+import { logDirectoryHolders, logGitFailure, logWorktreeEvent, worktreeErrorCode } from "./worktree-log";
 
 /** Abbreviated on purpose. Every character in a managed checkout's path is one
  * the worktree's own deepest file cannot have: Windows still resolves most APIs
@@ -53,6 +54,57 @@ async function removeWithRetries(path: string): Promise<void> {
   }
 }
 
+/** How many holders one message names before it stops counting. The message
+ * reaches a dialog, and a directory this thoroughly held is one story rather
+ * than eight — the rest are in the local log, and the message says how many it
+ * left out rather than dropping them silently. */
+const MAX_NAMED_HOLDERS = 3;
+
+/** How many survivors in one reconcile sweep may pay for a holder scan. The
+ * enumeration walks every process on the machine synchronously, and this sweep
+ * rides on a create the user is waiting for; the first survivors tell the same
+ * story the twentieth would. The event is still emitted for every one of them —
+ * only the names are capped. */
+const MAX_RECLAIM_HOLDER_SCANS = 2;
+
+/** The clause a failed delete appends to name what is holding the directory, or
+ * `""` when nothing could be named — the sentence has to read as it always did
+ * on a platform that cannot answer, with no dangling "held by".
+ *
+ * Each holder is spelled RELATIVE to the checkout: a host path never crosses
+ * the session wire, and the subdirectory is the actionable half anyway — the
+ * process is a `bun test` the agent left running in `bridge/`, not something
+ * about where the user keeps their files. */
+function describeHolders(root: string, holders: readonly DirectoryHolder[]): string {
+  if (holders.length === 0) return "";
+  const named = holders.slice(0, MAX_NAMED_HOLDERS)
+    .map((holder) => `${holder.name} (pid ${holder.pid})${holderLocation(root, holder.cwd)}`);
+  const rest = holders.length - named.length;
+  return ` Held by ${named.join(", ")}${rest > 0 ? `, and ${rest} more` : ""}.`;
+}
+
+/** Empty for a holder sitting in the checkout root itself, and for one whose
+ * current directory lies outside it — a location that cannot be spelled
+ * relative to the checkout is left out rather than guessed at.
+ *
+ * Gated on `pathBelow` rather than on the shape of `relative`'s answer, because
+ * the two differ exactly where it matters: `relative` reports a cross-root pair
+ * (another drive letter, a UNC share) as an ABSOLUTE path, which no `..` test
+ * catches, and this string crosses the session wire. */
+function holderLocation(root: string, cwd: string): string {
+  // Tried under the realpath'd spelling too, because the two sides are spelled
+  // differently by construction: `listProcessesWithCwdUnder` matches a holder
+  // under BOTH spellings of its root, while the kernel reports whatever path
+  // the process itself was given. A holder found only under the other spelling
+  // clears the enumeration and fails this test, dropping the subdirectory —
+  // the actionable half — on exactly the machines (a junction, a `subst`ed
+  // drive, an 8.3 profile path) the enumeration was widened for.
+  for (const [base, path] of [[root, cwd], [canonical(root), canonical(cwd)]] as const) {
+    if (pathBelow(base, path)) return ` in ${relative(base, path)}`;
+  }
+  return "";
+}
+
 /** How many same-stem branches to walk before giving up. A stem carries the
  * session's own word pair, so reaching even the low tens means something is
  * generating sessions in a loop — not a user naming things alike. */
@@ -80,6 +132,14 @@ export type WorktreeErrorCode =
   | "WORKTREE_DIRTY"
   | "WORKTREE_UNPUSHED"
   | "WORKTREE_DELETE_FAILED"
+  // The same wreckage as WORKTREE_DELETE_FAILED, split off for one reason: the
+  // app carries a copy arm for that code which REPLACES the bridge's message,
+  // which is correct while the message names no cause. Here it does name one
+  // — the live processes holding the directory — and that clause is the only
+  // thing separating an actionable failure from "Permission denied". A code
+  // with no arm falls through to `error.message`, so this one must never gain
+  // one, and its message must always read as a sentence to the user.
+  | "WORKTREE_DELETE_HELD"
   // Raised by SessionManager, not this file: the delete flag's lifetime must be
   // exactly one operation, so a second delete (or a start) against a session
   // already being removed is refused rather than allowed to race it. The app has
@@ -88,7 +148,11 @@ export type WorktreeErrorCode =
   | "WORKTREE_DELETE_IN_PROGRESS";
 
 export class WorktreeError extends Error {
-  constructor(readonly code: WorktreeErrorCode, message: string) {
+  /** @param holders live processes found holding the directory this failure is
+   *  about, when that was asked and answered. It rides on the error because the
+   *  `*_failed` event is logged by the caller that catches it, and the count is
+   *  the one part of the holder detail an analytics payload may carry. */
+  constructor(readonly code: WorktreeErrorCode, message: string, readonly holders?: number) {
     super(message);
     this.name = "WorktreeError";
   }
@@ -135,6 +199,10 @@ export interface WorktreeManagerOptions {
   now?: () => number;
   /** Required after a bridge restart to remove a missing worktree registration. */
   resolveRepoPath?: (projectId: string) => Promise<string | undefined>;
+  /** The seam for the Win32 process enumeration, which has nothing to stand in
+   * for it: it reads the real machine's process table, so a test can neither
+   * arrange a holder nor assert on what a message made of one says. */
+  listHolders?: (path: string) => DirectoryHolder[];
 }
 
 function canonical(path: string): string {
@@ -150,6 +218,7 @@ export class WorktreeManager {
   private readonly storeFor: (projectId: string) => CheckoutStore;
   private readonly newCheckoutId: () => string;
   private readonly now: () => number;
+  private readonly listHolders: (path: string) => DirectoryHolder[];
   private readonly repoPaths = new Map<string, string>();
 
   constructor(private readonly options: WorktreeManagerOptions = {}) {
@@ -158,6 +227,7 @@ export class WorktreeManager {
     this.storeFor = options.checkoutStore ?? ((projectId) => new CheckoutStore(this.abDir, projectId));
     this.newCheckoutId = options.newCheckoutId ?? shortCheckoutId;
     this.now = options.now ?? Date.now;
+    this.listHolders = options.listHolders ?? listProcessesWithCwdUnder;
   }
 
   async prepareForSession(args: PrepareWorktreeArgs): Promise<CheckoutRecord> {
@@ -312,6 +382,7 @@ export class WorktreeManager {
       const blocked = code === "WORKTREE_DIRTY" || code === "WORKTREE_UNPUSHED" || code === "WORKTREE_CONFLICT";
       logWorktreeEvent(blocked ? "worktree_delete_blocked" : "worktree_delete_failed", {
         checkoutId: args.checkoutId, elapsedMs: this.now() - startedAt, errorCode: code,
+        holders: error instanceof WorktreeError ? error.holders : undefined,
       });
       throw error;
     }
@@ -356,7 +427,23 @@ export class WorktreeManager {
     // present branch that refused the directory forever.
     if (existsSync(record.path)) await this.reclaimOwnedPath(record, repoPath);
     if (existsSync(record.path)) {
-      throw new WorktreeError("WORKTREE_DELETE_FAILED", "The isolated worktree's directory could not be removed.");
+      // Windows refuses to delete a directory that is any live process's
+      // current directory, and the processes that hold one are routinely
+      // ORPHANS the PTY teardown could not reach — so "Permission denied" is
+      // the whole story the user gets unless the holder is named here.
+      const holders = this.heldBy(record.path);
+      logDirectoryHolders("worktree remove", record.path, holders);
+      if (holders.length > 0) {
+        throw new WorktreeError(
+          "WORKTREE_DELETE_HELD",
+          `The isolated worktree's directory could not be removed.${describeHolders(record.path, holders)}`,
+          holders.length,
+        );
+      }
+      throw new WorktreeError(
+        "WORKTREE_DELETE_FAILED",
+        "The isolated worktree's directory could not be removed.",
+      );
     }
     const verified = await this.inspectRegistration(repoPath, record.path);
     if (verified) throw new WorktreeError("WORKTREE_DELETE_FAILED", "Git still reports the isolated worktree.");
@@ -374,6 +461,14 @@ export class WorktreeManager {
       }
     }
     await this.storeFor(record.projectId).remove(record.id);
+  }
+
+  /** Who is holding a directory that would not go away. Answers `[]` rather
+   * than throwing on any failure, and off Windows, where nothing asks the
+   * question: every caller is already reporting a failed delete, and an
+   * enumeration that failed must never become a second, different failure. */
+  private heldBy(path: string): DirectoryHolder[] {
+    try { return this.listHolders(path); } catch { return []; }
   }
 
   /** The managed-checkout root. Nothing outside it may be deleted by anything
@@ -577,6 +672,7 @@ export class WorktreeManager {
 
     const roots = this.projectRoots(wtRoot, projectId, repoPath, state.records);
     const ourCommonDir = await this.commonDirOf(repoPath, state.records);
+    let scansLeft = MAX_RECLAIM_HOLDER_SCANS;
     for (const { root, entry } of await this.rootEntries(roots)) {
       const dir = resolve(root, entry);
       if (!pathBelow(root, dir) || live.has(canonical(dir))) continue;
@@ -590,8 +686,25 @@ export class WorktreeManager {
       if (this.now() - mtimeMs < RECONCILE_GRACE_MS) continue;
       if (await this.hasLocalChanges(dir)) continue;
       if (repoPath) await this.git(["worktree", "remove", "--force", "--force", dir], repoPath).catch(() => undefined);
+      // One attempt, where the explicit delete gets five. This sweep runs inside
+      // `session:create`, which the app abandons after 15s, and it is itself a
+      // retry loop — a directory it cannot take now is reclaimed at the next
+      // create. Paying the backoff per survivor to save that one round trip is
+      // what turns a stranded checkout into a create that times out, and the
+      // grace period above has already excluded the dying grandchild the
+      // backoff exists to outlast.
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
-      if (!existsSync(dir)) counts.reclaimed++;
+      if (!existsSync(dir)) { counts.reclaimed++; continue; }
+      // Both calls above swallow their failure and a survivor moves no count,
+      // so without this event the sweep reports itself as having found nothing
+      // to do while it fails on the same directories at every create.
+      let holders: DirectoryHolder[] = [];
+      // Spent only when a scan actually happens: the budget counts scans, not
+      // survivors, and a survivor past it must stay indistinguishable from one
+      // nothing could be asked about.
+      if (scansLeft > 0) { scansLeft--; holders = this.heldBy(dir); }
+      logDirectoryHolders("worktree reclaim", dir, holders);
+      logWorktreeEvent("worktree_reclaim_failed", { projectId, holders: holders.length || undefined });
     }
     if (repoPath && counts.reclaimed) await this.git(["worktree", "prune"], repoPath).catch(() => undefined);
   }

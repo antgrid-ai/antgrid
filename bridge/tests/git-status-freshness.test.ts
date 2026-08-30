@@ -39,6 +39,13 @@ async function git(args: string[]): Promise<void> {
   if (code !== 0) throw new Error(await new Response(proc.stderr).text());
 }
 
+async function gitOut(args: string[]): Promise<string> {
+  const proc = Bun.spawn(["git", ...args], { cwd: root, stdout: "pipe", stderr: "pipe" });
+  const out = await new Response(proc.stdout).text();
+  if ((await proc.exited) !== 0) throw new Error(await new Response(proc.stderr).text());
+  return out.trim();
+}
+
 async function initRepo(): Promise<void> {
   await git(["init"]);
   await git(["config", "user.email", "test@antgrid.local"]);
@@ -147,26 +154,37 @@ test("a tree snapshot request answers with git status too", async () => {
 });
 
 test("a FAILED discard still refreshes the Git view", async () => {
+  writeFileSync(join(root, "tracked.ts"), "export const kept = 1;\n");
   await initRepo();
   const { bus, sent } = await bootCore();
   await waitFor(() => sent.some((m) => m.type === "git:status"), "the first git:status");
 
+  // Break the discard's LATER invocations while leaving `git status` healthy:
+  // drop the blob `tracked.ts` would be restored from. That ordering is the
+  // whole point — a discard is several git invocations, and one that fails
+  // after the index has already moved leaves the app holding a staged list the
+  // tree no longer matches.
+  //
+  // Deliberately NOT the earlier `status.showUntrackedFiles=bogus` shape.
+  // Breaking `git status` breaks the very read this asserts on: the refresh
+  // behind the failure returns empty-handed, the re-send is byte-identical to
+  // the cached frame and the bus dedups it away, so the only thing that could
+  // ever satisfy the assertion was a watcher-driven refresh landing after the
+  // config was put back — a 250ms debounce racing a `git config` spawn, which
+  // under load lost and left the 10s poll as the only trigger.
+  const blob = await gitOut(["rev-parse", "HEAD:tracked.ts"]);
+  rmSync(join(root, ".git", "objects", blob.slice(0, 2), blob.slice(2)), { force: true });
+
   writeFileSync(join(root, "staged.ts"), "export const z = 3;\n");
   await git(["add", "staged.ts"]);
+  rmSync(join(root, "tracked.ts"), { force: true });
   await waitFor(() => stagedPaths(sent).includes("staged.ts"), "the staged file");
   const before = sent.filter((m) => m.type === "git:status").length;
 
-  // A discard is several git invocations, and the later ones can fail after the
-  // index has already been reset — so a failure still moves the tree. Breaking
-  // `git status` alone (an invalid mode; reset/ls-files/restore keep working)
-  // is the shape a concurrent `index.lock` takes, and the one the app was left
-  // holding a stale staged list through: an index-only mutation touches
-  // `.git/`, which the watcher ignores, so only the 10s poll ever corrected it.
-  await git(["config", "status.showUntrackedFiles", "bogus"]);
   bus.dispatchInbound(
     createMessage("git:discard", {
       projectId: core!.projectId,
-      files: ["staged.ts"],
+      files: ["staged.ts", "tracked.ts"],
       includeStaged: true,
     }),
     "control",
@@ -177,9 +195,17 @@ test("a FAILED discard still refreshes the Git view", async () => {
     () => sent.some((m) => m.type === "git:discard-result" && m.success === false),
     "the failed discard result",
   );
-  await git(["config", "--unset", "status.showUntrackedFiles"]);
+  // Nothing in the failed discard touches the WORKTREE — the reset moves the
+  // index and `restore` dies before writing — so no watcher event can produce
+  // this frame. The handler's own refresh is the only thing that can, which is
+  // what makes this an assertion about the mechanism rather than about timing.
+  // Content-checked as well as counted, so a stray refresh cannot stand in for
+  // the one that carries the reset.
   await waitFor(
-    () => sent.filter((m) => m.type === "git:status").length > before,
-    "a git:status refresh behind the failed discard",
+    () =>
+      sent.filter((m) => m.type === "git:status").length > before &&
+      !stagedPaths(sent).includes("staged.ts"),
+    "a git:status refresh, behind the failed discard, without the reset file staged",
   );
+  expect(gitStatusPaths(sent)).toContain("staged.ts");
 });

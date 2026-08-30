@@ -65,6 +65,7 @@ class WorkspaceTabBar extends StatefulWidget {
 
 class _WorkspaceTabBarState extends State<WorkspaceTabBar> {
   final _tabKeys = {for (final view in WorkspaceView.values) view: GlobalKey()};
+  final _scrollController = ScrollController();
 
   @override
   void initState() {
@@ -105,6 +106,12 @@ class _WorkspaceTabBarState extends State<WorkspaceTabBar> {
   }
 
   @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Container(
       height: AbTokens.statusHeaderHeight,
@@ -118,21 +125,40 @@ class _WorkspaceTabBarState extends State<WorkspaceTabBar> {
           // never overflows when the resizable context panel narrows past
           // the tabs' intrinsic width. Expanded gives the scroll view a
           // bounded width; the trailing expand affordance stays fixed.
+          //
+          // The RawScrollbar is what makes that scrollability discoverable
+          // and mouse-draggable rather than a dead end: without it, a narrow
+          // panel with the selection centred (see [_revealSelected]) can push
+          // BOTH end tabs off screen with nothing on screen hinting there's
+          // more to scroll to, and a mouse (no touch drag, no trackpad
+          // gesture) has no obvious way to get there. Top-anchored so it
+          // never competes with each tab's own bottom active-state
+          // underline; `thumbVisibility: true` only ever draws when the
+          // strip actually overflows — a scrollbar has nothing to paint once
+          // every tab already fits.
           Expanded(
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              physics: const ClampingScrollPhysics(),
-              child: Row(
-                children: [
-                  for (final view in WorkspaceView.values)
-                    _TabItem(
-                      key: _tabKeys[view],
-                      view: view,
-                      isActive: view == widget.selected,
-                      onTap: () => widget.onSelected(view),
-                      badgeCount: widget.badges[view] ?? 0,
-                    ),
-                ],
+            child: RawScrollbar(
+              controller: _scrollController,
+              thumbVisibility: true,
+              thickness: 3,
+              radius: const Radius.circular(2),
+              scrollbarOrientation: ScrollbarOrientation.top,
+              child: SingleChildScrollView(
+                controller: _scrollController,
+                scrollDirection: Axis.horizontal,
+                physics: const ClampingScrollPhysics(),
+                child: Row(
+                  children: [
+                    for (final view in WorkspaceView.values)
+                      _TabItem(
+                        key: _tabKeys[view],
+                        view: view,
+                        isActive: view == widget.selected,
+                        onTap: () => widget.onSelected(view),
+                        badgeCount: widget.badges[view] ?? 0,
+                      ),
+                  ],
+                ),
               ),
             ),
           ),

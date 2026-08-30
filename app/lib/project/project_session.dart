@@ -177,6 +177,15 @@ class ProjectSession {
   /// stream and the fallback push. See [MessageRouter.setLifecyclePaused].
   void setLifecyclePaused(bool paused) => _router.setLifecyclePaused(paused);
 
+  /// Fires once the app has declared it can render again — with the
+  /// declaration already on the wire — so a surface that rebuilds from
+  /// snapshots can re-pull into a window the agent is no longer suppressing.
+  /// See [MessageRouter.focusResumed]; this is a project-level edge, and every
+  /// per-checkout bundle whose state the agent SUPPRESSES subscribes to it to
+  /// pull its own — terminals, the file tree, the preview. A bundle carried on
+  /// the status tier (config) is never suppressed and needs no subscription.
+  Stream<void> get focusResumed => _router.focusResumed;
+
   /// Status-tier inbound stream. Always-on (no focus gating), used by sessions
   /// and config services which need to react to small state-tier messages
   /// without burdening the agent's heavy pipeline.

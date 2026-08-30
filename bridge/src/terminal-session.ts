@@ -4,11 +4,19 @@ import { execFile, execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { delimiter, dirname, extname } from "node:path";
 import { logger } from "./logger";
+import { ETX, type GracefulExitAsk } from "./agents/types";
 const log = logger.child({ component: "terminal-session" });
 import { createMessage, type AbMessage } from "./protocol";
 import { findOnPath } from "./tool-detector";
 import { TerminalNotificationScanner, type NotificationEvent } from "./notification-scanner";
 import { VtCapabilityResponder } from "./vt-capability-responder";
+import {
+  createKillOnCloseJob,
+  snapshotDescendants,
+  survivingProcesses,
+  type ProcessIdentity,
+  type Win32Job,
+} from "./win32-process";
 
 /**
  * When ANTGRID_DEBUG_PTY_LOG is set, every PTY output chunk is appended to that
@@ -77,10 +85,15 @@ export function processGroupSpawn(platform: NodeJS.Platform = process.platform):
  *
  * The two platforms are reached differently and fail differently. Windows walks
  * parent links, so the tree must die BEFORE the leader: once the leader exits
- * its children are re-parented out of reach. POSIX names the process group,
- * which needs no ordering — but a pid that leads no group names no group, and
- * the signal is then a harmless ESRCH that quietly reaches nothing. That is why
- * callers spawning outside a PTY must pass `processGroupSpawn()`.
+ * its children are re-parented out of reach. It walks the LIVE table, so a
+ * process whose parent has ALREADY exited is unreachable to it whatever the
+ * ordering — and those orphans are the ordinary survivors of an agent session.
+ * That half is covered by the kill-on-close job every Windows PTY is also
+ * enclosed in (`TerminalSession.spawn`); this function is one of the two
+ * sweeps, never the whole of it. POSIX names the process group, which needs no
+ * ordering — but a pid that leads no group names no group, and the signal is
+ * then a harmless ESRCH that quietly reaches nothing. That is why callers
+ * spawning outside a PTY must pass `processGroupSpawn()`.
  *
  * The kill is issued synchronously on both platforms; only the WAITING is
  * deferred. The promise resolves once taskkill has exited, so a caller that
@@ -112,17 +125,90 @@ export function killProcessTree(pid: number): Promise<void> {
     }
     return Promise.resolve();
   }
+  return taskkillTrees([pid]);
+}
+
+/**
+ * One `taskkill /F /T` naming every pid, never one invocation each.
+ *
+ * The 5s ceiling is per INVOCATION, so a second call is a second 5s the
+ * teardown budget has to absorb — and `SessionManager.stopAndAwait` spends one
+ * `TEARDOWN_TIMEOUT_MS` on the ask and the whole sweep together. taskkill
+ * accepts repeated `/PID`, so the roots of one sweep belong in one call.
+ *
+ * Resolves on success, failure and timeout alike: already gone, never started,
+ * or refused all leave the caller's own kill of the leader as the next step,
+ * and a delete that goes on to fail reports why. It never rejects.
+ */
+function taskkillTrees(pids: readonly number[]): Promise<void> {
+  const targets = pids.filter((pid) => Number.isInteger(pid) && pid > 0);
+  if (targets.length === 0) return Promise.resolve();
+  const args = ["/F", "/T", ...targets.flatMap((pid) => ["/PID", String(pid)])];
   return new Promise<void>((resolve) => {
-    // Resolves on success, failure and timeout alike: already gone, never
-    // started, or refused all leave the caller's own kill of the leader as the
-    // next step, and a delete that goes on to fail reports why.
-    execFile(
-      "taskkill",
-      ["/F", "/T", "/PID", String(pid)],
-      { timeout: 5_000, windowsHide: true },
-      () => resolve(),
-    );
+    execFile("taskkill", args, { timeout: 5_000, windowsHide: true }, () => resolve());
   });
+}
+
+/**
+ * Kill the processes from a pre-ask snapshot that are STILL the same
+ * processes.
+ *
+ * The reach a graceful exit costs. `taskkill /T` walks live parent links, so a
+ * leader that left on its own takes every route to its survivors with it, and
+ * the PTY's job does not cover a child created through `ShellExecute`. What is
+ * left is the snapshot taken while the tree was whole — filtered through
+ * `survivingProcesses`, because a pid on its own may since have been reissued
+ * to a stranger.
+ *
+ * `/T` as well as `/F`: each survivor may have started a tree of its own, and
+ * those links ARE live.
+ *
+ * `alsoKill` carries the roots whose parent links are still whole — the PTY
+ * leader when it ignored the ask — so the whole sweep is ONE taskkill and one
+ * 5s ceiling rather than two. Naming them alongside the survivors also means
+ * the identity filter runs against the process table as it is BEFORE the
+ * leader kill, which is the freshest it can be.
+ *
+ * A snapshot that cannot be verified is not killed: `survivingProcesses`
+ * answers null when the process table is unreadable, and a `/PID` that has
+ * since been reissued takes a stranger's whole tree with it.
+ */
+function killSnapshotSurvivors(
+  snapshot: readonly ProcessIdentity[],
+  alsoKill: readonly number[] = [],
+): Promise<void> {
+  if (snapshot.length === 0) return taskkillTrees(alsoKill);
+  const alive = survivingProcesses(snapshot);
+  if (alive === null) {
+    log.warn("process table unreadable; %d snapshotted survivor(s) left unswept", snapshot.length);
+    return taskkillTrees(alsoKill);
+  }
+  return taskkillTrees([...alsoKill, ...alive.map((p) => p.pid)]);
+}
+
+/**
+ * Reported once per distinct reason, at `warn`, naming the terminal it first
+ * hit.
+ *
+ * Without a job or a descendant snapshot the Windows sweep cannot reach an
+ * orphan, so a soft ask would COST that sweep rather than soften it and the
+ * grace is skipped. Unreported it is skipped silently, on every teardown, for
+ * the whole life of the bridge, and the only field symptom is an agent that
+ * never gets to flush — which looks exactly like an agent that ignores the
+ * ask; those are different bugs with different fixes. Keyed on the reason
+ * rather than a single flag so one failure mode cannot mask the others, and
+ * per-process rather than per-terminal so a machine that can never do this
+ * says so once.
+ */
+const warnedGraceRefused = new Set<string>();
+function warnGraceRefused(terminalId: string, reason: string): void {
+  if (process.platform !== "win32" || warnedGraceRefused.has(reason)) return;
+  warnedGraceRefused.add(reason);
+  log.warn(
+    '%s (first seen on terminal "%s"); agents on this machine are force-killed rather than asked to exit',
+    reason,
+    terminalId,
+  );
 }
 
 /** A spawned child reachable by `killChildTree`: `ChildProcess` satisfies it. */
@@ -203,6 +289,62 @@ export function routeScannerEvent(
   onNotification(ev as NotificationRouteEvent);
 }
 
+/**
+ * How long an agent PTY is given to leave on its own before the sweep runs.
+ *
+ * Sized against the path that pays for it. `session:stop`, `session:archive`
+ * and `terminal:stop` are answered on the wire before the process is gone, so
+ * the only cost there is how long a stopped row takes to stop rendering. The
+ * binding budget is the delete: `SessionManager.stopAndAwait` spends ONE
+ * `TEARDOWN_TIMEOUT_MS` (15s) on the exit and the tree together, and a false
+ * answer there is converted into a user-visible `WORKTREE_DELETE_FAILED`, and
+ * `stopAndAwait`'s trailing tree wait has no bound of its own. Every term of
+ * that sum belongs here, because leaving one out is how the budget silently
+ * fills: this grace, PLUS `taskkill`'s 5s ceiling — one invocation, which is
+ * why `taskkillTrees` names every root in a single call — PLUS
+ * `awaitSnapshotGone`'s 1s poll. The app's mode-flip reply timeout (25s) has
+ * to stay above the whole of it.
+ *
+ * The floor is what an agent actually takes: measured against the installed
+ * claude-code on Windows, ask→exit ran 1.4-3.0s across runs in a large repo. A
+ * budget under that spends the whole grace and force-kills anyway, which is
+ * the bug wearing a longer stopwatch.
+ */
+export const AGENT_GRACE_MS = 4000;
+
+/**
+ * Ceiling on the shutdown grace, on Windows only.
+ *
+ * `HostController.shutdownOwnedHost` posts `host:shutdown`, polls for 3s and
+ * then force-kills the tree unconditionally, so this is sized to leave room in
+ * those 3s for everything downstream of the ask: the sweep, the awaited
+ * `teardownServices`, and the in-flight git refreshes that must be waited out
+ * rather than abandoned. It does NOT guarantee they fit — a chat runtime's own
+ * dispose has its own budget (codex: a 2s EOF wait, then a kill and a bounded
+ * reap) and a machine with one live can overrun the poll. That is survivable
+ * only because the force-kill it runs into sweeps the same tree by other means;
+ * anything added here whose VALUE depends on completing before `process.exit`
+ * has to be bounded at its own site. Raising this without raising that poll
+ * buys nothing: the extra time is spent inside a window the caller has already
+ * given up on. It also stays inside the up-to-5s drain root CLAUDE.md sizes the
+ * MSIX destage risk against, so the documented figure there still holds.
+ *
+ * POSIX keeps the caller's own budget: shutdown there already polled for the
+ * full 5s before force-killing, and cutting it would take grace away from a
+ * platform that had it.
+ *
+ * So app-quit is the one path where the ask is genuinely best-effort: it sits
+ * below the measured claude-code exit range and cannot be raised to cover it
+ * without eating the sweep's share of the same 3s. The per-session paths,
+ * which answer to `TEARDOWN_TIMEOUT_MS` instead, are where an agent reliably
+ * gets to run its own exit path.
+ */
+export const WINDOWS_SHUTDOWN_GRACE_MS = 2000;
+
+const DEFAULT_SIGNAL: NodeJS.Signals = "SIGTERM";
+const DEFAULT_KEYSTROKES: readonly string[] = [ETX];
+const DEFAULT_KEYSTROKE_GAP_MS = 300;
+
 export interface TerminalSessionOptions {
   terminalId?: string;
   name?: string;
@@ -236,6 +378,9 @@ export interface TerminalSessionOptions {
    *  probe's warning can name the agent that actually went quiet. Distinct from
    *  suppressOscNotifications, which is set for every plugin-source agent. */
   hookAliveProbeAgent?: string;
+  /** This agent's measured refinement of the platform's soft ask, or absent for
+   *  the platform default. See {@link GracefulExitAsk}. */
+  gracefulAsk?: GracefulExitAsk;
 }
 
 const BATCH_INTERVAL_MS = 16;
@@ -386,6 +531,35 @@ export class TerminalSession {
   private pty: IPty | null = null;
   private disposables: IDisposable[] = [];
   private treeKilledPromise: Promise<void> = Promise.resolve();
+  /** Windows only, and only while this session owns a live tree — see
+   *  `encloseInJob`. Null everywhere else. */
+  private job: Win32Job | null = null;
+  /** Whether a job was ever assigned, which is a different question from
+   *  whether one is still held: `closeJob` nulls the handle on a natural exit,
+   *  and the Windows grace is gated on the SWEEP being job-backed, not on the
+   *  handle still being open. Conflating them makes a session that has already
+   *  closed once report the FFI as unavailable. */
+  private hadJob = false;
+  /** A soft ask is in flight. Makes `close` idempotent: a stop racing a delete
+   *  is ordinary, and a second ask that restarts the timer would push the real
+   *  teardown out for as long as the user keeps pressing. */
+  private closing = false;
+  /** The in-flight grace, so a later caller with a TIGHTER budget can cut it —
+   *  see `shortenGrace`. Undefined whenever no ask is waiting. */
+  private graceTimer: ReturnType<typeof setTimeout> | undefined;
+  private graceExpire: (() => void) | undefined;
+  private graceDeadline = Infinity;
+  /** Whether the ask was answered, once one has been made. Read by shutdown so
+   *  its log can tell a machine where agents exit on request from one where
+   *  every ask is ignored. */
+  private _askAnswered: boolean | undefined;
+  /** Set once a sweep has actually run for this session's tree. A later `kill`
+   *  must not re-issue `taskkill` against the leader's pid: the process is gone
+   *  and Windows may have reissued that pid to a stranger. */
+  private swept = false;
+  /** Resolved by the PTY's own exit, so a grace period never polls a map. */
+  private exitWaiters = new Set<() => void>();
+  private ask: GracefulExitAsk;
 
   // Output batching — collect chunks, join on flush
   private batchChunks: string[] = [];
@@ -429,6 +603,7 @@ export class TerminalSession {
     this.suppressOscNotifications = opts.suppressOscNotifications ?? false;
     this.suppressOscTitle = opts.suppressOscTitle ?? false;
     this._hookAliveProbeAgent = opts.hookAliveProbeAgent;
+    this.ask = opts.gracefulAsk ?? {};
 
     this.shell = opts.shell ?? this.detectShell();
     this.name = opts.name ?? opts.command ?? this.shell;
@@ -437,11 +612,24 @@ export class TerminalSession {
   get cols(): number { return this._cols; }
   get rows(): number { return this._rows; }
   get driverClientId(): string | null { return this._driverClientId; }
-  get isRunning(): boolean { return this._running; }
+  /** A PTY that has been ASKED to leave is on its way out, not running. It has
+   *  to answer the same way `SessionManager.isRunning` does — `agent:status`
+   *  and the session rows are two channels of the same client, and for the
+   *  seconds a grace is worth they would otherwise contradict each other. */
+  get isRunning(): boolean { return this._running && !this.closing; }
   get shellBinary(): string { return this.command ?? this.shell; }
   // The agent whose injection includes a SessionStart /hook-alive ping — the
   // drift probe arms for these and no others, and names this in its warning.
   get hookAliveProbeAgent(): string | undefined { return this._hookAliveProbeAgent; }
+  /** This agent's declared grace, or undefined for the platform default. */
+  get graceMs(): number | undefined { return this.ask.graceMs; }
+  /** Whether a sweep of this session's tree reaches the orphans a parent-link
+   *  walk cannot. False off Windows, where nothing needs it, and on a machine
+   *  whose Win32 layer refused to load — which is the one case where a soft ask
+   *  would still cost the sweep, so the grace is gated on it. */
+  get jobBacked(): boolean { return this.hadJob; }
+  /** Undefined until this session has been asked to leave. */
+  get askAnswered(): boolean | undefined { return this._askAnswered; }
 
   // Re-enable the OSC scanner after it was suppressed for a plugin-owned agent.
   // Self-healing fallback for when the plugin's hooks never check in: restores
@@ -556,6 +744,14 @@ export class TerminalSession {
       name: "xterm-256color",
     });
 
+    // First statement after the pid exists, and nothing may await before it:
+    // the child is already running, and anything it spawns ahead of the
+    // assignment is created outside the job and stays beyond every sweep.
+    this.encloseInJob(this.pty.pid);
+
+    this.closing = false;
+    this.swept = false;
+    this._askAnswered = undefined;
     this._running = true;
 
     this.onMessage(
@@ -602,6 +798,14 @@ export class TerminalSession {
         this._running = false;
         this.flushBatch();
         this.dispose();
+        // Before the job close below, so a grace period waiting on this exit
+        // resolves into a microtask that already finds the tree reaped.
+        this.settleExitWaiters();
+        // An exit nobody asked for takes the tree with it too: an agent that
+        // finishes on its own is the common case, and the helpers it leaves
+        // behind hold a checkout subdirectory open — which on Windows is
+        // exactly what makes that checkout undeletable.
+        this.closeJob();
         log.info(`Terminal "${this.terminalId}" exited with code ${exitCode}`);
         this.onMessage(
           createMessage("terminal:exited", {
@@ -611,6 +815,65 @@ export class TerminalSession {
         );
       })
     );
+  }
+
+  /**
+   * Enclose the PTY's tree in a job the kernel empties when this session is
+   * finished with it.
+   *
+   * `killProcessTree` walks live parent links, which by construction cannot
+   * reach a process whose parent has already exited — and those are the
+   * ordinary survivors here. An agent's helpers (sandbox command runners,
+   * analysis servers) outlive the PTY holding a checkout subdirectory as their
+   * current directory, and Windows refuses to delete a directory that is any
+   * process's cwd, so `git worktree remove` aborts and the isolated session
+   * becomes undeletable. Job membership is inherited at `CreateProcess` and
+   * survives the parent's death, so a job reaches exactly what the walk
+   * cannot. It narrows the failure rather than closing it: a child created
+   * through `ShellExecute` is spawned by another process entirely and joins
+   * that one's job.
+   *
+   * The pid is the right root: bun-pty reports the SHELL it spawned, and the
+   * ConPTY's `conhost.exe` is a sibling created by this process that carries
+   * our cwd, not the PTY's — measured, so it holds no checkout to begin with.
+   *
+   * Inert off Windows, where the process group already reaches the tree and an
+   * orphan blocks no delete, and inert whenever the Win32 layer failed to
+   * load: `createKillOnCloseJob` answers null for both, so a spawn proceeds
+   * exactly as it does with no job at all.
+   */
+  private encloseInJob(pid: number): void {
+    // A second spawn into this session replaces the tree the old handle owns.
+    this.closeJob();
+    this.hadJob = false;
+    const job = createKillOnCloseJob();
+    if (job === null) {
+      warnGraceRefused(this.terminalId, "the kill-on-close job could not be created");
+      return;
+    }
+    // A kill-on-close job with no members is a kernel object with nothing to
+    // reap — drop it rather than hold a handle for a tree it does not own.
+    if (!job.assign(pid)) {
+      job.close();
+      warnGraceRefused(this.terminalId, "this PTY could not be assigned to a kill-on-close job");
+      return;
+    }
+    this.job = job;
+    this.hadJob = true;
+  }
+
+  /**
+   * Closing the handle IS the reap: every member still running dies with it,
+   * orphans included. Cleared from the session in the same step, so the handle
+   * is closed exactly once however many teardown paths reach it.
+   *
+   * Nothing here runs when the bridge is force-killed, and nothing needs to —
+   * the kernel closes our handles as it reaps us, which sweeps every PTY tree
+   * on the one path that skips all shutdown code.
+   */
+  private closeJob(): void {
+    this.job?.close();
+    this.job = null;
   }
 
   private enqueueBatch(data: string): void {
@@ -700,19 +963,110 @@ export class TerminalSession {
     }
   }
 
-  killGracefully(): void {
-    if (!this.pty || !this._running) return;
-    try {
-      process.kill(this.pty.pid, "SIGTERM");
-    } catch {
-      // Process may have already exited
-    }
-  }
-
   /** Resolves once this session's process tree is gone — see `killProcessTree`
    *  for who needs to wait and why. Already-resolved before any `kill()`. */
   get treeKilled(): Promise<void> {
     return this.treeKilledPromise;
+  }
+
+  /**
+   * Ask this session's process to leave, and sweep whatever is left of its tree
+   * once it has, or once `graceMs` has passed.
+   *
+   * NOT `async`, and it may not become one. `SessionManager.stopAndAwait` reads
+   * `treeKilled` immediately after asking for the stop, deliberately — the exit
+   * handler drops the session from the map, so there is no later chance to read
+   * it. A `close` that assigned `treeKilledPromise` after any suspension would
+   * hand that read the already-resolved placeholder, the tree wait would be
+   * vacuous, and `git worktree remove` would then run against a live tree: on
+   * Windows a sharing violation, and one no retry can clear.
+   *
+   * The escalation is UNCONDITIONAL. Nothing branches on whether the ask was
+   * answered, which is what makes a wrong guess about an agent cost latency
+   * instead of correctness — and an agent that leaves on its own still leaves
+   * helpers behind, so the answered branch owes a sweep too.
+   */
+  close(graceMs: number): Promise<void> {
+    if (this.closing) {
+      // A later caller may only TIGHTEN a grace already running, never extend
+      // it: shutdown clamps to `WINDOWS_SHUTDOWN_GRACE_MS` because the app
+      // force-kills this whole tree seconds after asking, and handing it back
+      // a per-session 4s chain spends that window on the ask alone.
+      this.shortenGrace(graceMs);
+      return this.treeKilledPromise;
+    }
+    const pty = this.pty;
+    if (!pty || !this._running || graceMs <= 0) {
+      this.kill();
+      return this.treeKilledPromise;
+    }
+    if (process.platform === "win32" && !this.hadJob) {
+      // Without the job the parent-link walk is the whole sweep, and asking
+      // first is precisely what destroys it. Fall back to what still works.
+      warnGraceRefused(this.terminalId, "no kill-on-close job is held for this PTY");
+      this.kill();
+      return this.treeKilledPromise;
+    }
+    // Taken while the tree is still whole: see `killSnapshotSurvivors`. A
+    // snapshot that could not be taken is the same bargain as a missing job —
+    // the only reach a departing leader leaves behind is gone, so the ask
+    // would cost the sweep instead of softening it.
+    let snapshot: readonly ProcessIdentity[] = [];
+    if (process.platform === "win32") {
+      const taken = snapshotDescendants(pty.pid);
+      if (taken === null) {
+        warnGraceRefused(this.terminalId, "this PTY's descendants could not be snapshotted");
+        this.kill();
+        return this.treeKilledPromise;
+      }
+      snapshot = taken;
+    }
+    this.closing = true;
+    // Registered BEFORE the ask, so a process that exits inside the ask itself
+    // cannot land its exit between the two.
+    const exited = this.awaitExitWithin(graceMs);
+    // An agent's farewell is not an attention signal — it must not ring a
+    // phone on the way out.
+    this.suppressOscNotifications = true;
+    this.askToExit(pty);
+    const previous = this.treeKilledPromise;
+    this.treeKilledPromise = exited.then((onOwn) => {
+      this._askAnswered = onOwn;
+      if (onOwn) {
+        log.info(`Terminal "${this.terminalId}" exited on request`);
+      } else {
+        log.warn(
+          `Terminal "${this.terminalId}" ignored the graceful ask after ${graceMs}ms; force-killing`,
+        );
+      }
+      // The exit handler has already done both on the answered branch; this is
+      // for the branch where nothing exited, whose batched output would
+      // otherwise die with the process.
+      this._running = false;
+      this.flushBatch();
+      return this.gracefulSweep(pty, snapshot, onOwn);
+    }).catch((err) => {
+      // `treeKilled` must never reject, exactly as `killProcessTree` must not:
+      // most callers fire and forget, `killAllGracefully` gathers these in a
+      // `Promise.all` whose rejection would skip the shutdown steps after it,
+      // and index.ts turns an unhandled rejection into a whole-bridge exit.
+      // The flush above is the one throw site — it runs observer callbacks and
+      // the transport — and losing a final output chunk must not cost a sweep.
+      log.warn(`Terminal "${this.terminalId}" close chain failed: %s`, err);
+    }).then(() => previous);
+    return this.treeKilledPromise;
+  }
+
+  /** Cut an in-flight grace short. Never lengthens one — a caller whose budget
+   *  is already covered by the running deadline has nothing to say. */
+  private shortenGrace(graceMs: number): void {
+    if (this.graceTimer === undefined || this.graceExpire === undefined) return;
+    const ms = Math.max(0, graceMs);
+    const deadline = Date.now() + ms;
+    if (deadline >= this.graceDeadline) return;
+    this.graceDeadline = deadline;
+    clearTimeout(this.graceTimer);
+    this.graceTimer = setTimeout(this.graceExpire, ms);
   }
 
   kill(): void {
@@ -723,7 +1077,23 @@ export class TerminalSession {
     // Captured before the chain so a later respawn reassigning `this.pty`
     // cannot redirect the deferred handle kill at the new PTY.
     const pty = this.pty;
-    if (!pty) return;
+    // Taken off the session for the same reason, and so the exit this kill
+    // provokes finds nothing left to close.
+    const job = this.job;
+    this.job = null;
+    if (!pty || this.swept) {
+      // A tree already swept must not be walked again: the leader's pid is free
+      // by then, and `taskkill /T` against a reissued one takes a stranger's
+      // whole tree with it.
+      job?.close();
+      return;
+    }
+    // A re-kill finds the job already taken, so its own chain closes nothing —
+    // and `treeKilled` is read by whoever asks LAST. Chaining the previous
+    // promise in is what keeps that read covering the job close: without it a
+    // second kill lands a promise that resolves while the first chain, the only
+    // one holding the handle, is still walking the tree.
+    const previous = this.treeKilledPromise;
     this.treeKilledPromise = killProcessTree(pty.pid).then(() => {
       try {
         pty.kill();
@@ -731,6 +1101,173 @@ export class TerminalSession {
         // On Windows `taskkill /T` normally reaped the leader already, so this
         // lands on a dead handle by design rather than by accident.
       }
+      // Last, so the parent-link walk above still runs against a live tree.
+      // The job is the backstop for what that walk cannot see — an orphan
+      // whose parent is already gone — never a replacement for it, and
+      // `treeKilled` therefore still resolves only once both have been issued.
+      job?.close();
+      this.swept = true;
+      return previous;
     });
+  }
+
+  /**
+   * The one soft ask each platform actually has.
+   *
+   * POSIX signals the GROUP, not the bare leader. bun-pty's own `setsid` makes
+   * the PTY child a session leader, and the SIGKILL this escalates to names
+   * that same group, so signalling the leader alone is strictly narrower than
+   * its own escalation — and the leader IS the `sh -c` wrap `spawn()` puts
+   * around a free-form command, so the agent underneath it never sees the ask.
+   *
+   * Windows has no soft signal to send: bun-pty's kill ignores its argument,
+   * node maps every signal to TerminateProcess, and `GenerateConsoleCtrlEvent`
+   * is unreachable from here — the ConPTY child leads no process group
+   * (CTRL_BREAK to its pid answers ERROR_INVALID_PARAMETER), and the
+   * AttachConsole + group-0 route reported success and delivered nothing, twice,
+   * including against a non-ConPTY control child. What DOES arrive is a
+   * KEYSTROKE: a raw-mode reader receives 0x03 verbatim, a cooked-mode one
+   * receives nothing at all. That asymmetry is why only agent PTYs are asked —
+   * a build tool in a service or setup PTY could not see this if we sent it.
+   */
+  private askToExit(pty: IPty): void {
+    if (process.platform !== "win32") {
+      // `-0` is `0`, which names OUR OWN process group — the same floor
+      // `killProcessTree` keeps, and for the same reason.
+      if (!Number.isInteger(pty.pid) || pty.pid <= 0) return;
+      const signal = this.ask.signal ?? DEFAULT_SIGNAL;
+      try {
+        process.kill(-pty.pid, signal);
+      } catch {
+        // A leader that somehow leads no group still deserves the ask.
+        try {
+          process.kill(pty.pid, signal);
+        } catch {
+          // Already gone; the exit waiter is about to answer.
+        }
+      }
+      return;
+    }
+    const keystrokes = this.ask.keystrokes ?? DEFAULT_KEYSTROKES;
+    const gapMs = this.ask.gapMs ?? DEFAULT_KEYSTROKE_GAP_MS;
+    let next = 0;
+    const press = (): void => {
+      if (!this._running || next >= keystrokes.length) return;
+      // `TerminalSession.write`, below the manager's — the work-status fold is
+      // fed from agent-core's inbound `terminal:input` handler, so a teardown
+      // keystroke can never flip a dying session to "working".
+      this.write(keystrokes[next++]!);
+      if (next < keystrokes.length) setTimeout(press, gapMs);
+    };
+    press();
+  }
+
+  /** True if this session's PTY exited within `ms`. The timer is kept on the
+   *  session so `shortenGrace` can cut it. */
+  private awaitExitWithin(ms: number): Promise<boolean> {
+    if (!this._running) return Promise.resolve(true);
+    this.graceDeadline = Date.now() + ms;
+    return new Promise<boolean>((resolve) => {
+      const expire = (): void => {
+        this.graceTimer = undefined;
+        this.graceExpire = undefined;
+        this.exitWaiters.delete(waiter);
+        resolve(false);
+      };
+      const waiter = (): void => {
+        if (this.graceTimer !== undefined) clearTimeout(this.graceTimer);
+        this.graceTimer = undefined;
+        this.graceExpire = undefined;
+        this.exitWaiters.delete(waiter);
+        resolve(true);
+      };
+      this.graceExpire = expire;
+      this.graceTimer = setTimeout(expire, ms);
+      this.exitWaiters.add(waiter);
+    });
+  }
+
+  private settleExitWaiters(): void {
+    const waiters = [...this.exitWaiters];
+    this.exitWaiters.clear();
+    for (const waiter of waiters) waiter();
+  }
+
+  /**
+   * The sweep that follows a grace period, in the order that makes it work: the
+   * reach that still exists first, then the handle, then the job — last, so
+   * everything above it ran against a live tree.
+   *
+   * It resolves only once the tree is actually gone, which the job alone cannot
+   * promise: `CloseHandle` initiates the kill and returns, while `git worktree
+   * remove` runs the instant this settles.
+   */
+  private gracefulSweep(
+    pty: IPty,
+    snapshot: readonly ProcessIdentity[],
+    leaderExited: boolean,
+  ): Promise<void> {
+    // Same floor `kill()` keeps, and for the same reason: a `kill()` landing
+    // inside the grace has already walked this tree and provoked the exit that
+    // ends it, so the pid `reapAfterGrace` would name is free by now and both
+    // its unguarded roots — `taskkill /T` and the POSIX pgid — would then take
+    // a stranger's whole tree. The handle and job below are still owed: closing
+    // a job twice is a no-op and the handle kill is caught.
+    const reaped = this.swept
+      ? Promise.resolve()
+      : this.reapAfterGrace(pty, snapshot, leaderExited);
+    return reaped.then(() => {
+      try {
+        pty.kill();
+      } catch {
+        // Ordinary on the answered branch: the handle is already dead.
+      }
+      this.closeJob();
+      this.swept = true;
+      return this.awaitSnapshotGone(snapshot);
+    });
+  }
+
+  private reapAfterGrace(
+    pty: IPty,
+    snapshot: readonly ProcessIdentity[],
+    leaderExited: boolean,
+  ): Promise<void> {
+    // The leader is still there, so both platforms still have their full reach:
+    // the live parent-link walk on Windows, the process group on POSIX. One
+    // taskkill carries both roots — a second invocation is a second 5s ceiling
+    // the delete's own budget has to absorb.
+    if (!leaderExited) {
+      return process.platform === "win32"
+        ? killSnapshotSurvivors(snapshot, [pty.pid])
+        : killProcessTree(pty.pid);
+    }
+    if (process.platform === "win32") return killSnapshotSurvivors(snapshot);
+    if (!Number.isInteger(pty.pid) || pty.pid <= 0) return Promise.resolve();
+    // The group id IS the leader's pid, and bun-pty has already reaped that
+    // leader — so an empty group is a pgid the kernel may have reissued. A
+    // group with any member left still answers, and its id cannot be reused
+    // while it does.
+    try {
+      process.kill(-pty.pid, 0);
+    } catch {
+      return Promise.resolve();
+    }
+    return killProcessTree(pty.pid);
+  }
+
+  /** Bounded, because both halves of the reap are asynchronous: `taskkill`
+   *  returns before its targets have finished exiting, and closing the job only
+   *  initiates the sweep. Expiring is not a failure to report here — the delete
+   *  that follows names whoever still holds the directory. */
+  private async awaitSnapshotGone(snapshot: readonly ProcessIdentity[]): Promise<void> {
+    if (snapshot.length === 0) return;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      // `?.length === 0`, so an unreadable process table (null) keeps polling:
+      // a waiter must never read a failed enumeration as proof the tree is
+      // gone — `git worktree remove` runs the instant this resolves.
+      if (survivingProcesses(snapshot)?.length === 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
   }
 }

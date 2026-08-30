@@ -85,21 +85,14 @@ void main() {
         find.descendant(of: rowFor(id), matching: find.byType(AbListRow)),
       );
 
-  /// The kebab lives behind a `Visibility` that maintains its size, so it is
-  /// always in the tree — its visibility flag is the assertion, not its absence.
-  bool kebabVisible(WidgetTester tester, String id) => tester
-      .widget<Visibility>(
-        find
-            .ancestor(
-              of: find.descendant(
-                of: rowFor(id),
-                matching: find.byTooltip('Session actions'),
-              ),
-              matching: find.byType(Visibility),
-            )
-            .last,
-      )
-      .visible;
+  bool kebabVisible(WidgetTester tester, String id) =>
+      find
+          .descendant(
+            of: rowFor(id),
+            matching: find.byTooltip('Session actions'),
+          )
+          .evaluate()
+          .isNotEmpty;
 
   testWidgets('a deleting row is marked, pulsed, and inert', (tester) async {
     final transport = FakeAgentTransport();

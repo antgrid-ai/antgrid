@@ -141,4 +141,61 @@ void main() {
     expect(sentOf(t, 'file:read'), isEmpty);
     await session.close();
   });
+
+  test('terminal:snapshot:request re-fires for every live tab on '
+      're-establishment', () async {
+    // The agent DROPS terminal output while suppressed yet keeps bumping the
+    // seq, and only a tab the app has never seen is pulled at discovery, so
+    // without this hydrator a returning tab renders its pre-departure frame
+    // forever.
+    final t = FakeAgentTransport();
+    final session = await makeSession(t);
+    t.emit('agent:status', {
+      'projectId': 'p',
+      'terminals': [
+        {'id': 'a', 'terminalId': 'a', 'name': 'a', 'running': true},
+        {'id': 'b', 'terminalId': 'b', 'name': 'b', 'running': false},
+      ],
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    t.clearSent();
+    expect(sentOf(t, 'terminal:snapshot:request'), isEmpty);
+    t.redriveHydrators();
+    await Future<void>.delayed(Duration.zero);
+
+    // The exited tab is pulled too, deliberately: whatever it printed as it
+    // died went into the suppressed window, and nothing will re-emit it.
+    final pulls = sentOf(t, 'terminal:snapshot:request');
+    expect(pulls.map((m) => m['terminalId']), unorderedEquals(['a', 'b']));
+
+    await session.close();
+  });
+
+  test(
+    'an optimistic pending terminal is not pulled on re-establishment',
+    () async {
+      final t = FakeAgentTransport();
+      final session = await makeSession(t);
+      t.emit('agent:status', {
+        'projectId': 'p',
+        'terminals': [
+          {'id': 'a', 'terminalId': 'a', 'name': 'a', 'running': true},
+        ],
+      });
+      await Future<void>.delayed(Duration.zero);
+
+      // The agent has never confirmed 'c', so it would answer a pull for it with
+      // a warning and no frame; its own terminal:started carries the pull.
+      session.terminalService.createAdHocTerminal('c', name: 'c');
+      t.clearSent();
+      t.redriveHydrators();
+      await Future<void>.delayed(Duration.zero);
+
+      final pulls = sentOf(t, 'terminal:snapshot:request');
+      expect(pulls.map((m) => m['terminalId']), ['a']);
+
+      await session.close();
+    },
+  );
 }

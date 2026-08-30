@@ -1,6 +1,48 @@
 import { JsonRpcEndpoint } from "./jsonrpc-stdio";
 import { resolveToolLaunchPath } from "../launch-path";
-import { stripInheritedCertOverrides } from "../../terminal-session";
+import {
+  killChildTree,
+  processGroupSpawn,
+  stripInheritedCertOverrides,
+} from "../../terminal-session";
+import { logger } from "../../logger";
+const log = logger.child({ component: "codex-spawn" });
+
+/**
+ * How long codex is given to leave on the EOF before it is terminated.
+ *
+ * A chat session has no PTY, so the ladder the PTY path uses does not reach
+ * it — but this runtime has a soft ask of its own that costs nothing to
+ * honour: the app-server reads NDJSON from stdin and exits when that stream
+ * closes. Ending stdin and terminating in the same breath makes that ask
+ * decorative on every platform.
+ */
+const CODEX_EOF_GRACE_MS = 2_000;
+
+/** Ceiling on waiting out the reap after the tree kill — see the kill impl. */
+const CODEX_REAP_CEILING_MS = 5_000;
+
+/**
+ * `true` when `p` settles within `ms`, `false` once the budget is spent.
+ *
+ * `Bun.sleep` cannot be cancelled, and both races here are normally won by the
+ * process exiting — so the loser's timer would go on holding the event loop
+ * open for the rest of its budget, which a shutdown then spends waiting on a
+ * codex that has already gone.
+ */
+async function raceTimeout(p: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      p.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export interface SpawnedCodex {
   endpoint: JsonRpcEndpoint;
@@ -67,6 +109,9 @@ export function spawnCodex(opts: {
   const proc = Bun.spawn([launchPath, ...args], {
     cwd: opts.cwd,
     env,
+    // Precondition for the POSIX half of `killChildTree` below: it signals the
+    // process GROUP, which exists only because this makes the child lead one.
+    ...processGroupSpawn(),
     stdin: "pipe",
     stdout: "pipe",
     // Piped AND continuously drained below (an unconsumed pipe would block
@@ -141,8 +186,11 @@ export function spawnCodex(opts: {
     failureDiagnosis,
     kill: async () => {
       endpoint.dispose();
+      // The ask: the app-server's stdin closing is its own exit signal, and it
+      // is the only one that works identically on all three platforms —
+      // `proc.kill()` is SIGTERM on POSIX and TerminateProcess on Windows.
       void stdin.end();
-      proc.kill();
+      const left = await raceTimeout(proc.exited, CODEX_EOF_GRACE_MS);
       // Codex funnels all app-server state through a single sqlite DB under
       // ~/.codex and holds its lock for the process's whole lifetime. A restart
       // that spawns a new app-server before this one has exited fails hard at
@@ -151,7 +199,13 @@ export function spawnCodex(opts: {
       // turn can take a few hundred ms to go away. (Verified: without this, a
       // stop→immediate-start of a chat session wedges the new codex.) Bounded so a
       // pathological non-reaping kill can't wedge the session's next start forever.
-      await Promise.race([proc.exited, Bun.sleep(5_000)]);
+      if (left) return;
+      log.warn("codex did not exit on stdin close after %dms; terminating", CODEX_EOF_GRACE_MS);
+      // `killChildTree`, not `proc.kill()`: the handle is one process, and
+      // terminating it alone leaves whatever the app-server started behind it
+      // — on Windows with no job around it to sweep them either.
+      await killChildTree({ pid: proc.pid, kill: () => proc.kill() });
+      await raceTimeout(proc.exited, CODEX_REAP_CEILING_MS);
     },
   };
 }

@@ -34,6 +34,30 @@ session's checkout — see `headlessScratchCwd`. History a CLI offers no switch 
 skip is redirected per spawn instead (`HeadlessCommand.scratchEnv`, a fresh dir
 the runner deletes after), so never list a var that also carries credentials.
 
+`AgentSpec.gracefulExit` is the one field that REFINES the default rather than
+declaring a capability, and it is the opposite of `headless` for a reason: a
+guessed argv can do damage, a guessed soft ask cannot, because the sweep that
+follows it is unconditional. Every agent is asked with the platform default;
+an entry only narrows that, and a wrong one costs the grace period and nothing
+else. Add one only from a measured ask→exit, since an invented keystroke count
+is latency on every stop of that agent. Its shape and the `ETX` constant live
+in `agents/types.ts` rather than beside the PTY, because that module is
+declaration-only — the header there says what the reverse import breaks. See
+**Stopping an agent**.
+
+**An agent's native session id is not stable across a resume**, so nothing may
+read a change of it as "a new conversation started". Measured on Claude Code:
+`--resume` copies the transcript into a NEW file and appends under a fresh id,
+so the same thread comes back wearing a different name. Every guard against
+re-naming a session is otherwise per-run — `SessionNamer` and `TitleAttempts`
+both die with the PTY — which is why the winning signal is also written to the
+session row as `autoTitleRank`, and why `SessionManager.noteConversationStart`
+records AT LAUNCH that a run continues the previous conversation. The first
+identity report spends that claim; every rotation after it is a real `/clear`.
+Get either half wrong and a stop/start pays another model spawn and renames the
+session — and not back to the same title, since the transcript read returns the
+LAST few messages, so the new name describes wherever the work had drifted to.
+
 The `agent:tools` advert (and the loopback `tools:list` reply) carries TWO
 arrays, and the split is load-bearing. `tools[]` is the PATH probe — what this
 machine can actually launch. `agents[]` (`agent-catalog.ts`, projected from the
@@ -114,7 +138,7 @@ already has them.
 
 - `config.ts` — Zod schemas for `antgrid.yaml`; var interpolation (`${project.path}`, `${env.VAR}`).
 - `protocol.ts` — message types as Zod discriminated union. `createMessage()`, `parseMessage()`/`parseMessageFast()`.
-- `terminal-manager.ts` → `terminal-session.ts` — PTY lifecycle; manager coordinates multiple sessions.
+- `terminal-manager.ts` → `terminal-session.ts` — PTY lifecycle; manager coordinates multiple sessions. On Windows each PTY also joins a kill-on-close job (`win32-process.ts`); the invariants are under **Isolated sessions**, because what they protect is a checkout delete. `terminal-screen.ts` is a headless `@xterm/headless` VT per PTY, fed the same bytes BEFORE the `suppressed` drop so it stays current through a socket drop or a backgrounded app, and its serialization — not the `ScrollbackBuffer` tail, which is a suffix of a diff stream — is what an attaching app replays; the attach blob is the VISIBLE SCREEN alone by DEFAULT, and that preamble never issues `3J` — the app's engine holds far more history than the bridge does (`SCREEN_SCROLLBACK_LINES` against `maxScrollbackLines` in `app/lib/models/terminal_models.dart`), and an erase reaching past the screen would destroy the user's own with nothing able to put it back. The ONE exception is a COLD attach, which the app asks for with `history: true` on `terminal:snapshot:request`: an engine that has rendered nothing for this terminal has no history to protect, and one screen is a real loss there (a scrolling build log, the worktree setup transcript above all, re-opened on a second device showed its last few rows and nothing else). That blob carries `SCREEN_SCROLLBACK_LINES` of history and DOES lead with `3J`, which is what keeps a repeat paint idempotent — a body taller than the screen scrolls its own opening rows into the buffer above, so without the erase every re-attach stacks another copy. **Only the client may set it**, because only the client knows what its engine holds; every bridge-initiated PUSH (`resyncState`) is screen-only for exactly that reason. The preamble also DEFAULTS the modes `@xterm/addon-serialize` emits set-only, since the body can turn those on and never off. `TerminalModeTracker` (`terminal-modes.ts`) restates every latched DEC private mode except `1049` after the blob, in LAST-WRITE order, because `@xterm/addon-serialize` emits only the set half: a mode the guest turned OFF behind a suppressed window survives in the app's long-lived engine unless something says so. `1049` is the exclusion because the blob has already selected the buffer and filled it, and a second `?1049h` re-saves the cursor and re-clears what it just painted. The tail the blob is composed WITH comes from `TerminalScreen.pendingTail()` — the chunks xterm has not consumed — never from watching chunks arrive during the barrier: `settle()`'s callback fires inside the parser's own loop, which then keeps draining the writes queued behind it, so most of what arrives across a barrier is in the body already and replaying it paints those bytes twice.
 - `work-status.ts` — pure fold from outbound bus frames (+ the inbound turn-start/answer hooks) to PER-SESSION work status; `ProjectCore.workStatus` is only its rollup. **This is the ONLY per-session reduction** — `SessionManager` folds nothing, it stamps this one's answer onto each `session:updated` entry via the injected `sessionWorkStatusFor`, and `ProjectCore.commitWork` calls `refreshSessionWork()` when the per-session map moves (the list is otherwise re-emitted only when the sessions themselves change). That re-emit folds straight back in, so it terminates *only* because `foldSessions` returns the SAME state for an unchanged session set — keep that discipline. Two readers, two paths: the advert carries `status` + `sessionStatuses` (dots), and `SessionEntry.workStatus` carries the live per-session value the mode-switch dialog branches on (`undefined` for a session the reduction has no entry for, i.e. not running — which is right, a flip does not restart a stopped session). **Presence of `sessionStatuses` is the app's capability signal** — `{}` means "warm, nothing running", absent means an older bridge, so never omit it for a warm core. A session is "working" only while a TURN is open, never merely because it is alive, and "unread" once that turn ENDED with nobody looking at it — read state the bridge owns outright, because it is the only party that sees both every turn end and every client's `session:focus`. Read state is tracked PER CLIENT, keyed by `InboundSource` — the desktop reaches a core over loopback, the phone over the relay, and they look at different sessions. A session is "seen" if ANYONE is on it. One shared slot was tried first and is wrong: the last client to speak stole it, so a phone opening session B put a blue dot on session A under the desktop's cursor. Three inbound signals feed it — `sessionFocus` (`session:focus`), `clientFocusState` (`client:focus-state`) and `clientGone` (the socket closed: `onPeerOffline` for the phone, `LocalListener.onOwnerDisconnected` for the desktop, without which a client that quit keeps one session permanently exempt). All arrive on the DATA plane, so a project nobody has opened reports no read state at all. It is gated on `readTracking`: until some client says what it is looking at, nothing may be called unseen — otherwise a bare agent, an eval, or a desktop driven from its own terminal turns every finished turn blue with nothing able to clear it. Backgrounding (`client:focus-state{paused}`) releases only THAT client's session, so a sibling still watching keeps its own read; an answer landing in someone's pocket is unread; the app RESTATES its focus on resume, since only it knows what is still on screen. Nothing persists it on either side — a bridge restart is a fresh read state, and the app is forbidden from caching it (`app_shell.dart` skips `unread` when writing the status cache). The four "user acted" signals are asymmetric on purpose, and each asymmetry is load-bearing:
   - `/turn-start` hook (Claude only) → `turnStart`: clears the block AND opens a turn.
   - chat resolve (`agent:permission-resolve`/`-question-resolve`) → `answerRequest`: same, but ONLY if something was actually pending — a resolve racing a retraction would otherwise open a turn no turn-end closes.
@@ -125,7 +149,7 @@ already has them.
 
   Two ordering rules fall out of the fold being keyed by session id: an attributed turn-start that beats its session's first `session:updated` is HELD in `pendingTurns` for exactly one session list, and a notification whose `terminalId` is not a running session (config-`terminals:` slots stamp one too) falls back to the project-wide key rather than being filed where nothing can read it. That fallback FANS OUT — `statusFor` reads it for every running session — and a turn-start clears it on the word of one session; both are accepted (losing the signal is worse than over-reporting it), and both are the reason a config-`terminals:` error dots every session on the project.
 - `port-scanner.ts` — platform-specific dev-port detection (polling).
-- `tunnel-manager.ts` — maps ports→preview URLs; only emits `preview:url` for proxies with `browser: true`. An entry whose label/scheme is unchanged is not re-pushed, so anything recorded while `connState.suppressed` is ALSO tracked in `undelivered` and re-pushed on the next unsuppressed pass — reconnect re-enters `onPortsUpdate` with identical ports (via `resyncState`'s `emitCurrent()`), and the app's own pull is the other half: `PreviewService` registers a `preview:snapshot:request` hydrator per checkout, so the handler answers with `preview:snapshot` plus an `emitCurrent()` on every (re)establish — a checkout whose bundle is built after the connect-time replay has no other way to learn its ports. Preview bodies are compressed inside the tunnel message (`encodeBody` in `localhost-fetch.ts`, `bodyEncoding: "gzip-base64"`), never at the WebSocket layer — the relay carries AES-GCM ciphertext, so permessage-deflate has nothing to squeeze. **Only compress what the request's `acceptEncodings` advertised**: `bodyEncoding` reaches the app as a bare string, so an app that predates the encoding renders the gzip bytes as the body. Compatibility rides on that one field in both directions — `z.object` strips it for an old bridge, and an old app never sends it.
+- `tunnel-manager.ts` — maps ports→preview URLs; only emits `preview:url` for proxies with `browser: true`. An entry whose label/scheme is unchanged is not re-pushed, so anything recorded while `connState.suppressed` is ALSO tracked in `undelivered` and re-pushed on the next unsuppressed pass — reconnect re-enters `onPortsUpdate` with identical ports (via `resyncState`'s `emitCurrent()`), and the app's own pull is the other half: `PreviewService` registers a `preview:snapshot:request` hydrator per checkout, so the handler answers with `preview:snapshot` plus an `emitCurrent()` on every (re)establish — a checkout whose bundle is built after the connect-time replay has no other way to learn its ports. Preview bodies are compressed inside the tunnel message (`encodeBody` in `localhost-fetch.ts`, `bodyEncoding: "gzip-base64"`), never at the WebSocket layer — the relay carries AES-GCM ciphertext, so permessage-deflate has nothing to squeeze. **Only compress what the request's `acceptEncodings` advertised**: `bodyEncoding` reaches the app as a bare string, so an app that predates the encoding renders the gzip bytes as the body. Compatibility rides on that one field in both directions — `z.object` strips it for an old bridge, and an old app never sends it. **The bridge, not the phone, is the authority on a port's scheme.** The phone can only guess `http` for a dev server it never saw announce itself (an Aspire AppHost, a `dotnet run` — anything started outside a project terminal), so `fetchLocalhost` retries the one failure that means "this listener is TLS" and memoizes the port; `onWsOpen` reads that memo (`isTlsOnlyPort`) rather than retrying, because a failed `wss` handshake is indistinguishable from a dev server refusing the connection. **The self-signed-cert exemption applies to BOTH** — the WebSocket upstream needs its own `tls.rejectUnauthorized: false`, and without it a page that only renders once its socket connects (Blazor, Vite HMR) is a blank tab with nothing logged. **`tunnel:ws-open` carries the browser's handshake headers, and `Cookie` is the load-bearing one**: a cookie-authenticated dev server reads its session off the WebSocket request, not the page load before it, so dropping them opens an ANONYMOUS socket behind an authenticated page — which renders as "not authorized" rather than as a failure, and only on the phone, since the desktop WebView dials the port itself. The app rewrites `Origin` to the dev server's own (only it knows the proxy's port), and the bridge drops what the upstream handshake mints (`WS_HOP_BY_HOP_HEADERS`) — including `Sec-WebSocket-Protocol`, since nothing carries the server's chosen subprotocol back to the browser.
 - `file-watcher.ts` → `file-tree.ts` — Chokidar watching with .gitignore support.
 - `file-search.ts` — ripgrep when present, else `git grep --untracked`. Both are handed the abDir as an exclude, and it is load-bearing rather than cosmetic: every managed worktree lives under it, so a project root that CONTAINS the state dir would otherwise report the isolated checkouts' files as main's own hits. The exclusion is anchored at the search root (ripgrep leans on the spawn's `cwd` for that) and dropped when it does not lie inside — a searcher rooted at a worktree sits under the state dir and must not anchor an exclude at its own ancestor.
 - `worktrees/` — managed checkouts for isolated sessions: Git lifecycle (`worktree-manager.ts`), the durable record (`checkout-store.ts`), repository identity (`project-resolver.ts`). See **Isolated sessions** below.
@@ -135,6 +159,88 @@ already has them.
 - `stream-mux.ts` — multiplexes project cores over the machine socket as sealed `{s, m}` envelopes (`s` absent/`"0"` = machine control plane; the ENVELOPE JSON is what gets fragmented, so `s` survives reassembly). `attachStream(bus, opts)` → `StreamHandle{streamId, detach, sendTunnel}`; admission = `stream-open` → `stream-opened` vs `error{ref: streamId}` (a rejection leaves the socket and other streams live); `opts.mayDeliver` is the OUTBOUND authorization hook, re-read on every bus frame and every `sendTunnel` (tunnel bypasses the bus) — absent means always-deliver, so a caller that answers to a switch must fail closed in its own provider; on each `welcome` the mux re-opens every attached stream (the relay dropped its `openStreams` on the disconnect). Current relays admit every stream a healthy machine opens — no per-account quota survives (`SESSION_LIMIT_EXCEEDED` is retired, kept only for relays predating the worker-limit change; `ErrorCode` in `packages/antgrid-wire/src/relay-protocol.ts` reserves the name for exactly that reason, and the relay side is the Streams bullet in `relay/CLAUDE.md`). The one rejection a current relay can still send is `STREAM_LIMIT_EXCEEDED`, the relay's structural per-connection ceiling: orders of magnitude above real use, so treat it as our bug (a leak of undetached streams), never as backpressure to retry. An inbound frame for an unknown streamId is dropped AND answered with a control-plane `stream-invalid {streamId}` (rate-limited per dead id): a host restart re-attaches every project under fresh ids, and without that notice the phone replays onto the dead id forever with nothing to trigger a renegotiation.
 - `host-server.ts` + `paired-phones.ts` — machine-level device trust. `HostServer.startRemoteControlPlane()` owns the single machine RelayClient (bare `deviceUuid` — the only registration shape; compound `deviceUuid.projectId` is gone); project cores attach as streams via `remoteDepsFor(projectId)` (`ProjectCoreRemoteDeps = {attachStream, currentPeerPubkey, sendPushDeliver}` — `wireRelaySlot` is deleted). Stream admission publishes `stream-ready {projectId, streamId}`, and `buildProjectsAdvertisement` (`agent:projects`) carries per-project `streamId` so a reconnecting phone binds without a fresh `project:start`; stopped projects start on demand (`handleControlPlaneVerb` → `project:start`). `startCore` re-advertises unconditionally: an open no phone asked for (restart re-open, desktop-side open) lands AFTER the handshake advert, and nothing else announces it. A rejected verb returns `control:result {ok:false,error}` to the phone (never silently dropped). Authorization for a remote device is `loadRemoteAccessPolicy(abDir)` (`agents/mobile-access-policy.json` — the filename and the `mobile-access:*` verbs keep the old spelling on purpose: both cross a version boundary the rename cannot reach) — ONE machine-wide boolean, the only gate, read live at every check via `remoteAccessEnabled()` so `mobile-access:set` takes effect without restarting a core. It gates the stream in BOTH directions and both halves are load-bearing: inbound at `currentPhoneAllowed()` (agent-core's bus handler + `handleTunnelMessage`), outbound at the stream's `mayDeliver` (`attachRelayStream`). Inbound alone is not enough — a project the phone cold-started opens as a `mode:"remote"` core with no `PromotionHandle`, so `demoteAllPromoted()` (which turning the switch off also runs, for every PROMOTED slot) never touches it and it would keep streaming terminal/tree/git at the phone. Gating at the send, not at detach, is deliberate: the core and its stream stay alive, so flipping the switch back on resumes the same `streamId` with no re-attach and no destroyed work. Which projectId that phone may name is bounded solely by `isSafeProjectId` + the `seenProjects` catalog — every remote verb (`project:start`, both sessions RPCs) must do that lookup, there is no second gate behind it. `loadPairedPhones(abDir)` (`agents/paired-phones.json`) is NOT authorization: it is the identity/push-token/`lastSeenAt` row, kept for push targeting and freshness (hence `watch()` + `touchLastSeen` survive).
 - `auth/` — in-memory OAuth (no on-disk store). `credentials.ts` parses one JSON line from stdin into a `BootstrapPayload` (`local | remote`, 10s idle timeout) written by the app on spawn. `oauth-client.ts` mints tokens via `POST /api/auth/oauth2/token` (`grant_type=client_credentials`, `resource=<licenseApiUrl>/api/auth`); `startTokenMaintenance` re-mints at 80% of TTL (30s retry). On `invalid_client` → emit `auth_revoked` to stderr, exit 4 — that verdict is keyed on the ERROR CODE, not the status: Better-Auth answers a revoked device with 401 but a deleted client row with **400** ("missing client"), and a sign-out rotates the device and drops its row, so both mean the cached pair is dead. Credentials reach the host only once, via the stdin bootstrap, so a host left running on a rotated-away pair can never recover on its own — the app respawns it when the account device changes (`local_host_warmup.dart`). **The boot-time control-plane mint is exempt from the exit** (`fatalRevokeArmed`, disarmed across `start()`'s `startRemoteControlPlane()`): host.json and the ready marker are already out by then, so exiting would have the app's supervisor respawn straight back into the same dead pair — a permanent crash loop that also takes down the loopback plane local work depends on. Boot logs and serves loopback-only; a verdict from token maintenance afterwards is still fatal.
+
+## Stopping an agent
+
+A coding agent has an exit path of its own — Claude Code withdraws its
+`fullscreenBootPending[pid]` canary from `~/.claude.json` in a `process.on("exit")`
+hook, and a stale entry silently disables the fullscreen renderer MACHINE-WIDE,
+for every project, until the file is hand-edited. Neither `TerminateProcess` nor
+`SIGKILL` runs one. So every teardown path asks first and sweeps after.
+
+- **The ask never replaces the sweep.** `TerminalSession.close(graceMs)` asks,
+  waits at most the budget, and then does exactly what `kill()` did — same
+  `killProcessTree`, same job close — on BOTH branches, whether the agent left
+  or not. That is what keeps a wrong `gracefulExit` entry, an agent that ignores
+  the ask, and a platform where the ask cannot land from ever costing a process
+  tree; every guarantee under **Isolated sessions** is unchanged by construction.
+  `close()` is deliberately NOT `async`: `SessionManager.stopAndAwait` reads
+  `treeKilled` right after asking for the stop, and an assignment landing after
+  a suspension would hand that read a resolved placeholder and run
+  `git worktree remove` against a live checkout.
+- **`gracefulBudget` (`terminal-manager.ts`) is the only policy.** `graceMs` at
+  every call site is a BUDGET, not a promise. Only `type: "agent"` terminals are
+  asked — stamped at one site (`SessionManager.startNow`), which is what makes
+  this a fact rather than a list to maintain. A service or an ad-hoc terminal
+  gets none: on Windows the ask is a keystroke a cooked-mode reader (a
+  `bun install`, a build tool, a shell blocked on a child) cannot see at all, so
+  it would spend the whole budget to change nothing. `askNonAgents` is the
+  shutdown path and is not a widening — POSIX shutdown already SIGTERMed
+  everything and withdrawing that would be the regression.
+- **The two platforms ask by different means, and each has a precondition.**
+  POSIX signals the process GROUP (`kill(-pid, SIGTERM)`), never the bare
+  leader: `spawn()` shell-wraps a free-form command, so the leader is the
+  wrapper and the agent underneath it learns nothing. Windows writes Ctrl-C
+  (ETX) into the ConPTY — which a raw-mode TUI reads and a cooked-mode child
+  does not, and which is NOT a console `CTRL_C_EVENT`;
+  `GenerateConsoleCtrlEvent` was measured and reaches nothing from here.
+- **On Windows the descendant snapshot is taken BEFORE the ask.** An agent that
+  leaves on request takes with it the live parent links `taskkill /T` walks, and
+  a `ShellExecute` child was never in our job — so a survivor holding the
+  checkout would be unreachable by both. `snapshotDescendants` /
+  `survivingProcesses` (`win32-process.ts`) match on pid + parentPid + name, so
+  a recycled pid is never killed. Neither ever answers "all gone" for a process
+  table it could not read: both return **null**, because the safe reading
+  differs by caller — "all alive" for one that is only WAITING
+  (`awaitSnapshotGone` keeps polling), "all gone" for one about to KILL
+  (`killSnapshotSurvivors` sweeps nothing and logs). The grace itself is REFUSED
+  on either of the two failures that leave a departing leader unreachable — no
+  kill-on-close job, or a snapshot that could not be taken — since asking first
+  is then the one thing that genuinely costs reach, and each refusal is logged
+  once per reason.
+- **Budgets are ceilings set by the caller above.** Per-session teardown gets
+  `AGENT_GRACE_MS`, which must stay well inside `TEARDOWN_TIMEOUT_MS` (one
+  budget covers the exit AND the tree, and overrunning it surfaces as
+  `WORKTREE_DELETE_FAILED`). Shutdown clamps to `WINDOWS_SHUTDOWN_GRACE_MS` on
+  Windows ONLY, because `HostController.shutdownOwnedHost` force-kills the whole
+  tree seconds after asking; POSIX keeps the caller's full budget. That clamp
+  sits below the measured claude-code exit, so a Windows app-quit is the one
+  path where the ask is genuinely best-effort — raising it past the app's own
+  poll buys nothing, it just moves the force-kill upstream.
+- **A session inside its grace is not running.** `SessionManager.stopping` keys
+  on the session's own tree-kill promise, and `isRunning` subtracts it — the
+  seconds the ask is worth are seconds `tm.has(id)` still answers true, which
+  otherwise leaves Stop rendering a live row and makes the Start the user
+  presses next hit `startNow`'s already-running guard and be answered `ok: true`
+  having done nothing.
+- **A same-id respawn pays the replaced run's exit bookkeeping itself, at the
+  replacement.** The grace turned the replace window from ~200ms into seconds,
+  which is long enough for the user to press Stop and then Start — so the
+  replaced PTY's exit routinely lands on a slot the replacement already owns,
+  where the same-id gate in `TerminalManager`'s exit handler drops it. The gate
+  is right to (an exit frame for a live slot tells the app a running terminal is
+  dead, and nothing corrects it), but everything that exit OWED — `namer.forget`,
+  `forgetTitleAttempts`, the handler's per-terminal guard, `noteExited` — goes
+  with it, and the restarted session then inherits the dead run's title state and
+  arming. `spawn()`'s duplicate branch fires `onTerminalExited` itself, and the
+  ORDERING is the whole invariant: that cleanup is keyed by terminal id, so it
+  must run while the id still means the old run — dispatching it after the
+  replacement registers reclaims the LIVE run's state instead. Only the callback
+  fires there, never the frame.
+- **Chat mode has no PTY and so no ladder.** codex's ask is its stdin closing
+  (the app-server exits on EOF) with a bounded wait and a `killChildTree`
+  escalation. The SDK-driven backends own their own process lifetime and are not
+  covered here.
 
 ## Isolated sessions (`src/worktrees/`)
 
@@ -263,11 +369,27 @@ first for every project on the machine, Git-backed or not.
   the handle `teardownCheckoutRuntime` holds is the shell, never the command
   whose cwd is inside the checkout — `killChildTree` is that pairing, and
   `TerminalManager.killAndAwaitTree` its PTY counterpart (the same signal
-  `kill()` sends; only the waiting differs). Waiting for the tree is NOT waiting
+  `kill()` sends; only the waiting differs) — both take an optional grace that
+  precedes, and never substitutes for, everything described here (**Stopping an
+  agent**). Waiting for the tree is NOT waiting
   for the PTY's exit — `SessionManager.awaitTerminalExit` is the other question,
   and `stopAndAwait` needs both answers: an asynchronous taskkill can deliver
   the leader's exit while it is still walking the rest of the tree, so the exit
   alone no longer implies the directory is free.
+  A parent-link walk also cannot reach an ORPHAN at all, and orphans are the
+  ordinary case: the agent's own helpers outlive the PTY, and once their parent
+  has exited there is no tree left to walk while their cwd still holds the
+  checkout. Every PTY is therefore also assigned to a kill-on-close job
+  (`win32-process.ts`) the instant its pid exists — later is already too late
+  for whatever the child has spawned by then — and the handle is closed on
+  NATURAL exit as well as on kill, since an agent finishing by itself is what
+  usually happens and a handle nothing closes leaks the tree it owns. Closing
+  the handle IS the reap, so the kernel closing them as the bridge dies sweeps
+  every PTY tree with no shutdown handler involved, which is what covers a
+  force-killed bridge. It narrows the failure rather than removing it — a
+  `ShellExecute`-created child joins its creator's job, not ours — so
+  `listProcessesWithCwdUnder` stays the way to name whoever still holds a
+  directory when a delete fails anyway. None of it applies off Windows.
   Mind the asymmetry in what a survivor costs
   — on Windows it blocks the delete outright, while POSIX unlinks the directory
   out from under it and leaves only a process nobody will reap.
@@ -285,7 +407,31 @@ first for every project on the machine, Git-backed or not.
   still raises `WORKTREE_DELETE_FAILED`, because whatever held the directory open
   is worth surfacing. Git's stderr goes to the local log via `logGitFailure`, and
   deliberately NOT into the structured `logWorktreeEvent` payloads, which feed
-  analytics and so carry a code and no message.
+  analytics and so carry a code and no message. **Surfacing it means NAMING the
+  holder**: on Windows a delete that still fails enumerates the live processes
+  whose cwd is inside the checkout and puts them in the thrown message, capped
+  and spelled RELATIVE to the checkout — a host path never crosses the session
+  wire, and "an orphaned `bun.exe` in `bridge/`" is the actionable half anyway.
+  Their full paths go to the local log (`logDirectoryHolders`); only the COUNT
+  joins the events. That local line is emitted even when NO holder could be
+  named — off Windows, past a reconcile's scan budget, or for a directory refused
+  with nothing live in it — because the events carry no path and it is the only
+  thing that ever says which directory survived. Off Windows the enumeration
+  answers nothing and the sentence must read as it always did. **Naming a holder
+  is also why that failure has its own code.** `friendlyErrorCopy`
+  (`app/lib/widgets/ab_status_helpers.dart`) has a `WORKTREE_DELETE_FAILED` arm
+  and `sessionRefusalCopy` prefers an arm over the bridge's message, so that code
+  would swallow the clause it took a process-table scan to produce. The held case
+  throws `WORKTREE_DELETE_HELD` instead, which has no arm and so falls through to
+  `error.message` verbatim — give it one and the feature goes silent again, with
+  nothing failing to say so.
+  The reconcile sweep does the same reclaim and gets its own
+  `worktree_reclaim_failed` event — a survivor moves none of `ReconcileCounts`,
+  so without it the sweep reports itself as having had nothing to do while it
+  fails on the same stranded directories at every single create — but NOT the
+  same patience: it takes one bare `rm`, not `removeWithRetries`, because it
+  rides on a `session:create` the app abandons after 15s and is itself the retry
+  loop.
 - **A rollback is not a delete.** `rollbackPrepared` bypasses the dirty/unpushed
   guard on purpose — no agent was ever admitted to that checkout — but never
   drops a branch whose head has moved out from under it.

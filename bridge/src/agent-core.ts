@@ -7,7 +7,7 @@ import { logger } from "./logger";
 const log = logger.child({ component: "agent-core" });
 import { TerminalManager } from "./terminal-manager";
 import { createKeyedLock } from "./keyed-lock";
-import { killChildTree, processGroupSpawn } from "./terminal-session";
+import { AGENT_GRACE_MS, killChildTree, processGroupSpawn } from "./terminal-session";
 import { createConnState, type ConnState } from "./conn-state";
 import { FileWatcher } from "./file-watcher";
 import { FileUploadManager } from "./file-upload";
@@ -733,10 +733,22 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       log.warn("Dropping tunnel request for unknown checkout %s", msg.checkoutId);
       return;
     }
-    if (msg.type === "tunnel:http-request" && runtime.tunnelManager) {
-      runtime.tunnelManager.onHttpRequest(msg).catch((err) =>
-        log.error("tunnel:http-request handler failed: %s", err)
-      );
+    if (!runtime.tunnelManager) return;
+    switch (msg.type) {
+      case "tunnel:http-request":
+        runtime.tunnelManager.onHttpRequest(msg).catch((err) =>
+          log.error("tunnel:http-request handler failed: %s", err)
+        );
+        break;
+      case "tunnel:ws-open":
+        runtime.tunnelManager.onWsOpen(msg);
+        break;
+      case "tunnel:ws-data":
+        runtime.tunnelManager.onWsData(msg);
+        break;
+      case "tunnel:ws-close":
+        runtime.tunnelManager.onWsClose(msg);
+        break;
     }
   }
 
@@ -919,10 +931,26 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         sendStatus();
         break;
       }
-      case "terminal:stop":
-        manager.kill(internalTerminalId(runtime, msg.terminalId));
+      case "terminal:stop": {
+        // A session id reaches this verb — `internalTerminalId` returns one
+        // verbatim — and a session PTY is `type: "agent"`, so it takes the
+        // grace. It has to take it through `SessionManager`, which is the only
+        // thing that records a session as stopping: without that the row keeps
+        // reading as running for the whole grace and the Start pressed inside
+        // it hits `startNow`'s already-running guard, exactly as `terminal:start`
+        // above refuses a session id rather than racing `session:start`.
+        if (sessions?.get(msg.terminalId)) {
+          sessions.stop(msg.terminalId);
+          sendStatus();
+          break;
+        }
+        // Budgeted, not promised: `gracefulBudget` answers 0 for a service or
+        // an ad-hoc terminal, and a user terminal someone is running an agent
+        // in is the case the budget exists for.
+        manager.kill(internalTerminalId(runtime, msg.terminalId), AGENT_GRACE_MS);
         sendStatus();
         break;
+      }
       case "terminal:resize":
         manager.resize(
           internalTerminalId(runtime, msg.terminalId),
@@ -1313,19 +1341,39 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         // Same wrong-checkout guard as the tree and preview requests below, and
         // for the same reason: every checkout runtime sees this frame, so
         // without it one request is answered N times and the app applies
-        // whichever reply lands last — another checkout's scrollback, under a
-        // seq that then filters the right one's output.
+        // whichever reply lands last — another checkout's screen, under a seq
+        // that then filters the right one's output. It stays outside the
+        // closure below because serializing N screens is real work.
         if (runtime.checkout.id !== checkoutIdOf(msg)) break;
-        const snap = manager.getReplaySnapshot(internalTerminalId(runtime, msg.terminalId));
-        if (!snap) {
-          log.warn("snapshot requested for unknown terminal %s", msg.terminalId);
-          break;
-        }
-        sendFromRuntime(runtime, createMessage("terminal:snapshot", {
-          terminalId: msg.terminalId,
-          scrollback: snap.text,
-          seq: snap.seq,
-        }));
+        // Detaching the body moved it out from under the dispatcher's own
+        // `.catch`, so it owns its rejections now — same shape as the
+        // `session:*` handlers above. Unhandled, one failed snapshot reaches
+        // `index.ts`'s `unhandledRejection` hook, which shuts the whole host
+        // down.
+        void (async () => {
+          try {
+            const snap = await manager.getAttachSnapshot(
+              internalTerminalId(runtime, msg.terminalId),
+              { history: msg.history === true },
+            );
+            if (runtime.disposed) return;
+            if (!snap) {
+              log.warn("snapshot requested for unknown terminal %s", msg.terminalId);
+              return;
+            }
+            sendFromRuntime(runtime, createMessage("terminal:snapshot", {
+              terminalId: msg.terminalId,
+              scrollback: snap.text,
+              seq: snap.seq,
+              composed: true,
+              // Echoed so the OTHER clients this reply fans out to can
+              // refuse it -- see the field on the schema.
+              history: msg.history === true,
+            }));
+          } catch (err) {
+            log.warn("snapshot for terminal %s failed: %s", msg.terminalId, err);
+          }
+        })();
         break;
       }
       case "file:tree:snapshot:request": {
@@ -1442,7 +1490,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     namer = null;
     antigravityTitleWatcher?.stop();
     antigravityTitleWatcher = null;
-    void structured?.disposeAll();
+    // Awaited with the rest, not voided: a chat runtime's dispose now waits out
+    // its own soft ask (codex exits on stdin EOF) before it terminates, so a
+    // discarded promise lets `process.exit` land first and leaves the
+    // app-server alive holding the ~/.codex sqlite lock the next start needs.
+    // Caught, because `pending` must stay reject-free for the `Promise.all`.
+    if (structured) pending.push(structured.disposeAll().catch(() => {}));
     structured = null;
     await Promise.all(pending);
   }
@@ -1660,6 +1713,35 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
 
   function awaitGitRefreshes(runtime: CheckoutRuntime): Promise<unknown> {
     return Promise.allSettled([...runtime.pendingGitRefreshes]);
+  }
+
+  // Upper bound on the shutdown-only drain below. Kept under
+  // `killAllGracefully`'s own 5s so the two together still fit inside the grace
+  // a supervisor allows the host — `owner-watchdog.ts` and the pre-update drain
+  // both give it seconds, not minutes.
+  const SHUTDOWN_GIT_DRAIN_MS = 3_000;
+
+  /** The shutdown-only, BOUNDED form of {@link awaitGitRefreshes}. The wait in
+   *  [teardownCheckoutRuntime] gates a `git worktree remove` and must stay
+   *  unbounded — a `git status` still holding the checkout as its cwd is what
+   *  aborts that sweep on Windows. Shutdown removes nothing, so there the same
+   *  wait only buys us not orphaning a child, which is never worth holding the
+   *  process open for: `git` against a very large or network-backed tree can
+   *  stop answering for far longer than anything waiting on us will allow.
+   *  False when the deadline won, so the caller can say so. */
+  async function drainGitRefreshes(timeoutMs: number): Promise<boolean> {
+    // Never rejects (every element is an allSettled), so the loser of the race
+    // running on unawaited is not an unhandled rejection.
+    const drained = Promise.all([...checkoutRuntimes.values()].map(awaitGitRefreshes));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<false>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+    });
+    try {
+      return await Promise.race([drained.then(() => true), deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   // Re-reads git status after the file watcher saw the tree move, and pushes
@@ -1990,20 +2072,62 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       runtime.portDetector?.emitCurrent();
     }
 
-    // Re-send terminal scrollback so the app has current output
+    // Re-send each terminal's screen so the app has current output.
+    //
+    // Serialized together, never one after another. Each snapshot waits out its
+    // OWN terminal's whole unparsed backlog, and the terminals share nothing —
+    // one `TerminalScreen`, one write buffer each — so awaiting them in turn
+    // just adds the timer round-trips up: measured 184 ms for a dozen idle
+    // terminals against 14 ms together, and a single flooding one holds every
+    // terminal behind it in `getStatus()` order for as long as it takes to
+    // drain. Nothing downstream cares about the order: the app keys the blob
+    // and its cutoff by terminalId.
+    //
+    // Each one SENDS at its own barrier rather than in a pass after the join,
+    // or the concurrency buys nothing: a blob describes the instant its seq was
+    // read, and holding it until the slowest terminal drains ships a screen the
+    // app has already been shown past — whose `2J` then erases the frames it
+    // applied in between, and whose seq re-arms the cutoff BELOW them so
+    // nothing refilters and nothing re-sends. `Promise.all` stays only as the
+    // join, so `resyncState`'s caller still waits for the whole set.
+    //
+    // Screen-only, never `history`: this is a PUSH, so nothing here knows what
+    // the app's engine holds, and a history blob erases before it paints. The
+    // app's own hydrator pull is what asks for history, per terminal, on the
+    // same re-establishment — see the `history` flag on terminal:snapshot:request.
     if (manager) {
-      for (const t of manager.getStatus()) {
-        const snap = manager.getReplaySnapshot(t.terminalId);
-        if (snap && snap.text) {
-          sendTerminalFrame(createMessage("terminal:output", {
+      const mgr = manager;
+      await Promise.all(
+        mgr.getStatus().map(async (t) => {
+          let snap: Awaited<ReturnType<typeof mgr.getAttachSnapshot>>;
+          try {
+            snap = await mgr.getAttachSnapshot(t.terminalId);
+          } catch (err) {
+            // One terminal's failure must not cost the others theirs — awaited
+            // together, a rejection would abandon the whole resync.
+            log.warn("resync snapshot for terminal %s failed: %s", t.terminalId, err);
+            return;
+          }
+          // `null` means the screen is gone — an exited terminal, which
+          // `getStatus` still reports so the tab stays visible. Never a test on
+          // the STRING: every snapshot opens with the attach preamble, so an
+          // empty-screen blob is not an empty one and such a test would skip
+          // nothing it means to.
+          if (!snap) return;
+          // A snapshot, never an output frame: a composed blob is a whole
+          // screen, so appended as ordinary output it would stack a second copy
+          // into a live tab, and with no seq the app's cutoff cannot filter it.
+          sendTerminalFrame(createMessage("terminal:snapshot", {
             // The INTERNAL id: sendTerminalFrame owns the external rewrite, and
             // handing it an already-externalised one makes its own owner lookup
             // miss and stamp an isolated checkout's replay as main's.
             terminalId: t.terminalId,
-            data: snap.text,
+            scrollback: snap.text,
+            seq: snap.seq,
+            composed: true,
           }));
-        }
-      }
+        }),
+      );
     }
   }
 
@@ -2017,7 +2141,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     const runtimeId = runtime.checkout.id;
     const send = (msg: AbMessage) => sendFromRuntime(runtime, msg);
     const pd = new PortDetector({
-      ports: (runtime.config.ports ?? []).map((p) => ({ port: p.port, name: p.name })),
+      ports: (runtime.config.ports ?? []).map((p) => ({ port: p.port, name: p.name, onDetect: p.onDetect })),
     });
     runtime.portDetector = pd;
     const previewPorts = new Set(
@@ -2276,7 +2400,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     }
 
     const pd = new PortDetector({
-      ports: (config.ports ?? []).map((p) => ({ port: p.port, name: p.name })),
+      ports: (config.ports ?? []).map((p) => ({ port: p.port, name: p.name, onDetect: p.onDetect })),
     });
     portDetector = pd;
     mainRuntime.portDetector = pd;
@@ -2589,7 +2713,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // Policy unit that turns title signals (OSC-2 + injected hook/plugin POSTs)
     // into session names, honoring manual-rename precedence via applyAutoName.
     namer = new SessionNamer({
-      applyAutoName: (id, name) => sessions?.applyAutoName(id, name),
+      applyAutoName: (id, name, rank) => sessions?.applyAutoName(id, name, rank),
     });
 
     // agy fires no hook on a `/rename`, so it would not reach the sidebar until
@@ -2909,6 +3033,12 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     // itself — so the count alone would let the flipped session rename itself
     // from whatever the user typed next.
     if (namer?.hasFinalTitle(target.terminalId)) return;
+    // The durable half of the same question, and the one that answers it after a
+    // restart: the namer is empty by then, the attempt budget below is empty
+    // too, and only the session row still knows its name is one we generated.
+    // Without it every stop/start pays another model spawn and renames the
+    // session from wherever the conversation had since drifted to.
+    if (sessions?.hasFinalAutoTitle(target.terminalId)) return;
 
     const key = titleAttemptKey(target);
     // Tested twice, and the two tests answer different questions. This one is a
@@ -3210,11 +3340,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       // map, so no session was ever asked to exit on its own and the line below
       // reported 0 for a machine that had just killed a dozen agents.
       const closed = manager ? await manager.killAllGracefully(5000) : 0;
-      teardownServices();
+      // Awaited: it ends in a `killChildTree` per running `command:run` child,
+      // and those are spawned through a shell with no job around them — issuing
+      // that kill and abandoning it leaves the real command holding a checkout
+      // directory with nothing left to sweep it.
+      await teardownServices();
       // After the timers are cleared, so nothing new can be scheduled behind
       // this — see [trackGitRefresh] for why an in-flight one has to be
-      // waited out rather than abandoned.
-      await Promise.all([...checkoutRuntimes.values()].map(awaitGitRefreshes));
+      // waited out rather than abandoned, and [drainGitRefreshes] for why the
+      // waiting stops here where it cannot at a checkout teardown.
+      if (!(await drainGitRefreshes(SHUTDOWN_GIT_DRAIN_MS))) {
+        log.warn("Shutdown proceeded with a git refresh still in flight");
+      }
 
       log.info("Antgrid Agent stopped. %d terminal(s) closed.", closed);
       return closed;

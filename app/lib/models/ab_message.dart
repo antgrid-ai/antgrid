@@ -397,6 +397,17 @@ class GitFileStatusEntry {
   final int additions; // lines added vs HEAD, combined staged+unstaged
   final int deletions; // lines removed vs HEAD, combined staged+unstaged
 
+  /// Which unmerged state a conflict is in, in the bridge's vocabulary
+  /// (bothModified, deletedByThem, …). Null on everything but a conflict, and
+  /// on a conflict from a bridge that predates the field.
+  final String? conflictKind;
+
+  /// A conflict with no marker left in the file: the user has worked through
+  /// it, so staging it is the routine "include this" rather than a claim about
+  /// content nobody has read. Defaults to false — an unknown answer must lead
+  /// to the confirmation, never past it.
+  final bool conflictResolved;
+
   const GitFileStatusEntry({
     required this.path,
     required this.status,
@@ -404,7 +415,15 @@ class GitFileStatusEntry {
     this.oldPath,
     this.additions = 0,
     this.deletions = 0,
+    this.conflictKind,
+    this.conflictResolved = false,
   });
+
+  bool get isConflict => status == '!';
+
+  /// A conflict the user has not visibly finished — the one thing that turns
+  /// staging into a question rather than an action. See [conflictResolved].
+  bool get isUnresolvedConflict => isConflict && !conflictResolved;
 
   static GitFileStatusEntry? fromJson(Map<String, dynamic> json) {
     final path = json['path'];
@@ -417,6 +436,8 @@ class GitFileStatusEntry {
       oldPath: json['oldPath'] as String?,
       additions: (json['additions'] as num?)?.toInt() ?? 0,
       deletions: (json['deletions'] as num?)?.toInt() ?? 0,
+      conflictKind: json['conflictKind'] as String?,
+      conflictResolved: json['conflictResolved'] as bool? ?? false,
     );
   }
 }
@@ -671,12 +692,28 @@ class TerminalSnapshotMessage {
   final String scrollback;
   final int seq;
 
+  /// Whether [scrollback] is a COMPLETE attach sequence — preamble, serialized
+  /// screen, supplemental modes — to be applied verbatim with nothing prepended
+  /// or appended. False (an older agent) means it is a mode prelude plus a raw
+  /// byte tail, and the client must place its own erase.
+  final bool composed;
+
+  /// Whether [scrollback] carries history ABOVE the screen, behind a `3J`
+  /// that erases what the engine already holds.
+  ///
+  /// A reply is broadcast to every client on the project, so this frame may
+  /// be the answer to a DIFFERENT device's cold attach. Only the client that
+  /// asked has an empty engine; for anyone else the erase is pure loss.
+  final bool history;
+
   const TerminalSnapshotMessage({
     required this.id,
     required this.timestamp,
     required this.terminalId,
     required this.scrollback,
     required this.seq,
+    this.composed = false,
+    this.history = false,
   });
 }
 
@@ -1033,8 +1070,46 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         ports: ports,
       );
 
+    case 'port:detected':
+      final projectId = json['projectId'];
+      final port = json['port'];
+      final url = json['url'];
+      final scheme = json['scheme'];
+      final source = json['source'];
+      if (projectId is! String ||
+          port is! int ||
+          url is! String ||
+          scheme is! String ||
+          source is! String) {
+        return null;
+      }
+      final attributesJson = json['attributes'];
+      final attributes = PortDetectedAttributes(
+        name: attributesJson is Map ? attributesJson['name'] as String? : null,
+        onDetect: attributesJson is Map
+            ? (attributesJson['onDetect'] as String? ?? 'notify')
+            : 'notify',
+      );
+      return PortDetectedMessage(
+        id: id,
+        timestamp: timestamp,
+        projectId: projectId,
+        port: port,
+        url: url,
+        scheme: scheme,
+        source: source,
+        sourceSessionId: json['sourceSessionId'] as String?,
+        attributes: attributes,
+      );
+
     case 'tunnel:http-response':
       return TunnelHttpResponse.fromJson(json);
+
+    case 'tunnel:ws-data':
+      return TunnelWsDataMessage.fromJson(json);
+
+    case 'tunnel:ws-close':
+      return TunnelWsCloseMessage.fromJson(json);
 
     case 'command:output':
       final projectId = json['projectId'];
@@ -1285,6 +1360,12 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         terminalId: terminalId,
         scrollback: scrollback,
         seq: seq,
+        // Anything but a literal `true` reads false, which selects the legacy
+        // branch — the one that is safe against a blob it cannot interpret.
+        composed: json['composed'] == true,
+        // Same conservative read as `composed`: anything but a literal
+        // `true` is a blob that erases nothing above the screen.
+        history: json['history'] == true,
       );
 
     case 'file:tree:snapshot:request':

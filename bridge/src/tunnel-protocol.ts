@@ -37,9 +37,61 @@ export const TunnelHttpResponse = z.object({
 export type TunnelHttpRequest = z.infer<typeof TunnelHttpRequest>;
 export type TunnelHttpResponse = z.infer<typeof TunnelHttpResponse>;
 
+/** App → bridge: open a real upstream `ws(s)://localhost:<port><path>`
+ *  connection, keyed by [tunnelId] for the life of the tab's WebSocket (a
+ *  preview page's own WS, e.g. Vite HMR or a Blazor Server SignalR circuit —
+ *  distinct from [TunnelHttpRequest]'s one-shot request/response shape). */
+export const TunnelWsOpen = z.object({
+  type: z.literal("tunnel:ws-open"),
+  tunnelId: z.string(),
+  port: z.number().int().positive(),
+  scheme: z.enum(["http", "https"]).optional(),
+  path: z.string(),
+  /** The browser's own handshake headers, minus the ones the upstream
+   *  handshake owns. Chiefly `Cookie`: a dev server that authenticates by
+   *  cookie reads the WebSocket request, not the page load that preceded it,
+   *  so without these the socket opens ANONYMOUSLY behind an authenticated
+   *  page — which a Blazor circuit renders as "not authorized" rather than as
+   *  a failure. Optional so an app predating it still opens a tunnel. */
+  headers: z.record(z.string(), z.string()).optional(),
+  checkoutId: z.string().default("main"),
+});
+
+/** Bidirectional once the tunnel is open: app→bridge is a browser-sent frame
+ *  to relay upstream, bridge→app is an upstream-sent frame to relay to the
+ *  browser. [binary] mirrors the WS frame's own text/binary distinction —
+ *  absent/false means [data] is UTF-8 text verbatim; true means it is
+ *  base64 of the raw bytes. Without it neither side can tell a base64-shaped
+ *  TEXT frame from an encoded BINARY one. */
+export const TunnelWsData = z.object({
+  type: z.literal("tunnel:ws-data"),
+  tunnelId: z.string(),
+  data: z.string(),
+  binary: z.boolean().optional(),
+  checkoutId: z.string().default("main"),
+});
+
+/** Bidirectional: either side tears the tunnel down (the browser tab's WS
+ *  closed, or the upstream dev-server connection did) and the other side
+ *  mirrors it — never a reply the sender waits on. */
+export const TunnelWsClose = z.object({
+  type: z.literal("tunnel:ws-close"),
+  tunnelId: z.string(),
+  code: z.number().int().optional(),
+  reason: z.string().optional(),
+  checkoutId: z.string().default("main"),
+});
+
+export type TunnelWsOpen = z.infer<typeof TunnelWsOpen>;
+export type TunnelWsData = z.infer<typeof TunnelWsData>;
+export type TunnelWsClose = z.infer<typeof TunnelWsClose>;
+
 const TunnelMessageSchema = z.discriminatedUnion("type", [
   TunnelHttpRequest,
   TunnelHttpResponse,
+  TunnelWsOpen,
+  TunnelWsData,
+  TunnelWsClose,
 ]);
 
 export type TunnelMessage = z.infer<typeof TunnelMessageSchema>;

@@ -1,8 +1,8 @@
 import { existsSync, readFileSync, watch as fsWatch, type FSWatcher } from "node:fs";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { AbConfigSchema, type AbConfig, formatZodIssues } from "./config";
-import { atomicWriteFile } from "./discovery";
+import { atomicWriteFile, isWatchEventFor } from "./discovery";
 import { logger } from "./logger";
 const log = logger.child({ component: "config-controller" });
 
@@ -79,14 +79,15 @@ export class ConfigController {
         onChange(r, diff);
       }, 100);
     };
-    try {
-      this.watcher = fsWatch(this.filePath, trigger);
-    } catch {
-      // file may not exist yet — also watch the parent dir
-      this.watcher = fsWatch(dirname(this.filePath), (_event, name) => {
-        if (typeof name === "string" && name.endsWith("antgrid.yaml")) trigger();
-      });
-    }
+    const fileName = basename(this.filePath);
+    // The DIRECTORY, never the file: [write] publishes by rename, and an inotify
+    // watch is keyed to the inode it was armed on — so on Linux the first save
+    // orphans a file-path watch and every later one is invisible for the life of
+    // the process (measured on Node and on Bun, on two filesystems). Watching
+    // the parent also covers the file not existing yet.
+    this.watcher = fsWatch(dirname(this.filePath), (_event, name) => {
+      if (isWatchEventFor(name, fileName)) trigger();
+    });
     // FSWatcher emits async 'error' events (EPERM/ENOENT on Windows when the
     // watched path is locked or removed at runtime); with no handler Node
     // rethrows them as an uncaught exception. Swallow-and-log, mirroring the

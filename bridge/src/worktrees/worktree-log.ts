@@ -1,4 +1,5 @@
 import { logger } from "../logger";
+import type { DirectoryHolder } from "../win32-process";
 
 const log = logger.child({ component: "worktree" });
 
@@ -18,6 +19,12 @@ export type WorktreeEvent =
    *  the branch to go, so a support bundle has to be able to see that it did not. */
   | "worktree_delete_branch_kept"
   | "worktree_delete_failed"
+  /** A reconcile's orphan sweep attempted a directory and it survived. Its own
+   *  event because the sweep's counts cannot express it: a failed reclaim moves
+   *  none of them, so `worktree_reconcile_completed` reads exactly like a sweep
+   *  that found nothing to do, on every create, for as long as the directories
+   *  stay stranded. */
+  | "worktree_reclaim_failed"
   | "worktree_reconcile_completed"
   | "worktree_forget_reclaimed";
 
@@ -40,6 +47,14 @@ export interface WorktreeEventFields {
    *  repository. Zero on a healthy machine, so it is worth a support bundle
    *  noticing. */
   foreign?: number;
+  /** How many live processes held the directory a delete or reclaim could not
+   *  remove. The count is the whole analytics-safe part — a holder's name and
+   *  current directory go to the local log, like Git's stderr does — and it is
+   *  what separates "Windows refused because something is running in there"
+   *  from every other way a delete fails. Absent rather than zero wherever the
+   *  question could not be asked: only Windows can answer it, and a zero would
+   *  read as "nothing held it" everywhere else. */
+  holders?: number;
 }
 
 export function logWorktreeEvent(event: WorktreeEvent, fields: WorktreeEventFields = {}): void {
@@ -63,4 +78,28 @@ export function worktreeErrorCode(error: unknown): string {
  *  gap without widening the analytics schema. */
 export function logGitFailure(what: string, result: { exitCode: number; stderr: string }): void {
   log.warn({ exitCode: result.exitCode, stderr: result.stderr.trim().slice(0, 500) }, `git ${what} failed`);
+}
+
+/** The directory a delete or reclaim could not remove, and who was still
+ *  running inside it: pid, image name and the subdirectory each one sits in.
+ *  Local log only, for the same reason as [logGitFailure] — a current directory
+ *  names the user's home directory layout, and the structured events feed
+ *  analytics. The user-facing message names at most a few of these; a support
+ *  bundle needs all of them, because the holder that matters is routinely the
+ *  third one.
+ *
+ *  Emitted even when no holder could be named, which is the ordinary case off
+ *  Windows and past a reconcile's scan budget: this is the ONLY line that ever
+ *  names the directory, and `worktree_reclaim_failed` carries a projectId and
+ *  nothing else — so without it five stranded checkouts are five byte-identical
+ *  events, and a support bundle can see that the sweep failed but not how many
+ *  directories are stranded, let alone which. Both callers log from a failure
+ *  they are already reporting, so no path here wants a silent answer. */
+export function logDirectoryHolders(what: string, path: string, holders: readonly DirectoryHolder[]): void {
+  log.warn(
+    { path, holders: holders.map((holder) => ({ pid: holder.pid, name: holder.name, cwd: holder.cwd })) },
+    holders.length === 0
+      ? `${what}: directory survived with no holder named`
+      : `${what}: directory held by ${holders.length} process(es)`,
+  );
 }

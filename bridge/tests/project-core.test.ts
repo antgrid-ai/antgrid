@@ -8,6 +8,7 @@ import { computeProjectId } from "../src/project-id";
 import { MessageBus } from "../src/message-bus";
 import type { AttachStreamOpts, StreamHandle } from "../src/stream-mux";
 import type { ConnState } from "../src/conn-state";
+import { createMessage, type AbMessage } from "../src/protocol";
 
 let cleanup: Array<() => void | Promise<unknown>> = [];
 // LIFO + awaited: cores shut down (stopping their file watchers) before the
@@ -222,4 +223,74 @@ test("remote-mode core also binds loopback (connect is non-null) and attaches it
 
   calls[0].opts.onAdmitted?.("stream-1");
   expect(core.isRelayRegistered()).toBe(true);
+});
+
+const WAIT_MS = 20_000;
+
+async function waitFor(predicate: () => boolean, what: string, timeoutMs = WAIT_MS): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+test("onSessionsChange fires on a rename but not on the create that established the baseline", async () => {
+  // Regression for the cross-device sync gap: a rename moves neither
+  // workStatus, workRunningCount nor sessionWorkStatuses, so onWorkStatusChange
+  // alone never tells a cold peeker (a device with this project's drawer
+  // collapsed) that a session's NAME changed. onSessionsChange exists
+  // specifically to catch that, via a content diff on `session:updated` — see
+  // ProjectCore.observeSessionsIdentity.
+  const folder = mkdtempSync(join(tmpdir(), "antgrid-pc-sess-change-"));
+  cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
+  writeFileSync(join(folder, "antgrid.yaml"), "");
+  const { deps, calls } = fakeRemoteDeps();
+  const core = new ProjectCore({
+    folder,
+    mode: "remote",
+    identity: {
+      deviceId: randomUUID(), deviceName: "d", createdAt: new Date().toISOString(),
+      ed25519PublicKey: "AAAA", ed25519PrivateKey: "AAAA",
+    },
+    remote: deps,
+  });
+  cleanup.push(() => core.shutdown());
+  await core.start();
+
+  const bus = calls[0].bus;
+  const sent: AbMessage[] = [];
+  bus.subscribe({ deliver: (m) => sent.push(m) });
+  let sessionsChanges = 0;
+  core.onSessionsChange(() => { sessionsChanges++; });
+
+  const createId = randomUUID();
+  bus.dispatchInbound(createMessage("session:create", {
+    requestId: createId, name: "Original name", command: "node keepalive.js",
+  }) as any, "control", "loopback");
+  await waitFor(
+    () => sent.some((m) => m.type === "session:result" && (m as any).requestId === createId),
+    "the session:create result",
+  );
+  const created = sent.find((m) => m.type === "session:result" && (m as any).requestId === createId) as any;
+  expect(created.ok).toBe(true);
+  const sessionId = created.session.id as string;
+
+  // The create's own session:updated seeds observeSessionsIdentity's baseline
+  // (never having seen this project's list before), so it must not count as a
+  // "change" in the sense onSessionsChange exists for — a fresh project's
+  // first advert already goes out unconditionally on open (host-server.ts).
+  const changesAfterCreate = sessionsChanges;
+
+  const renameId = randomUUID();
+  bus.dispatchInbound(createMessage("session:rename", {
+    requestId: renameId, sessionId, name: "Renamed",
+  }) as any, "control", "loopback");
+  await waitFor(
+    () => sent.some((m) => m.type === "session:result" && (m as any).requestId === renameId),
+    "the session:rename result",
+  );
+
+  expect(sessionsChanges).toBeGreaterThan(changesAfterCreate);
 });
