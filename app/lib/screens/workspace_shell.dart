@@ -37,6 +37,7 @@ import '../providers/new_session_picker.dart'
 import '../providers/providers.dart';
 import '../providers/relay_error_banner.dart';
 import '../providers/session_search.dart';
+import '../providers/session_workspace_state.dart';
 import '../providers/session_setup.dart';
 import '../providers/sessions.dart';
 import '../providers/supervisor_status.dart';
@@ -131,6 +132,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   /// applied once, while in portrait.
   _PanelMode? _panelMode;
   bool _prefsApplied = false;
+  SessionUiKey? _sessionUiKey;
   final _mobileScaffoldKey = GlobalKey<ScaffoldState>();
 
   /// Desktop-shaped layout, touch platform only: both the projects sidebar
@@ -521,7 +523,44 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
     if (idx >= 0 && idx < WorkspaceView.values.length) {
       _selectedView = WorkspaceView.values[idx];
     }
+    final key = ref.read(activeSessionUiKeyProvider);
+    if (key != null) {
+      final saved = ref.read(sessionWorkspaceStateProvider(key));
+      if (saved.initialized) {
+        _restoreSessionUi(saved);
+      } else {
+        ref
+            .read(sessionWorkspaceStateProvider(key).notifier)
+            .update(
+              (s) => s.copyWith(
+                initialized: true,
+                selectedView: _selectedView,
+                panelMode: _panelMode?.name,
+              ),
+            );
+      }
+      _sessionUiKey = key;
+    }
     _prefsApplied = true;
+  }
+
+  void _restoreSessionUi(SessionWorkspaceState state) {
+    _selectedView = state.selectedView;
+    _panelMode = state.panelMode == null
+        ? null
+        : _PanelMode.values.asNameMap()[state.panelMode];
+    _tabletEndDrawerOpen = state.tabletContextOpen;
+    _tabletContextPanelExpanded = state.tabletContextExpanded;
+  }
+
+  void _updateSessionUi(
+    SessionWorkspaceState Function(SessionWorkspaceState) change,
+  ) {
+    final key = _sessionUiKey ?? ref.read(activeSessionUiKeyProvider);
+    if (key == null) return;
+    ref
+        .read(sessionWorkspaceStateProvider(key).notifier)
+        .update((state) => change(state).copyWith(initialized: true));
   }
 
   void _updatePrefs() {
@@ -800,6 +839,40 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
   @override
   Widget build(BuildContext context) {
+    ref.listen<SessionUiKey?>(activeSessionUiKeyProvider, (previous, next) {
+      if (next == null || next == previous) return;
+      _sessionUiKey = next;
+      var saved = ref.read(sessionWorkspaceStateProvider(next));
+      if (!saved.initialized) {
+        final prefsService = ref.read(preferencesServiceProvider);
+        // The session can be selected while this project's asynchronous
+        // preference load is still in flight. `_applyPrefs` will seed it once
+        // the load lands; using `current` here would copy the previous
+        // project's layout into the new session.
+        if (prefsService.projectId != next.entryId) return;
+        final prefs = prefsService.current;
+        final idx = prefs.workspaceViewIndex;
+        saved = saved.copyWith(
+          initialized: true,
+          selectedView: idx >= 0 && idx < WorkspaceView.values.length
+              ? WorkspaceView.values[idx]
+              : WorkspaceView.files,
+          panelMode: prefs.panelMode,
+        );
+        ref
+            .read(sessionWorkspaceStateProvider(next).notifier)
+            .update((_) => saved);
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || ref.read(activeSessionUiKeyProvider) != next) return;
+        setState(() => _restoreSessionUi(saved));
+        if (_pageController.hasClients &&
+            _pageController.page?.round() != saved.mobilePage) {
+          _pageController.jumpToPage(saved.mobilePage);
+        }
+      });
+    });
+
     // Subsequent project switches (A → B while WorkspaceShell stays mounted)
     // bootstrap via this listener. The *initial* mount is handled by the
     // initState post-frame callback below: WorkspaceShell is only built
@@ -1266,6 +1339,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   }
 
   void _publishVisibleSurfaces(int page) {
+    _updateSessionUi((s) => s.copyWith(mobilePage: page));
     ref
         .read(agentSurfaceVisibleProvider.notifier)
         .set(page == _MobilePage.agent);
@@ -1363,6 +1437,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   void _selectView(WorkspaceView view) {
     setState(() {
       _selectedView = view;
+      _updateSessionUi((s) => s.copyWith(selectedView: view));
       _updatePrefs();
     });
     ref.read(visibleWorkspaceViewProvider.notifier).set(view);
@@ -1381,7 +1456,10 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       return;
     }
     if (_effectivePanelMode == _PanelMode.contextHidden) {
-      setState(() => _panelMode = _PanelMode.normal);
+      setState(() {
+        _panelMode = _PanelMode.normal;
+        _updateSessionUi((s) => s.copyWith(panelMode: _panelMode!.name));
+      });
     }
   }
 
@@ -1815,7 +1893,10 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   }
 
   void _setTabletContextExpanded(bool expanded) {
-    setState(() => _tabletContextPanelExpanded = expanded);
+    setState(() {
+      _tabletContextPanelExpanded = expanded;
+      _updateSessionUi((s) => s.copyWith(tabletContextExpanded: expanded));
+    });
   }
 
   /// Opens the touch tablet's context pane — reached only from
@@ -1823,14 +1904,20 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   /// [_tabletFlingLeftward]).
   void _openTabletContextPanel() {
     if (_tabletEndDrawerOpen) return;
-    setState(() => _tabletEndDrawerOpen = true);
+    setState(() {
+      _tabletEndDrawerOpen = true;
+      _updateSessionUi((s) => s.copyWith(tabletContextOpen: true));
+    });
   }
 
   /// Closes the touch tablet's context pane — the shared tail of its two
   /// close paths ([_closeTabletDrawers]'s back handler and the close button in
   /// the pane's own tab bar).
   void _closeTabletContextPanel() {
-    setState(() => _tabletEndDrawerOpen = false);
+    setState(() {
+      _tabletEndDrawerOpen = false;
+      _updateSessionUi((s) => s.copyWith(tabletContextOpen: false));
+    });
   }
 
   /// Closes whichever of the touch tablet's sidebar/context pane is open —
@@ -1907,6 +1994,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       _panelMode = _effectivePanelMode == _PanelMode.contextHidden
           ? _PanelMode.normal
           : _PanelMode.contextHidden;
+      _updateSessionUi((s) => s.copyWith(panelMode: _panelMode!.name));
       _updatePrefs();
     });
   }
@@ -1917,6 +2005,7 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
   void _hideContextPanel() {
     setState(() {
       _panelMode = _PanelMode.contextHidden;
+      _updateSessionUi((s) => s.copyWith(panelMode: _panelMode!.name));
       _updatePrefs();
     });
   }
@@ -1961,6 +2050,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
                 isExpanded: false,
                 onToggleExpand: () => setState(() {
                   _panelMode = _PanelMode.contextExpanded;
+                  _updateSessionUi(
+                    (s) => s.copyWith(panelMode: _panelMode!.name),
+                  );
                   _updatePrefs();
                 }),
                 onClose: _hideContextPanel,
@@ -1992,6 +2084,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
               isExpanded: true,
               onToggleExpand: () => setState(() {
                 _panelMode = _PanelMode.normal;
+                _updateSessionUi(
+                  (s) => s.copyWith(panelMode: _panelMode!.name),
+                );
                 _updatePrefs();
               }),
               onClose: _hideContextPanel,

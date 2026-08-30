@@ -26,6 +26,7 @@ import '../providers/open_checkout.dart';
 import '../providers/project_work_status.dart';
 import '../providers/providers.dart';
 import '../providers/session_delete_pending.dart';
+import '../providers/session_workspace_state.dart';
 import '../providers/session_setup.dart';
 import '../providers/sessions.dart';
 import '../providers/ui_attention_providers.dart';
@@ -847,6 +848,7 @@ class _SessionMenu extends ConsumerWidget {
           final archived = await svc.archive(session.id);
           if (archived != null) {
             clearChatComposerDraft(ref, session.id);
+            clearSessionWorkspaceState(ref, entryId, session.id);
           }
           _disconnectIfEmpty(ref);
         case _SessionAction.delete:
@@ -914,6 +916,7 @@ class _SessionMenu extends ConsumerWidget {
     );
     if (result == SessionDeleteResult.deleted) {
       clearChatComposerDraft(ref, capturedId);
+      clearSessionWorkspaceState(ref, entryId, capturedId);
       _disconnectIfEmpty(ref);
     }
   }
