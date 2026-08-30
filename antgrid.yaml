@@ -1,0 +1,21 @@
+name: antgrid
+
+worktree:
+  setup:
+    steps:
+      - name: Copy local service environment
+        copy: ["web/.env", "relay/.env"]
+      - name: Install Bun workspaces
+        run: bun install
+      - name: Generate Prisma client
+        run: bun run --filter antgrid-web prisma:generate
+      - name: Apply local database migrations
+        run: bun run --filter antgrid-web migrate
+      - name: Install Flutter packages
+        run: flutter pub get
+        workingDir: app
+      - name: Install Dart client packages
+        run: dart pub get
+        workingDir: packages/antgrid_relay_client
+    timeoutMs: 900000
+    onFailure: warn
