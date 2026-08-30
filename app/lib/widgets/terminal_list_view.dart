@@ -58,6 +58,13 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
   ) {
     final key = _uiKey;
     if (key == null) return;
+    _updateTerminalUiFor(key, change);
+  }
+
+  void _updateTerminalUiFor(
+    SessionUiKey key,
+    SessionWorkspaceState Function(SessionWorkspaceState) change,
+  ) {
     ref.read(sessionWorkspaceStateProvider(key).notifier).update(change);
   }
 
@@ -136,11 +143,11 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
       priority: BackPriority.pushedTerminal,
       active: onScreen && _pushedTerminalId != null,
       onBack: _backFromPushed,
-      child: _buildBody(terminalService),
+      child: _buildBody(terminalService, key),
     );
   }
 
-  Widget _buildBody(TerminalService terminalService) {
+  Widget _buildBody(TerminalService terminalService, SessionUiKey? key) {
     final tabs = _adHocTerminals;
 
     // Push navigation — fullscreen terminal output.
@@ -157,9 +164,14 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
         if (fullTab != null) {
           return _buildPushedView(fullTab, terminalService);
         }
-        WidgetsBinding.instance.addPostFrameCallback(
-          (_) => _setPushedTerminal(null),
-        );
+        if (key != null) {
+          WidgetsBinding.instance.addPostFrameCallback(
+            (_) => _updateTerminalUiFor(
+              key,
+              (s) => s.copyWith(clearPushedTerminalId: true),
+            ),
+          );
+        }
         return const SizedBox.shrink();
       }
       return _buildPushedView(tab, terminalService);
@@ -171,9 +183,14 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
           .where((t) => t.terminalId == _pinnedTerminalId)
           .firstOrNull;
       if (pinnedTab == null) {
-        WidgetsBinding.instance.addPostFrameCallback(
-          (_) => _setPinnedTerminal(null),
-        );
+        if (key != null) {
+          WidgetsBinding.instance.addPostFrameCallback(
+            (_) => _updateTerminalUiFor(
+              key,
+              (s) => s.copyWith(clearPinnedTerminalId: true),
+            ),
+          );
+        }
         return const SizedBox.shrink();
       }
       final remaining = tabs
