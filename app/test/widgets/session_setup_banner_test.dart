@@ -13,6 +13,7 @@ import 'package:antgrid/models/session_entry.dart';
 import 'package:antgrid/project/project_session.dart';
 import 'package:antgrid/project/project_session_registry.dart';
 import 'package:antgrid/providers/agent_transport.dart';
+import 'package:antgrid/providers/session_setup.dart';
 import 'package:antgrid/providers/sessions.dart';
 import 'package:antgrid/providers/value_controller.dart';
 import 'package:antgrid/services/sessions_service.dart';
@@ -245,6 +246,35 @@ void main() {
       expect(find.byTooltip('View setup log'), findsOneWidget);
       expect(find.byType(AbProgressRule), findsNothing);
     });
+
+    testWidgets('a successful run clears after a short confirmation', (
+      tester,
+    ) async {
+      await pumpBanner(tester, _setup('done', stepIndex: 3));
+
+      expect(find.text('Workspace ready'), findsOneWidget);
+      await tester.pump(kSessionSetupSuccessHold);
+      await tester.pump();
+
+      expect(find.byType(AbInlineBanner), findsNothing);
+    });
+
+    testWidgets('an open successful setup log stays until it is collapsed', (
+      tester,
+    ) async {
+      await pumpBanner(tester, _setup('done', stepIndex: 3));
+      await tester.tap(find.byTooltip('View setup log'));
+      await tester.pump();
+      await tester.pump(kSessionSetupSuccessHold);
+
+      expect(find.text('Workspace ready'), findsOneWidget);
+      await tester.tap(find.byTooltip('Hide setup log'));
+      await tester.pump();
+      await tester.pump(kSessionSetupSuccessHold);
+      await tester.pump();
+
+      expect(find.byType(AbInlineBanner), findsNothing);
+    });
   });
 
   // Dismissal is keyed on the RUN, not the session: a rerun is a new answer to
@@ -286,9 +316,8 @@ void main() {
         setup,
         extraOverrides: [
           selectedRegistrationIdProvider.overrideWith((ref) => _projectId),
-          projectSessionProvider(
-            _projectId,
-          ).overrideWith((ref) async => session),
+          projectSessionProvider(_projectId)
+              .overrideWith((ref) async => session),
         ],
       );
       return transport;

@@ -18,6 +18,91 @@ export '../services/sessions_service.dart' show SessionSetupAction;
 /// of being read as either finished or still going.
 enum SessionSetupPhase { running, done, failed, skipped, interrupted, unknown }
 
+/// How long a successful setup confirmation remains above the agent surface.
+const Duration kSessionSetupSuccessHold = Duration(seconds: 3);
+
+/// Ephemeral presentation state that must outlive an AgentPanel mount.
+///
+/// The panel is intentionally absent while the context pane is full-width.
+/// Keeping this state in the banner would resurrect dismissed results and
+/// re-enable setup actions whenever the user returned to the agent.
+class SessionSetupBannerUiState {
+  const SessionSetupBannerUiState({
+    this.hiddenRunKeys = const <String>{},
+    this.expandedSessionId,
+    this.actingSessionIds = const <String>{},
+  });
+
+  final Set<String> hiddenRunKeys;
+  final String? expandedSessionId;
+  final Set<String> actingSessionIds;
+}
+
+class SessionSetupBannerUiController
+    extends Notifier<SessionSetupBannerUiState> {
+  final Map<String, Timer> _successTimers = <String, Timer>{};
+
+  @override
+  SessionSetupBannerUiState build() {
+    ref.onDispose(() {
+      for (final timer in _successTimers.values) {
+        timer.cancel();
+      }
+    });
+    return const SessionSetupBannerUiState();
+  }
+
+  void hide(String runKey) {
+    _successTimers.remove(runKey)?.cancel();
+    state = SessionSetupBannerUiState(
+      hiddenRunKeys: {...state.hiddenRunKeys, runKey},
+      expandedSessionId: state.expandedSessionId,
+      actingSessionIds: state.actingSessionIds,
+    );
+  }
+
+  void toggleExpanded(String sessionId, String runKey) {
+    _successTimers.remove(runKey)?.cancel();
+    state = SessionSetupBannerUiState(
+      hiddenRunKeys: state.hiddenRunKeys,
+      expandedSessionId: state.expandedSessionId == sessionId
+          ? null
+          : sessionId,
+      actingSessionIds: state.actingSessionIds,
+    );
+  }
+
+  void setActing(String sessionId, bool acting) {
+    final next = {...state.actingSessionIds};
+    if (acting) {
+      next.add(sessionId);
+    } else {
+      next.remove(sessionId);
+    }
+    state = SessionSetupBannerUiState(
+      hiddenRunKeys: state.hiddenRunKeys,
+      expandedSessionId: state.expandedSessionId,
+      actingSessionIds: next,
+    );
+  }
+
+  void hideSuccessAfterDelay(String runKey) {
+    if (state.hiddenRunKeys.contains(runKey) ||
+        _successTimers.containsKey(runKey)) {
+      return;
+    }
+    _successTimers[runKey] = Timer(kSessionSetupSuccessHold, () {
+      _successTimers.remove(runKey);
+      hide(runKey);
+    });
+  }
+}
+
+final sessionSetupBannerUiProvider =
+    NotifierProvider<SessionSetupBannerUiController, SessionSetupBannerUiState>(
+      SessionSetupBannerUiController.new,
+    );
+
 SessionSetupPhase sessionSetupPhase(SessionSetup? setup) =>
     switch (setup?.state) {
       'running' => SessionSetupPhase.running,
@@ -51,17 +136,16 @@ typedef SessionSetupResult = ({bool ok, String? error});
 /// rendered row of a cross-project Recent list. Kept alive, every session id
 /// ever scrolled past — deleted ones included — would leave a provider behind,
 /// each re-running its scan of the list on every `session:updated`.
-final sessionSetupProvider = Provider.autoDispose.family<SessionSetup?, String>((
-  ref,
-  sessionId,
-) {
-  final state = ref.watch(freshSessionsStateProvider);
-  if (state == null) return null;
-  for (final s in state.sessions) {
-    if (s.id == sessionId) return s.setup;
-  }
-  return null;
-});
+final sessionSetupProvider = Provider.autoDispose.family<SessionSetup?, String>(
+  (ref, sessionId) {
+    final state = ref.watch(freshSessionsStateProvider);
+    if (state == null) return null;
+    for (final s in state.sessions) {
+      if (s.id == sessionId) return s.setup;
+    }
+    return null;
+  },
+);
 
 /// [sessionSetupProvider] for the session the workspace is showing.
 final activeSessionSetupProvider = Provider.autoDispose<SessionSetup?>((ref) {

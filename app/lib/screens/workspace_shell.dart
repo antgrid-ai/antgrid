@@ -59,7 +59,6 @@ import '../widgets/operational_error_toaster.dart';
 import '../widgets/projects_drawer.dart';
 import '../widgets/session_search_modal.dart';
 import '../widgets/session_start_refusal.dart';
-import '../widgets/session_setup_banner.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../widgets/resizable_pane.dart';
 import '../widgets/workspace_tab_bar.dart';
@@ -1108,7 +1107,6 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
             const OperationalErrorToaster(),
             const AbBanner(),
             const AbHostBanner(),
-            const SessionSetupBanner(),
             Expanded(
               child: isMobile
                   ? _buildMobile(surfaceChild)

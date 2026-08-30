@@ -47,6 +47,7 @@ import 'remote_host_chip.dart';
 import 'session_agent_mark.dart';
 import 'session_mode_control.dart';
 import 'session_rename_dialog.dart';
+import 'session_setup_banner.dart';
 import 'window_title_bar.dart';
 import 'workspace_menu_button.dart';
 
@@ -112,6 +113,7 @@ class AgentPanel extends ConsumerWidget {
           )
         else
           const AgentBar(),
+        const SessionSetupBanner(),
         Expanded(
           child: isChat && activeId != null
               // Keyed by session so switching sessions rebuilds the State —
