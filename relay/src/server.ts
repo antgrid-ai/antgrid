@@ -12,6 +12,7 @@ import {
 } from "./protocol.js";
 import { MessageRateLimiter, TokenBucketRateLimiter, pairKey } from "./rate-limiter.js";
 import { logger, setLogLevel } from "./logger.js";
+import { ConnectionLivenessTracker } from "./connection-liveness.js";
 import {
   buildHelloSigBody,
   encodeRouteFrame,
@@ -95,7 +96,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
     cache: licenseCache,
   });
   const startTime = Date.now();
-  const lastPong = new Map<string, number>();
+  const liveness = new ConnectionLivenessTracker();
   // Throttled per kind: either degradation drops every connection back into
   // the proxy's shared per-IP bucket and must be visible, but the detail is
   // proxy/client-supplied, so a hostile chain must not turn this into a flood.
@@ -355,6 +356,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
         // inserting the successor, so one device is never counted twice across
         // a restart.
         connections.remove(existing);
+        liveness.remove(existing.connectionId);
         sendErrorAndClose(existing.ws, "SUPERSEDED", "replaced by a newer connection", false, 1008);
       } else {
         sendErrorAndClose(ws, "SUPERSEDED", "a newer connection already holds this deviceId", false, 1008);
@@ -379,11 +381,11 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       openStreams: new Set<string>(),
     };
     connections.insert(conn);
+    liveness.add(conn.connectionId, now);
     ws.data.deviceId = hello.deviceId;
     ws.data.jti = claims?.jti;
     ws.data.phase = "ready";
     clearHelloTimer(ws.data.connectionId);
-    lastPong.delete(hello.deviceId);
 
     sendJson(ws, {
       type: "welcome",
@@ -427,6 +429,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       // Past hello per WsData but no live entry — the socket is being torn down.
       return;
     }
+    liveness.noteAuthenticatedInbound(conn.connectionId, Date.now());
 
     switch (msg.type) {
       case "hello":
@@ -437,6 +440,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       case "ping":
         // App-layer liveness probe: protocol-level pongs are unobservable from
         // browser-style WS clients, so clients probe here (see bridge watchdog).
+        liveness.noteApplicationPing(conn.connectionId, Date.now());
         ws.send(JSON.stringify({ type: "pong" }));
         return;
 
@@ -549,6 +553,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
       sendErrorAndClose(ws, "NOT_AUTHENTICATED", "Must be authenticated to route", false, 1008);
       return;
     }
+    liveness.noteAuthenticatedInbound(sender.connectionId, Date.now());
 
     // Authorization: account-derived and nothing else. Uniform
     // PEER_OFFLINE for deny-and-offline alike — an unauthorized sender must not
@@ -586,12 +591,15 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
 
   const pingInterval = config.pingIntervalMs > 0 ? setInterval(() => {
     const t = Date.now();
-    for (const c of connections.listConnections()) {
-      const live = connections.getByDeviceId(c.deviceId);
-      if (!live) continue;
-      const lastPongTime = lastPong.get(c.deviceId) ?? live.connectedAt;
-      if (t - lastPongTime > config.pingIntervalMs + config.pongTimeoutMs) {
-        logger.info("Device timed out (no pong)", { deviceId: c.deviceId });
+    const windowMs = config.pingIntervalMs + config.pongTimeoutMs;
+    for (const live of connections.getAll()) {
+      if (liveness.isTimedOut(live.connectionId, t, windowMs)) {
+        logger.info("Device timed out (no pong)", {
+          connectionId: live.connectionId,
+          deviceId: live.deviceId,
+          deviceType: live.deviceType,
+          ...liveness.ages(live.connectionId, t),
+        });
         try { live.ws.close(1001, "Pong timeout"); } catch { /* closing */ }
         continue;
       }
@@ -707,7 +715,7 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
           return;
         }
         connections.remove(conn);
-        lastPong.delete(conn.deviceId);
+        liveness.remove(conn.connectionId);
 
         // No cascade close: same-account peers stay connected and just go
         // offline to us. Must pass the Connection object, not
@@ -717,10 +725,10 @@ export function startServer(config: RelayConfig, deps: RelayServerDeps = {}): Re
         logger.info("WebSocket disconnected", { ip, deviceId: conn.deviceId });
       },
       pong(ws) {
-        if (ws.data.deviceId) {
-          lastPong.set(ws.data.deviceId, Date.now());
-          connections.updateLastSeen(ws.data.deviceId);
-        }
+        const conn = connections.getByConnectionId(ws.data.connectionId);
+        if (!conn) return;
+        liveness.noteProtocolPong(conn.connectionId, Date.now());
+        connections.updateLastSeen(conn.deviceId);
       },
     },
   });

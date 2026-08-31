@@ -67,6 +67,12 @@ class StreamCloseMessage {
   };
 }
 
+class PingMessage {
+  const PingMessage();
+
+  Map<String, dynamic> toJson() => {'type': 'ping'};
+}
+
 // --- Relay → Client ---
 
 /// Terminal success frame for the `hello` handshake (replaces v2
@@ -95,6 +101,14 @@ class WelcomeMessage {
       epoch: epoch,
       serverTime: serverTime,
     );
+  }
+}
+
+class PongMessage {
+  const PongMessage();
+
+  static PongMessage? fromJson(Map<String, dynamic> json) {
+    return const PongMessage();
   }
 }
 
@@ -239,6 +253,8 @@ Object? parseRelayMessage(Map<String, dynamic> json) {
   switch (type) {
     case 'welcome':
       return WelcomeMessage.fromJson(json);
+    case 'pong':
+      return PongMessage.fromJson(json);
     case 'stream-opened':
       return StreamOpenedMessage.fromJson(json);
     case 'stream-closed':
