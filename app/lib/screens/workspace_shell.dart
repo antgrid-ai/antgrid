@@ -501,8 +501,9 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
 
   // ── Preferences ──────────────────────────────────────────────────────
 
-  /// Apply preferences, updating state directly (no setState needed when
-  /// called from build — the build will use the updated values immediately).
+  /// Apply preferences, updating the local values immediately. Provider state
+  /// initialization is deferred when this runs during build because Riverpod
+  /// forbids notifying listeners while the widget tree is being built.
   void _applyPrefs(ProjectPreferences prefs) {
     _splitRatio = prefs.splitRatio;
     // An unrecognized name resolves to null — unchosen, so the viewport default
@@ -529,15 +530,22 @@ class WorkspaceShellState extends ConsumerState<WorkspaceShell>
       if (saved.initialized) {
         _restoreSessionUi(saved);
       } else {
-        ref
-            .read(sessionWorkspaceStateProvider(key).notifier)
-            .update(
-              (s) => s.copyWith(
-                initialized: true,
-                selectedView: _selectedView,
-                panelMode: _panelMode?.name,
-              ),
-            );
+        final selectedView = _selectedView;
+        final panelMode = _panelMode?.name;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          final current = ref.read(sessionWorkspaceStateProvider(key));
+          if (current.initialized) return;
+          ref
+              .read(sessionWorkspaceStateProvider(key).notifier)
+              .update(
+                (s) => s.copyWith(
+                  initialized: true,
+                  selectedView: selectedView,
+                  panelMode: panelMode,
+                ),
+              );
+        });
       }
       _sessionUiKey = key;
     }
