@@ -9,8 +9,6 @@ worktree:
         run: bun install
       - name: Generate Prisma client
         run: bun run --filter antgrid-web prisma:generate
-      - name: Apply local database migrations
-        run: bun run --filter antgrid-web migrate
       - name: Install Flutter packages
         run: flutter pub get
         workingDir: app
