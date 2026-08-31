@@ -124,6 +124,7 @@ export interface DriverCtx {
   send: (m: AbMessage) => void;
   projectPath: string;
   projectId: string;
+  approvalPolicy: ApprovalPolicy;
   chatAugment: () => { args: string[]; env: Record<string, string> };
   /** Persist the agent-native resume id for this slot (overwrite-latest). */
   onAgentSession: (agentSessionId: string) => void;
@@ -133,6 +134,14 @@ export interface DriverCtx {
   onLifecycle?: (evt: DriverLifecycleEvent) => void;
   /** Fire the advisory "a newer <tool> exists" nudge for this start. */
   emitUpdateCheck: () => void;
+}
+
+export type ApprovalPolicy = "default" | "bypass";
+
+export interface AgentApprovalPolicy {
+  terminalArgs?: readonly string[];
+  chat?: true;
+  risk: "bypasses-approvals" | "bypasses-approvals-and-sandbox";
 }
 
 /**
@@ -395,6 +404,8 @@ export interface AgentSpec {
    *  advertisement so a newly-added agent shows with a proper name without
    *  needing an app release. */
   label: string;
+  /** Explicit per-mode support. An empty object means bypass is unsupported. */
+  approvalPolicies: { bypass?: AgentApprovalPolicy };
   /**
    * Name this agent identifies itself by in `bridge hook <name> <event>` and in
    * the `agent` field of its loopback posts. Deliberately NOT `AgentKey`: the

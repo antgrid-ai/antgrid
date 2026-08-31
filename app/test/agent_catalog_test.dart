@@ -67,22 +67,35 @@ void main() {
 
   group('AgentDescriptor.fromJson', () {
     test('parses a complete descriptor', () {
-      final d = AgentDescriptor.fromJson(
-        _wire(
-          'codex',
-          label: 'Codex',
-          chatCapable: true,
-          judgeCapable: true,
-          handlerTerminal: true,
-          handlerChat: true,
-        ),
+      final wire = _wire(
+        'codex',
+        label: 'Codex',
+        chatCapable: true,
+        judgeCapable: true,
+        handlerTerminal: true,
+        handlerChat: true,
       );
+      wire['approvalPolicies'] = {
+        'terminal': ['default', 'bypass'],
+        'chat': ['default', 'bypass'],
+      };
+      wire['approvalPolicyRisk'] = 'bypasses-approvals-and-sandbox';
+      final d = AgentDescriptor.fromJson(wire);
       expect(d, isNotNull);
       expect(d!.label, 'Codex');
       expect(d.chatCapable, isTrue);
       expect(d.judgeCapable, isTrue);
       expect(d.handlerTerminal, isTrue);
       expect(d.handlerChat, isTrue);
+      expect(d.terminalApprovalPolicies, ['default', 'bypass']);
+      expect(d.chatApprovalPolicies, ['default', 'bypass']);
+      expect(d.approvalPolicyRisk, 'bypasses-approvals-and-sandbox');
+    });
+
+    test('an old bridge advertises no bypass capability', () {
+      final d = AgentDescriptor.fromJson(_wire('codex'))!;
+      expect(d.terminalApprovalPolicies, ['default']);
+      expect(d.chatApprovalPolicies, ['default']);
     });
 
     test('drops a partial descriptor rather than defaulting its fields', () {

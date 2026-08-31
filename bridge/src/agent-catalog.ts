@@ -25,5 +25,10 @@ export function buildAgentCatalog(): AgentDescriptor[] {
       terminal: handlerObservable(tool, "terminal"),
       chat: handlerObservable(tool, "chat"),
     },
+    approvalPolicies: {
+      terminal: spec.approvalPolicies.bypass?.terminalArgs ? ["default", "bypass"] : ["default"],
+      chat: spec.approvalPolicies.bypass?.chat ? ["default", "bypass"] : ["default"],
+    },
+    approvalPolicyRisk: spec.approvalPolicies.bypass?.risk,
   }));
 }

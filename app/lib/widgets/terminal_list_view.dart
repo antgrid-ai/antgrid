@@ -17,6 +17,7 @@ import '../models/terminal_models.dart';
 import '../navigation/back_intent.dart';
 import '../providers/providers.dart';
 import '../providers/sessions.dart';
+import '../providers/session_workspace_state.dart';
 import '../providers/visible_surface.dart';
 import '../services/terminal_service.dart';
 import 'terminal_detail_view.dart';
@@ -40,8 +41,40 @@ class TerminalListView extends ConsumerStatefulWidget {
 class _TerminalListViewState extends ConsumerState<TerminalListView> {
   static const int _maxAdHocTerminals = 10;
 
-  String? _pinnedTerminalId;
-  String? _pushedTerminalId;
+  SessionUiKey? get _uiKey => ref.read(activeSessionUiKeyProvider);
+
+  SessionWorkspaceState get _uiState {
+    final key = _uiKey;
+    return key == null
+        ? const SessionWorkspaceState()
+        : ref.read(sessionWorkspaceStateProvider(key));
+  }
+
+  String? get _pinnedTerminalId => _uiState.pinnedTerminalId;
+  String? get _pushedTerminalId => _uiState.pushedTerminalId;
+
+  void _updateTerminalUi(
+    SessionWorkspaceState Function(SessionWorkspaceState) change,
+  ) {
+    final key = _uiKey;
+    if (key == null) return;
+    _updateTerminalUiFor(key, change);
+  }
+
+  void _updateTerminalUiFor(
+    SessionUiKey key,
+    SessionWorkspaceState Function(SessionWorkspaceState) change,
+  ) {
+    ref.read(sessionWorkspaceStateProvider(key).notifier).update(change);
+  }
+
+  void _setPinnedTerminal(String? id) => _updateTerminalUi(
+    (s) => s.copyWith(pinnedTerminalId: id, clearPinnedTerminalId: id == null),
+  );
+
+  void _setPushedTerminal(String? id) => _updateTerminalUi(
+    (s) => s.copyWith(pushedTerminalId: id, clearPushedTerminalId: id == null),
+  );
 
   /// The PTYs carrying a checkout's `worktree.setup` transcript.
   ///
@@ -89,12 +122,14 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
       return false;
     }
     if (_pushedTerminalId == null) return false;
-    setState(() => _pushedTerminalId = null);
+    _setPushedTerminal(null);
     return true;
   }
 
   @override
   Widget build(BuildContext context) {
+    final key = ref.watch(activeSessionUiKeyProvider);
+    if (key != null) ref.watch(sessionWorkspaceStateProvider(key));
     final terminalService = serviceWhenReady(ref, terminalServiceProvider);
     if (terminalService == null) {
       return const AbLoading(message: 'loading terminals...');
@@ -108,11 +143,11 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
       priority: BackPriority.pushedTerminal,
       active: onScreen && _pushedTerminalId != null,
       onBack: _backFromPushed,
-      child: _buildBody(terminalService),
+      child: _buildBody(terminalService, key),
     );
   }
 
-  Widget _buildBody(TerminalService terminalService) {
+  Widget _buildBody(TerminalService terminalService, SessionUiKey? key) {
     final tabs = _adHocTerminals;
 
     // Push navigation — fullscreen terminal output.
@@ -129,9 +164,14 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
         if (fullTab != null) {
           return _buildPushedView(fullTab, terminalService);
         }
-        WidgetsBinding.instance.addPostFrameCallback(
-          (_) => setState(() => _pushedTerminalId = null),
-        );
+        if (key != null) {
+          WidgetsBinding.instance.addPostFrameCallback(
+            (_) => _updateTerminalUiFor(
+              key,
+              (s) => s.copyWith(clearPushedTerminalId: true),
+            ),
+          );
+        }
         return const SizedBox.shrink();
       }
       return _buildPushedView(tab, terminalService);
@@ -143,9 +183,14 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
           .where((t) => t.terminalId == _pinnedTerminalId)
           .firstOrNull;
       if (pinnedTab == null) {
-        WidgetsBinding.instance.addPostFrameCallback(
-          (_) => setState(() => _pinnedTerminalId = null),
-        );
+        if (key != null) {
+          WidgetsBinding.instance.addPostFrameCallback(
+            (_) => _updateTerminalUiFor(
+              key,
+              (s) => s.copyWith(clearPinnedTerminalId: true),
+            ),
+          );
+        }
         return const SizedBox.shrink();
       }
       final remaining = tabs
@@ -182,7 +227,7 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
           final id = _nextAdHocTerminalId(existingIds);
           final name = _terminalName(id);
           service.createAdHocTerminal(id, name: name);
-          setState(() => _pushedTerminalId = id);
+          _setPushedTerminal(id);
         },
       ),
     );
@@ -204,7 +249,7 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
                   final id = _nextAdHocTerminalId(existingIds);
                   final name = _terminalName(id);
                   service.createAdHocTerminal(id, name: name);
-                  setState(() => _pushedTerminalId = id);
+                  _setPushedTerminal(id);
                 },
         ),
       ],
@@ -252,17 +297,15 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
         AbRowAction(
           icon: AbIcons.pin,
           tooltip: 'Pin',
-          onTap: () => setState(() => _pinnedTerminalId = tab.terminalId),
+          onTap: () => _setPinnedTerminal(tab.terminalId),
         ),
         AbRowAction(
           icon: AbIcons.trash,
           tooltip: 'Delete',
           tone: AbIconButtonTone.danger,
           onTap: () {
-            setState(() {
-              if (_pinnedTerminalId == tab.terminalId) _pinnedTerminalId = null;
-              if (_pushedTerminalId == tab.terminalId) _pushedTerminalId = null;
-            });
+            if (_pinnedTerminalId == tab.terminalId) _setPinnedTerminal(null);
+            if (_pushedTerminalId == tab.terminalId) _setPushedTerminal(null);
             service.deleteTerminal(tab.terminalId);
           },
         ),
@@ -272,7 +315,7 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
       onTap: () {
         // Focusing the terminal clears its unread badge.
         service.setActiveTerminal(tab.terminalId);
-        setState(() => _pushedTerminalId = tab.terminalId);
+        _setPushedTerminal(tab.terminalId);
       },
     );
   }
@@ -283,10 +326,10 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
     return TerminalDetailView(
       tab: tab,
       terminalService: service,
-      onBack: () => setState(() => _pushedTerminalId = null),
+      onBack: () => _setPushedTerminal(null),
       onDelete: () {
         final id = tab.terminalId;
-        setState(() => _pushedTerminalId = null);
+        _setPushedTerminal(null);
         service.deleteTerminal(id);
       },
     );
@@ -327,7 +370,7 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
                         AbIconButton(
                           icon: AbIcons.unpin,
                           tooltip: 'Unpin',
-                          onTap: () => setState(() => _pinnedTerminalId = null),
+                          onTap: () => _setPinnedTerminal(null),
                         ),
                         AbIconButton(
                           icon: AbIcons.trash,
@@ -335,7 +378,7 @@ class _TerminalListViewState extends ConsumerState<TerminalListView> {
                           tone: AbIconButtonTone.danger,
                           onTap: () {
                             final id = pinnedTab.terminalId;
-                            setState(() => _pinnedTerminalId = null);
+                            _setPinnedTerminal(null);
                             service.deleteTerminal(id);
                           },
                         ),

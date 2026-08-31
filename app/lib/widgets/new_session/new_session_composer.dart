@@ -18,6 +18,7 @@ import '../../design/widgets/ab_loading.dart';
 import '../../design/widgets/ab_menu.dart';
 import '../../design/widgets/ab_snack_bar.dart';
 import '../../design/widgets/ab_text_field.dart';
+import '../../design/widgets/ab_switch.dart';
 import '../../design/widgets/ab_tooltip.dart';
 
 // The send key moved to the design system (shared with the transcript
@@ -32,6 +33,7 @@ import '../../providers/new_session_start.dart';
 import '../../screens/upgrade_screen.dart';
 import '../../services/sessions_service.dart' show SessionOperationException;
 import '../../utils/platform_utils.dart';
+import '../../util/detached.dart';
 import '../ab_status_helpers.dart' show sessionRefusalCopy;
 import 'branch_menu.dart';
 import 'branch_remote_advisory.dart';
@@ -442,6 +444,12 @@ class _NewSessionComposerState extends ConsumerState<NewSessionComposer> {
       if (next != null) _promptFocus.requestFocus();
     });
     ref.listen(newSessionAgentProvider, (_, next) => _applyModeDefault(next));
+    ref.listen(newSessionBypassSupportProvider, (_, next) {
+      if (next == null &&
+          ref.read(newSessionApprovalPolicyProvider) == 'bypass') {
+        ref.read(newSessionApprovalPolicyProvider.notifier).set('default');
+      }
+    });
     // Re-apply the mode default EXACTLY ONCE, when the wire chat-capability
     // future FIRST resolves (loading -> has-value). This closes a startup
     // race where initState's postFrameCallback (and a target switch's agent
@@ -1339,6 +1347,8 @@ class _GearPopoverContentState extends ConsumerState<_GearPopoverContent> {
     });
 
     final agent = ref.watch(newSessionAgentProvider);
+    final bypassDescriptor = ref.watch(newSessionBypassSupportProvider);
+    final bypass = ref.watch(newSessionApprovalPolicyProvider) == 'bypass';
 
     // `showAbPanel` inserts this content into the app's Overlay, above (not
     // inside) the page's Scaffold — so the AbTextFields below need their own
@@ -1358,6 +1368,62 @@ class _GearPopoverContentState extends ConsumerState<_GearPopoverContent> {
             controller: _name,
             hintText: 'untitled session',
             onChanged: (v) => ref.read(newSessionNameProvider.notifier).set(v),
+          ),
+          const SizedBox(height: AbTokens.space12),
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const _GearFieldLabel('YOLO / Skip approvals'),
+                    Text(
+                      bypassDescriptor == null
+                          ? 'Not supported for this agent and mode'
+                          : 'Launch this session without approval prompts',
+                      style: AbTokens.sansStyle(
+                        fontSize: AbTokens.fontXs,
+                        color: context.antgrid.textMuted,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              AbSwitch(
+                key: const Key('new-session-gear-yolo'),
+                value: bypass && bypassDescriptor != null,
+                semanticLabel: 'YOLO / Skip approvals',
+                onChanged: bypassDescriptor == null
+                    ? null
+                    : (next) {
+                        if (!next) {
+                          ref
+                              .read(newSessionApprovalPolicyProvider.notifier)
+                              .set('default');
+                          return;
+                        }
+                        detached('new-session', 'confirm YOLO mode', () async {
+                          final disablesSandbox =
+                              bypassDescriptor.approvalPolicyRisk ==
+                              'bypasses-approvals-and-sandbox';
+                          final confirmed = await AbConfirmDialog.show(
+                            context: context,
+                            title: 'Enable YOLO mode?',
+                            body: disablesSandbox
+                                ? 'This agent will bypass approval prompts and disable sandboxing for this session.'
+                                : 'This agent will bypass approval prompts for this session.',
+                            confirmLabel: 'Enable YOLO',
+                            destructive: true,
+                          );
+                          if (confirmed && mounted) {
+                            ref
+                                .read(newSessionApprovalPolicyProvider.notifier)
+                                .set('bypass');
+                          }
+                        });
+                      },
+              ),
+            ],
           ),
           const SizedBox(height: AbTokens.space12),
           const _GearFieldLabel('CLI arguments'),

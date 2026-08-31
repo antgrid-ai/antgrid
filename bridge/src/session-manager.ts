@@ -12,9 +12,11 @@ import {
 } from "./known-agents";
 import { augmentAgentLaunch, injectsHookAliveProbe } from "./agent-launch-augmenter";
 import { agentSpec } from "./agents/registry";
+import { resolveApprovalPolicy } from "./agent-approval-policy";
 // Aliased: this module declares its own, unrelated `AgentSpec` (the launch
 // triple) right below.
 import type { AgentSpec as RegistryAgentSpec } from "./agents/types";
+import type { ApprovalPolicy } from "./agents/types";
 import { stripAnsi } from "./handler/context";
 import { resumeArgv, sessionResumable } from "./agent-resume";
 import { isChatCapableTool } from "./structured/chat-capable";
@@ -57,6 +59,7 @@ export interface SessionLaunchSpec {
   args?: string;
   // 'chat' routes session:start to the structured driver instead of a PTY.
   mode?: "terminal" | "chat";
+  approvalPolicy?: ApprovalPolicy;
   /** Shared is the historical default. Worktree is host-gated and never accepts
    * a path from the caller. */
   isolation?: "shared" | "worktree";
@@ -124,7 +127,7 @@ export interface SessionManagerOpts {
   cursorDir?: string;
   /** Called by start()/stop() for a mode:'chat' session instead of the PTY path.
    *  Injected by agent-core to drive the StructuredAgentManager. */
-  onStartChat?: (opts: { sessionId: string; tool: string; resumeId?: string; config?: Record<string, string>; initialPrompt?: string }) => void;
+  onStartChat?: (opts: { sessionId: string; tool: string; resumeId?: string; config?: Record<string, string>; initialPrompt?: string; approvalPolicy: ApprovalPolicy }) => void;
   /** May return the teardown promise. The structured driver's dispose is what
    *  releases the agent's own process lock (codex's ~/.codex sqlite), so a
    *  caller that restarts this slot on another runtime must be able to await
@@ -193,6 +196,7 @@ interface PersistedEntry {
   // PTY (terminal) vs structured-driver (chat) session. Fixed at creation —
   // the two use different backends, so there is no post-hoc switch.
   mode: "terminal" | "chat";
+  approvalPolicy: ApprovalPolicy;
   // True once the user has named this session (manual rename or explicit
   // create-time name). Auto-naming from the agent title is suppressed forever
   // after — manual always wins. Backfilled from the name pattern on load.
@@ -261,6 +265,7 @@ const PersistedEntrySchema = z
     command: z.string().optional().catch(undefined),
     args: z.string().optional().catch(undefined),
     mode: z.enum(["terminal", "chat"]).optional().catch(undefined),
+    approvalPolicy: z.enum(["default", "bypass"]).optional().catch(undefined),
     manuallyRenamed: z.boolean().optional().catch(undefined),
     autoTitleRank: z.enum(TITLE_RANKS).optional().catch(undefined),
     agentSessionId: z.string().optional().catch(undefined),
@@ -290,6 +295,7 @@ const PersistedEntrySchema = z
       // Files written before this feature lack mode → 'terminal' (PTY), the
       // only backend those builds had.
       mode: s.mode ?? "terminal",
+      approvalPolicy: s.approvalPolicy ?? "default",
       // Backfill: files written before this feature lack the flag. A name that
       // isn't a default "Session N" was user-chosen → treat as manual so
       // live-follow never clobbers it. Default names start following.
@@ -630,6 +636,7 @@ export class SessionManager {
         // the delete, and this peek has no core to ask.
         deleting: false,
         tool: e.tool, command: e.command, args: e.args, mode: e.mode,
+        approvalPolicy: e.approvalPolicy,
         // Pessimistic, unlike `agentSessionResumable` below: hiding a control
         // the live list then shows is recoverable; offering Fork on a cold peek
         // that cannot resolve the checkout's agent spec is a menu item that can
@@ -741,7 +748,7 @@ export class SessionManager {
     }
 
     // Never inherit raw command/args. A fork launches the registry default.
-    const entry = this.buildEntry(undefined, { tool, mode: source.mode });
+    const entry = this.buildEntry(undefined, { tool, mode: source.mode, approvalPolicy: source.approvalPolicy });
     // Named after its source rather than left as the next "Session N": what a
     // fork is FOR is that it came from somewhere, and the drawer row is where
     // the user reads that. Assigned here instead of passed to buildEntry so
@@ -777,7 +784,7 @@ export class SessionManager {
 
     return this.createWorktree(
       undefined,
-      { tool, mode: source.mode, isolation: "worktree" },
+      { tool, mode: source.mode, approvalPolicy: source.approvalPolicy, isolation: "worktree" },
       entry,
       // A thunk, not a value: an argument expression is evaluated before the
       // call, so resolving HEAD eagerly here would answer "no committed HEAD"
@@ -801,6 +808,12 @@ export class SessionManager {
     // session:result error, rather than persisting an entry that fails every
     // start() forever (and re-fails on each reconnect once it's on disk).
     if (spec?.tool) resolveAgent(spec.tool);
+    const mode = spec?.mode ?? "terminal";
+    const approvalPolicy = spec?.approvalPolicy ?? "default";
+    if (approvalPolicy === "bypass") {
+      if (spec?.command) throw new Error("Custom-command sessions do not support bypass approval policy");
+      resolveApprovalPolicy(spec?.tool ?? this.agentSpec.name, mode, approvalPolicy);
+    }
     const id = crypto.randomUUID();
     const now = Date.now();
     const entry: PersistedEntry = {
@@ -812,7 +825,8 @@ export class SessionManager {
       tool: spec?.tool,
       command: spec?.command,
       args: spec?.args,
-      mode: spec?.mode ?? "terminal",
+      mode,
+      approvalPolicy,
       manuallyRenamed: name !== undefined,
       checkoutId: "main",
       checkoutKind: "main",
@@ -1899,6 +1913,7 @@ export class SessionManager {
       const chatAlreadyRunning = this.runningChat.has(id);
       this.runningChat.add(id);
       const chatTool = entry.tool ?? "codex";
+      resolveApprovalPolicy(chatTool, "chat", entry.approvalPolicy);
       const resumeId = entry.conversationStart === "fork" ? undefined : this.resumeIdFor(chatTool, entry);
       this.noteConversationStart(entry, resumeId !== undefined);
       this.opts.onStartChat?.({
@@ -1907,6 +1922,7 @@ export class SessionManager {
         resumeId,
         config: entry.config,
         initialPrompt: this.forkInitialPrompt(entry, initialPrompt),
+        approvalPolicy: entry.approvalPolicy,
       });
       entry.lastUsedAt = Date.now();
       this.completeForkLaunch(entry);
@@ -1973,6 +1989,7 @@ export class SessionManager {
       // for auto-naming. Additive flags/env only; fail-open inside the augmenter.
       const aug = augmentAgentLaunch(entry.tool, this.opts.storeDir, this.opts.cursorDir);
       baseArgs = [...baseArgs, ...aug.args];
+      baseArgs = [...baseArgs, ...resolveApprovalPolicy(entry.tool, "terminal", entry.approvalPolicy)];
       launchEnv = { ...launchEnv, ...aug.env };
       notificationsInjected = aug.notificationsInjected;
       // Resume the slot's last-active conversation (held in resumeArgs, appended
@@ -1980,6 +1997,7 @@ export class SessionManager {
       // for codex's `resume` subcommand).
       resumeArgs = entry.conversationStart === "fork" ? [] : this.resumeArgsFor(entry.tool, entry);
     } else if (entry.command) {
+      if (entry.approvalPolicy === "bypass") throw new Error("Custom-command sessions do not support bypass approval policy");
       // Custom command lines never resume and get no per-spawn hooks: the user
       // owns the whole line, so we don't inject title/resume integration and no
       // agentSessionId is ever captured for them.
@@ -1997,6 +2015,7 @@ export class SessionManager {
         notificationsInjected = aug.notificationsInjected;
         resumeArgs = entry.conversationStart === "fork" ? [] : this.resumeArgsFor(sessionAgentSpec.name, entry);
       }
+      baseArgs = [...baseArgs, ...resolveApprovalPolicy(sessionAgentSpec.name, "terminal", entry.approvalPolicy)];
     }
     if (!base) {
       // No per-session spec and the first-run wizard hasn't supplied an
@@ -2257,6 +2276,7 @@ export class SessionManager {
     if (mode === "chat" && !isChatCapableTool(entry.tool)) {
       throw new Error(`tool has no chat driver: ${entry.tool}`);
     }
+    resolveApprovalPolicy(entry.tool ?? this.agentSpec.name, mode, entry.approvalPolicy);
     // Read with the OLD mode — the same expression toWire uses.
     const wasRunning = entry.mode === "chat" ? this.runningChat.has(id) : this.tm.has(id);
     // Held across the teardown only: the exit-driven handler teardown fires
@@ -2478,6 +2498,7 @@ export class SessionManager {
       forkedFromSessionId: e.forkedFromSessionId,
       args: e.args,
       mode: e.mode,
+      approvalPolicy: e.approvalPolicy,
       agentSessionResumable: this.agentSessionResumable(e),
       // Read from the owning core's reduction (work-status.ts), never folded
       // here: one per-session reduction, not two that can disagree. Undefined

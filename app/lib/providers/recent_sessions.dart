@@ -25,6 +25,7 @@ import 'device_provisioning.dart';
 import 'projects.dart';
 import 'recent_agents.dart';
 import 'sessions.dart';
+import 'session_workspace_state.dart';
 import 'ui_attention_providers.dart';
 import 'agent_transport.dart';
 
@@ -470,6 +471,7 @@ Future<RecentSessionDeleteOutcome> deleteRecentSession(
       // that does not is merely stale under an id that never comes back.
       if (ack == SessionDeleteAck.deleted) {
         clearChatComposerDraft(ref, row.session.id);
+        clearSessionWorkspaceState(ref, o.registrationId, row.session.id);
       }
       return switch (ack) {
         SessionDeleteAck.deleted => RecentSessionDeleteOutcome.deleted,
@@ -530,6 +532,7 @@ Future<RecentSessionDeleteOutcome> deleteRecentSession(
   await store.put(o.registrationId, next);
   await store.flushNow();
   clearChatComposerDraft(ref, row.session.id);
+  clearSessionWorkspaceState(ref, o.registrationId, row.session.id);
   return RecentSessionDeleteOutcome.deleted;
 }
 

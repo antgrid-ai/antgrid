@@ -98,7 +98,7 @@ describe("session:* messages", () => {
       requestId: "r1",
       sessions: [{
         id: "s1", name: "Session 1",
-        createdAt: 1, lastUsedAt: 2, archived: false, running: true, deleting: false, mode: "terminal" as const,
+        createdAt: 1, lastUsedAt: 2, archived: false, running: true, deleting: false, mode: "terminal" as const, approvalPolicy: "default" as const,
         agentSessionResumable: true, forkSupported: false, sharedWorkspace: false, workspaceMemberCount: 1,
         checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const,
       }],
@@ -129,10 +129,10 @@ describe("session:* messages", () => {
   it("session:result and session:updated roundtrip", () => {
     const result = createMessage("session:result", {
       requestId: "r", ok: true,
-      session: { id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, deleting: false, mode: "terminal" as const, agentSessionResumable: true, forkSupported: false, sharedWorkspace: false, workspaceMemberCount: 1, checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const },
+      session: { id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, deleting: false, mode: "terminal" as const, approvalPolicy: "default" as const, agentSessionResumable: true, forkSupported: false, sharedWorkspace: false, workspaceMemberCount: 1, checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const },
     });
     const updated = createMessage("session:updated", {
-      sessions: [{ id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, deleting: false, mode: "terminal" as const, agentSessionResumable: true, forkSupported: false, sharedWorkspace: false, workspaceMemberCount: 1, checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const }],
+      sessions: [{ id: "s", name: "S", createdAt: 1, lastUsedAt: 2, archived: false, running: false, deleting: false, mode: "terminal" as const, approvalPolicy: "default" as const, agentSessionResumable: true, forkSupported: false, sharedWorkspace: false, workspaceMemberCount: 1, checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const }],
     });
     expect(AbMessageSchema.safeParse(JSON.parse(JSON.stringify(result))).success).toBe(true);
     expect(AbMessageSchema.safeParse(JSON.parse(JSON.stringify(updated))).success).toBe(true);
@@ -160,10 +160,31 @@ describe("session:* messages", () => {
     }
   });
 
+  it("session:create round-trips bypass and defaults old session rows", () => {
+    const created = parseMessage(JSON.stringify(createMessage("session:create", {
+      requestId: "r1", tool: "codex", approvalPolicy: "bypass",
+    })));
+    expect(created?.type).toBe("session:create");
+    if (created?.type === "session:create") expect(created.approvalPolicy).toBe("bypass");
+
+    const oldRow = {
+      id: "s1", name: "old", createdAt: 1, lastUsedAt: 1,
+      archived: false, running: false, mode: "terminal",
+    };
+    const parsed = parseMessage(JSON.stringify({
+      ...createMessage("session:list:result", { requestId: "r", sessions: [] }),
+      sessions: [oldRow],
+    }));
+    expect(parsed?.type).toBe("session:list:result");
+    if (parsed?.type === "session:list:result") {
+      expect(parsed.sessions[0]?.approvalPolicy).toBe("default");
+    }
+  });
+
   it("session entry schema accepts an optional command", () => {
     const entry = {
       id: "s1", name: "n", createdAt: 1, lastUsedAt: 1,
-      archived: false, running: false, deleting: false, command: "my-agent --serve", mode: "terminal" as const,
+      archived: false, running: false, deleting: false, command: "my-agent --serve", mode: "terminal" as const, approvalPolicy: "default" as const,
       agentSessionResumable: true, forkSupported: false, sharedWorkspace: false, workspaceMemberCount: 1,
       checkoutId: "main", checkoutKind: "main" as const, checkoutState: "ready" as const,
     };
@@ -178,7 +199,7 @@ describe("session:* messages", () => {
   it("session entry schema accepts optional native agent metadata", () => {
     const entry = {
       id: "s1", name: "n", createdAt: 1, lastUsedAt: 1,
-      archived: false, running: false, deleting: false, mode: "terminal" as const,
+      archived: false, running: false, deleting: false, mode: "terminal" as const, approvalPolicy: "default" as const,
       agentSessionResumable: true, forkSupported: false, sharedWorkspace: false, workspaceMemberCount: 1,
       agentSessionId: "cop-1",
       agentTranscriptPath: "/tmp/copilot-transcript.json",
@@ -251,7 +272,7 @@ describe("session:* messages", () => {
   it("deleting survives the roundtrip when the bridge sets it", () => {
     const entry = {
       id: "s1", name: "n", createdAt: 1, lastUsedAt: 1,
-      archived: false, running: false, deleting: true, mode: "terminal" as const,
+      archived: false, running: false, deleting: true, mode: "terminal" as const, approvalPolicy: "default" as const,
       agentSessionResumable: true, forkSupported: false, sharedWorkspace: false, workspaceMemberCount: 1,
       checkoutId: "c1", checkoutKind: "managed-worktree" as const, checkoutState: "ready" as const,
     };

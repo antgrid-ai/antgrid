@@ -50,6 +50,8 @@ test("buildAgentCatalog describes the whole registry in declaration order", () =
     chatCapable: true,
     judgeCapable: true,
     handler: { terminal: true, chat: true },
+    approvalPolicies: { terminal: ["default", "bypass"], chat: ["default", "bypass"] },
+    approvalPolicyRisk: "bypasses-approvals",
   });
   // The agent the PATH probe can find but the Handler can never observe — the
   // distinction the descriptor exists to carry. Judge-capable and unobservable
@@ -61,6 +63,8 @@ test("buildAgentCatalog describes the whole registry in declaration order", () =
     chatCapable: false,
     judgeCapable: true,
     handler: { terminal: false, chat: false },
+    approvalPolicies: { terminal: ["default", "bypass"], chat: ["default"] },
+    approvalPolicyRisk: "bypasses-approvals",
   });
   // Detectable and nameable, but not a judge: cursor-agent declares no headless
   // argv VERIFIED at any reach. The one it used to carry was written from its
@@ -72,6 +76,8 @@ test("buildAgentCatalog describes the whole registry in declaration order", () =
     chatCapable: false,
     judgeCapable: false,
     handler: { terminal: false, chat: false },
+    approvalPolicies: { terminal: ["default", "bypass"], chat: ["default"] },
+    approvalPolicyRisk: "bypasses-approvals",
   });
   // The same verdict reached the other way: no headless block at all.
   expect(byKey["kimi"]).toEqual({
@@ -80,6 +86,8 @@ test("buildAgentCatalog describes the whole registry in declaration order", () =
     chatCapable: false,
     judgeCapable: false,
     handler: { terminal: false, chat: false },
+    approvalPolicies: { terminal: ["default", "bypass"], chat: ["default"] },
+    approvalPolicyRisk: "bypasses-approvals",
   });
   expect(byKey["opencode"].handler).toEqual({ terminal: true, chat: true });
 });

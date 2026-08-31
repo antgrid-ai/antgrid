@@ -68,23 +68,6 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
   /// carried-over line would describe work that is no longer happening.
   String? _runKey;
 
-  /// Dismissal is per RUN, not per session: a rerun of a setup the user
-  /// dismissed is a new answer to the same question and has to be shown.
-  /// A set rather than one slot, keyed like [_expandedSessionId] and
-  /// [_actingSessionId]: this State survives a session switch, so a single
-  /// slot would un-dismiss whichever banner the user dismissed first.
-  final Set<String> _dismissedRunKeys = <String>{};
-
-  /// The log is expanded per session, so switching sessions collapses it
-  /// rather than opening a terminal for a workspace the user just left.
-  String? _expandedSessionId;
-
-  /// The session a `session:setup` verb is in flight for, keyed like
-  /// [_expandedSessionId] rather than held as a bare bool: this State
-  /// survives a session switch, so a single flag would disable whichever
-  /// session happened to be on screen when a slow answer arrived.
-  String? _actingSessionId;
-
   @override
   void dispose() {
     _tailTimer?.cancel();
@@ -96,6 +79,7 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
     final sessionId = ref.watch(activeSessionIdProvider);
     final setup = ref.watch(activeSessionSetupProvider);
     final phase = sessionSetupPhase(setup);
+    final ui = ref.watch(sessionSetupBannerUiProvider);
     // `unknown` is a state this build cannot name — say nothing rather than
     // guess at either "still going" or "finished".
     if (sessionId == null ||
@@ -106,13 +90,19 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
     }
 
     final runKey = '$sessionId|${setup.startedAt}';
-    if (_dismissedRunKeys.contains(runKey)) {
+    if (ui.hiddenRunKeys.contains(runKey)) {
       _syncTail(null, null);
       return const SizedBox.shrink();
     }
 
+    final expanded = ui.expandedSessionId == sessionId;
+    if (phase == SessionSetupPhase.done && !expanded) {
+      ref
+          .read(sessionSetupBannerUiProvider.notifier)
+          .hideSuccessAfterDelay(runKey);
+    }
+
     final running = phase == SessionSetupPhase.running;
-    final expanded = _expandedSessionId == sessionId;
     final terminalId = setup.terminalId;
     // While the log is open the tail is on screen in full; sampling it twice
     // would only pay the formatter again for a line the user is already
@@ -206,7 +196,11 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
           AbButton(
             label: action.label,
             compact: true,
-            onTap: _actingSessionId == sessionId
+            onTap:
+                ref
+                    .read(sessionSetupBannerUiProvider)
+                    .actingSessionIds
+                    .contains(sessionId)
                 ? null
                 : () => _act(sessionId, action.verb),
           ),
@@ -215,8 +209,9 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
         AbIconButton(
           icon: expanded ? AbIcons.chevronDown : AbIcons.chevronRight,
           tooltip: expanded ? 'Hide setup log' : 'View setup log',
-          onTap: () =>
-              setState(() => _expandedSessionId = expanded ? null : sessionId),
+          onTap: () => ref
+              .read(sessionSetupBannerUiProvider.notifier)
+              .toggleExpanded(sessionId, runKey),
         ),
         // A run still going has nothing to dismiss to — the banner is the only
         // account of why the agent has not started yet.
@@ -224,7 +219,8 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
           AbIconButton(
             icon: AbIcons.close,
             tooltip: 'Dismiss',
-            onTap: () => setState(() => _dismissedRunKeys.add(runKey)),
+            onTap: () =>
+                ref.read(sessionSetupBannerUiProvider.notifier).hide(runKey),
           ),
       ],
     );
@@ -290,7 +286,9 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
     final container = ref.container;
     final entryId = container.read(selectedRegistrationIdProvider);
     if (entryId == null) return;
-    setState(() => _actingSessionId = sessionId);
+    container
+        .read(sessionSetupBannerUiProvider.notifier)
+        .setActing(sessionId, true);
     detached(
       'SessionSetupBanner',
       'session:setup ${verb.wire} failed',
@@ -312,9 +310,9 @@ class _SessionSetupBannerState extends ConsumerState<SessionSetupBanner> {
           if (container.read(activeSessionIdProvider) != sessionId) return;
           showAbSnackBar(context, '${_failureCopy(verb)} — ${result.error}');
         } finally {
-          if (mounted && _actingSessionId == sessionId) {
-            setState(() => _actingSessionId = null);
-          }
+          container
+              .read(sessionSetupBannerUiProvider.notifier)
+              .setActing(sessionId, false);
         }
       },
     );

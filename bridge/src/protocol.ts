@@ -463,6 +463,11 @@ const AgentDescriptorSchema = z.object({
   chatCapable: z.boolean(),
   judgeCapable: z.boolean(),
   handler: z.object({ terminal: z.boolean(), chat: z.boolean() }),
+  approvalPolicies: z.object({
+    terminal: z.array(z.enum(["default", "bypass"])),
+    chat: z.array(z.enum(["default", "bypass"])),
+  }),
+  approvalPolicyRisk: z.enum(["bypasses-approvals", "bypasses-approvals-and-sandbox"]).optional(),
 });
 export type AgentDescriptor = z.infer<typeof AgentDescriptorSchema>;
 
@@ -1205,6 +1210,7 @@ const SessionEntrySchema = z.object({
   // Raw, shell-interpreted CLI-args string passed verbatim (not an argv array).
   args: z.string().optional(),
   mode: z.enum(["terminal", "chat"]).default("terminal"),
+  approvalPolicy: z.enum(["default", "bypass"]).default("default"),
   // False when this session's agent-native conversation can no longer be
   // resumed, so a mode switch would silently start a fresh one. Deliberately
   // NOT "can this session switch mode" — that also depends on the tool having a
@@ -1279,6 +1285,7 @@ const SessionCreateMessage = BaseMessage.extend({
   // Raw, shell-interpreted CLI-args string passed verbatim (not an argv array).
   args: z.string().optional(),
   mode: z.enum(["terminal", "chat"]).optional(),
+  approvalPolicy: z.enum(["default", "bypass"]).optional(),
   // Optional on the wire for an old client; handlers normalize omission to
   // shared before invoking SessionManager.
   isolation: z.enum(["shared", "worktree"]).optional(),

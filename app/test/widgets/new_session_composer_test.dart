@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/misc.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:antgrid/design/widgets/ab_cross_fade.dart';
+import 'package:antgrid/design/widgets/ab_switch.dart';
 import 'package:antgrid/design/ab_theme.dart';
 import 'package:antgrid/models/agent_descriptor.dart';
 import 'package:antgrid/models/git_branch.dart';
@@ -74,6 +75,9 @@ AgentDescriptor _descriptor(
   String tool,
   String label, {
   bool chatCapable = false,
+  List<String> terminalApprovalPolicies = const ['default'],
+  List<String> chatApprovalPolicies = const ['default'],
+  String? approvalPolicyRisk,
 }) => AgentDescriptor(
   tool: tool,
   label: label,
@@ -81,12 +85,22 @@ AgentDescriptor _descriptor(
   judgeCapable: chatCapable,
   handlerTerminal: chatCapable,
   handlerChat: chatCapable,
+  terminalApprovalPolicies: terminalApprovalPolicies,
+  chatApprovalPolicies: chatApprovalPolicies,
+  approvalPolicyRisk: approvalPolicyRisk,
 );
 
 /// The catalog a machine running today's bridge advertises, in registry order.
 final _fullCatalog = <String, AgentDescriptor>{
   'claude-code': _descriptor('claude-code', 'Claude Code', chatCapable: true),
-  'codex': _descriptor('codex', 'Codex', chatCapable: true),
+  'codex': _descriptor(
+    'codex',
+    'Codex',
+    chatCapable: true,
+    terminalApprovalPolicies: const ['default', 'bypass'],
+    chatApprovalPolicies: const ['default', 'bypass'],
+    approvalPolicyRisk: 'bypasses-approvals-and-sandbox',
+  ),
   'opencode': _descriptor('opencode', 'opencode', chatCapable: true),
   'cursor-agent': _descriptor('cursor-agent', 'Cursor'),
   'github-copilot': _descriptor('github-copilot', 'Copilot'),
@@ -480,6 +494,62 @@ void main() {
       tester.element(find.byType(NewSessionComposer)),
     );
     expect(container.read(newSessionNameProvider), 'my session');
+  });
+
+  testWidgets('YOLO is capability-gated and requires risk confirmation', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _host(
+        overrides: [
+          ..._baseOverrides(target: _project),
+          newSessionAgentProvider.overrideWith(
+            () => ValueController(const KnownAgent('codex')),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('new-session-gear-button')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('new-session-gear-yolo')));
+    await tester.pumpAndSettle();
+    expect(
+      find.text(
+        'This agent will bypass approval prompts and disable sandboxing for this session.',
+      ),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Enable YOLO'));
+    await tester.pumpAndSettle();
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(NewSessionComposer)),
+    );
+    expect(container.read(newSessionApprovalPolicyProvider), 'bypass');
+  });
+
+  testWidgets('custom commands cannot enable YOLO', (tester) async {
+    await tester.pumpWidget(
+      _host(
+        overrides: [
+          ..._baseOverrides(target: _project),
+          newSessionAgentProvider.overrideWith(
+            () => ValueController(const CustomAgent()),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('new-session-gear-button')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Not supported for this agent and mode'), findsOneWidget);
+    final toggle = tester.widget<AbSwitch>(
+      find.byKey(const Key('new-session-gear-yolo')),
+    );
+    expect(toggle.onChanged, isNull);
   });
 
   testWidgets('agent selector picks an agent and sets the touched flag', (

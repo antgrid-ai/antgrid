@@ -316,6 +316,7 @@ class SessionsService {
     String? command,
     String? args,
     String? mode,
+    String approvalPolicy = 'default',
     String isolation = 'shared',
     String? baseBranch,
   }) {
@@ -333,6 +334,7 @@ class SessionsService {
           'command': ?command,
           'args': ?args,
           'mode': ?mode,
+          'approvalPolicy': approvalPolicy,
           'isolation': isolation,
           'baseBranch': ?baseBranch,
         }),
@@ -343,17 +345,24 @@ class SessionsService {
 
   /// Forks from bridge-owned transcript and workspace state. The app supplies
   /// no command, native conversation id, transcript, or filesystem path.
-  Future<SessionEntry?> fork(String sourceSessionId, {required String workspace}) {
+  Future<SessionEntry?> fork(
+    String sourceSessionId, {
+    required String workspace,
+  }) {
     final requestId = _newRequestId();
     final pending = _newPending<SessionEntry?>(
       () => _pendingCreates.remove(requestId),
     );
     _pendingCreates[requestId] = pending;
-    unawaited(_send(createAbMessage('session:fork', {
-      'requestId': requestId,
-      'sourceSessionId': sourceSessionId,
-      'workspace': workspace,
-    })));
+    unawaited(
+      _send(
+        createAbMessage('session:fork', {
+          'requestId': requestId,
+          'sourceSessionId': sourceSessionId,
+          'workspace': workspace,
+        }),
+      ),
+    );
     return pending.future;
   }
 
