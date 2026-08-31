@@ -1,7 +1,13 @@
+import 'dart:io' show InternetAddress;
+
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_snack_bar.dart';
+import '../models/workspace_view.dart';
+import '../services/file_service.dart';
+import '../services/preview_service.dart';
 import '../widgets/terminal_hyperlink_sheet.dart';
 import 'ab_log.dart';
 
@@ -133,6 +139,174 @@ Future<void> openTerminalHyperlink(
       'TerminalView',
       'open hyperlink failed',
       fields: {'uri': _elide(uri), 'error': '$error', 'stack': '$stack'},
+    );
+  }
+}
+
+/// Extracts the raw filesystem path from an OSC 8 `file://` hyperlink target,
+/// or null when [uri] isn't shaped like one.
+///
+/// The path is handed to the bridge as-is (`FileService.resolveTerminalPath`
+/// → `file:resolve-path`) and resolved there against the checkout root: only
+/// the bridge machine's own platform separators are authoritative, and the
+/// app never learns which OS a remote session's machine runs — so this stays
+/// a syntactic unwrap, not a validity check.
+String? terminalFilePath(String uri) {
+  final parsed = Uri.tryParse(uri.trim());
+  if (parsed == null || parsed.scheme != 'file') return null;
+  if (parsed.path.isEmpty) return null;
+  var path = Uri.decodeFull(parsed.path);
+  // `file:///C:/Users/...` parses with a leading slash ahead of the drive
+  // letter; a Windows path never actually starts with one.
+  if (RegExp(r'^/[A-Za-z]:/').hasMatch(path)) {
+    path = path.substring(1);
+  }
+  return path;
+}
+
+/// Whether [host] is a dev server's address rather than an external site's —
+/// `localhost`, or any literal IPv4/IPv6 address (loopback, LAN, or a raw
+/// public IP typed straight at a box). A link that names a real external
+/// site by bare IP is vanishingly rare; a DOMAIN name is what a public site
+/// looks like, so a hostname always falls through to the external-browser
+/// path in [openContentLink] regardless of what it resolves to.
+bool isLocalDevHost(String host) {
+  return host.toLowerCase() == 'localhost' ||
+      InternetAddress.tryParse(host) != null;
+}
+
+/// Opens a link found in ANY app surface that renders untrusted content —
+/// terminal OSC 8 hyperlinks, a markdown-previewed file, or markdown inside
+/// an agent chat message. Every surface routes through this one function so
+/// the three destinations agree everywhere the app shows a link:
+///
+///  * `file://...` → the Files tab, resolved via [fileService] against
+///    whichever checkout the caller means (never assumed here).
+///  * `http(s)://` to `localhost` or a literal IP ([isLocalDevHost]) → the
+///    Preview tab via [previewService], in-app on every device — desktop
+///    dials it directly, a phone tunnels it over the relay — rather than an
+///    external browser that may have no route to the port at all.
+///  * anything else (a search result, a docs site, a GitHub PR) → the
+///    system browser, through [openTerminalHyperlink]'s existing scheme and
+///    deceptive-link checks.
+///
+/// [fileService] and [previewService] are resolved LAZILY, and re-invoked on
+/// every retry rather than captured once: this awaits user dialogs, and the
+/// checkout or session behind either service can be gone by the time a
+/// fallback path runs.
+///
+/// Never completes with an error, matching [openTerminalHyperlink]'s own
+/// contract — every caller discards the future this returns.
+Future<void> openContentLink(
+  BuildContext context,
+  String uri, {
+  required FileService? Function() fileService,
+  required PreviewService? Function() previewService,
+  required void Function(WorkspaceView) revealView,
+  bool disclosed = false,
+}) async {
+  final parsed = Uri.tryParse(uri.trim());
+  if (parsed?.scheme == 'file') {
+    await _openFileLink(context, uri, fileService, revealView);
+    return;
+  }
+  if (parsed != null &&
+      (parsed.scheme == 'http' || parsed.scheme == 'https') &&
+      isLocalDevHost(parsed.host)) {
+    await _openPreviewLink(context, parsed, previewService, revealView);
+    return;
+  }
+  await openTerminalHyperlink(context, uri, disclosed: disclosed);
+}
+
+/// Opens a path a `file://` link named in the Files tab. See
+/// [FileService.resolveTerminalPath] for why only the bridge can relativize
+/// the path, and [FileService.revealDirectory] for the folder case.
+Future<void> _openFileLink(
+  BuildContext context,
+  String rawUri,
+  FileService? Function() fileService,
+  void Function(WorkspaceView) revealView,
+) async {
+  try {
+    final path = terminalFilePath(rawUri);
+    if (path == null) {
+      if (context.mounted) showAbSnackBar(context, 'Could not open that link.');
+      return;
+    }
+    final service = fileService();
+    if (service == null) return;
+    final result = await service.resolveTerminalPath(path);
+    if (!context.mounted) return;
+    final relPath = result.relPath;
+    if (relPath == null) {
+      showAbSnackBar(context, 'That path is outside this workspace.');
+      return;
+    }
+    revealView(WorkspaceView.files);
+    if (result.isDirectory) {
+      service.revealDirectory(relPath);
+    } else {
+      service.selectFile(relPath);
+    }
+  } catch (error, stack) {
+    AbLog.error(
+      'ContentLink',
+      'open file link failed',
+      fields: {'error': '$error', 'stack': '$stack'},
+    );
+  }
+}
+
+/// Opens a `localhost`/IP-literal `http(s)` link in the Preview tab, with the
+/// same port-conflict confirm-and-fallback dialog the manual "open port" flow
+/// uses (`PreviewScreen._openPort`).
+Future<void> _openPreviewLink(
+  BuildContext context,
+  Uri target,
+  PreviewService? Function() previewService,
+  void Function(WorkspaceView) revealView,
+) async {
+  final scheme = target.scheme;
+  final port = target.hasPort ? target.port : (scheme == 'https' ? 443 : 80);
+  final path = target.path.isEmpty
+      ? '/'
+      : '${target.path}${target.query.isEmpty ? '' : '?${target.query}'}';
+  try {
+    final service = previewService();
+    if (service == null) return;
+    final result = await service.openTab(port, scheme: scheme, path: path);
+    if (!context.mounted) return;
+    if (result != SelectPortResult.portInUse) {
+      revealView(WorkspaceView.preview);
+      return;
+    }
+    final confirmed = await AbConfirmDialog.show(
+      context: context,
+      title: 'Port $port unavailable',
+      body:
+          'Port $port could not be opened on this device (it may be in use '
+          'or reserved). Open the preview on a different local port '
+          'instead? Sites that pin assets to port $port may not fully '
+          'load.',
+      confirmLabel: 'Open anyway',
+    );
+    if (!confirmed || !context.mounted) return;
+    // Re-resolved rather than reusing `service`: this awaited a user dialog,
+    // and the session behind it could have torn down in that window.
+    final fallback = previewService();
+    if (fallback == null) return;
+    await fallback.selectPortWithFallback(port, scheme: scheme, path: path);
+    if (!context.mounted) return;
+    revealView(WorkspaceView.preview);
+  } catch (error, stack) {
+    if (context.mounted) {
+      showAbSnackBar(context, 'Could not open preview on port $port.');
+    }
+    AbLog.error(
+      'ContentLink',
+      'open preview link failed',
+      fields: {'error': '$error', 'stack': '$stack'},
     );
   }
 }

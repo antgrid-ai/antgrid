@@ -1,5 +1,5 @@
 import chokidar, { type FSWatcher } from "chokidar";
-import { relative, extname, basename, join, isAbsolute } from "node:path";
+import { relative, resolve, sep, extname, basename, join, isAbsolute } from "node:path";
 import { statSync, watch as fsWatch, type FSWatcher as NodeFSWatcher } from "node:fs";
 import { logger } from "./logger";
 const log = logger.child({ component: "file-watcher" });
@@ -218,6 +218,40 @@ export class FileWatcher {
         encoding: result.encoding ?? "utf8",
         mimeType: result.mimeType,
         error: result.error,
+      }),
+    );
+  }
+
+  /** Resolves a path a terminal program printed (an OSC 8 `file://` hyperlink
+   *  target, absolute or already checkout-relative) against this checkout's
+   *  root, and replies with the checkout-relative form the app's file tree
+   *  understands. The app never learns the checkout's absolute root (see
+   *  `docs/architecture.md` — the checkout path never crosses the session
+   *  wire), so it cannot make this relative on its own; a null `relPath`
+   *  covers both a path from outside this checkout and one that fails to
+   *  resolve at all. Mirrors [readFile]'s own traversal guard. */
+  handleResolvePathRequest(requestId: string, rawPath: string): void {
+    const absPath = resolve(this.projectRoot, rawPath);
+    const normalizedRoot = resolve(this.projectRoot);
+    const insideRoot =
+      absPath === normalizedRoot || absPath.startsWith(normalizedRoot + sep);
+    let relPath: string | null = null;
+    let isDirectory = false;
+    if (insideRoot) {
+      relPath =
+        absPath === normalizedRoot ? "" : this.toRelPath(absPath);
+      try {
+        isDirectory = statSync(absPath).isDirectory();
+      } catch {
+        // Doesn't exist (yet) — still a valid path to point the Files tab at.
+      }
+    }
+    this.sendMessage(
+      createMessage("file:resolve-path-result", {
+        projectId: this.projectId,
+        requestId,
+        relPath,
+        isDirectory,
       }),
     );
   }

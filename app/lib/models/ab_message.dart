@@ -3,6 +3,7 @@ import 'package:uuid/uuid.dart';
 import 'agent_event.dart' show parseAgentEvent;
 import 'agent_hello.dart';
 import 'file_tree_models.dart';
+import 'git_sync_state.dart';
 import 'handler_state.dart' show HandlerEscalationChoice;
 import 'layout_models.dart';
 import 'preview_models.dart';
@@ -105,12 +106,30 @@ class ProxyStatusInfo {
 class GitInfo {
   final String branch;
 
-  const GitInfo({required this.branch});
+  /// Against the upstream REF, so as fresh as the last fetch — the same
+  /// contract `GitSyncState` documents. Both default to 0 rather than being
+  /// nullable: a bridge that predates the fields reports nothing, and "no
+  /// commits either way" is the right thing to render for an unknown answer.
+  final int ahead;
+  final int behind;
+  final bool hasUpstream;
+
+  const GitInfo({
+    required this.branch,
+    this.ahead = 0,
+    this.behind = 0,
+    this.hasUpstream = false,
+  });
 
   static GitInfo? fromJson(Map<String, dynamic> json) {
     final branch = json['branch'];
     if (branch is! String) return null;
-    return GitInfo(branch: branch);
+    return GitInfo(
+      branch: branch,
+      ahead: json['ahead'] is int ? json['ahead'] as int : 0,
+      behind: json['behind'] is int ? json['behind'] as int : 0,
+      hasUpstream: json['hasUpstream'] == true,
+    );
   }
 }
 
@@ -579,6 +598,74 @@ class GitUnstageResultMessage {
     required this.success,
     required this.files,
     this.error,
+  });
+}
+
+class GitSyncResultMessage {
+  final String id;
+  final int timestamp;
+  final String projectId;
+  final GitSyncOp op;
+  final bool success;
+
+  /// Null on a detached HEAD — the one shape with no branch to name.
+  final String? branch;
+  final String? remote;
+  final String? remoteBranch;
+  final String? summary;
+  final String? error;
+  final GitSyncFailureKind? failureKind;
+
+  /// Git's own invocation and stderr, present only on failure. Carried whole
+  /// because they are what the agent handoff forwards.
+  final String? command;
+  final String? stderr;
+
+  const GitSyncResultMessage({
+    required this.id,
+    required this.timestamp,
+    required this.projectId,
+    required this.op,
+    required this.success,
+    this.branch,
+    this.remote,
+    this.remoteBranch,
+    this.summary,
+    this.error,
+    this.failureKind,
+    this.command,
+    this.stderr,
+  });
+
+  /// The failure this result describes, or null when it succeeded. Folds the
+  /// wire fields into the shape the toast and the agent handoff both read, so
+  /// neither has to know which of `error`/`summary` carries the message.
+  GitSyncFailure? get failure {
+    if (success) return null;
+    return GitSyncFailure(
+      op: op,
+      kind: failureKind ?? GitSyncFailureKind.unknown,
+      message: error ?? '${op.label} failed',
+      branch: branch,
+      remote: remote,
+      remoteBranch: remoteBranch,
+      command: command,
+      stderr: stderr,
+    );
+  }
+}
+
+class GitSyncStateMessage {
+  final String id;
+  final int timestamp;
+  final String projectId;
+  final GitSyncState state;
+
+  const GitSyncStateMessage({
+    required this.id,
+    required this.timestamp,
+    required this.projectId,
+    required this.state,
   });
 }
 
@@ -1051,6 +1138,19 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         mimeType: json['mimeType'] as String?,
       );
 
+    case 'file:resolve-path-result':
+      final projectId = json['projectId'];
+      final requestId = json['requestId'];
+      if (projectId is! String || requestId is! String) return null;
+      return FileResolvePathResultMessage(
+        id: id,
+        timestamp: timestamp,
+        projectId: projectId,
+        requestId: requestId,
+        relPath: json['relPath'] as String?,
+        isDirectory: json['isDirectory'] as bool? ?? false,
+      );
+
     case 'ports:update':
       final projectId = json['projectId'];
       if (projectId is! String) return null;
@@ -1278,6 +1378,49 @@ Object? parseAbMessage(Map<String, dynamic> json) {
         success: unstageSuccess,
         files: unstageFiles,
         error: json['error'] as String?,
+      );
+
+    case 'git:sync-result':
+      final syncProjectId = json['projectId'];
+      final syncSuccess = json['success'];
+      final syncOpRaw = json['op'];
+      if (syncProjectId is! String ||
+          syncSuccess is! bool ||
+          syncOpRaw is! String) {
+        return null;
+      }
+      // An unknown op is the one field with no safe fallback: a result the app
+      // cannot attribute to the button that is spinning would clear the wrong
+      // one. Rejecting the frame leaves the wall-clock latch to unstick it.
+      final syncOp = GitSyncOp.fromWire(syncOpRaw);
+      if (syncOp == null) return null;
+      final syncKindRaw = json['failureKind'];
+      return GitSyncResultMessage(
+        id: id,
+        timestamp: timestamp,
+        projectId: syncProjectId,
+        op: syncOp,
+        success: syncSuccess,
+        branch: json['branch'] as String?,
+        remote: json['remote'] as String?,
+        remoteBranch: json['remoteBranch'] as String?,
+        summary: json['summary'] as String?,
+        error: json['error'] as String?,
+        failureKind: syncKindRaw is String
+            ? GitSyncFailureKind.fromWire(syncKindRaw)
+            : null,
+        command: json['command'] as String?,
+        stderr: json['stderr'] as String?,
+      );
+
+    case 'git:sync-state':
+      final syncStateProjectId = json['projectId'];
+      if (syncStateProjectId is! String) return null;
+      return GitSyncStateMessage(
+        id: id,
+        timestamp: timestamp,
+        projectId: syncStateProjectId,
+        state: GitSyncState.fromJson(json),
       );
 
     case 'file:search-result':

@@ -187,7 +187,15 @@ const AgentStatusMessage = BaseMessage.extend({
   services: z.array(ServiceStatusInfo).optional(),
   commands: z.array(CommandInfo).optional(),
   ports: z.array(PortInfo).optional(),
-  git: z.object({ branch: z.string() }).optional(),
+  // Counts are LOCAL (against the upstream ref), so they are as fresh as the
+  // last fetch — see [readSyncState] in git-sync.ts for why nothing here may
+  // reach the network. All three are optional so an older bridge still parses.
+  git: z.object({
+    branch: z.string(),
+    ahead: z.number().int().nonnegative().optional(),
+    behind: z.number().int().nonnegative().optional(),
+    hasUpstream: z.boolean().optional(),
+  }).optional(),
   agent: z.object({
     tool: z.string().optional(),
     name: z.string().optional(),
@@ -347,6 +355,73 @@ const GitUnstageResultMessage = BaseMessage.extend({
   success: z.boolean(),
   files: z.array(z.string()),
   error: z.string().optional(),
+  ...CheckoutScoped,
+});
+
+/** Why a push/pull did not happen. Mirrors [GitSyncFailureKind] in git-sync.ts
+ *  and `GitSyncFailureKind` in the Dart model BY HAND; a receiver that meets an
+ *  unrecognized value must read it as "unknown" rather than reject the frame,
+ *  which is what lets a newer bridge add a kind without an app release. */
+const GitSyncFailureKindSchema = z.enum([
+  "no-remote", "no-upstream", "ambiguous-remote", "not-fast-forward",
+  "rejected", "diverged", "auth", "conflict", "dirty-tree", "detached", "unknown",
+]);
+
+const GitSyncMessage = BaseMessage.extend({
+  type: z.literal("git:sync"),
+  projectId: z.string(),
+  op: z.enum(["push", "pull"]),
+  ...CheckoutScoped,
+});
+
+const GitSyncResultMessage = BaseMessage.extend({
+  type: z.literal("git:sync-result"),
+  projectId: z.string(),
+  op: z.enum(["push", "pull"]),
+  success: z.boolean(),
+  /** Null on a detached HEAD — the one shape with no branch to name. */
+  branch: z.string().nullable(),
+  remote: z.string().optional(),
+  remoteBranch: z.string().optional(),
+  summary: z.string().optional(),
+  error: z.string().optional(),
+  failureKind: GitSyncFailureKindSchema.optional(),
+  /** The git invocation and its verbatim stderr, present only on failure. They
+   *  are carried rather than summarized because they are what the agent handoff
+   *  forwards — the app never re-parses git's prose to build its own copy. */
+  command: z.string().optional(),
+  stderr: z.string().optional(),
+  ...CheckoutScoped,
+});
+
+const GitSyncStatusMessage = BaseMessage.extend({
+  type: z.literal("git:sync-status"),
+  projectId: z.string(),
+  /** Ask the REMOTE, not just the local upstream ref (see [readSyncState] vs
+   *  [checkBranchAgainstRemote]). Costs a network round trip, so it is opt-in
+   *  and never set by the refresh that rides git:status. */
+  probeRemote: z.boolean().optional(),
+  ...CheckoutScoped,
+});
+
+const GitSyncStateMessage = BaseMessage.extend({
+  type: z.literal("git:sync-state"),
+  projectId: z.string(),
+  branch: z.string().nullable(),
+  remote: z.string().nullable(),
+  remoteBranch: z.string().nullable(),
+  ahead: z.number().int().nonnegative(),
+  behind: z.number().int().nonnegative(),
+  hasUpstream: z.boolean(),
+  hasRemote: z.boolean(),
+  /** Present only when a probe actually reached the remote; the same wire
+   *  strings [BranchRemoteState] already uses. Absent means the counts are
+   *  local-only — as fresh as the last fetch, which is what the up/down
+   *  indicator promises. */
+  state: z.enum([
+    "no-remote", "no-upstream", "gone", "in-sync",
+    "behind", "ahead", "diverged", "differs", "unreachable",
+  ]).optional(),
   ...CheckoutScoped,
 });
 
@@ -563,6 +638,28 @@ const FileContentMessage = BaseMessage.extend({
   encoding: z.enum(["utf8", "base64"]).default("utf8"),
   mimeType: z.string().optional(),
   error: z.string().optional(),
+  ...CheckoutScoped,
+});
+
+const FileResolvePathMessage = BaseMessage.extend({
+  type: z.literal("file:resolve-path"),
+  projectId: z.string(),
+  requestId: z.string(),
+  // Raw path as it appeared in terminal output (an OSC 8 `file://` hyperlink
+  // target) — absolute on the bridge machine, or already checkout-relative.
+  path: z.string(),
+  ...CheckoutScoped,
+});
+
+const FileResolvePathResultMessage = BaseMessage.extend({
+  type: z.literal("file:resolve-path-result"),
+  projectId: z.string(),
+  requestId: z.string(),
+  // Checkout-relative, `/`-separated — the only form the app's file tree
+  // understands. Null when the path does not resolve inside this checkout (a
+  // path from elsewhere, a symlink escape, or unparsable garbage).
+  relPath: z.string().nullable(),
+  isDirectory: z.boolean(),
   ...CheckoutScoped,
 });
 
@@ -1841,6 +1938,8 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   TreeUpdateMessage,
   FileReadMessage,
   FileContentMessage,
+  FileResolvePathMessage,
+  FileResolvePathResultMessage,
   FileSearchMessage,
   FileSearchCancelMessage,
   FileSearchResultMessage,
@@ -1888,6 +1987,10 @@ export const AbMessageSchema = z.discriminatedUnion("type", [
   GitStageResultMessage,
   GitUnstageMessage,
   GitUnstageResultMessage,
+  GitSyncMessage,
+  GitSyncResultMessage,
+  GitSyncStatusMessage,
+  GitSyncStateMessage,
   AgentEnableRelayMessage,
   AgentDisableRelayMessage,
   AgentActivationPendingMessage,
@@ -1972,6 +2075,8 @@ export type TreeFull = z.infer<typeof TreeFullMessage>;
 export type TreeUpdate = z.infer<typeof TreeUpdateMessage>;
 export type FileRead = z.infer<typeof FileReadMessage>;
 export type FileContent = z.infer<typeof FileContentMessage>;
+export type FileResolvePath = z.infer<typeof FileResolvePathMessage>;
+export type FileResolvePathResult = z.infer<typeof FileResolvePathResultMessage>;
 export type PortInfo = z.infer<typeof PortInfoSchema>;
 export type PortsUpdate = z.infer<typeof PortsUpdateMessage>;
 export type PreviewUrl = z.infer<typeof PreviewUrlMessage>;
@@ -2013,6 +2118,10 @@ export type GitStage = z.infer<typeof GitStageMessage>;
 export type GitStageResult = z.infer<typeof GitStageResultMessage>;
 export type GitUnstage = z.infer<typeof GitUnstageMessage>;
 export type GitUnstageResult = z.infer<typeof GitUnstageResultMessage>;
+export type GitSync = z.infer<typeof GitSyncMessage>;
+export type GitSyncResult = z.infer<typeof GitSyncResultMessage>;
+export type GitSyncStatus = z.infer<typeof GitSyncStatusMessage>;
+export type GitSyncState = z.infer<typeof GitSyncStateMessage>;
 export type FileSearch = z.infer<typeof FileSearchMessage>;
 export type FileSearchCancel = z.infer<typeof FileSearchCancelMessage>;
 export type SearchMatch = z.infer<typeof SearchMatchSchema>;
@@ -2104,11 +2213,13 @@ export const CHECKOUT_VARIABLE_MESSAGE_TYPES = new Set<string>([
   "terminal:snapshot:request", "terminal:snapshot",
   "agent:status",
   "tree:full", "tree:update", "file:read", "file:content",
+  "file:resolve-path", "file:resolve-path-result",
   "file:search", "file:search-cancel", "file:search-result", "file:search-done",
   "file:upload-start", "file:upload-ready", "file:upload-chunk", "file:upload-ack", "file:upload-done", "file:upload-result",
   "git:status", "git:diff", "git:diff-content", "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",
   "git:commit", "git:commit-result", "git:discard", "git:discard-result",
   "git:stage", "git:stage-result", "git:unstage", "git:unstage-result",
+  "git:sync", "git:sync-result", "git:sync-status", "git:sync-state",
   "command:run", "command:output", "command:done",
   "config:read", "config:read-result", "config:write", "config:write-result", "config:changed", "config:detect-tools", "config:detect-tools-result",
   "ports:update", "port:detected", "preview:url", "file:tree:snapshot:request", "file:tree:snapshot", "preview:snapshot:request", "preview:snapshot",
@@ -2174,6 +2285,7 @@ const KNOWN_TYPES = new Set<string>([
   "terminal:start", "terminal:stop", "terminal:resize", "terminal:size", "agent:status",
   "ping", "pong", "handshake:client-hello", "handshake:agent-hello", "handshake:agent-ready",
   "tree:full", "tree:update", "file:read", "file:content",
+  "file:resolve-path", "file:resolve-path-result",
   "ports:update", "preview:url",
   "agent:disconnecting", "agent:projects", "agent:tools", "stream-ready", "stream-invalid", "control:result", "app:ready",
   "command:run", "command:output", "command:done", "notification:push", "push:register",
@@ -2183,6 +2295,7 @@ const KNOWN_TYPES = new Set<string>([
   "git:list-branches", "git:branches", "git:checkout", "git:checkout-result",
   "git:commit", "git:commit-result", "git:discard", "git:discard-result",
   "git:stage", "git:stage-result", "git:unstage", "git:unstage-result",
+  "git:sync", "git:sync-result", "git:sync-status", "git:sync-state",
   "file:search", "file:search-cancel", "file:search-result", "file:search-done",
   "file:upload-start", "file:upload-ready", "file:upload-chunk",
   "file:upload-ack", "file:upload-done", "file:upload-result",

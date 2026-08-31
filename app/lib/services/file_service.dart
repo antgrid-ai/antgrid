@@ -1,13 +1,16 @@
 import 'dart:async';
 
 import 'package:antgrid_relay_client/antgrid_relay_client.dart';
+import 'package:uuid/uuid.dart';
 
 import '../analytics/events.dart';
 import '../models/file_tree_models.dart';
 import '../models/preferences_models.dart';
 import '../models/ab_message.dart';
+import '../models/git_sync_state.dart';
 import '../project/project_session.dart';
 import '../util/detached.dart';
+import 'pending_reply.dart';
 import 'reply_latch.dart';
 
 /// Per-project file tree + git status + viewing-file service.
@@ -50,10 +53,26 @@ class FileService {
   final Duration gitActionTimeout;
   ReplyLatch? _diffLatch;
 
+  /// Wall-clock bound for push/pull. Longer than [gitActionTimeout] because
+  /// these reach the network — and load-bearing beyond the usual dropped-send
+  /// case: a bridge predating `git:sync` DROPS the verb silently, and there is
+  /// no bridge-to-app feature negotiation to check instead, so this timeout is
+  /// the only thing that clears the spinner against an older host.
+  final Duration gitSyncTimeout;
+  ReplyLatch? _syncLatch;
+
+  /// In-flight `file:resolve-path` round trips, keyed by requestId — plural
+  /// unlike [_diffLatch]/[_syncLatch] because more than one terminal link can
+  /// be clicked (or hovered-then-clicked from two terminals) before either
+  /// answer lands.
+  final Map<String, PendingReply<FileResolvePathResultMessage>>
+  _pendingResolves = {};
+
   FileService.fromSession(
     this.session, {
     this.checkoutId = 'main',
     this.gitActionTimeout = const Duration(seconds: 15),
+    this.gitSyncTimeout = const Duration(seconds: 150),
   }) : _state = FileTreeState(projectId: session.projectId) {
     _heavySub = session.checkoutHeavyStream(checkoutId).listen(_onHeavyJson);
     _statusSub = session.checkoutStatusStream(checkoutId).listen(_onStatusJson);
@@ -64,6 +83,12 @@ class FileService {
     // file tree stayed empty for the life of the session. As a hydrator it also
     // re-pulls on every reconnect.
     session.hydrateCheckout(checkoutId, _treeHydratorKey, _hydrateTree);
+    // The bridge caches `git:sync-state` for replay, but only a checkout whose
+    // bundle existed at connect time receives that replay — an isolated
+    // session's does not, exactly as [_hydrateTree] above documents. Asking
+    // also re-fires on every reconnect, which is what keeps the indicator from
+    // sitting on counts from before a drop.
+    session.hydrateCheckout(checkoutId, _syncHydratorKey, _hydrateSyncState);
     // A hydrator covers re-ESTABLISHMENT; this covers the other window the
     // agent suppresses in, which re-establishes nothing. While the app is
     // backgrounded the agent DROPS every `tree:update` and keeps bumping its
@@ -79,6 +104,7 @@ class FileService {
   }
 
   static const _treeHydratorKey = 'file:tree';
+  static const _syncHydratorKey = 'git:sync-state';
 
   Future<void> _hydrateTree() => session.sendForCheckout(
     checkoutId,
@@ -117,6 +143,10 @@ class FileService {
     }
     if (parsed is FileContentMessage) {
       _handleFileContent(parsed);
+      return;
+    }
+    if (parsed is FileResolvePathResultMessage) {
+      _pendingResolves.remove(parsed.requestId)?.complete(parsed);
       return;
     }
   }
@@ -159,6 +189,36 @@ class FileService {
       if (!parsed.success) _emitOpFeedback(parsed.error ?? 'Unstage failed');
       return;
     }
+    if (parsed is GitSyncResultMessage) {
+      _handleGitSyncResult(parsed);
+      return;
+    }
+    if (parsed is GitSyncStateMessage) {
+      _setState(_state.copyWith(git: _state.git.copyWith(sync: parsed.state)));
+      return;
+    }
+  }
+
+  void _handleGitSyncResult(GitSyncResultMessage msg) {
+    _syncLatch?.settle();
+    _syncLatch = null;
+    final failure = msg.failure;
+    // Two branches rather than one call passing both a value and its clear
+    // flag: that combination is ambiguous by house rule, and here it would
+    // also be wrong — `lastSyncFailure: null` reads as "unchanged", so a
+    // success would leave the previous failure's offer standing.
+    final git = failure == null
+        ? _state.git.copyWith(clearSyncing: true, clearSyncFailure: true)
+        : _state.git.copyWith(clearSyncing: true, lastSyncFailure: failure);
+    _setState(_state.copyWith(git: git));
+    // Toasted even when the panel will also offer the agent handoff: the
+    // handoff is an affordance the user may never look at, and a failure that
+    // said nothing at all would read as a button that did nothing.
+    _emitOpFeedback(
+      failure == null
+          ? (msg.summary ?? '${msg.op.label} complete')
+          : failure.message,
+    );
   }
 
   /// Surface a one-shot git op result. Bumping the seq makes each result a
@@ -451,6 +511,44 @@ class FileService {
     _setState(_state.copyWith(expandedPaths: expanded));
   }
 
+  /// Expands [path] and every ancestor directory so it is visible in the
+  /// tree. Used to reveal a folder a terminal link pointed at, which — unlike
+  /// a file — has no `selectedFilePath` of its own to make it visible.
+  void revealDirectory(String path) {
+    final segments = path.split('/').where((s) => s.isNotEmpty);
+    final expanded = Set<String>.from(_state.expandedPaths);
+    var acc = '';
+    for (final segment in segments) {
+      acc = acc.isEmpty ? segment : '$acc/$segment';
+      expanded.add(acc);
+    }
+    _setState(_state.copyWith(expandedPaths: expanded));
+  }
+
+  /// Resolves a path a terminal program printed (an OSC 8 `file://` hyperlink
+  /// target, absolute or relative) against this checkout, returning its
+  /// checkout-relative form — or a null [FileResolvePathResultMessage.relPath]
+  /// when it doesn't resolve inside this checkout. Only the bridge can answer
+  /// this: the app never learns the checkout's absolute root (see
+  /// `docs/architecture.md`), so it cannot relativize the path itself.
+  Future<FileResolvePathResultMessage> resolveTerminalPath(String rawPath) {
+    final requestId = const Uuid().v4();
+    final pending = PendingReply<FileResolvePathResultMessage>(
+      timeout: const Duration(seconds: 8),
+      onTimeout: () => _pendingResolves.remove(requestId),
+    );
+    _pendingResolves[requestId] = pending;
+    session.sendForCheckout(
+      checkoutId,
+      createAbMessage('file:resolve-path', {
+        'projectId': projectId,
+        'requestId': requestId,
+        'path': rawPath,
+      }),
+    );
+    return pending.future;
+  }
+
   void selectFile(String path, {int? searchLine, String? searchQuery}) {
     // Fire here, not in requestFileContent — the latter is a shared chokepoint
     // also hit by session-restore, fragment recovery, git "view file", and
@@ -611,6 +709,62 @@ class FileService {
     );
   }
 
+  /// Push the current branch, or publish it when it has no upstream. Never a
+  /// force push — a rejected push comes back as a [GitSyncFailure] for the
+  /// agent to reconcile rather than being forced through.
+  void push() => _sync(GitSyncOp.push);
+
+  /// Fast-forward the current branch onto its upstream. A diverged branch
+  /// changes nothing and reports [GitSyncFailureKind.diverged].
+  void pull() => _sync(GitSyncOp.pull);
+
+  void _sync(GitSyncOp op) {
+    if (_state.git.syncing != null) return;
+    _setState(
+      _state.copyWith(
+        git: _state.git.copyWith(syncing: op, clearSyncFailure: true),
+      ),
+    );
+    // Tier-2 one-shot, the same shape as [requestDiff]: a send dropped in a
+    // keyless relay window, or a bridge too old to know the verb, replies
+    // never — and without this the two buttons stay disabled for the life of
+    // the session.
+    _syncLatch?.settle();
+    final latch = _syncLatch = ReplyLatch();
+    session.sendForCheckout(
+      checkoutId,
+      createAbMessage('git:sync', {'projectId': projectId, 'op': op.name}),
+    );
+    unawaited(
+      session.action(() => latch.done, timeout: gitSyncTimeout).catchError((_) {
+        if (_disposed || _syncLatch != latch) return;
+        _syncLatch = null;
+        _setState(_state.copyWith(git: _state.git.copyWith(clearSyncing: true)));
+        _emitOpFeedback('${op.label} timed out');
+      }),
+    );
+  }
+
+  /// Re-read how the branch stands against its upstream.
+  ///
+  /// [probeRemote] additionally asks the REMOTE, which costs a network round
+  /// trip — so it is reserved for an explicit user action, never for the
+  /// hydrator, which would turn every reconnect into one.
+  void refreshSyncState({bool probeRemote = false}) {
+    session.sendForCheckout(
+      checkoutId,
+      createAbMessage('git:sync-status', {
+        'projectId': projectId,
+        if (probeRemote) 'probeRemote': true,
+      }),
+    );
+  }
+
+  Future<void> _hydrateSyncState() async {
+    if (_disposed) return;
+    refreshSyncState();
+  }
+
   void requestDiff(String path) {
     _setState(
       _state.copyWith(
@@ -704,8 +858,15 @@ class FileService {
     // Resolve any in-flight git:diff action so its timeout timer is cancelled.
     _diffLatch?.settle();
     _diffLatch = null;
+    _syncLatch?.settle();
+    _syncLatch = null;
+    for (final pending in _pendingResolves.values) {
+      pending.fail(StateError('FileService disposed'));
+    }
+    _pendingResolves.clear();
     session.unhydrateCheckout(checkoutId, 'file:selected');
     session.unhydrateCheckout(checkoutId, _treeHydratorKey);
+    session.unhydrateCheckout(checkoutId, _syncHydratorKey);
     await _heavySub?.cancel();
     _heavySub = null;
     await _statusSub?.cancel();

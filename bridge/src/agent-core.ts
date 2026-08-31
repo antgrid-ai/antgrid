@@ -55,7 +55,8 @@ import { snapshotAsksFor } from "./rpc/state-snapshot";
 import { StructuredAgentManager } from "./structured/structured-manager";
 import { TOOL_UPDATE_SPECS, createToolUpdateChecker, execToolUpdate, execToolVersion, parseAgentVersion, runAgentUpdate, updateSpecFor } from "./update/specs";
 import { getGitStatus, gitCommit, gitDiscard, gitStage, gitUnstage, type GitFileEntry } from "./git";
-import { listLocalBranches, checkoutLocalBranch } from "./git-branches";
+import { listLocalBranches, checkoutLocalBranch, checkBranchAgainstRemote } from "./git-branches";
+import { gitPull, gitPush, readSyncState, EMPTY_SYNC_STATE, type GitSyncState } from "./git-sync";
 import { WORKTREE_SESSIONS_SUPPORTED } from "./worktree-capability";
 
 /** Hand the event loop one full turn. `setImmediate` fires in libuv's check
@@ -89,6 +90,11 @@ interface CheckoutRuntime {
   runningCommands: Map<string, ChildProcess>;
   cachedGitBranch: string | null;
   cachedGitFiles: GitFileEntry[];
+  /** Ahead/behind against the upstream REF. Refreshed alongside the git status
+   * it rides with, which is only affordable because [readSyncState] reaches no
+   * remote — a probe here would be one network round trip per checkout every
+   * 10s on the backstop poll alone. */
+  cachedGitSync: GitSyncState;
   gitBranchInterval: ReturnType<typeof setInterval> | null;
   gitRefreshTimer: ReturnType<typeof setTimeout> | null;
   /** Fire-and-forget `git status` reads still running against this checkout —
@@ -184,6 +190,35 @@ export function isSubmitKeystroke(data: string): boolean {
  */
 export function hasTypedContent(data: string): boolean {
   return data.replace(/\r$/, "").length > 0;
+}
+
+/**
+ * Whether a `terminal:input` payload is the terminal ANSWERING the guest rather
+ * than the user driving it.
+ *
+ * A viewer's VT engine writes back on the same channel a keystroke uses, so an
+ * agent that turned on focus reporting (DEC 1004) or mouse tracking gets a
+ * stream of `terminal:input` frames nobody typed: `CSI I` / `CSI O` every time
+ * the app window is focused or blurred, and a mouse report for every click,
+ * drag and scroll over the grid. They must still reach the PTY — the guest
+ * asked for them — but they are not a reply, and counting them as one is what
+ * put out a blocked agent's "needs you" dot the instant the user clicked back
+ * into the window to answer it (see `userReply` in work-status.ts).
+ *
+ * Deliberately narrow: only the report shapes a viewer originates. Every other
+ * guest-query answer is served by the bridge itself
+ * (`vt-capability-responder.ts`) and never travels this way.
+ */
+export function isTerminalReport(data: string): boolean {
+  // Focus in/out. Exact match only: a longer payload that merely starts with
+  // one of these is input the user typed through it, and dropping that would
+  // lose a real reply.
+  if (data === "\x1b[I" || data === "\x1b[O") return true;
+  // SGR (1006) mouse: CSI < button ; col ; row (M|m).
+  if (/^\x1b\[<\d+;\d+;\d+[Mm]$/.test(data)) return true;
+  // Default X10 mouse: CSI M plus three bytes that may be ANY byte, so this is
+  // matched by length rather than content.
+  return data.length === 6 && data.startsWith("\x1b[M");
 }
 
 /**
@@ -611,6 +646,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       runningCommands: new Map(),
       cachedGitBranch: null,
       cachedGitFiles: [],
+      cachedGitSync: EMPTY_SYNC_STATE,
       gitBranchInterval: null,
       gitRefreshTimer: null,
       pendingGitRefreshes: new Set(),
@@ -815,6 +851,10 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     switch (msg.type) {
       case "terminal:input":
         manager.write(internalTerminalId(runtime, msg.terminalId), msg.data);
+        // Everything below reads the frame as "the user did something". A focus
+        // or mouse report is the viewer's VT engine answering a mode the guest
+        // turned on, so it goes to the PTY and stops there.
+        if (isTerminalReport(msg.data)) break;
         // Typing into a session counts as activity — float it up the drawer.
         // No-ops for non-session terminals (service PTYs).
         sessions?.touch(msg.terminalId);
@@ -969,6 +1009,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
         }
         break;
       }
+      case "file:resolve-path": {
+        const fw = runtime.fileWatcher;
+        if (fw) {
+          fw.handleResolvePathRequest(msg.requestId, msg.path);
+        } else {
+          log.warn("file:resolve-path for unknown projectId: %s", msg.projectId);
+        }
+        break;
+      }
       case "file:upload-start":
         runtime.uploadManager?.handleStart(msg);
         break;
@@ -1040,6 +1089,18 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       case "git:unstage": {
         handleGitUnstage(runtime, msg.projectId, msg.files).catch((err) =>
           log.error("git:unstage handler failed: %s", err)
+        );
+        break;
+      }
+      case "git:sync": {
+        handleGitSync(runtime, msg.projectId, msg.op).catch((err) =>
+          log.error("git:sync handler failed: %s", err)
+        );
+        break;
+      }
+      case "git:sync-status": {
+        handleGitSyncStatus(runtime, msg.projectId, msg.probeRemote === true).catch((err) =>
+          log.error("git:sync-status handler failed: %s", err)
         );
         break;
       }
@@ -1671,8 +1732,15 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
   async function refreshGitStatus(runtime: CheckoutRuntime = mainRuntime): Promise<void> {
     const ticket = ++runtime.gitStatusSeq;
     let files: GitFileEntry[];
+    let sync: GitSyncState;
     try {
-      files = await getGitStatus(runtime.checkout.path);
+      // Read together and applied together under ONE ticket: they are two
+      // halves of the same snapshot, and a separate sequence for each lets a
+      // reader see this refresh's file list beside the previous one's counts.
+      [files, sync] = await Promise.all([
+        getGitStatus(runtime.checkout.path),
+        readSyncState(runtime.checkout.path),
+      ]);
     } catch {
       // `Bun.spawn` throws SYNCHRONOUSLY when cwd is gone, which is the normal
       // state once the checkout has been removed under an in-flight refresh.
@@ -1684,6 +1752,7 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     if (ticket < runtime.gitStatusApplied) return;
     runtime.gitStatusApplied = ticket;
     runtime.cachedGitFiles = files;
+    runtime.cachedGitSync = sync;
   }
 
   // Coalescing window for a watcher-driven git refresh. Long enough that a
@@ -1782,6 +1851,24 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     );
   }
 
+  function sendGitSyncState(
+    runtime: CheckoutRuntime = mainRuntime,
+    state: GitSyncState = runtime.cachedGitSync,
+    probed?: Awaited<ReturnType<typeof checkBranchAgainstRemote>>,
+  ) {
+    sendFromRuntime(runtime, createMessage("git:sync-state", {
+      projectId: project.id,
+      branch: state.branch,
+      remote: state.remote,
+      remoteBranch: state.remoteBranch,
+      ahead: state.ahead,
+      behind: state.behind,
+      hasUpstream: state.hasUpstream,
+      hasRemote: state.hasRemote,
+      ...(probed ? { state: probed.state } : {}),
+    }));
+  }
+
   async function handleGitListBranches(runtime: CheckoutRuntime, projectId: string) {
     try {
       const catalog = await listLocalBranches(runtime.checkout.path);
@@ -1833,6 +1920,71 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
       await refreshGitStatus(runtime);
       sendGitStatus(runtime);
       sendStatus(runtime);
+    }
+  }
+
+  // Serialized per checkout. The app disables its own buttons while one runs,
+  // but that guards ONE client — a desktop and a phone driving the same
+  // project is the ordinary case here, and a pull rewriting HEAD underneath a
+  // push is a state neither result can describe. A lock rather than a flag for
+  // the reason keyed-lock.ts gives: the hazard is a suspension window, and
+  // every await added later would be a fresh hole in a flag.
+  const withGitSyncLock = createKeyedLock();
+
+  async function handleGitSync(
+    runtime: CheckoutRuntime,
+    projectId: string,
+    op: "push" | "pull",
+  ) {
+    const result = await withGitSyncLock(runtime.checkout.id, () =>
+      op === "push" ? gitPush(runtime.checkout.path) : gitPull(runtime.checkout.path),
+    );
+
+    sendFromRuntime(runtime, createMessage("git:sync-result", {
+      projectId,
+      op,
+      success: result.success,
+      branch: result.branch,
+      ...(result.remote ? { remote: result.remote } : {}),
+      ...(result.remoteBranch ? { remoteBranch: result.remoteBranch } : {}),
+      ...(result.summary ? { summary: result.summary } : {}),
+      ...(result.error ? { error: result.error } : {}),
+      ...(result.failureKind ? { failureKind: result.failureKind } : {}),
+      ...(result.command ? { command: result.command } : {}),
+      ...(result.stderr ? { stderr: result.stderr } : {}),
+    }));
+
+    // Refreshed on BOTH outcomes, for the reason [handleGitDiscard] gives: a
+    // pull is several git invocations and a fetch that succeeded before the
+    // ff-only refusal has already moved `refs/remotes`, so even a failure
+    // changes the counts. A successful push moves nothing but `.git/`, which
+    // the watcher ignores — nothing else would ever correct the indicator.
+    await refreshGitBranch(runtime);
+    await refreshGitStatus(runtime);
+    sendGitStatus(runtime);
+    sendGitSyncState(runtime);
+    sendStatus(runtime);
+  }
+
+  async function handleGitSyncStatus(
+    runtime: CheckoutRuntime,
+    projectId: string,
+    probeRemote: boolean,
+  ) {
+    await refreshGitStatus(runtime);
+    const state = runtime.cachedGitSync;
+    if (!probeRemote || !state.branch) {
+      sendGitSyncState(runtime, state);
+      return;
+    }
+    try {
+      // Bounded and non-prompting inside itself; a branch the remote cannot be
+      // asked about reports `unreachable`, which the app renders as nothing
+      // rather than as an error — the local counts beside it are still true.
+      const probed = await checkBranchAgainstRemote(runtime.checkout.path, state.branch);
+      sendGitSyncState(runtime, state, probed);
+    } catch {
+      sendGitSyncState(runtime, state);
     }
   }
 
@@ -2009,7 +2161,14 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
           icon: c.icon,
         })),
         ports: portStatus,
-        git: runtime.cachedGitBranch ? { branch: runtime.cachedGitBranch } : undefined,
+        git: runtime.cachedGitBranch
+          ? {
+              branch: runtime.cachedGitBranch,
+              ahead: runtime.cachedGitSync.ahead,
+              behind: runtime.cachedGitSync.behind,
+              hasUpstream: runtime.cachedGitSync.hasUpstream,
+            }
+          : undefined,
         agent: {
           tool: runtime.config.agent?.tool,
           name: agentName,
@@ -2253,15 +2412,23 @@ export async function buildAgentCore(opts: BuildAgentCoreOptions): Promise<Agent
     if (runtime.disposed) return;
     sendStatus(runtime);
     sendGitStatus(runtime);
+    // Sent once here so the bus CACHES it for replay: the app asks on every
+    // (re)establish, but a welcome-replay that already carries the counts is
+    // what keeps a reconnect from showing a synced branch for one round trip.
+    sendGitSyncState(runtime);
     runtime.gitBranchInterval = setInterval(() => {
       const branch = runtime.cachedGitBranch;
       const files = JSON.stringify(runtime.cachedGitFiles);
+      const sync = JSON.stringify(runtime.cachedGitSync);
       trackGitRefresh(
         runtime,
         Promise.all([refreshGitBranch(runtime), refreshGitStatus(runtime)])
           .then(() => {
             if (runtime.cachedGitBranch !== branch) sendStatus(runtime);
             if (JSON.stringify(runtime.cachedGitFiles) !== files) sendGitStatus(runtime);
+            // The backstop that catches a commit, fetch or push made OUTSIDE
+            // the app — those touch only `.git/`, which the watcher ignores.
+            if (JSON.stringify(runtime.cachedGitSync) !== sync) sendGitSyncState(runtime);
           })
           .catch(() => {}),
       );

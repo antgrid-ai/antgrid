@@ -381,6 +381,34 @@ class DemoTransport extends BufferedAgentTransport {
           _gitFailure('git:unstage-result', files: message['files']),
         ];
 
+      case 'git:sync':
+        return <Map<String, Object?>>[
+          <String, Object?>{
+            ..._gitFailure('git:sync-result'),
+            'op': message['op'] as String? ?? 'push',
+            'branch': kDemoBranch,
+            'failureKind': 'unknown',
+          },
+        ];
+
+      // Non-zero counts on purpose: the demo should show the sync control in
+      // the state worth looking at, not greyed out with nothing to do.
+      case 'git:sync-status':
+        return <Map<String, Object?>>[
+          <String, Object?>{
+            'type': 'git:sync-state',
+            'projectId': kDemoProjectId,
+            'checkoutId': 'main',
+            'branch': kDemoBranch,
+            'remote': 'origin',
+            'remoteBranch': kDemoBranch,
+            'ahead': 2,
+            'behind': 1,
+            'hasUpstream': true,
+            'hasRemote': true,
+          },
+        ];
+
       case 'file:search':
         return _search(
           query: message['query'] as String? ?? '',

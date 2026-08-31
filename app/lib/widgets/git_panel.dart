@@ -12,22 +12,26 @@ import '../design/widgets/ab_confirm_dialog.dart';
 import '../design/widgets/ab_diff_stat.dart';
 import '../design/widgets/ab_icon.dart';
 import '../design/widgets/ab_icon_button.dart';
+import '../design/widgets/ab_inline_banner.dart';
 import '../design/widgets/ab_tap_target.dart';
 import '../design/widgets/ab_tooltip.dart';
 import '../design/widgets/ab_loading.dart';
 import '../design/widgets/ab_separator.dart';
 import '../models/ab_message.dart' show GitFileStatusEntry;
+import '../models/git_sync_state.dart';
 import '../models/file_tree_models.dart';
 import '../navigation/back_intent.dart';
 import '../providers/analytics.dart';
 import '../providers/providers.dart';
 import '../providers/visible_surface.dart';
 import '../services/file_service.dart';
+import '../util/detached.dart';
 import '../widgets/workspace_tab_bar.dart';
 import '../widgets/diff_viewer.dart';
 import '../widgets/file_viewer_router.dart';
 import '../widgets/file_tree_view.dart';
 import '../widgets/git_commit_sheet.dart';
+import '../widgets/git_sync_failure_handoff.dart';
 
 /// Standalone git-changes panel extracted from FileExplorerScreen.
 ///
@@ -76,12 +80,14 @@ class _GitPanelState extends ConsumerState<GitPanel> {
         loading: () => _GitPanelScaffold(
           counts: counts,
           fileService: fileService,
+          git: git ?? GitPaneState.empty,
           collapsedPaths: collapsedPaths,
           body: const AbLoading(message: 'loading changes...'),
         ),
         error: (error, _) => _GitPanelScaffold(
           counts: counts,
           fileService: fileService,
+          git: git ?? GitPaneState.empty,
           collapsedPaths: collapsedPaths,
           body: Center(
             child: Text(
@@ -253,6 +259,7 @@ class _GitPanelScaffold extends StatelessWidget {
     required this.counts,
     required this.fileService,
     required this.body,
+    this.git = GitPaneState.empty,
     this.collapsedPaths = const {},
     this.onBack,
   });
@@ -260,6 +267,10 @@ class _GitPanelScaffold extends StatelessWidget {
   final _GitHeaderCounts counts;
   final FileService fileService;
   final Widget body;
+
+  /// Whole pane state, for the parts of the header that are not derivable from
+  /// [counts]: the sync indicator and the failure strip.
+  final GitPaneState git;
   final Set<String> collapsedPaths;
   final VoidCallback? onBack;
 
@@ -270,9 +281,15 @@ class _GitPanelScaffold extends StatelessWidget {
         _GitChangesHeader(
           counts: counts,
           fileService: fileService,
+          git: git,
           collapsedPaths: collapsedPaths,
           onBack: onBack,
         ),
+        // Between the header and its rule so the offer sits with the control
+        // that produced it. A snackbar cannot carry an action and is gone in
+        // four seconds; this failure needs an affordance that waits.
+        if (git.lastSyncFailure case final failure?)
+          _SyncFailureStrip(failure: failure, git: git),
         const AbSeparator.horizontal(),
         Expanded(child: body),
       ],
@@ -294,12 +311,14 @@ class _GitChangesHeader extends StatelessWidget {
   const _GitChangesHeader({
     required this.counts,
     required this.fileService,
+    this.git = GitPaneState.empty,
     this.collapsedPaths = const {},
     this.onBack,
   });
 
   final _GitHeaderCounts counts;
   final FileService fileService;
+  final GitPaneState git;
   final VoidCallback? onBack;
 
   /// Folders currently folded shut. Only used to decide which way the one
@@ -366,7 +385,12 @@ class _GitChangesHeader extends StatelessWidget {
   /// it no longer names. Measured on the pane, not the window: a phone's full
   /// width clears it, a touch tablet's quarter-width context pane does not,
   /// which is the case this exists for.
-  static const double _stackedHeaderWidth = 360;
+  //
+  // The sync control adds two more fixed-width cells (and a count label) to the
+  // right half, so the budget the title is left with shrank by about that much
+  // — raised in step, because the failure this constant exists to prevent is a
+  // title ellipsised to nothing while the counts beside it stay whole.
+  static const double _stackedHeaderWidth = 460;
 
   @override
   Widget build(BuildContext context) {
@@ -491,6 +515,13 @@ class _GitChangesHeader extends StatelessWidget {
     // toward it. Each cell is gated on its OWN scope for the same reason: a
     // tree of nothing but conflicts has nothing safe to revert, and is exactly
     // where Stage All is the way out.
+    // Left of the write group and outside it: those two act on the working
+    // tree, these two act on the branch's relationship to a remote. Sharing a
+    // border would read as one control.
+    if (git.sync.hasRemote) ...[
+      _SyncControl(sync: git.sync, syncing: git.syncing, fileService: fileService),
+      const SizedBox(width: AbTokens.space6),
+    ],
     if (counts.hasChanges) ...[
       _BulkActionGroup(
         children: [
@@ -605,9 +636,15 @@ class _BulkAction {
 /// winning) and the border turns what is left into surface the user can aim
 /// at, which is what the gap was always meant to be.
 class _BulkActionGroup extends StatelessWidget {
-  const _BulkActionGroup({required this.children});
+  const _BulkActionGroup({required this.children, this.leading});
 
   final List<_BulkAction> children;
+
+  /// Content shown INSIDE the border, before the first cell — the sync
+  /// control's counts. Inside rather than beside it because the counts label
+  /// those two buttons specifically; outside the border they read as another
+  /// free-floating mark in the header.
+  final Widget? leading;
 
   @override
   Widget build(BuildContext context) {
@@ -620,8 +657,9 @@ class _BulkActionGroup extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
+          ?leading,
           for (final (i, action) in children.indexed) ...[
-            if (i > 0)
+            if (i > 0 || leading != null)
               const SizedBox(
                 height: AbTokens.iconButtonBox,
                 child: AbSeparator.vertical(),
@@ -637,6 +675,161 @@ class _BulkActionGroup extends StatelessWidget {
           ],
         ],
       ),
+    );
+  }
+}
+
+/// Pull and Push, with the ahead/behind counts that answer "is this pushed?".
+///
+/// Both cells stay mounted whenever the repository has a remote, even when one
+/// of them has nothing to do — the same reasoning the bulk actions beside them
+/// document: a control that vanishes the moment its count reaches zero moves
+/// its neighbour under a finger already travelling toward it.
+///
+/// The counts are as fresh as the last fetch (see [GitSyncState]), which is
+/// what Pull is for. Nothing here probes the network on its own.
+class _SyncControl extends StatelessWidget {
+  const _SyncControl({
+    required this.sync,
+    required this.syncing,
+    required this.fileService,
+  });
+
+  final GitSyncState sync;
+  final GitSyncOp? syncing;
+  final FileService fileService;
+
+  @override
+  Widget build(BuildContext context) {
+    // Both are disabled while either runs: they mutate the same branch, and a
+    // pull racing a push is a state neither result can describe.
+    final busy = syncing != null;
+
+    // A branch that has never been pushed has nothing to pull and no counts to
+    // show — one action, named for what it does, matching VS Code.
+    if (sync.canPublish) {
+      return AbButton(
+        label: 'Publish Branch',
+        leading: AbIcon(
+          AbIcons.gitPush,
+          size: AbTokens.iconButtonGlyph,
+          color: context.antgrid.textMuted,
+        ),
+        onTap: busy ? null : fileService.push,
+      );
+    }
+
+    return _BulkActionGroup(
+      children: [
+        _BulkAction(
+          icon: AbIcons.gitPull,
+          tooltip: sync.behind > 0
+              ? 'Pull ${sync.behind} commit${sync.behind == 1 ? '' : 's'}'
+              : 'Pull',
+          onTap: (busy || !sync.canPull) ? null : fileService.pull,
+        ),
+        _BulkAction(
+          icon: AbIcons.gitPush,
+          tooltip: sync.ahead > 0
+              ? 'Push ${sync.ahead} commit${sync.ahead == 1 ? '' : 's'}'
+              : 'Push',
+          onTap: (busy || !sync.canPush) ? null : fileService.push,
+        ),
+      ],
+      // Null, not an empty box, when there is nothing to say: the group draws
+      // its separator on the strength of `leading != null`, so a zero-width
+      // child would leave a rule with nothing in front of it.
+      leading: busy
+          ? const Padding(
+              padding: EdgeInsets.symmetric(horizontal: AbTokens.space6),
+              child: AbLoadingDot(size: AbTokens.fontXs),
+            )
+          : (sync.ahead > 0 || sync.behind > 0
+                ? _SyncCounts(sync: sync)
+                : null),
+    );
+  }
+}
+
+/// The up/down counts, inside the sync control's border so they read as its
+/// label rather than as free-floating marks.
+class _SyncCounts extends StatelessWidget {
+  const _SyncCounts({required this.sync});
+
+  final GitSyncState sync;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.antgrid;
+    final style = AbTokens.monoStyle(
+      fontSize: AbTokens.fontXs,
+      color: colors.textMuted,
+    );
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: AbTokens.space6),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (sync.behind > 0) ...[
+            AbIcon(AbIcons.arrowDown, size: AbTokens.fontXs, color: colors.textMuted),
+            Text('${sync.behind}', style: style),
+          ],
+          if (sync.ahead > 0) ...[
+            if (sync.behind > 0) const SizedBox(width: AbTokens.space4),
+            AbIcon(AbIcons.arrowUp, size: AbTokens.fontXs, color: colors.textMuted),
+            Text('${sync.ahead}', style: style),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// The strip a failed push or pull leaves behind, and the one tap that hands
+/// it to the agent.
+///
+/// It persists rather than auto-dismissing: the toast that already fired says
+/// what happened, and this says what can be done about it — which is worth
+/// nothing if it disappears while the user is still reading the toast.
+class _SyncFailureStrip extends ConsumerWidget {
+  const _SyncFailureStrip({required this.failure, required this.git});
+
+  final GitSyncFailure failure;
+  final GitPaneState git;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return AbInlineBanner(
+      text: '${failure.op.label} failed — ${failure.message}',
+      color: context.antgrid.gitConflict,
+      trailing: failure.warrantsAgent
+          ? AbButton(
+              label: 'Ask agent to fix',
+              // A tap handler discards the future it starts, so a rejection
+              // inside the dialog or the send would reach
+              // `PlatformDispatcher.onError` as a fatal with no in-app frames.
+              onTap: () => detached(
+                'GitPanel',
+                'hand sync failure to agent',
+                () => _handOff(context, ref),
+              ),
+            )
+          : null,
+    );
+  }
+
+  Future<void> _handOff(BuildContext context, WidgetRef ref) async {
+    // Read the entries here rather than holding them on the strip: the dialog
+    // stays open indefinitely, and what the agent should be told about the
+    // working tree is what it holds when the message is composed.
+    final entries =
+        ref.read(fileTreeStateProvider).value?.gitFileEntries ?? const [];
+    await offerSyncFailureToAgent(
+      context: context,
+      container: ref.container,
+      failure: failure,
+      sync: git.sync,
+      changed: entries,
     );
   }
 }
@@ -662,6 +855,7 @@ class _GitPanelBody extends StatelessWidget {
         return _GitPanelScaffold(
           counts: _GitHeaderCounts.of(state.gitFileEntries),
           fileService: fileService,
+          git: state.git,
           collapsedPaths: state.git.collapsedPaths,
           onBack: showBack
               ? () {

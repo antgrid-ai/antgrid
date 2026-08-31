@@ -10,11 +10,13 @@ class AbBranchPill extends StatelessWidget {
     super.key,
     required this.branch,
     this.ahead = 0,
+    this.behind = 0,
     this.onTap,
   });
 
   final String branch;
   final int ahead;
+  final int behind;
   final VoidCallback? onTap;
 
   @override
@@ -48,6 +50,18 @@ class AbBranchPill extends StatelessWidget {
               ),
             ),
           ),
+          // Behind before ahead, the order every SCM status line uses.
+          if (behind > 0) ...[
+            const SizedBox(width: AbTokens.space4),
+            Text(
+              '↓$behind',
+              style: AbTokens.monoStyle(
+                fontSize: AbTokens.fontXs,
+                color: palette.textMuted,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
           if (ahead > 0) ...[
             const SizedBox(width: AbTokens.space4),
             Text(

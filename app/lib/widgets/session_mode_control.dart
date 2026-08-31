@@ -1,7 +1,9 @@
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../design/ab_icons.dart';
 import '../design/widgets/ab_confirm_dialog.dart';
+import '../design/widgets/ab_menu.dart';
 import '../design/widgets/ab_snack_bar.dart';
 import '../design/widgets/pulsing_opacity.dart';
 import '../models/agent_work_status.dart';
@@ -86,6 +88,57 @@ class SessionModeControl extends ConsumerWidget {
     // Dimming a control whose whole job is to look chooseable reads as broken,
     // so the pending state pulses instead.
     return inFlight ? PulsingOpacity(child: control) : control;
+  }
+}
+
+/// [SessionModeControl]'s state, redone as a single [AbLiveMenuRow] for a
+/// text-menu host (the mobile overflow popup) instead of a segmented
+/// control. A menu row has no room to show the option NOT being picked, so
+/// the label names the action ("Switch to Terminal"/"Switch to Chat")
+/// instead of the two-state choice. Same visibility/capability rules as
+/// [SessionModeControl] — keep the two in lockstep by hand; neither is a
+/// special case of the other's build method.
+class SessionModeMenuItem extends ConsumerWidget {
+  const SessionModeMenuItem({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final active = ref.watch(activeSessionProvider);
+    if (active == null || !active.agentSessionResumable) {
+      return const SizedBox.shrink();
+    }
+    final pending = ref.watch(pendingSessionModeProvider);
+    final inFlight = pending?.sessionId == active.id;
+    final mode = (ref.watch(activeSessionModeProvider) ?? active.mode) == 'chat'
+        ? 'chat'
+        : 'terminal';
+    final target = mode == 'chat' ? 'terminal' : 'chat';
+    final chatCapable = ref.watch(focusedToolChatCapableProvider(active.tool));
+    final agent =
+        ref.watch(focusedMachineToolsProvider).value?.labels[active.tool] ??
+        sessionAgentDisplayLabel(active, ref.watch(agentCatalogProvider));
+    final chatEnabled = mode == 'chat' || chatCapable == true;
+    // Switching TO terminal is always reachable; switching to chat carries
+    // the same capability gate as the segmented control's Chat cell.
+    final targetEnabled = target == 'terminal' || chatEnabled;
+
+    final row = AbLiveMenuRow(
+      label: target == 'chat' ? 'Switch to Chat' : 'Switch to Terminal',
+      icon: target == 'chat' ? AbIcons.comment : AbIcons.terminal,
+      enabled: targetEnabled,
+      disabledReason: chatCapable == null
+          ? "This machine hasn't said whether $agent supports chat sessions — "
+                'it may still be connecting, or its bridge may be too old to '
+                'answer.'
+          : "$agent doesn't support chat sessions.",
+      onTap: () {
+        // Inert while a flip is in flight, so a second tap can't queue a
+        // second one — same contract as SessionModeControl.
+        if (inFlight) return;
+        _switchMode(context, ref, active, target);
+      },
+    );
+    return inFlight ? PulsingOpacity(child: row) : row;
   }
 }
 

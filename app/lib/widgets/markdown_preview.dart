@@ -1,15 +1,19 @@
 import 'package:flutter/widgets.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:markdown_widget/markdown_widget.dart';
 
 import '../design/ab_colors.dart';
 import '../design/ab_tokens.dart';
 import '../models/file_tree_models.dart';
+import '../providers/providers.dart';
+import '../providers/visible_surface.dart';
+import '../util/external_url.dart';
 import 'markdown_heading_configs.dart';
 import 'preview_with_source_toggle.dart';
 
 /// Renders a markdown file. Defaults to the rendered preview; a header toggle
 /// switches to the full source code view.
-class MarkdownPreview extends StatelessWidget {
+class MarkdownPreview extends ConsumerWidget {
   final FileContent content;
   final VoidCallback? onClose;
   final VoidCallback? onRefreshContent;
@@ -28,7 +32,7 @@ class MarkdownPreview extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     return PreviewWithSourceToggle(
       content: content,
       onClose: onClose,
@@ -56,11 +60,28 @@ class MarkdownPreview extends StatelessWidget {
                 ),
                 // Underline-only links, matching the transcript — see
                 // markdown_body.dart for why the package default is unusable.
+                // `onTap` routes through the same file/preview/browser split
+                // every other link-bearing surface uses — see
+                // [openContentLink].
                 LinkConfig(
                   style: AbTokens.sansStyle(
                     color: c.textPrimary,
                     height: 1.55,
                   ).copyWith(decoration: TextDecoration.underline),
+                  onTap: (url) => openContentLink(
+                    context,
+                    url,
+                    fileService: () => focusedCheckoutServiceOrNull(
+                      ref.container,
+                      (s) => s.fileService,
+                    ),
+                    previewService: () => focusedCheckoutServiceOrNull(
+                      ref.container,
+                      (s) => s.previewService,
+                    ),
+                    revealView: (view) =>
+                        ref.read(workspaceMenuControlProvider)?.reveal(view),
+                  ),
                 ),
                 CodeConfig(
                   style: AbTokens.monoStyle(color: c.textPrimary, height: 1.55),

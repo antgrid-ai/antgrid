@@ -1,4 +1,5 @@
 import 'ab_message.dart' show GitFileStatusEntry;
+import 'git_sync_state.dart';
 
 enum FileNodeType { file, directory }
 
@@ -167,6 +168,20 @@ class GitPaneState {
   /// sitting on.
   final Set<String> collapsedPaths;
 
+  /// How the branch stands against its upstream. Replayed on reconnect (it is
+  /// in `kCheckoutDurableReplayTypes`), so this is durable state rather than a
+  /// one-shot — an app that reconnects must not show a synced branch until the
+  /// next op.
+  final GitSyncState sync;
+
+  /// The op currently in flight, if any. Null is idle; the two buttons are
+  /// disabled together while either runs, since both mutate the same branch.
+  final GitSyncOp? syncing;
+
+  /// The last push/pull that failed, kept until the next sync attempt so the
+  /// panel can offer the agent handoff after the toast has gone.
+  final GitSyncFailure? lastSyncFailure;
+
   const GitPaneState({
     this.diffPath,
     this.diffContent,
@@ -177,6 +192,9 @@ class GitPaneState {
     this.viewingFile,
     this.viewingLoading = false,
     this.collapsedPaths = const {},
+    this.sync = GitSyncState.empty,
+    this.syncing,
+    this.lastSyncFailure,
   });
 
   static const empty = GitPaneState();
@@ -193,6 +211,11 @@ class GitPaneState {
     bool? viewingLoading,
     bool clearViewing = false,
     Set<String>? collapsedPaths,
+    GitSyncState? sync,
+    GitSyncOp? syncing,
+    bool clearSyncing = false,
+    GitSyncFailure? lastSyncFailure,
+    bool clearSyncFailure = false,
   }) {
     return GitPaneState(
       diffPath: clearDiff ? null : (diffPath ?? this.diffPath),
@@ -208,6 +231,11 @@ class GitPaneState {
       // Survives clearDiff/clearViewing: closing a diff is not a reason to
       // reopen every folder the user shut to find it.
       collapsedPaths: collapsedPaths ?? this.collapsedPaths,
+      sync: sync ?? this.sync,
+      syncing: clearSyncing ? null : (syncing ?? this.syncing),
+      lastSyncFailure: clearSyncFailure
+          ? null
+          : (lastSyncFailure ?? this.lastSyncFailure),
     );
   }
 }
@@ -388,5 +416,28 @@ class FileContentMessage {
     this.error,
     this.encoding = 'utf8',
     this.mimeType,
+  });
+}
+
+/// Reply to a `file:resolve-path` request — a path a terminal program printed
+/// (an OSC 8 `file://` hyperlink target), resolved against the checkout the
+/// request named. [relPath] is null when the path does not resolve inside
+/// that checkout; the app never learns the checkout's absolute root, so only
+/// the bridge can make this call.
+class FileResolvePathResultMessage {
+  final String id;
+  final int timestamp;
+  final String projectId;
+  final String requestId;
+  final String? relPath;
+  final bool isDirectory;
+
+  const FileResolvePathResultMessage({
+    required this.id,
+    required this.timestamp,
+    required this.projectId,
+    required this.requestId,
+    this.relPath,
+    this.isDirectory = false,
   });
 }

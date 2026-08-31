@@ -145,6 +145,15 @@ already has them.
   - bare PTY keystroke → `userReply`: clears the block only. Typing in an idle session is not work.
   - PTY keystroke that SUBMITTED (`isSubmitKeystroke` in `agent-core.ts`: a trailing CR, but not `\x1b\r` — alt+enter inserts a newline and may never be sent) → `userReply({submitted:true})`: also opens a turn, but only for a session in `keystrokeTurnSessions` — an agent with turn-END hooks and no turn-start (codex/cursor/copilot; see `needsKeystrokeTurnStart` in `agents/registry.ts`, which reads it off each agent's own `hooks.turnBoundaryEvents`). Never for Claude (it has a real signal) nor for the hookless agents (opencode/antigravity/kilo/kimi/mistral-vibe — nothing would close the inferred turn).
 
+  Not every `terminal:input` frame is a keystroke. A viewer's VT engine answers
+  the modes the guest turned on over the SAME channel, so a session with DEC
+  1004 focus reporting or mouse tracking on gets `CSI I`/`CSI O` on every window
+  focus change and a mouse report per click — `isTerminalReport` (`agent-core.ts`)
+  is what keeps those out of all three "the user acted" consumers (`sessions.touch`,
+  the handler's runaway guard, `userReply`) while still writing them to the PTY.
+  Without it, clicking back into the window to ANSWER a blocked agent was itself
+  what cleared its "needs you" dot.
+
   The submit gate has **two** halves and both are required. A PTY delivers one keystroke per frame, so the submitting CR normally arrives alone and `isSubmitKeystroke` alone cannot tell a prompt from enter on an empty line or on a TUI menu — which start no turn, so the stop hook the inference depends on never fires. `hasTypedContent` (also `agent-core.ts`) marks the session in `typedSessions`, and only a submit with that marker opens a turn; opening consumes it. Which agent a session runs is `s.tool ?? defaultTool`, where `defaultTool` is folded from `agent:hello` — a `SessionEntry` carries `tool` only when it OVERRODE the project's `agent.tool`, so reading the entry alone silently opted every default-spec session out of the inference.
 
   Two ordering rules fall out of the fold being keyed by session id: an attributed turn-start that beats its session's first `session:updated` is HELD in `pendingTurns` for exactly one session list, and a notification whose `terminalId` is not a running session (config-`terminals:` slots stamp one too) falls back to the project-wide key rather than being filed where nothing can read it. That fallback FANS OUT — `statusFor` reads it for every running session — and a turn-start clears it on the word of one session; both are accepted (losing the signal is worse than over-reporting it), and both are the reason a config-`terminals:` error dots every session on the project.

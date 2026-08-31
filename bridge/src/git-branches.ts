@@ -198,7 +198,7 @@ const LS_REMOTE_TIMEOUT_MS = 6_000;
  * or a black-holed host. GIT_TERMINAL_PROMPT=0 turns the prompt into a failure
  * and the kill timer bounds the rest. Same shape as handler/snapshot.ts.
  */
-async function runGit(
+export async function runGitRemote(
   cwd: string,
   args: string[],
   timeoutMs?: number,
@@ -243,13 +243,13 @@ async function runGit(
  *  reports which of the two it was, because a missing ref means "deleted" only
  *  when config claimed one — a `.` remote (tracking a LOCAL branch) is a
  *  fallback, not tracking. */
-async function resolvePushTarget(
+export async function resolvePushTarget(
   projectPath: string,
   branch: string,
 ): Promise<{ remote: string; remoteBranch: string; tracked: boolean } | null> {
   const [remoteCfg, mergeCfg] = await Promise.all([
-    runGit(projectPath, ["config", "--get", `branch.${branch}.remote`]),
-    runGit(projectPath, ["config", "--get", `branch.${branch}.merge`]),
+    runGitRemote(projectPath, ["config", "--get", `branch.${branch}.remote`]),
+    runGitRemote(projectPath, ["config", "--get", `branch.${branch}.merge`]),
   ]);
   const remote = remoteCfg.stdout.trim();
   const merge = mergeCfg.stdout.trim();
@@ -261,7 +261,7 @@ async function resolvePushTarget(
     return { remote, remoteBranch, tracked: true };
   }
 
-  const remotes = await runGit(projectPath, ["remote"]);
+  const remotes = await runGitRemote(projectPath, ["remote"]);
   const names = remotes.stdout.split(/\r?\n/).map((n) => n.trim()).filter(Boolean);
   if (names.length === 0) return null;
   return { remote: names.includes("origin") ? "origin" : names[0]!, remoteBranch: branch, tracked: false };
@@ -271,7 +271,7 @@ export async function checkBranchAgainstRemote(
   projectPath: string,
   branch: string,
 ): Promise<BranchRemoteStatus> {
-  const localRev = await runGit(projectPath, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}^{commit}`]);
+  const localRev = await runGitRemote(projectPath, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}^{commit}`]);
   const localSha = localRev.stdout.trim();
   if (localRev.exitCode !== 0 || !localSha) {
     throw new GitHelperError("UNKNOWN_BRANCH", `Branch '${branch}' does not exist`);
@@ -280,7 +280,7 @@ export async function checkBranchAgainstRemote(
   const target = await resolvePushTarget(projectPath, branch);
   if (!target) return { branch, state: "no-remote" };
 
-  const ls = await runGit(
+  const ls = await runGitRemote(
     projectPath,
     ["ls-remote", "--heads", "--", target.remote, `refs/heads/${target.remoteBranch}`],
     LS_REMOTE_TIMEOUT_MS,
@@ -306,10 +306,10 @@ export async function checkBranchAgainstRemote(
 
   // Counts need the remote commit as a local object. Right after a fetch it is
   // there; otherwise `differs` is the whole honest answer.
-  const have = await runGit(projectPath, ["cat-file", "-e", `${remoteSha}^{commit}`]);
+  const have = await runGitRemote(projectPath, ["cat-file", "-e", `${remoteSha}^{commit}`]);
   if (have.exitCode !== 0) return { ...base, state: "differs" };
 
-  const counts = await runGit(projectPath, ["rev-list", "--left-right", "--count", `${remoteSha}...${localSha}`]);
+  const counts = await runGitRemote(projectPath, ["rev-list", "--left-right", "--count", `${remoteSha}...${localSha}`]);
   const [behindRaw, aheadRaw] = counts.stdout.trim().split(/\s+/);
   const behind = Number(behindRaw);
   const ahead = Number(aheadRaw);
