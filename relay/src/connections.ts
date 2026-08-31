@@ -138,6 +138,10 @@ export class Connections {
     return this.byDeviceId.get(deviceId);
   }
 
+  getAll(): Connection[] {
+    return [...this.byConnectionId.values()];
+  }
+
   /**
    * Every live connection belonging to ACCOUNT device [deviceId]: the exact
    * holder plus any per-machine app slot scoped under it (`<deviceId>#<machine>`).

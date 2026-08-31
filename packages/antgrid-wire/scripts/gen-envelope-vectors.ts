@@ -51,7 +51,7 @@ const server: Array<{ name: string; dart: "parsed" | "tolerated"; json: unknown 
   })),
   { name: "peer-online", dart: "parsed", json: { type: "peer-online", peerId: AGENT_ID } },
   { name: "peer-offline", dart: "parsed", json: { type: "peer-offline", peerId: AGENT_ID } },
-  { name: "pong", dart: "tolerated", json: { type: "pong" } },
+  { name: "pong", dart: "parsed", json: { type: "pong" } },
   {
     name: "push:result",
     dart: "tolerated",
@@ -61,7 +61,7 @@ const server: Array<{ name: string; dart: "parsed" | "tolerated"; json: unknown 
 
 // `dartEmits` — true when the Dart client constructs and sends this frame;
 // the Dart test asserts its toJson() equals the vector byte-for-byte.
-// ping and push:deliver are bridge-only (TS both ends).
+// push:deliver is bridge-only (TS both ends).
 const client: Array<{ name: string; dartEmits: boolean; json: unknown }> = [
   {
     name: "hello",
@@ -82,7 +82,7 @@ const client: Array<{ name: string; dartEmits: boolean; json: unknown }> = [
   },
   { name: "stream-open", dartEmits: true, json: { type: "stream-open", streamId: "s-7" } },
   { name: "stream-close", dartEmits: true, json: { type: "stream-close", streamId: "s-7" } },
-  { name: "ping", dartEmits: false, json: { type: "ping" } },
+  { name: "ping", dartEmits: true, json: { type: "ping" } },
   {
     name: "push:deliver",
     dartEmits: false,
